@@ -6,6 +6,81 @@ from .VLLMBlockHash import calculate_vllm_block_hashes
 from .VLLMCachePolicy import VLLMCacheDelta
 
 
+def media_expansion_spans(prediction, actual):
+    """Return (native start, native length, scheduling length) per expansion."""
+    predicted = sorted(prediction.mm_features or [], key=lambda f: f.mm_position.offset)
+    native = sorted(actual.mm_features or [], key=lambda f: f.mm_position.offset)
+    if Counter(f.modality for f in predicted) != Counter(f.modality for f in native):
+        raise ValueError("native media items differ from scheduling prediction")
+    if not predicted:
+        return ()
+    source_tokens, target_tokens = prediction.prompt_token_ids, actual.prompt_token_ids
+    for features, tokens, scheduling in (
+        (predicted, source_tokens, True),
+        (native, target_tokens, False),
+    ):
+        for feature in features:
+            position = feature.mm_position
+            if (
+                feature.modality not in ("image", "video", "audio")
+                or position.offset < 0
+                or position.length < 1
+                or position.offset + position.length > len(tokens)
+                or (scheduling and position.length != 1)
+            ):
+                raise ValueError("invalid scheduling-to-native media positions")
+    if len({f.mm_position.offset for f in predicted}) != len(predicted):
+        raise ValueError("overlapping scheduling media placeholders")
+    spans, shift = [], 0
+    for source, target in zip(predicted, native):
+        if source.modality != target.modality:
+            break
+        source, target = source.mm_position, target.mm_position
+        if target.offset != source.offset + shift:
+            break
+        spans.append((target.offset, target.length, 1))
+        shift += target.length - 1
+    else:
+        if len(target_tokens) == len(source_tokens) + shift:
+            return tuple(spans)
+
+    # Some native processors insert frame timestamps, delimiters or interleave
+    # audio/video. Treat that region as one expansion; never claim its partial
+    # cache coverage from a single modality's embedding mask.
+    first_source = predicted[0].mm_position.offset
+    first_native = min(f.mm_position.offset for f in native)
+    start = 0
+    while (
+        start < min(first_source, first_native)
+        and source_tokens[start] == target_tokens[start]
+    ):
+        start += 1
+    source_end = max(f.mm_position.offset + f.mm_position.length for f in predicted)
+    native_end = max(f.mm_position.offset + f.mm_position.length for f in native)
+    suffix = 0
+    limit = min(len(source_tokens) - source_end, len(target_tokens) - native_end)
+    while suffix < limit and source_tokens[-suffix - 1] == target_tokens[-suffix - 1]:
+        suffix += 1
+    return (
+        (
+            start,
+            len(target_tokens) - suffix - start,
+            len(source_tokens) - suffix - start,
+        ),
+    )
+
+
+def project_media_prefix(count, spans):
+    removed = 0
+    for offset, native_length, scheduling_length in spans:
+        if count <= offset:
+            break
+        if count < offset + native_length:
+            return offset - removed
+        removed += native_length - scheduling_length
+    return count - removed
+
+
 @dataclass
 class _Mapping:
     real_hashes: tuple
@@ -17,11 +92,11 @@ class _Mapping:
     owners: set = field(default_factory=set)
 
 
-class VLLMImageCacheMap:
+class VLLMMediaCacheMap:
     """Project native cache readiness into the scheduling token namespace.
 
-    Sparse image positions produce block boundaries; records retain neither
-    image tensors nor per-token maps. Calls use the Observer lifecycle lock.
+    Sparse media expansions produce block boundaries; records retain neither
+    media tensors nor per-token maps. Calls use the Observer lifecycle lock.
     """
 
     def __init__(self, cache_state, hybrid_tail_required, max_records=4096,
@@ -81,9 +156,8 @@ class VLLMImageCacheMap:
         affected = set(range(min(previous, current), max(previous, current)))
         for position in changed_positions:
             index = bisect_left(record.required_blocks, position + 1)
-            if (index < len(record.required_blocks)
-                    and record.required_blocks[index] == position + 1):
-                affected.add(index)
+            end = bisect_right(record.required_blocks, position + 1)
+            affected.update(range(index, end))
         for index in affected:
             full = index < current
             tail = full and record.real_hashes[
@@ -106,27 +180,26 @@ class VLLMImageCacheMap:
             self._owners.pop(owner, None)
         self._references -= len(record.real_hashes) + len(record.logical_hashes)
 
-    def register(self, owner, prediction, actual, block_size, logical_hashes=None):
+    def register(
+        self, owner, prediction, actual, block_size, logical_hashes=None, spans=None
+    ):
         self._changes = {}
-        predicted_images = prediction.mm_features or []
-        actual_images = actual.mm_features or []
-        if len(predicted_images) != len(actual_images):
-            raise ValueError("native image count differs from scheduling prediction")
+        spans = media_expansion_spans(prediction, actual) if spans is None else spans
+        if not spans:
+            return VLLMCacheDelta()
         positions = []
         shift = 0
-        for predicted, native in zip(predicted_images, actual_images):
-            source, target = predicted.mm_position, native.mm_position
-            if (predicted.modality != "image" or source.length != 1
-                    or native.modality != "image" or target.offset != source.offset + shift
-                    or target.length < 1
-                    or (positions and source.offset <= positions[-1][0])):
-                raise ValueError("invalid scheduling-to-native image positions")
-            shift += target.length - 1
-            positions.append((source.offset, shift))
-        if not positions:
-            return VLLMCacheDelta()
-        if len(actual.prompt_token_ids) != len(prediction.prompt_token_ids) + shift:
-            raise ValueError("native image expansion does not match token lengths")
+        for offset, native_length, scheduling_length in spans:
+            source_start = offset - shift
+            shift += native_length - scheduling_length
+            positions.append(
+                (
+                    source_start,
+                    source_start + scheduling_length,
+                    offset + native_length,
+                    shift,
+                )
+            )
         first_block = positions[0][0] // block_size
         logical = (logical_hashes if logical_hashes is not None else calculate_vllm_block_hashes(
             prediction.prompt_token_ids, block_size, request=prediction,
@@ -134,13 +207,16 @@ class VLLMImageCacheMap:
         if not logical:
             return VLLMCacheDelta()
         ends = []
-        image_index, shift = 0, 0
+        span_index, shift = 0, 0
         for block in range(first_block, first_block + len(logical)):
             end = (block + 1) * block_size
-            while image_index < len(positions) and positions[image_index][0] < end:
-                shift = positions[image_index][1]
-                image_index += 1
-            ends.append((end + shift + block_size - 1) // block_size)
+            while span_index < len(positions) and positions[span_index][1] <= end:
+                shift = positions[span_index][3]
+                span_index += 1
+            native_end = end + shift
+            if span_index < len(positions) and positions[span_index][0] < end:
+                native_end = positions[span_index][2]
+            ends.append((native_end + block_size - 1) // block_size)
         real = tuple(bytes(value) for value in actual.block_hashes[:ends[-1]])
         count = bisect_right(ends, len(real))
         logical, ends = logical[:count], ends[:count]
@@ -150,7 +226,7 @@ class VLLMImageCacheMap:
         logical = tuple(value.to_bytes(32, "big") for value in logical)
         definition = (logical, real, tuple(ends))
         if owner in self._owners:
-            raise ValueError("duplicate image cache mapping owner")
+            raise ValueError("duplicate media cache mapping owner")
         key = self._definitions.get(definition)
         record = self._records.get(key)
         if record is None:
@@ -201,3 +277,7 @@ class VLLMImageCacheMap:
         record.owners.discard(owner)
         if not record.owners and not record.states:
             self._drop(key)
+
+
+# Preserve imports used by existing image-only integrations.
+VLLMImageCacheMap = VLLMMediaCacheMap

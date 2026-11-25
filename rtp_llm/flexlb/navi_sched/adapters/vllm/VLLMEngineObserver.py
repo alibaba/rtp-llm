@@ -39,7 +39,11 @@ from .VLLMCachePolicy import (
 from .VLLMExecutionSample import PrefillExecutionSample, PrefillStepRequest
 from .VLLMExecutionWindow import PrefillExecutionWindowAssembler
 from .VLLMForwardProtocol import forward_outputs_fields, forward_request_type
-from .VLLMImageCacheMap import VLLMImageCacheMap
+from .VLLMImageCacheMap import (
+    VLLMMediaCacheMap,
+    media_expansion_spans,
+    project_media_prefix,
+)
 from .VLLMCoreCallbacks import VLLMCoreCallbacks
 from .VLLMSchedulerObserver import VLLMSchedulerObserver
 from .VLLMCacheCallbacks import VLLMCacheObserver
@@ -1657,7 +1661,7 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
             cache_key_type: VLLMCacheState(self._cache_policy)
             for cache_key_type in (0, 1)
         }
-        self._image_cache_map = VLLMImageCacheMap(
+        self._media_cache_map = VLLMMediaCacheMap(
             self._cache_states[0],
             self._cache_policy.hybrid_tail_required,
         )
@@ -1717,7 +1721,7 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
         self._cache_touch_last_log_ns = time.monotonic_ns()
         self._response_encoder = None
         self._response_request_ids: dict[int, str] = {}
-        self._response_image_positions: dict[int, tuple] = {}
+        self._response_media_spans: dict[int, tuple] = {}
         self._inactive_response_request_ids: set[int] = set()
         self._cancelled_before_decode: set[int] = set()
         self._pending_engine_abort_request_ids: list[str] = []
@@ -2365,13 +2369,13 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
             )
             preceding_workload = self._capture_arrival_workload()
             ready_ns = time.time_ns()
-            image_predictions = {}
+            media_predictions = {}
             try:
                 decoded = self._decode_forward_batch(
                     native_batch,
                     decoder,
                     msgspec.msgpack,
-                    image_predictions=image_predictions,
+                    media_predictions=media_predictions,
                 )
             except Exception:
                 self._release_native_forward_batch(native_batch)
@@ -2392,7 +2396,7 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
                     EngineCoreRequestType,
                     preceding_workload,
                     admission_started_ns,
-                    image_predictions=image_predictions,
+                    media_predictions=media_predictions,
                 )
                 enqueue_done_ns = time.time_ns()
                 _execution_timing_probe._diagnostic_format_info(
@@ -2483,7 +2487,7 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
         )
         original_size = len(native_batch.request_ids)
         decoded = []
-        image_predictions = {}
+        media_predictions = {}
         decode_ms = render_ms = enqueue_ms = -1.0
         prepared_ns = 0
         phase = "decode"
@@ -2496,7 +2500,7 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
                 decoder,
                 msgpack,
                 resume_rendering=False,
-                image_predictions=image_predictions,
+                media_predictions=media_predictions,
             )
             decode_ms = (time.perf_counter_ns() - started_ns) / 1_000_000.0
             phase = "render"
@@ -2565,7 +2569,7 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
                 preceding_workload,
                 started_ns,
                 render_ms,
-                image_predictions=image_predictions,
+                media_predictions=media_predictions,
             )
             enqueue_ms = (time.perf_counter_ns() - prepared_ns) / 1_000_000.0
             status = "enqueued"
@@ -2647,7 +2651,7 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
         msgpack,
         *,
         resume_rendering=True,
-        image_predictions=None,
+        media_predictions=None,
     ):
         decoded = []
         try:
@@ -2671,15 +2675,16 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
                 decoded.append((request_id, request))
                 features = getattr(request, "mm_features", None)
                 if (
-                    image_predictions is not None
+                    media_predictions is not None
                     and features
                     and getattr(request, "navi_sched_render_call", None) is not None
                     and all(
-                        f.modality == "image" and f.mm_position.length == 1
+                        f.modality in ("image", "video", "audio")
+                        and f.mm_position.length == 1
                         for f in features
                     )
                 ):
-                    image_predictions[request_id] = SimpleNamespace(
+                    media_predictions[request_id] = SimpleNamespace(
                         prompt_token_ids=request.prompt_token_ids,
                         mm_features=features,
                     )
@@ -2921,7 +2926,7 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
         preceding_workload=None,
         admission_started_ns=0,
         native_preparation_ms=0.0,
-        image_predictions=None,
+        media_predictions=None,
     ) -> None:
         engine_core = self._engine_core
         if engine_core is None:
@@ -3039,7 +3044,7 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
             self._release_forward_batch(state)
             return
 
-        self._register_image_cache_mappings(native_batch, processed, image_predictions)
+        self._register_media_cache_mappings(native_batch, processed, media_predictions)
 
         if preceding_workload is None:
             preceding_workload = self._capture_arrival_workload()
@@ -3101,13 +3106,13 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
             self._report_prepared_workload("submission_failed")
             raise
 
-    def _register_image_cache_mappings(
-        self, native_batch, processed, image_predictions=None
+    def _register_media_cache_mappings(
+        self, native_batch, processed, media_predictions=None
     ):
-        if not image_predictions:
+        if not media_predictions:
             return
         for request_id, value in processed:
-            prediction = image_predictions.get(request_id)
+            prediction = media_predictions.get(request_id)
             if prediction is None:
                 continue
             try:
@@ -3116,21 +3121,20 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
                     with self._response_lock:
                         if int(request_id) not in self._response_request_ids:
                             continue
-                        delta = self._image_cache_map.register(
+                        spans = media_expansion_spans(prediction, value[0])
+                        delta = self._media_cache_map.register(
                             int(request_id),
                             prediction,
                             value[0],
                             self._block_size,
                             logical_hashes=logical_hashes,
+                            spans=spans,
                         )
-                        self._response_image_positions[int(request_id)] = tuple(
-                            (feature.mm_position.offset, feature.mm_position.length)
-                            for feature in value[0].mm_features
-                        )
+                        self._response_media_spans[int(request_id)] = spans
                     self._report_cache_delta(delta)
             except Exception:
                 logger.exception(
-                    "failed to register scheduling image cache mapping: request_id=%s",
+                    "failed to register scheduling media cache mapping: request_id=%s",
                     request_id,
                 )
 
@@ -3152,17 +3156,17 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
 
     def _remove_response_requests(self, request_ids) -> None:
         request_ids = tuple(request_ids)
-        image_cache_map = getattr(self, "_image_cache_map", None)
+        media_cache_map = getattr(self, "_media_cache_map", None)
         with (
-            self._cache_lifecycle_lock if image_cache_map is not None else nullcontext()
+            self._cache_lifecycle_lock if media_cache_map is not None else nullcontext()
         ):
             with self._response_lock:
                 for request_id in request_ids:
                     request_id = int(request_id)
-                    if image_cache_map is not None:
-                        image_cache_map.finish(request_id)
+                    if media_cache_map is not None:
+                        media_cache_map.finish(request_id)
                     self._response_request_ids.pop(request_id, None)
-                    self._response_image_positions.pop(request_id, None)
+                    self._response_media_spans.pop(request_id, None)
                     self._inactive_response_request_ids.discard(request_id)
                     self._cancelled_before_decode.discard(request_id)
 
@@ -3290,7 +3294,7 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
         with self._response_lock:
             external_request_id = self._response_request_ids.get(request_id)
             active = request_id not in self._inactive_response_request_ids
-            image_positions = self._response_image_positions.get(request_id)
+            media_spans = self._response_media_spans.get(request_id)
         if external_request_id is None:
             return False
         response_request_ids = {str(value) for value in outputs.finished_requests or ()}
@@ -3323,26 +3327,21 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
             if self._response_encoder is None:
                 raise RuntimeError("NaviSched VLLM response encoder is not initialized")
             response_outputs = outputs
-            if image_positions:
-
-                def project_prefix(count):
-                    removed = 0
-                    for offset, length in image_positions:
-                        if count <= offset:
-                            break
-                        consumed = min(count - offset, length)
-                        removed += consumed - int(consumed == length)
-                    return count - removed
+            if media_spans:
 
                 response_outputs = copy.copy(outputs)
                 response_outputs.outputs = []
                 for value in outputs.outputs:
                     projected = copy.copy(value)
                     cached = value.num_cached_tokens
-                    projected.num_cached_tokens = project_prefix(cached)
+                    projected.num_cached_tokens = project_media_prefix(
+                        cached, media_spans
+                    )
                     projected.num_external_computed_tokens = (
                         projected.num_cached_tokens
-                        - project_prefix(cached - value.num_external_computed_tokens)
+                        - project_media_prefix(
+                            cached - value.num_external_computed_tokens, media_spans
+                        )
                     )
                     response_outputs.outputs.append(projected)
             frames = [
@@ -6319,7 +6318,7 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
                 event_time_us = time.time_ns() // 1000
                 alias_delta = None
                 if cache_key_type == 0:
-                    alias_delta = self._image_cache_map.update(
+                    alias_delta = self._media_cache_map.update(
                         (
                             tuple(
                                 expanded
@@ -6477,7 +6476,7 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
             self._cache_touch_queue.clear()
         with self._response_lock:
             self._response_request_ids.clear()
-            self._response_image_positions.clear()
+            self._response_media_spans.clear()
             self._inactive_response_request_ids.clear()
             self._cancelled_before_decode.clear()
             self._pending_engine_abort_request_ids.clear()

@@ -60,11 +60,40 @@ def _report_image_preparation(status, http_status, upstream_code):
         logger.warning("NaviSched image preparation metrics unavailable", exc_info=True)
 
 
+def _media_http_error(error):
+    """Find HTTP details retained by native media validation exceptions."""
+    seen = set()
+    current = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if getattr(current, "status", 0):
+            return current
+        current = current.__cause__ or current.__context__
+    return error
+
+
 class _PredictionRenderer:
     """Use native chat/token processing, replacing only media preparation."""
 
     def __init__(self, renderer):
         self._renderer = renderer
+        # Native async wrappers close over the original bound method. Rebind
+        # only prediction work, retaining the native renderer's executor.
+        for async_name, sync_name in (
+            ("_process_multimodal_async", "_process_multimodal"),
+            ("_process_for_engine_in_worker", "process_for_engine"),
+        ):
+            if hasattr(renderer, async_name):
+                from vllm.utils.async_utils import make_async
+
+                setattr(
+                    self,
+                    async_name,
+                    make_async(
+                        getattr(self, sync_name),
+                        executor=getattr(renderer, "_mm_executor", None),
+                    ),
+                )
 
     def __getattr__(self, name):
         value = getattr(self._renderer, name)
@@ -72,9 +101,19 @@ class _PredictionRenderer:
             return value.__func__.__get__(self, type(self))
         return value
 
-    def process_for_engine(self, prompt, arrival_time):
+    def process_for_engine(self, prompt, arrival_time, **kwargs):
         tokenized = msgspec.msgpack.encode(prompt)
-        output = self._renderer.process_for_engine.__func__(self, prompt, arrival_time)
+        output = self._renderer.process_for_engine.__func__(
+            self, prompt, arrival_time, **kwargs
+        )
+        output["_navi_sched_tokenized_prompt"] = tokenized
+        return output
+
+    async def process_for_engine_async(self, prompt, arrival_time, **kwargs):
+        tokenized = msgspec.msgpack.encode(prompt)
+        output = await self._renderer.process_for_engine_async.__func__(
+            self, prompt, arrival_time, **kwargs
+        )
         output["_navi_sched_tokenized_prompt"] = tokenized
         return output
 
@@ -98,13 +137,44 @@ class _PredictionRenderer:
                 ).hexdigest()
                 return None, identity
 
-            def _unsupported(self, *args, **kwargs):
-                raise ValueError("deferred rendering requires URL images")
+            async def _audio_with_uuid_async(self, audio_url, uuid):
+                return self._media_reference("audio", audio_url)
 
-            parse_image_embeds = _unsupported
-            parse_audio = _unsupported
-            parse_input_audio = _unsupported
-            parse_video = _unsupported
+            async def _video_with_uuid_async(self, video_url, uuid):
+                return self._media_reference("video", video_url)
+
+            def _media_reference(self, modality, url):
+                identity = hashlib.sha256(
+                    msgspec.json.encode(
+                        [
+                            f"navi-scheduling-{modality}-url-v1",
+                            url,
+                            self._mm_processor_kwargs,
+                            self._tracker.media_io_kwargs,
+                        ]
+                    )
+                ).hexdigest()
+                return None, identity
+
+            def parse_video(self, video_url, uuid=None):
+                # Keep native placeholder ordering, including audio extracted
+                # from a video, without invoking either media loader here.
+                placeholder = self._tracker.add(
+                    "video", self._video_with_uuid_async(video_url, uuid)
+                )
+                self._add_placeholder("video", placeholder)
+                if (
+                    video_url
+                    and self._mm_processor_kwargs
+                    and self._mm_processor_kwargs.get("use_audio_in_video", False)
+                ):
+                    placeholder = self._tracker.add(
+                        "audio", self._audio_with_uuid_async(video_url, uuid)
+                    )
+                    self._add_placeholder("audio", placeholder)
+
+            def parse_video_audio_together(self, video_url, uuid=None):
+                self.parse_video(video_url, uuid)
 
         class ReferenceTracker(AsyncMultiModalItemTracker):
             def create_parser(self, mm_processor_kwargs=None):
@@ -113,35 +183,53 @@ class _PredictionRenderer:
         return ReferenceTracker(model_config, **kwargs)
 
     def _process_multimodal(
-        self, prompt, mm_data, mm_uuids, mm_processor_kwargs, tokenization_kwargs
+        self,
+        prompt,
+        mm_data,
+        mm_uuids,
+        mm_processor_kwargs,
+        tokenization_kwargs,
+        *,
+        skip_mm_cache=False,
     ):
-        from vllm.multimodal.inputs import mm_inputs
+        try:
+            from vllm.inputs import mm_input as make_mm_input
+        except ImportError:
+            from vllm.multimodal.inputs import mm_inputs as make_mm_input
         from vllm.multimodal.processing import PromptReplacement
 
-        if set(mm_data) != {"image"} or not mm_uuids or "image" not in mm_uuids:
-            raise ValueError("deferred prediction supports URL images only")
+        token_ids = _media_token_ids(self._renderer)
+        counts = {
+            modality: len(identities)
+            for modality, identities in (mm_uuids or {}).items()
+        }
+        if (
+            not counts
+            or set(mm_data) != set(counts)
+            or not counts.keys() <= token_ids.keys()
+        ):
+            raise ValueError("deferred media placeholders do not match the model")
         processor = self._renderer.get_mm_processor()
-        count = len(mm_uuids["image"])
-        config = processor.info.get_hf_config()
-        image_token_id = getattr(config, "image_token_id", None)
-        if image_token_id is None:
-            image_token_id = config.image_token_index
         updates = [
             PromptReplacement(
-                modality="image",
-                target=[image_token_id],
-                replacement=[image_token_id] * SCHEDULING_IMAGE_TOKEN_COUNT,
+                modality=modality,
+                target=[token_ids[modality]],
+                replacement=[token_ids[modality]],
             )
+            for modality in counts
         ]
-        grouped = processor._bind_and_group_updates(updates, {"image": count})
+        grouped = processor._bind_and_group_updates(updates, counts)
         tokens = processor._apply_hf_processor_tokens_only(prompt)
         tokens, positions = processor._apply_prompt_updates(tokens, grouped)
-        processor._validate_mm_placeholders(positions, {"image": count})
-        return mm_inputs(
+        processor._validate_mm_placeholders(positions, counts)
+        return make_mm_input(
             prompt_token_ids=tokens,
-            mm_kwargs={"image": [None] * count},
-            mm_hashes={"image": mm_uuids["image"]},
-            mm_placeholders={"image": [item.to_range() for item in positions["image"]]},
+            mm_kwargs={modality: [None] * count for modality, count in counts.items()},
+            mm_hashes=mm_uuids,
+            mm_placeholders={
+                modality: [item.to_range() for item in positions[modality]]
+                for modality in counts
+            },
         )
 
 
@@ -173,7 +261,7 @@ class _TokenizedRenderer:
                 model_config=self.model_config,
             ),
             media_io_kwargs=params.media_io_kwargs,
-            mm_processor_kwargs=params.mm_processor_kwargs,
+            mm_processor_kwargs=params.mm_processor_kwargs or {},
         )
         prompt = {}
         if media is not None:
@@ -194,6 +282,60 @@ class _TokenizedRenderer:
         return [prompt]
 
 
+def _media_token_ids(renderer):
+    config = renderer.mm_processor.info.get_hf_config()
+    config = getattr(config, "thinker_config", config)
+    tokens = {}
+    for modality in ("image", "video", "audio"):
+        for suffix in ("token_id", "token_index"):
+            token = getattr(config, f"{modality}_{suffix}", None)
+            if isinstance(token, int) and token >= 0:
+                tokens[modality] = token
+                break
+    return tokens
+
+
+def _can_defer_conversation(conversation, supported_modalities, processor_kwargs):
+    modalities = set()
+    for message in conversation:
+        if not isinstance(message, dict):
+            return False
+        content = message.get("content")
+        if content is None or isinstance(content, str):
+            continue
+        if not isinstance(content, list):
+            return False
+        for part in content:
+            if not isinstance(part, dict):
+                return False
+            kind = part.get("type")
+            if kind == "text":
+                continue
+            if kind in ("image_url", "video_url", "audio_url"):
+                modality = kind.removesuffix("_url")
+                reference = part.get(kind)
+                url = reference.get("url") if isinstance(reference, dict) else reference
+                if not isinstance(url, str) or not url:
+                    return False
+                modalities.add(modality)
+            elif kind == "input_audio":
+                audio = part.get("input_audio")
+                if (
+                    not isinstance(audio, dict)
+                    or not audio.get("data")
+                    or not audio.get("format")
+                ):
+                    return False
+                modalities.add("audio")
+            else:
+                # Embeddings, decoded objects and future content types retain
+                # the native renderer and its validation/error behavior.
+                return False
+    if "video" in modalities and processor_kwargs.get("use_audio_in_video", False):
+        modalities.add("audio")
+    return bool(modalities) and modalities <= supported_modalities
+
+
 class VLLMDeferredRenderer:
     """Capture a native renderer invocation before any media download."""
 
@@ -210,15 +352,10 @@ class VLLMDeferredRenderer:
     async def render_chat_async(
         self, conversations, chat_params, tok_params=None, *, prompt_extras=None
     ):
+        processor_kwargs = getattr(chat_params, "mm_processor_kwargs", None) or {}
+        supported = _media_token_ids(self._renderer).keys()
         media = [
-            any(
-                isinstance(message.get("content"), list)
-                and any(
-                    isinstance(part, dict) and part.get("type") != "text"
-                    for part in message["content"]
-                )
-                for message in conversation
-            )
+            _can_defer_conversation(conversation, supported, processor_kwargs)
             for conversation in conversations
         ]
         if not any(media):
@@ -272,48 +409,9 @@ class VLLMDeferredRenderer:
         return conversation_outputs, prompts
 
     async def render_cmpl_async(self, prompts, tok_params=None, *, prompt_extras=None):
-        media = [
-            isinstance(prompt, dict) and bool(prompt.get("multi_modal_data"))
-            for prompt in prompts
-        ]
-        if not any(media):
-            return await self._renderer.render_cmpl_async(
-                prompts, tok_params, prompt_extras=prompt_extras
-            )
-        if not all(media):
-            results = await asyncio.gather(
-                *(
-                    self.render_cmpl_async(
-                        [prompt], tok_params, prompt_extras=prompt_extras
-                    )
-                    for prompt in prompts
-                )
-            )
-            return [prompt for outputs in results for prompt in outputs]
-        calls = [
-            msgspec.msgpack.encode(
-                {
-                    "version": 1,
-                    "entry": "render_cmpl_async",
-                    "inputs": [prompt],
-                    "tok_params": (
-                        asdict(tok_params) if tok_params is not None else None
-                    ),
-                    "prompt_extras": prompt_extras,
-                }
-            )
-            for prompt in prompts
-        ]
-        outputs = await self._prediction.render_cmpl_async(
+        return await self._renderer.render_cmpl_async(
             prompts, tok_params, prompt_extras=prompt_extras
         )
-        for output, call in zip(outputs, calls, strict=True):
-            continuation = msgspec.msgpack.decode(call)
-            continuation["tokenized_prompt"] = output.pop(
-                "_navi_sched_tokenized_prompt"
-            )
-            output["navi_sched_render_call"] = msgspec.msgpack.encode(continuation)
-        return outputs
 
 
 def create_deferred_renderer(renderer):
@@ -321,25 +419,16 @@ def create_deferred_renderer(renderer):
         return renderer
     if getattr(renderer, "mm_processor", None) is None:
         return renderer
-    from vllm.model_executor.models.deepseek_vl import DeepseekVLMultiModalProcessor
-    from vllm.model_executor.models.qwen3_vl import Qwen3VLMultiModalProcessor
     from vllm.renderers.hf import HfRenderer
 
-    if not isinstance(renderer, HfRenderer) or not isinstance(
-        renderer.mm_processor,
-        (DeepseekVLMultiModalProcessor, Qwen3VLMultiModalProcessor),
-    ):
-        raise ValueError(
-            "deferred rendering requires a DeepSeek-VL or Qwen3-VL HfRenderer"
-        )
+    if not isinstance(renderer, HfRenderer) or not _media_token_ids(renderer):
+        return renderer
     mm_config = renderer.model_config.get_multimodal_config()
     if (
         mm_config.mm_processor_cache_gb > 0
         and mm_config.mm_processor_cache_type == "shm"
-    ):
-        raise ValueError(
-            "deferred rendering does not support the shared-memory media transport"
-        )
+    ) or getattr(renderer.model_config.hf_config, "use_unified_vision_chunk", False):
+        return renderer
     return VLLMDeferredRenderer(renderer)
 
 
@@ -354,7 +443,9 @@ class NativeRenderContinuation:
 
         renderer = self._processor.renderer
         if renderer.mm_processor is not None:
-            renderer.shutdown()
+            previous_cache = renderer.mm_processor.cache
+            if previous_cache is not None:
+                previous_cache.close()
             renderer.mm_processor.cache = (
                 MULTIMODAL_REGISTRY.processor_only_cache_from_config(vllm_config)
             )
@@ -439,9 +530,10 @@ class NativeRenderContinuation:
             raise
         except Exception as exc:
             error_type = type(exc).__name__
-            http_status = getattr(exc, "status", 0)
-            error = str(exc)[:1024]
-            headers = getattr(exc, "headers", None) or {}
+            http_error = _media_http_error(exc)
+            http_status = getattr(http_error, "status", 0)
+            error = str(http_error)[:1024]
+            headers = getattr(http_error, "headers", None) or {}
             upstream_code = headers.get("Error-Code", "")[:128]
             upstream_message = headers.get("Error-Message", "")[:512]
             upstream_trace_id = headers.get("X-Trace-Id", "")[:128]

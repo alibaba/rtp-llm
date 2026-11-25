@@ -30,12 +30,11 @@ from vllm.config import DeviceConfig, ModelConfig, VllmConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.renderers import ChatParams, TokenizeParams
 from vllm.sampling_params import SamplingParams
-from vllm.transformers_utils.configs.deepseek_vl import DeepseekVLConfig
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
-_module_path = Path(__file__).parents[2] / "navi_sched/adapters/vllm/VLLMDeferredRenderer.py"
+_module_path = Path(__file__).parents[2] / "adapters/vllm/VLLMDeferredRenderer.py"
 _spec = importlib.util.spec_from_file_location("deferred_renderer", _module_path)
 deferred = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(deferred)
@@ -50,6 +49,12 @@ _prepare_spec = importlib.util.spec_from_file_location(
 )
 preparation = importlib.util.module_from_spec(_prepare_spec)
 _prepare_spec.loader.exec_module(preparation)
+
+
+try:
+    from vllm.exceptions import InvalidMediaURLError
+except ImportError:
+    from aiohttp import ClientResponseError as InvalidMediaURLError
 
 
 class PreparationProgressTest(unittest.IsolatedAsyncioTestCase):
@@ -175,14 +180,53 @@ class DeferredRendererTestBase(unittest.IsolatedAsyncioTestCase):
                     self.send_header("Content-Length", "0")
                     self.end_headers()
                     return
-                buffer = io.BytesIO()
-                Image.new("RGB", (137, 61), cls.image_color).save(buffer, format="PNG")
-                data = buffer.getvalue()
+                if self.path == "/audio.wav":
+                    import array
+                    import math
+                    import wave
+
+                    samples = array.array(
+                        "h",
+                        [
+                            int(12000 * math.sin(2 * math.pi * 440 * i / 16000))
+                            for i in range(8000)
+                        ],
+                    )
+                    buffer = io.BytesIO()
+                    with wave.open(buffer, "wb") as wav:
+                        wav.setnchannels(1)
+                        wav.setsampwidth(2)
+                        wav.setframerate(16000)
+                        wav.writeframes(samples.tobytes())
+                    data, content_type = buffer.getvalue(), "audio/wav"
+                elif self.path == "/video.mp4":
+                    import cv2
+                    import numpy as np
+
+                    with tempfile.TemporaryDirectory() as directory:
+                        video_path = str(Path(directory) / "video.mp4")
+                        writer = cv2.VideoWriter(
+                            video_path, cv2.VideoWriter_fourcc(*"mp4v"), 4, (64, 64)
+                        )
+                        if not writer.isOpened():
+                            raise RuntimeError("test video encoder unavailable")
+                        for color in (0, 64, 128, 255):
+                            writer.write(np.full((64, 64, 3), color, dtype=np.uint8))
+                        writer.release()
+                        data = Path(video_path).read_bytes()
+                    content_type = "video/mp4"
+                else:
+                    buffer = io.BytesIO()
+                    Image.new("RGB", (137, 61), cls.image_color).save(
+                        buffer, format="PNG"
+                    )
+                    data, content_type = buffer.getvalue(), "image/png"
                 self.send_response(200)
-                self.send_header("Content-Type", "image/png")
+                self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
                 self.wfile.write(data)
+
 
             def log_message(self, *args):
                 pass
@@ -195,6 +239,8 @@ class DeferredRendererTestBase(unittest.IsolatedAsyncioTestCase):
 
     @staticmethod
     def create_model_config(path):
+        from vllm.transformers_utils.configs.deepseek_vl import DeepseekVLConfig
+
         AutoConfig.register("deepseek_vl", DeepseekVLConfig, exist_ok=True)
         config = DeepseekVLConfig(
             image_token_index=1, num_image_tokens=576,
@@ -215,8 +261,11 @@ class DeferredRendererTestBase(unittest.IsolatedAsyncioTestCase):
         tokenizer.save_pretrained(path)
         return VllmConfig(
             model_config=ModelConfig(
-                model=path, tokenizer=path, dtype="float32",
-                max_model_len=2048, limit_mm_per_prompt={"image": 2},
+                model=path,
+                tokenizer=path,
+                dtype="float32",
+                max_model_len=2048,
+                limit_mm_per_prompt={"image": 2, "video": 2},
             ),
             device_config=DeviceConfig(device="cpu"),
         )
@@ -255,7 +304,9 @@ class DeferredRendererTestBase(unittest.IsolatedAsyncioTestCase):
         )
         self.source = deferred.VLLMDeferredRenderer(self.native)
         self.target = deferred.NativeRenderContinuation(self.config, ("generate",))
-        self.chat_params = ChatParams(chat_template_content_format="string")
+        self.chat_params = ChatParams(
+            chat_template_content_format="string", mm_processor_kwargs={}
+        )
         self.tok_params = TokenizeParams(max_total_tokens=2048, add_special_tokens=False)
         self.params = SamplingParams(max_tokens=3, temperature=0, n=1)
         self.http_requests.clear()
@@ -586,7 +637,7 @@ class DeferredRendererTest(DeferredRendererTestBase):
         failed.request_id = "missing-image"
         async with self.local_preparation_server() as client:
             results = await client.resume_async([failed, good], return_exceptions=True)
-            self.assertIsInstance(results[0], ClientResponseError)
+            self.assertIsInstance(results[0], (ClientResponseError, InvalidMediaURLError))
             self.assertEqual(422, results[0].status)
             self.assertIsNotNone(failed.navi_sched_render_call)
             self.assertIsNone(failed.mm_features[0].data)
@@ -653,7 +704,7 @@ class DeferredRendererTest(DeferredRendererTestBase):
                     [request], return_exceptions=True,
                     schedule_batch_id=87654321, local_batch_id=123,
                 )
-        self.assertIsInstance(results[0], ClientResponseError)
+        self.assertIsInstance(results[0], (ClientResponseError, InvalidMediaURLError))
         self.assertEqual(422, results[0].status)
         self.assertEqual(original_payload, request.navi_sched_render_call)
         self.assertIsNone(request.mm_features[0].data)
@@ -664,7 +715,7 @@ class DeferredRendererTest(DeferredRendererTestBase):
             self.assertIn("schedule_batch_id=87654321 local_batch_id=123", records[0])
         native = next(line for line in logs.output if "NATIVE_RENDER_REQUEST" in line)
         self.assertIn("phase=native_render", native)
-        self.assertIn("error_type=ClientResponseError http_status=404", native)
+        self.assertIn("http_status=404", native)
         self.assertIn(missing_url, native)
         self.assertIn("upstream_code='NO_DATA'", native)
         self.assertIn("upstream_message='no data found from transcode cluster'", native)
@@ -687,7 +738,7 @@ class DeferredRendererTest(DeferredRendererTestBase):
         with self.assertLogs("vllm.navi_sched", level="INFO") as logs:
             async with self.local_preparation_server() as client:
                 results = await client.resume_async([request], return_exceptions=True)
-        self.assertIsInstance(results[0], ClientResponseError)
+        self.assertIsInstance(results[0], (ClientResponseError, InvalidMediaURLError))
         self.assertEqual(422, results[0].status)
         native = next(line for line in logs.output if "NATIVE_RENDER_REQUEST" in line)
         self.assertIn("http_status=503", native)
@@ -713,7 +764,7 @@ class DeferredRendererTest(DeferredRendererTestBase):
             if path == "/image.png":
                 self.assertIs(request, results[0])
             else:
-                self.assertIsInstance(results[0], ClientResponseError)
+                self.assertIsInstance(results[0], (ClientResponseError, InvalidMediaURLError))
             for name, value in zip(("completed", "success", "rate_limited", "other_error", "cancelled"), expected):
                 metric = self.image_metrics["navi_sched.agent.image_prepare_" + name + "_qps"]
                 self.assertEqual(mock.call(value), metric.report.call_args)
@@ -1001,7 +1052,12 @@ class DeferredRendererTest(DeferredRendererTestBase):
             ("vLLM media preprocessing failed", 500),
             ("navi_sched_retryable:agent response pipe reached eof", 429),
         ):
-            with self.subTest(reason=reason), self.assertRaises(GenerationError) as raised:
+            from navi_sched.adapters.vllm import VLLMPluginRegistry as adapter
+            with (
+                self.subTest(reason=reason),
+                mock.patch("vllm.plugins.get_engine_adapter", return_value=adapter),
+                self.assertRaises(GenerationError) as raised,
+            ):
                 serving._raise_if_error("error", "failed-image", reason)
             self.assertEqual(status, raised.exception.status_code)
 
@@ -1099,8 +1155,8 @@ class DeferredRendererTest(DeferredRendererTestBase):
         from aiohttp import ClientResponseError
 
         self.assertIs(requests[0], results[0])
-        self.assertIsInstance(results[1], ClientResponseError)
-        self.assertEqual(404, results[1].status)
+        self.assertIsInstance(results[1], (ClientResponseError, InvalidMediaURLError))
+        self.assertEqual(404, deferred._media_http_error(results[1]).status)
         self.assertIs(requests[2], results[2])
         self.assertIsNone(requests[0].navi_sched_render_call)
         self.assertIsNotNone(requests[0].mm_features[0].data)
@@ -1203,23 +1259,37 @@ class QwenDeferredRendererTest(DeferredRendererTestBase):
         )
 
         config = Qwen3VLConfig(
-            image_token_id=1, video_token_id=6,
-            vision_start_token_id=7, vision_end_token_id=8,
+            image_token_id=1,
+            video_token_id=6,
+            vision_start_token_id=7,
+            vision_end_token_id=8,
             architectures=["Qwen3VLForConditionalGeneration"],
             text_config={
-                "vocab_size": 32, "hidden_size": 32, "intermediate_size": 64,
-                "num_hidden_layers": 2, "num_attention_heads": 4,
+                "vocab_size": 512,
+                "hidden_size": 32,
+                "intermediate_size": 64,
+                "num_hidden_layers": 2,
+                "num_attention_heads": 4,
                 "num_key_value_heads": 4,
             },
             vision_config={"patch_size": 16, "spatial_merge_size": 2},
         )
         config.save_pretrained(path)
-        inner = Tokenizer(models.WordLevel({
-            "[UNK]": 0, "<|image_pad|>": 1, "hello": 2, "world": 3,
-            "user": 4, "assistant": 5, "<|video_pad|>": 6,
-            "<|vision_start|>": 7, "<|vision_end|>": 8,
-        }, unk_token="[UNK]"))
-        inner.pre_tokenizer = pre_tokenizers.Whitespace()
+        vocabulary = {
+            "[UNK]": 0,
+            "<|image_pad|>": 1,
+            "hello": 2,
+            "world": 3,
+            "user": 4,
+            "assistant": 5,
+            "<|video_pad|>": 6,
+            "<|vision_start|>": 7,
+            "<|vision_end|>": 8,
+        }
+        for character in sorted(pre_tokenizers.ByteLevel.alphabet()):
+            vocabulary.setdefault(character, len(vocabulary))
+        inner = Tokenizer(models.BPE(vocabulary, [], unk_token="[UNK]"))
+        inner.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
         tokenizer = Qwen2TokenizerFast(
             tokenizer_object=inner, unk_token="[UNK]",
             eos_token="[UNK]", pad_token="[UNK]",
@@ -1239,9 +1309,13 @@ class QwenDeferredRendererTest(DeferredRendererTestBase):
         processor.save_pretrained(path)
         return VllmConfig(
             model_config=ModelConfig(
-                model=path, tokenizer=path, dtype="float32",
-                max_model_len=2048, limit_mm_per_prompt={"image": 2},
-            ), device_config=DeviceConfig(device="cpu"),
+                model=path,
+                tokenizer=path,
+                dtype="float32",
+                max_model_len=2048,
+                limit_mm_per_prompt={"image": 2, "video": 2},
+            ),
+            device_config=DeviceConfig(device="cpu"),
         )
 
     async def test_fixed_prediction_restores_native_qwen_tokens_and_content_hash(self):
@@ -1284,6 +1358,181 @@ class QwenDeferredRendererTest(DeferredRendererTestBase):
                     self.assertTrue(torch.equal(
                         native.data["pixel_values"].data, actual.data["pixel_values"].data,
                     ))
+
+
+class MediaContinuationAssertions:
+    async def assert_media_continuation_matches_native(
+        self, parts, expected_modalities
+    ):
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "hello world " * 8},
+                    *parts,
+                    {"type": "text", "text": "hello world " * 8},
+                ],
+            }
+        ]
+        self.http_requests.clear()
+        _, preview = await self.source.render_chat_async(
+            [messages], self.chat_params, self.tok_params
+        )
+        self.assertEqual([], self.http_requests, "entry must not fetch media")
+        prediction = self.wire_roundtrip(self.request(preview[0]))
+        request = self.wire_roundtrip(prediction)
+        self.assertIsNotNone(request.navi_sched_render_call)
+        self.assertEqual(expected_modalities, {f.modality for f in request.mm_features})
+        self.assertTrue(all(f.data is None for f in request.mm_features))
+        await self.target.resume_async([request])
+        self.assertIsNone(request.navi_sched_render_call)
+        self.assertTrue(self.http_requests, "execution must fetch URL media")
+        _, normal = await self.native.render_chat_async(
+            [messages], self.chat_params, self.tok_params
+        )
+        native = self.request(normal[0])
+        self.assertEqual(native.prompt_token_ids, request.prompt_token_ids)
+        for actual, expected in zip(
+            request.mm_features, native.mm_features, strict=True
+        ):
+            self.assertEqual(expected.modality, actual.modality)
+            self.assertEqual(expected.identifier, actual.identifier)
+            self.assertEqual(expected.mm_position, actual.mm_position)
+            self.assertEqual(set(expected.data), set(actual.data))
+            for name in expected.data:
+                before, after = expected.data[name].data, actual.data[name].data
+                if isinstance(before, torch.Tensor):
+                    torch.testing.assert_close(after, before, rtol=0, atol=0)
+                else:
+                    self.assertEqual(before, after)
+
+        from vllm.utils.hashing import sha256_cbor
+        from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
+        from vllm.v1.request import Request
+        from _navi_prepare_test.VLLMImageCacheMap import (
+            VLLMMediaCacheMap,
+            media_expansion_spans,
+            project_media_prefix,
+        )
+
+        init_none_hash(sha256_cbor)
+        actual = Request.from_engine_core_request(
+            request, get_request_block_hasher(4, sha256_cbor)
+        )
+        spans = media_expansion_spans(prediction, actual)
+        self.assertEqual(
+            len(prediction.prompt_token_ids),
+            project_media_prefix(len(actual.prompt_token_ids), spans),
+        )
+        cache = types.SimpleNamespace(_full_ready=set(), _tail_ready=set())
+        cache._flat_ready = cache._full_ready
+        mapping = VLLMMediaCacheMap(cache, False)
+        self.assertTrue(mapping.register(71, prediction, actual, 4).empty())
+        cache._full_ready.update(actual.block_hashes)
+        ready = mapping.update(actual.block_hashes)
+        self.assertTrue(
+            ready.added, "completed native media must publish scheduling aliases"
+        )
+        missing = actual.block_hashes[spans[0][0] // 4]
+        cache._full_ready.remove(missing)
+        self.assertTrue(
+            mapping.update([missing]).removed,
+            "evicting native media must revoke scheduling aliases",
+        )
+        mapping.finish(71)
+        self.assertEqual({}, mapping._owners)
+
+
+class VideoDeferredRendererTest(MediaContinuationAssertions, QwenDeferredRendererTest):
+    async def test_video_url_restores_native_tokens_frames_and_timestamps(self):
+        video = self.url.rsplit("/", 1)[0] + "/video.mp4"
+        await self.assert_media_continuation_matches_native(
+            [{"type": "video_url", "video_url": {"url": video}}], {"video"}
+        )
+
+    async def test_mixed_image_and_video_restore_native_inputs(self):
+        video = self.url.rsplit("/", 1)[0] + "/video.mp4"
+        await self.assert_media_continuation_matches_native(
+            [
+                {"type": "image_url", "image_url": {"url": self.url}},
+                {"type": "video_url", "video_url": {"url": video}},
+            ],
+            {"image", "video"},
+        )
+
+
+class AudioDeferredRendererTest(MediaContinuationAssertions, DeferredRendererTestBase):
+    @staticmethod
+    def create_model_config(path):
+        from transformers import (
+            Qwen2AudioConfig,
+            Qwen2AudioProcessor,
+            WhisperFeatureExtractor,
+        )
+
+        config = Qwen2AudioConfig(
+            audio_token_index=1,
+            architectures=["Qwen2AudioForConditionalGeneration"],
+            text_config={
+                "vocab_size": 512,
+                "hidden_size": 32,
+                "intermediate_size": 64,
+                "num_hidden_layers": 2,
+                "num_attention_heads": 4,
+                "num_key_value_heads": 4,
+            },
+        )
+        config.save_pretrained(path)
+        inner = Tokenizer(
+            models.WordLevel(
+                {
+                    "[UNK]": 0,
+                    "<|AUDIO|>": 1,
+                    "hello": 2,
+                    "world": 3,
+                    "user": 4,
+                    "assistant": 5,
+                    "<|audio_bos|>": 6,
+                    "<|audio_eos|>": 7,
+                },
+                unk_token="[UNK]",
+            )
+        )
+        inner.pre_tokenizer = pre_tokenizers.Whitespace()
+        tokenizer = PreTrainedTokenizerFast(tokenizer_object=inner, unk_token="[UNK]")
+        tokenizer.add_special_tokens(
+            {
+                "additional_special_tokens": [
+                    "<|AUDIO|>",
+                    "<|audio_bos|>",
+                    "<|audio_eos|>",
+                ]
+            }
+        )
+        tokenizer.chat_template = (
+            "{% for message in messages %}{{message['role']}} "
+            "{{message['content']}} {% endfor %}"
+        )
+        Qwen2AudioProcessor(
+            feature_extractor=WhisperFeatureExtractor(feature_size=128),
+            tokenizer=tokenizer,
+        ).save_pretrained(path)
+        return VllmConfig(
+            model_config=ModelConfig(
+                model=path,
+                tokenizer=path,
+                dtype="float32",
+                max_model_len=2048,
+                limit_mm_per_prompt={"audio": 2},
+            ),
+            device_config=DeviceConfig(device="cpu"),
+        )
+
+    async def test_audio_url_restores_native_tokens_and_features(self):
+        audio = self.url.rsplit("/", 1)[0] + "/audio.wav"
+        await self.assert_media_continuation_matches_native(
+            [{"type": "audio_url", "audio_url": {"url": audio}}], {"audio"}
+        )
 
 
 if __name__ == "__main__":
