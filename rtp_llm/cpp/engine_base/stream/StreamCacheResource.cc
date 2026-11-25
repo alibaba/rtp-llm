@@ -217,11 +217,26 @@ bool StreamCacheResource::copyChunkKernelBlocks(int batch, const std::string& ta
     return true;
 }
 
-void StreamCacheResource::completeLinearPrefillChunk(int completed_tokens) {
-    if (!stream_->chunkedPrefillEnabled()) {
+void StreamCacheResource::advanceLinearPrefillChunk(int end_tokens) {
+    if (!stream_->chunkedPrefillEnabled() || stream_->isFakeStream()) {
         return;
     }
-    const bool trace_last_n = linear_prefill_trace::enabled() && reuseCache();
+    for (int batch = 0; batch < batch_kv_cache_resource_->batchSize(); ++batch) {
+        for (const auto& tag : batch_kv_cache_resource_->cacheResource(batch).groupTags()) {
+            auto& ids = batch_kv_cache_resource_->mutableBlockIds(batch, tag);
+            if (ids.linearPrefillPlan()) {
+                ids.advanceLinearPrefillChunk(end_tokens);
+            }
+        }
+    }
+}
+
+void StreamCacheResource::completeLinearPrefillChunk(int prefix_tokens, int chunk_len) {
+    if (!stream_->chunkedPrefillEnabled() || stream_->isFakeStream() || chunk_len <= 0) {
+        return;
+    }
+    const int  completed_tokens = prefix_tokens + chunk_len;
+    const bool trace_last_n     = linear_prefill_trace::enabled() && reuseCache();
     for (int batch = 0; batch < batch_kv_cache_resource_->batchSize(); ++batch) {
         for (const auto& tag : batch_kv_cache_resource_->cacheResource(batch).groupTags()) {
             auto&       ids  = batch_kv_cache_resource_->mutableBlockIds(batch, tag);
@@ -230,11 +245,11 @@ void StreamCacheResource::completeLinearPrefillChunk(int completed_tokens) {
                 continue;
             }
             if (trace_last_n) {
-                const auto round = plan->round(stream_->prefixLength(), stream_->currentChunkLen());
+                const auto round = plan->round(prefix_tokens, chunk_len);
                 std::ostringstream fields;
                 fields << "\"request_id\":" << stream_->streamId() << ",\"batch\":" << batch
                        << ",\"group_tag\":" << linear_prefill_trace::quote(tag)
-                       << ",\"prefix_tokens\":" << stream_->prefixLength()
+                       << ",\"prefix_tokens\":" << prefix_tokens
                        << ",\"end_tokens\":" << completed_tokens
                        << ",\"input_block\":" << (round.input_owner_position ? ids.blocks()[*round.input_owner_position] : 0)
                        << ",\"output_block\":" << ids.blocks()[round.output_owner_position]
@@ -248,7 +263,7 @@ void StreamCacheResource::completeLinearPrefillChunk(int completed_tokens) {
                 fields << ']';
                 linear_prefill_trace::emit("linear_prefill_round_completed", fields.str());
             }
-            ids.completeLinearPrefillChunk(completed_tokens);
+            ids.completeLinearPrefillChunk(prefix_tokens, completed_tokens);
         }
     }
 }

@@ -57,7 +57,8 @@ public:
     void setLinearPrefillPlan(std::shared_ptr<const LinearPrefillPlan> plan);
     const std::shared_ptr<const LinearPrefillPlan>& linearPrefillPlan() const { return linear_prefill_plan_; }
     bool copyLinearPrefillKernelBlocks(int64_t prefix_tokens, int64_t query_tokens, BlockIdxType* destination) const;
-    void completeLinearPrefillChunk(int64_t completed_tokens);
+    void advanceLinearPrefillChunk(int64_t end_tokens);
+    void completeLinearPrefillChunk(int64_t prefix_tokens, int64_t completed_tokens);
     bool canPublishLinearPrefillBlock(size_t position) const;
 
     size_t kernelBlocksPerKvBlock() const;
@@ -103,6 +104,7 @@ private:
     // A null slot below this watermark is retired, not an unallocated checkpoint.
     size_t reclaimed_prefix_blocks_ = 0;
     std::shared_ptr<const LinearPrefillPlan> linear_prefill_plan_;
+    int64_t                                 linear_prefill_readable_tokens_  = 0;
     int64_t                                 linear_prefill_completed_tokens_ = 0;
 };
 

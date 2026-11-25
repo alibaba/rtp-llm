@@ -2920,6 +2920,70 @@ TEST_F(PPBatchStreamProcessorTest, MiddleFailureDrainsLaterChunksWithoutPublishi
     }
 }
 
+TEST_F(PPBatchStreamProcessorTest, LastNChunkedPrefillSeparatesSubmittedReadBoundaryFromCompletion) {
+    for (const auto type : {SP_TYPE_NONE, SP_TYPE_MTP}) {
+        SCOPED_TRACE(type);
+        auto processor = makeProcessor(type);
+        auto stream    = makeStream(101, {1, 2, 3, 4, 5, 6, 7, 8});
+        stream->fakeInitKVBlock(4);
+        auto  plan = std::make_shared<LinearPrefillPlan>(8, 2, 2, 2);
+        auto& res  = stream->streamCacheResource().kvCacheMutable().cacheResource(0);
+        const auto tag = res.groupTags().front();
+        auto& ids  = res.mutableBlockIds(tag);
+        ids.resize(4);
+        int physical = 10;
+        for (const auto pos : plan->newPositions()) {
+            ids.setAt(pos, physical++);
+        }
+        ids.setLinearPrefillPlan(plan);
+        stream->setChunkSize(4);
+        if (type != SP_TYPE_NONE) {
+            setProposals(stream, {0, 0, 0, 0});
+        }
+
+        BlockIndicesType execution(4);
+        ASSERT_TRUE(ids.copyLinearPrefillKernelBlocks(stream->prefixLength(), stream->currentChunkLen(), execution.data()));
+        stream->setPPInflight();
+        const auto first = processor.captureExecution(StreamGroups({stream}));
+        commitSubmittedChunksForTest(first);
+
+        // Round 2 reads round 1 state before round 1 callback arrives, while checkpoints remain unpublishable.
+        stream->setChunkSize(2);
+        ASSERT_TRUE(ids.copyLinearPrefillKernelBlocks(stream->prefixLength(), stream->currentChunkLen(), execution.data()));
+        stream->setPPInflight();
+        const auto second = processor.captureExecution(StreamGroups({stream}));
+        commitSubmittedChunksForTest(second);
+
+        ASSERT_TRUE(ids.copyLinearPrefillKernelBlocks(stream->prefixLength(), stream->currentChunkLen(), execution.data()));
+        stream->setPPInflight();
+        const auto final = processor.captureExecution(StreamGroups({stream}));
+        ASSERT_TRUE(stream->isLastChunk());
+        commitSubmittedChunksForTest(final);
+
+        EXPECT_FALSE(ids.canPublishLinearPrefillBlock(2));
+        EXPECT_FALSE(ids.canPublishLinearPrefillBlock(3));
+
+        auto ack = makeResult({stream->streamId()});
+        processor.dispatchExecutionResult(first, ack);
+        EXPECT_FALSE(ids.canPublishLinearPrefillBlock(2));
+        EXPECT_FALSE(ids.canPublishLinearPrefillBlock(3));
+
+        processor.dispatchExecutionResult(second, ack);
+        EXPECT_TRUE(ids.canPublishLinearPrefillBlock(2));
+        EXPECT_FALSE(ids.canPublishLinearPrefillBlock(3));
+
+        ack.new_token_ids     = intTensor({9}).reshape({1, 1});
+        ack.new_token_lengths = intTensor({1});
+        if (type != SP_TYPE_NONE) {
+            ack.propose_token_ids = intTensor({10, 11, 12}).reshape({1, 3});
+        }
+        processor.dispatchExecutionResult(final, ack);
+        EXPECT_TRUE(ids.canPublishLinearPrefillBlock(2));
+        EXPECT_TRUE(ids.canPublishLinearPrefillBlock(3));
+        EXPECT_FALSE(stream->isContextStream());
+    }
+}
+
 TEST_F(PPBatchStreamProcessorTest, MixedChunkPlanSeparatesRequestRowsAndTokensAndDefersHistory) {
     auto processor = makeProcessor();
     auto final     = makeStream(101, {1, 2}, config(2));

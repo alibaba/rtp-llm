@@ -223,7 +223,8 @@ TEST_F(HybridCoordinatorCacheManagerCPShardTest, LocalDecodeFallbackPreservesPro
         const auto group_index = config.topology().groupIdForTag("linear");
         const auto group = allocator->cacheGroups()[group_index];
         auto& ids = resource->mutableBlockIds(0, "linear");
-        ids.completeLinearPrefillChunk(length);
+        ids.advanceLinearPrefillChunk(length);
+        ids.completeLinearPrefillChunk(0, length);
         const auto original = ids.blocks();
         for (int generated_pages = 1; generated_pages <= 40; ++generated_pages) {
             ASSERT_TRUE(group->mallocForDecode(ids, length + generated_pages * 4, true));

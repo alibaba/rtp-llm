@@ -127,8 +127,10 @@ size_t BlockIds::kernelBlocksPerKvBlock() const {
 void BlockIds::setLinearPrefillPlan(std::shared_ptr<const LinearPrefillPlan> plan) {
     RTP_LLM_CHECK_WITH_INFO(!plan || kernel_blocks_per_kv_block_ == 1,
                             "borrowed LINEAR prefill requires one kernel page per state slot");
-    linear_prefill_plan_ = std::move(plan);
-    linear_prefill_completed_tokens_ = linear_prefill_plan_ ? linear_prefill_plan_->reusedTokens() : 0;
+    linear_prefill_plan_             = std::move(plan);
+    const int64_t reused             = linear_prefill_plan_ ? linear_prefill_plan_->reusedTokens() : 0;
+    linear_prefill_readable_tokens_  = reused;
+    linear_prefill_completed_tokens_ = reused;
 }
 
 bool BlockIds::copyLinearPrefillKernelBlocks(int64_t prefix_tokens,
@@ -137,9 +139,9 @@ bool BlockIds::copyLinearPrefillKernelBlocks(int64_t prefix_tokens,
     if (!linear_prefill_plan_) {
         return false;
     }
-    RTP_LLM_CHECK_WITH_INFO(prefix_tokens == linear_prefill_completed_tokens_,
+    RTP_LLM_CHECK_WITH_INFO(prefix_tokens == linear_prefill_readable_tokens_,
                             "LINEAR prefill input boundary is not complete: prefix=%ld completed=%ld",
-                            prefix_tokens, linear_prefill_completed_tokens_);
+                            prefix_tokens, linear_prefill_readable_tokens_);
     const auto round = linear_prefill_plan_->round(prefix_tokens, query_tokens);
     const auto owner = [&](int64_t position) {
         RTP_LLM_CHECK_WITH_INFO(position >= 0 && static_cast<size_t>(position) < block_indices.size()
@@ -157,14 +159,26 @@ bool BlockIds::copyLinearPrefillKernelBlocks(int64_t prefix_tokens,
     return true;
 }
 
-void BlockIds::completeLinearPrefillChunk(int64_t completed_tokens) {
+void BlockIds::advanceLinearPrefillChunk(int64_t end_tokens) {
     if (!linear_prefill_plan_) {
         return;
     }
-    RTP_LLM_CHECK_WITH_INFO(completed_tokens > linear_prefill_completed_tokens_
+    RTP_LLM_CHECK_WITH_INFO(end_tokens > linear_prefill_readable_tokens_
+                               && end_tokens <= linear_prefill_plan_->promptTokens(),
+                            "invalid LINEAR prefill advance: previous=%ld end=%ld",
+                            linear_prefill_readable_tokens_, end_tokens);
+    linear_prefill_readable_tokens_ = end_tokens;
+}
+
+void BlockIds::completeLinearPrefillChunk(int64_t prefix_tokens, int64_t completed_tokens) {
+    if (!linear_prefill_plan_) {
+        return;
+    }
+    RTP_LLM_CHECK_WITH_INFO(prefix_tokens == linear_prefill_completed_tokens_
+                               && completed_tokens > prefix_tokens
                                && completed_tokens <= linear_prefill_plan_->promptTokens(),
-                            "invalid LINEAR prefill completion: previous=%ld completed=%ld",
-                            linear_prefill_completed_tokens_, completed_tokens);
+                            "invalid LINEAR prefill completion: previous=%ld prefix=%ld completed=%ld",
+                            linear_prefill_completed_tokens_, prefix_tokens, completed_tokens);
     linear_prefill_completed_tokens_ = completed_tokens;
 }
 

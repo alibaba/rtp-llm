@@ -585,11 +585,23 @@ bool GenerateStream::hasPendingChunk() const {
 }
 
 void GenerateStream::advanceChunk() {
-    reuse_length_ += currentChunkLen();
+    const int chunk_len = currentChunkLen();
+    reuse_length_ += chunk_len;
     chunk_advanced_ = true;
     if (warmup_chunk_window_) {
         ++warmup_chunk_index_;
     }
+    if (chunk_len > 0 && stream_cache_resource_) {
+        stream_cache_resource_->advanceLinearPrefillChunk(reuse_length_);
+    }
+}
+
+void GenerateStream::completeLinearPrefillChunk(int prefix_tokens, int chunk_len) {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    if (hasErrorWithoutLock() || isFinished() || !isContextStream() || !stream_cache_resource_) {
+        return;
+    }
+    stream_cache_resource_->completeLinearPrefillChunk(prefix_tokens, chunk_len);
 }
 
 int GenerateStream::nextChunkBoundaryToken() const {
@@ -1015,8 +1027,8 @@ bool GenerateStream::prepareUpdateWithoutLock(const std::optional<ErrorInfo>& er
     if ((hasErrorWithoutLock() || isFinished()) && (!force_update_info || middle_chunk)) {
         return false;
     }
-    if (isContextStream()) {
-        stream_cache_resource_->completeLinearPrefillChunk(prefixLength() + currentChunkLen());
+    if (isContextStream() && !isPPInflight()) {
+        stream_cache_resource_->completeLinearPrefillChunk(prefixLength(), currentChunkLen());
     }
     if (middle_chunk) {
         advanceChunk();

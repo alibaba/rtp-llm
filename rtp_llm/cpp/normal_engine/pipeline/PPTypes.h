@@ -27,6 +27,8 @@ struct PPStreamExecution {
     int                             batch_size      = 0;
     int                             execute_tokens  = 0;
     int32_t                         priority        = 0;
+    int                             chunk_prefix    = 0;
+    int                             chunk_length    = 0;
 };
 
 struct PPExecutionSnapshot {
