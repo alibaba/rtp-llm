@@ -176,8 +176,12 @@ class MediaPipelineTraceTest(unittest.TestCase):
             len([s for s in later if s.name.endswith(".media") and s.links]), 2
         )
 
-    def test_native_download_span_belongs_to_original_media(self):
-        import os
+    def test_native_download_can_be_disabled(self):
+        with patch.dict(os.environ, {"MM_NATIVE_MEDIA_NETWORK": "0"}):
+            engine = self.engine()
+        self.assertIsNone(engine._media_network)
+
+    def test_native_download_span_belongs_to_original_media_by_default(self):
         from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
         class Origin(BaseHTTPRequestHandler):
@@ -193,8 +197,10 @@ class MediaPipelineTraceTest(unittest.TestCase):
         self.addCleanup(server.server_close)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self.addCleanup(server.shutdown)
-        with patch.dict(os.environ, {"MM_NATIVE_MEDIA_NETWORK": "1"}):
+        with patch.dict(os.environ):
+            os.environ.pop("MM_NATIVE_MEDIA_NETWORK", None)
             engine = self.engine()
+        self.assertIsNotNone(engine._media_network)
         inp = self.make_input()
         inp.url = f"http://127.0.0.1:{server.server_port}/image"
         engine.get_embedding_result([inp], request_id=84)

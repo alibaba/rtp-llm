@@ -284,7 +284,7 @@ class MMProcessEngine:
         preprocess_params = self.mm_part.get_preprocess_params()
         preprocess_func = self.mm_part.preprocess_input
 
-        use_native_network = os.getenv("MM_NATIVE_MEDIA_NETWORK") == "1"
+        use_native_network = os.getenv("MM_NATIVE_MEDIA_NETWORK", "1") == "1"
         self._media_network = None
         if vit_config.use_local_preprocess:
             self.preprocess_executor: PreprocessExecutor = LocalPreprocessExecutor(
