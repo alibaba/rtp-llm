@@ -92,8 +92,8 @@ size_t MemoryEvaluationHelper::getKVCacheMemorySize(const RuntimeConfig&        
         return kv_cache_config.kv_cache_mem_mb * 1024 * 1024;
     }
 
-    const auto remaining_bytes =
-        availableCacheMemory(runtime_config, model_config, parallelism_config, warm_up_result, sp_config);
+    const auto remaining_bytes = availableCacheMemory(
+        runtime_config, model_config, parallelism_config, warm_up_result, sp_config, &kv_cache_config);
     RTP_LLM_CHECK_WITH_INFO(remaining_bytes > transfer_memory_bytes,
                             "available memory after runtime reservation %zu MiB cannot hold CRC transfer workspace "
                             "%zu MiB and KV cache",
@@ -110,7 +110,8 @@ size_t MemoryEvaluationHelper::availableCacheMemory(const RuntimeConfig&        
                                                     const ModelConfig&                               model_config,
                                                     const ParallelismConfig&                         parallelism_config,
                                                     const std::optional<WarmUpResult>&               warm_up_result,
-                                                    const std::optional<SpeculativeExecutionConfig>& sp_config) {
+                                                    const std::optional<SpeculativeExecutionConfig>& sp_config,
+                                                    const KVCacheConfig*                             kv_cache_config) {
     size_t device_reserved_memory_bytes = getGpuExecStatus().device_memory_status.available_bytes;
     size_t runtime_required_bytes       = 0;
 
@@ -141,6 +142,25 @@ size_t MemoryEvaluationHelper::availableCacheMemory(const RuntimeConfig&        
                          runtime_required_bytes / 1024 / 1024);
     }
 
+    // Memory initialize() adds after this sizing but that this start already holds (see KVCacheConfig).
+    // Warm-up has run the target's initialize() before this sizing; the draft's always comes after.
+    // This only corrects sizing that runs before initialize(). If the sizing ever moves after both
+    // initialize() calls, free memory already reflects the growth: remove this adjustment.
+    const size_t  physical_free_bytes = device_reserved_memory_bytes;
+    const int64_t initialize_gpu_growth_bytes =
+        kv_cache_config ? (kv_cache_config->draft_initialize_gpu_growth_bytes
+                           + (warm_up_result ? 0 : kv_cache_config->target_initialize_gpu_growth_bytes)) :
+                          0;
+    if (initialize_gpu_growth_bytes != 0) {
+        const int64_t credited =
+            std::max<int64_t>(static_cast<int64_t>(physical_free_bytes) + initialize_gpu_growth_bytes, 0);
+        RTP_LLM_LOG_INFO("initialize() GPU growth %ld MiB already held: sizing from %ld MiB, not %ld MiB free",
+                         initialize_gpu_growth_bytes / 1024 / 1024,
+                         credited / 1024 / 1024,
+                         physical_free_bytes / 1024 / 1024);
+        device_reserved_memory_bytes = static_cast<size_t>(credited);
+    }
+
     size_t sample_need_mem =
         (size_t)runtime_config.max_generate_batch_size * model_config.vocab_size * 4 * 8;  // just estimated value
     RTP_LLM_LOG_INFO("sampler needs %ld MiB memory, model runtime needs %ld MiB memory, take max value.",
@@ -153,7 +173,26 @@ size_t MemoryEvaluationHelper::availableCacheMemory(const RuntimeConfig&        
                             device_reserved_memory_bytes / 1024 / 1024,
                             runtime_required_bytes / 1024 / 1024);
 
-    return device_reserved_memory_bytes - runtime_required_bytes;
+    size_t available_cache_bytes = device_reserved_memory_bytes - runtime_required_bytes;
+    // Crediting initialize() growth only offsets runtime reserve already spent; whenever
+    // credited growth + sample_need_mem exceeds runtime_required_bytes (e.g. a restart
+    // lowered the reserve), clamp so cache sizing never exceeds physical free minus sampler.
+    if (initialize_gpu_growth_bytes > 0) {
+        RTP_LLM_CHECK_WITH_INFO(physical_free_bytes > sample_need_mem,
+                                "physical free memory %ld MiB is less than sampler required memory %ld MiB",
+                                physical_free_bytes / 1024 / 1024,
+                                sample_need_mem / 1024 / 1024);
+        const size_t physical_cap = physical_free_bytes - sample_need_mem;
+        if (available_cache_bytes > physical_cap) {
+            RTP_LLM_LOG_WARNING(
+                "credited cache memory size %ld MiB exceeds physical free minus sampler (%ld MiB); clamping to %ld MiB",
+                available_cache_bytes / 1024 / 1024,
+                physical_cap / 1024 / 1024,
+                physical_cap / 1024 / 1024);
+            available_cache_bytes = physical_cap;
+        }
+    }
+    return available_cache_bytes;
 }
 
 }  // namespace rtp_llm

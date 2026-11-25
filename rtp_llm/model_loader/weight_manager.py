@@ -94,12 +94,15 @@ class WeightManager:
     or Pipeline Parallelism (PP)).
     """
 
+    _resident_weights_enabled: bool = False
+
     def __init__(
         self,
         device,
         weight: ModelWeights,
         model_weights_loader: ModelLoader,
         non_owned_global_weights: Sequence[str] = (),
+        resident_weights_enabled: bool = False,
     ) -> None:
         """
         Initializes the WeightManager with a model's weights, device information, and weight loader.
@@ -117,6 +120,7 @@ class WeightManager:
         self._weights_loader: ModelLoader = model_weights_loader
         self._weight_module = self._weights_loader._model_weights_info
         self._non_owned_global_weights = frozenset(non_owned_global_weights)
+        self._resident_weights_enabled = resident_weights_enabled
         self._working_stream: torch.cuda.Stream = torch.cuda.Stream(
             device=self._device,
         )
@@ -164,6 +168,8 @@ class WeightManager:
         Returns:
             None. The method updates internal model weights directly.
         Error Handling:
+            - `RuntimeError`: If this process holds resident weights
+                              (`--resident_weights_mode` dev/prod), checked before the request is parsed.
             - `KeyError`: If "desc", "name", or "method" fields are missing from `req`.
             - `ValueError`: If the "method" is invalid (not "cuda_ipc" or "shm"),
                             or if a layer weight name is invalid and its ID cannot be extracted.
@@ -171,6 +177,21 @@ class WeightManager:
             - `Exception`: If the tensor cannot be built from the IPC metadata (e.g., invalid descriptor).
                           This is a general catch-all for unexpected failures in `_t_helper.build_from_meta`.
         """
+        # Capability boundary: resident weights support inference and engine restarts
+        # only, not RL or other online base-weight updates. Missing pieces:
+        #   - resident tensors are read-only mappings; an update needs new memory and a swap;
+        #   - the published record would no longer match its checkpoint identity, and it has
+        #     no version or in-progress marker (like EPLB's begin/commit) a restart could trust;
+        #   - packed outputs of initialize-time transforms do not follow a raw-tensor update;
+        #   - an engine attaching the same slot meanwhile could map a half-updated record.
+        # The configuration decides, not whether this process ended up holding resident
+        # weights: ranks of one engine can differ there (a target that fell back to a
+        # checkpoint load beside a resident draft on the last stage), and accepting on some
+        # ranks would leave the stages on different weights.
+        if self._resident_weights_enabled:
+            raise RuntimeError(
+                "weight updates are not supported while the resident weights mode is enabled"
+            )
         if "desc" not in req:
             raise KeyError(
                 "Update request is missing the 'desc' field. "

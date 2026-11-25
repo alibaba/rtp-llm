@@ -514,7 +514,7 @@ uint32_t CacheConfigCreator::computeLocalBlockNum(const CacheConfig&            
         size_t kv_cache_mem_size;
         if (crc_plan && default_crc_bytes > 0) {
             const auto available_bytes = MemoryEvaluationHelper::availableCacheMemory(
-                runtime_config, model_config, parallelism_config, warm_up_result, sp_config);
+                runtime_config, model_config, parallelism_config, warm_up_result, sp_config, &kv_cache_config);
             auto minimum_kv_bytes = block_budget.explicit_pool_reserve_bytes;
             addBudgetBytes(minimum_kv_bytes, block_budget.paged_block_bytes);
             addBudgetBytes(minimum_kv_bytes, block_budget.swa_block_bytes);

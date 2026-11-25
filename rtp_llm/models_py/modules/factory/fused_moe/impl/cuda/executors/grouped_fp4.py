@@ -41,6 +41,7 @@ from rtp_llm.models_py.triton_kernels.moe.silu_mul_fp8_quant import (
     silu_mul_fp8_quant_packed,
 )
 from rtp_llm.models_py.utils.math import align, ceil_div
+from rtp_llm.resident_weights import resident_init_tensors
 
 from .fp8_fp4_base import Fp8Fp4ExecutorBase, normalize_moe_w13_gate_up
 
@@ -101,26 +102,56 @@ class GroupedFp4Executor(Fp8Fp4ExecutorBase):
         from rtp_llm.utils.model_weight import W
 
         cfg = self.cfg
-        E, D, inter = cfg.n_routed_experts, cfg.dim, cfg.moe_inter_dim
-        self._w13 = layer_weights.pop(W.moe_w1)
-        s13_raw = layer_weights.pop(W.moe_s1)
-        self._w13, s13_raw = normalize_moe_w13_gate_up(
+        group = (
+            f"fp8_fp4.grouped_fp4.routed:e{cfg.n_routed_experts}:d{cfg.dim}"
+            f":i{cfg.moe_inter_dim}:w1_{cfg.moe_w1_layout}"
+        )
+        (
             self._w13,
+            self._s13,
+            self._w2,
+            self._s2,
+            self._s13_dense_t,
+            self._s2_dense_t,
+        ) = resident_init_tensors(
+            layer_weights,
+            transform_key=group,
+            output_names=(
+                f"{group}.w13",
+                f"{group}.s13",
+                f"{group}.w2",
+                f"{group}.s2",
+                f"{group}.s13_dense_t",
+                f"{group}.s2_dense_t",
+            ),
+            consumed_names=(W.moe_w1, W.moe_s1, W.moe_w2, W.moe_s2),
+            builder=lambda: self._build_weights(layer_weights),
+        )
+
+    def _build_weights(self, layer_weights: Dict):
+        from rtp_llm.utils.model_weight import W
+
+        cfg = self.cfg
+        E, D, inter = cfg.n_routed_experts, cfg.dim, cfg.moe_inter_dim
+        w13 = layer_weights.pop(W.moe_w1)
+        s13_raw = layer_weights.pop(W.moe_s1)
+        w13, s13_raw = normalize_moe_w13_gate_up(
+            w13,
             s13_raw,
             inter,
             cfg.moe_w1_layout,
         )
-        self._w2 = layer_weights.pop(W.moe_w2)
+        w2 = layer_weights.pop(W.moe_w2)
         s2_raw = layer_weights.pop(W.moe_s2)
 
-        self._s13 = prepare_fp4_weight_scale_for_deepgemm(s13_raw, 2 * inter, D, E)
-        self._s2 = prepare_fp4_weight_scale_for_deepgemm(s2_raw, D, inter, E)
+        s13 = prepare_fp4_weight_scale_for_deepgemm(s13_raw, 2 * inter, D, E)
+        s2 = prepare_fp4_weight_scale_for_deepgemm(s2_raw, D, inter, E)
         s13_dense = prepare_fp4_weight_scale_for_deepgemm(
             s13_raw.reshape(E * 2 * inter, D // FP4_BLOCK),
             E * 2 * inter,
             D,
         )
-        self._s13_dense_t = s13_dense.as_strided(
+        s13_dense_t = s13_dense.as_strided(
             (E, s13_dense.size(1), 2 * inter),
             (2 * inter, E * 2 * inter, 1),
         )
@@ -129,7 +160,7 @@ class GroupedFp4Executor(Fp8Fp4ExecutorBase):
             E * D,
             inter,
         )
-        self._s2_dense_t = s2_dense.as_strided(
+        s2_dense_t = s2_dense.as_strided(
             (E, s2_dense.size(1), D),
             (D, E * D, 1),
         )
@@ -139,6 +170,7 @@ class GroupedFp4Executor(Fp8Fp4ExecutorBase):
         # planner sees the real residual HBM rather than what's
         # cached-but-unused inside PyTorch's allocator.
         torch.cuda.empty_cache()
+        return w13, s13, w2, s2, s13_dense_t, s2_dense_t
 
     def dense_gemm_warmup_weights(self):
         """Expose the two dense fallback GEMMs to model-level JIT warmup."""

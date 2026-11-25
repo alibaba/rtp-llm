@@ -5,12 +5,15 @@ from unittest.mock import Mock, patch
 
 from rtp_llm import start_server
 from rtp_llm.ops import RoleType, SpeculativeType
+from rtp_llm.utils.drain_flag import DrainFlag
 
 
 class ServiceDrainingPropagationTest(unittest.TestCase):
     def test_each_launch_passes_a_fresh_event_to_all_process_groups(self):
         configs = Mock()
         configs.parallelism_config.dp_size = 1
+        # Without in-place restart every process group shares the instance's event.
+        configs.server_config.engine_restart_limit = 0
         with ExitStack() as stack:
             for name in (
                 "init_controller",
@@ -39,6 +42,8 @@ class ServiceDrainingPropagationTest(unittest.TestCase):
                 configs.role_config.role_type = role
                 start_server.start_server(configs)
                 event = manager_class.call_args.kwargs["service_draining"]
+                # multiprocessing.Event.set() hangs once a waiter was killed.
+                self.assertIsInstance(event, DrainFlag)
                 self.assertIsNot(event, previous)
                 self.assertFalse(event.is_set())
                 for starter in [vit] if role == RoleType.VIT else starters:
