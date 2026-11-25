@@ -233,13 +233,26 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         FlexlbTrace.setRequestAttributes(Span.fromContext(entryTraceContext()), requestId);
         RequestState snapshot = getRequestStateForPhase(requestId, request.getBatchId(), phase);
         if (snapshot == null && shouldForwardToMaster()) {
-            FlexlbScheduleProtocol.GetRequestStateResponsePB forwarded =
-                    grpcForwarder.forwardGetRequestStateToMaster(request);
-            if (forwarded != null && forwarded.getFound()) {
-                responseObserver.onNext(forwarded);
-                responseObserver.onCompleted();
-                return;
-            }
+            Context callerContext = Context.current();
+            grpcForwarder
+                    .forwardGetRequestStateToMaster(request)
+                    .whenComplete(
+                            (forwarded, error) -> {
+                                if (callerContext.isCancelled()) {
+                                    return;
+                                }
+                                if (error != null) {
+                                    responseObserver.onError(error);
+                                    return;
+                                }
+                                responseObserver.onNext(
+                                        forwarded != null && forwarded.getFound()
+                                                ? forwarded
+                                                : FlexlbScheduleProtocol.GetRequestStateResponsePB
+                                                        .getDefaultInstance());
+                                responseObserver.onCompleted();
+                            });
+            return;
         }
         FlexlbScheduleProtocol.GetRequestStateResponsePB.Builder response =
                 FlexlbScheduleProtocol.GetRequestStateResponsePB.newBuilder()
