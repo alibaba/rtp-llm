@@ -391,7 +391,6 @@ class Qwen2ForCausalLM(Qwen3ForCausalLM):
     """Qwen2 owns its biased GQA decoder and shares the main dense PP runtime."""
 
     supports_ft_handler_heads = True
-    resident_after_post_load = True
     QKV_BIAS = True
     WEIGHTS_MAPPER = Qwen2CheckpointMapper()
     _decoder_layer = Qwen2DecoderLayer
@@ -424,7 +423,6 @@ class Qwen2ForCausalLM(Qwen3ForCausalLM):
 class Qwen2EmbeddingBackbone(Qwen2ForCausalLM):
     """Bidirectional Qwen2 blocks; the service handler owns sentence pooling."""
 
-    resident_after_post_load = True
 
     def __init__(self, model_config: Any, load_config: Any):
         # Both the FMHA selector and the default pooling handler consult this

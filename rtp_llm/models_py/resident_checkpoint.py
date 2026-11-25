@@ -103,7 +103,7 @@ def _slots(model):
         for name, tensor in (*leaf._parameters.items(), *leaf._buffers.items()):
             if (
                 tensor is None
-                or name in leaf._non_persistent_buffers_set
+                or (name in leaf._non_persistent_buffers_set and name not in getattr(leaf, '_resident_runtime_buffers', ()))
                 or id(tensor) in seen
             ):
                 continue
@@ -127,19 +127,6 @@ class _OwnerSlots(WeightDict):
         if self.destinations is not None:
             self.destinations[name].data = value
         super().__setitem__(name, value)
-
-
-def restore_final_linears(model):
-    """A final dense snapshot already includes post-processing and startup adapters."""
-    from rtp_llm.models_py.layers.linear import LinearBase
-
-    for leaf in model.modules():
-        if isinstance(leaf, LinearBase):
-            leaf._loaded_parameter_names = set(
-                getattr(leaf, "_rtp_loaded_weight_names", ())
-            )
-            leaf._main_weight_loaded = "weight" in leaf._loaded_parameter_names
-            leaf._post_load_done = True
 
 
 def _loaded_fields(model):

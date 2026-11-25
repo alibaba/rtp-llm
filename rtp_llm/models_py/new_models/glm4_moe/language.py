@@ -67,6 +67,7 @@ class GqaMoeForCausalLM(Qwen3ForCausalLM):
             ep_size=load_config.ep_size,
             ep_rank=load_config.ep_rank,
         )
+        cfg["resident_construction"] = getattr(load_config, "resident_construction", None)
         self._install_parameters(
             self,
             cfg,
@@ -142,3 +143,10 @@ class GqaMoeForCausalLM(Qwen3ForCausalLM):
 
 class Glm4MoeForCausalLM(GqaMoeForCausalLM):
     _install_parameters = staticmethod(install_glm4_parameters)
+
+    def resident_constructor_state(self):
+        from dataclasses import asdict
+
+        facts = super().resident_constructor_state()
+        facts["glm_layout"] = {**asdict(self._layout), "routed_layers": sorted(self._layout.routed_layers)}
+        return facts

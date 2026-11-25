@@ -161,6 +161,11 @@ class LinearBase(RtpModule):
             a, b, input_size, output_size, self.prefix
         )
 
+    def bind_resident_runtime(self):
+        bind = getattr(self.quant_method, "bind_resident_runtime", None)
+        if bind is not None:
+            bind(self)
+
     def requires_staged_device_postprocess(self) -> bool:
         return bool(self.quant_method.requires_staged_device_postprocess)
 

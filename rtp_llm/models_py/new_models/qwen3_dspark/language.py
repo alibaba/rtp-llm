@@ -170,6 +170,14 @@ class Qwen3DSparkForCausalLM(Qwen3DSparkRuntime, Qwen3ForCausalLM):
         # opt-in contract; ordinary checkpoints retain dense Qwen tying.
         Qwen3ForCausalLM.load_weights(self, mapped())
 
+    def prepare_resident_checkpoint_restore(self, state, values):
+        super().prepare_resident_checkpoint_restore(state, values)
+        if "d2t" in values:
+            value = values["d2t"]
+            if value.dtype != torch.int64 or tuple(value.shape) != (self.vocab_size,):
+                raise ValueError("Invalid resident DSpARK vocabulary map")
+            self._buffers["d2t"] = value
+
     def validate_weights_loaded(self, loaded_tensor_ids=None):
         super().validate_weights_loaded(loaded_tensor_ids)
         if self.vocab_size != self._input_vocab_size and self.d2t is None:

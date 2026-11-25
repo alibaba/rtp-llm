@@ -59,3 +59,13 @@ py_test(
     data = ["//:rtp_compute_ops", "//:th_transformer_config"],
     deps = ["//rtp_llm:models", "//rtp_llm/models_py:new_weight_loader"],
 )
+
+py_test(
+    name = "resident_restart_test",
+    srcs = ["resident_restart_test.py", "main_checkpoint_test.py"],
+    main = "resident_restart_test.py",
+    data = ["//:rtp_compute_ops", "//:th_transformer_config"],
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13"},
+    deps = ["//rtp_llm/models_py:new_weight_loader", "//rtp_llm/resident_weights", "//rtp_llm:safetensors_torch"],
+)

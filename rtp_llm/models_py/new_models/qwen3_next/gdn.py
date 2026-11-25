@@ -20,6 +20,9 @@ class Qwen3NextGatedDeltaNet(Qwen3NextGdnExecution, Qwen3NextGdnParameters):
         self.parallelism_config = parallelism_config
         self.norm_activation = norm_activation
 
+    def prepare_resident_projection(self):
+        self._prepare_input_projection()
+
     def process_weights_after_loading(self):
         self._prepare_input_projection()
         # Scratch may stage on CPU; take kernel views only after migration.

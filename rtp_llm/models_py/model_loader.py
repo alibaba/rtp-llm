@@ -2504,7 +2504,7 @@ class NewModelLoader:
         from rtp_llm.resident_weights import GLOBAL_SCOPE
 
         describe = getattr(model, "resident_constructor_state", None)
-        if describe is None or (startup_lora is not None and not getattr(model, "resident_after_post_load", False)):
+        if describe is None:
             raise RuntimeError(f"No resident checkpoint schema for {type(model).__name__} with startup_lora={startup_lora is not None}")
         constructor = json.dumps(describe(), sort_keys=True)
         header = getattr(model, "_resident_ft_header_facts", None)
@@ -2513,6 +2513,46 @@ class NewModelLoader:
             resident.init_scalar(GLOBAL_SCOPE, "native.ft_header", lambda: json.dumps(header))
         resident.init_scalar(GLOBAL_SCOPE, "native.format", lambda: format_route)
         resident.init_scalar(GLOBAL_SCOPE, "native.constructor", lambda: constructor)
+
+    def _finish_checkpoint(self, model, resident, method, startup_lora, finish_lora, route="hf"):
+        prepare = getattr(model, "prepare_resident_weights", None)
+        if resident is None:
+            self._run_post_load_hooks(model)
+            if finish_lora is not None:
+                finish_lora()
+        elif prepare is not None:
+            # Snapshot final bytes, including startup adapters, but create live
+            # kernel views only after their backing allocations stop moving.
+            if finish_lora is not None:
+                # On CUDA the remaining floating adapters target the canonical
+                # Parameters. Derived fused views must see the merged bytes.
+                finish_lora()
+            prepare()
+            self._record_resident_owner(model, resident, method, startup_lora, format_route=route)
+            self._bind_resident_runtime(model)
+            self._run_post_load_hooks(model)
+        else:
+            after = getattr(model, "resident_after_post_load", False)
+            if not after and finish_lora is not None:
+                # The pre-executor owner snapshots CUDA checkpoint projections.
+                # Floating factors use checkpoint orientation here; staged INT8
+                # leaves already consumed their factors during conversion.
+                finish_lora()
+                finish_lora = None
+            if not after:
+                self._record_resident_owner(model, resident, method, startup_lora, format_route=route)
+            self._run_post_load_hooks(model)
+            if finish_lora is not None:
+                finish_lora()
+            if after:
+                self._record_resident_owner(model, resident, method, startup_lora, format_route=route)
+
+    @staticmethod
+    def _bind_resident_runtime(model):
+        for leaf in model.modules():
+            hook = getattr(leaf, "bind_resident_runtime", None)
+            if hook is not None and not getattr(leaf, "_rtp_borrowed_parameter_names", ()):
+                hook()
 
     @torch.inference_mode()
     def load(self, *, startup_lora: Optional[Tuple[str, str]] = None, prepare_loans=None, resident=None, restored=None) -> nn.Module:
@@ -2574,13 +2614,15 @@ class NewModelLoader:
                     header = rc.ResidentFTHeader(self._resolved_model_path(), facts)
                 with torch.device("cpu"):
                     model = self._create_model(ft_load_config=load, ft_checkpoint=header)
+                bind_borrowed_parameters(model, self.parameter_aliases, self.load_config.device)
                 self._validate_runtime_backends(model, self.load_config.device)
                 self._notify_checkpoint_source(model, method)
-                bind_borrowed_parameters(model, self.parameter_aliases, self.load_config.device)
                 rc.restore(model, resident, restored, self.load_config.device,
                            construction=self.load_config.resident_construction)
                 model.to(self.load_config.device)
                 self._validate_loaded_weights(model)
+                if hasattr(model, "prepare_resident_weights"):
+                    self._bind_resident_runtime(model)
                 if not getattr(model, "resident_after_post_load", False):
                     self._run_post_load_hooks(model)
                 validate_borrowed_parameters(model)
@@ -2695,25 +2737,17 @@ class NewModelLoader:
                     self._finalize_host_staged_modules(model, defer_executor=resident is not None)
                 model.to(self.load_config.device)
                 self._validate_loaded_weights(model)
-                after_hooks = resident is not None and getattr(model, "resident_after_post_load", False)
-                if resident is not None and not after_hooks:
-                    ft_method = NewLoaderLoadMethod(ft_checkpoint.read_backend)
-                    self._record_resident_owner(model, resident, ft_method, startup_lora,
-                                                format_route="meta" if meta_checkpoint else "ft")
-                self._run_post_load_hooks(model)
-                validate_borrowed_parameters(model, self.load_config.device)
-                if finish_meta_lora is not None:
-                    finish_meta_lora()
-                elif startup_lora is not None:
-                    # Format adapters may import already packed runtime parameters.
-                    from rtp_llm.models_py.lora_checkpoint import (
-                        merge_startup_lora_checkpoint,
-                    )
+                if finish_meta_lora is None and startup_lora is not None:
+                    from rtp_llm.models_py.lora_checkpoint import merge_startup_lora_checkpoint
 
-                    merge_startup_lora_checkpoint(model, self, *startup_lora)
-                if resident is not None and after_hooks:
-                    self._record_resident_owner(model, resident, NewLoaderLoadMethod(ft_checkpoint.read_backend),
-                                                startup_lora, format_route="meta" if meta_checkpoint else "ft")
+                    def finish_meta_lora():
+                        merge_startup_lora_checkpoint(model, self, *startup_lora)
+
+                self._finish_checkpoint(
+                    model, resident, NewLoaderLoadMethod(ft_checkpoint.read_backend),
+                    startup_lora, finish_meta_lora, "meta" if meta_checkpoint else "ft",
+                )
+                validate_borrowed_parameters(model, self.load_config.device)
                 model.eval()
             if ft_rebalance:
                 # Keep the stage's immutable catalog, not a second model.
@@ -2954,14 +2988,7 @@ class NewModelLoader:
             validate_borrowed_parameters(model, self.load_config.device)
             model.to(self.load_config.device)
             self._validate_loaded_weights(model)
-            after_hooks = resident is not None and getattr(model, "resident_after_post_load", False)
-            if resident is not None and not after_hooks:
-                self._record_resident_owner(model, resident, method, startup_lora)
-            self._run_post_load_hooks(model)
-            if finish_lora is not None:
-                finish_lora()
-            if resident is not None and after_hooks:
-                self._record_resident_owner(model, resident, method, startup_lora)
+            self._finish_checkpoint(model, resident, method, startup_lora, finish_lora)
             validate_borrowed_parameters(model)
             model.eval()
         self._selected_load_method = method

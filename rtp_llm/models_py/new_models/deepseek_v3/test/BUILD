@@ -109,3 +109,12 @@ py_test(
     data = ["//rtp_llm/libs:librtp_compute_ops_so"],
     deps = ["//rtp_llm/models_py:new_weight_loader", "//rtp_llm:models", "//rtp_llm:fastsafetensors", "//rtp_llm:safetensors", "//rtp_llm:torch"],
 )
+
+py_test(
+    name = "test_resident_mla",
+    srcs = ["test_resident_mla.py", "test_nextn_route.py", "test_score_route.py"],
+    main = "test_resident_mla.py",
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+    deps = ["//rtp_llm/models_py:new_weight_loader", "//rtp_llm:models", "//rtp_llm:fastsafetensors", "//rtp_llm:torch", "//rtp_llm/resident_weights"],
+)

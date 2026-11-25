@@ -294,6 +294,11 @@ class _OwnedGlm5:
             raise ValueError("GLM-5 packed FP4 experts require the original HF checkpoint; the FT writer has no lossless packed-expert contract")
         return super().load_ft_checkpoint(checkpoint)
 
+    def resident_constructor_state(self):
+        facts = super().resident_constructor_state()
+        facts["packed_experts"] = self.decoder_layer_cls is _PackedGlm5Decoder
+        return facts
+
     def __init__(self, model_config, load_config):
         # Glm5._create_config already normalized quantization_config.expert_dtype.
         # Other model-wide formats (notably ModelOpt NVFP4) use a different
@@ -310,7 +315,8 @@ class _OwnedGlm5:
             and getattr(load_config.moe_config, "moe_strategy", None)
             in FP4_MEGA_MOE_STRATEGIES
         ):
-            packed = _legacy_packed_checkpoint(checkpoint_path(model_config))
+            state = getattr(load_config, "resident_construction", None)
+            packed = _legacy_packed_checkpoint(checkpoint_path(model_config)) if state is None else state["packed_experts"]
         if packed:
             self.decoder_layer_cls = _PackedGlm5Decoder
         super().__init__(model_config, load_config)

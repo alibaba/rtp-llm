@@ -16,12 +16,18 @@ from .decoder import Glm4MoeDecoderLayer
 
 
 def install_glm4_parameters(owner, cfg, *, layer_ids, partitioned):
+    state = cfg.get("resident_construction")
+    if state is None:
+        layout = Glm4CheckpointLayout.read(cfg["model_config"])
+    else:
+        fields = state["glm_layout"]
+        layout = Glm4CheckpointLayout(**{**fields, "routed_layers": frozenset(fields["routed_layers"])})
     install_gqa_moe_parameters(
         owner,
         cfg,
         layer_ids=layer_ids,
         partitioned=partitioned,
-        layout=Glm4CheckpointLayout.read(cfg["model_config"]),
+        layout=layout,
         qkv_bias=True,
     )
 

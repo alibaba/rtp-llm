@@ -1,13 +1,30 @@
 """Megatron-BERT direct-weight model using main's packed attention runtime."""
 
+from rtp_llm.models_py.new_models.resident_decoder import ResidentDecoderOwner
+from torch import nn
+
 from rtp_llm.models_py.model_desc.block_map import select_fmha_impl_for_layer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.new_models.megatron_bert.backbone import MegatronParameters
 
 
-class MegatronBertForEmbedding(MegatronParameters, GptModelBase, RtpModule):
+class MegatronBertForEmbedding(ResidentDecoderOwner, MegatronParameters, GptModelBase, RtpModule):
     supports_ft_handler_heads = True
+
+    def prepare_resident_checkpoint_restore(self, state, values):
+        super().prepare_resident_checkpoint_restore(state, values)
+        for name in self._custom:
+            value = values["custom_params." + name]
+            if value.dtype != self._custom_dtype[name]:
+                raise ValueError(f"Invalid resident Megatron handler {name}")
+            self.custom_params[name] = nn.Parameter(value, requires_grad=False)
+        table = values.get("embeddings.token_type_embeddings.weight")
+        if self.embeddings.token_type_embeddings is None and table is not None:
+            anchor = self.embeddings.word_embeddings.weight
+            if table.dtype != anchor.dtype or table.ndim != 2 or table.shape[1] != anchor.shape[1] or not table.shape[0]:
+                raise ValueError("Invalid resident Megatron token type table")
+            self.embeddings.token_type_embeddings = nn.Embedding.from_pretrained(table)
 
     def finalize_runtime_input_vocab(self, config, tokenizer):
         from rtp_llm.models_py.new_models.bert.checkpoint_metadata import publish_input_vocab

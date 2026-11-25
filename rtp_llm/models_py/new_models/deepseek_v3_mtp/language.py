@@ -200,6 +200,11 @@ class DeepSeekV32MTPForCausalLM(DeepSeekV32ForCausalLM):
 
         RtpModule.load_weights(self, self.WEIGHTS_MAPPER.apply(selected()))
 
+    def resident_constructor_state(self):
+        facts = super().resident_constructor_state()
+        facts["draft_layer"] = self._checkpoint_layer
+        return facts
+
     def __init__(
         self,
         model_config: Any,
@@ -230,7 +235,8 @@ class DeepSeekV32MTPForCausalLM(DeepSeekV32ForCausalLM):
                 "DeepSeek MTP newloader requires checkpoint config.json"
             )
         cfg = extract_config_values(model_config, load_config, config_json)
-        self._checkpoint_layer = self.draft_checkpoint_layer(config_json, ckpt_path)
+        state = getattr(load_config, "resident_construction", None)
+        self._checkpoint_layer = self.draft_checkpoint_layer(config_json, ckpt_path) if state is None else state["draft_layer"]
         self._checkpoint_prefix = f"model.layers.{self._checkpoint_layer}."
 
         prefix = self._checkpoint_prefix

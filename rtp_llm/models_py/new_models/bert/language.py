@@ -13,6 +13,7 @@ from rtp_llm.models_py.downstream_heads import (
     check_encoder_handler_alias,
 )
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
+from rtp_llm.models_py.new_models.resident_decoder import ResidentDecoderOwner
 from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.read_spec import ReadSpec, unwrap_checkpoint_tensor
 from rtp_llm.models_py.weight_mapper import WeightsMapper
@@ -99,7 +100,7 @@ class _OptionalPooler(RtpModule):
         super().validate_weights_loaded(loaded_tensor_ids)
 
 
-class BertEncoderOwner(GptModelBase, RtpModule):
+class BertEncoderOwner(ResidentDecoderOwner, GptModelBase, RtpModule):
     checkpoint_prefix = "bert"
     _embedding_exports = {
         "embedding": "embeddings.word_embeddings.weight",
@@ -123,20 +124,13 @@ class BertEncoderOwner(GptModelBase, RtpModule):
             raise ValueError("BERT FT embedding disagrees with explicit input_vocab_size")
         return cls(config, load, ft_input_rows=rows)
 
-    resident_after_post_load = True
-
     def resident_constructor_state(self):
         return {
+            **super().resident_constructor_state(),
             "input_rows": self.checkpoint_input_vocab_size,
             "input_major": self._checkpoint_input_major,
             "has_pooler": self.pooler is not None and self.pooler.weight is not None,
-            "handlers": self.handler_heads.resident_shapes(),
         }
-
-    def finish_resident_checkpoint_restore(self):
-        from rtp_llm.models_py.resident_checkpoint import restore_final_linears
-
-        restore_final_linears(self)
 
     def __init__(self, config, load, *, ft_input_rows=None):
         super().__init__(
@@ -238,7 +232,7 @@ class BertEncoderOwner(GptModelBase, RtpModule):
         )
 
     def prepare_resident_checkpoint_restore(self, state, values):
-        self.handler_heads.bind_resident_parameters_from_record(state["handlers"], values)
+        super().prepare_resident_checkpoint_restore(state, values)
         if state["has_pooler"]:
             if self.pooler is None:
                 raise ValueError("Resident pooler belongs to another PP stage")

@@ -7,7 +7,18 @@ from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.new_models.jina_bert.encoder import JinaEncoder
 
 
-class JinaBertForEmbedding(JinaEncoder, GptModelBase):
+from rtp_llm.models_py.new_models.resident_decoder import ResidentDecoderOwner
+
+
+class JinaBertForEmbedding(ResidentDecoderOwner, JinaEncoder, GptModelBase):
+    def prepare_resident_checkpoint_restore(self, state, values):
+        super().prepare_resident_checkpoint_restore(state, values)
+        for key, _, dtype in self._custom.values():
+            value = values["custom_params." + key]
+            if value.dtype != (dtype or self.embeddings.word_embeddings.weight.dtype):
+                raise ValueError(f"Invalid resident Jina handler {key}")
+            self.custom_params[key] = torch.nn.Parameter(value, requires_grad=False)
+
     def finalize_runtime_input_vocab(self, config, tokenizer):
         from rtp_llm.models_py.new_models.bert.checkpoint_metadata import publish_input_vocab
 

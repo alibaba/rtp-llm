@@ -23,6 +23,11 @@ class DeepSeekVLV2ForCausalLM(GqaMoeForCausalLM):
         prefix_mapping={"language.model.": "", "language.": "", "model.": ""}
     )
 
+    def resident_constructor_state(self):
+        state = super().resident_constructor_state()
+        state["correction_bias"] = self._layout.correction_bias
+        return state
+
     @staticmethod
     def _install_parameters(owner, cfg, *, layer_ids, partitioned):
         config = cfg["model_config"]
@@ -41,7 +46,8 @@ class DeepSeekVLV2ForCausalLM(GqaMoeForCausalLM):
             dense_width=hf["intermediate_size"],
             shared_width=hf["n_shared_experts"] * config.moe_inter_size,
             use_qk_norm=False,
-            correction_bias=has_correction_bias(path, depth, prefix="language."),
+            correction_bias=(cfg["resident_construction"]["correction_bias"] if cfg.get("resident_construction") is not None
+                             else has_correction_bias(path, depth, prefix="language.")),
         )
         if layout.correction_bias:
             # VL2's legacy router selects sigmoid GroupTopK by the presence of

@@ -32,6 +32,7 @@ from rtp_llm.models_py.new_models.model_base import (
 )
 from rtp_llm.models_py.quant_methods.base import QuantizationConfig
 from rtp_llm.models_py.read_spec import unwrap_checkpoint_tensor
+from rtp_llm.models_py.new_models.resident_decoder import ResidentDecoderOwner
 from rtp_llm.models_py.weight_mapper import WeightsMapper
 
 if TYPE_CHECKING:
@@ -411,7 +412,7 @@ def _validate_supported_parallelism(parallelism_config: Any) -> None:
         )
 
 
-class Qwen3ForCausalLM(GptModelBase, RtpModule):
+class Qwen3ForCausalLM(ResidentDecoderOwner, GptModelBase, RtpModule):
     """Direct parameter owner using the current runtime's PP/cache contract.
 
     The loading mixin is local to this model; legacy runtime models keep the
@@ -438,38 +439,6 @@ class Qwen3ForCausalLM(GptModelBase, RtpModule):
 
     _decoder_layer = Qwen3DecoderLayer
     _dense_config = staticmethod(_extract_config_values)
-
-    # Plain CUDA dense inference reads its final Parameters directly. Record after
-    # head normalization, logit scaling and (if requested) startup LoRA merge.
-    resident_after_post_load = True
-
-    def resident_constructor_state(self):
-        from rtp_llm.models_py.layers.linear import LinearBase
-        from rtp_llm.models_py.quant_methods.unquantized import UnquantizedLinearMethod
-
-        # A derived MoE or draft model can add non-parameter execution state.
-        # Only a concrete owner that declares this final-dense layout uses it.
-        if not type(self).__dict__.get("resident_after_post_load", False) or any(
-            not isinstance(m.quant_method, UnquantizedLinearMethod)
-            for m in self.modules() if isinstance(m, LinearBase)
-        ):
-            raise ValueError("This resident layout describes only unquantized Qwen3 language-model owners")
-        return {"handlers": self.handler_heads.resident_shapes(),
-                "head_explicit": bool(self.lm_head and self.lm_head._explicit_checkpoint_loaded),
-                "head_tied": bool(self.lm_head and self.lm_head._tied_checkpoint_loaded)}
-
-    def prepare_resident_checkpoint_restore(self, state, values):
-        self.handler_heads.bind_resident_parameters_from_record(state["handlers"], values)
-
-    def finish_resident_checkpoint_restore(self):
-        from rtp_llm.models_py.resident_checkpoint import restore_final_linears
-
-        self._lm_head_postprocessed = True
-        state = self._native_resident_state
-        if self.lm_head is not None:
-            self.lm_head._explicit_checkpoint_loaded = state["head_explicit"]
-            self.lm_head._tied_checkpoint_loaded = state["head_tied"]
-        restore_final_linears(self)
 
     def _decoder_kwargs(self, parallelism_config):
         return {}
@@ -594,6 +563,9 @@ class Qwen3ForCausalLM(GptModelBase, RtpModule):
             self.lm_head._copy_local_tied_weight(self.embed_tokens.weight.data)
 
     def process_weights_after_loading(self) -> None:
+        self._finalize_resident_head()
+
+    def _finalize_resident_head(self):
         if self._lm_head_postprocessed or self.lm_head is None:
             return
         processed = self.lm_head.weight
@@ -642,7 +614,6 @@ class Qwen3ForCausalLM(GptModelBase, RtpModule):
             py_hw_kernel_config=py_hw_kernel_config,
         )
 
-        self._native_resident_state = getattr(load_config, "resident_construction", None)
         cfg = self._dense_config(model_config, load_config)
         self._init_handler_heads(load_config, cfg)
         _validate_supported_parallelism(parallelism_config)

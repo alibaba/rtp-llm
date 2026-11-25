@@ -241,6 +241,11 @@ class W8A8Int8LinearMethod(QuantizeMethodBase):
         if layer.weight.device.type == "cpu":
             return
         self.validate_runtime_device(layer.weight.device)
+        self.bind_resident_runtime(layer)
+
+    def bind_resident_runtime(self, layer):
+        if layer.weight.device.type == "cpu":
+            return
         cls = _dense_executor_class()
         n, k = layer.weight.shape
         # Legacy executor accepts a [K,N] view of row-major [N,K] bytes. This

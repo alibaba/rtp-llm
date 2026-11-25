@@ -34,6 +34,7 @@ from rtp_llm.models_py.layers.embedding import (
 from rtp_llm.models_py.layers.norm import RMSResNorm
 from rtp_llm.models_py.model_desc.generic_moe import GenericMoeModel
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
+from rtp_llm.models_py.new_models.resident_decoder import ResidentDecoderOwner
 from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.weight_mapper import WeightsMapper
 from rtp_llm.utils.model_weight import W
@@ -625,7 +626,7 @@ def extract_config_values(
 # ------------------------------------------------------------------ #
 
 
-class DeepSeekV32ForCausalLM(DecoderHandlerOwner, MlaRuntimeLayoutMixin, GenericMoeModel, RtpModule):
+class DeepSeekV32ForCausalLM(ResidentDecoderOwner, DecoderHandlerOwner, MlaRuntimeLayoutMixin, GenericMoeModel, RtpModule):
     """Config-driven DeepSeek MLA/MoE implementation for newloader.
 
     WEIGHTS_MAPPER only strips "model." prefix.  All submodule names match

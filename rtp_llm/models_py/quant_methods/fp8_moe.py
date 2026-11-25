@@ -86,6 +86,11 @@ def _requant_per_channel_to_runtime_fp8(
     "fp8_per_channel_online",
 )
 class Fp8MoEMethod(FusedMoEMethodBase):
+    # Replaced by fused w13/w2 scales during finalization, not runtime inputs.
+    resident_released_buffers = frozenset({
+        "_gate_scales", "_up_scales", "_down_scales",
+        "_gate_ch_scales", "_up_ch_scales", "_down_ch_scales",
+    })
     checkpoint_suffix_family = "fp8_per_tensor"
 
     def __init__(self, quant_config: Any = None):

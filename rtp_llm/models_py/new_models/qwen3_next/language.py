@@ -34,6 +34,7 @@ from rtp_llm.models_py.model_desc.qwen3_next_mtp import Qwen3NextMTPModel
 from rtp_llm.models_py.module_base import CheckpointLoadTarget, RtpModule
 from rtp_llm.models_py.modules import MultimodalEmbeddingInjector
 from rtp_llm.models_py.new_models.model_base import required_config_value
+from rtp_llm.models_py.new_models.resident_decoder import ResidentDecoderOwner
 from rtp_llm.models_py.new_models.qwen3.language import (
     Qwen3Attention,
     _positive_int,
@@ -851,7 +852,7 @@ class _StageLayers(nn.ModuleDict):
         return iter(self.values())
 
 
-class Qwen3NextForCausalLM(DecoderHandlerOwner, Qwen3NextModel, RtpModule):
+class Qwen3NextForCausalLM(ResidentDecoderOwner, DecoderHandlerOwner, Qwen3NextModel, RtpModule):
     """Qwen3-Next Dense + Linear Attention (prefix model.)."""
 
     supports_pp_global_weight_aliases = True
@@ -996,6 +997,9 @@ class Qwen3NextForCausalLM(DecoderHandlerOwner, Qwen3NextModel, RtpModule):
             self.lm_head._copy_local_tied_weight(self.embed_tokens.weight.data)
 
     def process_weights_after_loading(self) -> None:
+        self._finalize_resident_head()
+
+    def _finalize_resident_head(self):
         if self._lm_head_postprocessed or self.lm_head is None:
             return
         processed = self.lm_head.weight

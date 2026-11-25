@@ -24,7 +24,6 @@ class Qwen2MTPForCausalLM(Qwen2ForCausalLM):
     decoder layers otherwise retain their checkpoint indices.
     """
 
-    resident_after_post_load = True
 
     def resident_constructor_state(self):
         state = super().resident_constructor_state()

@@ -524,6 +524,76 @@ class DeepSeekV32MlaAttention(RtpModule):
             weights = ((self._projection_name(name), tensor) for name, tensor in items)
         return super().load_weights(weights)
 
+    _derived_buffers = ("_fused_qkv_a_w", "_kv_b_w", "_kv_b_runtime_w",
+                        "_kv_b_runtime_s", "_kc_w", "_vc_w")
+
+    def prepare_resident_projection(self):
+        # Match the ordinary parent-before-child hook: KC/VC and fused A must
+        # be derived from the pre-quantized projections, including FT absorb.
+        self.process_weights_after_loading()
+        self._resident_runtime_buffers = self._derived_buffers
+        for name in self._derived_buffers:
+            value = getattr(self, name)
+            if value is not None:
+                self._buffers[name] = value.detach()
+        for root in (self._fused_qkv_a_runtime, self._kv_b_int8):
+            if root is not None:
+                for module in root.modules():
+                    module._resident_runtime_buffers = tuple(module._buffers)
+        self._resident_mla_ready = True
+
+    def resident_projection_facts(self):
+        def spec(module):
+            if module is None:
+                return None
+            if isinstance(module, _MixedMlaAProjection):
+                return ["mixed", module.quantize_q, spec(module.int8)]
+            if isinstance(module, _MlaInt8Projection):
+                return ["w8", module.output_size]
+            if isinstance(module, _CudaRuntimeFusedFp8Linear):
+                return ["fp8", list(module.block_size)]
+            raise TypeError(f"Unknown resident MLA projection {type(module)}")
+        return [spec(self._fused_qkv_a_runtime), spec(self._kv_b_int8),
+                bool(getattr(self, "_ft_absorb_weights", False))]
+
+    def restore_resident_projection(self, state, values, prefix):
+        def projection(spec, path):
+            if spec is None:
+                return None
+            kind = spec[0]
+            if kind == "fp8":
+                module = _CudaRuntimeFusedFp8Linear(values[path+"weight"],
+                    values[path+"weight_scale"], tuple(spec[1]))
+            elif kind == "w8":
+                # Already packed. The cold constructor quantizes a BF16 tensor.
+                module = _MlaInt8Projection.__new__(_MlaInt8Projection)
+                nn.Module.__init__(module)
+                module.output_size = spec[1]
+                for name in ("weight", "weight_scale"):
+                    module.register_buffer(name, values[path+name], persistent=False)
+            elif kind == "mixed":
+                module = _MixedMlaAProjection.__new__(_MixedMlaAProjection)
+                nn.Module.__init__(module)
+                module.quantize_q = spec[1]
+                module.int8 = projection(spec[2], path+"int8.")
+                module.register_buffer("floating", values[path+"floating"], persistent=False)
+            else:
+                raise ValueError(f"Invalid resident MLA projection {kind!r}")
+            module._resident_runtime_buffers = tuple(module._buffers)
+            return module
+        a, kv_b, ft_absorb = state
+        self._fused_qkv_a_runtime = projection(a, prefix+"_fused_qkv_a_runtime.")
+        self._kv_b_int8 = projection(kv_b, prefix+"_kv_b_int8.")
+        self._ft_absorb_weights = ft_absorb
+        self._resident_runtime_buffers = self._derived_buffers
+        for name in self._derived_buffers:
+            self._buffers[name] = values.get(prefix+name)
+        if self._kc_w is None or self._vc_w is None or (
+            self._fused_qkv_a_runtime is None and self._fused_qkv_a_w is None
+        ):
+            raise ValueError("Incomplete resident MLA projections")
+        self._resident_mla_ready = True
+
     def process_weights_after_loading(self):
         """Fuse q_a_proj + kv_a_proj_with_mqa into a single _fused_qkv_a_w.
 
@@ -537,6 +607,8 @@ class DeepSeekV32MlaAttention(RtpModule):
         # bf16 here. The forward projections still execute the fp8 weights via
         # the linear's DeepGEMM apply — this only affects the kc/vc + fused
         # views consumed by the MLA kernel.
+        if getattr(self, "_resident_mla_ready", False):
+            return
         q_a_scale = _fp8_scale_parameter(self.q_a_proj)
         kv_a_scale = _fp8_scale_parameter(self.kv_a_proj_with_mqa)
         is_hip = torch.version.hip is not None

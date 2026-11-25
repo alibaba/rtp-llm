@@ -26,7 +26,6 @@ def _check_window(hf, max_seq_len):
 class LlamaForCausalLM(Qwen2ForCausalLM):
     # The HF Q/K rotary channel ordering, gated MLP and TP slicing are the
     # same as Qwen2. Do not create (or falsely require) a packed QKV bias.
-    resident_after_post_load = True
     QKV_BIAS = False
 
     def checkpoint_weight_name_filter(self):

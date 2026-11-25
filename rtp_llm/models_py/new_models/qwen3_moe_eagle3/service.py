@@ -7,6 +7,7 @@ import torch
 from rtp_llm.models_py.layers.embedding import ParallelLMHead, VocabParallelEmbedding
 from rtp_llm.models_py.layers.linear import QKVParallelLinear, RowParallelLinear
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
+from rtp_llm.models_py.new_models.resident_decoder import ResidentDecoderOwner
 from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.new_models.model_base import select_fmha_impl_for_layer
 from rtp_llm.models_py.new_models.qwen3.language import Qwen3MLP
@@ -45,7 +46,7 @@ class _Attention(RtpModule):
         return self.o_proj(attended.reshape(x.shape[0], self.local_width))
 
 
-class Qwen3MoeEagle3ForCausalLM(GptModelBase, RtpModule):
+class Qwen3MoeEagle3ForCausalLM(ResidentDecoderOwner, GptModelBase, RtpModule):
     runtime_parameter_paths = {
         "embedding": "embed_tokens.weight",
         "lm_head": "lm_head.weight",

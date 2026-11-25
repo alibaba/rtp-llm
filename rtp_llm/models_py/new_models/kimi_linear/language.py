@@ -31,6 +31,7 @@ from rtp_llm.models_py.model_desc.kimi_linear import (
     KimiLinearModel,
 )
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
+from rtp_llm.models_py.new_models.resident_decoder import ResidentDecoderOwner
 from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.new_models.deepseek_v3.attention import DeepSeekV32MlaAttention
 from rtp_llm.models_py.new_models.deepseek_v3.language import (
@@ -573,7 +574,7 @@ class _KimiMlaKernelWeightLayout:
         return None
 
 
-class KimiLinearForCausalLM(DecoderHandlerOwner, KimiLinearModel, RtpModule):
+class KimiLinearForCausalLM(ResidentDecoderOwner, DecoderHandlerOwner, KimiLinearModel, RtpModule):
     """Clean prefix-streamed Kimi Linear NewLoader implementation."""
 
     # Kimi names routed-expert projections w1/w3/w2 while the shared

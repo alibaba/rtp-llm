@@ -388,6 +388,9 @@ class ModelOptFp4LinearMethod(QuantizeMethodBase):
             weight, scale = layer.weight, swizzle_nvfp4_scales(layer.weight_scale)
         layer.weight.data = weight.detach()
         layer.weight_scale.data = scale.detach()
+        self.bind_resident_runtime(layer)
+
+    def bind_resident_runtime(self, layer):
         self._executor = self._executor_type(
             weight=layer.weight,
             weight_scales=layer.weight_scale,

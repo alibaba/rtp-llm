@@ -22,6 +22,10 @@ from rtp_llm.models_py.read_spec import unwrap_checkpoint_tensor
 class KimiK25ForVisionEmbedding(RtpModule):
     fastsafetensors_load_isolated = True
 
+    def resident_constructor_state(self):
+        # Vision topology and nonpersistent rotary tables are entirely config-derived.
+        return {}
+
     def __init__(self, model_config, load_config: NewLoaderConfig):
         super().__init__()
         if load_config.tp_size != 1 or load_config.tp_rank != 0:

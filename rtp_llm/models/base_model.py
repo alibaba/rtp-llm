@@ -286,7 +286,7 @@ class BaseModel(object):
         config = self.model_config
         fingerprint = {
             "model_type": config.model_type,
-            "owner_layout": "newloader/native-v2",
+            "owner_layout": "newloader/native-v3",
             "load_method": str(self.load_method),
             "force_cpu_load_weights": str(self.force_cpu_load_weights),
             "fmha_config": self.fmha_config.to_string() if self.fmha_config is not None else "",
