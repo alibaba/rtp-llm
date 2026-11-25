@@ -4,6 +4,8 @@ import torch
 from torch import nn
 
 from rtp_llm.device.device_type import DeviceType, get_device_type
+from rtp_llm.models_py.distributed import pynccl_cp
+from rtp_llm.models_py.distributed.collective_torch import Group
 from rtp_llm.models_py.modules import IndexerOp, LayerNorm
 from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.ops import AttentionConfigs, HWKernelConfig, ParallelismConfig
@@ -365,6 +367,7 @@ class Indexer(nn.Module):
         fmha_params: Any,
         attention_inputs: Any,
         cp_params: Optional[Any],
+        prepared_keys=None,
     ) -> torch.Tensor:
         if _is_decode_phase(attention_inputs):
             return self.indexer_op._get_topk_paged(
@@ -388,6 +391,7 @@ class Indexer(nn.Module):
                 bool(getattr(cp_params, "kv_cache_sharded", False)),
                 int(getattr(cp_params, "cp_size", 1)),
                 int(getattr(cp_params, "cp_rank", 0)),
+                prepared_keys=prepared_keys,
                 kv_owner_tokens_per_block=self._kv_owner_tokens_per_block,
                 indexer_cp_plan=getattr(cp_params, "indexer_cp_plan", None),
                 indexer_cp_local_cu=getattr(cp_params, "indexer_cp_local_cu", None),
@@ -472,6 +476,36 @@ class Indexer(nn.Module):
             )
             q_fp8, q_scale = self._quantize_q_k(
                 query, key, kv_cache, fmha_params, attention_inputs, cp_params
+            )
+
+        if (
+            self._is_sparse_prefill_cp(attention_inputs)
+            and cp_params.kv_cache_sharded and cp_params.cp_size > 1
+            and pynccl_cp.enabled() and hidden_states.is_cuda
+            and not torch.cuda.is_current_stream_capturing()
+        ):
+            device = hidden_states.device
+            compute = torch.cuda.current_stream(device)
+            side = pynccl_cp.warmup_kv_overlap(Group.TP, device)
+            side.wait_stream(compute)
+            try:
+                with torch.cuda.stream(side):
+                    keys = self.indexer_op.gather_cp_keys(
+                        kv_cache, attention_inputs, cp_params.total_kv_len, device, True,
+                        cp_params.cu_kv_seqlens_global, cp_params.indexer_cp_plan,
+                        cp_params.indexer_cp_local_cu, cp_params.indexer_copy_dst_idx,
+                        cp_params.indexer_src_for_padded, pynccl_cp.all_gather_kv_overlap,
+                    )
+                    ready = side.record_event()
+                weights = self._get_logits_head_gate(hidden_states, q_scale, gate)
+            except BaseException:
+                compute.wait_stream(side)
+                raise
+            compute.wait_event(ready)
+            for key_tensor in keys:
+                key_tensor.record_stream(compute)
+            return self._compute_topk(
+                q_fp8, weights, kv_cache, fmha_params, attention_inputs, cp_params, prepared_keys=keys
             )
 
         weights = self._get_logits_head_gate(hidden_states, q_scale, gate)
