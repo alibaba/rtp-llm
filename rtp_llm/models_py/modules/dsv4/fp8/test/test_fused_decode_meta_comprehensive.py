@@ -966,12 +966,197 @@ def run_benchmarks():
         )
 
 
+def run_extended_correctness_tests():
+    """Verify fused extra fields, topk lengths, and cyclic state slot mappings."""
+    device = "cuda"
+    csa_state = _attn_type_mod.CSA_STATE
+    idx_state = _attn_type_mod.INDEXER_STATE
+    hca_state = _attn_type_mod.HCA_STATE
+
+    het_positions = torch.tensor(
+        [0, 3, 4, 127, 128, 129, 255, 511, 2047, 4096],
+        dtype=torch.int32,
+        device=device,
+    )
+    failed = 0
+    total = 0
+
+    for bs in (1, 4, 10, 32):
+        for q_len in (1, 2, 4):
+            reps = (bs + het_positions.numel() - 1) // het_positions.numel()
+            start_pos = het_positions.repeat(reps)[:bs].clone()
+            max_seq_len = max(int(start_pos.max().item()) + q_len + 128, 256)
+            max_seq_len = ((max_seq_len + 127) // 128) * 128
+
+            m = _alloc_mock(bs, q_len, max_seq_len, device)
+            T = bs * q_len
+            m.position_ids = torch.empty((T,), dtype=torch.int32, device=device)
+            m.position_ids_long = torch.empty((T,), dtype=torch.int64, device=device)
+            m.decode_seq_start_per_req = torch.empty(
+                (bs,), dtype=torch.int64, device=device
+            )
+            # Prefill sentinel so -1 fill is verified across every row.
+            m.topk_buffer_compressed = torch.full(
+                (bs, q_len, _INDEX_TOPK), 123, dtype=torch.int32, device=device
+            )
+            m.swa_topk_length = torch.empty((bs,), dtype=torch.int32, device=device)
+            m.compressed_topk_length_by_ratio = {
+                4: torch.empty((bs,), dtype=torch.int32, device=device),
+                128: torch.empty((bs,), dtype=torch.int32, device=device),
+            }
+
+            fused_update_decode_meta_pure(
+                m,
+                start_pos,
+                max_seq_len,
+                update_extra_fields=True,
+                update_topk_lengths=True,
+            )
+
+            pos_2d = start_pos.unsqueeze(1) + torch.arange(
+                q_len, dtype=torch.int32, device=device
+            ).unsqueeze(0)
+            exp_pos = pos_2d.reshape(-1)
+            exp_pos_long = exp_pos.to(torch.int64)
+            exp_seq_start = start_pos.to(torch.int64)
+            exp_swa_tl = (start_pos + q_len).clamp(min=0, max=_WINDOW).to(torch.int32)
+            exp_tl_4 = torch.clamp((start_pos + q_len) // 4, max=_INDEX_TOPK).to(
+                torch.int32
+            )
+            hca_dense_w = max_seq_len // 128
+            exp_tl_128 = torch.clamp((start_pos + q_len) // 128, max=hca_dense_w).to(
+                torch.int32
+            )
+
+            checks = [
+                ("position_ids", m.position_ids[:T], exp_pos),
+                ("position_ids_long", m.position_ids_long[:T], exp_pos_long),
+                (
+                    "decode_seq_start_per_req",
+                    m.decode_seq_start_per_req[:bs],
+                    exp_seq_start,
+                ),
+                (
+                    "topk_buffer_compressed",
+                    m.topk_buffer_compressed[:bs],
+                    torch.full_like(m.topk_buffer_compressed[:bs], -1),
+                ),
+                ("swa_topk_length", m.swa_topk_length[:bs], exp_swa_tl),
+                (
+                    "compressed_topk_length_4",
+                    m.compressed_topk_length_by_ratio[4][:bs],
+                    exp_tl_4,
+                ),
+                (
+                    "compressed_topk_length_128",
+                    m.compressed_topk_length_by_ratio[128][:bs],
+                    exp_tl_128,
+                ),
+            ]
+            for name, got, exp in checks:
+                total += 1
+                if not torch.equal(got, exp):
+                    print(f"  FAIL ext bs={bs} q={q_len} {name}")
+                    failed += 1
+
+            # Verify update_topk_lengths=False leaves length buffers untouched.
+            m.swa_topk_length.fill_(999)
+            m.compressed_topk_length_by_ratio[4].fill_(888)
+            m.compressed_topk_length_by_ratio[128].fill_(777)
+            fused_update_decode_meta_pure(
+                m,
+                start_pos,
+                max_seq_len,
+                update_extra_fields=True,
+                update_topk_lengths=False,
+            )
+            total += 1
+            if not (
+                int(m.swa_topk_length.min()) == 999
+                and int(m.compressed_topk_length_by_ratio[4].min()) == 888
+                and int(m.compressed_topk_length_by_ratio[128].min()) == 777
+            ):
+                print(f"  FAIL preserve lengths bs={bs} q={q_len}")
+                failed += 1
+
+            # Phase 2b with state slot mappings (cyclic + unallocated <= 0 -> -1).
+            max_blocks = 6
+            entries = {
+                SWA_KV: 132,
+                CSA_KV: 32,
+                INDEXER_KV: 32,
+                HCA_KV: 1,
+                csa_state: 4,
+                idx_state: 8,
+                hca_state: 2,
+            }
+            tokens = {
+                SWA_KV: 16384,
+                CSA_KV: 128,
+                INDEXER_KV: 128,
+                HCA_KV: 128,
+                csa_state: 64,
+                idx_state: 64,
+                hca_state: 128,
+            }
+            _alloc_phase2b(m, bs, device, seqlen=max_seq_len)
+            m.compressor_state_slot_mappings = {}
+            for idx, sp_tag in enumerate((csa_state, idx_state, hca_state)):
+                bt_rows = []
+                base = (idx + 1) * 50
+                for r in range(bs):
+                    row = torch.arange(
+                        base + r * 10,
+                        base + r * 10 + max_blocks,
+                        dtype=torch.int32,
+                        device=device,
+                    )
+                    if r % 3 == 0:
+                        row[0] = 0
+                    if r % 4 == 1:
+                        row[1] = -1
+                    bt_rows.append(row)
+                m.pool_block_tables[sp_tag] = torch.stack(bt_rows, dim=0)
+                m.compressor_state_slot_mappings[sp_tag] = torch.full(
+                    (T,), -9, dtype=torch.int64, device=device
+                )
+
+            fused_phase2b_pool_slot_mapping(
+                m, start_pos, bs, entries, tokens, update_state_slots=True
+            )
+
+            req_idx = (
+                torch.arange(bs, dtype=torch.int64, device=device)
+                .unsqueeze(1)
+                .expand(bs, q_len)
+                .reshape(-1)
+            )
+            pos_flat_i64 = exp_pos_long
+            for sp_tag in (csa_state, idx_state, hca_state):
+                total += 1
+                bt = m.pool_block_tables[sp_tag]
+                tpb = tokens[sp_tag]
+                epb = entries[sp_tag]
+                blk_idx = (pos_flat_i64 // tpb) % max_blocks
+                in_blk = pos_flat_i64 % epb
+                blk_ids = bt[req_idx, blk_idx].to(torch.int64)
+                exp_slots = torch.where(blk_ids > 0, blk_ids * epb + in_blk, -1)
+                got_slots = m.compressor_state_slot_mappings[sp_tag][:T]
+                if not torch.equal(got_slots, exp_slots):
+                    print(f"  FAIL state slots {sp_tag} bs={bs} q={q_len}")
+                    failed += 1
+
+    print(f"Extended fields + state slots: {total - failed}/{total} passed")
+    return failed
+
+
 def test_fused_decode_metadata_correctness():
     assert run_correctness_tests() == 0
+    assert run_extended_correctness_tests() == 0
 
 
 if __name__ == "__main__":
-    total_failures = run_correctness_tests()
+    total_failures = run_correctness_tests() + run_extended_correctness_tests()
     if total_failures == 0:
         print("\nAll correctness tests passed!")
         run_benchmarks()

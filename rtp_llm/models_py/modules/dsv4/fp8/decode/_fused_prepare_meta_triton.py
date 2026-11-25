@@ -42,6 +42,14 @@ def _fused_prepare_meta_kernel(
     swa_abs_idx_ptr,  # [B_max, q_len, WINDOW] i32
     swa_plus_csa_indexer_indices_ptr,  # [B_max, q_len, WINDOW + INDEX_TOPK] i32
     swa_plus_hca_dense_indices_ptr,  # [B_max, q_len, WINDOW + HCA_DENSE_WIDTH] i32
+    # optional fused metadata outputs (elided at compile time when HAS_*=False)
+    position_ids_ptr,  # [B_max * q_len] i32
+    position_ids_long_ptr,  # [B_max * q_len] i64
+    decode_seq_start_ptr,  # [B_max] i64
+    topk_buffer_compressed_ptr,  # [B_max, q_len, INDEX_TOPK] i32
+    swa_topk_len_ptr,  # [B_max] i32
+    cmp_topk_len_4_ptr,  # [B_max] i32
+    cmp_topk_len_128_ptr,  # [B_max] i32
     # runtime sizes
     bs,
     # constants
@@ -56,6 +64,13 @@ def _fused_prepare_meta_kernel(
     BLOCK_HCA: tl.constexpr,  # >= HCA_DENSE_WIDTH, power of 2
     HAS_CMP_4: tl.constexpr,  # False for SWA-only (MTP draft)
     HAS_CMP_128: tl.constexpr,  # False when no HCA layers
+    HAS_POS_IDS: tl.constexpr,
+    HAS_POS_IDS_LONG: tl.constexpr,
+    HAS_DECODE_SEQ_START: tl.constexpr,
+    HAS_TOPK_BUF: tl.constexpr,
+    HAS_SWA_TOPK_LEN: tl.constexpr,
+    HAS_CMP_TOPK_LEN_4: tl.constexpr,
+    HAS_CMP_TOPK_LEN_128: tl.constexpr,
 ):
     r = tl.program_id(0)
     q = tl.program_id(1)
@@ -68,13 +83,29 @@ def _fused_prepare_meta_kernel(
     in_ring = abs_pos % WINDOW  # i32 scalar
     out_rq = r * Q_LEN + q
 
+    if HAS_POS_IDS:
+        tl.store(position_ids_ptr + out_rq, abs_pos)
+    if HAS_POS_IDS_LONG:
+        tl.store(position_ids_long_ptr + out_rq, abs_pos.to(tl.int64))
+
     # ---- Scalar outputs (write once per request; gate on q==0) ----
     if q == 0:
         tl.store(start_pos_out_ptr + r, sp)
+        if HAS_DECODE_SEQ_START:
+            tl.store(decode_seq_start_ptr + r, sp.to(tl.int64))
+        if HAS_SWA_TOPK_LEN:
+            swa_tl = tl.minimum(tl.maximum(sp + Q_LEN, 0), WINDOW)
+            tl.store(swa_topk_len_ptr + r, swa_tl)
         if HAS_CMP_4:
-            tl.store(cmp_len_4_ptr + r, (sp + Q_LEN) // 4)
+            len_4 = (sp + Q_LEN) // 4
+            tl.store(cmp_len_4_ptr + r, len_4)
+            if HAS_CMP_TOPK_LEN_4:
+                tl.store(cmp_topk_len_4_ptr + r, tl.minimum(len_4, INDEX_TOPK))
         if HAS_CMP_128:
-            tl.store(cmp_len_128_ptr + r, (sp + Q_LEN) // 128)
+            len_128 = (sp + Q_LEN) // 128
+            tl.store(cmp_len_128_ptr + r, len_128)
+            if HAS_CMP_TOPK_LEN_128:
+                tl.store(cmp_topk_len_128_ptr + r, tl.minimum(len_128, HCA_DENSE_WIDTH))
 
     # ---- SWA slot mapping: r * WINDOW + (abs_pos % WINDOW) ----
     swa_slot = r * WINDOW + in_ring
@@ -103,6 +134,15 @@ def _fused_prepare_meta_kernel(
     swa_abs = tl.where(valid_pos, candidate, -1).to(tl.int32)
     tl.store(swa_abs_idx_ptr + base_w + k, swa_abs, mask=mask_w)
 
+    if HAS_CMP_4 or HAS_TOPK_BUF:
+        k2 = tl.arange(0, BLOCK_K)
+        mask_k = k2 < INDEX_TOPK
+        neg_k = tl.full((BLOCK_K,), -1, tl.int32)
+
+    if HAS_TOPK_BUF:
+        base_tb = r * Q_LEN * INDEX_TOPK + q * INDEX_TOPK
+        tl.store(topk_buffer_compressed_ptr + base_tb + k2, neg_k, mask=mask_k)
+
     # ---- Per-ratio compressed work: slot mapping + per-token lens
     #      + topk_total (window half = wi, ratio-specific dense half).
     #      cmp_len_R = abs_pos_p1 // R is computed ONCE and reused for
@@ -118,11 +158,9 @@ def _fused_prepare_meta_kernel(
         base_tt_4 = r * Q_LEN * WK_TOTAL_4 + q * WK_TOTAL_4
         tl.store(swa_plus_csa_indexer_indices_ptr + base_tt_4 + k, wi, mask=mask_w)
         # CSA dense half: all -1 (indexer fills per-call)
-        k2 = tl.arange(0, BLOCK_K)
-        mask_k = k2 < INDEX_TOPK
         tl.store(
             swa_plus_csa_indexer_indices_ptr + base_tt_4 + WINDOW + k2,
-            tl.full((BLOCK_K,), -1, tl.int32),
+            neg_k,
             mask=mask_k,
         )
 
@@ -166,6 +204,9 @@ def fused_update_decode_meta_pure(
     meta: Any,
     start_pos: torch.Tensor,
     max_seq_len: int,
+    *,
+    update_extra_fields: bool = False,
+    update_topk_lengths: bool = False,
 ) -> None:
     """Fuse the pure-start_pos metadata preparation into a single Triton kernel.
 
@@ -175,9 +216,9 @@ def fused_update_decode_meta_pure(
 
     Writes start_pos, slot_mapping_swa, slot_mapping_compressed,
     compressed_lens, compressed_lens_per_token, topk_window_idxs,
-    topk_total_by_ratio, swa_abs_idx.
-    Callers handle pool_write_slot_mappings, swa_global_slots,
-    hca_cmp_global_slots, and topk_buffer_compressed reset separately.
+    topk_total_by_ratio, swa_abs_idx, and optionally position_ids,
+    position_ids_long, decode_seq_start_per_req, topk_buffer_compressed,
+    and per-request effective topk_length buffers.
     """
     assert start_pos.is_cuda, (
         "fused_update_decode_meta_pure requires CUDA tensors, "
@@ -192,17 +233,14 @@ def fused_update_decode_meta_pure(
     bs = int(start_pos.shape[0])
     q_len = meta.q_len_per_req
     window_size = meta.window_size
-    index_topk = meta.topk_buffer_compressed.shape[-1]
+    topk_buf = getattr(meta, "topk_buffer_compressed", None)
+    index_topk = int(topk_buf.shape[-1]) if topk_buf is not None else 0
 
     has_4 = 4 in meta.slot_mapping_compressed
     has_128 = 128 in meta.topk_total_by_ratio
     hca_dense_width = (
         meta.topk_total_by_ratio[128].shape[-1] - window_size if has_128 else 0
     )
-    # When a ratio is absent (SWA-only MTP draft: compress_ratios=[0]),
-    # the corresponding kernel pointer is None — Triton lowers it to a
-    # null pointer, and the HAS_CMP_* constexpr gates eliminate any
-    # load/store referencing it at compile time.
     slot_cmp_4 = meta.slot_mapping_compressed[4] if has_4 else None
     cmp_len_4 = meta.compressed_lens[4] if has_4 else None
     cmp_len_pt_4 = meta.compressed_lens_per_token[4] if has_4 else None
@@ -215,12 +253,28 @@ def fused_update_decode_meta_pure(
     topk_total_128 = meta.topk_total_by_ratio[128] if has_128 else None
     stride_cmp_128 = meta.compressed_buffer_t_dim_per_ratio[128] if has_128 else 1
 
+    pos_ids = getattr(meta, "position_ids", None) if update_extra_fields else None
+    pos_ids_long = (
+        getattr(meta, "position_ids_long", None) if update_extra_fields else None
+    )
+    decode_seq_start = (
+        getattr(meta, "decode_seq_start_per_req", None) if update_extra_fields else None
+    )
+    topk_buf_out = topk_buf if (update_extra_fields and index_topk > 0) else None
+
+    swa_topk_len = (
+        getattr(meta, "swa_topk_length", None) if update_topk_lengths else None
+    )
+    cmp_topk_map = (
+        getattr(meta, "compressed_topk_length_by_ratio", None)
+        if update_topk_lengths
+        else None
+    )
+    cmp_topk_4 = cmp_topk_map.get(4) if (cmp_topk_map and has_4) else None
+    cmp_topk_128 = cmp_topk_map.get(128) if (cmp_topk_map and has_128) else None
+
     BLOCK_W = _next_pow2(window_size)
     BLOCK_K = _next_pow2(max(index_topk, 1))
-    # Pass the real ``hca_dense_width`` as the HCA_DENSE_WIDTH constexpr
-    # (may be 0); the kernel's ``if HCA_DENSE_WIDTH > 0`` gate elides the
-    # whole dense write at compile time, so BLOCK_HCA (=_next_pow2(0)==1)
-    # is never actually consumed by ``tl.arange`` on the width=0 path.
     BLOCK_HCA = _next_pow2(hca_dense_width)
 
     grid = (bs, q_len)
@@ -238,6 +292,13 @@ def fused_update_decode_meta_pure(
         meta.swa_abs_idx,
         topk_total_4,
         topk_total_128,
+        pos_ids,
+        pos_ids_long,
+        decode_seq_start,
+        topk_buf_out,
+        swa_topk_len,
+        cmp_topk_4,
+        cmp_topk_128,
         bs,
         Q_LEN=q_len,
         WINDOW=window_size,
@@ -250,6 +311,13 @@ def fused_update_decode_meta_pure(
         BLOCK_HCA=BLOCK_HCA,
         HAS_CMP_4=has_4,
         HAS_CMP_128=has_128,
+        HAS_POS_IDS=pos_ids is not None,
+        HAS_POS_IDS_LONG=pos_ids_long is not None,
+        HAS_DECODE_SEQ_START=decode_seq_start is not None,
+        HAS_TOPK_BUF=topk_buf_out is not None,
+        HAS_SWA_TOPK_LEN=swa_topk_len is not None,
+        HAS_CMP_TOPK_LEN_4=cmp_topk_4 is not None,
+        HAS_CMP_TOPK_LEN_128=cmp_topk_128 is not None,
     )
 
 
@@ -284,11 +352,17 @@ def _fused_phase2b_pool_slot_mapping_kernel(
     bt_csa_ptr,
     bt_idx_ptr,
     bt_hca_ptr,
+    bt_csa_state_ptr,
+    bt_idx_state_ptr,
+    bt_hca_state_ptr,
     # per-pool output slot buffers (i64, [B_max * q_len])
     slot_swa_ptr,
     slot_csa_ptr,
     slot_idx_ptr,
     slot_hca_ptr,
+    slot_csa_state_ptr,
+    slot_idx_state_ptr,
+    slot_hca_state_ptr,
     # runtime
     bs,
     # compile-time constants
@@ -306,11 +380,23 @@ def _fused_phase2b_pool_slot_mapping_kernel(
     HCA_E: tl.constexpr,
     HCA_TOKENS_PER_BLOCK: tl.constexpr,
     HCA_BT_STRIDE: tl.constexpr,
+    CSA_STATE_E: tl.constexpr,
+    CSA_STATE_TOKENS_PER_BLOCK: tl.constexpr,
+    CSA_STATE_BT_STRIDE: tl.constexpr,
+    IDX_STATE_E: tl.constexpr,
+    IDX_STATE_TOKENS_PER_BLOCK: tl.constexpr,
+    IDX_STATE_BT_STRIDE: tl.constexpr,
+    HCA_STATE_E: tl.constexpr,
+    HCA_STATE_TOKENS_PER_BLOCK: tl.constexpr,
+    HCA_STATE_BT_STRIDE: tl.constexpr,
     # pool existence flags — skip store when pool absent
     HAS_SWA: tl.constexpr,
     HAS_CSA: tl.constexpr,
     HAS_IDX: tl.constexpr,
     HAS_HCA: tl.constexpr,
+    HAS_CSA_STATE: tl.constexpr,
+    HAS_IDX_STATE: tl.constexpr,
+    HAS_HCA_STATE: tl.constexpr,
 ):
     r = tl.program_id(0)
     q = tl.program_id(1)
@@ -371,6 +457,44 @@ def _fused_phase2b_pool_slot_mapping_kernel(
         slot_hca = tl.where(skip_hca, -1, bid_hca * HCA_E + in_blk_hca)
         tl.store(slot_hca_ptr + out_idx, slot_hca)
 
+    # ---------- Compressor state pools: cyclic per-token ring ----------
+    if HAS_CSA_STATE or HAS_IDX_STATE or HAS_HCA_STATE:
+        abs_pos_i64 = abs_pos.to(tl.int64)
+        r_i64 = r.to(tl.int64)
+
+    if HAS_CSA_STATE:
+        bis_csa_st = (abs_pos_i64 // CSA_STATE_TOKENS_PER_BLOCK) % CSA_STATE_BT_STRIDE
+        in_blk_csa_st = abs_pos_i64 % CSA_STATE_E
+        bid_csa_st = tl.load(
+            bt_csa_state_ptr + r_i64 * CSA_STATE_BT_STRIDE + bis_csa_st
+        ).to(tl.int64)
+        slot_csa_st = tl.where(
+            bid_csa_st <= 0, -1, bid_csa_st * CSA_STATE_E + in_blk_csa_st
+        )
+        tl.store(slot_csa_state_ptr + out_idx, slot_csa_st)
+
+    if HAS_IDX_STATE:
+        bis_idx_st = (abs_pos_i64 // IDX_STATE_TOKENS_PER_BLOCK) % IDX_STATE_BT_STRIDE
+        in_blk_idx_st = abs_pos_i64 % IDX_STATE_E
+        bid_idx_st = tl.load(
+            bt_idx_state_ptr + r_i64 * IDX_STATE_BT_STRIDE + bis_idx_st
+        ).to(tl.int64)
+        slot_idx_st = tl.where(
+            bid_idx_st <= 0, -1, bid_idx_st * IDX_STATE_E + in_blk_idx_st
+        )
+        tl.store(slot_idx_state_ptr + out_idx, slot_idx_st)
+
+    if HAS_HCA_STATE:
+        bis_hca_st = (abs_pos_i64 // HCA_STATE_TOKENS_PER_BLOCK) % HCA_STATE_BT_STRIDE
+        in_blk_idx_hca = abs_pos_i64 % HCA_STATE_E
+        bid_hca_st = tl.load(
+            bt_hca_state_ptr + r_i64 * HCA_STATE_BT_STRIDE + bis_hca_st
+        ).to(tl.int64)
+        slot_hca_st = tl.where(
+            bid_hca_st <= 0, -1, bid_hca_st * HCA_STATE_E + in_blk_idx_hca
+        )
+        tl.store(slot_hca_state_ptr + out_idx, slot_hca_st)
+
 
 def fused_phase2b_pool_slot_mapping(
     meta: Any,
@@ -378,14 +502,18 @@ def fused_phase2b_pool_slot_mapping(
     bs: int,
     paged_pool_entries_per_block: Any,
     paged_pool_tokens_per_block: Any,
+    *,
+    update_state_slots: bool = False,
 ) -> None:
     """Fuse paged pool write slot mapping for all pools into one Triton kernel.
 
     Requirements:
       - All tensors on CUDA
-      - Pool subset from {SWA, CSA, INDEXER, HCA} (any combination)
+      - Pool subset from {SWA, CSA, INDEXER, HCA} and optionally compressor
+        state pools {CSA_STATE, INDEXER_STATE, HCA_STATE}
 
-    Writes pool_write_slot_mappings[:bs*q_len] for present pools.
+    Writes pool_write_slot_mappings[:bs*q_len] (and optionally
+    compressor_state_slot_mappings[:bs*q_len]) for present pools.
     Absent pools are compile-time eliminated via constexpr flags.
     """
     assert start_pos.is_cuda, (
@@ -395,12 +523,16 @@ def fused_phase2b_pool_slot_mapping(
 
     from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
         CSA_KV,
+        CSA_STATE,
         HCA_KV,
+        HCA_STATE,
         INDEXER_KV,
+        INDEXER_STATE,
         SWA_KV,
     )
 
     q_len = meta.q_len_per_req
+    state_slots_map = getattr(meta, "compressor_state_slot_mappings", {}) or {}
 
     has_swa = (
         SWA_KV in meta.pool_block_tables and SWA_KV in meta.pool_write_slot_mappings
@@ -415,30 +547,71 @@ def fused_phase2b_pool_slot_mapping(
     has_hca = (
         HCA_KV in meta.pool_block_tables and HCA_KV in meta.pool_write_slot_mappings
     )
+    has_csa_state = bool(
+        update_state_slots
+        and CSA_STATE in meta.pool_block_tables
+        and CSA_STATE in state_slots_map
+    )
+    has_idx_state = bool(
+        update_state_slots
+        and INDEXER_STATE in meta.pool_block_tables
+        and INDEXER_STATE in state_slots_map
+    )
+    has_hca_state = bool(
+        update_state_slots
+        and HCA_STATE in meta.pool_block_tables
+        and HCA_STATE in state_slots_map
+    )
 
-    if not (has_swa or has_csa or has_idx or has_hca):
+    if not (
+        has_swa
+        or has_csa
+        or has_idx
+        or has_hca
+        or has_csa_state
+        or has_idx_state
+        or has_hca_state
+    ):
         return
 
-    # For absent pools, pass the SWA buffer as a dummy (kernel won't touch it)
-    bt_swa = meta.pool_block_tables.get(
+    # For absent pools, pass a valid buffer as a dummy (kernel won't touch it)
+    fallback_bt = meta.pool_block_tables.get(
         SWA_KV, meta.pool_block_tables.get(next(iter(meta.pool_block_tables)))
     )
-    bt_csa = meta.pool_block_tables.get(CSA_KV, bt_swa)
-    bt_idx = meta.pool_block_tables.get(INDEXER_KV, bt_swa)
-    bt_hca = meta.pool_block_tables.get(HCA_KV, bt_swa)
+    bt_swa = meta.pool_block_tables.get(SWA_KV, fallback_bt)
+    bt_csa = meta.pool_block_tables.get(CSA_KV, fallback_bt)
+    bt_idx = meta.pool_block_tables.get(INDEXER_KV, fallback_bt)
+    bt_hca = meta.pool_block_tables.get(HCA_KV, fallback_bt)
+    bt_csa_state = meta.pool_block_tables.get(CSA_STATE, fallback_bt)
+    bt_idx_state = meta.pool_block_tables.get(INDEXER_STATE, fallback_bt)
+    bt_hca_state = meta.pool_block_tables.get(HCA_STATE, fallback_bt)
 
-    slot_swa = meta.pool_write_slot_mappings.get(
-        SWA_KV,
-        meta.pool_write_slot_mappings.get(next(iter(meta.pool_write_slot_mappings))),
-    )
-    slot_csa = meta.pool_write_slot_mappings.get(CSA_KV, slot_swa)
-    slot_idx = meta.pool_write_slot_mappings.get(INDEXER_KV, slot_swa)
-    slot_hca = meta.pool_write_slot_mappings.get(HCA_KV, slot_swa)
+    if meta.pool_write_slot_mappings:
+        fallback_slot = meta.pool_write_slot_mappings.get(
+            SWA_KV,
+            meta.pool_write_slot_mappings.get(
+                next(iter(meta.pool_write_slot_mappings))
+            ),
+        )
+    else:
+        fallback_slot = state_slots_map[next(iter(state_slots_map))]
+    slot_swa = meta.pool_write_slot_mappings.get(SWA_KV, fallback_slot)
+    slot_csa = meta.pool_write_slot_mappings.get(CSA_KV, fallback_slot)
+    slot_idx = meta.pool_write_slot_mappings.get(INDEXER_KV, fallback_slot)
+    slot_hca = meta.pool_write_slot_mappings.get(HCA_KV, fallback_slot)
+    slot_csa_state = state_slots_map.get(CSA_STATE, fallback_slot)
+    slot_idx_state = state_slots_map.get(INDEXER_STATE, fallback_slot)
+    slot_hca_state = state_slots_map.get(HCA_STATE, fallback_slot)
 
     swa_e = int(paged_pool_entries_per_block[SWA_KV]) if has_swa else 1
     csa_e = int(paged_pool_entries_per_block[CSA_KV]) if has_csa else 1
     idx_e = int(paged_pool_entries_per_block[INDEXER_KV]) if has_idx else 1
     hca_e = int(paged_pool_entries_per_block[HCA_KV]) if has_hca else 1
+    csa_state_e = int(paged_pool_entries_per_block[CSA_STATE]) if has_csa_state else 1
+    idx_state_e = (
+        int(paged_pool_entries_per_block[INDEXER_STATE]) if has_idx_state else 1
+    )
+    hca_state_e = int(paged_pool_entries_per_block[HCA_STATE]) if has_hca_state else 1
 
     def _raw_tokens(tag: str) -> int:
         return int(paged_pool_tokens_per_block[tag])
@@ -455,6 +628,9 @@ def fused_phase2b_pool_slot_mapping(
     csa_tokens = _compressed_tokens(_raw_tokens(CSA_KV), 4) if has_csa else 1
     idx_tokens = _compressed_tokens(_raw_tokens(INDEXER_KV), 4) if has_idx else 1
     hca_tokens = _compressed_tokens(_raw_tokens(HCA_KV), 128) if has_hca else 1
+    csa_state_tokens = _raw_tokens(CSA_STATE) if has_csa_state else 1
+    idx_state_tokens = _raw_tokens(INDEXER_STATE) if has_idx_state else 1
+    hca_state_tokens = _raw_tokens(HCA_STATE) if has_hca_state else 1
 
     grid = (bs, q_len)
     _fused_phase2b_pool_slot_mapping_kernel[grid](
@@ -463,10 +639,16 @@ def fused_phase2b_pool_slot_mapping(
         bt_csa,
         bt_idx,
         bt_hca,
+        bt_csa_state,
+        bt_idx_state,
+        bt_hca_state,
         slot_swa,
         slot_csa,
         slot_idx,
         slot_hca,
+        slot_csa_state,
+        slot_idx_state,
+        slot_hca_state,
         bs,
         Q_LEN=q_len,
         SWA_E=swa_e,
@@ -481,8 +663,20 @@ def fused_phase2b_pool_slot_mapping(
         HCA_E=hca_e,
         HCA_TOKENS_PER_BLOCK=hca_tokens,
         HCA_BT_STRIDE=bt_hca.shape[1],
+        CSA_STATE_E=csa_state_e,
+        CSA_STATE_TOKENS_PER_BLOCK=csa_state_tokens,
+        CSA_STATE_BT_STRIDE=bt_csa_state.shape[1],
+        IDX_STATE_E=idx_state_e,
+        IDX_STATE_TOKENS_PER_BLOCK=idx_state_tokens,
+        IDX_STATE_BT_STRIDE=bt_idx_state.shape[1],
+        HCA_STATE_E=hca_state_e,
+        HCA_STATE_TOKENS_PER_BLOCK=hca_state_tokens,
+        HCA_STATE_BT_STRIDE=bt_hca_state.shape[1],
         HAS_SWA=has_swa,
         HAS_CSA=has_csa,
         HAS_IDX=has_idx,
         HAS_HCA=has_hca,
+        HAS_CSA_STATE=has_csa_state,
+        HAS_IDX_STATE=has_idx_state,
+        HAS_HCA_STATE=has_hca_state,
     )

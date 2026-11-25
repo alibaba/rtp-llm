@@ -108,6 +108,16 @@ def _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS: tl.constexpr) -> None:
         )
 
 
+def _select_dequant_num_workers(num_reqs: int, max_tokens_hint: int = 0) -> int:
+    """Scale CTA grid along dim-1 for small-batch SM occupancy without specialization."""
+    if num_reqs <= 0:
+        return 128
+    target = max(128, (2048 + num_reqs - 1) // num_reqs)
+    if max_tokens_hint > 0:
+        target = min(target, max(128, int(max_tokens_hint)))
+    return min(1024, target)
+
+
 @triton.jit(do_not_specialize=["offset", "max_blocks_per_seq"])
 def _dequantize_and_gather_k_kernel(
     out_ptr,
@@ -191,9 +201,11 @@ def _dequantize_and_gather_k_kernel(
             qblock_start = qblock_idx * quant_block
             if qblock_start < fp8_dim:
                 offsets = qblock_start + tl.arange(0, quant_block)
-                mask = offsets < fp8_dim
-
-                x_uint8 = tl.load(token_fp8_ptr + offsets, mask=mask, other=0)
+                if fp8_dim % quant_block == 0:
+                    x_uint8 = tl.load(token_fp8_ptr + offsets)
+                else:
+                    mask = offsets < fp8_dim
+                    x_uint8 = tl.load(token_fp8_ptr + offsets, mask=mask, other=0)
                 x_fp8 = x_uint8.to(tl.float8e4nv, bitcast=True)
                 x_float = x_fp8.to(tl.float32)
 
@@ -202,15 +214,25 @@ def _dequantize_and_gather_k_kernel(
                 scale = tl.exp2(exponent)
 
                 x_dequant = x_float * scale
-                tl.store(output_row_ptr + offsets, x_dequant.to(tl.bfloat16), mask=mask)
+                if fp8_dim % quant_block == 0:
+                    tl.store(output_row_ptr + offsets, x_dequant.to(tl.bfloat16))
+                else:
+                    tl.store(
+                        output_row_ptr + offsets, x_dequant.to(tl.bfloat16), mask=mask
+                    )
 
-        # RoPE: bf16 passthrough
+        # RoPE: bf16 passthrough (single vectorized 64-elem transaction when bf16_dim==64)
         bf16_output_offset = fp8_dim
         bf16_cache_ptr = token_bf16_ptr.to(tl.pointer_type(tl.bfloat16))
-        for j in tl.static_range(bf16_dim // 16):
-            chunk_offsets = j * 16 + tl.arange(0, 16)
-            bf16_vals = tl.load(bf16_cache_ptr + chunk_offsets)
-            tl.store(output_row_ptr + bf16_output_offset + chunk_offsets, bf16_vals)
+        if bf16_dim == 64:
+            rope_offsets = tl.arange(0, 64)
+            bf16_vals = tl.load(bf16_cache_ptr + rope_offsets)
+            tl.store(output_row_ptr + bf16_output_offset + rope_offsets, bf16_vals)
+        else:
+            for j in tl.static_range(bf16_dim // 16):
+                chunk_offsets = j * 16 + tl.arange(0, 16)
+                bf16_vals = tl.load(bf16_cache_ptr + chunk_offsets)
+                tl.store(output_row_ptr + bf16_output_offset + chunk_offsets, bf16_vals)
 
 
 def dequantize_and_gather_k_cache(
@@ -263,8 +285,10 @@ def dequantize_and_gather_k_cache(
     )
 
     num_reqs = seq_lens.shape[0]
-    NUM_WORKERS = 128
-    _dequantize_and_gather_k_kernel[(num_reqs, NUM_WORKERS)](
+    num_workers = _select_dequant_num_workers(
+        num_reqs, max_tokens_hint=int(out.shape[1])
+    )
+    _dequantize_and_gather_k_kernel[(num_reqs, num_workers)](
         out,
         out.stride(0),
         out.stride(1),
@@ -286,6 +310,7 @@ def dequantize_and_gather_k_cache(
         fp8_max=FP8_MAX,
         n_quant_blocks=NOPE_TILES,
         TRAP_INVALID_KV_ACCESS=True,
+        num_warps=2,
     )
 
 
@@ -386,7 +411,6 @@ def _dequantize_and_gather_k_slots_kernel(
                 qblock_start = qblock_idx * quant_block
                 if qblock_start < fp8_dim:
                     offsets = qblock_start + tl.arange(0, quant_block)
-                    mask = offsets < fp8_dim
 
                     token_fp8_ptr = _packed_slot_byte_ptr(
                         k_cache_ptr,
@@ -396,7 +420,11 @@ def _dequantize_and_gather_k_slots_kernel(
                         num_cache_blocks,
                         CP_RANK_MAJOR_RAW,
                     )
-                    x_uint8 = tl.load(token_fp8_ptr, mask=mask, other=0)
+                    if fp8_dim % quant_block == 0:
+                        x_uint8 = tl.load(token_fp8_ptr)
+                    else:
+                        mask = offsets < fp8_dim
+                        x_uint8 = tl.load(token_fp8_ptr, mask=mask, other=0)
                     x_fp8 = x_uint8.to(tl.float8e4nv, bitcast=True)
                     x_float = x_fp8.to(tl.float32)
 
@@ -413,14 +441,19 @@ def _dequantize_and_gather_k_slots_kernel(
                     scale = tl.exp2(exponent)
 
                     x_dequant = x_float * scale
-                    tl.store(
-                        output_row_ptr + offsets, x_dequant.to(tl.bfloat16), mask=mask
-                    )
+                    if fp8_dim % quant_block == 0:
+                        tl.store(output_row_ptr + offsets, x_dequant.to(tl.bfloat16))
+                    else:
+                        tl.store(
+                            output_row_ptr + offsets,
+                            x_dequant.to(tl.bfloat16),
+                            mask=mask,
+                        )
 
             bf16_output_offset = fp8_dim
-            for j in tl.static_range(bf16_dim // 16):
-                chunk_offsets = j * 16 + tl.arange(0, 16)
-                bf16_byte_offsets = token_data_offset + fp8_dim + chunk_offsets * 2
+            if bf16_dim == 64:
+                rope_offsets = tl.arange(0, 64)
+                bf16_byte_offsets = token_data_offset + fp8_dim + rope_offsets * 2
                 bf16_cache_ptr = _packed_slot_byte_ptr(
                     k_cache_ptr,
                     physical_block_idx,
@@ -430,7 +463,23 @@ def _dequantize_and_gather_k_slots_kernel(
                     CP_RANK_MAJOR_RAW,
                 ).to(tl.pointer_type(tl.bfloat16))
                 bf16_vals = tl.load(bf16_cache_ptr)
-                tl.store(output_row_ptr + bf16_output_offset + chunk_offsets, bf16_vals)
+                tl.store(output_row_ptr + bf16_output_offset + rope_offsets, bf16_vals)
+            else:
+                for j in tl.static_range(bf16_dim // 16):
+                    chunk_offsets = j * 16 + tl.arange(0, 16)
+                    bf16_byte_offsets = token_data_offset + fp8_dim + chunk_offsets * 2
+                    bf16_cache_ptr = _packed_slot_byte_ptr(
+                        k_cache_ptr,
+                        physical_block_idx,
+                        bf16_byte_offsets,
+                        block_stride,
+                        num_cache_blocks,
+                        CP_RANK_MAJOR_RAW,
+                    ).to(tl.pointer_type(tl.bfloat16))
+                    bf16_vals = tl.load(bf16_cache_ptr)
+                    tl.store(
+                        output_row_ptr + bf16_output_offset + chunk_offsets, bf16_vals
+                    )
 
 
 def _launch_dequantize_and_gather_k_slots_unchecked(
@@ -451,7 +500,9 @@ def _launch_dequantize_and_gather_k_slots_unchecked(
     if batch_size == 0 or max_gather_len == 0:
         return
 
-    num_workers = 128
+    num_workers = _select_dequant_num_workers(
+        batch_size, max_tokens_hint=max_gather_len
+    )
     _dequantize_and_gather_k_slots_kernel[(batch_size, num_workers)](
         out,
         out.stride(0),
@@ -474,6 +525,7 @@ def _launch_dequantize_and_gather_k_slots_unchecked(
         n_quant_blocks=NOPE_TILES,
         TRAP_INVALID_KV_ACCESS=True,
         CP_RANK_MAJOR_RAW=bool(cp_rank_major_raw),
+        num_warps=2,
     )
 
 
@@ -808,9 +860,9 @@ def _gather_k_cache_packed_to_flat_kernel(
 
     batch_offsets = tl.arange(0, BATCH_BLOCK)
     batch_mask = batch_offsets < batch_size
-    padded_lens = tl.load(
-        padded_lens_ptr + batch_offsets, mask=batch_mask, other=0
-    ).to(tl.int64)
+    padded_lens = tl.load(padded_lens_ptr + batch_offsets, mask=batch_mask, other=0).to(
+        tl.int64
+    )
     padded_ends = tl.cumsum(padded_lens, axis=0)
     batch_idx = tl.sum((token_idx >= padded_ends).to(tl.int32), axis=0)
     padded_start = tl.sum(
@@ -1066,9 +1118,7 @@ def _restore_dequantize_scatter_packed_k_cache_flat_kernel(
     seq_ends = tl.cumsum(seq_lens, axis=0)
     batch_idx = tl.sum((token_idx >= seq_ends).to(tl.int32), axis=0)
     valid_batch = token_valid & (batch_idx >= 0) & (batch_idx < batch_size)
-    selected_seq_len = tl.sum(
-        tl.where(batch_offsets == batch_idx, seq_lens, 0), axis=0
-    )
+    selected_seq_len = tl.sum(tl.where(batch_offsets == batch_idx, seq_lens, 0), axis=0)
     seq_start = tl.sum(
         tl.where(batch_offsets == batch_idx, seq_ends - seq_lens, 0), axis=0
     )
@@ -1087,9 +1137,7 @@ def _restore_dequantize_scatter_packed_k_cache_flat_kernel(
     restored_idx = tl.load(
         restore_indices_ptr + token_idx, mask=token_valid, other=-1
     ).to(tl.int64)
-    valid_restore = (
-        token_valid & (restored_idx >= 0) & (restored_idx < gathered_rows)
-    )
+    valid_restore = token_valid & (restored_idx >= 0) & (restored_idx < gathered_rows)
     valid_row = valid_destination & valid_restore
     safe_restored_idx = tl.where(valid_restore, restored_idx, 0)
     token_ptr = gathered_ptr + safe_restored_idx * entry_bytes
@@ -1130,9 +1178,7 @@ def _restore_dequantize_scatter_packed_k_cache_flat_kernel(
     bf16_cache_ptr = token_bf16_ptr.to(tl.pointer_type(tl.bfloat16))
     for j in tl.static_range(bf16_dim // 16):
         chunk_offsets = j * 16 + tl.arange(0, 16)
-        bf16_vals = tl.load(
-            bf16_cache_ptr + chunk_offsets, mask=valid_row, other=0
-        )
+        bf16_vals = tl.load(bf16_cache_ptr + chunk_offsets, mask=valid_row, other=0)
         tl.store(
             output_row_ptr + bf16_output_offset + chunk_offsets,
             bf16_vals,
@@ -1648,8 +1694,9 @@ def prepare_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
         with record_function_range("dsv4.cp.all_gather.swa_prefix.wait_host"):
             _wait_swa_prefix_work_once(pending)
         try:
-            if cp_swa_direct_dequant_scatter_enabled() and direct_triton_fast_path_supported(
-                out.device
+            if (
+                cp_swa_direct_dequant_scatter_enabled()
+                and direct_triton_fast_path_supported(out.device)
             ):
                 _launch_dequantize_and_gather_k_slots_cp_rank_major_unchecked(
                     out,

@@ -116,6 +116,13 @@ class DSv4DecodeFmhaImplFP8:
         # False here (prepare_cuda_graph is hardcoded on the class).
         return True
 
+    def requires_host_attention_inputs(self) -> bool:
+        # Decode metadata preparation reads only device tensors
+        # (prefix_lengths_device, sequence_lengths_plus_1_device, and
+        # kv_cache_kernel_block_id_device), so CudaGraphRunner can elide host
+        # mirror copies and their D2H synchronization event.
+        return False
+
     def _extract_paged_block_tables(
         self,
         attn_inputs: Any,

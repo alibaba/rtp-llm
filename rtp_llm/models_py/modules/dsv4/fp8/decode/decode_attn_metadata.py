@@ -619,11 +619,30 @@ def _build_start_pos_from_attention_inputs(
         # decode-shaped batches.  CudaGraphRunner copies prefix_lengths for
         # prefill graph replay but leaves sequence_lengths at capture-time
         # sentinel values, so prefix_lengths is the only valid first-token
-        # position source for those q_len > 1 paths.
+        # position source for those q_len > 1 paths. Prefer device mirrors
+        # when running on CUDA so host mirror copies can be skipped cleanly.
         if is_target_verify or (is_prefill and q_len > 1):
-            start_pos = attention_inputs.prefix_lengths
+            dev_src = getattr(attention_inputs, "prefix_lengths_device", None)
+            if (
+                device.type == "cuda"
+                and isinstance(dev_src, torch.Tensor)
+                and dev_src.is_cuda
+                and dev_src.numel() > 0
+            ):
+                start_pos = dev_src
+            else:
+                start_pos = attention_inputs.prefix_lengths
         else:
-            start_pos = attention_inputs.sequence_lengths
+            dev_src = getattr(attention_inputs, "sequence_lengths_plus_1_device", None)
+            if (
+                device.type == "cuda"
+                and isinstance(dev_src, torch.Tensor)
+                and dev_src.is_cuda
+                and dev_src.numel() > 0
+            ):
+                start_pos = dev_src - 1
+            else:
+                start_pos = attention_inputs.sequence_lengths
 
     start_pos = start_pos.to(device=device, dtype=torch.int32)
     # Cuda-graph capture/warmup can hand us sentinel prefix lengths near
@@ -1005,8 +1024,6 @@ def update_decode_metadata_in_place_fp8(
         q_len,
     )
     bs = int(start_pos.shape[0])
-    position_ids_2d = _build_position_ids_2d(start_pos, q_len, device)
-    position_ids_flat = position_ids_2d.reshape(-1).contiguous()
     if paged_pool_entries_per_block:
         if paged_pool_tokens_per_block is None:
             raise ValueError("paged_pool_tokens_per_block is required for paged pools")
@@ -1045,28 +1062,33 @@ def update_decode_metadata_in_place_fp8(
         for r, t in meta.compressed_topk_length_by_ratio.items():
             ptr_snap[f"compressed_topk_length_by_ratio[{r}]"] = t.data_ptr()
 
-    meta.position_ids[: bs * q_len].copy_(position_ids_flat)
-    if meta.position_ids_long is not None:
-        meta.position_ids_long[: bs * q_len].copy_(position_ids_flat.to(torch.long))
-    if meta.decode_seq_start_per_req is not None:
-        meta.decode_seq_start_per_req[:bs].copy_(start_pos)
-    meta.topk_buffer_compressed[:bs].fill_(-1)
-
     from rtp_llm.models_py.modules.dsv4.fp8.decode._fused_prepare_meta_triton import (
         fused_update_decode_meta_pure,
     )
 
-    fused_update_decode_meta_pure(meta, start_pos, meta.max_seq_len)
-
-    # opt_flash_mla: derive FlashMLA topk_length / extra_topk_length from the
-    # just-filled compressed_lens + start_pos, in place (graph-stable buffers).
-    # During CUDA-graph capture/warmup (capture_full_width_lengths=True) write
-    # the FULL width so FlashMLA's frozen tile schedule is max-provisioned and
-    # safe for any real replay length; real per-request lengths are written
-    # before each replay by prepare_cuda_graph(). See _update_topk_lengths_in_place.
-    _update_topk_lengths_in_place(
-        meta, start_pos, bs, full_width=capture_full_width_lengths
-    )
+    if start_pos.is_cuda:
+        fused_update_decode_meta_pure(
+            meta,
+            start_pos,
+            meta.max_seq_len,
+            update_extra_fields=True,
+            update_topk_lengths=not capture_full_width_lengths,
+        )
+        if capture_full_width_lengths:
+            _update_topk_lengths_in_place(meta, start_pos, bs, full_width=True)
+    else:
+        position_ids_2d = _build_position_ids_2d(start_pos, q_len, device)
+        position_ids_flat = position_ids_2d.reshape(-1).contiguous()
+        meta.position_ids[: bs * q_len].copy_(position_ids_flat)
+        if meta.position_ids_long is not None:
+            meta.position_ids_long[: bs * q_len].copy_(position_ids_flat.to(torch.long))
+        if meta.decode_seq_start_per_req is not None:
+            meta.decode_seq_start_per_req[:bs].copy_(start_pos)
+        meta.topk_buffer_compressed[:bs].fill_(-1)
+        fused_update_decode_meta_pure(meta, start_pos, meta.max_seq_len)
+        _update_topk_lengths_in_place(
+            meta, start_pos, bs, full_width=capture_full_width_lengths
+        )
 
     # ------------------------------------------------------------------
     # Phase 2: paged write slot mappings (per cache tag).
@@ -1091,7 +1113,8 @@ def update_decode_metadata_in_place_fp8(
             n_cols = min(src_bt.shape[1], dst_bt.shape[1])
             # Zero stale rows beyond current bs to avoid carrying old block
             # ids (defensive — graph reads only [:bs] anyway).
-            dst_bt[bs:].zero_()
+            if bs < dst_bt.shape[0]:
+                dst_bt[bs:].zero_()
             dst_bt[:n_rows, :n_cols].copy_(src_bt[:n_rows, :n_cols])
             if n_cols < dst_bt.shape[1]:
                 dst_bt[:n_rows, n_cols:].zero_()
@@ -1100,22 +1123,32 @@ def update_decode_metadata_in_place_fp8(
             fused_phase2b_pool_slot_mapping,
         )
 
+        use_fused_state = bool(
+            start_pos.is_cuda
+            and meta.compressor_state_slot_mappings
+            and all(
+                meta.pool_block_tables[at].is_cuda
+                for at in meta.compressor_state_slot_mappings
+                if at in meta.pool_block_tables
+            )
+        )
         fused_phase2b_pool_slot_mapping(
             meta,
             start_pos,
             bs,
             paged_pool_entries_per_block,
             paged_pool_tokens_per_block,
+            update_state_slots=use_fused_state,
         )
-
-        _update_compressor_state_slot_mappings(
-            meta,
-            bs,
-            paged_pool_entries_per_block,
-        )
+        if not use_fused_state:
+            _update_compressor_state_slot_mappings(
+                meta,
+                bs,
+                paged_pool_entries_per_block,
+            )
 
     # Iter3.3: precompute translate_swa / translate_hca once per step.
-    # Shared across all 43 attention layers. Graph-safe: ``.copy_()`` into
+    # Shared across all 43 attention layers. Graph-safe: write straight into
     # pre-allocated buffers on meta (allocated at max_bs); never reassigns
     # the attribute, so graph replays read from fixed addresses.
     # ``req_id_per_token`` is deterministic (``arange(B)``) so it was filled
@@ -1140,14 +1173,14 @@ def update_decode_metadata_in_place_fp8(
             swa_eb = paged_pool_entries_per_block[SWA_KV]
             swa_tokens_per_block = paged_pool_tokens_per_block[SWA_KV]
             swa_local = meta.swa_abs_idx[:bs].reshape(T, window_size)
-            swa_global_new = translate_local_to_global_slots(
+            translate_local_to_global_slots(
                 req_id_bs,
                 meta.pool_block_tables[SWA_KV][:bs],
                 swa_local,
                 entries_per_block=swa_eb,
                 tokens_per_block_for_block_table=swa_tokens_per_block,
+                out=meta.swa_global_slots[:T],
             )
-            meta.swa_global_slots[:T].copy_(swa_global_new)
 
         # HCA layers all share the dense-idx-masked cmp_local_raw (already
         # materialised as topk_total[r=128][:, :, win:]); translate it once.
@@ -1163,15 +1196,17 @@ def update_decode_metadata_in_place_fp8(
             )
             hca_tt = meta.topk_total_by_ratio[128]
             K_h = hca_tt.shape[-1] - window_size
-            hca_cmp_local = hca_tt[:bs, :, window_size:].reshape(T, K_h).contiguous()
-            hca_global_new = translate_local_to_global_slots(
+            # Non-contiguous column slice (stride[0]=window+K_h, stride[1]=1) is
+            # consumed zero-copy by triton_convert_req_index_to_global_index.
+            hca_cmp_local = hca_tt[:bs, :, window_size:].reshape(T, K_h)
+            translate_local_to_global_slots(
                 req_id_bs,
                 meta.pool_block_tables[HCA_KV][:bs],
                 hca_cmp_local,
                 entries_per_block=hca_eb,
                 tokens_per_block_for_block_table=hca_tokens_per_block,
+                out=meta.hca_cmp_global_slots[:T],
             )
-            meta.hca_cmp_global_slots[:T].copy_(hca_global_new)
 
     # Update Python-scalar geometry (cheap — these are not captured into the graph)
     meta.batch_size = bs

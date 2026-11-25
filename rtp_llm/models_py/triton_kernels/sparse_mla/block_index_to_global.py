@@ -85,6 +85,7 @@ def triton_convert_req_index_to_global_index(
     HAS_PREFILL_WORKSPACE: bool = False,
     prefill_workspace_request_ids: torch.Tensor | None = None,
     prefill_workspace_starts: torch.Tensor | None = None,
+    out: torch.Tensor | None = None,
 ):
     """
     out[token_id, indice_id] =
@@ -129,11 +130,31 @@ def triton_convert_req_index_to_global_index(
     max_num_blocks_per_req = block_table.shape[1]
     tiles_per_row = NUM_TOPK_TOKENS // BLOCK_N
 
-    # Ensure contiguous tensors on the same device
+    # Keep contiguous-row 2D inputs (stride(1) == 1) zero-copy: the kernel uses
+    # ti_stride0 / ti_stride1 directly.
     req_id_c = req_id.contiguous()
     block_table_c = block_table.contiguous()
-    token_indices_c = token_indices.contiguous()
-    out = torch.empty_like(token_indices_c)
+    token_indices_c = (
+        token_indices
+        if token_indices.dim() == 2 and token_indices.stride(1) == 1
+        else token_indices.contiguous()
+    )
+    assert token_indices_c.shape[0] == num_tokens
+    if out is None:
+        out = torch.empty(
+            (num_tokens, NUM_TOPK_TOKENS),
+            dtype=torch.int32,
+            device=token_indices_c.device,
+        )
+    else:
+        assert (
+            out.dim() == 2
+            and out.shape[0] == num_tokens
+            and out.shape[1] == NUM_TOPK_TOKENS
+            and out.dtype == torch.int32
+            and out.device == token_indices_c.device
+            and out.stride(1) == 1
+        )
 
     # Strides in elements
     bt_stride0, bt_stride1 = block_table_c.stride()

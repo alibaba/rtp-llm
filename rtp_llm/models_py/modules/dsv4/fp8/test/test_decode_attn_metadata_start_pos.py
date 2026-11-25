@@ -11,6 +11,12 @@ from types import SimpleNamespace
 
 import torch
 
+from rtp_llm.models_py.modules.dsv4.fp8.decode.paged_topk_translator import (
+    translate_local_to_global_slots,
+)
+from rtp_llm.models_py.modules.dsv4.fp8.decode.pool_slot_mapping import (
+    compute_kv_pool_slot_mapping,
+)
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
     CSA_KV,
     CSA_STATE,
@@ -19,12 +25,6 @@ from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
     INDEXER_KV,
     INDEXER_STATE,
     SWA_KV,
-)
-from rtp_llm.models_py.modules.dsv4.fp8.decode.paged_topk_translator import (
-    translate_local_to_global_slots,
-)
-from rtp_llm.models_py.modules.dsv4.fp8.decode.pool_slot_mapping import (
-    compute_kv_pool_slot_mapping,
 )
 
 _THIS_DIR = Path(__file__).resolve().parent
@@ -788,6 +788,284 @@ class TestDecodeMetadataStartPos(unittest.TestCase):
         self.assertEqual(
             meta.swa_global_slots[:T].tolist(), expected_swa_global.tolist()
         )
+
+
+class TestDecodeMetadataDevicePriorityAndFusedParity(unittest.TestCase):
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+    def test_cuda_device_tensors_take_precedence_over_stale_host_tensors(self):
+        dev = torch.device("cuda")
+
+        # Plain decode prefers sequence_lengths_plus_1_device - 1 over stale host.
+        decode_attn = SimpleNamespace(
+            is_target_verify=False,
+            is_prefill=False,
+            sequence_lengths=torch.tensor([3, 4], dtype=torch.int32),
+            sequence_lengths_plus_1_device=torch.tensor(
+                [11, 22], dtype=torch.int32, device=dev
+            ),
+        )
+        sp_decode = _meta_mod._build_start_pos_from_attention_inputs(
+            decode_attn, dev, max_seq_len=512, q_len=1
+        )
+        self.assertEqual(sp_decode.tolist(), [10, 21])
+
+        # Target verify prefers prefix_lengths_device over stale host prefix_lengths.
+        tv_attn = SimpleNamespace(
+            is_target_verify=True,
+            is_prefill=False,
+            prefix_lengths=torch.tensor([5, 6], dtype=torch.int32),
+            prefix_lengths_device=torch.tensor(
+                [100, 200], dtype=torch.int32, device=dev
+            ),
+        )
+        sp_tv = _meta_mod._build_start_pos_from_attention_inputs(
+            tv_attn, dev, max_seq_len=512, q_len=4
+        )
+        self.assertEqual(sp_tv.tolist(), [100, 200])
+
+        # Fallback to host tensors when device mirrors are absent.
+        host_decode = SimpleNamespace(
+            is_target_verify=False,
+            is_prefill=False,
+            sequence_lengths=torch.tensor([3, 4], dtype=torch.int32),
+        )
+        self.assertEqual(
+            _meta_mod._build_start_pos_from_attention_inputs(
+                host_decode, dev, max_seq_len=512, q_len=1
+            ).tolist(),
+            [3, 4],
+        )
+
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+    def test_update_decode_metadata_in_place_matches_eager_on_cuda(self):
+        from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
+            CSA_STATE,
+            HCA_STATE,
+            INDEXER_STATE,
+        )
+
+        dev = torch.device("cuda")
+        max_bs = 4
+        max_seq_len = 1024
+        window_size = 128
+        head_dim = 64
+        index_topk = 512
+        compress_ratios = [4, 128]
+        all_pools = (
+            SWA_KV,
+            CSA_KV,
+            INDEXER_KV,
+            HCA_KV,
+            CSA_STATE,
+            INDEXER_STATE,
+            HCA_STATE,
+        )
+        entries = {
+            SWA_KV: 132,
+            CSA_KV: 32,
+            INDEXER_KV: 32,
+            HCA_KV: 1,
+            CSA_STATE: 4,
+            INDEXER_STATE: 4,
+            HCA_STATE: 2,
+        }
+        tokens = {
+            SWA_KV: 16384,
+            CSA_KV: 128,
+            INDEXER_KV: 128,
+            HCA_KV: 128,
+            CSA_STATE: 64,
+            INDEXER_STATE: 64,
+            HCA_STATE: 128,
+        }
+        max_blocks = 12
+        block_tables = {}
+        for idx, pool in enumerate(all_pools):
+            base = (idx + 1) * 100
+            rows = []
+            for r in range(max_bs):
+                row = torch.arange(
+                    base + r * 20,
+                    base + r * 20 + max_blocks,
+                    dtype=torch.int32,
+                    device=dev,
+                )
+                if r == max_bs - 1:
+                    row[-2:] = -1
+                rows.append(row)
+            block_tables[pool] = torch.stack(rows, dim=0)
+
+        for q_len in (1, 4):
+            init_pos = torch.zeros(max_bs, dtype=torch.int32, device=dev)
+            meta = build_decode_metadata_fp8(
+                init_pos,
+                q_len=q_len,
+                window_size=window_size,
+                head_dim=head_dim,
+                max_seq_len=max_seq_len,
+                compress_ratios=compress_ratios,
+                index_topk=index_topk,
+                device=dev,
+                paged_block_tables=block_tables,
+                paged_pool_entries_per_block=entries,
+                paged_pool_tokens_per_block=tokens,
+            )
+
+            test_cases = [
+                # (bs, is_target_verify, positions)
+                (max_bs, False, [3, 127, 128, 515]),
+                (3, True, [0, 125, 384]),
+            ]
+            for bs, is_tv, sp_vals in test_cases:
+                T = bs * q_len
+                if is_tv:
+                    step_attn = SimpleNamespace(
+                        is_target_verify=True,
+                        is_prefill=False,
+                        prefix_lengths=torch.full((bs,), 9999, dtype=torch.int32),
+                        prefix_lengths_device=torch.tensor(
+                            sp_vals, dtype=torch.int32, device=dev
+                        ),
+                    )
+                else:
+                    step_attn = SimpleNamespace(
+                        is_target_verify=False,
+                        is_prefill=False,
+                        sequence_lengths=torch.full((bs,), 9999, dtype=torch.int32),
+                        sequence_lengths_plus_1_device=torch.tensor(
+                            [v + 1 for v in sp_vals], dtype=torch.int32, device=dev
+                        ),
+                    )
+
+                step_bt = {p: t[:bs] for p, t in block_tables.items()}
+                eager = build_decode_metadata_fp8(
+                    step_attn,
+                    q_len=q_len,
+                    window_size=window_size,
+                    head_dim=head_dim,
+                    max_seq_len=max_seq_len,
+                    compress_ratios=compress_ratios,
+                    index_topk=index_topk,
+                    device=dev,
+                    paged_block_tables=step_bt,
+                    paged_pool_entries_per_block=entries,
+                    paged_pool_tokens_per_block=tokens,
+                )
+
+                update_decode_metadata_in_place_fp8(
+                    meta,
+                    step_attn,
+                    forbid_realloc=True,
+                    paged_block_tables=step_bt,
+                    paged_pool_entries_per_block=entries,
+                    paged_pool_tokens_per_block=tokens,
+                    capture_full_width_lengths=False,
+                )
+
+                self.assertTrue(torch.equal(meta.start_pos[:bs], eager.start_pos))
+                self.assertTrue(torch.equal(meta.position_ids[:T], eager.position_ids))
+                self.assertTrue(
+                    torch.equal(meta.position_ids_long[:T], eager.position_ids_long)
+                )
+                self.assertTrue(
+                    torch.equal(meta.slot_mapping_swa[:T], eager.slot_mapping_swa)
+                )
+                self.assertTrue(
+                    torch.equal(meta.topk_window_idxs[:bs], eager.topk_window_idxs)
+                )
+                self.assertTrue(
+                    torch.equal(
+                        meta.topk_buffer_compressed[:bs], eager.topk_buffer_compressed
+                    )
+                )
+                self.assertTrue(torch.equal(meta.swa_abs_idx[:bs], eager.swa_abs_idx))
+                self.assertTrue(
+                    torch.equal(meta.swa_global_slots[:T], eager.swa_global_slots)
+                )
+                self.assertTrue(
+                    torch.equal(
+                        meta.hca_cmp_global_slots[:T], eager.hca_cmp_global_slots
+                    )
+                )
+                self.assertTrue(
+                    torch.equal(meta.swa_topk_length[:bs], eager.swa_topk_length)
+                )
+                for r in compress_ratios:
+                    self.assertTrue(
+                        torch.equal(
+                            meta.slot_mapping_compressed[r][:T],
+                            eager.slot_mapping_compressed[r],
+                        )
+                    )
+                    self.assertTrue(
+                        torch.equal(
+                            meta.compressed_lens[r][:bs], eager.compressed_lens[r]
+                        )
+                    )
+                    self.assertTrue(
+                        torch.equal(
+                            meta.compressed_lens_per_token[r][:bs],
+                            eager.compressed_lens_per_token[r],
+                        )
+                    )
+                    self.assertTrue(
+                        torch.equal(
+                            meta.topk_total_by_ratio[r][:bs],
+                            eager.topk_total_by_ratio[r],
+                        )
+                    )
+                    self.assertTrue(
+                        torch.equal(
+                            meta.compressed_topk_length_by_ratio[r][:bs],
+                            eager.compressed_topk_length_by_ratio[r],
+                        )
+                    )
+                for p in (SWA_KV, CSA_KV, INDEXER_KV, HCA_KV):
+                    self.assertTrue(
+                        torch.equal(
+                            meta.pool_write_slot_mappings[p][:T],
+                            eager.pool_write_slot_mappings[p],
+                        )
+                    )
+                for sp_pool in (CSA_STATE, INDEXER_STATE, HCA_STATE):
+                    self.assertTrue(
+                        torch.equal(
+                            meta.compressor_state_slot_mappings[sp_pool][:T],
+                            eager.compressor_state_slot_mappings[sp_pool],
+                        )
+                    )
+
+            # Verify capture_full_width_lengths=True preserves prefilled widths.
+            meta.swa_topk_length.fill_(777)
+            for r in compress_ratios:
+                meta.compressed_topk_length_by_ratio[r].fill_(888)
+            update_decode_metadata_in_place_fp8(
+                meta,
+                SimpleNamespace(
+                    is_target_verify=False,
+                    is_prefill=False,
+                    sequence_lengths_plus_1_device=torch.tensor(
+                        [2] * max_bs, dtype=torch.int32, device=dev
+                    ),
+                ),
+                forbid_realloc=True,
+                paged_block_tables=block_tables,
+                paged_pool_entries_per_block=entries,
+                paged_pool_tokens_per_block=tokens,
+                capture_full_width_lengths=True,
+            )
+            self.assertEqual(
+                meta.swa_topk_length[:max_bs].tolist(), [window_size] * max_bs
+            )
+            expected_cmp_full = {
+                r: int(meta.topk_total_by_ratio[r].shape[-1]) - window_size
+                for r in compress_ratios
+            }
+            for r in compress_ratios:
+                self.assertEqual(
+                    meta.compressed_topk_length_by_ratio[r][:max_bs].tolist(),
+                    [expected_cmp_full[r]] * max_bs,
+                )
 
 
 if __name__ == "__main__":

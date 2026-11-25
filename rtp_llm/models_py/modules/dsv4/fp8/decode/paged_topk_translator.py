@@ -23,6 +23,8 @@ beyond what the kernel returns) so the hot path stays lean.
 
 from __future__ import annotations
 
+from typing import Optional
+
 import torch
 
 from rtp_llm.models_py.triton_kernels.sparse_mla.block_index_to_global import (
@@ -51,6 +53,8 @@ def translate_local_to_global_slots(
     local_idx: torch.Tensor,  # [T, K] int32, -1 sentinel preserved
     entries_per_block: int,
     tokens_per_block_for_block_table: int,
+    *,
+    out: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """[T, K] int32 global pool slot ids; -1 propagates as -1.
 
@@ -67,12 +71,18 @@ def translate_local_to_global_slots(
     block_n = 128
     while block_n > 1 and K % block_n != 0:
         block_n //= 2
+    local_idx_in = (
+        local_idx
+        if local_idx.dim() == 2 and local_idx.stride(1) == 1
+        else local_idx.contiguous()
+    )
     return triton_convert_req_index_to_global_index(
         req_id_per_token,
         block_table,
-        local_idx.contiguous(),
+        local_idx_in,
         ENTRIES_PER_BLOCK=int(entries_per_block),
         TOKENS_PER_BLOCK_FOR_BLOCK_TABLE=int(tokens_per_block_for_block_table),
         NUM_TOPK_TOKENS=K,
         BLOCK_N=block_n,
+        out=out,
     )
