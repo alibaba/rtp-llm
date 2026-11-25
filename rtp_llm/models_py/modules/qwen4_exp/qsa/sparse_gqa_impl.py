@@ -30,6 +30,7 @@ import torch
 
 from rtp_llm.config.cuda_graph import CudaGraphSelectionMode
 from rtp_llm.model_loader.model_weight_info import ModelWeights
+from rtp_llm.models_py.kernels.cuda.qsa.contracts import qsa_strict_validation_enabled
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_step_plan import (
     has_nonzero_prefill_prefix,
     host_input_mirror,
@@ -905,7 +906,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             not self._is_mtp_draft
             and trusted_selected
             and step is not None
-            and not fmha_validation.qsa_strict_validation_enabled()
+            and not qsa_strict_validation_enabled()
             and step.cu_seqlens is not None
         ):
             output = try_sm90_packed_paged_prefill(
