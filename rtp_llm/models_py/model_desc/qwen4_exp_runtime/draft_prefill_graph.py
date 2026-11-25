@@ -95,8 +95,7 @@ class DraftPrefillGraphReplay(Mapping):
         if (
             lengths.is_cuda
             and prefixes.is_cuda
-            and isinstance(cu, torch.Tensor)
-            and cu.is_cuda
+            and getattr(cu, "is_cuda", False)
             and os.getenv("RTP_QWEN4_STRICT_DRAFT_GRAPH_VALIDATE", "0") != "1"
         ):
             for tag, impl in self.impls.items():
