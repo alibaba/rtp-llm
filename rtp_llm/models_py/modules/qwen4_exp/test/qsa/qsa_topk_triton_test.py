@@ -89,7 +89,15 @@ class QsaTopkTritonTest(unittest.TestCase):
             token_budget=2048,
             validate_lengths=False,
         )
-        torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+        # Native TopK leaves the order of its selected complete blocks
+        # unspecified. The partial-block tail still has a fixed order.
+        torch.testing.assert_close(
+            actual[:, :2048].sort(dim=-1).values,
+            expected[:, :2048].sort(dim=-1).values,
+            atol=0,
+            rtol=0,
+        )
+        torch.testing.assert_close(actual[:, 2048:], expected[:, 2048:], atol=0, rtol=0)
         with self.assertRaisesRegex(ValueError, "non-negative"):
             select_qsa_paged_tokens(
                 scores, lengths, compress_ratio=4, token_budget=2048
