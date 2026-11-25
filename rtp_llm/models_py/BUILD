@@ -183,6 +183,20 @@ cc_binary(
 )
 
 py_library(
+    name = "determinism",
+    srcs = ["determinism/batch_invariant.py"],
+    deps = ["//rtp_llm:torch", "//rtp_llm:triton"],
+    visibility = ["//rtp_llm/models_py/distributed:__pkg__"],
+)
+
+py_library(
+    name = "batch_invariant_config",
+    srcs = ["determinism/batch_invariant_config.py"],
+    deps = ["//rtp_llm:device", "//rtp_llm:ops", "//rtp_llm:torch", "//rtp_llm:utils"],
+    visibility = ["//rtp_llm:__pkg__"],
+)
+
+py_library(
     name = "modules",
     srcs = glob([
         "modules/*.py",
@@ -203,6 +217,7 @@ py_library(
         ":utils",
         ":kernels",
         ":tile_kernels_mhc",
+        ":determinism",
         "//rtp_llm:warmup",
         "//rtp_llm/models_py/kernel_tuning",
         "//rtp_llm/resident_weights",

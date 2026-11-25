@@ -18,6 +18,7 @@ struct ResourceContext {
 
     RoleType role_type{RoleType::PDFUSION};
     bool defer_grammar_to_pp_tail{false};
+    bool     batch_invariant{false};
 
     bool reuse_cache{false};
     bool enable_device_cache{true};

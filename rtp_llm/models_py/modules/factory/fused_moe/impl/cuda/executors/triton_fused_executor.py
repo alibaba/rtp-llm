@@ -19,6 +19,9 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
     MoeConfigResolver,
 )
 from rtp_llm.models_py.triton_kernels.common.activation import silu_and_mul
+from rtp_llm.models_py.triton_kernels.moe.fixed_order_route_reduce import (
+    fixed_order_fp32_route_reduce,
+)
 from rtp_llm.models_py.triton_kernels.moe.fused_moe_kernel import (
     get_default_config,
     invoke_fused_moe_kernel,
@@ -26,10 +29,12 @@ from rtp_llm.models_py.triton_kernels.moe.fused_moe_kernel import (
 )
 from rtp_llm.utils.model_weight import W
 
-from .decode_capabilities import decode_capabilities
+from .decode_capabilities import DecodeCapabilities, decode_capabilities
 
 
 class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
+    _batch_invariant = False
+
     @classmethod
     def executor_type(cls):
         return ExecutorType.FUSED_MOE
@@ -59,16 +64,22 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
         # w1: [E, 2*inter_size, hidden_size], w2: [E, hidden_size, inter_size]
         self.w1 = weights[W.moe_w1]
         self.w2 = weights[W.moe_w2]
-        self.E = self.w1.size(0)
-        self.N = self.w1.size(1)  # 2 * inter_size
-        self.K = self.w1.size(2)  # hidden_size
+        self.E, self.N, self.K = self.w1.shape
         self.inter_size = self.N // 2
-        capabilities = decode_capabilities(
-            self.w1,
-            self.top_k,
-            self.ep_size,
-            getattr(getattr(config, "model_config", None), "model_type", ""),
-        )
+        self._batch_invariant = getattr(config, "batch_invariant", False) is True
+        if self._batch_invariant:
+            if not MoeConfigResolver.is_pure_tp_mode(config):
+                raise ValueError("batch-invariant experts require pure TP")
+            capabilities = DecodeCapabilities(
+                alignment=False, tuned_tiles=False, small_gemv=False
+            )
+        else:
+            capabilities = decode_capabilities(
+                self.w1,
+                self.top_k,
+                self.ep_size,
+                getattr(getattr(config, "model_config", None), "model_type", ""),
+            )
         self._decode_alignment = capabilities.alignment
         self._decode_tiles = capabilities.tuned_tiles
         self._small_moe_gemv = capabilities.small_gemv
@@ -92,6 +103,20 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
 
         assert topk_ids is not None
         assert topk_weights is not None
+
+        if self._batch_invariant:
+            if activation not in ("silu", "SiGLU") or apply_router_weight_on_input:
+                raise ValueError(
+                    "batch-invariant experts require SwiGLU and output weighting"
+                )
+            if expert_map is not None or a2_scale is not None or extra_expert_args:
+                raise ValueError(
+                    "batch-invariant experts require unquantized pure-TP inputs"
+                )
+            output = self._batch_invariant_experts(
+                hidden_states, topk_ids, topk_weights
+            )
+            return CombineForwardPayload(fused_expert_output=output)
 
         if (
             self._small_moe_gemv
@@ -119,10 +144,6 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
 
         M, K = hidden_states.shape
         top_k = topk_ids.size(1)
-        device = hidden_states.device
-        dtype = hidden_states.dtype
-        compute_type = tl.bfloat16 if dtype == torch.bfloat16 else tl.float16
-
         # Config selection for both GEMMs
         config1 = get_default_config(M, self.E, self.N, K, top_k)
         config2 = get_default_config(M, self.E, K, self.inter_size, top_k)
@@ -133,13 +154,6 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
 
             config1, config2 = sm120_decode_gemm_configs(M, config1, config2)
 
-        # Flat routing tensors for the kernel
-        flat_topk_weights = topk_weights.view(-1)  # [M * top_k]
-        flat_topk_ids = topk_ids.view(-1)  # [M * top_k]
-
-        # Token-expert alignment: compute once if block sizes match, else twice
-        block_m1 = config1["BLOCK_SIZE_M"]
-        block_m2 = config2["BLOCK_SIZE_M"]
         align = moe_align_block_size_torch
         if (
             self._decode_alignment
@@ -152,61 +166,86 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
             )
 
             align = moe_align_decode
-        sorted_token_ids, expert_ids, num_tokens_post_padded = align(
-            topk_ids, block_m1, self.E
+        routes = self._project_experts(
+            hidden_states, topk_ids, topk_weights, config1, config2, align
         )
-        if block_m1 == block_m2:
-            sorted_token_ids2, expert_ids2, num_tokens_post_padded2 = (
-                sorted_token_ids,
-                expert_ids,
-                num_tokens_post_padded,
-            )
-        else:
-            sorted_token_ids2, expert_ids2, num_tokens_post_padded2 = align(
-                topk_ids, block_m2, self.E
-            )
+        output = routes.view(M, top_k, K).sum(dim=1)
+        return CombineForwardPayload(fused_expert_output=output)
 
-        # GEMM1: hidden_states @ w1.T → intermediate1 [M*top_k, 2*inter]
-        intermediate1 = torch.empty(M * top_k, self.N, device=device, dtype=dtype)
+    def _batch_invariant_experts(
+        self, hidden_states, topk_ids, topk_weights
+    ) -> torch.Tensor:
+        from rtp_llm.models_py.determinism.batch_invariant import (
+            batch_invariant_moe_plan,
+        )
+
+        tile, chunk_size = batch_invariant_moe_plan(
+            hidden_states, self.w1, self.w2, topk_ids, topk_weights
+        )
+        output = hidden_states.new_empty(hidden_states.shape)
+        with torch.cuda.device_of(hidden_states):
+            for start in range(0, hidden_states.size(0), chunk_size):
+                chunk = slice(start, start + chunk_size)
+                routes = self._project_experts(
+                    hidden_states[chunk],
+                    topk_ids[chunk].contiguous(),
+                    topk_weights[chunk].contiguous(),
+                    tile,
+                    tile,
+                    moe_align_block_size_torch,
+                )
+                fixed_order_fp32_route_reduce(routes, output[chunk], topk_ids.size(1))
+                del routes  # Release this chunk before projecting the next.
+        return output
+
+    def _project_experts(
+        self, hidden_states, topk_ids, topk_weights, config1, config2, align
+    ) -> torch.Tensor:
+        """Return one weighted down projection for each token and routing slot."""
+        M, K = hidden_states.shape
+        top_k = topk_ids.size(1)
+        compute_type = (
+            tl.bfloat16 if hidden_states.dtype == torch.bfloat16 else tl.float16
+        )
+        flat_topk_weights = topk_weights.view(-1)
+        flat_topk_ids = topk_ids.view(-1)
+        block_m1 = config1["BLOCK_SIZE_M"]
+        block_m2 = config2["BLOCK_SIZE_M"]
+        aligned1 = align(topk_ids, block_m1, self.E)
+        aligned2 = (
+            aligned1 if block_m1 == block_m2 else align(topk_ids, block_m2, self.E)
+        )
+
+        up_gate = hidden_states.new_empty((M * top_k, self.N))
         invoke_fused_moe_kernel(
             hidden_states,
             self.w1,
-            intermediate1,
+            up_gate,
             flat_topk_weights,
             flat_topk_ids,
-            sorted_token_ids,
-            expert_ids,
-            num_tokens_post_padded,
+            *aligned1,
             mul_routed_weight=False,
             top_k=top_k,
             config=config1,
             compute_type=compute_type,
         )
 
-        # Activation: silu_and_mul(intermediate1) → intermediate2 [M*top_k, inter]
-        intermediate2 = torch.empty(
-            M * top_k, self.inter_size, device=device, dtype=dtype
-        )
-        silu_and_mul(intermediate2, intermediate1)
+        activated = hidden_states.new_empty((M * top_k, self.inter_size))
+        silu_and_mul(activated, up_gate)
+        del up_gate
 
-        # GEMM2: intermediate2 @ w2.T → out [M*top_k, K]
-        out = torch.empty(M * top_k, K, device=device, dtype=dtype)
+        routes = hidden_states.new_empty((M * top_k, K))
         invoke_fused_moe_kernel(
-            intermediate2,
+            activated,
             self.w2,
-            out,
+            routes,
             flat_topk_weights,
             flat_topk_ids,
-            sorted_token_ids2,
-            expert_ids2,
-            num_tokens_post_padded2,
+            *aligned2,
             mul_routed_weight=True,
             top_k=1,
             config=config2,
             compute_type=compute_type,
         )
 
-        # Sum reduce over top_k: out is [M*top_k, K], reshape and sum
-        output = out.view(M, top_k, K).sum(dim=1)
-
-        return CombineForwardPayload(fused_expert_output=output)
+        return routes

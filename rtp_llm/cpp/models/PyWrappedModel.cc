@@ -145,6 +145,7 @@ void PyWrappedModel::cleanupAfterConstructionFailure() noexcept {
         py::gil_scoped_acquire gil;
         held_attn_pyobj_   = py::object();
         py_forward_method_ = py::object();
+        batch_invariant_lm_head_ = py::object();
         generation_prefill_graph_runner_.reset();
         graph_runner_.reset();
         if (py_model_ && py::hasattr(py_model_, "close")) {
@@ -292,6 +293,7 @@ PyWrappedModel::~PyWrappedModel() {
         py::gil_scoped_acquire gil;
         held_attn_pyobj_   = py::object();
         py_forward_method_ = py::object();
+        batch_invariant_lm_head_ = py::object();
         if (hidden_state_capture_publisher_) {
             hidden_state_capture_publisher_->flushAndClose();
             hidden_state_capture_publisher_.reset();
@@ -1261,7 +1263,11 @@ torch::Tensor PyWrappedModel::computeLogits(const torch::Tensor& hidden) {
     torch::Tensor logits;
     {
         RTP_LLM_PROFILE_SCOPE("py_model.computeLogits(lm_head_mm)");
-        if (kernel.scalar_type() == torch::kFloat8_e4m3fn) {
+        if (batch_invariant_lm_head_) {
+            py::gil_scoped_acquire gil;
+            logits =
+                batch_invariant_lm_head_(hidden.to(torch::kBFloat16), kernel, py::none(), true).cast<torch::Tensor>();
+        } else if (kernel.scalar_type() == torch::kFloat8_e4m3fn) {
 #if USING_CUDA && defined(ENABLE_FP8)
             TORCH_CHECK(head.scales.defined() && head.scales.numel() == 1
                             && head.scales.scalar_type() == torch::kFloat32 && head.scales.device() == hidden.device()
