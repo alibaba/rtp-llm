@@ -388,11 +388,36 @@ class PyModelInputs:
 
     @multimodal_inputs.setter
     def multimodal_inputs(self, arg0: PyMultimodalInputs) -> None: ...
+    @property
+    def input_embeddings(self) -> typing.Optional[typing.List[torch.Tensor]]:
+        """
+        Input embeddings tensors
+        """
+
+    @input_embeddings.setter
+    def input_embeddings(self, arg0: typing.Optional[typing.List[torch.Tensor]]) -> None: ...
+    @property
+    def input_embeddings_locs(self) -> torch.Tensor:
+        """
+        Input embeddings locations
+        """
+
+    @input_embeddings_locs.setter
+    def input_embeddings_locs(self, arg0: torch.Tensor) -> None: ...
 
     @property
     def pp_intermediates(self) -> dict[str, torch.Tensor]: ...
     @pp_intermediates.setter
     def pp_intermediates(self, arg0: dict[str, torch.Tensor]) -> None: ...
+
+    @property
+    def cuda_graph_input_embedding_overrides(self) -> torch.Tensor: ...
+    @cuda_graph_input_embedding_overrides.setter
+    def cuda_graph_input_embedding_overrides(self, value: torch.Tensor) -> None: ...
+    @property
+    def cuda_graph_input_embedding_mask(self) -> torch.Tensor: ...
+    @cuda_graph_input_embedding_mask.setter
+    def cuda_graph_input_embedding_mask(self, value: torch.Tensor) -> None: ...
 
 class PyModelOutputs:
     @typing.overload

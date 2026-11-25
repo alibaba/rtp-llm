@@ -303,6 +303,11 @@ message V41RequestInputsPB {
     repeated V41ImageInputPB images = 4;
 }
 
+message InputEmbeddingsPB {
+    repeated TensorPB embeddings = 1;   // 和embedding_locs一一对应
+    repeated int32 embedding_locs = 2;  // embedding的在token ids中的起始位置
+}
+
 message GenerateInputPB {
     int64 request_id = 1;
     repeated int32 token_ids = 2;
@@ -322,6 +327,8 @@ message GenerateInputPB {
     V41RequestInputsPB v41_inputs = 12;
     // Master has already admitted this request to the selected Prefill.
     bool enqueued_by_master = 13;
+
+    InputEmbeddingsPB input_embeddings = 14;
 }
 
 message AuxInfoPB {

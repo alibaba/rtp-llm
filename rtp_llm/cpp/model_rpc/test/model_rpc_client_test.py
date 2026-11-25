@@ -84,6 +84,7 @@ from rtp_llm.utils.base_model_datatypes import (
     BatchedTerminalOutputs,
     GenerateInput,
     GenerateOutputs,
+    InputEmbeddings,
     RequestInfo,
 )
 from rtp_llm.utils.grpc_util import trans_tensor
@@ -2545,6 +2546,132 @@ class ModelRpcClientTest(TestCase):
         input_pb = trans_input(input_py)
 
         self.assertEqual(input_pb.generate_config.unique_key, "decode-batch-unique-key")
+
+
+    def test_enqueue_serializes_input_once(self):
+        class EmptyResponseIterator:
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                raise StopAsyncIteration
+
+            def cancel(self):
+                pass
+
+        client = ModelRpcClient(["127.0.0.1:12345"], {})
+        client._channel_pool.get = AsyncMock(return_value=MagicMock())
+        stub = MagicMock()
+        stub.GenerateStreamCall.return_value = EmptyResponseIterator()
+        input_py = GenerateInput(
+            token_ids=torch.tensor([1, 2, 3]),
+            generate_config=GenerateConfig(max_new_tokens=1),
+            request_id=123,
+            mm_inputs=[],
+        )
+
+        async def drain():
+            async for _ in client.enqueue(input_py):
+                pass
+
+        with patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.trans_input",
+            wraps=trans_input,
+        ) as convert, patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+            return_value=stub,
+        ):
+            asyncio.run(drain())
+
+        convert.assert_called_once_with(input_py)
+
+    def test_trans_output_reuses_single_all_hidden_states_for_all_outputs(self):
+        input_py = GenerateInput(
+            token_ids=torch.tensor([1, 2, 3]),
+            generate_config=GenerateConfig(return_all_hidden_states=True),
+            request_id=123,
+            mm_inputs=[],
+        )
+        outputs_pb = GenerateOutputsPB()
+        flatten = outputs_pb.flatten_output
+        flatten.finished.extend([True, True])
+        flatten.all_hidden_states.data_type = TensorPB.DataType.FP32
+        flatten.all_hidden_states.shape.extend([2, 2])
+        flatten.all_hidden_states.fp32_data = struct.pack("<ffff", 1.0, 2.0, 3.0, 4.0)
+
+        outputs = trans_output(input_py, outputs_pb, StreamState())
+
+        self.assertEqual(len(outputs.generate_outputs), 2)
+        for output in outputs.generate_outputs:
+            self.assertEqual(
+                [[1.0, 2.0], [3.0, 4.0]],
+                output.all_hidden_states.tolist(),
+            )
+
+    def test_trans_output_keeps_legacy_per_output_all_hidden_states(self):
+        input_py = GenerateInput(
+            token_ids=torch.tensor([1, 2, 3]),
+            generate_config=GenerateConfig(return_all_hidden_states=True),
+            request_id=123,
+            mm_inputs=[],
+        )
+        outputs_pb = GenerateOutputsPB()
+        flatten = outputs_pb.flatten_output
+        flatten.finished.extend([True, True])
+        flatten.all_hidden_states.data_type = TensorPB.DataType.FP32
+        flatten.all_hidden_states.shape.extend([2, 2, 2])
+        flatten.all_hidden_states.fp32_data = struct.pack(
+            "<ffffffff", 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0
+        )
+
+        outputs = trans_output(input_py, outputs_pb, StreamState())
+
+        self.assertEqual(len(outputs.generate_outputs), 2)
+        self.assertEqual(
+            [[1.0, 2.0], [3.0, 4.0]],
+            outputs.generate_outputs[0].all_hidden_states.tolist(),
+        )
+        self.assertEqual(
+            [[5.0, 6.0], [7.0, 8.0]],
+            outputs.generate_outputs[1].all_hidden_states.tolist(),
+        )
+
+    def test_trans_input_serializes_input_embeddings(self):
+        input_py = GenerateInput(
+            token_ids=torch.tensor([1, 2, 3]),
+            generate_config=GenerateConfig(),
+            request_id=123,
+            mm_inputs=[],
+            input_embeddings=InputEmbeddings(
+                embeddings=[
+                    torch.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=torch.float32),
+                    torch.tensor([[5.0, 6.0]], dtype=torch.float32),
+                ],
+                embedding_locs=[0, 2],
+            ),
+        )
+
+        input_pb = trans_input(input_py)
+
+        # Keep the mainline admission flag wire-compatible with the embedding extension.
+        fields = input_pb.DESCRIPTOR.fields_by_name
+        self.assertEqual(fields["enqueued_by_master"].number, 13)
+        self.assertEqual(fields["input_embeddings"].number, 14)
+        input_pb.enqueued_by_master = True
+        decoded = type(input_pb).FromString(input_pb.SerializeToString())
+        self.assertTrue(decoded.enqueued_by_master)
+        self.assertEqual(decoded.input_embeddings, input_pb.input_embeddings)
+
+        self.assertEqual(len(input_pb.input_embeddings.embeddings), 2)
+        self.assertEqual(list(input_pb.input_embeddings.embedding_locs), [0, 2])
+        self.assertEqual(
+            list(input_pb.input_embeddings.embeddings[0].shape),
+            [2, 2],
+        )
+        self.assertEqual(
+            input_pb.input_embeddings.embeddings[0].fp32_data,
+            struct.pack("<ffff", 1.0, 2.0, 3.0, 4.0),
+        )
 
 
 class _MetadataCaptureServicer(model_rpc_service_pb2_grpc.RpcServiceServicer):

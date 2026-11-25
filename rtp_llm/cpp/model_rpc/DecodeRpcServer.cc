@@ -726,6 +726,10 @@ grpc::Status DecodeRpcServer::preparePDRequest(const GenerateInputPB&          r
                                                std::optional<PrefillPeerInfo>& peer_info,
                                                grpc::ServerContext*            server_context) {
     input                      = QueryConverter::transQuery(&request);
+    const auto runtime_support = validateInputRuntimeSupport(*input);
+    if (!runtime_support.ok()) {
+        return serializeErrorMsg(std::to_string(request.request_id()), runtime_support);
+    }
     input->request_deadline_ms = deadline_ms;
     const auto support         = checkPDSupport(request);
     if (!support.supported) {
@@ -749,6 +753,13 @@ grpc::Status DecodeRpcServer::preparePDRequest(const GenerateInputPB&          r
         wire_tokens->Reserve(input->input_ids.numel());
         for (int64_t i = 0; i < input->input_ids.numel(); ++i) {
             wire_tokens->Add(token_ids[i]);
+        }
+        if (input->input_embeddings_locs.has_value()) {
+            auto* embeddings = prefill_request.mutable_input_embeddings();
+            embeddings->clear_embedding_locs();
+            for (int32_t loc : *input->input_embeddings_locs) {
+                embeddings->add_embedding_locs(loc);
+            }
         }
         auto* layout = prefill_request.mutable_multimodal_token_layout();
         for (size_t i = 0; i < input->multimodal_features->size(); ++i) {

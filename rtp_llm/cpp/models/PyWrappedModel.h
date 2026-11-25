@@ -89,6 +89,7 @@ public:
                    MtpIndexerRole            mtp_indexer_role             = MtpIndexerRole::NORMAL);
     ~PyWrappedModel();
 
+    static void rejectContextParallelInputEmbeddings(const ExecProperties& properties, const GptModelInputs& inputs);
     GptModelOutputs       forward(const GptModelInputs& inputs) override;
     PPIntermediateTensors makePPWarmUpInputTensors(const GptModelInputs& inputs, bool enable_cp) override;
     void                  releaseBuffers() override;

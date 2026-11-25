@@ -73,6 +73,11 @@ void EmbeddingInput::checkVaild() {
     if (input_embeddings.has_value() && total_length != input_embeddings.value().size(0)) {
         throw std::runtime_error("sum of token length don't equal to total_length");
     }
+    if (input_embeddings.has_value() && multimodal_features.has_value()) {
+        throw std::runtime_error("input_embeddings cannot be combined with multimodal_features in the same request: "
+                                 "embedding engine input_embeddings is a full-sequence tensor and cannot be remapped "
+                                 "across multimodal token expansion.");
+    }
 }
 
 }  // namespace rtp_llm

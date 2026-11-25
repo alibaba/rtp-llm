@@ -141,6 +141,7 @@ protected:
     virtual void updateAuxInfo(GenerateOutputsPB& outputs_pb, std::shared_ptr<GenerateStream>& stream) {}
 
     // Shared helpers for single and batch paths
+    ErrorInfo validateInputRuntimeSupport(const GenerateInput& input) const;
     ErrorInfo prepareInput(const GenerateInputPB&                                              input_pb,
                            std::shared_ptr<GenerateInput>&                                     output,
                            const opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>& parent_span = {},

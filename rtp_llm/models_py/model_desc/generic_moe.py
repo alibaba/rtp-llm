@@ -529,7 +529,7 @@ class GenericMoeModel(GptModelBase):
         multimodal_features = getattr(multimodal_inputs, "multimodal_features", None)
         injector = getattr(self, "multimodal_embedding_injector", None)
         if injector is None or not multimodal_features:
-            return self.embed_tokens(inputs.input_ids)
+            return self.get_inputs_embeds(inputs.input_ids, inputs)
 
         inputs_embeds = self.embed_tokens(
             inputs.input_ids,
@@ -537,6 +537,7 @@ class GenericMoeModel(GptModelBase):
             inputs.embedding_inputs.combo_tokens_type_ids,
             inputs.embedding_inputs.text_tokens_mask,
         )
+        inputs_embeds = self.apply_input_embeddings(inputs_embeds, inputs)
         return injector(
             inputs_embeds,
             multimodal_features,

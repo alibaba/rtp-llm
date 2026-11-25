@@ -8,6 +8,7 @@
 
 #include "RPCPool.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
+#include "rtp_llm/cpp/engine_base/stream/InputEmbeddingsUtils.h"
 #include "rtp_llm/cpp/model_rpc/TensorPbConvert.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
@@ -373,6 +374,36 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
     // Auto-TPM QoS priority (task40): 0 = not set; TPS metrics tagging only.
     generate_input->priority = input->priority();
 
+    // 转换 input_embeddings
+    if (input->has_input_embeddings()) {
+        const auto& input_embeddings_pb = input->input_embeddings();
+
+        std::vector<torch::Tensor> embeddings;
+        std::vector<int32_t>       embedding_locs;
+
+        // 转换 embeddings
+        for (int i = 0; i < input_embeddings_pb.embeddings_size(); i++) {
+            try {
+                embeddings.push_back(transTensor(input_embeddings_pb.embeddings(i)));
+            } catch (const std::runtime_error& error) {
+                throw std::invalid_argument(std::string("Request parsing error: ") + error.what());
+            }
+        }
+
+        // 转换 embedding_locs
+        embedding_locs.resize(input_embeddings_pb.embedding_locs_size());
+        memcpy(embedding_locs.data(),
+               input_embeddings_pb.embedding_locs().data(),
+               input_embeddings_pb.embedding_locs_size() * sizeof(int32_t));
+
+        generate_input->input_embeddings      = embeddings;
+        generate_input->input_embeddings_locs = embedding_locs;
+        auto status                           = validateAndNormalizeInputEmbeddings(*generate_input);
+        if (!status.ok()) {
+            throw std::invalid_argument("Request parsing error: " + status.ToString());
+        }
+    }
+
     return generate_input;
 }
 
@@ -685,8 +716,19 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
 
     stackBuffersToTensorPB(flatten_output->mutable_logits(), source_outputs, [](const auto& r) { return r.logits; });
 
-    stackBuffersToTensorPB(
-        flatten_output->mutable_all_hidden_states(), source_outputs, [](const auto& r) { return r.all_hidden_states; });
+    {
+        torch::Tensor all_hidden_states;
+        for (const auto& resp : source_outputs) {
+            if (resp.all_hidden_states.has_value()) {
+                all_hidden_states = resp.all_hidden_states.value();
+                break;
+            }
+        }
+        auto* hidden_states_pb = flatten_output->mutable_all_hidden_states();
+        if (all_hidden_states.defined()) {
+            transTensorPB(hidden_states_pb, all_hidden_states.contiguous());
+        }
+    }
 
     if (!source_outputs.empty() && source_outputs[0].prompt_logits.has_value()) {
         auto*       pb = flatten_output->mutable_prompt_logits();

@@ -494,6 +494,10 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
         }
         cancel_guard.emplace(*cancel_registry_, cancel_handle);
         auto input                   = QueryConverter::transQuery(request);
+        const auto support = validateInputRuntimeSupport(*input);
+        if (!support.ok()) {
+            return serializeErrorMsg(generate_context.request_key, generate_context.request_info, support);
+        }
         input->request_deadline_ms   = local_deadline;
         const bool request_cancelled = server_context && server_context->IsCancelled();
         if (local_deadline <= currentTimeMs() || request_cancelled) {
@@ -802,6 +806,11 @@ grpc::Status PrefillRpcServer::EnqueueBatch(grpc::ServerContext*         context
                     normalizeRpcTimeoutMs(config->timeout_ms(), maga_init_params_.pd_sep_config.max_rpc_timeout_ms)));
                 item_context               = makeBatchRequestContext(item, batch_span);
                 auto input                 = QueryConverter::transQuery(&item);
+                const auto runtime_support = validateInputRuntimeSupport(*input);
+                if (!runtime_support.ok()) {
+                    reject_item(runtime_support.code(), runtime_support.ToString());
+                    continue;
+                }
                 item_context->request_info = input->request_info;
                 if (input->generate_config->isPrefillOnly()) {
                     reject_item(ErrorCode::INVALID_PARAMS, "EnqueueBatch does not support prefill-only inputs");
