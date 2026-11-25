@@ -26,6 +26,19 @@ bool ordinaryStreamHasBlockTable(const GenerateStreamPtr& stream) {
     return stream->curBlocksNum() > 0;
 }
 
+bool allDecodeStreamsUseMtpCacheSnapshot(const StreamGroups& stream_groups) {
+    const auto& decode_streams = stream_groups.decodeStreams();
+    if (stream_groups.totalContextBatchSize() > 0 || decode_streams.empty()) {
+        return false;
+    }
+    for (const auto& stream : decode_streams) {
+        if (!stream->hasMtpCacheSnapshot()) {
+            return false;
+        }
+    }
+    return true;
+}
+
 size_t blockTableWidth(const StreamGroups& stream_groups, const std::vector<std::string>& tags, bool kernel) {
     size_t width = 0;
     auto   visit = [&](const GenerateStreamPtr& stream, bool decode) {
@@ -416,7 +429,8 @@ void publishModelInputCoreTensorsToCuda(GptModelInputs& model_input,
 
 NormalModelInputGatherer::NormalModelInputGatherer(const NormalModelInputGathererConfig& config): config_(config) {}
 
-GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamGroups& stream_groups) const {
+GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamGroups& stream_groups,
+                                                                   bool skip_host_page_tables) const {
     const size_t current_tokens_size      = stream_groups.modelExecuteTokenSize();
     const size_t total_batch_size         = stream_groups.totalModelBatchSize();
     const size_t total_decode_batch_size  = stream_groups.totalDecodeBatchSize();
@@ -452,7 +466,7 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
     model_input.request_id            = torch::empty({(int64_t)total_context_batch_size}, pinned_i64);
     model_input.request_pd_separation = torch::empty({(int64_t)total_context_batch_size}, pinned_bool);
 
-    if (max_blocks_num || kernel_width) {
+    if (!skip_host_page_tables && (max_blocks_num || kernel_width)) {
         model_input.kv_cache_kernel_block_id = torch::zeros(
             {(int64_t)config_.kv_cache_group_nums, (int64_t)total_batch_size, (int64_t)kernel_width}, pinned_i32);
         model_input.kv_cache_block_id = torch::zeros(
@@ -812,50 +826,59 @@ absl::StatusOr<torch::Tensor> NormalModelInputGatherer::gatherKvCacheKernelBlock
         return torch::Tensor{};
     }
 
-    static const auto pinned_i32  = torch::TensorOptions(torch::kInt32).pinned_memory(true);
-    auto              host_tensor = torch::zeros(
-        {(int64_t)config_.kv_cache_group_nums, (int64_t)total_batch_size, (int64_t)kernel_width}, pinned_i32);
+    torch::Tensor device_tensor;
+    if (allDecodeStreamsUseMtpCacheSnapshot(stream_groups)) {
+        const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+        device_tensor       = torch::zeros(
+            {(int64_t)config_.kv_cache_group_nums, (int64_t)total_batch_size, (int64_t)kernel_width}, cuda_i32);
+    } else {
+        static const auto pinned_i32  = torch::TensorOptions(torch::kInt32).pinned_memory(true);
+        auto              host_tensor = torch::zeros(
+            {(int64_t)config_.kv_cache_group_nums, (int64_t)total_batch_size, (int64_t)kernel_width}, pinned_i32);
 
-    const size_t per_batch_stride = kernel_width;
-    int32_t*     dst_base         = host_tensor.data_ptr<int32_t>();
+        const size_t per_batch_stride = kernel_width;
+        int32_t*     dst_base         = host_tensor.data_ptr<int32_t>();
 
-    auto fill_one_stream = [&](const GenerateStreamPtr& stream, int& batch_idx, bool decode) {
-        if (decode && stream->hasMtpCacheSnapshot()) {
-            ++batch_idx;
-            return;
-        }
-        auto current_batch_size = stream->currentBatchSize();
-        if (!ordinaryStreamHasBlockTable(stream)) {
-            batch_idx += current_batch_size;
-            return;
-        }
-        auto& kv_cache = *stream->kvCachePtr();
-        RTP_LLM_CHECK_WITH_INFO(kv_cache.groupNums() == host_tensor.size(0) && batch_idx >= 0
-                                    && static_cast<size_t>(batch_idx + current_batch_size) <= total_batch_size,
-                                "kernel block table group or batch exceeds destination");
-        for (int i = 0; i < current_batch_size; ++i) {
-            for (size_t row = 0; row < group_tags.size(); ++row) {
-                const auto& kernel_blocks = kv_cache.kernelBlocks(i, group_tags[row]);
-                RTP_LLM_CHECK_WITH_INFO(kernel_blocks.size() <= per_batch_stride,
-                                        "kernel block ids exceed destination row for tag=%s",
-                                        group_tags[row].c_str());
-                int32_t* dst = dst_base + (row * total_batch_size + static_cast<size_t>(batch_idx)) * per_batch_stride;
-                std::memcpy(dst, kernel_blocks.data(), kernel_blocks.size() * sizeof(int32_t));
+        auto fill_one_stream = [&](const GenerateStreamPtr& stream, int& batch_idx, bool decode) {
+            if (decode && stream->hasMtpCacheSnapshot()) {
+                ++batch_idx;
+                return;
             }
-            batch_idx += 1;
+            auto current_batch_size = stream->currentBatchSize();
+            if (!ordinaryStreamHasBlockTable(stream)) {
+                batch_idx += current_batch_size;
+                return;
+            }
+            auto& kv_cache = *stream->kvCachePtr();
+            RTP_LLM_CHECK_WITH_INFO(kv_cache.groupNums() == host_tensor.size(0) && batch_idx >= 0
+                                        && static_cast<size_t>(batch_idx + current_batch_size) <= total_batch_size,
+                                    "kernel block table group or batch exceeds destination");
+            for (int i = 0; i < current_batch_size; ++i) {
+                for (size_t row = 0; row < group_tags.size(); ++row) {
+                    const auto& kernel_blocks = kv_cache.kernelBlocks(i, group_tags[row]);
+                    RTP_LLM_CHECK_WITH_INFO(kernel_blocks.size() <= per_batch_stride,
+                                            "kernel block ids exceed destination row for tag=%s",
+                                            group_tags[row].c_str());
+                    int32_t* dst =
+                        dst_base + (row * total_batch_size + static_cast<size_t>(batch_idx)) * per_batch_stride;
+                    std::memcpy(dst, kernel_blocks.data(), kernel_blocks.size() * sizeof(int32_t));
+                }
+                batch_idx += 1;
+            }
+        };
+
+        int batch_idx = 0;
+        for (const auto& stream : stream_groups.decodeStreams()) {
+            fill_one_stream(stream, batch_idx, true);
         }
-    };
+        for (const auto& stream : stream_groups.contextStreams()) {
+            fill_one_stream(stream, batch_idx, false);
+        }
+
+        device_tensor = publishInt32ToCuda(host_tensor, host_holder);
+    }
 
     int batch_idx = 0;
-    for (const auto& stream : stream_groups.decodeStreams()) {
-        fill_one_stream(stream, batch_idx, true);
-    }
-    for (const auto& stream : stream_groups.contextStreams()) {
-        fill_one_stream(stream, batch_idx, false);
-    }
-
-    auto device_tensor = publishInt32ToCuda(host_tensor, host_holder);
-    batch_idx          = 0;
     for (const auto& stream : stream_groups.decodeStreams()) {
         const auto state = stream->getMtpAsyncDeviceState();
         if (GenerateStream::hasMtpCacheSnapshot(state)) {
@@ -933,7 +956,8 @@ absl::StatusOr<GptModelInputs> NormalModelInputGatherer::gather(const StreamGrou
         report_mixed_mode_error(context_streams);
     }
 
-    auto model_input                  = allocateModelInputBuffers(stream_groups);
+    const bool skip_host_page_tables  = defer_page_tables && allDecodeStreamsUseMtpCacheSnapshot(stream_groups);
+    auto       model_input            = allocateModelInputBuffers(stream_groups, skip_host_page_tables);
     model_input.skip_lm_head          = prefill_only;
     model_input.capture_hidden_states = prefill_only;
     initializeKvCacheMetadata(model_input);

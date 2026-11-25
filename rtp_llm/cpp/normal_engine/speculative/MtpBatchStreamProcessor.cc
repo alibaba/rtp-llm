@@ -1202,7 +1202,12 @@ void MtpBatchStreamProcessor::overlayMtpCacheSnapshots(const StreamGroups& strea
     };
 
     std::map<std::pair<int64_t, int64_t>, SnapshotBucket> buckets;
-    int64_t                                               row = 0;
+    int64_t                                               row                = 0;
+    int64_t                                               snapshot_rows      = 0;
+    int64_t                                               physical_groups    = -1;
+    int64_t                                               kernel_groups      = -1;
+    int64_t                                               max_physical_width = 0;
+    int64_t                                               max_kernel_width   = 0;
     for (const auto& stream : stream_groups.decodeStreams()) {
         const auto state        = stream->getMtpAsyncDeviceState();
         const bool use_snapshot = GenerateStream::hasMtpCacheSnapshot(state);
@@ -1217,7 +1222,21 @@ void MtpBatchStreamProcessor::overlayMtpCacheSnapshots(const StreamGroups& strea
                                         && kernel.is_cuda() && kernel.scalar_type() == torch::kInt32
                                         && kernel.dim() == 3 && kernel.size(1) == 1,
                                     "MTP cache snapshots require CUDA int32 [group,1,blocks] physical/kernel tensors");
-            auto& bucket = buckets[{physical.size(2), kernel.size(2)}];
+            if (physical_groups < 0) {
+                physical_groups = physical.size(0);
+                kernel_groups   = kernel.size(0);
+            } else {
+                RTP_LLM_CHECK_WITH_INFO(
+                    physical.size(0) == physical_groups && kernel.size(0) == kernel_groups,
+                    "MTP cache snapshot group count mismatch across streams: physical=%ld/%ld kernel=%ld/%ld",
+                    physical.size(0),
+                    physical_groups,
+                    kernel.size(0),
+                    kernel_groups);
+            }
+            max_physical_width = std::max(max_physical_width, physical.size(2));
+            max_kernel_width   = std::max(max_kernel_width, kernel.size(2));
+            auto& bucket       = buckets[{physical.size(2), kernel.size(2)}];
             // Keep the immutable device snapshots alive through the asynchronous
             // overlay copies below, without reading their mutable host rows.
             host_holder.hold(physical);
@@ -1225,6 +1244,7 @@ void MtpBatchStreamProcessor::overlayMtpCacheSnapshots(const StreamGroups& strea
             bucket.physical_tables.push_back(physical);
             bucket.kernel_tables.push_back(kernel);
             bucket.rows.push_back(row);
+            ++snapshot_rows;
         }
         row += use_snapshot ? 1 : stream->currentBatchSize();
     }
@@ -1236,10 +1256,62 @@ void MtpBatchStreamProcessor::overlayMtpCacheSnapshots(const StreamGroups& strea
         }
         return;
     }
+
+    const bool no_host_tables =
+        !model_input.kv_cache_block_id.defined() && !model_input.kv_cache_kernel_block_id.defined();
+    if (no_host_tables) {
+        RTP_LLM_CHECK_WITH_INFO(stream_groups.totalContextBatchSize() == 0 && snapshot_rows == row,
+                                "deferred MTP page tables require every stream in the batch to carry a cache snapshot");
+        if (max_physical_width == 0 && max_kernel_width == 0) {
+            return;
+        }
+#if USING_CUDA
+        std::vector<torch::Tensor> physical_rows(row), kernel_rows(row);
+        for (const auto& [widths, bucket] : buckets) {
+            (void)widths;
+            for (size_t i = 0; i < bucket.rows.size(); ++i) {
+                physical_rows.at(bucket.rows[i]) = bucket.physical_tables[i];
+                kernel_rows.at(bucket.rows[i])   = bucket.kernel_tables[i];
+            }
+        }
+        torch::Tensor physical, kernel;
+        if (tryMtpGatherPageSnapshots(physical_rows,
+                                      kernel_rows,
+                                      physical_groups,
+                                      max_physical_width,
+                                      kernel_groups,
+                                      max_kernel_width,
+                                      physical,
+                                      kernel,
+                                      at::cuda::getCurrentCUDAStream().stream())) {
+            model_input.kv_cache_block_id        = std::move(physical);
+            model_input.kv_cache_kernel_block_id = std::move(kernel);
+            return;
+        }
+#endif
+        if (buckets.size() == 1) {
+            const auto& [widths, bucket] = *buckets.begin();
+            (void)widths;
+            bool full_coverage = static_cast<int64_t>(bucket.rows.size()) == row;
+            for (size_t i = 0; full_coverage && i < bucket.rows.size(); ++i) {
+                full_coverage = bucket.rows[i] == static_cast<int64_t>(i);
+            }
+            if (full_coverage) {
+                RTP_LLM_PROFILE_SCOPE("mtp.page_tables_snapshot_concat");
+                model_input.kv_cache_block_id        = torch::cat(bucket.physical_tables, 1);
+                model_input.kv_cache_kernel_block_id = torch::cat(bucket.kernel_tables, 1);
+                return;
+            }
+        }
+        model_input.kv_cache_block_id = torch::zeros({physical_groups, row, max_physical_width}, cudaInt32Options());
+        model_input.kv_cache_kernel_block_id =
+            torch::zeros({kernel_groups, row, max_kernel_width}, cudaInt32Options());
+    }
 #if USING_CUDA
     const auto& physical_host = model_input.kv_cache_block_id;
     const auto& kernel_host   = model_input.kv_cache_kernel_block_id;
-    if (physical_host.defined() && kernel_host.defined() && physical_host.dim() == 3 && kernel_host.dim() == 3) {
+    if (!no_host_tables && physical_host.defined() && kernel_host.defined() && physical_host.device().is_cpu()
+        && kernel_host.device().is_cpu() && physical_host.dim() == 3 && kernel_host.dim() == 3) {
         std::vector<torch::Tensor> physical_rows(physical_host.size(1)), kernel_rows(kernel_host.size(1));
         for (const auto& [widths, bucket] : buckets) {
             (void)widths;
