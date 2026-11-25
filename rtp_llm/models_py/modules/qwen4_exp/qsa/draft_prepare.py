@@ -15,21 +15,27 @@ from triton.language.extra.cuda import libdevice
 from rtp_llm.models_py.kernels.cuda.qsa.draft_prepare_triton import _prepare_draft_qsa
 
 
+def _supported_heads(q):
+    if not q.is_cuda or torch.version.hip is not None:
+        return False
+    capability = torch.cuda.get_device_capability(q.device)
+    return (capability == (12, 0) and q.shape[1:] == (4, 128)) or (
+        capability == (10, 3) and q.shape[1:] == (8, 128)
+    )
+
+
 def try_prepare(q, positions, sources, visible, frequency, *, rope_config):
     from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import is_qsa_rope_style
 
     scale = float(getattr(rope_config, "scale", 1.0))
     # The caller retains graph metadata/ownership validation before mutation.
     if not (
-        q.is_cuda
-        and torch.version.hip is None
-        and torch.cuda.get_device_capability(q.device) == (12, 0)
+        q.ndim == 3
+        and _supported_heads(q)
         and q.dtype == torch.bfloat16
-        and q.ndim == 3
-        and q.shape[1:] == (4, 128)
         and q.stride(-1) == 1
         and q.stride(-2) == 128
-        and q.stride(0) >= 512
+        and q.stride(0) >= q.shape[1] * 128
         and 1 <= q.shape[0] <= 32
         and positions.shape == sources.shape == (q.shape[0],)
         and positions.dtype == sources.dtype == torch.int64
@@ -53,12 +59,13 @@ def try_prepare(q, positions, sources, visible, frequency, *, rope_config):
         and not q.requires_grad
     ):
         return None
-    padded = torch.empty((*visible.shape, 4, 128), dtype=q.dtype, device=q.device)
+    heads = q.shape[1]
+    padded = torch.empty((*visible.shape, heads, 128), dtype=q.dtype, device=q.device)
     cosine = torch.empty((q.shape[0], 64), dtype=q.dtype, device=q.device)
     sine = torch.empty_like(cosine)
-    weights = torch.empty((q.shape[0], 4), dtype=torch.float32, device=q.device)
+    weights = torch.empty((q.shape[0], heads), dtype=torch.float32, device=q.device)
     lengths = torch.empty_like(visible)
-    _prepare_draft_qsa[(q.shape[0], 4)](
+    _prepare_draft_qsa[(q.shape[0], heads)](
         q,
         positions,
         sources,
@@ -71,7 +78,7 @@ def try_prepare(q, positions, sources, visible, frequency, *, rope_config):
         lengths,
         QS=q.stride(0),
         QH=q.stride(1),
-        H=4,
+        H=heads,
         INV_SCALE=1.0 / scale,
         num_warps=4,
         enable_fp_fusion=False,
@@ -80,7 +87,16 @@ def try_prepare(q, positions, sources, visible, frequency, *, rope_config):
 
 
 def try_prepare_metadata(
-    q, row_lengths, prefixes, cu, frequency, *, rope_config, q_gamma=None, norm_eps=1e-6
+    q,
+    row_lengths,
+    prefixes,
+    cu,
+    frequency,
+    *,
+    rope_config,
+    q_gamma=None,
+    norm_eps=1e-6,
+    score_lengths=None,
 ):
     """Prepare fixed four-lane queries directly from owner-validated metadata.
 
@@ -92,15 +108,12 @@ def try_prepare_metadata(
 
     scale = float(getattr(rope_config, "scale", 1.0))
     if not (
-        q.is_cuda
-        and torch.version.hip is None
-        and torch.cuda.get_device_capability(q.device) == (12, 0)
+        q.ndim == 3
+        and _supported_heads(q)
         and q.dtype == torch.bfloat16
-        and q.ndim == 3
-        and q.shape[1:] == (4, 128)
         and q.stride(-1) == 1
         and q.stride(-2) == 128
-        and q.stride(0) >= 512
+        and q.stride(0) >= q.shape[1] * 128
         and row_lengths.ndim == prefixes.ndim == cu.ndim == 1
         and 1 <= row_lengths.numel() <= 8
         and q.shape[0] == row_lengths.numel() * 4
@@ -109,6 +122,15 @@ def try_prepare_metadata(
         and all(
             t.dtype == torch.int32 and t.device == q.device and t.is_contiguous()
             for t in (row_lengths, prefixes, cu)
+        )
+        and (
+            score_lengths is None
+            or (
+                score_lengths.shape == row_lengths.shape
+                and score_lengths.dtype == torch.int32
+                and score_lengths.device == q.device
+                and score_lengths.is_contiguous()
+            )
         )
         and isinstance(frequency, torch.Tensor)
         and frequency.shape == (32,)
@@ -138,14 +160,14 @@ def try_prepare_metadata(
         )
     ):
         return None
-    batch, rows = row_lengths.numel(), q.shape[0]
-    padded = torch.empty((batch, 4, 4, 128), dtype=q.dtype, device=q.device)
+    batch, rows, heads = row_lengths.numel(), q.shape[0], q.shape[1]
+    padded = torch.empty((batch, 4, heads, 128), dtype=q.dtype, device=q.device)
     cosine = torch.empty((rows, 64), dtype=q.dtype, device=q.device)
     sine = torch.empty_like(cosine)
-    weights = torch.empty((rows, 4), dtype=torch.float32, device=q.device)
+    weights = torch.empty((rows, heads), dtype=torch.float32, device=q.device)
     lengths = torch.empty((batch, 4), dtype=torch.int32, device=q.device)
     visible = torch.empty_like(lengths)
-    _prepare_draft_qsa[(rows, 4)](
+    _prepare_draft_qsa[(rows, heads)](
         q,
         None,
         None,
@@ -158,7 +180,7 @@ def try_prepare_metadata(
         lengths,
         QS=q.stride(0),
         QH=q.stride(1),
-        H=4,
+        H=heads,
         INV_SCALE=1.0 / scale,
         FROM_METADATA=True,
         ROW_LENGTHS=row_lengths,
@@ -169,6 +191,7 @@ def try_prepare_metadata(
         RAW_QUERY=q_gamma is not None,
         QG=q_gamma,
         EPS=float(norm_eps) if q_gamma is not None else 1e-6,
+        SCORE_LENGTHS=score_lengths,
         num_warps=4,
         enable_fp_fusion=False,
     )

@@ -83,6 +83,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         self._qsa_target_visible_lengths = None
         self._qsa_main_geometry = None
         self._flashinfer_qtoken: Optional["PagedQTokenG8"] = None
+        self._qtoken_is_mtp_draft = False
         self._validate_runtime_mode()
         rope_writer_cls = (
             FusedRopeKVCachePrefillOpQKVOut
@@ -288,6 +289,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             or self.is_target_verify
             or max(query_lengths) <= 8,
         )
+        self._qtoken_is_mtp_draft = runtime.is_mtp_draft
 
     def set_selected_indices(self, selected_indices: torch.Tensor) -> None:
         """Set one layer's packed selection without widening the global FMHA ABI."""
@@ -535,7 +537,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         )
 
     def _forward_flashinfer_qtoken(self, qkv, kv_cache, selected, gate, norm):
-        from libth_transformer_config import get_rope_cache_once
+        from libth_transformer_config import check_rope_cache, get_rope_cache_once
 
         from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
             ZeroCenteredFusedQKRMSNorm,
@@ -543,14 +545,26 @@ class SparseGqaFmhaImpl(FMHAImplBase):
 
         rope = self.attn_configs.rope_config
         pos = self.rope_params.position_ids
+        base_rope = (
+            self._qtoken_is_mtp_draft
+            and rope.style == RopeStyle.Base
+            and rope.is_neox_style
+            and kv_cache.kv_cache_base.stride(0) == 2 * 4 * 128 * 256
+        )
         fused_writer = (
             type(norm) is ZeroCenteredFusedQKRMSNorm
             and "forward" not in norm.__dict__
             and not self.attn_configs.use_logn_attn
-            and rope.style == RopeStyle.Mrope
+            and (
+                base_rope
+                or (
+                    rope.style == RopeStyle.Mrope
+                    and (rope.mrope_dim1, rope.mrope_dim2, rope.mrope_dim3)
+                    == (11, 11, 10)
+                )
+            )
             and (rope.dim, rope.index_factor, rope.base, rope.scale, rope.offset)
             == (64, 3, 10000000.0, 1.0, 0)
-            and (rope.mrope_dim1, rope.mrope_dim2, rope.mrope_dim3) == (11, 11, 10)
             and isinstance(pos, torch.Tensor)
             and pos.dtype == torch.int32
             and pos.device == qkv.device
@@ -567,8 +581,12 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         )
         if fused_writer:
             # Match the native writer's process-wide RoPE cache initialization.
-            get_rope_cache_once(rope, self.attn_configs.max_seq_len)
-        elif norm is not None:
+            rope_cache = get_rope_cache_once(rope, self.attn_configs.max_seq_len)
+            if base_rope and check_rope_cache(rope, rope_cache):
+                # If Base initialized the cache first, the native path uses
+                # cached coefficients and distinct decode position handling.
+                fused_writer = False
+        if not fused_writer and norm is not None:
             qkv = norm(qkv)
         self._qsa_main_cache_mutation_started = True
         if not fused_writer:
@@ -583,6 +601,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             pos.view(-1, 3) if fused_writer else None,
             norm if fused_writer else None,
             zero_tail=True,
+            base_rope=fused_writer and base_rope,
         )
         common.apply_write_cache_store(
             self.write_cache_store_impl, self.attn_inputs, kv_cache

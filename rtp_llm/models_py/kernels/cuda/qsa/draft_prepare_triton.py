@@ -29,6 +29,7 @@ def _prepare_draft_qsa(
     RAW_QUERY: tl.constexpr = False,
     QG=None,
     EPS: tl.constexpr = 1e-6,
+    SCORE_LENGTHS=None,
 ):
     row = tl.program_id(0)
     head = tl.program_id(1)
@@ -103,6 +104,8 @@ def _prepare_draft_qsa(
         if FROM_METADATA:
             visible = tl.where(active, prefix + lane + 1, 0).to(tl.int32)
             tl.store(VISIBLE + row, visible)
+            if SCORE_LENGTHS is not None and lane == 0:
+                tl.store(SCORE_LENGTHS + request, tl.where(count > 0, prefix + 4, 0))
         else:
             visible = tl.load(VISIBLE + row)
         tl.store(LENGTHS + row, visible // 4)

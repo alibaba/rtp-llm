@@ -300,9 +300,10 @@ def _prepare_fused_decode(
     VERIFY_POS_HISTORY=None,
     VERIFY_POS_CURRENT=None,
     VERIFY_Q: tl.constexpr = 0,
+    DRAFT_POSITION_FACTOR: tl.constexpr = 0,
 ):
     row, head = tl.program_id(0), tl.program_id(1)
-    position_row = positions + row * 3
+    position_row = positions + row * (DRAFT_POSITION_FACTOR or 3)
     if VERIFY_Q:
         if head < VERIFY_Q * 8:
             token = row * VERIFY_Q + head // 8
@@ -377,15 +378,18 @@ def _prepare_fused_decode(
         end = tl.where(live, length, 0) if PADDED else length
         tl.store(visible_lengths + row, end)
         if live:
-            coord_id = tl.load(
-                position_table + row * POSITION_WIDTH + page,
-                mask=page < POSITION_WIDTH,
-                other=0,
-            ).to(tl.int64)
-            coord_live = (coord_id > 0) & (coord_id < POSITION_BLOCKS)
+            if DRAFT_POSITION_FACTOR:
+                coord_live = True
+            else:
+                coord_id = tl.load(
+                    position_table + row * POSITION_WIDTH + page,
+                    mask=page < POSITION_WIDTH,
+                    other=0,
+                ).to(tl.int64)
+                coord_live = (coord_id > 0) & (coord_id < POSITION_BLOCKS)
+                coord_slot = coord_id * 8 + position % 8
             ring_offset = position % 8
             state_slot = state_id * 8 + ring_offset
-            coord_slot = coord_id * 8 + ring_offset
             d = tl.arange(0, 128)
             raw_key = tl.load(raw + row * RAW_STRIDE + d).to(tl.float32)
             tl.store(state_pool + state_slot * 128 + d, raw_key)
@@ -412,14 +416,23 @@ def _prepare_fused_decode(
                     partner = tl.gather(normalized, d ^ 32, 0)
                     # Both the group start and its last token are in the same
                     # page and the same aligned four-slot half of the ring.
-                    cosine, sine = _decode_rope(
-                        position_pool + (coord_slot - 3) * 3,
-                        inv_freq,
-                        d % 32,
-                        H_SECTION,
-                        W_SECTION,
-                        INV_SCALE,
-                    )
+                    if DRAFT_POSITION_FACTOR:
+                        # Draft Q uses the transported position, while a
+                        # compressed K uses its logical block start.
+                        angle = ((position - 3).to(tl.float32) * INV_SCALE) * tl.load(
+                            inv_freq + d % 32
+                        )
+                        cosine = libdevice.cos(angle).to(tl.bfloat16)
+                        sine = libdevice.sin(angle).to(tl.bfloat16)
+                    else:
+                        cosine, sine = _decode_rope(
+                            position_pool + (coord_slot - 3) * 3,
+                            inv_freq,
+                            d % 32,
+                            H_SECTION,
+                            W_SECTION,
+                            INV_SCALE,
+                        )
                     rotated = _decode_rotate(
                         normalized, partner, cosine, sine, tl.where(d < 32, -1.0, 1.0)
                     )
@@ -428,11 +441,14 @@ def _prepare_fused_decode(
                         kv_pool + kv_slot * 128 + d,
                         tl.where(d < 64, rotated, normalized),
                     )
-            for axis in tl.static_range(3):
-                coordinate = tl.load(position_row + axis)
-                tl.store(
-                    position_pool + coord_slot * 3 + axis, coordinate, mask=coord_live
-                )
+            if not DRAFT_POSITION_FACTOR:
+                for axis in tl.static_range(3):
+                    coordinate = tl.load(position_row + axis)
+                    tl.store(
+                        position_pool + coord_slot * 3 + axis,
+                        coordinate,
+                        mask=coord_live,
+                    )
 
 
 @triton.jit

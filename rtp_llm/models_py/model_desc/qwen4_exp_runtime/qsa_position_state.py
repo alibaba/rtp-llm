@@ -50,6 +50,8 @@ class _TargetPositionGeometry:
     undo_slots: torch.Tensor
     history_slots: torch.Tensor
     current_rows: torch.Tensor
+    visible_lengths: torch.Tensor
+    compressed_lengths: torch.Tensor
     rope_cache: dict = field(default_factory=dict)
 
 
@@ -93,6 +95,12 @@ class QSAPositionState:
             batch_size=batch,
             device=device,
         )
+        padding_tables = ()
+        if inputs.is_target_verify and self.is_graph and inputs.is_s_padded:
+            padding_tables = (
+                context.indexer_state_inputs.kv_cache_block_id_device,
+                context.indexer_kv_inputs.kv_cache_kernel_block_id_device,
+            )
         # Native metadata stays immutable for one forward. Share its geometry
         # and validation receipt across layers, never their pools or undo state.
         metadata = getattr(context, "metadata_cache", None)
@@ -108,6 +116,7 @@ class QSAPositionState:
             _tensor_key(prefix_source),
             _tensor_key(cu_source),
             _tensor_key(table),
+            tuple(map(_tensor_key, padding_tables)),
         )
         self.geometry = metadata.get(key) if metadata is not None else None
         self.staged = False
@@ -142,10 +151,20 @@ class QSAPositionState:
                 target_position_slots,
             )
 
+            visible = prefix_source.new_empty((batch, count // batch))
+            compressed = torch.empty_like(visible)
             slots = target_position_slots(
-                prefix_source, cu_source, table, count, self.pool.shape[0]
+                prefix_source,
+                cu_source,
+                table,
+                count,
+                self.pool.shape[0],
+                lengths=(visible, compressed),
+                padding_tables=padding_tables or None,
             )
-            self.geometry = _TargetPositionGeometry(positions, *slots)
+            self.geometry = _TargetPositionGeometry(
+                positions, *slots, visible, compressed
+            )
             if metadata is not None:
                 metadata[key] = self.geometry
             return

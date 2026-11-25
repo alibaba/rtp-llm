@@ -37,7 +37,11 @@ def try_prepare_fused_decode(
     rope_config,
     padded,
 ):
-    """Prepare ordinary SM103 decode from the replay's inclusive token lengths."""
+    """Prepare SM103 decode from the replay's inclusive token lengths.
+
+    Draft Base RoPE uses logical K positions and therefore supplies no position
+    pool. Its cache writes retain the draft's transactional undo.
+    """
     from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import is_qsa_rope_style
 
     if (
@@ -45,30 +49,48 @@ def try_prepare_fused_decode(
         or not q.is_cuda
         or torch.version.hip is not None
         or torch.cuda.get_device_capability(q.device) != (10, 3)
-        or not is_qsa_rope_style(rope_config, "Mrope")
         or int(rope_config.dim) != 64
-        or int(rope_config.index_factor) != 3
-        or not rope_config.mrope_interleaved
         or not getattr(rope_config, "indexer_is_neox_style", True)
         or inv_freq is None
     ):
         return None
-    sections = (
-        int(rope_config.mrope_dim1),
-        int(rope_config.mrope_dim2),
-        int(rope_config.mrope_dim3),
-    )
+    position_factor = int(rope_config.index_factor)
+    draft = position_pool is None and position_table is None
+    if draft:
+        if not is_qsa_rope_style(rope_config, "Base") or position_factor not in (1, 3):
+            return None
+        h_section = w_section = 0
+    else:
+        if (
+            position_pool is None
+            or position_table is None
+            or not is_qsa_rope_style(rope_config, "Mrope")
+            or position_factor != 3
+            or not rope_config.mrope_interleaved
+            or position_pool.shape[1:] != (8, 3)
+            or position_pool.dtype != torch.int32
+        ):
+            return None
+        sections = (
+            int(rope_config.mrope_dim1),
+            int(rope_config.mrope_dim2),
+            int(rope_config.mrope_dim3),
+        )
+        if (
+            min(sections) < 0
+            or sum(sections) != 32
+            or sections[1] > 11
+            or sections[2] > 10
+        ):
+            return None
+        _, h_section, w_section = sections
     scale = float(getattr(rope_config, "scale", 1.0))
-    if (
-        min(sections) < 0
-        or sum(sections) != 32
-        or sections[1] > 11
-        or sections[2] > 10
-        or not math.isfinite(scale)
-        or scale <= 0
-    ):
+    if not math.isfinite(scale) or scale <= 0:
         return None
     batch = q.shape[0]
+    tables = (
+        (state_table, kv_table) if draft else (state_table, kv_table, position_table)
+    )
     packed = (
         lengths,
         positions,
@@ -76,13 +98,9 @@ def try_prepare_fused_decode(
         k_gamma,
         inv_freq,
         state_pool,
-        state_table,
         kv_pool,
-        kv_table,
-        position_pool,
-        position_table,
-    )
-    tables = (state_table, kv_table, position_table)
+        *tables,
+    ) + (() if draft else (position_pool,))
     if not (
         batch > 0
         and all(t.device == q.device and t.is_contiguous() for t in packed)
@@ -94,7 +112,7 @@ def try_prepare_fused_decode(
         and raw_keys.device == q.device
         and q.dtype == raw_keys.dtype == torch.bfloat16
         and lengths.shape == (batch,)
-        and positions.shape == (batch, 3)
+        and positions.shape == (batch, position_factor)
         and positions.dtype == lengths.dtype == torch.int32
         and q_gamma.shape == k_gamma.shape == (128,)
         and all(t.dtype in (torch.bfloat16, torch.float32) for t in (q_gamma, k_gamma))
@@ -104,8 +122,6 @@ def try_prepare_fused_decode(
         and state_pool.dtype == torch.float32
         and kv_pool.shape[1:] == (32, 128)
         and kv_pool.dtype == torch.bfloat16
-        and position_pool.shape[1:] == (8, 3)
-        and position_pool.dtype == torch.int32
         and all(
             t.ndim == 2
             and t.shape[0] == batch
@@ -115,6 +131,15 @@ def try_prepare_fused_decode(
         )
     ):
         return None
+    undo = None
+    if draft:
+        from .decode_snapshot import try_snapshot_decode
+
+        undo = try_snapshot_decode(
+            lengths, kv_pool, kv_table, state_pool, state_table, inclusive_lengths=True
+        )
+        if undo is None:
+            return None
     rotated = torch.empty(q.shape, dtype=q.dtype, device=q.device)
     visible = torch.empty_like(lengths)
     _prepare_fused_decode[(batch, 9)](
@@ -137,17 +162,20 @@ def try_prepare_fused_decode(
         RAW_STRIDE=raw_keys.stride(0),
         STATE_WIDTH=state_table.shape[1],
         KV_WIDTH=kv_table.shape[1],
-        POSITION_WIDTH=position_table.shape[1],
+        POSITION_WIDTH=0 if draft else position_table.shape[1],
         STATE_BLOCKS=state_pool.shape[0],
         KV_BLOCKS=kv_pool.shape[0],
-        POSITION_BLOCKS=position_pool.shape[0],
-        H_SECTION=sections[1],
-        W_SECTION=sections[2],
+        POSITION_BLOCKS=0 if draft else position_pool.shape[0],
+        H_SECTION=h_section,
+        W_SECTION=w_section,
         INV_SCALE=1.0 / scale,
         EPS=norm_eps,
         PADDED=padded,
+        DRAFT_POSITION_FACTOR=position_factor if draft else 0,
         num_warps=1,
     )
+    if draft:
+        return rotated, visible, undo
     return rotated, visible
 
 

@@ -146,7 +146,15 @@ class PagedQTokenG8:
         return pool.unbind(1)
 
     def prepare(
-        self, qkv, selected, pool, positions=None, norm=None, *, zero_tail=False
+        self,
+        qkv,
+        selected,
+        pool,
+        positions=None,
+        norm=None,
+        *,
+        zero_tail=False,
+        base_rope=False,
     ):
         from rtp_llm.models_py.kernels.cuda.qsa.qtoken_prepare import prepare_qtoken
 
@@ -173,6 +181,7 @@ class PagedQTokenG8:
             q_only=norm is None,
             padded_rows=self.draft_padding,
             zero_tail=zero_tail,
+            base_rope=base_rope,
         )
 
     def attend(self, pool, gate):

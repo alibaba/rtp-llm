@@ -13,12 +13,12 @@ from rtp_llm.models_py.kernels.cuda.qsa.decode_snapshot import _snapshot_decode
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_compressor import IndexerCacheUndo
 
 
-def try_snapshot_decode(positions, kv, kt, state, st):
-    """Return None without writes outside the explicit bounded SM120 path."""
+def try_snapshot_decode(positions, kv, kt, state, st, *, inclusive_lengths=False):
+    """Snapshot bounded decode rows before the state and KV cache writes."""
     if not (
         positions.is_cuda
         and torch.version.hip is None
-        and torch.cuda.get_device_capability(positions.device) == (12, 0)
+        and torch.cuda.get_device_capability(positions.device) in ((10, 3), (12, 0))
         and positions.ndim == 1
         and 1 <= positions.numel() <= 32
         and positions.dtype == torch.int32
@@ -57,6 +57,7 @@ def try_snapshot_decode(positions, kv, kt, state, st):
         st.shape[1],
         kv.shape[0],
         state.shape[0],
+        inclusive_lengths,
         num_warps=4,
     )
     return IndexerCacheUndo(

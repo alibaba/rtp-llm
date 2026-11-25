@@ -59,8 +59,28 @@ def try_prepare_fused_prefill(
 
     rows = q.shape[0]
     batch = prefixes.numel()
-    tables = (state_table, kv_table, position_table)
-    pools = (state_pool, kv_pool, position_pool)
+    base_rope = is_qsa_rope_style(rope_config, "Base")
+    position_factor = int(rope_config.index_factor)
+    if base_rope:
+        # Eager draft preparation supplies canonical text positions. It has
+        # no coordinate side pool and only uses the zero-prefix path here.
+        if not emit_dense or position_factor not in (1, 3):
+            return None
+        tables = (state_table, kv_table)
+        pools = (state_pool, kv_pool)
+    elif (
+        is_qsa_rope_style(rope_config, "Mrope")
+        and position_factor == 3
+        and rope_config.mrope_interleaved
+        and position_pool is not None
+        and position_pool.shape[1:] == (8, 3)
+        and position_pool.dtype == torch.int32
+        and position_table is not None
+    ):
+        tables = (state_table, kv_table, position_table)
+        pools = (state_pool, kv_pool, position_pool)
+    else:
+        return None
     if not (
         q.is_cuda
         and torch.version.hip is None
@@ -73,7 +93,7 @@ def try_prepare_fused_prefill(
         and q.stride()[1:] == (128, 1)
         and raw_keys.shape == (rows, 128)
         and raw_keys.stride(1) == 1
-        and positions.shape == (rows, 3)
+        and positions.shape == (rows, position_factor)
         and positions.dtype == torch.int32
         and cu_seqlens.shape == (batch + 1,)
         and cu_seqlens.dtype == torch.int32
@@ -83,8 +103,6 @@ def try_prepare_fused_prefill(
         and state_pool.dtype == torch.float32
         and kv_pool.shape[1:] == (32, 128)
         and kv_pool.dtype == torch.bfloat16
-        and position_pool.shape[1:] == (8, 3)
-        and position_pool.dtype == torch.int32
         and all(
             t.ndim == 2
             and t.shape[0] == batch
@@ -114,29 +132,23 @@ def try_prepare_fused_prefill(
                 *pools,
             )
         )
-        and is_qsa_rope_style(rope_config, "Mrope")
         and int(rope_config.dim) == 64
-        and int(rope_config.index_factor) == 3
-        and bool(rope_config.mrope_interleaved)
         and bool(getattr(rope_config, "indexer_is_neox_style", True))
         and math.isfinite(norm_eps)
         and norm_eps >= 0
     ):
         return None
-    sections = (
-        int(rope_config.mrope_dim1),
-        int(rope_config.mrope_dim2),
-        int(rope_config.mrope_dim3),
-    )
+    h = w = 0
+    if not base_rope:
+        t, h, w = (
+            int(rope_config.mrope_dim1),
+            int(rope_config.mrope_dim2),
+            int(rope_config.mrope_dim3),
+        )
+        if min(t, h, w) < 0 or t + h + w != 32 or h > 11 or w > 10:
+            return None
     scale = float(getattr(rope_config, "scale", 1.0))
-    if not (
-        min(sections) >= 0
-        and sum(sections) == 32
-        and sections[1] <= 11
-        and sections[2] <= 10
-        and math.isfinite(scale)
-        and scale > 0
-    ):
+    if not math.isfinite(scale) or scale <= 0:
         return None
 
     rotated = torch.empty(q.shape, dtype=q.dtype, device=q.device)
@@ -181,15 +193,17 @@ def try_prepare_fused_prefill(
         KV_ROWS=kv_table.stride(0),
         KV_COLS=kv_table.shape[1],
         KV_BLOCKS=kv_pool.shape[0],
-        POSITION_ROWS=position_table.stride(0),
-        POSITION_COLS=position_table.shape[1],
-        POSITION_BLOCKS=position_pool.shape[0],
+        POSITION_ROWS=0 if base_rope else position_table.stride(0),
+        POSITION_COLS=0 if base_rope else position_table.shape[1],
+        POSITION_BLOCKS=0 if base_rope else position_pool.shape[0],
         EPS=norm_eps,
         INV_SCALE=1.0 / scale,
-        H=sections[1],
-        W=sections[2],
+        H=h,
+        W=w,
         EMIT_DENSE=emit_dense,
         Q_TILE=query_tile,
+        POSITION_FACTOR=position_factor,
+        BASE_ROPE=base_rope,
         num_warps=8,
         enable_fp_fusion=False,
     )

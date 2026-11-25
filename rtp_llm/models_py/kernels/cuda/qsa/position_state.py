@@ -13,12 +13,23 @@ def _target_slots(
     undo,
     history,
     current,
+    visible_lengths,
+    compressed_lengths,
+    state_table,
+    kv_table,
     ROWS: tl.constexpr,
     BATCH: tl.constexpr,
     POOL: tl.constexpr,
     COLS: tl.constexpr,
     TABLE_STRIDE: tl.constexpr,
     REQUESTS: tl.constexpr,
+    Q: tl.constexpr,
+    Q_TILE: tl.constexpr,
+    STATE_COLS: tl.constexpr,
+    KV_COLS: tl.constexpr,
+    STATE_STRIDES: tl.constexpr,
+    KV_STRIDES: tl.constexpr,
+    COL_TILE: tl.constexpr,
 ):
     row = tl.program_id(0)
     req = tl.arange(0, REQUESTS)
@@ -46,11 +57,41 @@ def _target_slots(
     tl.store(history + row, slot)
     tl.store(current + row, tl.where(start >= base, src, -1))
 
+    if Q:
+        # One program per request also produces the lengths shared by all QSA layers.
+        if row % Q == 0:
+            request = row // Q
+            active = True
+            if COL_TILE:
+                cols = tl.arange(0, COL_TILE)
+                state = tl.load(
+                    state_table + request * STATE_STRIDES[0] + cols * STATE_STRIDES[1],
+                    cols < STATE_COLS,
+                    other=0,
+                )
+                kv = tl.load(
+                    kv_table + request * KV_STRIDES[0] + cols * KV_STRIDES[1],
+                    cols < KV_COLS,
+                    other=0,
+                )
+                active = tl.sum(((state != 0) | (kv != 0)).to(tl.int32), 0) > 0
+            step = tl.arange(0, Q_TILE)
+            length = tl.where(active, tl.load(prefix + request) + step + 1, 0)
+            tl.store(visible_lengths + row + step, length, step < Q)
+            tl.store(compressed_lengths + row + step, length >> 2, step < Q)
 
-def target_position_slots(prefix, cu, table, rows, pool_blocks):
+
+def target_position_slots(
+    prefix, cu, table, rows, pool_blocks, *, lengths=None, padding_tables=None
+):
     undo = torch.empty(rows, dtype=torch.int64, device=table.device)
     history = torch.empty_like(undo)
     current = torch.empty_like(undo)
+    visible, compressed = lengths if lengths is not None else (None, None)
+    query_len = visible.shape[1] if visible is not None else 0
+    state, kv = padding_tables if padding_tables is not None else (None, None)
+    state_cols = state.shape[1] if state is not None else 0
+    kv_cols = kv.shape[1] if kv is not None else 0
     _target_slots[(rows,)](
         prefix,
         cu,
@@ -64,6 +105,17 @@ def target_position_slots(prefix, cu, table, rows, pool_blocks):
         COLS=table.shape[1],
         TABLE_STRIDE=table.stride(0),
         REQUESTS=triton.next_power_of_2(prefix.numel()),
+        visible_lengths=visible,
+        compressed_lengths=compressed,
+        state_table=state,
+        kv_table=kv,
+        Q=query_len,
+        Q_TILE=triton.next_power_of_2(query_len) if query_len else 1,
+        STATE_COLS=state_cols,
+        KV_COLS=kv_cols,
+        STATE_STRIDES=state.stride() if state is not None else (),
+        KV_STRIDES=kv.stride() if kv is not None else (),
+        COL_TILE=triton.next_power_of_2(max(state_cols, kv_cols)) if state_cols else 0,
         num_warps=1,
     )
     return undo, history, current

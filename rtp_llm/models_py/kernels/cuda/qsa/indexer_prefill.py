@@ -20,13 +20,18 @@ def _prefill_rope_pair(
     INV_SCALE: tl.constexpr,
     H: tl.constexpr,
     W: tl.constexpr,
+    POSITION_FACTOR: tl.constexpr,
+    BASE_ROPE: tl.constexpr,
 ):
-    axis = tl.where(
-        (freq % 3 == 1) & (freq < 3 * H),
-        1,
-        tl.where((freq % 3 == 2) & (freq < 3 * W), 2, 0),
-    )
-    coordinate = tl.load(positions + row * 3 + axis).to(tl.float32)
+    if BASE_ROPE:
+        axis = 0
+    else:
+        axis = tl.where(
+            (freq % 3 == 1) & (freq < 3 * H),
+            1,
+            tl.where((freq % 3 == 2) & (freq < 3 * W), 2, 0),
+        )
+    coordinate = tl.load(positions + row * POSITION_FACTOR + axis).to(tl.float32)
     angle = (coordinate * INV_SCALE) * tl.load(inv_freq + freq)
     cosine = libdevice.cos(angle).to(tl.bfloat16).to(tl.float32)
     sine = libdevice.sin(angle).to(tl.bfloat16).to(tl.float32)
@@ -46,6 +51,8 @@ def _prefill_query(
     INV_SCALE: tl.constexpr,
     H: tl.constexpr,
     W: tl.constexpr,
+    POSITION_FACTOR: tl.constexpr,
+    BASE_ROPE: tl.constexpr,
 ):
     head, column = tl.arange(0, 8), tl.arange(0, 128)
     raw = tl.load(q + row * Q_STRIDE + head[:, None] * 128 + column[None, :])
@@ -60,7 +67,9 @@ def _prefill_query(
     rotary, tail = tl.split(normed.reshape(8, 2, 64).permute(0, 2, 1))
     first, second = tl.split(rotary.reshape(8, 2, 32).permute(0, 2, 1))
     freq = tl.arange(0, 32)
-    cosine, sine = _prefill_rope_pair(positions, inv_freq, row, freq, INV_SCALE, H, W)
+    cosine, sine = _prefill_rope_pair(
+        positions, inv_freq, row, freq, INV_SCALE, H, W, POSITION_FACTOR, BASE_ROPE
+    )
     first, second = first.to(tl.float32), second.to(tl.float32)
     left = (first * cosine[None, :]).to(tl.bfloat16).to(tl.float32)
     left += (-second * sine[None, :]).to(tl.bfloat16).to(tl.float32)
@@ -107,6 +116,8 @@ def _prefill_key(
     H: tl.constexpr,
     W: tl.constexpr,
     EMIT_DENSE: tl.constexpr,
+    POSITION_FACTOR: tl.constexpr,
+    BASE_ROPE: tl.constexpr,
 ):
     page = logical // 128
     physical = tl.load(kv_table + request * TABLE_ROWS + page, page < TABLE_COLS, 0)
@@ -118,7 +129,7 @@ def _prefill_key(
         gain = 1.0 + tl.load(gamma + column).to(tl.float32)
         freq = tl.arange(0, 32)
         cos_half, sin_half = _prefill_rope_pair(
-            positions, inv_freq, row, freq, INV_SCALE, H, W
+            positions, inv_freq, row, freq, INV_SCALE, H, W, POSITION_FACTOR, BASE_ROPE
         )
         cosine = tl.gather(cos_half, column % 32, 0)
         sine = tl.gather(sin_half, column % 32, 0)
@@ -180,6 +191,8 @@ def _prepare_fused_prefill(
     W: tl.constexpr,
     EMIT_DENSE: tl.constexpr,
     Q_TILE: tl.constexpr,
+    POSITION_FACTOR: tl.constexpr = 3,
+    BASE_ROPE: tl.constexpr = False,
 ):
     tile, request = tl.program_id(0), tl.program_id(1)
     start = tl.load(cu + request).to(tl.int64)
@@ -204,6 +217,8 @@ def _prepare_fused_prefill(
                     INV_SCALE,
                     H,
                     W,
+                    POSITION_FACTOR,
+                    BASE_ROPE,
                 )
                 if not EMIT_DENSE:
                     tl.store(visible + row, prefix + local_row + 1)
@@ -236,6 +251,8 @@ def _prepare_fused_prefill(
                 H,
                 W,
                 EMIT_DENSE,
+                POSITION_FACTOR,
+                BASE_ROPE,
             )
     else:
         page = tile - query_tiles - groups
@@ -266,16 +283,17 @@ def _prepare_fused_prefill(
                 raw.to(tl.float32),
                 state_valid[:, None],
             )
-            pos_block = tl.load(
-                position_table + request * POSITION_ROWS + physical_page,
-                physical_page < POSITION_COLS,
-                0,
-            )
-            pos_valid = live & (pos_block > 0) & (pos_block < POSITION_BLOCKS)
-            pos_slot = pos_block.to(tl.int64) * 8 + ring
-            for axis in tl.static_range(3):
-                value = tl.load(positions + row * 3 + axis, pos_valid, 0)
-                tl.store(position_pool + pos_slot * 3 + axis, value, pos_valid)
+            if not BASE_ROPE:
+                pos_block = tl.load(
+                    position_table + request * POSITION_ROWS + physical_page,
+                    physical_page < POSITION_COLS,
+                    0,
+                )
+                pos_valid = live & (pos_block > 0) & (pos_block < POSITION_BLOCKS)
+                pos_slot = pos_block.to(tl.int64) * 8 + ring
+                for axis in tl.static_range(3):
+                    value = tl.load(positions + row * 3 + axis, pos_valid, 0)
+                    tl.store(position_pool + pos_slot * 3 + axis, value, pos_valid)
 
 
 @triton.jit(do_not_specialize=["PAGES"])

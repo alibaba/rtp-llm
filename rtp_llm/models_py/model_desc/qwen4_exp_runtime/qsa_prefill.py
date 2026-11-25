@@ -57,20 +57,21 @@ def _prefill_has_private_writes(host_table, table, pool, prefixes, lengths, *, r
 def try_fused_prefill_selection(self, q, raw_keys, indexer, rope_config):
     """Prepare ordinary Q/K and write private side pages in one launch."""
     inputs = self.main_inputs
+    draft = self.is_mtp_draft
     if (
         inputs.is_cuda_graph
         or inputs.is_s_padded
         or torch.cuda.is_current_stream_capturing()
         or indexer.compress_ratio != 4
         or indexer.token_budget != 2048
-        or self.position_state_cache is None
-        or self.position_state_inputs is None
-        or any(
-            cache.seq_size_per_block != 128
-            for cache in (
-                self.indexer_kv_cache,
-                self.indexer_state_cache,
-                self.position_state_cache,
+        or self.indexer_kv_cache.seq_size_per_block != 128
+        or self.indexer_state_cache.seq_size_per_block != 128
+        or (
+            not draft
+            and (
+                self.position_state_cache is None
+                or self.position_state_inputs is None
+                or self.position_state_cache.seq_size_per_block != 128
             )
         )
     ):
@@ -96,6 +97,11 @@ def try_fused_prefill_selection(self, q, raw_keys, indexer, rope_config):
     if any(prefix < 0 or prefix % 128 for prefix in prefixes):
         return None
     emit_dense = not any(prefixes)
+    if draft and (not emit_dense or not is_qsa_rope_style(rope_config, "Base")):
+        return None
+    position_factor = int(rope_config.index_factor)
+    if position_factor not in ((1, 3) if draft else (3,)):
+        return None
     compressed = [(p + n) // 4 for p, n in zip(prefixes, lengths)]
     if min(compressed) < 1 or (emit_dense and batch != 1):
         return None
@@ -119,7 +125,7 @@ def try_fused_prefill_selection(self, q, raw_keys, indexer, rope_config):
         or cu.shape != (batch + 1,)
         or positions is None
         or not positions.is_contiguous()
-        or positions.numel() != q.shape[0] * 3
+        or positions.numel() != q.shape[0] * position_factor
     ):
         return None
     kv_pool = _typed_2d_pool(
@@ -152,21 +158,26 @@ def try_fused_prefill_selection(self, q, raw_keys, indexer, rope_config):
         batch_size=batch,
         device=device,
     )
-    position_pool, position_table = _indexer_position_pool_and_table(
-        self, batch, device
-    )
-    if not all(
-        _prefill_has_private_writes(host, table, pool, prefixes, lengths, ratio=ratio)
-        for host, table, pool, ratio in (
-            (self.indexer_kv_inputs.kv_cache_kernel_block_id, kv_table, kv_pool, 4),
-            (self.indexer_state_inputs.kv_cache_block_id, state_table, state_pool, 1),
+    writes = [
+        (self.indexer_kv_inputs.kv_cache_kernel_block_id, kv_table, kv_pool, 4),
+        (self.indexer_state_inputs.kv_cache_block_id, state_table, state_pool, 1),
+    ]
+    position_pool = position_table = None
+    if not draft:
+        position_pool, position_table = _indexer_position_pool_and_table(
+            self, batch, device
+        )
+        writes.append(
             (
                 self.position_state_inputs.kv_cache_block_id,
                 position_table,
                 position_pool,
                 1,
-            ),
+            )
         )
+    if not all(
+        _prefill_has_private_writes(host, table, pool, prefixes, lengths, ratio=ratio)
+        for host, table, pool, ratio in writes
     ):
         return None
 
@@ -187,7 +198,7 @@ def try_fused_prefill_selection(self, q, raw_keys, indexer, rope_config):
         raw_keys,
         cu,
         prefix_device,
-        positions.view(-1, 3),
+        positions.view(-1, position_factor),
         indexer.q_norm_gamma,
         indexer.k_norm_gamma,
         indexer.rope_inv_freq(rope_config, fused_prep=True),
@@ -487,6 +498,11 @@ def select_draft_graph_tokens(
         draft_graph_lanes,
         draft_graph_rows,
     )
+    from rtp_llm.models_py.modules.qwen4_exp.qsa.flashinfer_indexer import (
+        prepare_flashinfer_decode_selection,
+        try_flashinfer_decode_selection,
+        use_fused_indexer_prep,
+    )
     from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_decode import (
         write_draft_window_with_undo_,
     )
@@ -577,6 +593,20 @@ def select_draft_graph_tokens(
 
     get_frequency = getattr(indexer, "rope_inv_freq", None)
     frequency = get_frequency(rope_config) if callable(get_frequency) else None
+    score_lengths = recipe = None
+    if (
+        raw_query
+        and lanes == 4
+        and int(indexer.token_budget) == 2048
+        and use_fused_indexer_prep()
+        and callable(get_frequency)
+    ):
+        recipe = prepare_flashinfer_decode_selection(
+            q, kv_pool, kv_table, query_len=lanes
+        )
+        if recipe is not None:
+            score_lengths = torch.empty_like(inputs.prefix_lengths_device)
+            frequency = get_frequency(rope_config, fused_prep=True)
     inverse = None
     metadata = try_prepare_metadata(
         q,
@@ -587,6 +617,7 @@ def select_draft_graph_tokens(
         rope_config=rope_config,
         q_gamma=indexer.q_norm_gamma if raw_query else None,
         norm_eps=indexer.norm_eps,
+        score_lengths=score_lengths,
     )
     if metadata is not None:
         padded, block_cos, block_sin, weights, compressed_lengths, visible = metadata
@@ -639,6 +670,16 @@ def select_draft_graph_tokens(
         norm_eps=float(indexer.norm_eps),
     )
     object.__setattr__(self, "_side_cache_undo", undo)
+    selected = None
+    if metadata is not None and recipe is not None:
+        selected = try_flashinfer_decode_selection(
+            padded.view(tokens, heads, dim),
+            kv_pool,
+            kv_table,
+            visible,
+            recipe=recipe,
+            kv_lengths=score_lengths,
+        )
     if prepared is None:
         rotated = apply_partial_rope(q, cos.unsqueeze(1), sin.unsqueeze(1))
         padded = rotated.index_select(0, sources).reshape(batch, lanes, heads, dim)
@@ -649,35 +690,36 @@ def select_draft_graph_tokens(
             dtype=torch.float32,
         )
         compressed_lengths = visible // 4
-    logits = qsa_paged_indexer_score(
-        padded.contiguous(),
-        weights,
-        kv_pool.flatten(0, 1),
-        kv_table,
-        compressed_lengths,
-        block_size=32,
-        max_ctx_len=int(kv_table.shape[1]) * 32,
-        validate_block_table=False,
-    )
-    from rtp_llm.models_py.kernels.cuda.qsa.cub_topk import try_cub_draft_qsa_tokens
+    if selected is None:
+        logits = qsa_paged_indexer_score(
+            padded.contiguous(),
+            weights,
+            kv_pool.flatten(0, 1),
+            kv_table,
+            compressed_lengths,
+            block_size=32,
+            max_ctx_len=int(kv_table.shape[1]) * 32,
+            validate_block_table=False,
+        )
+        from rtp_llm.models_py.kernels.cuda.qsa.cub_topk import try_cub_draft_qsa_tokens
 
-    if int(indexer.token_budget) == 2048:
-        packed = try_cub_draft_qsa_tokens(
+        if int(indexer.token_budget) == 2048:
+            packed = try_cub_draft_qsa_tokens(
+                logits,
+                visible.reshape(-1),
+                inputs.input_lengths_device,
+                inputs.cu_seqlens_device,
+            )
+            if packed is not None:
+                return packed
+        selected = select_qsa_paged_tokens(
             logits,
             visible.reshape(-1),
-            inputs.input_lengths_device,
-            inputs.cu_seqlens_device,
+            compress_ratio=4,
+            token_budget=int(indexer.token_budget),
+            validate_lengths=False,
+            scores_are_masked=True,
         )
-        if packed is not None:
-            return packed
-    selected = select_qsa_paged_tokens(
-        logits,
-        visible.reshape(-1),
-        compress_ratio=4,
-        token_budget=int(indexer.token_budget),
-        validate_lengths=False,
-        scores_are_masked=True,
-    )
     from rtp_llm.models_py.kernels.cuda.qsa.draft_layout_triton import (
         try_restore_selection,
     )

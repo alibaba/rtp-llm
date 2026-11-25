@@ -18,6 +18,7 @@ from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
 
 from .qsa_cache_views import _block_table, _typed_2d_pool, _validate_required_blocks
 from .qsa_plans import IncrementalPrefillPlan, TargetVerifyPlan
+from .qsa_position_state import _TargetPositionGeometry
 
 
 def _draft_incremental_prefill_geometry(
@@ -450,13 +451,6 @@ def _target_verify_geometry(
         device=device, dtype=torch.int32, non_blocking=True
     ).contiguous()
 
-    expected_cu = torch.arange(
-        0,
-        (batch_size + 1) * query_len,
-        query_len,
-        dtype=torch.int32,
-        device=device,
-    )
     cu_seqlens = self.main_inputs.cu_seqlens_device
     if (
         cu_seqlens.dtype != torch.int32
@@ -466,7 +460,11 @@ def _target_verify_geometry(
         raise RuntimeError(
             "qwen4_exp QSA target-verify cu_seqlens do not match gamma+1"
         )
+    expected_cu = cu_seqlens
     if not graph_target:
+        expected_cu = torch.arange(
+            0, (batch_size + 1) * query_len, query_len, dtype=torch.int32, device=device
+        )
         checks.add(
             (cu_seqlens != expected_cu).any(),
             "qwen4_exp QSA target-verify cu_seqlens do not match gamma+1",
@@ -571,25 +569,34 @@ def _target_verify_geometry(
         device=device,
     )
 
-    from rtp_llm.models_py.kernels.cuda.qsa.target_metadata_triton import (
-        try_target_metadata,
-    )
-
-    metadata = try_target_metadata(prefixes_device, query_len, ratio)
+    position_state = self.positions(ratio, checks) if graph_target else None
+    geometry = position_state.geometry if position_state is not None else None
     query_positions = block_starts = None
-    if metadata is None:
-        if offsets is None:
-            offsets = torch.arange(query_len, dtype=torch.int32, device=device)
-        visible_lengths = prefixes_device[:, None] + offsets[None, :] + 1
-        compressed_lengths = visible_lengths // ratio
+    active = None
+    if isinstance(geometry, _TargetPositionGeometry):
+        visible_lengths = geometry.visible_lengths
+        compressed_lengths = geometry.compressed_lengths
     else:
-        visible_lengths, compressed_lengths, query_positions, block_starts = metadata
-    if self.main_inputs.is_s_padded:
-        active = state_table.ne(0).any(dim=1, keepdim=True) | kv_table.ne(0).any(
-            dim=1, keepdim=True
+        from rtp_llm.models_py.kernels.cuda.qsa.target_metadata_triton import (
+            try_target_metadata,
         )
-        visible_lengths = torch.where(active, visible_lengths, 0)
-        compressed_lengths = torch.where(active, compressed_lengths, 0)
+
+        metadata = try_target_metadata(prefixes_device, query_len, ratio)
+        if metadata is None:
+            if offsets is None:
+                offsets = torch.arange(query_len, dtype=torch.int32, device=device)
+            visible_lengths = prefixes_device[:, None] + offsets[None, :] + 1
+            compressed_lengths = visible_lengths // ratio
+        else:
+            visible_lengths, compressed_lengths, query_positions, block_starts = (
+                metadata
+            )
+        if self.main_inputs.is_s_padded:
+            active = state_table.ne(0).any(dim=1, keepdim=True) | kv_table.ne(0).any(
+                dim=1, keepdim=True
+            )
+            visible_lengths = torch.where(active, visible_lengths, 0)
+            compressed_lengths = torch.where(active, compressed_lengths, 0)
     max_ctx_len = (max(prefix_values) + query_len) // ratio
     if graph_target:
         required_host = (max_ctx_len + kv_entries_per_block - 1) // kv_entries_per_block
@@ -616,7 +623,7 @@ def _target_verify_geometry(
     state_pairs = []
     active_rows = (
         self.host_values(active.reshape(-1))
-        if self.main_inputs.is_s_padded and not graph_target
+        if active is not None and not graph_target
         else None
     )
     for request_idx, prefix in enumerate(prefix_values):
@@ -646,7 +653,8 @@ def _target_verify_geometry(
             checks=checks,
         )
 
-    self.positions(ratio, checks)
+    if not graph_target:
+        self.positions(ratio, checks)
     checks.verify()
     return TargetVerifyPlan(
         **{

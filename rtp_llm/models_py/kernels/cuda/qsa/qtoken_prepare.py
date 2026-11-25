@@ -151,6 +151,7 @@ def _histogram_route(
     HISTOGRAM_BLOCKS: tl.constexpr,
     INDEX_STRIDE: tl.constexpr,
     TILED: tl.constexpr,
+    SINGLETON_HISTOGRAM: tl.constexpr,
 ):
     # Four sparse blocks share a u32. Its four bytes store eight query bits each.
     words: tl.constexpr = HISTOGRAM_BLOCKS // 4
@@ -185,7 +186,9 @@ def _histogram_route(
         )
     tl.debug_barrier()
 
-    item = tl.arange(0, 4096)
+    # Padded draft routes cover one query even when the live CU changes on replay.
+    QUERY_CAPACITY: tl.constexpr = 1 if SINGLETON_HISTOGRAM else 8
+    item = tl.arange(0, QUERY_CAPACITY * 512)
     query = item // 512
     logical, valid = _selected_blocks(
         selected,
@@ -198,7 +201,7 @@ def _histogram_route(
         INDEX_STRIDE,
     )
     _or_membership(hist, logical, query, valid & (logical < HISTOGRAM_BLOCKS))
-    tail_query = tl.arange(0, 8)
+    tail_query = tl.arange(0, QUERY_CAPACITY)
     tail_visible = first_visible + tail_query
     _or_membership(
         hist,
@@ -537,8 +540,26 @@ def _qsa_qtoken_prepare(
     INDEX_STRIDE: tl.constexpr,
     ZERO_TAIL: tl.constexpr,
     TILED_HISTOGRAM: tl.constexpr,
+    BASE_ROPE: tl.constexpr,
+    SINGLETON_HISTOGRAM: tl.constexpr,
+    INTERLEAVE_PREFILL: tl.constexpr,
 ):
     pid = tl.program_id(0)
+    if INTERLEAVE_PREFILL:
+        tl.static_assert(
+            BASE_ROPE
+            and PREFILL
+            and not DECODE_Q1
+            and not Q_ONLY
+            and not PADDED_ROWS
+            and SEARCH_STEPS == 0
+        )
+        # Interleave each eight-token route with its QKV tiles. The grid size
+        # truncates the last group to the live token count.
+        GROUP_CTAS: tl.constexpr = 1 + 8 * HEAD_TILES
+        group = pid // GROUP_CTAS
+        offset = pid % GROUP_CTAS
+        pid = tl.where(offset == 0, group, ROUTES + pid - group - 1)
     if pid < ROUTES:
         if DECODE_Q1:
             first = pid
@@ -597,6 +618,7 @@ def _qsa_qtoken_prepare(
                 HISTOGRAM_BLOCKS,
                 INDEX_STRIDE,
                 TILED_HISTOGRAM,
+                SINGLETON_HISTOGRAM,
             )
         else:
             count = _hash_route(
@@ -689,6 +711,7 @@ def _qsa_qtoken_prepare(
                 EPS=EPS,
                 BLOCK_HEADS=BLOCK_HEADS,
                 PREFILL=PREFILL,
+                BASE_ROPE=BASE_ROPE,
             )
 
 
@@ -716,6 +739,7 @@ def prepare_qtoken(
     q_only=False,
     padded_rows=False,
     zero_tail=False,
+    base_rope=False,
 ):
     """Fill packed Q and FlashInfer's bound locator, mask and length buffers.
 
@@ -728,6 +752,7 @@ def prepare_qtoken(
     With qkv=None, the caller has already written Q and its KV pages. q_only
     additionally compacts the query view after an existing writer. In padded
     graph prefill, route offsets may include singleton rows after the live CU.
+    base_rope selects the uncached text RoPE with three-axis position storage.
     zero_tail requires the final partially written atom to be on a private
     page. It clears masked slots that FlashInfer may still read with TMA.
     """
@@ -754,9 +779,24 @@ def prepare_qtoken(
     tiled_histogram = histogram_blocks > 16384 or (
         histogram_blocks > 8192 and tokens >= 2048
     )
+    tune_base = (
+        base_rope
+        and qkv is not None
+        and not q_only
+        and requests == 1
+        and torch.cuda.get_device_capability(qkv.device) == (10, 3)
+    )
+    singleton_histogram = (
+        tune_base and padded_rows and routes == tokens == 4 and histogram_blocks == 8192
+    )
     block_heads = 16 if prefill else 8
+    num_warps = 8 if histogram_blocks > 16384 or singleton_histogram else 4
+    if tune_base and decode_q1:
+        # Finer head tiles spread one projected token across more SMs.
+        block_heads = 4
     head_tiles = triton.cdiv(64 if q_only else 72, block_heads)
     launch_options = {}
+    interleave_prefill = False
     if (
         qkv is not None
         and not q_only
@@ -766,7 +806,11 @@ def prepare_qtoken(
     ):
         # The short metadata branch can otherwise limit residency for all QKV
         # CTAs on cold prefill. The cap is counterproductive for short batches.
-        launch_options["maxnreg"] = 64
+        tuned_prefill = tune_base and prefill and not padded_rows and tokens <= 16464
+        launch_options["maxnreg"] = 56 if tuned_prefill else 64
+        interleave_prefill = (
+            tuned_prefill and routes >= 512 and routes == triton.cdiv(tokens, 8)
+        )
     _qsa_qtoken_prepare[(routes + (tokens * head_tiles if qkv is not None else 0),)](
         qkv,
         selected,
@@ -807,7 +851,10 @@ def prepare_qtoken(
         1 if selected.shape[1] == 512 else 4,
         zero_tail,
         tiled_histogram,
-        num_warps=8 if histogram_blocks > 16384 else 4,
+        base_rope,
+        singleton_histogram,
+        interleave_prefill,
+        num_warps=num_warps,
         enable_fp_fusion=False,
         **launch_options,
     )

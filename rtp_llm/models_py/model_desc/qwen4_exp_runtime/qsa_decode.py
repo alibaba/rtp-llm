@@ -144,15 +144,18 @@ def select_decode_tokens(
     if (
         graph_decode
         and raw_query
-        and not self.is_mtp_draft
         and ratio == 4
         and token_budget == 2048
-        and self.position_state_cache is not None
-        and self.position_state_inputs is not None
-        and kv_tokens_per_block
-        == self.indexer_state_cache.seq_size_per_block
-        == self.position_state_cache.seq_size_per_block
-        == 128
+        and kv_tokens_per_block == self.indexer_state_cache.seq_size_per_block == 128
+        and (
+            self.position_state_cache is None
+            if self.is_mtp_draft
+            else (
+                self.position_state_cache is not None
+                and self.position_state_inputs is not None
+                and self.position_state_cache.seq_size_per_block == 128
+            )
+        )
         and position_ids.is_contiguous()
         and use_fused_indexer_prep()
     ):
@@ -162,15 +165,22 @@ def select_decode_tokens(
                 try_prepare_fused_decode,
             )
 
-            position_pool, position_table = _indexer_position_pool_and_table(
-                self, batch_size, q.device
-            )
-            self.mark_side_cache_written()
+            if self.is_mtp_draft:
+                if self._side_cache_undo is not None:
+                    raise RuntimeError(
+                        "qwen4_exp QSA side-cache transaction is already active"
+                    )
+                position_pool = position_table = None
+            else:
+                position_pool, position_table = _indexer_position_pool_and_table(
+                    self, batch_size, q.device
+                )
+                self.mark_side_cache_written()
             prepared = try_prepare_fused_decode(
                 q,
                 raw_keys,
                 self.main_inputs.sequence_lengths_plus_1_device,
-                position_ids.view(-1, 3),
+                position_ids.view(-1, index_factor),
                 indexer.q_norm_gamma,
                 indexer.k_norm_gamma,
                 indexer.rope_inv_freq(rope_config, fused_prep=True),
@@ -185,11 +195,16 @@ def select_decode_tokens(
                 padded=self.main_inputs.is_s_padded,
             )
             if prepared is not None:
-                rotated, visible_lengths = prepared
+                if self.is_mtp_draft:
+                    rotated, visible_lengths, undo = prepared
+                    object.__setattr__(self, "_side_cache_undo", undo)
+                else:
+                    rotated, visible_lengths = prepared
                 return try_flashinfer_decode_selection(
                     rotated, kv_pool, kv_table, visible_lengths, recipe=recipe
                 )
-            self.finalize_side_cache()
+            if not self.is_mtp_draft:
+                self.finalize_side_cache()
 
     if raw_query:
         from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (

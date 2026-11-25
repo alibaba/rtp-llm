@@ -187,7 +187,7 @@ def try_restore_selection(selected, inverse, valid):
     if not (
         selected.is_cuda
         and torch.version.hip is None
-        and torch.cuda.get_device_capability(selected.device) == (12, 0)
+        and torch.cuda.get_device_capability(selected.device) in ((10, 3), (12, 0))
         and selected.ndim == 2
         and selected.shape[1] == 2051
         and selected.shape[0] in (4, 8, 12, 16, 20, 24, 28, 32)

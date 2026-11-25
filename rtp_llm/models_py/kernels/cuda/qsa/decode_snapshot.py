@@ -19,12 +19,15 @@ def _snapshot_decode(
     STW: tl.constexpr,
     KB: tl.constexpr,
     SB: tl.constexpr,
+    INCLUSIVE_LENGTHS: tl.constexpr,
 ):
     row = tl.program_id(0)
     d = tl.arange(0, 128)
     # Match the reference's int64 conversion before arithmetic, even for
     # malformed int32 positions inspected by standalone validation.
     pos = tl.load(POS + row).to(tl.int64)
+    if INCLUSIVE_LENGTHS:
+        pos -= 1
     sc = tl.minimum(tl.maximum(pos >> 7, 0), STW - 1)
     kc = tl.minimum(tl.maximum(pos >> 7, 0), KTW - 1)
     sid = tl.load(ST + row * STW + sc).to(tl.int64)

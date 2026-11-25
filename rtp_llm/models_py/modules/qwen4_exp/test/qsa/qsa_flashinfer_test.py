@@ -117,18 +117,38 @@ class QsaFlashInferTest(unittest.TestCase):
         prepare.assert_called_once_with(ctx, q, raw, indexer, rope)
 
     def test_fused_cold_prefill_matches_dense_keys_and_cache(self):
+        self._check_fused_cold_prefill()
+
+    def test_fused_cold_draft_prefill_matches_dense_keys_and_cache(self):
+        for factor in (1, 3):
+            with self.subTest(position_factor=factor):
+                self._check_fused_cold_prefill(draft_factor=factor)
+
+    def _check_fused_cold_prefill(self, *, draft_factor=None):
         rows = 129
         rope, inv, joint, gamma = self._prep_fixture(rows)
         q, raw = joint[:, :8], joint[:, 8]
         cu = torch.tensor([0, rows], device="cuda", dtype=torch.int32)
         prefixes = cu[:1]
-        positions = (
-            torch.arange(rows, device="cuda")[:, None] + torch.arange(3, device="cuda")
-        ).int()
+        if draft_factor is None:
+            positions = (
+                torch.arange(rows, device="cuda")[:, None]
+                + torch.arange(3, device="cuda")
+            ).int()
+        else:
+            rope.style = "Base"
+            rope.index_factor = draft_factor
+            positions = torch.arange(13, rows + 13, device="cuda", dtype=torch.int32)[
+                :, None
+            ].repeat(1, draft_factor)
         table = torch.tensor([[2, 1]], device="cuda", dtype=torch.int32)
         kv = torch.randn(3, 32, 128, device="cuda", dtype=torch.bfloat16)
         state = torch.randn(3, 8, 128, device="cuda")
-        coords = torch.full((3, 8, 3), -1, device="cuda", dtype=torch.int32)
+        coords = (
+            torch.full((3, 8, 3), -1, device="cuda", dtype=torch.int32)
+            if draft_factor is None
+            else None
+        )
         expected_kv, expected_state = kv.clone(), state.clone()
         cos, sin = self._prep_rope(positions, rope)
         expected = write_zero_prefix_prefill(
@@ -160,7 +180,7 @@ class QsaFlashInferTest(unittest.TestCase):
             kv,
             table,
             coords,
-            table,
+            table if coords is not None else None,
             max_length=rows,
             norm_eps=1e-6,
             rope_config=rope,
@@ -178,10 +198,11 @@ class QsaFlashInferTest(unittest.TestCase):
             (dense, expected["block_keys"]),
             (kv, expected_kv),
             (state, expected_state),
-            (coords[2], positions[120:128]),
-            (coords[1, 0], positions[128]),
         ):
             torch.testing.assert_close(actual, reference, atol=0, rtol=0)
+        if coords is not None:
+            torch.testing.assert_close(coords[2], positions[120:128], atol=0, rtol=0)
+            torch.testing.assert_close(coords[1, 0], positions[128], atol=0, rtol=0)
 
     def test_fused_prefill_prepares_mixed_prefix_and_cold_rows(self):
         rows = 136
@@ -387,12 +408,21 @@ class QsaFlashInferTest(unittest.TestCase):
             coords = torch.randint(
                 100, 200_000, (4, 8, 3), device="cuda", dtype=torch.int32
             )
-            visible = (prefix[:, None] + order + 1).contiguous()
+            visible = prefix.new_empty((1, width))
+            compressed = torch.empty_like(visible)
+            empty_table = torch.zeros_like(table)
+            padding_tables = (table, empty_table) if width % 2 else (empty_table, table)
             pools = kv, state, coords
 
             def prepare():
                 slots, history, current = target_position_slots(
-                    prefix, cu, table, width, coords.shape[0]
+                    prefix,
+                    cu,
+                    table,
+                    width,
+                    coords.shape[0],
+                    lengths=(visible, compressed),
+                    padding_tables=padding_tables,
                 )
                 result = try_prepare_fused_target_decode(
                     q,
@@ -522,10 +552,8 @@ class QsaFlashInferTest(unittest.TestCase):
                     + 17 * order[:, None]
                     + prefix.new_tensor([81, 37, 69])
                 )
-                visible.copy_(prefix[:, None] + order + 1)
                 if padded:
                     table.zero_()
-                    visible.zero_()
                 else:
                     table.copy_(
                         table.new_tensor(
@@ -544,12 +572,25 @@ class QsaFlashInferTest(unittest.TestCase):
                 )
                 graph.replay()
                 with self.subTest(width=width, prefix=page, padded=padded):
+                    expected_visible = (
+                        torch.zeros_like(visible)
+                        if padded
+                        else prefix[:, None] + order + 1
+                    )
+                    torch.testing.assert_close(
+                        visible, expected_visible, atol=0, rtol=0
+                    )
+                    torch.testing.assert_close(
+                        compressed, expected_visible // 4, atol=0, rtol=0
+                    )
                     self.assertTrue(
                         torch.equal(
                             rotated.view(torch.uint8), expected_q.view(torch.uint8)
                         )
                     )
-                    torch.testing.assert_close(lengths, visible[:, 0] + width - 1)
+                    torch.testing.assert_close(
+                        lengths, expected_visible[:, 0] + width - 1
+                    )
                     torch.testing.assert_close(old_positions, expected_positions)
                     for field in (
                         "state_slots",
@@ -806,6 +847,163 @@ class QsaFlashInferTest(unittest.TestCase):
                     torch.testing.assert_close(
                         output, reference(), rtol=0.02, atol=0.003
                     )
+
+    def test_qtoken_draft_base_writer_matches_native(self):
+        from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
+            ZeroCenteredFusedQKRMSNorm,
+        )
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.flashinfer_qtoken import (
+            PagedQTokenG8,
+        )
+        from rtp_llm.ops import AttentionConfigs, RopeCache, RopeStyle
+        from rtp_llm.ops.fused_rope_kvcache_op import (
+            FusedRopeKVCacheDecodeOp,
+            FusedRopeKVCachePrefillOpQKVOut,
+            _get_fused_rope_kvcache,
+        )
+
+        if torch.cuda.get_device_capability() not in ((10, 0), (10, 3)):
+            self.skipTest("Qwen4 QToken G8 requires SM100 or SM103")
+        torch.manual_seed(73)
+        config = AttentionConfigs()
+        config.head_num, config.kv_head_num, config.size_per_head = 64, 4, 256
+        config.kernel_tokens_per_block, config.max_seq_len = 128, 16464
+        rope = config.rope_config
+        rope.style = RopeStyle.Base
+        rope.dim, rope.index_factor, rope.base = 64, 3, 10000000.0
+        rope.scale, rope.offset = 1.0, 0
+        norm = ZeroCenteredFusedQKRMSNorm(
+            torch.randn(256, device="cuda") * 0.1,
+            torch.randn(256, device="cuda", dtype=torch.bfloat16) * 0.1,
+            64,
+            4,
+            256,
+        )
+        with patch(
+            "rtp_llm.ops.fused_rope_kvcache_op.get_rope_cache_once",
+            return_value=RopeCache(),
+        ):
+            for prefill, graph, rows, live, prefix in (
+                (True, False, 129, 129, 0),
+                (False, True, 1, 1, 127),
+                (True, True, 4, 3, 127),
+            ):
+                with self.subTest(prefill=prefill, graph=graph):
+                    length = torch.tensor([live], dtype=torch.int32)
+                    prefixes = torch.tensor([prefix], dtype=torch.int32)
+                    cu = torch.tensor([0, live], device="cuda", dtype=torch.int32)
+                    visible = torch.arange(1, rows + 1, device="cuda") + prefix
+                    slots = torch.arange(2051, device="cuda", dtype=torch.int32)
+                    selected = torch.where(slots < visible[:, None], slots, -1).int()
+                    # Padded replay reserves the production page-table capacity
+                    # even when only the first two logical pages are live.
+                    table_columns = 129 if prefill and graph else 2
+                    table = torch.zeros(
+                        (1, table_columns), device="cuda", dtype=torch.int32
+                    )
+                    table[0, :2] = torch.tensor(
+                        [1, 3], device="cuda", dtype=torch.int32
+                    )
+                    positions = torch.full(
+                        (rows, 3), 333, device="cuda", dtype=torch.int32
+                    )
+                    positions[:, 0] = torch.arange(rows, device="cuda") * 3 + 9
+                    if rows > 1:
+                        positions[1, 0] = -1
+                    qkv = torch.randn(
+                        rows, 72 * 256, device="cuda", dtype=torch.bfloat16
+                    )
+                    initial = torch.randn(
+                        5, 2, 4, 128, 256, device="cuda", dtype=qkv.dtype
+                    )
+                    actual_pool = initial.clone()
+                    reference_pool = initial.clone()
+                    metadata = SimpleNamespace(
+                        is_prefill=prefill,
+                        is_target_verify=False,
+                        is_cuda_graph=graph,
+                        cu_seqlens_device=cu,
+                        decode_cu_seqlens_device=cu,
+                        input_lengths=length,
+                        prefix_lengths=prefixes,
+                        prefix_lengths_device=prefixes.cuda(),
+                        sequence_lengths_plus_1_device=(prefixes + 1).cuda(),
+                        kv_cache_kernel_block_id_device=table,
+                    )
+                    actual = PagedQTokenG8(
+                        metadata, qkv.shape, actual_pool, split_kv=graph
+                    )
+                    reference = PagedQTokenG8(
+                        metadata, qkv.shape, reference_pool, split_kv=graph
+                    )
+                    if prefill:
+                        native = FusedRopeKVCachePrefillOpQKVOut(config)
+                    else:
+                        native = FusedRopeKVCacheDecodeOp(config)
+                        native._sequence_lengths_device = prefixes.cuda()
+
+                    def run():
+                        actual.prepare(
+                            qkv,
+                            selected,
+                            actual_pool,
+                            positions,
+                            norm,
+                            base_rope=True,
+                            zero_tail=True,
+                        )
+
+                    def compare():
+                        params = SimpleNamespace(
+                            kv_cache_offset=_get_fused_rope_kvcache().convert_offset_to_block_array(
+                                table
+                            ),
+                            kv_cache_offset_h=None,
+                            padding_offset=None,
+                            position_ids=positions[:live].flatten(),
+                            cu_seqlens=cu,
+                            sequence_lengths=(
+                                native._sequence_lengths_device
+                                if not prefill
+                                else length
+                            ),
+                            prefix_lengths=prefixes,
+                            max_seq_len=live,
+                            max_prefix_length=int(prefixes[0]),
+                        )
+                        cache = SimpleNamespace(
+                            kv_cache_base=reference_pool, kv_scale_base=None
+                        )
+                        expected_qkv = native.forward(
+                            norm(qkv.clone())[:live], cache, params
+                        )
+                        reference.prepare(
+                            expected_qkv, selected, reference_pool, zero_tail=True
+                        )
+                        torch.testing.assert_close(
+                            actual.query, reference.query, rtol=0, atol=0
+                        )
+                        torch.testing.assert_close(
+                            actual_pool, reference_pool, rtol=0, atol=0
+                        )
+
+                    run()
+                    compare()
+                    if graph:
+                        replay = torch.cuda.CUDAGraph()
+                        with torch.cuda.graph(replay):
+                            run()
+                        actual_pool.copy_(initial)
+                        reference_pool.copy_(initial)
+                        qkv.neg_()
+                        positions[:, 0].add_(17)
+                        table[:, :2].copy_(table[:, :2].flip(1))
+                        if prefill:
+                            live -= 1
+                            length.fill_(live)
+                            cu[1] = live
+                        replay.replay()
+                        compare()
 
     def test_qtoken_gate_preserves_fp32_sigmoid_until_store(self):
         from rtp_llm.models_py.kernels.cuda.qsa.qtoken_gate import apply_qtoken_gate

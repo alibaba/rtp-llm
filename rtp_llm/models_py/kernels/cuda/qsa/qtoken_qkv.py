@@ -1,13 +1,20 @@
-"""Qwen4 Q/K normalization, MRoPE, and paged BF16 cache stores for QSA."""
+"""Qwen4 Q/K normalization, RoPE, and paged BF16 cache stores for QSA."""
 
 import triton
 import triton.language as tl
 
 
 @triton.jit
-def _mrope_factors(POS, row, logical_pos, PREFILL: tl.constexpr):
+def _rope_factors(
+    POS, row, logical_pos, PREFILL: tl.constexpr, BASE_ROPE: tl.constexpr
+):
     frequency = tl.arange(0, 32)
-    if PREFILL:
+    if BASE_ROPE:
+        # Base consumes only the first text axis. The native uncached writer
+        # uses the logical position when that explicit position is nonpositive.
+        position = tl.load(POS + row.to(tl.int64) * 3)
+        position = tl.where(position > 0, position, logical_pos)
+    elif PREFILL:
         axis = tl.where(
             frequency % 3 == 1,
             1,
@@ -78,6 +85,7 @@ def _norm_rope(
     HEADS: tl.constexpr,
     WIDE_NORM: tl.constexpr,
     PREFILL: tl.constexpr,
+    BASE_ROPE: tl.constexpr,
 ):
     source = row.to(tl.int64) * QKV_STRIDE + head[:, None] * 256 + column[None, :]
     lo = tl.load(QKV + source).to(tl.float32)
@@ -105,7 +113,7 @@ def _norm_rope(
     nhi = ((hi * inverse) * gain_hi[None, :]).to(tl.bfloat16)
 
     # The native writer rotates the BF16-rounded normalized Q/K values.
-    cosine, sine = _mrope_factors(POS, row, logical_pos, PREFILL)
+    cosine, sine = _rope_factors(POS, row, logical_pos, PREFILL, BASE_ROPE)
     cosine = tl.gather(cosine, column % 32, 0)[None, :]
     sine = tl.gather(sine, column % 32, 0)[None, :]
     peer = tl.broadcast_to((column ^ 32)[None, :], (HEADS, 128))
@@ -139,6 +147,7 @@ def prepare_qkv(
     EPS: tl.constexpr,
     BLOCK_HEADS: tl.constexpr,
     PREFILL: tl.constexpr,
+    BASE_ROPE: tl.constexpr,
     Q_HEADS: tl.constexpr = 64,
     KV_HEADS: tl.constexpr = 4,
 ):
@@ -166,6 +175,7 @@ def prepare_qkv(
             BLOCK_HEADS,
             RMS_ROWS * Q_HEADS < 16,
             PREFILL,
+            BASE_ROPE,
         )
         target = (row.to(tl.int64) * Q_HEADS + head[:, None]) * 256 + column[None, :]
         tl.store(QUERY + target, lo)
@@ -192,6 +202,7 @@ def prepare_qkv(
                 tile_heads,
                 RMS_ROWS * KV_HEADS < 16,
                 PREFILL,
+                BASE_ROPE,
             )
             target = page + cache_head[:, None] * head_stride + token
             tl.store(CACHE + target, lo)

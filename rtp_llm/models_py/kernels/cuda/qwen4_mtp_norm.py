@@ -1,4 +1,4 @@
-"""Pinned CUDA mean order for the MTP embedding's 2560-wide RMSNorm."""
+"""Graph-safe Qwen4 MTP input RMSNorms with FP32 zero-centered gains."""
 
 import math
 
@@ -86,3 +86,131 @@ def try_mtp_embedding_rms_norm(x, gamma, eps):
         enable_fp_fusion=False,
     )
     return output
+
+
+@triton.jit
+def _mtp_wide_rms_norm_row(
+    X,
+    G,
+    OUT,
+    ROW,
+    TILE_ID,
+    WIDTH: tl.constexpr,
+    LANES: tl.constexpr,
+    EPS: tl.constexpr,
+    TILE: tl.constexpr,
+):
+    # FP32 contiguous mean vectorizes four adjacent values per thread and
+    # splits the reduction across all 512 CTA threads for these widths.
+    cols = tl.arange(0, 2048)
+    partial = tl.full((2048,), 0.0, tl.float32)
+    for tile in tl.static_range(WIDTH // 2048):
+        values = tl.load(X + ROW * WIDTH + tile * 2048 + cols).to(tl.float32)
+        partial += values * values
+    even, odd = tl.split(partial.reshape(512, 2, 2))
+    a, c = tl.split(even)
+    b, d = tl.split(odd)
+    sums = ((a + b) + c) + d
+    if LANES > 32:
+        sums = tl.sum(sums.reshape(512 // LANES, LANES // 32, 32), 1)
+    else:
+        sums = sums.reshape(512 // LANES, 32)
+    variance = tl.sum(tl.sum(sums, 1), 0) * (1.0 / WIDTH)
+    columns = TILE_ID * TILE + tl.arange(0, TILE)
+    values = tl.load(X + ROW * WIDTH + columns).to(tl.float32)
+    gain = 1.0 + tl.load(G + columns).to(tl.float32)
+    inverse = tl.rsqrt(variance + EPS)
+    tl.store(OUT + ROW * WIDTH + columns, (values * inverse) * gain)
+
+
+@triton.jit
+def _mtp_wide_input_rms_norm(
+    EMBEDDING,
+    HIDDEN,
+    EMBEDDING_GAMMA,
+    HIDDEN_GAMMA,
+    EMBEDDING_OUT,
+    HIDDEN_OUT,
+    LANES: tl.constexpr,
+    EPS: tl.constexpr,
+    EMBEDDING_TILE: tl.constexpr,
+    HIDDEN_TILE: tl.constexpr,
+):
+    row = tl.program_id(0)
+    tile = tl.program_id(1)
+    if tile < 8192 // EMBEDDING_TILE:
+        _mtp_wide_rms_norm_row(
+            EMBEDDING,
+            EMBEDDING_GAMMA,
+            EMBEDDING_OUT,
+            row,
+            tile,
+            8192,
+            LANES,
+            EPS,
+            EMBEDDING_TILE,
+        )
+    else:
+        _mtp_wide_rms_norm_row(
+            HIDDEN,
+            HIDDEN_GAMMA,
+            HIDDEN_OUT,
+            row,
+            tile - 8192 // EMBEDDING_TILE,
+            32768,
+            LANES,
+            EPS,
+            HIDDEN_TILE,
+        )
+
+
+def try_mtp_wide_input_rms_norm(embedding, hidden, embedding_gamma, hidden_gamma, eps):
+    if not (
+        embedding.is_cuda
+        and torch.version.hip is None
+        and torch.version.git_version == _TORCH_GIT
+        and not torch.are_deterministic_algorithms_enabled()
+        and isinstance(eps, (float, int))
+        and math.isfinite(eps)
+        and eps >= 0
+        and embedding.ndim == hidden.ndim == 2
+        and embedding.shape[0] == hidden.shape[0]
+        and 1 <= embedding.shape[0] <= 32768
+        and embedding.shape[1] == 8192
+        and hidden.shape[1] == 32768
+        and embedding_gamma.shape == (8192,)
+        and hidden_gamma.shape == (32768,)
+        and embedding.dtype == hidden.dtype == torch.bfloat16
+        and all(
+            tensor.device == embedding.device
+            and tensor.is_contiguous()
+            and not tensor.requires_grad
+            for tensor in (embedding, hidden, embedding_gamma, hidden_gamma)
+        )
+        and all(
+            gamma.dtype in (torch.bfloat16, torch.float32)
+            for gamma in (embedding_gamma, hidden_gamma)
+        )
+        and torch.cuda.get_device_capability(embedding.device) == (10, 3)
+    ):
+        return None
+    rows = embedding.shape[0]
+    lanes = max(32, 512 // (1 << (rows.bit_length() - 1)))
+    embedding_tile, hidden_tile = (2048, 4096) if rows <= 32 else (8192, 32768)
+    embedding_out = torch.empty_like(embedding)
+    hidden_out = torch.empty_like(hidden)
+    _mtp_wide_input_rms_norm[(rows, 8192 // embedding_tile + 32768 // hidden_tile)](
+        embedding,
+        hidden,
+        embedding_gamma,
+        hidden_gamma,
+        embedding_out,
+        hidden_out,
+        LANES=lanes,
+        EPS=eps,
+        EMBEDDING_TILE=embedding_tile,
+        HIDDEN_TILE=hidden_tile,
+        num_warps=8,
+        enable_fp_fusion=False,
+    )
+    return embedding_out, hidden_out

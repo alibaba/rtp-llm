@@ -226,7 +226,6 @@ class Qwen4ExpAttention(Qwen3NextAttention):
             and type(qsa_runtime) is Qwen4ExpQSARuntimeContext
             and type(self.qsa_indexer) is Qwen4ExpQSAIndexer
             and not qsa_runtime.main_inputs.is_target_verify
-            and not qsa_runtime.is_mtp_draft
             and (
                 qsa_runtime.main_inputs.is_prefill
                 or qsa_runtime.main_inputs.is_cuda_graph
@@ -284,7 +283,7 @@ class Qwen4ExpAttention(Qwen3NextAttention):
                 raw_keys,
                 indexer=self.qsa_indexer,
                 rope_config=self.qsa_rope_config,
-                **({"raw_query": True} if raw_query else {}),
+                **({"raw_query": True} if raw_query or fused_query else {}),
             )
         if fused_query:
             from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_prefill import (
