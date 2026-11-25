@@ -1,4 +1,5 @@
 import os
+from contextlib import nullcontext
 from typing import Any, Dict, Optional
 
 import torch
@@ -33,6 +34,10 @@ from rtp_llm.models_py.modules.base.cuda.bf16_fp32_router import (
     bf16_fp32_router_logits,
     prepare_bf16_fp32_router_weight,
 )
+from rtp_llm.models_py.modules.base.cuda.paged_mqa import (
+    adaptive_target_layout,
+    reuse_adaptive_paged_mqa_tables,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
@@ -41,6 +46,7 @@ from rtp_llm.models_py.modules.hybrid.cmp_moe_streams import CmpMoeStreams
 from rtp_llm.models_py.modules.hybrid.glm5_cmp import (
     Glm5Cmp,
     resolve_glm5_cmp_enabled,
+    reuse_adaptive_cmp_physical_indices,
     should_enable_glm5_cmp,
 )
 from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
@@ -1046,6 +1052,10 @@ class GenericMoeModel(GptModelBase):
             py_hw_kernel_config=py_hw_kernel_config,
             device_resource_config=device_resource_config,
         )
+        self._adaptive_gc_tile32 = (
+            moe_config.moe_strategy == "gc_moe_se"
+            and os.environ.get("RTP_LLM_ADAPTIVE_EP_GC_TILE32", "0") == "1"
+        )
         # Determine attention_type from model_config.attn_config.use_mla
         self.embed_tokens = Embedding(
             model_config, parallelism_config, weights.get_global_weight(W.embedding)
@@ -1079,7 +1089,25 @@ class GenericMoeModel(GptModelBase):
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         failed = True
         try:
-            result = self._forward(inputs, fmha_impl)
+            attention_inputs = inputs.attention_inputs
+            gc_tile32_scope = nullcontext()
+            if (
+                getattr(self, "_adaptive_gc_tile32", False)
+                and bool(getattr(fmha_impl, "is_cuda_graph", False))
+                and adaptive_target_layout(attention_inputs)
+                and not getattr(attention_inputs, "is_draft_extend", False)
+            ):
+                from rtp_llm.models_py.modules.glm5_gc_moe.gc_moe_se import (
+                    adaptive_gc_moe_se_tile32,
+                )
+
+                gc_tile32_scope = adaptive_gc_moe_se_tile32()
+            with (
+                reuse_adaptive_paged_mqa_tables(attention_inputs),
+                reuse_adaptive_cmp_physical_indices(attention_inputs),
+                gc_tile32_scope,
+            ):
+                result = self._forward(inputs, fmha_impl)
             failed = False
             return result
         finally:

@@ -1,4 +1,6 @@
+#include <chrono>
 #include <cstdlib>
+#include <future>
 #include <memory>
 #include <string>
 #include "gtest/gtest.h"
@@ -12,7 +14,7 @@ class ScopedPerfLocalEnv {
 public:
     explicit ScopedPerfLocalEnv(const char* value) {
         const auto* old = std::getenv("RTP_LLM_PERF_LOCAL_REQUESTS");
-        present_ = old != nullptr;
+        present_        = old != nullptr;
         if (old) {
             previous_ = old;
         }
@@ -25,13 +27,37 @@ public:
             unsetenv("RTP_LLM_PERF_LOCAL_REQUESTS");
         }
     }
+
 private:
-    bool present_;
+    bool        present_;
     std::string previous_;
 };
 }  // namespace
 
 class BatchDecodeSchedulerTest: public DeviceTestBase {};
+
+TEST_F(BatchDecodeSchedulerTest, EmptyPerfDecodeRankYieldsForPeerStep) {
+    struct Case {
+        const char* perf_env;
+        bool        need_fill_fake_stream;
+        bool        expect_ready;
+    };
+    for (const auto& test_case : {Case{"1", true, true}, Case{"1", false, false}, Case{"0", true, false}}) {
+        ScopedPerfLocalEnv env(test_case.perf_env);
+        RuntimeConfig      runtime;
+        runtime.use_batch_decode_scheduler                                      = true;
+        runtime.batch_decode_scheduler_config.batch_decode_scheduler_batch_size = 1;
+        BatchDecodeScheduler scheduler(runtime, nullptr, nullptr, 0, test_case.need_fill_fake_stream);
+
+        auto       result = std::async(std::launch::async, [&scheduler] { return scheduler.schedule(); });
+        const auto status = result.wait_for(std::chrono::milliseconds(500));
+        ASSERT_TRUE(scheduler.stop().ok());
+        EXPECT_EQ(status, test_case.expect_ready ? std::future_status::ready : std::future_status::timeout);
+        const auto scheduled = result.get();
+        ASSERT_TRUE(scheduled.ok());
+        EXPECT_TRUE(scheduled->empty());
+    }
+}
 
 TEST_F(BatchDecodeSchedulerTest, StartupWarmupModePreservesContextAndAllowsOverride) {
     ScopedPerfLocalEnv env("0");
@@ -40,26 +66,26 @@ TEST_F(BatchDecodeSchedulerTest, StartupWarmupModePreservesContextAndAllowsOverr
             SCOPED_TRACE(warmup_type);
             SCOPED_TRACE(switch_mode);
             auto config = makeMhaCacheConfig(1, 32, 1, 4, 8, DataType::TYPE_FP16);
-            auto cache = std::make_shared<KVCacheManager>(config);
+            auto cache  = std::make_shared<KVCacheManager>(config);
             ASSERT_TRUE(cache->init());
             ResourceContext resources;
             resources.cache_manager = cache;
-            resources.role_type = RoleType::PREFILL;
+            resources.role_type     = RoleType::PREFILL;
             ModelConfig model;
             model.max_seq_len = 8192;
             RuntimeConfig runtime;
-            runtime.use_batch_decode_scheduler = true;
-            runtime.batch_decode_scheduler_config.batch_decode_scheduler_batch_size = 1;
+            runtime.use_batch_decode_scheduler                                       = true;
+            runtime.batch_decode_scheduler_config.batch_decode_scheduler_batch_size  = 1;
             runtime.batch_decode_scheduler_config.batch_decode_scheduler_warmup_type = warmup_type;
             BatchDecodeScheduler scheduler(runtime, cache, nullptr);
-            const bool expected_prefill = (warmup_type != 0) != switch_mode;
+            const bool           expected_prefill = (warmup_type != 0) != switch_mode;
             if (switch_mode) {
                 scheduler.updateSchedulerInfo(expected_prefill ? "{\"batch_size\":1,\"mode\":\"prefill\"}" :
                                                                  "{\"batch_size\":1,\"mode\":\"decode\"}");
             }
-            auto input = std::make_shared<GenerateInput>();
-            input->input_ids = torch::zeros({2}, torch::kInt32);
-            input->generate_config = std::make_shared<GenerateConfig>();
+            auto input                             = std::make_shared<GenerateInput>();
+            input->input_ids                       = torch::zeros({2}, torch::kInt32);
+            input->generate_config                 = std::make_shared<GenerateConfig>();
             input->generate_config->max_new_tokens = 1;
             auto stream = std::make_shared<NormalGenerateStream>(input, model, runtime, resources, nullptr);
             ASSERT_TRUE(scheduler.enqueue(stream).ok());
@@ -76,25 +102,25 @@ TEST_F(BatchDecodeSchedulerTest, StartupWarmupModePreservesContextAndAllowsOverr
 
 TEST_F(BatchDecodeSchedulerTest, PerfLocalDecodeAllocatesAndReleasesRealBlocks) {
     ScopedPerfLocalEnv env("1");
-    auto config = makeMhaCacheConfig(1, 32, 1, 4, 8, DataType::TYPE_FP16);
-    auto cache = std::make_shared<KVCacheManager>(config);
+    auto               config = makeMhaCacheConfig(1, 32, 1, 4, 8, DataType::TYPE_FP16);
+    auto               cache  = std::make_shared<KVCacheManager>(config);
     ASSERT_TRUE(cache->init());
     for (auto& buffer : cache->gpuCacheTensors()) {
         buffer.fill_(17);
     }
-    const auto free_before = cache->freeBlocksNum();
+    const auto      free_before = cache->freeBlocksNum();
     ResourceContext resources;
     resources.cache_manager = cache;
-    resources.role_type = RoleType::DECODE;
+    resources.role_type     = RoleType::DECODE;
     ModelConfig model;
     model.max_seq_len = 8192;
     RuntimeConfig runtime;
-    runtime.use_batch_decode_scheduler = true;
+    runtime.use_batch_decode_scheduler                                      = true;
     runtime.batch_decode_scheduler_config.batch_decode_scheduler_batch_size = 1;
     BatchDecodeScheduler scheduler(runtime, cache, nullptr);
-    auto input = std::make_shared<GenerateInput>();
-    input->input_ids = torch::zeros({12}, torch::kInt32);
-    input->generate_config = std::make_shared<GenerateConfig>();
+    auto                 input             = std::make_shared<GenerateInput>();
+    input->input_ids                       = torch::zeros({12}, torch::kInt32);
+    input->generate_config                 = std::make_shared<GenerateConfig>();
     input->generate_config->max_new_tokens = 30;
     auto stream = std::make_shared<NormalGenerateStream>(input, model, runtime, resources, nullptr);
     stream->setReserveStep(4);
@@ -121,25 +147,25 @@ TEST_F(BatchDecodeSchedulerTest, PerfLocalDecodeAllocatesAndReleasesRealBlocks) 
 TEST_F(BatchDecodeSchedulerTest, PerfGateOffAndOtherRolesKeepCacheContents) {
     for (const auto role : {RoleType::DECODE, RoleType::PDFUSION}) {
         ScopedPerfLocalEnv env(role == RoleType::DECODE ? "0" : "1");
-        auto config = makeMhaCacheConfig(1, 32, 1, 4, 8, DataType::TYPE_FP16);
-        auto cache = std::make_shared<KVCacheManager>(config);
+        auto               config = makeMhaCacheConfig(1, 32, 1, 4, 8, DataType::TYPE_FP16);
+        auto               cache  = std::make_shared<KVCacheManager>(config);
         ASSERT_TRUE(cache->init());
         for (auto& buffer : cache->gpuCacheTensors()) {
             buffer.fill_(17);
         }
         ResourceContext resources;
         resources.cache_manager = cache;
-        resources.role_type = role;
+        resources.role_type     = role;
         ModelConfig model;
         model.max_seq_len = 8192;
         RuntimeConfig runtime;
-        runtime.use_batch_decode_scheduler = true;
+        runtime.use_batch_decode_scheduler                                      = true;
         runtime.batch_decode_scheduler_config.batch_decode_scheduler_batch_size = 1;
         BatchDecodeScheduler scheduler(runtime, cache, nullptr);
-        auto input = std::make_shared<GenerateInput>();
-        input->input_ids = torch::zeros({12}, torch::kInt32);
-        input->generate_config = std::make_shared<GenerateConfig>();
-        auto stream = std::make_shared<NormalGenerateStream>(input, model, runtime, resources, nullptr);
+        auto                 input = std::make_shared<GenerateInput>();
+        input->input_ids           = torch::zeros({12}, torch::kInt32);
+        input->generate_config     = std::make_shared<GenerateConfig>();
+        auto stream                = std::make_shared<NormalGenerateStream>(input, model, runtime, resources, nullptr);
         ASSERT_TRUE(scheduler.enqueue(stream).ok());
         ASSERT_TRUE(scheduler.schedule().ok());
         EXPECT_FALSE(scheduler.perf_cache_initialized_);
@@ -152,22 +178,22 @@ TEST_F(BatchDecodeSchedulerTest, PerfGateOffAndOtherRolesKeepCacheContents) {
 
 TEST_F(BatchDecodeSchedulerTest, PerfLocalDecodeAllocationFailureTerminates) {
     ScopedPerfLocalEnv env("1");
-    auto config = makeMhaCacheConfig(1, 2, 1, 4, 8, DataType::TYPE_FP16);
-    auto cache = std::make_shared<KVCacheManager>(config);
+    auto               config = makeMhaCacheConfig(1, 2, 1, 4, 8, DataType::TYPE_FP16);
+    auto               cache  = std::make_shared<KVCacheManager>(config);
     ASSERT_TRUE(cache->init());
     ResourceContext resources;
     resources.cache_manager = cache;
-    resources.role_type = RoleType::DECODE;
+    resources.role_type     = RoleType::DECODE;
     ModelConfig model;
     model.max_seq_len = 8192;
     RuntimeConfig runtime;
-    runtime.use_batch_decode_scheduler = true;
+    runtime.use_batch_decode_scheduler                                      = true;
     runtime.batch_decode_scheduler_config.batch_decode_scheduler_batch_size = 1;
     BatchDecodeScheduler scheduler(runtime, cache, nullptr);
-    auto input = std::make_shared<GenerateInput>();
-    input->input_ids = torch::zeros({64}, torch::kInt32);
-    input->generate_config = std::make_shared<GenerateConfig>();
-    auto stream = std::make_shared<NormalGenerateStream>(input, model, runtime, resources, nullptr);
+    auto                 input = std::make_shared<GenerateInput>();
+    input->input_ids           = torch::zeros({64}, torch::kInt32);
+    input->generate_config     = std::make_shared<GenerateConfig>();
+    auto stream                = std::make_shared<NormalGenerateStream>(input, model, runtime, resources, nullptr);
     ASSERT_TRUE(scheduler.enqueue(stream).ok());
     const auto result = scheduler.schedule();
     ASSERT_TRUE(result.ok());

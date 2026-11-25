@@ -223,10 +223,43 @@ not disable the new rejection backend.
 
 With five draft steps, `RTP_LLM_ADAPTIVE_VERIFY_CAP=3` admits exactly the first
 three draft tokens and executes four Target positions per request, including
-the bonus position. Unset or `-1` enables dynamic budgeting: the first rounds for
-each batch size measure uniform verification lengths, then interpolate the
-observed CUDA-event costs. Missing seed predictions keep full verification when
-selecting a dynamic budget. Forced-acceptance requests do not train the estimator.
+the bonus position. The default, `-1`, enables dynamic budgeting. GLM5 TP1 Decode
+with EP > 1, five draft steps, and CUDA Graph uses a goal of 4.5 Target rows per
+request (including the bonus position). Set
+`RTP_LLM_ADAPTIVE_EP_VERIFY_ROWS_PER_REQUEST` to override the goal with a value in
+`[1, 6]`. The goal selects a captured row bucket and actual rows may differ.
+Missing or stale confidence keeps full verification. An explicit alternative
+EP policy takes precedence over the default goal. Other layouts keep their
+existing dynamic policy. Forced-acceptance requests do not train the estimator.
+
+Adaptive verification enables fused row restore on supported CUDA inputs and
+Indexer page-table reuse within ragged Target forwards by default. Set
+`RTP_LLM_ADAPTIVE_VERIFY_FUSED_RESTORE=0` or
+`RTP_LLM_ADAPTIVE_INDEXER_REUSE_PAGE_TABLE=0` to disable either optimization.
+
+With adaptive verification and CUDA Graph enabled, Target graphs use sparse
+**total packed token-row** buckets, not ordinary decode batch-size buckets.
+The maximum is `CONCURRENCY_LIMIT * (draft_steps + 1)`. By default, buckets start
+with 1, 2, 4, 8; each doubling interval up to 1024 has four subdivisions, followed
+by strides of 128 up to 4096 and 256 thereafter. The exact maximum is always
+included. For concurrency 64 and five draft steps this produces 26 graphs up to
+384 rows.
+
+Set `RTP_LLM_ADAPTIVE_CAPTURE_ROWS` to a comma-separated list of positive integers
+to override this grid, for example `1,2,4,8,16,24,32,48,64,96,128,192,256,384`.
+For finer capture, enumerate more row counts (ranges such as `1-48` are not
+accepted). An unset or empty value keeps the default grid. Explicit lists are
+sorted and deduplicated, and the maximum is appended if omitted. Empty entries,
+non-integers, zero, negative values and values above the maximum fail startup.
+Configure the same value on every rank and restart the service after changes.
+
+Replay rounds live rows up to the next configured bucket. The adaptive cost model
+uses this same normalized bucket list for calibration and budget evaluation;
+extra logical rows within a bucket are not charged as a larger graph. Padding
+rows are excluded from valid KV writes and outputs. More buckets can reduce
+padding but increase startup capture work. This setting does not change
+non-adaptive graphs or eager execution, and it does not replace
+`DECODE_CAPTURE_CONFIG` for ordinary decode graphs.
 
 Dynamic budgeting reads current confidence rows on the CPU before Target forward.
 Request/step indices are cached on the GPU; feedback validation and estimator

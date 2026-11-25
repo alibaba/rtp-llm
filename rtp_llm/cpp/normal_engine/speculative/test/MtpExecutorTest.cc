@@ -1,12 +1,16 @@
 #include <algorithm>
+#include <cmath>
 #include <memory>
 #include <limits>
 #include <chrono>
+#include <cstdlib>
 #include "torch/all.h"
 #include "autil/EnvUtil.h"
 #include "gtest/gtest.h"
+#include "pybind11/embed.h"
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/engine_base/TorchProfiler.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
@@ -554,7 +558,7 @@ TEST_F(MtpExecutorTest, testForwardOverlapHiddenStateContract) {
     target.attn_config.layer_compress_ratios.clear();
     draft.hc_mult = 4;
     EXPECT_FALSE(MtpExecutor::supportsForwardOverlapHiddenState(target, draft));
-    draft.hc_mult = 1;
+    draft.hc_mult     = 1;
     draft.hidden_size = 16;
     EXPECT_FALSE(MtpExecutor::supportsForwardOverlapHiddenState(target, draft));
 }
@@ -575,6 +579,41 @@ TEST_F(MtpExecutorTest, testDraftRawLogitsOptimizationIsOptIn) {
     EXPECT_EQ(optimized.forward(logits).token_ids.item<int64_t>(), 1);
 }
 
+TEST_F(MtpExecutorTest, testOptionalDraftTopTwoMarginKeepsGreedyProposal) {
+#if USING_CUDA
+    autil::EnvGuard fuse("RTP_LLM_MTP_OPTIMIZE", "1");
+    const auto      options = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    auto            mapping = torch::arange(4097, options.dtype(torch::kInt64)).flip({0});
+    auto            logits  = torch::full({4, 4097}, -120.0f, options);
+    logits[0][3].fill_(2.0f);
+    logits[0][4096].fill_(1.0f);
+    logits[1][2047].fill_(3.0f);
+    logits[1][2048].fill_(3.0f);
+    logits[2][4096].fill_(100.0f);
+    logits[3][130].fill_(std::numeric_limits<float>::quiet_NaN());
+    spec::FastTopKSampler       sampler(mapping, /*compact_point_mass=*/true);
+    const auto                  original = sampler.forward(logits);
+    spec::MtpDraftSampleContext context;
+    context.selected_logit_margin = torch::full({4}, std::numeric_limits<float>::quiet_NaN(), options);
+    const auto actual             = sampler.forward(logits, 1, &context);
+    ASSERT_TRUE(actual.token_ids_int32.defined());
+    EXPECT_TRUE(torch::equal(actual.token_ids, original.token_ids));
+    EXPECT_TRUE(torch::equal(actual.token_ids_int32, original.token_ids_int32));
+    EXPECT_FALSE(actual.all_probs.defined());
+    const auto gaps = context.selected_logit_margin.cpu();
+    EXPECT_NEAR(gaps[0].item<float>(), 1.0f, 1.0e-6f);
+    EXPECT_EQ(gaps[1].item<float>(), 0.0f);
+    EXPECT_EQ(gaps[2].item<float>(), 32.0f);
+    EXPECT_TRUE(std::isnan(gaps[3].item<float>()));
+
+    context.selected_logit_margin.fill_(std::numeric_limits<float>::quiet_NaN());
+    const auto bf16_logits = logits.to(torch::kBFloat16);
+    EXPECT_TRUE(
+        torch::equal(sampler.forward(bf16_logits, 1, &context).token_ids, sampler.forward(bf16_logits).token_ids));
+    EXPECT_TRUE(torch::isnan(context.selected_logit_margin).all().item<bool>());
+#endif
+}
+
 TEST_F(MtpExecutorTest, testDeterministicDraftSamplerReportsPointMassProposal) {
     auto identity_map = torch::arange(4, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA));
     spec::FastTopKSampler sampler(identity_map);
@@ -588,6 +627,24 @@ TEST_F(MtpExecutorTest, testDeterministicDraftSamplerReportsPointMassProposal) {
 }
 
 #if USING_CUDA
+TEST_F(MtpExecutorTest, testGreedyConfidencePreservesProposal) {
+#if USING_CUDA
+    const auto options = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    auto       logits  = torch::randn({14, 4099}, options);
+    // Tied maxima must keep the original lowest-ID choice.
+    logits[0].zero_();
+    spec::FastTopKSampler       sampler(torch::Tensor(), true);
+    auto                        baseline = sampler.forward(logits);
+    spec::MtpDraftSampleContext context;
+    context.selected_probability = torch::full({14}, -1.0, options);
+    auto observed                = sampler.forward(logits, 1, &context);
+    auto expected                = std::get<0>(torch::max(torch::softmax(logits, -1), -1, false));
+    EXPECT_TRUE(torch::equal(observed.token_ids, baseline.token_ids));
+    EXPECT_TRUE(torch::equal(context.selected_probability, expected));
+    EXPECT_FALSE(observed.all_probs.defined());
+#endif
+}
+
 TEST_F(MtpExecutorTest, testRejectionSamplingOverwritesPoisonedOutputs) {
     const auto i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
     const auto f32 = i32.dtype(torch::kFloat32);
@@ -713,8 +770,8 @@ TEST_F(MtpExecutorTest, testCompactPointMassProposalAndRejection) {
     EXPECT_TRUE(mapped.compactPointMassEnabled());
     auto                  mapping = torch::arange(7, i32.dtype(torch::kInt64)).flip({0});
     spec::FastTopKSampler remapped(mapping, true);
-    auto                  logits = torch::arange(7, f32).unsqueeze(0);
-    auto remapped_output = remapped.forward(logits);
+    auto                  logits          = torch::arange(7, f32).unsqueeze(0);
+    auto                  remapped_output = remapped.forward(logits);
     EXPECT_EQ(remapped_output.token_ids.item<int64_t>(), 0);
     EXPECT_FALSE(remapped_output.all_probs.defined());
     auto multiple = dense.forward(logits, 3);
@@ -1255,20 +1312,219 @@ TEST_F(MtpExecutorTest, testForwardOverlapConsumesGrpcPayloadBeforeFirstForwardA
     EXPECT_FALSE(stream->hasPendingAsyncBookkeeping());
 }
 
+TEST_F(MtpExecutorTest, testVerificationMetricsStayAlignedAcrossBatches) {
+    MtpExecutorTestConfig config;
+    config.gen_num_per_cycle = 3;
+    auto  components         = createMtpExecutorComponents(config);
+    auto& executor           = *components.executor;
+    auto  event              = cuda_graph::makeGraphEvent();
+    EXPECT_FALSE(executor.consumePendingAcceptLenMetrics().valid);
+    VerificationMetrics mixed;
+    mixed.batch_size        = 2;
+    mixed.target_rows       = 5;
+    mixed.dense_rows        = 8;
+    mixed.execution_rows    = 10;
+    mixed.graph_replay      = true;
+    mixed.adaptive_enabled  = true;
+    mixed.decision_mode     = 2;
+    mixed.zero_cap_requests = 1;
+    mixed.full_cap_requests = 1;
+    mixed.plan_us           = 12.5;
+    executor.stageAcceptLenMetrics(torch::tensor({1, 3}, torch::kInt32), event, 2, {0, 1}, {}, {}, mixed);
+    const auto previous = executor.consumePendingAcceptLenMetrics();
+    EXPECT_TRUE(previous.valid);
+    EXPECT_EQ(previous.total_accept_len, 4);
+    EXPECT_EQ(previous.verification.batch_size, 2);
+    EXPECT_DOUBLE_EQ(previous.verification.rowsPerRequest(), 2.5);
+    EXPECT_TRUE(previous.verification.hasExecutionRows());
+    EXPECT_EQ(previous.verification.execution_rows, 10);
+    EXPECT_TRUE(previous.verification.graph_replay);
+    EXPECT_DOUBLE_EQ(previous.verification.savedRowRatio(), 0.375);
+    EXPECT_DOUBLE_EQ(previous.verification.verifiedDraftAcceptRate(previous.total_accept_len), 2.0 / 3);
+    EXPECT_EQ(previous.verification.decision_mode, 2);
+    EXPECT_DOUBLE_EQ(previous.verification.plan_us, 12.5);
+    EXPECT_FALSE(executor.consumePendingAcceptLenMetrics().valid);
+    VerificationMetrics zero = mixed;
+    zero.batch_size = zero.target_rows = 1;
+    zero.dense_rows                    = 4;
+    zero.execution_rows                = 1;
+    zero.graph_replay                  = false;
+    zero.zero_cap_requests             = 1;
+    zero.full_cap_requests             = 0;
+    zero.decision_mode                 = 0;
+    executor.stageAcceptLenMetrics(torch::ones({1}, torch::kInt32), event, 1, {1}, {}, {}, zero);
+    const auto next = executor.consumePendingAcceptLenMetrics();
+    EXPECT_EQ(next.total_accept_len, 1);
+    EXPECT_EQ(next.verification.batch_size, 1);
+    EXPECT_TRUE(next.verification.hasExecutionRows());
+    EXPECT_EQ(next.verification.execution_rows, 1);
+    EXPECT_FALSE(next.verification.graph_replay);
+    EXPECT_DOUBLE_EQ(next.verification.savedRowRatio(), 0.75);
+    EXPECT_DOUBLE_EQ(next.verification.verifiedDraftAcceptRate(1), 0);
+    EXPECT_EQ(next.verification.full_cap_requests, 0);
+    EXPECT_FALSE(VerificationMetrics{}.valid());
+    mixed.execution_rows = 0;
+    EXPECT_FALSE(mixed.hasExecutionRows());
+    mixed.execution_rows = mixed.target_rows - 1;
+    EXPECT_FALSE(mixed.hasExecutionRows());
+
+    // Current GPU allocation can differ from the host's stale prediction.
+    // Keep producer storage alive through the existing metrics-stream event.
+    auto                options   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    auto                accepted  = torch::tensor({1, 4, 2}, options);
+    auto                caps      = torch::tensor({0, 3, 1}, options);
+    VerificationMetrics refreshed = mixed;
+    refreshed.batch_size          = 3;
+    refreshed.target_rows         = 7;
+    refreshed.dense_rows          = 12;
+    refreshed.zero_cap_requests   = 0;
+    refreshed.full_cap_requests   = 3;
+    event.record(cuda_graph::graphGetCurrentStream());
+    executor.stageAcceptLenMetrics(accepted, event, 3, {0, 1, 1}, {}, {}, refreshed, caps);
+    accepted = torch::Tensor();
+    caps     = torch::Tensor();
+    // Releasing callers' references and allocating another tensor must not
+    // recycle the staged producer storage before its D2H completes.
+    auto       scratch = torch::full({3}, 99, options);
+    const auto gpu     = executor.consumePendingAcceptLenMetrics();
+    EXPECT_TRUE(gpu.valid);
+    EXPECT_EQ(gpu.total_accept_len, 7);
+    EXPECT_EQ(gpu.total_stream_num, 3);
+    EXPECT_EQ(gpu.total_propose_token_num, 9);
+    EXPECT_EQ(gpu.verification.zero_cap_requests, 1);
+    EXPECT_EQ(gpu.verification.full_cap_requests, 1);
+    EXPECT_EQ(gpu.verification.target_rows, 7);
+    EXPECT_EQ(gpu.accept_len_by_priority.at(0), 1);
+    EXPECT_EQ(gpu.accept_len_by_priority.at(1), 6);
+    EXPECT_FALSE(executor.metrics_verification_caps_gpu_.defined());
+    EXPECT_FALSE(executor.metrics_verification_caps_cpu_.defined());
+    EXPECT_FALSE(executor.consumePendingAcceptLenMetrics().valid);
+}
+
+#if USING_CUDA
+TEST_F(MtpExecutorTest, testAdaptiveRestoreMatchesDenseZerosAndIndexCopy) {
+    const auto                          cuda_options = torch::TensorOptions().device(torch::kCUDA);
+    const auto                          stream       = cuda_graph::graphGetCurrentStream().stream();
+    const std::vector<std::vector<int>> trimmed      = {
+        {4, 5},
+        {29, 83},
+        {5, 77, 83},
+        {1, 2, 3, 4, 5, 10, 11, 16, 17, 23, 28, 29, 35, 46, 47, 53, 59, 65, 71, 83},
+    };
+    for (const auto& removed : trimmed) {
+        std::vector<int64_t> retained;
+        for (int i = 0; i < 84; ++i) {
+            if (std::find(removed.begin(), removed.end(), i) == removed.end()) {
+                retained.push_back(i);
+            }
+        }
+        const auto rows = torch::tensor(retained, cuda_options.dtype(torch::kInt64));
+        for (const auto dtype : {torch::kBFloat16, torch::kFloat32}) {
+            const auto cols    = dtype == torch::kFloat32 ? 154880 : 6144;
+            auto       compact = torch::randn({rows.numel(), cols}, cuda_options.dtype(dtype));
+            // Include signed zero and NaN; compare the underlying bytes.
+            compact[0][0]  = -0.0;
+            compact[0][1]  = std::numeric_limits<float>::quiet_NaN();
+            auto reference = torch::zeros({84, cols}, compact.options());
+            reference.index_copy_(0, rows, compact);
+            auto actual = tryMtpRestoreAdaptiveRows(compact, rows, 84, stream);
+            ASSERT_TRUE(actual.defined());
+            ASSERT_TRUE(torch::equal(reference.view(torch::kUInt8), actual.view(torch::kUInt8)));
+            auto strided = compact.slice(1, 0, cols, 2);
+            ASSERT_FALSE(tryMtpRestoreAdaptiveRows(strided, rows, 84, stream).defined());
+            auto odd_width = compact.slice(1, 0, cols - 1).contiguous();
+            ASSERT_FALSE(tryMtpRestoreAdaptiveRows(odd_width, rows, 84, stream).defined());
+        }
+    }
+}
+#endif
+
+TEST_F(MtpExecutorTest, testAdaptiveTargetPrepareUsesExactPackedMetadata) {
+    if (!autil::EnvUtil::getEnv("RTP_LLM_MTP_ASYNC_PREPARE", false)) {
+        GTEST_SKIP() << "Run the adaptive async-prepare target";
+    }
+    struct PreparedModel final: ModelBase {
+        GptModelInputs  prepared;
+        int             calls = 0;
+        GptModelOutputs forward(const GptModelInputs&) override {
+            return {};
+        }
+        void prepareAttentionInputs(const GptModelInputs& inputs) override {
+            prepared = inputs;
+            ++calls;
+        }
+    };
+    MtpExecutorTestConfig config;
+    config.gen_num_per_cycle = 3;
+    auto  components         = createMtpExecutorComponents(config);
+    auto& executor           = *components.executor;
+    // Enable after construction: this test exercises metadata, not the Python sampler.
+    executor.adaptive_verification_ = true;
+    auto  model                     = std::make_unique<PreparedModel>();
+    auto* captured                  = model.get();
+    executor.setTargetModel(std::move(model));
+    const auto options = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    for (const std::vector<int32_t>& caps : {std::vector<int32_t>{0, 0}, {1, 3}, {3, 3}}) {
+        GptModelInputs input;
+        input.combo_tokens            = torch::zeros({2}, options);
+        input.input_lengths           = torch::ones({2}, options);
+        input.prefix_lengths          = torch::tensor({31, 63}, options);
+        input.sequence_lengths        = torch::tensor({32, 64}, options);
+        input.lm_output_indexes       = torch::tensor({0, 1}, options);
+        auto          capacities      = torch::tensor(caps, options);
+        const int64_t total           = 2 + caps[0] + caps[1];
+        const auto    original_prefix = input.prefix_lengths.clone();
+        executor.launchTargetVerifyPrepareAsync(input, 2, capacities, total);
+        executor.target_verify_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());
+        ASSERT_GT(captured->calls, 0);
+        EXPECT_EQ(captured->prepared.combo_tokens.numel(), total);
+        checkTensorEqual(captured->prepared.input_lengths, capacities + 1);
+        checkTensorEqual(captured->prepared.prefix_lengths, original_prefix);
+        checkTensorEqual(captured->prepared.sequence_lengths_plus_1, original_prefix + 1);
+        checkTensorEqual(captured->prepared.lm_output_indexes, torch::arange(total, options));
+        checkTensorEqual(input.input_lengths, torch::ones({2}, options));
+        EXPECT_TRUE(captured->prepared.is_target_verify);
+    }
+    EXPECT_EQ(captured->calls, 3);
+}
+
 TEST_F(MtpExecutorTest, testForwardOverlapMultiStepFusionMatchesBarrierPath) {
+    const bool current_allocation = autil::EnvUtil::getEnv("TEST_ADAPTIVE_CURRENT_ALLOCATION", false);
+    if (autil::EnvUtil::getEnv("RTP_LLM_ADAPTIVE_VERIFICATION", false)) {
+        static auto interpreter = Py_IsInitialized() ? nullptr : std::make_unique<py::scoped_interpreter>();
+        py::exec(R"(
+import os
+import sys
+from pathlib import Path
+runfiles = Path(os.environ["TEST_SRCDIR"])
+sys.path[:0] = [str(runfiles), str(runfiles / os.environ["TEST_WORKSPACE"])] + [
+    str(path) for path in sorted(runfiles.glob("pip*/site-packages"))
+]
+import torch
+)");
+    }
     if (!autil::EnvUtil::getEnv("RTP_LLM_MTP_FORWARD_OVERLAP", false)
         || !autil::EnvUtil::getEnv("RTP_LLM_STREAM_ASYNC", false)
         || !autil::EnvUtil::getEnv("RTP_LLM_DEVICE_INPUT", false)
-        || autil::EnvUtil::getEnv("RTP_LLM_MTP_ASYNC_PREPARE", false)) {
+        || (autil::EnvUtil::getEnv("RTP_LLM_MTP_ASYNC_PREPARE", false) && !current_allocation)) {
         GTEST_SKIP() << "Run the dedicated overlap test targets";
     }
     struct TokenModel final: ModelBase {
         torch::ScalarType     hidden_dtype;
         std::function<void()> before_forward;
+        GptModelInputs        prepared;
         explicit TokenModel(torch::ScalarType dtype): hidden_dtype(dtype) {}
+        void prepareAttentionInputs(const GptModelInputs& input) override {
+            prepared = input;
+        }
         GptModelOutputs forward(const GptModelInputs& input) override {
             if (before_forward) {
                 before_forward();
+            }
+            if (input.is_target_verify && prepared.combo_tokens.defined()) {
+                EXPECT_EQ(prepared.combo_tokens.numel(), input.combo_tokens.numel());
+                EXPECT_TRUE(torch::equal(prepared.input_lengths, input.input_lengths));
+                EXPECT_TRUE(torch::equal(prepared.prefix_lengths, input.prefix_lengths));
             }
             auto            tokens   = input.combo_tokens.to(torch::kLong);
             auto            selected = tokens.index_select(0, input.lm_output_indexes.to(torch::kLong));
@@ -1281,7 +1537,7 @@ TEST_F(MtpExecutorTest, testForwardOverlapMultiStepFusionMatchesBarrierPath) {
             return out;
         }
     };
-    for (const int steps : {2, 3}) {
+    for (const int steps : (current_allocation ? std::vector<int>{2, 5} : std::vector<int>{2, 3})) {
         for (const auto dtype : {torch::kBFloat16, torch::kFloat32}) {
             SCOPED_TRACE(std::to_string(steps) + "/" + std::to_string(static_cast<int>(dtype)));
             auto run = [&](bool overlap, std::vector<torch::Tensor>& results) {
@@ -1291,12 +1547,45 @@ TEST_F(MtpExecutorTest, testForwardOverlapMultiStepFusionMatchesBarrierPath) {
                 config.cache_block_num              = 64;
                 auto  components                    = createMtpExecutorComponents(config);
                 auto& executor                      = *components.executor;
+                overlap                             = overlap && !executor.useAsyncPrepare();
                 executor.forward_overlap_supported_ = overlap;
                 executor.role_type_                 = RoleType::DECODE;
                 executor.batch_stream_processor_->model_input_gatherer_config_.kv_cache_group_types = {
                     CacheGroupType::FULL};
                 ASSERT_EQ(executor.useForwardOverlap(), overlap);
                 executor.setDraftModel(std::make_unique<TokenModel>(dtype));
+                if (current_allocation) {
+                    // Force a learned partial total, not a fixed per-request CAP.
+                    // All real current-confidence ranking, prepare, sampling,
+                    // feedback and asynchronous dispatch still execute below.
+                    py::dict scope;
+                    scope["session"] = *executor.adaptive_session_;
+                    py::exec(R"(
+import types
+import numpy as np
+from rtp_llm.models_py.sampling.adaptive_session import AdaptiveVerificationSession
+from rtp_llm.models_py.sampling.adaptive_controller import AdaptiveDraftController
+def prepare(self):
+    AdaptiveVerificationSession._prepare_plan(self)
+    batch = len(self.ids)
+    self._prepared = self.controller.prepare_from_host(
+        self.ids, confidence=None, fixed_budget=batch * max(1, self.steps // 2),
+        draft_cost_ms=np.zeros(batch + 1), verify_cost_ms=np.ones(batch * (self.steps + 1) + 1))
+    self.total = self._prepared[2]
+    self._metrics = (2, 0, 0, 0.0)
+    self._calibration = False
+def reallocate(self, ids, total):
+    self._test_calls += 1
+    result = AdaptiveDraftController.reallocate_current(self, ids, total)
+    self._test_caps.append(result[0].cpu().tolist())
+    return result
+session._prepare_plan = types.MethodType(prepare, session)
+session.controller._test_calls = 0
+session.controller._test_caps = []
+session.controller.reallocate_current = types.MethodType(reallocate, session.controller)
+)",
+                             scope);
+                }
                 auto context          = components.resource_context;
                 context.cache_manager = executor.cache_manager_;
                 context.role_type     = RoleType::DECODE;
@@ -1359,21 +1648,62 @@ TEST_F(MtpExecutorTest, testForwardOverlapMultiStepFusionMatchesBarrierPath) {
                 executor.setTargetModel(std::move(target));
                 // No worker drain between rounds. Reorder published batch rows,
                 // then shrink while the removed request still has bookkeeping.
-                active = {streams[0], streams[1]};
-                ASSERT_TRUE(executor.decodeStep(active, metrics).ok());
-                active = {streams[1], streams[0]};
-                ASSERT_TRUE(executor.decodeStep(active, metrics).ok());
-                active = {streams[0]};
-                ASSERT_TRUE(executor.decodeStep(active, metrics).ok());
-                executor.waitPreviousBookkeepingAndKvSwaps({streams[0], streams[1]});
+                const auto run_rounds = [&]() {
+                    active = {streams[0], streams[1]};
+                    ASSERT_TRUE(executor.decodeStep(active, metrics).ok());
+                    active = {streams[1], streams[0]};
+                    ASSERT_TRUE(executor.decodeStep(active, metrics).ok());
+                    active = {streams[0]};
+                    ASSERT_TRUE(executor.decodeStep(active, metrics).ok());
+                    executor.waitPreviousBookkeepingAndKvSwaps({streams[0], streams[1]});
+                };
+                if (executor.adaptive_verification_) {
+                    // Keep the GIL for Python-owned constructor/destructor
+                    // state, but never hold it across worker synchronization.
+                    py::gil_scoped_release release;
+                    run_rounds();
+                } else {
+                    run_rounds();
+                }
+                ASSERT_FALSE(HasFatalFailure());
                 EXPECT_EQ(target_forwards, 3);
+                if (current_allocation) {
+                    EXPECT_EQ(executor.adaptive_session_->attr("controller").attr("_test_calls").cast<int>(), 3);
+                }
+                std::vector<int> current_expected_lengths;
+                if (current_allocation) {
+                    const auto caps = executor.adaptive_session_->attr("controller")
+                                          .attr("_test_caps")
+                                          .cast<std::vector<std::vector<int>>>();
+                    ASSERT_EQ(caps.size(), 3);
+                    ASSERT_EQ(caps[0].size(), 2);
+                    ASSERT_EQ(caps[1].size(), 2);
+                    ASSERT_EQ(caps[2].size(), 1);
+                    const int budget_per_request = std::max(1, steps / 2);
+                    EXPECT_EQ(caps[0][0] + caps[0][1], 2 * budget_per_request);
+                    EXPECT_EQ(caps[1][0] + caps[1][1], 2 * budget_per_request);
+                    EXPECT_EQ(caps[2][0], budget_per_request);
+                    // Independent advancement oracle: request 0 accepts every
+                    // admitted draft; request 1 rejects its initial seed, then
+                    // accepts all drafts. The second round reverses batch order.
+                    current_expected_lengths = {1 + caps[0][0] + 1 + caps[1][1] + 1 + caps[2][0] + 1,
+                                                1 + 1 + caps[1][0] + 1};
+                }
                 int result_row = 0;
                 for (const auto& stream : streams) {
                     EXPECT_FALSE(stream->hasError());
                     EXPECT_FALSE(stream->hasPendingAsyncBookkeeping());
                     const auto& state = stream->getMtpAsyncDeviceState();
                     EXPECT_EQ(state.draft_all_probs_gpu.defined(), !mtpFusionEnabled());
-                    const int        expected_length = result_row == 0 ? 1 + 3 * (steps + 1) : 2 + steps + 1;
+                    const int effective_steps = executor.adaptive_verification_ ?
+                                                    autil::EnvUtil::getEnv("RTP_LLM_ADAPTIVE_VERIFY_CAP", steps) :
+                                                    steps;
+                    // Dynamic calibration: first B2 round uses full cap,
+                    // second B2 round probes cap-1, and new B1 starts full.
+                    const int        expected_length = current_allocation ? current_expected_lengths[result_row] :
+                                                       effective_steps < 0 ? (result_row == 0 ? 3 * steps + 3 : steps + 2) :
+                                                                             (result_row == 0 ? 1 + 3 * (effective_steps + 1) :
+                                                                                                2 + effective_steps + 1);
                     std::vector<int> expected_tokens;
                     for (int i = 0; i < expected_length; ++i) {
                         expected_tokens.push_back((result_row + 1 + i) % 4);
@@ -1404,6 +1734,12 @@ TEST_F(MtpExecutorTest, testForwardOverlapMultiStepFusionMatchesBarrierPath) {
                         stream->top_logprob_token_ids_.narrow(1, 0, stream->logprobs_history_size_).cpu().clone());
                     results.push_back(stream->top_logprobs_.narrow(1, 0, stream->logprobs_history_size_).cpu().clone());
                     stream->releaseResource();
+                }
+                if (executor.adaptive_verification_) {
+                    // Worker thread-local Python state is destroyed after task_done.
+                    // Never join the workers holding the embedded interpreter GIL.
+                    py::gil_scoped_release release;
+                    components.executor.reset();
                 }
             };
             std::vector<torch::Tensor> barrier, overlap;
@@ -2224,12 +2560,52 @@ TEST_F(MtpExecutorTest, testSingleBatchPrefill) {
     EXPECT_GT(cache_manager->getKVCacheInfo(-1, true).total_kv_cache, 0);
 }
 
+TEST_F(MtpExecutorTest, testProfileWindowWaitsForRealAndDrainsIdleSteps) {
+    const char*        output_dir = std::getenv("TEST_TMPDIR");
+    StepWindowProfiler profiler(output_dir ? output_dir : ".");
+    profiler.configure(true, "cohort_ended_before_offset", 2, 2);
+    profiler.startStep();
+    profiler.finishStep();
+    EXPECT_TRUE(profiler.enabled());
+    profiler.startStep(false);
+    profiler.finishStep();
+    EXPECT_FALSE(profiler.enabled());
+
+    profiler.configure(true, "real_then_idle", 1, 2);
+
+    profiler.startStep(false);
+    profiler.finishStep();
+    EXPECT_FALSE(profiler.has_profiler_.load());
+    EXPECT_EQ(profiler.waited_steps_, 0);
+
+    profiler.startStep();
+    profiler.finishStep();
+    EXPECT_FALSE(profiler.has_profiler_.load());
+    profiler.startStep();
+    ASSERT_TRUE(profiler.has_profiler_.load());
+    profiler.finishStep();
+    profiler.startStep(false);
+    profiler.finishStep();
+    EXPECT_FALSE(profiler.enabled());
+    EXPECT_FALSE(profiler.has_profiler_.load());
+
+    profiler.configure(true, "disabled_on_idle", 0, 5);
+    profiler.startStep();
+    ASSERT_TRUE(profiler.has_profiler_.load());
+    profiler.finishStep();
+    profiler.configure(false, "", 0, 0);
+    profiler.startStep(false);
+    profiler.finishStep();
+    EXPECT_FALSE(profiler.has_profiler_.load());
+}
+
 TEST_F(MtpExecutorTest, testProfileWindowSkipsIdleAndClosesOnPrefillFailure) {
-    auto components = createMtpExecutorComponents(MtpExecutorTestConfig{});
-    int starts = 0;
-    int finishes = 0;
-    bool active = false;
-    components.executor->profile_step_start_ = [&]() {
+    auto components                          = createMtpExecutorComponents(MtpExecutorTestConfig{});
+    int  starts                              = 0;
+    int  finishes                            = 0;
+    bool active                              = false;
+    components.executor->profile_step_start_ = [&](bool allow_start) {
+        EXPECT_TRUE(allow_start);
         EXPECT_FALSE(active);
         active = true;
         ++starts;
@@ -2247,9 +2623,9 @@ TEST_F(MtpExecutorTest, testProfileWindowSkipsIdleAndClosesOnPrefillFailure) {
     auto stream = createContextStream(
         components.model_config, components.runtime_config, components.resource_context, {0, 1, 2, 3});
     GptModelInputs input;
-    input.combo_tokens = torch::tensor({0, 1, 2, 3}, torch::kInt32);
-    input.input_lengths = torch::tensor({4}, torch::kInt32);
-    input.prefix_lengths = torch::tensor({0}, torch::kInt32);
+    input.combo_tokens      = torch::tensor({0, 1, 2, 3}, torch::kInt32);
+    input.input_lengths     = torch::tensor({4}, torch::kInt32);
+    input.prefix_lengths    = torch::tensor({0}, torch::kInt32);
     input.lm_output_indexes = torch::tensor({3}, torch::kInt32);
     components.fake_target_model->setInputs({input});
     components.fake_target_model->setForwardCallback([&]() {
@@ -2363,9 +2739,12 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
     test_config.vocab_size_override = 4;
     auto components                 = createMtpExecutorComponents(test_config);
 
-    int profile_starts = 0;
-    int profile_finishes = 0;
-    components.executor->profile_step_start_ = [&]() { ++profile_starts; };
+    int profile_starts                       = 0;
+    int profile_finishes                     = 0;
+    components.executor->profile_step_start_ = [&](bool allow_start) {
+        EXPECT_TRUE(allow_start);
+        ++profile_starts;
+    };
     components.executor->profile_step_finish_ = [&]() { ++profile_finishes; };
     components.fake_target_model->setForwardCallback([&]() {
         EXPECT_EQ(profile_starts, 1);

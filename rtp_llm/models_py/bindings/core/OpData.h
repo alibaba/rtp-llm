@@ -43,10 +43,10 @@ struct GptModelInputs {
     // shape [decoder_batch_size + context_batch_size], int32
     // sequence_lengths holds current sequence length for incremental decoding requests,
     // shape [decoder_batch_size], int32
-    mutable torch::Tensor combo_tokens;             // [cumulated_seq_len]
-    torch::Tensor         input_lengths;            // [batch_size]
-    torch::Tensor         sequence_lengths;         // [decoder_batch_size]
-    torch::Tensor         lm_output_indexes;        // selected output rows
+    mutable torch::Tensor combo_tokens;       // [cumulated_seq_len]
+    torch::Tensor         input_lengths;      // [batch_size]
+    torch::Tensor         sequence_lengths;   // [decoder_batch_size]
+    torch::Tensor         lm_output_indexes;  // selected output rows
     torch::Tensor         cache_store_publish_start_tokens;
     torch::Tensor         prefix_lengths;           // [context_batch_size]
     torch::Tensor         sequence_lengths_plus_1;  // optional CUDA mirror for target-verify linear attention
@@ -125,6 +125,10 @@ struct GptModelOutputs {
     torch::Tensor mtp_indexer_topk;
 
     std::vector<torch::Tensor> moe_gating;
+
+    // Set by the actual target verification forward. Zero means unavailable.
+    int64_t target_verify_execution_rows = 0;
+    bool    target_verify_graph_replay   = false;
 };
 
 struct CopyParams {
@@ -202,18 +206,18 @@ struct CacheStoreInputs {
     size_t context_batch_size = 0;
     size_t decoder_batch_size = 0;
 
-    torch::Tensor            request_id;             // [context_batch_size]
-    torch::Tensor            request_pd_separation;  // [context_batch_size]
+    torch::Tensor                                   request_id;             // [context_batch_size]
+    torch::Tensor                                   request_pd_separation;  // [context_batch_size]
     std::shared_ptr<const std::vector<std::string>> cache_keys =
         std::make_shared<const std::vector<std::string>>();  // [context_batch_size, global_max_blocks]
-    size_t                   tokens_per_block;
-    size_t                   kv_block_stride_bytes = 0;
-    size_t                   kv_scale_stride_bytes = 0;
-    bool                     pd_separation         = false;
-    size_t                   model_id              = 0;
-    bool                     decode_entrance       = false;
-    bool                     warmup;
-    bool                     use_opaque_kv_cache_store = false;
+    size_t tokens_per_block;
+    size_t kv_block_stride_bytes = 0;
+    size_t kv_scale_stride_bytes = 0;
+    bool   pd_separation         = false;
+    size_t model_id              = 0;
+    bool   decode_entrance       = false;
+    bool   warmup;
+    bool   use_opaque_kv_cache_store = false;
 
     int               layer_id    = 0;
     KVCacheRegionName region_name = KVCacheRegionName::DEFAULT;
@@ -343,12 +347,15 @@ struct GreedyParams {
     int                          force_topk             = 0;
     bool                         use_optimized_sampling = true;
     std::optional<torch::Tensor> output_all_probs_indices;
-    bool                         skip_logits_probs_restore = false;
-    bool                       defer_token_sampling              = false;
-    bool                       sequence_lengths_are_token_counts = false;
+    bool                         skip_logits_probs_restore         = false;
+    bool                         defer_token_sampling              = false;
+    bool                         sequence_lengths_are_token_counts = false;
     bool                         allow_compact_deferred_output     = false;
     std::vector<at::Generator>   deferred_rejection_generators     = {};
     int64_t                      deferred_rejection_rows           = 0;
+    torch::Tensor                deferred_filter_caps              = {};
+    int64_t                      deferred_filter_rows              = 0;
+    torch::Tensor                deferred_filter_active_rows       = {};
 };
 
 struct GreedyOutput {
@@ -425,29 +432,29 @@ struct SpeculativeSamplingParams {
 };
 
 struct RejectionSamplingParams {
-    torch::Tensor draft_probs_d;
-    torch::Tensor draft_token_ids_d;
-    torch::Tensor uniform_samples_d;
-    torch::Tensor target_probs_d;
-    torch::Tensor target_token_ids_d;
-    torch::Tensor output_token_ids_d;
-    torch::Tensor output_accepted_token_num_d;
-    torch::Tensor do_sample_d;
+    torch::Tensor              draft_probs_d;
+    torch::Tensor              draft_token_ids_d;
+    torch::Tensor              uniform_samples_d;
+    torch::Tensor              target_probs_d;
+    torch::Tensor              target_token_ids_d;
+    torch::Tensor              output_token_ids_d;
+    torch::Tensor              output_accepted_token_num_d;
+    torch::Tensor              do_sample_d;
     bool                       deferred_token_sampling = false;
     bool                       draft_point_mass        = false;
     std::vector<at::Generator> generator;
-    TensorHolder*              buffer_holder   = nullptr;
-    torch::Tensor              target_logits_d = {};
-    torch::Tensor              acceptance_cap  = {};
-    std::vector<bool>          force_accept    = {};
-    torch::Tensor              cum_log_probs   = {};
+    TensorHolder*              buffer_holder           = nullptr;
+    torch::Tensor              target_logits_d         = {};
+    torch::Tensor              acceptance_cap          = {};
+    std::vector<bool>          force_accept            = {};
+    torch::Tensor              cum_log_probs           = {};
     torch::Tensor              target_candidate_ids_d  = {};
     torch::Tensor              target_dense_fallback_d = {};
     torch::Tensor              target_fallback_rows_d  = {};
     // Single-consumption packet from the corresponding target producer. Native
     // submission writes its address prefix before asynchronous H2D transfer;
     // never share/reuse it across concurrent rejection calls.
-    torch::Tensor prepared_rejection_rng = {};
+    torch::Tensor prepared_rejection_rng  = {};
     torch::Tensor target_log_normalizer_d = {};
 };
 

@@ -11,6 +11,7 @@ py_library(
         "adaptive_controller.py",
         "adaptive_runtime.py",
         "adaptive_session.py",
+        "adaptive_tail_budget.py",
         "adaptive_verification.py",
         "draft_logits.py",
         "runtime.py",

@@ -232,6 +232,54 @@ def test_dynamic_fallback_rejects_rows_above_q_b_limit() -> None:
     )
 
 
+def test_adaptive_verify_selects_cmp_with_token_bucket_padding(monkeypatch) -> None:
+    cmp = _selection_cmp(has_indexer=True, reuses_indexer=False, is_moe_layer=False)
+    cmp.config = SimpleNamespace(model_type="glm_5")
+    cmp._draft_prefill_clone = False
+    rows, batch_capacity = 112, 64
+    request_table = torch.zeros((batch_capacity, 2), dtype=torch.int32)
+    inputs = SimpleNamespace(
+        is_prefill=True,
+        is_target_verify=True,
+        kv_cache_block_id_device=request_table,
+        kv_cache_kernel_block_id_device=torch.zeros(
+            (batch_capacity, 16), dtype=torch.int32
+        ),
+    )
+    # Representative graph capture lengths: 48 requests of width two,
+    # followed by 16 of width one.
+    batch_indices = torch.arange(batch_capacity, dtype=torch.int32).repeat_interleave(
+        torch.tensor([2] * 48 + [1] * 16)
+    )
+    params = SimpleNamespace(
+        expanded_seq_lens=torch.full((rows,), 64, dtype=torch.int32),
+        batch_indice_d=batch_indices,
+    )
+    attention = SimpleNamespace(attn_inputs=inputs, fmha_params=params, weights={})
+    layers = [SimpleNamespace(cmp=cmp)]
+    hidden = torch.empty((rows, 6144), dtype=torch.bfloat16)
+    cache = SimpleNamespace(get_layer_cache=lambda _: object())
+
+    monkeypatch.setenv("RTP_LLM_ADAPTIVE_VERIFICATION", "0")
+    assert not bridge.should_enable_glm5_cmp(layers, 1, hidden, attention, cache)
+
+    monkeypatch.setenv("RTP_LLM_ADAPTIVE_VERIFICATION", "1")
+    assert bridge.should_enable_glm5_cmp(layers, 1, hidden, attention, cache)
+
+    for invalid_map in (
+        None,
+        batch_indices[:-1],
+        batch_indices.view(-1, 1),
+        batch_indices.float(),
+    ):
+        params.batch_indice_d = invalid_map
+        assert not bridge.should_enable_glm5_cmp(layers, 1, hidden, attention, cache)
+
+    params.batch_indice_d = batch_indices
+    inputs.kv_cache_kernel_block_id_device = request_table[:-1]
+    assert not bridge.should_enable_glm5_cmp(layers, 1, hidden, attention, cache)
+
+
 def test_selected_call_initializes_all_layers_once() -> None:
     full = _selection_cmp(
         has_indexer=True,
@@ -514,6 +562,118 @@ def test_sparse_mla_calls_rtp_flashmla_directly() -> None:
 
     assert result is output
     flashmla.forward.assert_called_once_with(query, cache, topk, layer_id=3)
+
+
+def test_cmp_physical_index_scope_is_target_only(monkeypatch):
+    monkeypatch.setenv("RTP_LLM_ADAPTIVE_VERIFICATION", "1")
+    monkeypatch.setenv("RTP_LLM_ADAPTIVE_VERIFY_REUSE_MLA_INDICES", "1")
+    inputs = SimpleNamespace(is_target_verify=True, uniform_target_verify_layout=False)
+    with bridge.reuse_adaptive_cmp_physical_indices(inputs):
+        outer = bridge._cmp_physical_indices.get()
+        assert outer == {}
+        for field in ("uniform_target_verify_layout", "is_draft_extend"):
+            setattr(inputs, field, True)
+            with bridge.reuse_adaptive_cmp_physical_indices(inputs):
+                assert bridge._cmp_physical_indices.get() is None
+            setattr(inputs, field, False)
+            assert bridge._cmp_physical_indices.get() is outer
+        with pytest.raises(RuntimeError):
+            with bridge.reuse_adaptive_cmp_physical_indices(inputs):
+                raise RuntimeError("failed forward")
+        assert bridge._cmp_physical_indices.get() is outer
+    assert bridge._cmp_physical_indices.get() is None
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="CUDA graph replay requires CUDA"
+)
+def test_cmp_reuses_physical_indices_after_new_topk_and_page_map(monkeypatch):
+    from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_impl import (
+        SparseMlaFp8Op,
+    )
+
+    monkeypatch.setenv("RTP_LLM_ADAPTIVE_VERIFICATION", "1")
+    monkeypatch.setenv("RTP_LLM_ADAPTIVE_VERIFY_REUSE_MLA_INDICES", "1")
+    rows, top_k = 56, 2048
+    kwargs = dict(device="cuda", dtype=torch.int32)
+    topk = torch.empty((rows, top_k), **kwargs)
+    first = torch.empty_like(topk)
+    second = torch.empty_like(topk)
+    pages = torch.empty((14, 48), **kwargs)
+    other_pages = torch.empty_like(pages)
+    request_ids = torch.empty((rows,), **kwargs)
+    sparse = SparseMlaFp8Op(64, 512, 64, 192, 64, 1.0, top_k, use_cuda_graph=True)
+    sparse.mla_params = SimpleNamespace(batch_indice_d=request_ids)
+    # Keep the real production converter and replace only the final attention
+    # call. Record what each consumer would pass into the paged CUDA kernel.
+    sparse.forward = lambda *a, physical_indices, **kw: physical_indices
+    implementation = SimpleNamespace(
+        weights={}, fmha_params=sparse.mla_params, fmha_impl=sparse
+    )
+    layer = object.__new__(bridge.Glm5Cmp)
+    layer.layer_idx = 0
+    layer.self_attn = SimpleNamespace(has_indexer=True)
+    model = SimpleNamespace(is_target_verify=True, uniform_target_verify_layout=False)
+    cache = SimpleNamespace(
+        kv_cache_base=torch.empty((1, 64, 1, 656), device="cuda", dtype=torch.uint8)
+    )
+    recorded = [torch.empty((rows, 1, top_k), **kwargs) for _ in range(5)]
+
+    def replay_program():
+        with bridge.reuse_adaptive_cmp_physical_indices(model):
+            for slot, (source, table, produce) in enumerate(
+                (
+                    (first, pages, True),
+                    (first, pages, False),
+                    (second, pages, True),
+                    (second, pages, False),
+                    (second, other_pages, False),
+                )
+            ):
+                sparse.block_table = table
+                layer.self_attn.has_indexer = produce
+                if produce:
+                    topk.copy_(source)
+                mapped = layer.sparse_mla(topk, topk, implementation, cache)
+                recorded[slot].copy_(mapped)
+        assert bridge._cmp_physical_indices.get() is None
+
+    def refresh():
+        pages.random_(0, 500)
+        other_pages.random_(500, 1000)
+        request_ids.random_(0, 14)
+        first.random_(0, 48 * 64)
+        second.random_(0, 48 * 64)
+        first[0].fill_(-1)
+        second[-1].fill_(-1)
+
+    refresh()
+    with patch.object(
+        sparse,
+        "_convert_topk_indices_to_global",
+        wraps=sparse._convert_topk_indices_to_global,
+    ) as convert:
+        replay_program()
+        assert convert.call_count == 3
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            replay_program()
+        assert convert.call_count == 6
+    for _ in range(3):
+        refresh()
+        graph.replay()
+        for i, (source, table) in enumerate(
+            (
+                (first, pages),
+                (first, pages),
+                (second, pages),
+                (second, pages),
+                (second, other_pages),
+            )
+        ):
+            sparse.block_table = table
+            reference = sparse._convert_topk_indices_to_global(source)
+            torch.testing.assert_close(recorded[i], reference, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize(

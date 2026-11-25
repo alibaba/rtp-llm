@@ -1,9 +1,70 @@
 """Shared request layout for paged Indexer logits and its scheduler."""
 
 import os
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any
 
 import torch
+
+_forward_page_tables = ContextVar("paged_mqa_forward_page_tables", default=None)
+
+
+@contextmanager
+def reuse_adaptive_paged_mqa_tables(attention_inputs: Any):
+    """Scope immutable page table views to one ragged Target forward."""
+    enabled = (
+        os.environ.get("RTP_LLM_ADAPTIVE_INDEXER_REUSE_PAGE_TABLE", "1") == "1"
+        and adaptive_target_layout(attention_inputs)
+        and not bool(getattr(attention_inputs, "is_draft_extend", False))
+    )
+    if not enabled and _forward_page_tables.get() is None:
+        yield
+        return
+
+    token = _forward_page_tables.set({} if enabled else None)
+    try:
+        yield
+    finally:
+        _forward_page_tables.reset(token)
+
+
+def _tensor_view_key(tensor: torch.Tensor) -> tuple:
+    return (
+        tensor.device,
+        tensor.dtype,
+        tensor.data_ptr(),
+        tensor.shape,
+        tensor.stride(),
+    )
+
+
+def expand_adaptive_paged_mqa_table(
+    block_table: torch.Tensor, batch_indices: torch.Tensor
+) -> torch.Tensor:
+    cache = _forward_page_tables.get()
+    if cache is None:
+        return block_table.index_select(0, batch_indices.long())
+
+    # The active cache group can change at any layer. Views of the same storage
+    # can also use different offsets or strides. Keep streams isolated so every
+    # consumer is ordered after its producer without extra events.
+    stream = (
+        torch.cuda.current_stream(block_table.device).cuda_stream
+        if block_table.is_cuda
+        else None
+    )
+    key = (stream, _tensor_view_key(block_table), _tensor_view_key(batch_indices))
+    cached = cache.get(key)
+    if cached is not None:
+        return cached[2]
+
+    expanded = block_table.index_select(0, batch_indices.long())
+    # Retain the source views to prevent their addresses from being recycled
+    # inside this forward. In graph capture, the gather reads the replay-updated
+    # table and mapping. Only its expanded output is reused across layers.
+    cache[key] = (block_table, batch_indices, expanded)
+    return expanded
 
 
 def physical_block_table(attention_inputs: Any) -> torch.Tensor:
@@ -30,12 +91,7 @@ def paged_mqa_context_lens(attention_inputs: Any, fmha_params: Any) -> torch.Ten
     lengths = fmha_params.expanded_seq_lens
     if adaptive_target_layout(attention_inputs):
         return lengths.reshape(-1, 1)
-    if (
-        lengths.numel() > 0
-        and os.environ.get("RTP_LLM_INDEXER_NATIVE_MTP", "1") != "0"
-        and lengths.is_cuda
-        and torch.cuda.get_device_capability(lengths.device)[0] == 10
-    ):
+    if _native_paged_mqa_enabled(lengths):
         batch_size = physical_block_table(attention_inputs).shape[0]
         if batch_size == 0 or lengths.numel() % batch_size:
             raise ValueError("MTP query lengths must contain equal rows per request")
@@ -43,7 +99,55 @@ def paged_mqa_context_lens(attention_inputs: Any, fmha_params: Any) -> torch.Ten
     return lengths.reshape(-1, 1)
 
 
+def _native_paged_mqa_enabled(lengths: torch.Tensor) -> bool:
+    return (
+        lengths.numel() > 0
+        and lengths.is_cuda
+        and os.environ.get("RTP_LLM_INDEXER_NATIVE_MTP", "1") != "0"
+        and torch.cuda.get_device_capability(lengths.device)[0] == 10
+    )
+
+
+def refresh_paged_mqa_request_ids(
+    attention_inputs: Any,
+    fmha_params: Any,
+    lengths: torch.Tensor,
+    deep_gemm: Any,
+    forbid_realloc: bool,
+) -> torch.Tensor | None:
+    if not adaptive_target_layout(attention_inputs) or not _native_paged_mqa_enabled(
+        lengths
+    ):
+        return None
+    # Older wheels only support the original per-query API.
+    if not all(
+        "indices:" in (getattr(deep_gemm, name, None).__doc__ or "")
+        for name in ("get_paged_mqa_logits_metadata", "fp8_paged_mqa_logits")
+    ):
+        return None
+
+    batch_ids = fmha_params.batch_indice_d
+    if batch_ids.shape != lengths.shape or batch_ids.dtype != torch.int32:
+        raise ValueError("Paged MQA request IDs need one int32 value per query")
+    ids = getattr(fmha_params, "paged_mqa_request_ids", None)
+    if ids is None or ids.shape != batch_ids.shape or ids.device != batch_ids.device:
+        if forbid_realloc:
+            raise RuntimeError(
+                "Paged MQA request ID storage changed during graph replay"
+            )
+        ids = torch.empty_like(batch_ids, memory_format=torch.contiguous_format)
+        fmha_params.paged_mqa_request_ids = ids
+    # DeepGEMM uses the final context length of each contiguous request group.
+    # Graph padding carries batch ID 0. Give it its own group so its length 0
+    # cannot replace the actual length of a preceding request with batch ID 0.
+    ids.copy_(batch_ids)
+    ids.masked_fill_(lengths <= 0, -1)
+    return ids
+
+
 def adaptive_target_layout(attention_inputs: Any) -> bool:
-    return bool(getattr(attention_inputs, "is_target_verify", False)) and (
-        os.environ.get("RTP_LLM_ADAPTIVE_VERIFICATION", "0") == "1"
+    return (
+        bool(getattr(attention_inputs, "is_target_verify", False))
+        and not bool(getattr(attention_inputs, "uniform_target_verify_layout", False))
+        and os.environ.get("RTP_LLM_ADAPTIVE_VERIFICATION", "0") == "1"
     )

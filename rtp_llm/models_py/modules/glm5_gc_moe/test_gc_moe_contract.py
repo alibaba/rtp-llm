@@ -3,6 +3,9 @@
 import os
 import sys
 import unittest
+from dataclasses import dataclass
+from types import ModuleType, SimpleNamespace
+from unittest.mock import Mock, patch
 
 import torch
 
@@ -26,6 +29,117 @@ def _import_gc_wheel():
 
 
 class GCMoeContractTest(unittest.TestCase):
+    def test_tile32_requires_adaptive_scope_and_exact_compatible_shape(self):
+        from rtp_llm.models_py.modules.glm5_gc_moe.gc_moe_se import (
+            _eligible_tile32,
+            adaptive_gc_moe_se_tile32,
+        )
+
+        x = SimpleNamespace(
+            is_cuda=True,
+            dtype=torch.bfloat16,
+            device=torch.device("cuda", 0),
+            shape=(56, 6144),
+        )
+        cfg = SimpleNamespace(
+            ep_size=4,
+            n_routed_experts=256,
+            n_activated_experts=8,
+        )
+        buf = SimpleNamespace(
+            hidden=6144,
+            intermediate_hidden=2048,
+            group=SimpleNamespace(size=lambda: 4),
+            num_experts=256,
+            num_topk=8,
+            mma_type="fp8xfp4",
+            num_shared_experts=1,
+            _for_call=lambda n: None,
+        )
+        self.assertFalse(_eligible_tile32(x, cfg, buf, 56, 16))
+        with patch.object(torch.cuda, "get_device_capability", return_value=(10, 3)):
+            with self.assertRaisesRegex(RuntimeError, "restore scope"):
+                with adaptive_gc_moe_se_tile32():
+                    self.assertTrue(_eligible_tile32(x, cfg, buf, 56, 16))
+                    self.assertFalse(_eligible_tile32(x, cfg, buf, 56, 32))
+                    self.assertFalse(_eligible_tile32(x, cfg, buf, 57, 16))
+                    x.shape = (64, 6144)
+                    self.assertTrue(_eligible_tile32(x, cfg, buf, 64, 16))
+                    buf.num_shared_experts = 0
+                    self.assertFalse(_eligible_tile32(x, cfg, buf, 64, 16))
+                    raise RuntimeError("restore scope")
+        buf.num_shared_experts = 1
+        self.assertFalse(_eligible_tile32(x, cfg, buf, 64, 16))
+
+    def test_tile32_packer_and_launch_use_same_block(self):
+        from rtp_llm.models_py.modules.glm5_gc_moe import gc_moe_se
+
+        @dataclass(frozen=True)
+        class Call:
+            block_m: int
+            shared_experts: int
+
+        x = torch.empty((56, 6144), dtype=torch.bfloat16)
+        buf = SimpleNamespace(num_max_tokens_per_rank=84, _for_call=Mock())
+        buf._for_call.return_value = buf
+        subject = SimpleNamespace(
+            _check_shared_expert_ready=lambda: None,
+            _mega_buf=buf,
+            _mega_y=x,
+            cfg=SimpleNamespace(
+                ep_size=4,
+                n_routed_experts=256,
+                n_activated_experts=8,
+                layer_id=0,
+            ),
+            _input_packer=Mock(),
+            _mega_l1_w=object(),
+            _mega_l1_sf=object(),
+            _mega_l2_w=object(),
+            _mega_l2_sf=object(),
+            _shared_l1_w=object(),
+            _shared_l1_sf=object(),
+            _shared_l2_w=object(),
+            _shared_l2_sf=object(),
+        )
+        wheel = ModuleType("gc_moe")
+        wheel.get_block_m_for_gc_moe = Mock(return_value=16)
+        wheel.fp8_fp4_gc_moe = Mock()
+        validate = Mock(return_value=Call(16, 1))
+        launch = Mock()
+        with (
+            patch.dict(sys.modules, {"gc_moe": wheel}),
+            patch.object(gc_moe_se, "_eligible_tile32", return_value=True),
+            patch.object(gc_moe_se, "_tile32_api", return_value=(validate, launch)),
+            patch.object(gc_moe_se, "_sync_cuda_graph_warmup_ranks"),
+        ):
+            weights, indices = object(), object()
+            gc_moe_se.GLM5GCMoESE._forward_impl(
+                subject,
+                x,
+                weights,
+                indices,
+                inputs_prepacked=False,
+            )
+        subject._input_packer.pack.assert_called_once_with(
+            x, weights, indices, buf, 56, 32
+        )
+        validate.assert_called_once()
+        buf._for_call.assert_called_once_with(1)
+        launch.assert_called_once()
+        self.assertEqual(launch.call_args.args[0], Call(32, 1))
+        wheel.fp8_fp4_gc_moe.assert_not_called()
+
+    def test_tile32_adapter_falls_back_for_unknown_wheel(self):
+        from rtp_llm.models_py.modules.glm5_gc_moe import gc_moe_se
+
+        wheel = ModuleType("gc_moe")
+        with patch.object(gc_moe_se.metadata, "version", return_value="0.7"):
+            try:
+                self.assertIsNone(gc_moe_se._tile32_api(wheel))
+            finally:
+                gc_moe_se._tile32_api.cache_clear()
+
     def test_up_gate_checkpoint_uses_gc_transform(self):
         gc_moe = _import_gc_wheel()
 

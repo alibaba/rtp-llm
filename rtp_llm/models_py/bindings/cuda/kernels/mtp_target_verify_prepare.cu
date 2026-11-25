@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <climits>
+#include <cstdint>
 #include <cuda_bf16.h>
 #include <limits>
 #include <math_constants.h>
@@ -11,26 +12,78 @@
 namespace rtp_llm {
 
 namespace {
-__global__ void deepinferGreedyFinalizeRtp(const int32_t* draft,const int32_t* target,int32_t* out,
-                                         int32_t* lengths,int64_t* rows,int64_t* total,int batch,int steps,int token_stride){
-    __shared__ int64_t partial[256];
-    int64_t sum=0;
-    for(int b=threadIdx.x;b<batch;b+=blockDim.x){
-        int last=steps;
-        for(int j=0;j<steps;j++){
-            int token=target[(b*(steps+1)+j)*token_stride+token_stride-1];
-            if(token!=draft[b*steps+j]){last=j;break;}
+
+constexpr int kRestoreThreads          = 256;
+constexpr int kRestoreVectorsPerThread = 8;
+constexpr int kRestoreVectorsPerBlock  = kRestoreThreads * kRestoreVectorsPerThread;
+
+__global__ void mtpRestoreAdaptiveRowsKernel(
+    const uint4* compact, const int64_t* active_rows, uint4* dense, int compact_rows, int vectors_per_row) {
+    const int      row = blockIdx.y;
+    __shared__ int source_row;
+    if (threadIdx.x == 0) {
+        int first = 0;
+        int last  = compact_rows;
+        while (first < last) {
+            const int middle = first + (last - first) / 2;
+            if (active_rows[middle] < row) {
+                first = middle + 1;
+            } else {
+                last = middle;
+            }
         }
-        for(int j=0;j<=steps;j++)
-            out[b*(steps+1)+j]=j<=last?target[(b*(steps+1)+j)*token_stride+token_stride-1]:0;
-        lengths[b]=last+1;rows[b]=last+1;sum+=last+1;
+        source_row = first < compact_rows && active_rows[first] == row ? first : -1;
     }
-    partial[threadIdx.x]=sum;__syncthreads();
-    for(int offset=128;offset;offset/=2){
-        if(threadIdx.x<offset)partial[threadIdx.x]+=partial[threadIdx.x+offset];
+    __syncthreads();
+
+    const int  column_base = blockIdx.x * kRestoreVectorsPerBlock + threadIdx.x;
+    const auto dest_base   = static_cast<int64_t>(row) * vectors_per_row;
+    const auto src_base    = static_cast<int64_t>(source_row) * vectors_per_row;
+    const auto zero        = make_uint4(0, 0, 0, 0);
+#pragma unroll
+    for (int i = 0; i < kRestoreVectorsPerThread; ++i) {
+        const int column = column_base + i * kRestoreThreads;
+        if (column < vectors_per_row) {
+            dense[dest_base + column] = source_row < 0 ? zero : compact[src_base + column];
+        }
+    }
+}
+
+__global__ void deepinferGreedyFinalizeRtp(const int32_t* draft,
+                                           const int32_t* target,
+                                           int32_t*       out,
+                                           int32_t*       lengths,
+                                           int64_t*       rows,
+                                           int64_t*       total,
+                                           int            batch,
+                                           int            steps,
+                                           int            token_stride) {
+    __shared__ int64_t partial[256];
+    int64_t            sum = 0;
+    for (int b = threadIdx.x; b < batch; b += blockDim.x) {
+        int last = steps;
+        for (int j = 0; j < steps; j++) {
+            int token = target[(b * (steps + 1) + j) * token_stride + token_stride - 1];
+            if (token != draft[b * steps + j]) {
+                last = j;
+                break;
+            }
+        }
+        for (int j = 0; j <= steps; j++)
+            out[b * (steps + 1) + j] = j <= last ? target[(b * (steps + 1) + j) * token_stride + token_stride - 1] : 0;
+        lengths[b] = last + 1;
+        rows[b]    = last + 1;
+        sum += last + 1;
+    }
+    partial[threadIdx.x] = sum;
+    __syncthreads();
+    for (int offset = 128; offset; offset /= 2) {
+        if (threadIdx.x < offset)
+            partial[threadIdx.x] += partial[threadIdx.x + offset];
         __syncthreads();
     }
-    if(threadIdx.x==0)total[0]=partial[0];
+    if (threadIdx.x == 0)
+        total[0] = partial[0];
 }
 __global__ void mtpAcceptMetricsKernel(const int32_t* lengths, int64_t* rows, int64_t* total, int32_t count) {
     __shared__ int64_t sums[256];
@@ -79,22 +132,25 @@ __global__ void mtpPublishStateKernel(const int32_t*       lengths,
     }
 }
 
-struct MtpPreviousRows { const int32_t* rows[128]; };
+struct MtpPreviousRows {
+    const int32_t* rows[128];
+};
 __global__ void mtpPublishStateRowsKernel(const int32_t*       lengths,
-                                      const int32_t*       tokens,
-                                      MtpPreviousRows       previous,
-                                      const __nv_bfloat16* hidden,
-                                      int32_t*             next,
-                                      int32_t*             selected,
-                                      __nv_bfloat16*       output_hidden,
-                                      int32_t              stride,
-                                      int32_t              width, int32_t offset) {
+                                          const int32_t*       tokens,
+                                          MtpPreviousRows      previous,
+                                          const __nv_bfloat16* hidden,
+                                          int32_t*             next,
+                                          int32_t*             selected,
+                                          __nv_bfloat16*       output_hidden,
+                                          int32_t              stride,
+                                          int32_t              width,
+                                          int32_t              offset) {
     const int32_t row      = blockIdx.y + offset;
     const int32_t col      = blockIdx.x * blockDim.x + threadIdx.x;
     const int32_t accepted = lengths[row];
     if (col == 0) {
         selected[row] = tokens[row * stride + accepted - 1];
-        next[row] = *previous.rows[blockIdx.y] + accepted;
+        next[row]     = *previous.rows[blockIdx.y] + accepted;
     }
     if (col < width) {
         output_hidden[row * width + col] = hidden[(row * stride + accepted - 1) * width + col];
@@ -137,34 +193,126 @@ __device__ __forceinline__ MtpMaxToken mtpReduce(MtpMaxToken value) {
     __syncthreads();
     return shared[0];
 }
-__global__ void mtpGreedyPartialKernel(const float* probs, MtpMaxToken* partial, int width, int partitions) {
-    int         row = blockIdx.y, tile = blockIdx.x;
-    MtpMaxToken best{-INFINITY, INT_MAX};
+struct MtpTopTwo {
+    MtpMaxToken first;
+    MtpMaxToken second;
+};
+
+__device__ __forceinline__ MtpMaxToken mtpEmpty(MtpMaxToken) {
+    return {-INFINITY, INT_MAX};
+}
+
+__device__ __forceinline__ MtpTopTwo mtpEmpty(MtpTopTwo) {
+    return {{-INFINITY, INT_MAX}, {-INFINITY, INT_MAX}};
+}
+
+__device__ __forceinline__ void mtpAccumulate(MtpMaxToken& best, MtpMaxToken other) {
+    best = mtpPick(best, other);
+}
+
+__device__ __forceinline__ void mtpAccumulate(MtpTopTwo& best, MtpMaxToken other) {
+    // XOR merges can encounter an ID via both sides. Keep distinct candidates
+    // even for equal probabilities and preserve the legacy first-index tie.
+    if (other.index == INT_MAX || other.index == best.first.index || other.index == best.second.index)
+        return;
+    if (mtpPick(best.first, other).index == other.index) {
+        best.second = best.first;
+        best.first  = other;
+    } else {
+        best.second = mtpPick(best.second, other);
+    }
+}
+
+__device__ __forceinline__ void mtpAccumulate(MtpTopTwo& best, MtpTopTwo other) {
+    mtpAccumulate(best, other.first);
+    mtpAccumulate(best, other.second);
+}
+
+__device__ __forceinline__ MtpTopTwo mtpWarpReduce(MtpTopTwo value) {
+#pragma unroll
+    for (int off = 16; off > 0; off /= 2) {
+        MtpTopTwo other;
+        other.first  = {__shfl_xor_sync(0xffffffff, value.first.score, off),
+                        __shfl_xor_sync(0xffffffff, value.first.index, off)};
+        other.second = {__shfl_xor_sync(0xffffffff, value.second.score, off),
+                        __shfl_xor_sync(0xffffffff, value.second.index, off)};
+        mtpAccumulate(value, other);
+    }
+    return value;
+}
+
+__device__ __forceinline__ MtpTopTwo mtpReduce(MtpTopTwo value) {
+    __shared__ MtpTopTwo shared[8];
+    const int            lane = threadIdx.x % 32, warp = threadIdx.x / 32;
+    value = mtpWarpReduce(value);
+    if (lane == 0)
+        shared[warp] = value;
+    __syncthreads();
+    if (warp == 0) {
+        value = mtpWarpReduce(lane < 8 ? shared[lane] : mtpEmpty(MtpTopTwo{}));
+        if (lane == 0)
+            shared[0] = value;
+    }
+    __syncthreads();
+    return shared[0];
+}
+
+__device__ __forceinline__ void mtpWriteLogitMargin(MtpMaxToken, float*) {}
+
+__device__ __forceinline__ void mtpWriteLogitMargin(MtpTopTwo best, float* margin) {
+    constexpr float clip  = 32.0f;
+    float           value = CUDART_NAN_F;
+    if (best.second.index != INT_MAX && isfinite(best.first.score) && isfinite(best.second.score)
+        && best.first.score > 0.0f && best.first.score <= 1.0f && best.second.score >= 0.0f) {
+        // FP32 softmax rounds close logits and can underflow the runner-up.
+        // The result is a clipped proxy used only for budget prediction.
+        value = best.second.score == 0.0f ? clip :
+                                            fminf(clip, fmaxf(0.0f, logf(best.first.score) - logf(best.second.score)));
+    }
+    *margin = value;
+}
+
+__device__ __forceinline__ MtpMaxToken mtpFirst(MtpMaxToken best) {
+    return best;
+}
+__device__ __forceinline__ MtpMaxToken mtpFirst(MtpTopTwo best) {
+    return best.first;
+}
+
+template<typename Partial>
+__global__ void mtpGreedyPartialKernel(const float* probs, Partial* partial, int width, int partitions) {
+    int  row = blockIdx.y, tile = blockIdx.x;
+    auto best = mtpEmpty(Partial{});
     for (int col = tile * 2048 + threadIdx.x; col < min(width, (tile + 1) * 2048); col += 256) {
-        best = mtpPick(best, MtpMaxToken{probs[row * width + col], col});
+        mtpAccumulate(best, MtpMaxToken{probs[row * width + col], col});
     }
     best = mtpReduce(best);
     if (threadIdx.x == 0)
         partial[row * partitions + tile] = best;
 }
-__global__ void mtpGreedyPackKernel(const MtpMaxToken* partial,
-                                    float*             output,
-                                    int64_t*           ids,
-                                    int32_t*           ids32,
-                                    const int64_t*     mapping,
-                                    int                mapsize,
-                                    int                width,
-                                    int                partitions,
-                                    const int32_t*     sequence_lengths,
-                                    int32_t*           next_sequence_lengths,
-                                    __nv_bfloat16*     hidden_to_zero,
-                                    int32_t            hidden_width,
-                                    bool               zero_tokens) {
-    int         row = blockIdx.y, tile = blockIdx.x;
-    MtpMaxToken best{-INFINITY, INT_MAX};
+
+template<typename Partial>
+__global__ void mtpGreedyPackKernel(const Partial* partial,
+                                    float*         output,
+                                    int64_t*       ids,
+                                    int32_t*       ids32,
+                                    const int64_t* mapping,
+                                    int            mapsize,
+                                    int            width,
+                                    int            partitions,
+                                    const int32_t* sequence_lengths,
+                                    int32_t*       next_sequence_lengths,
+                                    __nv_bfloat16* hidden_to_zero,
+                                    int32_t        hidden_width,
+                                    bool           zero_tokens,
+                                    float*         selected_probability,
+                                    float*         selected_logit_margin) {
+    int  row = blockIdx.y, tile = blockIdx.x;
+    auto partial_best = mtpEmpty(Partial{});
     for (int p = threadIdx.x; p < partitions; p += 256)
-        best = mtpPick(best, partial[row * partitions + p]);
-    best = mtpReduce(best);
+        mtpAccumulate(partial_best, partial[row * partitions + p]);
+    partial_best    = mtpReduce(partial_best);
+    const auto best = mtpFirst(partial_best);
     if (output != nullptr) {
         for (int col = tile * 2048 + threadIdx.x; col < min(width, (tile + 1) * 2048); col += 256)
             output[row * width + col] = col == best.index ? 1.f : 0.f;
@@ -178,6 +326,12 @@ __global__ void mtpGreedyPackKernel(const MtpMaxToken* partial,
             id = 0;
         ids[row]   = id;
         ids32[row] = static_cast<int32_t>(id);
+        if (selected_probability != nullptr) {
+            selected_probability[row] = best.score;
+        }
+        if (selected_logit_margin != nullptr) {
+            mtpWriteLogitMargin(partial_best, selected_logit_margin + row);
+        }
         if (next_sequence_lengths != nullptr) {
             next_sequence_lengths[row] = sequence_lengths[row] + 1;
         }
@@ -365,15 +519,15 @@ void checkCudaI32Vector(const torch::Tensor& tensor, const char* name, int64_t b
 
 }  // namespace
 
-bool tryMtpPublishState(const torch::Tensor& accept_lengths,
-                        const torch::Tensor& accepted_tokens,
-                        const torch::Tensor& previous_lengths,
-                        const torch::Tensor& hidden_states,
-                        int32_t              tokens_per_batch,
-                        torch::Tensor&       next_lengths,
-                        torch::Tensor&       selected_tokens,
-                        torch::Tensor&       selected_hidden,
-                        cudaStream_t         stream,
+bool tryMtpPublishState(const torch::Tensor&               accept_lengths,
+                        const torch::Tensor&               accepted_tokens,
+                        const torch::Tensor&               previous_lengths,
+                        const torch::Tensor&               hidden_states,
+                        int32_t                            tokens_per_batch,
+                        torch::Tensor&                     next_lengths,
+                        torch::Tensor&                     selected_tokens,
+                        torch::Tensor&                     selected_hidden,
+                        cudaStream_t                       stream,
                         const std::vector<const int32_t*>& previous_rows) {
     if (!accept_lengths.defined() || !accepted_tokens.defined() || !accept_lengths.is_cuda()
         || accept_lengths.scalar_type() != torch::kInt32 || !accept_lengths.is_contiguous()
@@ -409,15 +563,20 @@ bool tryMtpPublishState(const torch::Tensor& accept_lengths,
         return true;
     if (!previous_rows.empty()) {
         for (int32_t offset = 0; offset < batch; offset += 128) {
-            const int32_t count = std::min<int64_t>(batch - offset, 128);
+            const int32_t   count = std::min<int64_t>(batch - offset, 128);
             MtpPreviousRows previous{};
             std::copy_n(previous_rows.begin() + offset, count, previous.rows);
             mtpPublishStateRowsKernel<<<dim3(std::max((width + 255) / 256, 1), count), 256, 0, stream>>>(
-                accept_lengths.data_ptr<int32_t>(), accepted_tokens.data_ptr<int32_t>(), previous,
+                accept_lengths.data_ptr<int32_t>(),
+                accepted_tokens.data_ptr<int32_t>(),
+                previous,
                 has_hidden ? reinterpret_cast<const __nv_bfloat16*>(hidden_states.data_ptr<at::BFloat16>()) : nullptr,
-                next_lengths.data_ptr<int32_t>(), selected_tokens.data_ptr<int32_t>(),
+                next_lengths.data_ptr<int32_t>(),
+                selected_tokens.data_ptr<int32_t>(),
                 has_hidden ? reinterpret_cast<__nv_bfloat16*>(selected_hidden.data_ptr<at::BFloat16>()) : nullptr,
-                tokens_per_batch, width, offset);
+                tokens_per_batch,
+                width,
+                offset);
         }
         return true;
     }
@@ -436,11 +595,11 @@ bool tryMtpPublishState(const torch::Tensor& accept_lengths,
 
 bool tryMtpGreedyFinalize(const torch::Tensor& draft,
                           const torch::Tensor& target,
-                          torch::Tensor& tokens,
-                          torch::Tensor& lengths,
-                          torch::Tensor& rows,
-                          torch::Tensor& total,
-                          cudaStream_t stream) {
+                          torch::Tensor&       tokens,
+                          torch::Tensor&       lengths,
+                          torch::Tensor&       rows,
+                          torch::Tensor&       total,
+                          cudaStream_t         stream) {
     const torch::Tensor* tensors[] = {&draft, &target, &tokens, &lengths};
     for (const auto* tensor : tensors) {
         if (!tensor->defined() || !tensor->is_cuda() || tensor->scalar_type() != torch::kInt32
@@ -449,19 +608,24 @@ bool tryMtpGreedyFinalize(const torch::Tensor& draft,
     }
     if (draft.dim() != 2 || target.dim() != 2 || tokens.dim() != 2 || lengths.dim() != 1)
         return false;
-    const auto batch = draft.size(0);
-    const auto steps = draft.size(1);
+    const auto batch  = draft.size(0);
+    const auto steps  = draft.size(1);
     const auto stride = target.size(1);
     if (batch <= 0 || batch > 65535 || steps <= 0 || steps > 32 || stride <= 0 || stride > INT_MAX
-        || target.size(0) != batch * (steps + 1) || target.numel() > INT_MAX
-        || tokens.size(0) != batch || tokens.size(1) != steps + 1 || lengths.numel() != batch)
+        || target.size(0) != batch * (steps + 1) || target.numel() > INT_MAX || tokens.size(0) != batch
+        || tokens.size(1) != steps + 1 || lengths.numel() != batch)
         return false;
-    rows = torch::empty({batch}, lengths.options().dtype(torch::kInt64));
+    rows  = torch::empty({batch}, lengths.options().dtype(torch::kInt64));
     total = torch::empty({1}, rows.options());
-    deepinferGreedyFinalizeRtp<<<1, 256, 0, stream>>>(
-        draft.data_ptr<int32_t>(), target.data_ptr<int32_t>(), tokens.data_ptr<int32_t>(),
-        lengths.data_ptr<int32_t>(), rows.data_ptr<int64_t>(), total.data_ptr<int64_t>(),
-        static_cast<int>(batch), static_cast<int>(steps), static_cast<int>(stride));
+    deepinferGreedyFinalizeRtp<<<1, 256, 0, stream>>>(draft.data_ptr<int32_t>(),
+                                                      target.data_ptr<int32_t>(),
+                                                      tokens.data_ptr<int32_t>(),
+                                                      lengths.data_ptr<int32_t>(),
+                                                      rows.data_ptr<int64_t>(),
+                                                      total.data_ptr<int64_t>(),
+                                                      static_cast<int>(batch),
+                                                      static_cast<int>(steps),
+                                                      static_cast<int>(stride));
     return true;
 }
 
@@ -476,6 +640,40 @@ bool tryMtpAcceptMetrics(const torch::Tensor& lengths, torch::Tensor& rows, torc
                                                   total.data_ptr<int64_t>(),
                                                   static_cast<int32_t>(lengths.numel()));
     return true;
+}
+
+torch::Tensor tryMtpRestoreAdaptiveRows(const torch::Tensor& compact,
+                                        const torch::Tensor& active_rows,
+                                        int64_t              dense_rows,
+                                        cudaStream_t         stream) {
+    if (!compact.is_cuda() || compact.dim() < 1 || !compact.is_contiguous() || compact.numel() == 0
+        || (compact.scalar_type() != torch::kFloat32 && compact.scalar_type() != torch::kBFloat16)
+        || !active_rows.is_cuda() || active_rows.device() != compact.device() || !active_rows.is_contiguous()
+        || active_rows.dim() != 1 || active_rows.scalar_type() != torch::kInt64
+        || compact.size(0) != active_rows.size(0) || dense_rows <= compact.size(0) || dense_rows > 65535) {
+        return {};
+    }
+    const int64_t row_elements = compact.numel() / compact.size(0);
+    if (row_elements > INT_MAX / compact.element_size()) {
+        return {};
+    }
+    const int64_t row_bytes = row_elements * compact.element_size();
+    if (row_bytes % sizeof(uint4) || reinterpret_cast<uintptr_t>(compact.data_ptr()) % alignof(uint4)) {
+        return {};
+    }
+
+    auto shape                 = compact.sizes().vec();
+    shape[0]                   = dense_rows;
+    auto       dense           = torch::empty(shape, compact.options());
+    const int  vectors_per_row = row_bytes / sizeof(uint4);
+    const dim3 grid((vectors_per_row + kRestoreVectorsPerBlock - 1) / kRestoreVectorsPerBlock, dense_rows);
+    mtpRestoreAdaptiveRowsKernel<<<grid, kRestoreThreads, 0, stream>>>(
+        reinterpret_cast<const uint4*>(compact.data_ptr()),
+        active_rows.data_ptr<int64_t>(),
+        reinterpret_cast<uint4*>(dense.data_ptr()),
+        compact.size(0),
+        vectors_per_row);
+    return dense;
 }
 
 bool tryMtpCleanRejectedTokens(torch::Tensor& tokens, cudaStream_t stream) {
@@ -498,7 +696,16 @@ bool tryMtpGreedyPack(const torch::Tensor& probabilities,
                       bool                 zero_tokens,
                       torch::Tensor&       next_sequence_lengths,
                       cudaStream_t         stream,
-                      bool                 compact_point_mass) {
+                      bool                 compact_point_mass,
+                      const torch::Tensor& selected_probability,
+                      const torch::Tensor& selected_logit_margin) {
+    if (selected_probability.defined()
+        && (zero_tokens || selected_probability.device() != probabilities.device()
+            || selected_probability.scalar_type() != torch::kFloat32 || selected_probability.dim() != 1
+            || !selected_probability.is_contiguous() || probabilities.dim() != 2
+            || selected_probability.size(0) != probabilities.size(0))) {
+        return false;
+    }
     const bool has_mapping = mapping.defined() && mapping.numel() > 0;
     if (!probabilities.is_cuda() || probabilities.scalar_type() != torch::kFloat32 || probabilities.dim() != 2
         || !probabilities.is_contiguous() || probabilities.size(1) <= 0 || probabilities.size(0) > 65535
@@ -526,28 +733,45 @@ bool tryMtpGreedyPack(const torch::Tensor& probabilities,
     output_tokens_int32      = torch::empty({batch, 1}, probabilities.options().dtype(torch::kInt32));
     if (batch == 0)
         return true;
-    auto scratch = torch::empty({static_cast<int64_t>(batch) * partitions * static_cast<int64_t>(sizeof(MtpMaxToken))},
-                                probabilities.options().dtype(torch::kByte));
-    auto partial = reinterpret_cast<MtpMaxToken*>(scratch.data_ptr<uint8_t>());
-    mtpGreedyPartialKernel<<<dim3(partitions, batch), 256, 0, stream>>>(
-        probabilities.data_ptr<float>(), partial, width, partitions);
+    const bool write_margin =
+        selected_logit_margin.defined() && !zero_tokens && compact_point_mass
+        && selected_logit_margin.device() == probabilities.device()
+        && selected_logit_margin.scalar_type() == torch::kFloat32 && selected_logit_margin.dim() == 1
+        && selected_logit_margin.is_contiguous() && selected_logit_margin.size(0) == batch
+        && !selected_logit_margin.is_alias_of(probabilities)
+        && (!selected_probability.defined() || !selected_logit_margin.is_alias_of(selected_probability));
     const int32_t output_partitions =
         compact_point_mass ? std::max<int32_t>(1, zero_tokens ? (hidden_to_zero.size(1) + 2047) / 2048 : 1) :
                              partitions;
-    mtpGreedyPackKernel<<<dim3(output_partitions, batch), 256, 0, stream>>>(
-        partial,
-        compact_point_mass ? nullptr : output_probabilities.data_ptr<float>(),
-        output_tokens.data_ptr<int64_t>(),
-        output_tokens_int32.data_ptr<int32_t>(),
-        has_mapping ? mapping.data_ptr<int64_t>() : nullptr,
-        has_mapping ? static_cast<int32_t>(mapping.numel()) : 0,
-        width,
-        partitions,
-        has_sequence ? sequence_lengths.data_ptr<int32_t>() : nullptr,
-        has_sequence ? next_sequence_lengths.data_ptr<int32_t>() : nullptr,
-        zero_tokens ? reinterpret_cast<__nv_bfloat16*>(hidden_to_zero.data_ptr<at::BFloat16>()) : nullptr,
-        zero_tokens ? static_cast<int32_t>(hidden_to_zero.size(1)) : 0,
-        zero_tokens);
+    const auto launch = [&](auto partial_tag, float* margin) {
+        using Partial = decltype(partial_tag);
+        auto scratch  = torch::empty({static_cast<int64_t>(batch) * partitions * static_cast<int64_t>(sizeof(Partial))},
+                                    probabilities.options().dtype(torch::kByte));
+        auto partial  = reinterpret_cast<Partial*>(scratch.data_ptr<uint8_t>());
+        mtpGreedyPartialKernel<<<dim3(partitions, batch), 256, 0, stream>>>(
+            probabilities.data_ptr<float>(), partial, width, partitions);
+        mtpGreedyPackKernel<<<dim3(output_partitions, batch), 256, 0, stream>>>(
+            partial,
+            compact_point_mass ? nullptr : output_probabilities.data_ptr<float>(),
+            output_tokens.data_ptr<int64_t>(),
+            output_tokens_int32.data_ptr<int32_t>(),
+            has_mapping ? mapping.data_ptr<int64_t>() : nullptr,
+            has_mapping ? static_cast<int32_t>(mapping.numel()) : 0,
+            width,
+            partitions,
+            has_sequence ? sequence_lengths.data_ptr<int32_t>() : nullptr,
+            has_sequence ? next_sequence_lengths.data_ptr<int32_t>() : nullptr,
+            zero_tokens ? reinterpret_cast<__nv_bfloat16*>(hidden_to_zero.data_ptr<at::BFloat16>()) : nullptr,
+            zero_tokens ? static_cast<int32_t>(hidden_to_zero.size(1)) : 0,
+            zero_tokens,
+            selected_probability.defined() ? selected_probability.data_ptr<float>() : nullptr,
+            margin);
+    };
+    if (write_margin) {
+        launch(MtpTopTwo{}, selected_logit_margin.data_ptr<float>());
+    } else {
+        launch(MtpMaxToken{}, nullptr);
+    }
     return true;
 }
 
@@ -1299,17 +1523,16 @@ void invokeMtpSpecSamplerTokenMatrix(const torch::Tensor& history,
     constexpr int block_size = 256;
     const int grid_size = static_cast<int>(std::min<int64_t>((output.numel() + block_size - 1) / block_size, 65535));
     mtpSpecSamplerTokenMatrixKernel<<<grid_size, block_size, 0, stream>>>(history.data_ptr<int32_t>(),
-                                                                         draft.data_ptr<int32_t>(),
-                                                                         base_lengths.data_ptr<int32_t>(),
-                                                                         output.data_ptr<int32_t>(),
-                                                                         output.numel(),
-                                                                         history.size(1),
-                                                                         output.size(1),
-                                                                         gamma);
+                                                                          draft.data_ptr<int32_t>(),
+                                                                          base_lengths.data_ptr<int32_t>(),
+                                                                          output.data_ptr<int32_t>(),
+                                                                          output.numel(),
+                                                                          history.size(1),
+                                                                          output.size(1),
+                                                                          gamma);
     const auto status = cudaGetLastError();
-    RTP_LLM_CHECK_WITH_INFO(status == cudaSuccess,
-                            "MTP sampler token matrix launch failed: %s",
-                            cudaGetErrorString(status));
+    RTP_LLM_CHECK_WITH_INFO(
+        status == cudaSuccess, "MTP sampler token matrix launch failed: %s", cudaGetErrorString(status));
 }
 
 // REBASE CONFLICT CONTEXT(518707c73): source branch added this fused

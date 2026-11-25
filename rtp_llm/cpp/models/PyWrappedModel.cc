@@ -346,8 +346,8 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
         RTP_LLM_FAIL("device attention input metadata requires CUDA");
 #endif
     } else {
-        py_attn_inputs.total_tokens        = 0;
-        bool prepared                      = false;
+        py_attn_inputs.total_tokens = 0;
+        bool prepared               = false;
 #if USING_CUDA
         prepared = mtp_indexer_role_ != MtpIndexerRole::NORMAL && mtpFusionEnabled() && !inputs.is_target_verify
                    && !inputs.is_draft_extend
@@ -640,7 +640,7 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
             device_props_.prefill_cp_kv_cache_sharded ? static_cast<int>(device_props_.tp_size) : 1,
             device_props_.prefill_cp_kv_cache_sharded ? static_cast<int>(device_props_.tp_rank) : 0};
         cache_store_inputs.publish_start_tokens = inputs.cache_store_publish_start_tokens;
-        params = std::move(cache_store_inputs);
+        params                                  = std::move(cache_store_inputs);
     }
     return params;
 }
@@ -954,7 +954,9 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         // and combo_tokens above used direct .to(non_blocking=true). Both are async on
         // the current stream and will be ordered correctly with the kernels below.
 
-        auto submit_forward_and_post = [&]() -> GptModelOutputs {
+        int64_t target_verify_execution_rows = 0;
+        bool    target_verify_graph_replay   = false;
+        auto    submit_forward_and_post      = [&]() -> GptModelOutputs {
             auto py_model_inputs = PyModelInputs({token_ids, input_hiddens, attention_inputs_, bert_embedding_inputs});
             PyModelOutputs py_model_outputs;
             torch::Tensor  hidden_states;
@@ -981,7 +983,12 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                     graph_state_.current_real_graph_bs);
                 py_model_inputs.attention_inputs.is_s_padded = true;
                 PrefillProgressScope::mark(PrefillPhase::GRAPH);
-                py_model_outputs = graph_runner_->forward(py_model_inputs, graph_state_);
+                graph_state_.target_verify_execution_rows = 0;
+                py_model_outputs                          = graph_runner_->forward(py_model_inputs, graph_state_);
+                if (inputs.is_target_verify) {
+                    target_verify_execution_rows = graph_state_.target_verify_execution_rows;
+                    target_verify_graph_replay   = true;
+                }
                 PrefillProgressScope::mark(PrefillPhase::TAIL);
                 RTP_LLM_LOG_DEBUG("[PyWrappedModel] CUDA graph forward completed");
                 hidden_states = py_model_outputs.hidden_states.clone();
@@ -998,6 +1005,9 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                 }
                 auto py_model_forward = py_model_.attr("forward");
                 auto outputs          = py_model_forward(py_model_inputs, held_attn_pyobj_);
+                if (inputs.is_target_verify) {
+                    target_verify_execution_rows = token_ids.numel();
+                }
                 PrefillProgressScope::mark(PrefillPhase::TAIL);
                 py_model_outputs = outputs.cast<PyModelOutputs>();
                 hidden_states    = py_model_outputs.hidden_states.clone();
@@ -1047,28 +1057,30 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                     return forwardPostLayersLastHidden(hidden_states, inputs);
                 }
                 size_t num_valid_tokens = context_parallel_processor_->handleOutputs(hidden_states, inputs, cp_params);
-                auto   outputs          = callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens);
+                auto   outputs = callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens);
                 if (mtp_hidden_states.defined() && mtp_hidden_states.numel() > 0) {
                     if (outputs.all_hidden_states.defined()
                         && outputs.all_hidden_states.size(0) == mtp_hidden_states.size(0)) {
                         outputs.all_hidden_states = mtp_hidden_states;
                     } else {
                         RTP_LLM_LOG_WARNING("[PyWrappedModel] ignored restored CP MTP hidden due to output shape "
-                                            "mismatch: mtp_rows=%ld output_rows=%ld",
+                                                    "mismatch: mtp_rows=%ld output_rows=%ld",
                                             mtp_hidden_states.dim() > 0 ? mtp_hidden_states.size(0) : -1,
                                             outputs.all_hidden_states.defined() && outputs.all_hidden_states.dim() > 0 ?
-                                                outputs.all_hidden_states.size(0) :
-                                                -1);
+                                                        outputs.all_hidden_states.size(0) :
+                                                        -1);
                     }
                 }
                 return outputs;
             }
             return callForwardPostLayers(hidden_states, inputs, true);
         };
-        if (prefillOptimizationsEnabled() && !inputs.warmup && inputs.pd_separation) {
-            return cache_store_async_writer_->completeAfter(submit_forward_and_post);
-        }
-        return submit_forward_and_post();
+        auto outputs                         = prefillOptimizationsEnabled() && !inputs.warmup && inputs.pd_separation ?
+                                                   cache_store_async_writer_->completeAfter(submit_forward_and_post) :
+                                                   submit_forward_and_post();
+        outputs.target_verify_execution_rows = target_verify_execution_rows;
+        outputs.target_verify_graph_replay   = target_verify_graph_replay;
+        return outputs;
 
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("Python error during forward call on Python instance: %s", e.what());
@@ -1504,7 +1516,7 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                     sliceKvCacheBlockIdByBatch(inputs.kv_cache_block_id, sliced_batch_idx, d_micro_batch_size);
                 micro_model_inputs.kv_cache_kernel_block_id =
                     sliceKvCacheBlockIdByBatch(inputs.kv_cache_kernel_block_id, sliced_batch_idx, d_micro_batch_size);
-                micro_model_inputs.prefix_lengths = torch::empty({0}, runtimeCudaI32Options());
+                micro_model_inputs.prefix_lengths                   = torch::empty({0}, runtimeCudaI32Options());
                 micro_model_inputs.cache_store_publish_start_tokens = torch::Tensor();
                 micro_model_inputs.lm_output_indexes =
                     inputs.lm_output_indexes.narrow(0, sliced_batch_idx, d_micro_batch_size);

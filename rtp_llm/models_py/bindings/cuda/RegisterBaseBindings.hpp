@@ -294,6 +294,16 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("k"),
                   py::arg("max_seq_len"));
 
+    rtp_ops_m.def("topk_v3_adaptive_cluster_rescan",
+                  &topk_v3_adaptive_cluster_rescan,
+                  "Adaptive Target exact TopK with cluster-sharded fallback",
+                  py::arg("logits"),
+                  py::arg("lengths"),
+                  py::arg("output"),
+                  py::arg("workspace"),
+                  py::arg("k"),
+                  py::arg("max_seq_len"));
+
     rtp_ops_m.def("topk_v3_tie_break",
                   &topk_v3_tie_break,
                   "GLM5 prefill stable ragged radix-select TopK",
@@ -362,10 +372,14 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("total_tokens"));
 
     rtp_ops_m.def("cp_gather_and_upconvert_fp8_kv_cache_padded",
-                 &rtp_llm::cp_gather_and_upconvert_fp8_kv_cache_padded,
-                 "Read FP8 KV into padded BF16 rows, fusing conversion, scatter and zero fill",
-                 py::arg("src_cache"), py::arg("dst_fused"), py::arg("block_table"),
-                 py::arg("actual_lens"), py::arg("padded_lens"), py::arg("padded_starts"));
+                  &rtp_llm::cp_gather_and_upconvert_fp8_kv_cache_padded,
+                  "Read FP8 KV into padded BF16 rows, fusing conversion, scatter and zero fill",
+                  py::arg("src_cache"),
+                  py::arg("dst_fused"),
+                  py::arg("block_table"),
+                  py::arg("actual_lens"),
+                  py::arg("padded_lens"),
+                  py::arg("padded_starts"));
 
     rtp_ops_m.def("concat_and_cache_mla",
                   &rtp_llm::concat_and_cache_mla,

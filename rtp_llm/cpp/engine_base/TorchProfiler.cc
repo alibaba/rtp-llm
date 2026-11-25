@@ -206,7 +206,7 @@ void StepWindowProfiler::tick() {
     }
 }
 
-void StepWindowProfiler::startStep() {
+void StepWindowProfiler::startStep(bool allow_start) {
     // Fast path: no profiling active and no profiler to clean up — zero cost.
     if (!enabled_.load(std::memory_order_relaxed) && !has_profiler_.load(std::memory_order_relaxed)) {
         return;
@@ -236,6 +236,16 @@ void StepWindowProfiler::startStep() {
 
     std::lock_guard<std::mutex> lock(mu_);
     if (profiler_) {
+        return;
+    }
+    if (!allow_start) {
+        // A perf cohort that finished before its requested offset has no
+        // trace to export. Let the next cohort arm its own window.
+        if (waited_steps_ > 0) {
+            enabled_.store(false);
+            waited_steps_ = 0;
+            RTP_LLM_LOG_INFO("timeline profiling cancelled before requested start step");
+        }
         return;
     }
     if (waited_steps_ < start_step_.load()) {

@@ -14,7 +14,7 @@ typedef std::shared_ptr<LogitsProcessorStates> LogitsProcessorStatesPtr;
 
 struct SamplerInitParams {
     std::string model_type;
-    int64_t vocab_size = 8193;
+    int64_t     vocab_size = 8193;
 };
 
 enum class LogitsProcessorPhase {
@@ -88,9 +88,13 @@ public:
     mutable torch::Tensor              all_probs_indices;
     bool                               allow_compact_target_probs = false;
     bool                               skip_logits_probs_restore  = false;
-    bool                               defer_token_sampling = false;
+    bool                               defer_token_sampling       = false;
     std::vector<at::Generator>         rejection_generators       = {};
     int64_t                            rejection_rows             = 0;
+    // Adaptive verify only. Row offsets above the cap have no target logits.
+    torch::Tensor deferred_filter_caps        = {};
+    int64_t       deferred_filter_rows        = 0;
+    torch::Tensor deferred_filter_active_rows = {};  // dense row indices, including bonus rows
 };
 
 struct SamplerOutput {
@@ -104,7 +108,7 @@ public:
     torch::Tensor raw_logprobs_row_indices;
     // MTP top-1 proposals have q(v)=1 only at token_ids. No dense draft
     // probability tensor is required when this explicit representation is set.
-    bool draft_point_mass = false;
+    bool          draft_point_mass = false;
     torch::Tensor all_probs_indices;
     bool          deferred_token_sampling = false;
     torch::Tensor verify_logits           = {};
@@ -119,8 +123,8 @@ public:
 
 struct MergedOutput {
 public:
-    GptModelOutputs model_output;
-    SamplerOutput   sampler_output;
+    GptModelOutputs                model_output;
+    SamplerOutput                  sampler_output;
     std::shared_ptr<RecordedBatch> recorded_batch;
 };
 

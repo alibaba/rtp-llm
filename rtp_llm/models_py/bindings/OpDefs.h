@@ -38,13 +38,13 @@ struct LayerKVCache {
 // Whole-model KV cache holding tensors for all layers.
 // Call getLayerCache(global_layer_id) to obtain a per-layer LayerKVCache.
 struct KVCache {
-    size_t        dsa_mla_resident_tokens = 0;
-    size_t        dsa_mla_hbm_blocks = 0;
+    size_t                     dsa_mla_resident_tokens    = 0;
+    size_t                     dsa_mla_hbm_blocks         = 0;
     size_t                     dsa_prefill_staging_tokens = 0;
     int                        dsa_prefill_hbm_layers     = -1;
     size_t                     dsa_prefill_staging_layers = 0;
     std::vector<torch::Tensor> mla_hbm_cache_by_layer;
-    torch::Tensor block_generations;
+    torch::Tensor              block_generations;
     // Per-layer views
     std::vector<torch::Tensor> kv_cache_base_by_layer;
     std::vector<torch::Tensor> kv_scale_base_by_layer;
@@ -249,13 +249,13 @@ struct PyModelInitResources {
 };
 
 struct PyCacheStoreInputs {
-    size_t                   context_batch_size = 0;
-    size_t                   decoder_batch_size = 0;
-    torch::Tensor            request_id;
-    torch::Tensor            request_pd_separation;
-    torch::Tensor            kv_cache_layer_to_group;
-    torch::Tensor            kv_cache_layer_region_to_group;
-    torch::Tensor            kv_cache_group_types;
+    size_t        context_batch_size = 0;
+    size_t        decoder_batch_size = 0;
+    torch::Tensor request_id;
+    torch::Tensor request_pd_separation;
+    torch::Tensor kv_cache_layer_to_group;
+    torch::Tensor kv_cache_layer_region_to_group;
+    torch::Tensor kv_cache_group_types;
     // Shared by all layer write tasks; laid out [context_batch_size, global_max_blocks].
     std::shared_ptr<const std::vector<std::string>> cache_keys = std::make_shared<const std::vector<std::string>>();
     // Pinned-host mirrors of device length tensors for cache store consumption.
@@ -278,8 +278,8 @@ struct PyCacheStoreInputs {
     rtp_llm::CacheStoreAsyncWriter*      cache_store_async_writer = nullptr;
 
     // CP-page-RR sharding context. (1, 0) = no sharding (legacy path).
-    int cp_size = 1;
-    int cp_rank = 0;
+    int           cp_size = 1;
+    int           cp_rank = 0;
     torch::Tensor publish_start_tokens;
 };
 
@@ -302,8 +302,10 @@ struct PyContextParallelParams {
 };
 
 struct PyAttentionInputs {
-    bool          is_prefill{false};
-    bool          is_target_verify{false};
+    bool is_prefill{false};
+    bool is_target_verify{false};
+    // Captured target layout retains equal rows for every request.
+    bool          uniform_target_verify_layout{false};
     bool          is_draft_extend{false};
     torch::Tensor prefix_lengths;
     torch::Tensor sequence_lengths;

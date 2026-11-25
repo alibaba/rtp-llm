@@ -150,7 +150,7 @@ void preallocateTorchCudaPoolForPrefill(RoleType role_type, int device_id) {
 
 NormalEngine::NormalEngine(const EngineInitParams&                       params,
                            std::unique_ptr<ProposeModelEngineInitParams> propose_params,
-                           bool defer_loop_start):
+                           bool                                          defer_loop_start):
     EngineBase(params),
     model_config_(params.model_config_),
     parallelism_config(params.parallelism_config),
@@ -301,7 +301,7 @@ void NormalEngine::initExecutor(const EngineInitParams&                        p
             kv_cache_layer_to_group_,
             /*warm_up=*/false,
             [this](const std::list<GenerateStreamPtr>& streams) { maybeRefreshCacheStatusSnapshot(streams); },
-            [this]() { step_profiler_.startStep(); },
+            [this](bool allow_start) { step_profiler_.startStep(allow_start); },
             [this]() { step_profiler_.finishStep(); }));
     } else {
         executor_.reset(new NormalExecutor(
@@ -320,8 +320,13 @@ void NormalEngine::initExecutor(const EngineInitParams&                        p
 
 void NormalEngine::initScheduler() {
     if (runtime_config.use_batch_decode_scheduler) {
-        scheduler_.reset(new BatchDecodeScheduler(
-            runtime_config, resource_context_.cache_manager, metrics_reporter_, parallelism_config.dp_rank));
+        const bool need_fill_fake_stream =
+            isMTPEagle() && parallelism_config.dp_size > 1 && pd_sep_config.role_type == RoleType::DECODE;
+        scheduler_.reset(new BatchDecodeScheduler(runtime_config,
+                                                  resource_context_.cache_manager,
+                                                  metrics_reporter_,
+                                                  parallelism_config.dp_rank,
+                                                  need_fill_fake_stream));
         RTP_LLM_LOG_INFO("create batch decode scheduler done");
     } else if (runtime_config.use_gather_batch_scheduler) {
         scheduler_.reset(new GatherBatchScheduler(runtime_config,
@@ -551,8 +556,7 @@ std::shared_ptr<GenerateStream> NormalEngine::createMinFakeStream(int32_t max_ne
     return stream;
 }
 
-void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result,
-                                    bool defer_connector_start) {
+void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result, bool defer_connector_start) {
     const bool use_cuda_malloc_block_pool = shouldUseCudaMallocKVCacheBacking(pd_sep_config, cache_store_config);
     if (propose_params_ && propose_params_->draftModel()) {
         auto config = CacheConfigCreator::createSpConfig(model_config_,

@@ -15,9 +15,12 @@ Usage:
 
 import enum
 import math
+import os
 import sys
+from types import SimpleNamespace
 from typing import Tuple
 from unittest import SkipTest, TestCase, main, skipIf
+from unittest.mock import patch
 
 import torch
 import torch.nn.functional as F
@@ -42,6 +45,9 @@ SKIP_REASON = f"Requires CUDA >= 12.9, current: {torch.version.cuda if torch.ver
 
 # Only import if CUDA version is sufficient
 if CUDA_VERSION_OK:
+    from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl import (
+        flashmla_sparse_impl,
+    )
     from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_impl import (
         SparseMlaFp8Op,
     )
@@ -537,6 +543,85 @@ def ref_sparse_mla_forward(
     return output.to(q.dtype)
 
 
+def _make_grouped_verify_op(**overrides):
+    kwargs = dict(
+        num_heads=64,
+        kv_lora_rank=512,
+        qk_rope_head_dim=64,
+        qk_nope_head_dim=192,
+        page_size=64,
+        softmax_extra_scale=1.0,
+        top_k=2048,
+        use_cuda_graph=True,
+    )
+    return SparseMlaFp8Op(**(kwargs | overrides))
+
+
+@skipIf(not CUDA_VERSION_OK, SKIP_REASON)
+class GroupedVerifyPlanTest(TestCase):
+    def test_opt_in_shape_and_device_guards(self):
+        op = _make_grouped_verify_op()
+        target = SimpleNamespace(is_target_verify=True)
+        table = SimpleNamespace(is_cuda=True, device="cuda:0")
+        caps = SimpleNamespace(major=10, minor=3, multi_processor_count=148)
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "RTP_LLM_ADAPTIVE_VERIFICATION": "1",
+                    flashmla_sparse_impl._GROUPED_VERIFY_ENV: "1",
+                },
+            ),
+            patch.object(torch.cuda, "get_device_properties", return_value=caps),
+            patch.object(
+                flashmla_sparse_impl,
+                "_grouped_verify_wheel_supported",
+                return_value=True,
+            ) as support,
+        ):
+            for rows, batch in (
+                (56, 14),
+                (64, 16),
+                (76, 19),
+                (80, 5),
+                (82, 41),
+                (84, 7),
+            ):
+                self.assertEqual(op._select_verify_batch(rows, table, target), batch)
+            self.assertEqual(op._select_verify_batch(55, table, target), 1)
+            self.assertEqual(op._select_verify_batch(56, table, None), 1)
+            draft = SimpleNamespace(is_target_verify=True, is_draft_extend=True)
+            self.assertEqual(op._select_verify_batch(56, table, draft), 1)
+            eager = _make_grouped_verify_op(use_cuda_graph=False)
+            self.assertEqual(eager._select_verify_batch(56, table, target), 1)
+            wrong_topk = _make_grouped_verify_op(top_k=1024)
+            self.assertEqual(wrong_topk._select_verify_batch(56, table, target), 1)
+            with patch.dict(os.environ, {"RTP_LLM_ADAPTIVE_VERIFICATION": "0"}):
+                self.assertEqual(op._select_verify_batch(56, table, target), 1)
+            with patch.dict(
+                os.environ, {flashmla_sparse_impl._GROUPED_VERIFY_ENV: "0"}
+            ):
+                self.assertEqual(op._select_verify_batch(56, table, target), 1)
+            caps.minor = 0
+            self.assertEqual(op._select_verify_batch(56, table, target), 1)
+            caps.minor = 3
+            support.return_value = False
+            self.assertEqual(op._select_verify_batch(56, table, target), 1)
+
+    def test_scheduler_rejects_changed_grouping_at_equal_rows(self):
+        op = _make_grouped_verify_op()
+        get_meta = lambda **unused: (SimpleNamespace(), None)
+        with patch.object(
+            flashmla_sparse_impl, "get_mla_metadata", get_meta, create=True
+        ):
+            op._reset_sched_meta(4 * 64, 14)
+            original = op._sched_meta
+            op._reset_sched_meta(4 * 64, 14)
+            self.assertIs(op._sched_meta, original)
+            with self.assertRaisesRegex(ValueError, "changed scheduler shape"):
+                op._reset_sched_meta(56 * 64, 1)
+
+
 @skipIf(not CUDA_VERSION_OK, SKIP_REASON)
 class SparseMlaFp8DecodeOpTest(TestCase):
     """Test SparseMlaFp8Op for decode stage."""
@@ -558,6 +643,69 @@ class SparseMlaFp8DecodeOpTest(TestCase):
     def tearDown(self) -> None:
         """Clean up after each test."""
         torch.cuda.empty_cache()
+
+    def test_adaptive_target_grouped_view_replay(self):
+        props = torch.cuda.get_device_properties(self.device)
+        if (props.major, props.minor, props.multi_processor_count) != (10, 3, 148):
+            self.skipTest("Grouped verification is scoped to 148-SM SM103")
+        if not flashmla_sparse_impl._grouped_verify_wheel_supported():
+            self.skipTest("Grouped verification requires the measured FlashMLA wheel")
+        set_seed(20261123)
+        raw_kv = torch.randn(96, 64, 1, 576, device=self.device)
+        fp8_kv = quantize_k_cache(raw_kv, FP8KVCacheLayout.V32_FP8Sparse)
+        table = torch.arange(96, dtype=torch.int32, device=self.device).view(1, -1)
+        target = SimpleNamespace(is_target_verify=True)
+        with patch.dict(
+            os.environ,
+            {
+                "RTP_LLM_ADAPTIVE_VERIFICATION": "1",
+                flashmla_sparse_impl._GROUPED_VERIFY_ENV: "1",
+            },
+        ):
+            for rows, batch, kv_dtype in (
+                (56, 14, torch.float8_e4m3fn),
+                (64, 16, torch.int8),
+                (84, 7, torch.uint8),
+            ):
+                with self.subTest(rows=rows, kv_dtype=kv_dtype):
+                    kv = fp8_kv.view(kv_dtype)
+                    q = torch.randn(rows, 64, 576, device=self.device)
+                    indices = torch.randint(
+                        96 * 64, (rows, 1, 2048), dtype=torch.int32, device=self.device
+                    )
+                    indices[::4, :, 512:] = -1
+                    indices[-1] = -1
+                    sink = torch.linspace(-1.0, 1.0, 64, dtype=torch.float32)
+                    params = SimpleNamespace(
+                        batch_indice_h=torch.empty(rows, device="cpu")
+                    )
+                    flat, grouped = _make_grouped_verify_op(), _make_grouped_verify_op()
+                    flat.plan(params, table)
+                    grouped.plan(params, table, target)
+                    self.assertEqual(grouped._verify_batch, batch)
+
+                    def run(op):
+                        return op.forward(
+                            q, kv, indices, physical_indices=indices, attn_sink=sink
+                        )
+
+                    run(grouped)
+                    graph = torch.cuda.CUDAGraph()
+                    torch.cuda.synchronize()
+                    with torch.cuda.graph(graph):
+                        actual = run(grouped)
+                    for _ in range(2):
+                        reference = run(flat)
+                        grouped.plan(params, table, target)
+                        graph.replay()
+                        self.assertEqual(actual.shape, (rows, 64, 512))
+                        self.assertEqual(actual.dtype, reference.dtype)
+                        self.assertEqual(actual[-1].abs().max().item(), 0.0)
+                        relative_l2 = (actual.float() - reference.float()).norm()
+                        relative_l2 /= reference.float().norm().clamp_min(1e-6)
+                        self.assertLess(relative_l2.item(), 0.005)
+                        q.mul_(0.875)
+                        indices[1, :, 1024:] = -1
 
     def _run_test(self, p: TestParam):
         """Run single test case."""

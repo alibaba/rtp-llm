@@ -50,8 +50,8 @@ public:
                          const std::vector<int32_t>&                    kv_cache_layer_to_group = {},
                          bool                                           warm_up                 = false,
                          CacheStatusSnapshotRefreshCallback             cache_status_snapshot_refresh_callback = {},
-                         std::function<void()>                          profile_step_start = {},
-                         std::function<void()>                          profile_step_finish = {});
+                         std::function<void(bool)>                      profile_step_start                     = {},
+                         std::function<void()>                          profile_step_finish                    = {});
 
     absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us = 0) override;
     bool         updateEplbConfig(const EPLBConfig& config) override;
@@ -103,9 +103,10 @@ protected:
         // rows as total_accept_len, so the bucket sums match it exactly.
         std::map<int32_t, int64_t> accept_len_by_priority;
         bool                       valid = false;
+        VerificationMetrics        verification;
     };
 
-    bool isTpRank0() const;
+    bool                 isTpRank0() const;
     void                 adaptivePredict(const StreamGroups& groups, int step, const torch::Tensor& logits);
     std::vector<int64_t> adaptiveRequestIds(const StreamGroups& groups);
 
@@ -124,7 +125,10 @@ protected:
     // prepare runners and add source branch previous-bookkeeping stream ordering.
     void            waitPreviousBookkeepingAndKvSwaps(const std::list<GenerateStreamPtr>& streams);
     void            prepareGrpcMtpDeviceState(const std::list<GenerateStreamPtr>& streams, TensorHolder& host_holder);
-    void            launchTargetVerifyPrepareAsync(const GptModelInputs& model_input, size_t batch_size);
+    void            launchTargetVerifyPrepareAsync(const GptModelInputs& model_input,
+                                                   size_t                batch_size,
+                                                   const torch::Tensor&  adaptive_caps = torch::Tensor(),
+                                                   int64_t               adaptive_rows = -1);
     void            launchDraftPrefillPrepareAsync(const GptModelInputs& model_input);
     GptModelOutputs runTargetVerifyForward(GptModelInputs& model_input, const StreamGroups& stream_groups);
     void            debugCheckLinearBlockMapAtKernelRead(const GptModelInputs& model_input,
@@ -137,11 +141,13 @@ protected:
          buildSpecLogitsVerifyInline(const std::list<GenerateStreamPtr>& streams,
                                      const torch::Tensor&                draft_tokens,
                                      std::shared_ptr<torch::Event>       draft_tokens_ready_event,
-                                     bool                              skip_finished_streams = false);
+                                     bool                                skip_finished_streams = false);
     void collectDecodeMetrics(const StreamGroups&                          stream_groups,
                               torch::Event&                                accept_len_ready_event,
                               const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
-                              MtpMetricsCollector&                         metrics_collector);
+                              MtpMetricsCollector&                         metrics_collector,
+                              const VerificationMetrics&                   verification      = {},
+                              const torch::Tensor&                         verification_caps = {});
     std::shared_ptr<MtpTargetLogprobs>
                  launchEarlyMtpTargetLogprobsFinalize(const StreamGroups&                          stream_groups,
                                                       const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
@@ -163,7 +169,9 @@ protected:
                           const StreamGroups&         stream_groups,
                           std::vector<torch::Tensor>& draft_probs_list,
                           torch::Tensor&              draft_token_ids_t,
-                          int64_t&                    model_forward_us);
+                          int64_t&                    model_forward_us,
+                          const torch::Tensor&        draft_probabilities_for_plan,
+                          bool                        use_margin_for_plan);
 
     bool useDeviceInput() const;
     bool checkDeviceInput() const;
@@ -171,12 +179,14 @@ protected:
     void checkModelInputsOnCuda(const GptModelInputs& model_input, const char* tag) const;
 
     AcceptLenMetricsSnapshot consumePendingAcceptLenMetrics();
-    void                     stageAcceptLenMetrics(const torch::Tensor& accept_len,
-                                                   torch::Event&        accept_len_ready_event,
-                                                   size_t               stream_count,
-                                                   std::vector<int32_t> row_priorities,
-                                                   const torch::Tensor& prepared_rows = {},
-                                                   const torch::Tensor& prepared_total = {});
+    void                     stageAcceptLenMetrics(const torch::Tensor&       accept_len,
+                                                   torch::Event&              accept_len_ready_event,
+                                                   size_t                     stream_count,
+                                                   std::vector<int32_t>       row_priorities,
+                                                   const torch::Tensor&       prepared_rows     = {},
+                                                   const torch::Tensor&       prepared_total    = {},
+                                                   const VerificationMetrics& verification      = {},
+                                                   const torch::Tensor&       verification_caps = {});
 
     void prepareStreams(const std::list<GenerateStreamPtr>& streams,
                         std::list<GenerateStreamPtr>&       prefill_streams,
@@ -203,8 +213,8 @@ protected:
     // Opt-in gate to skip the broad sync at decodeStep start.
     // Device state, epoch-guarded clears, and single-slotted workers preserve
     // correctness while bookkeeping overlaps the next step.
-    bool useDropBroadSync() const;
-    bool useForwardOverlap() const;
+    bool        useDropBroadSync() const;
+    bool        useForwardOverlap() const;
     static bool supportsForwardOverlapHiddenState(const ModelConfig& target, const ModelConfig& draft);
 
     bool shouldSkipFakeStreamForStop(const GptModelInputs& model_input, const char* phase) const;
@@ -247,13 +257,15 @@ private:
     size_t                                                                                     vocab_size_;
 
     // for mtp
-    DataType                                         data_type_;
-    size_t                                           hidden_size_;
-    size_t                                           propose_step_;
-    size_t                                           draft_vocab_size_;
-    bool                                             adaptive_verification_ = false;
-    bool                                             glm5_target_ = false;
-    std::shared_ptr<py::object>                      adaptive_session_;
+    DataType                                   data_type_;
+    size_t                                     hidden_size_;
+    size_t                                     propose_step_;
+    size_t                                     draft_vocab_size_;
+    bool                                       adaptive_verification_       = false;
+    bool                                       adaptive_prediction_enabled_ = false;
+    bool                                       glm5_target_                 = false;
+    std::shared_ptr<py::object>                adaptive_session_;
+    std::vector<std::weak_ptr<GenerateStream>> adaptive_dense_fallback_streams_;
     std::map<std::weak_ptr<GenerateStream>, int64_t, std::owner_less<std::weak_ptr<GenerateStream>>>
                                                      adaptive_request_ids_;
     int64_t                                          adaptive_next_request_id_  = 0;
@@ -272,7 +284,8 @@ private:
     bool                               warm_up_;
     RoleType                           role_type_;
     CacheStatusSnapshotRefreshCallback cache_status_snapshot_refresh_callback_;
-    std::function<void()>              profile_step_start_;
+    std::function<void(bool)>          profile_step_start_;
+    const bool                         defer_perf_profile_until_real_decode_;
     std::function<void()>              profile_step_finish_;
 
     // True when any KV-cache group is CacheGroupType::LINEAR (RWKV / Mamba /
@@ -295,6 +308,9 @@ private:
     torch::Tensor                 metrics_accept_len_rows_cpu_;
     std::vector<int32_t>          metrics_accept_len_row_priorities_;
     std::shared_ptr<torch::Event> metrics_accept_len_ready_event_;
+    VerificationMetrics           metrics_verification_;
+    torch::Tensor                 metrics_verification_caps_gpu_;
+    torch::Tensor                 metrics_verification_caps_cpu_;
     int64_t                       metrics_accept_len_stream_num_        = 0;
     int64_t                       metrics_accept_len_propose_token_num_ = 0;
 

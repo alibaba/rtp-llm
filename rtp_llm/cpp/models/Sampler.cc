@@ -19,7 +19,7 @@ namespace rtp_llm {
 Sampler::Sampler(const SamplerInitParams& params): copy_stream_(cuda_graph::graphGetStreamFromPool(false)) {
     if (params.model_type == "hy_v4") {
         use_optimized_sampling_ = true;
-        force_topk_ = 4096;
+        force_topk_             = 4096;
         if (const char* value = std::getenv("RTP_LLM_HY4_FORCE_TOPK")) {
             char* end         = nullptr;
             errno             = 0;
@@ -130,9 +130,9 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                                      torch::empty({(int64_t)inputs.batch_size_out}, torch::kFloat32) :
                                      inputs.cum_log_probs;
 
-    size_t from_batch_idx_in = 0, to_batch_idx_in = 0;
-    size_t from_batch_idx_out = 0;
-    bool   deferred_token_sampling = false;
+    size_t        from_batch_idx_in = 0, to_batch_idx_in = 0;
+    size_t        from_batch_idx_out      = 0;
+    bool          deferred_token_sampling = false;
     torch::Tensor compact_logits, compact_ids, dense_fallback, fallback_rows, prepared_rejection_rng, log_normalizer;
 
     while (from_batch_idx_in < inputs.batch_size) {
@@ -186,6 +186,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
             auto generator            = std::vector<at::Generator>{inputs.generator.begin() + from_batch_idx_in,
                                                                    inputs.generator.begin() + from_batch_idx_in + batch_size_in};
 
+            const bool whole_batch = from_batch_idx_in == 0 && batch_size_in == inputs.batch_size;
             RTP_LLM_PROFILE_SCOPE("sampler.forward.execSampleGreedy");
             auto greedy_output = execSampleGreedy(
                 {logits,
@@ -212,11 +213,12 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                  use_optimized_sampling_ && inputs.skip_logits_probs_restore,
                  inputs.defer_token_sampling,
                  inputs.phase == LogitsProcessorPhase::MTP_VERIFY,
-                 from_batch_idx_in == 0 && batch_size_in == inputs.batch_size,
+                 whole_batch,
                  inputs.rejection_generators,
-                 from_batch_idx_in == 0 && batch_size_in == inputs.batch_size && !inputs.rejection_generators.empty() ?
-                     inputs.rejection_rows :
-                     0});
+                 whole_batch && !inputs.rejection_generators.empty() ? inputs.rejection_rows : 0,
+                 whole_batch ? inputs.deferred_filter_caps : torch::Tensor(),
+                 whole_batch ? inputs.deferred_filter_rows : 0,
+                 whole_batch ? inputs.deferred_filter_active_rows : torch::Tensor()});
             deferred_token_sampling = greedy_output.deferred_token_sampling;
             if (greedy_output.deferred_logits.defined()) {
                 compact_logits         = greedy_output.deferred_logits;

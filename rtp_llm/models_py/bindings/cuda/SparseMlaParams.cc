@@ -128,9 +128,9 @@ void SparseMlaParams::fillParamsInternal(bool                 is_prefill,
         auto ks_ptr                  = ks_h_.data_ptr<int32_t>();
         auto ke_ptr                  = ke_h_.data_ptr<int32_t>();
 
-        int64_t offset             = 0;
-        int64_t k_offset           = 0;
-        prefill_max_kv_len         = 0;
+        int64_t offset     = 0;
+        int64_t k_offset   = 0;
+        prefill_max_kv_len = 0;
         for (int i = 0; i < batch_size; ++i) {
             const int32_t input_len  = input_lengths_ptr[i];
             const int32_t prefix_len = prefix_lengths_ptr ? prefix_lengths_ptr[i] : 0;
@@ -719,6 +719,7 @@ void registerPySparseMlaParams(pybind11::module& m) {
         .def_readonly("prefill_total_kv_tokens", &SparseMlaParams::prefill_total_kv_tokens)
         .def_readonly("prefill_max_kv_len", &SparseMlaParams::prefill_max_kv_len)
         .def_readwrite("schedule_metadata", &SparseMlaParams::schedule_metadata)
+        .def_readwrite("paged_mqa_request_ids", &SparseMlaParams::paged_mqa_request_ids)
         .def(
             "fill_cp_plan_params",
             [](rtp_llm::SparseMlaParams&   self,

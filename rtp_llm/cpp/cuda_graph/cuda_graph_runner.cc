@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
 
+#include "rtp_llm/cpp/cuda_graph/cuda_graph_capture_range.h"
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
@@ -298,8 +299,8 @@ void CudaGraphRunner::prepareInputData(const PyModelInputs& inputs, CudaGraphSta
     const size_t     graph_idx        = is_prefill_cuda_graph_mode_ ?
                                             state.current_real_graph_seq_len :
                                             (state.decode_graph_key > 0 ? state.decode_graph_key : state.current_real_graph_bs);
-    auto& py_model_inputs_ = graph_instances_[graph_idx].mem_hold_.py_model_inputs_;
-    int   token_num        = is_prefill_cuda_graph_mode_ ? state.current_seq_len : inputs.input_ids.size(0);
+    auto&            py_model_inputs_ = graph_instances_[graph_idx].mem_hold_.py_model_inputs_;
+    int              token_num        = is_prefill_cuda_graph_mode_ ? state.current_seq_len : inputs.input_ids.size(0);
 
     optimizedCopyAsync(inputs.input_ids, py_model_inputs_.input_ids, token_num * sizeof(int));
 
@@ -329,6 +330,11 @@ void CudaGraphRunner::prepareInputData(const PyModelInputs& inputs, CudaGraphSta
         optimizedCopyAsync(inputs.input_hiddens,
                            py_model_inputs_.input_hiddens,
                            inputs.input_hiddens.numel() * inputs.input_hiddens.element_size());
+        if (adaptive_verification_ && token_num < py_model_inputs_.input_hiddens.size(0)) {
+            // Dummy rows must not retain NaNs or previous-request activations.
+            // Attention metadata separately gives them slot=-1 and zero KV length.
+            py_model_inputs_.input_hiddens.slice(0, token_num).zero_();
+        }
     }
 
     if (is_prefill_cuda_graph_mode_) {
@@ -367,11 +373,11 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     const size_t graph_idx               = is_prefill_cuda_graph_mode_ ?
                                                state.current_real_graph_seq_len :
                                                (state.decode_graph_key > 0 ? state.decode_graph_key : state.current_real_graph_bs);
-    auto&     py_model_inputs_        = graph_instances_[graph_idx].mem_hold_.py_model_inputs_;
-    auto      attn_pyobj              = graph_instances_[graph_idx].mem_hold_.attn_pyobj_;
-    const int captured_batch_capacity = py_model_inputs_.attention_inputs.input_lengths.defined() ?
-                                            static_cast<int>(py_model_inputs_.attention_inputs.input_lengths.size(0)) :
-                                            static_cast<int>(max_bs_);
+    auto&        py_model_inputs_        = graph_instances_[graph_idx].mem_hold_.py_model_inputs_;
+    auto         attn_pyobj              = graph_instances_[graph_idx].mem_hold_.attn_pyobj_;
+    const int    captured_batch_capacity = py_model_inputs_.attention_inputs.input_lengths.defined() ?
+                                               static_cast<int>(py_model_inputs_.attention_inputs.input_lengths.size(0)) :
+                                               static_cast<int>(max_bs_);
     RTP_LLM_CHECK_WITH_INFO(state.current_batch_size <= captured_batch_capacity,
                             "cuda graph replay batch size %d exceeds captured capacity %d for graph %zu",
                             state.current_batch_size,
@@ -379,7 +385,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                             graph_idx);
 
     // Per-launch capacity contract: see fuse_copy_util.h sizing rationale.
-    // Worst case here is ~8 contiguous + (1 + group_count) strided copies,
+    // Worst case here is ~8 contiguous + (2 + group_count) strided copies,
     // batched into one launch each. If new copies are added below — or if the
     // hybrid KV-cache group_count grows materially — re-check MAX_FUSED_*_COPIES.
     FusedD2DCopyParams     d2d_copies;
@@ -391,9 +397,8 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     // Clear stale device ranges before strided D2D copies. All device-side fills
     // are fused into one kernel to avoid a train of tiny aten::fill_ launches.
 #if USING_CUDA
-    const bool defer_mtp_fill = mtpFusionEnabled()
-                                && (inputs.attention_inputs.is_target_verify
-                                    || inputs.attention_inputs.is_draft_extend);
+    const bool defer_mtp_fill =
+        mtpFusionEnabled() && (inputs.attention_inputs.is_target_verify || inputs.attention_inputs.is_draft_extend);
     CudaGraphPrepareFillParams fill_params;
     {
         RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs(fused_fill)");
@@ -504,6 +509,24 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                inputs.attention_inputs.cu_kv_seqlens,
                py_model_inputs_.attention_inputs.cu_kv_seqlens,
                (state.current_batch_size + 1) * sizeof(int));
+    if (adaptive_verification_ && state.current_batch_size < captured_batch_capacity) {
+        // Token-bucket graphs can serve different request counts. Empty metadata
+        // slots must have zero KV extent, not capture/previous replay offsets.
+        // Broadcast the last live device offset in the existing fused copy;
+        // avoid a CPU readback or an extra elementwise launch.
+        const auto& src = inputs.attention_inputs.cu_kv_seqlens;
+        auto&       dst = py_model_inputs_.attention_inputs.cu_kv_seqlens;
+        RTP_LLM_CHECK_WITH_INFO(src.is_cuda() && dst.is_cuda() && src.scalar_type() == torch::kInt32
+                                    && dst.scalar_type() == torch::kInt32 && src.numel() >= state.current_batch_size + 1
+                                    && dst.numel() >= captured_batch_capacity + 1,
+                                "invalid adaptive cu_kv_seqlens buffers");
+        strided_d2d_copies.add(src.data_ptr<int32_t>() + state.current_batch_size,
+                               dst.data_ptr<int32_t>() + state.current_batch_size + 1,
+                               captured_batch_capacity - state.current_batch_size,
+                               sizeof(int32_t),
+                               0,
+                               sizeof(int32_t));
+    }
     addD2DCopy(d2d_copies,
                inputs.attention_inputs.input_lengths,
                py_model_inputs_.attention_inputs.input_lengths,
@@ -659,8 +682,8 @@ void CudaGraphRunner::updateKVCacheKernelBlockId(const PyModelInputs& inputs, Cu
     const size_t     graph_idx        = is_prefill_cuda_graph_mode_ ?
                                             state.current_real_graph_seq_len :
                                             (state.decode_graph_key > 0 ? state.decode_graph_key : state.current_real_graph_bs);
-    auto& py_model_inputs_ = graph_instances_[graph_idx].mem_hold_.py_model_inputs_;
-    auto  attn_pyobj       = graph_instances_[graph_idx].mem_hold_.attn_pyobj_;
+    auto&            py_model_inputs_ = graph_instances_[graph_idx].mem_hold_.py_model_inputs_;
+    auto             attn_pyobj       = graph_instances_[graph_idx].mem_hold_.attn_pyobj_;
 
     // Re-mirror KV block-id device buffers. Dense kernels consume the
     // kernel-granularity table; sparse MLA/indexer consume the physical page
@@ -751,9 +774,10 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
             graph_instances_[state.current_real_graph_seq_len].mem_hold_.decoder_layer_hidden_states_.slice(
                 0, 0, state.current_seq_len);
     } else {
+        const int key = state.decode_graph_key > 0 ? state.decode_graph_key : state.current_real_graph_bs;
         {
             RTP_LLM_PROFILE_SCOPE("cuda_graph.forward(replayDecode)");
-            replayDecode(state.decode_graph_key > 0 ? state.decode_graph_key : state.current_real_graph_bs);
+            replayDecode(key);
             if (debugSyncCudaGraphReplayEnabled()) {
                 RTP_LLM_LOG_INFO("[CudaGraphRunner] debug sync after decode replay key=%d seq_len_sum=%d",
                                  state.current_real_graph_bs,
@@ -761,9 +785,11 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
                 cuda_graph::graphDeviceSynchronize();
             }
         }
-        outputs.hidden_states =
-            graph_instances_[state.decode_graph_key > 0 ? state.decode_graph_key : state.current_real_graph_bs]
-                .mem_hold_.decoder_layer_hidden_states_.slice(0, 0, state.seq_len_sum);
+        const auto& captured_hidden = graph_instances_[key].mem_hold_.decoder_layer_hidden_states_;
+        if (inputs.attention_inputs.is_target_verify) {
+            state.target_verify_execution_rows = captured_hidden.size(0);
+        }
+        outputs.hidden_states = captured_hidden.slice(0, 0, state.seq_len_sum);
     }
     // record forward done event
     forward_event_.record(cuda_graph::graphGetCurrentStream());
@@ -794,6 +820,30 @@ bool CudaGraphRunner::tryGetRealGraphPrefillSeqLen(const PyModelInputs& inputs, 
 }
 
 bool CudaGraphRunner::tryGetRealGraphDecodeBatchSize(const PyModelInputs& inputs, CudaGraphState& state) {
+    if (adaptive_verification_) {
+        RTP_LLM_CHECK_WITH_INFO(is_target_verify_ && inputs.attention_inputs.is_target_verify,
+                                "adaptive graph runner requires a target verification input");
+        state.current_batch_size = inputs.attention_inputs.input_lengths.size(0);
+        state.seq_len_sum        = inferTotalTokensNoSync(inputs);
+        adaptiveVerifyReplayShape(
+            static_cast<int>(max_bs_), num_tokens_per_bs_, state.current_batch_size, state.seq_len_sum);
+        // MTP contributes one to num_tokens_per_bs_ rows per request. The
+        // maximum batch and maximum total therefore require uniform lengths.
+        if (uniform_verify_graph_key_ > 0 && state.current_batch_size == static_cast<int>(max_bs_)
+            && state.seq_len_sum == max_num_token_) {
+            state.current_real_graph_bs = state.current_batch_size;
+            state.decode_graph_key      = uniform_verify_graph_key_;
+            return true;
+        }
+        const auto bucket = std::lower_bound(capture_range_.begin(), capture_range_.end(), state.seq_len_sum);
+        RTP_LLM_CHECK_WITH_INFO(bucket != capture_range_.end(), "adaptive verification exceeds captured row buckets");
+        const auto shape            = adaptiveVerifyGraphShape(static_cast<int>(max_bs_), num_tokens_per_bs_, *bucket);
+        state.current_real_graph_bs = shape.batch_capacity;
+        state.decode_graph_key      = shape.rows;
+        RTP_LLM_CHECK_WITH_INFO(
+            graph_instances_.count(shape.rows) != 0, "adaptive target graph was not captured: rows=%d", shape.rows);
+        return true;
+    }
     int cuda_graph_bs        = inputs.attention_inputs.input_lengths.size(0);
     state.current_batch_size = cuda_graph_bs;
     RTP_LLM_LOG_DEBUG("canRun judge for batch size: %d", cuda_graph_bs);
@@ -1078,8 +1128,8 @@ void CudaGraphRunner::initCapture() {
         const char* value = std::getenv(name);
         return value == nullptr || std::strcmp(value, "1") == 0;
     };
-    const bool optimized_capture = default_on("RTP_LLM_GLM5_EH_FUSION")
-                                   || default_on("RTP_LLM_GLM5_CMP_MOE_DUAL_STREAM");
+    const bool optimized_capture =
+        default_on("RTP_LLM_GLM5_EH_FUSION") || default_on("RTP_LLM_GLM5_CMP_MOE_DUAL_STREAM");
     at::AutoGradMode grad_mode(optimized_capture ? false : at::GradMode::is_enabled());
     c10::DeviceGuard graph_device_guard(cuda_graph::graphDevice(device_index_));
     if (enable_cuda_graph_) {
@@ -1299,6 +1349,35 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type, boo
                          graph_pool_delta / 1024 / 1024,
                          post_capture_reserved / 1024 / 1024);
     }
+}
+
+void CudaGraphRunner::profileAdaptiveGraph(int key, int rows) {
+    if (!profile_adaptive_costs_) {
+        return;
+    }
+    c10::DeviceGuard       graph_device_guard(cuda_graph::graphDevice(device_index_));
+    py::gil_scoped_acquire gil;
+    // The same prepared buffers just passed replayAndSyncCheck. Replay only at
+    // startup, before requests own any KV pages, and measure actual GPU time.
+    // torch.cuda.Event also supports the ROCm backend without CUDA-only types.
+    auto                event_type = py::module_::import("torch.cuda").attr("Event");
+    auto                begin      = event_type(py::arg("enable_timing") = true);
+    auto                end        = event_type(py::arg("enable_timing") = true);
+    std::vector<double> samples;
+    for (int repeat = 0; repeat < 5; ++repeat) {
+        begin.attr("record")();
+        replayGraph(key);
+        end.attr("record")();
+        end.attr("synchronize")();
+        samples.push_back(begin.attr("elapsed_time")(end).cast<double>());
+    }
+    std::sort(samples.begin(), samples.end());
+    adaptive_cost_curve_.emplace_back(rows, samples[2]);
+    RTP_LLM_LOG_INFO("[adaptive-profile] target=%d rows=%d graph_ms=%.6f samples=5 capture_context=%d",
+                     is_target_verify_,
+                     rows,
+                     samples[2],
+                     max_seq_len_);
 }
 
 void CudaGraphRunner::replayAndSyncCheck(int key, const char* key_type) {

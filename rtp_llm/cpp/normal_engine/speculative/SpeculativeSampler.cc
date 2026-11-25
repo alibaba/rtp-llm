@@ -78,10 +78,14 @@ bool FastTopKSampler::compactPointMassEnabled() const {
 FastTopKSamplerOutput
 FastTopKSampler::forward(const torch::Tensor& logits, int top_k, const MtpDraftSampleContext* context) {
     FastTopKSamplerOutput output;
-    const auto scores = use_raw_logits_ && top_k == 1 ? logits : torch::softmax(logits, -1);
+    const auto            scores  = use_raw_logits_ && top_k == 1 ? logits : torch::softmax(logits, -1);
     const bool            compact = top_k == 1 && compactPointMassEnabled();
+    const torch::Tensor   empty;
+    const auto&           selected_probability = context ? context->selected_probability : empty;
+    RTP_LLM_CHECK(!selected_probability.defined() || (top_k == 1 && !use_raw_logits_ && !context->zero_tokens));
 #if USING_CUDA
-    const torch::Tensor empty;
+    const auto& selected_margin =
+        context && top_k == 1 && !use_raw_logits_ && !context->zero_tokens ? context->selected_logit_margin : empty;
     if (mtpFusionEnabled() && top_k == 1
         && tryMtpGreedyPack(scores,
                             d2t_map_,
@@ -93,14 +97,24 @@ FastTopKSampler::forward(const torch::Tensor& logits, int top_k, const MtpDraftS
                             context && context->zero_tokens,
                             output.next_sequence_lengths,
                             cuda_graph::graphGetCurrentStream().stream(),
-                            compact)) {
+                            compact,
+                            selected_probability,
+                            selected_margin)) {
         output.fake_inputs_prepared = context && context->zero_tokens;
         return output;
     }
 #endif
 
     if (top_k == 1) {
-        output.token_ids = use_raw_logits_ ? torch::argmax(scores, -1, true) : std::get<1>(torch::max(scores, -1, true));
+        if (use_raw_logits_) {
+            output.token_ids = torch::argmax(scores, -1, true);
+        } else {
+            auto selected    = torch::max(scores, -1, true);
+            output.token_ids = std::get<1>(selected);
+            if (selected_probability.defined()) {
+                selected_probability.copy_(std::get<0>(selected).squeeze(1));
+            }
+        }
         // A deterministic top-1 proposal must be represented by its point-mass
         // distribution when rejection sampling computes its acceptance ratio.
         if (!compact) {
@@ -165,7 +179,7 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
 
     auto do_sample_d =
         target_sampler_output.deferred_token_sampling ? target_sampler_output.verify_do_sample : torch::Tensor();
-    [[maybe_unused]] bool all_greedy = true;
+    [[maybe_unused]] bool all_greedy        = true;
     [[maybe_unused]] bool has_forced_accept = false;
     if (!do_sample_d.defined()) {
         auto do_sample =
@@ -185,7 +199,7 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
                       && do_sample_d.dim() == 1 && do_sample_d.size(0) == batch_size && do_sample_d.is_contiguous());
     }
 
-    auto          rand_options      = torch::TensorOptions().device(target_device).dtype(torch::kFloat);
+    auto          rand_options = torch::TensorOptions().device(target_device).dtype(torch::kFloat);
     torch::Tensor uniform_samples_d;
     if (!target_sampler_output.deferred_token_sampling) {
         uniform_samples_d = torch::rand({(long)batch_size, (long)propose_step_ + 1}, rand_options);
@@ -204,8 +218,8 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
         }
     }
 
-    auto          draft_token_probs_d_t  = draft_token_probs;
-    auto          target_token_probs_d_t = target_token_probs;
+    auto       draft_token_probs_d_t  = draft_token_probs;
+    auto       target_token_probs_d_t = target_token_probs;
     const auto output_options = torch::TensorOptions().device(target_device).dtype(torch::kInt32).requires_grad(false);
     // The CUDA rejection kernel writes every token slot and acceptance length,
     // including unused -1 tails, on both greedy and stochastic branches.
@@ -230,7 +244,7 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
                                           target_sampler_output.verify_dense_fallback.size(-1) :
                                           target_token_probs_d_t.size(2);
     if (!draft_sampler_output.draft_point_mass && draft_token_probs_d_t.size(2) != target_vocab_size) {
-        const int64_t num_spec          = draft_token_probs_d_t.size(1);
+        const int64_t num_spec = draft_token_probs_d_t.size(1);
 
         // Reuse pre-allocated padding buffer to avoid per-forward GPU allocation.
         // Grow-only along batch / num_spec dims; vocab dim must match exactly.
@@ -294,11 +308,13 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
                                    target_sampler_output.prepared_rejection_rng,
                                    target_sampler_output.verify_log_normalizer});
         } else if (mtpFusionEnabled() && draft_sampler_output.draft_point_mass && all_greedy && !has_forced_accept) {
-            greedy_finalized = tryMtpGreedyFinalize(draft_token_ids_d_t, target_token_ids_d_t,
-                                                   output_token_ids_d, output_accepted_token_num_d,
-                                                   sample_output.accept_metric_rows,
-                                                   sample_output.accept_metric_total,
-                                                   cuda_graph::graphGetCurrentStream().stream());
+            greedy_finalized = tryMtpGreedyFinalize(draft_token_ids_d_t,
+                                                    target_token_ids_d_t,
+                                                    output_token_ids_d,
+                                                    output_accepted_token_num_d,
+                                                    sample_output.accept_metric_rows,
+                                                    sample_output.accept_metric_total,
+                                                    cuda_graph::graphGetCurrentStream().stream());
         }
         if (!target_sampler_output.deferred_token_sampling && !greedy_finalized
             && draft_sampler_output.draft_point_mass) {
@@ -436,7 +452,6 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
         sample_output.accept_len_cpu    = sample_output.accept_len.to(torch::kCPU, true);
     }
     sample_output.transfer_done_event->record(cuda_graph::graphGetCurrentStream());
-
 }
 
 void SpeculativeSampler::streamSample(SpeculativeSamplerOutput&           sample_output,

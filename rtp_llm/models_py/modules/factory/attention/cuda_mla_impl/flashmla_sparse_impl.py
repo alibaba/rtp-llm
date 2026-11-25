@@ -12,6 +12,8 @@ Two operators:
 import logging
 import os
 from dataclasses import dataclass
+from functools import lru_cache
+from importlib.metadata import PackageNotFoundError, version
 from typing import Dict, List, Optional
 
 import torch
@@ -30,7 +32,10 @@ try:
 except (ImportError, AttributeError, ValueError) as _e:
     logging.warning(f"flash_mla not available: {_e}. Requires CUDA >= 12.9")
 
-from rtp_llm.models_py.modules.base.cuda.paged_mqa import paged_mqa_context_lens
+from rtp_llm.models_py.modules.base.cuda.paged_mqa import (
+    paged_mqa_context_lens,
+    refresh_paged_mqa_request_ids,
+)
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_kv_cache_write_op import (
     MlaKVCacheWriteOp,
@@ -281,6 +286,21 @@ class SparseMlaOp(object):
 # ---------------------------------------------------------------------------
 
 
+# Measured virtual batches for the 148-SM Blackwell V32 sparse decode kernel.
+# Every row still carries its own physical TopK indices. The grouping only
+# changes the split-KV scheduling geometry and its accumulation order.
+_GROUPED_VERIFY_BATCHES = {56: 14, 64: 16, 76: 19, 80: 5, 82: 41, 84: 7}
+_GROUPED_VERIFY_ENV = "RTP_LLM_ADAPTIVE_VERIFY_FLASHMLA_GROUPED_VIEW"
+
+
+@lru_cache(maxsize=1)
+def _grouped_verify_wheel_supported() -> bool:
+    try:
+        return version("flash_mla") == "1.0.0+49e2000.cu132"
+    except PackageNotFoundError:
+        return False
+
+
 class SparseMlaFp8DecodeParams(object):
     """Wraps the (sched_meta, num_splits) returned by get_mla_metadata.
 
@@ -327,12 +347,49 @@ class SparseMlaFp8Op(SparseMlaOp):
         # dangling/stale pointer, so plan() must refresh it in place.
         self._sched_meta = None
         self._sched_meta_key = None
+        self._verify_batch = 1
         # Gather workspace (None when path is disabled / no work to do)
         self._gather: Optional[_GatherWorkspace] = None
 
-    def _reset_sched_meta(self, num_q_tokens_per_head_k: int) -> None:
+    def _select_verify_batch(
+        self,
+        rows: int,
+        block_table: torch.Tensor,
+        attn_inputs: Optional[PyAttentionInputs],
+    ) -> int:
+        batch = _GROUPED_VERIFY_BATCHES.get(rows, 1)
+        if (
+            batch == 1
+            or type(self) is not SparseMlaFp8Op
+            or not self.use_cuda_graph
+            or os.environ.get(_GROUPED_VERIFY_ENV, "0") != "1"
+            or os.environ.get("RTP_LLM_ADAPTIVE_VERIFICATION", "0") != "1"
+            or not getattr(attn_inputs, "is_target_verify", False)
+            or getattr(attn_inputs, "is_draft_extend", False)
+            or (
+                self.num_heads,
+                self.qk_head_dim,
+                self.qk_rope_head_dim,
+                self.kv_lora_rank,
+                self.token_per_block,
+                self.top_k,
+            )
+            != (64, 256, 64, 512, 64, 2048)
+            or not block_table.is_cuda
+            or not _grouped_verify_wheel_supported()
+        ):
+            return 1
+        props = torch.cuda.get_device_properties(block_table.device)
+        if (props.major, props.minor, props.multi_processor_count) != (10, 3, 148):
+            return 1
+        return batch
+
+    def _reset_sched_meta(
+        self, num_q_tokens_per_head_k: int, verify_batch: int
+    ) -> None:
         key = (
             int(num_q_tokens_per_head_k),
+            verify_batch,
             int(self.top_k),
             int(self.num_heads),
             1,
@@ -377,7 +434,10 @@ class SparseMlaFp8Op(SparseMlaOp):
 
         # get_mla_metadata returns an empty FlashMLASchedMeta; the kernel fills
         # it on first call, then reuses it for the rest of the forward.
-        self._reset_sched_meta(int(mla_params.batch_indice_h.shape[0]) * self.num_heads)
+        rows = int(mla_params.batch_indice_h.shape[0])
+        verify_batch = self._select_verify_batch(rows, block_table, attn_inputs)
+        self._reset_sched_meta(rows // verify_batch * self.num_heads, verify_batch)
+        self._verify_batch = verify_batch
 
         # Gather path: only for prefill, gated by env var.
         gather_enabled = (
@@ -507,20 +567,40 @@ class SparseMlaFp8Op(SparseMlaOp):
         if kv_cache.ndim == 3:
             kv_cache = kv_cache.unsqueeze(-2)
 
-        # Indices: [T, 1, topk] → [1, T, topk] (kernel expects batched layout)
         global_indices = (
-            (
-                self._convert_topk_indices_to_global(topk_indices)
-                if physical_indices is None
-                else physical_indices
-            )
-            .squeeze(1)
-            .unsqueeze(0)
-        )
+            self._convert_topk_indices_to_global(topk_indices)
+            if physical_indices is None
+            else physical_indices
+        ).squeeze(1)
 
+        batch = self._verify_batch
+        if batch == 1:
+            grouped_q = q.unsqueeze(0)
+            grouped_indices = global_indices.unsqueeze(0)
+        else:
+            rows = q.size(0)
+            if (
+                q.shape != (rows, 64, 576)
+                or q.dtype != torch.bfloat16
+                or self.block_table is None
+                or q.device != self.block_table.device
+                or kv.device != q.device
+                or kv.dtype not in (torch.uint8, torch.int8, torch.float8_e4m3fn)
+                or kv_cache.shape[1:] != (64, 1, 656)
+                or global_indices.shape != (rows, 2048)
+                or global_indices.dtype != torch.int32
+                or global_indices.device != q.device
+                or (attn_sink is not None and attn_sink.dtype != torch.float32)
+                or _GROUPED_VERIFY_BATCHES.get(rows) != batch
+            ):
+                raise ValueError("Grouped Target FlashMLA needs BF16 Q and V32 FP8 KV")
+            grouped_q = q.view(batch, rows // batch, 64, 576)
+            grouped_indices = global_indices.view(batch, rows // batch, 2048)
+
+        first_grouped_call = batch != 1 and not self._sched_meta.have_initialized
         sink_kwargs = {} if attn_sink is None else {"attn_sink": attn_sink}
         attn_out, _ = flash_mla_with_kvcache(
-            q=q.unsqueeze(0),
+            q=grouped_q,
             k_cache=kv_cache,
             block_table=self.block_table,
             head_dim_v=self.kv_lora_rank,
@@ -528,10 +608,22 @@ class SparseMlaFp8Op(SparseMlaOp):
             tile_scheduler_metadata=self._sched_meta,
             num_splits=None,
             is_fp8_kvcache=True,
-            indices=global_indices,
+            indices=grouped_indices,
             softmax_scale=self.scale,
             **sink_kwargs,
         )
+        if batch != 1:
+            if first_grouped_call:
+                logging.getLogger(__name__).info(
+                    "[target-flashmla-view] rank=%s pid=%d target_verify=1 "
+                    "draft_extend=0 rows=%d b=%d s_q=%d",
+                    os.environ.get("WORLD_RANK", "unknown"),
+                    os.getpid(),
+                    rows,
+                    batch,
+                    rows // batch,
+                )
+            return attn_out.view(rows, 64, 512)[:, :actual_heads]
         return attn_out.squeeze(0)[:, :actual_heads]
 
 
@@ -675,8 +767,12 @@ class SparseMlaImpl(MlaImplBase):
         if not isinstance(lengths, torch.Tensor) or lengths.numel() == 0:
             return
         lengths_2d = paged_mqa_context_lens(attn_inputs, self.fmha_params)
+        request_ids = refresh_paged_mqa_request_ids(
+            attn_inputs, self.fmha_params, lengths, deep_gemm, forbid_realloc
+        )
+        request_args = {"indices": request_ids} if request_ids is not None else {}
         new_schedule = deep_gemm.get_paged_mqa_logits_metadata(
-            lengths_2d, self.seq_size_per_block, deep_gemm.get_num_sms()
+            lengths_2d, self.seq_size_per_block, deep_gemm.get_num_sms(), **request_args
         )
 
         current = getattr(self.fmha_params, "schedule_metadata", None)

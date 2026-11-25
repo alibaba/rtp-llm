@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <vector>
+#include <utility>
 
 namespace rtp_llm {
 
@@ -10,12 +11,13 @@ using namespace torch_ext;
 
 // Current state of CUDA graph execution (used when calling canRun/forward with graph runner)
 struct CudaGraphState {
-    int current_batch_size{1};
-    int current_seq_len{1};
-    int current_real_graph_bs{1};       // for decode
-    int current_real_graph_seq_len{1};  // for prefill
-    int seq_len_sum{0};
-    int decode_graph_key{0};
+    int     current_batch_size{1};
+    int     current_seq_len{1};
+    int     current_real_graph_bs{1};       // for decode
+    int     current_real_graph_seq_len{1};  // for prefill
+    int     seq_len_sum{0};
+    int     decode_graph_key{0};
+    int64_t target_verify_execution_rows{0};
 };
 
 struct GraphParams {
@@ -24,6 +26,7 @@ struct GraphParams {
     bool                 is_prefill_cuda_graph_mode   = false;
     bool                 is_target_verify             = false;
     bool                 adaptive_verification        = false;
+    bool                 profile_adaptive_costs       = false;
     bool                 is_draft_extend              = false;
     int                  max_seq_len                  = 0;
     int                  tokens_per_block             = 0;  // physical kv block size
@@ -42,6 +45,8 @@ struct GraphParams {
     // the DSv4 MTP draft graph captures with the [T, hc*dim] residual shape
     // produced by the target's getMtpTargetHiddenStates accessor.
     int64_t hc_mult = 1;
+    // Opt-in native uniform target capture for an adaptive replay.
+    bool adaptive_native_full_width = false;
 };
 
 class GraphBase {
@@ -62,6 +67,7 @@ public:
     // buffers after page-table changes. Other captured fields stay untouched.
     virtual void updateKVCacheKernelBlockId(const PyModelInputs& inputs, CudaGraphState& state) {}
 
-    py::object py_instance_;
+    std::vector<std::pair<int, double>> adaptive_cost_curve_;
+    py::object                          py_instance_;
 };
 }  // namespace rtp_llm

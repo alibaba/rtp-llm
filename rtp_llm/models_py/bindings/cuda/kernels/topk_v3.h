@@ -27,10 +27,19 @@ namespace torch_ext {
 //   * ``num_rows`` corresponds to ``B * S`` after flattening the leading
 //     dims of the indexer ``score [B, S, T_max]`` tensor.
 void topk_v3(const torch::Tensor& logits,
-                       const torch::Tensor& lengths,
-                       torch::Tensor& output,
-                       torch::Tensor& workspace,
-                       int64_t k,
-                       int64_t max_seq_len);
+             const torch::Tensor& lengths,
+             torch::Tensor&       output,
+             torch::Tensor&       workspace,
+             int64_t              k,
+             int64_t              max_seq_len);
+
+// Optional cluster-sharded exact fallback for validated adaptive Target shapes.
+// Other shapes and devices retain the original dispatch.
+void topk_v3_adaptive_cluster_rescan(const torch::Tensor& scores,
+                                     const torch::Tensor& lengths,
+                                     torch::Tensor&       output,
+                                     torch::Tensor&       workspace,
+                                     int64_t              k,
+                                     int64_t              max_seq_len);
 
 }  // namespace torch_ext

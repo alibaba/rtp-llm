@@ -3,6 +3,11 @@
 from __future__ import annotations
 
 import logging
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import is_dataclass, replace
+from functools import lru_cache
+from importlib import metadata
 
 import torch
 
@@ -28,6 +33,61 @@ from .gc_moe import (
 from .input_packer_se import get_gc_moe_se_input_packer
 
 logger = logging.getLogger(__name__)
+
+_adaptive_tile32 = ContextVar("adaptive_gc_moe_se_tile32", default=False)
+
+
+@contextmanager
+def adaptive_gc_moe_se_tile32():
+    token = _adaptive_tile32.set(True)
+    try:
+        yield
+    finally:
+        _adaptive_tile32.reset(token)
+
+
+@lru_cache(maxsize=1)
+def _tile32_api(gc_moe):
+    # This wheel exposes the checked call object but has no public block_m override.
+    # Until the wheel exposes a public override, only use its known call contract.
+    try:
+        if metadata.version("gc_moe") != "0.6.1+ce37121.cu132":
+            return None
+        from gc_moe import gc as public
+        from gc_moe.apis import gc_moe as api
+        from gc_moe.jit_kernels.impls.sm100_fp8_fp4_gc_moe import launch_gc_moe
+    except ImportError:
+        return None
+    config_type = getattr(api, "ValidatedCall", None)
+    if (
+        getattr(public, "fp8_fp4_gc_moe", None) is not gc_moe.fp8_fp4_gc_moe
+        or getattr(api, "get_block_m_for_gc_moe", None)
+        is not gc_moe.get_block_m_for_gc_moe
+        or not is_dataclass(config_type)
+        or not {"block_m", "shared_experts"}.issubset(config_type.__dataclass_fields__)
+        or not callable(getattr(api, "validate_call", None))
+        or not callable(launch_gc_moe)
+    ):
+        return None
+    return api.validate_call, launch_gc_moe
+
+
+def _eligible_tile32(x, cfg, buf, tokens, stock_block_m):
+    return (
+        _adaptive_tile32.get()
+        and tokens in (56, 64)
+        and stock_block_m == 16
+        and x.is_cuda
+        and x.dtype == torch.bfloat16
+        and x.shape == (tokens, 6144)
+        and (cfg.ep_size, cfg.n_routed_experts, cfg.n_activated_experts) == (4, 256, 8)
+        and (buf.hidden, buf.intermediate_hidden) == (6144, 2048)
+        and (buf.group.size(), buf.num_experts, buf.num_topk) == (4, 256, 8)
+        and buf.mma_type == "fp8xfp4"
+        and buf.num_shared_experts == 1
+        and callable(getattr(buf, "_for_call", None))
+        and torch.cuda.get_device_capability(x.device) == (10, 3)
+    )
 
 
 class GLM5GCMoESE(GLM5MegaMoESE):
@@ -102,6 +162,38 @@ class GLM5GCMoESE(GLM5MegaMoESE):
                 "fp8xfp4",
             )
         )
+        y = self._mega_y[:tokens]
+        l1 = (self._mega_l1_w, self._mega_l1_sf)
+        l2 = (self._mega_l2_w, self._mega_l2_sf)
+        call_args = dict(
+            shared_l1_weights=(self._shared_l1_w, self._shared_l1_sf),
+            shared_l2_weights=(self._shared_l2_w, self._shared_l2_sf),
+            recipe=(1, 1, FP4_BLOCK),
+            shared_recipe=SHARED_WEIGHT_RECIPE,
+            activation="swiglu",
+            activation_clamp=activation_clamp,
+            fast_math=False,
+        )
+        tile32 = (
+            _tile32_api(gc_moe)
+            if _eligible_tile32(x, self.cfg, buf, tokens, block_m)
+            else None
+        )
+        config = None
+        if tile32 is not None:
+            validate_call, launch_gc_moe = tile32
+            validated = validate_call(
+                y,
+                l1,
+                l2,
+                buf,
+                **call_args,
+                cumulative_local_expert_recv_stats=None,
+                activation_alpha=None,
+            )
+            if validated.block_m == block_m and validated.shared_experts == 1:
+                block_m = 32
+                config = replace(validated, block_m=block_m)
         if inputs_prepacked:
             stage_shared_fp8_input_scales(
                 buf.x_sf, buf.shared_l1_acts_sf, tokens, block_m
@@ -113,18 +205,17 @@ class GLM5GCMoESE(GLM5MegaMoESE):
         _sync_cuda_graph_warmup_ranks(
             f"glm5.gc_moe_se.layer{self.cfg.layer_id}.before_gc", x.device
         )
-        y = self._mega_y[:tokens]
-        gc_moe.fp8_fp4_gc_moe(
-            y,
-            (self._mega_l1_w, self._mega_l1_sf),
-            (self._mega_l2_w, self._mega_l2_sf),
-            buf,
-            shared_l1_weights=(self._shared_l1_w, self._shared_l1_sf),
-            shared_l2_weights=(self._shared_l2_w, self._shared_l2_sf),
-            recipe=(1, 1, FP4_BLOCK),
-            shared_recipe=SHARED_WEIGHT_RECIPE,
-            activation="swiglu",
-            activation_clamp=activation_clamp,
-            fast_math=False,
-        )
+        if config is None:
+            gc_moe.fp8_fp4_gc_moe(y, l1, l2, buf, **call_args)
+        else:
+            launch_gc_moe(
+                config,
+                y,
+                l1,
+                l2,
+                buf._for_call(config.shared_experts),
+                call_args["shared_l1_weights"],
+                call_args["shared_l2_weights"],
+                None,
+            )
         return y

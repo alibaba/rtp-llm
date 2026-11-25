@@ -5,18 +5,23 @@ from types import SimpleNamespace
 from typing import Any, Dict, Optional, Tuple
 
 import torch
+from torch import nn
+
 from rtp_llm.config.prefill_optimization import PREFILL_OPTIMIZATIONS_ENABLED
 from rtp_llm.models_py import prefill_optimization as _prefill_optimization
 from rtp_llm.models_py.distributed.collective_torch import Group, barrier
 from rtp_llm.models_py.distributed.pynccl_cp import all_gather
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
-from rtp_llm.models_py.modules.base.cuda.paged_mqa import paged_mqa_context_lens
+from rtp_llm.models_py.modules.base.cuda.paged_mqa import (
+    adaptive_target_layout,
+    expand_adaptive_paged_mqa_table,
+    paged_mqa_context_lens,
+)
 from rtp_llm.models_py.modules.base.cuda.paged_mqa import (
     physical_block_table as _physical_block_table,
 )
 from rtp_llm.models_py.modules.dsv4.chunk_env import dsv4_chunk_tokens_from_env
 from rtp_llm.ops.compute_ops import KVCache, rtp_llm_ops
-from torch import nn
 
 # Try to import CUDA dependencies, but don't fail if running on CPU
 try:
@@ -320,6 +325,12 @@ class IndexerOp(nn.Module):
             rtp_llm_ops.topk_v3
             if glm5_topk_backend == "topk_v3"
             else rtp_llm_ops.dsv4_persistent_topk
+        )
+
+        self._adaptive_target_cluster_rescan = (
+            glm5_topk_backend == "topk_v3"
+            and os.environ.get("RTP_LLM_ADAPTIVE_VERIFY_TOPK_CLUSTER_RESCAN", "0")
+            == "1"
         )
 
         prefill_topk_backend = (
@@ -756,6 +767,26 @@ class IndexerOp(nn.Module):
         q_scale = q_scale.view(-1, self.index_n_heads, 1)
         return q_fp8, q_scale
 
+    def _select_paged_topk(
+        self,
+        attention_inputs: Any,
+        rows: int,
+        max_seq_len: int,
+        *,
+        is_cuda_graph: bool,
+    ):
+        if (
+            self._adaptive_target_cluster_rescan
+            and is_cuda_graph
+            and adaptive_target_layout(attention_inputs)
+            and not getattr(attention_inputs, "is_draft_extend", False)
+            and rows in (56, 64)
+            and self.index_topk == 2048
+            and 65536 < max_seq_len <= 524288
+        ):
+            return rtp_llm_ops.topk_v3_adaptive_cluster_rescan
+        return self._paged_topk_op
+
     def _get_topk_paged(
         self,
         q_fp8: torch.Tensor,
@@ -763,6 +794,8 @@ class IndexerOp(nn.Module):
         kv_cache: KVCache,
         fmha_params: Any,
         attention_inputs: Any,
+        *,
+        is_cuda_graph: bool = False,
     ) -> torch.Tensor:
         """
         Compute TopK indices for paged attention (decode phase).
@@ -805,11 +838,17 @@ class IndexerOp(nn.Module):
                 (0, self.index_topk), dtype=torch.int32, device=q_fp8.device
             )
 
-        if (
-            is_target_verify
-            and os.environ.get("RTP_LLM_ADAPTIVE_VERIFICATION", "0") == "1"
-        ):
-            block_table = block_table.index_select(0, fmha_params.batch_indice_d.long())
+        request_args = {}
+        if adaptive_target_layout(attention_inputs):
+            block_table = expand_adaptive_paged_mqa_table(
+                block_table, fmha_params.batch_indice_d
+            )
+            request_ids = getattr(fmha_params, "paged_mqa_request_ids", None)
+            if (
+                request_ids is not None
+                and os.environ.get("RTP_LLM_INDEXER_NATIVE_MTP", "1") != "0"
+            ):
+                request_args["indices"] = request_ids
         elif is_multi_token_decode:
             num_tokens = q_fp8.shape[0]
             batch_size = block_table.shape[0]
@@ -840,6 +879,7 @@ class IndexerOp(nn.Module):
                 kvlen_2d,
                 self.blocksize,
                 deep_gemm.get_num_sms(),
+                **request_args,
             )
 
         logits = deep_gemm.fp8_paged_mqa_logits(
@@ -851,6 +891,7 @@ class IndexerOp(nn.Module):
             schedule_metadata,
             max_seq_len,
             clean_logits=False,
+            **request_args,
         )
 
         assert (
@@ -860,7 +901,10 @@ class IndexerOp(nn.Module):
         topk_result = logits.new_empty(
             (logits.shape[0], self.index_topk), dtype=torch.int32
         )
-        self._paged_topk_op(
+        paged_topk = self._select_paged_topk(
+            attention_inputs, logits.shape[0], max_seq_len, is_cuda_graph=is_cuda_graph
+        )
+        paged_topk(
             logits,
             lengths,
             topk_result,

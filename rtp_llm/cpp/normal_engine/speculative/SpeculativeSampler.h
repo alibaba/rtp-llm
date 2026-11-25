@@ -32,6 +32,11 @@ struct MtpDraftSampleContext {
     torch::Tensor sequence_lengths;
     torch::Tensor hidden_to_zero;
     bool          zero_tokens = false;
+    // Optional normalized score of the unchanged greedy winner, one per row.
+    torch::Tensor selected_probability;
+    // Optional predictor-only log(p1 / p2) gap, clipped to 32. The caller
+    // initializes unsupported or unrun rows to NaN. Sampling never reads it.
+    torch::Tensor selected_logit_margin;
 };
 
 struct FastTopKSamplerOutput {
@@ -55,9 +60,9 @@ public:
     forward(const torch::Tensor& logits, int top_k = 1, const MtpDraftSampleContext* context = nullptr);
 
 private:
-    torch::Tensor     d2t_map_;
-    bool              allow_compact_point_mass_ = false;
-    bool              use_raw_logits_ = false;
+    torch::Tensor d2t_map_;
+    bool          allow_compact_point_mass_ = false;
+    bool          use_raw_logits_           = false;
 };
 
 class SpeculativeSampler {

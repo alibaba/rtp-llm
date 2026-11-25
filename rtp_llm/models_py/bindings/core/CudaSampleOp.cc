@@ -109,8 +109,7 @@ pybind11::object& pyTopPRenormFn() {
 }
 
 pybind11::object& pyGumbelSampleFn() {
-    static pybind11::object fn =
-        pybind11::module_::import("rtp_llm.models_py.sampling.adapter").attr("sample");
+    static pybind11::object fn = pybind11::module_::import("rtp_llm.models_py.sampling.adapter").attr("sample");
     return fn;
 }
 
@@ -533,7 +532,8 @@ bool trySubmitDeferredKernels(const RejectionSamplingParams& params,
             return false;
         dense_vocab = dense.size(2);
     }
-    const DeferredKernelKey      key = std::tuple_cat(*layout, std::make_tuple(dense_vocab, compact && params.target_log_normalizer_d.defined()));
+    const DeferredKernelKey key =
+        std::tuple_cat(*layout, std::make_tuple(dense_vocab, compact && params.target_log_normalizer_d.defined()));
     std::unique_lock<std::mutex> guard(deferredGraphMutex(), std::try_to_lock);
     if (!guard.owns_lock())
         return false;
@@ -559,13 +559,13 @@ bool trySubmitDeferredKernels(const RejectionSamplingParams& params,
         params.target_logits_d, params.draft_token_ids_d, seeds, positions, params.do_sample_d};
     if (params.acceptance_cap.defined())
         inputs.push_back(params.acceptance_cap);
-    std::vector<torch::Tensor> extra  = compact ? std::vector<torch::Tensor>{params.target_candidate_ids_d,
-                                                                                   params.target_dense_fallback_d,
-                                                                                   params.target_fallback_rows_d} :
-                                                        std::vector<torch::Tensor>{};
+    std::vector<torch::Tensor> extra = compact ? std::vector<torch::Tensor>{params.target_candidate_ids_d,
+                                                                            params.target_dense_fallback_d,
+                                                                            params.target_fallback_rows_d} :
+                                                 std::vector<torch::Tensor>{};
     if (compact && params.target_log_normalizer_d.defined())
         extra.push_back(params.target_log_normalizer_d);
-    const auto                       stream = uploadDeferredInputs(
+    const auto stream = uploadDeferredInputs(
         plan->addresses, inputs, params.output_token_ids_d, params.output_accepted_token_num_d, extra);
     for (auto& kernel : plan->kernels)
         kernel.launch(params.target_logits_d.size(0), stream.stream());
@@ -607,7 +607,7 @@ torch::Tensor reserveSamplingSeedOffsets(const std::vector<at::Generator>& gener
                                          int64_t                           batch_size,
                                          int                               increment,
                                          int64_t                           prefix = 0) {
-    auto options  = torch::TensorOptions().dtype(torch::kInt64).pinned_memory(true);
+    auto options = torch::TensorOptions().dtype(torch::kInt64).pinned_memory(true);
     auto state_h =
         torch::empty({prefix + 2 * batch_size}, options).narrow(0, prefix, 2 * batch_size).view({2, batch_size});
     auto seed_ptr = state_h.data_ptr<int64_t>();
@@ -773,20 +773,20 @@ static GreedyOutput tryCompactDeferredSampling(const GreedyParams& params, float
         return {};
     const auto* requested_k = params.top_k.data_ptr<int32_t>();
     const auto* requested_p = params.top_p.data_ptr<float>();
-    const char* filter_env = std::getenv("RTP_LLM_GUMBEL_LOGIT_FILTER");
-    const auto normalize_p = [](float value) {
+    const char* filter_env  = std::getenv("RTP_LLM_GUMBEL_LOGIT_FILTER");
+    const auto  normalize_p = [](float value) {
         return std::abs(value) < 1e-7f || std::abs(value - 1.0f) < 1e-7f ? 1.0f : value;
     };
     const float compact_p = normalize_p(requested_p[0]);
-    if (params.allow_compact_deferred_output && (!filter_env || std::string(filter_env) == "1")
-        && requested_k[0] >= 2 && requested_k[0] <= 1024
-        && std::all_of(requested_k, requested_k + batch_size,
-                       [requested_k](int32_t value) { return value == requested_k[0]; })
+    if (params.allow_compact_deferred_output && (!filter_env || std::string(filter_env) == "1") && requested_k[0] >= 2
+        && requested_k[0] <= 1024
+        && std::all_of(
+            requested_k, requested_k + batch_size, [requested_k](int32_t value) { return value == requested_k[0]; })
         && std::all_of(requested_p, requested_p + batch_size, [compact_p, normalize_p](float value) {
                return normalize_p(value) == compact_p;
            })) {
         torch::Tensor log_normalizer;
-        auto compact = torch_ext::deferred_compact_topk_topp(
+        auto          compact = torch_ext::deferred_compact_topk_topp(
             params.logits, 1024, compact_p, temperature, &log_normalizer, requested_k[0]);
         if (std::get<0>(compact).defined()) {
             torch::Tensor prepared_rng;
@@ -818,8 +818,8 @@ static GreedyOutput tryCompactDeferredSampling(const GreedyParams& params, float
 
 static GreedyOutput
 flashinferSampleGreedy(const GreedyParams& params, const torch::Tensor& transposed_tokens, bool mixed_batch = false) {
-    const auto batch_size = params.logits.size(0);
-    auto       cur_stream = at::cuda::getCurrentCUDAStream().stream();
+    const auto batch_size     = params.logits.size(0);
+    auto       cur_stream     = at::cuda::getCurrentCUDAStream().stream();
     const bool compact_output = params.output_all_probs_indices.has_value();
 
     // [batch_size, vocab_size] — compute softmax probabilities.
@@ -848,7 +848,7 @@ flashinferSampleGreedy(const GreedyParams& params, const torch::Tensor& transpos
             return std::abs(value) < 1e-7f || std::abs(value - 1.0f) < 1e-7f ? 1.0f : value;
         };
         const float compact_p = normalize_p(requested_p[0]);
-        auto prepared = tryCompactDeferredSampling(params);
+        auto        prepared  = tryCompactDeferredSampling(params);
         if (prepared.deferred_token_sampling)
             return prepared;
         if ((!filter_env || std::string(filter_env) == "1") && requested_k[0] == 1024
@@ -876,10 +876,41 @@ flashinferSampleGreedy(const GreedyParams& params, const torch::Tensor& transpos
         if (no_k && no_p) {
             return GreedyOutput{torch::Tensor(), true};
         }
+        const auto& active_rows   = params.deferred_filter_active_rows;
+        const auto* active_filter = std::getenv("RTP_LLM_ADAPTIVE_ACTIVE_ROW_FILTER");
+        // Keep the fixed rejection layout and RNG stride, but avoid full-vocab
+        // filtering for rows beyond each adaptive cap. Require enough pruning
+        // to pay for gathering active logits and scattering filtered scores.
+        if (active_rows.defined() && active_rows.numel() > 0 && active_rows.numel() <= batch_size * 3 / 4
+            && vocab >= 32768 && (!active_filter || std::strcmp(active_filter, "0") != 0)
+            && (no_k || (k[0] > 1 && std::all_of(k + 1, k + batch_size, [k](int32_t value) { return value == k[0]; })))
+            && (no_p || (p[0] > 0.0f && p[0] < 1.0f && std::all_of(p + 1, p + batch_size, [p](float value) {
+                             return value == p[0];
+                         })))) {
+            auto probs    = torch::softmax(params.logits.index_select(0, active_rows), -1);
+            auto filtered = torch::empty_like(probs);
+            if (!no_k) {
+                top_k_renorm_probs(probs, filtered, std::nullopt, k[0], (int64_t)cur_stream);
+                std::swap(probs, filtered);
+            }
+            if (!no_p) {
+                top_p_renorm_probs(probs, filtered, std::nullopt, p[0], (int64_t)cur_stream);
+                std::swap(probs, filtered);
+            }
+            params.logits.index_copy_(0, active_rows, probs.log());
+            check_cuda_error();
+            return GreedyOutput{torch::Tensor(), true};
+        }
         auto probs_t = torch::softmax(params.logits, -1);
         auto output  = torch::empty_like(probs_t);
         if (no_k) {
-            top_p_renorm_probs(probs_t, output, top_p, 1.0, (int64_t)cur_stream);
+            top_p_renorm_probs(probs_t,
+                               output,
+                               top_p,
+                               1.0,
+                               (int64_t)cur_stream,
+                               params.deferred_filter_caps,
+                               params.deferred_filter_rows);
         } else {
             std::transform(k, k + batch_size, k, [](int32_t value) { return value <= 0 ? 1 << 30 : value; });
             if (no_p) {
@@ -887,7 +918,13 @@ flashinferSampleGreedy(const GreedyParams& params, const torch::Tensor& transpos
             } else {
                 auto temporary = torch::empty_like(probs_t);
                 top_k_renorm_probs(probs_t, temporary, top_k, 0, (int64_t)cur_stream);
-                top_p_renorm_probs(temporary, output, top_p, 1.0, (int64_t)cur_stream);
+                top_p_renorm_probs(temporary,
+                                   output,
+                                   top_p,
+                                   1.0,
+                                   (int64_t)cur_stream,
+                                   params.deferred_filter_caps,
+                                   params.deferred_filter_rows);
             }
         }
         params.logits.copy_(output.log(), true);
@@ -933,11 +970,10 @@ flashinferSampleGreedy(const GreedyParams& params, const torch::Tensor& transpos
     // [1, batch_size] — last row of transposed_tokens
     auto samples_t = transposed_tokens.slice(0, transposed_tokens.size(0) - 1, transposed_tokens.size(0));
 
-    constexpr bool       deterministic    = true;
-    constexpr int        max_sampling_rounds = 32;
-    auto [seed_t, offset_t] =
-        makeSamplingSeedOffsetTensors(
-            params.generator, batch_size, static_cast<int>(max_sampling_rounds), params.buffer_holder);
+    constexpr bool deterministic       = true;
+    constexpr int  max_sampling_rounds = 32;
+    auto [seed_t, offset_t]            = makeSamplingSeedOffsetTensors(
+        params.generator, batch_size, static_cast<int>(max_sampling_rounds), params.buffer_holder);
 
     torch::Tensor success_t = success;
     torch::Tensor top_k_t   = force_topk > 0 ? params.top_k.clone() : params.top_k;
@@ -1106,15 +1142,15 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
                           || std::any_of(params.do_sample.value().data_ptr<bool>(),
                                          params.do_sample.value().data_ptr<bool>() + batch_size,
                                          [&](auto t) { return t; });
-    const bool    deferred = params.defer_token_sampling && Py_IsInitialized();
+    const bool deferred = params.defer_token_sampling && Py_IsInitialized();
     if (deferred && batch_size > 0 && params.allow_compact_deferred_output
         && params.top_k.data_ptr<int32_t>()[0] == 1024 && need_do_sample && !has_not_do_sample) {
         const auto* temperatures = params.temperature.data_ptr<float>();
-        const float temperature = temperatures[0];
+        const float temperature  = temperatures[0];
         // Mixed temperatures retain the batch-wide epsilon scaling in processLogits.
         if (temperature != 1.0f && std::isfinite(temperature) && temperature > 0.0f
-            && std::all_of(temperatures, temperatures + batch_size,
-                           [temperature](float value) { return value == temperature; })
+            && std::all_of(
+                temperatures, temperatures + batch_size, [temperature](float value) { return value == temperature; })
             && !requiresTokenHistory(params)) {
             auto output = tryCompactDeferredSampling(params, temperature);
             if (output.deferred_token_sampling)
@@ -1252,9 +1288,9 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     const auto vocab_size = params.logits.size(1);
 
     const bool unfiltered =
-        std::all_of(top_k_ptr, top_k_ptr + batch_size, [vocab_size](auto k) {
-            return static_cast<int32_t>(k) <= 0 || k >= vocab_size;
-        })
+        std::all_of(top_k_ptr,
+                    top_k_ptr + batch_size,
+                    [vocab_size](auto k) { return static_cast<int32_t>(k) <= 0 || k >= vocab_size; })
         && std::all_of(top_p_ptr, top_p_ptr + batch_size, [](float p) {
                // top_p=0 is the existing RTP "no cutoff" convention.
                return std::abs(p) < 1e-7f || std::abs(p - 1.0f) < 1e-7f;
@@ -1299,8 +1335,9 @@ void rejectionSampling(const RejectionSamplingParams& params) {
         const int64_t rows       = params.target_logits_d.size(1);
         // The compact producer may already have reserved RNG while filtering
         // ran on the GPU. Native and fallback dispatch consume the same packet.
-        const int64_t prefix  = params.target_candidate_ids_d.defined() ? (params.target_log_normalizer_d.defined() ? 12 : 11) : 8;
-        auto          state_h = params.prepared_rejection_rng;
+        const int64_t prefix =
+            params.target_candidate_ids_d.defined() ? (params.target_log_normalizer_d.defined() ? 12 : 11) : 8;
+        auto state_h = params.prepared_rejection_rng;
         if (state_h.defined()) {
             TORCH_CHECK(state_h.device().is_cpu() && state_h.scalar_type() == torch::kInt64 && state_h.dim() == 2
                             && state_h.size(0) == 2 && state_h.size(1) == batch_size && state_h.is_contiguous()
@@ -1322,7 +1359,7 @@ void rejectionSampling(const RejectionSamplingParams& params) {
         }
         auto             seeds     = state_d.select(0, 0);
         auto             positions = state_d.select(0, 1);
-        pybind11::object draft = params.draft_point_mass ? pybind11::none() : pybind11::cast(params.draft_probs_d);
+        pybind11::object draft     = params.draft_point_mass ? pybind11::none() : pybind11::cast(params.draft_probs_d);
         pybind11::object cap =
             params.acceptance_cap.defined() ? pybind11::cast(params.acceptance_cap) : pybind11::none();
         pybind11::object cumulative =
