@@ -1,5 +1,6 @@
 package org.flexlb.balance.endpoint;
 
+import org.flexlb.balance.AdmissionVersion;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.prediction.FormulaPredictor;
@@ -84,6 +85,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
             new RoutingConfig.ExecutionTimeEstimatorConfig().getExpression());
     private final PrefillTimePredictor predictor;
     private final long inflightRequestLimit;
+    private final boolean reportPendingTokenWork;
     private final AtomicLong lastIndexedCachePollStartNanos = new AtomicLong(Long.MIN_VALUE);
 
     /** Engine waiting-queue admission gate; null when tokenBalance disables the gate. */
@@ -138,9 +140,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
         }
         RoutingConfig.HotspotReleaseConfig hotspotRelease =
                 prefillRouting == null ? null : prefillRouting.getHotspotRelease();
-        if (tokenBalance != null || hotspotRelease != null && hotspotRelease.isEnabled()) {
-            this.prefillState.enableTokenWorkload();
-        }
+        this.reportPendingTokenWork = tokenBalance != null || hotspotRelease != null && hotspotRelease.isEnabled();
     }
 
     /** Start of the most recent poll whose returned cache version is visible in routing. */
@@ -376,17 +376,27 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     /** Soft scoring reservation of outstanding uncached work; closes exactly once on commit or abandoned planning. */
     public PrefillTokenWorkload.Reservation planTokenWork(long tokens) {
-        return prefillState.planTokenWork(tokens);
+        return tryPlanTokenWork(AdmissionVersion.ANY, tokens, 0L);
     }
 
-    /** Advisory outstanding uncached work for token-balanced ranking; 0 when accounting is disabled. */
+    public PrefillTokenWorkload.Snapshot tokenWorkloadSnapshot() {
+        return prefillState.tokenWorkloadSnapshot();
+    }
+
+    /** Reserve once on the selected generation, rejecting a changed ranking input. */
+    public PrefillTokenWorkload.Reservation tryPlanTokenWork(
+            long expectedVersion, long tokens, long durationMs) {
+        return prefillState.tryPlanTokenWork(expectedVersion, tokens, durationMs);
+    }
+
+    /** Advisory outstanding uncached work for token-balanced ranking. */
     public double tokenWorkloadScore() {
-        return prefillState.tokenWorkloadScore();
+        return tokenWorkloadSnapshot().score();
     }
 
     /** Advisory outstanding pending uncached work for pool occupancy snapshots. */
     public long pendingTokenWork() {
-        return prefillState.pendingTokenWork();
+        return reportPendingTokenWork ? prefillState.pendingTokenWork() : 0L;
     }
 
     /**

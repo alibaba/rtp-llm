@@ -14,9 +14,8 @@ import java.util.Objects;
  * <p>The selection owns its generation pin until the router moves it into a
  * DIRECT registration or a queue-route admission.  It carries only immutable
  * routing output besides that pin; {@link ServerStatus} remains response
- * metadata and is never an ownership token.  A token-balanced Prefill
- * selection may also hold a soft workload reservation that the route owner
- * converts into pending token work at commit.</p>
+ * metadata and is never an ownership token. A Prefill selection transfers
+ * its planned work and optional hotspot migration charge to the route owner.</p>
  */
 public final class SelectedRole implements AutoCloseable {
 
@@ -26,13 +25,14 @@ public final class SelectedRole implements AutoCloseable {
     private final long placementVersion;
     private final long residentPrefixTokens;
     private PrefillTokenWorkload.Reservation tokenReservation;
+    private HotspotRedirectLimiter.Ticket redirectTicket;
 
     private SelectedRole(
             WorkerEndpoint.GenerationPin generationPin,
             ServerStatus serverStatus,
             long prefillWorkMs,
             long placementVersion, long residentPrefixTokens,
-            PrefillTokenWorkload.Reservation tokenReservation) {
+            PrefillTokenWorkload.Reservation tokenReservation, HotspotRedirectLimiter.Ticket redirectTicket) {
         this.generationPin = generationPin;
         this.serverStatus = serverStatus;
         if (!serverStatus.isSuccess()) {
@@ -70,6 +70,7 @@ public final class SelectedRole implements AutoCloseable {
         this.placementVersion = placementVersion;
         this.residentPrefixTokens = residentPrefixTokens;
         this.tokenReservation = tokenReservation;
+        this.redirectTicket = redirectTicket;
     }
 
     public static SelectedRole prefill(
@@ -98,25 +99,19 @@ public final class SelectedRole implements AutoCloseable {
             long prefillWorkMs,
             long placementVersion,
             PrefillTokenWorkload.Reservation tokenReservation) {
-        return prefill(generationPin, serverStatus, prefillWorkMs, placementVersion, 0L, tokenReservation);
+        return prefill(generationPin, serverStatus, prefillWorkMs, placementVersion, 0L, tokenReservation, null);
     }
 
     static SelectedRole prefill(WorkerEndpoint.GenerationPin generationPin, ServerStatus serverStatus,
             long prefillWorkMs, long placementVersion, long residentPrefixTokens,
-            PrefillTokenWorkload.Reservation tokenReservation) {
+            PrefillTokenWorkload.Reservation tokenReservation, HotspotRedirectLimiter.Ticket redirectTicket) {
         if (prefillWorkMs < 0L) {
-            if (generationPin != null) {
-                generationPin.close();
+            try (generationPin; tokenReservation; redirectTicket) {
+                throw new IllegalArgumentException("Prefill work must be non-negative");
             }
-            if (tokenReservation != null) {
-                tokenReservation.close();
-            }
-            throw new IllegalArgumentException(
-                    "Prefill work must be non-negative");
         }
-        return createOwned(
-                generationPin, serverStatus, prefillWorkMs,
-                placementVersion, residentPrefixTokens, tokenReservation);
+        return createOwned(generationPin, serverStatus, prefillWorkMs,
+                placementVersion, residentPrefixTokens, tokenReservation, redirectTicket);
     }
 
     public static SelectedRole decode(
@@ -137,14 +132,14 @@ public final class SelectedRole implements AutoCloseable {
             }
             throw new IllegalArgumentException("Decode selection requires Decode metadata");
         }
-        return createOwned(generationPin, serverStatus, -1L, placementVersion, 0L, null);
+        return createOwned(generationPin, serverStatus, -1L, placementVersion, 0L, null, null);
     }
 
     public static SelectedRole stateless(
             WorkerEndpoint.GenerationPin generationPin,
             ServerStatus serverStatus) {
         return createOwned(
-                generationPin, serverStatus, -1L, 0L, 0L, null);
+                generationPin, serverStatus, -1L, 0L, 0L, null, null);
     }
 
     private static SelectedRole createOwned(
@@ -152,19 +147,15 @@ public final class SelectedRole implements AutoCloseable {
             ServerStatus serverStatus,
             long prefillWorkMs,
             long placementVersion, long residentPrefixTokens,
-            PrefillTokenWorkload.Reservation tokenReservation) {
+            PrefillTokenWorkload.Reservation tokenReservation, HotspotRedirectLimiter.Ticket redirectTicket) {
         try {
             return new SelectedRole(
                     generationPin, serverStatus, prefillWorkMs,
-                    placementVersion, residentPrefixTokens, tokenReservation);
+                    placementVersion, residentPrefixTokens, tokenReservation, redirectTicket);
         } catch (RuntimeException | Error failure) {
-            if (generationPin != null) {
-                generationPin.close();
+            try (generationPin; tokenReservation; redirectTicket) {
+                throw failure;
             }
-            if (tokenReservation != null) {
-                tokenReservation.close();
-            }
-            throw failure;
         }
     }
 
@@ -216,6 +207,13 @@ public final class SelectedRole implements AutoCloseable {
         return owned;
     }
 
+    /** Transfer the optional hotspot migration charge with the Prefill selection. */
+    public HotspotRedirectLimiter.Ticket takeRedirectTicket() {
+        var owned = redirectTicket;
+        redirectTicket = null;
+        return owned;
+    }
+
     private WorkerEndpoint.GenerationPin requireOwnedPin() {
         if (generationPin == null) {
             throw new IllegalStateException(
@@ -228,17 +226,6 @@ public final class SelectedRole implements AutoCloseable {
     public void close() {
         WorkerEndpoint.GenerationPin owned = generationPin;
         generationPin = null;
-        if (owned != null) {
-            owned.close();
-        }
-        closeTokenReservation();
-    }
-
-    private void closeTokenReservation() {
-        PrefillTokenWorkload.Reservation reservation = tokenReservation;
-        tokenReservation = null;
-        if (reservation != null) {
-            reservation.close();
-        }
+        try (owned; var tokens = takeTokenReservation(); var redirect = takeRedirectTicket()) { }
     }
 }

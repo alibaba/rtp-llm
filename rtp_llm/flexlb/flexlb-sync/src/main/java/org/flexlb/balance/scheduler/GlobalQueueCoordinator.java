@@ -460,6 +460,9 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             return Outcome.DONE;
         }
         PlacementResult<RouteAdmission, PlacementKey> result = plan.result;
+        if (result.status() == PlacementResult.Status.REPLAN) {
+            return Outcome.REPLAN;
+        }
         if (result.status() == PlacementResult.Status.REJECTED) {
             removeRequest(entry);
             completeDecisionResponse(entry, result.failure());

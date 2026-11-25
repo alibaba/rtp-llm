@@ -49,6 +49,8 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
@@ -64,9 +66,17 @@ class DirectAdmissionContractTest {
 
     @ParameterizedTest
     @ValueSource(ints = {1, 2})
-    void concurrentDirectAdmissionsUseCurrentCapacityWithoutRetryingSelection(int prefillCapacity) throws Exception {
+    void concurrentDirectAdmissionsRerankStaleDecodeAndRespectPrefillCapacity(int prefillCapacity) throws Exception {
         try (Fixture fixture = new Fixture(prefillCapacity, 2);
              var executor = Executors.newFixedThreadPool(2)) {
+            var sameVersion = new CyclicBarrier(2);
+            var initialVersion = fixture.decode.placementVersion();
+            doAnswer(call -> {
+                sameVersion.await(2L, TimeUnit.SECONDS);
+                return call.callRealMethod();
+            }).when(fixture.decode).reserve(any(), anyLong(),
+                    anyLong(), anyLong(),
+                    anyInt(), any(), eq(initialVersion));
             var readyToPublish = new CyclicBarrier(2);
             doAnswer(call -> {
                 // Both requests have selected this generation and acquired Decode capacity.
@@ -88,7 +98,7 @@ class DirectAdmissionContractTest {
             assertEquals(48L * prefillCapacity, fixture.decode.routingView().inflightExpectedKv());
             fixture.assertNoWaitingQueue();
             verify(fixture.requests, times(2)).commitRoute(any(), any());
-            verify(fixture.prefillSelector, times(2)).select(any(), eq(RoleType.PREFILL), any());
+            verify(fixture.prefillSelector, org.mockito.Mockito.atLeast(3)).select(any(), eq(RoleType.PREFILL), any());
         }
     }
 

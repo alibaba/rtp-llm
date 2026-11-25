@@ -30,10 +30,21 @@ class DecodeStateTest {
     private static final AdmissionCapacity CAPACITY = new AdmissionCapacity(2, 100);
 
     @Test
+    void staleDirectPlacementDoesNotRegisterEvenWhenCapacityIsAvailable() {
+        DecodeState state = new DecodeState(status());
+        long version = state.placementVersion();
+        var first = state.reserve(1, 100, 200, 50, true, null, version);
+        org.junit.jupiter.api.Assertions.assertNotNull(first);
+        org.junit.jupiter.api.Assertions.assertNull(state.reserve(2, 100, 200, 50, true, null, version));
+        assertEquals(1, state.routingView().totalLoad());
+        org.junit.jupiter.api.Assertions.assertNotNull(state.reserve(2, 100, 200, 50, true, null, state.placementVersion()));
+    }
+
+    @Test
     void returnedPermitCannotDispatchOrReleaseItsReplacement() {
         WorkerStatus status = status();
         DecodeState state = new DecodeState(status);
-        var reservation = state.reserve(1, 100, 200, 50, true, CAPACITY);
+        var reservation = state.reserve(1, 100, 200, 50, true, CAPACITY, state.placementVersion());
         var first = state.acquireDispatchPermit(reservation, CAPACITY).permit();
         assertTrue(state.dispatch(first, DispatchOutcome.ABANDONED).capacityReleased());
         assertTrue(state.resourceSnapshot().isQueued(1));
@@ -56,7 +67,7 @@ class DecodeStateTest {
     void calibrationConvertsTheSameReservationWithoutDoubleChargingAndSettlesTerminal() {
         WorkerStatus status = status();
         DecodeState state = new DecodeState(status);
-        var reservation = state.reserve(2, 100, 200, 50, true, CAPACITY);
+        var reservation = state.reserve(2, 100, 200, 50, true, CAPACITY, state.placementVersion());
         var permit = state.acquireDispatchPermit(reservation, CAPACITY).permit();
         TaskInfo task = new TaskInfo();
         task.setRequestId(2L);
@@ -102,7 +113,7 @@ class DecodeStateTest {
     void regressedActivePhaseRetainsIdentityAcrossRepeatedReportsAndResumption(TaskPhase regressed) {
         WorkerStatus status = status();
         DecodeState state = new DecodeState(status);
-        var reservation = state.reserve(10, 100, 200, 50, true, CAPACITY);
+        var reservation = state.reserve(10, 100, 200, 50, true, CAPACITY, state.placementVersion());
         calibrate(state, status, Map.of("10", task(10, TaskPhase.RUNNING)), Map.of());
         for (int i = 0; i < 2; i++) {
             var observation = calibrate(state, status, Map.of("10", task(10, regressed)), Map.of());
@@ -124,8 +135,8 @@ class DecodeStateTest {
     void expiryOfRegressedRequestDoesNotSubtractAnotherRunningRequestsSlot() {
         WorkerStatus status = status();
         DecodeState state = new DecodeState(status);
-        var regressed = state.reserve(10, 100, 200, 50, true, CAPACITY);
-        var running = state.reserve(11, 100, 200, 50, true, CAPACITY);
+        var regressed = state.reserve(10, 100, 200, 50, true, CAPACITY, state.placementVersion());
+        var running = state.reserve(11, 100, 200, 50, true, CAPACITY, state.placementVersion());
         calibrate(state, status, Map.of("10", task(10, TaskPhase.RUNNING), "11", task(11, TaskPhase.RUNNING)), Map.of());
         calibrate(state, status, Map.of("10", task(10, TaskPhase.RECEIVED), "11", task(11, TaskPhase.RUNNING)), Map.of());
         // These are local Engine ownership slots, not physical GPU running concurrency.
@@ -142,7 +153,7 @@ class DecodeStateTest {
     void regressedClaimKeepsOneHoldAndExplicitFinishedWinsOverActiveSnapshot(PreemptionCancelPhase reply) {
         WorkerStatus status = status();
         DecodeState state = new DecodeState(status);
-        var victim = state.reserve(10, 100, 200, 50, true, CAPACITY);
+        var victim = state.reserve(10, 100, 200, 50, true, CAPACITY, state.placementVersion());
         calibrate(state, status, Map.of("10", task(10, TaskPhase.RUNNING)), Map.of());
         assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS, state.beginPreemption(
                 1, java.util.List.of(victim), 11, 100, 200, 80, new AdmissionCapacity(1, 100)));

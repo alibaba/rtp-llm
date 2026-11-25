@@ -5,12 +5,15 @@ import org.flexlb.balance.projection.RouteProjection;
 
 import java.util.Arrays;
 
+import static com.google.common.math.LongMath.saturatedAdd;
+
 /** Reusable columns for modeled Prefill candidates from one fleet snapshot. */
 final class PrefillCandidateSet {
 
     private static final int INITIAL_CAPACITY = 16;
     private String[] endpointAddresses = new String[0];
     private PrefillEndpoint[] endpoints = new PrefillEndpoint[0];
+    private PrefillTokenWorkload.Snapshot[] workloads = new PrefillTokenWorkload.Snapshot[0];
     private long[] projectedTtftMs = new long[0];
     private long[] incomingPrefillMs = new long[0];
     private long[] cacheHitTokens = new long[0];
@@ -27,6 +30,7 @@ final class PrefillCandidateSet {
         Arrays.fill(endpointAddresses, 0, size, null);
         Arrays.fill(endpoints, 0, size, null);
         Arrays.fill(admissionBlocks, 0, size, null);
+        Arrays.fill(workloads, 0, size, null);
         ensureCapacity(expectedCapacity);
         size = 0;
         hotspots = PrefillHotspots.Snapshot.EMPTY;
@@ -38,20 +42,22 @@ final class PrefillCandidateSet {
     void addCandidate(String address, PrefillEndpoint endpoint,
                       RouteProjection.CandidateView candidate,
                       long ownershipVersion) {
-        addCandidate(address, endpoint, candidate, null, ownershipVersion);
+        addCandidate(address, endpoint, candidate, null, ownershipVersion, endpoint.tokenWorkloadSnapshot());
     }
 
     void addCandidate(String address, PrefillEndpoint endpoint,
                       RouteProjection.CandidateView candidate,
                       String admissionBlock,
-                      long ownershipVersion) {
+                      long ownershipVersion, PrefillTokenWorkload.Snapshot workload) {
         if (!candidate.hasPrediction()) {
             throw new IllegalArgumentException("candidate requires a work prediction");
         }
         ensureCapacity(size + 1);
         endpointAddresses[size] = address;
         endpoints[size] = endpoint;
-        projectedTtftMs[size] = candidate.projectedTtftMsValue();
+        workloads[size] = workload;
+        projectedTtftMs[size] = saturatedAdd(
+                candidate.projectedTtftMsValue(), workload.plannedDurationMs());
         incomingPrefillMs[size] = candidate.incomingPrefillMs();
         cacheHitTokens[size] = candidate.cacheHitTokens();
         routingCacheMatchTokens[size] = candidate.routingCacheMatchTokens();
@@ -66,7 +72,10 @@ final class PrefillCandidateSet {
 
     void setHotspots(PrefillHotspots.Snapshot hotspots) { this.hotspots = hotspots; }
     boolean isHotspot(int index) { return hotspots.isHot(endpoints[index]); }
-    boolean mayRedirect(int source, int target) { return hotspots.mayRedirect(endpoints[source], endpoints[target]); }
+    boolean mayRedirect(int source, int target) {
+        return hotspots.mayRedirect(endpoints[source], endpoints[target], workloads[target]);
+    }
+    PrefillTokenWorkload.Snapshot workload(int index) { return workloads[index]; }
     PrefillEndpoint endpoint(int index) { return endpoints[index]; }
     String endpointAddress(int index) { return endpointAddresses[index]; }
     long cacheHit(int index) { return cacheHitTokens[index]; }
@@ -91,6 +100,7 @@ final class PrefillCandidateSet {
                 Math.max(INITIAL_CAPACITY, endpoints.length << 1));
         endpointAddresses = Arrays.copyOf(endpointAddresses, capacity);
         endpoints = Arrays.copyOf(endpoints, capacity);
+        workloads = Arrays.copyOf(workloads, capacity);
         projectedTtftMs = Arrays.copyOf(projectedTtftMs, capacity);
         incomingPrefillMs = Arrays.copyOf(incomingPrefillMs, capacity);
         cacheHitTokens = Arrays.copyOf(cacheHitTokens, capacity);

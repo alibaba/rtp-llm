@@ -15,6 +15,13 @@ public record CapacityBoundary(
         RouteProjection.AdmissionBlockSemantics projectionSemantics,
         Throwable cause) {
 
+    /** Yield this delivery cycle after repeated version conflicts; no capacity-release event is necessary. */
+    public static final CapacityBoundary RETRY_PLACEMENT = deliveryUnavailable(new Availability() {
+        @Override public boolean isAvailable() { return true; }
+        @Override public void addListener(Runnable listener) { }
+        @Override public void removeListener(Runnable listener) { }
+    });
+
     public static final CapacityBoundary OWNERSHIP_LOST =
             new CapacityBoundary(Status.OWNERSHIP_LOST, null, null, null);
 

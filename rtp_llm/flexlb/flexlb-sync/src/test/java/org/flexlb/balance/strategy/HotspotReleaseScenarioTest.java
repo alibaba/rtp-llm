@@ -21,9 +21,17 @@ import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
@@ -31,7 +39,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /** Hotspot selection and recovery with real endpoints and committed status reports. */
@@ -54,6 +66,7 @@ class HotspotReleaseScenarioTest {
     @BeforeEach
     void setUp() {
         config = StrategyTestSupport.config();
+        config.getRouter().getRoles().getPrefill().getExecutionTimeEstimator().setExpression("sum(computeTokens)");
         config.setDispatcher(DispatcherConfig.nonBatch());
         config.getScheduler().setType(SchedulerConfig.Type.DIRECT);
         // The hotspot's 30 running streams count as unknown Engine work and
@@ -130,10 +143,62 @@ class HotspotReleaseScenarioTest {
         }
     }
 
+    /** Force two planners to finish ranking the same idle worker before either can reserve it. */
+    @ParameterizedTest
+    @CsvSource({"false,false", "false,true", "true,false", "true,true"})
+    void competingPlacementsRefreshTargetLoad(boolean tokenBalance, boolean migrate) throws Exception {
+        var prefill = config.getRouter().getRoles().getPrefill();
+        if (!tokenBalance) { prefill.setTokenBalance(null); }
+        prefill.getHotspotRelease().setEnabled(migrate);
+        prefill.getHotspotRelease().setSustainedPressureMs(0);
+        var directory = spy(new WorkerDirectory(registry));
+        var barrier = new CyclicBarrier(2);
+        var attempts = new AtomicInteger();
+        doAnswer(call -> {
+            if (attempts.incrementAndGet() <= 2) { barrier.await(5, TimeUnit.SECONDS); }
+            return call.callRealMethod();
+        }).when(directory).captureEndpoint(RoleType.PREFILL, IDLE_IP + ":8080");
+        strategy = new CostBasedPrefillStrategy(directory, cache, mock(EngineHealthReporter.class), budget, hotspots);
+        var initial = new ArrayList<PrefillTokenWorkload.Reservation>();
+        try (var planners = Executors.newFixedThreadPool(2)) {
+            if (migrate) {
+                prefill.setCacheAffinity(new RoutingConfig.CacheAffinityConfig());
+                // 30 observed at the source, 0 at target. One more target plan reaches the sampled mean of 15.
+                for (int i = 0; i < 14; i++) { initial.add(idle.planTokenWork(0)); }
+            } else {
+                republishRunning(leader, 0);
+                when(cache.findMatchingEngines(any(), eq(RoleType.PREFILL), any())).thenReturn(Map.of());
+                initial.add(leader.tryPlanTokenWork(-1L, 1, 1));
+            }
+            var requestA = context(1);
+            var requestB = context(2);
+            var a = planners.submit(() -> strategy.select(requestA, RoleType.PREFILL, null));
+            var b = planners.submit(() -> strategy.select(requestB, RoleType.PREFILL, null));
+            try (var first = a.get(10, TimeUnit.SECONDS).value(); var second = b.get(10, TimeUnit.SECONDS).value()) {
+                assertEquals(Set.of(LEADER_IP, IDLE_IP),
+                        Set.of(first.serverStatus().getServerIp(), second.serverStatus().getServerIp()));
+                verify(directory, times(2)).captureEndpoint(RoleType.PREFILL, IDLE_IP + ":8080");
+                verify(directory).captureEndpoint(RoleType.PREFILL, LEADER_IP + ":8080");
+            }
+        } finally {
+            initial.forEach(PrefillTokenWorkload.Reservation::close);
+        }
+        assertEquals(0, leader.tokenWorkloadSnapshot().plannedRequests());
+        assertEquals(0, idle.tokenWorkloadSnapshot().plannedRequests());
+    }
+
     /** One selection round; the request is a 50% hit on the leader. */
     private String selectedIp() {
+        var result = strategy.select(context(requestId++), RoleType.PREFILL, null);
+        assertEquals(PlacementResult.Status.SUCCESS, result.status());
+        try (SelectedRole selected = result.value()) {
+            return selected.serverStatus().getServerIp();
+        }
+    }
+
+    private BalanceContext context(long id) {
         Request request = new Request();
-        request.setRequestId(requestId++);
+        request.setRequestId(id);
         request.setSeqLen(1_000L);
         request.setPriority(50);
         request.setCacheKeyBlockSize(100L);
@@ -142,12 +207,7 @@ class HotspotReleaseScenarioTest {
         context.setRequest(request);
         context.setSchedulingMetadata(SchedulingMetadata.explicit(
                 50, System.currentTimeMillis() + 60_000L));
-        PlacementResult<SelectedRole, ?> result =
-                strategy.select(context, RoleType.PREFILL, null);
-        assertEquals(PlacementResult.Status.SUCCESS, result.status());
-        try (SelectedRole selected = result.value()) {
-            return selected.serverStatus().getServerIp();
-        }
+        return context;
     }
 
     /** Drive production governor rounds with a monotonic test clock. */

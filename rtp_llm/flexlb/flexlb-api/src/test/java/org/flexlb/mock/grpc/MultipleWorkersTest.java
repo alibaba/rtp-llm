@@ -14,7 +14,6 @@ import org.junit.jupiter.api.Timeout;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -70,11 +69,11 @@ class MultipleWorkersTest extends FlexLBMockTestBase {
         workerBIpPort = workerIpPort(workerB);
 
         // 2. Reconfigure DefaultRouter to alternate between worker A and B
-        AtomicInteger routeCounter = new AtomicInteger(0);
         reset(router);
         when(router.select(any(BalanceContext.class), any())).thenAnswer(inv -> {
             BalanceContext ctx = inv.getArgument(0);
-            boolean useB = routeCounter.getAndIncrement() % 2 == 1;
+            // Alternate by request so a version-conflict retry retains its fixture worker.
+            boolean useB = ctx.getRequestId() % 2 == 0;
             return admittedRoute(
                     ctx, buildRouteResponse(ctx.getRequestId(), useB));
         });

@@ -612,35 +612,32 @@ public final class PrefillState {
     private int batchLeasesInUse;
     private long routeLeasesInUse;
     private volatile long occupiedRouteSlots;
-    /** Outstanding uncached token accounting for selection scoring; null when disabled. */
-    private volatile PrefillTokenWorkload tokenWorkload;
+    private final PrefillTokenWorkload tokenWorkload = new PrefillTokenWorkload();
     /** Engine waiting-queue admission gate; null when tokenBalance disables the gate. */
     private volatile EngineQueueAdmission engineQueueAdmission;
 
-    /** Enable accepted-token accounting for hotspot detection and token-balanced selection. */
-    public void enableTokenWorkload() {
-        tokenWorkload = new PrefillTokenWorkload();
-    }
-
-    /** Soft scoring reservation; never consumes admission capacity and closes exactly once. */
-    public PrefillTokenWorkload.Reservation planTokenWork(long tokens) {
-        PrefillTokenWorkload ledger = tokenWorkload;
-        if (ledger == null) {
-            throw new IllegalStateException("Prefill token workload accounting is disabled");
+    /** Capture published ownership and outstanding plans at one instant. */
+    public PrefillTokenWorkload.Snapshot tokenWorkloadSnapshot() {
+        lock.lock();
+        try {
+            return tokenWorkload.snapshot();
+        } finally {
+            lock.unlock();
         }
-        return ledger.plan(tokens);
     }
 
-    /** Advisory outstanding uncached work for ranking, including soft reservations. */
-    public double tokenWorkloadScore() {
-        PrefillTokenWorkload ledger = tokenWorkload;
-        return ledger == null ? 0.0 : ledger.snapshot().score();
+    public PrefillTokenWorkload.Reservation tryPlanTokenWork(
+            long expectedVersion, long tokens, long durationMs) {
+        lock.lock();
+        try {
+            return tokenWorkload.tryPlan(expectedVersion, tokens, durationMs);
+        } finally {
+            lock.unlock();
+        }
     }
 
-    /** Advisory outstanding pending uncached work for pool occupancy snapshots. */
     public long pendingTokenWork() {
-        PrefillTokenWorkload ledger = tokenWorkload;
-        return ledger == null ? 0L : ledger.snapshot().pendingTokens();
+        return tokenWorkload.pendingTokens();
     }
 
     /** Attach the Engine waiting-queue admission gate before the endpoint starts serving. */
@@ -653,25 +650,18 @@ public final class PrefillState {
     /** Caller holds {@link #lock}. */
     private void acceptTokenWorkUnderLock(RequestEntry entry, ScheduledRequest item) {
         requireLock();
-        PrefillTokenWorkload ledger = tokenWorkload;
-        if (ledger == null) {
-            return;
-        }
         long tokens = Math.max(0L, item.seqLen() - item.hitCache());
+        tokenWorkload.accept(tokens, item.prefillTokenReservation());
         entry.tokenWork = tokens;
-        ledger.accept(tokens);
     }
 
     /** Caller holds {@link #lock}. */
     private void releaseTokenWorkUnderLock(RequestEntry entry) {
         requireLock();
-        PrefillTokenWorkload ledger = tokenWorkload;
-        long tokens = entry.tokenWork;
-        entry.tokenWork = 0L;
-        if (ledger == null || tokens == 0L) {
-            return;
+        if (entry.tokenWork > 0) {
+            tokenWorkload.release(entry.tokenWork);
+            entry.tokenWork = 0L;
         }
-        ledger.release(tokens);
     }
 
     /** Publish the capacity summary before readers observe a new ownership revision. */
@@ -686,6 +676,7 @@ public final class PrefillState {
         long count = saturatedAdd(requests.size(), unknownEngineRequestCount);
         if (outstandingRequestCount != count) {
             outstandingRequestCount = count;
+            tokenWorkload.updateObservedRequests(count);
         }
     }
 
@@ -740,12 +731,12 @@ public final class PrefillState {
         RequestEntry entry = new RequestEntry(item);
         putRequestUnderLock(item.requestId(), entry);
         try {
+            acceptTokenWorkUnderLock(entry, item);
             activeIndex.add(item);
         } catch (RuntimeException | Error failure) {
             removeRequestUnderLock(item.requestId(), entry);
             throw failure;
         }
-        acceptTokenWorkUnderLock(entry, item);
         recordMutationUnderLock();
         return true;
     }
@@ -1214,8 +1205,8 @@ public final class PrefillState {
             RouteReservation reservation = new RouteReservation(entry, item.requestId(), predictedMs);
             ReservationResult<RouteReservation> result = new ReservationResult<>(CapacityStatus.ACQUIRED, reservation);
             entry.reservation = reservation;
-            putRequestUnderLock(item.requestId(), entry);
             acceptTokenWorkUnderLock(entry, item);
+            putRequestUnderLock(item.requestId(), entry);
             routeLeasesInUse++;
             committedWorkCapture = null;
             recordMutationUnderLock();
@@ -1751,6 +1742,7 @@ public final class PrefillState {
             // Canonical retirement commit. Everything which may allocate or
             // validate has completed above this line.
             for (RequestEntry entry : requests.values()) {
+                releaseTokenWorkUnderLock(entry);
                 entry.activeItem = null;
                 entry.committedItem = null;
                 entry.reservation = null;

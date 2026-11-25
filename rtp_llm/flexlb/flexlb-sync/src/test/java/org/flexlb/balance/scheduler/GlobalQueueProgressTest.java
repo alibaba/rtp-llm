@@ -60,6 +60,17 @@ import static org.mockito.Mockito.when;
  */
 class GlobalQueueProgressTest {
     @Test
+    void workloadConflictRetriesWithoutWaitingForCapacity() throws Exception {
+        try (Fixture f = new Fixture(RoleType.PREFILL)) {
+            f.replanOnce.add(91L);
+            f.submit(91L, "g1");
+            awaitCondition(() -> f.admitted.contains(91L));
+            verify(f.router, org.mockito.Mockito.times(2)).select(any(), eq("g1"));
+            assertEquals(List.of(91L), f.admissionOrder);
+        }
+    }
+
+    @Test
     void queueAdmissionEventPrecedesDecisionOnPlannerThread() throws Exception {
         FlexlbTrace.configure(OpenTelemetry.noop(), "test");
         try (Fixture f = new Fixture(RoleType.PREFILL)) {
@@ -545,6 +556,7 @@ class GlobalQueueProgressTest {
         private final Set<Long> admitted = ConcurrentHashMap.newKeySet();
         private final List<Long> admissionOrder = new CopyOnWriteArrayList<>();
         private final Set<Long> admissionBlocked = ConcurrentHashMap.newKeySet();
+        private final Set<Long> replanOnce = ConcurrentHashMap.newKeySet();
         private final Set<Long> decodeBlocked = ConcurrentHashMap.newKeySet();
         private volatile LongConsumer onAdmission = ignored -> { };
         private volatile LongConsumer onSelection = ignored -> { };
@@ -619,6 +631,7 @@ class GlobalQueueProgressTest {
                 long id = context.getRequestId();
                 selected.add(id);
                 onSelection.accept(id);
+                if (replanOnce.remove(id)) { return PlacementResult.replan(); }
                 if ("a".equals(groups.get(id)) && aSlots.get() == 0 && !preempt) {
                     return PlacementResult.blocked(new PlacementKey(role, "a"));
                 }

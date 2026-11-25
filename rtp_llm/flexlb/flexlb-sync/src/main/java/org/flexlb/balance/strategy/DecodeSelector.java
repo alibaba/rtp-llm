@@ -1,5 +1,6 @@
 package org.flexlb.balance.strategy;
 
+import org.flexlb.balance.AdmissionVersion;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
@@ -121,8 +122,14 @@ public class DecodeSelector {
     public record Dispatch(ServerStatus status, DecodeEndpoint endpoint,
                            DecodeEndpoint.ReservationHandle reservation, DecodeEndpoint.EngineDispatchPermit permit) { }
 
-    /** Try every eligible candidate at most once; a lost race on one worker cannot strand an idle peer. */
+    /** Rank again if another planner changes the selected worker before its permit is acquired. */
     public CapacityBoundary.Attempt<Dispatch> tryDispatch(DecodeBinding request, String group, boolean allowsEnginePreemption) {
+        return AdmissionVersion.retryConflicts(() -> tryDispatchOnce(request, group, allowsEnginePreemption),
+                attempt -> attempt.boundary() == CapacityBoundary.RETRY_PLACEMENT);
+    }
+
+    private CapacityBoundary.Attempt<Dispatch> tryDispatchOnce(
+            DecodeBinding request, String group, boolean allowsEnginePreemption) {
         // Capture before the snapshot. Capacity may return between the failed attempt and listener installation.
         int preemptionPriority = allowsEnginePreemption ? request.priority() : PriorityNormalizer.NO_PRIORITY;
         var changes = workerDirectory.observeDecodeCapacity(group, preemptionPriority);
@@ -158,9 +165,12 @@ public class DecodeSelector {
                     DecodeEndpoint endpoint = (DecodeEndpoint) pin.endpoint();
                     ServerStatus status = serverStatus(selected, request.requestId());
                     var permit = endpoint.reserveForDispatch(pin, request.requestId(), request.hardKvTokens(),
-                            request.expectedKvTokens(), request.priority(), request.capacity());
+                            request.expectedKvTokens(), request.priority(), request.capacity(), selected.admissionVersion());
                     if (permit != null) {
                         return CapacityBoundary.Attempt.accepted(new Dispatch(status, endpoint, permit.reservation(), permit));
+                    }
+                    if (endpoint.placementVersion() != selected.admissionVersion()) {
+                        return CapacityBoundary.Attempt.rejected(CapacityBoundary.RETRY_PLACEMENT);
                     }
                 }
             }

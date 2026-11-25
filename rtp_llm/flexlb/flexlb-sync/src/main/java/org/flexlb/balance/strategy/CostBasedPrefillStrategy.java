@@ -1,5 +1,6 @@
 package org.flexlb.balance.strategy;
 
+import org.flexlb.balance.AdmissionVersion;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
@@ -45,6 +46,7 @@ public class CostBasedPrefillStrategy {
     private static final ThreadLocal<PrefillCandidateSet> CANDIDATES =
             ThreadLocal.withInitial(PrefillCandidateSet::new);
 
+    private final HotspotRedirectLimiter redirectLimiter;
     private final WorkerDirectory workerDirectory;
     private final CacheAwareService cacheAwareService;
     private final EngineHealthReporter engineHealthReporter;
@@ -66,7 +68,8 @@ public class CostBasedPrefillStrategy {
                              EngineHealthReporter engineHealthReporter,
                              HotspotRedirectLimiter redirectLimiter, PrefillHotspots hotspots) {
         this.hotspots = hotspots;
-        this.ranking = new PrefillCandidateRanking(engineHealthReporter, redirectLimiter);
+        this.redirectLimiter = redirectLimiter;
+        this.ranking = new PrefillCandidateRanking(engineHealthReporter);
         this.workerDirectory = workerDirectory;
         this.cacheAwareService = cacheAwareService;
         this.engineHealthReporter = engineHealthReporter;
@@ -76,10 +79,6 @@ public class CostBasedPrefillStrategy {
             BalanceContext balanceContext,
             RoleType roleType,
             String group) {
-        long requestId = balanceContext.getRequestId();
-        long seqLen = balanceContext.getRequest().getSeqLen();
-        FlexlbConfig config = balanceContext.getConfig();
-
         // Cache matching sees every live Prefill, including busy or blocked workers.
         EndpointDiscovery discovery = discoverEndpoints(roleType, group);
         Map<String, Integer> cacheMatchResults = discovery.directory().isEmpty() ? Map.of()
@@ -88,104 +87,92 @@ public class CostBasedPrefillStrategy {
             return blockedWithDiagnostics(Response.error(roleType.getErrorType()),
                     new PlacementKey(roleType, group), 0, Map.of());
         }
-        Map<String, Integer> rejections = new java.util.HashMap<>();
-        PrefillCandidateSet survivors = evaluateCandidates(
-                discovery, balanceContext, cacheMatchResults, rejections);
-        if (survivors.size() == 0) {
-            return blockedWithDiagnostics(Response.error(StrategyErrorType.RESOURCE_EXHAUSTED),
-                    new PlacementKey(roleType, group), discovery.candidates().size(), rejections);
-        }
-
-        var prefill = config.getRouter().getRoles().getPrefill();
-        var release = prefill.getHotspotRelease();
-        if (release.isEnabled()) {
-            survivors.setHotspots(hotspots.sample(roleType, group, discovery.candidates(), release));
-        }
-        int selectedIndex = ranking.select(survivors, roleType, group, balanceContext);
-
-        if (selectedIndex < 0) {
-            Logger.debug(
-                    "Prefill select failed: all filtered out, request_id={}, rejections={}",
-                    requestId,
-                    rejections);
-            return PlacementResult.blocked(new PlacementKey(roleType, group));
-        }
-
-        PrefillEndpoint best = survivors.endpoint(selectedIndex);
-        long bestCacheHit = survivors.cacheHit(selectedIndex);
-        long selectedPrefillMs = survivors.prefillMs(selectedIndex);
-        // Check only the winner: temporary pressure must not send B to a colder Prefill.
-        String admissionBlock = survivors.admissionBlock(selectedIndex);
-        boolean directCapacityFull = admissionBlock == null
-                && config.isDirect() && !best.canAcceptRequest();
-        WorkerEndpoint.GenerationPin selectedPin =
-                workerDirectory.captureEndpoint(
-                        roleType,
-                        survivors.endpointAddress(selectedIndex));
-        if (selectedPin == null || selectedPin.endpoint() != best) {
-            if (selectedPin != null) {
-                selectedPin.close();
+        var release = balanceContext.getConfig().getRouter().getRoles().getPrefill().getHotspotRelease();
+        return AdmissionVersion.retryConflicts(() -> {
+            Map<String, Integer> rejections = new java.util.HashMap<>();
+            PrefillCandidateSet candidates = evaluateCandidates(discovery, balanceContext, cacheMatchResults, rejections);
+            if (candidates.size() == 0) {
+                return blockedWithDiagnostics(Response.error(StrategyErrorType.RESOURCE_EXHAUSTED),
+                        new PlacementKey(roleType, group), discovery.candidates().size(), rejections);
             }
-            // The planning endpoint retired or was replaced after the
-            // full-fleet snapshot. Re-enter the queue rather than
-            // transferring ownership for a stale generation.
-            return PlacementResult.blocked(new PlacementKey(roleType, group));
-        }
-        if (admissionBlock != null || directCapacityFull) {
-            try (selectedPin) {
-                Response failure = admissionBlock == null
-                        ? admissionFailure(best, balanceContext.getPriority())
-                        : Response.error(StrategyErrorType.RESOURCE_EXHAUSTED);
-                // The selected P owns queue progress, including head removal and Decode wakeups.
-                return PlacementResult.blocked(PlacementKey.exact(roleType,
-                        best.getStatus().topologySnapshot().group(), survivors.endpointAddress(selectedIndex)), failure, Map.of(
-                        "role", roleType.name(), "workers", discovery.candidates().size(),
-                        "observedAtMs", System.currentTimeMillis(),
-                        "selectedEndpoint", survivors.endpointAddress(selectedIndex),
-                        "cacheHitTokens", bestCacheHit,
-                        "projectedTtftMs", RouteProjection.Candidate.UNKNOWN,
-                        "reason", admissionBlock == null ? "PREFILL_CAPACITY" : admissionBlock));
+            if (release.isEnabled()) {
+                redirectLimiter.recordPlacement(balanceContext, candidates.maximumCacheHit);
+                candidates.setHotspots(hotspots.sample(roleType, group, discovery.candidates(), release));
             }
-        }
-        long selectedTtft = survivors.projectedTtftMs(selectedIndex);
-        // Reserve outstanding uncached work before handing the pin to the route
-        // owner; blocked and stale-generation paths return before this point.
-        PrefillTokenWorkload.Reservation tokenReservation =
-                prefill.getTokenBalance() == null ? null : best.planTokenWork(
-                        Math.max(0L, seqLen - bestCacheHit));
-        SelectedRole selectedRole = buildSelectedRole(
-                best,
-                roleType,
-                requestId,
-                selectedTtft,
-                selectedPrefillMs,
-                bestCacheHit,
-                survivors.routingCacheMatchTokens(selectedIndex),
-                survivors.ownershipVersion(selectedIndex),
-                selectedPin,
-                tokenReservation);
-        try {
-            reportSelectedEstimates(
-                    roleType,
-                    best,
-                    config,
-                    selectedTtft,
-                    selectedPrefillMs);
-            reportCacheHitMetrics(roleType, bestCacheHit, seqLen);
-            reportRoutingCacheMatchMetrics(
-                    roleType,
-                    survivors.routingCacheMatchTokens(selectedIndex),
-                    survivors.maximumRoutingCacheMatchTokens,
-                    seqLen);
-            return PlacementResult.success(selectedRole);
-        } catch (RuntimeException | Error failure) {
+            var choice = ranking.select(candidates, roleType, group, balanceContext);
+            return registerChoice(balanceContext, roleType, group, candidates, choice, discovery.candidates().size());
+        }, attempt -> attempt.status() == PlacementResult.Status.REPLAN);
+    }
+
+    private PlacementResult<SelectedRole, PlacementKey> registerChoice(
+            BalanceContext context, RoleType role, String group, PrefillCandidateSet candidates,
+            PrefillCandidateRanking.Choice choice, int workers) {
+        long seqLen = context.getRequest().getSeqLen();
+        FlexlbConfig config = context.getConfig();
+        while (choice.index() >= 0) {
+            int index = choice.index();
+            PrefillEndpoint endpoint = candidates.endpoint(index);
+            String address = candidates.endpointAddress(index);
+            String block = candidates.admissionBlock(index);
+            boolean directCapacityFull = block == null && config.isDirect() && !endpoint.canAcceptRequest();
+            WorkerEndpoint.GenerationPin pin = workerDirectory.captureEndpoint(role, address);
+            if (pin == null || pin.endpoint() != endpoint) {
+                if (pin != null) { pin.close(); }
+                return PlacementResult.blocked(new PlacementKey(role, group));
+            }
+            PrefillTokenWorkload.Reservation work = null;
+            HotspotRedirectLimiter.Ticket budget = null;
+            boolean transferred = false;
             try {
-                selectedRole.close();
-            } catch (RuntimeException | Error cleanupFailure) {
-                failure.addSuppressed(cleanupFailure);
+                if (block != null || directCapacityFull) {
+                    Response failure = block == null ? admissionFailure(endpoint, context.getPriority())
+                            : Response.error(StrategyErrorType.RESOURCE_EXHAUSTED);
+                    return PlacementResult.blocked(PlacementKey.exact(role,
+                            endpoint.getStatus().topologySnapshot().group(), address), failure, Map.of(
+                            "role", role.name(), "workers", workers, "observedAtMs", System.currentTimeMillis(),
+                            "selectedEndpoint", address, "cacheHitTokens", candidates.cacheHit(index),
+                            "projectedTtftMs", RouteProjection.Candidate.UNKNOWN,
+                            "reason", block == null ? "PREFILL_CAPACITY" : block));
+                }
+
+                long hit = candidates.cacheHit(index);
+                long duration = candidates.prefillMs(index);
+                work = endpoint.tryPlanTokenWork(choice.expectedVersion(candidates),
+                        Math.max(0L, seqLen - hit), duration);
+                if (work == null) { return PlacementResult.replan(); }
+                if (choice.redirect()) {
+                    var release = config.getRouter().getRoles().getPrefill().getHotspotRelease();
+                    budget = redirectLimiter.tryAcquire(candidates.maximumCacheHit - hit, release.getMaxExtraComputePermille());
+                    if (budget == null) {
+                        choice = choice.rateLimited();
+                        continue;
+                    }
+                }
+
+                long ttft = candidates.projectedTtftMs(index);
+                var status = prefillStatus(endpoint, role, context.getRequestId(), ttft, hit);
+                transferred = true; // The factory consumes all three resources, including on failure.
+                SelectedRole selected = SelectedRole.prefill(pin, status, duration, candidates.ownershipVersion(index),
+                        candidates.routingCacheMatchTokens(index), work, budget);
+                try {
+                    ranking.report(candidates, role, group, index, choice.reason());
+                    reportSelectedEstimates(role, endpoint, config, ttft, duration);
+                    reportCacheHitMetrics(role, hit, seqLen);
+                    reportRoutingCacheMatchMetrics(role, candidates.routingCacheMatchTokens(index),
+                            candidates.maximumRoutingCacheMatchTokens, seqLen);
+                    return PlacementResult.success(selected);
+                } catch (RuntimeException | Error failure) {
+                    try (selected) { throw failure; }
+                }
+            } finally {
+                if (!transferred) {
+                    try (var ownedPin = pin; var ownedWork = work; var ownedBudget = budget) {
+                        // Release this exact attempt before retrying or selecting the fallback.
+                    }
+                }
             }
-            throw failure;
         }
+        return PlacementResult.blocked(new PlacementKey(role, group));
     }
 
     private static Response admissionFailure(PrefillEndpoint endpoint, int priority) {
@@ -357,6 +344,7 @@ public class CostBasedPrefillStrategy {
                     calculateCacheMatch(ep, endpointAddress, cacheMatchResults, request);
             long cacheHit = cacheMatch.effectiveHitTokens();
             long routingCacheMatchTokens = cacheMatch.routingHitTokens();
+            var workload = ep.tokenWorkloadSnapshot();
             RouteProjection.Inputs projectionInputs =
                     ep.captureRouteProjectionInputs();
             PrefillTimePredictor predictor = ep.getPredictor();
@@ -395,7 +383,7 @@ public class CostBasedPrefillStrategy {
                         projectionInputs.queue(), projection, admissionProbe, planningAtMs);
             }
             candidates.addCandidate(endpointAddress, ep, projection, admissionBlock,
-                    projectionInputs.ownershipVersion());
+                    projectionInputs.ownershipVersion(), workload);
             if (Logger.isTraceEnabled()) {
                 Logger.trace("Prefill ranking - ip: {}, order: {}, hitCache: {}, modeledWorkMs: {}",
                         endpointAddress, balanceContext.getConfig().isPriorityOrdering() ? "PRIORITY" : "FIFO",
@@ -514,54 +502,24 @@ public class CostBasedPrefillStrategy {
                 roleType, candidateMaxHitTokens);
     }
 
-    private SelectedRole buildSelectedRole(
-            PrefillEndpoint ep,
-            RoleType roleType,
-            long requestId,
-            long projectedTtftMs,
-            long selectedPrefillMs,
-            long bestCacheHit,
-            long residentPrefixTokens,
-            long placementVersion,
-            WorkerEndpoint.GenerationPin selectedPin,
-            PrefillTokenWorkload.Reservation tokenReservation) {
-        try {
-            // Populate DebugInfo so ScheduledRequest.hitCache() can read
-            // hitCacheLen for batch metrics.
-            DebugInfo debugInfo = new DebugInfo();
-            debugInfo.setHitCacheLen(bestCacheHit);
-
-            if (selectedPin == null || selectedPin.endpoint() != ep) {
-                throw new IllegalStateException(
-                        "selected Prefill endpoint generation changed before handoff");
-            }
-            WorkerStatus workerStatus = ep.getStatus();
-            WorkerStatus.TopologySnapshot topology = workerStatus.topologySnapshot();
-            WorkerStatus.EngineObservation status = workerStatus.committedEngineObservation();
-            ServerStatus result = new ServerStatus();
-            result.setRole(roleType);
-            result.setRequestId(requestId);
-            result.setPrefillTime(projectedTtftMs);
-            result.setGroup(topology.group());
-            result.setServerIp(topology.ip());
-            result.setHttpPort(topology.port());
-            result.setGrpcPort(CommonUtils.toGrpcPort(topology.port()));
-            result.setDpRank(status.dpRank());
-            result.setDebugInfo(debugInfo);
-            result.setSuccess(true);
-            WorkerEndpoint.GenerationPin ownedPin = selectedPin;
-            selectedPin = null;
-            PrefillTokenWorkload.Reservation ownedReservation = tokenReservation;
-            tokenReservation = null;
-            return SelectedRole.prefill(
-                    ownedPin, result, selectedPrefillMs, placementVersion, residentPrefixTokens, ownedReservation);
-        } finally {
-            if (selectedPin != null) {
-                selectedPin.close();
-            }
-            if (tokenReservation != null) {
-                tokenReservation.close();
-            }
-        }
+    private static ServerStatus prefillStatus(PrefillEndpoint ep, RoleType roleType, long requestId,
+                                              long projectedTtftMs, long bestCacheHit) {
+        DebugInfo debugInfo = new DebugInfo();
+        debugInfo.setHitCacheLen(bestCacheHit);
+        WorkerStatus workerStatus = ep.getStatus();
+        WorkerStatus.TopologySnapshot topology = workerStatus.topologySnapshot();
+        WorkerStatus.EngineObservation status = workerStatus.committedEngineObservation();
+        ServerStatus result = new ServerStatus();
+        result.setRole(roleType);
+        result.setRequestId(requestId);
+        result.setPrefillTime(projectedTtftMs);
+        result.setGroup(topology.group());
+        result.setServerIp(topology.ip());
+        result.setHttpPort(topology.port());
+        result.setGrpcPort(CommonUtils.toGrpcPort(topology.port()));
+        result.setDpRank(status.dpRank());
+        result.setDebugInfo(debugInfo);
+        result.setSuccess(true);
+        return result;
     }
 }

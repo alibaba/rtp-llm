@@ -5,6 +5,7 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.prediction.DecodeCostFormula;
 import org.flexlb.balance.strategy.DecodeSelector;
+import org.flexlb.balance.strategy.PrefillTokenWorkload;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.VictimStage;
@@ -36,6 +37,7 @@ public final class ScheduledRequest implements Prioritized {
     private final BalanceContext ctx;
     private final CompletableFuture<Response> future;
     private final RequestExecution execution;
+    private final PrefillTokenWorkload.Reservation prefillTokenReservation;
     private volatile DecodePreemptionWait pendingDecodePreemption;
 
     /** One victim-control RPC is in progress. Dispatch may resume only after it settles. */
@@ -100,6 +102,22 @@ public final class ScheduledRequest implements Prioritized {
                      DecodeEndpoint.ReservationHandle decodeReservation,
                      long enqueuedAtMs,
                      DecodeBinding frozenDecode) {
+        this(ctx, future, routeResponse, prefill, decode, prefillEp, decodeEp, decodeReservation,
+                enqueuedAtMs, frozenDecode, null);
+    }
+
+    ScheduledRequest(BalanceContext ctx,
+                     CompletableFuture<Response> future,
+                     Response routeResponse,
+                     ServerStatus prefill,
+                     ServerStatus decode,
+                     PrefillEndpoint prefillEp,
+                     DecodeEndpoint decodeEp,
+                     DecodeEndpoint.ReservationHandle decodeReservation,
+                     long enqueuedAtMs,
+                     DecodeBinding frozenDecode,
+                     PrefillTokenWorkload.Reservation prefillTokenReservation) {
+        this.prefillTokenReservation = prefillTokenReservation;
         this.ctx = Objects.requireNonNull(ctx, "ctx");
         this.future = future;
         assignQueueSequence(ctx);
@@ -120,6 +138,8 @@ public final class ScheduledRequest implements Prioritized {
     // -- accessors --
 
     public BalanceContext ctx() { return ctx; }
+
+    public PrefillTokenWorkload.Reservation prefillTokenReservation() { return prefillTokenReservation; }
 
     /** Stable identity retained by endpoint state and request lifecycle tracking. */
     public RequestExecution execution() { return execution; }

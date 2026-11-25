@@ -3,6 +3,7 @@ package org.flexlb.balance.strategy;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.prediction.FormulaPredictor;
 import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.balance.scheduler.PlacementKey;
 import org.flexlb.balance.scheduler.ScheduledRequest;
@@ -75,7 +76,7 @@ class CostBasedPrefillSelectionMetricTest {
         cache = mock(CacheAwareService.class);
         when(cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of());
         reporter = mock(EngineHealthReporter.class);
-        ranking = new PrefillCandidateRanking(reporter, new HotspotRedirectLimiter());
+        ranking = new PrefillCandidateRanking(reporter);
         strategy = new CostBasedPrefillStrategy(
                 new WorkerDirectory(registry), cache, reporter);
 
@@ -418,15 +419,12 @@ class CostBasedPrefillSelectionMetricTest {
                 new long[] {100L, 105L, 1_000L},
                 new long[] {500L, 500L, 0L});
 
-        int selectedIndex = ranking.select(
+        var choice = ranking.select(
                 candidates, RoleType.PREFILL, null, context);
 
-        assertEquals(0, selectedIndex,
+        assertEquals(0, choice.index(),
                 "equal cache hit must preserve the minimum-TTFT baseline");
-        verify(reporter).reportCacheAffinityDecision(
-                RoleType.PREFILL,
-                "10.1.0." + (selectedIndex + 1),
-                "NO_CACHE_LEAD");
+        assertEquals("NO_CACHE_LEAD", choice.reason());
     }
 
     @Test
@@ -436,12 +434,11 @@ class CostBasedPrefillSelectionMetricTest {
                 new long[] {100L, 105L, 1_000L},
                 new long[] {500L, 600L, 0L});
 
-        int selectedIndex = ranking.select(
+        var choice = ranking.select(
                 candidates, RoleType.PREFILL, null, context);
 
-        assertEquals(1, selectedIndex);
-        verify(reporter).reportCacheAffinityDecision(
-                RoleType.PREFILL, "10.1.0.2", "CACHE_LEADER");
+        assertEquals(1, choice.index());
+        assertEquals("CACHE_LEADER", choice.reason());
     }
 
     @ParameterizedTest
@@ -459,10 +456,32 @@ class CostBasedPrefillSelectionMetricTest {
         Set<Integer> selected = new HashSet<>();
         for (int attempt = 0; attempt < 6; attempt++) {
             selected.add(ranking.select(
-                    candidates, RoleType.PREFILL, null, context));
+                    candidates, RoleType.PREFILL, null, context).index());
         }
 
         assertEquals(affinityEnabled ? Set.of(1) : Set.of(0, 1), selected);
+    }
+
+    @Test
+    void forecastsRoundedToZeroFavorLessOutstandingWorkAmongEqualTtftAndCacheHits() {
+        var formula = new FormulaPredictor("sum(computeTokens) / 20000000");
+        long estimate = formula.estimateMs(53_880L, 0L);
+        assertEquals(0L, estimate);
+        config.getRouter().getRoles().getPrefill().setCacheAffinity(null);
+        var candidates = new PrefillCandidateSet();
+        candidates.reset(3);
+        var prediction = new RouteProjection.Candidate(estimate, estimate,
+                RouteProjection.Candidate.InitialHeadDisposition.NONE, "", 0L, 0L);
+        // The first worker has 50 accepted tokens, the second has a zero-token plan, and the third is idle.
+        candidates.addCandidate("a", mock(PrefillEndpoint.class), prediction, null, 0,
+                new PrefillTokenWorkload.Snapshot(50, 0, 0, 0, 1));
+        candidates.addCandidate("b", mock(PrefillEndpoint.class), prediction, null, 0,
+                new PrefillTokenWorkload.Snapshot(0, 0, 1, 0, 0));
+        candidates.addCandidate("c", mock(PrefillEndpoint.class), prediction, null, 0,
+                new PrefillTokenWorkload.Snapshot(0));
+
+        var choice = ranking.select(candidates, RoleType.PREFILL, null, context);
+        assertEquals(2, choice.index());
     }
 
     @Test
@@ -475,7 +494,7 @@ class CostBasedPrefillSelectionMetricTest {
         Set<Integer> selected = new HashSet<>();
         for (int attempt = 0; attempt < 6; attempt++) {
             selected.add(ranking.select(
-                    candidates, RoleType.PREFILL, null, context));
+                    candidates, RoleType.PREFILL, null, context).index());
         }
 
         assertEquals(Set.of(0, 2), selected);
@@ -557,6 +576,7 @@ class CostBasedPrefillSelectionMetricTest {
             String ip = "10.1.0." + (i + 1);
             PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
             when(endpoint.getIp()).thenReturn(ip);
+            when(endpoint.tokenWorkloadSnapshot()).thenReturn(new PrefillTokenWorkload.Snapshot(0));
             candidates.addCandidate(
                     ip + ":8080",
                     endpoint,

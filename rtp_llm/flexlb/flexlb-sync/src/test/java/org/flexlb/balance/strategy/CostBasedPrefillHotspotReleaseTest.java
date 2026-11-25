@@ -33,13 +33,14 @@ import static java.util.concurrent.TimeUnit.MILLISECONDS;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -60,27 +61,27 @@ class CostBasedPrefillHotspotReleaseTest {
         var request = tokenContext(new FlexlbConfig());
         java.util.stream.IntStream.range(0, 32).parallel()
                 .forEach(i -> budget.recordPlacement(request, 900));
-        assertFalse(budget.tryAcquire(101, 1000));
-        assertTrue(budget.tryAcquire(100, 1000));
+        assertNull(budget.tryAcquire(101, 1000));
+        assertNotNull(budget.tryAcquire(100, 1000));
 
         nowNanos.set(MILLISECONDS.toNanos(1000));
         budget.recordPlacement(request, 0L);
-        assertFalse(budget.tryAcquire(1, 1000), "a new cache estimate on retry cannot refill the window");
+        assertNull(budget.tryAcquire(1, 1000), "a new cache estimate on retry cannot refill the window");
     }
 
     @Test
     void chargeOnlyAdditionalComputeTokensEvenWhenTheBudgetIsZero() {
-        assertTrue(budget.tryAcquire(0, 0));
-        assertFalse(budget.tryAcquire(1, 10));
+        assertNotNull(budget.tryAcquire(0, 0));
+        assertNull(budget.tryAcquire(1, 10));
         recordColdArrival(100_099);
-        assertFalse(budget.tryAcquire(1001, 10));
-        assertTrue(budget.tryAcquire(600, 10));
-        assertTrue(budget.tryAcquire(0, 0));
-        assertFalse(budget.tryAcquire(400, 10), "600 of 1000 tokens consumed 600 ms of pacing");
+        assertNull(budget.tryAcquire(1001, 10));
+        assertNotNull(budget.tryAcquire(600, 10));
+        assertNotNull(budget.tryAcquire(0, 0));
+        assertNull(budget.tryAcquire(400, 10), "600 of 1000 tokens consumed 600 ms of pacing");
         nowNanos.set(MILLISECONDS.toNanos(600));
-        assertFalse(budget.tryAcquire(401, 10));
-        assertTrue(budget.tryAcquire(400, 10));
-        assertTrue(budget.tryAcquire(0, 10));
+        assertNull(budget.tryAcquire(401, 10));
+        assertNotNull(budget.tryAcquire(400, 10));
+        assertNotNull(budget.tryAcquire(0, 10));
     }
 
     @Test
@@ -88,15 +89,57 @@ class CostBasedPrefillHotspotReleaseTest {
         nowNanos.set(MILLISECONDS.toNanos(900));
         recordColdArrival(200_000);
         nowNanos.set(MILLISECONDS.toNanos(1050));
-        assertTrue(budget.tryAcquire(1000, 10));
+        assertNotNull(budget.tryAcquire(1000, 10));
         nowNanos.set(MILLISECONDS.toNanos(1750));
         recordColdArrival(100_000);
         nowNanos.set(MILLISECONDS.toNanos(1900));
-        assertFalse(budget.tryAcquire(1, 10), "remaining 1000-token allowance was already spent");
+        assertNull(budget.tryAcquire(1, 10), "remaining 1000-token allowance was already spent");
         nowNanos.set(MILLISECONDS.toNanos(2050));
-        assertTrue(budget.tryAcquire(1000, 10));
+        assertNotNull(budget.tryAcquire(1000, 10));
         nowNanos.set(MILLISECONDS.toNanos(3000));
-        assertFalse(budget.tryAcquire(1, 10));
+        assertNull(budget.tryAcquire(1, 10));
+    }
+
+    @Test
+    void onlyAbandonedRedirectsRefundBudgetAndPacing() {
+        recordColdArrival(1000);
+        var first = budget.tryAcquire(400, 1000);
+        assertNotNull(first);
+        first.commit();
+        first.close();
+        assertNull(budget.tryAcquire(1, 1000));
+
+        nowNanos.set(MILLISECONDS.toNanos(400));
+        var provisional = budget.tryAcquire(600, 1000);
+        assertNotNull(provisional);
+        assertNull(budget.tryAcquire(1, 1000));
+        provisional.close();
+        provisional.close();
+        assertNull(budget.tryAcquire(601, 1000), "the committed first charge still counts");
+        assertNotNull(budget.tryAcquire(600, 1000), "refunding the latest charge restores its pacing slot");
+    }
+
+    @Test
+    void lateRollbackCannotRefundAnotherTicketsAllowanceOrPacing() {
+        recordColdArrival(1000);
+        var first = budget.tryAcquire(400, 1000);
+        assertNotNull(first);
+        nowNanos.set(MILLISECONDS.toNanos(400));
+        var next = budget.tryAcquire(400, 1000);
+        assertNotNull(next);
+        next.commit();
+        first.close();
+        assertNull(budget.tryAcquire(100, 1000), "the later committed ticket still controls pacing");
+
+        nowNanos.set(MILLISECONDS.toNanos(800));
+        var abandoned = budget.tryAcquire(500, 1000);
+        assertNotNull(abandoned);
+        nowNanos.set(MILLISECONDS.toNanos(1800));
+        recordColdArrival(1000);
+        var current = budget.tryAcquire(1000, 1000);
+        assertNotNull(current);
+        abandoned.close();
+        assertNull(budget.tryAcquire(1, 1000), "closing an expired ticket must leave the new window intact");
     }
 
     @Test
@@ -107,7 +150,7 @@ class CostBasedPrefillHotspotReleaseTest {
         PrefillEndpoint leader = tokenEndpoint("leader");
         PrefillEndpoint other = tokenEndpoint("other");
         when(leader.observedRequestCount()).thenReturn(30L);
-        when(leader.tokenWorkloadScore()).thenReturn(800.0);
+        when(leader.tokenWorkloadSnapshot()).thenReturn(new PrefillTokenWorkload.Snapshot(800));
         CostBasedPrefillStrategy strategy = tokenStrategy(
                 config, List.of(
                         new EndpointRegistry.PrefillRoutingEntry("leader:8080", leader),
@@ -117,6 +160,7 @@ class CostBasedPrefillHotspotReleaseTest {
                 tokenContext(config), RoleType.PREFILL, "g").value()) {
             assertEquals("other", selected.serverStatus().getServerIp(),
                     "a released leader must lose to lower uncached work");
+            verify(other).tryPlanTokenWork(eq(0L), anyLong(), anyLong());
         }
 
         config.getRouter().getRoles().getPrefill().getHotspotRelease().setMaxExtraComputePermille(0);
@@ -132,7 +176,7 @@ class CostBasedPrefillHotspotReleaseTest {
         PrefillEndpoint leader = tokenEndpoint("leader");
         PrefillEndpoint other = tokenEndpoint("other");
         when(leader.observedRequestCount()).thenReturn(30L);
-        when(leader.tokenWorkloadScore()).thenReturn(800.0);
+        when(leader.tokenWorkloadSnapshot()).thenReturn(new PrefillTokenWorkload.Snapshot(800));
         var strategy = tokenStrategy(config, List.of(
                 new EndpointRegistry.PrefillRoutingEntry("leader:8080", leader),
                 new EndpointRegistry.PrefillRoutingEntry("other:8080", other)));
@@ -157,7 +201,7 @@ class CostBasedPrefillHotspotReleaseTest {
         FlexlbConfig config = configWithHotspotRelease();
         PrefillEndpoint leader = tokenEndpoint("leader");
         PrefillEndpoint other = tokenEndpoint("other");
-        when(leader.tokenWorkloadScore()).thenReturn(800.0);
+        when(leader.tokenWorkloadSnapshot()).thenReturn(new PrefillTokenWorkload.Snapshot(800));
         CostBasedPrefillStrategy strategy = tokenStrategy(
                 config, List.of(
                         new EndpointRegistry.PrefillRoutingEntry("leader:8080", leader),
@@ -167,6 +211,7 @@ class CostBasedPrefillHotspotReleaseTest {
                 tokenContext(config), RoleType.PREFILL, "g").value()) {
             assertEquals("leader", selected.serverStatus().getServerIp(),
                     "a non-hotspot leader keeps its cache affinity");
+            verify(leader).tryPlanTokenWork(eq(org.flexlb.balance.AdmissionVersion.ANY), anyLong(), anyLong());
         }
     }
 
@@ -174,7 +219,7 @@ class CostBasedPrefillHotspotReleaseTest {
     void disabledSwitchKeepsTokenBalancePinningUnchanged() {
         PrefillEndpoint leader = tokenEndpoint("leader");
         PrefillEndpoint other = tokenEndpoint("other");
-        when(leader.tokenWorkloadScore()).thenReturn(800.0);
+        when(leader.tokenWorkloadSnapshot()).thenReturn(new PrefillTokenWorkload.Snapshot(800));
         FlexlbConfig config = tokenBalanceConfig(false);
         CostBasedPrefillStrategy strategy = tokenStrategy(
                 config, List.of(
@@ -192,21 +237,17 @@ class CostBasedPrefillHotspotReleaseTest {
     void enabledSwitchReplacesTheAffinityTtftCap() {
         FlexlbConfig config = affinityConfig();
         EngineHealthReporter reporter = mock(EngineHealthReporter.class);
-        var ranking = new PrefillCandidateRanking(reporter, budget);
+        var ranking = new PrefillCandidateRanking(reporter);
         var request = tokenContext(config);
 
         config.getRouter().getRoles().getPrefill().getHotspotRelease().setEnabled(false);
         assertEquals(0, ranking.select(
-                candidates(100L, 1000L, 500L, 600L), RoleType.PREFILL, null, request),
+                candidates(100L, 1000L, 500L, 600L), RoleType.PREFILL, null, request).index(),
                 "gate off: the TTFT cap must keep rejecting the leader");
-        assertFalse(budget.tryAcquire(1, 1000), "disabled placements must not fund redirects");
         config.getRouter().getRoles().getPrefill().getHotspotRelease().setEnabled(true);
-        assertEquals(1, ranking.select(
-                candidates(100L, 1000L, 500L, 600L), RoleType.PREFILL, null, request),
-                "gate on: the healthy leader retains affinity");
-        assertTrue(budget.tryAcquire(1, 1000), "the same request can contribute once enabled");
-        verify(reporter).reportCacheAffinityDecision(
-                RoleType.PREFILL, "10.1.0.2", "CACHE_LEADER");
+        var enabled = ranking.select(candidates(100L, 1000L, 500L, 600L), RoleType.PREFILL, null, request);
+        assertEquals(1, enabled.index(), "gate on: the healthy leader retains affinity");
+        assertEquals("CACHE_LEADER", enabled.reason());
     }
 
     @Test
@@ -215,20 +256,16 @@ class CostBasedPrefillHotspotReleaseTest {
         config.getRouter().getRoles().getPrefill().getHotspotRelease().setMaxExtraComputePermille(1000);
         recordColdArrival(1000);
         EngineHealthReporter reporter = mock(EngineHealthReporter.class);
-        var ranking = new PrefillCandidateRanking(reporter, budget);
+        var ranking = new PrefillCandidateRanking(reporter);
         var request = tokenContext(config);
         PrefillCandidateSet survivors = candidates(100L, 1000L, 500L, 600L);
         sampleRequestLoads(survivors, 4, 30);
 
-        assertEquals(0, ranking.select(
-                survivors, RoleType.PREFILL, null, request),
-                "a released leader must lose to the minimum-TTFT baseline");
-        verify(reporter).reportCacheAffinityDecision(
-                RoleType.PREFILL, "10.1.0.1", "HOTSPOT_RELEASE");
-        config.getRouter().getRoles().getPrefill().getHotspotRelease().setMaxExtraComputePermille(0);
-        assertEquals(1, ranking.select(
-                survivors, RoleType.PREFILL, null, request));
-        verify(reporter).reportCacheAffinityDecision(RoleType.PREFILL, "10.1.0.2", "HOTSPOT_RATE_LIMIT");
+        var choice = ranking.select(survivors, RoleType.PREFILL, null, request);
+        assertEquals(0, choice.index());
+        assertEquals("HOTSPOT_RELEASE", choice.reason());
+        assertEquals(1, choice.rateLimited().index());
+        assertEquals("HOTSPOT_RATE_LIMIT", choice.rateLimited().reason());
     }
 
     @Test
@@ -236,59 +273,60 @@ class CostBasedPrefillHotspotReleaseTest {
         FlexlbConfig config = affinityConfig();
         config.getRouter().getRoles().getPrefill().getHotspotRelease().setMaxExtraComputePermille(0);
         var reporter = mock(EngineHealthReporter.class);
-        var ranking = new PrefillCandidateRanking(reporter, budget);
+        var ranking = new PrefillCandidateRanking(reporter);
         var survivors = candidates(100, 200, 500, 500);
         sampleRequestLoads(survivors, 30, 4);
 
-        assertEquals(1, ranking.select(survivors, RoleType.PREFILL, "g", tokenContext(config)));
-        verify(reporter).reportCacheAffinityDecision(RoleType.PREFILL, "10.1.0.2", "HOTSPOT_RELEASE");
+        var redirect = ranking.select(survivors, RoleType.PREFILL, "g", tokenContext(config));
+        assertEquals(1, redirect.index());
     }
 
     @Test
-    void redirectFromFastestBestHitBaselineRequiresEnoughExtraCompute() {
+    void rankingProposesTargetAndPreservesFastestFallbackWithoutSpendingBudget() {
         FlexlbConfig config = affinityConfig();
         config.getRouter().getRoles().getPrefill().getHotspotRelease().setMaxExtraComputePermille(10);
         var reporter = mock(EngineHealthReporter.class);
-        var ranking = new PrefillCandidateRanking(reporter, budget);
+        var ranking = new PrefillCandidateRanking(reporter);
         var survivors = candidates(100, 200, 900, 500);
         sampleRequestLoads(survivors, 30, 4);
         var request = tokenContext(config);
 
-        assertEquals(0, ranking.select(survivors, RoleType.PREFILL, "g", request));
-        verify(reporter).reportCacheAffinityDecision(RoleType.PREFILL, "10.1.0.1", "HOTSPOT_RATE_LIMIT");
+        var proposed = ranking.select(survivors, RoleType.PREFILL, "g", request);
+        assertEquals(1, proposed.index());
+        assertEquals(0, proposed.fallback());
+        assertNull(budget.tryAcquire(400, 10));
 
         recordColdArrival(40_000);
-        assertEquals(1, ranking.select(survivors, RoleType.PREFILL, "g", request));
-        verify(reporter).reportCacheAffinityDecision(RoleType.PREFILL, "10.1.0.2", "HOTSPOT_RELEASE");
+        assertEquals(proposed, ranking.select(survivors, RoleType.PREFILL, "g", request));
+        assertNotNull(budget.tryAcquire(400, 10), "ranking must leave budget available for registration");
     }
 
     @Test
     void retainsBaselineWithoutAHealthyAlternativeOrWhenReleaseIsDisabled() {
         FlexlbConfig config = affinityConfig();
         var reporter = mock(EngineHealthReporter.class);
-        var ranking = new PrefillCandidateRanking(reporter, budget);
+        var ranking = new PrefillCandidateRanking(reporter);
         var request = tokenContext(config);
         var survivors = candidates(100, 200, 500, 500);
 
-        assertEquals(0, ranking.select(survivors, RoleType.PREFILL, "g", request), "healthy baseline");
+        assertEquals(0, ranking.select(survivors, RoleType.PREFILL, "g", request).index(), "healthy baseline");
         sampleRequestLoads(survivors, 30, 30, 4, 4, 4);
-        assertEquals(0, ranking.select(survivors, RoleType.PREFILL, "g", request), "all candidates hot");
+        assertEquals(0, ranking.select(survivors, RoleType.PREFILL, "g", request).index(), "all candidates hot");
 
         var single = new PrefillCandidateSet();
         single.reset(1);
         addCandidate(single, 1, "10.1.0.1", 100, 100, 500);
         sampleRequestLoads(single, 30, 4);
-        assertEquals(0, ranking.select(single, RoleType.PREFILL, "g", request), "one candidate");
+        assertEquals(0, ranking.select(single, RoleType.PREFILL, "g", request).index(), "one candidate");
 
         sampleRequestLoads(survivors, 30, 4);
         when(survivors.endpoint(1).engineQueueAdmissionBlocked()).thenReturn(true);
-        assertEquals(0, ranking.select(survivors, RoleType.PREFILL, "g", request), "peer cannot admit");
+        assertEquals(0, ranking.select(survivors, RoleType.PREFILL, "g", request).index(), "peer cannot admit");
         when(survivors.endpoint(1).engineQueueAdmissionBlocked()).thenReturn(false);
 
         config.getRouter().getRoles().getPrefill().getHotspotRelease().setEnabled(false);
-        assertEquals(0, ranking.select(survivors, RoleType.PREFILL, "g", request), "release disabled");
-        verify(reporter, times(5))
-                .reportCacheAffinityDecision(RoleType.PREFILL, "10.1.0.1", "NO_CACHE_LEAD");
+        assertEquals(0, ranking.select(survivors, RoleType.PREFILL, "g", request).index(), "release disabled");
+
     }
 
     @Test
@@ -303,14 +341,12 @@ class CostBasedPrefillHotspotReleaseTest {
         for (int i = 0; i < survivors.size(); i++) {
             when(survivors.endpoint(i).canAcceptRequest()).thenReturn(true);
         }
-        when(survivors.endpoint(1).tokenWorkloadScore()).thenReturn(1.0);
-        when(survivors.endpoint(2).tokenWorkloadScore()).thenReturn(50.0);
+        when(survivors.workload(1).score()).thenReturn(1.0);
+        when(survivors.workload(2).score()).thenReturn(50.0);
         for (FlexlbConfig config : List.of(affinityConfig(), tokenBalanceConfig(true))) {
             config.getRouter().getRoles().getPrefill().getHotspotRelease().setMaxExtraComputePermille(1000);
-            var limiter = new HotspotRedirectLimiter(() -> 0L);
-            limiter.recordPlacement(tokenContext(config), 0);
-            var ranking = new PrefillCandidateRanking(mock(EngineHealthReporter.class), limiter);
-            assertEquals(2, ranking.select(survivors, RoleType.PREFILL, "g", tokenContext(config)));
+            var ranking = new PrefillCandidateRanking(mock(EngineHealthReporter.class));
+            assertEquals(2, ranking.select(survivors, RoleType.PREFILL, "g", tokenContext(config)).index());
         }
     }
 
@@ -318,7 +354,7 @@ class CostBasedPrefillHotspotReleaseTest {
     void twoHotGroupsCompeteForOnePacedStreamOfRedirects() {
         var config = affinityConfig();
         config.getRouter().getRoles().getPrefill().getHotspotRelease().setMaxExtraComputePermille(10);
-        var ranking = new PrefillCandidateRanking(mock(EngineHealthReporter.class), budget);
+        var ranking = new PrefillCandidateRanking(mock(EngineHealthReporter.class));
         var request = tokenContext(config);
         request.getRequest().setSeqLen(2000L);
         var a = candidates(100, 1000, 0, 1000);
@@ -330,8 +366,10 @@ class CostBasedPrefillHotspotReleaseTest {
             nowNanos.set(MILLISECONDS.toNanos(ms));
             long grants = java.util.stream.IntStream.range(0, 32).parallel().filter(i -> {
                 boolean first = i % 2 == 0;
-                return ranking.select(first ? a : b, RoleType.PREFILL,
-                        first ? "a" : "b", request) == 0;
+                var candidates = first ? a : b;
+                var choice = ranking.select(candidates, RoleType.PREFILL, first ? "a" : "b", request);
+                long extraTokens = candidates.maximumCacheHit - candidates.cacheHit(choice.index());
+                return choice.redirect() && budget.tryAcquire(extraTokens, 10) != null;
             }).count();
             assertEquals(ms % 200 == 0 ? 1 : 0, grants, "redirects at " + ms + "ms");
         }
@@ -343,6 +381,9 @@ class CostBasedPrefillHotspotReleaseTest {
         for (int i = 0; i < loads.length; i++) {
             var endpoint = i < survivors.size() ? survivors.endpoint(i) : mock(PrefillEndpoint.class);
             when(endpoint.observedRequestCount()).thenReturn(loads[i]);
+            if (i < survivors.size()) {
+                when(survivors.workload(i).observedRequests()).thenReturn(loads[i]);
+            }
             pool.add(new EndpointRegistry.PrefillRoutingEntry("peer-" + i, endpoint));
         }
         survivors.setHotspots(new PrefillHotspots(() -> 0L).sample(
@@ -418,7 +459,8 @@ class CostBasedPrefillHotspotReleaseTest {
                         mock(RequestRegistry.class), mock(DeliveryMetrics.class))
                         .projectionPolicy());
         when(endpoint.engineQueueAdmissionBlocked()).thenReturn(false);
-        when(endpoint.planTokenWork(anyLong()))
+        when(endpoint.tokenWorkloadSnapshot()).thenReturn(new PrefillTokenWorkload.Snapshot(0));
+        when(endpoint.tryPlanTokenWork(anyLong(), anyLong(), anyLong()))
                 .thenReturn(mock(PrefillTokenWorkload.Reservation.class));
         return endpoint;
     }
@@ -447,6 +489,7 @@ class CostBasedPrefillHotspotReleaseTest {
             long ttftMs, long executionMs, long hitTokens) {
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
         when(endpoint.getIp()).thenReturn(ip);
+        when(endpoint.tokenWorkloadSnapshot()).thenReturn(mock(PrefillTokenWorkload.Snapshot.class));
         candidates.addCandidate(
                 ip + ":8080",
                 endpoint,

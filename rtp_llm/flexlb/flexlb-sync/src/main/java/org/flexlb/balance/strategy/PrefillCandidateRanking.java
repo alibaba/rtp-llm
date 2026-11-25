@@ -1,5 +1,6 @@
 package org.flexlb.balance.strategy;
 
+import org.flexlb.balance.AdmissionVersion;
 import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.route.RoleType;
@@ -9,38 +10,49 @@ import org.flexlb.util.Logger;
 import java.util.BitSet;
 import java.util.function.IntPredicate;
 
-/** Rank one projection snapshot. Both policies spend from the same Master-wide redirect budget. */
+import static com.google.common.math.LongMath.saturatedAdd;
+
+/** Ranks Prefill workers and proposes a redirect for validation when the target is reserved. */
 final class PrefillCandidateRanking {
     private final EngineHealthReporter reporter;
-    private final HotspotRedirectLimiter redirectLimiter;
     private final EndpointRoundRobin tieRotation = new EndpointRoundRobin();
     private final EndpointRoundRobin redirectRotation = new EndpointRoundRobin();
 
-    PrefillCandidateRanking(EngineHealthReporter reporter, HotspotRedirectLimiter redirectLimiter) {
+    PrefillCandidateRanking(EngineHealthReporter reporter) {
         this.reporter = reporter;
-        this.redirectLimiter = redirectLimiter;
     }
 
-    int select(PrefillCandidateSet candidates, RoleType role, String group, BalanceContext request) {
+    record Choice(int index, int fallback, boolean cacheFirst, String reason) {
+        static Choice ordinary(int index, boolean cacheFirst, String reason) {
+            return new Choice(index, index, cacheFirst, reason);
+        }
+
+        Choice redirectTo(int target) {
+            return new Choice(target, index, cacheFirst, "HOTSPOT_RELEASE");
+        }
+
+        Choice rateLimited() {
+            return ordinary(fallback, cacheFirst, "HOTSPOT_RATE_LIMIT");
+        }
+
+        boolean redirect() { return index != fallback; }
+
+        long expectedVersion(PrefillCandidateSet candidates) {
+            return cacheFirst && !redirect() ? AdmissionVersion.ANY : candidates.workload(index).admissionVersion();
+        }
+    }
+
+    Choice select(PrefillCandidateSet candidates, RoleType role, String group, BalanceContext request) {
         if (candidates.size() == 0) {
-            return -1;
+            return Choice.ordinary(-1, false, null);
         }
         var prefill = request.getConfig().getRouter().getRoles().getPrefill();
         long inputTokens = request.getRequest().getSeqLen();
         var release = prefill.getHotspotRelease();
-        if (release.isEnabled()) {
-            redirectLimiter.recordPlacement(request, candidates.maximumCacheHit);
-        }
         boolean direct = request.getConfig().isDirect();
         return prefill.getTokenBalance() == null
                 ? selectByTtft(candidates, role, group, inputTokens, prefill.getCacheAffinity(), release, direct)
                 : selectTokenBalancedCandidate(candidates, role, group, inputTokens, prefill.getTokenBalance(), release, direct);
-    }
-
-    private boolean permitsRedirect(PrefillCandidateSet candidates, int alternate,
-                                    RoutingConfig.HotspotReleaseConfig release) {
-        return redirectLimiter.tryAcquire(
-                candidates.maximumCacheHit - candidates.cacheHit(alternate), release.getMaxExtraComputePermille());
     }
 
     private static BitSet redirectTargets(PrefillCandidateSet candidates, int source, boolean direct) {
@@ -56,15 +68,16 @@ final class PrefillCandidateRanking {
     }
 
     /** Cache leaders pin hot requests unless a detected hotspot can redirect under the shared limit. */
-    private int selectTokenBalancedCandidate(PrefillCandidateSet survivors,
+    private Choice selectTokenBalancedCandidate(PrefillCandidateSet survivors,
             RoleType roleType, String group, long seqLen,
             RoutingConfig.TokenBalanceConfig tokenBalance, RoutingConfig.HotspotReleaseConfig release, boolean direct) {
         boolean hotspotRelease = release.isEnabled();
         boolean cacheFirst = PrefillTokenBalance.cacheFirst(
                 survivors.maximumCacheHit, seqLen, tokenBalance.getMinPrefixHitPercent());
         if (!cacheFirst) {
-            return selectByTokenWork(survivors, roleType, group, seqLen, hotspotRelease,
+            int target = selectByTokenWork(survivors, roleType, group, seqLen, hotspotRelease,
                     i -> !survivors.endpoint(i).engineQueueAdmissionBlocked(), tieRotation);
+            return Choice.ordinary(target, false, null);
         }
 
         BitSet leaders = new BitSet();
@@ -77,7 +90,7 @@ final class PrefillCandidateRanking {
         // Keep the original affinity choice as the fallback when the shared quota is exhausted.
         int source = selectTokenLeader(survivors, openLeaders.isEmpty() ? leaders : openLeaders,
                 roleType, group, tieRotation);
-        int fallback = openLeaders.get(source) ? source : -1;
+        Choice fallback = Choice.ordinary(openLeaders.get(source) ? source : -1, true, null);
         if (!hotspotRelease || !survivors.isHotspot(source)) { return fallback; }
 
         BitSet targets = redirectTargets(survivors, source, direct);
@@ -87,7 +100,7 @@ final class PrefillCandidateRanking {
         int selected = leaders.isEmpty()
                 ? selectByTokenWork(survivors, roleType, group, seqLen, true, targets::get, redirectRotation)
                 : selectTokenLeader(survivors, leaders, roleType, group, redirectRotation);
-        return selected >= 0 && permitsRedirect(survivors, selected, release) ? selected : fallback;
+        return selected >= 0 ? fallback.redirectTo(selected) : fallback;
     }
 
     private static int selectTokenLeader(PrefillCandidateSet survivors, BitSet leaders, RoleType role,
@@ -112,7 +125,7 @@ final class PrefillCandidateRanking {
                 continue;
             }
             long tokens = accountForHits ? Math.max(0L, seqLen - survivors.cacheHit(i)) : seqLen;
-            scores[i] = survivors.endpoint(i).tokenWorkloadScore() + tokens;
+            scores[i] = survivors.workload(i).score() + tokens;
             minimum = Math.min(minimum, scores[i]);
         }
         if (!Double.isFinite(minimum)) { return -1; }
@@ -123,7 +136,7 @@ final class PrefillCandidateRanking {
     private record TtftChoice(int index, String reason) { }
 
     /** Apply the ordinary ranking first, then release its winner if that endpoint is hot. */
-    private int selectByTtft(PrefillCandidateSet survivors, RoleType role, String group, long seqLen,
+    private Choice selectByTtft(PrefillCandidateSet survivors, RoleType role, String group, long seqLen,
                              RoutingConfig.CacheAffinityConfig affinity, RoutingConfig.HotspotReleaseConfig release,
                              boolean direct) {
         BitSet eligible = new BitSet(survivors.size());
@@ -131,20 +144,19 @@ final class PrefillCandidateRanking {
         TtftChoice choice = rankByTtft(survivors, eligible, role, group, seqLen, affinity,
                 release.isEnabled(), tieRotation);
         int selected = choice.index();
-        String reason = choice.reason();
+        Choice ordinary = Choice.ordinary(selected, "CACHE_LEADER".equals(choice.reason()), choice.reason());
         if (release.isEnabled() && survivors.isHotspot(selected)) {
             BitSet targets = redirectTargets(survivors, selected, direct);
             if (!targets.isEmpty()) {
                 int alternate = rankByTtft(survivors, targets, role, group, seqLen, affinity,
                         true, redirectRotation).index();
-                if (permitsRedirect(survivors, alternate, release)) {
-                    selected = alternate;
-                    reason = "HOTSPOT_RELEASE";
-                } else {
-                    reason = "HOTSPOT_RATE_LIMIT";
-                }
+                return ordinary.redirectTo(alternate);
             }
         }
+        return ordinary;
+    }
+
+    void report(PrefillCandidateSet survivors, RoleType role, String group, int selected, String reason) {
         if (reason != null) {
             reporter.reportCacheAffinityDecision(role, survivors.endpoint(selected).getIp(), reason);
             if (Logger.isDebugEnabled()) {
@@ -154,7 +166,6 @@ final class PrefillCandidateRanking {
                         survivors.projectedTtftMs(selected), survivors.cacheHit(selected), reason);
             }
         }
-        return selected;
     }
 
     private static TtftChoice rankByTtft(PrefillCandidateSet survivors, BitSet eligible, RoleType role, String group,
@@ -171,7 +182,7 @@ final class PrefillCandidateRanking {
         String reason = null;
         if (affinity != null) {
             BitSet preferred = new BitSet(survivors.size());
-            long cutoff = saturatingAdd(survivors.projectedTtftMs(baseline), Math.max(0L, affinity.getMaxExtraTtftMs()));
+            long cutoff = saturatedAdd(survivors.projectedTtftMs(baseline), Math.max(0L, affinity.getMaxExtraTtftMs()));
             double minimumHitRate = normalizedHitRate(affinity.getMinPrefixHitPercent());
             boolean strongerCache = false;
             boolean minimumHitRateMet = false;
@@ -200,11 +211,32 @@ final class PrefillCandidateRanking {
             }
         }
         int reference = baseline;
+        IntPredicate tied = i -> eligible.get(i) && survivors.projectedTtftMs(i) == survivors.projectedTtftMs(reference)
+                && (affinity == null || survivors.compareCacheMatch(i, reference) == 0);
+        int lightest = reference;
+        boolean zeroDuration = survivors.prefillMs(reference) == 0;
+        for (int i = eligible.nextSetBit(0); zeroDuration && i >= 0; i = eligible.nextSetBit(i + 1)) {
+            if (!tied.test(i)) { continue; }
+            if (survivors.prefillMs(i) != 0) {
+                zeroDuration = false;
+            } else if (compareOutstandingWork(survivors.workload(i), survivors.workload(lightest)) < 0) {
+                lightest = i;
+            }
+        }
+        // Sub-millisecond formulas can yield the same zero service estimate for a whole fleet.
+        // Resolve these cost ties with already placed work, then rotate among exact equals.
+        var preferredWork = zeroDuration ? survivors.workload(lightest) : null;
         int selected = rotation.next(role, group, survivors.size(),
-                i -> eligible.get(i) && survivors.projectedTtftMs(i) == survivors.projectedTtftMs(reference)
-                        && (affinity == null || survivors.compareCacheMatch(i, reference) == 0),
+                i -> tied.test(i) && (preferredWork == null || compareOutstandingWork(survivors.workload(i), preferredWork) == 0),
                 survivors::endpointAddress);
         return new TtftChoice(selected, reason);
+    }
+
+    private static int compareOutstandingWork(PrefillTokenWorkload.Snapshot left, PrefillTokenWorkload.Snapshot right) {
+        int tokens = Long.compare(saturatedAdd(left.pendingTokens(), left.plannedTokens()),
+                saturatedAdd(right.pendingTokens(), right.plannedTokens()));
+        return tokens != 0 ? tokens : Long.compare(saturatedAdd(left.observedRequests(), left.plannedRequests()),
+                saturatedAdd(right.observedRequests(), right.plannedRequests()));
     }
 
     private static double normalizedHitRate(double configuredRate) {
@@ -241,15 +273,4 @@ final class PrefillCandidateRanking {
                         && survivors.projectedTtftMs(i) == survivors.projectedTtftMs(leader),
                 survivors::endpointAddress);
     }
-
-    private static long saturatingAdd(long left, long right) {
-        if (right > 0L && left > Long.MAX_VALUE - right) {
-            return Long.MAX_VALUE;
-        }
-        if (right < 0L && left < Long.MIN_VALUE - right) {
-            return Long.MIN_VALUE;
-        }
-        return left + right;
-    }
-
 }

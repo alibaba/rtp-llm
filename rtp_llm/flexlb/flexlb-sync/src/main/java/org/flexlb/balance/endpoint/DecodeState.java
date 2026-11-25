@@ -1,5 +1,6 @@
 package org.flexlb.balance.endpoint;
 
+import org.flexlb.balance.AdmissionVersion;
 import org.flexlb.balance.endpoint.DecodeEndpoint.AdmissionCapacity;
 import org.flexlb.balance.endpoint.DecodeEndpoint.CapacityRelease;
 import org.flexlb.balance.endpoint.DecodeEndpoint.CapacityUsage;
@@ -109,8 +110,8 @@ final class DecodeState {
      */
     private final ReentrantLock admissionLock = new ReentrantLock();
 
-    /** Monotonic diagnostic generation for the layered admission projection. */
-    private final AtomicLong admissionVersion = new AtomicLong();
+    /** Optimistic registration version for the layered admission projection. */
+    private final AdmissionVersion admissionVersion = new AdmissionVersion();
 
     /**
      * Generation-local, non-authoritative cache for bulk routing traversal.
@@ -126,9 +127,10 @@ final class DecodeState {
     // Reservation: acquire and release exact ownership.
 
     ReservationHandle reserve(long requestId, long hardKv, long expectedKv, int priority,
-                              boolean queued, AdmissionCapacity capacity) {
+                              boolean queued, AdmissionCapacity capacity, long expectedVersion) {
         admissionLock.lock();
         try {
+            if (!admissionVersion.accepts(expectedVersion)) { return null; }
             if (!requestIdAvailableForReservationLocked(requestId)) { return null; }
             if (capacity != null && queuedPlacementIsFullLocked(hardKv, expectedKv, capacity)) { return null; }
             ReservationHandle reservation = reserveLocked(requestId, hardKv, expectedKv, priority);
@@ -162,7 +164,7 @@ final class DecodeState {
         reservedRequestCount.incrementAndGet();
         inflightKvReservedTotal.addAndGet(kvTokens);
         inflightExpectedKvReservedTotal.addAndGet(expectedKvTokens);
-        admissionVersion.incrementAndGet();
+        admissionVersion.advance();
         return handle;
     }
 
@@ -287,7 +289,7 @@ final class DecodeState {
         if (reason == ReleaseReason.COUNTERPART_FINISHED && !decodeRequests.containsKey(requestId)) {
             rememberSettledLocked(requestId, System.currentTimeMillis());
         }
-        admissionVersion.incrementAndGet();
+        admissionVersion.advance();
         return true;
     }
 
@@ -306,7 +308,7 @@ final class DecodeState {
         if (hasExactIncomingAttemptLocked(reservation)) { return ReservationReleaseResult.CONFLICT; }
         if (!exact || !current.ownsRequest()) { return ReservationReleaseResult.STALE; }
         if (settleAuthoritativeTerminalLocked(reservation, true, System.currentTimeMillis())) {
-            admissionVersion.incrementAndGet();
+            admissionVersion.advance();
         }
         return ReservationReleaseResult.RELEASED;
     }
@@ -366,7 +368,7 @@ final class DecodeState {
         // Use a history-only entry, so no old exact token remains live.
         decodeRequests.remove(requestId, state);
         rememberSettledLocked(requestId, System.currentTimeMillis());
-        admissionVersion.incrementAndGet();
+        admissionVersion.advance();
         return true;
     }
 
@@ -514,7 +516,7 @@ final class DecodeState {
             // Re-queueing begins a new dispatch round. Invalidate any
             // pre-delivery lease before publishing that transition.
             removeEngineDispatchPermitLocked(requestId);
-            admissionVersion.incrementAndGet();
+            admissionVersion.advance();
         } finally {
             admissionLock.unlock();
         }
@@ -547,10 +549,10 @@ final class DecodeState {
 
     /** Create the first local owner and charge its dispatch permit under the same capacity check. */
     DispatchLease reserveForDispatch(long requestId, long hardKv, long expectedKv, int priority,
-                                     AdmissionCapacity capacity) {
+                                     AdmissionCapacity capacity, long expectedVersion) {
         admissionLock.lock();
         try {
-            if (!requestIdAvailableForReservationLocked(requestId)
+            if (!admissionVersion.accepts(expectedVersion) || !requestIdAvailableForReservationLocked(requestId)
                     || queuedPlacementIsFullLocked(hardKv, expectedKv, capacity)) {
                 return null;
             }
@@ -609,7 +611,7 @@ final class DecodeState {
                 reservation.kvTokens());
         engineDispatchPermitExpectedKvReservedTotal.addAndGet(
                 reservation.expectedKvTokens());
-        admissionVersion.incrementAndGet();
+        admissionVersion.advance();
         return permit;
     }
 
@@ -626,7 +628,7 @@ final class DecodeState {
                 return new DispatchResult(EngineDispatchPermitTransferStatus.OWNERSHIP_LOST, false);
             }
             removeEngineDispatchPermitLocked(permit.requestId);
-            admissionVersion.incrementAndGet();
+            admissionVersion.advance();
             return new DispatchResult(EngineDispatchPermitTransferStatus.TRANSFERRED, true);
         } finally {
             admissionLock.unlock();
@@ -654,7 +656,7 @@ final class DecodeState {
                     || !permit.reservation.queued()
                     || permit.reservation.preemptionClaim != null) {
                 removeEngineDispatchPermitLocked(permit.requestId);
-                admissionVersion.incrementAndGet();
+                admissionVersion.advance();
                 transferStatus = EngineDispatchPermitTransferStatus.OWNERSHIP_LOST;
             } else {
                 removeEngineDispatchPermitLocked(permit.requestId);
@@ -662,7 +664,7 @@ final class DecodeState {
                 // same lock. Transfer only changes ownership; it never re-reads the cap.
                 removeQueuedPhaseLocked(permit.requestId, permit.reservation);
                 permit.reservation.engineLifecycleOwned = true;
-                admissionVersion.incrementAndGet();
+                admissionVersion.advance();
                 transferStatus = EngineDispatchPermitTransferStatus.TRANSFERRED;
             }
             capacityIncreased = engineDispatchHardGateUsageLocked() < usageBefore;
@@ -997,7 +999,7 @@ final class DecodeState {
                 }
                 throw installationFailure;
             }
-            admissionVersion.incrementAndGet();
+            admissionVersion.advance();
             return PreemptionBeginResult.SUCCESS;
         } finally {
             admissionLock.unlock();
@@ -1016,7 +1018,7 @@ final class DecodeState {
                 if (claim == null || claim.attemptToken != attemptToken
                         || !claim.phase.canTransitionTo(update.phase())) { return false; }
                 claim.phase = update.phase();
-                admissionVersion.incrementAndGet();
+                admissionVersion.advance();
                 return true;
             }
             ReservationHandle victim = update.reservation();
@@ -1057,7 +1059,7 @@ final class DecodeState {
             preemptionClaim(victim.requestId()).phase =
                     PreemptionCancelPhase.CANCEL_IN_FLIGHT;
         }
-        admissionVersion.incrementAndGet();
+        admissionVersion.advance();
         return true;
     }
 
@@ -1071,7 +1073,7 @@ final class DecodeState {
         if (finished) {
             settleAuthoritativeTerminalLocked(victim, false, System.currentTimeMillis());
         }
-        admissionVersion.incrementAndGet();
+        admissionVersion.advance();
         return true;
     }
 
@@ -1121,7 +1123,7 @@ final class DecodeState {
             attempt.remainingVictims.remove(requestId, reservation);
         }
         rememberSettledLocked(requestId, System.currentTimeMillis());
-        admissionVersion.incrementAndGet();
+        admissionVersion.advance();
         return true;
     }
 
@@ -1149,7 +1151,7 @@ final class DecodeState {
                 }
             }
             preemptionAttempts.remove(attemptToken);
-            admissionVersion.incrementAndGet();
+            admissionVersion.advance();
             return true;
         } finally {
             admissionLock.unlock();
@@ -1160,7 +1162,7 @@ final class DecodeState {
         DecodeRequestState removed = shadowReservation(requestId);
         boolean changed = removeShadowExactLocked(requestId, removed);
         if (changed) {
-            admissionVersion.incrementAndGet();
+            admissionVersion.advance();
         }
         return changed;
     }
@@ -1366,7 +1368,7 @@ final class DecodeState {
     private List<WorkerStatusFact> doCalibrate(
             WorkerStatus.EngineObservation engine,
             Map<String, WorkerStatus.TaskObservation> finishedTasks) {
-        admissionVersion.incrementAndGet();
+        admissionVersion.advance();
         List<WorkerStatusFact> facts = new ArrayList<>();
 
         // Build one authoritative Decode view. Claimed victims that merely
@@ -1571,7 +1573,7 @@ final class DecodeState {
                 if (permit != null) { permit.retiredByEndpoint = true; }
             }
             List<ReservationHandle> retired = retireGenerationOwnershipLocked();
-            admissionVersion.incrementAndGet();
+            admissionVersion.advance();
             return retired;
         } finally {
             admissionLock.unlock();
@@ -1678,7 +1680,7 @@ final class DecodeState {
                             && entry.getValue().settledAtMs != 0L
                             && entry.getValue().settledAtMs < cutoff);
             if (evicted > 0 || trackedPurged > 0 || settledTerminalRecordsPurged) {
-                admissionVersion.incrementAndGet();
+                admissionVersion.advance();
             }
             capacityChanged = evicted > 0 || trackedPurged > 0
                     || settledTerminalRecordsPurged;
@@ -1779,7 +1781,7 @@ final class DecodeState {
 
     private boolean isCurrentAdmissionSummary(DecodeEndpoint.AdmissionSummary summary) {
         return summary != null
-                && summary.routing().admissionVersion() == admissionVersion.get()
+                && summary.routing().admissionVersion() == admissionVersion.current()
                 && summary.routing().workerStatus() == status.committedWorkerStatus()
                 && summary.routing().topology() == status.topologySnapshot();
     }
@@ -1838,7 +1840,7 @@ final class DecodeState {
                 status.getIpPort(),
                 status.topologySnapshot(),
                 status.committedWorkerStatus(),
-                admissionVersion.get());
+                admissionVersion.current());
     }
 
     private DecodeRoutingView routingViewLocked(
@@ -1881,7 +1883,7 @@ final class DecodeState {
     }
 
     DecodeRoutingView routingViewSnapshot(String address) {
-        long version = admissionVersion.get();
+        long version = admissionVersion.current();
         WorkerStatus status = this.status;
         WorkerStatus.TopologySnapshot topology = status.topologySnapshot();
         DecodeRoutingView cached = routingViewCache;
@@ -1893,7 +1895,7 @@ final class DecodeState {
             WorkerStatus.CommittedWorkerStatus committed =
                     status.committedWorkerStatus();
             topology = status.topologySnapshot();
-            version = admissionVersion.get();
+            version = admissionVersion.current();
             cached = routingViewCache;
             if (routingViewMatches(cached, address, version, topology)) {
                 return cached;
@@ -1919,7 +1921,7 @@ final class DecodeState {
     }
 
     long placementVersion() {
-        return admissionVersion.get();
+        return admissionVersion.current();
     }
 
     long realKvAvailable() {

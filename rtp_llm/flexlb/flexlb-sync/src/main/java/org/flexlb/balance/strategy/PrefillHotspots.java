@@ -16,6 +16,8 @@ import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.function.LongSupplier;
 
+import static com.google.common.math.LongMath.saturatedAdd;
+
 /** Samples outstanding load within the exact role and group used by a placement. */
 final class PrefillHotspots {
     private static final long SAMPLE_NANOS = TimeUnit.MILLISECONDS.toNanos(100);
@@ -90,14 +92,17 @@ final class PrefillHotspots {
             return hotspots.contains(endpoint);
         }
 
-        boolean mayRedirect(PrefillEndpoint source, PrefillEndpoint target) {
+        boolean mayRedirect(PrefillEndpoint source, PrefillEndpoint target, PrefillTokenWorkload.Snapshot current) {
             if (!isHot(source) || isHot(target)) {
                 return false;
             }
             Load from = loads.get(source);
-            Load to = loads.get(target);
-            return to != null && (requests.allows(from.requests(), to.requests())
-                    || compute.allows(from.compute(), to.compute()));
+            if (!loads.containsKey(target)) { return false; }
+            long targetRequests = saturatedAdd(
+                    current.observedRequests(), current.plannedRequests());
+            long targetCompute = saturatedAdd(
+                    current.pendingTokens(), current.plannedTokens());
+            return requests.allows(from.requests(), targetRequests) || compute.allows(from.compute(), targetCompute);
         }
     }
 

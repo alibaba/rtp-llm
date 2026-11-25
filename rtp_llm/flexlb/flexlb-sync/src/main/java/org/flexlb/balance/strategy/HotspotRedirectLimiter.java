@@ -3,17 +3,17 @@ package org.flexlb.balance.strategy;
 import it.unimi.dsi.fastutil.longs.LongArrayFIFOQueue;
 import org.flexlb.dao.BalanceContext;
 
+import java.util.LinkedHashSet;
 import java.util.function.LongSupplier;
 
 /** The trailing second of baseline and additional Prefill compute on this Master. */
-final class HotspotRedirectLimiter {
+public final class HotspotRedirectLimiter {
     private static final long WINDOW_NANOS = 1_000_000_000L;
 
     private final LongSupplier nanoTime;
     private final TokenWindow baseline = new TokenWindow();
-    private final TokenWindow extra = new TokenWindow();
-    private long lastPaidRedirect;
-    private long paidRedirectGap;
+    private final LinkedHashSet<Ticket> charges = new LinkedHashSet<>();
+    private long chargedTokens;
 
     HotspotRedirectLimiter() {
         this(System::nanoTime);
@@ -33,25 +33,63 @@ final class HotspotRedirectLimiter {
         baseline.add(now, Math.max(0L, request.getRequest().getSeqLen() - bestHitTokens));
     }
 
-    synchronized boolean tryAcquire(long extraTokens, int permille) {
+    synchronized Ticket tryAcquire(long extraTokens, int permille) {
         if (extraTokens == 0) {
-            return true;
+            return Ticket.FREE;
         }
         long now = nanoTime.getAsLong();
         baseline.expire(now);
-        extra.expire(now);
+        while (!charges.isEmpty() && now - charges.getFirst().at >= WINDOW_NANOS) {
+            chargedTokens -= charges.removeFirst().tokens;
+        }
         // Divide before multiplying to preserve the exact floor even at large token totals.
         long quota = baseline.total / 1000 * permille + baseline.total % 1000 * permille / 1000;
-        if (extraTokens > quota - extra.total) {
-            return false;
+        if (extraTokens > quota - chargedTokens) {
+            return null;
         }
-        if (extra.total > 0 && now - lastPaidRedirect < paidRedirectGap) {
-            return false;
+        if (!charges.isEmpty()) {
+            Ticket latest = charges.getLast();
+            if (now - latest.at < latest.gap) { return null; }
         }
-        extra.add(now, extraTokens);
-        lastPaidRedirect = now;
-        paidRedirectGap = (long) Math.ceil((double) extraTokens * WINDOW_NANOS / quota);
-        return true;
+        long gap = (long) Math.ceil((double) extraTokens * WINDOW_NANOS / quota);
+        Ticket ticket = new Ticket(this, now, extraTokens, gap);
+        charges.add(ticket);
+        chargedTokens += extraTokens;
+        return ticket;
+    }
+
+    /** A charge counts from acquisition. Abandoning an uncommitted route restores its quota and pacing. */
+    public static final class Ticket implements AutoCloseable {
+        private static final Ticket FREE = new Ticket(null, 0L, 0L, 0L);
+        private final HotspotRedirectLimiter limiter;
+        private final long at;
+        private final long tokens;
+        private final long gap;
+        private boolean committed;
+
+        private Ticket(HotspotRedirectLimiter limiter, long at, long tokens, long gap) {
+            this.limiter = limiter;
+            this.at = at;
+            this.tokens = tokens;
+            this.gap = gap;
+        }
+
+        public void commit() {
+            if (limiter != null) {
+                synchronized (limiter) { committed = true; }
+            }
+        }
+
+        @Override
+        public void close() {
+            if (limiter != null) {
+                synchronized (limiter) {
+                    if (!committed && limiter.charges.remove(this)) {
+                        limiter.chargedTokens -= tokens;
+                    }
+                }
+            }
+        }
     }
 
     private static final class TokenWindow {

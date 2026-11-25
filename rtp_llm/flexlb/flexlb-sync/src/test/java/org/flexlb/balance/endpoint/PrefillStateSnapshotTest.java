@@ -176,7 +176,11 @@ class PrefillStateSnapshotTest {
     @Test
     void retirementProjectsQueuedPreparedAndCommittedItemsWithoutModeExceptions() {
         ScheduledRequest queued = item(1), prepared = item(2), committed = item(3);
+        var plan = state.tryPlanTokenWork(state.tokenWorkloadSnapshot().admissionVersion(), 100L, 5L);
+        when(queued.prefillTokenReservation()).thenReturn(plan);
         enqueue(queued);
+        assertEquals(100L, state.tokenWorkloadSnapshot().pendingTokens());
+        assertEquals(0L, state.tokenWorkloadSnapshot().plannedRequests());
         var preparedReservation = state.reserveUnqueuedRoute(prepared, 20L, Long.MAX_VALUE).reservation();
         var committedReservation = state.reserveUnqueuedRoute(committed, 30L, Long.MAX_VALUE).reservation();
         try (var handoff = state.commitRouteGroup(List.of(committed), List.of(committedReservation),
@@ -184,6 +188,8 @@ class PrefillStateSnapshotTest {
             assertEquals(2, state.committedSnapshot().requests().size());
         }
         var retired = state.retireGenerationOwnership();
+        assertEquals(0L, state.tokenWorkloadSnapshot().pendingTokens());
+        plan.close();
         assertNull(retired.invariantFailure());
         assertEquals(3, retired.ownedItems().size());
         assertTrue(retired.ownedItems().containsAll(List.of(queued.execution(), prepared.execution(), committed.execution())));

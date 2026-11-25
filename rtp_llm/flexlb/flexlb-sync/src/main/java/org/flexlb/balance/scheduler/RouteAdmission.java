@@ -10,6 +10,7 @@ import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
 import org.flexlb.balance.scheduler.ScheduledRequest.DecodeBinding;
+import org.flexlb.balance.strategy.HotspotRedirectLimiter;
 import org.flexlb.balance.strategy.PrefillTokenWorkload;
 import org.flexlb.balance.strategy.SelectedRole;
 import org.flexlb.dao.BalanceContext;
@@ -64,6 +65,7 @@ public final class RouteAdmission implements AutoCloseable {
         ServerStatus decodeStatus = null;
         long decodePlacementVersion = 0L;
         PrefillTokenWorkload.Reservation prefillTokenReservation = null;
+        HotspotRedirectLimiter.Ticket redirectTicket = null;
 
         try {
             for (SelectedRole selected : selectedRoles) {
@@ -92,6 +94,7 @@ public final class RouteAdmission implements AutoCloseable {
                     prefillEndpoint = prefill;
                     prefillPin = pin;
                     prefillTokenReservation = tokenReservation;
+                    redirectTicket = selected.takeRedirectTicket();
                     prefillStatus = status;
                     prefillPlacementVersion = placementVersion;
                     prefillWorkMs = selected.prefillWorkMs();
@@ -135,14 +138,13 @@ public final class RouteAdmission implements AutoCloseable {
                             residentPrefixTokens,
                             decodePin,
                             decodePlacementVersion,
-                            prefillTokenReservation),
+                            prefillTokenReservation,
+                            redirectTicket),
                     decodeRequest.bind(decodeStatus, decodeEndpoint, null));
         } catch (RuntimeException | Error failure) {
             WorkerEndpoint.GenerationPin ownedPrefillPin = prefillPin;
             WorkerEndpoint.GenerationPin ownedDecodePin = decodePin;
-            PrefillTokenWorkload.Reservation ownedTokenReservation = prefillTokenReservation;
-            try (ownedPrefillPin; ownedDecodePin) {
-                if (ownedTokenReservation != null) { ownedTokenReservation.close(); }
+            try (ownedPrefillPin; ownedDecodePin; var tokens = prefillTokenReservation; var redirect = redirectTicket) {
                 throw failure;
             }
         }
@@ -187,7 +189,7 @@ public final class RouteAdmission implements AutoCloseable {
                         prefillStatus().getGroup(), prefillEndpoint().ipPort()));
             }
             case CLOSED -> PlacementResult.closed();
-            case REJECTED -> throw new IllegalStateException("route commit cannot reject with a response");
+            case REJECTED, REPLAN -> throw new IllegalStateException("unexpected route commit result: " + result);
         };
     }
 
@@ -214,21 +216,9 @@ public final class RouteAdmission implements AutoCloseable {
     boolean reserveDecode() {
         requireProvisional();
         if (decodeEndpoint() == null || decodeBinding.reservation() != null) { return true; }
-        DecodeEndpoint.ReservationHandle reservation = switch (decodeBinding.mode()) {
-            case IMMEDIATE -> decodeEndpoint().reserve(
-                    decodePin(),
-                    requestId,
-                    decodeBinding.hardKvTokens(),
-                    decodeBinding.expectedKvTokens(),
-                    decodeBinding.priority());
-            case WAIT_AT_PLACEMENT, PREEMPT_AT_PLACEMENT -> decodeEndpoint().reserve(
-                    decodePin(),
-                    requestId,
-                    decodeBinding.hardKvTokens(),
-                    decodeBinding.expectedKvTokens(),
-                    decodeBinding.priority(),
-                    decodeBinding.capacity());
-        };
+        var capacity = decodeBinding.mode() == ScheduledRequest.DecodeMode.IMMEDIATE ? null : decodeBinding.capacity();
+        var reservation = decodeEndpoint().reserve(decodePin(), requestId, decodeBinding.hardKvTokens(),
+                decodeBinding.expectedKvTokens(), decodeBinding.priority(), capacity, decodePlacementVersion());
         if (reservation == null) { return false; }
         try {
             decodeBinding = decodeBinding.bind(decodeStatus(), decodeEndpoint(), reservation);
@@ -267,7 +257,8 @@ public final class RouteAdmission implements AutoCloseable {
         }
         return new ScheduledRequest(context, future, response,
                 ServerStatus.copyOf(prefillStatus()), ServerStatus.copyOf(decodeStatus()),
-                prefillEndpoint(), decodeEndpoint(), decodeBinding.reservation(), enqueuedAtMs, decodeBinding);
+                prefillEndpoint(), decodeEndpoint(), decodeBinding.reservation(), enqueuedAtMs, decodeBinding,
+                selection.prefillTokenReservation());
     }
 
     /** The caller has registered the same canonical request before selecting this route. */
@@ -284,6 +275,7 @@ public final class RouteAdmission implements AutoCloseable {
         try (AdmissionHandle handle = lifecycle.claimAdmissionHandle(requestId, context.getFuture())) {
             if (handle == null) { return PlacementResult.closed(); }
             if (!reserveDecode()) {
+                if (decodePlacementVersion() != decodeEndpoint().placementVersion()) { return PlacementResult.replan(); }
                 return PlacementResult.blocked(decodePlacementKey());
             }
             ScheduledRequest item = createScheduledRequest(context, context.getFuture(), context.getEnqueueTime());
@@ -372,6 +364,7 @@ public final class RouteAdmission implements AutoCloseable {
     private void markCommitted() {
         requireProvisional();
         ownership = Ownership.COMMITTED;
+        if (selection.redirectTicket() != null) { selection.redirectTicket().commit(); }
         closePins();
     }
 
@@ -393,14 +386,13 @@ public final class RouteAdmission implements AutoCloseable {
     }
 
     private void closePins() {
-        try (var prefill = prefillPin(); var decode = decodePin()) { }
-        PrefillTokenWorkload.Reservation tokenReservation =
-                selection.prefillTokenReservation();
-        if (tokenReservation != null) { tokenReservation.close(); }
+        try (var prefill = prefillPin(); var decode = decodePin();
+                var tokens = selection.prefillTokenReservation(); var redirect = selection.redirectTicket()) { }
     }
 
     private record Selection(PrefillEndpoint prefillEndpoint, WorkerEndpoint.GenerationPin prefillPin,
                              ServerStatus prefillStatus, long prefillPlacementVersion, long prefillWorkMs, long residentPrefixTokens,
                              WorkerEndpoint.GenerationPin decodePin, long decodePlacementVersion,
-                             PrefillTokenWorkload.Reservation prefillTokenReservation) { }
+                             PrefillTokenWorkload.Reservation prefillTokenReservation,
+                             HotspotRedirectLimiter.Ticket redirectTicket) { }
 }

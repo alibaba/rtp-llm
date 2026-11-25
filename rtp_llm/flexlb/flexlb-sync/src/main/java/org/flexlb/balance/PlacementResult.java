@@ -67,9 +67,15 @@ public record PlacementResult<V, B>(
         return new PlacementResult<>(Status.CLOSED, null, null, null, null);
     }
 
+    /** Ranking changed before the target workload could be reserved. No capacity event is needed. */
+    public static <V, B> PlacementResult<V, B> replan() {
+        return new PlacementResult<>(Status.REPLAN, null, null, null, null);
+    }
+
     public enum Status {
         SUCCESS,
         REJECTED,
+        REPLAN,
         BLOCKED,
         CLOSED
     }

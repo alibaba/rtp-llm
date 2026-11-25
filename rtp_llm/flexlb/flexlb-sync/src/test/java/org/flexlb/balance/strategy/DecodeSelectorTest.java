@@ -91,11 +91,12 @@ class DecodeSelectorTest {
         return context;
     }
 
-    @Test
-    void lateDispatchTriesNextReadyWorkerWhenTheBestSnapshotLosesItsLastSlot() {
+    @ParameterizedTest
+    @ValueSource(longs = {1, 64})
+    void lateDispatchReranksWhenTheSelectedWorkerVersionChanges(long limit) {
         configureCost("running_size");
         configService.loadBalanceConfig().getRouter().getRoles().getDecode()
-                .getAvailability().setMaxEngineRequests(1L);
+                .getAvailability().setMaxEngineRequests(limit);
         registerWorker("127.0.0.1", 10_000, 10_000);
         registerWorker("127.0.0.2", 10_000, 10_000);
         EndpointRegistry registry = decodeRegistry();
@@ -105,13 +106,14 @@ class DecodeSelectorTest {
             var first = decodeEndpoint(registry, "127.0.0.1:8080");
             reservePinned(first, 123L, 100, 100, 50);
             WorkerDirectory racing = Mockito.mock(WorkerDirectory.class);
-            Mockito.when(racing.decodeRoutingSnapshot(null)).thenReturn(stale);
+            Mockito.when(racing.decodeRoutingSnapshot(null)).thenReturn(stale).thenAnswer(call -> actual.decodeRoutingSnapshot(null));
             Mockito.when(racing.observeDecodeCapacity(null, 0)).thenReturn(actual.observeDecodeCapacity(null, 0));
             Mockito.when(racing.captureDecodeGeneration(Mockito.any()))
                     .thenAnswer(invocation -> actual.captureDecodeGeneration(invocation.getArgument(0)));
             DecodeBinding request = DecodeBinding.capture(context(100, 456L));
             var result = new DecodeSelector(racing).tryDispatch(request, null, false);
             Assertions.assertTrue(result.accepted());
+            Mockito.verify(racing, Mockito.times(2)).decodeRoutingSnapshot(null);
             var granted = result.value();
             Assertions.assertEquals("127.0.0.2", granted.status().getServerIp());
             Assertions.assertNull(first.reservationHandle(request.requestId()));

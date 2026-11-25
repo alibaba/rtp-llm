@@ -256,6 +256,10 @@ class CostBasedPrefillStrategyBlockerTest {
 
     private static PrefillEndpoint rejectedEndpoint(RoleType role, String group, AdmissionRejectReason reason) {
         var endpoint = mock(PrefillEndpoint.class);
+        var ledger = new PrefillTokenWorkload();
+        when(endpoint.tokenWorkloadSnapshot()).thenAnswer(call -> ledger.snapshot());
+        when(endpoint.tryPlanTokenWork(anyLong(), anyLong(), anyLong())).thenAnswer(call ->
+                ledger.tryPlan(call.getArgument(0), call.getArgument(1), call.getArgument(2)));
         when(endpoint.getStatus()).thenReturn(
                 WorkerStatus.createDiscovered(role, group, "worker", 8080, 8090, "test"));
         when(endpoint.admissionRejectReason(50)).thenReturn(reason);

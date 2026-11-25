@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.AdmissionVersion;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
@@ -106,32 +107,19 @@ public final class RequestScheduler {
         long decisionStartedNanos = System.nanoTime();
         FlexlbTrace.event(context.getTraceContext(), "flexlb.decision.started");
         try {
-            PlacementResult<RouteAdmission, PlacementKey> selection = FlexlbTrace.stage(
-                    context.getTraceContext(), "rtp_llm.flexlb.pd_decision", () -> router.select(context));
-            FlexlbTrace.recordPlacement(context.getTraceContext(), decisionStartedNanos,
-                    selection.status().name(), selection.diagnostics(), null);
-            context.setSchedulingDiagnostics(selection.diagnostics());
-            switch (selection.status()) {
+            var result = AdmissionVersion.retryConflicts(() -> selectAndCommitDirect(context, decisionStartedNanos),
+                    attempt -> attempt.status() == PlacementResult.Status.REPLAN);
+            failure = switch (result.status()) {
                 case SUCCESS -> {
-                    try (RouteAdmission admission = selection.value()) {
-                        var committed = admission.tryCommitDirectRoute(context, requestRegistry);
-                        failure = switch (committed.status()) {
-                            case SUCCESS -> {
-                                var delivery = committed.value();
-                                requestRegistry.publishRoute(delivery.claim(), delivery.precedingWork(), delivery.unstartedWorkMs());
-                                yield null;
-                            }
-                            case REJECTED -> committed.failure();
-                            case CLOSED -> Response.error(StrategyErrorType.REQUEST_CANCELLED);
-                            case BLOCKED -> Response.error(StrategyErrorType.RESOURCE_EXHAUSTED);
-                        };
-                    }
+                    var delivery = result.value();
+                    requestRegistry.publishRoute(delivery.claim(), delivery.precedingWork(), delivery.unstartedWorkMs());
+                    yield null;
                 }
-                case BLOCKED -> failure = selection.failure() != null
-                        ? selection.failure() : Response.error(selection.blocker().role().getErrorType());
-                case REJECTED -> failure = selection.failure();
-                case CLOSED -> failure = Response.error(StrategyErrorType.REQUEST_CANCELLED);
-            }
+                case REPLAN -> Response.error(StrategyErrorType.SCHEDULER_PLAN_CONFLICT);
+                case REJECTED -> result.failure();
+                case BLOCKED -> Response.error(StrategyErrorType.RESOURCE_EXHAUSTED);
+                case CLOSED -> Response.error(StrategyErrorType.REQUEST_CANCELLED);
+            };
         } catch (RuntimeException selectionFailure) {
             FlexlbTrace.recordPlacement(context.getTraceContext(), decisionStartedNanos,
                     "ERROR", null, selectionFailure);
@@ -141,6 +129,28 @@ public final class RequestScheduler {
                 requestRegistry.publishDecisionResponseAsync(context.getRequestId(), context.getFuture(), failure);
             }
         }
+    }
+
+    private PlacementResult<RouteAdmission.RouteDelivery, PlacementKey> selectAndCommitDirect(
+            BalanceContext context, long startedNanos) {
+        var selection = FlexlbTrace.stage(context.getTraceContext(), "rtp_llm.flexlb.pd_decision",
+                () -> router.select(context));
+        FlexlbTrace.recordPlacement(context.getTraceContext(), startedNanos,
+                selection.status().name(), selection.diagnostics(), null);
+        context.setSchedulingDiagnostics(selection.diagnostics());
+        return switch (selection.status()) {
+            case SUCCESS -> {
+                try (var admission = selection.value()) {
+                    yield admission.tryCommitDirectRoute(context, requestRegistry);
+                }
+            }
+            case BLOCKED -> PlacementResult.rejected(selection.failure() != null
+                    ? selection.failure() : Response.error(selection.blocker().role().getErrorType()));
+            case REJECTED -> PlacementResult.rejected(selection.failure());
+            case CLOSED -> PlacementResult.closed();
+            // The Prefill selector already exhausted its own conflict retries.
+            case REPLAN -> PlacementResult.rejected(Response.error(StrategyErrorType.SCHEDULER_PLAN_CONFLICT));
+        };
     }
 
     public RequestState cancelRequest(

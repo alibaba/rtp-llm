@@ -1,5 +1,6 @@
 package org.flexlb.balance.endpoint;
 
+import org.flexlb.balance.AdmissionVersion;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
 import org.flexlb.balance.prediction.DecodeCostFormula;
@@ -54,15 +55,20 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     public ReservationHandle reserve(GenerationPin pin, long requestId, long hardKv,
                                      long expectedKv, int priority, AdmissionCapacity capacity) {
+        return reserve(pin, requestId, hardKv, expectedKv, priority, capacity, AdmissionVersion.ANY);
+    }
+
+    public ReservationHandle reserve(GenerationPin pin, long requestId, long hardKv, long expectedKv,
+                                     int priority, AdmissionCapacity capacity, long expectedVersion) {
         requirePinnedGeneration(pin);
-        return state.reserve(requestId, hardKv, expectedKv, priority, true, capacity);
+        return state.reserve(requestId, hardKv, expectedKv, priority, true, capacity, expectedVersion);
     }
 
     /** An engine-facing shadow for work already outside the local queue. */
     public ReservationHandle reserveUnqueued(GenerationPin pin, long requestId, long hardKv,
                                              long expectedKv, int priority) {
         requirePinnedGeneration(pin);
-        ReservationHandle reservation = state.reserve(requestId, hardKv, expectedKv, priority, false, null);
+        ReservationHandle reservation = state.reserve(requestId, hardKv, expectedKv, priority, false, null, AdmissionVersion.ANY);
         if (reservation == null) {
             throw new IllegalStateException("Decode request id is already owned: " + requestId);
         }
@@ -129,10 +135,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     public EngineDispatchPermit reserveForDispatch(GenerationPin pin, long requestId, long hardKv,
-                                                   long expectedKv, int priority, AdmissionCapacity capacity) {
+                                                   long expectedKv, int priority, AdmissionCapacity capacity, long expectedVersion) {
         requirePinnedGeneration(pin);
         if (!hasAvailableSchedulingStatus()) { return null; }
-        DecodeState.DispatchLease lease = state.reserveForDispatch(requestId, hardKv, expectedKv, priority, capacity);
+        DecodeState.DispatchLease lease = state.reserveForDispatch(requestId, hardKv, expectedKv, priority, capacity, expectedVersion);
         return lease == null ? null : new EngineDispatchPermit(this, lease.handle(pin.generationId()), lease);
     }
 

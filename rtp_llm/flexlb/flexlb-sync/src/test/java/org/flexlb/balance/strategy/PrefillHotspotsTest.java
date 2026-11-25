@@ -64,7 +64,7 @@ class PrefillHotspotsTest {
         assertFalse(sample(List.of(replacement, idle), null, 2500).isHot(replacement.endpoint()));
         assertTrue(sample(List.of(replacement, idle), null, 3000).isHot(replacement.endpoint()));
         when(idle.endpoint().observedRequestCount()).thenReturn(1L);
-        assertTrue(sample(List.of(replacement, idle), null, 3100).mayRedirect(replacement.endpoint(), idle.endpoint()));
+        assertTrue(mayRedirect(sample(List.of(replacement, idle), null, 3100), replacement, idle));
     }
 
     @Test
@@ -79,14 +79,14 @@ class PrefillHotspotsTest {
         var remaining = entry("remaining", 20, 2000);
         var pool = List.of(requestHot, computeHot, requestLight, computeLight, atBothMeans, peer, remaining);
         var snapshot = sample(pool, null, 0);
-        assertTrue(snapshot.mayRedirect(requestHot.endpoint(), requestLight.endpoint()));
-        assertTrue(snapshot.mayRedirect(computeHot.endpoint(), computeLight.endpoint()));
-        assertFalse(snapshot.mayRedirect(requestHot.endpoint(), computeLight.endpoint()));
-        assertFalse(snapshot.mayRedirect(computeHot.endpoint(), requestLight.endpoint()));
-        assertFalse(snapshot.mayRedirect(requestHot.endpoint(), atBothMeans.endpoint()));
-        assertFalse(snapshot.mayRedirect(computeHot.endpoint(), atBothMeans.endpoint()));
-        assertFalse(snapshot.mayRedirect(requestHot.endpoint(), computeHot.endpoint()));
-        assertFalse(snapshot.mayRedirect(computeLight.endpoint(), requestLight.endpoint()));
+        assertTrue(mayRedirect(snapshot, requestHot, requestLight));
+        assertTrue(mayRedirect(snapshot, computeHot, computeLight));
+        assertFalse(mayRedirect(snapshot, requestHot, computeLight));
+        assertFalse(mayRedirect(snapshot, computeHot, requestLight));
+        assertFalse(mayRedirect(snapshot, requestHot, atBothMeans));
+        assertFalse(mayRedirect(snapshot, computeHot, atBothMeans));
+        assertFalse(mayRedirect(snapshot, requestHot, computeHot));
+        assertFalse(mayRedirect(snapshot, computeLight, requestLight));
     }
 
     @Test
@@ -95,7 +95,7 @@ class PrefillHotspotsTest {
         var target = entry("target", 16, 0);
         var snapshot = sample(List.of(source, target, entry("a", 11, 0),
                 entry("b", 12, 0), entry("c", 12, 0)), null, 0);
-        assertTrue(snapshot.mayRedirect(source.endpoint(), target.endpoint()), "16 is below 16.2");
+        assertTrue(mayRedirect(snapshot, source, target), "16 is below 16.2");
     }
 
     @Test
@@ -105,7 +105,7 @@ class PrefillHotspotsTest {
         when(lighter.endpoint().getInflightBatchCount()).thenReturn(2);
         var snapshot = sample(List.of(hot, lighter), null, 0);
         assertTrue(snapshot.isHot(hot.endpoint()));
-        assertTrue(snapshot.mayRedirect(hot.endpoint(), lighter.endpoint()));
+        assertTrue(mayRedirect(snapshot, hot, lighter));
     }
 
     @Test
@@ -114,8 +114,27 @@ class PrefillHotspotsTest {
         var second = entry("second", 30, 2500);
         var snapshot = sample(List.of(first, second), null, 0);
         assertFalse(snapshot.isHot(first.endpoint()));
-        assertFalse(snapshot.mayRedirect(first.endpoint(), second.endpoint()));
-        assertFalse(sample(List.of(), null, 100).mayRedirect(first.endpoint(), second.endpoint()));
+        assertFalse(mayRedirect(snapshot, first, second));
+        assertFalse(mayRedirect(sample(List.of(), null, 100), first, second));
+    }
+
+    @Test
+    void stopsRedirectingToTargetThatFilledAfterPoolWasSampled() {
+        config.setOutlierFactor(1.0);
+        var source = entry("hot", 30, 5000);
+        var target = entry("light", 10, 3000);
+        var sampled = sample(List.of(source, target), null, 0);
+        assertTrue(mayRedirect(sampled, source, target));
+
+        var withPlans = new PrefillTokenWorkload.Snapshot(3000, 1000, 10, 100, 10);
+        assertFalse(sampled.mayRedirect(source.endpoint(), target.endpoint(), withPlans));
+        var afterAdmission = new PrefillTokenWorkload.Snapshot(4000, 0, 0, 0, 20);
+        assertFalse(sampled.mayRedirect(source.endpoint(), target.endpoint(), afterAdmission));
+    }
+
+    private static boolean mayRedirect(PrefillHotspots.Snapshot sample, PrefillRoutingEntry source,
+                                       PrefillRoutingEntry target) {
+        return sample.mayRedirect(source.endpoint(), target.endpoint(), target.endpoint().tokenWorkloadSnapshot());
     }
 
     private PrefillHotspots.Snapshot sample(List<PrefillRoutingEntry> pool, String group, long atMs) {
@@ -127,6 +146,7 @@ class PrefillHotspotsTest {
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
         when(endpoint.observedRequestCount()).thenReturn(requests);
         when(endpoint.pendingTokenWork()).thenReturn(tokens);
+        when(endpoint.tokenWorkloadSnapshot()).thenReturn(new PrefillTokenWorkload.Snapshot(tokens, 0, 0, 0, requests));
         return new PrefillRoutingEntry(address, endpoint);
     }
 }

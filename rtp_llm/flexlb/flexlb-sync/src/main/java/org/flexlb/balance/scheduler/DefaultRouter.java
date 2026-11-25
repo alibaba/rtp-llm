@@ -23,7 +23,6 @@ import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
 
 /**
@@ -108,11 +107,8 @@ public class DefaultRouter {
         DecodeBinding decodeAdmission = DecodeBinding.capture(context);
         List<RoleType> roles = context.getConfig().isQueue() ? queuePlacementRoles : requiredRoles;
         try (PinnedRouting routing = selectAll(context, roles, policyGroup, decodeAdmission)) {
-            if (routing.blocker() != null) {
-                return PlacementResult.blocked(routing.blocker(), routing.failure(), routing.diagnostics);
-            }
-            if (routing.failure() != null) {
-                return PlacementResult.rejected(routing.failure(), routing.diagnostics);
+            if (routing.failure != null) {
+                return routing.failure;
             }
             if (roles.size() != requiredRoles.size()) {
                 String decodeGroup = StringUtils.isNotBlank(policyGroup) ? policyGroup : routing.prefillGroup();
@@ -169,11 +165,11 @@ public class DefaultRouter {
         try {
             if (context.getRequest().getSelectedVit() != null) {
                 if (vitCacheSelector == null) {
-                    return new PinnedRouting(selected, null, Response.error(StrategyErrorType.VIT_ROUTE_STALE), null);
+                    return new PinnedRouting(selected, PlacementResult.rejected(Response.error(StrategyErrorType.VIT_ROUTE_STALE)));
                 }
                 SelectedRole vit = vitCacheSelector.selectPinned(context, policyGroup);
                 if (vit == null) {
-                    return new PinnedRouting(selected, null, Response.error(StrategyErrorType.VIT_ROUTE_STALE), null);
+                    return new PinnedRouting(selected, PlacementResult.rejected(Response.error(StrategyErrorType.VIT_ROUTE_STALE)));
                 }
                 selected.add(vit);
                 group = vit.serverStatus().getGroup();
@@ -186,18 +182,8 @@ public class DefaultRouter {
                     Logger.debug(
                             "Failed to select {} worker for request {}",
                             role.getCode(), context.getRequestId());
-                    if (result.status() == PlacementResult.Status.REJECTED) {
-                        return new PinnedRouting(
-                                selected, null, result.failure(), result.diagnostics());
-                    }
-                    if (result.status() == PlacementResult.Status.BLOCKED) {
-                        return new PinnedRouting(
-                                selected,
-                                result.blocker(),
-                                result.failure(), result.diagnostics());
-                    }
-                    throw new IllegalStateException("unexpected selector result: "
-                            + result.status());
+                    return new PinnedRouting(selected, new PlacementResult<>(result.status(),
+                            null, result.failure(), result.blocker(), result.diagnostics()));
                 }
                 SelectedRole selection = result.value();
                 try {
@@ -210,7 +196,7 @@ public class DefaultRouter {
                     group = selection.serverStatus().getGroup();
                 }
             }
-            return new PinnedRouting(selected, null, null, null);
+            return new PinnedRouting(selected, null);
         } catch (RuntimeException | Error failure) {
             closeSelections(selected, failure);
             throw failure;
@@ -320,26 +306,11 @@ public class DefaultRouter {
 
     private static final class PinnedRouting implements AutoCloseable {
         private final List<SelectedRole> selections;
-        private final PlacementKey blocker;
-        private final Response failure;
-        private final Map<String, Object> diagnostics;
+        private final PlacementResult<RouteAdmission, PlacementKey> failure;
 
-        private PinnedRouting(
-                List<SelectedRole> selections,
-                PlacementKey blocker,
-                Response failure, Map<String, Object> diagnostics) {
+        private PinnedRouting(List<SelectedRole> selections, PlacementResult<RouteAdmission, PlacementKey> failure) {
             this.selections = selections;
-            this.blocker = blocker;
             this.failure = failure;
-            this.diagnostics = diagnostics;
-        }
-
-        private PlacementKey blocker() {
-            return blocker;
-        }
-
-        private Response failure() {
-            return failure;
         }
 
         private List<SelectedRole> selections() {
