@@ -4,7 +4,6 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.projection.RouteProjection;
 
 import java.util.Arrays;
-import java.util.Set;
 
 /** Reusable columns for modeled Prefill candidates from one fleet snapshot. */
 final class PrefillCandidateSet {
@@ -18,7 +17,7 @@ final class PrefillCandidateSet {
     private long[] routingCacheMatchTokens = new long[0];
     private long[] ownershipVersions = new long[0];
     private String[] admissionBlocks = new String[0];
-    private Set<PrefillEndpoint> hotspots = Set.of();
+    private PrefillHotspots.Snapshot hotspots = PrefillHotspots.Snapshot.EMPTY;
     private int size;
     long minimumProjectedTtftMs;
     long maximumCacheHit;
@@ -30,7 +29,7 @@ final class PrefillCandidateSet {
         Arrays.fill(admissionBlocks, 0, size, null);
         ensureCapacity(expectedCapacity);
         size = 0;
-        hotspots = Set.of();
+        hotspots = PrefillHotspots.Snapshot.EMPTY;
         minimumProjectedTtftMs = Long.MAX_VALUE;
         maximumCacheHit = 0L;
         maximumRoutingCacheMatchTokens = 0L;
@@ -65,8 +64,9 @@ final class PrefillCandidateSet {
         size++;
     }
 
-    void setHotspots(Set<PrefillEndpoint> hotspots) { this.hotspots = hotspots; }
-    boolean isHotspot(int index) { return hotspots.contains(endpoints[index]); }
+    void setHotspots(PrefillHotspots.Snapshot hotspots) { this.hotspots = hotspots; }
+    boolean isHotspot(int index) { return hotspots.isHot(endpoints[index]); }
+    boolean mayRedirect(int source, int target) { return hotspots.mayRedirect(endpoints[source], endpoints[target]); }
     PrefillEndpoint endpoint(int index) { return endpoints[index]; }
     String endpointAddress(int index) { return endpointAddresses[index]; }
     long cacheHit(int index) { return cacheHitTokens[index]; }

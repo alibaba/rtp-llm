@@ -24,9 +24,9 @@ import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.WorkerDirectory;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
@@ -218,7 +218,7 @@ class CostBasedPrefillHotspotReleaseTest {
         var ranking = new PrefillCandidateRanking(reporter, budget);
         var request = tokenContext(config);
         PrefillCandidateSet survivors = candidates(100L, 1000L, 500L, 600L);
-        survivors.setHotspots(Set.of(survivors.endpoint(1)));
+        sampleRequestLoads(survivors, 4, 30);
 
         assertEquals(0, ranking.select(
                 survivors, RoleType.PREFILL, null, request),
@@ -238,7 +238,7 @@ class CostBasedPrefillHotspotReleaseTest {
         var reporter = mock(EngineHealthReporter.class);
         var ranking = new PrefillCandidateRanking(reporter, budget);
         var survivors = candidates(100, 200, 500, 500);
-        survivors.setHotspots(Set.of(survivors.endpoint(0)));
+        sampleRequestLoads(survivors, 30, 4);
 
         assertEquals(1, ranking.select(survivors, RoleType.PREFILL, "g", tokenContext(config)));
         verify(reporter).reportCacheAffinityDecision(RoleType.PREFILL, "10.1.0.2", "HOTSPOT_RELEASE");
@@ -251,7 +251,7 @@ class CostBasedPrefillHotspotReleaseTest {
         var reporter = mock(EngineHealthReporter.class);
         var ranking = new PrefillCandidateRanking(reporter, budget);
         var survivors = candidates(100, 200, 900, 500);
-        survivors.setHotspots(Set.of(survivors.endpoint(0)));
+        sampleRequestLoads(survivors, 30, 4);
         var request = tokenContext(config);
 
         assertEquals(0, ranking.select(survivors, RoleType.PREFILL, "g", request));
@@ -271,16 +271,16 @@ class CostBasedPrefillHotspotReleaseTest {
         var survivors = candidates(100, 200, 500, 500);
 
         assertEquals(0, ranking.select(survivors, RoleType.PREFILL, "g", request), "healthy baseline");
-        survivors.setHotspots(Set.of(survivors.endpoint(0), survivors.endpoint(1)));
+        sampleRequestLoads(survivors, 30, 30, 4, 4, 4);
         assertEquals(0, ranking.select(survivors, RoleType.PREFILL, "g", request), "all candidates hot");
 
         var single = new PrefillCandidateSet();
         single.reset(1);
         addCandidate(single, 1, "10.1.0.1", 100, 100, 500);
-        single.setHotspots(Set.of(single.endpoint(0)));
+        sampleRequestLoads(single, 30, 4);
         assertEquals(0, ranking.select(single, RoleType.PREFILL, "g", request), "one candidate");
 
-        survivors.setHotspots(Set.of(survivors.endpoint(0)));
+        sampleRequestLoads(survivors, 30, 4);
         when(survivors.endpoint(1).engineQueueAdmissionBlocked()).thenReturn(true);
         assertEquals(0, ranking.select(survivors, RoleType.PREFILL, "g", request), "peer cannot admit");
         when(survivors.endpoint(1).engineQueueAdmissionBlocked()).thenReturn(false);
@@ -292,6 +292,29 @@ class CostBasedPrefillHotspotReleaseTest {
     }
 
     @Test
+    void fastestCoolPeerMustAlsoBeBelowMeanLoadForTtftAndTokenRanking() {
+        var survivors = new PrefillCandidateSet();
+        survivors.reset(3);
+        addCandidate(survivors, 1, "10.1.0.1", 100, 100, 900);
+        addCandidate(survivors, 2, "10.1.0.2", 110, 110, 800);
+        addCandidate(survivors, 3, "10.1.0.3", 200, 200, 700);
+        // 25 is above the pool mean (22.375) but below the source threshold (37.5).
+        sampleRequestLoads(survivors, 70, 25, 2, 2, 2, 25, 26, 27);
+        for (int i = 0; i < survivors.size(); i++) {
+            when(survivors.endpoint(i).canAcceptRequest()).thenReturn(true);
+        }
+        when(survivors.endpoint(1).tokenWorkloadScore()).thenReturn(1.0);
+        when(survivors.endpoint(2).tokenWorkloadScore()).thenReturn(50.0);
+        for (FlexlbConfig config : List.of(affinityConfig(), tokenBalanceConfig(true))) {
+            config.getRouter().getRoles().getPrefill().getHotspotRelease().setMaxExtraComputePermille(1000);
+            var limiter = new HotspotRedirectLimiter(() -> 0L);
+            limiter.recordPlacement(tokenContext(config), 0);
+            var ranking = new PrefillCandidateRanking(mock(EngineHealthReporter.class), limiter);
+            assertEquals(2, ranking.select(survivors, RoleType.PREFILL, "g", tokenContext(config)));
+        }
+    }
+
+    @Test
     void twoHotGroupsCompeteForOnePacedStreamOfRedirects() {
         var config = affinityConfig();
         config.getRouter().getRoles().getPrefill().getHotspotRelease().setMaxExtraComputePermille(10);
@@ -300,8 +323,8 @@ class CostBasedPrefillHotspotReleaseTest {
         request.getRequest().setSeqLen(2000L);
         var a = candidates(100, 1000, 0, 1000);
         var b = candidates(100, 1000, 100, 1100);
-        a.setHotspots(Set.of(a.endpoint(1)));
-        b.setHotspots(Set.of(b.endpoint(1)));
+        sampleRequestLoads(a, 4, 30);
+        sampleRequestLoads(b, 4, 30);
         recordColdArrival(500_000);
         for (int ms : new int[] {0, 199, 200, 399, 400, 600, 800, 999}) {
             nowNanos.set(MILLISECONDS.toNanos(ms));
@@ -312,6 +335,18 @@ class CostBasedPrefillHotspotReleaseTest {
             }).count();
             assertEquals(ms % 200 == 0 ? 1 : 0, grants, "redirects at " + ms + "ms");
         }
+    }
+
+    /** The pool may include endpoints that did not survive this request's projection. */
+    private static void sampleRequestLoads(PrefillCandidateSet survivors, long... loads) {
+        var pool = new ArrayList<EndpointRegistry.PrefillRoutingEntry>();
+        for (int i = 0; i < loads.length; i++) {
+            var endpoint = i < survivors.size() ? survivors.endpoint(i) : mock(PrefillEndpoint.class);
+            when(endpoint.observedRequestCount()).thenReturn(loads[i]);
+            pool.add(new EndpointRegistry.PrefillRoutingEntry("peer-" + i, endpoint));
+        }
+        survivors.setHotspots(new PrefillHotspots(() -> 0L).sample(
+                RoleType.PREFILL, "g", pool, new RoutingConfig.HotspotReleaseConfig()));
     }
 
     private static FlexlbConfig tokenBalanceConfig(boolean hotspotRelease) {

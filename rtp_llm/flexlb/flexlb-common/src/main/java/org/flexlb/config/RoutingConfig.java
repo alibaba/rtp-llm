@@ -57,7 +57,7 @@ public final class RoutingConfig {
         private boolean enabled = true;
         /** Fleet-median multiple above which a worker counts as congested; at least 1.0. */
         private double outlierFactor = 1.5;
-        /** Time above the setpoint with spare pool capacity before declaring a hotspot. */
+        /** Time above the pool's congestion threshold before declaring a hotspot. */
         private long sustainedPressureMs = 0L;
         /** Additional uncached Prefill tokens allowed per thousand baseline compute tokens. */
         private int maxExtraComputePermille = 10;

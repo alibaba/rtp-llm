@@ -32,75 +32,126 @@ final class PrefillHotspots {
                 .expireAfterAccess(STALE_NANOS, TimeUnit.NANOSECONDS).build();
     }
 
-    Set<PrefillEndpoint> sample(RoleType role, String group, List<PrefillRoutingEntry> candidates,
-                               HotspotReleaseConfig config) {
+    Snapshot sample(RoleType role, String group, List<PrefillRoutingEntry> candidates,
+                    HotspotReleaseConfig config) {
         if (candidates.isEmpty()) {
-            return Set.of();
+            return Snapshot.EMPTY;
         }
         Pool pool = pools.get(new Scope(role, group), ignored -> new Pool());
         return pool.sample(candidates, config, nanoTime.getAsLong());
     }
 
+    private record Load(long requests, long compute) { }
+
+    /** Integer loads strictly below the mean are exactly those below its ceiling. */
+    private record Signal(long outlierLimit, long meanCeiling) {
+        private static Signal measure(long[] values, long floor, double factor) {
+            int count = values.length;
+            long whole = 0;
+            long remainders = 0;
+            // Split before adding: the sum of long token counts can overflow.
+            for (long value : values) {
+                whole += value / count;
+                remainders += value % count;
+            }
+            long meanCeiling = whole + (remainders + count - 1L) / count;
+            Arrays.sort(values);
+            int mid = count / 2;
+            double median = count % 2 == 1 ? values[mid] : 0.5 * values[mid - 1] + 0.5 * values[mid];
+            // Requiring a strictly lower peer also excludes uniform pools, even at long precision limits.
+            long limit = Math.max(values[0], Math.max(floor, (long) (factor * median)));
+            return new Signal(limit, meanCeiling);
+        }
+
+        private boolean allows(long source, long target) {
+            return source > outlierLimit && target < meanCeiling && target < source;
+        }
+    }
+
+    /** Read-only view shared by every decision within one pool sampling interval. */
+    static final class Snapshot {
+        private static final Signal NONE = new Signal(Long.MAX_VALUE, 0L);
+        static final Snapshot EMPTY = new Snapshot(Map.of(), Set.of(), NONE, NONE);
+
+        private final Map<PrefillEndpoint, Load> loads;
+        private final Set<PrefillEndpoint> hotspots;
+        private final Signal requests;
+        private final Signal compute;
+
+        private Snapshot(Map<PrefillEndpoint, Load> loads, Set<PrefillEndpoint> hotspots,
+                         Signal requests, Signal compute) {
+            this.loads = Map.copyOf(loads);
+            this.hotspots = Set.copyOf(hotspots);
+            this.requests = requests;
+            this.compute = compute;
+        }
+
+        boolean isHot(PrefillEndpoint endpoint) {
+            return hotspots.contains(endpoint);
+        }
+
+        boolean mayRedirect(PrefillEndpoint source, PrefillEndpoint target) {
+            if (!isHot(source) || isHot(target)) {
+                return false;
+            }
+            Load from = loads.get(source);
+            Load to = loads.get(target);
+            return to != null && (requests.allows(from.requests(), to.requests())
+                    || compute.allows(from.compute(), to.compute()));
+        }
+    }
+
     private static final class Pool {
-        private record Sample(long at, Set<PrefillEndpoint> hotspots) { }
+        private record Sample(long at, Snapshot snapshot) { }
 
         private Map<PrefillEndpoint, Long> aboveSince = Map.of();
         private volatile Sample last;
 
-        Set<PrefillEndpoint> sample(List<PrefillRoutingEntry> entries, HotspotReleaseConfig config, long now) {
+        Snapshot sample(List<PrefillRoutingEntry> entries, HotspotReleaseConfig config, long now) {
             Sample sampled = last;
             if (sampled != null && now - sampled.at() < SAMPLE_NANOS) {
-                return sampled.hotspots();
+                return sampled.snapshot();
             }
             return refresh(entries, config, now);
         }
 
-        private synchronized Set<PrefillEndpoint> refresh(List<PrefillRoutingEntry> entries,
-                                                          HotspotReleaseConfig config, long now) {
+        private synchronized Snapshot refresh(List<PrefillRoutingEntry> entries,
+                                              HotspotReleaseConfig config, long now) {
             if (last != null && now - last.at() < SAMPLE_NANOS) {
-                return last.hotspots();
+                return last.snapshot();
             }
             long[] requests = new long[entries.size()];
             long[] compute = new long[entries.size()];
-            boolean spare = false;
+            Map<PrefillEndpoint, Load> loads = new HashMap<>();
             for (int i = 0; i < entries.size(); i++) {
                 PrefillEndpoint endpoint = entries.get(i).endpoint();
                 requests[i] = endpoint.observedRequestCount();
                 compute[i] = endpoint.pendingTokenWork();
-                if (requests[i] == 0 && compute[i] == 0 && endpoint.getInflightBatchCount() == 0) {
-                    spare = true;
-                }
+                loads.put(endpoint, new Load(requests[i], compute[i]));
             }
+            Signal requestSignal = Signal.measure(requests, config.getSetpointFloor(), config.getOutlierFactor());
+            Signal computeSignal = Signal.measure(compute, config.getComputeTokenFloor(), config.getOutlierFactor());
+            long duration = TimeUnit.MILLISECONDS.toNanos(config.getSustainedPressureMs());
+            boolean fresh = last != null && now - last.at() < STALE_NANOS;
             Map<PrefillEndpoint, Long> continuing = new HashMap<>();
             Set<PrefillEndpoint> hotspots = new HashSet<>();
-            if (spare) {
-                long requestLimit = threshold(requests, config.getSetpointFloor(), config.getOutlierFactor());
-                long computeLimit = threshold(compute, config.getComputeTokenFloor(), config.getOutlierFactor());
-                long duration = TimeUnit.MILLISECONDS.toNanos(config.getSustainedPressureMs());
-                boolean fresh = last != null && now - last.at() < STALE_NANOS;
-                for (int i = 0; i < entries.size(); i++) {
-                    if (requests[i] <= requestLimit && compute[i] <= computeLimit) {
-                        continue;
-                    }
-                    PrefillEndpoint endpoint = entries.get(i).endpoint();
-                    long since = fresh ? aboveSince.getOrDefault(endpoint, now) : now;
-                    continuing.put(endpoint, since);
-                    if (now - since >= duration) {
-                        hotspots.add(endpoint);
-                    }
+            for (var entry : loads.entrySet()) {
+                Load load = entry.getValue();
+                if (load.requests() <= requestSignal.outlierLimit() && load.compute() <= computeSignal.outlierLimit()) {
+                    continue;
+                }
+                PrefillEndpoint endpoint = entry.getKey();
+                long since = fresh ? aboveSince.getOrDefault(endpoint, now) : now;
+                continuing.put(endpoint, since);
+                if (now - since >= duration) {
+                    hotspots.add(endpoint);
                 }
             }
             aboveSince = continuing;
-            last = new Sample(now, Set.copyOf(hotspots));
-            return last.hotspots();
+            Snapshot snapshot = hotspots.isEmpty() ? Snapshot.EMPTY
+                    : new Snapshot(loads, hotspots, requestSignal, computeSignal);
+            last = new Sample(now, snapshot);
+            return snapshot;
         }
-    }
-
-    private static long threshold(long[] values, long floor, double factor) {
-        long[] sorted = values.clone();
-        Arrays.sort(sorted);
-        int mid = sorted.length / 2;
-        double median = sorted.length % 2 == 1 ? sorted[mid] : 0.5 * sorted[mid - 1] + 0.5 * sorted[mid];
-        return Math.max(floor, (long) (factor * median));
     }
 }

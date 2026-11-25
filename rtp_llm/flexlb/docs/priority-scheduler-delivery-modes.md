@@ -144,7 +144,8 @@ budget also end the wait.
 
 Under `router.roles.prefill.hotspotRelease`, a cache leader becomes a hotspot
 when either of two independently measured loads exceeds its pool threshold
-and the pool has an idle peer. Outstanding requests come from the Prefill
+and a peer carries less of that load than both the source and the pool's
+arithmetic mean. Outstanding requests come from the Prefill
 ownership ledger. It includes locally queued requests, requests in transit and
 active requests reported by the engine. Matching request and batch identities
 count once. When only aggregate engine counts are available, the ledger adds
@@ -157,10 +158,12 @@ times the median for the same role and routing group. `setpointFloor` defaults
 to 10 outstanding requests and `computeTokenFloor` to 1,000 tokens.
 `sustainedPressureMs` defaults to 0.
 A positive duration requires continuous pressure. The first sample showing
-relief or pool saturation closes the gate. In TTFT ranking, Master checks
+relief ends the period of continuous pressure. In TTFT ranking, Master checks
 the selected endpoint for a hotspot even when it has both the lowest TTFT
-and the best cache match. If a healthy alternative can accept the request
-within the extra compute budget, Master redirects the new placement.
+and the best cache match. Master ranks eligible non-hot peers whose load is
+strictly below the pool mean and the source on at least one signal that
+triggered the hotspot. If the selected peer can accept the request within
+the extra compute budget, Master redirects the new placement.
 Requests already in the endpoint's local queue keep their assignment.
 
 All Prefill groups on a Master share a trailing one-second extra compute budget.

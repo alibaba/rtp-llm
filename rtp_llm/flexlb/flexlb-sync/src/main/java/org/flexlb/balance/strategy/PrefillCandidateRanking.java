@@ -1,6 +1,5 @@
 package org.flexlb.balance.strategy;
 
-import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.route.RoleType;
@@ -8,6 +7,7 @@ import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.util.Logger;
 
 import java.util.BitSet;
+import java.util.function.IntPredicate;
 
 /** Rank one projection snapshot. Both policies spend from the same Master-wide redirect budget. */
 final class PrefillCandidateRanking {
@@ -31,54 +31,63 @@ final class PrefillCandidateRanking {
         if (release.isEnabled()) {
             redirectLimiter.recordPlacement(request, candidates.maximumCacheHit);
         }
+        boolean direct = request.getConfig().isDirect();
         return prefill.getTokenBalance() == null
-                ? selectByTtft(candidates, role, group, inputTokens, prefill.getCacheAffinity(), release, request.getConfig().isDirect())
-                : selectTokenBalancedCandidate(candidates, role, group, inputTokens, prefill.getTokenBalance(), release);
+                ? selectByTtft(candidates, role, group, inputTokens, prefill.getCacheAffinity(), release, direct)
+                : selectTokenBalancedCandidate(candidates, role, group, inputTokens, prefill.getTokenBalance(), release, direct);
     }
 
-    private boolean permitsRedirect(PrefillCandidateSet candidates, int pinned, int alternate,
+    private boolean permitsRedirect(PrefillCandidateSet candidates, int alternate,
                                     RoutingConfig.HotspotReleaseConfig release) {
-        return alternate < 0 || alternate == pinned || redirectLimiter.tryAcquire(
+        return redirectLimiter.tryAcquire(
                 candidates.maximumCacheHit - candidates.cacheHit(alternate), release.getMaxExtraComputePermille());
+    }
+
+    private static BitSet redirectTargets(PrefillCandidateSet candidates, int source, boolean direct) {
+        BitSet targets = new BitSet(candidates.size());
+        for (int i = 0; i < candidates.size(); i++) {
+            if (candidates.mayRedirect(source, i) && candidates.admissionBlock(i) == null
+                    && !candidates.endpoint(i).engineQueueAdmissionBlocked()
+                    && (!direct || candidates.endpoint(i).canAcceptRequest())) {
+                targets.set(i);
+            }
+        }
+        return targets;
     }
 
     /** Cache leaders pin hot requests unless a detected hotspot can redirect under the shared limit. */
     private int selectTokenBalancedCandidate(PrefillCandidateSet survivors,
             RoleType roleType, String group, long seqLen,
-            RoutingConfig.TokenBalanceConfig tokenBalance, RoutingConfig.HotspotReleaseConfig release) {
+            RoutingConfig.TokenBalanceConfig tokenBalance, RoutingConfig.HotspotReleaseConfig release, boolean direct) {
         boolean hotspotRelease = release.isEnabled();
         boolean cacheFirst = PrefillTokenBalance.cacheFirst(
                 survivors.maximumCacheHit, seqLen, tokenBalance.getMinPrefixHitPercent());
         if (!cacheFirst) {
-            return selectByTokenWork(survivors, roleType, group, seqLen, hotspotRelease, tieRotation);
+            return selectByTokenWork(survivors, roleType, group, seqLen, hotspotRelease,
+                    i -> !survivors.endpoint(i).engineQueueAdmissionBlocked(), tieRotation);
         }
 
         BitSet leaders = new BitSet();
         BitSet openLeaders = new BitSet();
-        BitSet pinnedLeaders = new BitSet();
         for (int i = 0; i < survivors.size(); i++) {
             if (survivors.cacheHit(i) != survivors.maximumCacheHit) { continue; }
             leaders.set(i);
-            PrefillEndpoint endpoint = survivors.endpoint(i);
-            if (!endpoint.engineQueueAdmissionBlocked()) { openLeaders.set(i); }
-            if (!hotspotRelease || !survivors.isHotspot(i)) {
-                pinnedLeaders.set(i);
-            }
+            if (!survivors.endpoint(i).engineQueueAdmissionBlocked()) { openLeaders.set(i); }
         }
         // Keep the original affinity choice as the fallback when the shared quota is exhausted.
         int source = selectTokenLeader(survivors, openLeaders.isEmpty() ? leaders : openLeaders,
                 roleType, group, tieRotation);
         int fallback = openLeaders.get(source) ? source : -1;
-        if (pinnedLeaders.get(source)) { return fallback; }
+        if (!hotspotRelease || !survivors.isHotspot(source)) { return fallback; }
 
-        int selected;
-        if (pinnedLeaders.isEmpty()) {
-            selected = selectByTokenWork(survivors, roleType, group, seqLen, true, redirectRotation);
-        } else {
-            pinnedLeaders.and(openLeaders);
-            selected = selectTokenLeader(survivors, pinnedLeaders, roleType, group, redirectRotation);
-        }
-        return permitsRedirect(survivors, source, selected, release) ? selected : fallback;
+        BitSet targets = redirectTargets(survivors, source, direct);
+        if (targets.isEmpty()) { return fallback; }
+
+        leaders.and(targets);
+        int selected = leaders.isEmpty()
+                ? selectByTokenWork(survivors, roleType, group, seqLen, true, targets::get, redirectRotation)
+                : selectTokenLeader(survivors, leaders, roleType, group, redirectRotation);
+        return selected >= 0 && permitsRedirect(survivors, selected, release) ? selected : fallback;
     }
 
     private static int selectTokenLeader(PrefillCandidateSet survivors, BitSet leaders, RoleType role,
@@ -94,17 +103,16 @@ final class PrefillCandidateRanking {
     }
 
     private static int selectByTokenWork(PrefillCandidateSet survivors, RoleType role, String group,
-                                         long seqLen, boolean accountForHits, EndpointRoundRobin rotation) {
+                                         long seqLen, boolean accountForHits, IntPredicate eligible, EndpointRoundRobin rotation) {
         double[] scores = new double[survivors.size()];
         double minimum = Double.POSITIVE_INFINITY;
         for (int i = 0; i < survivors.size(); i++) {
-            PrefillEndpoint endpoint = survivors.endpoint(i);
-            if (endpoint.engineQueueAdmissionBlocked()) {
+            if (!eligible.test(i)) {
                 scores[i] = Double.POSITIVE_INFINITY;
                 continue;
             }
             long tokens = accountForHits ? Math.max(0L, seqLen - survivors.cacheHit(i)) : seqLen;
-            scores[i] = endpoint.tokenWorkloadScore() + tokens;
+            scores[i] = survivors.endpoint(i).tokenWorkloadScore() + tokens;
             minimum = Math.min(minimum, scores[i]);
         }
         if (!Double.isFinite(minimum)) { return -1; }
@@ -125,17 +133,11 @@ final class PrefillCandidateRanking {
         int selected = choice.index();
         String reason = choice.reason();
         if (release.isEnabled() && survivors.isHotspot(selected)) {
-            for (int i = 0; i < survivors.size(); i++) {
-                if (survivors.isHotspot(i) || survivors.admissionBlock(i) != null
-                        || survivors.endpoint(i).engineQueueAdmissionBlocked()
-                        || direct && !survivors.endpoint(i).canAcceptRequest()) {
-                    eligible.clear(i);
-                }
-            }
-            if (!eligible.isEmpty()) {
-                int alternate = rankByTtft(survivors, eligible, role, group, seqLen, affinity,
+            BitSet targets = redirectTargets(survivors, selected, direct);
+            if (!targets.isEmpty()) {
+                int alternate = rankByTtft(survivors, targets, role, group, seqLen, affinity,
                         true, redirectRotation).index();
-                if (permitsRedirect(survivors, selected, alternate, release)) {
+                if (permitsRedirect(survivors, alternate, release)) {
                     selected = alternate;
                     reason = "HOTSPOT_RELEASE";
                 } else {

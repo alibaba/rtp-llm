@@ -100,12 +100,12 @@ class HotspotReleaseScenarioTest {
         try (var backlog = leader.planTokenWork(1_500L)) {
             assertEquals(LEADER_IP, selectedIp());
             driveGovernor(6L);
-            assertTrue(sampledHotspots().contains(leader));
+            assertTrue(sampledHotspots().isHot(leader));
             assertEquals(IDLE_IP, selectedIp());
 
             republishRunning(leader, 0L);
             governorTimeMs += 100L;
-            assertFalse(sampledHotspots().contains(leader));
+            assertFalse(sampledHotspots().isHot(leader));
             assertEquals(LEADER_IP, selectedIp());
         }
     }
@@ -114,7 +114,7 @@ class HotspotReleaseScenarioTest {
     void transientPressureBelowConfiguredDurationKeepsAffinity() {
         try (var backlog = leader.planTokenWork(1_500L)) {
             driveGovernor(4L);
-            assertFalse(sampledHotspots().contains(leader));
+            assertFalse(sampledHotspots().isHot(leader));
             assertEquals(LEADER_IP, selectedIp());
         }
     }
@@ -125,7 +125,7 @@ class HotspotReleaseScenarioTest {
         republishRunning(idle, 30L);
         try (var backlog = leader.planTokenWork(1_500L)) {
             driveGovernor(12L);
-            assertFalse(sampledHotspots().contains(leader));
+            assertFalse(sampledHotspots().isHot(leader));
             assertEquals(LEADER_IP, selectedIp());
         }
     }
@@ -158,7 +158,7 @@ class HotspotReleaseScenarioTest {
         }
     }
 
-    private java.util.Set<PrefillEndpoint> sampledHotspots() {
+    private PrefillHotspots.Snapshot sampledHotspots() {
         return hotspots.sample(RoleType.PREFILL, null, registry.prefillRoutingSnapshot(RoleType.PREFILL),
                 config.getRouter().getRoles().getPrefill().getHotspotRelease());
     }
