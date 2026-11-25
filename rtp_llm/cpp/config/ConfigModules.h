@@ -262,6 +262,15 @@ struct KVCacheConfig {
     // CPU BlockPool for INDEXER_STATE / CSA_STATE / HCA_STATE / SWA_KV.
     bool dsv4_fixed_pool_use_memory = false;
 
+    // GPU memory the model's initialize() adds (net of what it frees). The KV cache is sized from
+    // free memory before initialize(), so a cold start pays this out of the runtime reserve. Only a
+    // resident weights restart sets these: it attaches the cold initialize()'s output before the
+    // sizing, and getKVCacheMemorySize adds it back so the restart sizes like its cold start.
+    // Runtime values, not flags, and not pickled. If the KV cache is ever sized after initialize(),
+    // the growth is already reflected in free memory: these must stay 0, and can then be removed.
+    int64_t target_initialize_gpu_growth_bytes = 0;
+    int64_t draft_initialize_gpu_growth_bytes  = 0;
+
     // HBM cache event publishing. Only tp_rank=0 with pp_size=1 creates an active publisher for each DP replica.
     std::string kv_cache_event_publisher_type       = "none";  // none | kvcm
     std::string kv_cache_event_manager_endpoint     = "";      // KVCM Meta HTTP endpoint

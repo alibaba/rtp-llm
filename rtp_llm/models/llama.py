@@ -179,6 +179,7 @@ class Gemma(Llama):
         device_resource_config: DeviceResourceConfig,
         vit_config: Optional[Any] = None,
         merge_lora: bool = False,
+        **kwargs,
     ):
         if fmha_config.enable_open_source_fmha:
             logging.warn(
@@ -197,6 +198,9 @@ class Gemma(Llama):
             device_resource_config=device_resource_config,
             vit_config=vit_config,
             merge_lora=merge_lora,
+            # Everything BaseModel grows later, resident_weights_config included, reaches it
+            # through here; this override exists only to set one env var first.
+            **kwargs,
         )
 
     @staticmethod

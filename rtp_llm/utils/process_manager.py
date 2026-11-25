@@ -101,6 +101,12 @@ class ProcessManager:
         self.health_check_status: Dict[str, dict] = {}  # process_name -> status
         self.health_check_lock = threading.Lock()
 
+        # Optional rtp_llm.utils.backend_restart.BackendRestarter; None keeps the
+        # original "any child death stops everything" behavior.
+        self.backend_restarter = None
+        # The current backend generation's own drain event when backends restart in place.
+        self.backend_service_draining = None
+
         self._setup_signal_handlers()
 
     def _setup_signal_handlers(self):
@@ -113,13 +119,20 @@ class ProcessManager:
         logging.info(
             f"Process manager received signal {signum}, initiating shutdown..."
         )
-        if self.service_draining is not None:
-            self.service_draining.value = True
+        self._mark_service_draining()
         if self._defer_first_sigterm_if_needed(signum):
             return
         self._cancel_deferred_sigterm_timer()
         self.shutdown_requested = True
 
+    def _mark_service_draining(self):
+        for flag in (self.service_draining, self.backend_service_draining):
+            if flag is None:
+                continue
+            if hasattr(flag, "set"):
+                flag.set()
+            else:
+                flag.value = True
     def _defer_first_sigterm_if_needed(self, signum) -> bool:
         if not self._defer_first_sigterm or signum != signal.SIGTERM:
             return False
@@ -195,6 +208,13 @@ class ProcessManager:
             self.processes.append(process)
             self._register_group(shutdown_group)
             self.process_groups[shutdown_group].append(process)
+
+    def replace_group_processes(self, shutdown_group: str, processes: List[Process]):
+        """Swap one group's members (a restarted backend) and keep the rest untouched."""
+        old = self.process_groups.get(shutdown_group, [])
+        self.processes = [p for p in self.processes if p not in old] + list(processes)
+        self._register_group(shutdown_group)
+        self.process_groups[shutdown_group] = list(processes)
 
     def add_processes(self, processes: List[Process], shutdown_group: str = "default"):
         """Add multiple processes to manage"""
@@ -368,8 +388,7 @@ class ProcessManager:
         SIGINT here is the explicit parent-to-backend shutdown handoff so it
         can begin reaping its rank children before the outer manager escalates.
         """
-        if self.service_draining is not None:
-            self.service_draining.value = True
+        self._mark_service_draining()
         logging.info(f"Sending SIGTERM (drain_timeout={drain_timeout}s)")
         self._used_pre_stop_drain_signal = False
         drain_deadline = self._make_deadline(drain_timeout)
@@ -749,6 +768,22 @@ class ProcessManager:
                 and not self.shutdown_requested
                 and self._is_all_processes_alive()
             ):
+                event = self._poll_backend_row()
+                if event == "stop":
+                    logging.info("Backend row is stopping normally; stopping too")
+                    self.shutdown_requested = True
+                    continue
+                if event == "failure":
+                    if self._restart_backend(local=False):
+                        continue
+                    if self._withdraw_readiness is not None:
+                        self._withdraw_readiness()
+                    self.failure_detected = True
+                    logging.error("Backend row failed and was not restarted")
+                    self._terminate_processes(drain_timeout=0, staged=False)
+                    time.sleep(self.POST_KILL_REAP_WINDOW)
+                    self._force_kill_processes()
+                    break
                 time.sleep(self.monitor_interval)
                 continue
 
@@ -757,8 +792,14 @@ class ProcessManager:
             if not any_alive:
                 break
             if self.shutdown_requested:
+                # Only a normal stop is published to the row; a failure cleanup must
+                # stay a failure on every machine.
+                if self.backend_restarter is not None and not self.failure_detected:
+                    self.backend_restarter.on_shutdown()
                 drain_timeout = 0 if self.failure_detected else self.shutdown_timeout
                 self._terminate_processes(drain_timeout, staged=True)
+            elif self._restart_backend(local=True):
+                continue
             else:
                 # Unexpected death → escalate to failure shutdown.
                 for proc in self.processes:
@@ -771,6 +812,40 @@ class ProcessManager:
             time.sleep(self.POST_KILL_REAP_WINDOW)
             self._force_kill_processes()
             break
+
+    def _poll_backend_row(self) -> str:
+        if self.backend_restarter is None:
+            return "none"
+        return self.backend_restarter.poll().value
+
+    def _restart_backend(self, local: bool) -> bool:
+        """Hand a backend failure to the restarter. False means: fail as before."""
+        from rtp_llm.utils.backend_restart import RestartOutcome
+
+        restarter = self.backend_restarter
+        if restarter is None:
+            return False
+        backend = list(self.process_groups.get("backend", []))
+        if local:
+            dead = [p for p in self.processes if not p.is_alive()]
+            if not dead or any(p not in backend for p in dead):
+                return False
+        try:
+            outcome, processes = restarter.handle_backend_failure(backend, local)
+        except Exception:
+            # Unexpected: fail as without restart, but keep every backend the restarter
+            # started under this manager so the failure cleanup reaches it.
+            logging.exception("Backend restart failed unexpectedly")
+            self.replace_group_processes("backend", list(restarter.live))
+            return False
+        # Keep whatever backend is still running under management, so a failure or
+        # stop path below also reaches a half-started generation.
+        self.replace_group_processes("backend", processes)
+        if outcome == RestartOutcome.GIVE_UP:
+            return False
+        if outcome == RestartOutcome.SHUTDOWN:
+            self.shutdown_requested = True
+        return True
 
     def monitor_and_release_processes(self):
         """Monitor all processes until completion or failure.
@@ -830,8 +905,7 @@ class ProcessManager:
         Normal SIGTERM/SIGINT shutdown does NOT call this method; the signal
         handler sets shutdown_requested directly, leaving failure_detected=False.
         """
-        if self.service_draining is not None:
-            self.service_draining.value = True
+        self._mark_service_draining()
         self.shutdown_requested = True
         self.failure_detected = True
 

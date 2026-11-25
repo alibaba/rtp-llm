@@ -153,3 +153,22 @@ def init_server_group_args(parser, server_config, distribute_config):
         default=1,
         help="Process manager monitor interval in seconds",
     )
+    server_group.add_argument(
+        "--engine_restart_limit",
+        env_name="ENGINE_RESTART_LIMIT",
+        bind_to=(server_config, "engine_restart_limit"),
+        type=int,
+        default=-1,
+        help="backend 子树死亡后原地重启的次数上限（连续健康 10 分钟后清零）；"
+        "-1 表示按 resident_weights_mode 取默认（prod 为 3，其余为 0）；0 表示关闭，任何子进程死亡都让 start_server 以 1 退出",
+    )
+    server_group.add_argument(
+        "--engine_restart_heartbeat_timeout_s",
+        env_name="ENGINE_RESTART_HEARTBEAT_TIMEOUT_S",
+        bind_to=(server_config, "engine_restart_heartbeat_timeout_s"),
+        type=float,
+        default=30.0,
+        help="开启原地重启的跨机行里，某台机器的心跳或行协调器超过这么多秒没有响应，"
+        "就认为这一行已经丢失：所有机器以 1 退出，不再原地重启。调小能更快停掉对端整机"
+        "故障后卡住的行，但 start_server 偶尔停顿也更容易被误判",
+    )

@@ -34,6 +34,15 @@ class RtpLLMOp:
 
     def start(self):
         self.weight = self.model.weight
+        # Resident weights restart: size the KV cache as the cold start did (see KVCacheConfig).
+        draft = self.propose_model.model if self.propose_model is not None else None
+        kv_cache_config = self.engine_config.kv_cache_config
+        kv_cache_config.target_initialize_gpu_growth_bytes = (
+            self.model.resident_initialize_gpu_growth_bytes
+        )
+        kv_cache_config.draft_initialize_gpu_growth_bytes = (
+            0 if draft is None else draft.resident_initialize_gpu_growth_bytes
+        )
         logging.info("engine_config: %s", self.engine_config.to_string())
         from rtp_llm.telemetry.config import load_trace_config
 

@@ -5,11 +5,12 @@ import tempfile
 import unittest
 from contextlib import ExitStack
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 from rtp_llm import start_server
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.ops import CPRotateMethod, RoleType, SpeculativeType
+from rtp_llm.utils.drain_flag import DrainFlag
 
 
 def service_configs(model="deepseek_v41", *, batch_size=2, token_budget=0):
@@ -41,6 +42,53 @@ def completed_output(token_len=1, reuse_len=0, finished=True):
             )
         ]
     )
+
+
+class ServiceDrainingPropagationTest(unittest.TestCase):
+    def test_each_launch_passes_a_fresh_event_to_manager_and_backend(self):
+        configs = Mock()
+        configs.parallelism_config.dp_size = 1
+        configs.load_config.resident_weights_config.mode = "none"
+        configs.profiling_debug_logging_config.debug_load_server = False
+        # Without in-place restart every process group shares the instance's event.
+        configs.server_config.engine_restart_limit = 0
+        configs.server_config.startup_health_check_timeout = 3600
+        with ExitStack() as stack:
+            for name in (
+                "blocked_download_domains",
+                "export_oss_internal_region_allowlist",
+                "configure_warmup",
+                "init_controller",
+                "_sync_server_shutdown_timeout",
+                "_setup_startup_warmup_health_gate",
+                "_maybe_run_startup_real_warmup",
+                "_mark_startup_warmup_health_gate_ready",
+                "start_frontend_server_impl",
+                "start_dash_sc_server_impl",
+                "start_vit_server_impl",
+            ):
+                stack.enter_context(patch.object(start_server, name))
+            manager_class = stack.enter_context(
+                patch.object(start_server, "ProcessManager")
+            )
+            backend_starter = stack.enter_context(
+                patch.object(start_server, "start_backend_server_impl")
+            )
+            previous = None
+            for role in (RoleType.PDFUSION, RoleType.PDFUSION, RoleType.VIT):
+                configs.role_config.role_type = role
+                start_server.start_server(configs)
+                event = manager_class.call_args.kwargs["service_draining"]
+                # multiprocessing.Event.set() hangs once a waiter was killed.
+                self.assertIsInstance(event, DrainFlag)
+                self.assertIsNot(event, previous)
+                self.assertFalse(event.is_set())
+                self.assertFalse(event.value)
+                if role != RoleType.VIT:
+                    self.assertIs(backend_starter.call_args.args[-1], event)
+                event.set()
+                self.assertTrue(event.value)
+                previous = event
 
 
 class StartupRealWarmupTest(unittest.TestCase):
