@@ -517,6 +517,8 @@ class MegaMoeSEResidentTest(_ResidentCase):
                 raise AssertionError(f"deep_gemm.{name} is required by this target")
 
     def test_routed_key_distinguishes_source_widths_and_backend_layouts(self):
+        import deep_gemm
+
         module = (
             "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe"
         )
@@ -527,10 +529,20 @@ class MegaMoeSEResidentTest(_ResidentCase):
                 cfg = _mega_cfg()
                 cfg.moe_inter_dim = source_inter
                 _mega_executor(cfg)._transform_routed_weights({}, None, 512)
+            # Newer DeepGEMM wheels omit the legacy fused entry point.
+            def transform_weights_for_mega_moe_fused(*args):
+                self.fail("a resident cache lookup must not build weights")
+
             fused = MegaMoeFusedBackend.__new__(MegaMoeFusedBackend)
             torch.nn.Module.__init__(fused)
             fused.cfg = cfg
-            fused._transform_routed_weights({}, None, 512)
+            with patch.object(
+                deep_gemm,
+                "transform_weights_for_mega_moe_fused",
+                transform_weights_for_mega_moe_fused,
+                create=True,
+            ):
+                fused._transform_routed_weights({}, None, 512)
         keys = [call.kwargs["transform_key"] for call in record.call_args_list]
         self.assertNotEqual(keys[0], keys[1])
         # These names are persisted in resident manifests written by main.

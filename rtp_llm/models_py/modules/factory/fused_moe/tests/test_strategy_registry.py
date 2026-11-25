@@ -71,6 +71,17 @@ def _config(strategy: str, quant_config=None) -> MoEConfigAdapter:
 
 
 class StrategyRegistryDiagnosticsTest(unittest.TestCase):
+    def test_prepared_fp4_extension_keeps_builtin_recipes_immutable(self):
+        from rtp_llm.config import mega_moe
+
+        with patch.dict(mega_moe._fp4_extension_strategies):
+            for name, fused_shared in (("custom_fp4", False), ("custom_fp4_se", True)):
+                mega_moe.register_prepared_fp4_strategy(name, fused_shared=fused_shared)
+                self.assertTrue(mega_moe.is_mega_moe_strategy(name))
+                self.assertTrue(mega_moe.is_fp4_mega_moe_strategy(name))
+                self.assertEqual(mega_moe.has_fused_shared_experts(name), fused_shared)
+                self.assertNotIn(name, mega_moe.MEGA_MOE_STRATEGIES)
+
     def test_new_recipes_do_not_inspect_legacy_parallelism(self):
         for strategy_type in (
             cuda_strategies.CudaMegaMoeFp8Strategy,

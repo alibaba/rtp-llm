@@ -24,6 +24,7 @@ def prepare_shared_expert_weights(
     *,
     fp8_routed: bool,
     allow_requant: bool = True,
+    transform=None,
     expected_num_experts: int | None = None,
 ) -> SharedExpertWeights:
     import deep_gemm
@@ -78,7 +79,7 @@ def prepare_shared_expert_weights(
     else:
         sf1 = prepare_fp8_weight_scale_for_deepgemm(s1, 2 * intermediate, cfg.dim)
         sf2 = prepare_fp8_weight_scale_for_deepgemm(s2, cfg.dim, intermediate)
-    transform = (
+    transform = transform or (
         deep_gemm.transform_weights_for_mega_moe_fp8
         if fp8_routed
         else deep_gemm.transform_weights_for_mega_moe

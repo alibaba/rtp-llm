@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 import torch
 
 from rtp_llm.config.layer_partition import local_layer_range
-from rtp_llm.config.mega_moe import FP4_MEGA_MOE_STRATEGIES, FUSED_SHARED_STRATEGIES
+from rtp_llm.config.mega_moe import has_fused_shared_experts, is_fp4_mega_moe_strategy
 from rtp_llm.config.quant_config import (
     Fp8PerTensorQuantConfig,
     ModelOptFp4Config,
@@ -117,11 +117,11 @@ def _apply_mega_moe_fp4_wrappers(
     )
     from rtp_llm.model_loader.per_block_fp8_quant_weight import PerBlockFp8Weight
 
-    if moe_strategy not in FP4_MEGA_MOE_STRATEGIES:
+    if not is_fp4_mega_moe_strategy(moe_strategy):
         return weight_info
 
     is_offline = is_offline_mega_moe_fp4_ckpt(database)
-    include_shared_expert = moe_strategy in FUSED_SHARED_STRATEGIES
+    include_shared_expert = has_fused_shared_experts(moe_strategy)
     scale_dtype = (
         PerBlockFp8Weight._get_scale_dtype(getattr(quant_config, "scale_fmt", None))
         if is_offline

@@ -5,7 +5,7 @@ from typing import Any, Dict, Optional
 import torch
 from torch import nn
 
-from rtp_llm.config.mega_moe import MEGA_MOE_STRATEGIES, MegaMoeExecutionPolicy
+from rtp_llm.config.mega_moe import MegaMoeExecutionPolicy, is_mega_moe_strategy
 from rtp_llm.models_py.kernels.cuda.mtp_frontend import no_module_hooks
 from rtp_llm.models_py.modules.hybrid.cmp_moe_streams import CmpMoeStreams
 from rtp_llm.config.model_config import ModelConfig
@@ -110,7 +110,7 @@ class Glm5MoeLayer(GenericMoeLayer):
         max_generate_batch_size: int,
         enable_cuda_graph: bool,
     ):
-        if moe_config.moe_strategy not in MEGA_MOE_STRATEGIES:
+        if not is_mega_moe_strategy(moe_config.moe_strategy):
             return super()._create_fused_moe(
                 weights, moe_config, max_generate_batch_size, enable_cuda_graph
             )
@@ -274,7 +274,7 @@ class Glm5MoeDecoderLayer(nn.Module):
                 quant_config,
                 hw_kernel_config=hw_kernel_config,
             )
-        elif moe_config.moe_strategy in MEGA_MOE_STRATEGIES:
+        elif is_mega_moe_strategy(moe_config.moe_strategy):
             self.mlp = Glm5MoeLayer(
                 config,
                 parallelism_config,
@@ -627,7 +627,7 @@ class Glm5ModelBase(CpMtpHiddenHandoff, GenericMoeModel):
     def prepare_moe_forward(self, tokens: int, is_prefill: bool) -> bool:
         """Called by the engine before graph selection for non-MTP PDFUSION DP."""
         self._moe_forward_plan = None
-        if self.moe_config.moe_strategy not in MEGA_MOE_STRATEGIES:
+        if not is_mega_moe_strategy(self.moe_config.moe_strategy):
             return True
         backend = torch.distributed.get_backend()
         device = (
