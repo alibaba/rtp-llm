@@ -1,6 +1,8 @@
 package org.flexlb.balance.endpoint;
 
+import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.delivery.DeliveryStrategy;
+import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.config.DecisionPolicyConfig;
 import org.flexlb.config.DispatcherConfig;
@@ -23,6 +25,7 @@ import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -37,6 +40,61 @@ import static org.mockito.Mockito.mock;
 
 /** The configured limit, real worker publication lock and canonical request ledger together. */
 class WorkerBatcherRequestCapacityTest {
+
+    @ParameterizedTest
+    @CsvSource({"false", "true"})
+    @Timeout(10)
+    void runningAndInflightIndependentlyParkAndResumeDelivery(boolean sameVersion) throws Exception {
+        FlexlbConfig config = productionConfig();
+        config.setDispatcher(DispatcherConfig.nonBatch());
+        config.getDispatcher().setMaxInflightPerPrefillWorker(3);
+        config.getDispatcher().setMaxRunningSizePrefillWorker(2);
+        config.getScheduler().setDecision(DecisionPolicyConfig.single());
+        Semaphore delivered = new Semaphore(0);
+        var runtime = new EndpointTestSupport.TestRequestRuntime() {
+            @Override
+            void onCompleted(DeliveryClaim claim, DeliveryResult result) {
+                delivered.release();
+            }
+        };
+        try (Fixture fixture = fixture(config, runtime)) {
+            PrefillEndpoint endpoint = fixture.endpoint;
+            CountDownLatch parked = new CountDownLatch(1);
+            DeliveryStrategy live = EndpointTestSupport.liveRouteStrategy(runtime);
+            doAnswer(invocation -> {
+                var transaction = live.prepare(invocation.getArgument(0), invocation.getArgument(1), invocation.getArgument(2));
+                if (transaction.blockedItem() != null) {
+                    parked.countDown();
+                }
+                return transaction;
+            }).when(fixture.delivery).prepare(anyList(), any(), any());
+            WorkerStatusResponse report = new WorkerStatusResponse();
+            report.setRunningQueryLen(2);
+            EndpointTestSupport.applyStatus(endpoint, report).run();
+            ScheduledRequest first = item(config, endpoint, 1);
+            assertTrue(EndpointTestSupport.offer(endpoint, first));
+            assertTrue(EndpointTestSupport.offer(endpoint, item(config, endpoint, 2)));
+            assertTrue(parked.await(2, TimeUnit.SECONDS));
+            assertFalse(endpoint.routeAdmissionAvailability().isAvailable());
+            assertEquals(2, endpoint.queuedRequestCount(), "the running limit still allows placement");
+            assertEquals(0, delivered.availablePermits());
+
+            // Two Engine-only streams still occupy inflight slots. Only running changes the verdict.
+            report.setRunningQueryLen(1);
+            report.setWaitingQueryLen(1);
+            if (sameVersion) {
+                EndpointTestSupport.applyHeartbeat(endpoint, report);
+            } else {
+                EndpointTestSupport.applyStatus(endpoint, report).run();
+            }
+            assertTrue(delivered.tryAcquire(2, TimeUnit.SECONDS), "a status update alone must wake delivery");
+            assertFalse(endpoint.routeAdmissionAvailability().isAvailable(), "inflight is now full");
+            assertEquals(1, endpoint.queuedRequestCount());
+            assertTrue(endpoint.releaseCommittedItem(first.execution()));
+            assertTrue(delivered.tryAcquire(2, TimeUnit.SECONDS), "inflight release must wake the remaining request");
+            assertEquals(0, endpoint.queuedRequestCount());
+        }
+    }
 
     @ParameterizedTest
     @CsvSource({"false", "true"})
@@ -209,6 +267,28 @@ class WorkerBatcherRequestCapacityTest {
             assertTrue(EndpointTestSupport.offer(fixture.endpoint, item(config, fixture.endpoint, 2L)));
             assertTrue(prepared.await(5L, TimeUnit.SECONDS));
             assertEquals(2, groupSize.get(), "concurrent batch limit must not change each group's size");
+        }
+    }
+
+    @Test
+    void batchReservationChecksReportedRunningBeforeTakingAnInflightSlot() {
+        FlexlbConfig config = productionConfig();
+        config.getDispatcher().setMaxRunningSizePrefillWorker(2);
+        try (Fixture fixture = fixture(config)) {
+            PrefillEndpoint endpoint = fixture.endpoint;
+            WorkerStatusResponse report = new WorkerStatusResponse();
+            report.setRunningQueryLen(3);
+            EndpointTestSupport.applyStatus(endpoint, report).run();
+            ScheduledRequest request = item(config, endpoint, 1);
+            assertTrue(EndpointTestSupport.offer(endpoint, request));
+            assertFalse(endpoint.batchAdmissionAvailability(2).isAvailable());
+            assertEquals(PrefillState.CapacityStatus.CAPACITY_FULL, endpoint.reserveBatch(request, 1, 2).status());
+            report.setRunningQueryLen(1);
+            EndpointTestSupport.applyHeartbeat(endpoint, report);
+            assertTrue(endpoint.batchAdmissionAvailability(2).isAvailable());
+            var result = endpoint.reserveBatch(request, 1, 2);
+            assertEquals(PrefillState.CapacityStatus.ACQUIRED, result.status());
+            result.reservation().close();
         }
     }
 

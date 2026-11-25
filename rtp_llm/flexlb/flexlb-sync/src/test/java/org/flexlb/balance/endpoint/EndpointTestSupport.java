@@ -79,6 +79,19 @@ public final class EndpointTestSupport {
         }
     }
 
+    static void applyHeartbeat(PrefillEndpoint endpoint, WorkerStatusResponse response) {
+        WorkerStatus status = endpoint.getStatus();
+        Runnable projection;
+        status.lock.lock();
+        try {
+            response.setStatusVersion(status.appliedStatusCursor().statusVersion());
+            projection = endpoint.observeStatusHeartbeat(status, WorkerStatusTestFixtures.observation(status, response));
+        } finally {
+            status.lock.unlock();
+        }
+        projection.run();
+    }
+
     static WorkerEndpoint publishEndpoint(
             EndpointRegistry registry,
             RoleType role,

@@ -330,7 +330,8 @@ public final class WorkerBatcher {
                 ? PrefillActiveIndex.ordered(INITIAL_QUEUE_ALLOCATION, queueOrder,
                         this::signalQueuedDecodeCapacityAvailable)
                 : PrefillActiveIndex.disabled();
-        this.prefillState = new PrefillState(queueLock, activeIndex, capacityAvailableSignal);
+        this.prefillState = new PrefillState(queueLock, activeIndex, System::currentTimeMillis,
+                capacityAvailableSignal, config.getDispatcher().getMaxRunningSizePrefillWorker());
         this.normalStopFailure = new CancellationException(
                 "FlexLB worker scheduling queue stopped: " + key);
         this.stopAcknowledgementFailure = new IllegalStateException(

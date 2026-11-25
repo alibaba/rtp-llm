@@ -22,7 +22,6 @@ import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.testfixture.TaskInfo;
 import org.flexlb.testfixture.WorkerStatusResponse;
-import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -1457,26 +1456,13 @@ class PrefillEndpointTest {
                     "Engine work and the delivered route retain separate identities");
 
             for (int repeat = 0; repeat < 20; repeat++) {
-                applyHeartbeat(routeEndpoint, status);
+                EndpointTestSupport.applyHeartbeat(routeEndpoint, status);
             }
             assertEquals(1, preparationCount.get(), "identical heartbeats must not redeliver the route");
             assertEquals(0, routeEndpoint.queuedRequestCount());
         } finally {
             routeEndpoint.close();
         }
-    }
-
-    private static void applyHeartbeat(PrefillEndpoint endpoint, WorkerStatusResponse response) {
-        WorkerStatus status = endpoint.getStatus();
-        Runnable projection;
-        status.lock.lock();
-        try {
-            response.setStatusVersion(status.appliedStatusCursor().statusVersion());
-            projection = endpoint.observeStatusHeartbeat(status, WorkerStatusTestFixtures.observation(status, response));
-        } finally {
-            status.lock.unlock();
-        }
-        projection.run();
     }
 
     @Test

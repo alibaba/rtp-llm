@@ -6,6 +6,7 @@ import org.flexlb.config.SchedulerConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.testfixture.WorkerStatusResponse;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
@@ -28,6 +29,7 @@ class PrefillEndpointDirectSchedulerTest {
         config.setScheduler(SchedulerConfig.direct());
         config.setDispatcher(DispatcherConfig.nonBatch());
         config.getDispatcher().setMaxInflightPerPrefillWorker(4);
+        config.getDispatcher().setMaxRunningSizePrefillWorker(2);
         var runtime = EndpointTestSupport.requestRuntime();
         PrefillEndpoint endpoint = new PrefillEndpoint(
                 EndpointTestSupport.workerStatus(role, "127.0.0.82", 8082, 9082),
@@ -35,6 +37,15 @@ class PrefillEndpointDirectSchedulerTest {
                 mock(BatchSchedulerReporter.class));
         endpoint.startGeneration();
         try (var executor = Executors.newFixedThreadPool(8)) {
+            WorkerStatusResponse report = new WorkerStatusResponse();
+            report.setRunningQueryLen(2);
+            EndpointTestSupport.applyStatus(endpoint, report).run();
+            try (var pin = endpoint.tryPinGeneration()) {
+                assertEquals(PrefillState.CapacityStatus.CAPACITY_FULL,
+                        endpoint.reserveUnqueuedRoute(pin, item(100L), 10L).status());
+            }
+            report.setRunningQueryLen(0);
+            EndpointTestSupport.applyHeartbeat(endpoint, report);
             List<Future<PrefillState.ReservationResult<PrefillState.RouteReservation>>> futures =
                     new ArrayList<>();
             for (long id = 1; id <= 64; id++) {

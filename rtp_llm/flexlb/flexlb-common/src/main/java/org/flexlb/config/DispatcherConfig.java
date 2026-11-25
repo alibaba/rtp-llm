@@ -20,6 +20,8 @@ public final class DispatcherConfig {
     /** Order requests waiting on the same Prefill by compute cost within business priority. */
     private boolean prefillCostOrder;
     private int maxInflightPerPrefillWorker = DEFAULT_MAX_INFLIGHT_PER_PREFILL_WORKER;
+    /** Pause delivery while the worker reports at least this many running streams. */
+    private int maxRunningSizePrefillWorker = -1;
     /** BATCH only: engine wait for FetchResponse attachment, not generation duration. */
     private int fetchAttachTimeoutMs = DEFAULT_FETCH_ATTACH_TIMEOUT_MS;
 
@@ -47,6 +49,10 @@ public final class DispatcherConfig {
         if (maxInflightPerPrefillWorker <= 0) {
             throw new ConfigValidationException("dispatcher.maxInflightPerPrefillWorker",
                     "must be greater than zero");
+        }
+        if (maxRunningSizePrefillWorker != -1 && maxRunningSizePrefillWorker <= 0) {
+            throw new ConfigValidationException("dispatcher.maxRunningSizePrefillWorker",
+                    "must be -1 (disabled) or greater than zero");
         }
         if (fetchAttachTimeoutMs <= 0) {
             throw new ConfigValidationException("dispatcher.fetchAttachTimeoutMs",

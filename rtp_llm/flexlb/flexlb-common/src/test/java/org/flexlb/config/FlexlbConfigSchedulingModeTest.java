@@ -235,6 +235,21 @@ class FlexlbConfigSchedulingModeTest {
     }
 
     @Test
+    void runningLimitIsOptionalAndIndependentOfInflightLimit() {
+        assertEquals(-1, parse("QUEUE", "NON_BATCH", "").getDispatcher().getMaxRunningSizePrefillWorker());
+        var dispatcher = parse("QUEUE", "NON_BATCH",
+                ",\"maxInflightPerPrefillWorker\":128,\"maxRunningSizePrefillWorker\":16").getDispatcher();
+        assertEquals(128, dispatcher.getMaxInflightPerPrefillWorker());
+        assertEquals(16, dispatcher.getMaxRunningSizePrefillWorker());
+        assertEquals(-1, parse("QUEUE", "NON_BATCH",
+                ",\"maxRunningSizePrefillWorker\":-1").getDispatcher().getMaxRunningSizePrefillWorker());
+        for (String value : new String[]{"0", "-2", "1.5", "\"2\"", "null", "2147483648"}) {
+            assertThrows(ConfigValidationException.class,
+                    () -> parse("QUEUE", "NON_BATCH", ",\"maxRunningSizePrefillWorker\":" + value), value);
+        }
+    }
+
+    @Test
     void limits_require_positive_integers_without_json_coercion() {
         for (String type : new String[]{"BATCH", "NON_BATCH"}) {
             for (String value : new String[]{"0", "-1", "1.5", "\"2\"", "true", "null", "[]", "{}", "2147483648"}) {

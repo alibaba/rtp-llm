@@ -610,7 +610,8 @@ public final class PrefillState {
     /** Derived immutable work; ACTIVE queue mutations leave committed work unchanged. */
     private WorkCapture committedWorkCapture;
     private long unknownEngineRequestCount;
-    private ActiveObservations latestActivity;
+    private final int maxRunningSizePrefillWorker;
+    private volatile ActiveObservations latestActivity;
     private int batchLeasesInUse;
     private long routeLeasesInUse;
     private volatile long occupiedRouteSlots;
@@ -751,6 +752,12 @@ public final class PrefillState {
 
     public PrefillState(ReentrantLock lock, PrefillActiveIndex activeIndex,
                         LongSupplier clock, Runnable capacityAvailable) {
+        this(lock, activeIndex, clock, capacityAvailable, -1);
+    }
+
+    public PrefillState(ReentrantLock lock, PrefillActiveIndex activeIndex,
+                        LongSupplier clock, Runnable capacityAvailable, int maxRunningSizePrefillWorker) {
+        this.maxRunningSizePrefillWorker = maxRunningSizePrefillWorker;
         this.lock = Objects.requireNonNull(lock, "lock");
         this.activeIndex = Objects.requireNonNull(activeIndex, "activeIndex");
         this.clock = Objects.requireNonNull(clock, "clock");
@@ -960,7 +967,7 @@ public final class PrefillState {
                 return new ReservationResult<>(
                         CapacityStatus.BATCH_ID_ALREADY_RESERVED, null);
             }
-            if (batchLeasesInUse >= maximum) {
+            if (batchLeasesInUse >= maximum || !runningCapacityAvailable(latestActivity)) {
                 return new ReservationResult<>(
                         CapacityStatus.CAPACITY_FULL, null);
             }
@@ -983,7 +990,7 @@ public final class PrefillState {
     private boolean batchCapacityAvailable(int maximum) {
         lock.lock();
         try {
-            return batchLeasesInUse < maximum
+            return batchLeasesInUse < maximum && runningCapacityAvailable(latestActivity)
                     && engineQueueAdmissionAvailableUnderLock();
         } finally {
             lock.unlock();
@@ -1012,14 +1019,23 @@ public final class PrefillState {
         boolean dispatchAllowed = admission == null
                 || admission.state() != EngineQueueAdmission.State.CONGESTED
                 && !admission.dispatchBlocked();
-        return dispatchAllowed && (maximum == 0L || occupiedRouteSlots < maximum);
+        return dispatchAllowed && runningCapacityAvailable(latestActivity)
+                && (maximum == 0L || occupiedRouteSlots < maximum);
     }
 
     private boolean routeCapacityAvailableUnderLock(long maximum) {
         requireLock();
+        if (!runningCapacityAvailable(latestActivity)) {
+            return false;
+        }
         return maximum == 0L || routeLeasesInUse < maximum
                 && unknownEngineRequestCount < maximum - routeLeasesInUse
                 && engineQueueAdmissionAvailableUnderLock();
+    }
+
+    private boolean runningCapacityAvailable(ActiveObservations activity) {
+        return maxRunningSizePrefillWorker == -1 || activity != null
+                && activity.reportedRunning >= 0L && activity.reportedRunning < maxRunningSizePrefillWorker;
     }
 
     /** Caller holds {@link #lock}; unknown Engine feedback keeps the legacy capacity verdict. */
@@ -1262,7 +1278,7 @@ public final class PrefillState {
             if (requests.containsKey(item.requestId())) {
                 return new ReservationResult<>(CapacityStatus.REQUEST_ALREADY_RESERVED, null);
             }
-            if (maxOutstandingRequests > 0L && !routeCapacityAvailableUnderLock(maxOutstandingRequests)) {
+            if (!routeCapacityAvailableUnderLock(maxOutstandingRequests)) {
                 return new ReservationResult<>(CapacityStatus.CAPACITY_FULL, null);
             }
             RequestEntry entry = new RequestEntry(item, QueueMembership.UNINDEXED);
@@ -1387,7 +1403,7 @@ public final class PrefillState {
             }
             capacityReleased = nextUnknown < unknownEngineRequestCount;
             unknownEngineRequestCount = nextUnknown;
-            publishActivityUnderLock(activity);
+            capacityReleased |= publishActivityUnderLock(activity);
             capacityReleased |= observeEngineQueueReleaseUnderLock(
                     engine, observation.statusVersion(), nowMs);
             if (schedulingInputsChanged) {
@@ -1497,10 +1513,13 @@ public final class PrefillState {
                                       Map<Long, WorkerStatus.TaskObservation> foreign) {
     }
 
-    private void publishActivityUnderLock(ActiveObservations activity) {
+    /** Return whether the latest running count reopens delivery, including on same-version heartbeats. */
+    private boolean publishActivityUnderLock(ActiveObservations activity) {
         requireLock();
         activity.owned.forEach((id, task) -> requests.get(id).lastObservedTask = task);
+        boolean reopened = !runningCapacityAvailable(latestActivity) && runningCapacityAvailable(activity);
         latestActivity = activity;
+        return reopened;
     }
 
     private ActiveObservations prepareActiveObservationsUnderLock(
@@ -1639,7 +1658,7 @@ public final class PrefillState {
             });
             capacityReleased |= nextUnknown < unknownEngineRequestCount;
             unknownEngineRequestCount = nextUnknown;
-            publishActivityUnderLock(activity);
+            capacityReleased |= publishActivityUnderLock(activity);
             capacityReleased |= observeEngineQueueReleaseUnderLock(
                     engine, statusVersion, nowMs);
             // Status reduction changes counts after invalidating the old work revision.
