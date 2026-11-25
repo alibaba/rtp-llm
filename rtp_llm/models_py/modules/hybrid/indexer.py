@@ -480,8 +480,10 @@ class Indexer(nn.Module):
 
         if (
             self._is_sparse_prefill_cp(attention_inputs)
-            and cp_params.kv_cache_sharded and cp_params.cp_size > 1
-            and pynccl_cp.enabled() and hidden_states.is_cuda
+            and getattr(cp_params, "kv_cache_sharded", False)
+            and getattr(cp_params, "cp_size", 1) > 1
+            and pynccl_cp.enabled()
+            and hidden_states.is_cuda
             and not torch.cuda.is_current_stream_capturing()
         ):
             device = hidden_states.device
