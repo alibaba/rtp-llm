@@ -620,8 +620,8 @@ decord==0.6.0 \
 deep-ep @ http://artlab.alibaba-inc.com/1/pypi/rtp_llm/deep-ep/deep_ep-2.1.0%2Ba56d615-cp310-cp310-linux_x86_64.whl \
     --hash=sha256:76c04452cfbd8acf363ceeea1b59dc95b970fc945f86dec5b39bbb1b200dfcf0
     # via -r deps/requirements_torch_gpu_cuda13_sm90.txt
-deep-gemm @ http://artlab.alibaba-inc.com/1/pypi/rtp_llm/deep_gemm/deep_gemm-2.8.2%2B8692811.cu132-cp310-cp310-linux_x86_64.whl \
-    --hash=sha256:3fd8ecf073c7a13e452cae5f153a10fa17d4067b9b59d174e0b3554823b997b7
+deep-gemm @ http://artlab.alibaba-inc.com/1/pypi/rtp_llm/deep_gemm/deep_gemm-2.8.2%2Bbbbb3c3.cu132-cp310-cp310-linux_x86_64.whl \
+    --hash=sha256:2a3940ea0bd69d60dd41ef8f98249c01e2e724e68800e5464bc1e07b01279b98
     # via -r deps/requirements_torch_gpu_cuda13_sm90.txt
 distro==1.9.0 \
     --hash=sha256:2fa77c6fd8940f116ee1d6b94a2f90b13b5ea8d019b98bc8bafdcabcdd9bdbed \

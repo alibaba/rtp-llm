@@ -336,7 +336,7 @@ def main():
     from rtp_llm.test.perf_test.deepseek_v41_sm90_role_test import configure_jit_cache, validate_startup
     jit = configure_jit_cache()
     deep_gemm_version = importlib.metadata.version("deep-gemm")
-    require(deep_gemm_version.startswith("2.8.2+8692811"), "Select the separate SM90 DeepGEMM wheel")
+    require(deep_gemm_version.startswith("2.8.2+bbbb3c3"), "Select the separate SM90 DeepGEMM wheel")
     require(importlib.metadata.version("nvidia-cutlass-dsl") == "4.8.1", "Select the separate SM90 DSL wheel")
     gpu_rows = subprocess.check_output(["nvidia-smi", "--query-gpu=index,compute_cap", "--format=csv,noheader,nounits"], text=True).splitlines()
     devices = {int(row.split(",")[0]): row.split(",")[1].strip() for row in gpu_rows}

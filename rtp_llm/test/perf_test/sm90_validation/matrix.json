@@ -27,7 +27,7 @@
       },
       "gpu_pool": "H20_CU13",
       "architecture": "SM9.0; local L20Z requires actual device confirmation",
-      "deepgemm": "2.8.2+8692811",
+      "deepgemm": "2.8.2+bbbb3c3",
       "cutlass_dsl": "4.8.1",
       "sidecar": "flash_mla_sm909241ae3 MLA32"
     },

@@ -10,7 +10,7 @@ certify a build or test result.
 
 | Lane | Bazel selection | DeepGEMM | CUTLASS DSL |
 | --- | --- | --- | --- |
-| SM90 x86 | `--config=cuda13 --repo_env=RTP_LLM_SM90_DEPS=1` | `2.8.2+8692811` | `4.8.1` |
+| SM90 x86 | `--config=cuda13 --repo_env=RTP_LLM_SM90_DEPS=1` | `2.8.2+bbbb3c3` | `4.8.1` |
 | SM100/103 x86 | `--config=cuda13 --repo_env=RTP_LLM_SM90_DEPS=0` | `2.8.2+341b656` | `4.7.1` |
 | SM100 ARM | `--config=cuda13_arm --repo_env=RTP_LLM_SM90_DEPS=0` | upstream ARM `341b656` | `4.7.1` |
 

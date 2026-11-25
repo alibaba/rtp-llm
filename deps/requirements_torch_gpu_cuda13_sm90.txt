@@ -43,7 +43,7 @@ http://artlab.alibaba-inc.com/1/pypi/rtp_llm/gc_moe/gc_moe-0.6.1+0a3d661.cu132-p
 # DeepGEMM opt_sm90 with native Hopper G32 dense and fused shared GEMMs.
 # Preserves explicit-device SM100 views and sm90_fp8_fp4_mega_moe.
 # One CUDA 13.2 package, built against Torch 2.11+cu130.
-http://artlab.alibaba-inc.com/1/pypi/rtp_llm/deep_gemm/deep_gemm-2.8.2%2B8692811.cu132-cp310-cp310-linux_x86_64.whl
+http://artlab.alibaba-inc.com/1/pypi/rtp_llm/deep_gemm/deep_gemm-2.8.2%2Bbbbb3c3.cu132-cp310-cp310-linux_x86_64.whl
 https://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/rtp-llm-deps/dsv41/20261013/x86-cuda132/flash_mla-1.0.0%2B2e5429f-cp310-cp310-linux_x86_64.whl
 https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/whl/eplb-20261023-01a16309/flash_mla_legacy-1.0.0%2B9241ae3.rtp1-cp310-cp310-linux_x86_64.whl
 # Official DeepEP main@a56d6156 with legacy Buffer and V2 APIs.

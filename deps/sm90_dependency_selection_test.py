@@ -112,7 +112,7 @@ class DependencySelectionTest(unittest.TestCase):
             self.assertIn(
                 "nvidia-cutlass-dsl==" + ("4.8.1" if enabled else "4.7.1"), x86
             )
-            self.assertEqual(any("8692811" in value for value in x86), enabled)
+            self.assertEqual(any("bbbb3c3" in value for value in x86), enabled)
             self.assertEqual(any("gc_moe@" in value for value in x86), enabled)
             metadata.append(selected)
         self.assertEqual(
@@ -123,10 +123,10 @@ class DependencySelectionTest(unittest.TestCase):
         sm90 = (ROOT / "deps/requirements_lock_torch_gpu_cuda13_sm90.txt").read_text()
         self.assertIn("cuda-python==13.0.3", default)
         self.assertIn("nvidia-cutlass-dsl==4.7.1", default)
-        self.assertNotIn("8692811", default)
+        self.assertNotIn("bbbb3c3", default)
         self.assertIn("cuda-python==13.2.0", sm90)
         self.assertIn("nvidia-cutlass-dsl==4.8.1", sm90)
-        self.assertIn("8692811", sm90)
+        self.assertIn("bbbb3c3", sm90)
 
     def test_default_build_does_not_resolve_gc_moe_or_sm90_sidecar(self):
         source = (ROOT / "rtp_llm/models_py/BUILD").read_text()
