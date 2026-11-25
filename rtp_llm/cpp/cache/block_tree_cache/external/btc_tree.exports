@@ -1,0 +1,4 @@
+{
+    global: btc_tree_*;
+    local: *;
+};

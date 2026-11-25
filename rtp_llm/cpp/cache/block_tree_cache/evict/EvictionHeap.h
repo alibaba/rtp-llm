@@ -50,6 +50,10 @@ public:
         return out;
     }
 
+    std::vector<EvictionEntry> orderedEntries() const {
+        return {ordered_.begin(), ordered_.end()};
+    }
+
     bool   contains(TreeNode* node) const;
     size_t size() const;
 

@@ -315,6 +315,12 @@ cc_library(
 )
 
 cc_library(
+    name = "block_index",
+    hdrs = ["BlockIndex.h"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "batch_kv_cache_resource",
     srcs = ["KVCacheResource.cc"],
     hdrs = [
@@ -324,6 +330,7 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
+        ":block_index",
         ":cache_config",
         ":cache_group_type",
         "//rtp_llm/cpp/utils:core_utils",

@@ -29,6 +29,14 @@ BlockTree::BlockTree(std::vector<GroupSetPtr> group_sets): group_sets_(std::move
     root_->group_set_resources.resize(group_sets_.size());
 }
 
+BlockTree::BlockTree(ExternalGroups groups):
+    external_group_count_(groups.count), root_(std::make_unique<TreeNode>()) {
+    if (external_group_count_ == 0) {
+        throw std::invalid_argument("external BlockTree requires at least one group");
+    }
+    root_->group_set_resources.resize(external_group_count_);
+}
+
 const ReusableGroupLocation* BlockTree::reusableGroupLocation(std::string_view group_tag) const {
     const auto location_it = reusable_group_locations_.find(std::string(group_tag));
     return location_it == reusable_group_locations_.end() ? nullptr : &location_it->second;
@@ -97,7 +105,7 @@ TreeNode* BlockTree::createNode(CacheKeyType key, TreeNode* parent) {
     node->cache_key = key;
     node->parent    = parent;
     node->index     = node_pool_.size();
-    node->group_set_resources.resize(group_sets_.size());
+    node->group_set_resources.resize(group_sets_.size() + external_group_count_);
     auto* raw = node.get();
     node_pool_.push_back(std::move(node));
     cache_keys_.push_back(key);
@@ -126,6 +134,20 @@ std::vector<TreeNode*> BlockTree::findNode(const CacheKeysType& cache_keys) cons
         path.push_back(current);
     }
 
+    return path;
+}
+
+std::vector<TreeNode*> BlockTree::ensureExternalPath(const CacheKeysType& cache_keys) {
+    RTP_LLM_CHECK(external_group_count_ != 0);
+    auto      path    = findNode(cache_keys);
+    TreeNode* current = path.empty() ? root_.get() : path.back();
+    path.reserve(cache_keys.size());
+    for (size_t i = path.size(); i < cache_keys.size(); ++i) {
+        auto* child = createNode(cache_keys[i], current);
+        current->children.emplace(cache_keys[i], child);
+        path.push_back(child);
+        current = child;
+    }
     return path;
 }
 
@@ -394,11 +416,14 @@ void BlockTree::removePendingNodes(const std::unordered_map<TreeNode*, size_t>& 
     }
 }
 
-TreeNode* BlockTree::removeNodeAndEmptyAncestors(TreeNode* node) {
+TreeNode* BlockTree::removeNodeAndEmptyAncestors(TreeNode* node, CacheKeysType* removed_keys) {
     TreeNode* current       = node;
     size_t    removed_count = 0;
     while (isRemovable(current)) {
         TreeNode* parent = current->parent;
+        if (removed_keys) {
+            removed_keys->push_back(current->cache_key);
+        }
         removeNode(current);
         current = parent;
         ++removed_count;
