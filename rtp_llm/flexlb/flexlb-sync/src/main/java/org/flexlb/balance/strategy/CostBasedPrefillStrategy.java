@@ -73,7 +73,7 @@ public class CostBasedPrefillStrategy {
             Logger.debug("Prefill select failed: no admission capacity, request_id={}", requestId);
             balanceContext.recordSelectionReason(roleType, "NO_ADMISSION_CAPACITY");
             return classifyAdmissionFailure(
-                    discovery.directory(), balanceContext.getPriority(), roleType, group);
+                    discovery, balanceContext.getPriority(), roleType, group);
         }
         CacheMatchResult cacheMatchResult = getCacheMatchResult(balanceContext, roleType, group);
         Map<String, Integer> rejections = new java.util.HashMap<>();
@@ -411,21 +411,21 @@ public class CostBasedPrefillStrategy {
     }
 
     private static PlacementResult<SelectedRole, PlacementKey> classifyAdmissionFailure(
-            List<EndpointRegistry.PrefillRoutingEntry> directory,
-            int priority,
-            RoleType role,
-            String group) {
+            EndpointDiscovery discovery, int priority, RoleType role, String group) {
         AdmissionRejectReason reason = null;
         int workerCount = 0;
         long observedRequestCount = 0;
-        for (var entry : directory) {
+        for (var entry : discovery.directory()) {
             PrefillEndpoint endpoint = entry.endpoint();
             if (group != null && !group.equals(endpoint.getStatus().topologySnapshot().group())) {
                 continue;
             }
             workerCount++;
             observedRequestCount += endpoint.observedRequestCount();
-            AdmissionRejectReason workerReason = endpoint.admissionRejectReason(priority);
+            AdmissionRejectReason workerReason =
+                    discovery.directCapacityBlocked()
+                            ? AdmissionRejectReason.RESOURCE_EXHAUSTED
+                            : endpoint.admissionRejectReason(priority);
             if (reason == null) {
                 reason = workerReason;
             } else if (reason == AdmissionRejectReason.UNSPECIFIED
@@ -712,7 +712,10 @@ public class CostBasedPrefillStrategy {
         List<EndpointRegistry.PrefillRoutingEntry> matching = new ArrayList<>();
         int registered = 0;
         var config = context.getConfig();
-        boolean rankBeforeAdmission = !config.isBatchDispatch();
+        boolean nonBatch = !config.isBatchDispatch();
+        boolean canWaitForCapacity = nonBatch && config.isQueue();
+        boolean directNonBatch = nonBatch && config.isDirect();
+        boolean directCapacityBlocked = false;
         long nowUs = System.nanoTime() / 1000;
         for (EndpointRegistry.PrefillRoutingEntry entry : directory) {
             PrefillEndpoint endpoint = entry.endpoint();
@@ -720,13 +723,16 @@ public class CostBasedPrefillStrategy {
                 continue;
             }
             registered++;
-            if (rankBeforeAdmission
-                    ? endpoint.getStatus().hasFreshSchedulingStatus(nowUs)
-                    : endpoint.canAcceptRequest()) {
+            if (nonBatch && !endpoint.getStatus().hasFreshSchedulingStatus(nowUs)) {
+                continue;
+            }
+            if (canWaitForCapacity || endpoint.canAcceptRequest()) {
                 matching.add(entry);
+            } else if (directNonBatch) {
+                directCapacityBlocked = true;
             }
         }
-        return new EndpointDiscovery(directory, matching, registered);
+        return new EndpointDiscovery(directory, matching, registered, directCapacityBlocked);
     }
 
     private CacheMatchResult getCacheMatchResult(
@@ -856,7 +862,8 @@ public class CostBasedPrefillStrategy {
     private record EndpointDiscovery(
             List<EndpointRegistry.PrefillRoutingEntry> directory,
             List<EndpointRegistry.PrefillRoutingEntry> candidates,
-            int registeredCount) {
+            int registeredCount,
+            boolean directCapacityBlocked) {
 
         private EndpointDiscovery {
             candidates = java.util.Objects.requireNonNull(candidates, "candidates");
