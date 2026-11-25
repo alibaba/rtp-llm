@@ -44,6 +44,8 @@ _SM90_WEIGHT_LAYOUT = "tiled"
 
 _GATE_PACK_KERNEL = None
 _GATE_PACK_KERNEL_UNAVAILABLE = False
+_GATE_GEMV_PACK_API = None
+_GATE_GEMV_PACK_UNAVAILABLE = False
 
 # Largest token count where the merged launch still beats the two-launch path.
 # The merged kernel runs one program per (token, K128 tile), so its block count
@@ -71,6 +73,23 @@ def _get_gate_pack_kernel():
         return None
     _GATE_PACK_KERNEL = fused_sqrtsoftplus_gate_pack
     return _GATE_PACK_KERNEL
+
+
+def _get_gate_gemv_pack_api():
+    """Lazily import the SM90 fused Gate-GEMV/WGMMA + TopK + FP8 Pack API."""
+    global _GATE_GEMV_PACK_API, _GATE_GEMV_PACK_UNAVAILABLE
+    if _GATE_GEMV_PACK_API is not None or _GATE_GEMV_PACK_UNAVAILABLE:
+        return _GATE_GEMV_PACK_API
+    try:
+        from ..._sm90_gate_gemv_fused import (
+            can_use_sm90_gate_gemv_pack,
+            fused_sm90_gate_gemv_pack,
+        )
+    except Exception:  # noqa: BLE001 - CPU-only / missing cuda.bindings hosts
+        _GATE_GEMV_PACK_UNAVAILABLE = True
+        return None
+    _GATE_GEMV_PACK_API = (can_use_sm90_gate_gemv_pack, fused_sm90_gate_gemv_pack)
+    return _GATE_GEMV_PACK_API
 
 
 @register_strategy
@@ -180,6 +199,13 @@ class SM90MegaMoEStrategy(RoutedExpertsStrategy):
             self._mega_runtime_device,
         )
         self._input_packer = get_mega_sm90_input_packer()
+        if bool(self.cfg.is_decode_role):
+            try:
+                from ..._sm90_gate_gemv_fused import warmup_sm90_gate_gemv_pack
+
+                warmup_sm90_gate_gemv_pack(self._mega_runtime_device)
+            except Exception:  # noqa: BLE001 - CPU-only / fallback path stays available
+                pass
 
     def can_use_gate_pack_static(self, gate) -> bool:
         """Whether router + input staging can collapse into one launch.
@@ -299,21 +325,54 @@ class SM90MegaMoEStrategy(RoutedExpertsStrategy):
             self.setup_runtime()
         T = x.size(0)
         buf = self._mega_buf
-        with record_function_range("dsv4.moe.gate_linear_bf16"):
-            scores = gate._project_scores(x, gate._weight_bf16())
-        with record_function_range("dsv4.moe.mega_sm90_gate_pack"):
-            kernel(
-                scores.contiguous(),
-                gate.bias.contiguous(),
+        gemv_api = _get_gate_gemv_pack_api()
+        use_gemv_pack = False
+        w_bf16 = None
+        if gemv_api is not None and isinstance(
+            getattr(gate, "weight", None), torch.Tensor
+        ):
+            can_use_gemv, fused_gemv_pack = gemv_api
+            w_bf16 = gate._weight_bf16()
+            use_gemv_pack = can_use_gemv(
                 x,
+                w_bf16,
+                gate.bias,
                 buf.x[:T],
                 buf.x_sf[:T],
                 buf.topk_weights[:T],
                 buf.topk_idx[:T],
                 topk=int(gate.topk),
-                route_scale=float(gate.route_scale),
-                norm_eps=1e-12,
             )
+        if use_gemv_pack:
+            with record_function_range("dsv4.moe.mega_sm90_gate_gemv_pack"):
+                fused_gemv_pack(
+                    x,
+                    w_bf16,
+                    gate.bias,
+                    buf.x[:T],
+                    buf.x_sf[:T],
+                    buf.topk_weights[:T],
+                    buf.topk_idx[:T],
+                    topk=int(gate.topk),
+                    route_scale=float(gate.route_scale),
+                    norm_eps=1e-12,
+                )
+        else:
+            with record_function_range("dsv4.moe.gate_linear_bf16"):
+                scores = gate._project_scores(x, gate._weight_bf16())
+            with record_function_range("dsv4.moe.mega_sm90_gate_pack"):
+                kernel(
+                    scores.contiguous(),
+                    gate.bias.contiguous(),
+                    x,
+                    buf.x[:T],
+                    buf.x_sf[:T],
+                    buf.topk_weights[:T],
+                    buf.topk_idx[:T],
+                    topk=int(gate.topk),
+                    route_scale=float(gate.route_scale),
+                    norm_eps=1e-12,
+                )
         self._finalize_packed_routing(T, eplb_layer)
         y = self._mega_y[:T]
         self._launch(y, T, expert_load=expert_load)
