@@ -45,6 +45,11 @@ void registerPyModuleOps(py::module& rtp_ops_m) {
 
     rtp_ops_m.def("tp2_ar_hc_meta_size", &tp2ArHcMetaSize);
     rtp_ops_m.def("tp2_ar_hc_buffer_size", &tp2ArHcBufferSize, py::arg("max_single_rows") = 12288);
+    rtp_ops_m.def("tp2_ar_hc_lamport_buffer_size", &tp2ArHcLamportBufferSize, py::arg("max_lamport_rows") = 1024);
+    rtp_ops_m.def("tp2_ar_hc_init_lamport_buffer",
+                  &tp2ArHcInitLamportBuffer,
+                  py::arg("buffer_ptr"),
+                  py::arg("buffer_bytes"));
     rtp_ops_m.def("tp2_p2p_gather_buffer_size", &tp2P2pGatherBufferSize, py::arg("max_single_rows") = 12288);
     rtp_ops_m.def("tp2_p2p_all_gather",
                   &tp2P2pAllGather,
@@ -67,7 +72,9 @@ void registerPyModuleOps(py::module& rtp_ops_m) {
                   py::arg("packed_dual"),
                   py::arg("collect_amax"),
                   py::arg("enable_pdl"),
-                  py::arg("buffer_bytes") = 0);
+                  py::arg("buffer_bytes")         = 0,
+                  py::arg("lamport_buffers")      = std::vector<int64_t>{},
+                  py::arg("lamport_buffer_bytes") = 0);
     rtp_ops_m.def("tp2_ar_hc_inject_only",
                   &tp2ArHcInjectOnly,
                   py::arg("hyper_x"),
@@ -78,7 +85,9 @@ void registerPyModuleOps(py::module& rtp_ops_m) {
                   py::arg("rank"),
                   py::arg("packed_dual"),
                   py::arg("enable_pdl"),
-                  py::arg("buffer_bytes") = 0);
+                  py::arg("buffer_bytes")         = 0,
+                  py::arg("lamport_buffers")      = std::vector<int64_t>{},
+                  py::arg("lamport_buffer_bytes") = 0);
 
     rtp_ops_m.def("cublas_gemm_bf16_bf16_fp32",
                   &torch_ext::cublas_gemm_bf16_bf16_fp32,

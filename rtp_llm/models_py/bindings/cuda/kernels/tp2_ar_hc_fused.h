@@ -10,6 +10,8 @@ namespace rtp_llm {
 
 int64_t tp2ArHcMetaSize();
 int64_t tp2ArHcBufferSize(int64_t max_single_rows = 12288);
+int64_t tp2ArHcLamportBufferSize(int64_t max_lamport_rows = 1024);
+void    tp2ArHcInitLamportBuffer(int64_t buffer_ptr, int64_t buffer_bytes);
 int64_t tp2P2pGatherBufferSize(int64_t max_single_rows = 12288);
 
 torch::Tensor tp2P2pAllGather(const torch::Tensor&        shard,
@@ -31,7 +33,9 @@ tp2ArHcInjectNorm(const torch::Tensor&        hyper_x,
                   bool                        packed_dual,
                   bool                        collect_amax,
                   bool                        enable_pdl,
-                  int64_t                     buffer_bytes = 0);
+                  int64_t                     buffer_bytes         = 0,
+                  const std::vector<int64_t>& lamport_buffers      = {},
+                  int64_t                     lamport_buffer_bytes = 0);
 
 torch::Tensor tp2ArHcInjectOnly(const torch::Tensor&        hyper_x,
                                 const torch::Tensor&        local_sub,
@@ -41,6 +45,8 @@ torch::Tensor tp2ArHcInjectOnly(const torch::Tensor&        hyper_x,
                                 int64_t                     rank,
                                 bool                        packed_dual,
                                 bool                        enable_pdl,
-                                int64_t                     buffer_bytes = 0);
+                                int64_t                     buffer_bytes         = 0,
+                                const std::vector<int64_t>& lamport_buffers      = {},
+                                int64_t                     lamport_buffer_bytes = 0);
 
 }  // namespace rtp_llm

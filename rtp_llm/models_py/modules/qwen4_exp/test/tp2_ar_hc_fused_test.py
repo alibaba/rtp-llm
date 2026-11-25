@@ -52,7 +52,7 @@ def _tp2_worker(rank: int, port: int) -> None:
             g_gen.manual_seed(20261122)
             gamma = (torch.randn(10240, generator=g_gen, device=device) * 0.1).bfloat16()
 
-            for rows in (1, 4, 17, 48, 64, 128, 192, 256, 512, 1024, 2048, 5200, 8192):
+            for rows in (1, 4, 17, 48, 64, 128, 192, 256, 512, 1, 128, 4, 1024, 2048, 5200, 8192, 16):
                 x_gen = torch.Generator(device=device)
                 x_gen.manual_seed(1000 + rows)
                 hyper_x = torch.randn(
@@ -70,12 +70,15 @@ def _tp2_worker(rank: int, port: int) -> None:
                 local_packed = torch.randn(
                     (2 * rows, 2560), generator=r_gen, device=device, dtype=torch.bfloat16
                 )
+                # Inject negative-zero sentinel values to verify Lamport sanitization.
+                local_single[0, :16] = torch.tensor(-0.0, device=device, dtype=torch.bfloat16)
+                local_packed[0, :16] = torch.tensor(-0.0, device=device, dtype=torch.bfloat16)
+                local_packed[rows, :16] = torch.tensor(-0.0, device=device, dtype=torch.bfloat16)
 
                 peer_single = local_single.clone()
                 dist.all_reduce(peer_single, group=group)
-                peer_packed = local_packed.clone()
-                dist.all_reduce(peer_packed, group=group)
-                ref_dual = peer_packed[:rows] + peer_packed[rows:]
+                ref_dual = local_packed[:rows] + local_packed[rows:]
+                dist.all_reduce(ref_dual, group=group)
 
                 for packed_dual, local_t, ref_sub in (
                     (False, local_single, peer_single),
@@ -110,22 +113,22 @@ def _tp2_worker(rank: int, port: int) -> None:
                                 scale, ref_scale, atol=1e-6, rtol=1e-5
                             )
 
-            # CUDA Graph replay across multiple steps and shapes
-            for rows in (4, 64, 192):
+            # CUDA Graph replay across multiple steps and shapes (Lamport branch + row, bf16 + fused fp8 scale)
+            for rows, collect in ((4, True), (64, False), (64, True), (128, True), (192, False)):
                 gx = torch.randn((rows, 10240), device=device, dtype=torch.bfloat16)
                 gg = torch.randn((rows, 4), device=device, dtype=torch.bfloat16)
                 gp = torch.randn((2 * rows, 2560), device=device, dtype=torch.bfloat16)
                 deferred = DeferredTp2Sublayer(gp, True, ws)
-                ws.try_inject_grouped_norm(gx, deferred, gg, gamma, 1e-6, collect_scale=False)
+                ws.try_inject_grouped_norm(gx, deferred, gg, gamma, 1e-6, collect_scale=collect)
                 torch.cuda.synchronize(device)
                 dist.barrier(group=group)
 
                 graph = torch.cuda.CUDAGraph()
                 with torch.cuda.graph(graph):
-                    c_res, c_norm, _ = ws.try_inject_grouped_norm(
-                        gx, deferred, gg, gamma, 1e-6, collect_scale=False
+                    c_res, c_norm, c_scale = ws.try_inject_grouped_norm(
+                        gx, deferred, gg, gamma, 1e-6, collect_scale=collect
                     )
-                for step in range(3):
+                for step in range(4):
                     s_gen = torch.Generator(device=device)
                     s_gen.manual_seed(9000 + rows + step)
                     gx.copy_(
@@ -140,14 +143,15 @@ def _tp2_worker(rank: int, port: int) -> None:
                         torch.randn(gp.shape, generator=p_gen, device=device, dtype=torch.bfloat16)
                     )
                     graph.replay()
-                    ref_p = gp.clone()
-                    dist.all_reduce(ref_p, group=group)
-                    ref_sub = ref_p[:rows] + ref_p[rows:]
-                    ref_res, ref_norm, _ = try_inject_grouped_norm(
-                        gx, ref_sub, gg, gamma, 1e-6, collect_scale=False
+                    ref_sub = gp[:rows] + gp[rows:]
+                    dist.all_reduce(ref_sub, group=group)
+                    ref_res, ref_norm, ref_scale = try_inject_grouped_norm(
+                        gx, ref_sub, gg, gamma, 1e-6, collect_scale=collect
                     )
                     assert torch.equal(c_res, ref_res)
                     torch.testing.assert_close(c_norm, ref_norm, atol=1e-2, rtol=1e-2)
+                    if collect:
+                        torch.testing.assert_close(c_scale, ref_scale, atol=1e-6, rtol=1e-5)
                 graph.reset()
 
             # Multicast-free TP2 P2P IPC AllGather (decode + 10K prefill BF16 & FP8 + CUDA Graph)
