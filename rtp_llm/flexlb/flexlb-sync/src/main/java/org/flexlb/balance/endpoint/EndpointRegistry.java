@@ -780,8 +780,8 @@ public class EndpointRegistry {
                             reporter,
                             placementAvailability);
             case DECODE -> new DecodeEndpoint(status, endpointEvents, placementAvailability);
-            case ENCODER -> new EncoderEndpoint(status, endpointEvents);
-            case VIT -> new WorkerEndpoint(status);
+            case ENCODER -> new EncoderEndpoint(status, endpointEvents, placementAvailability);
+            case VIT -> new WorkerEndpoint(status, placementAvailability);
             case FRONTEND -> throw new AssertionError("validated above");
         };
     }

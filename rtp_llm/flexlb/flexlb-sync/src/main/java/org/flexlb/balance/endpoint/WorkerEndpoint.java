@@ -1,6 +1,7 @@
 package org.flexlb.balance.endpoint;
 
 import lombok.Getter;
+import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.dao.master.WorkerStatus;
 
 import java.util.Objects;
@@ -44,9 +45,15 @@ public class WorkerEndpoint {
     @Getter private final WorkerStatus status;
 
     private final EndpointGenerationLifecycle generationLifecycle;
+    private final PlacementAvailability placementAvailability;
 
     public WorkerEndpoint(WorkerStatus status) {
+        this(status, null);
+    }
+
+    WorkerEndpoint(WorkerStatus status, PlacementAvailability placementAvailability) {
         this.status = Objects.requireNonNull(status, "status");
+        this.placementAvailability = placementAvailability;
         this.generationLifecycle =
                 new EndpointGenerationLifecycle(this::continueRetirementAfterHandoff);
     }
@@ -139,7 +146,14 @@ public class WorkerEndpoint {
     }
 
     /** Wake placement attempts when this generation can accept more work. */
-    public void signalPlacementCapacityChanged() {}
+    public void signalPlacementCapacityChanged() {
+        if (placementAvailability != null
+                && !isGenerationRetiringOrRetired()
+                && hasFreshSchedulingStatus()) {
+            placementAvailability.capacityChanged(
+                    status.getRole(), status.topologySnapshot().group(), status.getLogicalIpPort());
+        }
+    }
 
     /** Validate an exact, still-open pin before consuming its admission right. */
     public final void requirePinnedGeneration(GenerationPin pin) {
