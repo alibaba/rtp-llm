@@ -370,12 +370,18 @@ def _ple_gate_and_norm_kernel(
     GC_PTR,
     U_PTR,
     UNORM_PTR,
+    COMB_SUB_PTR,
+    COMB_INJ_PTR,
+    COMB_OUT_PTR,
     KEY_STRIDE: tl.constexpr,
     VAL_STRIDE: tl.constexpr,
     HID_STRIDE: tl.constexpr,
+    COMB_OUT_STRIDE: tl.constexpr,
     WIDTH: tl.constexpr,
     H: tl.constexpr,
+    HC_COUNT: tl.constexpr,
     EPS: tl.constexpr,
+    HAS_COMBINE: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
@@ -384,7 +390,7 @@ def _ple_gate_and_norm_kernel(
     valid = col < H
     hc_col = branch * H + col
 
-    # 1. Per-branch GemmaRMSNorm on K and H (no bias, 1.0 + weight)
+    # 1. Per-branch GemmaRMSNorm on K and (optionally deferred-combined) H
     k = tl.load(KEY_PTR + row * KEY_STRIDE + hc_col, mask=valid, other=0.0).to(tl.float32)
     gk = tl.load(GK_PTR + hc_col, mask=valid, other=0.0).to(tl.float32)
     kn = (k * 1.0 / tl.sqrt(tl.sum(k * k, axis=0) / H + EPS) * (1.0 + gk)).to(
@@ -392,6 +398,12 @@ def _ple_gate_and_norm_kernel(
     )
 
     q = tl.load(HID_PTR + row * HID_STRIDE + hc_col, mask=valid, other=0.0).to(tl.float32)
+    if HAS_COMBINE:
+        sub = tl.load(COMB_SUB_PTR + row * H + col, mask=valid, other=0.0).to(tl.float32)
+        inj = tl.load(COMB_INJ_PTR + row * HC_COUNT + branch).to(tl.float32)
+        q_comb = (q + sub * inj).to(HID_PTR.dtype.element_ty)
+        tl.store(COMB_OUT_PTR + row * COMB_OUT_STRIDE + hc_col, q_comb, mask=valid)
+        q = q_comb.to(tl.float32)
     gq = tl.load(GQ_PTR + hc_col, mask=valid, other=0.0).to(tl.float32)
     qn = (q * 1.0 / tl.sqrt(tl.sum(q * q, axis=0) / H + EPS) * (1.0 + gq)).to(
         HID_PTR.dtype.element_ty
@@ -431,6 +443,53 @@ def _ple_add3_kernel(
     delta = (u + c).to(OUT_PTR.dtype.element_ty).to(tl.float32)
     h = tl.load(H_PTR + offs, mask=mask, other=0.0).to(tl.float32)
     tl.store(OUT_PTR + offs, h + delta, mask=mask)
+
+
+@triton.jit
+def _ple_add3_hc_combine_norm_kernel(
+    H_PTR,
+    U_PTR,
+    CONV_PTR,
+    SUB_PTR,
+    INJ_PTR,
+    W_PTR,
+    B_PTR,
+    OUT_H_PTR,
+    OUT_NORM_PTR,
+    WIDTH: tl.constexpr,
+    H: tl.constexpr,
+    HC_COUNT: tl.constexpr,
+    EPS: tl.constexpr,
+    HAS_COMBINE: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    row = tl.program_id(0).to(tl.int64)
+    branch = tl.program_id(1).to(tl.int64)
+    col = tl.arange(0, BLOCK)
+    valid = col < H
+    hc_col = branch * H + col
+    offs = row * WIDTH + hc_col
+
+    u = tl.load(U_PTR + offs, mask=valid, other=0.0).to(tl.float32)
+    c = tl.load(CONV_PTR + offs, mask=valid, other=0.0).to(tl.float32)
+    delta = (u + c).to(OUT_H_PTR.dtype.element_ty).to(tl.float32)
+    h = tl.load(H_PTR + offs, mask=valid, other=0.0).to(tl.float32)
+    comb = (h + delta).to(OUT_H_PTR.dtype.element_ty)
+    if HAS_COMBINE:
+        sub = tl.load(SUB_PTR + row * H + col, mask=valid, other=0.0).to(tl.float32)
+        inj = tl.load(INJ_PTR + row * HC_COUNT + branch).to(tl.float32)
+        comb = (comb.to(tl.float32) + sub * inj).to(OUT_H_PTR.dtype.element_ty)
+    tl.store(OUT_H_PTR + offs, comb, mask=valid)
+
+    comb_f = tl.where(valid, comb.to(tl.float32), 0.0)
+    inv_rms = 1.0 / tl.sqrt(tl.sum(comb_f * comb_f, axis=0) / H + EPS)
+    w = tl.load(W_PTR + hc_col, mask=valid, other=0.0).to(tl.float32)
+    normed = comb_f * inv_rms * (1.0 + w)
+    if HAS_BIAS:
+        b = tl.load(B_PTR + hc_col, mask=valid, other=0.0).to(tl.float32)
+        normed = normed + b
+    tl.store(OUT_NORM_PTR + offs, normed, mask=valid)
 
 
 # ---------------------------------------------------------------------------
@@ -549,19 +608,34 @@ def ple_gate_and_norm_triton(
     norm_conv: torch.Tensor,
     hc_count: int,
     eps: float = 1e-6,
+    *,
+    combine_sub: Optional[torch.Tensor] = None,
+    combine_inj: Optional[torch.Tensor] = None,
+    out_combined: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Fused PLE GemmaRMSNorm(K), GemmaRMSNorm(H), signed-sqrt gate, U=alpha*V, GemmaRMSNorm(U)."""
     B, T, width = hidden.shape
     hidden_size = width // hc_count
+    has_combine = combine_sub is not None and combine_inj is not None
     if not hidden.is_cuda or hidden_size > 8192:
         # Pure PyTorch fallback
+        hid_eff = hidden
+        if has_combine:
+            assert combine_sub is not None and combine_inj is not None
+            hid_eff = (
+                hidden.reshape(B, T, hc_count, hidden_size).float()
+                + combine_sub.reshape(B, T, 1, hidden_size).float()
+                * combine_inj.reshape(B, T, hc_count, 1).float()
+            ).flatten(-2).to(hidden.dtype)
+            if out_combined is not None:
+                out_combined.copy_(hid_eff)
         k_4 = key.reshape(B, T, hc_count, hidden_size).float()
         kn = (
             k_4
             * torch.rsqrt(k_4.square().mean(dim=-1, keepdim=True) + eps)
             * (1.0 + norm_key.reshape(1, 1, hc_count, hidden_size).float())
         ).to(key.dtype)
-        h_4 = hidden.reshape(B, T, hc_count, hidden_size).float()
+        h_4 = hid_eff.reshape(B, T, hc_count, hidden_size).float()
         qn = (
             h_4
             * torch.rsqrt(h_4.square().mean(dim=-1, keepdim=True) + eps)
@@ -593,7 +667,20 @@ def ple_gate_and_norm_triton(
     u = torch.empty_like(hid_c)
     u_norm = torch.empty_like(hid_c)
     if B * T == 0:
+        if has_combine and out_combined is not None:
+            out_combined.zero_()
         return u, u_norm
+
+    if has_combine:
+        assert combine_sub is not None and combine_inj is not None
+        sub_2d = combine_sub.contiguous().view(B * T, hidden_size)
+        inj_2d = combine_inj.contiguous().view(B * T, hc_count)
+        comb_target = out_combined if out_combined is not None else torch.empty_like(hid_c)
+        comb_2d = comb_target.view(B * T, width)
+    else:
+        sub_2d = hid_2d
+        inj_2d = hid_2d
+        comb_2d = hid_2d
 
     block = max(128, triton.next_power_of_2(hidden_size))
     num_warps = 4
@@ -606,12 +693,18 @@ def ple_gate_and_norm_triton(
         norm_conv.contiguous(),
         u.view(B * T, width),
         u_norm.view(B * T, width),
+        sub_2d,
+        inj_2d,
+        comb_2d,
         KEY_STRIDE=int(key_2d.stride(0)),
         VAL_STRIDE=int(val_2d.stride(0)),
         HID_STRIDE=int(hid_2d.stride(0)),
+        COMB_OUT_STRIDE=int(comb_2d.stride(0)),
         WIDTH=width,
         H=hidden_size,
+        HC_COUNT=hc_count,
         EPS=eps,
+        HAS_COMBINE=has_combine,
         BLOCK=block,
         num_warps=num_warps,
     )
@@ -646,6 +739,83 @@ def ple_add3_triton(
     return out
 
 
+def ple_add3_and_hc_norm_triton(
+    hidden: torch.Tensor,
+    u: torch.Tensor,
+    conv_out: torch.Tensor,
+    norm_weight: torch.Tensor,
+    norm_bias: Optional[torch.Tensor] = None,
+    hc_count: int = 4,
+    eps: float = 1e-6,
+    *,
+    combine_sub: Optional[torch.Tensor] = None,
+    combine_inj: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Fused H + (U + conv_out) [+ post inj * sub] + next-HC per-branch GemmaRMSNorm."""
+    width = int(hidden.shape[-1])
+    if width % hc_count != 0:
+        raise ValueError(f"Last dim {width} is not divisible by hc_count={hc_count}")
+    hidden_size = width // hc_count
+    has_combine = combine_sub is not None and combine_inj is not None
+
+    if not hidden.is_cuda or hidden_size > 8192:
+        comb = hidden + (u + conv_out)
+        if has_combine:
+            assert combine_sub is not None and combine_inj is not None
+            comb = (
+                comb.unflatten(-1, (hc_count, hidden_size)).float()
+                + combine_sub.unsqueeze(-2).float() * combine_inj.unsqueeze(-1).float()
+            ).flatten(-2).to(hidden.dtype)
+        streams = comb.unflatten(-1, (hc_count, hidden_size)).float()
+        normed_f = streams * torch.rsqrt(streams.square().mean(dim=-1, keepdim=True) + eps)
+        normed = normed_f.flatten(-2) * (1.0 + norm_weight.float())
+        if norm_bias is not None:
+            normed = normed + norm_bias.float()
+        return comb, normed.to(hidden.dtype)
+
+    h_c = hidden.contiguous()
+    u_c = u.contiguous()
+    c_c = conv_out.contiguous()
+    w_c = norm_weight.contiguous()
+    b_c = norm_bias.contiguous() if norm_bias is not None else w_c
+    rows = h_c.numel() // width
+    out_h = torch.empty_like(h_c)
+    out_norm = torch.empty_like(h_c)
+    if rows == 0:
+        return out_h, out_norm
+
+    if has_combine:
+        assert combine_sub is not None and combine_inj is not None
+        sub_c = combine_sub.contiguous().view(rows, hidden_size)
+        inj_c = combine_inj.contiguous().view(rows, hc_count)
+    else:
+        sub_c = h_c
+        inj_c = h_c
+
+    block = max(128, triton.next_power_of_2(hidden_size))
+    num_warps = 8 if block >= 4096 else 4
+    _ple_add3_hc_combine_norm_kernel[(rows, hc_count)](
+        h_c,
+        u_c,
+        c_c,
+        sub_c,
+        inj_c,
+        w_c,
+        b_c,
+        out_h,
+        out_norm,
+        WIDTH=width,
+        H=hidden_size,
+        HC_COUNT=hc_count,
+        EPS=eps,
+        HAS_COMBINE=has_combine,
+        HAS_BIAS=norm_bias is not None,
+        BLOCK=block,
+        num_warps=num_warps,
+    )
+    return out_h, out_norm
+
+
 # ---------------------------------------------------------------------------
 # Module: Qwen4_5PLELayer
 # ---------------------------------------------------------------------------
@@ -676,6 +846,10 @@ class Qwen4_5PLELayer(nn.Module):
         tp_rank: int = 0,
         tp_group: Any = None,
         fast_all_reduce: Any = None,
+        sp_size: int = 1,
+        sp_rank: int = 0,
+        sp_group: Any = None,
+        dp_attn: bool = False,
     ) -> None:
         super().__init__()
         if ngram_size < 2:
@@ -770,6 +944,10 @@ class Qwen4_5PLELayer(nn.Module):
         self.norm_conv = nn.Parameter(
             torch.zeros(self.hc_hidden_size, dtype=dtype, device=device)
         )
+        self.sp_size = max(1, int(sp_size))
+        self.sp_rank = int(sp_rank)
+        self.sp_group = sp_group
+        self.dp_attn = bool(dp_attn)
         self.conv1d = Qwen4_5ShortConv(
             channels=self.hc_hidden_size,
             kernel_size=conv_kernel_size,
@@ -777,6 +955,10 @@ class Qwen4_5PLELayer(nn.Module):
             use_activation=False,
             dtype=dtype,
             device=device,
+            sp_size=self.sp_size,
+            sp_rank=self.sp_rank,
+            sp_group=self.sp_group,
+            dp_attn=self.dp_attn,
         )
 
         # External n-gram table storage (intentionally NOT registered as Parameter/Buffer
@@ -951,7 +1133,7 @@ class Qwen4_5PLELayer(nn.Module):
         wv = self.value_proj.weight
         if torch.is_grad_enabled() and (wk.requires_grad or wv.requires_grad):
             return torch.cat([wk, wv], dim=0)
-        key = (wk.data_ptr(), wk._version, wv.data_ptr(), wv._version)
+        key = (wk.data_ptr(), 0 if wk.is_inference() else wk._version, wv.data_ptr(), 0 if wv.is_inference() else wv._version)
         if self._fused_kv_key != key or self._fused_kv_weight is None:
             self._fused_kv_weight = torch.cat([wk, wv], dim=0).contiguous()
             self._fused_kv_key = key
@@ -1215,13 +1397,63 @@ class Qwen4_5PLELayer(nn.Module):
         block_t: int = 16,
     ) -> torch.Tensor:
         """Whole-batch packed ragged prefill with boundary snapshot scatter."""
+        ple_out, _ = self.forward_packed_prefill_with_hc(
+            hidden_states,
+            flat_input_ids,
+            cu_seqlens,
+            tok_req,
+            tile_req,
+            tile_t0,
+            prev_ngram_ctx=prev_ngram_ctx,
+            init_conv_state=init_conv_state,
+            snap_tok_idx=snap_tok_idx,
+            snap_req_idx=snap_req_idx,
+            conv_dst_pool=conv_dst_pool,
+            conv_snap_phys=conv_snap_phys,
+            ctx_dst_pool=ctx_dst_pool,
+            ctx_snap_phys=ctx_snap_phys,
+            skip_invalid_phys=skip_invalid_phys,
+            block_t=block_t,
+        )
+        return ple_out
+
+    def forward_packed_prefill_with_hc(
+        self,
+        hidden_states: torch.Tensor,
+        flat_input_ids: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        tok_req: torch.Tensor,
+        tile_req: torch.Tensor,
+        tile_t0: torch.Tensor,
+        *,
+        prev_ngram_ctx: Optional[torch.Tensor] = None,
+        init_conv_state: Optional[torch.Tensor] = None,
+        snap_tok_idx: Optional[torch.Tensor] = None,
+        snap_req_idx: Optional[torch.Tensor] = None,
+        conv_dst_pool: Optional[torch.Tensor] = None,
+        conv_snap_phys: Optional[torch.Tensor] = None,
+        ctx_dst_pool: Optional[torch.Tensor] = None,
+        ctx_snap_phys: Optional[torch.Tensor] = None,
+        skip_invalid_phys: bool = True,
+        block_t: int = 16,
+        pre_combine_sub: Optional[torch.Tensor] = None,
+        pre_combine_inj: Optional[torch.Tensor] = None,
+        post_combine_sub: Optional[torch.Tensor] = None,
+        post_combine_inj: Optional[torch.Tensor] = None,
+        hc_norm_weight: Optional[torch.Tensor] = None,
+        hc_norm_bias: Optional[torch.Tensor] = None,
+        hc_eps: float = 1e-6,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """Whole-batch packed ragged prefill optionally fused with pre/post HC ops."""
         N, W = hidden_states.shape
         if W != self.hc_hidden_size:
             raise ValueError(
                 f"Expected hidden_states width {self.hc_hidden_size}, got {W}"
             )
         if N == 0:
-            return hidden_states.clone()
+            h_empty = hidden_states.clone()
+            n_empty = torch.empty_like(h_empty) if hc_norm_weight is not None else None
+            return h_empty, n_empty
 
         if flat_input_ids.is_cuda and self.ngram_size == 3:
             ids_c = flat_input_ids.to(torch.int64).contiguous()
@@ -1321,6 +1553,8 @@ class Qwen4_5PLELayer(nn.Module):
         )
         key, value = self._project_kv_fused(emb, use_fused_cuda=hidden_states.is_cuda)
         h_3d = hidden_states.unsqueeze(0)
+        has_pre = pre_combine_sub is not None and pre_combine_inj is not None
+        h_eff_3d = torch.empty_like(h_3d) if has_pre else h_3d
         u, u_norm = ple_gate_and_norm_triton(
             key,
             value,
@@ -1330,6 +1564,9 @@ class Qwen4_5PLELayer(nn.Module):
             self.norm_conv,
             self.hc_count,
             self.eps,
+            combine_sub=pre_combine_sub.unsqueeze(0) if has_pre else None,
+            combine_inj=pre_combine_inj.unsqueeze(0) if has_pre else None,
+            out_combined=h_eff_3d if has_pre else None,
         )
         conv_out = causal_dwconv1d_ragged_prefill_with_snapshots_triton(
             u_norm.squeeze(0),
@@ -1347,7 +1584,21 @@ class Qwen4_5PLELayer(nn.Module):
             use_activation=False,
             block_t=block_t,
         )
-        return ple_add3_triton(h_3d, u, conv_out.unsqueeze(0)).squeeze(0)
+        if hc_norm_weight is not None:
+            has_post = post_combine_sub is not None and post_combine_inj is not None
+            ple_out_3d, hc_normed_3d = ple_add3_and_hc_norm_triton(
+                h_eff_3d,
+                u,
+                conv_out.unsqueeze(0),
+                hc_norm_weight,
+                hc_norm_bias,
+                hc_count=self.hc_count,
+                eps=hc_eps,
+                combine_sub=post_combine_sub.unsqueeze(0) if has_post else None,
+                combine_inj=post_combine_inj.unsqueeze(0) if has_post else None,
+            )
+            return ple_out_3d.squeeze(0), hc_normed_3d.squeeze(0)
+        return ple_add3_triton(h_eff_3d, u, conv_out.unsqueeze(0)).squeeze(0), None
 
     def forward(
         self,

@@ -775,11 +775,16 @@ def load_qwen4_5_from_checkpoint(
     backbone = causal_lm.model if hasattr(causal_lm, "model") else causal_lm
     lm_head = getattr(causal_lm, "lm_head", None)
     cfg: Qwen4_5ArchConfig = backbone.config
-    ep_size = getattr(backbone, "ep_size", 1)
-    ep_rank = getattr(backbone, "ep_rank", 0)
+    ep_size = int(getattr(backbone, "ep_size", 1) or 1)
+    ep_rank = int(getattr(backbone, "ep_rank", 0) or 0)
     ep_group = getattr(backbone, "ep_group", None)
     tp_size = max(1, int(getattr(backbone, "tp_size", 1) or 1))
     tp_rank = int(getattr(backbone, "tp_rank", 0) or 0)
+    tp_group = getattr(backbone, "tp_group", None)
+    dp_attn = bool(getattr(backbone, "dp_attn", False)) or int(getattr(backbone, "dp_size", 1) or 1) > 1
+    ple_shard_size = tp_size if dp_attn else ep_size
+    ple_shard_rank = tp_rank if dp_attn else ep_rank
+    ple_shard_group = tp_group if dp_attn else ep_group
 
     device = backbone.embed_tokens.weight.device
     ops: List[Tuple[Any, ...]] = []
@@ -844,9 +849,9 @@ def load_qwen4_5_from_checkpoint(
                     ops.append((scale_key, w_scale_tensor, torch.bfloat16))
 
                 total_shards = cfg.split_ngram_parts
-                if ple_mode == "gpu_sharded" and ep_size > 1:
-                    local_shards = total_shards // ep_size
-                    shard_offset = ep_rank * local_shards
+                if ple_mode == "gpu_sharded" and ple_shard_size > 1:
+                    local_shards = total_shards // ple_shard_size
+                    shard_offset = ple_shard_rank * local_shards
                     shard_dev = device
                 elif ple_mode == "cpu_uva":
                     local_shards = total_shards
@@ -1007,13 +1012,13 @@ def load_qwen4_5_from_checkpoint(
 
         for ple, shard_bufs, w_scale_tensor, shard_offset, total_shards in ple_plans:
             w_scale = w_scale_tensor if w_scale_tensor is not None else DEFAULT_PLE_WEIGHT_SCALE
-            if ple_mode == "gpu_sharded" and ep_size > 1:
+            if ple_mode == "gpu_sharded" and ple_shard_size > 1:
                 ple.set_ngram_table(
                     shard_bufs,
                     weight_scale=w_scale,
                     shard_offset=shard_offset,
                     total_shards=total_shards,
-                    ep_group=ep_group,
+                    ep_group=ple_shard_group,
                 )
             elif ple_mode == "cpu_uva":
                 ple.set_ngram_table(
@@ -1131,13 +1136,16 @@ def bind_qwen4_5_model_weights(
             if isinstance(shards_raw, (list, tuple)):
                 total_shards = arch_cfg.split_ngram_parts
                 local_shards = len(shards_raw)
-                shard_offset = ep_rank * local_shards if local_shards < total_shards else 0
+                dp_attn = bool(getattr(backbone, "dp_attn", False)) or int(getattr(backbone, "dp_size", 1) or 1) > 1
+                b_rank = eff_rank if dp_attn else ep_rank
+                b_group = getattr(backbone, "tp_group", None) if dp_attn else ep_group
+                shard_offset = b_rank * local_shards if local_shards < total_shards else 0
                 ple.set_ngram_table(
                     list(shards_raw),
                     weight_scale=w_scale,
                     shard_offset=shard_offset,
                     total_shards=total_shards,
-                    ep_group=ep_group if local_shards < total_shards else None,
+                    ep_group=b_group if local_shards < total_shards else None,
                     enable_cpu_uva=True,
                 )
             else:

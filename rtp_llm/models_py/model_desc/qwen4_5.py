@@ -19,8 +19,12 @@ production ``1109-bf16-re-mxfp4-ple-fp8`` checkpoint:
 
 from __future__ import annotations
 
+import inspect
 import math
+import os
+import threading
 from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple, Union
 
 import torch
@@ -49,6 +53,11 @@ from rtp_llm.models_py.modules.qwen4_5.short_conv import Qwen4_5ShortConv
 from rtp_llm.models_py.modules.qwen4_5.yoco import YoCoSharingPlan
 
 
+_SUPPORTED_PARALLEL_MODES = ("tp4_ep4", "dp4_ep4", "dp2_tp2_ep4", "sp4_tp4_ep4")
+_SUBGROUP_CACHE_LOCK = threading.Lock()
+_SUBGROUP_CACHE: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
+
+
 def _resolve_tp_group_safe(tp_size: int) -> Any:
     if tp_size <= 1 or not dist.is_available() or not dist.is_initialized():
         return None
@@ -61,9 +70,376 @@ def _resolve_tp_group_safe(tp_size: int) -> Any:
             return _get_group(Group.TP)
     except Exception:
         pass
-    if dist.get_world_size() >= tp_size:
+    if dist.get_world_size() == tp_size:
         return dist.group.WORLD
     return None
+
+
+def _resolve_dp_group_safe(dp_size: int) -> Any:
+    if dp_size <= 1 or not dist.is_available() or not dist.is_initialized():
+        return None
+    try:
+        from rtp_llm.models_py.distributed import collective_torch
+
+        if getattr(collective_torch, "_initialized", False):
+            from rtp_llm.models_py.distributed.collective_torch import Group, _get_group
+
+            return _get_group(Group.DP)
+    except Exception:
+        pass
+    if dist.get_world_size() == dp_size:
+        return dist.group.WORLD
+    return None
+
+
+@dataclass(frozen=True)
+class Qwen4_5ParallelTopology:
+    """Resolved multi-dimensional parallelism topology for Target and DFlash2."""
+
+    parallel_mode: str
+    world_size: int
+    world_rank: int
+    tp_size: int
+    tp_rank: int
+    tp_group: Any
+    dp_size: int
+    dp_rank: int
+    dp_group: Any
+    ep_size: int
+    ep_rank: int
+    ep_group: Any
+    sp_size: int
+    sp_rank: int
+    sp_group: Any
+    dp_attn: bool
+
+
+def _get_or_create_2d_subgroups(
+    world_size: int, world_rank: int, dp_size: int, tp_size: int
+) -> Tuple[Any, Any]:
+    """Deterministically construct DP & TP ProcessGroups on an initialized WORLD."""
+    backend = dist.get_backend(dist.group.WORLD)
+    cache_key = (id(dist.group.WORLD), str(backend), world_size, dp_size, tp_size)
+    with _SUBGROUP_CACHE_LOCK:
+        cached = _SUBGROUP_CACHE.get(cache_key)
+        if cached is not None:
+            return cached["tp_group"], cached["dp_group"]
+
+        my_tp_group: Any = dist.group.WORLD if tp_size == world_size else None
+        my_dp_group: Any = dist.group.WORLD if dp_size == world_size else None
+        if 1 < tp_size < world_size:
+            for dp_r in range(dp_size):
+                ranks = [dp_r * tp_size + t for t in range(tp_size)]
+                grp = dist.new_group(ranks=ranks, backend=backend)
+                if world_rank in ranks:
+                    my_tp_group = grp
+            dist.barrier(group=dist.group.WORLD)
+        if 1 < dp_size < world_size:
+            for tp_r in range(tp_size):
+                ranks = [d * tp_size + tp_r for d in range(dp_size)]
+                grp = dist.new_group(ranks=ranks, backend=backend)
+                if world_rank in ranks:
+                    my_dp_group = grp
+            dist.barrier(group=dist.group.WORLD)
+
+        _SUBGROUP_CACHE[cache_key] = {"tp_group": my_tp_group, "dp_group": my_dp_group}
+        return my_tp_group, my_dp_group
+
+
+def resolve_qwen4_5_parallel_topology(
+    *,
+    parallel_mode: Optional[str] = None,
+    tp_size: Optional[int] = None,
+    tp_rank: Optional[int] = None,
+    tp_group: Any = None,
+    ep_size: Optional[int] = None,
+    ep_rank: Optional[int] = None,
+    ep_group: Any = None,
+    dp_size: Optional[int] = None,
+    dp_rank: Optional[int] = None,
+    dp_group: Any = None,
+    sp_size: Optional[int] = None,
+    sp_rank: Optional[int] = None,
+    sp_group: Any = None,
+    dp_attn: Optional[bool] = None,
+) -> Qwen4_5ParallelTopology:
+    """Resolve TP/DP/EP/SP topology from explicit args or ``parallel_mode`` preset."""
+    dist_init = dist.is_available() and dist.is_initialized()
+    dist_ws = int(dist.get_world_size()) if dist_init else 1
+    dist_rk = int(dist.get_rank()) if dist_init else 0
+
+    mode = str(parallel_mode).strip().lower() if parallel_mode else ""
+    if mode and mode not in _SUPPORTED_PARALLEL_MODES:
+        raise ValueError(
+            f"Unsupported parallel_mode={parallel_mode!r}; expected one of {_SUPPORTED_PARALLEL_MODES}"
+        )
+
+    if mode == "tp4_ep4":
+        tp_s = max(1, int(tp_size if tp_size is not None else (dist_ws if dist_ws > 1 else 4)))
+        ep_s = max(1, int(ep_size if ep_size is not None else tp_s))
+        dp_s = max(1, int(dp_size if dp_size is not None else 1))
+        sp_s = max(1, int(sp_size if sp_size is not None else 1))
+        tp_r = int(tp_rank if tp_rank is not None else (dist_rk % tp_s if dist_init else 0))
+        ep_r = int(ep_rank if ep_rank is not None else (dist_rk % ep_s if dist_init else 0))
+        dp_r = int(dp_rank if dp_rank is not None else 0)
+        sp_r = int(sp_rank if sp_rank is not None else 0)
+        eff_dp_attn = bool(dp_attn) if dp_attn is not None else (dp_s > 1)
+    elif mode == "dp4_ep4":
+        dp_s = max(1, int(dp_size if dp_size is not None else (dist_ws if dist_ws > 1 else 4)))
+        tp_s = max(1, int(tp_size if tp_size is not None else 1))
+        ep_s = max(1, int(ep_size if ep_size is not None else dp_s))
+        sp_s = max(1, int(sp_size if sp_size is not None else 1))
+        dp_r = int(dp_rank if dp_rank is not None else (dist_rk % dp_s if dist_init else 0))
+        ep_r = int(ep_rank if ep_rank is not None else (dist_rk % ep_s if dist_init else 0))
+        tp_r = int(tp_rank if tp_rank is not None else 0)
+        sp_r = int(sp_rank if sp_rank is not None else 0)
+        eff_dp_attn = bool(dp_attn) if dp_attn is not None else True
+    elif mode == "dp2_tp2_ep4":
+        tp_s = max(1, int(tp_size if tp_size is not None else 2))
+        dp_s = max(1, int(dp_size if dp_size is not None else (max(1, dist_ws // tp_s) if dist_ws > 1 else 2)))
+        ep_s = max(1, int(ep_size if ep_size is not None else dp_s * tp_s))
+        sp_s = max(1, int(sp_size if sp_size is not None else 1))
+        if dist_init and dist_ws >= dp_s * tp_s:
+            def_dp_r, def_tp_r = divmod(dist_rk % (dp_s * tp_s), tp_s)
+        else:
+            def_dp_r, def_tp_r = 0, 0
+        dp_r = int(dp_rank if dp_rank is not None else def_dp_r)
+        tp_r = int(tp_rank if tp_rank is not None else def_tp_r)
+        ep_r = int(ep_rank if ep_rank is not None else (dist_rk % ep_s if dist_init else (dp_r * tp_s + tp_r)))
+        sp_r = int(sp_rank if sp_rank is not None else 0)
+        eff_dp_attn = bool(dp_attn) if dp_attn is not None else True
+    elif mode == "sp4_tp4_ep4":
+        tp_s = max(1, int(tp_size if tp_size is not None else (dist_ws if dist_ws > 1 else 4)))
+        sp_s = max(1, int(sp_size if sp_size is not None else tp_s))
+        ep_s = max(1, int(ep_size if ep_size is not None else tp_s))
+        dp_s = max(1, int(dp_size if dp_size is not None else 1))
+        tp_r = int(tp_rank if tp_rank is not None else (dist_rk % tp_s if dist_init else 0))
+        sp_r = int(sp_rank if sp_rank is not None else (dist_rk % sp_s if dist_init else 0))
+        ep_r = int(ep_rank if ep_rank is not None else (dist_rk % ep_s if dist_init else 0))
+        dp_r = int(dp_rank if dp_rank is not None else 0)
+        eff_dp_attn = bool(dp_attn) if dp_attn is not None else False
+    else:
+        tp_s = max(1, int(tp_size if tp_size is not None else 1))
+        ep_s = max(1, int(ep_size if ep_size is not None else 1))
+        dp_s = max(1, int(dp_size if dp_size is not None else 1))
+        sp_s = max(1, int(sp_size if sp_size is not None else 1))
+        tp_r = int(tp_rank if tp_rank is not None else 0)
+        ep_r = int(ep_rank if ep_rank is not None else 0)
+        dp_r = int(dp_rank if dp_rank is not None else 0)
+        sp_r = int(sp_rank if sp_rank is not None else 0)
+        eff_dp_attn = bool(dp_attn) if dp_attn is not None else (dp_s > 1)
+        if not mode:
+            if sp_s > 1 and tp_s > 1:
+                mode = "sp4_tp4_ep4"
+            elif dp_s > 1 and tp_s > 1:
+                mode = "dp2_tp2_ep4"
+            elif dp_s > 1:
+                mode = "dp4_ep4"
+            else:
+                mode = "tp4_ep4"
+
+    eff_ws = max(1, dist_ws if dist_init else max(dp_s * tp_s, ep_s, sp_s))
+    eff_wr = dist_rk if dist_init else (dp_r * tp_s + tp_r)
+
+    if dist_init:
+        if ep_group is None and ep_s > 1 and dist_ws == ep_s:
+            ep_group = dist.group.WORLD
+        if tp_group is None and tp_s > 1:
+            tp_group = _resolve_tp_group_safe(tp_s)
+        if dp_group is None and dp_s > 1:
+            dp_group = _resolve_dp_group_safe(dp_s)
+        if (tp_s > 1 and tp_group is None) or (dp_s > 1 and dp_group is None):
+            if dp_s * tp_s == dist_ws:
+                sg_tp, sg_dp = _get_or_create_2d_subgroups(dist_ws, dist_rk, dp_s, tp_s)
+                if tp_group is None and tp_s > 1:
+                    tp_group = sg_tp
+                if dp_group is None and dp_s > 1:
+                    dp_group = sg_dp
+        if sp_group is None and sp_s > 1:
+            if tp_s == sp_s and tp_group is not None:
+                sp_group = tp_group
+            elif dist_ws == sp_s:
+                sp_group = dist.group.WORLD
+
+    return Qwen4_5ParallelTopology(
+        parallel_mode=mode,
+        world_size=eff_ws,
+        world_rank=eff_wr,
+        tp_size=tp_s,
+        tp_rank=tp_r,
+        tp_group=tp_group,
+        dp_size=dp_s,
+        dp_rank=dp_r,
+        dp_group=dp_group,
+        ep_size=ep_s,
+        ep_rank=ep_r,
+        ep_group=ep_group,
+        sp_size=sp_s,
+        sp_rank=sp_r,
+        sp_group=sp_group,
+        dp_attn=eff_dp_attn,
+    )
+
+
+class _CpuAllToAllState:
+    def __init__(
+        self,
+        hidden: torch.Tensor,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+        splits: List[int],
+        local_tokens: int,
+    ) -> None:
+        self.mode = "cpu_gloo_gather"
+        self.hidden = hidden
+        self.hidden_fp8 = None
+        self.topk_ids = topk_ids
+        self.topk_weights = topk_weights
+        self.splits = splits
+        self.local_tokens = local_tokens
+
+
+class _CpuAllToAllCommShim:
+    """Pure-PyTorch AllToAll shim matching Qwen4_5AllToAllComm for Gloo/CPU unit tests."""
+
+    def __init__(self, group: Any) -> None:
+        self.group = group
+        self.world_size = int(dist.get_world_size(group)) if group is not None else 1
+        self.rank = int(dist.get_rank(group)) if group is not None else 0
+
+    def dispatch(
+        self,
+        hidden: torch.Tensor,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+        *,
+        num_experts: Optional[int] = None,
+        equal_tokens: Optional[bool] = None,
+        quantize_fp8: bool = False,
+    ) -> _CpuAllToAllState:
+        del num_experts, quantize_fp8
+        dev = hidden.device
+        m_loc = int(hidden.shape[0])
+        if self.world_size <= 1 or self.group is None:
+            return _CpuAllToAllState(hidden, topk_ids, topk_weights, [m_loc], m_loc)
+        if equal_tokens:
+            splits = [m_loc] * self.world_size
+        else:
+            cnts = [torch.empty((1,), dtype=torch.int64, device="cpu") for _ in range(self.world_size)]
+            dist.all_gather(cnts, torch.tensor([m_loc], dtype=torch.int64, device="cpu"), group=self.group)
+            splits = [int(c.item()) for c in cnts]
+        max_m = max(splits) if splits else 0
+        if max_m == 0:
+            return _CpuAllToAllState(hidden, topk_ids, topk_weights, splits, 0)
+        h_cpu = hidden.detach().to(device="cpu").contiguous()
+        i_cpu = topk_ids.detach().to(device="cpu", dtype=torch.int64).contiguous()
+        w_cpu = topk_weights.detach().to(device="cpu", dtype=torch.float32).contiguous()
+        pad = max_m - m_loc
+        h_pad = torch.cat([h_cpu, torch.zeros((pad, h_cpu.shape[1]), dtype=h_cpu.dtype)], dim=0) if pad > 0 else h_cpu
+        i_pad = torch.cat([i_cpu, torch.full((pad, i_cpu.shape[1]), -1, dtype=torch.int64)], dim=0) if pad > 0 else i_cpu
+        w_pad = torch.cat([w_cpu, torch.zeros((pad, w_cpu.shape[1]), dtype=torch.float32)], dim=0) if pad > 0 else w_cpu
+        gh = [torch.empty_like(h_pad) for _ in range(self.world_size)]
+        gi = [torch.empty_like(i_pad) for _ in range(self.world_size)]
+        gw = [torch.empty_like(w_pad) for _ in range(self.world_size)]
+        dist.all_gather(gh, h_pad, group=self.group)
+        dist.all_gather(gi, i_pad, group=self.group)
+        dist.all_gather(gw, w_pad, group=self.group)
+        cat_h = torch.cat([t[:s] for t, s in zip(gh, splits) if s > 0], dim=0).to(dev)
+        cat_i = torch.cat([t[:s] for t, s in zip(gi, splits) if s > 0], dim=0).to(dev)
+        cat_w = torch.cat([t[:s] for t, s in zip(gw, splits) if s > 0], dim=0).to(dev)
+        return _CpuAllToAllState(cat_h, cat_i, cat_w, splits, m_loc)
+
+    def combine(
+        self,
+        ep_output: torch.Tensor,
+        state: _CpuAllToAllState,
+        *,
+        use_symm_p2p: Optional[bool] = None,
+    ) -> torch.Tensor:
+        del use_symm_p2p
+        if self.world_size <= 1 or self.group is None:
+            return ep_output
+        if sum(state.splits) == 0:
+            return ep_output[:0]
+        dev = ep_output.device
+        buf = ep_output.detach().to(device="cpu").contiguous()
+        dist.all_reduce(buf, op=dist.ReduceOp.SUM, group=self.group)
+        off = sum(state.splits[: self.rank])
+        return buf[off : off + state.local_tokens].to(dev)
+
+
+def resolve_qwen4_5_all_to_all(
+    ep_group: Any,
+    *,
+    device: Optional[torch.device],
+    dtype: torch.dtype,
+    hidden_dim: int,
+    top_k: int,
+) -> Any:
+    if ep_group is None or not dist.is_available() or not dist.is_initialized():
+        return None
+    if int(dist.get_world_size(ep_group)) <= 1:
+        return None
+    dev = device if device is not None else torch.device("cpu")
+    backend = str(dist.get_backend(ep_group)).lower()
+    if dev.type == "cuda" and backend != "gloo":
+        from rtp_llm.models_py.modules.qwen4_5.alltoall_comm import get_qwen4_5_all_to_all
+
+        return get_qwen4_5_all_to_all(
+            ep_group,
+            device=dev,
+            dtype=dtype,
+            hidden_dim=hidden_dim,
+            top_k=top_k,
+            single_node=True,
+        )
+    return _CpuAllToAllCommShim(ep_group)
+
+
+def _resolve_dense_linear_mode(override: Optional[str], stored: Optional[str]) -> str:
+    if override is not None:
+        return str(override).strip().lower()
+    if stored is not None:
+        return str(stored).strip().lower()
+    return os.environ.get("QWEN4_5_DENSE_LINEAR_MODE", "bf16").strip().lower()
+
+
+def _wrap_linear_with_sm100_fp8(mod: nn.Module, eff_mode: str) -> nn.Module:
+    from rtp_llm.models_py.modules.qwen4_5.fp8_linear import SM100FP8Linear
+
+    if isinstance(mod, SM100FP8Linear):
+        mod.mode = eff_mode
+        mod._prepare_w4a8_flag = bool(eff_mode == "w4a8")
+        if eff_mode != "bf16" and mod.weight is not None and mod.weight.is_cuda:
+            mod.prepare_weights()
+        return mod
+    if eff_mode == "bf16" or not isinstance(mod, nn.Linear) or not mod.weight.is_cuda:
+        return mod
+    inst = SM100FP8Linear(
+        in_features=mod.in_features,
+        out_features=mod.out_features,
+        bias=(mod.bias is not None),
+        mode=eff_mode,
+        keep_bf16=False,
+        prepare_trtllm_ll=True,
+        prepare_mxfp8=True,
+        prepare_w4a8=(eff_mode == "w4a8"),
+        dtype=mod.weight.dtype,
+        device=mod.weight.device,
+    )
+    inst.weight = mod.weight
+    if mod.bias is not None:
+        inst.bias = mod.bias
+    inst.prepare_weights()
+    return inst
+
+
+def _filter_init_kwargs(cls: Any, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        params = inspect.signature(cls).parameters
+    except Exception:
+        return {}
+    return {k: v for k, v in kwargs.items() if k in params}
 
 
 class Qwen4_5ProfileRecorder:
@@ -121,6 +497,16 @@ class Qwen4_5DecoderLayer(nn.Module):
         tp_rank: int = 0,
         tp_group: Any = None,
         fast_all_reduce: Any = None,
+        sp_size: int = 1,
+        sp_rank: int = 0,
+        sp_group: Any = None,
+        dp_attn: bool = False,
+        kv_dtype: str = "bf16",
+        fp8_indexer_kv: Optional[bool] = None,
+        all_to_all_comm: Any = None,
+        dp_equal_tokens: Optional[bool] = None,
+        use_symm_p2p_combine: Optional[bool] = None,
+        dense_linear_mode: Optional[str] = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -134,7 +520,14 @@ class Qwen4_5DecoderLayer(nn.Module):
         self.tp_rank = int(tp_rank or 0)
         self.tp_group = tp_group
         self.fast_all_reduce = fast_all_reduce
+        self.sp_size = max(1, int(sp_size or 1))
+        self.sp_rank = int(sp_rank or 0)
+        self.sp_group = sp_group
+        self.dp_attn = bool(dp_attn)
+        self.kv_dtype = str(kv_dtype)
+        self._dense_linear_mode = dense_linear_mode
 
+        sp_dp_kw = {"sp_size": self.sp_size, "sp_rank": self.sp_rank, "sp_group": self.sp_group, "dp_attn": self.dp_attn}
         is_first_layer = layer_idx == 0
         is_last_layer = layer_idx == (config.num_hidden_layers - 1)
 
@@ -158,6 +551,7 @@ class Qwen4_5DecoderLayer(nn.Module):
                 tp_rank=self.tp_rank,
                 tp_group=tp_group,
                 fast_all_reduce=fast_all_reduce,
+                **_filter_init_kwargs(Qwen4_5PLELayer.__init__, sp_dp_kw),
             )
         else:
             self.ple = None
@@ -174,6 +568,7 @@ class Qwen4_5DecoderLayer(nn.Module):
             emits_latent=True,
             dtype=dtype,
             device=device,
+            **_filter_init_kwargs(Qwen4_5HyperConnection.__init__, sp_dp_kw),
         )
 
         # 3. Attention block (GDN or dense MQA-1 Full Attention / QSA)
@@ -187,6 +582,7 @@ class Qwen4_5DecoderLayer(nn.Module):
                     tp_rank=self.tp_rank,
                     tp_group=tp_group,
                     fast_all_reduce=fast_all_reduce,
+                    **_filter_init_kwargs(Qwen4_5GatedDeltaNet.from_config, sp_dp_kw),
                 ).to(device=device, dtype=dtype)
             )
             self.self_attn: Optional[Qwen4_5Attention] = None
@@ -194,6 +590,16 @@ class Qwen4_5DecoderLayer(nn.Module):
             if self.linear_attn.A_log is not None:
                 self.linear_attn.A_log.data = self.linear_attn.A_log.data.float()
         elif self.layer_type == "full_attention":
+            eff_fp8_idx = (
+                bool(fp8_indexer_kv)
+                if fp8_indexer_kv is not None
+                else self.kv_dtype.lower().startswith("fp8")
+            )
+            attn_extra = {
+                **sp_dp_kw,
+                "fp8_indexer_kv": eff_fp8_idx,
+                "kv_cache_dtype": self.kv_dtype,
+            }
             self.self_attn = Qwen4_5Attention.from_config(
                 config,
                 layer_idx,
@@ -202,6 +608,7 @@ class Qwen4_5DecoderLayer(nn.Module):
                 tp_rank=self.tp_rank,
                 tp_group=tp_group,
                 fast_all_reduce=fast_all_reduce,
+                **_filter_init_kwargs(Qwen4_5Attention.from_config, attn_extra),
             ).to(device=device, dtype=dtype)
             self.linear_attn = None
             # Keep RoPE inv_freq in FP32
@@ -223,6 +630,7 @@ class Qwen4_5DecoderLayer(nn.Module):
                 use_activation=config.output_sconv_use_activation,
                 dtype=dtype,
                 device=device,
+                **_filter_init_kwargs(Qwen4_5ShortConv.__init__, sp_dp_kw),
             )
         else:
             self.attn_output_sconv = None
@@ -239,11 +647,21 @@ class Qwen4_5DecoderLayer(nn.Module):
             emits_latent=not is_last_layer,
             dtype=dtype,
             device=device,
+            **_filter_init_kwargs(Qwen4_5HyperConnection.__init__, sp_dp_kw),
         )
 
         # 6. FFN block: first_k_dense_replace Dense MLP, remaining Latent MoE
         self.is_moe = layer_idx >= config.first_k_dense_replace
         if self.is_moe:
+            moe_extra = _filter_init_kwargs(
+                Qwen4_5LatentMoE.from_config,
+                {
+                    "all_to_all_comm": all_to_all_comm,
+                    "dp_equal_tokens": dp_equal_tokens,
+                    "use_symm_p2p_combine": use_symm_p2p_combine,
+                    "dense_linear_mode": dense_linear_mode,
+                },
+            )
             self.mlp: Union[Qwen4_5DenseMLP, Qwen4_5LatentMoE] = Qwen4_5LatentMoE.from_config(
                 config,
                 use_triton_mxfp4=use_triton_mxfp4,
@@ -258,8 +676,13 @@ class Qwen4_5DecoderLayer(nn.Module):
                 tp_rank=self.tp_rank,
                 tp_group=tp_group,
                 fast_all_reduce=fast_all_reduce,
+                **moe_extra,
             )
         else:
+            dense_extra = _filter_init_kwargs(
+                Qwen4_5DenseMLP.from_config,
+                {"dense_linear_mode": dense_linear_mode},
+            )
             self.mlp = Qwen4_5DenseMLP.from_config(
                 config,
                 is_shared_expert=False,
@@ -270,6 +693,7 @@ class Qwen4_5DecoderLayer(nn.Module):
                 tp_rank=self.tp_rank,
                 tp_group=tp_group,
                 fast_all_reduce=fast_all_reduce,
+                **dense_extra,
             )
 
         # 7. Optional FFN output ShortConv (k=4, residual=True)
@@ -281,18 +705,43 @@ class Qwen4_5DecoderLayer(nn.Module):
                 use_activation=config.output_sconv_use_activation,
                 dtype=dtype,
                 device=device,
+                **_filter_init_kwargs(Qwen4_5ShortConv.__init__, sp_dp_kw),
             )
         else:
             self.ffn_output_sconv = None
 
     @torch.no_grad()
-    def prepare_weights(self, *, transpose_mxfp4: bool = False) -> None:
+    def prepare_weights(
+        self,
+        *,
+        transpose_mxfp4: bool = False,
+        dense_linear_mode: Optional[str] = None,
+    ) -> None:
+        eff_mode = _resolve_dense_linear_mode(dense_linear_mode, self._dense_linear_mode)
+        if dense_linear_mode is not None:
+            self._dense_linear_mode = dense_linear_mode
         if isinstance(self.mlp, Qwen4_5LatentMoE):
             self.mlp.prepare_weights(
-                transpose_mxfp4=transpose_mxfp4, fuse_shared_gate_up=True
+                transpose_mxfp4=transpose_mxfp4,
+                fuse_shared_gate_up=True,
+                dense_linear_mode=eff_mode,
             )
         else:
-            self.mlp.prepare_weights(fuse_gate_up=True)
+            self.mlp.prepare_weights(fuse_gate_up=True, dense_linear_mode=eff_mode)
+        if self.linear_attn is not None:
+            self.linear_attn.in_proj_qkvz = _wrap_linear_with_sm100_fp8(
+                self.linear_attn.in_proj_qkvz, eff_mode
+            )
+            self.linear_attn.out_proj = _wrap_linear_with_sm100_fp8(
+                self.linear_attn.out_proj, eff_mode
+            )
+        if self.self_attn is not None:
+            self.self_attn.q_proj = _wrap_linear_with_sm100_fp8(
+                self.self_attn.q_proj, eff_mode
+            )
+            self.self_attn.o_proj = _wrap_linear_with_sm100_fp8(
+                self.self_attn.o_proj, eff_mode
+            )
 
     def forward(
         self,
@@ -572,44 +1021,93 @@ class Qwen4_5Model(nn.Module):
         dtype: torch.dtype = torch.bfloat16,
         device: Optional[torch.device] = None,
         init_mxfp4_weights: bool = True,
-        ep_size: int = 1,
-        ep_rank: int = 0,
+        parallel_mode: Optional[str] = None,
+        ep_size: Optional[int] = None,
+        ep_rank: Optional[int] = None,
         ep_group: Any = None,
-        tp_size: int = 1,
-        tp_rank: int = 0,
+        tp_size: Optional[int] = None,
+        tp_rank: Optional[int] = None,
         tp_group: Any = None,
+        dp_size: Optional[int] = None,
+        dp_rank: Optional[int] = None,
+        dp_group: Any = None,
+        sp_size: Optional[int] = None,
+        sp_rank: Optional[int] = None,
+        sp_group: Any = None,
+        dp_attn: Optional[bool] = None,
+        kv_dtype: str = "bf16",
+        fp8_indexer_kv: Optional[bool] = None,
+        all_to_all_comm: Any = None,
+        dp_equal_tokens: Optional[bool] = None,
+        use_symm_p2p_combine: Optional[bool] = None,
+        dense_linear_mode: Optional[str] = None,
         fast_all_reduce: Any = None,
     ) -> None:
         super().__init__()
         self.config = config
-        self.tp_size = max(1, int(tp_size or 1))
-        self.tp_rank = int(tp_rank or 0)
+        topo = resolve_qwen4_5_parallel_topology(
+            parallel_mode=parallel_mode,
+            tp_size=tp_size,
+            tp_rank=tp_rank,
+            tp_group=tp_group,
+            ep_size=ep_size,
+            ep_rank=ep_rank,
+            ep_group=ep_group,
+            dp_size=dp_size,
+            dp_rank=dp_rank,
+            dp_group=dp_group,
+            sp_size=sp_size,
+            sp_rank=sp_rank,
+            sp_group=sp_group,
+            dp_attn=dp_attn,
+        )
+        self.parallel_topology = topo
+        self.parallel_mode = topo.parallel_mode
+        self.tp_size = topo.tp_size
+        self.tp_rank = topo.tp_rank
+        self.tp_group = topo.tp_group
+        self.ep_size = topo.ep_size
+        self.ep_rank = topo.ep_rank
+        self.ep_group = topo.ep_group
+        self.dp_size = topo.dp_size
+        self.dp_rank = topo.dp_rank
+        self.dp_group = topo.dp_group
+        self.sp_size = topo.sp_size
+        self.sp_rank = topo.sp_rank
+        self.sp_group = topo.sp_group
+        self.dp_attn = topo.dp_attn
+        self.kv_dtype = str(kv_dtype)
+        self._dense_linear_mode = dense_linear_mode
         if not (0 <= self.tp_rank < self.tp_size):
             raise ValueError(f"tp_rank={self.tp_rank} out of range for tp_size={self.tp_size}")
-        if tp_group is None and self.tp_size > 1:
-            tp_group = _resolve_tp_group_safe(self.tp_size)
-        self.tp_group = tp_group
 
+        dev = torch.device(device) if device is not None else None
         if (
             fast_all_reduce is None
             and self.tp_size > 1
-            and tp_group is not None
-            and device is not None
-            and torch.device(device).type == "cuda"
+            and self.tp_group is not None
+            and dev is not None
+            and dev.type == "cuda"
             and dist.is_available()
             and dist.is_initialized()
         ):
             fast_all_reduce = get_qwen4_5_fast_all_reduce(
-                tp_group,
-                device=torch.device(device),
+                self.tp_group,
+                device=dev,
                 dtype=dtype,
                 hidden_dims=(int(config.hidden_size), int(config.routed_expert_hidden_size)),
             )
         self.fast_all_reduce = fast_all_reduce
 
-        self.ep_size = int(ep_size)
-        self.ep_rank = int(ep_rank)
-        self.ep_group = ep_group
+        if all_to_all_comm is None and self.ep_size > 1 and self.dp_attn and self.ep_group is not None:
+            all_to_all_comm = resolve_qwen4_5_all_to_all(
+                self.ep_group,
+                device=dev,
+                dtype=dtype,
+                hidden_dim=int(config.routed_expert_hidden_size),
+                top_k=int(config.num_experts_per_tok),
+            )
+        self.all_to_all_comm = all_to_all_comm
         self.sharing_plan = YoCoSharingPlan.from_config(config)
 
         # Target embed_tokens stays replicated [vocab_size, hidden_size]
@@ -627,13 +1125,23 @@ class Qwen4_5Model(nn.Module):
                     dtype=dtype,
                     device=device,
                     init_mxfp4_weights=init_mxfp4_weights,
-                    ep_size=ep_size,
-                    ep_rank=ep_rank,
-                    ep_group=ep_group,
+                    ep_size=self.ep_size,
+                    ep_rank=self.ep_rank,
+                    ep_group=self.ep_group,
                     tp_size=self.tp_size,
                     tp_rank=self.tp_rank,
-                    tp_group=tp_group,
+                    tp_group=self.tp_group,
                     fast_all_reduce=fast_all_reduce,
+                    sp_size=self.sp_size,
+                    sp_rank=self.sp_rank,
+                    sp_group=self.sp_group,
+                    dp_attn=self.dp_attn,
+                    kv_dtype=self.kv_dtype,
+                    fp8_indexer_kv=fp8_indexer_kv,
+                    all_to_all_comm=all_to_all_comm,
+                    dp_equal_tokens=dp_equal_tokens,
+                    use_symm_p2p_combine=use_symm_p2p_combine,
+                    dense_linear_mode=dense_linear_mode,
                 )
                 for i in range(config.num_hidden_layers)
             ]
@@ -650,16 +1158,30 @@ class Qwen4_5Model(nn.Module):
             emits_latent=True,
             dtype=dtype,
             device=device,
+            **_filter_init_kwargs(
+                Qwen4_5HyperConnection.__init__,
+                {"sp_size": self.sp_size, "sp_rank": self.sp_rank, "sp_group": self.sp_group, "dp_attn": self.dp_attn},
+            ),
         )
         # Freeze inference parameters so Qwen4_5HyperConnection / PLE hit cached fused weights.
         self.requires_grad_(False)
 
     @torch.no_grad()
-    def prepare_weights(self, *, transpose_mxfp4: bool = False) -> None:
+    def prepare_weights(
+        self,
+        *,
+        transpose_mxfp4: bool = False,
+        dense_linear_mode: Optional[str] = None,
+    ) -> None:
+        if dense_linear_mode is not None:
+            self._dense_linear_mode = dense_linear_mode
         self.requires_grad_(False)
         for layer in self.layers:
             assert isinstance(layer, Qwen4_5DecoderLayer)
-            layer.prepare_weights(transpose_mxfp4=transpose_mxfp4)
+            layer.prepare_weights(
+                transpose_mxfp4=transpose_mxfp4,
+                dense_linear_mode=dense_linear_mode,
+            )
             for hc in (layer.attn_hyper_connection, layer.mlp_hyper_connection):
                 if hc.emits_latent and hc.use_combine and hasattr(hc, "_get_fused_down_inject_weight"):
                     hc._get_fused_down_inject_weight()
@@ -890,13 +1412,16 @@ class Qwen4_5Model(nn.Module):
                     shard_rows = int(ple_shard_rows)
 
                 table_dtype = torch.float8_e4m3fn if ple_fp8 else dtype
-                if ple_mode == "gpu_sharded" and self.ep_size > 1:
-                    if total_shards % self.ep_size != 0:
+                ple_group_size = self.tp_size if self.dp_attn else self.ep_size
+                ple_group_rank = self.tp_rank if self.dp_attn else self.ep_rank
+                ple_group = self.tp_group if self.dp_attn else self.ep_group
+                if ple_mode == "gpu_sharded" and ple_group_size > 1:
+                    if total_shards % ple_group_size != 0:
                         raise ValueError(
-                            f"split_ngram_parts={total_shards} not divisible by ep_size={self.ep_size}"
+                            f"split_ngram_parts={total_shards} not divisible by ple_group_size={ple_group_size}"
                         )
-                    local_shards = total_shards // self.ep_size
-                    shard_offset = self.ep_rank * local_shards
+                    local_shards = total_shards // ple_group_size
+                    shard_offset = ple_group_rank * local_shards
                     shards: List[torch.Tensor] = []
                     for s_local in range(local_shards):
                         s_global = shard_offset + s_local
@@ -923,7 +1448,7 @@ class Qwen4_5Model(nn.Module):
                         weight_scale=DEFAULT_PLE_WEIGHT_SCALE,
                         shard_offset=shard_offset,
                         total_shards=total_shards,
-                        ep_group=self.ep_group,
+                        ep_group=ple_group,
                     )
                 elif ple_mode in ("gpu_sharded", "gpu_full"):
                     shards = []
@@ -1060,12 +1585,26 @@ class Qwen4_5ForCausalLM(nn.Module):
         dtype: torch.dtype = torch.bfloat16,
         device: Optional[torch.device] = None,
         init_mxfp4_weights: bool = True,
-        ep_size: int = 1,
-        ep_rank: int = 0,
+        parallel_mode: Optional[str] = None,
+        ep_size: Optional[int] = None,
+        ep_rank: Optional[int] = None,
         ep_group: Any = None,
-        tp_size: int = 1,
-        tp_rank: int = 0,
+        tp_size: Optional[int] = None,
+        tp_rank: Optional[int] = None,
         tp_group: Any = None,
+        dp_size: Optional[int] = None,
+        dp_rank: Optional[int] = None,
+        dp_group: Any = None,
+        sp_size: Optional[int] = None,
+        sp_rank: Optional[int] = None,
+        sp_group: Any = None,
+        dp_attn: Optional[bool] = None,
+        kv_dtype: str = "bf16",
+        fp8_indexer_kv: Optional[bool] = None,
+        all_to_all_comm: Any = None,
+        dp_equal_tokens: Optional[bool] = None,
+        use_symm_p2p_combine: Optional[bool] = None,
+        dense_linear_mode: Optional[str] = None,
         fast_all_reduce: Any = None,
     ) -> None:
         super().__init__()
@@ -1077,30 +1616,82 @@ class Qwen4_5ForCausalLM(nn.Module):
             dtype=dtype,
             device=device,
             init_mxfp4_weights=init_mxfp4_weights,
+            parallel_mode=parallel_mode,
             ep_size=ep_size,
             ep_rank=ep_rank,
             ep_group=ep_group,
             tp_size=tp_size,
             tp_rank=tp_rank,
             tp_group=tp_group,
+            dp_size=dp_size,
+            dp_rank=dp_rank,
+            dp_group=dp_group,
+            sp_size=sp_size,
+            sp_rank=sp_rank,
+            sp_group=sp_group,
+            dp_attn=dp_attn,
+            kv_dtype=kv_dtype,
+            fp8_indexer_kv=fp8_indexer_kv,
+            all_to_all_comm=all_to_all_comm,
+            dp_equal_tokens=dp_equal_tokens,
+            use_symm_p2p_combine=use_symm_p2p_combine,
+            dense_linear_mode=dense_linear_mode,
             fast_all_reduce=fast_all_reduce,
         )
+        self.parallel_topology = self.model.parallel_topology
+        self.parallel_mode = self.model.parallel_mode
         self.tp_size = self.model.tp_size
         self.tp_rank = self.model.tp_rank
         self.tp_group = self.model.tp_group
+        self.ep_size = self.model.ep_size
+        self.ep_rank = self.model.ep_rank
+        self.ep_group = self.model.ep_group
+        self.dp_size = self.model.dp_size
+        self.dp_rank = self.model.dp_rank
+        self.dp_group = self.model.dp_group
+        self.sp_size = self.model.sp_size
+        self.sp_rank = self.model.sp_rank
+        self.sp_group = self.model.sp_group
+        self.dp_attn = self.model.dp_attn
+        self.kv_dtype = self.model.kv_dtype
+        self._dense_linear_mode = dense_linear_mode
         if config.vocab_size % self.tp_size != 0:
             raise ValueError(
                 f"vocab_size ({config.vocab_size}) must be divisible by tp_size ({self.tp_size})"
             )
+        from rtp_llm.models_py.modules.qwen4_5.fp8_linear import SM100FP8Linear
+
         self.local_vocab_size = config.vocab_size // self.tp_size
-        self.lm_head = nn.Linear(
-            config.hidden_size, self.local_vocab_size, bias=False, dtype=dtype, device=device
+        init_lm_mode = _resolve_dense_linear_mode(dense_linear_mode, None)
+        self.lm_head: nn.Module = SM100FP8Linear(
+            in_features=config.hidden_size,
+            out_features=self.local_vocab_size,
+            bias=False,
+            mode=init_lm_mode,
+            keep_bf16=True,
+            prepare_trtllm_ll=True,
+            prepare_mxfp8=True,
+            prepare_w4a8=(init_lm_mode == "w4a8"),
+            dtype=dtype,
+            device=device,
         )
         self.requires_grad_(False)
 
     @torch.no_grad()
-    def prepare_weights(self, *, transpose_mxfp4: bool = False) -> None:
-        self.model.prepare_weights(transpose_mxfp4=transpose_mxfp4)
+    def prepare_weights(
+        self,
+        *,
+        transpose_mxfp4: bool = False,
+        dense_linear_mode: Optional[str] = None,
+    ) -> None:
+        eff_mode = _resolve_dense_linear_mode(dense_linear_mode, self._dense_linear_mode)
+        if dense_linear_mode is not None:
+            self._dense_linear_mode = dense_linear_mode
+        self.model.prepare_weights(
+            transpose_mxfp4=transpose_mxfp4,
+            dense_linear_mode=dense_linear_mode,
+        )
+        self.lm_head = _wrap_linear_with_sm100_fp8(self.lm_head, eff_mode)
 
     def create_runtime_state(
         self,

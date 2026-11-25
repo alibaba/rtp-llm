@@ -692,7 +692,19 @@ def test_gdn_fused_unpack_verify_ragged_and_tp() -> None:
     d_gdn_tp, _ = report_diff("Qwen4_5GatedDeltaNet L0 TP=4 vs TP=1", og_sum, og1)
     assert d_gdn_tp < 1e-2
 
-    print("  PASS: GDN Ragged Snapshots, V=8 Verify (+Rollback+CG), and Attention/GDN TP=4 hooks verified.")
+    # R0 SP/DP/FP8 constructor hooks check
+    attn_sp = Qwen4_5Attention.from_config(
+        cfg_tp, layer_idx=19, tp_size=4, tp_rank=1, sp_size=4, sp_rank=2, dp_attn=True,
+        fp8_indexer_kv=True, kv_cache_dtype="fp8_e4m3",
+    )
+    assert attn_sp.sp_size == 4 and attn_sp.sp_rank == 2 and attn_sp.dp_attn is True
+    assert attn_sp.fp8_indexer_kv is True and attn_sp.kv_cache_dtype == "fp8_e4m3"
+    gdn_sp = Qwen4_5GatedDeltaNet.from_config(
+        cfg_tp, layer_idx=0, tp_size=4, tp_rank=1, sp_size=4, sp_rank=2, dp_attn=True,
+    )
+    assert gdn_sp.sp_size == 4 and gdn_sp.sp_rank == 2 and gdn_sp.dp_attn is True
+
+    print("  PASS: GDN Ragged Snapshots, V=8 Verify (+Rollback+CG), Attention/GDN TP=4 & SP/DP/FP8 hooks verified.")
 
 
 @torch.no_grad()

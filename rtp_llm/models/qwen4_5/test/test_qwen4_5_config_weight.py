@@ -625,5 +625,38 @@ class TestQwen4_5ConfigWeightKVCache(unittest.TestCase):
         expected_p1 = torch.cat([conv_full[512:1024], conv_full[2048+512:2048+1024], conv_full[4096+2048:4096+4096]], dim=0)
         self.assertTrue(torch.equal(conv_p1, expected_p1))
 
+    def test_8_multi_parallel_kv_plans_and_dflash2_fp8_kv_plan(self):
+        from types import SimpleNamespace
+        from rtp_llm.models.qwen4_5.qwen4_5_kv_cache import (
+            GDN_CONV_STATE_TAG,
+            GDN_SSM_STATE_TAG,
+            build_dflash2_kv_cache_plan,
+            build_qwen4_5_kv_cache_plan,
+        )
+
+        p_tp4 = build_qwen4_5_kv_cache_plan(self.arch_cfg, parallel_mode="tp4_ep4", enable_yoco_decode=True)
+        p_dp4 = build_qwen4_5_kv_cache_plan(self.arch_cfg, parallel_mode="dp4_ep4", enable_yoco_decode=True)
+        p_dp2 = build_qwen4_5_kv_cache_plan(self.arch_cfg, parallel_mode="dp2_tp2_ep4", enable_yoco_decode=True)
+        p_sp4 = build_qwen4_5_kv_cache_plan(self.arch_cfg, parallel_mode="sp4_tp4_ep4", enable_yoco_decode=True)
+
+        self.assertEqual(p_tp4.layers[0].ssm_state_shape, (32, 64, 64))
+        self.assertEqual(p_sp4.layers[0].ssm_state_shape, (32, 64, 64))
+        self.assertEqual(p_dp2.layers[0].ssm_state_shape, (64, 64, 64))
+        self.assertEqual(p_dp4.layers[0].ssm_state_shape, (128, 64, 64))
+        self.assertEqual(p_dp2.layers[0].gdn_conv_channels, 6144)
+        self.assertEqual(p_dp4.layers[0].gdn_conv_channels, 12288)
+        self.assertAlmostEqual(p_dp2.ssm_mib_per_req, p_tp4.ssm_mib_per_req * 2.0, places=5)
+        self.assertAlmostEqual(p_dp4.ssm_mib_per_req, p_tp4.ssm_mib_per_req * 4.0, places=5)
+        self.assertEqual(p_dp4.kv_bytes_per_token, p_tp4.kv_bytes_per_token)
+        self.assertTrue(any(lp.allocates_ssm_state for lp in p_dp2.layers))
+
+        d_spec = SimpleNamespace(num_hidden_layers=5, num_key_value_heads=1, head_dim=256, swa_window_size=2048)
+        d_bf16 = build_dflash2_kv_cache_plan(d_spec, parallel_mode="tp4_ep4", dflash_kv_dtype="bf16")
+        d_fp8 = build_dflash2_kv_cache_plan(d_spec, parallel_mode="dp4_ep4", dflash_kv_dtype="fp8_e4m3")
+        self.assertEqual(d_bf16.kv_bytes_per_token, 5 * 2 * 1 * 256 * 2)
+        self.assertEqual(d_fp8.kv_bytes_per_token, 5 * 2 * 1 * 256 * 1)
+        self.assertEqual(d_fp8.total_bytes_for_seq_len(20480, 1), d_bf16.total_bytes_for_seq_len(20480, 1) // 2)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -145,6 +145,7 @@ class Qwen4_5FastAllReduce:
         self._symm_buffer: Optional[torch.Tensor] = None
         self._symm_group_name: Optional[str] = None
         self._symm_use_oneshot: bool = True
+        self._gemma_gamma_cache: Dict[int, Tuple[torch.Tensor, int, torch.Tensor]] = {}
         self._destroyed: bool = False
 
         if group is None or not dist.is_initialized():
@@ -595,6 +596,103 @@ class Qwen4_5FastAllReduce:
         ).to(x.dtype)
         return normed, res_out
 
+    def _resolve_gemma_gamma(
+        self, weight: torch.Tensor, gamma_plus_one: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        if gamma_plus_one is not None:
+            return gamma_plus_one
+        key = id(weight)
+        ver = -1 if weight.is_inference() else int(weight._version)
+        cached = self._gemma_gamma_cache.get(key)
+        if cached is not None and cached[0] is weight and cached[1] == ver:
+            return cached[2]
+        gamma = (weight.float() + 1.0).to(self.dtype).contiguous()
+        if not torch.cuda.is_current_stream_capturing():
+            self._gemma_gamma_cache[key] = (weight, ver, gamma)
+        return gamma
+
+    def all_reduce_residual_gemma_rmsnorm(
+        self,
+        x: torch.Tensor,
+        residual: torch.Tensor,
+        weight: torch.Tensor,
+        eps: float = 1e-6,
+        *,
+        gamma_plus_one: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """All-reduce ``x``, add ``residual``, and apply GemmaRMSNorm (``1 + weight``).
+
+        Uses FlashInfer fused ``kARResidualRMSNorm`` with cached
+        ``gamma = (1 + weight)`` in BF16/FP16 when active and eligible; falls back
+        to :meth:`all_reduce` + FP32 GemmaRMSNorm otherwise.
+        """
+        orig_shape = x.shape
+        H = int(orig_shape[-1])
+        x_c = x if x.is_contiguous() else x.contiguous()
+        res_c = residual if residual.is_contiguous() else residual.contiguous()
+        x_2d = x_c.reshape(-1, H)
+        res_2d = res_c.reshape(-1, H)
+
+        if (
+            self.active_backend == "flashinfer"
+            and self.should_use_flashinfer(x_2d)
+            and res_2d.shape == x_2d.shape
+            and res_2d.dtype == self.dtype
+            and weight.is_cuda
+            and weight.shape == (H,)
+        ):
+            gamma = self._resolve_gemma_gamma(weight, gamma_plus_one)
+            if gamma.dtype == self.dtype and gamma.shape == (H,):
+                res_out = torch.empty_like(x_2d)
+                norm_out = torch.empty_like(x_2d)
+                use_oneshot = self._resolve_flashinfer_oneshot(x_2d.shape[0])
+                self._flashinfer_comm.allreduce_fusion(
+                    input=x_2d,
+                    workspace=self._fi_workspace,
+                    pattern=self._fi_pattern_ar_res_norm,
+                    launch_with_pdl=True,
+                    trigger_completion_at_end=True,
+                    residual_out=res_out,
+                    norm_out=norm_out,
+                    residual_in=res_2d,
+                    rms_gamma=gamma,
+                    rms_eps=float(eps),
+                    use_oneshot=use_oneshot,
+                    fp32_acc=self._fp32_acc,
+                )
+                return norm_out.reshape(orig_shape), res_out.reshape(orig_shape)
+
+        reduced = self.all_reduce(x_c)
+        res_out = reduced + res_c
+        res_f32 = res_out.float()
+        gamma_f32 = (
+            gamma_plus_one.float()
+            if gamma_plus_one is not None
+            else (weight.float() + 1.0)
+        )
+        normed = (
+            res_f32
+            * torch.rsqrt(res_f32.pow(2).mean(dim=-1, keepdim=True) + float(eps))
+            * gamma_f32
+        ).to(x.dtype)
+        return normed, res_out
+
+    def all_reduce_hc_combine(
+        self,
+        branch_out: torch.Tensor,
+        streams: torch.Tensor,
+        h_post: torch.Tensor,
+    ) -> torch.Tensor:
+        """All-reduce ``branch_out`` and combine into mHC-lite ``streams``.
+
+        Equivalent to ``streams + h_post[..., None] * all_reduce(branch_out)``.
+        """
+        reduced = self.all_reduce(branch_out)
+        if reduced.dim() == 2 and streams.dim() == 3:
+            reduced = reduced.unsqueeze(1)
+        out_f32 = streams.float() + h_post.float().unsqueeze(-1) * reduced.float()
+        return out_f32.to(streams.dtype)
+
     def destroy(self) -> None:
         if self._destroyed:
             return
@@ -606,6 +704,7 @@ class Qwen4_5FastAllReduce:
                 pass
             self._fi_workspace = None
         self._symm_buffer = None
+        self._gemma_gamma_cache.clear()
         self.active_backend = "nccl" if self.world_size > 1 else "noop"
 
 

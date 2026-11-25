@@ -2565,6 +2565,10 @@ class Qwen4_5GatedDeltaNet(nn.Module):
         tp_rank: int = 0,
         tp_group: Any = None,
         fast_all_reduce: Any = None,
+        sp_size: int = 1,
+        sp_rank: int = 0,
+        sp_group: Any = None,
+        dp_attn: bool = False,
     ) -> None:
         super().__init__()
         self.config = config
@@ -2578,6 +2582,10 @@ class Qwen4_5GatedDeltaNet(nn.Module):
         self.tp_rank = int(tp_rank)
         self.tp_group = tp_group
         self.fast_all_reduce = fast_all_reduce
+        self.sp_size = max(1, int(sp_size))
+        self.sp_rank = int(sp_rank)
+        self.sp_group = sp_group
+        self.dp_attn = bool(dp_attn)
         if config.linear_num_key_heads % self.tp_size != 0:
             raise ValueError(
                 f"linear_num_key_heads ({config.linear_num_key_heads}) not divisible by tp_size ({self.tp_size})"
@@ -2652,6 +2660,10 @@ class Qwen4_5GatedDeltaNet(nn.Module):
         tp_rank: int = 0,
         tp_group: Any = None,
         fast_all_reduce: Any = None,
+        sp_size: int = 1,
+        sp_rank: int = 0,
+        sp_group: Any = None,
+        dp_attn: bool = False,
     ) -> "Qwen4_5GatedDeltaNet":
         plan = sharing_plan if sharing_plan is not None else YoCoSharingPlan.from_config(config)
         return cls(
@@ -2664,6 +2676,10 @@ class Qwen4_5GatedDeltaNet(nn.Module):
             tp_rank=tp_rank,
             tp_group=tp_group,
             fast_all_reduce=fast_all_reduce,
+            sp_size=sp_size,
+            sp_rank=sp_rank,
+            sp_group=sp_group,
+            dp_attn=dp_attn,
         )
 
     @property
@@ -3229,7 +3245,11 @@ class Qwen4_5GatedDeltaNet(nn.Module):
         )
         has_init_s = init_ssm_state is not None
         has_stage_s = stage_ssm_state is not None
-        block_dv = 16 if self.head_v_dim % 16 == 0 else self.head_v_dim
+        block_dv = (
+            32
+            if (2 <= bsz <= 16 and self.head_v_dim % 32 == 0)
+            else (16 if self.head_v_dim % 16 == 0 else self.head_v_dim)
+        )
         _gdn_verify_scan_kernel[(bsz, self.num_v_heads, self.head_v_dim // block_dv)](
             q,
             k,
@@ -3279,7 +3299,7 @@ class Qwen4_5GatedDeltaNet(nn.Module):
             BLOCK_DV=block_dv,
             HAS_INIT_STATE=has_init_s,
             HAS_STAGE_STATE=has_stage_s,
-            num_warps=2 if block_dv <= 16 else 4,
+            num_warps=2 if bsz >= 2 else (8 if block_dv <= 16 else 4),
         )
         return core_out
 
@@ -3405,7 +3425,7 @@ class Qwen4_5GatedDeltaNet(nn.Module):
                     GQA_RATIO=self.gqa_ratio,
                     D_K=self.head_k_dim,
                     D_V=self.head_v_dim,
-                    num_warps=4,
+                    num_warps=1 if bsz >= 2 else 2,
                 )
             else:
                 core_out = self._launch_gdn_verify_scan(

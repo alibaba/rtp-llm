@@ -528,6 +528,182 @@ class TestQwen4_5E2E(unittest.TestCase):
             self.assertEqual(p.exitcode, 0, f"Gloo TP=4 worker {r} exited {p.exitcode}: {errors}")
         self.assertEqual(errors, [])
 
+    def test_07_distributed_gloo_multi_parallel_modes_8layer_parity(self) -> None:
+        """Real 4-rank Gloo E2E parity for dp4_ep4, dp2_tp2_ep4, and sp4_tp4_ep4 (distinct DP inputs!)."""
+        import socket
+        import torch.multiprocessing as mp
+
+        for pmode in ("dp4_ep4", "dp2_tp2_ep4", "sp4_tp4_ep4"):
+            with socket.socket() as sock:
+                sock.bind(("127.0.0.1", 0))
+                port = sock.getsockname()[1]
+
+            ctx = mp.get_context("spawn")
+            err_q = ctx.Queue()
+            procs = [
+                ctx.Process(target=_gloo_multi_parallel_worker, args=(r, 4, port, pmode, err_q))
+                for r in range(4)
+            ]
+            for p in procs:
+                p.start()
+            for p in procs:
+                p.join(timeout=120)
+            errors = []
+            while not err_q.empty():
+                errors.append(err_q.get())
+            for r, p in enumerate(procs):
+                if p.is_alive():
+                    p.terminate()
+                    self.fail(f"Gloo {pmode} worker {r} timed out")
+                self.assertEqual(p.exitcode, 0, f"Gloo {pmode} worker {r} exited {p.exitcode}: {errors}")
+            self.assertEqual(errors, [])
+
+    @torch.no_grad()
+    def test_08_dense_linear_mode_auto_and_fp8_target_parity(self) -> None:
+        """Verify Target SM100FP8Linear wrapping (qkvz/out_proj/q_proj/o_proj/lm_head/MLP) + zero-copy alias + parity."""
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA unavailable")
+        from dataclasses import replace
+        from rtp_llm.models_py.modules.qwen4_5.fp8_linear import SM100FP8Linear
+
+        device = torch.device("cuda:0")
+        cfg = replace(
+            make_mini_qwen4_5_config(),
+            indexer_n_heads=8,
+            indexer_kv_heads=1,
+            indexer_head_dim=64,
+            indexer_compress_ratio=4,
+            indexer_budget=16,
+        )
+        m_ref = Qwen4_5ForCausalLM(cfg, dtype=torch.bfloat16, device=device, dense_linear_mode="bf16")
+        m_ref.init_synthetic_weights(seed=777, ple_mode="gpu_full")
+        _stabilize_router_margins(m_ref)
+        m_ref.prepare_weights()
+
+        # Test both init-time dense_linear_mode="auto" and post-load upgrade via prepare_weights
+        m_auto = Qwen4_5ForCausalLM(cfg, dtype=torch.bfloat16, device=device, dense_linear_mode="bf16")
+        from rtp_llm.models_py.model_desc.qwen4_5_runtime import Qwen4_5RTPModel
+        from rtp_llm.ops import ParallelismConfig
+
+        m_auto.init_synthetic_weights(seed=777, ple_mode="gpu_full")
+        _stabilize_router_margins(m_auto)
+        rtp_view = Qwen4_5RTPModel.from_causal_lm(m_auto, parallelism_config=ParallelismConfig())
+        qkvz_ptr = m_auto.model.layers[1].linear_attn.in_proj_qkvz.weight.data_ptr()
+        qproj_ptr = m_auto.model.layers[3].self_attn.q_proj.weight.data_ptr()
+        lm_ptr = m_auto.lm_head.weight.data_ptr()
+        m_auto.prepare_weights(dense_linear_mode="auto")
+
+        self.assertIsInstance(m_auto.lm_head, SM100FP8Linear)
+        self.assertIs(rtp_view.lm_head, m_auto.lm_head)
+        self.assertEqual(m_auto.lm_head.weight.data_ptr(), lm_ptr)
+        self.assertIsInstance(m_auto.model.layers[1].linear_attn.in_proj_qkvz, SM100FP8Linear)
+        self.assertIsInstance(m_auto.model.layers[1].linear_attn.out_proj, SM100FP8Linear)
+        self.assertEqual(m_auto.model.layers[1].linear_attn.in_proj_qkvz.weight.data_ptr(), qkvz_ptr)
+        self.assertIsInstance(m_auto.model.layers[3].self_attn.q_proj, SM100FP8Linear)
+        self.assertIsInstance(m_auto.model.layers[3].self_attn.o_proj, SM100FP8Linear)
+        self.assertEqual(m_auto.model.layers[3].self_attn.q_proj.weight.data_ptr(), qproj_ptr)
+        self.assertIsNotNone(m_auto.model.layers[0].mlp._fp8_gate_up)
+        self.assertIsNotNone(m_auto.model.layers[1].mlp._fp8_latent_down_gate)
+
+        B, T_prompt, T_gen = 2, 16, 4
+        g = torch.Generator(device=device).manual_seed(9090)
+        tokens = torch.randint(10, cfg.vocab_size, (B, T_prompt + T_gen), device=device, generator=g)
+
+        st_ref = m_ref.create_runtime_state(B, max_seq_len=64, enable_yoco_decode=True)
+        st_auto = m_auto.create_runtime_state(B, max_seq_len=64, enable_yoco_decode=True)
+        ref_p = m_ref(tokens[:, :T_prompt], state=st_ref, enable_yoco_decode=True)
+        auto_p = m_auto(tokens[:, :T_prompt], state=st_auto, enable_yoco_decode=True)
+        self.assertGreater(_cos_sim(auto_p, ref_p), 0.999)
+
+        for t in range(T_prompt, T_prompt + T_gen):
+            r_d = m_ref(tokens[:, t : t + 1], state=st_ref, enable_yoco_decode=True)
+            a_d = m_auto(tokens[:, t : t + 1], state=st_auto, enable_yoco_decode=True)
+            self.assertGreater(_cos_sim(a_d, r_d), 0.999)
+
+
+@torch.no_grad()
+def _gloo_multi_parallel_worker(rank: int, world_size: int, port: int, pmode: str, err_q) -> None:
+    try:
+        from dataclasses import replace
+        os.environ["MASTER_ADDR"] = "127.0.0.1"
+        os.environ["MASTER_PORT"] = str(port)
+        torch.cuda.set_device(0)
+        device = torch.device("cuda:0")
+        dist.init_process_group(backend="gloo", rank=rank, world_size=world_size)
+        try:
+            cfg = replace(
+                make_mini_qwen4_5_config(),
+                indexer_n_heads=8,
+                indexer_kv_heads=1,
+                indexer_head_dim=64,
+                indexer_compress_ratio=4,
+                indexer_budget=16,
+            )
+            par_model = Qwen4_5ForCausalLM(
+                cfg,
+                dtype=torch.bfloat16,
+                device=device,
+                parallel_mode=pmode,
+                dp_equal_tokens=True,
+                kv_dtype="bf16",
+            )
+            assert par_model.parallel_mode == pmode
+            par_model.init_synthetic_weights(seed=2027, ple_mode="gpu_sharded")
+            _stabilize_router_margins(par_model)
+            par_model.prepare_weights()
+            for layer in par_model.model.layers:
+                if hasattr(layer.mlp, "backend"):
+                    layer.mlp.backend = "triton_splitk"
+
+            B, T_prompt, T_gen = 2, 16, 4
+            g = torch.Generator(device=device).manual_seed(5151 + par_model.dp_rank * 99)
+            tokens = torch.randint(10, cfg.vocab_size, (B, T_prompt + T_gen), device=device, generator=g)
+
+            st_par = par_model.create_runtime_state(B, max_seq_len=64, enable_yoco_decode=True)
+            par_outs = [par_model(tokens[:, :T_prompt], state=st_par, enable_yoco_decode=True)]
+            for t in range(T_prompt, T_prompt + T_gen):
+                par_outs.append(par_model(tokens[:, t : t + 1], state=st_par, enable_yoco_decode=True))
+            logits_par = torch.cat(par_outs, dim=1)
+
+            ref_model = Qwen4_5ForCausalLM(cfg, dtype=torch.bfloat16, device=device)
+            ref_model.init_synthetic_weights(seed=2027, ple_mode="gpu_full")
+            _stabilize_router_margins(ref_model)
+            ref_model.prepare_weights()
+            for layer in ref_model.model.layers:
+                if hasattr(layer.mlp, "backend"):
+                    layer.mlp.backend = "triton_splitk"
+
+            st_ref = ref_model.create_runtime_state(B, max_seq_len=64, enable_yoco_decode=True)
+            ref_outs = [ref_model(tokens[:, :T_prompt], state=st_ref, enable_yoco_decode=True)]
+            for t in range(T_prompt, T_prompt + T_gen):
+                ref_outs.append(ref_model(tokens[:, t : t + 1], state=st_ref, enable_yoco_decode=True))
+            logits_ref = torch.cat(ref_outs, dim=1)
+
+            cos_p = _cos_sim(logits_par[:, :T_prompt], logits_ref[:, :T_prompt])
+            cos_d = _cos_sim(logits_par[:, T_prompt:], logits_ref[:, T_prompt:])
+            assert cos_p > 0.999 and cos_d > 0.999, (
+                f"{pmode} rank={rank} dp_rank={par_model.dp_rank} E2E mismatch: prefill={cos_p}, decode={cos_d}"
+            )
+            if pmode == "dp4_ep4":
+                for layer in par_model.model.layers:
+                    if hasattr(layer.mlp, "backend"):
+                        layer.mlp.backend = "auto"
+                for layer in ref_model.model.layers:
+                    if hasattr(layer.mlp, "backend"):
+                        layer.mlp.backend = "deepgemm_masked"
+                st_p2 = par_model.create_runtime_state(B, max_seq_len=64, enable_yoco_decode=True)
+                st_r2 = ref_model.create_runtime_state(B, max_seq_len=64, enable_yoco_decode=True)
+                lp2 = par_model(tokens[:, :T_prompt], state=st_p2, enable_yoco_decode=True)
+                lr2 = ref_model(tokens[:, :T_prompt], state=st_r2, enable_yoco_decode=True)
+                cos_w4a8 = _cos_sim(lp2, lr2)
+                assert cos_w4a8 > 0.995, f"dp4_ep4 W4A8 auto vs deepgemm_masked ref mismatch: {cos_w4a8}"
+            dist.barrier()
+        finally:
+            dist.destroy_process_group()
+    except BaseException as exc:
+        err_q.put(f"rank {rank} ({pmode}): {exc!r}")
+        raise
+
 
 @torch.no_grad()
 def _gloo_tp4_ep4_worker(rank: int, world_size: int, port: int, err_q) -> None:

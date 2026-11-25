@@ -333,6 +333,268 @@ if _HAS_TRITON:
             mask=n_mask,
         )
 
+    @triton.jit(
+        do_not_specialize=["NEXT_N", "max_ctx_len", "max_blocks", "pool_blocks", "SCALE"]
+    )
+    def _qsa_paged_score_tc_kernel(
+        q_ptr,
+        pool_ptr,
+        bt_ptr,
+        ctx_ptr,
+        out_ptr,
+        stride_qb: tl.int64,
+        stride_qs: tl.int64,
+        NEXT_N,
+        max_ctx_len,
+        max_blocks,
+        pool_blocks,
+        SCALE,
+        H_IDX: tl.constexpr,
+        D_IDX: tl.constexpr,
+        BLOCK_SIZE: tl.constexpr,
+        QS: tl.constexpr,
+        BN: tl.constexpr,
+        IS_FP8_K: tl.constexpr,
+    ):
+        """SM100 TensorCore QSA paged indexer scorer grouping QS queries per K load."""
+        b = tl.program_id(0).to(tl.int64)
+        q_grp = tl.program_id(1).to(tl.int64)
+        blk = tl.program_id(2).to(tl.int64)
+
+        rn = blk * BN + tl.arange(0, BN)
+        n_mask = rn < max_ctx_len
+        bi = rn // BLOCK_SIZE
+        ei = rn % BLOCK_SIZE
+        in_bt = n_mask & (bi < max_blocks)
+        phys = tl.load(bt_ptr + b * max_blocks + bi, mask=in_bt, other=0)
+        has_blk = in_bt & (phys > 0) & (phys < pool_blocks)
+        slot = tl.where(has_blk, phys.to(tl.int64) * BLOCK_SIZE + ei, 0)
+
+        rd = tl.arange(0, D_IDX)
+        k_mat = tl.load(
+            pool_ptr + slot[:, None] * D_IDX + rd[None, :],
+            mask=has_blk[:, None],
+            other=0.0,
+        )
+
+        M_Q: tl.constexpr = QS * H_IDX
+        rm = tl.arange(0, M_Q)
+        q_local = rm // H_IDX
+        q_head = rm % H_IDX
+        s_offs = q_grp * QS + q_local
+        s_live = s_offs < NEXT_N
+        qv = tl.load(
+            q_ptr
+            + b * stride_qb
+            + s_offs[:, None] * stride_qs
+            + q_head[:, None] * D_IDX
+            + rd[None, :],
+            mask=s_live[:, None],
+            other=0.0,
+        )
+        if IS_FP8_K:
+            qv = qv.to(tl.float8e4nv)
+        logits = tl.dot(qv, tl.trans(k_mat))
+        logits = tl.maximum(logits, 0.0)
+        scores = tl.sum(tl.reshape(logits, (QS, H_IDX, BN)), axis=1) * SCALE
+
+        s_idx = q_grp * QS + tl.arange(0, QS)
+        s_mask = s_idx < NEXT_N
+        vis_s = tl.load(ctx_ptr + b * NEXT_N + s_idx, mask=s_mask, other=0)
+        valid = s_mask[:, None] & has_blk[None, :] & (rn[None, :] < vis_s[:, None])
+        out_vals = tl.where(valid, scores, float("-inf"))
+        tl.store(
+            out_ptr + (b * NEXT_N + s_idx[:, None]) * max_ctx_len + rn[None, :],
+            out_vals,
+            mask=s_mask[:, None] & n_mask[None, :],
+        )
+
+    @triton.jit
+    def _qsa_bsearch_topk_expand_kernel(
+        scores_ptr,
+        len_ptr,
+        out_ptr,
+        stride_s: tl.int64,
+        stride_l: tl.int64,
+        stride_o: tl.int64,
+        N: tl.constexpr,
+        BN: tl.constexpr,
+        K_BLKS: tl.constexpr,
+        RATIO: tl.constexpr,
+        BUDGET: tl.constexpr,
+    ):
+        """Single-launch exact binary-search block Top-K + token expansion (CG-safe)."""
+        row = tl.program_id(0).to(tl.int64)
+        vis = tl.load(len_ptr + row * stride_l)
+        complete = tl.maximum(vis // RATIO, 0)
+        cols = tl.arange(0, BN)
+        in_c = (cols < complete) & (cols < N)
+        vals = tl.load(scores_ptr + row * stride_s + cols, mask=in_c, other=float("-inf")).to(
+            tl.float32
+        )
+        is_fin = in_c & (vals > float("-inf")) & (vals < float("inf"))
+        bits = vals.to(tl.uint32, bitcast=True)
+        ord_u = tl.where((bits & 0x80000000) != 0, ~bits, bits ^ 0x80000000)
+        ord_u = tl.where(is_fin, ord_u, 0)
+
+        valid_cnt = tl.sum(is_fin.to(tl.int32), 0)
+        k_rem = tl.minimum(K_BLKS, valid_cnt)
+        lo = tl.zeros((), dtype=tl.uint32)
+        hi = tl.full((), 0xFFFFFFFF, tl.uint32)
+        for _bit in tl.static_range(32):
+            mid = lo + ((hi - lo) >> 1) + 1
+            cnt = tl.sum((is_fin & (ord_u >= mid)).to(tl.int32), 0)
+            lo = tl.where(cnt >= k_rem, mid, lo)
+            hi = tl.where(cnt < k_rem, mid - 1, hi)
+
+        gt_m = is_fin & (ord_u > lo)
+        gt_cnt = tl.sum(gt_m.to(tl.int32), 0)
+        eq_m = is_fin & (ord_u == lo)
+        eq_rank = tl.cumsum(eq_m.to(tl.int32), 0) - 1
+        sel_m = gt_m | (eq_m & (gt_cnt + eq_rank < k_rem))
+        sel_pos = tl.cumsum(sel_m.to(tl.int32), 0) - 1
+
+        out_row = out_ptr + row * stride_o
+        for r in tl.static_range(RATIO):
+            tl.store(
+                out_row + sel_pos * RATIO + r,
+                cols * RATIO + r,
+                mask=sel_m & (sel_pos < K_BLKS),
+            )
+        if k_rem < K_BLKS:
+            tail_s = tl.arange(0, K_BLKS)
+            for r in tl.static_range(RATIO):
+                tl.store(out_row + tail_s * RATIO + r, -1, mask=(tail_s >= k_rem))
+
+        tail_cnt = tl.maximum(vis, 0) % RATIO
+        for r in tl.static_range(RATIO - 1):
+            tl.store(out_row + BUDGET + r, complete * RATIO + r if r < tail_cnt else -1)
+
+    @triton.jit
+    def _qsa_radix2_chunked_topk_expand_kernel(
+        scores_ptr,
+        len_ptr,
+        out_ptr,
+        stride_s: tl.int64,
+        stride_l: tl.int64,
+        stride_o: tl.int64,
+        N: tl.constexpr,
+        CHUNK: tl.constexpr,
+        N_CHUNKS: tl.constexpr,
+        K_BLKS: tl.constexpr,
+        RATIO: tl.constexpr,
+        BUDGET: tl.constexpr,
+    ):
+        """CG-safe 2-bit radix-select chunked Top-K + token expansion for long contexts (N <= 32768)."""
+        row = tl.program_id(0).to(tl.int64)
+        vis = tl.load(len_ptr + row * stride_l)
+        complete = tl.maximum(vis // RATIO, 0)
+
+        valid_cnt = tl.zeros((), dtype=tl.int32)
+        for c in tl.static_range(N_CHUNKS):
+            offs = c * CHUNK + tl.arange(0, CHUNK)
+            in_c = (offs < complete) & (offs < N)
+            vals = (
+                tl.load(scores_ptr + row * stride_s + offs, mask=in_c, other=float("-inf")).to(
+                    tl.float32
+                )
+                + 0.0
+            )
+            is_fin = in_c & (vals > float("-inf")) & (vals < float("inf"))
+            valid_cnt += tl.sum(is_fin.to(tl.int32), 0)
+
+        k_tot = tl.minimum(K_BLKS, valid_cnt)
+        lo = tl.zeros((), dtype=tl.uint32)
+        hi = tl.full((), 0xFFFFFFFF, tl.uint32)
+        k_rem = k_tot
+        if k_tot > 0:
+            for p in tl.static_range(16):
+                shift = 30 - 2 * p
+                packed_cnt = tl.zeros((), dtype=tl.int64)
+                for c in tl.static_range(N_CHUNKS):
+                    offs = c * CHUNK + tl.arange(0, CHUNK)
+                    in_c = (offs < complete) & (offs < N)
+                    vals = (
+                        tl.load(scores_ptr + row * stride_s + offs, mask=in_c, other=float("-inf")).to(
+                            tl.float32
+                        )
+                        + 0.0
+                    )
+                    is_fin = in_c & (vals > float("-inf")) & (vals < float("inf"))
+                    bits = vals.to(tl.uint32, bitcast=True)
+                    ord_u = tl.where((bits & 0x80000000) != 0, ~bits, bits ^ 0x80000000)
+                    act = is_fin & (ord_u >= lo) & (ord_u <= hi)
+                    q2 = (ord_u >> shift) & 3
+                    w123 = (
+                        tl.where(act & (q2 == 1), 1, 0).to(tl.int64)
+                        + (tl.where(act & (q2 == 2), 1, 0).to(tl.int64) << 20)
+                        + (tl.where(act & (q2 == 3), 1, 0).to(tl.int64) << 40)
+                    )
+                    packed_cnt += tl.sum(w123, 0)
+                c3 = (packed_cnt >> 40).to(tl.int32)
+                c2 = ((packed_cnt >> 20) & 0xFFFFF).to(tl.int32)
+                c1 = (packed_cnt & 0xFFFFF).to(tl.int32)
+                b = tl.where(
+                    k_rem <= c3,
+                    3,
+                    tl.where(k_rem <= c3 + c2, 2, tl.where(k_rem <= c3 + c2 + c1, 1, 0)),
+                ).to(tl.uint32)
+                sub = tl.where(
+                    b == 3, 0, tl.where(b == 2, c3, tl.where(b == 1, c3 + c2, c3 + c2 + c1))
+                )
+                k_rem = k_rem - sub
+                step_span = (1 << shift) - 1
+                lo = lo + (b << tl.full((), shift, tl.uint32))
+                hi = lo + tl.full((), step_span, tl.uint32)
+
+        out_row = out_ptr + row * stride_o
+        if k_tot > 0:
+            eq_take = k_rem
+            total_gt = k_tot - eq_take
+            gt_ptr = tl.zeros((), dtype=tl.int32)
+            eq_ptr = total_gt
+            eq_rem = eq_take
+            for c in tl.static_range(N_CHUNKS):
+                offs = c * CHUNK + tl.arange(0, CHUNK)
+                in_c = (offs < complete) & (offs < N)
+                vals = (
+                    tl.load(scores_ptr + row * stride_s + offs, mask=in_c, other=float("-inf")).to(
+                        tl.float32
+                    )
+                    + 0.0
+                )
+                is_fin = in_c & (vals > float("-inf")) & (vals < float("inf"))
+                bits = vals.to(tl.uint32, bitcast=True)
+                ord_u = tl.where((bits & 0x80000000) != 0, ~bits, bits ^ 0x80000000)
+                gt_m = is_fin & (ord_u > lo)
+                eq_m = is_fin & (ord_u == lo)
+                gt_rank = tl.cumsum(gt_m.to(tl.int32), 0) - 1
+                gt_pos = gt_ptr + gt_rank
+                eq_rank = tl.cumsum(eq_m.to(tl.int32), 0) - 1
+                take_eq = eq_m & (eq_rank < eq_rem)
+                eq_pos = eq_ptr + eq_rank
+                sel_m = gt_m | take_eq
+                sel_pos = tl.where(gt_m, gt_pos, eq_pos)
+                for r in tl.static_range(RATIO):
+                    tl.store(
+                        out_row + sel_pos * RATIO + r,
+                        offs * RATIO + r,
+                        mask=sel_m & (sel_pos < K_BLKS),
+                    )
+                gt_ptr += tl.sum(gt_m.to(tl.int32), 0)
+                eq_c = tl.sum(take_eq.to(tl.int32), 0)
+                eq_ptr += eq_c
+                eq_rem -= eq_c
+
+        if k_tot < K_BLKS:
+            tail_s = tl.arange(0, K_BLKS)
+            for r in tl.static_range(RATIO):
+                tl.store(out_row + tail_s * RATIO + r, -1, mask=(tail_s >= k_tot))
+
+        tail_cnt = tl.maximum(vis, 0) % RATIO
+        for r in tl.static_range(RATIO - 1):
+            tl.store(out_row + BUDGET + r, complete * RATIO + r if r < tail_cnt else -1)
+
 
 def qsa_prefill_score(
     q_rot: torch.Tensor,
@@ -434,10 +696,58 @@ def qsa_paged_score(
         logits = torch.empty(
             (m_rows, max_ctx_len), device=q_rot_bf16.device, dtype=torch.float32
         )
+        is_fp8_k = kv_pool.dtype == torch.float8_e4m3fn
+        cap_major = (
+            torch.cuda.get_device_capability(q_rot_bf16.device)[0]
+            if torch.version.hip is None
+            else 0
+        )
+        can_tc = (
+            cap_major >= 8
+            and (kv_pool.dtype == torch.bfloat16 or (is_fp8_k and cap_major >= 9))
+            and q_c.dtype == torch.bfloat16
+            and head_dim >= 16
+            and (head_dim & (head_dim - 1)) == 0
+            and 1 <= n_heads <= 16
+            and (n_heads & (n_heads - 1)) == 0
+            and max_ctx_len >= 16
+        )
+        if can_tc:
+            min_qs = max(1, 16 // n_heads)
+            qs = max(min_qs, min(8, triton.next_power_of_2(max(1, next_n))))
+            bn = 32 if (bsz * triton.cdiv(max_ctx_len, 64) < 32 and max_ctx_len >= 32) else 64
+            if max_ctx_len < 32:
+                bn = 16
+            if qs == 8 and next_n == 8 and bsz <= 2 and min_qs <= 4:
+                qs = 4
+            grid_tc = (bsz, triton.cdiv(next_n, qs), triton.cdiv(max_ctx_len, bn))
+            _qsa_paged_score_tc_kernel[grid_tc](
+                q_c,
+                pool_flat,
+                bt_c,
+                ctx_c,
+                logits,
+                q_c.stride(0),
+                q_c.stride(1),
+                next_n,
+                max_ctx_len,
+                max_blocks,
+                pool_blocks,
+                scale,
+                H_IDX=n_heads,
+                D_IDX=head_dim,
+                BLOCK_SIZE=kv_entries_per_block,
+                QS=qs,
+                BN=bn,
+                IS_FP8_K=is_fp8_k,
+                num_warps=4,
+                num_stages=2 if bn >= 32 else 1,
+            )
+            return logits
         grid = (m_rows, triton.cdiv(max_ctx_len, _PAGED_SCORE_BN))
         _qsa_paged_score_kernel[grid](
             q_c,
-            pool_flat,
+            pool_flat if not is_fp8_k else pool_flat.to(torch.bfloat16),
             bt_c,
             ctx_c,
             logits,
@@ -493,10 +803,76 @@ def _select_top_tokens(
     token_budget: int,
     scores_are_masked: bool,
 ) -> torch.Tensor:
-    """Zero-sync token index expansion wrapping ``select_qsa_paged_tokens``."""
+    """Zero-sync token index expansion with CG-safe Triton TopK fast path."""
+    vis_1d = visible_lengths.to(dtype=torch.int32).reshape(-1)
+    rows = int(block_scores.shape[0])
+    cols = int(block_scores.shape[1]) if block_scores.ndim == 2 else 0
+    if (
+        _HAS_TRITON
+        and block_scores.is_cuda
+        and torch.version.hip is None
+        and block_scores.dtype == torch.float32
+        and block_scores.ndim == 2
+        and block_scores.stride(-1) == 1
+        and compress_ratio == 4
+        and token_budget > 0
+        and token_budget % compress_ratio == 0
+        and 1 <= rows <= 1024
+        and 1 <= cols <= 32768
+        and torch.cuda.get_device_capability(block_scores.device)[0] >= 8
+    ):
+        k_blks = token_budget // compress_ratio
+        if k_blks <= 1024 and (k_blks & (k_blks - 1)) == 0:
+            if cols <= 8192:
+                bn = max(64, triton.next_power_of_2(cols))
+                out = torch.empty(
+                    (rows, token_budget + compress_ratio - 1),
+                    device=block_scores.device,
+                    dtype=torch.int32,
+                )
+                nw = 8 if bn >= 4096 else 4
+                _qsa_bsearch_topk_expand_kernel[(rows,)](
+                    block_scores,
+                    vis_1d,
+                    out,
+                    int(block_scores.stride(0)),
+                    int(vis_1d.stride(0)),
+                    int(out.stride(0)),
+                    N=cols,
+                    BN=bn,
+                    K_BLKS=k_blks,
+                    RATIO=compress_ratio,
+                    BUDGET=token_budget,
+                    num_warps=nw,
+                )
+                return out
+            elif rows <= 128:
+                out = torch.empty(
+                    (rows, token_budget + compress_ratio - 1),
+                    device=block_scores.device,
+                    dtype=torch.int32,
+                )
+                n_chunks = triton.cdiv(cols, 8192)
+                _qsa_radix2_chunked_topk_expand_kernel[(rows,)](
+                    block_scores,
+                    vis_1d,
+                    out,
+                    int(block_scores.stride(0)),
+                    int(vis_1d.stride(0)),
+                    int(out.stride(0)),
+                    N=cols,
+                    CHUNK=8192,
+                    N_CHUNKS=n_chunks,
+                    K_BLKS=k_blks,
+                    RATIO=compress_ratio,
+                    BUDGET=token_budget,
+                    num_warps=8,
+                )
+                return out
+
     return select_qsa_paged_tokens(
         block_scores,
-        visible_lengths.to(dtype=torch.int32).reshape(-1),
+        vis_1d,
         compress_ratio=compress_ratio,
         token_budget=token_budget,
         validate_lengths=False,
@@ -1068,6 +1444,7 @@ if _HAS_TRITON:
         QS: tl.constexpr,
         M_ROWS: tl.constexpr,
         KT: tl.constexpr,
+        CHECK_EMPTY: tl.constexpr,
     ):
         """Multi-query GQA sparse prefill reading 1-bit packed bitmap + split-BF16 P@V."""
         b = tl.program_id(0).to(tl.int64)
@@ -1113,30 +1490,34 @@ if _HAS_TRITON:
                     other=0,
                 ).to(tl.uint32)
                 valid = live[:, None] & ((words & bit_mask[None, :]) != 0)
-            t = tile * KT + t_rel
-            t_live = t < T
-            kval = tl.load(
-                k_ptr + ((b * HK + hk) * T + t[:, None]) * D + d[None, :],
-                mask=t_live[:, None],
-                other=0.0,
-            )
-            logits = tl.dot(qv, tl.trans(kval)) * SCALE
-            logits = tl.where(valid, logits, float("-inf"))
-            nxt = tl.maximum(mx, tl.max(logits, 1))
-            rescale = tl.where(nxt == float("-inf"), 0.0, tl.exp(mx - nxt))
-            prob = tl.where(valid, tl.exp(logits - nxt[:, None]), 0.0)
-            vv = tl.load(
-                v_ptr + ((b * HK + hk) * T + t[:, None]) * D + d[None, :],
-                mask=t_live[:, None],
-                other=0.0,
-            )
-            high = prob.to(tl.bfloat16)
-            low = (prob - high.to(tl.float32)).to(tl.bfloat16)
-            acc = acc * rescale[:, None]
-            acc = tl.dot(high, vv, acc)
-            acc = tl.dot(low, vv, acc)
-            z = z * rescale + tl.sum(prob, 1)
-            mx = nxt
+            has_any = True
+            if CHECK_EMPTY:
+                has_any = tl.max((words != 0).to(tl.int32)) != 0
+            if has_any:
+                t = tile * KT + t_rel
+                t_live = t < T
+                kval = tl.load(
+                    k_ptr + ((b * HK + hk) * T + t[:, None]) * D + d[None, :],
+                    mask=t_live[:, None],
+                    other=0.0,
+                )
+                logits = tl.dot(qv, tl.trans(kval)) * SCALE
+                logits = tl.where(valid, logits, float("-inf"))
+                nxt = tl.maximum(mx, tl.max(logits, 1))
+                rescale = tl.where(nxt == float("-inf"), 0.0, tl.exp(mx - nxt))
+                prob = tl.where(valid, tl.exp(logits - nxt[:, None]), 0.0)
+                vv = tl.load(
+                    v_ptr + ((b * HK + hk) * T + t[:, None]) * D + d[None, :],
+                    mask=t_live[:, None],
+                    other=0.0,
+                )
+                high = prob.to(tl.bfloat16)
+                low = (prob - high.to(tl.float32)).to(tl.bfloat16)
+                acc = acc * rescale[:, None]
+                acc = tl.dot(high, vv, acc)
+                acc = tl.dot(low, vv, acc)
+                z = z * rescale + tl.sum(prob, 1)
+                mx = nxt
 
         res = tl.where(z[:, None] > 0, acc / z[:, None], 0.0)
         tl.store(
@@ -1146,36 +1527,294 @@ if _HAS_TRITON:
         )
 
     @triton.jit
+    def _qsa_q4_pack_quads_kernel(
+        sel_ptr,
+        bmp_ptr,
+        dup_ptr,
+        stride_sel_b: tl.int64,
+        stride_sel_s: tl.int64,
+        S,
+        T,
+        K: tl.constexpr,
+        BK: tl.constexpr,
+        N_WORDS,
+        N_GRP_S,
+    ):
+        """Pack 4 consecutive queries' selected indices into per-quad 16-bit bitmasks."""
+        grp = tl.program_id(0).to(tl.int64)
+        b = grp // N_GRP_S
+        g_s = grp % N_GRP_S
+        bmp_base = bmp_ptr + grp * N_WORDS
+
+        for j in tl.static_range(4):
+            s_idx = g_s * 4 + j
+            if s_idx < S:
+                row_ptr = sel_ptr + b * stride_sel_b + s_idx * stride_sel_s
+                for start in range(0, K, BK):
+                    offs = start + tl.arange(0, BK)
+                    in_k = offs < K
+                    tok = tl.load(row_ptr + offs, mask=in_k, other=-1)
+                    valid = in_k & (tok >= 0) & (tok < T)
+                    safe_tok = tl.where(valid, tok, 0)
+                    quad = safe_tok >> 2
+                    w_idx = quad >> 1
+                    bit_pos = ((quad & 1) << 4) + (j << 2) + (safe_tok & 3)
+                    bit = tl.full((BK,), 1, tl.uint32) << bit_pos.to(tl.uint32)
+                    old = tl.atomic_or(bmp_base + w_idx, bit, mask=valid, sem="relaxed").to(
+                        tl.uint32
+                    )
+                    bad = (valid & ((old & bit) != 0)) | (in_k & (tok >= T))
+                    if tl.max(bad.to(tl.int32), 0) != 0:
+                        tl.store(dup_ptr, 1)
+
+    @triton.jit
+    def _qsa_q4_compact_quads_kernel(
+        bmp_ptr,
+        u_packed_ptr,
+        u_cnt_ptr,
+        N_WORDS,
+        MAX_U,
+        BW: tl.constexpr,
+    ):
+        """Stream-compact non-zero 4-token quads into packed ``(quad_id << 16) | qmask16``."""
+        grp = tl.program_id(0).to(tl.int64)
+        bmp_base = bmp_ptr + grp * N_WORDS
+        u_base = u_packed_ptr + grp * MAX_U
+        cnt = tl.zeros((), dtype=tl.int32)
+        for start in range(0, N_WORDS, BW):
+            offs = start + tl.arange(0, BW)
+            in_w = offs < N_WORDS
+            w = tl.load(bmp_base + offs, mask=in_w, other=0).to(tl.uint32)
+            m0 = w & 0xFFFF
+            m1 = (w >> 16) & 0xFFFF
+            nz0 = in_w & (m0 != 0)
+            nz1 = in_w & (m1 != 0)
+            c_both = nz0.to(tl.int32) + nz1.to(tl.int32)
+            pos_end = tl.cumsum(c_both, 0)
+            pos_start = cnt + (pos_end - c_both)
+            q0 = offs.to(tl.uint32) * 2
+            q1 = q0 + 1
+            tl.store(
+                u_base + pos_start,
+                ((q0 << 16) | m0).to(tl.int32),
+                mask=nz0 & (pos_start < MAX_U),
+            )
+            tl.store(
+                u_base + pos_start + nz0.to(tl.int32),
+                ((q1 << 16) | m1).to(tl.int32),
+                mask=nz1 & ((pos_start + nz0.to(tl.int32)) < MAX_U),
+            )
+            cnt += tl.sum(c_both, 0)
+        tl.store(u_cnt_ptr + grp, cnt)
+
+    @triton.jit
+    def _qsa_q4_gqa_kernel(
+        q_ptr,
+        k_ptr,
+        v_ptr,
+        sc_ptr,
+        bt_ptr,
+        u_packed_ptr,
+        u_cnt_ptr,
+        out_ptr,
+        stride_qb: tl.int64,
+        stride_qh: tl.int64,
+        stride_qs: tl.int64,
+        stride_kp: tl.int64,
+        stride_kkv: tl.int64,
+        stride_kh: tl.int64,
+        stride_kt: tl.int64,
+        stride_vp: tl.int64,
+        stride_vh: tl.int64,
+        stride_vt: tl.int64,
+        stride_scp: tl.int64,
+        stride_sckv: tl.int64,
+        stride_sch: tl.int64,
+        stride_sct: tl.int64,
+        stride_btb: tl.int64,
+        stride_btp: tl.int64,
+        stride_ob: tl.int64,
+        stride_oh: tl.int64,
+        stride_os: tl.int64,
+        S,
+        T,
+        MAX_PAGES,
+        NUM_PAGES,
+        MAX_U,
+        N_GRP_S,
+        D: tl.constexpr,
+        SCALE: tl.constexpr,
+        HK: tl.constexpr,
+        G: tl.constexpr,
+        M_ROWS: tl.constexpr,
+        PAGE_SIZE: tl.constexpr,
+        BK_Q: tl.constexpr,
+        IS_PAGED: tl.constexpr,
+        IS_FP8: tl.constexpr,
+        HAS_SCALE: tl.constexpr,
+    ):
+        """Q4 deduplicated 4-query GQA TensorCore prefill kernel (dense or paged, BF16 or FP8)."""
+        g_s = N_GRP_S - 1 - tl.program_id(0).to(tl.int64)
+        b = tl.program_id(1).to(tl.int64)
+        hk = tl.program_id(2).to(tl.int64)
+        grp = b * N_GRP_S + g_s
+
+        r = tl.arange(0, M_ROWS)
+        q_j = r // G
+        pos = g_s * 4 + q_j
+        live = (r < 4 * G) & (pos < S)
+        h = hk * G + (r % G)
+        d = tl.arange(0, D)
+
+        qv = tl.load(
+            q_ptr + b * stride_qb + h[:, None] * stride_qh + pos[:, None] * stride_qs + d[None, :],
+            mask=live[:, None],
+            other=0.0,
+        )
+        u_cnt = tl.minimum(tl.load(u_cnt_ptr + grp), MAX_U)
+        mx = tl.full((M_ROWS,), float("-inf"), tl.float32)
+        z = tl.zeros((M_ROWS,), tl.float32)
+        acc = tl.zeros((M_ROWS, D), tl.float32)
+
+        q_u_base = u_packed_ptr + grp * MAX_U
+        QUADS_PER_PAGE: tl.constexpr = PAGE_SIZE // 4
+        sub_offs = tl.arange(0, 4)
+
+        for start in range(0, u_cnt, BK_Q):
+            qo = start + tl.arange(0, BK_Q)
+            qin = qo < u_cnt
+            packed = tl.load(q_u_base + qo, mask=qin, other=0).to(tl.uint32)
+            quad_id = (packed >> 16).to(tl.int32)
+            qmask16 = (packed & 0xFFFF).to(tl.int32)
+
+            masks_tok = tl.broadcast_to(qmask16[:, None], (BK_Q, 4)).reshape(BK_Q * 4)
+            sub_tok = tl.broadcast_to(sub_offs[None, :], (BK_Q, 4)).reshape(BK_Q * 4)
+            shift = q_j[:, None] * 4 + sub_tok[None, :]
+
+            if IS_PAGED:
+                log_p = tl.where(qin, quad_id // QUADS_PER_PAGE, 0)
+                p_in = qin & (log_p < MAX_PAGES)
+                phys_q = tl.load(
+                    bt_ptr + b * stride_btb + tl.minimum(log_p, MAX_PAGES - 1) * stride_btp,
+                    mask=p_in,
+                    other=0,
+                ).to(tl.int64)
+                slot_q = (quad_id % QUADS_PER_PAGE)[:, None] * 4 + sub_offs[None, :]
+                tok_glob = (quad_id[:, None] * 4 + sub_offs[None, :]).reshape(BK_Q * 4)
+                q_ok = p_in & (phys_q > 0) & (phys_q < NUM_PAGES)
+                phys_tok = tl.broadcast_to(phys_q[:, None], (BK_Q, 4)).reshape(BK_Q * 4)
+                slot_tok = slot_q.reshape(BK_Q * 4)
+                t_ok = (
+                    tl.broadcast_to(q_ok[:, None], (BK_Q, 4)).reshape(BK_Q * 4)
+                    & (tok_glob < T)
+                )
+                valid = live[:, None] & t_ok[None, :] & (((masks_tok[None, :] >> shift) & 1) != 0)
+                k_ptrs = (
+                    k_ptr
+                    + phys_tok[:, None] * stride_kp
+                    + hk * stride_kh
+                    + slot_tok[:, None] * stride_kt
+                    + d[None, :]
+                )
+                v_ptrs = k_ptrs + stride_kkv
+                if HAS_SCALE:
+                    sc_base = (
+                        sc_ptr
+                        + phys_tok * stride_scp
+                        + hk * stride_sch
+                        + slot_tok * stride_sct
+                    )
+            else:
+                tok_q = quad_id[:, None] * 4 + sub_offs[None, :]
+                tok_glob = tok_q.reshape(BK_Q * 4)
+                t_ok = tl.broadcast_to(qin[:, None], (BK_Q, 4)).reshape(BK_Q * 4) & (tok_glob < T)
+                safe_tok = tl.where(t_ok, tok_glob, 0).to(tl.int64)
+                valid = live[:, None] & t_ok[None, :] & (((masks_tok[None, :] >> shift) & 1) != 0)
+                k_ptrs = k_ptr + b * stride_kp + hk * stride_kh + safe_tok[:, None] * stride_kt + d[None, :]
+                v_ptrs = v_ptr + b * stride_vp + hk * stride_vh + safe_tok[:, None] * stride_vt + d[None, :]
+
+            k_val = tl.load(k_ptrs, mask=t_ok[:, None], other=0.0)
+            if IS_FP8:
+                if HAS_SCALE:
+                    sc_k = tl.load(sc_base, mask=t_ok, other=1.0).to(tl.float32)
+                    k_val = (k_val.to(tl.float32) * sc_k[:, None]).to(tl.bfloat16)
+                else:
+                    k_val = k_val.to(tl.bfloat16)
+            logits = tl.dot(qv, tl.trans(k_val)) * SCALE
+            logits = tl.where(valid, logits, float("-inf"))
+            nxt = tl.maximum(mx, tl.max(logits, 1))
+            rescale = tl.where(nxt == float("-inf"), 0.0, tl.exp(mx - nxt))
+            prob = tl.where(valid, tl.exp(logits - nxt[:, None]), 0.0)
+
+            v_val = tl.load(v_ptrs, mask=t_ok[:, None], other=0.0)
+            if IS_FP8:
+                if HAS_SCALE:
+                    sc_v = tl.load(sc_base + stride_sckv, mask=t_ok, other=1.0).to(tl.float32)
+                    v_val = (v_val.to(tl.float32) * sc_v[:, None]).to(tl.bfloat16)
+                else:
+                    v_val = v_val.to(tl.bfloat16)
+
+            high = prob.to(tl.bfloat16)
+            low = (prob - high.to(tl.float32)).to(tl.bfloat16)
+            acc = acc * rescale[:, None]
+            acc = tl.dot(high, v_val, acc)
+            acc = tl.dot(low, v_val, acc)
+            z = z * rescale + tl.sum(prob, 1)
+            mx = nxt
+
+        res = tl.where(z[:, None] > 0, acc / z[:, None], 0.0)
+        tl.store(
+            out_ptr + b * stride_ob + h[:, None] * stride_oh + pos[:, None] * stride_os + d[None, :],
+            res.to(out_ptr.dtype.element_ty),
+            mask=live[:, None],
+        )
+
+    @triton.jit
     def _qsa_sparse_prefill_grouped_fast_kernel(
         q_ptr,
         k_ptr,
         v_ptr,
+        sc_ptr,
+        bt_ptr,
         idx_ptr,
         out_ptr,
-        stride_q_b,
-        stride_q_h,
-        stride_q_s,
-        stride_out_b,
-        stride_out_h,
-        stride_out_s,
-        stride_k_b,
-        stride_k_h,
-        stride_k_t,
-        stride_v_b,
-        stride_v_h,
-        stride_v_t,
-        stride_idx_b,
-        stride_idx_s,
+        stride_q_b: tl.int64,
+        stride_q_h: tl.int64,
+        stride_q_s: tl.int64,
+        stride_out_b: tl.int64,
+        stride_out_h: tl.int64,
+        stride_out_s: tl.int64,
+        stride_k_b: tl.int64,
+        stride_k_kv: tl.int64,
+        stride_k_h: tl.int64,
+        stride_k_t: tl.int64,
+        stride_v_b: tl.int64,
+        stride_v_h: tl.int64,
+        stride_v_t: tl.int64,
+        stride_sc_p: tl.int64,
+        stride_sc_kv: tl.int64,
+        stride_sc_h: tl.int64,
+        stride_sc_t: tl.int64,
+        stride_bt_b: tl.int64,
+        stride_bt_p: tl.int64,
+        stride_idx_b: tl.int64,
+        stride_idx_s: tl.int64,
         K,
         T,
+        MAX_PAGES,
+        NUM_PAGES,
         D: tl.constexpr,
         SCALE: tl.constexpr,
         q_per_kv: tl.constexpr,
+        PAGE_SIZE: tl.constexpr,
         MAX_BLKS: tl.constexpr,
         BLK_K: tl.constexpr,
         BLK_H: tl.constexpr,
+        IS_PAGED: tl.constexpr,
+        IS_FP8: tl.constexpr,
+        HAS_SCALE: tl.constexpr,
     ):
-        """Grouped sparse FMHA with empty-block skip and split-BF16 P@V for SM80+/SM103."""
+        """Grouped sparse FMHA with empty-block skip and split-BF16 P@V for SM80+/SM103 (dense or paged)."""
         pid_s = tl.num_programs(0).to(tl.int64) - 1 - tl.program_id(0).to(tl.int64)
         pid_b = tl.program_id(1).to(tl.int64)
         pid_kv = tl.program_id(2).to(tl.int64)
@@ -1193,8 +1832,6 @@ if _HAS_TRITON:
             other=0.0,
         )
         idx_base = idx_ptr + pid_b * stride_idx_b + pid_s * stride_idx_s
-        k_base = k_ptr + pid_b * stride_k_b + pid_kv * stride_k_h
-        v_base = v_ptr + pid_b * stride_v_b + pid_kv * stride_v_h
         max_score = tl.full((BLK_H,), float("-inf"), tl.float32)
         sum_exp = tl.zeros((BLK_H,), tl.float32)
         acc = tl.zeros((BLK_H, D), tl.float32)
@@ -1204,11 +1841,33 @@ if _HAS_TRITON:
             idx = tl.load(idx_base + tr, mask=tr < K, other=-1)
             valid = (tr < K) & (idx >= 0) & (idx < T)
             if tl.sum(valid.to(tl.int32), 0) > 0:
-                k = tl.load(
-                    k_base + idx[:, None] * stride_k_t + rd[None, :],
-                    mask=valid[:, None],
-                    other=0.0,
-                )
+                if IS_PAGED:
+                    safe_idx = tl.where(valid, idx, 0)
+                    log_p = safe_idx // PAGE_SIZE
+                    p_ok = valid & (log_p < MAX_PAGES)
+                    phys = tl.load(
+                        bt_ptr + pid_b * stride_bt_b + tl.minimum(log_p, MAX_PAGES - 1) * stride_bt_p,
+                        mask=p_ok,
+                        other=0,
+                    ).to(tl.int64)
+                    valid = p_ok & (phys > 0) & (phys < NUM_PAGES)
+                    slot = (safe_idx % PAGE_SIZE).to(tl.int64)
+                    k_ptrs = k_ptr + phys[:, None] * stride_k_b + pid_kv * stride_k_h + slot[:, None] * stride_k_t + rd[None, :]
+                    v_ptrs = k_ptrs + stride_k_kv
+                    if HAS_SCALE:
+                        sc_base = sc_ptr + phys * stride_sc_p + pid_kv * stride_sc_h + slot * stride_sc_t
+                else:
+                    safe_idx = tl.where(valid, idx, 0).to(tl.int64)
+                    k_ptrs = k_ptr + pid_b * stride_k_b + pid_kv * stride_k_h + safe_idx[:, None] * stride_k_t + rd[None, :]
+                    v_ptrs = v_ptr + pid_b * stride_v_b + pid_kv * stride_v_h + safe_idx[:, None] * stride_v_t + rd[None, :]
+
+                k = tl.load(k_ptrs, mask=valid[:, None], other=0.0)
+                if IS_FP8:
+                    if HAS_SCALE:
+                        sc_k = tl.load(sc_base, mask=valid, other=1.0).to(tl.float32)
+                        k = (k.to(tl.float32) * sc_k[:, None]).to(tl.bfloat16)
+                    else:
+                        k = k.to(tl.bfloat16)
                 score = tl.dot(q, tl.trans(k)) * SCALE
                 score = tl.where(valid[None, :], score, float("-inf"))
                 next_max = tl.maximum(max_score, tl.max(score, axis=1))
@@ -1216,11 +1875,13 @@ if _HAS_TRITON:
                     next_max == float("-inf"), 0.0, tl.exp(max_score - next_max)
                 )
                 weights = tl.where(valid[None, :], tl.exp(score - next_max[:, None]), 0.0)
-                v = tl.load(
-                    v_base + idx[:, None] * stride_v_t + rd[None, :],
-                    mask=valid[:, None],
-                    other=0.0,
-                )
+                v = tl.load(v_ptrs, mask=valid[:, None], other=0.0)
+                if IS_FP8:
+                    if HAS_SCALE:
+                        sc_v = tl.load(sc_base + stride_sc_kv, mask=valid, other=1.0).to(tl.float32)
+                        v = (v.to(tl.float32) * sc_v[:, None]).to(tl.bfloat16)
+                    else:
+                        v = v.to(tl.bfloat16)
                 high = weights.to(tl.bfloat16)
                 low = (weights - high.to(tl.float32)).to(tl.bfloat16)
                 acc = acc * rescale[:, None]
@@ -1239,6 +1900,389 @@ if _HAS_TRITON:
             out.to(out_ptr.dtype.element_ty),
             mask=live_h[:, None],
         )
+
+    @triton.jit
+    def _qsa_gqa_paged_split_tc_kernel(
+        q_ptr,
+        kv_ptr,
+        sc_ptr,
+        bt_ptr,
+        kv_lens_ptr,
+        sel_ptr,
+        p_out_ptr,
+        p_m_ptr,
+        p_z_ptr,
+        gate_ptr,
+        stride_qb: tl.int64,
+        stride_qh: tl.int64,
+        stride_qs: tl.int64,
+        stride_kp: tl.int64,
+        stride_kkv: tl.int64,
+        stride_kh: tl.int64,
+        stride_kt: tl.int64,
+        stride_scp: tl.int64,
+        stride_sckv: tl.int64,
+        stride_sch: tl.int64,
+        stride_sct: tl.int64,
+        stride_btb: tl.int64,
+        stride_btp: tl.int64,
+        stride_lb: tl.int64,
+        stride_ls: tl.int64,
+        stride_sb: tl.int64,
+        stride_ss: tl.int64,
+        stride_ob: tl.int64,
+        stride_oh: tl.int64,
+        stride_os: tl.int64,
+        S,
+        K,
+        MAX_PAGES,
+        NUM_PAGES,
+        HK: tl.constexpr,
+        G: tl.constexpr,
+        M_ROWS: tl.constexpr,
+        PAGE_SIZE: tl.constexpr,
+        D: tl.constexpr,
+        SCALE: tl.constexpr,
+        KT: tl.constexpr,
+        NUM_SPLITS: tl.constexpr,
+        WITH_GATE: tl.constexpr,
+        IS_FP8: tl.constexpr,
+        HAS_SCALE: tl.constexpr,
+    ):
+        """GQA TensorCore paged split-KV kernel for QSA decode/verify (BF16 & FP8)."""
+        pid_m = tl.program_id(0).to(tl.int64)
+        split = tl.program_id(1).to(tl.int64)
+        hk = pid_m % HK
+        bs = pid_m // HK
+        b = bs // S
+        s = bs % S
+
+        r = tl.arange(0, M_ROWS)
+        live_h = r < G
+        h = hk * G + r
+        d = tl.arange(0, D)
+
+        qv = tl.load(
+            q_ptr + b * stride_qb + h[:, None] * stride_qh + s * stride_qs + d[None, :],
+            mask=live_h[:, None],
+            other=0.0,
+        )
+        kv_len = tl.load(kv_lens_ptr + b * stride_lb + s * stride_ls).to(tl.int32)
+        sel_row = sel_ptr + b * stride_sb + s * stride_ss
+
+        mx = tl.full((M_ROWS,), float("-inf"), tl.float32)
+        z = tl.zeros((M_ROWS,), tl.float32)
+        acc = tl.zeros((M_ROWS, D), tl.float32)
+
+        step = NUM_SPLITS * KT
+        n_blks = tl.maximum(0, tl.cdiv(K - split * KT, step))
+        for blk in range(n_blks):
+            off = (blk * NUM_SPLITS + split) * KT + tl.arange(0, KT)
+            in_k = off < K
+            tok = tl.load(sel_row + off, mask=in_k, other=-1)
+            cand = in_k & (tok >= 0) & (tok < kv_len)
+            safe_tok = tl.where(cand, tok, 0)
+            log_p = safe_tok // PAGE_SIZE
+            p_in = cand & (log_p < MAX_PAGES)
+            phys = tl.load(
+                bt_ptr + b * stride_btb + tl.minimum(log_p, MAX_PAGES - 1) * stride_btp,
+                mask=p_in,
+                other=0,
+            ).to(tl.int64)
+            valid = p_in & (phys > 0) & (phys < NUM_PAGES)
+            if tl.sum(valid.to(tl.int32), 0) > 0:
+                slot = (safe_tok % PAGE_SIZE).to(tl.int64)
+                k_ptrs = (
+                    kv_ptr
+                    + phys[:, None] * stride_kp
+                    + hk * stride_kh
+                    + slot[:, None] * stride_kt
+                    + d[None, :]
+                )
+                k_val = tl.load(k_ptrs, mask=valid[:, None], other=0.0)
+                if IS_FP8:
+                    if HAS_SCALE:
+                        sc_base = sc_ptr + phys * stride_scp + hk * stride_sch + slot * stride_sct
+                        sc_k = tl.load(sc_base, mask=valid, other=1.0).to(tl.float32)
+                        k_val = (k_val.to(tl.float32) * sc_k[:, None]).to(tl.bfloat16)
+                    else:
+                        k_val = k_val.to(tl.bfloat16)
+                logits = tl.dot(qv, tl.trans(k_val)) * SCALE
+                logits = tl.where(valid[None, :], logits, float("-inf"))
+                nxt = tl.maximum(mx, tl.max(logits, 1))
+                rescale = tl.where(nxt == float("-inf"), 0.0, tl.exp(mx - nxt))
+                prob = tl.where(valid[None, :], tl.exp(logits - nxt[:, None]), 0.0)
+                v_val = tl.load(k_ptrs + stride_kkv, mask=valid[:, None], other=0.0)
+                if IS_FP8:
+                    if HAS_SCALE:
+                        sc_v = tl.load(sc_base + stride_sckv, mask=valid, other=1.0).to(tl.float32)
+                        v_val = (v_val.to(tl.float32) * sc_v[:, None]).to(tl.bfloat16)
+                    else:
+                        v_val = v_val.to(tl.bfloat16)
+                acc = acc * rescale[:, None]
+                acc = tl.dot(prob.to(tl.bfloat16), v_val, acc)
+                z = z * rescale + tl.sum(prob, 1)
+                mx = nxt
+
+        if NUM_SPLITS == 1:
+            res = tl.where(z[:, None] > 0, acc / z[:, None], 0.0)
+            if WITH_GATE:
+                hq_tot = HK * G
+                g_offs = ((b * S + s) * hq_tot + h[:, None]) * D + d[None, :]
+                gate = tl.load(gate_ptr + g_offs, mask=live_h[:, None], other=0.0).to(tl.float32)
+                sig = tl.sigmoid(gate).to(tl.bfloat16).to(tl.float32)
+                res = res.to(tl.bfloat16).to(tl.float32) * sig
+            tl.store(
+                p_out_ptr + b * stride_ob + h[:, None] * stride_oh + s * stride_os + d[None, :],
+                res.to(p_out_ptr.dtype.element_ty),
+                mask=live_h[:, None],
+            )
+        else:
+            row_base = (bs * (HK * G) + h) * NUM_SPLITS + split
+            tl.store(
+                p_out_ptr + row_base[:, None] * D + d[None, :],
+                acc,
+                mask=live_h[:, None],
+            )
+            tl.store(p_m_ptr + row_base, mx, mask=live_h)
+            tl.store(p_z_ptr + row_base, z, mask=live_h)
+
+    @triton.jit
+    def _qsa_gqa_paged_merge_kernel(
+        p_out_ptr,
+        p_m_ptr,
+        p_z_ptr,
+        out_ptr,
+        gate_ptr,
+        stride_ob: tl.int64,
+        stride_oh: tl.int64,
+        stride_os: tl.int64,
+        S,
+        HQ: tl.constexpr,
+        D: tl.constexpr,
+        NUM_SPLITS: tl.constexpr,
+        SP_PAD: tl.constexpr,
+        WITH_GATE: tl.constexpr,
+    ):
+        """Merge split-KV partial accumulators with optional fused BF16 sigmoid output gate."""
+        row = tl.program_id(0).to(tl.int64)
+        h = row % HQ
+        bs = row // HQ
+        s = bs % S
+        b = bs // S
+
+        sp = tl.arange(0, SP_PAD)
+        sp_m = sp < NUM_SPLITS
+        rd = tl.arange(0, D)
+
+        base_ms = row * NUM_SPLITS + sp
+        m = tl.load(p_m_ptr + base_ms, mask=sp_m, other=float("-inf"))
+        z = tl.load(p_z_ptr + base_ms, mask=sp_m, other=0.0)
+        gmax = tl.max(m, axis=0)
+        scale = tl.where(sp_m & (z > 0), tl.exp(m - gmax), 0.0)
+        denom = tl.sum(z * scale, axis=0)
+
+        p = tl.load(
+            p_out_ptr + (row * NUM_SPLITS + sp[:, None]) * D + rd[None, :],
+            mask=sp_m[:, None],
+            other=0.0,
+        )
+        num = tl.sum(p * scale[:, None], axis=0)
+        out = tl.where(denom > 0, num / denom, 0.0)
+        if WITH_GATE:
+            gate = tl.load(gate_ptr + (bs * HQ + h) * D + rd).to(tl.float32)
+            sig = tl.sigmoid(gate).to(tl.bfloat16).to(tl.float32)
+            out = out.to(tl.bfloat16).to(tl.float32) * sig
+        tl.store(
+            out_ptr + b * stride_ob + h * stride_oh + s * stride_os + rd,
+            out.to(out_ptr.dtype.element_ty),
+        )
+
+
+def _view_mha_kv_and_scale_hnd(
+    kv_cache_base: torch.Tensor,
+    kv_scale: Optional[torch.Tensor],
+    *,
+    kv_heads: int,
+    page_size: int,
+    head_dim: int,
+) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    """Return zero-copy rank-5 HND KV cache and optional rank-4 HND/broadcast FP32 scale."""
+    if kv_cache_base.ndim == 2:
+        pages = int(kv_cache_base.shape[0])
+        required = 2 * kv_heads * page_size * head_dim
+        if int(kv_cache_base.shape[1]) < required or kv_cache_base.stride(1) != 1:
+            raise ValueError(
+                f"Invalid packed HybridPool MHA shape={tuple(kv_cache_base.shape)} "
+                f"stride={tuple(kv_cache_base.stride())} for required={required}"
+            )
+        kv_hnd = torch.as_strided(
+            kv_cache_base,
+            (pages, 2, kv_heads, page_size, head_dim),
+            (
+                int(kv_cache_base.stride(0)),
+                kv_heads * page_size * head_dim,
+                page_size * head_dim,
+                head_dim,
+                1,
+            ),
+        )
+    else:
+        kv_hnd = view_mha_kv_hnd(
+            kv_cache_base, kv_heads=kv_heads, page_size=page_size, head_dim=head_dim
+        )
+    if kv_scale is None or kv_hnd.dtype != torch.float8_e4m3fn:
+        return kv_hnd, None
+    pages = int(kv_hnd.shape[0])
+    if kv_scale.ndim == 1 and int(kv_scale.numel()) == 2:
+        sc_hnd = torch.as_strided(
+            kv_scale,
+            (pages, 2, kv_heads, page_size),
+            (0, int(kv_scale.stride(0)), 0, 0),
+        )
+        return kv_hnd, sc_hnd
+    if kv_scale.ndim == 2:
+        width = 2 * kv_heads * page_size
+        if int(kv_scale.shape[0]) == pages and int(kv_scale.shape[1]) >= width and kv_scale.stride(1) == 1:
+            sc_hnd = torch.as_strided(
+                kv_scale,
+                (pages, 2, kv_heads, page_size),
+                (int(kv_scale.stride(0)), kv_heads * page_size, page_size, 1),
+            )
+            return kv_hnd, sc_hnd
+    if tuple(kv_scale.shape) == (pages, 2, kv_heads, page_size):
+        return kv_hnd, kv_scale
+    if tuple(kv_scale.shape) == (pages, 2, page_size, kv_heads):
+        return kv_hnd, kv_scale.transpose(2, 3)
+    raise ValueError(f"Unsupported FP8 KV scale shape {tuple(kv_scale.shape)}")
+
+
+def _try_run_q4_prefill(
+    q_bhtd: torch.Tensor,
+    k_ptr_obj: torch.Tensor,
+    v_ptr_obj: torch.Tensor,
+    sc_hnd: Optional[torch.Tensor],
+    bt_kv: Optional[torch.Tensor],
+    sel_c: torch.Tensor,
+    *,
+    T: int,
+    page_size: int,
+    is_paged: bool,
+) -> Optional[torch.Tensor]:
+    """Attempt Q4 block-dedup sparse prefill; returns None if fallback to Direct is faster/needed."""
+    B, H_q, S, D = q_bhtd.shape
+    H_kv = int(k_ptr_obj.shape[2] if is_paged else k_ptr_obj.shape[1])
+    K = int(sel_c.shape[-1])
+    q_per_kv = H_q // max(H_kv, 1)
+    if (
+        not _HAS_TRITON
+        or torch.cuda.is_current_stream_capturing()
+        or S < 8
+        or K < 32
+        or T <= 0
+        or q_per_kv > 8
+        or (is_paged and (page_size % 4 != 0 or bt_kv is None))
+    ):
+        return None
+    n_grp_s = triton.cdiv(S, 4)
+    n_grp = B * n_grp_s
+    n_quads = triton.cdiv(T, 4)
+    n_words = triton.cdiv(n_quads, 2)
+    cap_u = min(n_quads, max(triton.cdiv(K, 4) * 5, 1024))
+    # Cap Q4 workspace at ~200 MB to keep peak memory bounded for very wide batches/contexts
+    if (n_grp * (n_words + cap_u) * 4) > 200 * 1024 * 1024:
+        return None
+
+    dev = q_bhtd.device
+    bmp = torch.zeros((n_grp, n_words), dtype=torch.int32, device=dev)
+    dup = torch.zeros((1,), dtype=torch.int32, device=dev)
+    u_packed = torch.empty((n_grp, cap_u), dtype=torch.int32, device=dev)
+    u_cnt = torch.empty((n_grp,), dtype=torch.int32, device=dev)
+    bk = 512 if K >= 256 else max(16, triton.next_power_of_2(K))
+    _qsa_q4_pack_quads_kernel[(n_grp,)](
+        sel_c,
+        bmp,
+        dup,
+        int(sel_c.stride(0)),
+        int(sel_c.stride(1)),
+        S,
+        T,
+        K=K,
+        BK=bk,
+        N_WORDS=n_words,
+        N_GRP_S=n_grp_s,
+        num_warps=4,
+    )
+    _qsa_q4_compact_quads_kernel[(n_grp,)](
+        bmp,
+        u_packed,
+        u_cnt,
+        N_WORDS=n_words,
+        MAX_U=cap_u,
+        BW=1024,
+        num_warps=8,
+    )
+    # 1 tiny sync check: verify no duplicate/OOB AND high enough quad overlap vs Direct
+    has_dup, max_u_seen, sum_u_seen = torch.stack(
+        [dup[0].to(torch.int64), u_cnt.max().to(torch.int64), u_cnt.sum(dtype=torch.int64)]
+    ).tolist()
+    if has_dup != 0 or max_u_seen > cap_u or sum_u_seen > n_grp * int(K * 0.625):
+        return None
+
+    out = torch.empty_like(q_bhtd)
+    m_rows = 16 if q_per_kv <= 4 else 32
+    is_fp8 = k_ptr_obj.dtype == torch.float8_e4m3fn
+    has_scale = is_fp8 and sc_hnd is not None
+    dummy_bt = bt_kv if is_paged and bt_kv is not None else sel_c
+    dummy_sc = sc_hnd if has_scale and sc_hnd is not None else k_ptr_obj
+    _qsa_q4_gqa_kernel[(n_grp_s, B, H_kv)](
+        q_bhtd,
+        k_ptr_obj,
+        v_ptr_obj,
+        dummy_sc,
+        dummy_bt,
+        u_packed,
+        u_cnt,
+        out,
+        int(q_bhtd.stride(0)),
+        int(q_bhtd.stride(1)),
+        int(q_bhtd.stride(2)),
+        int(k_ptr_obj.stride(0)),
+        int(k_ptr_obj.stride(1)) if is_paged else 0,
+        int(k_ptr_obj.stride(2)) if is_paged else int(k_ptr_obj.stride(1)),
+        int(k_ptr_obj.stride(3)) if is_paged else int(k_ptr_obj.stride(2)),
+        int(v_ptr_obj.stride(0)),
+        int(v_ptr_obj.stride(1)),
+        int(v_ptr_obj.stride(2)),
+        int(sc_hnd.stride(0)) if has_scale and sc_hnd is not None else 0,
+        int(sc_hnd.stride(1)) if has_scale and sc_hnd is not None else 0,
+        int(sc_hnd.stride(2)) if has_scale and sc_hnd is not None else 0,
+        int(sc_hnd.stride(3)) if has_scale and sc_hnd is not None else 0,
+        int(bt_kv.stride(0)) if is_paged and bt_kv is not None else 0,
+        int(bt_kv.stride(1)) if is_paged and bt_kv is not None else 0,
+        int(out.stride(0)),
+        int(out.stride(1)),
+        int(out.stride(2)),
+        S,
+        T,
+        int(bt_kv.shape[1]) if is_paged and bt_kv is not None else 1,
+        int(k_ptr_obj.shape[0]) if is_paged else 1,
+        cap_u,
+        n_grp_s,
+        D=D,
+        SCALE=D**-0.5,
+        HK=H_kv,
+        G=q_per_kv,
+        M_ROWS=m_rows,
+        PAGE_SIZE=max(4, page_size) if is_paged else 4,
+        BK_Q=8,
+        IS_PAGED=is_paged,
+        IS_FP8=is_fp8,
+        HAS_SCALE=has_scale,
+        num_warps=4,
+        num_stages=2,
+    )
+    return out
 
 
 def qsa_sparse_prefill_attention(
@@ -1288,12 +2332,12 @@ def qsa_sparse_prefill_attention(
             v_c = v_bhtd.contiguous()
             sel_c = selected.contiguous()
 
-            # 1) Packed 1-bit bitmap multi-query path for unique selections
+            # 1) Dense short/medium context (T <= 2048 and <= 2*K): packed 1-bit bitmap multi-query path
             words = triton.cdiv(T, 32)
             if (
                 not torch.cuda.is_current_stream_capturing()
                 and S >= 128
-                and T >= 64
+                and 64 <= T <= min(2048, 2 * K)
                 and q_per_kv <= 16
                 and (B * S * words) <= 32 * 1024 * 1024
             ):
@@ -1339,45 +2383,68 @@ def qsa_sparse_prefill_attention(
                         QS=qs,
                         M_ROWS=m_rows,
                         KT=kt,
+                        CHECK_EMPTY=False,
                         num_warps=4,
                         num_stages=1,
                     )
                     return out
 
-            # 2) Fast grouped SM80+/SM103 fallback (handles duplicates & long contexts)
-            if S >= 128 and K >= 32 and 3 <= q_per_kv <= 16:
-                blk_k = 64 if D <= 256 else 32
+            # 2) Sparse long-context Q4 4-query quad-dedup TensorCore kernel
+            q4_out = _try_run_q4_prefill(
+                q_c, k_c, v_c, None, None, sel_c, T=T, page_size=4, is_paged=False
+            )
+            if q4_out is not None:
+                return q4_out
+
+            # 3) Fast direct grouped GQA TensorCore path (BLK_K=32, num_stages=2)
+            if S >= 16 and K >= 32 and 3 <= q_per_kv <= 16:
+                blk_k = 32 if D >= 256 else 64
                 out = torch.empty_like(q_c)
                 _qsa_sparse_prefill_grouped_fast_kernel[(S, B, H_kv)](
                     q_c,
                     k_c,
                     v_c,
+                    k_c,
+                    sel_c,
                     sel_c,
                     out,
-                    q_c.stride(0),
-                    q_c.stride(1),
-                    q_c.stride(2),
-                    out.stride(0),
-                    out.stride(1),
-                    out.stride(2),
-                    k_c.stride(0),
-                    k_c.stride(1),
-                    k_c.stride(2),
-                    v_c.stride(0),
-                    v_c.stride(1),
-                    v_c.stride(2),
-                    sel_c.stride(0),
-                    sel_c.stride(1),
+                    int(q_c.stride(0)),
+                    int(q_c.stride(1)),
+                    int(q_c.stride(2)),
+                    int(out.stride(0)),
+                    int(out.stride(1)),
+                    int(out.stride(2)),
+                    int(k_c.stride(0)),
+                    0,
+                    int(k_c.stride(1)),
+                    int(k_c.stride(2)),
+                    int(v_c.stride(0)),
+                    int(v_c.stride(1)),
+                    int(v_c.stride(2)),
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    int(sel_c.stride(0)),
+                    int(sel_c.stride(1)),
                     K,
                     T,
+                    1,
+                    1,
                     D=D,
                     SCALE=D**-0.5,
                     q_per_kv=q_per_kv,
+                    PAGE_SIZE=1,
                     MAX_BLKS=triton.cdiv(K, blk_k),
                     BLK_K=blk_k,
                     BLK_H=16,
+                    IS_PAGED=False,
+                    IS_FP8=False,
+                    HAS_SCALE=False,
                     num_warps=4,
-                    num_stages=1,
+                    num_stages=2,
                 )
                 return out
 
@@ -1423,6 +2490,133 @@ def qsa_sparse_prefill_attention(
     return out
 
 
+def qsa_sparse_paged_prefill_attention(
+    q_bhtd: torch.Tensor,
+    kv_cache_base: torch.Tensor,
+    kv_block_table: torch.Tensor,
+    selected: torch.Tensor,
+    *,
+    page_size: int,
+    kv_heads: int,
+    head_dim: int,
+    max_ctx_len: int,
+    kv_scale: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Zero-copy sparse prefill directly against paged MHA KV pool (Q4 dedup + GQA TC fallback)."""
+    B, H_q, S, D = q_bhtd.shape
+    if B == 0 or S == 0:
+        return torch.empty_like(q_bhtd)
+    K = int(selected.shape[-1])
+    if max_ctx_len <= 0 or K == 0:
+        return torch.zeros_like(q_bhtd)
+
+    q_per_kv = H_q // max(kv_heads, 1)
+    kv_hnd, sc_hnd = _view_mha_kv_and_scale_hnd(
+        kv_cache_base,
+        kv_scale,
+        kv_heads=kv_heads,
+        page_size=page_size,
+        head_dim=head_dim,
+    )
+    if (
+        _HAS_TRITON
+        and q_bhtd.is_cuda
+        and torch.version.hip is None
+        and q_bhtd.dtype == torch.bfloat16
+        and kv_hnd.dtype in (torch.bfloat16, torch.float8_e4m3fn)
+        and selected.dtype == torch.int32
+        and kv_block_table.dtype == torch.int32
+        and D in (64, 128, 256)
+        and H_q % kv_heads == 0
+        and q_per_kv <= 16
+        and page_size > 0
+        and (page_size & (page_size - 1)) == 0
+        and torch.cuda.get_device_capability(q_bhtd.device)[0] >= 8
+    ):
+        q_c = q_bhtd if q_bhtd.stride(-1) == 1 else q_bhtd.contiguous()
+        sel_c = selected if selected.stride(-1) == 1 else selected.contiguous()
+        q4_out = _try_run_q4_prefill(
+            q_c,
+            kv_hnd,
+            kv_hnd,
+            sc_hnd,
+            kv_block_table,
+            sel_c,
+            T=max_ctx_len,
+            page_size=page_size,
+            is_paged=True,
+        )
+        if q4_out is not None:
+            return q4_out
+
+        blk_k = 32 if D >= 256 else 64
+        out = torch.empty_like(q_c)
+        is_fp8 = kv_hnd.dtype == torch.float8_e4m3fn
+        has_scale = is_fp8 and sc_hnd is not None
+        dummy_sc = sc_hnd if has_scale and sc_hnd is not None else kv_hnd
+        _qsa_sparse_prefill_grouped_fast_kernel[(S, B, kv_heads)](
+            q_c,
+            kv_hnd,
+            kv_hnd,
+            dummy_sc,
+            kv_block_table,
+            sel_c,
+            out,
+            int(q_c.stride(0)),
+            int(q_c.stride(1)),
+            int(q_c.stride(2)),
+            int(out.stride(0)),
+            int(out.stride(1)),
+            int(out.stride(2)),
+            int(kv_hnd.stride(0)),
+            int(kv_hnd.stride(1)),
+            int(kv_hnd.stride(2)),
+            int(kv_hnd.stride(3)),
+            0,
+            0,
+            0,
+            int(sc_hnd.stride(0)) if has_scale and sc_hnd is not None else 0,
+            int(sc_hnd.stride(1)) if has_scale and sc_hnd is not None else 0,
+            int(sc_hnd.stride(2)) if has_scale and sc_hnd is not None else 0,
+            int(sc_hnd.stride(3)) if has_scale and sc_hnd is not None else 0,
+            int(kv_block_table.stride(0)),
+            int(kv_block_table.stride(1)),
+            int(sel_c.stride(0)),
+            int(sel_c.stride(1)),
+            K,
+            max_ctx_len,
+            int(kv_block_table.shape[1]),
+            int(kv_hnd.shape[0]),
+            D=D,
+            SCALE=D**-0.5,
+            q_per_kv=q_per_kv,
+            PAGE_SIZE=page_size,
+            MAX_BLKS=triton.cdiv(K, blk_k),
+            BLK_K=blk_k,
+            BLK_H=16,
+            IS_PAGED=True,
+            IS_FP8=is_fp8,
+            HAS_SCALE=has_scale,
+            num_warps=4,
+            num_stages=2,
+        )
+        return out
+
+    kv_lens_2d = torch.full((B, S), max_ctx_len, dtype=torch.int32, device=q_bhtd.device)
+    return qsa_sparse_paged_decode_attention(
+        q_bhtd,
+        kv_cache_base,
+        kv_block_table,
+        kv_lens_2d,
+        selected,
+        page_size=page_size,
+        kv_heads=kv_heads,
+        head_dim=head_dim,
+        kv_scale=kv_scale,
+        is_cuda_graph=False,
+    )
+
+
 def qsa_sparse_paged_decode_attention(
     q_bhsd: torch.Tensor,
     kv_cache_base: torch.Tensor,
@@ -1433,17 +2627,228 @@ def qsa_sparse_paged_decode_attention(
     page_size: int,
     kv_heads: int,
     head_dim: int,
+    kv_scale: Optional[torch.Tensor] = None,
     output_gate: Optional[torch.Tensor] = None,
     is_cuda_graph: bool = False,
 ) -> torch.Tensor:
-    """Sparse paged GQA/MQA attention ``[B, H_q, S, D]`` wrapping ``sparse_paged_gqa_attn``."""
+    """Sparse paged GQA/MQA attention ``[B, H_q, S, D]`` using fast GQA TensorCore Split-KV."""
+    B, H_q, S, D = q_bhsd.shape
+    if B == 0 or S == 0:
+        if output_gate is not None:
+            return torch.empty((B, S, H_q, D), device=q_bhsd.device, dtype=q_bhsd.dtype).transpose(
+                1, 2
+            )
+        return torch.empty_like(q_bhsd)
+
+    K = int(selected.shape[-1])
+    kv_hnd, sc_hnd = _view_mha_kv_and_scale_hnd(
+        kv_cache_base,
+        kv_scale,
+        kv_heads=kv_heads,
+        page_size=page_size,
+        head_dim=head_dim,
+    )
+    q_per_kv = H_q // max(kv_heads, 1)
+
+    if output_gate is not None and not (
+        output_gate.shape == (B, S, H_q, D)
+        and output_gate.dtype == q_bhsd.dtype
+        and output_gate.device == q_bhsd.device
+        and output_gate.is_contiguous()
+    ):
+        raise ValueError("QSA output gate must be contiguous [B,S,H,D] on the query device")
+
+    if (
+        _HAS_TRITON
+        and q_bhsd.is_cuda
+        and torch.version.hip is None
+        and q_bhsd.dtype == torch.bfloat16
+        and kv_hnd.dtype in (torch.bfloat16, torch.float8_e4m3fn)
+        and kv_block_table.dtype == torch.int32
+        and kv_lens.dtype == torch.int32
+        and selected.dtype == torch.int32
+        and kv_heads > 0
+        and H_q % kv_heads == 0
+        and 1 <= q_per_kv <= 16
+        and D in (64, 128, 256)
+        and page_size > 0
+        and (page_size & (page_size - 1)) == 0
+        and int(kv_hnd.stride(-1)) == 1
+        and torch.cuda.get_device_capability(q_bhsd.device)[0] >= 8
+    ):
+        if K == 0:
+            if output_gate is not None:
+                return torch.zeros(
+                    (B, S, H_q, D), device=q_bhsd.device, dtype=q_bhsd.dtype
+                ).transpose(1, 2)
+            return torch.zeros_like(q_bhsd)
+
+        q_c = q_bhsd if q_bhsd.stride(-1) == 1 else q_bhsd.contiguous()
+        sel_c = selected if selected.stride(-1) == 1 else selected.contiguous()
+        kv_lens_2d = kv_lens.unsqueeze(1) if kv_lens.ndim == 1 else kv_lens
+        is_fp8 = kv_hnd.dtype == torch.float8_e4m3fn
+        has_scale = is_fp8 and sc_hnd is not None
+
+        m_ctas = B * S * kv_heads
+        if not is_fp8:
+            if m_ctas <= 16:
+                target_sp, kt, nw, stg = 32, 32, 4, 2
+            elif m_ctas <= 128:
+                target_sp, kt, nw, stg = 4, (64 if K >= 256 else 32), 4, 2
+            else:
+                target_sp, kt, nw, stg = 4, 32, 4, 2
+        else:
+            if m_ctas <= 16:
+                target_sp, kt, nw, stg = 16, 32, 4, 2
+            elif m_ctas <= 128:
+                if S > 1:
+                    target_sp, kt, nw, stg = 16, 32, 4, 1
+                else:
+                    target_sp, kt, nw, stg = 4, (64 if K >= 256 else 32), 4, 2
+            else:
+                target_sp, kt, nw, stg = 4, (64 if D <= 256 and K >= 256 else 32), 8, 1
+
+        splits = min(target_sp, triton.next_power_of_2(triton.cdiv(K, kt)))
+        m_rows = 16
+        with_gate = output_gate is not None
+        if with_gate:
+            out = torch.empty(
+                (B, S, H_q, D), device=q_c.device, dtype=q_c.dtype
+            ).transpose(1, 2)
+        else:
+            out = torch.empty_like(q_c)
+
+        dummy_sc = sc_hnd if has_scale and sc_hnd is not None else kv_hnd
+        dummy_gate = output_gate if with_gate and output_gate is not None else out
+
+        if splits == 1:
+            _qsa_gqa_paged_split_tc_kernel[(m_ctas, 1)](
+                q_c,
+                kv_hnd,
+                dummy_sc,
+                kv_block_table,
+                kv_lens_2d,
+                sel_c,
+                out,
+                out,
+                out,
+                dummy_gate,
+                int(q_c.stride(0)),
+                int(q_c.stride(1)),
+                int(q_c.stride(2)),
+                int(kv_hnd.stride(0)),
+                int(kv_hnd.stride(1)),
+                int(kv_hnd.stride(2)),
+                int(kv_hnd.stride(3)),
+                int(sc_hnd.stride(0)) if has_scale and sc_hnd is not None else 0,
+                int(sc_hnd.stride(1)) if has_scale and sc_hnd is not None else 0,
+                int(sc_hnd.stride(2)) if has_scale and sc_hnd is not None else 0,
+                int(sc_hnd.stride(3)) if has_scale and sc_hnd is not None else 0,
+                int(kv_block_table.stride(0)),
+                int(kv_block_table.stride(1)),
+                int(kv_lens_2d.stride(0)),
+                int(kv_lens_2d.stride(1)),
+                int(sel_c.stride(0)),
+                int(sel_c.stride(1)),
+                int(out.stride(0)),
+                int(out.stride(1)),
+                int(out.stride(2)),
+                S,
+                K,
+                int(kv_block_table.shape[1]),
+                int(kv_hnd.shape[0]),
+                HK=kv_heads,
+                G=q_per_kv,
+                M_ROWS=m_rows,
+                PAGE_SIZE=page_size,
+                D=D,
+                SCALE=D**-0.5,
+                KT=kt,
+                NUM_SPLITS=1,
+                WITH_GATE=with_gate,
+                IS_FP8=is_fp8,
+                HAS_SCALE=has_scale,
+                num_warps=nw,
+                num_stages=stg,
+            )
+            return out
+
+        p_out = torch.empty((B, S, H_q, splits, D), dtype=torch.float32, device=q_c.device)
+        p_m = torch.empty((B, S, H_q, splits), dtype=torch.float32, device=q_c.device)
+        p_z = torch.empty((B, S, H_q, splits), dtype=torch.float32, device=q_c.device)
+        _qsa_gqa_paged_split_tc_kernel[(m_ctas, splits)](
+            q_c,
+            kv_hnd,
+            dummy_sc,
+            kv_block_table,
+            kv_lens_2d,
+            sel_c,
+            p_out,
+            p_m,
+            p_z,
+            dummy_gate,
+            int(q_c.stride(0)),
+            int(q_c.stride(1)),
+            int(q_c.stride(2)),
+            int(kv_hnd.stride(0)),
+            int(kv_hnd.stride(1)),
+            int(kv_hnd.stride(2)),
+            int(kv_hnd.stride(3)),
+            int(sc_hnd.stride(0)) if has_scale and sc_hnd is not None else 0,
+            int(sc_hnd.stride(1)) if has_scale and sc_hnd is not None else 0,
+            int(sc_hnd.stride(2)) if has_scale and sc_hnd is not None else 0,
+            int(sc_hnd.stride(3)) if has_scale and sc_hnd is not None else 0,
+            int(kv_block_table.stride(0)),
+            int(kv_block_table.stride(1)),
+            int(kv_lens_2d.stride(0)),
+            int(kv_lens_2d.stride(1)),
+            int(sel_c.stride(0)),
+            int(sel_c.stride(1)),
+            int(out.stride(0)),
+            int(out.stride(1)),
+            int(out.stride(2)),
+            S,
+            K,
+            int(kv_block_table.shape[1]),
+            int(kv_hnd.shape[0]),
+            HK=kv_heads,
+            G=q_per_kv,
+            M_ROWS=m_rows,
+            PAGE_SIZE=page_size,
+            D=D,
+            SCALE=D**-0.5,
+            KT=kt,
+            NUM_SPLITS=splits,
+            WITH_GATE=False,
+            IS_FP8=is_fp8,
+            HAS_SCALE=has_scale,
+            num_warps=nw,
+            num_stages=stg,
+        )
+        sp_pad = max(1, triton.next_power_of_2(splits))
+        _qsa_gqa_paged_merge_kernel[(B * S * H_q,)](
+            p_out,
+            p_m,
+            p_z,
+            out,
+            dummy_gate,
+            int(out.stride(0)),
+            int(out.stride(1)),
+            int(out.stride(2)),
+            S,
+            HQ=H_q,
+            D=D,
+            NUM_SPLITS=splits,
+            SP_PAD=sp_pad,
+            WITH_GATE=with_gate,
+            num_warps=4,
+        )
+        return out
+
     from rtp_llm.models_py.kernels.cuda.qsa.sparse_paged_fmha import (
         sparse_paged_gqa_attn,
     )
 
-    kv_hnd = view_mha_kv_hnd(
-        kv_cache_base, kv_heads=kv_heads, page_size=page_size, head_dim=head_dim
-    )
     in_capture = bool(
         is_cuda_graph
         and (
@@ -1459,6 +2864,7 @@ def qsa_sparse_paged_decode_attention(
         selected,
         page_size=page_size,
         kv_head_num=kv_heads,
+        kv_scale=sc_hnd,
         graph_capture=in_capture,
         output_gate=output_gate,
         selected_has_count=False,
@@ -1472,6 +2878,7 @@ __all__ = [
     "qsa_prefill_score",
     "qsa_select_causal_from_projected",
     "qsa_sparse_paged_decode_attention",
+    "qsa_sparse_paged_prefill_attention",
     "qsa_sparse_prefill_attention",
     "score_and_select_qsa_paged",
     "view_indexer_kv_pool",

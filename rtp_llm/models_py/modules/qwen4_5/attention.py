@@ -478,6 +478,12 @@ class Qwen4_5Attention(nn.Module):
         tp_rank: int = 0,
         tp_group: Any = None,
         fast_all_reduce: Any = None,
+        sp_size: int = 1,
+        sp_rank: int = 0,
+        sp_group: Any = None,
+        dp_attn: bool = False,
+        fp8_indexer_kv: bool = False,
+        kv_cache_dtype: str = "bf16",
     ) -> None:
         super().__init__()
         self.config = config
@@ -489,6 +495,12 @@ class Qwen4_5Attention(nn.Module):
         self.tp_rank = int(tp_rank)
         self.tp_group = tp_group
         self.fast_all_reduce = fast_all_reduce
+        self.sp_size = max(1, int(sp_size))
+        self.sp_rank = int(sp_rank)
+        self.sp_group = sp_group
+        self.dp_attn = bool(dp_attn)
+        self.fp8_indexer_kv = bool(fp8_indexer_kv)
+        self.kv_cache_dtype = str(kv_cache_dtype)
         if config.num_attention_heads % self.tp_size != 0:
             raise ValueError(
                 f"num_attention_heads ({config.num_attention_heads}) not divisible by tp_size ({self.tp_size})"
@@ -578,6 +590,12 @@ class Qwen4_5Attention(nn.Module):
         tp_rank: int = 0,
         tp_group: Any = None,
         fast_all_reduce: Any = None,
+        sp_size: int = 1,
+        sp_rank: int = 0,
+        sp_group: Any = None,
+        dp_attn: bool = False,
+        fp8_indexer_kv: bool = False,
+        kv_cache_dtype: str = "bf16",
     ) -> "Qwen4_5Attention":
         plan = sharing_plan if sharing_plan is not None else YoCoSharingPlan.from_config(config)
         is_consumer = plan.is_full_attn_consumer(layer_idx)
@@ -591,6 +609,12 @@ class Qwen4_5Attention(nn.Module):
             tp_rank=tp_rank,
             tp_group=tp_group,
             fast_all_reduce=fast_all_reduce,
+            sp_size=sp_size,
+            sp_rank=sp_rank,
+            sp_group=sp_group,
+            dp_attn=dp_attn,
+            fp8_indexer_kv=fp8_indexer_kv,
+            kv_cache_dtype=kv_cache_dtype,
         )
 
     def _maybe_all_reduce(self, out: torch.Tensor) -> torch.Tensor:

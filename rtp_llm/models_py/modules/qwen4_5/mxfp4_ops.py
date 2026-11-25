@@ -2526,7 +2526,7 @@ def _gather_slot_weighted_reduce_kernel(
 
 
 def mxfp4_moe_deepgemm_contiguous(
-    x: torch.Tensor,
+    x: Optional[torch.Tensor],
     topk_ids: torch.Tensor,
     topk_weights: torch.Tensor,
     weights: MXFP4MoEWeights,
@@ -2535,13 +2535,23 @@ def mxfp4_moe_deepgemm_contiguous(
     up_beta: float = 25.0,
     ep_start: int = 0,
     ep_size: int = 1,
+    prequant_fp8: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+    out_dtype: Optional[torch.dtype] = None,
 ) -> torch.Tensor:
     """DeepGEMM SM100 ``m_grouped_fp8_fp4_gemm_nt_contiguous`` (Prefill / large-M)."""
     import deep_gemm
 
-    M, L = x.shape
+    x_ref = prequant_fp8[0] if prequant_fp8 is not None else x
+    assert x_ref is not None
+    M, L = x_ref.shape
+    dev = x_ref.device
+    res_dtype = (
+        out_dtype
+        if out_dtype is not None
+        else (x.dtype if x is not None else torch.bfloat16)
+    )
     if M == 0:
-        return torch.empty_like(x)
+        return torch.empty((0, L), dtype=res_dtype, device=dev)
     top_k = topk_ids.shape[1]
     E_local = weights.num_experts
     I = weights.intermediate_size
@@ -2563,25 +2573,29 @@ def mxfp4_moe_deepgemm_contiguous(
     offsets = torch.cumsum(aligned_counts, dim=0) - aligned_counts
     all_tokens = int(aligned_counts.sum().item())
     if all_tokens == 0:
-        return torch.zeros((M, L), dtype=x.dtype, device=x.device)
+        return torch.zeros((M, L), dtype=res_dtype, device=dev)
 
     (w13_i8, w13_s), (w2_i8, w2_s) = weights.get_deepgemm_pair()
 
-    x_q, x_sc_raw = per_token_group_quant_fp8_ue8m0(x, scale_format="raw")
-    a_fp8 = torch.zeros((all_tokens, L), dtype=torch.float8_e4m3fn, device=x.device)
+    if prequant_fp8 is not None:
+        x_q, x_sc_raw = prequant_fp8
+    else:
+        assert x is not None
+        x_q, x_sc_raw = per_token_group_quant_fp8_ue8m0(x, scale_format="raw")
+    a_fp8 = torch.zeros((all_tokens, L), dtype=torch.float8_e4m3fn, device=dev)
     num_groups = L // 32
     num_packs = num_groups // 4
     tma_m = ((all_tokens + 3) // 4) * 4
-    a_scale = torch.zeros((num_packs, tma_m), dtype=torch.int32, device=x.device).T[:all_tokens]
+    a_scale = torch.zeros((num_packs, tma_m), dtype=torch.int32, device=dev).T[:all_tokens]
 
-    m_indices = torch.zeros((all_tokens,), dtype=torch.int32, device=x.device)
+    m_indices = torch.zeros((all_tokens,), dtype=torch.int32, device=dev)
     _init_m_indices_kernel[(E_local,)](
         counts, aligned_counts, offsets, m_indices, BLOCK=256, num_warps=4
     )
 
     M_total = M * top_k
-    write_cnt = torch.zeros((E_local,), dtype=torch.int32, device=x.device)
-    dst_slots = torch.empty((M, top_k), dtype=torch.int32, device=x.device)
+    write_cnt = torch.zeros((E_local,), dtype=torch.int32, device=dev)
+    dst_slots = torch.empty((M, top_k), dtype=torch.int32, device=dev)
     _scatter_fp8_to_contig_kernel[(M_total,)](
         x_q.view(torch.uint8),
         x_sc_raw,
@@ -2606,7 +2620,7 @@ def mxfp4_moe_deepgemm_contiguous(
         num_warps=4,
     )
 
-    gate_up = torch.empty((all_tokens, 2 * I), dtype=torch.bfloat16, device=x.device)
+    gate_up = torch.empty((all_tokens, 2 * I), dtype=torch.bfloat16, device=dev)
     deep_gemm.m_grouped_fp8_fp4_gemm_nt_contiguous(
         (a_fp8, a_scale),
         (w13_i8, w13_s),
@@ -2620,7 +2634,7 @@ def mxfp4_moe_deepgemm_contiguous(
         gate_up, gate_beta=gate_beta, up_beta=up_beta, scale_format="deepgemm"
     )
 
-    down_out = torch.empty((all_tokens, L), dtype=torch.bfloat16, device=x.device)
+    down_out = torch.empty((all_tokens, L), dtype=torch.bfloat16, device=dev)
     deep_gemm.m_grouped_fp8_fp4_gemm_nt_contiguous(
         (h_fp8, h_scale),
         (w2_i8, w2_s),
@@ -2630,7 +2644,7 @@ def mxfp4_moe_deepgemm_contiguous(
         recipe_b=(1, 32),
     )
 
-    out = torch.empty((M, L), dtype=x.dtype, device=x.device)
+    out = torch.empty((M, L), dtype=res_dtype, device=dev)
     BLOCK_K = 512 if L >= 512 else triton.next_power_of_2(max(L, 64))
     w_f = topk_weights.float().contiguous()
     _gather_slot_weighted_reduce_kernel[(M, triton.cdiv(L, BLOCK_K))](
@@ -2759,7 +2773,7 @@ def _gather_masked_weighted_reduce_kernel(
 
 
 def mxfp4_moe_deepgemm_masked(
-    x: torch.Tensor,
+    x: Optional[torch.Tensor],
     topk_ids: torch.Tensor,
     topk_weights: torch.Tensor,
     weights: MXFP4MoEWeights,
@@ -2768,13 +2782,23 @@ def mxfp4_moe_deepgemm_masked(
     up_beta: float = 25.0,
     ep_start: int = 0,
     ep_size: int = 1,
+    prequant_fp8: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+    out_dtype: Optional[torch.dtype] = None,
 ) -> torch.Tensor:
     """DeepGEMM SM100 ``m_grouped_fp8_fp4_gemm_nt_masked`` (100% CUDA-Graph Decode)."""
     import deep_gemm
 
-    M, L = x.shape
+    x_ref = prequant_fp8[0] if prequant_fp8 is not None else x
+    assert x_ref is not None
+    M, L = x_ref.shape
+    dev = x_ref.device
+    res_dtype = (
+        out_dtype
+        if out_dtype is not None
+        else (x.dtype if x is not None else torch.bfloat16)
+    )
     if M == 0:
-        return torch.empty_like(x)
+        return torch.empty((0, L), dtype=res_dtype, device=dev)
     top_k = topk_ids.shape[1]
     E_local = weights.num_experts
     I = weights.intermediate_size
@@ -2791,17 +2815,21 @@ def mxfp4_moe_deepgemm_masked(
 
     (w13_i8, w13_s), (w2_i8, w2_s) = weights.get_deepgemm_pair()
 
-    x_q, x_sc_raw = per_token_group_quant_fp8_ue8m0(x, scale_format="raw")
+    if prequant_fp8 is not None:
+        x_q, x_sc_raw = prequant_fp8
+    else:
+        assert x is not None
+        x_q, x_sc_raw = per_token_group_quant_fp8_ue8m0(x, scale_format="raw")
     # Active slots [0..masked_m[e]-1] are fully overwritten and masked_m==0 groups
     # are skipped by DeepGEMM, avoiding costly FillFunctors inside CUDA Graphs.
-    a_fp8 = torch.empty((E_local, max_m, L), dtype=torch.float8_e4m3fn, device=x.device)
+    a_fp8 = torch.empty((E_local, max_m, L), dtype=torch.float8_e4m3fn, device=dev)
     num_groups = L // 32
     num_packs = num_groups // 4
     a_scale = torch.empty(
-        (E_local, num_packs, max_m), dtype=torch.int32, device=x.device
+        (E_local, num_packs, max_m), dtype=torch.int32, device=dev
     ).transpose(1, 2)
-    masked_m = torch.zeros((E_local,), dtype=torch.int32, device=x.device)
-    dst_pos = torch.empty((M, top_k), dtype=torch.int32, device=x.device)
+    masked_m = torch.zeros((E_local,), dtype=torch.int32, device=dev)
+    dst_pos = torch.empty((M, top_k), dtype=torch.int32, device=dev)
 
     M_total = M * top_k
     _scatter_fp8_to_masked_kernel[(M_total,)](
@@ -2830,7 +2858,7 @@ def mxfp4_moe_deepgemm_masked(
     )
     del x_q, x_sc_raw
 
-    gate_up = torch.empty((E_local, max_m, 2 * I), dtype=torch.bfloat16, device=x.device)
+    gate_up = torch.empty((E_local, max_m, 2 * I), dtype=torch.bfloat16, device=dev)
     deep_gemm.m_grouped_fp8_fp4_gemm_nt_masked(
         (a_fp8, a_scale),
         (w13_i8, w13_s),
@@ -2851,7 +2879,7 @@ def mxfp4_moe_deepgemm_masked(
     )
     del gate_up
 
-    down_out = torch.empty((E_local, max_m, L), dtype=torch.bfloat16, device=x.device)
+    down_out = torch.empty((E_local, max_m, L), dtype=torch.bfloat16, device=dev)
     deep_gemm.m_grouped_fp8_fp4_gemm_nt_masked(
         (h_fp8, h_scale),
         (w2_i8, w2_s),
@@ -2863,7 +2891,7 @@ def mxfp4_moe_deepgemm_masked(
     )
     del h_fp8, h_scale
 
-    out = torch.empty((M, L), dtype=x.dtype, device=x.device)
+    out = torch.empty((M, L), dtype=res_dtype, device=dev)
     BLOCK_K = 512 if L >= 512 else triton.next_power_of_2(max(L, 64))
     w_f = (
         topk_weights
@@ -2955,7 +2983,7 @@ def _scatter_fp8_to_flashinfer_kernel(
 
 
 def mxfp4_moe_flashinfer(
-    x: torch.Tensor,
+    x: Optional[torch.Tensor],
     topk_ids: torch.Tensor,
     topk_weights: torch.Tensor,
     weights: MXFP4MoEWeights,
@@ -2965,13 +2993,23 @@ def mxfp4_moe_flashinfer(
     ep_start: int = 0,
     ep_size: int = 1,
     swap_ab: bool = True,
+    prequant_fp8: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+    out_dtype: Optional[torch.dtype] = None,
 ) -> torch.Tensor:
     """FlashInfer ``group_gemm_mxfp4_nt_groupwise`` SM100/SM103 MXFP4 MoE backend."""
     import flashinfer.gemm as fi_gemm
 
-    M, L = x.shape
+    x_ref = prequant_fp8[0] if prequant_fp8 is not None else x
+    assert x_ref is not None
+    M, L = x_ref.shape
+    dev = x_ref.device
+    res_dtype = (
+        out_dtype
+        if out_dtype is not None
+        else (x.dtype if x is not None else torch.bfloat16)
+    )
     if M == 0:
-        return torch.empty_like(x)
+        return torch.empty((0, L), dtype=res_dtype, device=dev)
     top_k = topk_ids.shape[1]
     E_local = weights.num_experts
     I = weights.intermediate_size
@@ -2989,24 +3027,28 @@ def mxfp4_moe_flashinfer(
         flat_local = flat_ids
     counts = _gpu_expert_bincount(flat_local, E_local)
     aligned_counts = ((counts + 3) // 4) * 4
-    m_indptr = torch.zeros((E_local + 1,), dtype=torch.int32, device=x.device)
+    m_indptr = torch.zeros((E_local + 1,), dtype=torch.int32, device=dev)
     torch.cumsum(aligned_counts, dim=0, out=m_indptr[1:])
     cum_m = int(m_indptr[-1].item())
     if cum_m == 0:
-        return torch.zeros((M, L), dtype=x.dtype, device=x.device)
+        return torch.zeros((M, L), dtype=res_dtype, device=dev)
 
     (w13_u8, w13_fi_s), (w2_u8, w2_fi_s) = weights.get_flashinfer_pair()
 
-    x_q, x_sc_raw = per_token_group_quant_fp8_ue8m0(x, scale_format="raw")
-    a_fp8 = torch.zeros((cum_m, L), dtype=torch.float8_e4m3fn, device=x.device)
+    if prequant_fp8 is not None:
+        x_q, x_sc_raw = prequant_fp8
+    else:
+        assert x is not None
+        x_q, x_sc_raw = per_token_group_quant_fp8_ue8m0(x, scale_format="raw")
+    a_fp8 = torch.zeros((cum_m, L), dtype=torch.float8_e4m3fn, device=dev)
     num_groups = L // 32
     sf_cols_pad = ((num_groups + 3) // 4) * 4
     total_sf_rows = ((cum_m + max(E_local - 1, 0) * 127 + 127) // 128) * 128
-    a_scale = torch.zeros((total_sf_rows * sf_cols_pad,), dtype=torch.uint8, device=x.device)
+    a_scale = torch.zeros((total_sf_rows * sf_cols_pad,), dtype=torch.uint8, device=dev)
 
     M_total = M * top_k
-    write_cnt = torch.zeros((E_local,), dtype=torch.int32, device=x.device)
-    dst_slots = torch.empty((M, top_k), dtype=torch.int32, device=x.device)
+    write_cnt = torch.zeros((E_local,), dtype=torch.int32, device=dev)
+    dst_slots = torch.empty((M, top_k), dtype=torch.int32, device=dev)
     _scatter_fp8_to_flashinfer_kernel[(M_total,)](
         x_q.view(torch.uint8),
         x_sc_raw,
@@ -3030,7 +3072,7 @@ def mxfp4_moe_flashinfer(
         num_warps=4,
     )
 
-    gate_up = torch.empty((cum_m, 2 * I), dtype=torch.bfloat16, device=x.device)
+    gate_up = torch.empty((cum_m, 2 * I), dtype=torch.bfloat16, device=dev)
     fi_gemm.group_gemm_mxfp4_nt_groupwise(
         a=a_fp8,
         b=w13_u8,
@@ -3050,7 +3092,7 @@ def mxfp4_moe_flashinfer(
         m_indptr=m_indptr,
     )
 
-    down_out = torch.empty((cum_m, L), dtype=torch.bfloat16, device=x.device)
+    down_out = torch.empty((cum_m, L), dtype=torch.bfloat16, device=dev)
     fi_gemm.group_gemm_mxfp4_nt_groupwise(
         a=h_fp8,
         b=w2_u8,
@@ -3062,7 +3104,7 @@ def mxfp4_moe_flashinfer(
         out_dtype=torch.bfloat16,
     )
 
-    out = torch.empty((M, L), dtype=x.dtype, device=x.device)
+    out = torch.empty((M, L), dtype=res_dtype, device=dev)
     BLOCK_K = 512 if L >= 512 else triton.next_power_of_2(max(L, 64))
     w_f = topk_weights.float().contiguous()
     _gather_slot_weighted_reduce_kernel[(M, triton.cdiv(L, BLOCK_K))](
@@ -3086,22 +3128,24 @@ def mxfp4_moe_flashinfer(
 # ---------------------------------------------------------------------------
 
 
-def _resolve_moe_backend(
-    x: torch.Tensor,
+def resolve_moe_backend_for_shape(
+    M: int,
+    L: int,
+    device: torch.device,
     weights: MXFP4MoEWeights,
     backend: str,
     use_triton: bool,
 ) -> str:
-    if backend == "ref" or not use_triton or not x.is_cuda or not supports_triton_mxfp4(x.device):
+    """Resolve active MXFP4 MoE backend without needing a live activation tensor."""
+    if backend == "ref" or not use_triton or device.type != "cuda" or not supports_triton_mxfp4(device):
         return "ref"
     req = backend if backend != "auto" else os.environ.get("QWEN4_5_MXFP4_BACKEND", "auto")
     capturing = (
         torch.cuda.is_current_stream_capturing()
         or os.environ.get("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD") == "1"
     )
-    M, L = x.shape
     I = weights.intermediate_size
-    dev_idx = int(x.device.index or 0)
+    dev_idx = int(device.index or 0)
     dg_masked_ok = (
         not weights.weights_transposed
         and L % 128 == 0
@@ -3152,8 +3196,19 @@ def _resolve_moe_backend(
     return "triton"
 
 
-def mxfp4_moe_forward(
+def _resolve_moe_backend(
     x: torch.Tensor,
+    weights: MXFP4MoEWeights,
+    backend: str,
+    use_triton: bool,
+) -> str:
+    return resolve_moe_backend_for_shape(
+        int(x.shape[0]), int(x.shape[1]), x.device, weights, backend, use_triton
+    )
+
+
+def mxfp4_moe_forward(
+    x: Optional[torch.Tensor],
     topk_ids: torch.Tensor,
     topk_weights: torch.Tensor,
     weights: MXFP4MoEWeights,
@@ -3165,6 +3220,8 @@ def mxfp4_moe_forward(
     ep_start: int = 0,
     ep_size: int = 1,
     backend: str = "auto",
+    prequant_fp8: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+    out_dtype: Optional[torch.dtype] = None,
 ) -> torch.Tensor:
     """Full 2-stage MXFP4 Routed Experts execution with regime dispatch.
 
@@ -3181,10 +3238,78 @@ def mxfp4_moe_forward(
       - ``"triton"``: Baseline grouped Triton ``tl.dot_scaled``.
       - ``"ref"``: Exact dequant-BF16 reference.
     """
-    chosen = _resolve_moe_backend(x, weights, backend, use_triton)
-    M, L = x.shape
+    x_ref = prequant_fp8[0] if (x is None and prequant_fp8 is not None) else x
+    assert x_ref is not None
+    M, L = x_ref.shape
+    dev = x_ref.device
+    res_dtype = (
+        out_dtype
+        if out_dtype is not None
+        else (x.dtype if x is not None else torch.bfloat16)
+    )
     if M == 0:
-        return torch.empty_like(x)
+        return torch.empty((0, L), dtype=res_dtype, device=dev)
+
+    chosen = resolve_moe_backend_for_shape(M, L, dev, weights, backend, use_triton)
+
+    if chosen == "deepgemm_contiguous":
+        return mxfp4_moe_deepgemm_contiguous(
+            x,
+            topk_ids,
+            topk_weights,
+            weights,
+            gate_beta=gate_beta,
+            up_beta=up_beta,
+            ep_start=ep_start,
+            ep_size=ep_size,
+            prequant_fp8=prequant_fp8,
+            out_dtype=res_dtype,
+        )
+    if chosen == "deepgemm_masked":
+        return mxfp4_moe_deepgemm_masked(
+            x,
+            topk_ids,
+            topk_weights,
+            weights,
+            gate_beta=gate_beta,
+            up_beta=up_beta,
+            ep_start=ep_start,
+            ep_size=ep_size,
+            prequant_fp8=prequant_fp8,
+            out_dtype=res_dtype,
+        )
+    if chosen == "flashinfer":
+        return mxfp4_moe_flashinfer(
+            x,
+            topk_ids,
+            topk_weights,
+            weights,
+            gate_beta=gate_beta,
+            up_beta=up_beta,
+            ep_start=ep_start,
+            ep_size=ep_size,
+            swap_ab=True,
+            prequant_fp8=prequant_fp8,
+            out_dtype=res_dtype,
+        )
+    if chosen == "flashinfer_noswap":
+        return mxfp4_moe_flashinfer(
+            x,
+            topk_ids,
+            topk_weights,
+            weights,
+            gate_beta=gate_beta,
+            up_beta=up_beta,
+            ep_start=ep_start,
+            ep_size=ep_size,
+            swap_ab=False,
+            prequant_fp8=prequant_fp8,
+            out_dtype=res_dtype,
+        )
+
+    if x is None:
+        assert prequant_fp8 is not None
+        x = _dequant_fp8_ue8m0_ref(prequant_fp8[0], prequant_fp8[1], res_dtype)
 
     if chosen == "ref":
         return mxfp4_moe_forward_ref(
@@ -3207,52 +3332,6 @@ def mxfp4_moe_forward(
             up_beta=up_beta,
             ep_start=ep_start,
             ep_size=ep_size,
-        )
-    if chosen == "deepgemm_contiguous":
-        return mxfp4_moe_deepgemm_contiguous(
-            x,
-            topk_ids,
-            topk_weights,
-            weights,
-            gate_beta=gate_beta,
-            up_beta=up_beta,
-            ep_start=ep_start,
-            ep_size=ep_size,
-        )
-    if chosen == "deepgemm_masked":
-        return mxfp4_moe_deepgemm_masked(
-            x,
-            topk_ids,
-            topk_weights,
-            weights,
-            gate_beta=gate_beta,
-            up_beta=up_beta,
-            ep_start=ep_start,
-            ep_size=ep_size,
-        )
-    if chosen == "flashinfer":
-        return mxfp4_moe_flashinfer(
-            x,
-            topk_ids,
-            topk_weights,
-            weights,
-            gate_beta=gate_beta,
-            up_beta=up_beta,
-            ep_start=ep_start,
-            ep_size=ep_size,
-            swap_ab=True,
-        )
-    if chosen == "flashinfer_noswap":
-        return mxfp4_moe_flashinfer(
-            x,
-            topk_ids,
-            topk_weights,
-            weights,
-            gate_beta=gate_beta,
-            up_beta=up_beta,
-            ep_start=ep_start,
-            ep_size=ep_size,
-            swap_ab=False,
         )
     if chosen != "triton":
         raise ValueError(f"Unknown MXFP4 MoE backend={chosen!r}")

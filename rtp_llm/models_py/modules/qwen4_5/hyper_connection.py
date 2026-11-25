@@ -10,7 +10,7 @@ Implements:
 from __future__ import annotations
 
 import math
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -32,6 +32,8 @@ def _grouped_gemma_rmsnorm_bias_kernel(
     OUT_PTR,
     WIDTH: tl.constexpr,
     GROUP_SIZE: tl.constexpr,
+    X_STRIDE: tl.constexpr,
+    SINGLE_STREAM: tl.constexpr,
     EPS: tl.constexpr,
     HAS_BIAS: tl.constexpr,
     BLOCK: tl.constexpr,
@@ -41,7 +43,8 @@ def _grouped_gemma_rmsnorm_bias_kernel(
     offs = tl.arange(0, BLOCK)
     mask = offs < GROUP_SIZE
     col = group * GROUP_SIZE + offs
-    x = tl.load(X_PTR + row * WIDTH + col, mask=mask, other=0.0).to(tl.float32)
+    x_offs = row * X_STRIDE + (offs if SINGLE_STREAM else col)
+    x = tl.load(X_PTR + x_offs, mask=mask, other=0.0).to(tl.float32)
     w = tl.load(W_PTR + col, mask=mask, other=0.0).to(tl.float32)
     inv_rms = 1.0 / tl.sqrt(tl.sum(x * x, axis=0) / GROUP_SIZE + EPS)
     out = x * inv_rms * (1.0 + w)
@@ -59,31 +62,34 @@ def _grouped_gemma_rmsnorm_bias_chunked_kernel(
     OUT_PTR,
     WIDTH: tl.constexpr,
     GROUP_SIZE: tl.constexpr,
+    X_STRIDE: tl.constexpr,
+    SINGLE_STREAM: tl.constexpr,
     EPS: tl.constexpr,
     HAS_BIAS: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
     group = tl.program_id(1).to(tl.int64)
-    base = row * WIDTH + group * GROUP_SIZE
+    out_base = row * WIDTH + group * GROUP_SIZE
+    x_base = row * X_STRIDE if SINGLE_STREAM else out_base
     w_base = group * GROUP_SIZE
     sum_sq = tl.zeros((), dtype=tl.float32)
     for start in range(0, GROUP_SIZE, BLOCK):
         offs = start + tl.arange(0, BLOCK)
         mask = offs < GROUP_SIZE
-        x = tl.load(X_PTR + base + offs, mask=mask, other=0.0).to(tl.float32)
+        x = tl.load(X_PTR + x_base + offs, mask=mask, other=0.0).to(tl.float32)
         sum_sq += tl.sum(x * x, axis=0)
     inv_rms = 1.0 / tl.sqrt(sum_sq / GROUP_SIZE + EPS)
     for start in range(0, GROUP_SIZE, BLOCK):
         offs = start + tl.arange(0, BLOCK)
         mask = offs < GROUP_SIZE
-        x = tl.load(X_PTR + base + offs, mask=mask, other=0.0).to(tl.float32)
+        x = tl.load(X_PTR + x_base + offs, mask=mask, other=0.0).to(tl.float32)
         w = tl.load(W_PTR + w_base + offs, mask=mask, other=0.0).to(tl.float32)
         out = x * inv_rms * (1.0 + w)
         if HAS_BIAS:
             b = tl.load(B_PTR + w_base + offs, mask=mask, other=0.0).to(tl.float32)
             out = out + b
-        tl.store(OUT_PTR + base + offs, out, mask=mask)
+        tl.store(OUT_PTR + out_base + offs, out, mask=mask)
 
 
 @triton.jit
@@ -94,6 +100,7 @@ def _hc_combine_kernel(
     DST_PTR,
     HIDDEN: tl.constexpr,
     HC_COUNT: tl.constexpr,
+    SINGLE_STREAM: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
@@ -101,9 +108,14 @@ def _hc_combine_kernel(
     mask = col < HIDDEN
     sub = tl.load(OUT_PTR + row * HIDDEN + col, mask=mask, other=0.0).to(tl.float32)
     row_base = row * (HC_COUNT * HIDDEN)
+    res_single = (
+        tl.load(RES_PTR + row * HIDDEN + col, mask=mask, other=0.0).to(tl.float32)
+        if SINGLE_STREAM
+        else 0.0
+    )
     for branch in tl.static_range(HC_COUNT):
         offset = row_base + branch * HIDDEN + col
-        res = tl.load(RES_PTR + offset, mask=mask, other=0.0).to(tl.float32)
+        res = res_single if SINGLE_STREAM else tl.load(RES_PTR + offset, mask=mask, other=0.0).to(tl.float32)
         w = tl.load(INJ_PTR + row * HC_COUNT + branch).to(tl.float32)
         comb = res + sub * w
         tl.store(DST_PTR + offset, comb, mask=mask)
@@ -120,6 +132,7 @@ def _hc_combine_and_norm_kernel(
     NORM_PTR,
     HIDDEN: tl.constexpr,
     HC_COUNT: tl.constexpr,
+    SINGLE_STREAM: tl.constexpr,
     EPS: tl.constexpr,
     HAS_BIAS: tl.constexpr,
     BLOCK: tl.constexpr,
@@ -130,8 +143,9 @@ def _hc_combine_and_norm_kernel(
     mask = offs < HIDDEN
     col = branch * HIDDEN + offs
     res_offset = row * (HC_COUNT * HIDDEN) + col
+    res_in_offset = (row * HIDDEN + offs) if SINGLE_STREAM else res_offset
 
-    res = tl.load(RES_PTR + res_offset, mask=mask, other=0.0).to(tl.float32)
+    res = tl.load(RES_PTR + res_in_offset, mask=mask, other=0.0).to(tl.float32)
     sub = tl.load(SUB_PTR + row * HIDDEN + offs, mask=mask, other=0.0).to(tl.float32)
     inj = tl.load(INJ_PTR + row * HC_COUNT + branch).to(tl.float32)
     comb = (res + sub * inj).to(RES_PTR.dtype.element_ty)
@@ -249,10 +263,17 @@ def grouped_gemma_rmsnorm_bias_ref(
     eps: float = 1e-6,
 ) -> torch.Tensor:
     """Exact FP32 PyTorch reference for per-branch GemmaRMSNorm (1 + w) + bias."""
-    width = x.shape[-1]
-    if width % hc_count != 0:
-        raise ValueError(f"Last dim {width} is not divisible by hc_count={hc_count}")
-    hidden_size = width // hc_count
+    w_width = int(weight.shape[0])
+    x_width = int(x.shape[-1])
+    if hc_count > 1 and x_width * hc_count == w_width:
+        x = x.unsqueeze(-2).expand(*x.shape[:-1], hc_count, x_width).flatten(-2)
+        width = w_width
+        hidden_size = x_width
+    else:
+        width = x_width
+        if width % hc_count != 0:
+            raise ValueError(f"Last dim {width} is not divisible by hc_count={hc_count}")
+        hidden_size = width // hc_count
     streams = x.unflatten(-1, (hc_count, hidden_size)).float()
     normed = streams * torch.rsqrt(streams.square().mean(dim=-1, keepdim=True) + eps)
     out = normed.flatten(-2) * (1.0 + weight.float())
@@ -274,12 +295,23 @@ def grouped_gemma_rmsnorm_bias_triton(
     x_c = x.contiguous()
     w_c = weight.contiguous()
     b_c = bias.contiguous() if bias is not None else w_c
-    width = int(x_c.shape[-1])
+    width = int(w_c.shape[0])
+    x_width = int(x_c.shape[-1])
     if width % hc_count != 0:
-        raise ValueError(f"Last dim {width} is not divisible by hc_count={hc_count}")
+        raise ValueError(f"Weight dim {width} is not divisible by hc_count={hc_count}")
     group_size = width // hc_count
-    rows = x_c.numel() // width
-    out = torch.empty_like(x_c)
+    if x_width == width:
+        single_stream = False
+    elif hc_count > 1 and x_width == group_size:
+        single_stream = True
+    else:
+        raise ValueError(f"Last dim {x_width} is not divisible by hc_count={hc_count}")
+    rows = x_c.numel() // x_width
+    out = (
+        torch.empty((*x_c.shape[:-1], width), dtype=x_c.dtype, device=x_c.device)
+        if single_stream
+        else torch.empty_like(x_c)
+    )
     if rows == 0:
         return out
     has_bias = bias is not None
@@ -293,6 +325,8 @@ def grouped_gemma_rmsnorm_bias_triton(
             out,
             WIDTH=width,
             GROUP_SIZE=group_size,
+            X_STRIDE=x_width,
+            SINGLE_STREAM=single_stream,
             EPS=eps,
             HAS_BIAS=has_bias,
             BLOCK=block,
@@ -306,6 +340,8 @@ def grouped_gemma_rmsnorm_bias_triton(
             out,
             WIDTH=width,
             GROUP_SIZE=group_size,
+            X_STRIDE=x_width,
+            SINGLE_STREAM=single_stream,
             EPS=eps,
             HAS_BIAS=has_bias,
             BLOCK=4096,
@@ -322,7 +358,10 @@ def hc_combine_ref(
     """Exact FP32 PyTorch reference for injecting block_output into all HC streams."""
     hc_count = inject_w.shape[-1]
     hidden_size = block_output.shape[-1]
-    res_f = residual.unflatten(-1, (hc_count, hidden_size)).float()
+    if hc_count > 1 and int(residual.shape[-1]) == hidden_size:
+        res_f = residual.unsqueeze(-2).expand(*residual.shape[:-1], hc_count, hidden_size).float()
+    else:
+        res_f = residual.unflatten(-1, (hc_count, hidden_size)).float()
     out_f = block_output.unsqueeze(-2).float()
     inj_f = inject_w.unsqueeze(-1).float()
     return (res_f + out_f * inj_f).flatten(-2).to(residual.dtype)
@@ -341,13 +380,22 @@ def hc_combine_triton(
     inj_c = inject_w.contiguous()
     hc_count = int(inj_c.shape[-1])
     hidden_size = int(out_c.shape[-1])
-    width = int(res_c.shape[-1])
-    if width != hc_count * hidden_size:
+    res_width = int(res_c.shape[-1])
+    width = hc_count * hidden_size
+    if res_width == width:
+        single_stream = False
+    elif hc_count > 1 and res_width == hidden_size:
+        single_stream = True
+    else:
         raise ValueError(
-            f"residual width {width} != hc_count ({hc_count}) * hidden_size ({hidden_size})"
+            f"residual width {res_width} != hc_count ({hc_count}) * hidden_size ({hidden_size})"
         )
-    rows = res_c.numel() // width
-    dst = torch.empty_like(res_c)
+    rows = res_c.numel() // res_width
+    dst = (
+        torch.empty((*res_c.shape[:-1], width), dtype=res_c.dtype, device=res_c.device)
+        if single_stream
+        else torch.empty_like(res_c)
+    )
     if rows == 0:
         return dst
     block = 512 if hidden_size >= 512 else max(128, triton.next_power_of_2(hidden_size))
@@ -358,6 +406,7 @@ def hc_combine_triton(
         dst,
         HIDDEN=hidden_size,
         HC_COUNT=hc_count,
+        SINGLE_STREAM=single_stream,
         BLOCK=block,
         num_warps=4,
     )
@@ -387,10 +436,20 @@ def hc_combine_and_norm_triton(
     inj_c = prev_inject_w.contiguous()
     w_c = norm_weight.contiguous()
     b_c = norm_bias.contiguous() if norm_bias is not None else w_c
-    width = int(res_c.shape[-1])
-    rows = res_c.numel() // width
-    combined = torch.empty_like(res_c)
-    normed = torch.empty_like(res_c)
+    res_width = int(res_c.shape[-1])
+    width = hc_count * hidden_size
+    if res_width == width:
+        single_stream = False
+    elif hc_count > 1 and res_width == hidden_size:
+        single_stream = True
+    else:
+        raise ValueError(
+            f"residual width {res_width} != hc_count ({hc_count}) * hidden_size ({hidden_size})"
+        )
+    rows = res_c.numel() // res_width
+    out_shape = (*res_c.shape[:-1], width)
+    combined = torch.empty(out_shape, dtype=res_c.dtype, device=res_c.device)
+    normed = torch.empty(out_shape, dtype=res_c.dtype, device=res_c.device)
     if rows == 0:
         return combined, normed
 
@@ -406,6 +465,7 @@ def hc_combine_and_norm_triton(
         normed,
         HIDDEN=hidden_size,
         HC_COUNT=hc_count,
+        SINGLE_STREAM=single_stream,
         EPS=eps,
         HAS_BIAS=norm_bias is not None,
         BLOCK=block,
@@ -551,6 +611,11 @@ class Qwen4_5HyperConnection(nn.Module):
         emits_latent: bool = True,
         dtype: torch.dtype = torch.bfloat16,
         device: Optional[torch.device] = None,
+        *,
+        sp_size: int = 1,
+        sp_rank: int = 0,
+        sp_group: Any = None,
+        dp_attn: bool = False,
     ) -> None:
         super().__init__()
         if not emits_latent and (not prev_mix or is_head):
@@ -559,6 +624,10 @@ class Qwen4_5HyperConnection(nn.Module):
                 "so gate_latent can come from prev_latent."
             )
 
+        self.sp_size = max(1, int(sp_size))
+        self.sp_rank = int(sp_rank)
+        self.sp_group = sp_group
+        self.dp_attn = bool(dp_attn)
         self.hidden_size = hidden_size
         self.hc_count = hc_count
         self.hc_lowrank = hc_lowrank
@@ -610,7 +679,7 @@ class Qwen4_5HyperConnection(nn.Module):
         assert w_down is not None and w_inj is not None
         if torch.is_grad_enabled() and (w_down.requires_grad or w_inj.requires_grad):
             return torch.cat([w_down, w_inj], dim=0)
-        key = (w_down.data_ptr(), w_down._version, w_inj.data_ptr(), w_inj._version)
+        key = (w_down.data_ptr(), 0 if w_down.is_inference() else w_down._version, w_inj.data_ptr(), 0 if w_inj.is_inference() else w_inj._version)
         if self._fused_down_inject_key != key or self._fused_down_inject_weight is None:
             self._fused_down_inject_weight = torch.cat([w_down, w_inj], dim=0).contiguous()
             self._fused_down_inject_key = key
@@ -661,6 +730,15 @@ class Qwen4_5HyperConnection(nn.Module):
             mixed = hc_mix_reduce_triton(gate_logits, normed, self.hc_count)
 
         return mixed, residual, inject_w, latent
+
+    def mix_from_normed(
+        self,
+        normed: torch.Tensor,
+        residual: torch.Tensor,
+        prev_latent: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+        """Read-side hyper-connection mix from precomputed grouped RMSNorm output."""
+        return self._project_and_mix_from_normed(normed, residual, prev_latent)
 
     def mix_with_latent(
         self,

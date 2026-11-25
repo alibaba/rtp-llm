@@ -20,6 +20,9 @@ from rtp_llm.models_py.modules.qwen4_5.ple import (
     DEFAULT_PLE_WEIGHT_SCALE,
     Qwen4_5PLELayer,
     compute_ngram_vocab_sizes,
+    ple_add3_and_hc_norm_triton,
+    ple_add3_triton,
+    ple_gate_and_norm_triton,
 )
 from rtp_llm.models_py.modules.qwen4_5.short_conv import (
     Qwen4_5ShortConv,
@@ -769,7 +772,79 @@ def test_ple_packed_prefill_verify_and_tp_hooks() -> None:
     emb_ref = ple.gather_embeddings(ple.compute_ngram_ids(idsv[:, :1]))
     tp_d, _ = _diff_stats(sum(embs_tp), emb_ref)
     assert tp_d < 1e-2, f"PLE TP=4 sharded embedding sum mismatch={tp_d}"
-    print(f"  [PASS] PLE packed_prefill(3 reqs), verify(V=8)+rollback+CG(diff={cg_d:.1e}), TP=4 hook(diff={tp_d:.1e})")
+
+    # 4. R0 Fusions: single-stream emb_flat HC, ple_add3_and_hc_norm_triton, forward_packed_prefill_with_hc, and SP/DP hooks
+    hc_head = Qwen4_5HyperConnection(
+        hidden_size=H, hc_count=HC, hc_lowrank=32, is_head=True, dtype=dtype, device=device,
+        sp_size=4, sp_rank=1, dp_attn=True,
+    ).eval()
+    hc_next = Qwen4_5HyperConnection(
+        hidden_size=H, hc_count=HC, hc_lowrank=32, is_head=False, dtype=dtype, device=device,
+    ).eval()
+    assert hc_head.sp_size == 4 and hc_head.sp_rank == 1 and hc_head.dp_attn is True
+    emb_single = torch.randn((N, H), device=device, dtype=dtype)
+    m_s, r_s, inj_s, lat_s = hc_head.mix_with_latent(emb_single)
+    m_f, r_f, inj_f, lat_f = hc_head.mix_with_latent(emb_single.repeat(1, HC))
+    assert r_s.shape == (N, H)
+    assert _diff_stats(m_s, m_f)[0] == 0.0 and _diff_stats(inj_s, inj_f)[0] == 0.0 and _diff_stats(lat_s, lat_f)[0] == 0.0
+    sub_b0 = torch.randn((N, H), device=device, dtype=dtype)
+    comb_s = hc_next.combine(sub_b0, r_s, inj_s)
+    comb_f = hc_next.combine(sub_b0, r_f, inj_f)
+    assert comb_s.shape == (N, HC * H) and _diff_stats(comb_s, comb_f)[0] == 0.0
+    cm_s, c_s, cinj_s, clat_s = hc_next.combine_and_mix_with_latent(sub_b0, r_s, inj_s, lat_s)
+    cm_f, c_f, cinj_f, clat_f = hc_next.combine_and_mix_with_latent(sub_b0, r_f, inj_f, lat_f)
+    assert _diff_stats(c_s, c_f)[0] == 0.0 and _diff_stats(cm_s, cm_f)[0] == 0.0
+    assert _diff_stats(cinj_s, cinj_f)[0] == 0.0 and _diff_stats(clat_s, clat_f)[0] == 0.0
+
+    # Standalone ple_add3_and_hc_norm_triton + pre-combine ple_gate_and_norm_triton + forward_packed_prefill_with_hc
+    u_t = torch.randn((1, N, HC * H), device=device, dtype=dtype)
+    c_t = torch.randn((1, N, HC * H), device=device, dtype=dtype)
+    h_t = torch.randn((1, N, HC * H), device=device, dtype=dtype)
+    sub_t = torch.randn((1, N, H), device=device, dtype=dtype)
+    inj_t = torch.rand((1, N, HC), device=device, dtype=dtype)
+    ah_ref = ple_add3_triton(h_t, u_t, c_t)
+    an_ref = grouped_gemma_rmsnorm_bias_triton(ah_ref, hc_next.hc_norm_weight, hc_next.hc_norm_bias, HC, hc_next.eps)
+    ah_fus, an_fus = ple_add3_and_hc_norm_triton(h_t, u_t, c_t, hc_next.hc_norm_weight, hc_next.hc_norm_bias, HC, hc_next.eps)
+    assert _diff_stats(ah_fus, ah_ref)[0] == 0.0 and _diff_stats(an_fus, an_ref)[0] == 0.0
+    ah_pc_ref = hc_combine_triton(sub_t.squeeze(0), ah_ref.squeeze(0), inj_t.squeeze(0)).unsqueeze(0)
+    an_pc_ref = grouped_gemma_rmsnorm_bias_triton(ah_pc_ref, hc_next.hc_norm_weight, hc_next.hc_norm_bias, HC, hc_next.eps)
+    ah_pc, an_pc = ple_add3_and_hc_norm_triton(
+        h_t, u_t, c_t, hc_next.hc_norm_weight, hc_next.hc_norm_bias, HC, hc_next.eps,
+        combine_sub=sub_t, combine_inj=inj_t,
+    )
+    assert _diff_stats(ah_pc, ah_pc_ref)[0] == 0.0 and _diff_stats(an_pc, an_pc_ref)[0] == 0.0
+
+    tok_req_t = torch.tensor(tok_req, device=device, dtype=torch.int32)
+    t_req_t = torch.tensor(t_req, device=device, dtype=torch.int32)
+    t_t0_t = torch.tensor(t_t0, device=device, dtype=torch.int32)
+    h_pre_comb_ref = hc_next.combine(sub_b0, h_rag, inj_s)
+    ple_unfus = ple.forward_packed_prefill(
+        h_pre_comb_ref, ids_rag, cu, tok_req_t, t_req_t, t_t0_t, prev_ngram_ctx=prev_ctx, init_conv_state=init_conv, block_t=16
+    )
+    mx_unfus, res_unfus, mi_unfus, ml_unfus = hc_next.mix_with_latent(ple_unfus, lat_s)
+    ple_fus, normed_fus = ple.forward_packed_prefill_with_hc(
+        h_rag, ids_rag, cu, tok_req_t, t_req_t, t_t0_t, prev_ngram_ctx=prev_ctx, init_conv_state=init_conv, block_t=16,
+        pre_combine_sub=sub_b0, pre_combine_inj=inj_s,
+        hc_norm_weight=hc_next.hc_norm_weight, hc_norm_bias=hc_next.hc_norm_bias, hc_eps=hc_next.eps,
+    )
+    mx_fus, res_fus, mi_fus, ml_fus = hc_next.mix_from_normed(normed_fus, ple_fus, lat_s)
+    assert _diff_stats(ple_fus, ple_unfus)[0] == 0.0
+    assert _diff_stats(mx_fus, mx_unfus)[0] == 0.0
+    assert _diff_stats(mi_fus, mi_unfus)[0] == 0.0 and _diff_stats(ml_fus, ml_unfus)[0] == 0.0
+
+    # ShortConv & PLE SP/DP constructor + exchange_sp_left_halo sanity
+    ple_sp = Qwen4_5PLELayer(
+        hidden_size=H, hc_count=HC, ple_embed_dim=PLE_DIM, ngram_size=3,
+        heads_per_ngram=HEADS_PER_NGRAM, conv_kernel_size=4, split_ngram_parts=num_shards,
+        ngram_heads_vocab_sizes=primes, weight_scale=DEFAULT_PLE_WEIGHT_SCALE,
+        dtype=dtype, device=device, sp_size=4, sp_rank=2, dp_attn=True,
+    )
+    assert ple_sp.sp_size == 4 and ple_sp.sp_rank == 2 and ple_sp.dp_attn is True
+    assert ple_sp.conv1d.sp_size == 4 and ple_sp.conv1d.sp_rank == 2 and ple_sp.conv1d.dp_attn is True
+    halo = ple_sp.conv1d.exchange_sp_left_halo(h_rag[:, :H])
+    assert halo.shape == (1, H, 3)
+
+    print(f"  [PASS] PLE packed_prefill(3 reqs), verify(V=8)+rollback+CG(diff={cg_d:.1e}), TP=4 & R0 PLE+HC fusions(diff=0.0)")
 
 
 # ---------------------------------------------------------------------------

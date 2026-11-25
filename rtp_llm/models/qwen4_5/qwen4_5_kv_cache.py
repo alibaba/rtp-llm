@@ -286,10 +286,23 @@ class Qwen4_5KVCachePlan:
         )
 
 
+def resolve_kv_cache_tp_size(tp_size: int = 1, parallel_mode: Optional[str] = None) -> int:
+    if parallel_mode:
+        pm = str(parallel_mode).strip().lower()
+        if pm == "dp4_ep4":
+            return 1
+        if pm == "dp2_tp2_ep4":
+            return 2 if int(tp_size or 1) <= 1 else int(tp_size)
+        if pm in ("tp4_ep4", "sp4_tp4_ep4"):
+            return 4 if int(tp_size or 1) <= 1 else int(tp_size)
+    return max(1, int(tp_size or 1))
+
+
 def build_qwen4_5_kv_cache_plan(
     arch_cfg: Qwen4_5ArchConfig,
     *,
     tp_size: int = 1,
+    parallel_mode: Optional[str] = None,
     enable_yoco_decode: Optional[bool] = None,
     kv_dtype: str = "BF16",
     state_dtype: str = "BF16",
@@ -302,7 +315,7 @@ def build_qwen4_5_kv_cache_plan(
     and full-hidden output sconv/PLE states keep their full per-rank shape.
     """
     share_map = validate_qwen4_5_arch_config(arch_cfg)
-    tp = max(1, int(tp_size or 1))
+    tp = resolve_kv_cache_tp_size(tp_size, parallel_mode)
     if tp > 1:
         if arch_cfg.linear_num_key_heads % tp != 0:
             raise ValueError(
@@ -589,6 +602,8 @@ def build_qwen4_5_kv_cache_spec_descs(
     arch_cfg: Optional[Qwen4_5ArchConfig] = None,
     *,
     tp_size: int = 1,
+    parallel_mode: Optional[str] = None,
+    kv_dtype: str = "BF16",
     enable_yoco_decode: Optional[bool] = None,
     allow_small_block_explicit: bool = False,
 ) -> List[List[Any]]:
@@ -614,6 +629,8 @@ def build_qwen4_5_kv_cache_spec_descs(
     plan = build_qwen4_5_kv_cache_plan(
         resolved_arch,
         tp_size=tp_size,
+        parallel_mode=parallel_mode,
+        kv_dtype=kv_dtype,
         enable_yoco_decode=enable_yoco_decode,
     )
 
@@ -736,3 +753,58 @@ def build_qwen4_5_kv_cache_spec_descs(
         layer_descs.append(descs)
 
     return layer_descs
+
+
+@dataclass(frozen=True)
+class DFlash2KVCachePlan:
+    """Per-token and per-request KV cache sizing descriptor for DFlash2."""
+
+    num_hidden_layers: int
+    num_kv_heads: int
+    head_dim: int
+    kv_dtype: str
+    kv_dtype_bytes: int
+    sliding_window: Optional[int]
+    kv_bytes_per_token: int
+
+    def total_bytes_for_seq_len(self, seq_len: int, batch_size: int = 1) -> int:
+        if seq_len < 0 or batch_size < 0:
+            raise ValueError("seq_len and batch_size must be non-negative")
+        return int(batch_size) * int(seq_len) * int(self.kv_bytes_per_token)
+
+
+def dflash2_kv_dtype_to_str(dflash_kv_dtype: str = "bf16") -> str:
+    norm = str(dflash_kv_dtype or "bf16").strip().upper()
+    if norm in ("FP8_E4M3", "F8_E4M3", "FP8"):
+        return "F8_E4M3"
+    if norm in ("BF16", "BFLOAT16"):
+        return "BF16"
+    if norm in ("FP16", "F16", "FLOAT16"):
+        return "F16"
+    raise ValueError(f"Unsupported dflash_kv_dtype={dflash_kv_dtype!r}")
+
+
+def build_dflash2_kv_cache_plan(
+    spec: Any,
+    *,
+    parallel_mode: Optional[str] = None,
+    tp_size: int = 1,
+    dflash_kv_dtype: str = "bf16",
+) -> DFlash2KVCachePlan:
+    del parallel_mode, tp_size  # DFlash2 is MQA-1 (1 KV head, replicated on every TP rank).
+    dt_str = dflash2_kv_dtype_to_str(dflash_kv_dtype)
+    elem_bytes = _KV_DTYPE_BYTES[dt_str]
+    n_layers = int(getattr(spec, "num_hidden_layers", 5))
+    n_kv = int(getattr(spec, "num_key_value_heads", 1))
+    hd = int(getattr(spec, "head_dim", 256))
+    swa = getattr(spec, "swa_window_size", None)
+    kv_bpt = n_layers * 2 * n_kv * hd * elem_bytes
+    return DFlash2KVCachePlan(
+        num_hidden_layers=n_layers,
+        num_kv_heads=n_kv,
+        head_dim=hd,
+        kv_dtype=dt_str,
+        kv_dtype_bytes=elem_bytes,
+        sliding_window=int(swa) if swa is not None else None,
+        kv_bytes_per_token=kv_bpt,
+    )

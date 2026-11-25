@@ -986,6 +986,10 @@ class Qwen4_5DSparkWeight(ModelDeployWeightInfo):
         tp_size = int(getattr(self, "tp_size", 1) or 1)
         tp_rank = int(getattr(self, "tp_rank", 0) or 0)
         dp_size = int(getattr(self, "dp_size", 1) or 1)
+        dp_rank = int(getattr(self, "dp_rank", 0) or 0)
+        if ep_size <= 1 and dp_size > 1:
+            eff_ep = dp_size * tp_size
+            return eff_ep, dp_rank * tp_size + tp_rank
         if ep_size <= 1 and tp_size > 1 and dp_size == 1:
             return tp_size, tp_rank
         return max(1, ep_size), max(0, ep_rank)
@@ -1266,6 +1270,11 @@ class Qwen4_5DSpark(BaseModel):
     def _create_python_model(self):
         from rtp_llm.models_py.model_desc.qwen4_5_dspark_model import Qwen4_5DSparkModel
 
+        kv_dtype_str = (
+            "fp8_e4m3"
+            if getattr(self.model_config.attn_config, "kv_cache_dtype", None) == KvCacheDataType.FP8
+            else "bf16"
+        )
         self.py_model = Qwen4_5DSparkModel(
             self.model_config,
             self.parallelism_config,
@@ -1273,6 +1282,8 @@ class Qwen4_5DSpark(BaseModel):
             max_generate_batch_size=self.max_generate_batch_size,
             fmha_config=self.fmha_config,
             py_hw_kernel_config=getattr(self, "hw_kernel_config", None),
+            dflash_kv_dtype=kv_dtype_str,
+            dense_linear_mode=getattr(self.model_config, "dense_linear_mode", None),
         )
 
 

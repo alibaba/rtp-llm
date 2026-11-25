@@ -46,9 +46,13 @@ from rtp_llm.models_py.modules.qwen4_5.checkpoint_loader import (
 )
 from rtp_llm.models_py.modules.qwen4_5.contracts import Qwen4_5ArchConfig
 from rtp_llm.models_py.modules.qwen4_5.qsa_bridge import (
+    _select_top_tokens,
     build_qsa_neox_cos_sin,
     qsa_paged_score,
     qsa_prefill_score,
+    qsa_sparse_paged_decode_attention,
+    qsa_sparse_paged_prefill_attention,
+    _try_run_q4_prefill,
     qsa_sparse_prefill_attention,
     score_and_select_qsa_paged,
     view_indexer_kv_pool,
@@ -1112,6 +1116,529 @@ class Qwen4_5QSATest(unittest.TestCase):
                 out1 = m_src(ids, state=st1)
                 out2 = m_dst(ids, state=st2)
                 self.assertGreaterEqual(_cosine(out1, out2), 0.99999)
+
+    @torch.no_grad()
+    def test_r0_20k_indexer_topk_sparse_prefill_and_uniform_batch(self) -> None:
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA required")
+        dev = torch.device("cuda", 0)
+        torch.manual_seed(20261125)
+
+        # 1) 20K Indexer TensorCore parity: ctx=20480 (5120 blks), BF16 + FP8, H_idx in (4, 8), S in (8, 256)
+        total_blks = 5120
+        kv_tpb = 64
+        ent_per_blk = kv_tpb // 4  # 16
+        blks_per_req = total_blks // ent_per_blk  # 320
+        for n_heads in (4, 8):
+            kv_pool_bf16 = torch.randn((blks_per_req * 2 + 8, ent_per_blk, 128), device=dev, dtype=torch.bfloat16)
+            kv_pool_bf16[0].zero_()
+            kv_pool_fp8 = kv_pool_bf16.to(torch.float8_e4m3fn)
+            for bsz, s_q in ((2, 8), (64, 8), (1, 256)):
+                kv_tbl = torch.randint(1, blks_per_req * 2 + 8, (bsz, blks_per_req), device=dev, dtype=torch.int32)
+                q_rot = torch.randn((bsz, s_q, n_heads, 128), device=dev, dtype=torch.bfloat16)
+                ctx_lens = torch.full((bsz, s_q), total_blks, device=dev, dtype=torch.int32)
+                ctx_lens[0, 0] = 317
+                # Pure PyTorch FP32 reference on sample batch elements
+                ref_list = []
+                for bi in range(min(bsz, 2)):
+                    keys_bi = kv_pool_bf16[kv_tbl[bi]].reshape(total_blks, 128).float()
+                    sc_bi = torch.einsum("shd,kd->shk", q_rot[bi].float(), keys_bi).relu().sum(dim=1)
+                    mask_bi = torch.arange(total_blks, device=dev).unsqueeze(0) < ctx_lens[bi].unsqueeze(1)
+                    ref_list.append(sc_bi.masked_fill(~mask_bi, float("-inf")))
+                ref_01 = torch.stack(ref_list, dim=0)
+
+                out_bf16 = qsa_paged_score(q_rot, kv_pool_bf16, kv_tbl, ctx_lens, max_ctx_len=total_blks).view(bsz, s_q, total_blks)
+                cos_bf16 = _cosine(out_bf16[: min(bsz, 2)][torch.isfinite(ref_01)], ref_01[torch.isfinite(ref_01)])
+                self.assertGreaterEqual(cos_bf16, 0.99999, f"20K BF16 TC indexer cos={cos_bf16}")
+                self.assertTrue(torch.isinf(out_bf16[0, 0, 317:]).all())
+
+                out_fp8 = qsa_paged_score(q_rot, kv_pool_fp8, kv_tbl, ctx_lens, max_ctx_len=total_blks).view(bsz, s_q, total_blks)
+                cos_fp8 = _cosine(out_fp8[: min(bsz, 2)][torch.isfinite(ref_01)], ref_01[torch.isfinite(ref_01)])
+                self.assertGreaterEqual(cos_fp8, 0.999, f"20K FP8 TC indexer cos={cos_fp8}")
+
+        # 2) _select_top_tokens binary-search fast path (5120 -> 512) + vis < 2048 + M=8, 512, 1024
+        for rows in (8, 512, 1024):
+            sc = torch.randn((rows, 5120), device=dev, dtype=torch.float32)
+            vis = torch.full((rows,), 20480, device=dev, dtype=torch.int32)
+            vis[0] = 3
+            vis[1] = 21
+            vis[2] = 512
+            sc[0, :] = float("-inf")
+            sc[1, 5:] = float("-inf")
+            sc[2, 128:] = float("-inf")
+            sel = _select_top_tokens(sc, vis, compress_ratio=4, token_budget=2048, scores_are_masked=True)
+            self.assertEqual(sel.shape, (rows, 2051))
+            # Check tail indices (last 3 slots are vis-3..vis-1, or clamped >=0) and exact top-512 block set on valid rows
+            from rtp_llm.models_py.modules.qwen4_5.qsa_bridge import select_qsa_paged_tokens
+            sel_ref_edge = select_qsa_paged_tokens(
+                sc[:3], vis[:3], compress_ratio=4, token_budget=2048, validate_lengths=False, scores_are_masked=True
+            )
+            for r in (0, 1, 2, rows - 1):
+                v_r = int(vis[r].item())
+                self.assertTrue(((sel[r] == -1) | ((sel[r] >= 0) & (sel[r] < v_r))).all())
+                if r < 3:
+                    self.assertEqual(
+                        set(sel[r][sel[r] >= 0].tolist()),
+                        set(sel_ref_edge[r][sel_ref_edge[r] >= 0].tolist()),
+                    )
+                    self.assertEqual(int((sel[r] == -1).sum()), int((sel_ref_edge[r] == -1).sum()))
+            for r in (3, rows - 1):
+                _, top_ref = torch.topk(sc[r], k=512, dim=-1)
+                blk_got = set((sel[r, :2048] // 4).unique().tolist())
+                blk_exp = set(top_ref.tolist())
+                self.assertEqual(blk_got, blk_exp, f"bsearch topk block set mismatch row={r}")
+
+        # 3) 90%-Hit 18K+2K Sparse Prefill (T=20480, S=2048, K=2051, CHECK_EMPTY=True) parity
+        q_sp = torch.randn((1, 16, 2048, 128), device=dev, dtype=torch.bfloat16)
+        k_sp = torch.randn((1, 2, 20480, 128), device=dev, dtype=torch.bfloat16) * 0.25
+        v_sp = torch.randn((1, 2, 20480, 128), device=dev, dtype=torch.bfloat16)
+        # Unique 512-block selection (2048 unique tokens + 3 sentinel slots -> exercises CHECK_EMPTY=True bitmap path)
+        blks_sp = (torch.arange(512, device=dev, dtype=torch.int32).unsqueeze(0) * 9 + torch.arange(2048, device=dev, dtype=torch.int32).unsqueeze(1) * 13) % 5120
+        tok_sp = (blks_sp.unsqueeze(-1) * 4 + torch.arange(4, device=dev, dtype=torch.int32)).reshape(1, 2048, 2048)
+        sel_sp = torch.cat([tok_sp, torch.full((1, 2048, 3), -1, device=dev, dtype=torch.int32)], dim=-1)
+        out_sp = qsa_sparse_prefill_attention(q_sp, k_sp, v_sp, sel_sp)
+        # Check subset of queries against exact PyTorch gather reference
+        sub_q_idx = [0, 511, 1500, 2047]
+        ref_sub = []
+        scale = 1.0 / math.sqrt(128.0)
+        for qi in sub_q_idx:
+            uq_idx = sel_sp[0, qi][sel_sp[0, qi] >= 0].to(torch.long)
+            k_g = k_sp[0, :, uq_idx].float().repeat_interleave(8, dim=0)
+            v_g = v_sp[0, :, uq_idx].float().repeat_interleave(8, dim=0)
+            logits = torch.matmul(q_sp[0, :, qi].float().unsqueeze(1), k_g.transpose(1, 2)) * scale
+            w = torch.softmax(logits, dim=-1)
+            ref_sub.append(torch.matmul(w, v_g).squeeze(1))
+        ref_stack = torch.stack(ref_sub, dim=1)
+        out_sub = out_sp[0, :, sub_q_idx].float()
+        self.assertGreaterEqual(_cosine(out_sub, ref_stack), 0.9999)
+
+        # 4) Uniform batched FullAttn / QSA prefill in run_prefill_ragged vs single-req prefill (with prefix KV cache + YoCo + PLE)
+        arch = _make_mini_arch(indexer_n_heads=4, indexer_budget=16, max_position_embeddings=512)
+        m_u = Qwen4_5ForCausalLM(
+            arch, use_triton_mxfp4=False, compute_mode="bf16", dtype=torch.bfloat16, device=dev
+        ).eval()
+        m_u.init_synthetic_weights(seed=777, ple_mode="gpu_full", ple_fp8=False)
+        _stabilize_router_margins(m_u)
+        m_u.prepare_weights()
+        pools = {
+            tag: 64
+            for tag in [
+                INDEXER_KV_TAG,
+                INDEXER_STATE_TAG,
+                FULL_ATTN_KV_TAG,
+                "linear",
+                "gdn_consumer_q_conv",
+                "full_attn_kv_sconv",
+                "full_attn_output_sconv",
+                "linear_attn_output_sconv",
+                "ffn_output_sconv",
+                "ple_conv_state",
+                "ple_ngram_ctx",
+            ]
+        }
+        plan_u = build_qwen4_5_kv_cache_plan(arch)
+        cache_u = LocalKVCache(plan_u, tokens_per_block=64, num_blocks_per_tag=pools, device=dev, dtype=torch.bfloat16)
+        cache_s = LocalKVCache(plan_u, tokens_per_block=64, num_blocks_per_tag=pools, device=dev, dtype=torch.bfloat16)
+        rt_u = Qwen4_5RTPModel.from_causal_lm(m_u, kv_cache=cache_u).eval()
+        rt_s = Qwen4_5RTPModel.from_causal_lm(m_u, kv_cache=cache_s).eval()
+
+        gen = torch.Generator(device="cpu").manual_seed(91)
+        bsz_u, t_pfx, t_suf = 3, 24, 18
+        pfx_ids = torch.randint(4, 240, (bsz_u, t_pfx), generator=gen, dtype=torch.int64).to(dev)
+        suf_ids = torch.randint(4, 240, (bsz_u, t_suf), generator=gen, dtype=torch.int64).to(dev)
+        tbl_u = build_block_tables_for_requests(cache_u, [t_pfx + t_suf] * bsz_u)
+        tbl_s = build_block_tables_for_requests(cache_s, [t_pfx + t_suf] * bsz_u)
+        # Seed prefix in both caches individually, then run uniform batched suffix vs individual suffix
+        for rt_item, tbl_item in ((rt_u, tbl_u), (rt_s, tbl_s)):
+            for bi in range(bsz_u):
+                tb1 = {tag: [rows[bi]] for tag, rows in tbl_item.items()}
+                ai1 = make_tagged_attention_inputs(
+                    tb1, is_prefill=True, input_lengths=[t_pfx], sequence_lengths=[t_pfx], prefix_lengths=[0], device=dev
+                )
+                rt_item.forward(LocalPyModelInputs(input_ids=pfx_ids[bi], attention_inputs=ai1))
+        ai_u = make_tagged_attention_inputs(
+            tbl_u, is_prefill=True, input_lengths=[t_suf] * bsz_u, sequence_lengths=[t_pfx + t_suf] * bsz_u, prefix_lengths=[t_pfx] * bsz_u, device=dev
+        )
+        out_u_batched = rt_u.forward(LocalPyModelInputs(input_ids=suf_ids.reshape(-1), attention_inputs=ai_u)).hidden_states
+        outs_single = []
+        for bi in range(bsz_u):
+            tb1 = {tag: [rows[bi]] for tag, rows in tbl_s.items()}
+            ai1 = make_tagged_attention_inputs(
+                tb1, is_prefill=True, input_lengths=[t_suf], sequence_lengths=[t_pfx + t_suf], prefix_lengths=[t_pfx], device=dev
+            )
+            outs_single.append(rt_s.forward(LocalPyModelInputs(input_ids=suf_ids[bi], attention_inputs=ai1)).hidden_states)
+        out_u_single = torch.cat(outs_single, dim=0)
+        # Exact parity vs per-request ragged loop (trigger via inhomogeneous trailing length) + single-request check
+        cache_nh = LocalKVCache(plan_u, tokens_per_block=64, num_blocks_per_tag=pools, device=dev, dtype=torch.bfloat16)
+        rt_nh = Qwen4_5RTPModel.from_causal_lm(m_u, kv_cache=cache_nh).eval()
+        tbl_nh = build_block_tables_for_requests(cache_nh, [t_pfx + t_suf + 1] * bsz_u)
+        for bi in range(bsz_u):
+            tb1 = {tag: [rows[bi]] for tag, rows in tbl_nh.items()}
+            ai1 = make_tagged_attention_inputs(
+                tb1, is_prefill=True, input_lengths=[t_pfx], sequence_lengths=[t_pfx], prefix_lengths=[0], device=dev
+            )
+            rt_nh.forward(LocalPyModelInputs(input_ids=pfx_ids[bi], attention_inputs=ai1))
+        nh_ids = torch.cat([suf_ids[0], suf_ids[1], suf_ids[2], suf_ids[2, -1:]], dim=0)
+        ai_nh = make_tagged_attention_inputs(
+            tbl_nh, is_prefill=True, input_lengths=[t_suf, t_suf, t_suf + 1], sequence_lengths=[t_pfx + t_suf, t_pfx + t_suf, t_pfx + t_suf + 1], prefix_lengths=[t_pfx] * bsz_u, device=dev
+        )
+        out_nh = rt_nh.forward(LocalPyModelInputs(input_ids=nh_ids, attention_inputs=ai_nh)).hidden_states
+        self.assertGreaterEqual(_cosine(out_u_batched[: 2 * t_suf], out_nh[: 2 * t_suf]), 0.999999)
+        u_cos = _cosine(out_u_batched, out_u_single)
+        self.assertGreaterEqual(u_cos, 0.998, f"Uniform batched prefill vs single cos={u_cos}")
+
+
+    def test_r1_qsa_gqa_tc_verify_bf16_fp8_gate_and_cg(self) -> None:
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA required")
+        dev = torch.device("cuda")
+        from rtp_llm.models_py.kernels.cuda.qsa.sparse_paged_fmha import sparse_paged_gqa_attn
+
+        torch.manual_seed(202611)
+        H_q, H_kv, D, P, K = 8, 1, 256, 64, 2051
+        for B, S in [(1, 8), (8, 8), (64, 8)]:
+            ctx = 20480
+            n_req_pages = ctx // P
+            pages = B * n_req_pages + 1
+            q = torch.randn((B, H_q, S, D), device=dev, dtype=torch.bfloat16)
+            kv = torch.randn((pages, 2, H_kv, P, D), device=dev, dtype=torch.bfloat16) * 0.25
+            bt = torch.arange(1, B * n_req_pages + 1, dtype=torch.int32, device=dev).view(B, n_req_pages)
+            kv_lens = torch.full((B, S), ctx, dtype=torch.int32, device=dev)
+            kv_lens[:, -1] = ctx - 3  # vary tail length
+            sel = torch.full((B, S, K), -1, dtype=torch.int32, device=dev)
+            for si in range(S):
+                blks = torch.randint(0, ctx // 4 - 4, (B, 512), device=dev, dtype=torch.int32)
+                sel[:, si, :2048] = (
+                    blks.unsqueeze(-1) * 4 + torch.arange(4, device=dev, dtype=torch.int32)
+                ).reshape(B, 2048)
+                sel[:, si, 2048] = 0
+                sel[:, si, 2049] = ctx - 4
+
+            gate = torch.randn((B, S, H_q, D), device=dev, dtype=torch.bfloat16)
+            out_tc = qsa_sparse_paged_decode_attention(
+                q, kv, bt, kv_lens, sel, page_size=P, kv_heads=H_kv, head_dim=D, output_gate=gate
+            )
+            out_ref = sparse_paged_gqa_attn(
+                q, kv, bt, kv_lens, sel, page_size=P, kv_head_num=H_kv, output_gate=gate, validate_selected=False
+            )
+            self.assertGreaterEqual(_cosine(out_tc, out_ref), 0.99999)
+            self.assertEqual(tuple(out_tc.stride()), (S * H_q * D, D, H_q * D, 1))
+
+            # HybridPool 2D + FP8 KV (both per-token HND scale, [2] scalar scale, and unit None)
+            if B == 8:
+                pool_2d = kv.reshape(pages, -1).contiguous()
+                out_2d = qsa_sparse_paged_decode_attention(
+                    q, pool_2d, bt, kv_lens, sel, page_size=P, kv_heads=H_kv, head_dim=D
+                )
+                out_ref_ng = sparse_paged_gqa_attn(
+                    q, kv, bt, kv_lens, sel, page_size=P, kv_head_num=H_kv, validate_selected=False
+                )
+                self.assertGreaterEqual(_cosine(out_2d, out_ref_ng), 0.99999)
+
+                kv_fp8 = kv.to(torch.float8_e4m3fn)
+                sc_hnd = torch.full((pages, 2, H_kv, P), 0.5, dtype=torch.float32, device=dev)
+                out_fp8_hnd = qsa_sparse_paged_decode_attention(
+                    q, kv_fp8, bt, kv_lens, sel, page_size=P, kv_heads=H_kv, head_dim=D, kv_scale=sc_hnd, output_gate=gate
+                )
+                out_fp8_ref = sparse_paged_gqa_attn(
+                    q, kv_fp8, bt, kv_lens, sel, page_size=P, kv_head_num=H_kv, kv_scale=sc_hnd, output_gate=gate, validate_selected=False
+                )
+                self.assertGreaterEqual(_cosine(out_fp8_hnd, out_fp8_ref), 0.9995)
+
+                sc_vec = torch.tensor([0.5, 0.5], dtype=torch.float32, device=dev)
+                out_fp8_vec = qsa_sparse_paged_decode_attention(
+                    q, kv_fp8, bt, kv_lens, sel, page_size=P, kv_heads=H_kv, head_dim=D, kv_scale=sc_vec, output_gate=gate
+                )
+                self.assertGreaterEqual(_cosine(out_fp8_vec, out_fp8_hnd), 0.99999)
+
+                out_fp8_unit = qsa_sparse_paged_decode_attention(
+                    q, kv_fp8, bt, kv_lens, sel, page_size=P, kv_heads=H_kv, head_dim=D, kv_scale=None
+                )
+                self.assertGreaterEqual(_cosine(out_fp8_unit, out_ref_ng), 0.999)
+
+                # CUDA Graph capture & replay parity
+                st_q = q.clone()
+                st_bt = bt.clone()
+                st_len = kv_lens.clone()
+                st_sel = sel.clone()
+                st_gate = gate.clone()
+                # Warmup
+                _ = qsa_sparse_paged_decode_attention(
+                    st_q, kv, st_bt, st_len, st_sel, page_size=P, kv_heads=H_kv, head_dim=D, output_gate=st_gate, is_cuda_graph=True
+                )
+                torch.cuda.synchronize()
+                g = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(g):
+                    cg_out = qsa_sparse_paged_decode_attention(
+                        st_q, kv, st_bt, st_len, st_sel, page_size=P, kv_heads=H_kv, head_dim=D, output_gate=st_gate, is_cuda_graph=True
+                    )
+                st_q.copy_(torch.randn_like(st_q))
+                st_gate.copy_(torch.randn_like(st_gate))
+                g.replay()
+                eag_out = qsa_sparse_paged_decode_attention(
+                    st_q, kv, st_bt, st_len, st_sel, page_size=P, kv_heads=H_kv, head_dim=D, output_gate=st_gate
+                )
+                self.assertGreaterEqual(_cosine(cg_out, eag_out), 0.999999)
+
+    def test_r1_radix2_20k_topk_and_q4_paged_prefill_parity(self) -> None:
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA required")
+        dev = torch.device("cuda")
+        from rtp_llm.models_py.modules.qwen4_5.qsa_bridge import select_qsa_paged_tokens
+
+        torch.manual_seed(202612)
+        # 1) 20K (cols=20480 -> ctx=81920) radix2 chunked TopK parity
+        for rows in (8, 64, 128):
+            cols = 20480
+            sc = torch.randn((rows, cols), device=dev, dtype=torch.float32)
+            sc[0, :128] = 5.0  # force ties
+            sc[1, :] = float("-inf")
+            vis = torch.full((rows,), cols * 4, dtype=torch.int32, device=dev)
+            vis[0] = 260 * 4 + 3  # short + tail=3
+            sc[0, 260:] = float("-inf")
+            vis[1] = 2  # empty complete blocks + tail=2
+            sel = _select_top_tokens(
+                sc, vis, compress_ratio=4, token_budget=2048, scores_are_masked=True
+            )
+            sel_ref = select_qsa_paged_tokens(
+                sc[:3], vis[:3], compress_ratio=4, token_budget=2048, validate_lengths=False, scores_are_masked=True
+            )
+            for r in range(3):
+                self.assertEqual(
+                    set(sel[r][sel[r] >= 0].tolist()),
+                    set(sel_ref[r][sel_ref[r] >= 0].tolist()),
+                )
+                self.assertEqual(int((sel[r] == -1).sum()), int((sel_ref[r] == -1).sum()))
+            for r in (3, rows - 1):
+                _, top_ref = torch.topk(sc[r], k=512, dim=-1)
+                self.assertEqual(set((sel[r, :2048] // 4).unique().tolist()), set(top_ref.tolist()))
+
+        # 2) Sparse Prefill (Dense + Paged + HybridPool + FP8, 85% Q4 overlap & 0%/dup Direct fallback)
+        B, H_q, H_kv, S, T, D, P, K = 4, 8, 1, 128, 20480, 256, 64, 2051
+        pages = B * (T // P) + 1
+        q = torch.randn((B, H_q, S, D), device=dev, dtype=torch.bfloat16)
+        kv = torch.randn((pages, 2, H_kv, P, D), device=dev, dtype=torch.bfloat16) * 0.25
+        bt = torch.arange(1, pages, dtype=torch.int32, device=dev).view(B, T // P)
+        k_dense = kv[bt.long(), 0].permute(0, 2, 1, 3, 4).reshape(B, H_kv, T, D).contiguous()
+        v_dense = kv[bt.long(), 1].permute(0, 2, 1, 3, 4).reshape(B, H_kv, T, D).contiguous()
+
+        n_q = T // 4
+        # 85% Q4 overlap selections (distinct within row)
+        sel_ov = torch.full((B, S, K), -1, dtype=torch.int32, device=dev)
+        for bi in range(B):
+            base = torch.randperm(n_q - 2, device=dev, dtype=torch.int32) + 1  # reserve quads 0 and n_q-1 for tail slots
+            for g in range(S // 4):
+                anchor = base[:512]
+                for j in range(4):
+                    s = g * 4 + j
+                    r = j * 24
+                    blks = torch.cat([anchor[r:], base[512 : 512 + r]])
+                    sel_ov[bi, s, :2048] = (
+                        blks.unsqueeze(-1) * 4 + torch.arange(4, device=dev, dtype=torch.int32)
+                    ).reshape(-1)
+                    if j == 3:
+                        base = base.roll(-512)
+        sel_ov[:, :, 2048] = 3
+        sel_ov[:, :, 2049] = T - 1
+
+        # Exact FP32 ref on sampled positions
+        def _ref_at(b_i: int, s_i: int, sel_t: torch.Tensor) -> torch.Tensor:
+            idx = sel_t[b_i, s_i]
+            idx = idx[(idx >= 0) & (idx < T)].long()
+            sc_l = (q[b_i, :, s_i, :].float() @ k_dense[b_i, 0, idx].float().T) * (D ** -0.5)
+            return (torch.softmax(sc_l, dim=-1) @ v_dense[b_i, 0, idx].float()).to(torch.bfloat16)
+
+        # Explicitly verify non-fallback Q4 path on both dense [B, H_kv, T, D] and paged [pages, 2, H_kv, P, D]
+        out_q4_dense_direct = _try_run_q4_prefill(
+            q, k_dense, v_dense, None, None, sel_ov, T=T, page_size=4, is_paged=False
+        )
+        self.assertIsNotNone(out_q4_dense_direct, "Dense Q4 prefill unexpectedly fell back")
+        out_q4_paged_direct = _try_run_q4_prefill(
+            q, kv, kv, None, bt, sel_ov, T=T, page_size=P, is_paged=True
+        )
+        self.assertIsNotNone(out_q4_paged_direct, "Paged Q4 prefill unexpectedly fell back")
+        self.assertGreaterEqual(_cosine(out_q4_dense_direct, out_q4_paged_direct), 0.999999)
+
+        # Also check dense Q4 S=64, T=128 causal continuation window (non-power-of-two T>=2*K edge)
+        q_c64 = q[:1, :, :64].contiguous()
+        k_c64 = k_dense[:1, :, :128].contiguous()
+        v_c64 = v_dense[:1, :, :128].contiguous()
+        sel_c64 = torch.full((1, 64, K), -1, dtype=torch.int32, device=dev)
+        for s_i in range(64):
+            comp_i = (64 + s_i + 1) // 4
+            sel_c64[0, s_i, : comp_i * 4] = torch.arange(comp_i * 4, device=dev, dtype=torch.int32)
+            for r_i in range((64 + s_i + 1) % 4):
+                sel_c64[0, s_i, 2048 + r_i] = comp_i * 4 + r_i
+        out_c64 = _try_run_q4_prefill(
+            q_c64, k_c64, v_c64, None, None, sel_c64, T=128, page_size=4, is_paged=False
+        )
+        self.assertIsNotNone(out_c64)
+        from rtp_llm.models_py.kernels.cuda.qsa.sparse_fmha import sparse_prefill_attn
+        ref_c64 = sparse_prefill_attn(q_c64, k_c64, v_c64, sel_c64, validate_selected=False)
+        self.assertGreaterEqual(_cosine(out_c64, ref_c64), 0.99999)
+
+        out_dense_ov = qsa_sparse_prefill_attention(q, k_dense, v_dense, sel_ov)
+        out_paged_ov = qsa_sparse_paged_prefill_attention(
+            q, kv, bt, sel_ov, page_size=P, kv_heads=H_kv, head_dim=D, max_ctx_len=T
+        )
+        out_2d_fp8 = qsa_sparse_paged_prefill_attention(
+            q,
+            kv.reshape(pages, -1).to(torch.float8_e4m3fn),
+            bt,
+            sel_ov,
+            page_size=P,
+            kv_heads=H_kv,
+            head_dim=D,
+            max_ctx_len=T,
+            kv_scale=torch.tensor([1.0, 1.0], dtype=torch.float32, device=dev),
+        )
+        # 0% overlap + duplicate indices (exercises Direct fallback)
+        sel_zero = sel_ov.clone()
+        for s in range(S):
+            sel_zero[:, s, :2048] = (
+                torch.randperm(n_q, device=dev, dtype=torch.int32)[:512].unsqueeze(-1) * 4
+                + torch.arange(4, device=dev, dtype=torch.int32)
+            ).reshape(-1).unsqueeze(0).expand(B, 2048)
+        sel_zero[:, 0, 2050] = sel_zero[:, 0, 0]  # intentional duplicate
+        out_dense_0 = qsa_sparse_prefill_attention(q, k_dense, v_dense, sel_zero)
+        out_paged_0 = qsa_sparse_paged_prefill_attention(
+            q, kv, bt, sel_zero, page_size=P, kv_heads=H_kv, head_dim=D, max_ctx_len=T
+        )
+        for bi, si in [(0, 0), (0, 3), (B - 1, S - 1)]:
+            ref = _ref_at(bi, si, sel_ov)
+            self.assertGreaterEqual(_cosine(out_dense_ov[bi, :, si], ref), 0.99999)
+            self.assertGreaterEqual(_cosine(out_paged_ov[bi, :, si], ref), 0.99999)
+            self.assertGreaterEqual(_cosine(out_2d_fp8[bi, :, si], ref), 0.999)
+            ref0 = _ref_at(bi, si, sel_zero)
+            self.assertGreaterEqual(_cosine(out_dense_0[bi, :, si], ref0), 0.99999)
+            self.assertGreaterEqual(_cosine(out_paged_0[bi, :, si], ref0), 0.99999)
+
+        # 3) Zero-copy Paged QSA Prefill end-to-end inside Qwen4_5RTPModel for B=1 & B=3 (t_pfx > 0)
+        arch = _make_mini_arch(indexer_n_heads=8, indexer_budget=16, max_position_embeddings=512)
+        m_p = Qwen4_5ForCausalLM(
+            arch, use_triton_mxfp4=False, compute_mode="bf16", dtype=torch.bfloat16, device=dev
+        ).eval()
+        m_p.init_synthetic_weights(seed=808, ple_mode="gpu_full", ple_fp8=False)
+        _stabilize_router_margins(m_p)
+        m_p.prepare_weights()
+        pools = {
+            tag: 64
+            for tag in [
+                INDEXER_KV_TAG,
+                INDEXER_STATE_TAG,
+                FULL_ATTN_KV_TAG,
+                "linear",
+                "gdn_consumer_q_conv",
+                "full_attn_kv_sconv",
+                "full_attn_output_sconv",
+                "linear_attn_output_sconv",
+                "ffn_output_sconv",
+                "ple_conv_state",
+                "ple_ngram_ctx",
+            ]
+        }
+        plan_p = build_qwen4_5_kv_cache_plan(arch)
+        cache_p = LocalKVCache(plan_p, tokens_per_block=64, num_blocks_per_tag=pools, device=dev, dtype=torch.bfloat16)
+        rt_p = Qwen4_5RTPModel.from_causal_lm(m_p, kv_cache=cache_p).eval()
+        cache_ref = LocalKVCache(plan_p, tokens_per_block=64, num_blocks_per_tag=pools, device=dev, dtype=torch.bfloat16)
+        rt_ref = Qwen4_5RTPModel.from_causal_lm(m_p, kv_cache=cache_ref).eval()
+        tbl_p = build_block_tables_for_requests(cache_p, [192, 192])
+        tbl_ref = build_block_tables_for_requests(cache_ref, [192, 193])
+        ids_pfx = torch.randint(4, 240, (64,), dtype=torch.int64, device=dev)
+        ids_suf = torch.randint(4, 240, (128,), dtype=torch.int64, device=dev)
+        # Seed B=2 prefix in both uniform paged and non-uniform ragged reference caches
+        for bi in range(2):
+            for rt_i, tbl_i in ((rt_p, tbl_p), (rt_ref, tbl_ref)):
+                tb1 = {tag: [rows[bi]] for tag, rows in tbl_i.items()}
+                ai1 = make_tagged_attention_inputs(
+                    tb1, is_prefill=True, input_lengths=[64], sequence_lengths=[64], prefix_lengths=[0], device=dev
+                )
+                rt_i.forward(LocalPyModelInputs(input_ids=ids_pfx, attention_inputs=ai1))
+        ai_s2 = make_tagged_attention_inputs(
+            tbl_p, is_prefill=True, input_lengths=[128, 128], sequence_lengths=[192, 192], prefix_lengths=[64, 64], device=dev
+        )
+        out_s2 = rt_p.forward(
+            LocalPyModelInputs(input_ids=torch.cat([ids_suf, ids_suf]), attention_inputs=ai_s2)
+        ).hidden_states
+        ai_nh = make_tagged_attention_inputs(
+            tbl_ref, is_prefill=True, input_lengths=[128, 129], sequence_lengths=[192, 193], prefix_lengths=[64, 64], device=dev
+        )
+        out_nh = rt_ref.forward(
+            LocalPyModelInputs(input_ids=torch.cat([ids_suf, ids_suf, ids_suf[-1:]]), attention_inputs=ai_nh)
+        ).hidden_states[:128]
+        self.assertGreaterEqual(_cosine(out_s2[:128], out_nh), 0.999999)
+        self.assertGreaterEqual(_cosine(out_s2[128:], out_nh), 0.999999)
+
+    def test_r1_batched_opaque_tx_commit_and_rollback(self) -> None:
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA required")
+        dev = torch.device("cuda")
+        from rtp_llm.models_py.model_desc.qwen4_5_runtime import (
+            LocalLayerKVCache,
+            _Qwen4_5OpaqueTxManager,
+            _write_opaque_rows_raw_gpu,
+        )
+
+        torch.manual_seed(202613)
+        arch = _make_mini_arch(indexer_n_heads=8, indexer_budget=16, max_position_embeddings=512)
+        mgr = _Qwen4_5OpaqueTxManager(bridge=None, arch_cfg=arch)  # type: ignore[arg-type]
+        B_cap, V, tpb = 4, 8, 64
+        stage = mgr.acquire_stage(B_cap, V, is_cuda_graph=False)
+        stage.begin_forward(
+            torch.tensor([60, 125, 10, 63], dtype=torch.int32, device=dev),
+            kv_cache=None,
+            attention_inputs=None,
+        )
+        caches = []
+        ref_bases = []
+        for idx_e in range(17):
+            num_blocks = 16
+            width_b = 256 if idx_e % 3 == 0 else (4096 if idx_e % 3 == 1 else 16384)
+            base = torch.randint(-100, 100, (num_blocks, width_b // 2), dtype=torch.int16, device=dev).to(torch.bfloat16)
+            ref_bases.append(base.clone())
+            lc = LocalLayerKVCache(kv_cache_base=base, seq_size_per_block=tpb, layer_id=idx_e, tag=f"tag_{idx_e}")
+            bt = torch.tensor(
+                [[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12], [13, 14, 15, 0]],
+                dtype=torch.int32,
+                device=dev,
+            )
+            st = stage.stage_tensor(
+                f"tag_{idx_e}",
+                idx_e,
+                lc,
+                bt,
+                (width_b // 2,),
+                torch.bfloat16,
+            )
+            st.copy_(torch.randint(-50, 50, st.shape, dtype=torch.int16, device=dev).to(torch.bfloat16))
+            caches.append((lc, bt, st))
+        stage.ready = True
+
+        # Verify commit -> rollback bit-exact restoration across live_bs == 4 and live_bs == 2
+        for live_bs, a_vals in [(4, [6, 5, 3, 1]), (2, [7, 2])]:
+            accept = torch.tensor(a_vals, dtype=torch.int32, device=dev)
+            mgr.prepare_commit(accept)
+            self.assertIsNotNone(mgr._batched_undo_meta)
+            mgr.finish_commit(True)
+
+            # Check committed contents against reference _write_opaque_rows_raw_gpu
+            for idx_e, (lc, bt, st) in enumerate(caches):
+                expected = ref_bases[idx_e].clone()
+                recs = mgr._undo_records[idx_e]
+                _write_opaque_rows_raw_gpu(expected, recs.phys_ids, recs.commit_u8, lc.tag, idx_e)
+                self.assertTrue(
+                    torch.equal(lc.kv_cache_base, expected),
+                    f"Commit mismatch entry={idx_e} live_bs={live_bs}",
+                )
+
+            # Rollback and assert exact original snapshot restored
+            mgr.finish_commit(False)
+            for idx_e, (lc, _, _) in enumerate(caches):
+                self.assertTrue(
+                    torch.equal(lc.kv_cache_base, ref_bases[idx_e]),
+                    f"Rollback mismatch entry={idx_e} live_bs={live_bs}",
+                )
+            mgr._active_pending = stage
 
 
 if __name__ == "__main__":

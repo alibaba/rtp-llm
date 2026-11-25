@@ -29,6 +29,7 @@ are applied immediately after ``Qwen4_5DenseMLP`` / ``Qwen4_5LatentMoE`` inside
 
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from typing import Any, Optional, Tuple
 
@@ -41,12 +42,14 @@ from triton.language.extra import libdevice
 
 from rtp_llm.models_py.modules.qwen4_5.activation import SituAndMul
 from rtp_llm.models_py.modules.qwen4_5.contracts import Qwen4_5ArchConfig
+from rtp_llm.models_py.modules.qwen4_5.fp8_linear import SM100FP8Linear
 from rtp_llm.models_py.modules.qwen4_5.mxfp4_ops import (
     MXFP4_BLOCK_SIZE,
     MXFP4MoEWeights,
     mxfp4_moe_forward,
     mxfp4_moe_forward_ref,
     prepare_mxfp4_moe_weights,
+    resolve_moe_backend_for_shape,
     supports_triton_mxfp4,
 )
 
@@ -162,6 +165,37 @@ class GemmaRMSNorm(nn.Module):
         return gemma_rmsnorm(x, self.weight, eps=self.eps, use_triton=flag)
 
 
+@triton.jit(do_not_specialize=["stride_dg_row", "stride_out_row"])
+def _latent_norm_mul_sigmoid_kernel(
+    dg_ptr,
+    ln_w_ptr,
+    out_ptr,
+    M,
+    L,
+    stride_dg_row: tl.int64,
+    stride_out_row: tl.int64,
+    eps: tl.constexpr,
+    BLOCK_L: tl.constexpr,
+):
+    """Fused GemmaRMSNorm(down) * sigmoid(gate) from [M, 2*L] in one pass."""
+    row = tl.program_id(0).to(tl.int64)
+    if row >= M:
+        return
+    offs = tl.arange(0, BLOCK_L)
+    mask = offs < L
+    dg_base = dg_ptr + row * stride_dg_row
+    x_down = tl.load(dg_base + offs, mask=mask, other=0.0).to(tl.float32)
+    x_gate = tl.load(dg_base + L + offs, mask=mask, other=0.0).to(tl.float32)
+    w_ln = tl.load(ln_w_ptr + offs, mask=mask, other=0.0).to(tl.float32)
+
+    mean_sq = tl.sum(tl.where(mask, x_down * x_down, 0.0), axis=0) / L
+    inv_rms = tl.rsqrt(mean_sq + eps)
+    normed = (x_down * inv_rms * (1.0 + w_ln)).to(out_ptr.dtype.element_ty)
+    sig_g = tl.div_rn(1.0, 1.0 + libdevice.exp(-x_gate)).to(out_ptr.dtype.element_ty)
+    out = (normed.to(tl.float32) * sig_g.to(tl.float32)).to(out_ptr.dtype.element_ty)
+    tl.store(out_ptr + row * stride_out_row + offs, out, mask=mask)
+
+
 
 @triton.jit
 def _qwen45_sigmoid_topk_router_kernel(
@@ -237,6 +271,7 @@ class Qwen4_5DenseMLP(nn.Module):
         tp_rank: int = 0,
         tp_group: Any = None,
         fast_all_reduce: Any = None,
+        dense_linear_mode: Optional[str] = None,
         dtype: torch.dtype = torch.bfloat16,
         device: Optional[torch.device] = None,
     ) -> None:
@@ -247,6 +282,15 @@ class Qwen4_5DenseMLP(nn.Module):
         self.tp_rank = int(tp_rank)
         self.tp_group = tp_group
         self.fast_all_reduce = fast_all_reduce
+        self.dense_linear_mode = (
+            str(dense_linear_mode).lower()
+            if dense_linear_mode is not None
+            else os.environ.get("QWEN4_5_DENSE_LINEAR_MODE", "bf16").strip().lower()
+        )
+        self._fp8_gate_up: Optional[SM100FP8Linear] = None
+        self._fp8_gate: Optional[SM100FP8Linear] = None
+        self._fp8_up: Optional[SM100FP8Linear] = None
+        self._fp8_down: Optional[SM100FP8Linear] = None
         if self.tp_size < 1 or self.full_intermediate_size % self.tp_size != 0:
             raise ValueError(
                 f"intermediate_size={self.full_intermediate_size} must be divisible by tp_size={self.tp_size}"
@@ -292,6 +336,7 @@ class Qwen4_5DenseMLP(nn.Module):
         tp_rank: int = 0,
         tp_group: Any = None,
         fast_all_reduce: Any = None,
+        dense_linear_mode: Optional[str] = None,
         dtype: torch.dtype = torch.bfloat16,
         device: Optional[torch.device] = None,
     ) -> "Qwen4_5DenseMLP":
@@ -310,6 +355,7 @@ class Qwen4_5DenseMLP(nn.Module):
             tp_rank=tp_rank,
             tp_group=tp_group,
             fast_all_reduce=fast_all_reduce,
+            dense_linear_mode=dense_linear_mode,
             dtype=dtype,
             device=device,
         )
@@ -353,14 +399,74 @@ class Qwen4_5DenseMLP(nn.Module):
             self.prepare_weights(fuse_gate_up=True)
 
     @torch.no_grad()
-    def prepare_weights(self, *, fuse_gate_up: bool = True) -> None:
-        """Optionally cache concatenated ``[gate_proj; up_proj]`` for single-GEMM forward."""
+    def prepare_weights(
+        self,
+        *,
+        fuse_gate_up: bool = True,
+        dense_linear_mode: Optional[str] = None,
+    ) -> None:
+        """Cache concatenated ``[gate_proj; up_proj]`` and optional SM100 FP8 weights."""
+        if dense_linear_mode is not None:
+            self.dense_linear_mode = str(dense_linear_mode).lower()
         if fuse_gate_up:
             self._gate_up_weight = torch.cat(
                 [self.gate_proj.weight.data, self.up_proj.weight.data], dim=0
             ).contiguous()
         else:
             self._gate_up_weight = None
+
+        eff_mode = (
+            self.dense_linear_mode
+            or os.environ.get("QWEN4_5_DENSE_LINEAR_MODE", "bf16").strip().lower()
+        )
+        if eff_mode != "bf16" and self.gate_proj.weight.is_cuda:
+            kw = dict(
+                mode=eff_mode,
+                keep_bf16=True,
+                prepare_trtllm_ll=True,
+                prepare_mxfp8=True,
+                prepare_w4a8=(eff_mode == "w4a8"),
+                dtype=self.gate_proj.weight.dtype,
+                device=self.gate_proj.weight.device,
+            )
+            if self._gate_up_weight is not None:
+                self._fp8_gate_up = SM100FP8Linear(
+                    self.hidden_size, 2 * self.local_intermediate_size, **kw
+                )
+                self._fp8_gate_up.prepare_weights(self._gate_up_weight)
+                self._fp8_gate = None
+                self._fp8_up = None
+            else:
+                self._fp8_gate_up = None
+                self._fp8_gate = SM100FP8Linear.from_linear(
+                    self.gate_proj,
+                    mode=eff_mode,
+                    keep_bf16=True,
+                    prepare_trtllm_ll=True,
+                    prepare_mxfp8=True,
+                    prepare_w4a8=(eff_mode == "w4a8"),
+                )
+                self._fp8_up = SM100FP8Linear.from_linear(
+                    self.up_proj,
+                    mode=eff_mode,
+                    keep_bf16=True,
+                    prepare_trtllm_ll=True,
+                    prepare_mxfp8=True,
+                    prepare_w4a8=(eff_mode == "w4a8"),
+                )
+            self._fp8_down = SM100FP8Linear.from_linear(
+                self.down_proj,
+                mode=eff_mode,
+                keep_bf16=True,
+                prepare_trtllm_ll=True,
+                prepare_mxfp8=True,
+                prepare_w4a8=(eff_mode == "w4a8"),
+            )
+        else:
+            self._fp8_gate_up = None
+            self._fp8_gate = None
+            self._fp8_up = None
+            self._fp8_down = None
 
     def forward(
         self,
@@ -373,12 +479,16 @@ class Qwen4_5DenseMLP(nn.Module):
             return torch.empty_like(hidden_states)
 
         if self._gate_up_weight is not None and (use_triton is None or use_triton):
-            gate_up = F.linear(hidden_states, self._gate_up_weight)
+            gate_up = (
+                self._fp8_gate_up(hidden_states)
+                if self._fp8_gate_up is not None
+                else F.linear(hidden_states, self._gate_up_weight)
+            )
             act = self.act_fn(gate_up)
-            out = self.down_proj(act)
+            out = self._fp8_down(act) if self._fp8_down is not None else self.down_proj(act)
         else:
-            gate = self.gate_proj(hidden_states)
-            up = self.up_proj(hidden_states)
+            gate = self._fp8_gate(hidden_states) if self._fp8_gate is not None else self.gate_proj(hidden_states)
+            up = self._fp8_up(hidden_states) if self._fp8_up is not None else self.up_proj(hidden_states)
             if use_triton is None:
                 act = self.act_fn(gate, up)
             else:
@@ -388,7 +498,7 @@ class Qwen4_5DenseMLP(nn.Module):
                     act = self.act_fn(gate, up)
                 finally:
                     self.act_fn.use_triton = orig_flag
-            out = self.down_proj(act)
+            out = self._fp8_down(act) if self._fp8_down is not None else self.down_proj(act)
 
         if self.tp_size > 1 and not skip_allreduce:
             if self.fast_all_reduce is not None:
@@ -453,6 +563,10 @@ class Qwen4_5LatentMoE(nn.Module):
         tp_rank: int = 0,
         tp_group: Any = None,
         fast_all_reduce: Any = None,
+        all_to_all_comm: Any = None,
+        dp_equal_tokens: Optional[bool] = None,
+        use_symm_p2p_combine: Optional[bool] = None,
+        dense_linear_mode: Optional[str] = None,
         enable_shared_overlap: bool = True,
         backend: str = "auto",
     ) -> None:
@@ -508,6 +622,19 @@ class Qwen4_5LatentMoE(nn.Module):
         self.tp_rank = int(tp_rank)
         self.tp_group = tp_group
         self.fast_all_reduce = fast_all_reduce
+        self.all_to_all_comm = all_to_all_comm
+        self.dp_equal_tokens = dp_equal_tokens
+        self.use_symm_p2p_combine = use_symm_p2p_combine
+        self.dense_linear_mode = (
+            str(dense_linear_mode).lower()
+            if dense_linear_mode is not None
+            else os.environ.get("QWEN4_5_DENSE_LINEAR_MODE", "bf16").strip().lower()
+        )
+        self.register_buffer("_latent_down_gate_weight", None, persistent=False)
+        self._fp8_latent_down_gate: Optional[SM100FP8Linear] = None
+        self._fp8_latent_down: Optional[SM100FP8Linear] = None
+        self._fp8_latent_gate: Optional[SM100FP8Linear] = None
+        self._fp8_latent_up: Optional[SM100FP8Linear] = None
         self.enable_shared_overlap = bool(enable_shared_overlap)
         self.backend = str(backend)
         self.use_triton_mxfp4 = bool(use_triton_mxfp4)
@@ -550,13 +677,14 @@ class Qwen4_5LatentMoE(nn.Module):
         else:
             self.register_parameter("expert_bias", None)
 
-        # Shared expert (BF16 Dense MLP + sigmoid scalar gate)
+        # Shared expert (BF16/FP8 Dense MLP + sigmoid scalar gate)
         self.shared_expert = Qwen4_5DenseMLP(
             hidden_size=self.hidden_size,
             intermediate_size=self.shared_expert_intermediate_size,
             gate_beta=self.gate_beta,
             up_beta=self.up_beta,
             use_triton=self.use_triton_mxfp4,
+            dense_linear_mode=self.dense_linear_mode,
             dtype=dtype,
             device=device,
         )
@@ -647,6 +775,10 @@ class Qwen4_5LatentMoE(nn.Module):
         tp_rank: int = 0,
         tp_group: Any = None,
         fast_all_reduce: Any = None,
+        all_to_all_comm: Any = None,
+        dp_equal_tokens: Optional[bool] = None,
+        use_symm_p2p_combine: Optional[bool] = None,
+        dense_linear_mode: Optional[str] = None,
         enable_shared_overlap: bool = True,
         backend: str = "auto",
     ) -> "Qwen4_5LatentMoE":
@@ -664,6 +796,10 @@ class Qwen4_5LatentMoE(nn.Module):
             tp_rank=tp_rank,
             tp_group=tp_group,
             fast_all_reduce=fast_all_reduce,
+            all_to_all_comm=all_to_all_comm,
+            dp_equal_tokens=dp_equal_tokens,
+            use_symm_p2p_combine=use_symm_p2p_combine,
+            dense_linear_mode=dense_linear_mode,
             enable_shared_overlap=enable_shared_overlap,
             backend=backend,
         )
@@ -721,8 +857,10 @@ class Qwen4_5LatentMoE(nn.Module):
         *,
         transpose_mxfp4: bool = False,
         fuse_shared_gate_up: bool = True,
+        fuse_latent_down_gate: bool = True,
         prepare_deepgemm: bool = False,
         prepare_flashinfer: bool = False,
+        dense_linear_mode: Optional[str] = None,
     ) -> None:
         """Prepare MXFP4 routed weights, SM100 scale caches, shared expert, and overlap stream."""
         if self.w13_u8 is not None and self.w2_u8 is not None:
@@ -745,7 +883,71 @@ class Qwen4_5LatentMoE(nn.Module):
                 weights.get_deepgemm_pair()
             if prepare_flashinfer and not self.weights_transposed:
                 weights.get_flashinfer_pair()
-        self.shared_expert.prepare_weights(fuse_gate_up=fuse_shared_gate_up)
+        if dense_linear_mode is not None:
+            self.dense_linear_mode = str(dense_linear_mode).lower()
+        eff_mode = (
+            self.dense_linear_mode
+            or os.environ.get("QWEN4_5_DENSE_LINEAR_MODE", "bf16").strip().lower()
+        )
+        if fuse_latent_down_gate:
+            self._latent_down_gate_weight = torch.cat(
+                [self.latent_down_proj.weight.data, self.latent_gate_proj.weight.data], dim=0
+            ).contiguous()
+        else:
+            self._latent_down_gate_weight = None
+
+        if eff_mode != "bf16" and self.latent_down_proj.weight.is_cuda:
+            if self._latent_down_gate_weight is not None:
+                self._fp8_latent_down_gate = SM100FP8Linear(
+                    self.hidden_size,
+                    2 * self.latent_dim,
+                    mode=eff_mode,
+                    keep_bf16=True,
+                    prepare_trtllm_ll=True,
+                    prepare_mxfp8=True,
+                    prepare_w4a8=(eff_mode == "w4a8"),
+                    dtype=self.latent_down_proj.weight.dtype,
+                    device=self.latent_down_proj.weight.device,
+                )
+                self._fp8_latent_down_gate.prepare_weights(self._latent_down_gate_weight)
+                self._fp8_latent_down = None
+                self._fp8_latent_gate = None
+            else:
+                self._fp8_latent_down_gate = None
+                self._fp8_latent_down = SM100FP8Linear.from_linear(
+                    self.latent_down_proj,
+                    mode=eff_mode,
+                    keep_bf16=True,
+                    prepare_trtllm_ll=True,
+                    prepare_mxfp8=True,
+                    prepare_w4a8=(eff_mode == "w4a8"),
+                )
+                self._fp8_latent_gate = SM100FP8Linear.from_linear(
+                    self.latent_gate_proj,
+                    mode=eff_mode,
+                    keep_bf16=True,
+                    prepare_trtllm_ll=True,
+                    prepare_mxfp8=True,
+                    prepare_w4a8=(eff_mode == "w4a8"),
+                )
+            self._fp8_latent_up = SM100FP8Linear.from_linear(
+                self.latent_up_proj,
+                mode=eff_mode,
+                keep_bf16=True,
+                prepare_trtllm_ll=True,
+                prepare_mxfp8=True,
+                prepare_w4a8=(eff_mode == "w4a8"),
+            )
+        else:
+            self._fp8_latent_down_gate = None
+            self._fp8_latent_down = None
+            self._fp8_latent_gate = None
+            self._fp8_latent_up = None
+
+        self.shared_expert.prepare_weights(
+            fuse_gate_up=fuse_shared_gate_up,
+            dense_linear_mode=eff_mode,
+        )
         self.prepare_shared_expert_overlap()
 
     def _mxfp4_weights(self) -> MXFP4MoEWeights:
@@ -857,66 +1059,165 @@ class Qwen4_5LatentMoE(nn.Module):
         mode: str,
         backend: str,
     ) -> torch.Tensor:
-        # 1. Latent down projection (5120 -> 2560)
-        routed = F.linear(x, self.latent_down_proj.weight)
-
-        # 2. Pre-MoE Gemma RMSNorm ((1.0 + weight) in FP32)
-        routed = self.pre_moe_latent_layernorm(routed, use_triton=run_triton)
-
-        # 3. Latent input gate (5120 -> 2560)
-        routed = routed * torch.sigmoid(F.linear(x, self.latent_gate_proj.weight))
+        # 1..3. Latent down+gate fused GEMM (5120 -> 5120) + fused GemmaRMSNorm * sigmoid(gate)
+        if self._latent_down_gate_weight is not None:
+            dg = (
+                self._fp8_latent_down_gate(x)
+                if self._fp8_latent_down_gate is not None
+                else F.linear(x, self._latent_down_gate_weight)
+            )
+            if run_triton and self.latent_dim <= 4096 and dg.is_cuda:
+                dg_2d = dg if dg.is_contiguous() else dg.contiguous()
+                M_dg = int(dg_2d.shape[0])
+                routed = torch.empty((M_dg, self.latent_dim), dtype=dg_2d.dtype, device=dg_2d.device)
+                if M_dg > 0:
+                    _latent_norm_mul_sigmoid_kernel[(M_dg,)](
+                        dg_2d,
+                        self.pre_moe_latent_layernorm.weight.contiguous(),
+                        routed,
+                        M_dg,
+                        self.latent_dim,
+                        dg_2d.stride(0),
+                        routed.stride(0),
+                        eps=float(self.rms_norm_eps),
+                        BLOCK_L=triton.next_power_of_2(self.latent_dim),
+                        num_warps=4,
+                    )
+            else:
+                d_part, g_part = dg.split(self.latent_dim, dim=-1)
+                routed = self.pre_moe_latent_layernorm(d_part, use_triton=run_triton) * torch.sigmoid(g_part)
+        else:
+            routed = (
+                self._fp8_latent_down(x)
+                if self._fp8_latent_down is not None
+                else F.linear(x, self.latent_down_proj.weight)
+            )
+            routed = self.pre_moe_latent_layernorm(routed, use_triton=run_triton)
+            l_gate = (
+                self._fp8_latent_gate(x)
+                if self._fp8_latent_gate is not None
+                else F.linear(x, self.latent_gate_proj.weight)
+            )
+            routed = routed * torch.sigmoid(l_gate)
 
         # 4. Sigmoid + expert-bias top-k router
         topk_ids, topk_weights = self.route(routed, use_triton=run_triton)
 
-        # 5. Routed MXFP4 experts (2560 -> 2560; EP AllReduce happens in 2560-dim latent space)
+        # 5. Routed MXFP4 experts (2560 -> 2560)
         weights = self._mxfp4_weights()
-        if run_triton:
-            routed = mxfp4_moe_forward(
+        use_a2a = (
+            self.all_to_all_comm is not None
+            and self.ep_size > 1
+            and getattr(self.all_to_all_comm, "world_size", 1) > 1
+        )
+        if use_a2a:
+            eff_m_est = int(routed.shape[0]) * self.ep_size
+            resolved_b = resolve_moe_backend_for_shape(
+                eff_m_est,
+                self.latent_dim,
+                routed.device,
+                weights,
+                backend,
+                run_triton,
+            )
+            want_fp8_a2a = run_triton and resolved_b in (
+                "deepgemm_masked",
+                "deepgemm_contiguous",
+                "flashinfer",
+                "flashinfer_noswap",
+            )
+            a2a_state = self.all_to_all_comm.dispatch(
                 routed,
                 topk_ids,
                 topk_weights,
-                weights,
-                gate_beta=self.gate_beta,
-                up_beta=self.up_beta,
-                compute_mode=mode,
-                use_triton=True,
-                ep_start=self.ep_start,
-                ep_size=self.ep_size,
-                backend=backend,
+                num_experts=self.num_experts,
+                equal_tokens=self.dp_equal_tokens,
+                quantize_fp8=want_fp8_a2a,
+            )
+            if run_triton:
+                routed_ep = mxfp4_moe_forward(
+                    a2a_state.hidden,
+                    a2a_state.topk_ids,
+                    a2a_state.topk_weights,
+                    weights,
+                    gate_beta=self.gate_beta,
+                    up_beta=self.up_beta,
+                    compute_mode=mode,
+                    use_triton=True,
+                    ep_start=self.ep_start,
+                    ep_size=self.ep_size,
+                    backend=backend,
+                    prequant_fp8=a2a_state.hidden_fp8,
+                    out_dtype=routed.dtype,
+                )
+            else:
+                assert a2a_state.hidden is not None
+                routed_ep = mxfp4_moe_forward_ref(
+                    a2a_state.hidden,
+                    a2a_state.topk_ids,
+                    a2a_state.topk_weights,
+                    weights,
+                    gate_beta=self.gate_beta,
+                    up_beta=self.up_beta,
+                    ep_start=self.ep_start,
+                    ep_size=self.ep_size,
+                )
+            routed = self.all_to_all_comm.combine(
+                routed_ep, a2a_state, use_symm_p2p=self.use_symm_p2p_combine
             )
         else:
-            routed = mxfp4_moe_forward_ref(
-                routed,
-                topk_ids,
-                topk_weights,
-                weights,
-                gate_beta=self.gate_beta,
-                up_beta=self.up_beta,
-                ep_start=self.ep_start,
-                ep_size=self.ep_size,
-            )
-        if self.ep_size > 1 and self.ep_group is not None:
-            if (
-                self.fast_all_reduce is not None
-                and self.fast_all_reduce.group is self.ep_group
-            ):
-                routed = self.fast_all_reduce(routed)
-            else:
-                if not routed.is_contiguous():
-                    routed = routed.contiguous()
-                torch.distributed.all_reduce(
-                    routed, op=torch.distributed.ReduceOp.SUM, group=self.ep_group
+            if run_triton:
+                routed = mxfp4_moe_forward(
+                    routed,
+                    topk_ids,
+                    topk_weights,
+                    weights,
+                    gate_beta=self.gate_beta,
+                    up_beta=self.up_beta,
+                    compute_mode=mode,
+                    use_triton=True,
+                    ep_start=self.ep_start,
+                    ep_size=self.ep_size,
+                    backend=backend,
                 )
+            else:
+                routed = mxfp4_moe_forward_ref(
+                    routed,
+                    topk_ids,
+                    topk_weights,
+                    weights,
+                    gate_beta=self.gate_beta,
+                    up_beta=self.up_beta,
+                    ep_start=self.ep_start,
+                    ep_size=self.ep_size,
+                )
+            if self.ep_size > 1 and self.ep_group is not None:
+                if (
+                    self.fast_all_reduce is not None
+                    and self.fast_all_reduce.group is self.ep_group
+                ):
+                    routed = self.fast_all_reduce(routed)
+                else:
+                    if not routed.is_contiguous():
+                        routed = routed.contiguous()
+                    torch.distributed.all_reduce(
+                        routed, op=torch.distributed.ReduceOp.SUM, group=self.ep_group
+                    )
 
         # 6. Latent up projection (2560 -> 5120)
-        routed = F.linear(routed, self.latent_up_proj.weight)
+        routed = (
+            self._fp8_latent_up(routed)
+            if self._fp8_latent_up is not None
+            else F.linear(routed, self.latent_up_proj.weight)
+        )
 
         # 7. Latent output scale gate ([M, 1])
         scale = torch.sigmoid(F.linear(x, self.latent_scale_gate.weight))
         return routed * scale
 
     def _forward_shared(self, x: torch.Tensor, *, run_triton: bool) -> torch.Tensor:
+        if x.shape[0] == 0:
+            return torch.empty_like(x)
         shared = self.shared_expert(x, use_triton=run_triton, skip_allreduce=True)
         if self.shared_expert_gate is not None:
             shared = shared * torch.sigmoid(F.linear(x, self.shared_expert_gate.weight))
@@ -936,7 +1237,14 @@ class Qwen4_5LatentMoE(nn.Module):
         """
         orig_shape = hidden_states.shape
         x = hidden_states.reshape(-1, self.hidden_size)
-        if x.shape[0] == 0:
+        has_a2a = (
+            self.all_to_all_comm is not None
+            and self.ep_size > 1
+            and getattr(self.all_to_all_comm, "world_size", 1) > 1
+        )
+        # Never skip DP-EP collective dispatch on a 0-token rank: other DP ranks may
+        # route tokens to this rank's local experts inside all_to_all_comm.
+        if x.shape[0] == 0 and not has_a2a:
             return torch.empty_like(hidden_states)
 
         use_triton = (

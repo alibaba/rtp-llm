@@ -63,6 +63,7 @@ from rtp_llm.models_py.modules.qwen4_5.checkpoint_loader import bind_qwen4_5_mod
 from rtp_llm.models_py.modules.qwen4_5.qsa_bridge import (
     build_qsa_neox_cos_sin,
     qsa_select_causal_from_projected,
+    qsa_sparse_paged_prefill_attention,
     qsa_sparse_prefill_attention,
     score_and_select_qsa_paged,
     view_indexer_kv_pool,
@@ -672,6 +673,37 @@ def _load_single_req_full_attn_kv(
     return k, v
 
 
+def _load_batched_full_attn_kv(
+    base: torch.Tensor,
+    bt_blocks: torch.Tensor,
+    bsz: int,
+    total_tokens: int,
+    tokens_per_block: int,
+    *,
+    num_kv_heads: int,
+    head_dim: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Vectorized [bsz, total_tokens, H_kv, D] gather from paged MHA pool."""
+    nhd = _view_mha_kv_nhd(base, num_kv_heads, tokens_per_block, head_dim)
+    if bsz <= 0 or total_tokens <= 0:
+        empty = torch.empty((max(0, bsz), max(0, total_tokens), num_kv_heads, head_dim), dtype=nhd.dtype, device=nhd.device)
+        return empty, empty
+    n_pages = (total_tokens + tokens_per_block - 1) // tokens_per_block
+    page_ids = bt_blocks[:bsz, :n_pages].reshape(-1).to(device=nhd.device, dtype=torch.long)
+    if not torch.cuda.is_current_stream_capturing() and (
+        ((page_ids <= 0) | (page_ids >= nhd.shape[0])).any().item()
+    ):
+        raise RuntimeError(
+            f"Invalid FullAttn physical page ids for pool={nhd.shape[0]}"
+        )
+    gathered = nhd.index_select(0, page_ids).view(
+        bsz, n_pages, 2, tokens_per_block, num_kv_heads, head_dim
+    )
+    k = gathered[:, :, 0].reshape(bsz, n_pages * tokens_per_block, num_kv_heads, head_dim)[:, :total_tokens]
+    v = gathered[:, :, 1].reshape(bsz, n_pages * tokens_per_block, num_kv_heads, head_dim)[:, :total_tokens]
+    return k, v
+
+
 def _store_single_req_full_attn_kv(
     base: torch.Tensor,
     blocks: torch.Tensor,
@@ -1028,6 +1060,126 @@ if _HAS_TRITON:
         safe_phys = tl.minimum(tl.maximum(phys, 0), num_blocks - 1).to(tl.int64)
         u_val = tl.load(base_ptr + safe_phys * base_sb + offs, mask=mask)
         tl.store(undo_ptr + row * undo_sb + offs, u_val, mask=mask)
+
+    @triton.jit
+    def _prepare_opaque_tx_commit_batched_triton(
+        ptrs_bt_ptr,
+        ptrs_steps_ptr,
+        ptrs_base_ptr,
+        ptrs_phys_ptr,
+        ptrs_commit_ptr,
+        ptrs_undo_ptr,
+        pos_before_ptr,
+        accept_len_ptr,
+        bt_s0_ptr,
+        bt_s1_ptr,
+        steps_sb_ptr,
+        steps_sv_ptr,
+        base_sb_ptr,
+        commit_sb_ptr,
+        undo_sb_ptr,
+        tpb_ptr,
+        max_blocks_ptr,
+        num_blocks_ptr,
+        n_elems_ptr,
+        live_bs: tl.int32,
+        verify_w: tl.int32,
+        BLOCK_SIZE: tl.constexpr,
+    ):
+        """Prepare commit & undo snapshots across all opaque TxStage entries in 1 kernel."""
+        e = tl.program_id(0).to(tl.int64)
+        row = tl.program_id(1).to(tl.int64)
+        blk = tl.program_id(2).to(tl.int64)
+        n_elems = tl.load(n_elems_ptr + e).to(tl.int32)
+        if blk * BLOCK_SIZE >= n_elems:
+            return
+        tpb = tl.load(tpb_ptr + e).to(tl.int32)
+        max_blocks = tl.load(max_blocks_ptr + e).to(tl.int32)
+        num_blocks = tl.load(num_blocks_ptr + e).to(tl.int32)
+        is_bnd = row >= live_bs
+        b = row - live_bs if is_bnd else row
+        a_len = tl.load(accept_len_ptr + b).to(tl.int32)
+        pos_b = tl.load(pos_before_ptr + b).to(tl.int32)
+        valid = a_len > 0
+
+        if not is_bnd:
+            step_idx = tl.minimum(tl.maximum(a_len - 1, 0), verify_w - 1)
+            target_pos = tl.maximum(pos_b + a_len - 1, 0)
+            do_commit = valid
+        else:
+            boundary_step = (tpb - 1) - (pos_b % tpb)
+            crossed = (
+                valid
+                & ((a_len - 1) > boundary_step)
+                & (boundary_step >= 0)
+                & (boundary_step < verify_w)
+            )
+            step_idx = tl.minimum(tl.maximum(boundary_step, 0), verify_w - 1)
+            target_pos = pos_b
+            do_commit = crossed
+
+        bt_ptr = tl.load(ptrs_bt_ptr + e).to(tl.pointer_type(tl.int32))
+        bt_s0 = tl.load(bt_s0_ptr + e).to(tl.int64)
+        bt_s1 = tl.load(bt_s1_ptr + e).to(tl.int64)
+        page = tl.minimum(tl.maximum(target_pos // tpb, 0), max_blocks - 1)
+        raw_phys = tl.load(bt_ptr + b * bt_s0 + page.to(tl.int64) * bt_s1).to(tl.int32)
+        phys = tl.where(do_commit & (raw_phys > 0) & (raw_phys < num_blocks), raw_phys, 0)
+        if blk == 0:
+            phys_ids_ptr = tl.load(ptrs_phys_ptr + e).to(tl.pointer_type(tl.int32))
+            tl.store(phys_ids_ptr + row, phys)
+
+        offs = blk * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        mask = offs < n_elems
+        steps_ptr = tl.load(ptrs_steps_ptr + e).to(tl.pointer_type(tl.int32))
+        steps_sb = tl.load(steps_sb_ptr + e).to(tl.int64)
+        steps_sv = tl.load(steps_sv_ptr + e).to(tl.int64)
+        commit_ptr = tl.load(ptrs_commit_ptr + e).to(tl.pointer_type(tl.int32))
+        commit_sb = tl.load(commit_sb_ptr + e).to(tl.int64)
+        base_ptr = tl.load(ptrs_base_ptr + e).to(tl.pointer_type(tl.int32))
+        base_sb = tl.load(base_sb_ptr + e).to(tl.int64)
+        undo_ptr = tl.load(ptrs_undo_ptr + e).to(tl.pointer_type(tl.int32))
+        undo_sb = tl.load(undo_sb_ptr + e).to(tl.int64)
+
+        c_val = tl.load(
+            steps_ptr + b * steps_sb + step_idx.to(tl.int64) * steps_sv + offs,
+            mask=mask,
+        )
+        tl.store(commit_ptr + row * commit_sb + offs, c_val, mask=mask)
+        safe_phys = tl.minimum(tl.maximum(phys, 0), num_blocks - 1).to(tl.int64)
+        u_val = tl.load(base_ptr + safe_phys * base_sb + offs, mask=mask)
+        tl.store(undo_ptr + row * undo_sb + offs, u_val, mask=mask)
+
+    @triton.jit
+    def _write_opaque_rows_batched_triton(
+        ptrs_dst_ptr,
+        ptrs_src_ptr,
+        ptrs_phys_ptr,
+        dst_sb_ptr,
+        src_sb_ptr,
+        num_blocks_ptr,
+        n_elems_ptr,
+        BLOCK_SIZE: tl.constexpr,
+    ):
+        """Scatter commit or undo snapshots back to persistent opaque pools in 1 kernel."""
+        e = tl.program_id(0).to(tl.int64)
+        row = tl.program_id(1).to(tl.int64)
+        blk = tl.program_id(2).to(tl.int64)
+        n_elems = tl.load(n_elems_ptr + e).to(tl.int32)
+        if blk * BLOCK_SIZE >= n_elems:
+            return
+        num_blocks = tl.load(num_blocks_ptr + e).to(tl.int32)
+        phys_ptr = tl.load(ptrs_phys_ptr + e).to(tl.pointer_type(tl.int32))
+        phys = tl.load(phys_ptr + row).to(tl.int32)
+        if phys <= 0 or phys >= num_blocks:
+            return
+        offs = blk * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        mask = offs < n_elems
+        src_ptr = tl.load(ptrs_src_ptr + e).to(tl.pointer_type(tl.int32))
+        src_sb = tl.load(src_sb_ptr + e).to(tl.int64)
+        dst_ptr = tl.load(ptrs_dst_ptr + e).to(tl.pointer_type(tl.int32))
+        dst_sb = tl.load(dst_sb_ptr + e).to(tl.int64)
+        val = tl.load(src_ptr + row * src_sb + offs, mask=mask)
+        tl.store(dst_ptr + phys.to(tl.int64) * dst_sb + offs, val, mask=mask)
 
 
 def _view_opaque_pool_2d(base: torch.Tensor, target_dtype: torch.dtype) -> Tuple[torch.Tensor, int]:
@@ -1541,6 +1693,7 @@ class Qwen4_5TargetVerifyHandle:
             page_size=self.page_size,
             kv_heads=int(self.arch_cfg.num_key_value_heads),
             head_dim=int(self.arch_cfg.head_dim),
+            kv_scale=getattr(kv_cache_layer, "kv_scale_base", None),
             output_gate=None,
             is_cuda_graph=self.is_cuda_graph,
         )
@@ -1569,6 +1722,7 @@ class Qwen4_5TargetVerifyHandle:
             page_size=self.page_size,
             kv_heads=int(self.arch_cfg.num_key_value_heads),
             head_dim=int(self.arch_cfg.head_dim),
+            kv_scale=getattr(kv_cache_layer, "kv_scale_base", None),
             output_gate=output_gate,
             is_cuda_graph=self.is_cuda_graph,
         )
@@ -1659,6 +1813,7 @@ class Qwen4_5QSADecodeHandle:
             page_size=self.page_size,
             kv_heads=int(self.arch_cfg.num_key_value_heads),
             head_dim=int(self.arch_cfg.head_dim),
+            kv_scale=getattr(kv_cache_layer, "kv_scale_base", None),
             output_gate=None,
             is_cuda_graph=self.is_cuda_graph,
         )
@@ -3610,17 +3765,47 @@ class Qwen4_5PagedStateBridge:
                 target_dtype=target_dtype,
             )
 
-        # Packed [N, H] activations across all active requests
+        # Packed [N, H] activations across all active requests; Layer 0 HC fuses 1->4 stream broadcast
         emb_flat = model.embed_tokens(flat_input_ids)
-        hyper_hidden = emb_flat.repeat(1, self.cfg.hc_count)
+        hyper_hidden = (
+            emb_flat
+            if self.cfg.hc_count > 1 and (len(model.layers) == 0 or model.layers[0].ple is None)
+            else emb_flat.repeat(1, self.cfg.hc_count)
+        )
         prev_latent: Optional[torch.Tensor] = None
         deferred: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
 
         shared_gdn_packed: Dict[int, SharedGDNInputs] = {}
         source_prefix_ssm: Dict[int, Optional[torch.Tensor]] = {}
         full_kv_reqs: Dict[int, List[FullAttnKVCache]] = {}
+        full_kv_batched: Dict[int, Tuple[torch.Tensor, torch.Tensor]] = {}
         full_qsa_raw_reqs: Dict[int, List[Tuple[torch.Tensor, torch.Tensor]]] = {}
+        full_qsa_raw_batched: Dict[int, Tuple[torch.Tensor, torch.Tensor]] = {}
         source_idx_prefill: Dict[int, Tuple[torch.Tensor, torch.Tensor]] = {}
+        source_kv_prefill: Dict[int, Tuple[Any, torch.Tensor]] = {}
+        uniform_full_batch = (
+            plan.bsz > 0
+            and len(set(plan.active_lens)) == 1
+            and len(set(plan.active_pfx)) == 1
+            and plan.active_lens[0] > 0
+        )
+
+        def _ensure_source_kv_batched(src_id: int) -> Tuple[torch.Tensor, torch.Tensor]:
+            if src_id not in full_kv_batched:
+                src_kv_c, src_bt_act = source_kv_prefill[src_id]
+                bsz_u = plan.bsz
+                t_tot_u = plan.active_pfx[0] + plan.active_lens[0]
+                k_fb, v_fb = _load_batched_full_attn_kv(
+                    src_kv_c.kv_cache_base,
+                    src_bt_act,
+                    bsz_u,
+                    t_tot_u,
+                    int(src_kv_c.seq_size_per_block),
+                    num_kv_heads=sa.num_kv_heads,
+                    head_dim=sa.head_dim,
+                )
+                full_kv_batched[src_id] = (k_fb, v_fb)
+            return full_kv_batched[src_id]
 
         flat_pos_2d = flat_positions.unsqueeze(0)
 
@@ -3633,13 +3818,13 @@ class Qwen4_5PagedStateBridge:
                 else {}
             )
 
-            # 1. Optional PLE (Layer 1) — packed hashing, 1 gather + 1 AllReduce, 1 W_kv GEMM, 1 conv+scatter
+            # 1. Optional PLE (Layer 1) — packed hashing, 1 gather + 1 AllReduce, 1 W_kv GEMM, 1 conv+scatter + fused HC combine/norm
+            ple_hc_normed: Optional[torch.Tensor] = None
             if layer.ple is not None:
-                if deferred is not None:
-                    hyper_hidden = layer.attn_hyper_connection.combine(
-                        deferred[0], hyper_hidden, deferred[1]
-                    )
-                    deferred = None
+                pre_sub = deferred[0] if deferred is not None else None
+                pre_inj = deferred[1] if deferred is not None else None
+                deferred = None
+                attn_hc = layer.attn_hyper_connection
 
                 if kv_cache is not None:
                     c_st = layer_caches[PLE_STATE_TAG]
@@ -3667,7 +3852,7 @@ class Qwen4_5PagedStateBridge:
                     _, _, _, _, s_phys_ctx = _snap_phys_for(c_ctx, bt_ctx)
                     conv_pool_bf16, _ = _view_opaque_pool_2d(c_st.kv_cache_base, dtype)
                     ctx_pool_i64, _ = _view_opaque_pool_2d(c_ctx.kv_cache_base, torch.int64)
-                    hyper_hidden = layer.ple.forward_packed_prefill(
+                    hyper_hidden, ple_hc_normed = layer.ple.forward_packed_prefill_with_hc(
                         hyper_hidden,
                         flat_input_ids,
                         plan.cu_seqlens_i32,
@@ -3684,9 +3869,14 @@ class Qwen4_5PagedStateBridge:
                         ctx_snap_phys=s_phys_ctx,
                         skip_invalid_phys=True,
                         block_t=16,
+                        pre_combine_sub=pre_sub,
+                        pre_combine_inj=pre_inj,
+                        hc_norm_weight=attn_hc.hc_norm_weight,
+                        hc_norm_bias=attn_hc.hc_norm_bias,
+                        hc_eps=attn_hc.eps,
                     )
                 else:
-                    hyper_hidden = layer.ple.forward_packed_prefill(
+                    hyper_hidden, ple_hc_normed = layer.ple.forward_packed_prefill_with_hc(
                         hyper_hidden,
                         flat_input_ids,
                         plan.cu_seqlens_i32,
@@ -3694,10 +3884,21 @@ class Qwen4_5PagedStateBridge:
                         plan.tile_req_16,
                         plan.tile_t0_16,
                         block_t=16,
+                        pre_combine_sub=pre_sub,
+                        pre_combine_inj=pre_inj,
+                        hc_norm_weight=attn_hc.hc_norm_weight,
+                        hc_norm_bias=attn_hc.hc_norm_bias,
+                        hc_eps=attn_hc.eps,
                     )
 
             # 2. Attn Hyper-Connection (1 pass across ALL N tokens)
-            if deferred is None:
+            if ple_hc_normed is not None:
+                attn_in, hyper_hidden, attn_inj, prev_latent = (
+                    layer.attn_hyper_connection.mix_from_normed(
+                        ple_hc_normed, hyper_hidden, prev_latent
+                    )
+                )
+            elif deferred is None:
                 attn_in, hyper_hidden, attn_inj, prev_latent = (
                     layer.attn_hyper_connection.mix_with_latent(hyper_hidden, prev_latent)
                 )
@@ -4059,66 +4260,72 @@ class Qwen4_5PagedStateBridge:
                         else:
                             full_qsa_raw_reqs[lid] = []
 
-                    # Per-request attention (once over the full sequence per request!)
+                    # Batched uniform path OR per-request ragged path (once over full sequence!)
                     full_kv_reqs[lid] = []
-                    attn_bhtd = torch.empty(
-                        (1, sa.num_heads, total_tokens, sa.head_dim),
-                        dtype=dtype,
-                        device=device,
-                    )
-                    for bi in range(plan.bsz):
-                        s, e = int(cu_list[bi]), int(cu_list[bi + 1])
-                        t_in = e - s
-                        t_pfx = plan.active_pfx[bi]
+                    out_flat: Optional[torch.Tensor] = None
+                    if uniform_full_batch and (kv_cache is None or kv_c is not None):
+                        bsz_u = plan.bsz
+                        t_in = plan.active_lens[0]
+                        t_pfx = plan.active_pfx[0]
                         t_tot = t_pfx + t_in
-                        if t_pfx > 0 and kv_c is not None and bt_kv_act is not None:
-                            tpb_kv = int(kv_c.seq_size_per_block)
-                            k_pfx, v_pfx = _load_single_req_full_attn_kv(
-                                kv_c.kv_cache_base,
-                                bt_kv_act[bi],
-                                t_pfx,
-                                tpb_kv,
-                                num_kv_heads=sa.num_kv_heads,
-                                head_dim=sa.head_dim,
-                            )
-                            k_full = torch.cat([k_pfx.unsqueeze(0), k_all[:, s:e]], dim=1)
-                            v_full = torch.cat([v_pfx.unsqueeze(0), v_all[:, s:e]], dim=1)
-                        else:
-                            k_full = k_all[:, s:e]
-                            v_full = v_all[:, s:e]
-                        full_kv_reqs[lid].append(
-                            FullAttnKVCache(k_cache=k_full, v_cache=v_full, seq_len=t_tot)
+                        use_paged_qsa = (
+                            sa.indexer is not None
+                            and t_pfx > 0
+                            and kv_c is not None
+                            and bt_kv_act is not None
                         )
-
-                        q_b_bhtd = q_all[:, s:e].transpose(1, 2)
-                        k_b_bhtd = k_full.transpose(1, 2)
-                        v_b_bhtd = v_full.transpose(1, 2)
+                        if kv_c is not None and bt_kv_act is not None:
+                            source_kv_prefill[lid] = (kv_c, bt_kv_act)
+                        q_u_bhtd = q_all.view(bsz_u, t_in, sa.num_heads, sa.head_dim).transpose(1, 2)
                         if sa.indexer is not None:
                             idx = sa.indexer
                             assert q_idx_all is not None and raw_k_idx_all is not None
-                            q_idx_b = q_idx_all[:, s:e]
-                            raw_k_b = raw_k_idx_all[:, s:e]
-                            pos_b = flat_pos_2d[:, s:e]
+                            q_idx_u = q_idx_all.view(bsz_u, t_in, idx.n_heads, idx.head_dim)
+                            raw_k_u = raw_k_idx_all.view(bsz_u, t_in, idx.head_dim)
+                            pos_u = flat_pos_2d.view(bsz_u, t_in)
                             if kv_cache is None:
-                                full_qsa_raw_reqs[lid].append((raw_k_b, idx.k_norm_gamma))
+                                k_full_b = k_all.view(bsz_u, t_in, sa.num_kv_heads, sa.head_dim)
+                                v_full_b = v_all.view(bsz_u, t_in, sa.num_kv_heads, sa.head_dim)
+                                full_kv_batched[lid] = (k_full_b, v_full_b)
+                                for bi in range(bsz_u):
+                                    full_kv_reqs[lid].append(
+                                        FullAttnKVCache(
+                                            k_cache=k_full_b[bi : bi + 1],
+                                            v_cache=v_full_b[bi : bi + 1],
+                                            seq_len=t_tot,
+                                        )
+                                    )
+                                full_qsa_raw_batched[lid] = (raw_k_u, idx.k_norm_gamma)
+                                for bi in range(bsz_u):
+                                    full_qsa_raw_reqs[lid].append((raw_k_u[bi : bi + 1], idx.k_norm_gamma))
                             if t_pfx == 0 or kv_cache is None:
-                                cos_b, sin_b = build_qsa_neox_cos_sin(
-                                    pos_b, sa.indexer_rotary_dim, sa.rope_theta, attn_in.dtype
+                                k_full_b = k_all.view(bsz_u, t_in, sa.num_kv_heads, sa.head_dim)
+                                v_full_b = v_all.view(bsz_u, t_in, sa.num_kv_heads, sa.head_dim)
+                                full_kv_batched[lid] = (k_full_b, v_full_b)
+                                k_u_bhtd = k_full_b.transpose(1, 2)
+                                v_u_bhtd = v_full_b.transpose(1, 2)
+                                cos_u, sin_u = build_qsa_neox_cos_sin(
+                                    pos_u, sa.indexer_rotary_dim, sa.rope_theta, attn_in.dtype
                                 )
                                 pref_selected = qsa_select_causal_from_projected(
-                                    idx, q_idx_b, raw_k_b, cos_b, sin_b
+                                    idx, q_idx_u, raw_k_u, cos_u, sin_u
+                                )
+                                out_u = qsa_sparse_prefill_attention(
+                                    q_u_bhtd, k_u_bhtd, v_u_bhtd, pref_selected
                                 )
                             else:
                                 assert idx_kv_pool is not None and bt_idx_kv_act is not None
-                                vis_q = torch.arange(
-                                    t_pfx + 1, t_tot + 1, dtype=torch.int32, device=device
-                                ).unsqueeze(0)
+                                vis_q = (
+                                    torch.arange(t_pfx + 1, t_tot + 1, dtype=torch.int32, device=device)
+                                    .unsqueeze(0)
+                                    .expand(bsz_u, t_in)
+                                )
                                 max_ctx_p = max(1, t_tot // idx.compress_ratio)
                                 pref_selected = score_and_select_qsa_paged(
-                                    q_idx_b,
-                                    pos_b,
+                                    q_idx_u,
+                                    pos_u,
                                     idx_kv_pool,
-                                    bt_idx_kv_act[bi : bi + 1],
+                                    bt_idx_kv_act[:bsz_u],
                                     vis_q,
                                     compress_ratio=idx.compress_ratio,
                                     token_budget=idx.token_budget,
@@ -4126,15 +4333,66 @@ class Qwen4_5PagedStateBridge:
                                     rope_theta=sa.rope_theta,
                                     max_ctx_len=max_ctx_p,
                                 )
-                            out_b = qsa_sparse_prefill_attention(
-                                q_b_bhtd, k_b_bhtd, v_b_bhtd, pref_selected
-                            )
+                                if use_paged_qsa:
+                                    assert kv_c is not None and bt_kv_act is not None
+                                    out_u = qsa_sparse_paged_prefill_attention(
+                                        q_u_bhtd,
+                                        kv_c.kv_cache_base,
+                                        bt_kv_act[:bsz_u],
+                                        pref_selected,
+                                        page_size=int(kv_c.seq_size_per_block),
+                                        kv_heads=sa.num_kv_heads,
+                                        head_dim=sa.head_dim,
+                                        max_ctx_len=t_tot,
+                                        kv_scale=getattr(kv_c, "kv_scale_base", None),
+                                    )
+                                else:
+                                    k_full_b, v_full_b = _load_batched_full_attn_kv(
+                                        kv_c.kv_cache_base,
+                                        bt_kv_act,
+                                        bsz_u,
+                                        t_tot,
+                                        int(kv_c.seq_size_per_block),
+                                        num_kv_heads=sa.num_kv_heads,
+                                        head_dim=sa.head_dim,
+                                    )
+                                    full_kv_batched[lid] = (k_full_b, v_full_b)
+                                    out_u = qsa_sparse_prefill_attention(
+                                        q_u_bhtd,
+                                        k_full_b.transpose(1, 2),
+                                        v_full_b.transpose(1, 2),
+                                        pref_selected,
+                                    )
                         else:
+                            if t_pfx > 0 and kv_c is not None and bt_kv_act is not None:
+                                k_full_b, v_full_b = _load_batched_full_attn_kv(
+                                    kv_c.kv_cache_base,
+                                    bt_kv_act,
+                                    bsz_u,
+                                    t_tot,
+                                    int(kv_c.seq_size_per_block),
+                                    num_kv_heads=sa.num_kv_heads,
+                                    head_dim=sa.head_dim,
+                                )
+                            else:
+                                k_full_b = k_all.view(bsz_u, t_in, sa.num_kv_heads, sa.head_dim)
+                                v_full_b = v_all.view(bsz_u, t_in, sa.num_kv_heads, sa.head_dim)
+                            full_kv_batched[lid] = (k_full_b, v_full_b)
+                            for bi in range(bsz_u):
+                                full_kv_reqs[lid].append(
+                                    FullAttnKVCache(
+                                        k_cache=k_full_b[bi : bi + 1],
+                                        v_cache=v_full_b[bi : bi + 1],
+                                        seq_len=t_tot,
+                                    )
+                                )
+                            k_u_bhtd = k_full_b.transpose(1, 2)
+                            v_u_bhtd = v_full_b.transpose(1, 2)
                             if t_pfx == 0:
-                                out_b = torch.nn.functional.scaled_dot_product_attention(
-                                    q_b_bhtd,
-                                    k_b_bhtd,
-                                    v_b_bhtd,
+                                out_u = torch.nn.functional.scaled_dot_product_attention(
+                                    q_u_bhtd,
+                                    k_u_bhtd,
+                                    v_u_bhtd,
                                     attn_mask=None,
                                     is_causal=True,
                                     scale=sa.scaling,
@@ -4143,16 +4401,116 @@ class Qwen4_5PagedStateBridge:
                             else:
                                 q_i = torch.arange(t_pfx, t_tot, device=device).unsqueeze(1)
                                 k_i = torch.arange(t_tot, device=device).unsqueeze(0)
-                                out_b = torch.nn.functional.scaled_dot_product_attention(
-                                    q_b_bhtd,
-                                    k_b_bhtd,
-                                    v_b_bhtd,
+                                out_u = torch.nn.functional.scaled_dot_product_attention(
+                                    q_u_bhtd,
+                                    k_u_bhtd,
+                                    v_u_bhtd,
                                     attn_mask=(q_i >= k_i),
                                     is_causal=False,
                                     scale=sa.scaling,
                                     enable_gqa=True,
                                 )
-                        attn_bhtd[:, :, s:e].copy_(out_b)
+                        gate_u = (
+                            gate_4d.view(bsz_u, t_in, sa.num_heads, sa.head_dim)
+                            if gate_4d is not None
+                            else None
+                        )
+                        out_flat = apply_attn_output_gate_flatten(out_u, gate_u).reshape(
+                            total_tokens, sa.num_heads * sa.head_dim
+                        )
+                    else:
+                        attn_bhtd = torch.empty(
+                            (1, sa.num_heads, total_tokens, sa.head_dim),
+                            dtype=dtype,
+                            device=device,
+                        )
+                        for bi in range(plan.bsz):
+                            s, e = int(cu_list[bi]), int(cu_list[bi + 1])
+                            t_in = e - s
+                            t_pfx = plan.active_pfx[bi]
+                            t_tot = t_pfx + t_in
+                            if t_pfx > 0 and kv_c is not None and bt_kv_act is not None:
+                                tpb_kv = int(kv_c.seq_size_per_block)
+                                k_pfx, v_pfx = _load_single_req_full_attn_kv(
+                                    kv_c.kv_cache_base,
+                                    bt_kv_act[bi],
+                                    t_pfx,
+                                    tpb_kv,
+                                    num_kv_heads=sa.num_kv_heads,
+                                    head_dim=sa.head_dim,
+                                )
+                                k_full = torch.cat([k_pfx.unsqueeze(0), k_all[:, s:e]], dim=1)
+                                v_full = torch.cat([v_pfx.unsqueeze(0), v_all[:, s:e]], dim=1)
+                            else:
+                                k_full = k_all[:, s:e]
+                                v_full = v_all[:, s:e]
+                            full_kv_reqs[lid].append(
+                                FullAttnKVCache(k_cache=k_full, v_cache=v_full, seq_len=t_tot)
+                            )
+
+                            q_b_bhtd = q_all[:, s:e].transpose(1, 2)
+                            k_b_bhtd = k_full.transpose(1, 2)
+                            v_b_bhtd = v_full.transpose(1, 2)
+                            if sa.indexer is not None:
+                                idx = sa.indexer
+                                assert q_idx_all is not None and raw_k_idx_all is not None
+                                q_idx_b = q_idx_all[:, s:e]
+                                raw_k_b = raw_k_idx_all[:, s:e]
+                                pos_b = flat_pos_2d[:, s:e]
+                                if kv_cache is None:
+                                    full_qsa_raw_reqs[lid].append((raw_k_b, idx.k_norm_gamma))
+                                if t_pfx == 0 or kv_cache is None:
+                                    cos_b, sin_b = build_qsa_neox_cos_sin(
+                                        pos_b, sa.indexer_rotary_dim, sa.rope_theta, attn_in.dtype
+                                    )
+                                    pref_selected = qsa_select_causal_from_projected(
+                                        idx, q_idx_b, raw_k_b, cos_b, sin_b
+                                    )
+                                else:
+                                    assert idx_kv_pool is not None and bt_idx_kv_act is not None
+                                    vis_q = torch.arange(
+                                        t_pfx + 1, t_tot + 1, dtype=torch.int32, device=device
+                                    ).unsqueeze(0)
+                                    max_ctx_p = max(1, t_tot // idx.compress_ratio)
+                                    pref_selected = score_and_select_qsa_paged(
+                                        q_idx_b,
+                                        pos_b,
+                                        idx_kv_pool,
+                                        bt_idx_kv_act[bi : bi + 1],
+                                        vis_q,
+                                        compress_ratio=idx.compress_ratio,
+                                        token_budget=idx.token_budget,
+                                        rotary_dim=sa.indexer_rotary_dim,
+                                        rope_theta=sa.rope_theta,
+                                        max_ctx_len=max_ctx_p,
+                                    )
+                                out_b = qsa_sparse_prefill_attention(
+                                    q_b_bhtd, k_b_bhtd, v_b_bhtd, pref_selected
+                                )
+                            else:
+                                if t_pfx == 0:
+                                    out_b = torch.nn.functional.scaled_dot_product_attention(
+                                        q_b_bhtd,
+                                        k_b_bhtd,
+                                        v_b_bhtd,
+                                        attn_mask=None,
+                                        is_causal=True,
+                                        scale=sa.scaling,
+                                        enable_gqa=True,
+                                    )
+                                else:
+                                    q_i = torch.arange(t_pfx, t_tot, device=device).unsqueeze(1)
+                                    k_i = torch.arange(t_tot, device=device).unsqueeze(0)
+                                    out_b = torch.nn.functional.scaled_dot_product_attention(
+                                        q_b_bhtd,
+                                        k_b_bhtd,
+                                        v_b_bhtd,
+                                        attn_mask=(q_i >= k_i),
+                                        is_causal=False,
+                                        scale=sa.scaling,
+                                        enable_gqa=True,
+                                    )
+                            attn_bhtd[:, :, s:e].copy_(out_b)
                 else:
                     # Consumer FullAttn / QSA
                     src_lid = layer.kv_cache_owner
@@ -4161,36 +4519,31 @@ class Qwen4_5PagedStateBridge:
                     if sa.indexer is not None:
                         q_idx_cons, _ = sa.indexer.project(attn_in.unsqueeze(0))
 
-                    attn_bhtd = torch.empty(
-                        (1, sa.num_heads, total_tokens, sa.head_dim),
-                        dtype=dtype,
-                        device=device,
-                    )
-                    for bi in range(plan.bsz):
-                        s, e = int(cu_list[bi]), int(cu_list[bi + 1])
-                        t_in = e - s
-                        t_pfx = plan.active_pfx[bi]
+                    out_flat = None
+                    if uniform_full_batch and (src_lid in full_kv_batched or src_lid in source_kv_prefill):
+                        bsz_u = plan.bsz
+                        t_in = plan.active_lens[0]
+                        t_pfx = plan.active_pfx[0]
                         t_tot = t_pfx + t_in
-                        kv_obj = src_kv_list[bi]
-                        q_b_bhtd = q_all[:, s:e].transpose(1, 2)
-                        k_b_bhtd = kv_obj.k_cache[:, :t_tot].transpose(1, 2)
-                        v_b_bhtd = kv_obj.v_cache[:, :t_tot].transpose(1, 2)
+                        q_u_bhtd = q_all.view(bsz_u, t_in, sa.num_heads, sa.head_dim).transpose(1, 2)
                         if sa.indexer is not None:
                             idx = sa.indexer
                             assert q_idx_cons is not None
-                            q_idx_b = q_idx_cons[:, s:e]
-                            pos_b = flat_pos_2d[:, s:e]
+                            q_idx_u = q_idx_cons.view(bsz_u, t_in, idx.n_heads, idx.head_dim)
+                            pos_u = flat_pos_2d.view(bsz_u, t_in)
                             if kv_cache is not None:
                                 src_idx_kv_pool, src_bt_idx_kv_act = source_idx_prefill[src_lid]
-                                vis_q = torch.arange(
-                                    t_pfx + 1, t_tot + 1, dtype=torch.int32, device=device
-                                ).unsqueeze(0)
+                                vis_q = (
+                                    torch.arange(t_pfx + 1, t_tot + 1, dtype=torch.int32, device=device)
+                                    .unsqueeze(0)
+                                    .expand(bsz_u, t_in)
+                                )
                                 max_ctx_p = max(1, t_tot // idx.compress_ratio)
                                 cons_selected = score_and_select_qsa_paged(
-                                    q_idx_b,
-                                    pos_b,
+                                    q_idx_u,
+                                    pos_u,
                                     src_idx_kv_pool,
-                                    src_bt_idx_kv_act[bi : bi + 1],
+                                    src_bt_idx_kv_act[:bsz_u],
                                     vis_q,
                                     compress_ratio=idx.compress_ratio,
                                     token_budget=idx.token_budget,
@@ -4199,25 +4552,46 @@ class Qwen4_5PagedStateBridge:
                                     max_ctx_len=max_ctx_p,
                                 )
                             else:
-                                src_raw, src_kn = full_qsa_raw_reqs[src_lid][bi]
-                                cos_b, sin_b = build_qsa_neox_cos_sin(
-                                    torch.arange(t_tot, device=device).unsqueeze(0),
+                                src_raw_b, src_kn = full_qsa_raw_batched[src_lid]
+                                cos_u, sin_u = build_qsa_neox_cos_sin(
+                                    torch.arange(t_tot, device=device).unsqueeze(0).expand(bsz_u, t_tot),
                                     sa.indexer_rotary_dim,
                                     sa.rope_theta,
                                     attn_in.dtype,
                                 )
                                 cons_selected = qsa_select_causal_from_projected(
-                                    idx, q_idx_b, src_raw, cos_b, sin_b, k_norm_gamma=src_kn
+                                    idx, q_idx_u, src_raw_b, cos_u, sin_u, k_norm_gamma=src_kn
                                 )
-                            out_b = qsa_sparse_prefill_attention(
-                                q_b_bhtd, k_b_bhtd, v_b_bhtd, cons_selected
-                            )
+                            if t_pfx > 0 and kv_cache is not None and src_lid in source_kv_prefill:
+                                src_kv_c, src_bt_act = source_kv_prefill[src_lid]
+                                out_u = qsa_sparse_paged_prefill_attention(
+                                    q_u_bhtd,
+                                    src_kv_c.kv_cache_base,
+                                    src_bt_act[:bsz_u],
+                                    cons_selected,
+                                    page_size=int(src_kv_c.seq_size_per_block),
+                                    kv_heads=sa.num_kv_heads,
+                                    head_dim=sa.head_dim,
+                                    max_ctx_len=t_tot,
+                                    kv_scale=getattr(src_kv_c, "kv_scale_base", None),
+                                )
+                            else:
+                                k_full_b, v_full_b = _ensure_source_kv_batched(src_lid)
+                                out_u = qsa_sparse_prefill_attention(
+                                    q_u_bhtd,
+                                    k_full_b[:, :t_tot].transpose(1, 2),
+                                    v_full_b[:, :t_tot].transpose(1, 2),
+                                    cons_selected,
+                                )
                         else:
+                            k_full_b, v_full_b = _ensure_source_kv_batched(src_lid)
+                            k_u_bhtd = k_full_b[:, :t_tot].transpose(1, 2)
+                            v_u_bhtd = v_full_b[:, :t_tot].transpose(1, 2)
                             if t_pfx == 0:
-                                out_b = torch.nn.functional.scaled_dot_product_attention(
-                                    q_b_bhtd,
-                                    k_b_bhtd,
-                                    v_b_bhtd,
+                                out_u = torch.nn.functional.scaled_dot_product_attention(
+                                    q_u_bhtd,
+                                    k_u_bhtd,
+                                    v_u_bhtd,
                                     attn_mask=None,
                                     is_causal=True,
                                     scale=sa.scaling,
@@ -4226,18 +4600,102 @@ class Qwen4_5PagedStateBridge:
                             else:
                                 q_i = torch.arange(t_pfx, t_tot, device=device).unsqueeze(1)
                                 k_i = torch.arange(t_tot, device=device).unsqueeze(0)
-                                out_b = torch.nn.functional.scaled_dot_product_attention(
-                                    q_b_bhtd,
-                                    k_b_bhtd,
-                                    v_b_bhtd,
+                                out_u = torch.nn.functional.scaled_dot_product_attention(
+                                    q_u_bhtd,
+                                    k_u_bhtd,
+                                    v_u_bhtd,
                                     attn_mask=(q_i >= k_i),
                                     is_causal=False,
                                     scale=sa.scaling,
                                     enable_gqa=True,
                                 )
-                        attn_bhtd[:, :, s:e].copy_(out_b)
+                        gate_u = (
+                            gate_4d.view(bsz_u, t_in, sa.num_heads, sa.head_dim)
+                            if gate_4d is not None
+                            else None
+                        )
+                        out_flat = apply_attn_output_gate_flatten(out_u, gate_u).reshape(
+                            total_tokens, sa.num_heads * sa.head_dim
+                        )
+                    else:
+                        attn_bhtd = torch.empty(
+                            (1, sa.num_heads, total_tokens, sa.head_dim),
+                            dtype=dtype,
+                            device=device,
+                        )
+                        for bi in range(plan.bsz):
+                            s, e = int(cu_list[bi]), int(cu_list[bi + 1])
+                            t_in = e - s
+                            t_pfx = plan.active_pfx[bi]
+                            t_tot = t_pfx + t_in
+                            kv_obj = src_kv_list[bi]
+                            q_b_bhtd = q_all[:, s:e].transpose(1, 2)
+                            k_b_bhtd = kv_obj.k_cache[:, :t_tot].transpose(1, 2)
+                            v_b_bhtd = kv_obj.v_cache[:, :t_tot].transpose(1, 2)
+                            if sa.indexer is not None:
+                                idx = sa.indexer
+                                assert q_idx_cons is not None
+                                q_idx_b = q_idx_cons[:, s:e]
+                                pos_b = flat_pos_2d[:, s:e]
+                                if kv_cache is not None:
+                                    src_idx_kv_pool, src_bt_idx_kv_act = source_idx_prefill[src_lid]
+                                    vis_q = torch.arange(
+                                        t_pfx + 1, t_tot + 1, dtype=torch.int32, device=device
+                                    ).unsqueeze(0)
+                                    max_ctx_p = max(1, t_tot // idx.compress_ratio)
+                                    cons_selected = score_and_select_qsa_paged(
+                                        q_idx_b,
+                                        pos_b,
+                                        src_idx_kv_pool,
+                                        src_bt_idx_kv_act[bi : bi + 1],
+                                        vis_q,
+                                        compress_ratio=idx.compress_ratio,
+                                        token_budget=idx.token_budget,
+                                        rotary_dim=sa.indexer_rotary_dim,
+                                        rope_theta=sa.rope_theta,
+                                        max_ctx_len=max_ctx_p,
+                                    )
+                                else:
+                                    src_raw, src_kn = full_qsa_raw_reqs[src_lid][bi]
+                                    cos_b, sin_b = build_qsa_neox_cos_sin(
+                                        torch.arange(t_tot, device=device).unsqueeze(0),
+                                        sa.indexer_rotary_dim,
+                                        sa.rope_theta,
+                                        attn_in.dtype,
+                                    )
+                                    cons_selected = qsa_select_causal_from_projected(
+                                        idx, q_idx_b, src_raw, cos_b, sin_b, k_norm_gamma=src_kn
+                                    )
+                                out_b = qsa_sparse_prefill_attention(
+                                    q_b_bhtd, k_b_bhtd, v_b_bhtd, cons_selected
+                                )
+                            else:
+                                if t_pfx == 0:
+                                    out_b = torch.nn.functional.scaled_dot_product_attention(
+                                        q_b_bhtd,
+                                        k_b_bhtd,
+                                        v_b_bhtd,
+                                        attn_mask=None,
+                                        is_causal=True,
+                                        scale=sa.scaling,
+                                        enable_gqa=True,
+                                    )
+                                else:
+                                    q_i = torch.arange(t_pfx, t_tot, device=device).unsqueeze(1)
+                                    k_i = torch.arange(t_tot, device=device).unsqueeze(0)
+                                    out_b = torch.nn.functional.scaled_dot_product_attention(
+                                        q_b_bhtd,
+                                        k_b_bhtd,
+                                        v_b_bhtd,
+                                        attn_mask=(q_i >= k_i),
+                                        is_causal=False,
+                                        scale=sa.scaling,
+                                        enable_gqa=True,
+                                    )
+                            attn_bhtd[:, :, s:e].copy_(out_b)
 
-                out_flat = apply_attn_output_gate_flatten(attn_bhtd, gate_4d).squeeze(0)
+                if out_flat is None:
+                    out_flat = apply_attn_output_gate_flatten(attn_bhtd, gate_4d).squeeze(0)
                 attn_out = sa._maybe_all_reduce(sa.o_proj(out_flat))
 
             # 4. Attention Output ShortConv + clip (1 pass across ALL N tokens)
@@ -5037,6 +5495,8 @@ class _Qwen4_5OpaqueTxStage:
         self.attention_inputs: Any = None
         self.kv_cache: Any = None
         self.ready = False
+        self._batched_sig: Any = None
+        self._batched_meta: Optional[Dict[str, Any]] = None
 
     def get_steps_arange(self, verify_w: int, device: torch.device) -> torch.Tensor:
         if (
@@ -5170,6 +5630,7 @@ class _Qwen4_5OpaqueTxManager:
         self._active_pending: Optional[_Qwen4_5OpaqueTxStage] = None
         self._undo_records: List[_TxUndoRecord] = []
         self._committed = False
+        self._batched_undo_meta: Optional[Dict[str, Any]] = None
 
     def acquire_stage(
         self,
@@ -5239,6 +5700,9 @@ class _Qwen4_5OpaqueTxManager:
         v_w = stage.verify_width
 
         undo_records: List[_TxUndoRecord] = []
+        elig_specs: List[Tuple[Any, ...]] = []
+        non_triton_entries: List[Tuple[_TxStageEntry, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int, int, int, int, torch.Tensor]] = []
+
         for entry in stage.entries.values():
             base = entry.cache.kv_cache_base
             num_blocks = int(base.shape[0])
@@ -5259,10 +5723,20 @@ class _Qwen4_5OpaqueTxManager:
             phys_slice = entry.phys_ids_buf[: 2 * live_bs]
             commit_slice = entry.commit_u8_buf[: 2 * live_bs]
             undo_slice = entry.undo_u8_buf[: 2 * live_bs]
+            rec = _TxUndoRecord(
+                cache=entry.cache,
+                tag=entry.tag,
+                layer_idx=entry.layer_idx,
+                phys_ids=phys_slice,
+                commit_u8=commit_slice,
+                undo_u8=undo_slice,
+            )
+            undo_records.append(rec)
 
             if (
                 _HAS_TRITON
                 and base.is_cuda
+                and bt_live.dtype == torch.int32
                 and need_bytes % 4 == 0
                 and int(base_u8.stride(0)) % 4 == 0
                 and int(commit_slice.stride(0)) % 4 == 0
@@ -5276,6 +5750,64 @@ class _Qwen4_5OpaqueTxManager:
                 )
                 steps_i32_3d = steps_i32.view(live_bs, v_w, steps_row_elems)
                 base_i32, _ = _view_opaque_pool_2d(base, torch.int32)
+                commit_i32 = commit_slice.view(torch.int32)
+                undo_i32 = undo_slice.view(torch.int32)
+                n_elems = need_bytes // 4
+                elig_specs.append(
+                    (
+                        rec,
+                        bt_live,
+                        steps_i32_3d,
+                        base_i32,
+                        phys_slice,
+                        commit_i32,
+                        undo_i32,
+                        int(bt_live.stride(0)),
+                        int(bt_live.stride(1)),
+                        int(steps_i32_3d.stride(0)),
+                        int(steps_i32_3d.stride(1)),
+                        int(base_i32.stride(0)),
+                        int(commit_i32.stride(0)),
+                        int(undo_i32.stride(0)),
+                        tpb,
+                        max_blocks,
+                        num_blocks,
+                        n_elems,
+                    )
+                )
+            else:
+                non_triton_entries.append(
+                    (entry, bt_live, phys_slice, commit_slice, undo_slice, need_bytes, tpb, max_blocks, num_blocks, base_u8)
+                )
+
+        fallback_recs: List[_TxUndoRecord] = [item[0] for item in []]
+        for (entry, bt_live, phys_slice, commit_slice, undo_slice, need_bytes, tpb, max_blocks, num_blocks, base_u8) in non_triton_entries:
+            fallback_recs.append(
+                _TxUndoRecord(
+                    cache=entry.cache,
+                    tag=entry.tag,
+                    layer_idx=entry.layer_idx,
+                    phys_ids=phys_slice,
+                    commit_u8=commit_slice,
+                    undo_u8=undo_slice,
+                )
+            )
+            if (
+                _HAS_TRITON
+                and base_u8.is_cuda
+                and need_bytes % 4 == 0
+                and int(base_u8.stride(0)) % 4 == 0
+                and int(commit_slice.stride(0)) % 4 == 0
+                and int(undo_slice.stride(0)) % 4 == 0
+                and base_u8.data_ptr() % 4 == 0
+                and commit_slice.data_ptr() % 4 == 0
+                and undo_slice.data_ptr() % 4 == 0
+            ):
+                steps_i32, steps_row_elems = _view_opaque_pool_2d(
+                    entry.steps[:live_bs].reshape(live_bs * v_w, -1), torch.int32
+                )
+                steps_i32_3d = steps_i32.view(live_bs, v_w, steps_row_elems)
+                base_i32, _ = _view_opaque_pool_2d(entry.cache.kv_cache_base, torch.int32)
                 commit_i32 = commit_slice.view(torch.int32)
                 undo_i32 = undo_slice.view(torch.int32)
                 n_elems = need_bytes // 4
@@ -5343,39 +5875,203 @@ class _Qwen4_5OpaqueTxManager:
                 safe_phys = phys_slice.to(torch.int64).clamp(min=0, max=num_blocks - 1)
                 undo_slice.copy_(base_u8[:, :need_bytes].index_select(0, safe_phys))
 
-            undo_records.append(
-                _TxUndoRecord(
-                    cache=entry.cache,
-                    tag=entry.tag,
-                    layer_idx=entry.layer_idx,
-                    phys_ids=phys_slice,
-                    commit_u8=commit_slice,
-                    undo_u8=undo_slice,
+        batched_meta: Optional[Dict[str, Any]] = None
+        if len(elig_specs) > 1:
+            sig = tuple(
+                (
+                    s[1].data_ptr(),
+                    s[2].data_ptr(),
+                    s[3].data_ptr(),
+                    s[4].data_ptr(),
+                    s[5].data_ptr(),
+                    s[6].data_ptr(),
+                    *s[7:],
                 )
+                for s in elig_specs
             )
+            if stage._batched_sig == sig and stage._batched_meta is not None:
+                batched_meta = stage._batched_meta
+            elif not torch.cuda.is_current_stream_capturing():
+                batched_meta = {
+                    "num_e": len(elig_specs),
+                    "max_n_elems": max(s[17] for s in elig_specs),
+                    "ptrs_bt": torch.tensor([s[1].data_ptr() for s in elig_specs], dtype=torch.int64, device=dev),
+                    "ptrs_steps": torch.tensor([s[2].data_ptr() for s in elig_specs], dtype=torch.int64, device=dev),
+                    "ptrs_base": torch.tensor([s[3].data_ptr() for s in elig_specs], dtype=torch.int64, device=dev),
+                    "ptrs_phys": torch.tensor([s[4].data_ptr() for s in elig_specs], dtype=torch.int64, device=dev),
+                    "ptrs_commit": torch.tensor([s[5].data_ptr() for s in elig_specs], dtype=torch.int64, device=dev),
+                    "ptrs_undo": torch.tensor([s[6].data_ptr() for s in elig_specs], dtype=torch.int64, device=dev),
+                    "bt_s0": torch.tensor([s[7] for s in elig_specs], dtype=torch.int64, device=dev),
+                    "bt_s1": torch.tensor([s[8] for s in elig_specs], dtype=torch.int64, device=dev),
+                    "steps_sb": torch.tensor([s[9] for s in elig_specs], dtype=torch.int64, device=dev),
+                    "steps_sv": torch.tensor([s[10] for s in elig_specs], dtype=torch.int64, device=dev),
+                    "base_sb": torch.tensor([s[11] for s in elig_specs], dtype=torch.int64, device=dev),
+                    "commit_sb": torch.tensor([s[12] for s in elig_specs], dtype=torch.int64, device=dev),
+                    "undo_sb": torch.tensor([s[13] for s in elig_specs], dtype=torch.int64, device=dev),
+                    "tpb": torch.tensor([s[14] for s in elig_specs], dtype=torch.int32, device=dev),
+                    "max_blocks": torch.tensor([s[15] for s in elig_specs], dtype=torch.int32, device=dev),
+                    "num_blocks": torch.tensor([s[16] for s in elig_specs], dtype=torch.int32, device=dev),
+                    "n_elems": torch.tensor([s[17] for s in elig_specs], dtype=torch.int32, device=dev),
+                }
+                stage._batched_sig = sig
+                stage._batched_meta = batched_meta
 
+            if batched_meta is not None:
+                block_sz = 1024
+                _prepare_opaque_tx_commit_batched_triton[
+                    (batched_meta["num_e"], 2 * live_bs, int(triton.cdiv(batched_meta["max_n_elems"], block_sz)))
+                ](
+                    batched_meta["ptrs_bt"],
+                    batched_meta["ptrs_steps"],
+                    batched_meta["ptrs_base"],
+                    batched_meta["ptrs_phys"],
+                    batched_meta["ptrs_commit"],
+                    batched_meta["ptrs_undo"],
+                    stage.seq_before_buf,
+                    stage.accept_len_buf,
+                    batched_meta["bt_s0"],
+                    batched_meta["bt_s1"],
+                    batched_meta["steps_sb"],
+                    batched_meta["steps_sv"],
+                    batched_meta["base_sb"],
+                    batched_meta["commit_sb"],
+                    batched_meta["undo_sb"],
+                    batched_meta["tpb"],
+                    batched_meta["max_blocks"],
+                    batched_meta["num_blocks"],
+                    batched_meta["n_elems"],
+                    live_bs,
+                    v_w,
+                    BLOCK_SIZE=block_sz,
+                )
+            else:
+                for s in elig_specs:
+                    block_sz = 1024
+                    _prepare_opaque_tx_commit_triton[(2 * live_bs, int(triton.cdiv(s[17], block_sz)))](
+                        s[1],
+                        stage.seq_before_buf,
+                        stage.accept_len_buf,
+                        s[2],
+                        s[3],
+                        s[4],
+                        s[5],
+                        s[6],
+                        s[7],
+                        s[8],
+                        s[9],
+                        s[10],
+                        s[11],
+                        s[12],
+                        s[13],
+                        live_bs,
+                        v_w,
+                        s[14],
+                        s[15],
+                        s[16],
+                        s[17],
+                        BLOCK_SIZE=block_sz,
+                    )
+                    fallback_recs.append(s[0])
+        elif len(elig_specs) == 1:
+            s = elig_specs[0]
+            block_sz = 1024
+            _prepare_opaque_tx_commit_triton[(2 * live_bs, int(triton.cdiv(s[17], block_sz)))](
+                s[1],
+                stage.seq_before_buf,
+                stage.accept_len_buf,
+                s[2],
+                s[3],
+                s[4],
+                s[5],
+                s[6],
+                s[7],
+                s[8],
+                s[9],
+                s[10],
+                s[11],
+                s[12],
+                s[13],
+                live_bs,
+                v_w,
+                s[14],
+                s[15],
+                s[16],
+                s[17],
+                BLOCK_SIZE=block_sz,
+            )
+            fallback_recs.append(s[0])
+
+        self._batched_undo_meta = (
+            {"meta": batched_meta, "live_bs": live_bs, "fallback_recs": fallback_recs}
+            if batched_meta is not None
+            else None
+        )
         self._undo_records = undo_records
         self._committed = False
 
     def finish_commit(self, commit: bool) -> None:
         if commit:
-            for rec in self._undo_records:
-                _write_opaque_rows_raw_gpu(
-                    rec.cache.kv_cache_base, rec.phys_ids, rec.commit_u8, rec.tag, rec.layer_idx
+            if self._batched_undo_meta is not None:
+                bm = self._batched_undo_meta["meta"]
+                lbs = self._batched_undo_meta["live_bs"]
+                block_sz = 1024
+                _write_opaque_rows_batched_triton[
+                    (bm["num_e"], 2 * lbs, int(triton.cdiv(bm["max_n_elems"], block_sz)))
+                ](
+                    bm["ptrs_base"],
+                    bm["ptrs_commit"],
+                    bm["ptrs_phys"],
+                    bm["base_sb"],
+                    bm["commit_sb"],
+                    bm["num_blocks"],
+                    bm["n_elems"],
+                    BLOCK_SIZE=block_sz,
                 )
+                for rec in self._batched_undo_meta["fallback_recs"]:
+                    _write_opaque_rows_raw_gpu(
+                        rec.cache.kv_cache_base, rec.phys_ids, rec.commit_u8, rec.tag, rec.layer_idx
+                    )
+            else:
+                for rec in self._undo_records:
+                    _write_opaque_rows_raw_gpu(
+                        rec.cache.kv_cache_base, rec.phys_ids, rec.commit_u8, rec.tag, rec.layer_idx
+                    )
             self._committed = True
         else:
             if self._committed:
-                for rec in self._undo_records:
-                    _write_opaque_rows_raw_gpu(
-                        rec.cache.kv_cache_base, rec.phys_ids, rec.undo_u8, rec.tag, rec.layer_idx
+                if self._batched_undo_meta is not None:
+                    bm = self._batched_undo_meta["meta"]
+                    lbs = self._batched_undo_meta["live_bs"]
+                    block_sz = 1024
+                    _write_opaque_rows_batched_triton[
+                        (bm["num_e"], 2 * lbs, int(triton.cdiv(bm["max_n_elems"], block_sz)))
+                    ](
+                        bm["ptrs_base"],
+                        bm["ptrs_undo"],
+                        bm["ptrs_phys"],
+                        bm["base_sb"],
+                        bm["undo_sb"],
+                        bm["num_blocks"],
+                        bm["n_elems"],
+                        BLOCK_SIZE=block_sz,
                     )
+                    for rec in self._batched_undo_meta["fallback_recs"]:
+                        _write_opaque_rows_raw_gpu(
+                            rec.cache.kv_cache_base, rec.phys_ids, rec.undo_u8, rec.tag, rec.layer_idx
+                        )
+                else:
+                    for rec in self._undo_records:
+                        _write_opaque_rows_raw_gpu(
+                            rec.cache.kv_cache_base, rec.phys_ids, rec.undo_u8, rec.tag, rec.layer_idx
+                        )
             self._committed = False
             self._undo_records.clear()
+            self._batched_undo_meta = None
             self._active_pending = None
 
     def finalize_commit(self) -> None:
         self._undo_records.clear()
+        self._batched_undo_meta = None
         self._committed = False
         self._active_pending = None
 
@@ -5451,6 +6147,14 @@ class Qwen4_5RTPModel(_RtpGptModelBase):
         ep_size = int(getattr(parallelism_config, "ep_size", 1)) if parallelism_config is not None else 1
         ep_rank = int(getattr(parallelism_config, "ep_rank", 0)) if parallelism_config is not None else 0
         ep_group = getattr(parallelism_config, "ep_group", None) if parallelism_config is not None else None
+        sp_size = int(getattr(parallelism_config, "sp_size", 1) or 1) if parallelism_config is not None else 1
+        sp_rank = int(getattr(parallelism_config, "sp_rank", 0) or 0) if parallelism_config is not None else 0
+        sp_group = getattr(parallelism_config, "sp_group", None) if parallelism_config is not None else None
+        dp_size = int(getattr(parallelism_config, "dp_size", 1) or 1) if parallelism_config is not None else 1
+        dp_rank = int(getattr(parallelism_config, "dp_rank", 0) or 0) if parallelism_config is not None else 0
+        dp_group = getattr(parallelism_config, "dp_group", None) if parallelism_config is not None else None
+        dp_attn = bool(getattr(parallelism_config, "dp_attn", dp_size > 1)) if parallelism_config is not None else False
+        parallel_mode = getattr(parallelism_config, "parallel_mode", None) if parallelism_config is not None else None
 
         if backbone is not None:
             self.model = backbone
@@ -5468,10 +6172,23 @@ class Qwen4_5RTPModel(_RtpGptModelBase):
                 "ep_rank": ep_rank,
                 "ep_group": ep_group,
             }
-            if "tp_size" in m_params:
-                m_kw["tp_size"] = tp_size
-                m_kw["tp_rank"] = tp_rank
-                m_kw["tp_group"] = tp_group
+            for k, v in (
+                ("tp_size", tp_size),
+                ("tp_rank", tp_rank),
+                ("tp_group", tp_group),
+                ("sp_size", sp_size),
+                ("sp_rank", sp_rank),
+                ("sp_group", sp_group),
+                ("dp_size", dp_size),
+                ("dp_rank", dp_rank),
+                ("dp_group", dp_group),
+                ("dp_attn", dp_attn),
+                ("parallel_mode", parallel_mode),
+            ):
+                if k in m_params and (v is not None or k in ("sp_group", "dp_group", "parallel_mode")):
+                    if v is not None or k == "parallel_mode":
+                        if v is not None:
+                            m_kw[k] = v
             self.model = Qwen4_5Model(self.arch_config, **m_kw)
             if weight is not None:
                 b_params = inspect.signature(bind_qwen4_5_model_weights).parameters
@@ -5502,6 +6219,14 @@ class Qwen4_5RTPModel(_RtpGptModelBase):
         self.tp_size = eff_tp
         self.tp_rank = int(tp_rank)
         self.tp_group = tp_group if tp_group is not None else getattr(self.model, "tp_group", None)
+        self.sp_size = int(getattr(self.model, "sp_size", sp_size) or 1)
+        self.sp_rank = int(sp_rank)
+        self.sp_group = sp_group if sp_group is not None else getattr(self.model, "sp_group", None)
+        self.dp_size = int(getattr(self.model, "dp_size", dp_size) or 1)
+        self.dp_rank = int(dp_rank)
+        self.dp_group = dp_group if dp_group is not None else getattr(self.model, "dp_group", None)
+        self.dp_attn = bool(getattr(self.model, "dp_attn", dp_attn))
+        self.parallel_mode = parallel_mode if parallel_mode is not None else getattr(self.model, "parallel_mode", None)
         self.bridge = Qwen4_5PagedStateBridge(self.arch_config, tp_size=self.tp_size)
         self.tx_manager = _Qwen4_5OpaqueTxManager(self.bridge, self.arch_config)
 

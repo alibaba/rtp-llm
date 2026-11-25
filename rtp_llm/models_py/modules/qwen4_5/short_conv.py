@@ -9,7 +9,7 @@ Supports:
 
 from __future__ import annotations
 
-from typing import Optional, Sequence, Tuple, Union
+from typing import Any, Optional, Sequence, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -1100,6 +1100,11 @@ class Qwen4_5ShortConv(nn.Module):
         use_activation: bool = False,
         dtype: torch.dtype = torch.bfloat16,
         device: Optional[torch.device] = None,
+        *,
+        sp_size: int = 1,
+        sp_rank: int = 0,
+        sp_group: Any = None,
+        dp_attn: bool = False,
     ) -> None:
         super().__init__()
         if kernel_size < 1:
@@ -1109,6 +1114,10 @@ class Qwen4_5ShortConv(nn.Module):
         self.residual = residual
         self.use_activation = use_activation
         self.activation = "silu" if use_activation else None
+        self.sp_size = max(1, int(sp_size))
+        self.sp_rank = int(sp_rank)
+        self.sp_group = sp_group
+        self.dp_attn = bool(dp_attn)
 
         self.weight = nn.Parameter(
             torch.empty(channels, 1, kernel_size, dtype=dtype, device=device)
@@ -1130,6 +1139,56 @@ class Qwen4_5ShortConv(nn.Module):
                 dtype=dt,
             )
         )
+
+    def exchange_sp_left_halo(
+        self,
+        x_local: torch.Tensor,
+        *,
+        init_state: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Exchange ``(kernel_size - 1)`` left-boundary tail tokens across SP ranks."""
+        w_ctx = self.kernel_size - 1
+        if x_local.ndim == 2:
+            x_3d = x_local.unsqueeze(0)
+        elif x_local.ndim == 3:
+            x_3d = x_local
+        else:
+            raise ValueError(f"Expected 2D or 3D x_local, got {tuple(x_local.shape)}")
+        bsz, t_loc, ch = x_3d.shape
+        if w_ctx == 0:
+            return torch.empty((bsz, ch, 0), dtype=x_3d.dtype, device=x_3d.device)
+
+        if init_state is not None:
+            left_halo = init_state.contiguous()
+        else:
+            left_halo = torch.zeros((bsz, ch, w_ctx), dtype=x_3d.dtype, device=x_3d.device)
+
+        if self.sp_size <= 1 or self.sp_group is None or self.dp_attn:
+            return left_halo
+
+        import torch.distributed as dist
+
+        if t_loc >= w_ctx:
+            tail = x_3d[:, t_loc - w_ctx :, :].transpose(1, 2).contiguous()
+        else:
+            tail = torch.zeros((bsz, ch, w_ctx), dtype=x_3d.dtype, device=x_3d.device)
+            if t_loc > 0:
+                tail[:, :, w_ctx - t_loc :] = x_3d.transpose(1, 2)
+
+        ops = []
+        recv_buf = (
+            torch.empty((bsz, ch, w_ctx), dtype=x_3d.dtype, device=x_3d.device)
+            if self.sp_rank > 0
+            else None
+        )
+        if self.sp_rank + 1 < self.sp_size:
+            ops.append(dist.P2POp(dist.isend, tail, peer=self.sp_rank + 1, group=self.sp_group))
+        if self.sp_rank > 0 and recv_buf is not None:
+            ops.append(dist.P2POp(dist.irecv, recv_buf, peer=self.sp_rank - 1, group=self.sp_group))
+        if ops:
+            for req in dist.batch_isend_irecv(ops):
+                req.wait()
+        return recv_buf if recv_buf is not None else left_halo
 
     def forward(
         self,

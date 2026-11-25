@@ -300,10 +300,15 @@ class Qwen4_5(_BaseModel):
 
         self.device = device
         arch_cfg = self.model_config.arch_config
+        parallel_mode = getattr(self.parallelism_config, "parallel_mode", None)
         tp_size = int(self.parallelism_config.tp_size)
         tp_rank = int(self.parallelism_config.tp_rank)
         dp_size = int(self.parallelism_config.dp_size)
+        dp_rank = int(getattr(self.parallelism_config, "dp_rank", 0))
+        sp_size = int(getattr(self.parallelism_config, "sp_size", 1) or 1)
+        sp_rank = int(getattr(self.parallelism_config, "sp_rank", 0) or 0)
         ep_size_cfg = int(getattr(self.parallelism_config, "ep_size", 1))
+        kv_dtype = str(getattr(self.model_config, "kv_dtype", "bf16") or "bf16")
 
         tp_group = None
         if tp_size > 1 and dist.is_available() and dist.is_initialized():
@@ -385,12 +390,22 @@ class Qwen4_5(_BaseModel):
             dtype=torch.bfloat16,
             device=torch_dev,
             init_mxfp4_weights=False,
+            parallel_mode=parallel_mode,
             ep_size=eff_ep_size,
             ep_rank=eff_ep_rank,
             ep_group=ep_group,
             tp_size=tp_size,
             tp_rank=tp_rank,
             tp_group=tp_group,
+            dp_size=dp_size,
+            dp_rank=dp_rank,
+            dp_group=getattr(self.parallelism_config, "dp_group", None),
+            sp_size=sp_size,
+            sp_rank=sp_rank,
+            sp_group=getattr(self.parallelism_config, "sp_group", None),
+            dp_attn=getattr(self.parallelism_config, "dp_attn", None),
+            kv_dtype=kv_dtype,
+            dense_linear_mode=getattr(self.model_config, "dense_linear_mode", None),
             fast_all_reduce=fast_all_reduce,
         )
         num_workers = int(os.environ.get("QWEN4_5_LOAD_WORKERS", "8"))
@@ -446,12 +461,14 @@ class Qwen4_5(_BaseModel):
         arch_cfg: Qwen4_5ArchConfig,
         *,
         tp_size: int = 1,
+        parallel_mode: Optional[str] = None,
         enable_yoco_decode: Optional[bool] = None,
         kv_dtype: str = "BF16",
     ) -> Qwen4_5KVCachePlan:
         return build_qwen4_5_kv_cache_plan(
             arch_cfg,
             tp_size=tp_size,
+            parallel_mode=parallel_mode,
             enable_yoco_decode=enable_yoco_decode,
             kv_dtype=kv_dtype,
         )
