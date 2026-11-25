@@ -758,6 +758,9 @@ class EpVerifyRowsPerRequestTest(unittest.TestCase):
         self, *, value="4.5", env=None, steps=5, rows=None, ep_size=8, allowed=True
     ):
         flags = {} if value is None else {self.ENV: value}
+        if rows is None:
+            maximum = 64 * (steps + 1)
+            rows = [bucket for bucket in self.GRID if bucket < maximum] + [maximum]
         with (
             patch.dict(os.environ, {**flags, **(env or {})}, clear=True),
             patch.object(torch.cuda, "Stream"),
@@ -766,7 +769,7 @@ class EpVerifyRowsPerRequestTest(unittest.TestCase):
                 64,
                 steps,
                 "cpu",
-                self.GRID if rows is None else rows,
+                rows,
                 ep_size=ep_size,
                 allow_ep_current_scores=allowed,
             )
@@ -823,13 +826,27 @@ class EpVerifyRowsPerRequestTest(unittest.TestCase):
         self.assertEqual(fixed.fixed_cap, 3)
         self.assertFalse(fixed.needs_prediction())
 
+    def test_unset_preserves_measured_policy_for_other_draft_widths(self):
+        for steps in (7, 9):
+            with self.subTest(steps=steps):
+                session = self.create_session(value=None, steps=steps)
+                self.assertIsNone(session._ep_verify_rows_per_request)
+                self.assertIsInstance(session._ep_policy, _MeasuredEpPolicy)
+                self.assertFalse(session.needs_prediction())
+
     def test_validates_number_topology_and_conflicts(self):
         for bad in ("", "bad", "nan", "inf", "0.75", "6.25"):
             with self.subTest(value=bad), self.assertRaisesRegex(ValueError, self.ENV):
                 self.create_session(value=bad)
+        for steps in (7, 9):
+            with (
+                self.subTest(steps=steps),
+                self.assertRaisesRegex(ValueError, self.ENV),
+            ):
+                self.create_session(value=str(steps + 1.25), steps=steps)
         unsupported = (
             {"ep_size": 1},
-            {"steps": 4, "rows": [1, 320]},
+            {"value": "1", "steps": 0},
             {"rows": []},
             {"allowed": False},
             {"env": {"RTP_LLM_ADAPTIVE_VERIFY_CAP": "5"}},
@@ -843,32 +860,48 @@ class EpVerifyRowsPerRequestTest(unittest.TestCase):
             ):
                 self.create_session(**options)
 
-    def test_r64_uses_existing_current_prefix_allocator_with_same_budget(self):
-        session = self.create_session()
+    def test_configured_widths_use_current_prefix_allocator_at_same_budget(self):
         ids = list(range(14))
-        self.assertIsNone(session._ep_policy)
-        self.assertTrue(session.needs_prediction())
-        (caps, rows, total), cached, current, _, metrics, committed, _ = self.prepare(
-            session, ids, age=16
-        )
-        self.assertEqual(total, 64)
-        self.assertEqual(int(caps.sum()), 50)
-        self.assertEqual(rows.numel(), 64)
-        self.assertTrue(current)
-        self.assertFalse(cached or committed)
-        self.assertEqual(metrics[0], 2)
-        moved = caps.flip(0)
-        dense = torch.arange(84).reshape(14, 6)
-        reranked = moved, dense[torch.arange(6) <= moved[:, None]], 64
-        with patch.object(
-            session.controller, "reallocate_current", return_value=reranked
-        ) as allocate:
-            current_caps, current_rows, current_total = session.plan()
-            self.assertIs(current_caps, reranked[0])
-            self.assertIs(current_rows, reranked[1])
-            self.assertEqual(current_total, 64)
-            allocate.assert_called_once_with(ids, 64)
-        self.assertEqual(session.controller._pending.request_ids, tuple(ids))
+        for steps, value, expected in ((5, "4.5", 64), (7, "6.4", 96), (9, "8", 112)):
+            with self.subTest(steps=steps, value=value):
+                session = self.create_session(value=value, steps=steps)
+                width = steps + 1
+                self.assertIsNone(session._ep_policy)
+                self.assertTrue(session.needs_prediction())
+                cold, _, current, _, metrics, _, _ = session.begin_for_executor(ids)
+                self.assertEqual(cold[2], len(ids) * width)
+                self.assertEqual(metrics[0], 3)
+                self.assertFalse(current)
+
+                plan, cached, current, _, metrics, committed, _ = self.prepare(
+                    session, ids, age=16
+                )
+                caps, rows, total = plan
+                self.assertEqual(total, expected)
+                self.assertEqual(session._cost_key(total), total)
+                self.assertEqual(int(caps.sum()) + len(ids), total)
+                self.assertTrue(torch.all((caps >= 0) & (caps <= steps)))
+                positions = torch.arange(width)
+                dense = torch.arange(len(ids) * width).reshape(len(ids), width)
+                torch.testing.assert_close(rows, dense[positions <= caps[:, None]])
+                self.assertTrue(current)
+                self.assertFalse(cached or committed)
+                self.assertEqual(metrics[0], 2)
+
+                moved = caps.clone()
+                moved[0] += 1
+                moved[-1] -= 1
+                reranked = moved, dense[positions <= moved[:, None]], total
+                with patch.object(
+                    session.controller, "reallocate_current", return_value=reranked
+                ) as allocate:
+                    current_caps, current_rows, current_total = session.plan()
+                    self.assertIs(current_caps, reranked[0])
+                    self.assertIs(current_rows, reranked[1])
+                    self.assertEqual(current_total, expected)
+                    allocate.assert_called_once_with(ids, expected)
+                self.assertEqual(session.controller._pending.request_ids, tuple(ids))
+                self.assertIs(session.controller._pending.capacities, moved)
 
     def test_ep_steady_shape_reuses_host_plan_across_prediction_order(self):
         session = self.create_session()
@@ -924,19 +957,21 @@ class EpVerifyRowsPerRequestTest(unittest.TestCase):
                 self.assertEqual(metrics[0], 2)
 
     def test_full_width_competes_with_reduced_buckets(self):
-        for batch, requested, expected in (
-            (14, "6", 84),
-            (14, "6.0", 84),
-            (14, "5.9", 84),
-            (10, "5.8", 60),
-            (14, "5.7", 80),
+        for steps, batch, requested, expected in (
+            (5, 14, "6", 84),
+            (5, 14, "6.0", 84),
+            (5, 14, "5.9", 84),
+            (5, 10, "5.8", 60),
+            (5, 14, "5.7", 80),
+            (7, 14, "8", 112),
+            (9, 14, "10", 140),
         ):
-            with self.subTest(batch=batch, requested=requested):
-                session = self.create_session(value=requested)
+            with self.subTest(steps=steps, batch=batch, requested=requested):
+                session = self.create_session(value=requested, steps=steps)
                 plan, cached, current, _, metrics, _, _ = self.prepare(
                     session, list(range(batch))
                 )
-                cutting = expected < batch * 6
+                cutting = expected < batch * (steps + 1)
                 self.assertEqual(plan[2], expected)
                 self.assertEqual(metrics[0], 2 if cutting else 3)
                 self.assertEqual(current, cutting)

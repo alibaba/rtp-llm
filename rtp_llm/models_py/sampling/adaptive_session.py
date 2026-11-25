@@ -28,7 +28,7 @@ def _configured_ep_verify_rows_per_request(
     supports_budget = (
         allow_ep_current_scores
         and ep_size > 1
-        and steps == 5
+        and steps > 0
         and fixed_cap == -1
         and has_capture_buckets
     )
@@ -37,9 +37,9 @@ def _configured_ep_verify_rows_per_request(
         or os.environ.get("RTP_LLM_ADAPTIVE_EP_CURRENT_SCORES") == "1"
     )
     if raw is None:
-        # Implicit defaults must leave other layouts and explicit policies
-        # usable. An explicitly requested budget is validated below.
-        return 4.5 if supports_budget and not competing_policy else None
+        # The default is tuned for five draft steps. Other widths keep their
+        # existing policy unless the operator supplies a budget.
+        return 4.5 if supports_budget and steps == 5 and not competing_policy else None
     range_error = f"{_EP_VERIFY_ROWS_ENV} requires a finite number in [1, {steps + 1}]"
     try:
         rows = float(raw)
@@ -50,7 +50,7 @@ def _configured_ep_verify_rows_per_request(
     if not supports_budget:
         raise ValueError(
             f"{_EP_VERIFY_ROWS_ENV} requires GLM5 TP1 Decode with EP > 1, "
-            "MTP5, CAP=-1 and CUDA Graph captures"
+            "positive draft steps, CAP=-1 and CUDA Graph captures"
         )
     if competing_policy:
         raise ValueError(

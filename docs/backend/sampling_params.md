@@ -224,13 +224,17 @@ not disable the new rejection backend.
 With five draft steps, `RTP_LLM_ADAPTIVE_VERIFY_CAP=3` admits exactly the first
 three draft tokens and executes four Target positions per request, including
 the bonus position. The default, `-1`, enables dynamic budgeting. GLM5 TP1 Decode
-with EP > 1, five draft steps, and CUDA Graph uses a goal of 4.5 Target rows per
-request (including the bonus position). Set
-`RTP_LLM_ADAPTIVE_EP_VERIFY_ROWS_PER_REQUEST` to override the goal with a value in
-`[1, 6]`. The goal selects a captured row bucket and actual rows may differ.
-Missing or stale confidence keeps full verification. An explicit alternative
-EP policy takes precedence over the default goal. Other layouts keep their
-existing dynamic policy. Forced-acceptance requests do not train the estimator.
+with EP > 1, five draft steps, and CUDA Graph defaults to a goal of 4.5 Target
+rows per request, including the bonus position. Set
+`RTP_LLM_ADAPTIVE_EP_VERIFY_ROWS_PER_REQUEST` on this layout with a positive
+number of draft steps supported by the model and `CAP=-1`. Set a finite target in
+`[1, draft_steps + 1]`. Fractional goals are allowed, such as 6.4 for seven
+draft steps or 8.0 for nine. The runtime uses the batch goal to choose among
+captured row buckets and full verification, so actual rows per request may
+differ. Missing or stale confidence keeps full verification. Unset budgets
+keep the existing dynamic policy at other draft widths. An explicit alternative
+EP policy takes precedence over the default goal and cannot be combined with
+an explicit budget. Forced-acceptance requests do not train the estimator.
 
 Adaptive verification enables fused row restore on supported CUDA inputs and
 Indexer page-table reuse within ragged Target forwards by default. Set
