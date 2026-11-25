@@ -1,5 +1,6 @@
 """CUDA-specific indexer operations for DeepSeek-V3.2 DSA mechanism."""
 
+import os
 from typing import Any, Dict, Optional, Tuple
 
 import torch
@@ -93,7 +94,7 @@ def _fp8_paged_mqa_logits_compat(
     first_error: Optional[Exception] = None
     for context_lens_dim in candidates:
         adapted_context_lens = (
-            flat_context_lens.view(-1, 1)
+            context_lens.reshape(q.size(0), q.size(1))
             if context_lens_dim == 2
             else flat_context_lens
         )
@@ -139,15 +140,12 @@ def _get_topk_workspace(device: torch.device) -> torch.Tensor:
     return ws
 
 
-def _fp8_mqa_logits_chunk_rows(num_rows: int, num_keys: int) -> int:
-    """Bound the FP32 score workspace to 256 MiB using padded key columns.
-
-    The shared indexer chooses its own memory plan. DSV4's separate indexer
-    retains its existing deployment override and is unaffected.
-    """
-    columns = max(256, (int(num_keys) + 255) // 256 * 256)
-    budget_rows = max(1, (256 * 1024 * 1024) // (4 * columns))
-    return min(max(int(num_rows), 1), budget_rows)
+def _fp8_mqa_logits_chunk_rows(num_rows: int, num_keys: int, topk: int = 0, heads: int = 1) -> int:
+    """Fit padded DeepGEMM scores, indices and writer scratch into 256 MiB."""
+    tile = max(1, 128 // heads)
+    stride = ((num_keys + 256) * 4 + 1023) // 1024 * 1024
+    tile_bytes = tile * max(stride + topk * 4, topk * 64)
+    return min(max(num_rows, 1), max(1, (256 << 20) // tile_bytes) * tile)
 
 
 def _canonicalize_topk_indices(indices: torch.Tensor) -> torch.Tensor:
@@ -362,6 +360,7 @@ class IndexerOp(nn.Module):
         row_ends: torch.Tensor,
         output: torch.Tensor,
         max_seq_len: int,
+        *, canonicalize: bool = True,
     ) -> None:
         # A stable selected set and order both matter for sparse attention.
         rtp_llm_ops.topk_v3_tie_break(
@@ -372,7 +371,8 @@ class IndexerOp(nn.Module):
             self.index_topk,
             min(max(int(max_seq_len), 1), logits.shape[1]),
         )
-        output.copy_(_canonicalize_topk_indices(output))
+        if canonicalize:
+            output.copy_(_canonicalize_topk_indices(output))
 
     def _run_prefill_topk(
         self,
@@ -383,7 +383,7 @@ class IndexerOp(nn.Module):
         max_seq_len: int,
     ) -> None:
         if self._prefill_topk_backend == "topk_v3_tie_break":
-            self._run_stable_topk(logits, row_starts, row_ends, output, max_seq_len)
+            self._run_stable_topk(logits, row_starts, row_ends, output, max_seq_len, canonicalize=False)
             return
         rtp_llm_ops.dsv4_top_k_per_row_prefill(
             logits,
@@ -396,6 +396,17 @@ class IndexerOp(nn.Module):
             self.index_topk,
             True,  # force radix sort
         )
+
+    def _write_prefill_topk(self, indices, offsets, output):
+        canonicalize = self._prefill_topk_backend == "topk_v3_tie_break"
+        if indices.is_cuda and os.environ.get("RTP_INDEXER_FUSED_TOPK", "0") == "1":
+            from .indexer_launch_fusion import try_write_topk
+
+            if try_write_topk(indices, offsets, output, canonicalize):
+                return
+        if canonicalize:
+            indices = _canonicalize_topk_indices(indices)
+        output.copy_(torch.where(indices >= 0, indices + offsets.unsqueeze(1), indices))
 
     def apply_rope_and_rotate_q_k(
         self,
@@ -820,6 +831,7 @@ class IndexerOp(nn.Module):
         block_table = _physical_block_table(attention_inputs)
         lengths = fmha_params.expanded_seq_lens
 
+        native_next_n = 1
         if is_multi_token_decode:
             # Target verify and draft extend have multiple query tokens per
             # request. Treat either phase as flattened decode: each token gets
@@ -835,9 +847,21 @@ class IndexerOp(nn.Module):
                 )
             # The attention planner already owns the token-to-request map.
             # Draft-extend lengths can vary and include empty padded requests.
-            block_table = torch.index_select(block_table, 0, batch_indices)
-            lengths = fmha_params.expanded_seq_lens
-            kvlen_2d = lengths.reshape(-1, 1)
+            host_lengths = getattr(attention_inputs, "input_lengths", None)
+            if (
+                _paged_mqa_context_lens_dim == 2
+                and q_fp8.is_cuda and is_sm10x()
+                and os.environ.get("RTP_LLM_INDEXER_NATIVE_MTP", "1") != "0"
+                and not torch.cuda.is_current_stream_capturing()
+                and isinstance(host_lengths, torch.Tensor) and host_lengths.device.type == "cpu"
+                and host_lengths.numel() == block_table.shape[0] and host_lengths.numel() > 0
+            ):
+                rows, remainder = divmod(num_tokens, host_lengths.numel())
+                if rows > 1 and not remainder and bool((host_lengths == rows).all()):
+                    native_next_n = rows
+            if native_next_n == 1:
+                block_table = torch.index_select(block_table, 0, batch_indices)
+            kvlen_2d = lengths.reshape(-1, native_next_n)
         else:
             # deep_gemm 2.5.0 expects context_lens as [batch_size, next_n].
             # fmha_params.kvlen_d is 1D [B]; unsqueeze(1) -> [B, 1] for next_n=1.
@@ -854,7 +878,7 @@ class IndexerOp(nn.Module):
         # SM10x can also run CUDA12 wheels with the older 1D context ABI.
         # Keep the shared shape probe while reusing graph-owned metadata.
         logits = _fp8_paged_mqa_logits_compat(
-            q_fp8.unsqueeze(1),
+            q_fp8.reshape(-1, native_next_n, self.index_n_heads, self.index_head_dim) if native_next_n > 1 else q_fp8.unsqueeze(1),
             kv_cache_fp8.view(dtype=torch.uint8),
             weights,
             kvlen_2d,
@@ -862,7 +886,7 @@ class IndexerOp(nn.Module):
             self.blocksize,
             max_seq_len,
             schedule_metadata=(
-                schedule_metadata if has_schedule_metadata and is_sm10x() else None
+                schedule_metadata if native_next_n == 1 and has_schedule_metadata and is_sm10x() else None
             ),
         )
 
@@ -958,7 +982,7 @@ class IndexerOp(nn.Module):
         )
         if num_rows == 0:
             return topk_result
-        chunk_rows = _fp8_mqa_logits_chunk_rows(num_rows, total_kv_tokens)
+        chunk_rows = _fp8_mqa_logits_chunk_rows(num_rows, total_kv_tokens, self.index_topk, self.index_n_heads)
         prefill_max_kv_len = int(
             getattr(fmha_params, "prefill_max_kv_len", total_kv_tokens)
         )
@@ -983,13 +1007,9 @@ class IndexerOp(nn.Module):
                 topk_part,
                 prefill_max_kv_len,
             )
-            topk_result[row_start:row_end] = torch.where(
-                topk_part >= 0,
-                topk_part
-                + fmha_params.topk_indices_offset[row_start:row_end].unsqueeze(1),
-                topk_part,
-            )
-            del logits, topk_part
+            del logits
+            self._write_prefill_topk(topk_part, fmha_params.topk_indices_offset[row_start:row_end], topk_result[row_start:row_end])
+            del topk_part
             row_start = row_end
 
         return topk_result
@@ -1160,7 +1180,7 @@ class IndexerOp(nn.Module):
             )
             if nr == 0:
                 return topk_result
-            chunk_rows = _fp8_mqa_logits_chunk_rows(nr, total_kv_tokens)
+            chunk_rows = _fp8_mqa_logits_chunk_rows(nr, total_kv_tokens, self.index_topk, self.index_n_heads)
             row_start = 0
             while row_start < nr:
                 row_end = min(row_start + chunk_rows, nr)
@@ -1182,12 +1202,9 @@ class IndexerOp(nn.Module):
                     topk_part,
                     prefill_max_kv_len,
                 )
-                topk_result[row_start:row_end] = torch.where(
-                    topk_part >= 0,
-                    topk_part + topk_off[row_start:row_end].unsqueeze(1),
-                    topk_part,
-                )
-                del logits_p, topk_part
+                del logits_p
+                self._write_prefill_topk(topk_part, topk_off[row_start:row_end], topk_result[row_start:row_end])
+                del topk_part
                 row_start = row_end
             return topk_result
 
