@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -83,7 +82,7 @@ class MegaHCARoutingTest(unittest.TestCase):
             ep_size=8,
         )
 
-        with patch.dict(os.environ, {"DSV4_MEGA": "1"}, clear=True), patch(
+        with patch(
             "rtp_llm.models_py.modules.dsv4.transformer._build_block",
             return_value=layer,
         ), patch(

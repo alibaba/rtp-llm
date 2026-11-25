@@ -387,7 +387,7 @@ class Block(nn.Module):
         )
         if use_mega_attention:
             # Fused HC/norm intermediates are not exposed by Mega;
-            # DSV4_MEGA=0 restores the ordinary attention path.
+            # Falls back to the ordinary attention path when Mega decode is unavailable or shape is unsupported.
             x = mega_adapter.forward_attention_sublayer(
                 self, x, attn_metadata, kv_cache=kv_cache
             )

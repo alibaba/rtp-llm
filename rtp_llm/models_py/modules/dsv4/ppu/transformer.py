@@ -1,31 +1,33 @@
 """PPU overrides; unchanged behavior is inherited from the shared DSV4 implementation."""
 
 from __future__ import annotations
-from rtp_llm.models_py.modules.dsv4.transformer import (
-    _TRUE_ENV_VALUES,
-    _FALSE_ENV_VALUES,
-    _optional_env_bool,
-    V4Args,
-    _block_kwargs,
-)
+
 import logging
-import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
 from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.base.common.embedding import EmbeddingTorch
 from rtp_llm.models_py.modules.dsv4 import _profiler
-from rtp_llm.models_py.modules.dsv4.ppu.block import Block
 from rtp_llm.models_py.modules.dsv4.cp import CPContext, build_cp_context
+from rtp_llm.models_py.modules.dsv4.ppu.block import Block
 from rtp_llm.models_py.modules.dsv4.ppu.hc.factory import build_hc_head
 from rtp_llm.models_py.modules.dsv4.ppu.tp_norm import tp_gather_hidden, tp_rms_norm
+from rtp_llm.models_py.modules.dsv4.transformer import (
+    V4Args,
+)
+from rtp_llm.models_py.modules.dsv4.transformer import (
+    V4Transformer as _BaseV4Transformer,
+)
+from rtp_llm.models_py.modules.dsv4.transformer import _block_kwargs
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
     synchronized_moe_chunk_plan,
 )
-from rtp_llm.models_py.modules.dsv4.transformer import V4Transformer as _BaseV4Transformer
+
 
 def _build_block(
     layer_id: int,
@@ -43,6 +45,7 @@ def _build_block(
         **_block_kwargs(layer_id, args, layer_weights, commit_only=commit_only),
         platform_provider=provider,
     )
+
 
 class V4Transformer(_BaseV4Transformer):
     def __init__(
@@ -78,12 +81,9 @@ class V4Transformer(_BaseV4Transformer):
         embedding_weight = None
         if not self.commit_only:
             embedding_weight = gw[W.embedding]
-            # Process-level deployment override, intentionally outside V4Args.
-            # Set it consistently in each worker's environment.
-            mega_request = _optional_env_bool("DSV4_MEGA")
-            # SWA-only MTP/DSpark drafts share the process switch, but have no
-            # Mega sublayers to initialize or require from the runtime.
-            if mega_request is not False and any(args.compress_ratios[: args.n_layers]):
+            # SWA-only MTP/DSpark drafts have no Mega sublayers to initialize or
+            # require from the runtime.
+            if any(args.compress_ratios[: args.n_layers]):
                 from rtp_llm.models_py.modules.dsv4.fp8.decode.mega_support import (
                     mega_decode_unavailable_reason,
                 )
@@ -92,10 +92,6 @@ class V4Transformer(_BaseV4Transformer):
                     args,
                     embedding_weight.device,
                 )
-                if unavailable_reason is not None and mega_request is True:
-                    raise RuntimeError(
-                        f"DSV4_MEGA=1 is unsupported: {unavailable_reason}"
-                    )
                 if unavailable_reason is not None:
                     logging.info(
                         "DSV4 Mega decode is unavailable; using the ordinary path: %s",
@@ -104,8 +100,7 @@ class V4Transformer(_BaseV4Transformer):
                 else:
                     self._mega_decode_enabled = True
                     logging.info(
-                        "DSV4 Mega attention decode enabled on %s (TP1, dim=%d); "
-                        "set DSV4_MEGA=0 to disable",
+                        "DSV4 Mega attention decode enabled on %s (TP1, dim=%d)",
                         embedding_weight.device,
                         args.dim,
                     )
@@ -360,6 +355,7 @@ class V4Transformer(_BaseV4Transformer):
                 h[:, -1].to(self.head_weight.dtype), self.head_weight
             ).float()
         return h
+
 
 from rtp_llm.models_py.modules.dsv4.ppu.tp_norm import tp_gather_hidden, tp_rms_norm
 

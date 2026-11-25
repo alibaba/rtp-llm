@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -107,8 +106,7 @@ class MegaCSARoutingTest(unittest.TestCase):
             tp_size=1,
         )
 
-        with patch.dict(os.environ, {}, clear=True):
-            transformer = self._make_transformer(args, layers)
+        transformer = self._make_transformer(args, layers)
 
         self.assertIsNotNone(transformer._mega_csa_runtime)
         self.assertTrue(transformer._mega_decode_enabled)
@@ -116,53 +114,30 @@ class MegaCSARoutingTest(unittest.TestCase):
             layer.enable_mega_csa.assert_called_once()
             layer.enable_mega_hca.assert_called_once()
 
-    def test_explicit_zero_disables_default_mega_path(self) -> None:
-        layer = torch.nn.Module()
-        layer.enable_mega_csa = MagicMock()
-        layer.enable_mega_hca = MagicMock()
-        args = V4Args(
-            n_layers=1,
-            n_mtp_layers=0,
-            compress_ratios=[4],
-            fp8_kv_cache=True,
-            tp_size=1,
-        )
-
-        with patch.dict(os.environ, {"DSV4_MEGA": "0"}, clear=True):
-            transformer = self._make_transformer(args, [layer])
-
-        self.assertIsNone(transformer._mega_csa_runtime)
-        self.assertFalse(transformer._mega_decode_enabled)
-        layer.enable_mega_csa.assert_not_called()
-        layer.enable_mega_hca.assert_not_called()
-
-    def test_swa_only_draft_ignores_process_mega_enable(self) -> None:
+    def test_swa_only_draft_skips_mega_decode(self) -> None:
         for n_layers in (1, 3):
-            for request in (None, "0", "1"):
-                with self.subTest(n_layers=n_layers, request=request):
-                    layers = []
-                    for _ in range(n_layers):
-                        layer = torch.nn.Module()
-                        layer.enable_mega_csa = MagicMock()
-                        layer.enable_mega_hca = MagicMock()
-                        layers.append(layer)
-                    args = V4Args(
-                        n_layers=n_layers,
-                        n_mtp_layers=0,
-                        compress_ratios=[0] * n_layers + [4, 128],
-                    )
-                    environment = {} if request is None else {"DSV4_MEGA": request}
-                    with patch.dict(os.environ, environment, clear=True):
-                        transformer = self._make_transformer(
-                            args,
-                            layers,
-                            unavailable_reason="no CSA or HCA layers require Mega attention",
-                        )
-                    self.assertFalse(transformer._mega_decode_enabled)
-                    self.assertIsNone(transformer._mega_csa_runtime)
-                    for layer in layers:
-                        layer.enable_mega_csa.assert_not_called()
-                        layer.enable_mega_hca.assert_not_called()
+            with self.subTest(n_layers=n_layers):
+                layers = []
+                for _ in range(n_layers):
+                    layer = torch.nn.Module()
+                    layer.enable_mega_csa = MagicMock()
+                    layer.enable_mega_hca = MagicMock()
+                    layers.append(layer)
+                args = V4Args(
+                    n_layers=n_layers,
+                    n_mtp_layers=0,
+                    compress_ratios=[0] * n_layers + [4, 128],
+                )
+                transformer = self._make_transformer(
+                    args,
+                    layers,
+                    unavailable_reason="no CSA or HCA layers require Mega attention",
+                )
+                self.assertFalse(transformer._mega_decode_enabled)
+                self.assertIsNone(transformer._mega_csa_runtime)
+                for layer in layers:
+                    layer.enable_mega_csa.assert_not_called()
+                    layer.enable_mega_hca.assert_not_called()
 
     def test_unsupported_geometry_does_not_enable_mega_by_default(self) -> None:
         layer = torch.nn.Module()
@@ -176,10 +151,9 @@ class MegaCSARoutingTest(unittest.TestCase):
             tp_size=2,
         )
 
-        with patch.dict(os.environ, {}, clear=True):
-            transformer = self._make_transformer(
-                args, [layer], unavailable_reason="TP1 is required, got TP2"
-            )
+        transformer = self._make_transformer(
+            args, [layer], unavailable_reason="TP1 is required, got TP2"
+        )
 
         self.assertIsNone(transformer._mega_csa_runtime)
         layer.enable_mega_csa.assert_not_called()
@@ -191,32 +165,14 @@ class MegaCSARoutingTest(unittest.TestCase):
         layer.enable_mega_hca = MagicMock()
         args = V4Args(n_layers=1, n_mtp_layers=0, compress_ratios=[4])
 
-        with patch.dict(os.environ, {}, clear=True):
-            transformer = self._make_transformer(
-                args,
-                [layer],
-                unavailable_reason="rtp-kernel is missing DSV4 Mega ABI",
-            )
+        transformer = self._make_transformer(
+            args,
+            [layer],
+            unavailable_reason="rtp-kernel is missing DSV4 Mega ABI",
+        )
 
         self.assertFalse(transformer._mega_decode_enabled)
         self.assertIsNone(transformer._mega_csa_runtime)
-        layer.enable_mega_csa.assert_not_called()
-        layer.enable_mega_hca.assert_not_called()
-
-    def test_explicit_mega_fails_fast_when_runtime_is_unsupported(self) -> None:
-        layer = torch.nn.Module()
-        layer.enable_mega_csa = MagicMock()
-        layer.enable_mega_hca = MagicMock()
-        args = V4Args(n_layers=1, n_mtp_layers=0, compress_ratios=[4])
-
-        with patch.dict(os.environ, {"DSV4_MEGA": "1"}, clear=True):
-            with self.assertRaisesRegex(RuntimeError, "sm_100a or sm_103a"):
-                self._make_transformer(
-                    args,
-                    [layer],
-                    unavailable_reason="sm_100a or sm_103a is required, got sm_90",
-                )
-
         layer.enable_mega_csa.assert_not_called()
         layer.enable_mega_hca.assert_not_called()
 
@@ -240,7 +196,7 @@ class MegaCSARoutingTest(unittest.TestCase):
             tp_size=1,
         )
 
-        with patch.dict(os.environ, {"DSV4_MEGA": "1"}, clear=True), patch(
+        with patch(
             "rtp_llm.models_py.modules.dsv4.transformer._build_block",
             return_value=layer,
         ), patch(
