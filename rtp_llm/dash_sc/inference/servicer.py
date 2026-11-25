@@ -2269,7 +2269,9 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         prompt_cached_token_num: Optional[int] = None,
     ) -> None:
         """Capture the frame and fan out per-chunk metrics (records, no log)."""
-        is_first, now = record.record_response_chunk(resp)
+        is_first, is_first_token, now = record.record_response_chunk(
+            resp, delta_len=delta_len
+        )
         if is_first:
             milestone("dash_sc.first_response_frame_ready")
         if prompt_token_num is not None and record.backend_input_len is None:
@@ -2292,9 +2294,6 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                 )
                 if delta_len > 1:
                     record.multi_token_frame_count += 1
-                if record.first_token_ts is None:
-                    record.first_token_ts = now
-                    record.first_token_frame_len = delta_len
                 record.last_token_ts = now
             else:
                 record.empty_frame_count += 1
@@ -2311,6 +2310,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             rank_id=self._rank_id,
             server_id=self._server_id,
             is_first=is_first,
+            is_first_token=is_first_token,
             now=now,
         )
 

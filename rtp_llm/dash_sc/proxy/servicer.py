@@ -228,7 +228,7 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
 
     def _record_and_report_chunk(self, record: GrpcAccessRecord, resp) -> None:
         """Capture the frame and fan out per-chunk metrics (records, no log)."""
-        is_first, now = record.record_response_chunk(resp)
+        is_first, is_first_token, now = record.record_response_chunk(resp)
         if _is_stream_done(resp):
             record.mark_terminal(now=now)
         report_chunk(
@@ -236,6 +236,7 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             rank_id=self._rank_id,
             server_id=self._server_id,
             is_first=is_first,
+            is_first_token=is_first_token,
             now=now,
         )
 

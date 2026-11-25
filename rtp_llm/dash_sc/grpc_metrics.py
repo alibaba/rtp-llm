@@ -93,21 +93,21 @@ def report_chunk(
     rank_id: Optional[int],
     server_id: Optional[int],
     is_first: bool,
+    is_first_token: bool,
     now: Optional[float] = None,
 ) -> None:
     """Mirror ``_call_generate_with_report`` per-chunk metrics.
 
-    ``is_first`` picks FIRST_TOKEN_RT vs ITER_RT/ITER_QPS — same split as the
-    HTTP path. :func:`_metric_tags` returns the memoized tag dict, read-only
-    here, so the per-token path allocates nothing.
+    First-token latency starts at RPC arrival. Iteration metrics follow wire
+    frames, including frames sent before the first generated token.
     """
     tags = _metric_tags(rank_id, server_id)
     if now is None:
         now = time.time()
-    if is_first:
-        ttfb_ms = (now - record.start_ts) * 1000.0
-        kmonitor.report(GaugeMetrics.RESPONSE_FIRST_TOKEN_RT_METRIC, ttfb_ms, tags)
-    else:
+    if is_first_token:
+        ttft_ms = (now - record.start_ts) * 1000.0
+        kmonitor.report(GaugeMetrics.RESPONSE_FIRST_TOKEN_RT_METRIC, ttft_ms, tags)
+    if not is_first:
         last = record.last_chunk_ts or record.first_resp_ts or record.start_ts
         iter_rt_ms = (now - last) * 1000.0
         kmonitor.report(GaugeMetrics.RESPONSE_ITER_RT_METRIC, iter_rt_ms, tags)
@@ -170,11 +170,15 @@ def _report_frontend_structured_metrics(
         kind = (
             "non_contiguous_span_repeat"
             if output.non_contiguous
-            else "same_token_run"
-            if output.repeat_unit_size == 1
-            else "exact_ngram_loop"
-            if output.repeat_unit_size <= 64
-            else "long_span_repeat"
+            else (
+                "same_token_run"
+                if output.repeat_unit_size == 1
+                else (
+                    "exact_ngram_loop"
+                    if output.repeat_unit_size <= 64
+                    else "long_span_repeat"
+                )
+            )
         )
         output_tags = {**tags, "kind": kind, "action": "metric"}
         kmonitor.report(AccMetrics.OUTPUT_REPETITION_QPS_METRIC, 1, output_tags)

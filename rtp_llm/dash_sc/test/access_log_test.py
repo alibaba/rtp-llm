@@ -462,7 +462,7 @@ class BuildRecordTest(TestCase):
             (_make_stream_response(generated_ids=[40]), [40], True, 0, None),
         ):
             rec.record_generated_ids(ids)
-            _, now = rec.record_response_chunk(resp)
+            _, _, now = rec.record_response_chunk(resp, delta_len=len(ids))
             if rec.prompt_cached_token_num is None and cached is not None:
                 rec.prompt_cached_token_num = cached
             rec.finish_reason = finish_reason
@@ -473,9 +473,6 @@ class BuildRecordTest(TestCase):
             rec.max_tokens_per_frame = max(rec.max_tokens_per_frame, delta_len)
             if delta_len > 1:
                 rec.multi_token_frame_count += 1
-            if rec.first_token_ts is None:
-                rec.first_token_ts = now
-                rec.first_token_frame_len = delta_len
             rec.last_token_ts = now
             if finished and not rec.terminal_seen:
                 rec.terminal_seen = True
@@ -833,15 +830,52 @@ class GrpcMetricsTest(TestCase):
     def test_chunk_first_vs_iter(self) -> None:
         rec = _make_record()
         grpc_metrics.report_chunk(
-            rec, rank_id=self.rank_id, server_id=self.server_id, is_first=True
+            rec,
+            rank_id=self.rank_id,
+            server_id=self.server_id,
+            is_first=True,
+            is_first_token=True,
         )
         grpc_metrics.report_chunk(
-            rec, rank_id=self.rank_id, server_id=self.server_id, is_first=False
+            rec,
+            rank_id=self.rank_id,
+            server_id=self.server_id,
+            is_first=False,
+            is_first_token=False,
         )
         metrics = self._metrics()
         self.assertEqual(metrics.count(GaugeMetrics.RESPONSE_FIRST_TOKEN_RT_METRIC), 1)
         self.assertEqual(metrics.count(GaugeMetrics.RESPONSE_ITER_RT_METRIC), 1)
         self.assertEqual(metrics.count(AccMetrics.ITER_QPS_METRIC), 2)
+
+    def test_first_token_latency_after_estimated_usage(self) -> None:
+        fake = _make_stream_response(generated_ids=[])
+        fake.infer_response.parameters["estimated_usage"].bool_param = True
+        fake.infer_response.raw_output_contents[0] = struct.pack("<i", 0)
+        token = _make_stream_response(generated_ids=[0])
+        error = _make_dash_error_response()
+        metric = GaugeMetrics.RESPONSE_FIRST_TOKEN_RT_METRIC
+        for raw_mode in (False, True):
+            for frames, expected in (
+                ([(fake, 0), (token, 1), (token, 1)], [2000.0]),
+                ([(fake, 0), (error, 0)], []),
+            ):
+                with self.subTest(raw_mode=raw_mode, expected=expected):
+                    self.calls.clear()
+                    rec = _make_record(start_ts=10.0, raw_mode=raw_mode)
+                    for now, (resp, length) in enumerate(frames, start=11):
+                        first, first_token, ts = rec.record_response_chunk(
+                            resp, now=now, delta_len=None if raw_mode else length
+                        )
+                        grpc_metrics.report_chunk(
+                            rec,
+                            rank_id=self.rank_id,
+                            server_id=self.server_id,
+                            is_first=first,
+                            is_first_token=first_token,
+                            now=ts,
+                        )
+                    self.assertEqual([v for _, v, _ in self._for(metric)], expected)
 
     def test_done_success(self) -> None:
         rec = _make_record(input_len=3, output_len=5, resp_count=2)

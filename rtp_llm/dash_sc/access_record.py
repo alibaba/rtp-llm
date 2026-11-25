@@ -574,6 +574,7 @@ class GrpcAccessRecord:
         if aux_info is None or (not overwrite and self.aux_info is not None):
             return
         self.aux_info = aux_info
+
     def check_repetition(self) -> None:
         self._repetition_monitor.check_generated_ids(self.generated_ids or ())
 
@@ -783,21 +784,29 @@ class GrpcAccessRecord:
         resp: predict_v2_pb2.ModelStreamInferResponse,
         *,
         now: Optional[float] = None,
-    ) -> tuple[bool, float]:
-        """Mark + count one outbound response frame at transport level.
-
-        Returns ``(is_first, now)`` so the caller can drive ``grpc_metrics``
-        without recomputing the timestamp. Pure data mutation — no metrics, no
-        logging. Both servicers call this once per yielded frame; structured
-        token accounting is an explicit second layer.
-        """
+        delta_len: Optional[int] = None,
+    ) -> tuple[bool, bool, float]:
+        """Record a frame and return (first frame, first token, timestamp)."""
         if now is None:
             now = time.time()
         is_first = self.first_resp_ts is None
         self.mark_first_resp(now)
         self.resp_count += 1
         self.capture_response_chunk(resp, now=now)
-        return is_first, now
+        is_first_token = False
+        if self.first_token_ts is None:
+            if delta_len is None and resp is not None:
+                # The proxy has only the wire frame. Empty generated_ids may
+                # contain a padding word, so use the declared token count.
+                for output in resp.infer_response.outputs:
+                    if output.name in ("generated_ids", "token_ids") and output.shape:
+                        delta_len = output.shape[-1]
+                        break
+            if delta_len is not None and delta_len > 0:
+                self.first_token_ts = now
+                self.first_token_frame_len = delta_len
+                is_first_token = True
+        return is_first, is_first_token, now
 
     def resolve_status(self, context, exc: Optional[BaseException]) -> float:
         """Classify the final RPC outcome and return the end timestamp.
