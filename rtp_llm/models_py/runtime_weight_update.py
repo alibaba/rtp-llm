@@ -54,6 +54,13 @@ class LoRAUpdate:
         return (self.b.float() @ self.a.float() * float(self.scale)).to(self.a.dtype)
 
 
+def checked_lora_sum(target: str, base: torch.Tensor, delta: torch.Tensor) -> torch.Tensor:
+    merged = base + delta
+    if not torch.isfinite(merged).all():
+        raise ValueError(f"Non-finite merged LoRA weight for {target!r}")
+    return merged
+
+
 class RuntimeLoRAManager:
     """Atomic runtime LoRA activation for stable NewLoader storages.
 
@@ -278,7 +285,9 @@ class RuntimeLoRAManager:
             TensorUpdate(
                 target,
                 self._weights[target],
-                base + deltas[target] if target in deltas else base,
+                checked_lora_sum(target, base, deltas[target])
+                if target in deltas
+                else base,
             )
             for target, base in bases.items()
         ]
@@ -314,7 +323,9 @@ class RuntimeLoRAManager:
                     TensorUpdate(
                         name,
                         self._weights[name],
-                        base + deltas[name] if name in deltas else base,
+                        checked_lora_sum(name, base, deltas[name])
+                        if name in deltas
+                        else base,
                     )
                     for name, base in staged.items()
                 ]

@@ -11,6 +11,7 @@ from rtp_llm.models_py.quant_methods.base import (
 from rtp_llm.models_py.quant_methods.groupwise_export import cuda_groupwise_layout
 from rtp_llm.models_py.quant_methods.int8 import quantize_weight_only_int8
 from rtp_llm.models_py.read_spec import unwrap_checkpoint_tensor
+from rtp_llm.models_py.runtime_weight_update import checked_lora_sum
 
 
 @lru_cache(maxsize=None)
@@ -156,17 +157,19 @@ class WeightOnlyInt8LinearMethod(QuantizeMethodBase):
         # exact unsigned-offset/interleaved bytes in [K,N] storage. Preserve
         # a signed parameter dtype for state inspection; .view(uint8) is free.
         update = getattr(layer, "_startup_lora_update", None)
+        weight = layer.weight
         if update is not None:
             # TP/fused factors are in checkpoint orientation. Match the base
             # merge: FP32 product, cast the delta, then add before quantization.
-            delta = update.delta().to(layer.weight.dtype)
-            if delta.shape != layer.weight.shape or not torch.isfinite(delta).all():
+            delta = update.delta().to(weight)
+            if delta.shape != weight.shape:
                 raise ValueError(f"Invalid startup LoRA delta for {update.target!r}")
-            layer.weight.add_(delta.to(layer.weight.device))
-            del layer._startup_lora_update
-        packed, scale = pack_weight_only_int8(layer.weight)
+            weight = checked_lora_sum(update.target, weight, delta)
+        packed, scale = pack_weight_only_int8(weight)
         layer.weight = torch.nn.Parameter(packed, requires_grad=False)
         layer.weight_scale = torch.nn.Parameter(scale, requires_grad=False)
+        if update is not None:
+            del layer._startup_lora_update
 
     def apply(self, layer, x, bias=None):
         return apply_packed_weight_only_int8(

@@ -20,6 +20,7 @@ from rtp_llm.models_py.lora_checkpoint import (
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.registry import register_model
+from rtp_llm.models_py.runtime_weight_update import LoRAUpdate, RuntimeLoRAManager
 
 
 class Projection(RtpModule):
@@ -78,6 +79,70 @@ class DirectAdapterTest(unittest.TestCase):
             )
         save_file(tensors, str(dest / "adapter_model.safetensors"))
         return str(dest)
+
+    def test_named_checkpoint_cannot_pair_factors_from_different_adapters(self):
+        path = Path(self.path) / "adapter_model.safetensors"
+        a = torch.tensor([[1.0, 2.0, 3.0]])
+        b = torch.tensor([[1.0], [-1.0]])
+
+        def factors(left, right, target="proj"):
+            return {
+                f"{target}.lora_A{left}.weight": a.clone(),
+                f"{target}.lora_B{right}.weight": b.clone(),
+            }
+
+        save_file(factors(".red", ".red"), str(path))
+        self.manager.load("serving-alias", self.path)
+        self.manager.merge("serving-alias", pause_engine=nullcontext)
+        weight = self.model.proj.weight
+        before, ptr = weight.clone(), weight.data_ptr()
+        self.assertTrue(torch.equal(before, self.base + self.expected_delta))
+        for invalid in (
+            factors(".red", ".blue"),
+            factors("", ".red"),
+            factors(".red", ""),
+            {**factors(".red", ".red"), **factors(".blue", ".blue", "remote")},
+        ):
+            with self.subTest(keys=tuple(invalid)):
+                save_file(invalid, str(path))
+                with self.assertRaisesRegex(ValueError, "Mixed adapter names"):
+                    self.manager.load("invalid", self.path)
+                self.assertEqual(self.manager.loaded_adapters, ("serving-alias",))
+                self.assertEqual(self.manager.active_adapters, ("serving-alias",))
+                self.assertEqual(weight.data_ptr(), ptr)
+                self.assertTrue(torch.equal(weight, before))
+
+    def test_overflow_never_installs_partial_weights_or_changes_active_adapters(self):
+        weights = {k: torch.zeros(1, 1, dtype=torch.float16) for k in ("good", "bad")}
+        manager = RuntimeLoRAManager(weights)
+        for adapter in ("a", "b"):
+            manager.load(
+                adapter,
+                [
+                    LoRAUpdate(k, torch.tensor([[v]]), torch.tensor([[v]]))
+                    for k, v in (("good", 1.0), ("bad", 200.0))
+                ],
+            )
+        manager.merge("a")
+        before = {k: v.clone() for k, v in weights.items()}
+        ptrs = {k: v.data_ptr() for k, v in weights.items()}
+        self.assertEqual(before["bad"].item(), 40000)
+        # First overflow the sum of two finite deltas, then a new base + one delta.
+        for operation in (
+            lambda: manager.merge(["a", "b"]),
+            lambda: manager.update_base_weights(before),
+        ):
+            with self.assertRaisesRegex(ValueError, "Non-finite merged LoRA weight.*bad"):
+                operation()
+            self.assertEqual(manager.active_adapters, ("a",))
+            self.assertEqual(manager.loaded_adapters, ("a", "b"))
+            for k, v in weights.items():
+                self.assertEqual(v.data_ptr(), ptrs[k])
+                self.assertTrue(torch.equal(v, before[k]))
+                self.assertEqual(manager.base_weight(k).item(), 0)
+        manager.unmerge()
+        self.assertEqual(manager.active_adapters, ())
+        self.assertTrue(all(v.item() == 0 for v in weights.values()))
 
     def test_load_merge_unmerge_unload_preserve_storage(self):
         manager = self.manager

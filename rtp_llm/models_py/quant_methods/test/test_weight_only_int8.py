@@ -84,6 +84,28 @@ def load_fixture(
 
 class WeightOnlyInt8CheckpointTest(unittest.TestCase):
     @torch.inference_mode()
+    def test_startup_lora_overflow_leaves_unpacked_weight_untouched(self):
+        from rtp_llm.models_py.runtime_weight_update import LoRAUpdate
+
+        layer = RowParallelLinear(
+            input_size=64, output_size=64, prefix="proj",
+            params_dtype=torch.float16, quant_config=QuantizationConfig("INT8"),
+        )
+        base = torch.full((64, 64), 40000.0, dtype=torch.float16)
+        layer.load_weights({"weight": base.clone()})
+        original = layer.weight
+        update = LoRAUpdate(
+            "proj.weight", torch.full((1, 64), 200.0), torch.full((64, 1), 200.0)
+        )
+        layer.quant_method.stage_startup_lora(layer, update)
+        with self.assertRaisesRegex(ValueError, "Non-finite merged LoRA weight.*proj.weight"):
+            layer.process_weights_after_loading()
+        self.assertIs(layer.weight, original)
+        self.assertTrue(torch.equal(layer.weight, base))
+        self.assertIsNone(layer.weight_scale)
+        self.assertIs(layer._startup_lora_update, update)
+
+    @torch.inference_mode()
     def test_update_requantizes_complete_shard_without_replacing_storage(self):
         from rtp_llm.models_py.runtime_weight_update import RuntimeWeightTransaction
 

@@ -286,18 +286,24 @@ def read_lora_checkpoint(path: str) -> list[LoRAUpdate]:
     if not isinstance(tensors, dict) or not tensors:
         raise ValueError("LoRA checkpoint must contain a non-empty tensor mapping")
     pairs = {}
+    checkpoint_adapter = None
     for name, tensor in tensors.items():
         if not isinstance(name, str):
             raise ValueError("LoRA tensor names must be strings")
         name = name.removeprefix("base_model.model.")
-        match = re.fullmatch(r"(.+)\.lora_([AB])(?:\.[^.]+)?\.weight", name)
+        match = re.fullmatch(r"(.+)\.lora_([AB])(?:\.([^.]+))?\.weight", name)
         if match is None:
             raise ValueError(f"Unexpected LoRA checkpoint tensor {name!r}")
         if not isinstance(tensor, torch.Tensor) or tensor.ndim != 2:
             raise ValueError(f"LoRA factor {name!r} must be a rank-2 tensor")
         if tensor.dtype not in (torch.float16, torch.bfloat16, torch.float32):
             raise ValueError(f"Unsupported LoRA factor dtype for {name!r}")
-        target, factor = match.groups()
+        target, factor, adapter = match.groups()
+        # One PEFT config describes one adapter, including on non-local targets.
+        if not pairs:
+            checkpoint_adapter = adapter
+        elif adapter != checkpoint_adapter:
+            raise ValueError("Mixed adapter names in one LoRA checkpoint")
         pair = pairs.setdefault(target + ".weight", {})
         if factor in pair:
             raise ValueError(f"Duplicate LoRA factor for {target!r}")
