@@ -11,6 +11,7 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -21,6 +22,7 @@ import java.util.function.Predicate;
 import static org.flexlb.config.RoutingConfig.QueuedRequestPolicy.DISABLED;
 import static org.flexlb.config.RoutingConfig.QueuedRequestPolicy.HIGHEST_HIT_RATE_FIRST;
 import static org.flexlb.config.RoutingConfig.QueuedRequestPolicy.LOWEST_HIT_RATE_FIRST;
+import static org.flexlb.config.RoutingConfig.QueuedRequestPolicy.MIN_SOURCE_CACHE_HIT_RATE;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.Mockito.mock;
@@ -73,6 +75,33 @@ class QueuedMigrationCandidatesTest {
         verify(source, never()).getStatus();
         assertEquals(highPriorityCold, QueuedMigrationCandidates.candidate(source, LOWEST_HIT_RATE_FIRST, false,
                 item -> item != ineligibleTail, new QueuedMigrationCandidates.Cursor()));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void strictMinimumUsesCurrentSourceHitsAndRotatesOnlyAmongEligibleMinima(boolean costOrdered) {
+        var cache = new CacheStatus();
+        cache.setBlockSize(4L);
+        cache.setCachedKeys(Set.of(1L, 2L));
+        var nearHead = queued(1, 16, 16, List.of(1L, 9L));
+        var nearTail = queued(2, 32, 32, List.of(1L, 2L, 9L));
+        var warmTail = queued(3, 8, 0, List.of(1L, 9L));
+        var ineligible = queued(4, 16, 0, List.of(9L));
+        var source = source(cache, List.of(nearHead, nearTail, warmTail, ineligible));
+        var cursor = new QueuedMigrationCandidates.Cursor();
+        Predicate<ScheduledRequest> eligible = item -> item != ineligible;
+
+        // 4/16 and 8/32 tie below the tail's 4/8, despite their higher placement estimates.
+        for (var expected : List.of(nearTail, nearHead, nearTail)) {
+            assertEquals(expected, QueuedMigrationCandidates.candidate(
+                    source, MIN_SOURCE_CACHE_HIT_RATE, costOrdered, eligible, cursor));
+        }
+        // The next scan must use the refreshed prefix: only nearTail now falls to 4/32.
+        cache.setCachedKeys(Set.of(1L));
+        for (int attempt = 0; attempt < 2; attempt++) {
+            assertEquals(nearTail, QueuedMigrationCandidates.candidate(
+                    source, MIN_SOURCE_CACHE_HIT_RATE, costOrdered, eligible, cursor));
+        }
     }
 
     @Test

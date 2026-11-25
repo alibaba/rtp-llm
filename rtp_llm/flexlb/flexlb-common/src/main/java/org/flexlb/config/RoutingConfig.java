@@ -84,7 +84,9 @@ public final class RoutingConfig {
     public enum QueuedRequestPolicy {
         DISABLED,
         HIGHEST_HIT_RATE_FIRST,
-        LOWEST_HIT_RATE_FIRST
+        LOWEST_HIT_RATE_FIRST,
+        /** Always choose the minimum source prefix hit ratio among eligible queued requests. */
+        MIN_SOURCE_CACHE_HIT_RATE
     }
 
     /** Prefill selection by outstanding uncached tokens with hot/cold cache affinity. */

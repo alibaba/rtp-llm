@@ -98,7 +98,7 @@ class QueuedHotspotMigrationScenarioTest {
             var receiver = (PrefillEndpoint) endpoints.get(RoleType.PREFILL, RECEIVER + ":8080");
             var expected = switch (policy) {
                 case DISABLED -> List.<Long>of();
-                case LOWEST_HIT_RATE_FIRST -> List.of(5L, 7L);
+                case LOWEST_HIT_RATE_FIRST, MIN_SOURCE_CACHE_HIT_RATE -> List.of(5L, 7L);
                 case HIGHEST_HIT_RATE_FIRST -> List.of(6L, 8L);
             };
             if (policy != QueuedRequestPolicy.DISABLED) {

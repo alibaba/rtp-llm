@@ -31,8 +31,12 @@ final class QueuedMigrationCandidates {
     }
 
     private record Scored(int index, long hits, long input) {
+        private int compareRate(Scored other) {
+            return PrefillCostOrder.compareTokenRatios(hits, input, other.hits, other.input);
+        }
+
         private int compareTo(Scored other, boolean highestFirst) {
-            int byRate = PrefillCostOrder.compareTokenRatios(hits, input, other.hits, other.input);
+            int byRate = compareRate(other);
             if (byRate == 0) { return Integer.compare(other.index, index); }
             return highestFirst ? -byRate : byRate;
         }
@@ -48,8 +52,7 @@ final class QueuedMigrationCandidates {
         boolean fromTail = costOrdered && policy == QueuedRequestPolicy.LOWEST_HIT_RATE_FIRST;
         int previous = cursor.previousIndex(items, policy, fromTail);
         int next = fromTail || items.size() <= 1 ? nextFromTail(items, previous, eligible)
-                : nextByHitRate(items, previous, eligible, source.getStatus().getCacheStatus(),
-                        policy == QueuedRequestPolicy.HIGHEST_HIT_RATE_FIRST);
+                : nextByHitRate(items, previous, eligible, source.getStatus().getCacheStatus(), policy);
         cursor.index = next;
         if (next < 0) { return null; }
         cursor.sequence = items.get(next).enqueueSeq();
@@ -68,7 +71,8 @@ final class QueuedMigrationCandidates {
     }
 
     private static int nextByHitRate(List<ScheduledRequest> items, int previous, Predicate<ScheduledRequest> eligible,
-                                     CacheStatus cache, boolean highestFirst) {
+                                     CacheStatus cache, QueuedRequestPolicy policy) {
+        boolean highestFirst = policy == QueuedRequestPolicy.HIGHEST_HIT_RATE_FIRST;
         Scored last = previous < 0 ? null : score(items.get(previous), previous, cache);
         Scored best = null;
         Scored successor = null;
@@ -81,7 +85,11 @@ final class QueuedMigrationCandidates {
                 successor = current;
             }
         }
-        if (successor != null) { return successor.index(); }
+        // Strict minimum only rotates among ties, even if the previous candidate could not move.
+        if (successor != null && (policy != QueuedRequestPolicy.MIN_SOURCE_CACHE_HIT_RATE
+                || successor.compareRate(best) == 0)) {
+            return successor.index();
+        }
         return best == null ? -1 : best.index();
     }
 
