@@ -1,22 +1,431 @@
+import atexit
+import builtins
+import errno
+import hashlib
 import logging
+import os
+import tempfile
 import time
 import unittest
-from unittest.mock import MagicMock, Mock, patch
+from pathlib import Path
+from unittest.mock import MagicMock, Mock, mock_open, patch
 
 import requests
 
 import rtp_llm.utils.fuser as fuser
-from rtp_llm.utils.fuser import Fuser, _redact_uri, retry_with_timeout
+from rtp_llm.aios.kmonitor.python_client.kmonitor.utils.hippo_helper import HippoHelper
+from rtp_llm.utils.fuser import (
+    Fuser,
+    _redact_uri,
+    MountRwMode,
+    _fuse_mount_options,
+    fetch_remote_file_to_local,
+    retry_with_timeout,
+    umount_file,
+)
+from rtp_llm.utils.jit_cache_store import resolve_remote
 
 
 class TestFuser(unittest.TestCase):
     def setUp(self):
         self.fuser = Fuser()
+        self.addCleanup(atexit.unregister, self.fuser.umount_all)
+        mount_root = tempfile.TemporaryDirectory()
+        self.addCleanup(mount_root.cleanup)
+        self.fuser._fuse_path_prefix = mount_root.name
         self.mock_response = MagicMock()
         self.mock_response.json.return_value = {"errorCode": 0}
+        self.external_mounts = {}
+        mount_options = patch(
+            "rtp_llm.utils.fuser._fuse_mount_options",
+            side_effect=lambda path: self.external_mounts.get(path),
+        )
+        self.mount_options = mount_options.start()
+        self.addCleanup(mount_options.stop)
 
     def tearDown(self):
         self.fuser._mount_src_map = {}
+
+    def mount_path(self, uri):
+        return (
+            Path(self.fuser._fuse_path_prefix) / hashlib.md5(uri.encode()).hexdigest()
+        )
+
+    def external_mount(self, uri, options=("rw",)):
+        path = self.mount_path(uri)
+        path.mkdir()
+        self.external_mounts[str(path)] = set(options)
+        return path
+
+    @patch("requests.post")
+    def test_external_mount_is_readable_without_mount_or_unmount(self, mock_post):
+        uri = "oss://bucket/model/"
+        mount_path = self.external_mount(uri, options=("ro",))
+        (mount_path / "config.json").write_text('{"model_type": "glm"}')
+
+        with patch("rtp_llm.utils.fuser._fuser", self.fuser):
+            for _ in range(2):
+                local_path = fetch_remote_file_to_local(uri)
+                self.assertEqual(local_path, str(mount_path))
+                self.assertEqual(
+                    (Path(local_path) / "config.json").read_text(),
+                    '{"model_type": "glm"}',
+                )
+            umount_file(local_path)
+            umount_file(local_path, force=True)
+            self.fuser.umount_all()
+
+        self.assertEqual(self.fuser._mount_src_map, {})
+        mock_post.assert_not_called()
+
+    @patch("requests.post")
+    def test_cleanup_only_unmounts_managed_directories(self, mock_post):
+        external_uri = "oss://bucket/external/"
+        external_path = self.external_mount(external_uri)
+        mock_post.return_value = self.mock_response
+
+        for force in (False, True):
+            with self.subTest(force=force):
+                self.assertEqual(
+                    self.fuser.mount_or_reuse_dir(external_uri), str(external_path)
+                )
+                managed_path = self.fuser.mount_or_reuse_dir(
+                    f"oss://bucket/managed/{force}"
+                )
+                Path(managed_path).mkdir()
+                mock_post.reset_mock()
+
+                self.fuser.umount_all(force=force)
+
+                mock_post.assert_called_once_with(
+                    f"{self.fuser._fuse_uri}/FuseService/umount",
+                    json={"mountDir": managed_path},
+                    timeout=600,
+                )
+                self.assertEqual(self.fuser._mount_src_map, {})
+                self.assertTrue(external_path.is_dir())
+
+    @patch("requests.post")
+    def test_removed_external_mount_falls_back_to_mount(self, mock_post):
+        uri = "oss://bucket/model/"
+        mount_path = self.external_mount(uri)
+        self.assertEqual(self.fuser.mount_or_reuse_dir(uri), str(mount_path))
+        mock_post.assert_not_called()
+
+        mount_path.rmdir()
+        self.external_mounts.clear()
+        mock_post.return_value = self.mock_response
+        self.assertEqual(self.fuser.mount_or_reuse_dir(uri), str(mount_path))
+
+        mock_post.assert_called_once()
+        request = mock_post.call_args.kwargs["json"]
+        self.assertEqual(request["uri"], uri)
+        self.assertEqual(request["mountDir"], str(mount_path))
+        self.assertEqual(self.fuser._mount_src_map[str(mount_path)], (uri, 1))
+
+    @patch("requests.post")
+    def test_existing_directory_is_reused_for_all_mount_options(self, mock_post):
+        uri = "oss://bucket/cache/"
+        mount_path = self.external_mount(uri)
+        for mode in MountRwMode:
+            for enable_ref in (False, True):
+                with self.subTest(mode=mode, enable_ref=enable_ref):
+                    local_path = self.fuser.mount_or_reuse_dir(uri, mode, enable_ref)
+                    self.assertEqual(local_path, str(mount_path))
+                    self.assertEqual(self.fuser._mount_src_map, {})
+                    self.assertEqual(list(mount_path.iterdir()), [])
+                    self.fuser.umount_fuse_dir(local_path, force=True)
+        self.fuser.umount_all()
+        mock_post.assert_not_called()
+
+    @patch("requests.post")
+    def test_missing_directory_preserves_explicit_mount_options(self, mock_post):
+        uri = "oss://bucket/cache/"
+        mock_post.return_value = self.mock_response
+        for mode, enable_ref in (
+            (MountRwMode.RWMODE_RO, False),
+            (MountRwMode.RWMODE_RO, True),
+            (MountRwMode.RWMODE_WO, False),
+            (MountRwMode.RWMODE_WO, True),
+            (MountRwMode.RWMODE_RW, False),
+            (MountRwMode.RWMODE_RW, True),
+        ):
+            with self.subTest(mode=mode, enable_ref=enable_ref):
+                self.fuser._mount_src_map.clear()
+                mock_post.reset_mock()
+                local_path = self.fuser.mount_or_reuse_dir(uri, mode, enable_ref)
+                mock_post.assert_called_once()
+                request = mock_post.call_args.kwargs["json"]
+                self.assertEqual(request["rwMode"], mode.name)
+                self.assertEqual(request["enableMntRef"], enable_ref)
+                self.assertEqual(self.fuser._mount_src_map[local_path], (uri, 1))
+
+    @patch("requests.post")
+    def test_remote_jit_cache_uses_external_mount_for_publish_and_restore(
+        self, mock_post
+    ):
+        uri = "oss://bucket/jit-cache/"
+        mount_path = self.external_mount(uri)
+        local_root = Path(self.fuser._fuse_path_prefix)
+        kernel = local_root / "kernel.cubin"
+        kernel.write_bytes(b"compiled kernel")
+
+        with patch("rtp_llm.utils.fuser._fuser", self.fuser):
+            store = resolve_remote(uri, "v1", "test-scope")
+            self.assertIsNotNone(store)
+            try:
+                self.assertEqual(store.remote_root, mount_path / "v1/test-scope")
+                store.publish_snapshot({"triton/kernel.cubin": kernel})
+                restored = store.prepare_restore(local_root / "restore-staging")
+                self.assertIsNotNone(restored)
+                self.assertEqual(
+                    (restored.staging / "triton/kernel.cubin").read_bytes(),
+                    kernel.read_bytes(),
+                )
+            finally:
+                store.close()
+            self.fuser.umount_all()
+
+        self.assertTrue(mount_path.is_dir())
+        self.assertEqual(self.fuser._mount_src_map, {})
+        mock_post.assert_not_called()
+
+    @patch("requests.post")
+    def test_remote_jit_cache_unusable_external_mount_fails_open(self, mock_post):
+        uri = "oss://bucket/jit-cache/"
+        mount_path = self.external_mount(uri)
+        with patch("rtp_llm.utils.fuser._fuser", self.fuser), patch(
+            "rtp_llm.utils.jit_cache_store.os.access", return_value=False
+        ), self.assertLogs(level="WARNING") as logs:
+            self.assertIsNone(resolve_remote(uri, "v1", "test-scope"))
+
+        self.assertTrue(any("JIT_CACHE_FAIL_OPEN" in line for line in logs.output))
+        self.assertTrue(mount_path.is_dir())
+        mock_post.assert_not_called()
+
+    @patch("requests.post")
+    def test_remote_jit_cache_missing_directory_is_mounted_and_released(
+        self, mock_post
+    ):
+        uri = "oss://bucket/jit-cache/"
+        mount_path = self.mount_path(uri)
+
+        def mount_response(url, **kwargs):
+            if url.endswith("/FuseService/mount"):
+                mount_path.mkdir()
+            return self.mock_response
+
+        mock_post.side_effect = mount_response
+        with patch("rtp_llm.utils.fuser._fuser", self.fuser):
+            store = resolve_remote(uri, "v1", "test-scope")
+            self.assertIsNotNone(store)
+            try:
+                mock_post.assert_called_once()
+                request = mock_post.call_args.kwargs["json"]
+                self.assertEqual(request["rwMode"], "RWMODE_RW")
+                self.assertTrue(request["enableMntRef"])
+                self.assertEqual(request["cacheOptions"]["writeMode"], "WRITE_THROGH")
+                self.assertEqual(self.fuser._mount_src_map[str(mount_path)], (uri, 1))
+            finally:
+                store.close()
+
+        self.assertEqual(self.fuser._mount_src_map, {})
+        self.assertEqual(mock_post.call_count, 2)
+        self.assertTrue(mock_post.call_args.args[0].endswith("/FuseService/umount"))
+
+    @patch("requests.post")
+    def test_managed_mount_keeps_reference_count(self, mock_post):
+        uri = "oss://bucket/model/"
+        mock_post.return_value = self.mock_response
+        local_path = self.fuser.mount_or_reuse_dir(uri)
+        Path(local_path).mkdir()
+        self.external_mounts[local_path] = {"rw"}
+        with patch("rtp_llm.utils.fuser._check_external_mount_access") as check:
+            self.assertEqual(self.fuser.mount_or_reuse_dir(uri), local_path)
+            check.assert_not_called()
+        self.assertEqual(self.fuser._mount_src_map[local_path], (uri, 2))
+        self.assertEqual(mock_post.call_count, 2)
+
+        self.fuser.umount_fuse_dir(local_path)
+        self.assertEqual(self.fuser._mount_src_map[local_path], (uri, 1))
+        self.assertEqual(mock_post.call_count, 2)
+        self.fuser.umount_fuse_dir(local_path)
+        self.assertNotIn(local_path, self.fuser._mount_src_map)
+        self.assertTrue(mock_post.call_args.args[0].endswith("/FuseService/umount"))
+
+    @patch("requests.post")
+    def test_file_at_mount_path_is_not_reused(self, mock_post):
+        uri = "oss://bucket/model/"
+        self.mount_path(uri).write_text("not a directory")
+        mock_post.return_value = self.mock_response
+        self.fuser.mount_or_reuse_dir(uri)
+        mock_post.assert_called_once()
+
+    @patch("requests.post")
+    def test_plain_directory_is_not_treated_as_a_mount(self, mock_post):
+        uri = "oss://bucket/model/"
+        mount_path = self.mount_path(uri)
+        mount_path.mkdir()
+        (mount_path / "stale.json").write_text("stale local data")
+        mock_post.return_value = self.mock_response
+
+        with patch("rtp_llm.utils.fuser._check_external_mount_access") as check:
+            self.assertEqual(self.fuser.mount_or_reuse_dir(uri), str(mount_path))
+            check.assert_not_called()
+        mock_post.assert_called_once()
+        self.assertEqual(self.fuser._mount_src_map[str(mount_path)], (uri, 1))
+
+    @patch("requests.post")
+    def test_readonly_mount_is_not_read(self, mock_post):
+        uri = "oss://bucket/model/"
+        mount_path = self.external_mount(uri, options=("ro",))
+        weights = mount_path / "weights.bin"
+        weights.write_bytes(b"weights")
+
+        with patch("rtp_llm.utils.fuser.open", wraps=builtins.open) as open_file:
+            self.assertEqual(self.fuser.mount_or_reuse_dir(uri), str(mount_path))
+            open_file.assert_not_called()
+
+        self.assertEqual(weights.read_bytes(), b"weights")
+        self.assertEqual(list(mount_path.iterdir()), [weights])
+        mock_post.assert_not_called()
+
+    @patch("requests.post")
+    def test_readonly_mount_rejects_write_modes_without_remount(self, mock_post):
+        uri = "oss://bucket/cache/"
+        mount_path = self.external_mount(uri, options=("ro",))
+        for mode in (MountRwMode.RWMODE_RW, MountRwMode.RWMODE_WO):
+            with self.subTest(mode=mode), self.assertRaises(PermissionError) as error:
+                self.fuser.mount_or_reuse_dir(uri, mode)
+            self.assertEqual(error.exception.errno, errno.EROFS)
+        self.assertEqual(list(mount_path.iterdir()), [])
+        self.assertEqual(self.fuser._mount_src_map, {})
+        mock_post.assert_not_called()
+
+    @patch("requests.post")
+    def test_dead_external_mount_does_not_remount(self, mock_post):
+        uri = "oss://bucket/model/"
+        self.external_mount(uri)
+        with patch(
+            "rtp_llm.utils.fuser.os.statvfs",
+            side_effect=OSError(errno.ENOTCONN, "Transport endpoint is not connected"),
+        ), self.assertRaises(OSError) as error:
+            self.fuser.mount_or_reuse_dir(uri)
+        self.assertEqual(error.exception.errno, errno.ENOTCONN)
+        mock_post.assert_not_called()
+
+    @patch("requests.post")
+    def test_external_mount_reuse_never_writes(self, mock_post):
+        uri = "oss://bucket/jit-cache/"
+        mount_path = self.external_mount(uri)
+        with patch("rtp_llm.utils.fuser.open", wraps=builtins.open) as open_file, patch(
+            "rtp_llm.utils.fuser.os.rename"
+        ) as rename, patch("rtp_llm.utils.fuser.os.unlink") as unlink:
+            self.assertEqual(
+                self.fuser.mount_or_reuse_dir(uri, MountRwMode.RWMODE_RW),
+                str(mount_path),
+            )
+        open_file.assert_not_called()
+        rename.assert_not_called()
+        unlink.assert_not_called()
+        self.assertEqual(list(mount_path.iterdir()), [])
+        self.assertEqual(self.fuser._mount_src_map, {})
+        mock_post.assert_not_called()
+
+    @patch("requests.post")
+    def test_oss_delayed_visibility_does_not_block_reuse(self, mock_post):
+        # OSS FUSE only exposes an object after its background upload, so any
+        # read/write probe would race it. Reuse must not touch the mount.
+        uri = "oss://bucket/jit-cache/"
+        mount_path = self.external_mount(uri)
+
+        def still_uploading(*args, **kwargs):
+            raise OSError(errno.EIO, "object is still uploading")
+
+        with patch("rtp_llm.utils.fuser.open", side_effect=still_uploading), patch(
+            "rtp_llm.utils.fuser.os.rename", side_effect=still_uploading
+        ), patch("rtp_llm.utils.fuser.os.unlink", side_effect=still_uploading):
+            self.assertEqual(
+                self.fuser.mount_or_reuse_dir(uri, MountRwMode.RWMODE_RW),
+                str(mount_path),
+            )
+        self.assertEqual(list(mount_path.iterdir()), [])
+        mock_post.assert_not_called()
+
+    @patch("requests.post")
+    def test_mountinfo_error_does_not_trigger_mount(self, mock_post):
+        self.mount_options.side_effect = PermissionError("cannot read mountinfo")
+        with self.assertRaises(PermissionError):
+            self.fuser.mount_or_reuse_dir("oss://bucket/model/")
+        mock_post.assert_not_called()
+
+    @patch("requests.post")
+    def test_remote_jit_cache_readonly_external_mount_fails_open(self, mock_post):
+        uri = "oss://bucket/jit-cache/"
+        mount_path = self.external_mount(uri, options=("ro",))
+        with patch("rtp_llm.utils.fuser._fuser", self.fuser), self.assertLogs(
+            level="WARNING"
+        ) as logs:
+            self.assertIsNone(resolve_remote(uri, "v1", "test-scope"))
+        self.assertTrue(any("JIT_CACHE_FAIL_OPEN" in line for line in logs.output))
+        self.assertEqual(list(mount_path.iterdir()), [])
+        mock_post.assert_not_called()
+
+    @patch("requests.post")
+    def test_active_mount_does_not_run_reuse_checks(self, mock_post):
+        uri = "oss://bucket/model/"
+        self.external_mount(uri, options=("ro",))
+        mock_post.return_value = self.mock_response
+        with patch("rtp_llm.utils.fuser._check_external_mount_access") as check:
+            local_path = self.fuser.mount_dir(uri, MountRwMode.RWMODE_RW, True)
+            check.assert_not_called()
+        self.mount_options.assert_not_called()
+        mock_post.assert_called_once()
+        self.assertEqual(self.fuser._mount_src_map[local_path], (uri, 1))
+
+    @patch("requests.post")
+    def test_mount_prefixes_can_be_reused_without_sidecar_probe(self, mock_post):
+        uri = "oss://bucket/model/"
+        suffix = hashlib.md5(uri.encode()).hexdigest()
+        for port, prefix in ((None, "/mnt/fuse"), ("12345", "/work/app/fuse")):
+            with self.subTest(port=port), patch.object(
+                HippoHelper, "host_fuse_port", return_value=port
+            ), patch.object(HippoHelper, "app_workdir", "/work/app"), patch(
+                "rtp_llm.utils.fuser._check_external_mount_access"
+            ) as check, patch(
+                "rtp_llm.utils.fuser._fuser", None
+            ):
+                self.external_mounts[f"{prefix}/{suffix}"] = {"ro"}
+                self.assertEqual(fetch_remote_file_to_local(uri), f"{prefix}/{suffix}")
+                check.assert_called_once_with(
+                    f"{prefix}/{suffix}", MountRwMode.RWMODE_RO, {"ro"}
+                )
+        mock_post.assert_not_called()
+
+    @patch("requests.post")
+    def test_availability_is_probed_on_demand_and_cached(self, mock_post):
+        for status, expected in ((200, True), (500, False)):
+            with self.subTest(status=status):
+                mock_post.reset_mock()
+                mock_post.return_value.status_code = status
+                fuser = Fuser()
+                self.addCleanup(atexit.unregister, fuser.umount_all)
+                mock_post.assert_not_called()
+                self.assertEqual(fuser.available, expected)
+                self.assertEqual(fuser.available, expected)
+                mock_post.assert_called_once()
+
+    @patch("rtp_llm.utils.fuser._get_fuser")
+    @patch("rtp_llm.utils.fuser._nfs_manager.mount_nfs_dir")
+    def test_local_and_nas_paths_keep_existing_behavior(self, mock_nfs, mock_fuser):
+        self.assertEqual(fetch_remote_file_to_local("/models/glm"), "/models/glm")
+        mock_nfs.assert_not_called()
+        mock_nfs.return_value = "/mounted/nas/model"
+        self.assertEqual(
+            fetch_remote_file_to_local("nas://server/model"), "/mounted/nas/model"
+        )
+        mock_nfs.assert_called_once_with("nas://server/model")
+        mock_fuser.assert_not_called()
 
     @patch("requests.post")
     def test_mount_dir_success(self, mock_post):
@@ -41,13 +450,30 @@ class TestFuser(unittest.TestCase):
         ]
 
         # Mock requests.post并设置side effects
-        with patch("requests.post", side_effect=side_effects) as mock_post:
-            fuser = Fuser()
-            mount_path = fuser.mount_dir("test-path")
+        with patch("requests.post", side_effect=side_effects) as mock_post, patch(
+            "rtp_llm.utils.fuser.time.sleep"
+        ):
+            mount_path = self.fuser.mount_dir("test-path")
             self.assertEqual(mock_post.call_count, 3)
-            fuser._mount_src_map = {}
 
         self.assertIsNotNone(mount_path)
+
+    @patch("rtp_llm.utils.fuser.time.sleep")
+    def test_failed_mount_directory_does_not_bypass_retry(self, mock_sleep):
+        uri = "oss://bucket/model/"
+        mount_path = self.mount_path(uri)
+
+        def mount_response(*args, **kwargs):
+            if not mount_path.exists():
+                mount_path.mkdir()
+                self.external_mounts[str(mount_path)] = {"rw"}
+                return Mock(json=lambda: {"errorCode": 1})
+            return self.mock_response
+
+        with patch("requests.post", side_effect=mount_response) as mock_post:
+            self.assertEqual(self.fuser.mount_or_reuse_dir(uri), str(mount_path))
+            self.assertEqual(mock_post.call_count, 2)
+            self.assertEqual(self.fuser._mount_src_map[str(mount_path)], (uri, 1))
 
     @patch("requests.post")
     def test_umount_fuse_dir_success(self, mock_post):
@@ -121,6 +547,81 @@ class TestFuser(unittest.TestCase):
         self.assertIn("OSS_ENDPOINT=oss-cn-shanghai.aliyuncs.com", redacted)
         self.assertIn("OSS_ACCESS_ID=", redacted)
         self.assertIn("OSS_ACCESS_KEY=", redacted)
+
+
+class FuseMountInfoTest(unittest.TestCase):
+    def test_mount_namespace_and_options(self):
+        root = "1 0 8:1 / / rw - ext4 /dev/root rw\n"
+        fuse = "2 1 0:99 / /mnt/fuse rw - fuse.ossfs oss rw\n"
+        cases = (
+            ("ordinary directory", root, "/mnt/fuse/hash", None),
+            ("exact mount", root + fuse, "/mnt/fuse", {"rw"}),
+            ("parent mount", root + fuse, "/mnt/fuse/hash", {"rw"}),
+            ("sibling prefix", root + fuse, "/mnt/fuse-other/hash", None),
+            (
+                "bind mount of fuse subdirectory",
+                root + "2 1 0:99 /models/glm /mnt/fuse/hash ro - fuse.ossfs oss rw\n",
+                "/mnt/fuse/hash",
+                {"ro", "rw"},
+            ),
+            (
+                "read-only superblock",
+                root + "2 1 0:99 / /mnt/fuse rw - fuse.ossfs oss ro\n",
+                "/mnt/fuse/hash",
+                {"ro", "rw"},
+            ),
+            (
+                "escaped mount path",
+                root + "2 1 0:99 / /mnt/my\\040fuse\\134dir rw - fuse.ossfs oss rw\n",
+                "/mnt/my fuse\\dir/hash",
+                {"rw"},
+            ),
+            (
+                "non-fuse child hides parent",
+                root + fuse + "3 2 0:1 / /mnt/fuse/hash rw - tmpfs tmpfs rw\n",
+                "/mnt/fuse/hash",
+                None,
+            ),
+            (
+                "stacked non-fuse mount in reverse record order",
+                root + "3 2 0:1 / /mnt/fuse rw - tmpfs tmpfs rw\n" + fuse,
+                "/mnt/fuse/hash",
+                None,
+            ),
+            (
+                "ancestor mount hides a deeper fuse sibling",
+                root
+                + "2 1 0:99 / /mnt/fuse/hash rw - fuse.ossfs oss rw\n"
+                + "3 1 0:1 / /mnt/fuse rw - tmpfs tmpfs rw\n",
+                "/mnt/fuse/hash",
+                None,
+            ),
+            (
+                "ancestor overmount hides a deeper fuse child",
+                root
+                + fuse
+                + "3 2 0:100 / /mnt/fuse/hash rw - fuse.ossfs oss rw\n"
+                + "4 2 0:1 / /mnt/fuse rw - tmpfs tmpfs rw\n",
+                "/mnt/fuse/hash",
+                None,
+            ),
+            (
+                "fuse child on the visible overmount",
+                root
+                + fuse
+                + "3 2 0:100 / /mnt/fuse/hash ro - fuse.ossfs old ro\n"
+                + "4 2 0:1 / /mnt/fuse rw - tmpfs tmpfs rw\n"
+                + "5 4 0:101 / /mnt/fuse/hash rw - fuse.ossfs new rw\n",
+                "/mnt/fuse/hash",
+                {"rw"},
+            ),
+            ("malformed entry", root + "invalid mount entry\n", "/mnt/fuse", None),
+        )
+        for label, contents, path, expected in cases:
+            with self.subTest(label=label), patch(
+                "rtp_llm.utils.fuser.open", mock_open(read_data=contents)
+            ):
+                self.assertEqual(_fuse_mount_options(path), expected)
 
 
 class RetryDecoratorTest(unittest.TestCase):
