@@ -89,7 +89,7 @@ std::shared_ptr<EmbeddingOutput> EmbeddingEngine::decode(th::Tensor             
                                                          bool                             inputs_on_current_stream) {
     auto input = std::make_shared<EmbeddingInput>(
         token_ids, token_type_ids, input_lengths, request_id, multimodal_features, input_embeddings);
-#if USING_CUDA
+#if USING_CUDA || USING_ROCM
     if (inputs_on_current_stream && executor_->canOverlapTensorOutput()) {
         input->allow_stream_overlap = true;
         if ((multimodal_features && !multimodal_features->features.empty())
