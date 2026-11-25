@@ -142,8 +142,6 @@ def local_rank_start(
         backend_manager.serve_forever()
 
     except BaseException as e:
-        if prefill_watchdog is not None:
-            prefill_watchdog.close()
         if service_draining is not None:
             service_draining.set()
         error_msg = f"start server error: {e}"
@@ -407,6 +405,11 @@ def multi_rank_start(
     except BaseException as e:
         if service_draining is not None:
             service_draining.set()
+        if prefill_watchdog is not None:
+            try:
+                prefill_watchdog.close()
+            except Exception:
+                logging.exception("Failed to clean up the Prefill watchdog")
         error_msg = str(e) or type(e).__name__
         error_trace = traceback.format_exc()
         logging.error(f"Multi-rank startup failed: {error_msg}")
