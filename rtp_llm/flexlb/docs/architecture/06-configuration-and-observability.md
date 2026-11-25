@@ -102,6 +102,25 @@ BATCH 的批次占位同样使用请求的上限。
 `ENABLE_STDOUT_LOG`、`ENABLE_FALLBACK` 不再覆盖 JSON。行为配置只认
 所选来源的 `FLEXLB_CONFIG` 文档，避免嵌套字段到环境变量名的隐式转换。
 
+### P 引擎 TTFT 分段采集
+
+`observability.ttftStages.enabled` 默认开启。FlexLB 使用 PREFILL/PDFUSION 已提交的
+WorkerStatus 完成任务，汇总本 Master 观察到的有效 P 任务。大盘按 Master 的公共标签 `HIPPO_ROLE` 筛选部署。单机模式由本机上报，
+启用选主时由当前主节点上报，备节点跳过采集和窗口上报。切主时允许少量样本丢失或混入新窗口。
+远端 KV 是否单列的配置发生变化时，从下一个完整窗口开始使用新口径。
+
+总耗时取 `engine_add_to_first_token_us`。五段为 Hybrid KV 槽位等待、前置远端 KV 等待、
+Scheduler 等待、Prefill 在途墙钟时间及其他。仅在已确认远端 KV 加载完全位于调度之前的部署
+设置 `observability.ttftStages.remoteKvBeforeScheduler=true`。其他为总耗时扣除已归因阶段的余量。
+总耗时缺失或为负、参与拆分的阶段耗时为负、或这些阶段之和超过总耗时时，丢弃该条分段样本。缺失的可选阶段按零参与拆分，对应的未归因耗时留在“其他”。
+
+每个 20 秒窗口按收集时刻归属。`app.prefill.engine.ttft.stages.window20s.*` 按
+`slot` 和 `statistic=mean|p50|p95|p99` 上报总耗时和五段耗时（微秒）。
+分位按总 TTFT 排序取最近秩，同耗时按任务 ID 排序，所有阶段均取自选中的同一任务。
+`samples` 和 `window.end.ms` 标记样本数和窗口结束时间，交替 slot 区分相邻窗口。
+单窗有效任务超过 65,536 条时仍上报均值、任务数和窗口结束时间，跳过该窗的三个分位。
+PLE 通过独立的 `ple.wait.us` 和 `ple.requests` 计数器累计。PLE 耗时须存在且非负。引擎总耗时存在时，PLE 耗时须小于等于总耗时；缺少总耗时时，须有正的 `firstTokenTimeMs`。
+
 ### UniConfig 连接
 
 Spectrum 部署的扩展配置中启用 Turbo UniConfig：
@@ -538,6 +557,37 @@ phase 时间戳的 0 表示未知，缺少时间戳时不报告相减得到的�
 Engine received→waiting 和 waiting→running 使用 WorkerStatus 中 Engine 自己记录的
 阶段时间戳计算。轮询间隔影响 Master 收到样本的时间，不用探测到状态的时间估算阶段耗时；
 完成任务的时间戳完整时，无需在轮询中逐个观察到这些阶段。
+
+### 请求级首 Token 阶段指标
+
+配套 vLLM develop 的请求计时经 DashLLM WorkerStatus RPC 进入 `TaskTelemetry`，
+与 `remote_kv_wait_ms` 一样，在 `GrpcWorkerStatusRunner` 消费 PREFILL/PDFUSION
+完成任务且该任务已有首 token 时，由 `EngineHealthReporter` 上报。只扩展现有
+完成任务入口，不增加监控轮询或另一条 DashLLM 直报链路；上报时间可能晚于首 token。
+
+以下指标均以 `app.engine.worker.status.` 为逻辑前缀，使用 GAUGE + SUMMARY：
+
+| 后缀 | 单位 | 定义 |
+| --- | --- | --- |
+| `scheduler.wait.us` | 微秒 | 原生 Scheduler 接纳到首次为请求分配正 token 预算 |
+| `scheduler.wait.steps` | 次 | 上述等待期间的非空调度轮数，不含首次分配预算轮 |
+| `hybrid.kv.alloc.wait.us` | 微秒 | Hybrid 入队准备到本地 KV 槽位分配成功 |
+| `prefill.inflight.wall.us` | 微秒 | 首 token 前有效 Prefill chunk 的在途墙钟区间并集，不是纯 GPU 计算时间 |
+| `engine.add.to.first.token.us` | 微秒 | EngineCore 接纳到 scheduler 处理首个非空输出 token |
+| `scheduler.wait.for.ple.ready.us` | 微秒 | scheduler 观察到 PLE 未就绪后的累计等待 |
+
+每个字段仅在值存在且非负时上报，明确的 0 是有效样本；旧引擎缺字段不产生零样本。
+标签复用阶段指标的 `role/group` 和 Master 公共身份，不增加 engineIp 或 request_id。
+KMonitor 命名空间沿用当前部署配置；微秒面板除以 1000 显示毫秒，轮数不转换。
+Micrometer provider 仅暴露最近值；GAUGE + SUMMARY 不意味着存在 Prometheus Histogram
+bucket，分位数和跨实例聚合必须以实际接收端支持的统计为准。
+
+引擎内总耗时直接取 `engine.add.to.first.token.us`，不含 EngineCore 输入队列等待
+和向客户端交付首 token 的时间。首次调度前 PLE 等待已经计入 `scheduler.wait.us`；
+原生 connector 的外部 KV 等待也可能与其重叠，因此不能将所有阶段堆叠相加。
+旧 `scheduler.wait.ms` 仍为 waiting→running 扣除 remote KV wait 的口径，不由新增
+`scheduler.wait.us` 覆盖。不同字段的有效样本集合可能不同，不能直接用聚合曲线相减
+推算未覆盖阶段。完成窗口仍有界，不承诺进程故障或长轮询停顿下无损上传。
 
 gRPC 服务端执行器与批次发送执行器初始化后立即通过 `FlexMonitor` 上报一次状态，之后每 2 秒上报忙碌线程数、总线程数和
 排队任务数；gRPC 服务端另报最大线程数、累计拒绝任务数。它们与其它线程池使用相同的

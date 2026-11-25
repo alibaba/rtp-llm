@@ -11,6 +11,7 @@ import org.flexlb.enums.BalanceStatusEnum;
 import org.flexlb.service.address.WorkerAddressService;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.EngineHealthReporter;
+import org.flexlb.service.monitor.TtftStageAggregator;
 import org.flexlb.sync.status.WorkerDirectory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -32,6 +33,7 @@ public class EngineSyncRunner implements Runnable {
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
 
     private final WorkerDirectory workerDirectory;
+    private final TtftStageAggregator ttftStages;
 
     private final WorkerAddressService workerAddressService;
 
@@ -92,7 +94,29 @@ public class EngineSyncRunner implements Runnable {
                             boolean cacheFullSnapshotDebugMode,
                             long statusStaleAfterUs) {
 
+        this(workerDirectory, workerAddressService, statusCheckExecutor, engineHealthReporter,
+                engineGrpcService, roleType, cacheAwareService, cacheIntervalService, syncRequestTimeoutMs,
+                syncCount, syncEngineStatusInterval, kvcmEnabled, cacheFullSnapshotDebugMode, statusStaleAfterUs, null);
+    }
+
+    public EngineSyncRunner(WorkerDirectory workerDirectory,
+                            WorkerAddressService workerAddressService,
+                            ExecutorService statusCheckExecutor,
+                            EngineHealthReporter engineHealthReporter,
+                            EngineGrpcService engineGrpcService,
+                            RoleType roleType,
+                            CacheAwareService cacheAwareService,
+                            DynamicCacheIntervalService cacheIntervalService,
+                            long syncRequestTimeoutMs,
+                            LongAdder syncCount,
+                            Long syncEngineStatusInterval,
+                            boolean kvcmEnabled,
+                            boolean cacheFullSnapshotDebugMode,
+                            long statusStaleAfterUs,
+                            TtftStageAggregator ttftStages) {
+
         this.workerAddressService = workerAddressService;
+        this.ttftStages = ttftStages;
         this.workerDirectory = workerDirectory;
         this.statusCheckExecutor = statusCheckExecutor;
         this.engineHealthReporter = engineHealthReporter;
@@ -184,7 +208,7 @@ public class EngineSyncRunner implements Runnable {
                         GrpcWorkerStatusRunner grpcWorkerStatusRunner = new GrpcWorkerStatusRunner(workerIpPort,
                                 host.getWorkerStatusPort(), site, roleType, host.getGroup(), workerStatus,
                                 statusPollLease, workerDirectory, engineHealthReporter, engineGrpcService,
-                                syncRequestTimeoutMs, cacheAwareService, statusCheckExecutor);
+                                syncRequestTimeoutMs, cacheAwareService, statusCheckExecutor, ttftStages);
                         statusCheckExecutor.submit(grpcWorkerStatusRunner);
                         handedOff = true;
                     } catch (RejectedExecutionException e) {

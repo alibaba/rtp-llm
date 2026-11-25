@@ -286,4 +286,41 @@ class EngineStatusConverterTest {
     private static EngineRpcService.WorkerStatusPB.Builder statusBuilder() {
         return EngineRpcService.WorkerStatusPB.newBuilder().setRole("RoleType.PREFILL");
     }
+
+    @Test
+    void preservesTimingWireTagsAndExplicitZerosForActiveAndFinishedTasks() throws Exception {
+        var bytes = new ByteArrayOutputStream();
+        var wire = CodedOutputStream.newInstance(bytes);
+        wire.writeString(34, "timed-request");
+        for (int tag = 35; tag <= 40; tag++) {
+            wire.writeInt64(tag, tag - 35);
+        }
+        wire.flush();
+        var task = EngineRpcService.TaskInfoPB.parseFrom(bytes.toByteArray());
+        var observation = EngineStatusConverter.convertToStatusObservation(owner,
+                statusBuilder().addRunningTaskInfo(task).addFinishedTaskList(task).build());
+        var timing = observation.finishedTasks().get("timed-request").telemetry();
+        assertEquals(timing, observation.activeTasks().get("timed-request").telemetry());
+        assertEquals(0L, timing.schedulerWaitUs());
+        assertEquals(1L, timing.schedulerWaitSteps());
+        assertEquals(2L, timing.hybridKvAllocWaitUs());
+        assertEquals(3L, timing.prefillInflightWallUs());
+        assertEquals(4L, timing.engineAddToFirstTokenUs());
+        assertEquals(5L, timing.schedulerWaitForPleReadyUs());
+    }
+
+    @Test
+    void leavesUnavailableTimingFieldsNullForOlderWorkers() {
+        var task = EngineRpcService.TaskInfoPB.newBuilder().setRequestIdStr("old-worker").build();
+        var observation = EngineStatusConverter.convertToStatusObservation(owner,
+                statusBuilder().addFinishedTaskList(task).build());
+        var telemetry = observation.finishedTasks().get("old-worker").telemetry();
+
+        assertNull(telemetry.schedulerWaitUs());
+        assertNull(telemetry.schedulerWaitSteps());
+        assertNull(telemetry.hybridKvAllocWaitUs());
+        assertNull(telemetry.prefillInflightWallUs());
+        assertNull(telemetry.engineAddToFirstTokenUs());
+        assertNull(telemetry.schedulerWaitForPleReadyUs());
+    }
 }

@@ -10,6 +10,7 @@ public final class ObservabilityConfig {
 
     private CacheHitConfig cacheHit = new CacheHitConfig();
     private LoggingConfig logging = new LoggingConfig();
+    private TtftStagesConfig ttftStages = new TtftStagesConfig();
 
     @Getter
     @Setter

@@ -9,6 +9,7 @@ import org.flexlb.enums.BalanceStatusEnum;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.grpc.EngineStatusConverter;
 import org.flexlb.service.monitor.EngineHealthReporter;
+import org.flexlb.service.monitor.TtftStageAggregator;
 import org.flexlb.sync.status.WorkerDirectory;
 import org.flexlb.util.IdUtils;
 import org.slf4j.Logger;
@@ -41,6 +42,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
     private static final int MAX_CONSECUTIVE_FAILURES = 3;
     private final CacheAwareService cacheAwareService;
     private final Executor callbackExecutor;
+    private final TtftStageAggregator ttftStages;
 
     public GrpcWorkerStatusRunner(String ipPort,
                                   int workerStatusPort,
@@ -55,6 +57,25 @@ public class GrpcWorkerStatusRunner implements Runnable {
                                   long syncRequestTimeoutMs,
                                   CacheAwareService cacheAwareService,
                                   Executor callbackExecutor) {
+        this(ipPort, workerStatusPort, site, roleType, ignoredGroup, workerStatus, pollLease,
+                workerDirectory, engineHealthReporter, engineGrpcService, syncRequestTimeoutMs,
+                cacheAwareService, callbackExecutor, null);
+    }
+
+    public GrpcWorkerStatusRunner(String ipPort,
+                                  int workerStatusPort,
+                                  String site,
+                                  RoleType roleType,
+                                  String ignoredGroup,
+                                  WorkerStatus workerStatus,
+                                  WorkerStatus.PollLease pollLease,
+                                  WorkerDirectory workerDirectory,
+                                  EngineHealthReporter engineHealthReporter,
+                                  EngineGrpcService engineGrpcService,
+                                  long syncRequestTimeoutMs,
+                                  CacheAwareService cacheAwareService,
+                                  Executor callbackExecutor,
+                                  TtftStageAggregator ttftStages) {
         this.ipPort = ipPort;
         this.ip = workerStatus.getIp();
         this.workerStatusPort = workerStatusPort;
@@ -69,6 +90,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
         this.syncRequestTimeoutMs = syncRequestTimeoutMs;
         this.cacheAwareService = cacheAwareService;
         this.callbackExecutor = callbackExecutor;
+        this.ttftStages = ttftStages;
     }
 
     public GrpcWorkerStatusRunner(String ipPort,
@@ -426,6 +448,14 @@ public class GrpcWorkerStatusRunner implements Runnable {
         } catch (Throwable telemetryFailure) {
             logger.warn("Worker status telemetry failed after commit for {}: {}",
                     ipPort, telemetryFailure.getMessage());
+        }
+
+        try {
+            if (ttftStages != null) {
+                ttftStages.addWorkerStatus(observation);
+            }
+        } catch (RuntimeException timingFailure) {
+            logger.warn("P engine TTFT collection failed after worker status commit at {}", ipPort, timingFailure);
         }
     }
 
