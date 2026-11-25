@@ -1,6 +1,7 @@
 load(":defs.bzl", "custom_smoke_test", "smoke_test")
 load(":suites_timeout_recovery.bzl", "timeout_recovery_suites")
 load("@arch_config//:arch_select.bzl", "cuda13_x86_test_gpu")
+load("@bazel_skylib//lib:selects.bzl", "selects")
 package(default_visibility = ["//visibility:public"])
 
 # Native cache-stack smoke: real disk/SDK transfers, RPC deadlines and the
@@ -114,18 +115,23 @@ cc_binary(
         "//3rdparty/3fs:hf3fs",
         "//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_client",
         "//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_client_headers",
+        "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:sdk_buffer_safety",
         "@grpc//:grpc++",
         "@havenask//aios/alog:alog",
         "@havenask//aios/autil:lock_free",
         "@havenask//aios/autil:string_helper",
-    ],
+    ] + selects.with_or({
+        ("//:using_cuda13_x86", "//:using_cuda13_arm"): [
+            "@local_config_cuda//cuda:cuda_headers",
+            "@local_config_cuda//cuda:cudart",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 py_library(
     name = "pace_smoke_fixture",
-    srcs = [
-        "pace_fixture.py", "remote_kvcm_server.py",
-    ],
+    srcs = ["pace_fixture.py", "remote_kvcm_server.py"],
     deps = ["//rtp_llm:psutil", "//rtp_llm:requests", "//rtp_llm/test/utils:test_util"],
 )
 
@@ -141,6 +147,25 @@ _PACE_SMOKE_DATA = [
     "//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_server_bin",
 ]
 
+sh_binary(
+    name = "pace_namespace_env",
+    srcs = ["scripts/start_pace_smoke_namespace.sh"],
+    testonly = True,
+    tags = ["manual"],
+    data = [
+        "scripts/pace_smoke_faults.py",
+        "scripts/prepare_pace_smoke.py",
+        "scripts/start_pace_smoke.py",
+        "//tools:nvidia_wheel_env",
+    ] + select({
+        "//3rdparty/remote_kv_cache_manager:pace_smoke_prebuilt": [
+            "//3rdparty/pace_test_runtime:runtime",
+            "//3rdparty/remote_kv_cache_manager:pace_smoke_manager_startup_config",
+        ],
+        "//conditions:default": [],
+    }),
+)
+
 py_test(
     name = "remote_cache_pace_contract",
     srcs = ["pace_contract_smoke.py"],
@@ -148,8 +173,8 @@ py_test(
     deps = [":pace_smoke_fixture"],
     data = _PACE_SMOKE_DATA,
     args = ["--sdk", "$(location :pace_sdk_smoke)"],
-    # The contract uses CPU buffers with either a CPU-only or CUDA SDK.
-    tags = ["manual", "smoke_case", "no-remote", "requires-pace"],
+    exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"},
+    tags = ["manual", "smoke_case", "requires-pace", "L20_CU13"],
     timeout = "long",
     legacy_create_init = 0,
 )

@@ -1,8 +1,9 @@
 import os
+import json
 import signal
 import tempfile
 import unittest
-from unittest.mock import Mock, call, patch
+from unittest.mock import MagicMock, Mock, call, patch
 
 from rtp_llm.test.smoke.remote_kvcm_server import RemoteKVCMServer
 
@@ -34,6 +35,53 @@ class RemoteKVCMServerTest(unittest.TestCase):
             self.assertFalse(server.start_server())
         self.assertTrue(popen.call_args.kwargs["start_new_session"])
         stop.assert_called_once_with()
+
+    def test_pace_requires_an_external_fixture(self):
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch("rtp_llm.test.smoke.remote_kvcm_server.PortManager") as ports,
+            patch.dict(os.environ, {"KVCM_PACE_FIXTURE": ""}),
+            self.assertRaisesRegex(RuntimeError, "KVCM_PACE_FIXTURE"),
+        ):
+            RemoteKVCMServer(directory, {"PACE_REQUIRED": "true"}, directory, directory + "/output")
+        ports.assert_not_called()
+
+    def test_pace_uses_the_supplied_fixture(self):
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch("rtp_llm.test.smoke.remote_kvcm_server.PortManager") as ports,
+            patch.dict(os.environ),
+        ):
+            ports.return_value.get_consecutive_ports.return_value = ([10001, 10002, 10003, 10004], [])
+            path = os.path.join(directory, "fixture.json")
+            with open(path, "w") as output:
+                json.dump({"domain": "http://127.0.0.1:12348", "provider_status_urls": ["http://127.0.0.1:12346/api/status"]}, output)
+            os.environ["KVCM_PACE_FIXTURE"] = path
+            os.environ["TEST_TMPDIR"] = directory
+            server = RemoteKVCMServer(directory, {"PACE_REQUIRED": "true"}, directory, directory + "/output")
+            self.assertEqual(server.pace_fixture.config["domain"], "http://127.0.0.1:12348")
+            server.close()
+            server.copy_logs()
+            self.assertIsNone(server._work_dir)
+
+    def test_cleanup_failure_does_not_replace_the_original_test_error(self):
+        lock = MagicMock()
+        self.server._locks = [lock]
+        with (
+            patch.object(self.server, "stop_server", side_effect=RuntimeError("cleanup failed")),
+            self.assertLogs(level="ERROR"),
+            self.assertRaisesRegex(ValueError, "model failed"),
+        ):
+            try:
+                raise ValueError("model failed")
+            finally:
+                self.server.close()
+        lock.__exit__.assert_called_once_with(None, None, None)
+
+    def test_non_pace_close_preserves_existing_failed_stop_behavior(self):
+        self.server._locks = []
+        with patch.object(self.server, "stop_server"):
+            self.server.close()
 
     def test_exited_manager_does_not_skip_surviving_children(self):
         self.process.poll.return_value = 0

@@ -1,7 +1,7 @@
-"""Real model/service/cache E2E using short production timeout settings.
+"""Real model/service/cache E2E for timeout recovery.
 
-No delay injection: concurrency and cache transfers create the workload. A
-deadline sweep must actually reach the requested path; absence is a failure.
+The deadline sweeps use ordinary cache transfers under concurrency. The PACE
+case takes a Provider offline during a TENT TCP or native AFT GDR read.
 """
 
 import argparse
@@ -9,15 +9,18 @@ import concurrent.futures
 import json
 import logging
 import os
+import re
 import shlex
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import requests
 from transformers import AutoTokenizer
 
+from rtp_llm.test.smoke.pace_fixture import runfile
 from rtp_llm.test.smoke.remote_kvcm_server import RemoteKVCMServer
 from rtp_llm.test.smoke.timeout_recovery_checks import (
     analyze_timeout_recovery,
@@ -25,6 +28,9 @@ from rtp_llm.test.smoke.timeout_recovery_checks import (
     frozen_host_metric_samples,
 )
 from rtp_llm.test.utils.maga_server_manager import MagaServerManager
+
+
+KVCM_OK_STATUS = 1
 
 
 class CacheTimeoutRecoveryE2ETest(unittest.TestCase):
@@ -37,6 +43,7 @@ class CacheTimeoutRecoveryE2ETest(unittest.TestCase):
         self.addCleanup(self.work.cleanup)
         self.root = Path(self.work.name)
         self.backend = "kvcm" if OPTIONS.scenario.startswith("kvcm") else "local"
+        self.pace_provider_offline = OPTIONS.scenario == "kvcm_pace_provider_offline"
         self.model = os.environ.get(
             "CHECKPOINT_PATH", "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct"
         )
@@ -64,37 +71,70 @@ class CacheTimeoutRecoveryE2ETest(unittest.TestCase):
             f"Archive row {i}: books, maps and letters are stored in box {i % 17}.\n"
             for i in range(600)
         )
-        body = self.tokenizer.decode(self.tokenizer.encode(body)[:4096])
+        body_tokens = 192 if self.pace_provider_offline else 4096
+        body = self.tokenizer.decode(self.tokenizer.encode(body)[:body_tokens])
         prompts = [
             f"Document {i:04d}.\n{body}\nReturn only the word READY.\nAnswer:"
-            for i in range(OPTIONS.concurrency)
+            for i in range(3 if self.pace_provider_offline else OPTIONS.concurrency)
         ]
         for prompt in prompts:
             count = len(self.tokenizer.encode(prompt))
-            self.assertGreater(count, 3000)
+            self.assertGreater(count, 192 if self.pace_provider_offline else 3000)
             self.assertLess(count + 8, 8192)
         return prompts
 
     def start_kvcm(self):
-        binary = (
-            Path(os.environ["TEST_SRCDIR"])
-            / os.environ["TEST_WORKSPACE"]
-            / "3rdparty/remote_kv_cache_manager/bin/kv_cache_manager_bin"
+        binary = runfile(
+            os.environ["TEST_WORKSPACE"],
+            "3rdparty/remote_kv_cache_manager/bin/kv_cache_manager_bin",
         )
         self.assertTrue(binary.is_file(), f"missing real KVCM server: {binary}")
-        # Keep payload files private to this test, away from shared runfiles.
-        installation = self.root / "kvcm"
-        (installation / "bin").mkdir(parents=True)
-        (installation / "bin/kv_cache_manager_bin").symlink_to(binary.resolve())
+        config = {"KVCM_LOG_LEVEL": "DEBUG"}
+        if self.pace_provider_offline:
+            installation = binary.parent.parent
+            config["PACE_REQUIRED"] = "true"
+        else:
+            # Keep payload files private to this test, away from shared runfiles.
+            installation = self.root / "kvcm"
+            (installation / "bin").mkdir(parents=True)
+            (installation / "bin/kv_cache_manager_bin").symlink_to(binary)
         self.remote = RemoteKVCMServer(
             str(installation),
-            {"KVCM_LOG_LEVEL": "DEBUG"},
+            config,
             str(Path.cwd() / "logs"),
             str(self.output / "kvcm_logs"),
         )
         self.addCleanup(self.remote.copy_logs)
         self.addCleanup(self.remote.stop_server)
+        if self.pace_provider_offline:
+            fixture = self.remote.pace_fixture.config
+            self.pace_transport = fixture.get("transport")
+            self.assertTrue(
+                self.pace_transport in ("aft", "tcp") and fixture.get("provider_offline_dir"),
+                "Provider-offline recovery requires aft or tcp with PACE_SMOKE_FAULTS=provider-offline",
+            )
+            self.assertEqual(
+                fixture["client_env"]["TAIR_MEMPOOL_ENABLE_TENT"],
+                "1" if self.pace_transport == "tcp" else "0",
+            )
+            self.assertEqual(len(fixture["provider_status_urls"]), 1)
+            self.provider_ip = urlsplit(fixture["provider_status_urls"][0]).hostname
+            self.assertTrue(self.provider_ip, "Provider-offline fixture needs a Provider status URL")
+            self.offline_dir = Path(fixture["provider_offline_dir"])
+            self.metrics_url = fixture["consumer_metrics_url"]
         self.assertTrue(self.remote.start_server(), "real KVCM server startup failed")
+        self.remote_env = self.remote.client_env()
+        if self.pace_provider_offline:
+            self.remote_env.update({
+                "TAIR_MEMPOOL_PIPELINE_WRITE": "0",
+                "RTP_LLM_REMOTE_CACHE_ENABLE_GDR_ZERO_COPY": "1" if self.pace_transport == "aft" else "0",
+                "RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH": "0",
+            })
+            compat = Path(os.environ.get("CUDA_HOME", "/usr/local/cuda")) / "compat"
+            if (compat / "libcuda.so.1").is_file():
+                paths = (str(compat), os.environ.get("LD_LIBRARY_PATH"))
+                self.remote_env["LD_LIBRARY_PATH"] = os.pathsep.join(filter(None, paths))
+            return
         self.remote.post_json(
             "updateStorage",
             {
@@ -147,7 +187,6 @@ class CacheTimeoutRecoveryE2ETest(unittest.TestCase):
         )["instance_group"]
         self.assertEqual(configured["event_report_storage_candidates"], [event_storage])
         self.assertEqual(configured["storage_candidates"], ["nfs_01"])
-        self.remote_env = self.remote.client_env()
 
     def server_args(self, budget, label):
         args = shlex.split(os.environ["SMOKE_ARGS"])
@@ -244,11 +283,11 @@ class CacheTimeoutRecoveryE2ETest(unittest.TestCase):
                 "--enable_remote_cache",
                 "1",
                 "--kvcm_model_sdk_config",
-                '[{"type":"file"}]',
+                self.remote_env.get("RECO_MODEL_SDK_CONFIG", '[{"type":"file"}]'),
                 "--kvcm_client_config",
                 "",
                 "--kvcm_instance_group",
-                "default",
+                self.remote_env.get("RECO_INSTANCE_GROUP", "default"),
                 "--kvcm_enable_vipserver",
                 "false",
                 "--kvcm_server_address",
@@ -266,6 +305,8 @@ class CacheTimeoutRecoveryE2ETest(unittest.TestCase):
                 "--kvcm_instance_id_salt",
                 self.root.name,
             ]
+        if self.pace_provider_offline:
+            args += ["--block_tree_frozen_force_release_timeout_ms", "0"]
         return shlex.join(args)
 
     def start_model(self, budget, label):
@@ -322,11 +363,14 @@ class CacheTimeoutRecoveryE2ETest(unittest.TestCase):
         )
         return server
 
-    def request(self, server, index, label, reuse=True, allow_timeout_error=False):
+    def request(
+        self, server, index, label, reuse=True, allow_timeout_error=False, timeout=180
+    ):
+        max_new_tokens = 1 if self.pace_provider_offline else 4
         query = {
             "prompt": self.prompts[index],
             "generate_config": {
-                "max_new_tokens": 4,
+                "max_new_tokens": max_new_tokens,
                 "top_k": 1,
                 "random_seed": 42,
                 "reuse_cache": reuse,
@@ -340,7 +384,7 @@ class CacheTimeoutRecoveryE2ETest(unittest.TestCase):
             response = session.post(
                 f"http://127.0.0.1:{server.port}/",
                 json=query,
-                timeout=180,
+                timeout=timeout,
             )
         (self.output / f"{label}_{index}.http.json").write_text(response.text)
         result = response.json()
@@ -370,7 +414,7 @@ class CacheTimeoutRecoveryE2ETest(unittest.TestCase):
         self.assertIsInstance(output_ids, list, result)
         self.assertEqual(len(output_ids), 1, result)
         self.assertTrue(output_ids[0], result)
-        self.assertLessEqual(len(output_ids[0]), 4, result)
+        self.assertLessEqual(len(output_ids[0]), max_new_tokens, result)
         self.assertTrue(
             all(type(token) is int and token >= 0 for token in output_ids[0]), result
         )
@@ -425,10 +469,10 @@ class CacheTimeoutRecoveryE2ETest(unittest.TestCase):
         )
 
     def wait_for_remote_seed(self):
-        # Keep the writer alive until KVCM acknowledges full publication. Model
+        # Keep the writer alive until KVCM acknowledges publication. Model
         # probes cannot establish this while its DEVICE cache still serves hits.
         deadline = time.monotonic() + 180
-        access_log = Path.cwd() / "logs" / "access.log"
+        access_log = Path(self.remote.access_log_path)
         while True:
             sessions = {}
             completed = set()
@@ -438,6 +482,15 @@ class CacheTimeoutRecoveryE2ETest(unittest.TestCase):
                     event = json.loads(line)
                 except json.JSONDecodeError:
                     continue  # A live log may end in an incomplete record.
+                if self.pace_provider_offline:
+                    trace_id = event.get("trace_id")
+                    if (
+                        event.get("api_name") == "FinishWriteCache"
+                        and event.get("status_code") == KVCM_OK_STATUS
+                        and trace_id
+                    ):
+                        completed.add(trace_id)
+                    continue
                 request = event.get("request", {})
                 if not request.get("instance_id", "").startswith(self.root.name + "_"):
                     continue
@@ -616,7 +669,140 @@ class CacheTimeoutRecoveryE2ETest(unittest.TestCase):
                 server.stop_server()
         self.fail(f"NOT COVERED: no TP2 D2H eviction RPC timeout: {self.observations}")
 
+    def exercise_pace_provider_offline(self):
+        aft = self.pace_transport == "aft"
+        counter = (
+            "tairmempool_mp_server_gdr_read_success_bytes" if aft else
+            "tairmempool_mp_server_tent_tcp_read_succ_bytes"
+        )
+
+        def remote_read_bytes():
+            with requests.Session() as session:
+                session.trust_env = False
+                response = session.get(self.metrics_url, timeout=2)
+                response.raise_for_status()
+            for line in response.text.splitlines():
+                if line.startswith(counter + " "):
+                    return int(float(line.split()[1]))
+            self.fail(f"Consumer counter is missing: {counter}")
+
+        def signal_time(name):
+            path = self.offline_dir / name
+            deadline = time.monotonic() + 5
+            while not path.is_file():
+                self.assertLess(
+                    time.monotonic(), deadline, f"No Provider {name} acknowledgement; see faults.log"
+                )
+                time.sleep(0.02)
+            return int(path.read_text())
+
+        server = self.start_model(30000, "pace_provider_offline")
+        reference = [self.request(server, index, "seed") for index in range(len(self.prompts))]
+        for result in reference:
+            self.assertEqual(result["aux_info"]["remote_reuse_len"], 0, result)
+        self.wait_for_remote_seed()
+
+        before_bytes = remote_read_bytes()
+        healthy = self.request(server, 0, "healthy_hit")
+        self.assertEqual(healthy["output_ids"], reference[0]["output_ids"])
+        self.assertGreater(healthy["aux_info"]["remote_reuse_len"], 0, healthy)
+        before = self.log_text(server)
+        engine_logs = set(server.timeout_cpp_logs.glob("engine-*.log"))
+        self.assertTrue(engine_logs, "missing RTP engine logs")
+        self.assertNotIn("kvcm client loadKvCaches fail", before)
+        self.assertNotIn("KVCM READ frozen:", before)
+        deadline = time.monotonic() + 5
+        while (read_bytes := remote_read_bytes() - before_bytes) <= 0:
+            self.assertLess(time.monotonic(), deadline, f"Healthy remote read did not advance {counter}")
+            time.sleep(0.1)
+        self.observations.append({
+            "stage": "healthy_gdr_read" if aft else "healthy_tcp_read",
+            "remote_reuse_len": healthy["aux_info"]["remote_reuse_len"],
+            "gdr_read_bytes" if aft else "tcp_read_bytes": read_bytes,
+        })
+
+        (self.offline_dir / "pause.request").touch()
+        offline_us = signal_time("paused")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            pending_read = executor.submit(self.request, server, 1, "provider_offline", timeout=20)
+            time.sleep(0.25)
+            (self.offline_dir / "kill.request").touch()
+            killed_us = signal_time("killed")
+            self.observations.append({
+                "stage": "provider_offline", "offline_us": offline_us, "killed_us": killed_us,
+            })
+            recomputed = pending_read.result()
+
+        deadline_us = offline_us + 10_000_000
+        while True:
+            text = self.log_text(server)
+            report = analyze_timeout_recovery(
+                text, backend="kvcm", require_frozen=aft, require_timeout=aft,
+                required_evidence=("kvcm_sdk_timeout",) if aft else (),
+            )
+            if (report["frozen"] and not report["pending"]) or time.time_ns() // 1000 >= deadline_us:
+                break
+            time.sleep(0.05)
+        self.persist_evidence(server, text, report)
+        report["stage"] = "provider_offline_recovery"
+        self.observations.append(report)
+        if not aft:
+            report["sdk_read_errors"] = re.findall(r"kvcm client loadKvCaches fail, ec \[(\d+)\]", text)
+            logging.info(
+                "TENT TCP Provider offline: SDK read errors=%s, frozen=%d, released=%d, pending=%d",
+                report["sdk_read_errors"], len(report["frozen"]), len(report["released"]), len(report["pending"]),
+            )
+            self.assertTrue(report["sdk_read_errors"], "Fault did not reach the KVCM SDK read path")
+
+        self.assertEqual(recomputed["output_ids"], reference[1]["output_ids"])
+        self.assertEqual(recomputed["aux_info"]["remote_reuse_len"], 0, recomputed)
+        after = self.request(server, 2, "after_provider_exit", reuse=False)
+        self.assertEqual(after["output_ids"], reference[2]["output_ids"])
+        self.assertEqual(
+            set(server.timeout_cpp_logs.glob("engine-*.log")),
+            engine_logs,
+            "RTP engine PID changed while Provider was offline",
+        )
+        self.assertNotIn("FrozenTask recovery forced release", text)
+        self.assertTrue(report["passed"], report)
+        if aft:
+            self.assertEqual(len(report["released"]), 1, report)
+            self.assertEqual(report["released"][0]["failure_reason"], "sdk_timeout", report)
+        for released in report["released"]:
+            self.assertEqual(released["execution_type"], "kvcm_read", released)
+            self.assertLessEqual(offline_us, released["frozen_at_us"], released)
+            self.assertLessEqual(released["frozen_at_us"], released["released_at_us"], released)
+            self.assertLessEqual(released["released_at_us"], deadline_us, released)
+            elapsed_ms = (released["released_at_us"] - offline_us) / 1000
+            if aft:
+                self.assertLessEqual(killed_us, released["released_at_us"], released)
+                report["offline_to_release_ms"] = elapsed_ms
+            logging.info(
+                "Naturally released %d DEVICE blocks for %s %.1f ms after Provider offline",
+                released["target_block_count"], released["trace"], elapsed_ms,
+            )
+        if not aft:
+            return
+
+        meta_log = (self.offline_dir.parent / "meta.log").read_text(errors="replace")
+        consumer_log = (self.offline_dir.parent / "consumer.log").read_text(errors="replace")
+        eviction = re.search(rf"Deleting unhealthy node (\d+) with ip {re.escape(self.provider_ip)}\b", meta_log)
+        self.assertIsNotNone(eviction, "Meta did not evict the offline Provider")
+        provider_id = eviction[1]
+        self.assertRegex(
+            consumer_log,
+            rf'UnRegisterNode \{{"ids":\[{provider_id}\][^\n]*"types":\["provider"\]',
+        )
+        self.assertRegex(
+            consumer_log,
+            rf"PeerIoQuiesced request:[^\n]*provider_node_id={provider_id}\b[^\n]*"
+            r"is_read=1 previously_timed_out=1[^\n]*buffer_safe=1 completion_published=0",
+        )
+
     def test_short_timeouts_recover_without_breaking_generation(self):
+        if self.pace_provider_offline:
+            self.exercise_pace_provider_offline()
+            return
         if OPTIONS.scenario == "local_d2h_rpc":
             self.exercise_d2h_eviction()
             return
@@ -717,6 +903,7 @@ if __name__ == "__main__":
             "kvcm_queue",
             "kvcm_rpc",
             "kvcm_sdk",
+            "kvcm_pace_provider_offline",
         ],
         required=True,
     )

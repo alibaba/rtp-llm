@@ -197,12 +197,13 @@ def _record(line):
 
 
 def analyze_timeout_recovery(
-    text, *, backend, require_frozen=False, required_evidence=()
+    text, *, backend, require_frozen=False, required_evidence=(), require_timeout=True
 ):
     """Return a JSON-serializable report; incomplete recovery is a failed report.
 
     ``required_evidence`` lists categories that must all be observed. With no
-    explicit categories, any real timeout of the selected backend is required.
+    explicit categories, any real timeout of the selected backend is required
+    unless require_timeout is false.
     Pass the entire log window from one server lifetime, including freeze lines.
     Repeated copies of identical log records are harmless.
     """
@@ -278,7 +279,7 @@ def analyze_timeout_recovery(
     if require_frozen and not matching_frozen:
         errors.append(f"no {backend} frozen execution was observed")
     observed = {name: sorted(set(lines)) for name, lines in evidence.items() if lines}
-    if not any(name.startswith(backend + "_") for name in observed):
+    if require_timeout and not any(name.startswith(backend + "_") for name in observed):
         errors.append(f"no {backend} timeout was observed")
     for name in required_evidence:
         if name not in observed:

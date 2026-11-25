@@ -5,6 +5,7 @@ import shutil
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 from typing import Any, Dict, Union
@@ -43,17 +44,19 @@ class RemoteKVCMServer:
         self._enable_debug_service = False
         self._server_process = None
         self.pace_fixture = None
-        if str_to_bool(kvcm_config.get("PACE_REQUIRED", "false")):
+        pace_required = str_to_bool(kvcm_config.get("PACE_REQUIRED", "false"))
+        if pace_required:
             fixture_path = os.environ.get("KVCM_PACE_FIXTURE", "")
             if not fixture_path:
                 raise RuntimeError(
-                    "PACE smoke requires --test_env=KVCM_PACE_FIXTURE=<config.json>"
+                    "PACE smoke requires KVCM_PACE_FIXTURE. "
+                    "Run run_pace_smoke.sh or pass an existing fixture with --test_env."
                 )
             self.pace_fixture = PaceFixture(fixture_path)
         logging.info(
             f"kvcm_server_path:{server_path}\nblock_path:{self._block_path}\nbin_path:{self._bin_path}\nkvcm_src_logs_path:{kvcm_src_logs_path}\nkvcm_dst_logs_path:{kvcm_dst_logs_path}"
         )
-        if self.pace_fixture is None and os.path.isdir(self._block_path):
+        if not pace_required and os.path.isdir(self._block_path):
             shutil.rmtree(self._block_path)
 
         ports, self._locks = PortManager().get_consecutive_ports(4)
@@ -64,7 +67,7 @@ class RemoteKVCMServer:
         self._kvcm_src_logs_path = kvcm_src_logs_path
         self._kvcm_dst_logs_path = kvcm_dst_logs_path
         self._work_dir = None
-        if self.pace_fixture is not None:
+        if pace_required:
             self._work_dir = tempfile.mkdtemp(prefix="pace-kvcm-", dir=os.environ.get("TEST_TMPDIR"))
             self._kvcm_src_logs_path = os.path.join(self._work_dir, "logs")
             os.makedirs(self._kvcm_src_logs_path)
@@ -77,7 +80,6 @@ class RemoteKVCMServer:
                 logging.warning(f"path [{self._kvcm_src_logs_path}] not exist")
                 return
             shutil.copytree(self._kvcm_src_logs_path, self._kvcm_dst_logs_path, dirs_exist_ok=True)
-            # Keep diagnostics until the manager has stopped and logs are saved.
             if self._work_dir is not None and self._server_process is None:
                 shutil.rmtree(self._work_dir)
                 self._work_dir = None
@@ -94,6 +96,10 @@ class RemoteKVCMServer:
     @property
     def http_port(self) -> int:
         return self._http_port
+
+    @property
+    def access_log_path(self) -> str:
+        return os.path.join(self._kvcm_src_logs_path, "access.log")
 
     def address(self) -> str:
         return self._address
@@ -253,6 +259,20 @@ class RemoteKVCMServer:
             return
         self._server_process = None
         self._fault_trigger = False
+
+    def close(self):
+        failed = sys.exc_info()[0] is not None
+        try:
+            try:
+                self.stop_server()
+            finally:
+                for lock in self._locks:
+                    lock.__exit__(None, None, None)
+                self._locks = []
+        except Exception:
+            logging.exception("Failed to close the KVCM test environment")
+            if not failed:
+                raise
 
     def inject_fault(self):
         fault_map = {

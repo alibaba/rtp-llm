@@ -8,10 +8,8 @@ def _pace_smoke(name, task_info, smoke_args, gpu_type="L20_CU13",
         task_info = task_info,
         smoke_args = smoke_args,
         gpu_type = [gpu_type],
-        tags = ["requires-pace", "no-remote"],
-        data = [
-            "//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_server_bin",
-        ],
+        tags = ["requires-pace", "no-remote", "exclusive"],
+        data = ["//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_server_bin"],
         kvcm_envs = ["PACE_REQUIRED=true",
                      "PACE_METADATA_CHECK=" + str(metadata_check),
                      "PACE_MODEL_EVENTS_CHECK=" + str(model_events_check), "KVCM_LOG_LEVEL=DEBUG"] + kvcm_envs,
@@ -59,16 +57,17 @@ def _pace_suites():
         "--tp_size 2 --act_type BF16 --seq_size_per_block 2048 --reuse_cache_tail_blocks 8 --reuse_cache 1 --enable_remote_cache 1 --kvcm_put_timeout_ms 17000 --kvcm_get_timeout_ms 17000 --kvcm_task_timeout_ms 20000" + REMOTE_CACHE_DEVICE_STORE_ARGS,
         gpu_type = "H20_CU13", sleep_time_qr = 20,
     ))
-    native.test_suite(name = "smoke_cuda_remote_cache_pace", tests = tests)
+    native.test_suite(name = "smoke_cuda_remote_cache_pace", tests = tests, tags = ["manual"])
     native.test_suite(
         name = "smoke_kvcm_p1_gpu",
+        tags = ["manual"],
         tests = [":smoke_cuda_remote_cache_pace"] + [
             "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test:" + name
             for name in ["client_wrapper_test", "kvcm_config_test", "kvcm_internal_test",
                          "kvcm_mock_only_full_test", "kvcm_mock_full_linear_test", "kvcm_independent_pool_test"]
         ] + ["//rtp_llm/cpp/cache/events/test:kv_cache_event_publisher_test"],
     )
-    native.test_suite(name = "smoke_kvcm_p1_cpu", tests = [":remote_cache_pace_contract"])
+    native.test_suite(name = "smoke_kvcm_p1_cpu", tests = [":remote_cache_pace_contract"], tags = ["manual"])
 
 # Remote uploads originate from DEVICE inserts. With no lower local tier, drop
 # every DEVICE tree entry after insertion so later queries must read the backend.

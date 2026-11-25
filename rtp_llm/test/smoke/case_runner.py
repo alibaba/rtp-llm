@@ -142,12 +142,16 @@ class CaseRunner(object):
         try:
             return self._run_impl()
         finally:
-            if self.remote_kvcm_server is not None:
-                self.remote_kvcm_server.stop_server()
-                self.remote_kvcm_server.copy_logs()
-            summarize_and_cleanup_coredumps(
-                os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", "")
-            )
+            try:
+                if self.remote_kvcm_server is not None:
+                    try:
+                        self.remote_kvcm_server.close()
+                    finally:
+                        self.remote_kvcm_server.copy_logs()
+            finally:
+                summarize_and_cleanup_coredumps(
+                    os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", "")
+                )
 
     def _run_impl(self):
         self._dmesg_baseline = snapshot_dmesg()
@@ -322,8 +326,10 @@ class CaseRunner(object):
             started = remote_kvcm_server.start_server()
         finally:
             if not started:
-                remote_kvcm_server.stop_server()
-                remote_kvcm_server.copy_logs()
+                try:
+                    remote_kvcm_server.close()
+                finally:
+                    remote_kvcm_server.copy_logs()
         if started:
             return remote_kvcm_server
         logging.error("start remote_kvcm_server")

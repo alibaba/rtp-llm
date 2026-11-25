@@ -56,6 +56,10 @@ load("//3rdparty/media_network:repositories.bzl", "media_network_deps")
 
 media_network_deps()
 
+load("//3rdparty/pace_test_runtime:repositories.bzl", "pace_test_deps")
+
+pace_test_deps()
+
 load("@io_opentelemetry_cpp//bazel:repository.bzl", "opentelemetry_cpp_deps")
 
 opentelemetry_cpp_deps()

@@ -39,7 +39,7 @@ class PaceFixture:
             raise ValueError("PACE fixture requires provider_status_urls")
         self.backend = "pace"
         self.storage_type = 3
-        self.media_type = 2
+        self.media_type = 0 if self.config.get("transport") in ("aft", "aft-rdma", "aft-gdr") else 2
         self.instance_group = ""
 
     def check_services(self):

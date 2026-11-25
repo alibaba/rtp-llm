@@ -1,7 +1,7 @@
 load(":defs.bzl", "custom_smoke_test")
 
 def timeout_recovery_suites():
-    """Full model-service E2E; short production budgets, no delay injection."""
+    """Full model-service E2E for cache deadlines and PACE Provider loss."""
     tests = []
     for scenario, tp, legacy in [
         ("local_queue", 1, False),
@@ -30,4 +30,19 @@ def timeout_recovery_suites():
         name = "smoke_cache_timeout_recovery",
         tests = tests,
         tags = ["manual"],
+    )
+
+    custom_smoke_test(
+        name = "remote_cache_pace_provider_offline",
+        main = "cache_timeout_recovery_e2e_test.py",
+        smoke_args = "--tp_size 1 --world_size 1 --role_type PREFILL --use_local 1 --cache_store_rdma_mode 0",
+        args = ["--scenario", "kvcm_pace_provider_offline"],
+        gpu_type = ["L20_CU13"],
+        tags = ["manual", "requires-pace", "exclusive-if-local"],
+        data = [
+            "//rtp_llm:sdk",
+            "timeout_recovery_checks.py",
+            "//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_server_bin",
+        ],
+        deps = [":pace_smoke_fixture", "//rtp_llm:requests", "//rtp_llm:transformers"],
     )
