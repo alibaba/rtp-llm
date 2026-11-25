@@ -185,6 +185,84 @@ struct EndpointHoldFixture {
 };
 } // namespace
 
+TEST_F(KVCacheManagerTest, PDLoadPinsOnlyPlannedPrivatePhysicalPagesAndRollsBackOnFailure) {
+    EndpointHoldFixture     f;
+    BatchKVCacheResource    resource;
+    PDLoadDestinationBlocks targets;
+    resource.resetBatchSize(1);
+    resource.initGroups(f.manager->cacheConfig().topologyPtr());
+    for (const auto& tag : f.tags) {
+        resource.setBatchBlocks(0, tag, {f.block(tag, 0), NULL_BLOCK_IDX, f.block(tag, 1), f.block(tag, 2)});
+        // Multiple planned regions on a page share the same connector ref.
+        targets[tag] = {f.block(tag, 1), NULL_BLOCK_IDX, f.block(tag, 1), f.block(tag, 2)};
+        f.pools.at(tag)->incTreeRef(f.block(tag, 0), BlockTreeRefType::CACHE);
+    }
+    const auto& rows     = resource.cacheResource(0).groupBlockIds();
+    const auto  baseline = f.refs();
+    auto        hold     = f.manager->holdPDLoadDestination(rows, targets);
+    ASSERT_TRUE(hold);
+    for (const auto& tag : f.tags) {
+        EXPECT_EQ(f.pools.at(tag)->referencedBlocksNum(DeviceBlockRefType::PD_CONNECTOR), 2u);
+        EXPECT_EQ(f.refs(tag, 0), 2u);  // Shared read-only prefix remained unpinned.
+        EXPECT_EQ(f.refs(tag, 1), 2u);
+        EXPECT_EQ(f.refs(tag, 2), 2u);
+        EXPECT_EQ(hold->blockIdsSnapshot().blocks(tag), rows.blocks(tag));
+        EXPECT_EQ(hold->protectedPositions().at(tag), (std::vector<int32_t>{2, 3}));
+        EXPECT_EQ(rows.blocks(tag).front(), f.block(tag, 0));
+    }
+    hold.reset();
+    EXPECT_EQ(f.refs(), baseline);
+    auto empty = f.manager->holdPDLoadDestination(rows, {});  // Full prefix hit with no writes.
+    ASSERT_TRUE(empty);
+    for (const auto& tag : f.tags) {
+        EXPECT_EQ(empty->blockIdsSnapshot().blocks(tag), rows.blocks(tag));
+    }
+    EXPECT_TRUE(empty->protectedPositions().empty());
+
+    const auto& tag = f.tags.back();
+    targets[tag].push_back(f.block(tag, 0));  // Shared cache page cannot be a write target.
+    EXPECT_FALSE(f.manager->holdPDLoadDestination(rows, targets));
+    EXPECT_EQ(f.refs(), baseline);
+    targets[tag].back() = f.block(tag, 3);  // Allocated, but absent from this request's map.
+    EXPECT_FALSE(f.manager->holdPDLoadDestination(rows, targets));
+    EXPECT_EQ(f.refs(), baseline);
+    targets[tag].back() = f.block(tag, 2);
+    f.pools.at(tag)->incRef(f.block(tag, 2), DeviceBlockRefType::REQUEST);
+    EXPECT_FALSE(f.manager->holdPDLoadDestination(rows, targets));
+    f.pools.at(tag)->decRef(f.block(tag, 2), DeviceBlockRefType::REQUEST);
+    EXPECT_EQ(f.refs(), baseline);
+    for (const auto& group : f.tags) {
+        f.pools.at(group)->decTreeRef(f.block(group, 0), BlockTreeRefType::CACHE);
+    }
+}
+
+TEST_F(KVCacheManagerTest, PDLoadOwnsBackingUntilLastWriterReleasesItsReference) {
+    std::weak_ptr<DeviceBlockPool>         pool;
+    std::shared_ptr<PDLoadDestinationHold> last_writer;
+    BlockIdxType                           block = NULL_BLOCK_IDX;
+    {
+        EndpointHoldFixture  f;
+        BatchKVCacheResource resource;
+        resource.resetBatchSize(1);
+        resource.initGroups(f.manager->cacheConfig().topologyPtr());
+        const auto& tag = f.tags.front();
+        pool            = f.pools.at(tag);
+        block           = f.block(tag, 0);
+        resource.setBatchBlocks(0, tag, {block});
+        last_writer = f.manager->holdPDLoadDestination(resource.cacheResource(0).groupBlockIds(), {{tag, {block}}});
+        ASSERT_TRUE(last_writer);
+    }
+    auto backing = pool.lock();
+    ASSERT_TRUE(backing);
+    EXPECT_FALSE(backing->hasRequestRef(block));
+    EXPECT_FALSE(backing->isFrozen(block));
+    EXPECT_TRUE(backing->isAllocated(block));
+    last_writer.reset();
+    EXPECT_FALSE(backing->isAllocated(block));
+    backing.reset();
+    EXPECT_TRUE(pool.expired());
+}
+
 TEST_F(KVCacheManagerTest, EndpointFullHoldsShareAcrossBoundariesAndBothReleaseOrders) {
     for (const bool defer_writer_wait : {false, true})
     for (const bool reversed : {false, true}) {

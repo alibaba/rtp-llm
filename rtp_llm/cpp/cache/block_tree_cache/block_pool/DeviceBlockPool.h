@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -64,6 +65,10 @@ public:
     // Atomically test allocation and pin; empty for invalid/unallocated pages.
     // Allocation/callback failures still propagate before acquiring a reference.
     RemotePublicationPin tryPinForRemotePublication(BlockIdxType block);
+
+    // Pin a request-owned P/D destination while its stream protects the block table.
+    // The new writer requires exclusive request ownership before acquiring its pin.
+    RemotePublicationPin tryPinForPDLoad(BlockIdxType block);
 
     struct RequestReferenceUpdate {
         BlockIdxType block;
@@ -134,8 +139,11 @@ protected:
     bool hasExternalRefNoLock(BlockIdxType block) const override;
 
 private:
-    void releaseRemotePublicationPin(BlockIdxType block, const std::function<void()>& notify) noexcept;
+    template<DeviceBlockRefType RefType>
+    RemotePublicationPin pinForIONoLock(BlockIdxType block);
+    void releaseIOPin(BlockIdxType block, DeviceBlockRefType type, const std::function<void()>& notify) noexcept;
     bool                         hasRequestRefNoLock(BlockIdxType block) const;
+    bool                         isExclusiveRequestBlockNoLock(BlockIdxType block) const;
     const DeviceBlockPoolConfig& config() const;
     // global_layer_id -> {layout_index, local_layer_id}
     std::pair<int, int> mapGlobalLayerIdToLocal(int global_layer_id) const;
@@ -164,6 +172,7 @@ private:
     void processLayerTensors(size_t layout_idx, const MemoryLayoutConfig& layout_cfg, size_t& global_layer_begin);
 
     // Helper functions for regUserMr/deregUserMr
+    void retireRegisteredBuffers();
     void registerUserMrForBuffer(std::shared_ptr<MemoryUtil> memory_util,
                                  size_t                      layout_idx,
                                  size_t                      offset_bytes,
@@ -171,15 +180,9 @@ private:
                                  size_t                      stride_bytes,
                                  bool                        gpu,
                                  const std::string&          buffer_type);
-    void deregisterUserMrForBuffer(std::shared_ptr<MemoryUtil> memory_util,
-                                   size_t                      layout_idx,
-                                   size_t                      offset_bytes,
-                                   bool                        gpu,
-                                   const std::string&          buffer_type);
 
 private:
     static constexpr size_t                          kRefTypeCount = static_cast<size_t>(DeviceBlockRefType::COUNT);
-    RemotePublicationPin pinForRemotePublicationNoLock(BlockIdxType block);
     std::vector<uint32_t> refcounts_;
     std::array<std::vector<uint32_t>, kRefTypeCount> refcounts_by_type_;
     std::array<size_t, kRefTypeCount>                referenced_block_counts_{};
@@ -189,7 +192,8 @@ private:
     size_t        allocation_size_bytes_{0};
     bool          uses_dedicated_device_allocation_{false};
 
-    bool                        kvcache_reg_mr_  = false;
+    std::mutex                  registration_mutex_;
+    std::vector<void*>          registered_buffers_;
     int64_t                     mr_cost_time_ms_ = 0;
     std::shared_ptr<CacheStore> cache_store_;
 

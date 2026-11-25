@@ -11,8 +11,12 @@
 #include <utility>
 #include <mutex>
 #include "rtp_llm/cpp/model_rpc/ShutdownCoordinator.h"
+#include "rtp_llm/cpp/model_rpc/PDWriteLease.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/LoadContext.h"
 
 namespace rtp_llm {
+
+class PDLoadDestinationHold;
 
 class DecodeRpcServer: public RemoteRpcServer {
 public:
@@ -27,6 +31,8 @@ public:
                                    const BatchGenerateInputPB* request,
                                    BatchGenerateOutputsPB*     response);
 
+    grpc::Status PreparePDWriteLease(grpc::ServerContext*, const PreparePDWriteLeaseRequestPB*, PDWriteLeasePB*);
+    grpc::Status SealPDWriteLease(grpc::ServerContext*, const PDWriteLeasePB*, SealPDWriteLeaseResponsePB*);
     grpc::Status RemoteLoad(grpc::ServerContext*          server_context,
                             const BroadcastLoadRequestPB* request,
                             BroadcastLoadResponsePB*      response);
@@ -51,7 +57,8 @@ public:
                            int                      partition_count,
                            int                      partition_id,
                            grpc::ServerContext*     server_context,
-                           int32_t                  prefill_cp_size = 1):
+                           int32_t                  prefill_cp_size = 1,
+                           std::function<bool()>    check_cancelled = {}):
             request_id(request_id),
             request_key(std::move(request_key)),
             peer_addrs(std::move(peer_addrs)),
@@ -60,9 +67,12 @@ public:
             timeout_ms(timeout_ms),
             partition_count(partition_count),
             partition_id(partition_id),
-            server_context(server_context),
+            is_cancelled(std::move(check_cancelled)),
             prefill_cp_size(prefill_cp_size),
             group_block_ids_(std::move(group_block_ids)) {
+            if (!is_cancelled) {
+                is_cancelled = [server_context] { return server_context && server_context->IsCancelled(); };
+            }
             group_block_ids_.validate();
         }
 
@@ -83,8 +93,8 @@ public:
         int                      partition_count;
         int                      partition_id;
 
-        grpc::ServerContext* server_context;
-        int32_t              prefill_cp_size;
+        std::function<bool()> is_cancelled;
+        int32_t               prefill_cp_size;
 
     private:
         GroupBlockIds group_block_ids_;
@@ -93,7 +103,8 @@ public:
 private:
     struct LoadCacheResult {
         ErrorInfo error_info;
-        size_t    loaded_cache_block_count = 0;
+        size_t    loaded_cache_block_count    = 0;
+        bool      destination_writes_quiesced = false;
 
         bool ok() const {
             return error_info.ok();
@@ -117,9 +128,14 @@ private:
     void
     reportEarlyFinishTask(DecodeGenerateContext& decode_context, int64_t error_code, const std::string& error_message);
 
-    LoadCacheResult        loadCache(const LoadKVCacheContext& load_context);
+    LoadCacheResult        loadCache(const LoadKVCacheContext&                         load_context,
+                                     const std::shared_ptr<PDLoadDestinationHold>&     destination_hold  = nullptr,
+                                     std::shared_ptr<void>                             writer_lifetime   = {},
+                                     const std::function<void(std::function<void()>)>& register_recovery = {});
     LoadCacheResult        loadCacheForAllRank(DecodeGenerateContext& decode_context);
-    LoadCacheResult        loadCacheAsyncForTp(DecodeGenerateContext& decode_context, LoadKVCacheContext& load_context);
+    LoadCacheResult        loadCacheAsyncForTp(DecodeGenerateContext&                        decode_context,
+                                               LoadKVCacheContext&                           load_context,
+                                               const std::shared_ptr<PDLoadDestinationHold>& destination_hold = nullptr);
     BroadcastLoadRequestPB constructRemoteLoadRequest(const LoadKVCacheContext&       load_context,
                                                       int                             index,
                                                       const std::vector<std::string>& peer_ips) const;
@@ -159,6 +175,16 @@ private:
                                                   const std::vector<size_t>& transferred_cache_key_counts);
     static size_t    minLoadedCacheBlockCount(const std::vector<size_t>& rank_loaded_cache_block_counts);
     static ErrorInfo validateRemoteLoadTopology(size_t worker_size, size_t peer_size);
+    static std::vector<CacheStoreBlockPair> buildGroupLoadPlan(
+        const CacheConfig& config, const std::string& tag, size_t block_count, size_t key_count, int64_t reused_blocks);
+    void                       visitLoadDestinations(const GroupBlockIds&                                   rows,
+                                                     size_t                                                 key_count,
+                                                     int64_t                                                reuse,
+                                                     const std::function<void(const std::string&, size_t)>& visit) const;
+    static bool                remoteLoadDestinationQuiesced(bool                           finish_ok,
+                                                             const grpc::Status&            status,
+                                                             const BroadcastLoadResponsePB& response,
+                                                             const PDWriteLeasePB&          expected);
     static std::vector<size_t> completionQueueExpectedResponseCounts(size_t worker_size);
     static grpc::Status        generateRequestReadFailureStatus(bool cancelled);
     static ErrorInfo           cacheLoadClientError(int64_t request_id, ErrorCode error_code);
@@ -183,6 +209,9 @@ private:
     bool                                 requires_group_drain_ = false;
     autil::ThreadPoolBasePtr thread_pool_;
     std::atomic<size_t>      onflight_load_cache_requests_{0};
+    std::shared_ptr<PDWriteLeaseRegistry> write_leases_            = std::make_shared<PDWriteLeaseRegistry>();
+    std::chrono::milliseconds             pd_write_recovery_delay_ = kPDWriteRecoveryDelay;
+    std::shared_ptr<std::atomic<size_t>>  pending_write_drains_    = std::make_shared<std::atomic<size_t>>(0);
     size_t                   model_id;
 };
 

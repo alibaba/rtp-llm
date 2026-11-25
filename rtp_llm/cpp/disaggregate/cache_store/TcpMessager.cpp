@@ -53,6 +53,7 @@ void TcpMessager::load(const std::shared_ptr<LoadRequest>&                      
     auto channel = tcp_client_->getChannel(request->ip, request->port);
     if (channel == nullptr) {
         RTP_LLM_LOG_WARNING("messager client get channel failed, ip %s", request->ip.c_str());
+        request->callback.destinationWritesStopped();
         request->callback(false, CacheStoreErrorCode::LoadConnectFailed);
         return;
     }
@@ -60,6 +61,7 @@ void TcpMessager::load(const std::shared_ptr<LoadRequest>&                      
     auto load_request = makeLoadRequest(request);
     if (load_request == nullptr) {
         RTP_LLM_LOG_WARNING("messager client generate load request failed");
+        request->callback.destinationWritesStopped();
         request->callback(false, CacheStoreErrorCode::LoadSendRequestFailed);
         return;
     }

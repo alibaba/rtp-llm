@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -23,6 +24,13 @@ namespace {
 #if USING_CUDA || USING_ROCM
 class RecordingMemoryUtil: public MemoryUtil {
 public:
+    bool regLoadDestinationMr(void* buf, uint64_t size, bool gpu, uint64_t aligned_size) override {
+        if (++load_registrations == fail_registration) {
+            throw std::runtime_error("test registration failure");
+        }
+        return MemoryUtil::regLoadDestinationMr(buf, size, gpu, aligned_size);
+    }
+
     bool regUserMr(void* buf, uint64_t size, bool gpu, uint64_t aligned_size) override {
         reg_calls.push_back({buf, size, gpu, aligned_size});
         return true;
@@ -59,6 +67,8 @@ public:
 
     std::vector<RegCall>   reg_calls;
     std::vector<DeregCall> dereg_calls;
+    size_t                 load_registrations = 0;
+    size_t                 fail_registration  = 0;
 };
 
 class RecordingCacheStore: public CacheStore {
@@ -231,6 +241,7 @@ TEST(BlockPoolDeviceMallocTest, PassesGpuBackingToMemoryRegistrationBoundary) {
     auto        cache_store = std::make_shared<RecordingCacheStore>(memory_util);
     pool->regUserMr(/*model_id=*/0, cache_store);
 
+    ASSERT_EQ(memory_util->load_registrations, 1u);
     ASSERT_EQ(memory_util->reg_calls.size(), 1u);
     EXPECT_EQ(memory_util->reg_calls[0].buf, pool->getBaseAddress());
     EXPECT_EQ(memory_util->reg_calls[0].size, layout.kv_block_pool_size_bytes);
@@ -241,6 +252,43 @@ TEST(BlockPoolDeviceMallocTest, PassesGpuBackingToMemoryRegistrationBoundary) {
     ASSERT_EQ(memory_util->dereg_calls.size(), 1u);
     EXPECT_EQ(memory_util->dereg_calls[0].buf, pool->getBaseAddress());
     EXPECT_TRUE(memory_util->dereg_calls[0].gpu);
+    pool.reset();
+    EXPECT_EQ(memory_util->dereg_calls.size(), 1u);
+#else
+    GTEST_SKIP() << "Raw device allocation is only supported in CUDA and ROCm builds";
+#endif
+}
+
+TEST(BlockPoolDeviceMallocTest, RollsBackPartialRegistrationAndRetiresOnDestruction) {
+#if USING_CUDA || USING_ROCM
+    if (deviceCount() == 0) {
+        GTEST_SKIP() << "No GPU is visible";
+    }
+    auto config = makeSmallBlockPoolConfig();
+    auto second = config.memory_layouts.front();
+    second.kv_cache_offset_bytes += config.total_size_bytes;
+    config.memory_layouts.push_back(second);
+    config.total_size_bytes *= 2;
+    auto pool = std::make_shared<DeviceBlockPool>(std::make_shared<const DeviceBlockPoolConfig>(config));
+    ASSERT_TRUE(pool->init());
+    auto memory               = std::make_shared<RecordingMemoryUtil>();
+    auto store                = std::make_shared<RecordingCacheStore>(memory);
+    memory->fail_registration = 2;
+    EXPECT_THROW(pool->regUserMr(0, store), std::runtime_error);
+    ASSERT_EQ(memory->reg_calls.size(), 1u);
+    ASSERT_EQ(memory->dereg_calls.size(), 1u);
+    EXPECT_EQ(memory->dereg_calls.front().buf, memory->reg_calls.front().buf);
+
+    pool->regUserMr(0, store);
+    ASSERT_EQ(memory->reg_calls.size(), 3u);
+    auto other = std::make_shared<RecordingMemoryUtil>();
+    pool->regUserMr(0, std::make_shared<RecordingCacheStore>(other));
+    pool.reset();
+    ASSERT_EQ(memory->dereg_calls.size(), 3u);
+    EXPECT_EQ(memory->dereg_calls[1].buf, memory->reg_calls[2].buf);
+    EXPECT_EQ(memory->dereg_calls[2].buf, memory->reg_calls[1].buf);
+    EXPECT_TRUE(other->reg_calls.empty());
+    EXPECT_TRUE(other->dereg_calls.empty());
 #else
     GTEST_SKIP() << "Raw device allocation is only supported in CUDA and ROCm builds";
 #endif

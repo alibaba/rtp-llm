@@ -1,6 +1,7 @@
 #pragma once
 
 #include <condition_variable>
+#include <chrono>
 #include <mutex>
 #include <memory>
 #include <functional>
@@ -12,6 +13,8 @@
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 
 namespace rtp_llm {
+
+inline constexpr auto kPDWriteRecoveryDelay = std::chrono::seconds(300);
 
 class CacheStore;
 
@@ -28,7 +31,7 @@ public:
     void waitDone();
 
     bool                     success() const;
-    const ErrorInfo&         getErrorInfo() const;
+    ErrorInfo                getErrorInfo() const;
     std::string              getErrorInfoString() const;
     std::vector<std::string> failedBlockDebugInfos() const;
 
@@ -60,6 +63,13 @@ protected:
 class LoadContext: public SyncContext {
 public:
     LoadContext(const std::shared_ptr<CacheStore>& cache_store, bool combine_load);
+    // These signals require positive transport evidence for every submitted write.
+    bool destinationWritesStopped() const;
+    bool waitForDestinationWritesStopped(std::chrono::steady_clock::time_point deadline) const;
+    void onDestinationWritesStopped(std::function<void()> callback);
+    // Recovery asks the transport to stop. Only a physical stop receipt releases a destination.
+    void recoverDestinationWritesAfterTimeout(std::chrono::milliseconds isolation = kPDWriteRecoveryDelay) noexcept;
+    std::function<void()> destinationRecoveryCallback(std::chrono::milliseconds delay = kPDWriteRecoveryDelay) const;
 
 public:
     void load(const std::vector<std::shared_ptr<RequestBlockBuffer>>& request_block_buffer,
@@ -75,6 +85,8 @@ protected:
     bool doCall(const std::shared_ptr<RequestBlockBuffer>& request_block_buffer, int64_t timeout_ms) override;
 
 private:
+    class DestinationWrites;
+    std::shared_ptr<DestinationWrites> destination_writes_;
     std::string peer_ip_;
     uint32_t    port_;
     uint32_t    rdma_port_;

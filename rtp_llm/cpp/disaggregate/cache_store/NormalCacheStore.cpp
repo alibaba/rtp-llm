@@ -220,17 +220,20 @@ void NormalCacheStore::load(const std::shared_ptr<RequestBlockBuffer>& request_b
                             int                                        partition_id) {
     if (request_block_buffer == nullptr || !request_block_buffer->isValid() || ip.empty()) {
         RTP_LLM_LOG_WARNING("normal cache store run load failed, invalid params");
+        callback.destinationWritesStopped();
         callback(false, CacheStoreErrorCode::InvalidParams);
         return;
     }
 
     if (port == 0 || (memory_util_->isRdmaMode() && rdma_port == 0)) {
         RTP_LLM_LOG_WARNING("normal cache store run load failed, port is 0");
+        callback.destinationWritesStopped();
         callback(false, CacheStoreErrorCode::InvalidParams);
         return;
     }
 
     if (request_block_buffer->getBlocksCount() == 0) {
+        callback.destinationWritesStopped();
         callback(true, CacheStoreErrorCode::None);
         return;
     }
@@ -250,6 +253,7 @@ void NormalCacheStore::load(const std::shared_ptr<RequestBlockBuffer>& request_b
                  partition_id]() {
         if (!tryPinThreadDevice(this->device_id_, "normal cache store load task")) {
             collector->markEnd(false);
+            callback.destinationWritesStopped();
             callback(false, CacheStoreErrorCode::LoadErrorUnknown);
             return;
         }
@@ -261,6 +265,7 @@ void NormalCacheStore::load(const std::shared_ptr<RequestBlockBuffer>& request_b
         RTP_LLM_LOG_WARNING("normal cache store push load task for request id [%s] to thread pool failed",
                             request_block_buffer->getRequestId().c_str());
         collector->markEnd(false);
+        callback.destinationWritesStopped();
         callback(false, CacheStoreErrorCode::PushWorkerItemFailed);
         return;
     }

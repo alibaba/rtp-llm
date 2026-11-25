@@ -284,6 +284,18 @@ cc_test(
 )
 
 cc_test(
+    name = "pd_write_lease_test",
+    srcs = ["PDWriteLeaseTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/model_rpc:pd_write_lease",
+        "@com_google_googletest//:gtest_main",
+        "@grpc//:grpc++",
+    ],
+    timeout = "short",
+)
+
+cc_test(
     name = "shutdown_coordinator_test",
     srcs = ["ShutdownCoordinatorTest.cc"],
     copts = copts(),

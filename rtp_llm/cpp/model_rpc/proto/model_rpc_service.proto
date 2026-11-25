@@ -41,6 +41,8 @@ message GroupBlockPB {
 message TaggedBlockIdsPB {
     string tag = 1;
     repeated int32 block_ids = 2;
+    reserved 3;
+    reserved "masked_positions";
 }
 
 enum RoleTypePB {
@@ -489,13 +491,50 @@ message BroadcastLoadRequestPB {
     reserved "group_block_ids";
     int32 prefill_cp_size = 13;
     repeated TaggedBlockIdsPB tagged_group_block_ids = 14;
+    reserved 15;
+    reserved "destination_blocks_held";
+    PDWriteLeasePB write_lease = 16;
+    reserved 17;
+    reserved "protected_destinations";
+    PDProtectedPositionsPB protected_positions = 18;
+}
 
+// Presence is required even for a load with no writes.
+message PDProtectedPositionsPB {
+    message Group {
+        string tag = 1;
+        // Indices into the unchanged tagged_group_block_ids row for this group.
+        repeated int32 protected_positions = 2;
+    }
+    repeated Group groups = 1;
 }
 
 message BroadcastLoadResponsePB {
     RpcErrorPB error_info = 1;
     int64 done_time_us = 2;
     int64 loaded_cache_block_count = 3;
+    // Positive acknowledgement on failure. Older workers leave this unset.
+    bool destination_writes_quiesced = 4;
+    PDWriteLeasePB stopped_lease = 5;
+}
+
+// Address-free admission. Only the issuing worker incarnation may claim/seal its token.
+message PreparePDWriteLeaseRequestPB {
+    int64 request_id = 1;
+    string request_key = 2;
+    int64 dp_rank = 3;
+    int64 timeout_ms = 4;
+}
+message PDWriteLeasePB {
+    string worker_epoch = 1;
+    uint64 token = 2;
+    reserved 3;
+    reserved "supports_protected_destinations";
+    bool supports_protected_positions = 4;
+}
+message SealPDWriteLeaseResponsePB {
+    PDWriteLeasePB lease = 1;
+    bool stopped = 2;
 }
 
 message RemoteFinishRequestPB {
@@ -1172,6 +1211,8 @@ service RpcService {
     rpc GetCacheStatus(CacheVersionPB) returns (CacheStatusPB);
     rpc GenerateStreamCall(GenerateInputPB) returns (stream GenerateOutputsPB);
     rpc BatchGenerateCall(BatchGenerateInputPB) returns (BatchGenerateOutputsPB);
+    rpc PreparePDWriteLease(PreparePDWriteLeaseRequestPB) returns (PDWriteLeasePB);
+    rpc SealPDWriteLease(PDWriteLeasePB) returns (SealPDWriteLeaseResponsePB);
     rpc RemoteLoad(BroadcastLoadRequestPB) returns (BroadcastLoadResponsePB);
     rpc RemoteGenerate(stream GenerateRequestPB) returns (stream GenerateOutputsPB);
     rpc RemoteFinish(RemoteFinishRequestPB) returns (EmptyPB);

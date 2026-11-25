@@ -2,6 +2,7 @@
 
 #include <string>
 #include <functional>
+#include <utility>
 #include <stdint.h>
 #include <unistd.h>
 #include <map>
@@ -59,7 +60,39 @@ inline std::string CacheStoreErrorCodeToString(CacheStoreErrorCode code) {
 }
 
 typedef std::function<void(bool, CacheStoreErrorCode)> CacheStoreStoreDoneCallback;
-typedef std::function<void(bool, CacheStoreErrorCode)> CacheStoreLoadDoneCallback;
+// The RPC result and the last possible access to the destination are independent.
+class CacheStoreLoadDoneCallback: public std::function<void(bool, CacheStoreErrorCode)> {
+public:
+    using ResultCallback = std::function<void(bool, CacheStoreErrorCode)>;
+    using FenceRegistrar = std::function<void(std::function<void()>)>;
+    using ResultCallback::function;
+    CacheStoreLoadDoneCallback() = default;
+    CacheStoreLoadDoneCallback(ResultCallback        result,
+                               std::function<void()> stopped,
+                               FenceRegistrar        register_fence = {}):
+        ResultCallback(std::move(result)), stopped_(std::move(stopped)), register_fence_(std::move(register_fence)) {}
+
+    void setDestinationFence(std::function<void()> start) const {
+        if (register_fence_) {
+            register_fence_(std::move(start));
+        }
+    }
+
+    // A delayed fence can retain this notifier independently of the result and request buffers.
+    std::function<void()> destinationStopNotifier() const {
+        return stopped_;
+    }
+    void destinationWritesStopped() const {
+        if (stopped_) {
+            stopped_();
+        }
+    }
+
+private:
+    std::function<void()> stopped_;
+    FenceRegistrar        register_fence_;
+};
+
 typedef std::function<void(bool)>                      WriteBlockDoneCallback;
 typedef std::function<void(bool, CacheStoreErrorCode, const std::map<std::string, std::string>&)>
                   CacheStoreRemoteStoreDoneCallback;

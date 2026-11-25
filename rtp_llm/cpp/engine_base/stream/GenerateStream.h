@@ -520,6 +520,11 @@ public:
         return return_all_hidden_states_;
     }
 
+    // Pin the destinations and copy the first tile's dispatch metadata under the same stream lock.
+    std::shared_ptr<PDLoadDestinationHold> holdPDLoadDestination(CacheKeysType&                   keys,
+                                                                 GroupBlockIds&                   groups,
+                                                                 int64_t&                         reuse_blocks,
+                                                                 const PDLoadDestinationSelector& select);
     void holdKVCacheForPDSep();
     void releaseKVCacheForPDSep();
 

@@ -1,3 +1,5 @@
+#include <future>
+
 #include "gtest/gtest.h"
 #include "rtp_llm/cpp/cache/test/TestLayoutSpec.h"
 #include "gmock/gmock.h"
@@ -25,6 +27,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstring>
 #include <memory>
@@ -41,8 +44,27 @@ namespace {
 constexpr int kDsv4PoolNum        = 7;
 constexpr int kDsv4TokensPerBlock = 256;
 
+class CancellableDecodeLoad final: public DecodeGenerateContext {
+public:
+    using DecodeGenerateContext::DecodeGenerateContext;
+    bool isRequestCancelled() const override {
+        if (!cancelled.load()) {
+            return false;
+        }
+        std::call_once(observed_once, [this] { cancel_observed.set_value(); });
+        return true;
+    }
+
+    std::atomic<bool>          cancelled{false};
+    mutable std::once_flag     observed_once;
+    mutable std::promise<void> cancel_observed;
+};
+
 class DummyMemoryUtil: public MemoryUtil {
 public:
+    explicit DummyMemoryUtil(bool rdma = false, bool supports_write_stop = true):
+        rdma_(rdma), supports_write_stop_(supports_write_stop) {}
+
     bool regUserMr(void*, uint64_t, bool, uint64_t = 0) override {
         return true;
     }
@@ -56,14 +78,21 @@ public:
         return true;
     }
     bool isRdmaMode() override {
-        return false;
+        return rdma_;
     }
+    bool supportsLoadWriteStop() override {
+        return supports_write_stop_;
+    }
+
+private:
+    bool rdma_;
+    bool supports_write_stop_;
 };
 
 class MemoryBackedCacheStore: public NormalCacheStore {
 public:
-    MemoryBackedCacheStore() {
-        memory_util_                = std::make_shared<DummyMemoryUtil>();
+    explicit MemoryBackedCacheStore(bool rdma = false) {
+        memory_util_                = std::make_shared<DummyMemoryUtil>(rdma);
         request_block_buffer_store_ = std::make_shared<RequestBlockBufferStore>(memory_util_);
     }
 
@@ -91,6 +120,7 @@ public:
               uint32_t = 1000,
               int      = 1,
               int      = 0) override {
+        load_buffer_requests_.push_back(request_block_buffer);
         bool ok = true;
         for (const auto& [key, block] : request_block_buffer->getBlocks()) {
             auto it = stored_blocks_.find(key);
@@ -108,24 +138,8 @@ public:
         }
         runtimeSyncAndCheck();
         load_request_keys_.push_back(request_block_buffer->getRequestKey());
+        callback.destinationWritesStopped();
         callback(ok, ok ? CacheStoreErrorCode::None : CacheStoreErrorCode::LoadErrorUnknown);
-    }
-
-    std::shared_ptr<LoadContext>
-    loadBuffers(const std::vector<std::shared_ptr<RequestBlockBuffer>>& request_block_buffers,
-                const std::string&                                      ip,
-                uint32_t                                                port,
-                uint32_t                                                rdma_port,
-                int64_t                                                 timeout_ms,
-                LoadContext::CheckCancelFunc                            check_cancel_func,
-                int                                                     partition_count,
-                int                                                     partition_id) override {
-        load_buffer_requests_.insert(
-            load_buffer_requests_.end(), request_block_buffers.begin(), request_block_buffers.end());
-        auto context = std::make_shared<LoadContext>(shared_from_this(), false);
-        context->load(
-            request_block_buffers, ip, port, rdma_port, timeout_ms, check_cancel_func, partition_count, partition_id);
-        return context;
     }
 
     std::unordered_map<std::string, std::vector<uint8_t>> stored_blocks_;
@@ -133,6 +147,28 @@ public:
     std::vector<std::string>                              load_request_keys_;
     std::vector<std::shared_ptr<RequestBlockBuffer>>      store_buffer_requests_;
     std::vector<std::shared_ptr<RequestBlockBuffer>>      load_buffer_requests_;
+};
+
+class DelayedRdmaCacheStore: public MemoryBackedCacheStore {
+public:
+    DelayedRdmaCacheStore(): MemoryBackedCacheStore(true) {}
+
+    void load(const std::shared_ptr<RequestBlockBuffer>& buffer,
+              CacheStoreLoadDoneCallback                 callback,
+              const std::string&,
+              uint32_t,
+              uint32_t,
+              uint32_t,
+              int,
+              int) override {
+        load_buffer_requests_.push_back(buffer);
+        ASSERT_FALSE(pending);
+        pending = std::move(callback);
+        submitted.set_value();
+    }
+
+    std::promise<void>         submitted;
+    CacheStoreLoadDoneCallback pending;
 };
 
 class MinimalEngine: public EngineBase {
@@ -391,6 +427,43 @@ protected:
     size_t                                initial_free_blocks_ = 0;
 };
 
+TEST_F(PdSepKVCacheReleaseTest, DecodePDLoadSnapshotAndPinsSurviveRelease) {
+    prepareStreamWithConfig({1, 2, 3, 4, 5, 6, 7, 8, 9}, makeConfig(), 8, RoleType::DECODE);
+    auto& resource = stream_->streamCacheResource();
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    CacheKeysType keys;
+    GroupBlockIds groups;
+    int64_t       reuse_blocks = -1;
+    const auto    select_tail  = [](const GroupBlockIds& rows, size_t, int64_t) {
+        const auto& tag = rows.tag_to_index_.begin()->first;
+        return PDLoadDestinationBlocks{{tag, {rows.blocks(tag).back()}}};
+    };
+    auto hold = stream_->holdPDLoadDestination(keys, groups, reuse_blocks, select_tail);
+    ASSERT_TRUE(hold);
+    EXPECT_EQ(keys, stream_->cacheKeys(0));
+    EXPECT_EQ(reuse_blocks, stream_->reuseBlockSize());
+    const auto& tag = cache_manager_->cacheConfig().groupTags().front();
+    const auto& row = stream_->kvCachePtr()->cacheResource(0).groupBlockIds(tag);
+    ASSERT_TRUE(row);
+    const auto ids = row->blocks();
+    ASSERT_GE(ids.size(), 2u);
+    EXPECT_EQ(groups.blocks(tag), ids);
+    EXPECT_EQ(hold->protectedPositions().at(tag), std::vector<int32_t>{static_cast<int32_t>(ids.size() - 1)});
+    row->swap(0, 1);
+    EXPECT_EQ(groups.blocks(tag), ids);
+    row->swap(0, 1);
+
+    stream_->releaseResource();
+    EXPECT_TRUE(resource.isResourceReleased());
+    EXPECT_FALSE(stream_->holdPDLoadDestination(keys, groups, reuse_blocks, select_tail));
+    const auto& pool = cache_manager_->coordinator_manager_->groupBlockPools().front();
+    EXPECT_EQ(pool->referencedBlocksNum(DeviceBlockRefType::PD_CONNECTOR), 1u);
+    EXPECT_TRUE(pool->isAllocated(ids.back()));
+    EXPECT_FALSE(pool->isAllocated(ids.front()));
+    hold.reset();
+    EXPECT_EQ(pool->referencedBlocksNum(DeviceBlockRefType::PD_CONNECTOR), 0u);
+}
+
 TEST_F(PdSepKVCacheReleaseTest, MissingGroupIdentityRejectsAsyncLoadBeforeConnecting) {
     auto             manager = std::make_shared<KVCacheManager>(makeConfig(), /*warmup=*/false, nullptr);
     EngineInitParams params;
@@ -445,6 +518,272 @@ TEST_F(PdSepKVCacheReleaseTest, MalformedGroupIndexRejectsAsyncLoadBeforeConnect
         EXPECT_TRUE(server.resource_.rpc_pool.connection_pool_.empty());
     }
 }
+
+class DelayedTcpCacheStore: public MemoryBackedCacheStore {
+public:
+    DelayedTcpCacheStore(): MemoryBackedCacheStore(false) {}
+
+    void load(const std::shared_ptr<RequestBlockBuffer>&,
+              CacheStoreLoadDoneCallback callback,
+              const std::string&,
+              uint32_t,
+              uint32_t,
+              uint32_t,
+              int,
+              int) override {
+        std::lock_guard<std::mutex> lock(mu);
+        pending.push_back(std::move(callback));
+        cv.notify_all();
+    }
+
+    bool waitPending(size_t expected) {
+        std::unique_lock<std::mutex> lock(mu);
+        return cv.wait_for(lock, std::chrono::seconds(5), [&] { return pending.size() >= expected; });
+    }
+
+    std::mutex                              mu;
+    std::condition_variable                 cv;
+    std::vector<CacheStoreLoadDoneCallback> pending;
+};
+
+std::future<void> observeDestinationFence(const CacheStoreLoadDoneCallback& callback) {
+    auto seen   = std::make_shared<std::promise<void>>();
+    auto future = seen->get_future();
+    callback.setDestinationFence([seen] { seen->set_value(); });
+    return future;
+}
+
+class PdSepRdmaLateCompletionTest: public PdSepKVCacheReleaseTest, public ::testing::WithParamInterface<bool> {};
+
+TEST_P(PdSepRdmaLateCompletionTest, TimedOutLoadKeepsDecodeBlockUntilTransportSettlement) {
+    constexpr int    tokens_per_block = 8;
+    constexpr size_t target_blocks    = 9;  // >50% of 16-block pool (exceeds ~30%-40% frozen abort ratio).
+    std::vector<int> prompt(target_blocks * tokens_per_block, 1);
+    for (size_t i = 0; i < prompt.size(); ++i) {
+        prompt[i] = static_cast<int>(i + 1);
+    }
+    prepareStreamWithConfig(prompt, makeConfig(), tokens_per_block, RoleType::DECODE);
+    ASSERT_TRUE(stream_->initKVBlock().ok());
+    const auto original_blocks = stream_->kvCachePtr()->blocks(0, "default");
+    ASSERT_EQ(original_blocks.size(), target_blocks);
+    const auto pool = cache_manager_->coordinator_manager_->groupBlockPools().front();
+
+    auto             store = std::make_shared<DelayedRdmaCacheStore>();
+    EngineInitParams params;
+    params.model_id                 = 1;
+    params.model_config_.num_layers = cache_manager_->cacheConfig().layer_num;
+    DecodeRpcServer server;
+    if (!GetParam()) {
+        server.pd_write_recovery_delay_ = std::chrono::milliseconds(50);
+    }
+    server.maga_init_params_     = params;
+    server.engine_               = std::make_shared<MinimalEngine>(params, cache_manager_);
+    server.resource_.cache_store = store;
+    server.resource_.workers     = {"decode"};
+    grpc::ServerContext          server_context;
+    DecodeRpcContext             rpc_context{nullptr};
+    kmonitor::MetricsReporterPtr reporter;
+    DecodeGenerateContext        context(
+        rpc_context, /*timeout_ms=*/1, &server_context, reporter, std::make_shared<RpcServerRuntimeMeta>());
+    context.peer_addrs = {"127.0.0.1:12345:12346"};
+    context.setStream(stream_);
+    const auto result = server.loadCacheForAllRank(context);
+    EXPECT_EQ(result.error_info.code(), ErrorCode::CACHE_STORE_LOAD_BUFFER_TIMEOUT);
+    EXPECT_FALSE(result.destination_writes_quiesced);
+    ASSERT_TRUE(store->pending);
+    auto fence = observeDestinationFence(store->pending);
+    ASSERT_FALSE(store->load_buffer_requests_.empty());
+    store->load_buffer_requests_.clear();
+
+    stream_->reportError(result.error_info.code(), result.error_info.ToString());
+    stream_->releaseResource();
+    context.markRpcHandlingCompleted();
+    EXPECT_EQ(pool->referencedBlocksNum(DeviceBlockRefType::PD_CONNECTOR), target_blocks);
+    for (const auto b : original_blocks) {
+        EXPECT_FALSE(pool->hasRequestRef(b));
+        EXPECT_TRUE(pool->isAllocated(b));
+        EXPECT_FALSE(pool->isFrozen(b));
+    }
+
+    // Give another request every remaining page, so the allocator cannot mask premature reuse.
+    const int other_blocks       = static_cast<int>(initial_free_blocks_ - target_blocks);
+    auto      other_input        = std::make_shared<GenerateInput>();
+    other_input->generate_config = std::make_shared<GenerateConfig>();
+    other_input->input_ids       = torch::arange(other_blocks * tokens_per_block, torch::kInt32);
+    auto other_tokens =
+        std::make_shared<CompleteTokenIds>(1, 1, other_blocks * tokens_per_block + tokens_per_block, tokens_per_block);
+    other_tokens->init(other_input);
+    auto other = std::make_shared<BatchKVCacheResource>();
+    other->resetBatchSize(1);
+    other->initGroups(cache_manager_->cacheConfig().topologyPtr());
+    ASSERT_TRUE(cache_manager_->malloc({other, other_tokens, 2, true, false, false}).success);
+    const auto& allocated = other->blocks(0, "default");
+    EXPECT_EQ(allocated.size(), static_cast<size_t>(other_blocks));
+    for (const auto b : original_blocks) {
+        EXPECT_EQ(std::find(allocated.begin(), allocated.end(), b), allocated.end());
+    }
+    EXPECT_EQ(pool->freeBlocksNum(), 0u);
+    EXPECT_FALSE(server.waitForDrain(std::chrono::system_clock::now()));
+
+    // Business RPC completion alone (success or RDMA write failure) must NOT release or freeze blocks.
+    const bool confirmed = GetParam();
+    auto       stop      = store->pending.destinationStopNotifier();
+    ASSERT_TRUE(stop);
+    store->pending(confirmed, confirmed ? CacheStoreErrorCode::None : CacheStoreErrorCode::LoadRdmaWriteFailed);
+    store->pending = {};
+    for (const auto b : original_blocks) {
+        EXPECT_FALSE(pool->isFrozen(b));
+    }
+    EXPECT_EQ(pool->referencedBlocksNum(DeviceBlockRefType::PD_CONNECTOR), target_blocks);
+    EXPECT_EQ(pool->freeBlocksNum(), 0u);
+
+    if (!confirmed) {
+        ASSERT_EQ(fence.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+        ASSERT_NO_THROW(fence.get());
+        EXPECT_EQ(pool->referencedBlocksNum(DeviceBlockRefType::PD_CONNECTOR), target_blocks);
+    } else {
+        EXPECT_EQ(fence.wait_for(std::chrono::seconds(0)), std::future_status::timeout);
+    }
+    stop();
+    EXPECT_EQ(pool->referencedBlocksNum(DeviceBlockRefType::PD_CONNECTOR), 0u);
+    for (const auto b : original_blocks) {
+        EXPECT_FALSE(pool->isFrozen(b));
+        EXPECT_FALSE(pool->isAllocated(b));
+    }
+    EXPECT_EQ(pool->referencedBlocksNum(DeviceBlockRefType::PD_CONNECTOR), 0u);
+    EXPECT_EQ(pool->freeBlocksNum(), target_blocks);
+    EXPECT_TRUE(server.waitForDrain(std::chrono::system_clock::now()));
+    cache_manager_->free({other, other_tokens, 2});
+    EXPECT_EQ(pool->freeBlocksNum(), initial_free_blocks_);
+}
+
+class PdSepSinglePTcpDirectCancelTest: public PdSepKVCacheReleaseTest, public ::testing::WithParamInterface<bool> {};
+
+TEST_P(PdSepSinglePTcpDirectCancelTest, CancelledSingleWorkerTcpLoadHoldsBlocksUntilEveryLocalCopyStops) {
+    constexpr int    tokens_per_block = 8;
+    constexpr size_t target_blocks    = 9;  // >50% of 16-block pool (exceeds ~30%-40% frozen abort ratio).
+    std::vector<int> prompt(target_blocks * tokens_per_block, 1);
+    for (size_t i = 0; i < prompt.size(); ++i) {
+        prompt[i] = static_cast<int>(i + 1);
+    }
+    prepareStreamWithConfig(prompt, makeConfig(), tokens_per_block, RoleType::DECODE);
+    ASSERT_TRUE(stream_->initKVBlock().ok());
+    const auto original_blocks = stream_->kvCachePtr()->blocks(0, "default");
+    ASSERT_EQ(original_blocks.size(), target_blocks);
+    const auto pool = cache_manager_->coordinator_manager_->groupBlockPools().front();
+
+    auto             store  = std::make_shared<DelayedTcpCacheStore>();
+    const size_t     layers = cache_manager_->cacheConfig().layer_num;
+    EngineInitParams params;
+    params.model_id                            = 1;
+    params.model_config_.num_layers            = layers;
+    params.pd_sep_config.load_cache_timeout_ms = 10000;
+    params.pd_sep_config.max_rpc_timeout_ms    = 10000;
+    DecodeRpcServer server;
+    if (!GetParam()) {
+        server.pd_write_recovery_delay_ = std::chrono::milliseconds(50);
+    }
+    server.maga_init_params_     = params;
+    server.engine_               = std::make_shared<MinimalEngine>(params, cache_manager_);
+    server.resource_.cache_store = store;
+    server.resource_.workers     = {"decode"};
+
+    grpc::ServerContext          server_context;
+    DecodeRpcContext             rpc_context{nullptr};
+    kmonitor::MetricsReporterPtr reporter;
+    CancellableDecodeLoad        context(
+        rpc_context, /*timeout_ms=*/10000, &server_context, reporter, std::make_shared<RpcServerRuntimeMeta>());
+    context.peer_addrs = {"127.0.0.1:12345:0"};
+    context.setStream(stream_);
+
+    // Start single-P / single-D TCP direct load, wait until every layer is dispatched, then cancel RPC.
+    auto load_future = std::async(std::launch::async, [&] { return server.loadCacheForAllRank(context); });
+    ASSERT_TRUE(store->waitPending(layers));
+    auto fence = observeDestinationFence(store->pending.back());
+    context.cancelled.store(true);
+    ASSERT_EQ(load_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    const auto result = load_future.get();
+    EXPECT_EQ(result.error_info.code(), ErrorCode::CANCELLED);
+    EXPECT_FALSE(result.destination_writes_quiesced);
+    store->load_buffer_requests_.clear();
+
+    stream_->reportError(result.error_info.code(), result.error_info.ToString());
+    stream_->releaseResource();
+    context.markRpcHandlingCompleted();
+    EXPECT_EQ(pool->referencedBlocksNum(DeviceBlockRefType::PD_CONNECTOR), target_blocks);
+    for (const auto b : original_blocks) {
+        EXPECT_FALSE(pool->hasRequestRef(b));
+        EXPECT_TRUE(pool->isAllocated(b));
+        EXPECT_FALSE(pool->isFrozen(b));
+    }
+
+    // Allocate all remaining free blocks in a second request; none of the cancelled blocks may be reused.
+    const int other_blocks       = static_cast<int>(initial_free_blocks_ - target_blocks);
+    auto      other_input        = std::make_shared<GenerateInput>();
+    other_input->generate_config = std::make_shared<GenerateConfig>();
+    other_input->input_ids       = torch::arange(other_blocks * tokens_per_block, torch::kInt32);
+    auto other_tokens =
+        std::make_shared<CompleteTokenIds>(1, 1, other_blocks * tokens_per_block + tokens_per_block, tokens_per_block);
+    other_tokens->init(other_input);
+    auto other = std::make_shared<BatchKVCacheResource>();
+    other->resetBatchSize(1);
+    other->initGroups(cache_manager_->cacheConfig().topologyPtr());
+    ASSERT_TRUE(cache_manager_->malloc({other, other_tokens, 2, true, false, false}).success);
+    const auto& allocated = other->blocks(0, "default");
+    EXPECT_EQ(allocated.size(), static_cast<size_t>(other_blocks));
+    for (const auto b : original_blocks) {
+        EXPECT_EQ(std::find(allocated.begin(), allocated.end(), b), allocated.end());
+    }
+    EXPECT_EQ(pool->freeBlocksNum(), 0u);
+
+    // Complete all but the final layer copy; blocks must remain pinned.
+    const bool ok = GetParam();
+    for (size_t i = 0; i + 1 < store->pending.size(); ++i) {
+        store->pending[i].destinationWritesStopped();
+        store->pending[i](true, CacheStoreErrorCode::None);
+    }
+    EXPECT_EQ(pool->referencedBlocksNum(DeviceBlockRefType::PD_CONNECTOR), target_blocks);
+    EXPECT_EQ(pool->freeBlocksNum(), 0u);
+    EXPECT_FALSE(server.waitForDrain(std::chrono::system_clock::now()));
+
+    // The last RPC result alone cannot prove that its local GPU copy has stopped.
+    store->pending.back()(ok, ok ? CacheStoreErrorCode::None : CacheStoreErrorCode::LoadBufferTimeout);
+    EXPECT_EQ(pool->referencedBlocksNum(DeviceBlockRefType::PD_CONNECTOR), target_blocks);
+    EXPECT_EQ(pool->freeBlocksNum(), 0u);
+    if (!ok) {
+        ASSERT_EQ(fence.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+        ASSERT_NO_THROW(fence.get());
+        EXPECT_EQ(pool->referencedBlocksNum(DeviceBlockRefType::PD_CONNECTOR), target_blocks);
+    } else {
+        EXPECT_EQ(fence.wait_for(std::chrono::seconds(0)), std::future_status::timeout);
+    }
+    store->pending.back().destinationWritesStopped();
+    EXPECT_EQ(pool->referencedBlocksNum(DeviceBlockRefType::PD_CONNECTOR), 0u);
+    store->pending.clear();
+    for (const auto b : original_blocks) {
+        EXPECT_FALSE(pool->isFrozen(b));
+        EXPECT_FALSE(pool->isAllocated(b));
+    }
+    EXPECT_EQ(pool->referencedBlocksNum(DeviceBlockRefType::PD_CONNECTOR), 0u);
+    EXPECT_EQ(pool->freeBlocksNum(), target_blocks);
+    EXPECT_TRUE(server.waitForDrain(std::chrono::system_clock::now()));
+    cache_manager_->free({other, other_tokens, 2});
+    EXPECT_EQ(pool->freeBlocksNum(), initial_free_blocks_);
+}
+
+INSTANTIATE_TEST_SUITE_P(SinglePTcpDirect,
+                         PdSepSinglePTcpDirectCancelTest,
+                         ::testing::Bool(),
+                         [](const ::testing::TestParamInfo<bool>& info) {
+                             return info.param ? "LateCopySucceeded" : "LateCopyFailed";
+                         });
+
+INSTANTIATE_TEST_SUITE_P(LateRdmaCallback,
+                         PdSepRdmaLateCompletionTest,
+                         ::testing::Bool(),
+                         [](const ::testing::TestParamInfo<bool>& info) {
+                             return info.param ? "Completed" : "Unknown";
+                         });
 
 // =============================================================================
 // Test 1: Normal release without PD sep hold
@@ -607,6 +946,92 @@ TEST_F(PdSepKVCacheReleaseTest, testInsertIntoCache_CalledDuringRelease_ReuseWor
 
     stream2->releaseResource();
 }
+
+// =============================================================================
+class PdSepLoadPublicationTest: public PdSepKVCacheReleaseTest, public ::testing::WithParamInterface<bool> {};
+
+TEST_P(PdSepLoadPublicationTest, ReuseRequiresSuccessfulLoadEvenAfterWritesStop) {
+    constexpr int tokens_per_block = 8;
+    prepareStreamWithConfig(
+        {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14}, makeConfig(), tokens_per_block, RoleType::DECODE);
+    stream_->generate_status_->status = StreamState::WAITING;
+    ASSERT_TRUE(stream_->initKVBlock().ok());
+    const auto blocks = stream_->kvCachePtr()->blocks(0, "default");
+    ASSERT_EQ(blocks.size(), 2u);
+    const auto pool = cache_manager_->coordinator_manager_->groupBlockPools().front();
+
+    const size_t     layers = cache_manager_->cacheConfig().layer_num;
+    auto             store  = std::make_shared<DelayedTcpCacheStore>();
+    EngineInitParams params;
+    params.model_id                 = 1;
+    params.model_config_.num_layers = layers;
+    DecodeRpcServer server;
+    server.maga_init_params_     = params;
+    server.engine_               = std::make_shared<MinimalEngine>(params, cache_manager_);
+    server.resource_.cache_store = store;
+    server.resource_.workers     = {"decode"};
+    grpc::ServerContext          server_context;
+    DecodeRpcContext             rpc_context{nullptr};
+    kmonitor::MetricsReporterPtr reporter;
+    CancellableDecodeLoad        context(
+        rpc_context, 10000, &server_context, reporter, std::make_shared<RpcServerRuntimeMeta>());
+    context.peer_addrs = {"127.0.0.1:12345:0"};
+    context.setStream(stream_);
+
+    const bool succeeded = GetParam();
+    auto       load      = std::async(std::launch::async, [&] { return server.loadCacheForAllRank(context); });
+    ASSERT_TRUE(store->waitPending(layers));
+    for (size_t layer = 0; layer + 1 < layers; ++layer) {
+        store->pending[layer].destinationWritesStopped();
+    }
+    auto independent_pin = pool->pinForRemotePublication(blocks.front());
+    ASSERT_TRUE(independent_pin);
+    EXPECT_EQ(pool->referencedBlocksNum(DeviceBlockRefType::PD_CONNECTOR), blocks.size());
+    EXPECT_EQ(pool->referencedBlocksNum(DeviceBlockRefType::REMOTE_CONNECTOR), 1u);
+    store->pending.back().destinationWritesStopped();
+    for (size_t layer = 0; layer < layers; ++layer) {
+        const bool copied = succeeded || layer + 1 < layers;
+        store->pending[layer](copied, copied ? CacheStoreErrorCode::None : CacheStoreErrorCode::LoadErrorUnknown);
+    }
+    const auto result = load.get();
+    ASSERT_EQ(result.error_info.ok(), succeeded);
+    ASSERT_TRUE(result.destination_writes_quiesced);
+    EXPECT_EQ(pool->referencedBlocksNum(DeviceBlockRefType::PD_CONNECTOR), 0u);
+    EXPECT_TRUE(pool->hasRequestRef(blocks.front()));
+    EXPECT_EQ(pool->referencedBlocksNum(DeviceBlockRefType::REMOTE_CONNECTOR), 1u);
+    context.markRpcHandlingCompleted();
+
+    // Exercise independent FINISHED cleanup even when only the final layer failed.
+    // Physical completion and the stream status alone cannot certify the prefix contents.
+    ASSERT_TRUE(stream_->finishWithoutGenerate());
+    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::CACHE) > 0, succeeded);
+
+    auto next_input = std::make_shared<GenerateInput>(*stream_->generateInput());
+    next_input->request_id += 1;
+    ModelConfig model;
+    model.attn_config.tokens_per_block = tokens_per_block;
+    model.max_seq_len                  = 2048;
+    auto reader =
+        std::make_shared<NormalGenerateStream>(next_input, model, RuntimeConfig{}, stream_->resourceContext(), nullptr);
+    ASSERT_TRUE(reader->initKVBlock().ok());
+    EXPECT_EQ(reader->reuseLength(), succeeded ? tokens_per_block : 0);
+    const auto reader_blocks = reader->kvCachePtr()->blocks(0, "default");
+    ASSERT_FALSE(reader_blocks.empty());
+    EXPECT_EQ(reader_blocks.front() == blocks.front(), succeeded);
+    EXPECT_EQ(pool->referencedBlocksNum(DeviceBlockRefType::REMOTE_CONNECTOR), 1u);
+    EXPECT_TRUE(pool->hasRequestRef(reader_blocks.front()));
+    independent_pin.reset();
+    EXPECT_EQ(pool->isAllocated(blocks.front()), succeeded);
+    EXPECT_TRUE(pool->hasRequestRef(reader_blocks.front()));
+    reader->releaseResource();
+}
+
+INSTANTIATE_TEST_SUITE_P(PhysicalWritesStopped,
+                         PdSepLoadPublicationTest,
+                         ::testing::Bool(),
+                         [](const ::testing::TestParamInfo<bool>& p) {
+                             return p.param ? "LoadSucceeded" : "LoadFailed";
+                         });
 
 // =============================================================================
 // Test 6: Race condition simulation
@@ -1803,5 +2228,326 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreUsesTensorDeviceForCpuKvScale
     ASSERT_NE(scale_block, nullptr);
     EXPECT_FALSE(scale_block->gpu_mem);
 }
+
+TEST_F(PdSepKVCacheReleaseTest, RdmaWorkerRejectsMissingScopeOrUnprotectedTargetBeforeLoading) {
+    prepareStreamWithConfig({1, 2, 3}, makeConfig(), 8, RoleType::DECODE);
+    auto             store = std::make_shared<DelayedRdmaCacheStore>();
+    EngineInitParams params;
+    params.model_config_.num_layers = cache_manager_->cacheConfig().layer_num;
+    DecodeRpcServer server;
+    server.maga_init_params_     = params;
+    server.engine_               = std::make_shared<MinimalEngine>(params, cache_manager_);
+    server.resource_.cache_store = store;
+
+    BroadcastLoadRequestPB request;
+    request.set_dp_rank(params.parallelism_config.dp_rank);
+    request.add_cache_keys(42);
+    auto* row = request.add_tagged_group_block_ids();
+    row->set_tag("default");
+    request.add_cache_keys(43);
+    request.add_peer_addrs("127.0.0.1:12345:12346");
+    request.set_partition_count(1);
+    row->add_block_ids(1);
+    row->add_block_ids(2);
+
+    grpc::ServerContext     context;
+    BroadcastLoadResponsePB legacy_reply;
+    EXPECT_FALSE(server.RemoteLoad(&context, &request, &legacy_reply).ok());
+    EXPECT_FALSE(store->pending);
+    for (bool has_scope : {false, true}) {
+        PreparePDWriteLeaseRequestPB prepare;
+        prepare.set_dp_rank(request.dp_rank());
+        prepare.set_timeout_ms(10000);
+        ASSERT_TRUE(server.PreparePDWriteLease(&context, &prepare, request.mutable_write_lease()).ok());
+        if (has_scope) {
+            // The first block is protected, but the worker also plans to load the second.
+            auto* protected_row = request.mutable_protected_positions()->add_groups();
+            protected_row->set_tag("default");
+            protected_row->add_protected_positions(0);
+        }
+        BroadcastLoadResponsePB response;
+        ASSERT_TRUE(server.RemoteLoad(&context, &request, &response).ok());
+        EXPECT_NE(response.error_info().error_code(), ErrorCodePB::NONE_ERROR);
+        EXPECT_TRUE(response.destination_writes_quiesced());
+        EXPECT_NE(response.error_info().error_message().find(has_scope ? "unprotected" : "requires"),
+                  std::string::npos);
+        EXPECT_FALSE(store->pending);
+        EXPECT_TRUE(store->load_buffer_requests_.empty());
+    }
+    store->memory_util_ = std::make_shared<DummyMemoryUtil>(true, false);
+    PreparePDWriteLeaseRequestPB unsupported;
+    unsupported.set_dp_rank(request.dp_rank());
+    unsupported.set_timeout_ms(10000);
+    PDWriteLeasePB refused;
+    EXPECT_EQ(server.PreparePDWriteLease(&context, &unsupported, &refused).error_code(),
+              grpc::StatusCode::FAILED_PRECONDITION);
+    EXPECT_EQ(refused.token(), 0u);
+    EXPECT_TRUE(store->load_buffer_requests_.empty());
+}
+
+TEST_F(PdSepKVCacheReleaseTest, WorkerSealArmsInflightRecoveryAndRequiresTransportStop) {
+    prepareStreamWithConfig({1, 2, 3}, makeConfig(), 8, RoleType::DECODE);
+    ASSERT_TRUE(stream_->initKVBlock().ok());
+    CacheKeysType keys;
+    GroupBlockIds rows;
+    int64_t       reuse = 0;
+    auto hold = stream_->holdPDLoadDestination(keys, rows, reuse, [](const GroupBlockIds& rows, size_t, int64_t) {
+        return PDLoadDestinationBlocks{{"default", rows.blocks("default")}};
+    });
+    ASSERT_TRUE(hold);
+    ASSERT_EQ(rows.blocks("default").size(), 1u);
+    auto             store = std::make_shared<DelayedRdmaCacheStore>();
+    EngineInitParams params;
+    params.model_config_.num_layers = cache_manager_->cacheConfig().layer_num;
+    DecodeRpcServer server;
+    server.pd_write_recovery_delay_ = std::chrono::milliseconds(40);
+    server.maga_init_params_        = params;
+    server.engine_                  = std::make_shared<MinimalEngine>(params, cache_manager_);
+    server.resource_.cache_store    = store;
+    grpc::ServerContext          context;
+    PreparePDWriteLeaseRequestPB prepare;
+    prepare.set_request_key("remote-worker-stop");
+    prepare.set_dp_rank(params.parallelism_config.dp_rank);
+    prepare.set_timeout_ms(10000);
+    BroadcastLoadRequestPB request;
+    ASSERT_TRUE(server.PreparePDWriteLease(&context, &prepare, request.mutable_write_lease()).ok());
+    request.set_request_key(prepare.request_key());
+    request.set_dp_rank(prepare.dp_rank());
+    request.set_partition_count(1);
+    request.set_timeout_ms(10000);
+    request.add_peer_addrs("127.0.0.1:12345:12346");
+    request.add_cache_keys(42);
+    auto* row = request.add_tagged_group_block_ids();
+    row->set_tag("default");
+    row->add_block_ids(rows.blocks("default").front());
+    auto* protected_row = request.mutable_protected_positions()->add_groups();
+    protected_row->set_tag("default");
+    protected_row->add_protected_positions(0);
+    BroadcastLoadResponsePB response;
+    auto                    submitted = store->submitted.get_future();
+    auto outcome = std::async(std::launch::async, [&] { return server.RemoteLoad(&context, &request, &response); });
+    ASSERT_EQ(submitted.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    ASSERT_TRUE(store->pending);
+    SealPDWriteLeaseResponsePB sealed;
+    ASSERT_TRUE(server.SealPDWriteLease(&context, &request.write_lease(), &sealed).ok());
+    EXPECT_FALSE(sealed.stopped());
+    auto fence           = std::make_shared<std::promise<void>>();
+    auto fence_requested = fence->get_future();
+    store->pending.setDestinationFence([fence] { fence->set_value(); });
+    ASSERT_EQ(fence_requested.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_EQ(outcome.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
+    ASSERT_TRUE(server.SealPDWriteLease(&context, &request.write_lease(), &sealed).ok());
+    EXPECT_FALSE(sealed.stopped());
+    auto stop = store->pending.destinationStopNotifier();
+    ASSERT_TRUE(stop);
+    store->pending(false, CacheStoreErrorCode::LoadRdmaWriteFailed);
+    ASSERT_EQ(outcome.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    ASSERT_TRUE(outcome.get().ok());
+    EXPECT_EQ(response.error_info().error_code(), ErrorCodePB::CACHE_STORE_LOAD_RDMA_WRITE_FAILED);
+    EXPECT_FALSE(response.destination_writes_quiesced());
+    store->pending = {};
+    ASSERT_TRUE(server.SealPDWriteLease(&context, &request.write_lease(), &sealed).ok());
+    EXPECT_FALSE(sealed.stopped());
+    stop();
+    ASSERT_TRUE(server.SealPDWriteLease(&context, &request.write_lease(), &sealed).ok());
+    EXPECT_TRUE(sealed.stopped());
+    EXPECT_TRUE(samePDWriteLease(request.write_lease(), sealed.lease()));
+}
+
+namespace {
+
+class ControlledLoadWorker final: public RpcService::Service {
+public:
+    grpc::Status PreparePDWriteLease(grpc::ServerContext*,
+                                     const PreparePDWriteLeaseRequestPB* request,
+                                     PDWriteLeasePB*                     response) override {
+        if (block_prepare) {
+            prepare_entered.set_value();
+            if (release_prepare.get_future().wait_for(std::chrono::seconds(10)) != std::future_status::ready) {
+                return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "test prepare timed out");
+            }
+        }
+        if (prepare_error != grpc::StatusCode::OK)
+            return grpc::Status(prepare_error, "worker declined prepare");
+        *response = leases->prepare(*request);
+        return grpc::Status::OK;
+    }
+    grpc::Status SealPDWriteLease(grpc::ServerContext*,
+                                  const PDWriteLeasePB*       request,
+                                  SealPDWriteLeaseResponsePB* response) override {
+        bool stopped = false;
+        if (!leases->seal(*request, stopped))
+            return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "epoch");
+        if (seal_calls.fetch_add(1) == 0) {
+            first_seal.set_value();
+            return grpc::Status(grpc::StatusCode::UNAVAILABLE, "lost first seal response");
+        }
+        *response->mutable_lease() = *request;
+        response->set_stopped(stopped);
+        return grpc::Status::OK;
+    }
+    grpc::Status RemoteLoad(grpc::ServerContext*,
+                            const BroadcastLoadRequestPB* request,
+                            BroadcastLoadResponsePB*      response) override {
+        ++load_calls;
+        auto writer = leases->claim(*request);
+        if (!writer)
+            return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "not prepared");
+        EXPECT_TRUE(request->has_protected_positions());
+        entered.set_value();
+        if (reply.wait_for(std::chrono::seconds(10)) != std::future_status::ready) {
+            return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "test worker timed out");
+        }
+        const bool acknowledged = reply.get();
+        if (acknowledged) {
+            writer.reset();
+            *response->mutable_stopped_lease() = request->write_lease();
+            response->set_destination_writes_quiesced(true);
+        } else {
+            // Keep the independent physical operation live after losing the RPC.
+            std::lock_guard<std::mutex> lock(mu);
+            physical_writer = std::move(writer);
+        }
+        reply_prepared.set_value();
+        return acknowledged ? grpc::Status::OK : grpc::Status(grpc::StatusCode::UNAVAILABLE, "missing worker receipt");
+    }
+    void completePhysicalWrite() {
+        std::lock_guard<std::mutex> lock(mu);
+        physical_writer.reset();
+    }
+
+    grpc::StatusCode   prepare_error = grpc::StatusCode::OK;
+    bool               block_prepare = false;
+    std::promise<void> prepare_entered;
+    std::promise<void> release_prepare;
+    std::atomic<int>   load_calls{0};
+    std::atomic<int>   seal_calls{0};
+    std::promise<void> first_seal;
+    std::promise<void> entered;
+    std::promise<void> reply_prepared;
+    std::promise<bool> allow_reply;
+    std::future<bool>  reply{allow_reply.get_future()};
+
+private:
+    std::mutex                            mu;
+    std::shared_ptr<void>                 physical_writer;
+    std::shared_ptr<PDWriteLeaseRegistry> leases = std::make_shared<PDWriteLeaseRegistry>();
+};
+
+}  // namespace
+
+enum class FanoutOutcome {
+    ACKNOWLEDGED,
+    LOST_RESPONSE,
+    LEGACY_WORKER,
+    WORKER_CANCELLED,
+    CANCEL_DURING_PREPARE
+};
+class PdSepRdmaFanoutTest: public PdSepKVCacheReleaseTest, public ::testing::WithParamInterface<FanoutOutcome> {};
+
+TEST_P(PdSepRdmaFanoutTest, CancelRetainsDecodeTargetUntilLastWorkerReceipt) {
+    using namespace std::chrono_literals;
+    prepareStreamWithConfig({1, 2, 3}, makeConfig(), 8, RoleType::DECODE);
+    ASSERT_TRUE(stream_->initKVBlock().ok());
+    const auto block = stream_->kvCachePtr()->blocks(0, "default").front();
+    const auto pool  = cache_manager_->coordinator_manager_->groupBlockPools().front();
+
+    EngineInitParams params;
+    params.model_config_.num_layers                      = cache_manager_->cacheConfig().layer_num;
+    params.pd_sep_config.load_cache_timeout_ms           = 10000;
+    params.pd_sep_config.max_rpc_timeout_ms              = 10000;
+    params.pd_sep_config.decode_polling_kv_cache_step_ms = 2;
+    DecodeRpcServer decode;
+    decode.maga_init_params_ = params;
+    decode.engine_           = std::make_shared<MinimalEngine>(params, cache_manager_);
+    // This rank uses TCP. The remote workers can still publish RDMA destinations.
+    decode.resource_.cache_store = std::make_shared<MemoryBackedCacheStore>(false);
+    ControlledLoadWorker workers[2];
+    if (GetParam() == FanoutOutcome::LEGACY_WORKER)
+        workers[1].prepare_error = grpc::StatusCode::UNIMPLEMENTED;
+    if (GetParam() == FanoutOutcome::WORKER_CANCELLED)
+        workers[1].prepare_error = grpc::StatusCode::CANCELLED;
+    workers[1].block_prepare = GetParam() == FanoutOutcome::CANCEL_DURING_PREPARE;
+    std::vector<std::unique_ptr<grpc::Server>> servers;
+    for (auto& worker : workers) {
+        grpc::ServerBuilder builder;
+        int                 port = 0;
+        builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port);
+        builder.RegisterService(&worker);
+        servers.push_back(builder.BuildAndStart());
+        ASSERT_TRUE(servers.back());
+        auto address = "127.0.0.1:" + std::to_string(port);
+        decode.resource_.workers.push_back(address);
+        decode.resource_.grpc_workers.push_back(address);
+    }
+
+    grpc::ServerContext          server_context;
+    DecodeRpcContext             rpc_context{nullptr};
+    kmonitor::MetricsReporterPtr reporter;
+    CancellableDecodeLoad        context(
+        rpc_context, 10000, &server_context, reporter, std::make_shared<RpcServerRuntimeMeta>());
+    context.peer_addrs = {"127.0.0.1:12345:12346"};
+    context.setStream(stream_);
+    auto outcome = std::async(std::launch::async, [&] { return decode.loadCacheForAllRank(context); });
+    if (workers[1].prepare_error != grpc::StatusCode::OK || workers[1].block_prepare) {
+        if (workers[1].block_prepare) {
+            EXPECT_EQ(workers[1].prepare_entered.get_future().wait_for(5s), std::future_status::ready);
+            context.cancelled.store(true);
+        }
+        EXPECT_EQ(outcome.wait_for(5s), std::future_status::ready);
+        if (workers[1].block_prepare)
+            workers[1].release_prepare.set_value();
+        const auto code = outcome.get().error_info.code();
+        EXPECT_EQ(code, workers[1].block_prepare ? ErrorCode::CANCELLED : ErrorCode::LOAD_KV_CACHE_FAILED);
+        EXPECT_EQ(workers[0].load_calls.load(), 0);
+        EXPECT_EQ(workers[1].load_calls.load(), 0);
+        EXPECT_EQ(pool->referencedBlocksNum(DeviceBlockRefType::PD_CONNECTOR), 0u);
+        context.markRpcHandlingCompleted();
+        return;
+    }
+    EXPECT_EQ(workers[0].entered.get_future().wait_for(5s), std::future_status::ready);
+    EXPECT_EQ(workers[1].entered.get_future().wait_for(5s), std::future_status::ready);
+    workers[0].allow_reply.set_value(true);
+    EXPECT_EQ(workers[0].reply_prepared.get_future().wait_for(5s), std::future_status::ready);
+    context.cancelled.store(true);
+    EXPECT_EQ(context.cancel_observed.get_future().wait_for(5s), std::future_status::ready);
+
+    stream_->reportError(ErrorCode::CANCELLED, "test cancelled during fanout");
+    stream_->releaseResource();
+    EXPECT_FALSE(pool->hasRequestRef(block));
+    EXPECT_TRUE(pool->isAllocated(block));
+    EXPECT_FALSE(pool->isFrozen(block));
+    EXPECT_EQ(pool->referencedBlocksNum(DeviceBlockRefType::PD_CONNECTOR), 1u);
+    EXPECT_EQ(outcome.wait_for(5s), std::future_status::ready);
+    EXPECT_EQ(outcome.get().error_info.code(), ErrorCode::CANCELLED);
+    context.markRpcHandlingCompleted();
+    ASSERT_EQ(workers[1].first_seal.get_future().wait_for(5s), std::future_status::ready);
+
+    EXPECT_FALSE(decode.waitForDrain(std::chrono::system_clock::now()));
+    const auto generation   = cache_manager_->allocationGeneration();
+    const bool acknowledged = GetParam() == FanoutOutcome::ACKNOWLEDGED;
+    workers[1].allow_reply.set_value(acknowledged);
+    EXPECT_EQ(workers[1].reply_prepared.get_future().wait_for(5s), std::future_status::ready);
+    if (!acknowledged) {
+        // Repeated stop queries alone cannot release a target a worker can still write.
+        EXPECT_FALSE(cache_manager_->waitForAllocationChange(generation, 150));
+        EXPECT_EQ(pool->referencedBlocksNum(DeviceBlockRefType::PD_CONNECTOR), 1u);
+        EXPECT_FALSE(pool->isFrozen(block));
+        workers[1].completePhysicalWrite();
+    }
+    EXPECT_TRUE(cache_manager_->waitForAllocationChange(generation, 5000));
+    EXPECT_GE(workers[1].seal_calls.load(), 2);
+    EXPECT_EQ(pool->referencedBlocksNum(DeviceBlockRefType::PD_CONNECTOR), 0u);
+    EXPECT_FALSE(pool->isAllocated(block));
+    EXPECT_TRUE(decode.waitForDrain(std::chrono::system_clock::now() + 5s));
+}
+
+INSTANTIATE_TEST_SUITE_P(WriteLeaseSettlement,
+                         PdSepRdmaFanoutTest,
+                         ::testing::Values(FanoutOutcome::ACKNOWLEDGED,
+                                           FanoutOutcome::LOST_RESPONSE,
+                                           FanoutOutcome::LEGACY_WORKER,
+                                           FanoutOutcome::WORKER_CANCELLED,
+                                           FanoutOutcome::CANCEL_DURING_PREPARE));
 
 }  // namespace rtp_llm

@@ -50,6 +50,15 @@ public:
 
     bool isValid() const;
 
+    // Set on the first buffer of a load before handing it to loadBuffers().
+    // LoadContext takes ownership before publishing any destination address.
+    void setLoadWriterLifetime(std::shared_ptr<void> lifetime) {
+        load_writer_lifetime_ = std::move(lifetime);
+    }
+    std::shared_ptr<void> takeLoadWriterLifetime() {
+        return std::move(load_writer_lifetime_);
+    }
+
     // change with true callback, dtor with false callback
     typedef std::function<void(bool ok, const std::vector<std::shared_ptr<BlockBuffer>>&)> WatchFunc;
     bool setWatchFunc(WatchFunc&& watch_func);
@@ -61,6 +70,7 @@ private:
     void triggerWatchFunc(bool ok, const std::vector<std::shared_ptr<BlockBuffer>>&);
 
 private:
+    std::shared_ptr<void> load_writer_lifetime_;
     std::string requestid_;
     std::string request_key_;
 

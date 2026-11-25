@@ -1,8 +1,15 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/LoadContext.h"
 
+#include "autil/Scope.h"
+
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/ErrorCodeUtil.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include <algorithm>
+#include <map>
+#include <thread>
+#include <unordered_set>
 
 namespace rtp_llm {
 
@@ -52,10 +59,12 @@ void SyncContext::call(const std::vector<std::shared_ptr<RequestBlockBuffer>>& r
 void SyncContext::updateResult(bool                                       success,
                                CacheStoreErrorCode                        ec,
                                const std::shared_ptr<RequestBlockBuffer>& request_block_buffer) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::mutex> lock(mutex_);
     if (!success) {
-        auto error_code = transCacheStoreErrorCode(ec);
-        error_info_     = ErrorInfo(error_code, ErrorCodeToString(error_code));
+        if (!timed_out_ && error_info_.code() != ErrorCode::CANCELLED) {
+            const auto error_code = transCacheStoreErrorCode(ec);
+            error_info_           = ErrorInfo(error_code, ErrorCodeToString(error_code));
+        }
         failed_request_block_buffers_.push_back(request_block_buffer);
         RTP_LLM_LOG_WARNING("request %s call finished, state:[%s], error code[%s], cost time %ldms",
                             request_block_buffer->getRequestKey().c_str(),
@@ -116,7 +125,7 @@ std::string SyncContext::getErrorInfoString() const {
     return error_info_.ToString();
 }
 
-const ErrorInfo& SyncContext::getErrorInfo() const {
+ErrorInfo SyncContext::getErrorInfo() const {
     std::unique_lock<std::mutex> lock(mutex_);
     return error_info_;
 }
@@ -137,8 +146,231 @@ std::vector<std::string> SyncContext::failedBlockDebugInfos() const {
     return debug_infos;
 }
 
+namespace {
+// One monotonic timer queue for abandoned loads. Entries hold only weak destination references.
+class IsolationDeadlines {
+public:
+    using Clock = std::chrono::steady_clock;
+
+    static IsolationDeadlines& instance() {
+        static IsolationDeadlines timers;
+        return timers;
+    }
+    void schedule(Clock::time_point deadline, std::function<void()> action) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        actions_.emplace(deadline, std::move(action));
+        changed_.notify_one();
+    }
+
+private:
+    IsolationDeadlines(): worker_([this] { run(); }) {}
+    ~IsolationDeadlines() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            closing_ = true;
+        }
+        changed_.notify_one();
+        worker_.join();
+    }
+    void run() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        while (!closing_) {
+            if (actions_.empty()) {
+                changed_.wait(lock);
+                continue;
+            }
+            const auto deadline = actions_.begin()->first;
+            if (Clock::now() < deadline) {
+                changed_.wait_until(lock, deadline);
+                continue;
+            }
+            auto action = std::move(actions_.begin()->second);
+            actions_.erase(actions_.begin());
+            lock.unlock();
+            action();
+            action = {};
+            lock.lock();
+        }
+    }
+    std::mutex                                              mutex_;
+    std::condition_variable                                 changed_;
+    std::multimap<Clock::time_point, std::function<void()>> actions_;
+    bool                                                    closing_ = false;
+    std::thread                                             worker_;
+};
+}  // namespace
+
+// This object can outlive LoadContext, gRPC and the logical completion callback.
+// Keep only the destination owner and observers alive while an issued write lacks proof.
+class LoadContext::DestinationWrites: public std::enable_shared_from_this<DestinationWrites> {
+public:
+    void setLifetime(std::shared_ptr<void> lifetime) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        lifetime_ = std::move(lifetime);
+    }
+
+    struct Write {
+        std::function<void()> fence;
+    };
+    using Operation = std::shared_ptr<Write>;
+
+    void finish(const Operation& write) {
+        std::function<void()>        unused_fence;
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (pending_.erase(write)) {
+            unused_fence = std::move(write->fence);
+            releaseIfStopped(lock);
+        }
+    }
+
+    void beginWrite(const Operation& write) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        pending_.insert(write);
+        if (lifetime_ || !observers_.empty()) {
+            pending_owner_ = shared_from_this();
+        }
+    }
+
+    void setFence(const Operation& write, std::function<void()> fence) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (!pending_.count(write)) {
+            return;
+        }
+        if (!recovery_due_) {
+            write->fence = std::move(fence);
+            return;
+        }
+        lock.unlock();
+        invokeFence(fence);
+    }
+
+    void scheduleRecovery(std::chrono::milliseconds isolation) noexcept {
+        try {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (recovery_scheduled_ || (sealed_ && pending_.empty())) {
+                return;
+            }
+            IsolationDeadlines::instance().schedule(IsolationDeadlines::Clock::now() + isolation,
+                                                    [weak = weak_from_this()] {
+                                                        if (auto self = weak.lock()) {
+                                                            self->recover();
+                                                        }
+                                                    });
+            recovery_scheduled_ = true;
+        } catch (...) {
+            RTP_LLM_LOG_ERROR("Failed to schedule KV destination recovery; retaining the write references");
+        }
+    }
+
+    void seal() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        sealed_ = true;
+        releaseIfStopped(lock);
+    }
+
+    bool stopped() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return sealed_ && pending_.empty();
+    }
+
+    bool wait(std::chrono::steady_clock::time_point deadline) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return cond_.wait_until(lock, deadline, [this] { return sealed_ && pending_.empty(); });
+    }
+
+    void onStopped(std::function<void()> callback) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (sealed_ && pending_.empty()) {
+            lock.unlock();
+            callback();
+            return;
+        }
+        observers_.push_back(std::move(callback));
+        if (!pending_.empty()) {
+            pending_owner_ = shared_from_this();
+        }
+    }
+
+private:
+    static void invokeFence(const std::function<void()>& fence) noexcept {
+        try {
+            if (fence) {
+                fence();
+            }
+        } catch (...) {
+            RTP_LLM_LOG_ERROR("KV destination fence failed; retaining the write references");
+        }
+    }
+
+    void recover() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        recovery_due_ = true;
+        // Transports may acknowledge synchronously and remove the current operation.
+        while (true) {
+            auto it =
+                std::find_if(pending_.begin(), pending_.end(), [](const auto& write) { return bool(write->fence); });
+            if (it == pending_.end()) {
+                return;
+            }
+            auto fence = std::move((*it)->fence);
+            lock.unlock();
+            invokeFence(fence);
+            lock.lock();
+        }
+    }
+
+    void releaseIfStopped(std::unique_lock<std::mutex>& lock) {
+        if (!sealed_ || !pending_.empty()) {
+            return;
+        }
+        auto observers = std::move(observers_);
+        auto lifetime  = std::move(lifetime_);
+        pending_owner_.reset();
+        lock.unlock();
+        lifetime.reset();
+        cond_.notify_all();
+        for (auto& observer : observers) {
+            observer();
+        }
+    }
+
+    mutable std::mutex                 mutex_;
+    std::condition_variable            cond_;
+    std::unordered_set<Operation>      pending_;
+    bool                               recovery_scheduled_ = false;
+    bool                               recovery_due_       = false;
+    bool                               sealed_             = false;
+    std::shared_ptr<void>              lifetime_;
+    std::shared_ptr<DestinationWrites> pending_owner_;
+    std::vector<std::function<void()>> observers_;
+};
+
 LoadContext::LoadContext(const std::shared_ptr<CacheStore>& cache_store, bool combine_load):
-    SyncContext(cache_store, combine_load) {}
+    SyncContext(cache_store, combine_load), destination_writes_(std::make_shared<DestinationWrites>()) {}
+
+bool LoadContext::destinationWritesStopped() const {
+    return destination_writes_->stopped();
+}
+
+bool LoadContext::waitForDestinationWritesStopped(std::chrono::steady_clock::time_point deadline) const {
+    return destination_writes_->wait(deadline);
+}
+
+void LoadContext::onDestinationWritesStopped(std::function<void()> callback) {
+    destination_writes_->onStopped(std::move(callback));
+}
+
+void LoadContext::recoverDestinationWritesAfterTimeout(std::chrono::milliseconds isolation) noexcept {
+    destination_writes_->scheduleRecovery(isolation);
+}
+
+std::function<void()> LoadContext::destinationRecoveryCallback(std::chrono::milliseconds delay) const {
+    return [weak = std::weak_ptr<DestinationWrites>(destination_writes_), delay] {
+        if (auto writes = weak.lock()) {
+            writes->scheduleRecovery(delay);
+        }
+    };
+}
 
 void LoadContext::load(const std::vector<std::shared_ptr<RequestBlockBuffer>>& request_block_buffer,
                        const std::string&                                      ip,
@@ -148,6 +380,10 @@ void LoadContext::load(const std::vector<std::shared_ptr<RequestBlockBuffer>>& r
                        CheckCancelFunc                                         check_cancel_func,
                        int                                                     partition_count,
                        int                                                     partition_id) {
+    autil::ScopeGuard seal([this] { destination_writes_->seal(); });
+    if (!request_block_buffer.empty() && request_block_buffer.front()) {
+        destination_writes_->setLifetime(request_block_buffer.front()->takeLoadWriterLifetime());
+    }
     peer_ip_         = ip;
     port_            = port;
     rdma_port_       = rdma_port;
@@ -158,13 +394,22 @@ void LoadContext::load(const std::vector<std::shared_ptr<RequestBlockBuffer>>& r
 
 bool LoadContext::doCall(const std::shared_ptr<RequestBlockBuffer>& request_block_buffer, int64_t timeout_ms) {
     auto cache_store = cache_store_.lock();
+    if (!cache_store) {
+        return false;
+    }
 
-    auto load_layer_callback = [request_block_buffer, shared_this = shared_from_this()](bool                success,
-                                                                                        CacheStoreErrorCode ec) {
-        shared_this->updateResult(success, ec, request_block_buffer);
-    };
+    auto                       write = std::make_shared<DestinationWrites::Write>();
+    CacheStoreLoadDoneCallback callback(
+        [request_block_buffer, shared_this = shared_from_this()](bool success, CacheStoreErrorCode ec) {
+            shared_this->updateResult(success, ec, request_block_buffer);
+        },
+        [state = destination_writes_, write] { state->finish(write); },
+        [state = destination_writes_, write](std::function<void()> fence) {
+            state->setFence(write, std::move(fence));
+        });
+    destination_writes_->beginWrite(write);
     cache_store->load(request_block_buffer,
-                      load_layer_callback,
+                      std::move(callback),
                       peer_ip_,
                       port_,
                       rdma_port_,

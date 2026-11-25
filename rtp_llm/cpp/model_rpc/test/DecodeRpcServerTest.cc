@@ -233,6 +233,7 @@ TEST(ModelRpcProtoTest, GroupedCacheFieldsPreserveLegacyNumbers) {
     const auto* response = BroadcastLoadResponsePB::descriptor();
     ASSERT_NE(response, nullptr);
     EXPECT_EQ(response->FindFieldByName("loaded_cache_block_count")->number(), 3);
+    EXPECT_EQ(response->FindFieldByName("destination_writes_quiesced")->number(), 4);
 
     const auto* remote = RemoteOperationRequestPB::descriptor();
     ASSERT_NE(remote, nullptr);
@@ -329,6 +330,51 @@ TEST(DecodeRpcServerTest, EmptyRemoteLoadTopologyFailsBeforePartitionArithmetic)
     EXPECT_TRUE(DecodeRpcServer::validateRemoteLoadTopology(/*worker_size=*/4, /*peer_size=*/2).ok());
     EXPECT_EQ(DecodeRpcServer::validateRemoteLoadTopology(/*worker_size=*/3, /*peer_size=*/2).code(),
               ErrorCode::LOAD_KV_CACHE_FAILED);
+}
+
+TEST(DecodeRpcServerTest, RemoteLoadRequiresPhysicalAcknowledgementForThePreparedLease) {
+    PDWriteLeasePB expected;
+    expected.set_worker_epoch("first");
+    expected.set_token(1);
+    BroadcastLoadResponsePB reply;
+    EXPECT_FALSE(DecodeRpcServer::remoteLoadDestinationQuiesced(true, grpc::Status::OK, reply, expected));
+    reply.mutable_error_info()->set_error_code(ErrorCodePB::CACHE_STORE_LOAD_CONNECT_FAILED);
+    *reply.mutable_stopped_lease() = expected;
+    EXPECT_FALSE(DecodeRpcServer::remoteLoadDestinationQuiesced(true, grpc::Status::OK, reply, expected));
+    reply.set_destination_writes_quiesced(true);
+    EXPECT_TRUE(DecodeRpcServer::remoteLoadDestinationQuiesced(true, grpc::Status::OK, reply, expected));
+    EXPECT_FALSE(DecodeRpcServer::remoteLoadDestinationQuiesced(false, grpc::Status::OK, reply, expected));
+    EXPECT_FALSE(DecodeRpcServer::remoteLoadDestinationQuiesced(
+        true, grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "timeout"), reply, expected));
+    reply.mutable_stopped_lease()->set_worker_epoch("other");
+    EXPECT_FALSE(DecodeRpcServer::remoteLoadDestinationQuiesced(true, grpc::Status::OK, reply, expected));
+}
+
+TEST(DecodeRpcServerTest, ShutdownSealsUnclaimedWriteLeasesBeforeReportingDrain) {
+    DecodeRpcServer              server;
+    grpc::ServerContext          context;
+    PreparePDWriteLeaseRequestPB prepare;
+    prepare.set_timeout_ms(10000);
+    PDWriteLeasePB rejected;
+    prepare.set_dp_rank(server.maga_init_params_.parallelism_config.dp_rank);
+    EXPECT_EQ(server.PreparePDWriteLease(&context, &prepare, &rejected).error_code(),
+              grpc::StatusCode::FAILED_PRECONDITION);
+    EXPECT_EQ(rejected.token(), 0u);
+    BroadcastLoadRequestPB pending;
+    BroadcastLoadRequestPB active;
+    pending.set_dp_rank(prepare.dp_rank());
+    active.set_dp_rank(prepare.dp_rank());
+    *pending.mutable_write_lease() = server.write_leases_->prepare(prepare);
+    *active.mutable_write_lease()  = server.write_leases_->prepare(prepare);
+    auto writer                    = server.write_leases_->claim(active);
+    ASSERT_TRUE(writer);
+    server.beginShutdown();
+    EXPECT_EQ(server.write_leases_->prepare(prepare).token(), 0u);
+    BroadcastLoadResponsePB reply;
+    EXPECT_FALSE(server.RemoteLoad(&context, &pending, &reply).ok());
+    EXPECT_FALSE(server.waitForDrain(std::chrono::system_clock::now()));
+    writer.reset();
+    EXPECT_TRUE(server.waitForDrain(std::chrono::system_clock::now()));
 }
 
 TEST(DecodeRpcServerTest, OddTpWorkersWaitForEveryCompletionQueueResponse) {
