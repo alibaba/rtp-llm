@@ -35,6 +35,7 @@ from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_compressor import (
     write_indexer_cache,
 )
 from rtp_llm.models_py.modules.qwen4_exp.qsa.validation import DeviceChecks
+from rtp_llm.models_py.utils.kvcache import canonical_cache_tag
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
 
 from . import qsa_decode, qsa_geometry, qsa_prefill, qsa_target
@@ -159,11 +160,14 @@ class Qwen4ExpQSARuntimeContext:
         allow_graph_decode: bool = False,
         allow_graph_target: bool = False,
     ) -> list[int]:
-        if str(self.indexer_kv_cache.tag) != INDEXER_KV_TAG:
+        if canonical_cache_tag(self.indexer_kv_cache.tag) != INDEXER_KV_TAG:
             raise RuntimeError("qwen4_exp QSA received the wrong indexer KV cache")
-        if str(self.indexer_state_cache.tag) != INDEXER_STATE_TAG:
+        if canonical_cache_tag(self.indexer_state_cache.tag) != INDEXER_STATE_TAG:
             raise RuntimeError("qwen4_exp QSA received the wrong indexer state cache")
-        if str(self.main_cache.tag) in (INDEXER_KV_TAG, INDEXER_STATE_TAG):
+        if canonical_cache_tag(self.main_cache.tag) in (
+            INDEXER_KV_TAG,
+            INDEXER_STATE_TAG,
+        ):
             raise RuntimeError("qwen4_exp QSA main cache resolves to a side-pool tag")
 
         all_inputs = (

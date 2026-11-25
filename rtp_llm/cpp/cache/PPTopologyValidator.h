@@ -24,6 +24,7 @@ struct StageCacheGroupSnapshot {
     uint32_t       block_num                 = 0;
     uint32_t       explicit_block_num        = 0;  // 0 = follows the paged budget
     std::string    policy_fingerprint;
+    bool           is_draft = false;
 };
 
 /** Per-stage cache geometry exchanged at startup. */
@@ -63,7 +64,9 @@ struct PPValidationResult {
  * Validates cache geometry across PP stages and builds the agreed group
  * table. All stages declare the same logical tags and agree on their policy and
  * token geometry. The leading stage assigns IDs using the minimum capacity
- * among stages with local backing for each tag.
+ * among stages with local backing for each tag. Draft (MTP) groups carry
+ * allocation-only rows on non-final stages; their physical backing lives on
+ * the last PP stage.
  */
 PPValidationResult validatePPTopology(const std::vector<StageCacheSnapshot>& stages);
 

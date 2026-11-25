@@ -897,6 +897,8 @@ message P2PPipelineLayoutPB {
         repeated int32 worker_indices = 4;
         P2PShardLayoutPB main_shards = 5;
         P2PShardLayoutPB draft_shards = 6;
+        // Stage 0 allocator rows, including logical rows backed by another stage.
+        repeated string block_table_tags = 7;
     }
     repeated Stage stages = 1;
     uint32 worker_count = 2;

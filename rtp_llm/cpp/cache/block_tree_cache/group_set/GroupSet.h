@@ -15,6 +15,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DiskBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/HostBlockPool.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
+#include "rtp_llm/cpp/cache/CacheConfig.h"
 
 namespace rtp_llm {
 
@@ -40,10 +41,10 @@ public:
 
     virtual ~GroupSet() = default;
 
-    void initialize(size_t                               group_set_id,
-                    std::shared_ptr<const CacheTopology> topology,
-                    std::vector<std::string>             group_tags,
-                    BackingLayout                        backing_layout = {});
+    void initialize(size_t                             group_set_id,
+                    std::shared_ptr<const CacheConfig> cache_config,
+                    std::vector<std::string>           group_tags,
+                    BackingLayout                      backing_layout = {});
 
     size_t groupSetId() const {
         return group_set_id_;
@@ -51,13 +52,16 @@ public:
     const std::vector<std::string>& groupTags() const {
         return group_tags_;
     }
-    std::shared_ptr<const CacheTopology> topologyPtr() const {
-        return topology_;
+    std::shared_ptr<const CacheConfig> cacheConfig() const {
+        return cache_config_;
     }
     const GroupBase& group(std::string_view tag) const {
-        return topology_->group(tag);
+        return cache_config_->group(tag);
     }
-    size_t payloadBytes() const {
+    const KVCacheSpec& groupSpec(std::string_view tag) const;
+    // Local layer IDs for the tag's owning module (module-local, never union).
+    std::vector<int> localLayerIdsForMember(std::string_view tag) const;
+    size_t           payloadBytes() const {
         return payload_bytes_;
     }
     bool usesPhysicalPayloadGeometry() const {
@@ -101,7 +105,7 @@ private:
     std::shared_ptr<HostBlockPool>          host_pool_;
     std::shared_ptr<DiskBlockPool>          disk_pool_;
     size_t                                  group_set_id_{0};
-    std::shared_ptr<const CacheTopology>    topology_;
+    std::shared_ptr<const CacheConfig>      cache_config_;
     std::vector<std::string>                group_tags_;
     size_t                                  payload_bytes_{0};
     size_t                                  storage_bytes_{0};

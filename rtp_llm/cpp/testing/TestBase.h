@@ -103,7 +103,7 @@ protected:
                                                    uint              size_per_head,
                                                    uint              tokens_per_block,
                                                    rtp_llm::DataType dtype) {
-        // Delegate to the unified cache/test helper so derived fields (stride/bytes, layer_all_num, etc.)
+        // Delegate to the unified cache/test helper so derived fields (stride/bytes, layer_num, etc.)
         // are always initialized consistently.
         return rtp_llm::test::makeSimpleMhaCacheConfig(/*layer_num=*/static_cast<int>(layer_num),
                                                        /*block_num=*/static_cast<int>(block_num),
@@ -201,7 +201,7 @@ protected:
 
         auto batch_kv_cache = std::make_shared<rtp_llm::BatchKVCacheResource>();
         batch_kv_cache->resetBatchSize(batch_size);
-        batch_kv_cache->initGroups(cache_config.topologyPtr());
+        batch_kv_cache->initGroups(cache_config);
 
         auto complete_token_ids =
             std::make_shared<rtp_llm::CompleteTokenIds>(static_cast<int>(batch_size),

@@ -238,6 +238,7 @@ cc_test_wrapper(
         "//conditions:default": ["@platforms//:incompatible"],
     }),
     deps = kvcm_backend_test_deps + [
+        "//rtp_llm/cpp/cache/test:cache_config_test_access",
         "//rtp_llm/cpp/cache:coordinator_cache_manager",
         "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:subscriber",
         "//rtp_llm/cpp/testing:device_test_utils",

@@ -1047,6 +1047,8 @@ public:
         };
         configure_cache_model(score_cache_model_config);
         configure_cache_model(propose_cache_model_config);
+        // The draft declares module-scoped tags; the C++ side never renames.
+        test::declareModuleScopedTags(propose_cache_model_config);
 
         auto cache_sp_config              = sp_config;
         cache_sp_config.gen_num_per_cycle = 1;
@@ -1312,17 +1314,20 @@ public:
 
 #if USING_CUDA
 TEST_F(MtpExecutorTest, LinearReplayGatherPreservesCancelledBatchRows) {
-    auto linear      = test::makeLinearSpec("linear", 16, TYPE_FP16, 1, 1);
-    auto full        = test::makeMhaSpec("full", 16, TYPE_FP16, 1, 1);
-    auto config      = test::makeSingleLayerCacheConfig(linear, CacheGroupType::LINEAR, 16);
-    config.layer_num = 2;
-    config.fromGroupedSpecs(
-        {linear, full}, {{0}, {1}}, {CacheGroupType::LINEAR, CacheGroupType::FULL}, {"linear", "full"});
+    auto linear                  = test::makeLinearSpec("linear", 16, TYPE_FP16, 1, 1);
+    auto full                    = test::makeMhaSpec("full", 16, TYPE_FP16, 1, 1);
+    auto config                  = test::makeSingleLayerCacheConfig(linear, CacheGroupType::LINEAR, 16);
+    config.fromGroupedSpecs(0,
+                            {linear, full},
+                            /*layer_num=*/2,
+                            {{0}, {1}},
+                            {CacheGroupType::LINEAR, CacheGroupType::FULL},
+                            {"linear", "full"});
     auto draft = test::makeSingleLayerCacheConfig(full, CacheGroupType::FULL, 16);
-    config.mtp_sub_configs.push_back(config.mergeMTPModule(draft, 0, config.layer_num));
+    ::rtp_llm::test::CacheConfigTestAccess::addMtpModule(
+        config, test::declareModuleScopedTags(draft.topology(0)), draft.moduleMetadata(0));
     config.finalizeBlockNums(16, RuntimeConfig{});
-    const auto linear_group_id = static_cast<int>(config.topology().groupIdForTag("linear"));
-    config.linear_replay       = LinearReplayPlan::create({linear_group_id}, 2, 4, {1, 1}, {1, 1}, false, TYPE_FP16, 1);
+    config.linear_replay = LinearReplayPlan::create({"linear"}, 2, 4, {1, 1}, {1, 1}, false, TYPE_FP16, 1);
 
     MtpExecutorTestConfig test_config;
     test_config.num_layers                    = 2;
@@ -1349,16 +1354,16 @@ TEST_F(MtpExecutorTest, LinearReplayGatherPreservesCancelledBatchRows) {
     cancelled->reportError(ErrorCode::CANCELLED, "cancel after batch rows are fixed");
 
     std::vector<int32_t> ids;
-    for (const auto& group : config.groups()) {
+    for (const auto& tag : config.allGroupTags()) {
         for (const auto& stream : batch) {
-            ids.push_back(stream->streamCacheResource().kvCache().blocks(0, group.tag).at(0));
+            ids.push_back(stream->streamCacheResource().kvCache().blocks(0, tag).at(0));
         }
     }
     const auto     cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
     TensorHolder   holder;
     GptModelInputs input;
-    input.kv_cache_group_tags      = config.groupTags();
-    input.kv_cache_kernel_block_id = torch::tensor(ids, cuda_i32).reshape({2, 2, 1});
+    input.kv_cache_group_tags      = config.allGroupTags();
+    input.kv_cache_kernel_block_id = torch::tensor(ids, cuda_i32).reshape({3, 2, 1});
     std::vector<GenerateStream::LinearReplayRound> rounds;
     const auto                                     status =
         executor->batch_stream_processor_->gatherLinearReplayInputs(streams, config, input, holder, rounds);
@@ -1387,17 +1392,21 @@ TEST_F(MtpExecutorTest, LinearReplayGatherPreservesCancelledBatchRows) {
 }
 
 TEST_F(MtpExecutorTest, LinearReplayAsyncDispatchPreservesAcceptedWindowAndPageTable) {
-    auto linear      = test::makeLinearSpec("linear", 16, TYPE_FP16, 1, 1);
-    auto full        = test::makeMhaSpec("full", 16, TYPE_FP16, 1, 1);
-    auto config      = test::makeSingleLayerCacheConfig(linear, CacheGroupType::LINEAR, 16);
-    config.layer_num = 2;
-    config.fromGroupedSpecs(
-        {linear, full}, {{0}, {1}}, {CacheGroupType::LINEAR, CacheGroupType::FULL}, {"linear", "full"});
+    auto linear                  = test::makeLinearSpec("linear", 16, TYPE_FP16, 1, 1);
+    auto full                    = test::makeMhaSpec("full", 16, TYPE_FP16, 1, 1);
+    auto config                  = test::makeSingleLayerCacheConfig(linear, CacheGroupType::LINEAR, 16);
+    config.fromGroupedSpecs(0,
+                            {linear, full},
+                            /*layer_num=*/2,
+                            {{0}, {1}},
+                            {CacheGroupType::LINEAR, CacheGroupType::FULL},
+                            {"linear", "full"});
     auto draft = test::makeSingleLayerCacheConfig(full, CacheGroupType::FULL, 16);
-    config.mtp_sub_configs.push_back(config.mergeMTPModule(draft, 0, config.layer_num));
+    ::rtp_llm::test::CacheConfigTestAccess::addMtpModule(
+        config, test::declareModuleScopedTags(draft.topology(0)), draft.moduleMetadata(0));
     config.finalizeBlockNums(16, RuntimeConfig{});
     const auto linear_group_id = static_cast<int>(config.topology().groupIdForTag("linear"));
-    config.linear_replay       = LinearReplayPlan::create({linear_group_id}, 1, 4, {1, 1}, {1, 1}, false, TYPE_FP16, 1);
+    config.linear_replay       = LinearReplayPlan::create({"linear"}, 1, 4, {1, 1}, {1, 1}, false, TYPE_FP16, 1);
 
     MtpExecutorTestConfig test_config;
     test_config.num_layers                    = 2;
@@ -1419,14 +1428,14 @@ TEST_F(MtpExecutorTest, LinearReplayAsyncDispatchPreservesAcceptedWindowAndPageT
 
     const auto           cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
     std::vector<int32_t> ids;
-    for (const auto& group : config.groups()) {
-        ids.push_back(stream->streamCacheResource().kvCache().blocks(0, group.tag).at(0));
+    for (const auto& tag : config.allGroupTags()) {
+        ids.push_back(stream->streamCacheResource().kvCache().blocks(0, tag).at(0));
     }
-    auto           table = torch::tensor(ids, cuda_i32).reshape({2, 1, 1});
+    auto           table = torch::tensor(ids, cuda_i32).reshape({3, 1, 1});
     StreamGroups   streams({stream});
     TensorHolder   holder;
     GptModelInputs input;
-    input.kv_cache_group_tags      = config.groupTags();
+    input.kv_cache_group_tags      = config.allGroupTags();
     input.kv_cache_kernel_block_id = table;
     std::vector<GenerateStream::LinearReplayRound> rounds;
     ASSERT_TRUE(
@@ -1606,11 +1615,12 @@ TEST_P(MtpCacheStrideTest, ForwardAndPrepareUseSingleGroupStrideOnly) {
         auto full   = test::makeMhaSpec("full", 4, TYPE_FP16, 1, head_size);
         auto config = test::makeSingleLayerCacheConfig(full, CacheGroupType::FULL, 8);
         if (with_linear) {
-            config.layer_num = single_layer ? 1 : 2;
-            config.fromGroupedSpecs({test::makeLinearSpec("linear", 4, TYPE_FP16, 1, 1), full},
-                                               {{0}, {single_layer ? 0 : 1}},
-                                               {CacheGroupType::LINEAR, CacheGroupType::FULL},
-                                               {"linear", "full"});
+            config.fromGroupedSpecs(0,
+                                    {test::makeLinearSpec("linear", 4, TYPE_FP16, 1, 1), full},
+                                    static_cast<uint32_t>(single_layer ? 1 : 2),
+                                    {{0}, {single_layer ? 0 : 1}},
+                                    {CacheGroupType::LINEAR, CacheGroupType::FULL},
+                                    {"linear", "full"});
         }
         auto groups = config.topology().groups();
         for (auto& group : groups) {
@@ -1618,24 +1628,25 @@ TEST_P(MtpCacheStrideTest, ForwardAndPrepareUseSingleGroupStrideOnly) {
                 test::setGroupLayout(group, head_size * 16, head_size * 4);  // bytes/physical block/layer
             }
         }
-        config.setTopology(std::move(groups), config.topology().layers());
+        config.setTopology(0, std::move(groups), config.topology().layers());
         return config;
     };
     auto target = make_config(multiple_groups, 3);
     auto draft  = make_config(draft_has_linear, 1, true);
-    target.mtp_sub_configs.push_back(target.mergeMTPModule(draft, 0, target.layer_num));
+    ::rtp_llm::test::CacheConfigTestAccess::addMtpModule(
+        target, test::declareModuleScopedTags(draft.topology(0)), draft.moduleMetadata(0));
     target.finalizeBlockNums(8, RuntimeConfig{});
     if (multiple_groups && !draft_has_linear) {
-        EXPECT_TRUE(target.mtp_sub_configs[0]->layerIdsForGroup("linear").empty());
-        EXPECT_EQ(target.mtp_sub_configs[0]->groupNums(), 2);  // groups, including placeholder
+        EXPECT_EQ(target.topology(1).groups().size(), 1u);
+        EXPECT_EQ(target.topology(1).groupTags(), (std::vector<std::string>{"mtp_full"}));
     }
 
     auto         components         = createMtpExecutorComponents(MtpExecutorTestConfig{}, &target);
     auto*        executor           = components.executor.get();
     const size_t target_stride      = multiple_groups ? 0 : 48;
     const size_t target_scale       = multiple_groups ? 0 : 12;
-    const size_t draft_stride       = multiple_groups ? 0 : 16;
-    const size_t draft_scale        = multiple_groups ? 0 : 4;
+    const size_t draft_stride       = draft_has_linear ? 0 : 16;
+    const size_t draft_scale        = draft_has_linear ? 0 : 4;
     bool         saw_target_prepare = false;
     bool         saw_draft_prepare  = false;
     components.fake_target_model->setInputObserver([&](const GptModelInputs& inputs) {
@@ -1729,8 +1740,9 @@ TEST_F(MtpExecutorTest, MixedCacheSnapshotsPrepareTokensLengthsAndPositionsWitho
         const auto&                         cache = components.executor->cache_manager_->cacheConfig();
         GenerateStream::MtpAsyncDeviceState state;
         state.next_kv_cache_block_id_gpu =
-            torch::ones({cache.groupNums(), 1, 2}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+            torch::ones({cache.allGroupNums(), 1, 2}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
         state.next_kv_cache_kernel_block_id_gpu = state.next_kv_cache_block_id_gpu.clone();
+        state.next_kv_cache_row_tags            = cache.allGroupTags();
         state.accept_tokens_gpu                 = torch::tensor({{1, 3}}, torch::kInt32).cuda();
         state.accept_len_gpu                    = torch::tensor({2}, torch::kInt32).cuda();
         state.next_seq_len_gpu                  = torch::tensor({6}, torch::kInt32).cuda();
@@ -1749,7 +1761,7 @@ TEST_F(MtpExecutorTest, MixedCacheSnapshotsPrepareTokensLengthsAndPositionsWitho
         SpeculativeExecutionConfig speculative;
         speculative.gen_num_per_cycle = width;
         MtpBatchStreamProcessor processor(
-            model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, cache, speculative, false);
+            model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, cache, 0, speculative, false);
         TensorHolder holder;
         // There is no worker to finish this counter: an added fallback wait
         // would deadlock instead of consuming the immutable snapshot.
@@ -1909,6 +1921,7 @@ void MtpExecutorTest::runSnapshotFaultScenario(const char* directory) {
                                                  PDSepConfig{},
                                                  ProfilingDebugLoggingConfig{},
                                                  components.resource_context.cache_manager->cacheConfig(),
+                                                 0,
                                                  SpeculativeExecutionConfig{},
                                                  false));
     bool step_ok = false;
@@ -2124,12 +2137,15 @@ TEST_F(MtpExecutorTest, DISABLED_BlockDraftTpReceiver) {
             input.prefix_lengths           = torch::tensor({4}, torch::kInt32);
             input.sequence_lengths         = torch::empty({0}, torch::kInt32);
             input.lm_output_indexes        = torch::arange(sp_type == SP_TYPE_DFLASH ? 1 : 0, width, torch::kInt32);
-            input.kv_cache_group_tags      = {"full", "linear"};
-            input.kv_cache_block_id        = torch::tensor({1, 2, 3, 4}, torch::kInt32).reshape({2, 1, 2});
-            input.kv_cache_kernel_block_id = torch::tensor({5, 6, 7, 8, 9, 10}, torch::kInt32).reshape({2, 1, 3});
-            input.kv_cache_group_types     = torch::tensor(
-                {static_cast<int>(CacheGroupType::FULL), static_cast<int>(CacheGroupType::LINEAR)}, torch::kInt32);
-            input.kv_cache_update_mapping = torch::tensor({1, 5, 6}, torch::kInt32).reshape({1, 3});
+            input.kv_cache_group_tags      = {"full", "mtp_full", "linear"};
+            input.kv_cache_block_id        = torch::tensor({1, 2, 11, 12, 3, 4}, torch::kInt32).reshape({3, 1, 2});
+            input.kv_cache_kernel_block_id =
+                torch::tensor({5, 6, 7, 13, 14, 15, 8, 9, 10}, torch::kInt32).reshape({3, 1, 3});
+            input.kv_cache_group_types    = torch::tensor({static_cast<int>(CacheGroupType::FULL),
+                                                           static_cast<int>(CacheGroupType::FULL),
+                                                           static_cast<int>(CacheGroupType::LINEAR)},
+                                                       torch::kInt32);
+            input.kv_cache_update_mapping = torch::tensor({2, 5, 6}, torch::kInt32).reshape({1, 3});
             input.is_target_verify        = true;
             ParallelismConfig parallelism;
             parallelism.tp_size = 2;
@@ -2140,13 +2156,15 @@ TEST_F(MtpExecutorTest, DISABLED_BlockDraftTpReceiver) {
 
         auto full        = test::makeMhaSpec("full", 4, TYPE_FP16, 1, 2);
         auto target      = test::makeSingleLayerCacheConfig(full, CacheGroupType::FULL, 8);
-        target.layer_num = 2;
-        target.fromGroupedSpecs({test::makeLinearSpec("linear", 4, TYPE_FP16, 1, 1), full},
+        target.fromGroupedSpecs(0,
+                                {test::makeLinearSpec("linear", 4, TYPE_FP16, 1, 1), full},
+                                /*layer_num=*/2,
                                 {{0}, {1}},
                                 {CacheGroupType::LINEAR, CacheGroupType::FULL},
                                 {"linear", "full"});
         auto draft = test::makeSingleLayerCacheConfig(full, CacheGroupType::FULL, 8);
-        target.mtp_sub_configs.push_back(target.mergeMTPModule(draft, 0, target.layer_num));
+        ::rtp_llm::test::CacheConfigTestAccess::addMtpModule(
+            target, test::declareModuleScopedTags(draft.topology(0)), draft.moduleMetadata(0));
         target.finalizeBlockNums(8, RuntimeConfig{});
 
         MtpExecutorTestConfig config;
@@ -2163,14 +2181,16 @@ TEST_F(MtpExecutorTest, DISABLED_BlockDraftTpReceiver) {
         bool reached_proposal                 = false;
         components.fake_draft_model->setInputObserver([&](const GptModelInputs& input) {
             reached_proposal = true;
-            EXPECT_EQ(input.kv_cache_group_tags, (std::vector<std::string>{"full", "linear"}));
-            checkTensorEqual(input.kv_cache_block_id, torch::tensor({1, 2, 3, 4}, torch::kInt32).reshape({2, 1, 2}));
+            EXPECT_EQ(input.kv_cache_group_tags, (std::vector<std::string>{"full", "linear", "mtp_full"}));
+            checkTensorEqual(input.kv_cache_block_id,
+                             torch::tensor({1, 2, 3, 4, 11, 12}, torch::kInt32).reshape({3, 1, 2}));
             checkTensorEqual(input.kv_cache_kernel_block_id,
-                             torch::tensor({5, 6, 7, 8, 9, 10}, torch::kInt32).reshape({2, 1, 3}));
-            checkTensorEqual(
-                input.kv_cache_group_types,
-                torch::tensor({static_cast<int>(CacheGroupType::FULL), static_cast<int>(CacheGroupType::LINEAR)},
-                              torch::kInt32));
+                             torch::tensor({5, 6, 7, 8, 9, 10, 13, 14, 15}, torch::kInt32).reshape({3, 1, 3}));
+            checkTensorEqual(input.kv_cache_group_types,
+                             torch::tensor({static_cast<int>(CacheGroupType::FULL),
+                                            static_cast<int>(CacheGroupType::LINEAR),
+                                            static_cast<int>(CacheGroupType::FULL)},
+                                           torch::kInt32));
             checkTensorEqual(input.kv_cache_update_mapping, torch::tensor({1, 5, 6}, torch::kInt32).reshape({1, 3}));
             throw TpProposalReached{};
         });
@@ -5101,16 +5121,20 @@ protected:
         auto full   = test::makeMhaSpec("full", 2048, TYPE_FP16, 1, 1);
         auto config = test::makeSingleLayerCacheConfig(linear, CacheGroupType::LINEAR, 16);
         if (second_linear) {
-            auto other       = test::makeLinearSpec("other_linear", 65536, TYPE_FP16, 1, 1);
-            config.layer_num = 3;
-            config.fromGroupedSpecs({linear, other, full},
+            auto other                   = test::makeLinearSpec("other_linear", 65536, TYPE_FP16, 1, 1);
+            config.fromGroupedSpecs(0,
+                                    {linear, other, full},
+                                    /*layer_num=*/3,
                                     {{0}, {1}, {2}},
                                     {CacheGroupType::LINEAR, CacheGroupType::LINEAR, CacheGroupType::FULL},
                                     {"linear", "other_linear", "full"});
         } else {
-            config.layer_num = 2;
-            config.fromGroupedSpecs(
-                {linear, full}, {{0}, {1}}, {CacheGroupType::LINEAR, CacheGroupType::FULL}, {"linear", "full"});
+            config.fromGroupedSpecs(0,
+                                    {linear, full},
+                                    /*layer_num=*/2,
+                                    {{0}, {1}},
+                                    {CacheGroupType::LINEAR, CacheGroupType::FULL},
+                                    {"linear", "full"});
         }
         config.seq_size_per_block = 2048;
         config.finalizeBlockNums(16, RuntimeConfig{});
@@ -5122,7 +5146,7 @@ protected:
         ModelConfig model_config;
         model_config.max_seq_len                  = 131080;
         model_config.vocab_size                   = 4;
-        model_config.num_layers                   = config.layer_num;
+        model_config.num_layers                   = config.layer_num();
         model_config.attn_config.tokens_per_block = config.seq_size_per_block;
         // No pool allocation is needed to exercise the production guard.
         // An empty manager also keeps these synthetic logical rows from
@@ -5130,10 +5154,10 @@ protected:
         auto stream = createContextStream(model_config, RuntimeConfig{}, ResourceContext{}, {0});
         stream->getCompleteTokenIds()->setSeqLength(seq_length);
         auto& resource = stream->kvCacheMutable();
-        resource.initGroups(config.topologyPtr());
-        for (size_t group_id = 0; group_id < config.groups().size(); ++group_id) {
-            resource.setBatchBlocks(
-                0, config.groups()[group_id].tag, BlockIndicesType(capacities.at(group_id), NULL_BLOCK_IDX));
+        resource.initGroups(config);
+        const auto tags = config.allGroupTags();
+        for (size_t row = 0; row < tags.size(); ++row) {
+            resource.setBatchBlocks(0, tags[row], BlockIndicesType(capacities.at(row), NULL_BLOCK_IDX));
         }
         return stream;
     }
@@ -5220,9 +5244,22 @@ TEST_F(MtpCacheSnapshotCapacityTest, FullAndReplayGroupsNeedNoProposalReserve) {
     // dispatchDecodeAsync masks replay groups to FULL before checking capacity:
     // their canonical row contains no per-proposal state slots.
     const auto linear_group_id     = static_cast<int>(config.topology().groupIdForTag("linear"));
-    config.linear_replay.group_ids = {linear_group_id};
+    config.linear_replay.group_tags = {"linear"};
     types[linear_group_id]         = CacheGroupType::FULL;
     EXPECT_TRUE(MtpExecutor::hasLinearCacheSnapshotCapacity({stream}, config, types, 1, 1, 4));
+}
+
+TEST_F(MtpCacheSnapshotCapacityTest, DraftLinearRowNeedsProposalReserveWhenTargetReplays) {
+    auto config = makeCapacityConfig();
+    auto draft  = test::makeSingleLayerCacheConfig(
+        test::makeLinearSpec("mtp_linear", 32768, TYPE_FP16, 1, 1), CacheGroupType::LINEAR, 16);
+    ::rtp_llm::test::CacheConfigTestAccess::addMtpModule(config, draft.topologyPtr(0), draft.moduleMetadata(0));
+    config.linear_replay.group_tags = {"linear"};
+    const auto types = std::vector<CacheGroupType>{CacheGroupType::FULL, CacheGroupType::FULL, CacheGroupType::LINEAR};
+    for (const size_t draft_slots : {5, 6}) {
+        const auto stream = makeCapacityStream(config, /*seq_length=*/65537, {1, 1, draft_slots});
+        EXPECT_EQ(MtpExecutor::hasLinearCacheSnapshotCapacity({stream}, config, types, 6, 6, 4), draft_slots == 6);
+    }
 }
 
 }  // namespace rtp_llm

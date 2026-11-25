@@ -10,6 +10,7 @@ from rtp_llm.models_py.utils.cache_payload_view import (
     payload_view,
     same_tensor_metadata,
 )
+from rtp_llm.models_py.utils.kvcache import canonical_cache_tag
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
 
 _same_tensor_metadata = same_tensor_metadata
@@ -42,7 +43,7 @@ def _typed_2d_pool(
     entries: int,
     width: int,
 ) -> torch.Tensor:
-    if str(cache.tag) != tag:
+    if canonical_cache_tag(cache.tag) != tag:
         raise RuntimeError(
             f"QSA cache tag mismatch: expected {tag!r}, got {cache.tag!r}"
         )

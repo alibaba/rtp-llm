@@ -212,7 +212,11 @@ class DraftModelLoadingTest(unittest.TestCase):
                     self.assertEqual(engine_config.sp_config.gen_num_per_cycle, 2)
                     self.assertEqual(engine_config.load_config.load_method, load_method)
                     if expected_method is None:
-                        self.assertIsNone(propose)
+                        if pp_rank == 0:
+                            self.assertIsNone(propose.model)
+                            self.assertIs(propose.allocation_only_config, draft_config)
+                        else:
+                            self.assertIsNone(propose)
                         model_cls.from_config.assert_not_called()
                         continue
                     model_cls.from_config.assert_called_once()
@@ -257,7 +261,8 @@ class DraftModelLoadingTest(unittest.TestCase):
                         SimpleNamespace(model_type=model_type),
                         engine_config,
                     )
-                self.assertIsNone(propose)
+                self.assertIsNone(propose.model)
+                self.assertEqual(propose.allocation_only_config.model_type, model_type)
                 factory.assert_not_called()
                 self.assertEqual(engine_config.sp_config.type, expected)
 
@@ -318,6 +323,16 @@ class DraftModelLoadingTest(unittest.TestCase):
                         )
                         with self.assertRaisesRegex(Exception, expected):
                             model.load()
+
+    def test_dflash_declares_its_own_cache_groups(self):
+        from rtp_llm.models.qwen_3_dflash import Qwen3DFlash
+
+        target = SimpleNamespace(tag="default")
+        draft = SimpleNamespace(kv_cache_spec_descs=[[SimpleNamespace(tag=target.tag)]])
+        Qwen3DFlash._post_build_model_config(draft)
+        self.assertEqual(target.tag, "default")
+        self.assertEqual(draft.kv_cache_spec_descs[0][0].tag, "mtp_default")
+
     def test_dflash_rejects_pp_gt_1_before_weight_loading(self):
         from rtp_llm.models.qwen_3_dflash import Qwen3DFlash
 

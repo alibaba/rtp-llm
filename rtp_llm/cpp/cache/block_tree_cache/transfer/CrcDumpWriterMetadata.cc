@@ -45,15 +45,19 @@ CrcDumpWriter::Metadata CrcDumpWriter::dumpMetadata(const TransferDescriptor& de
         has_device ? descriptor.blocksAt(Tier::DEVICE) : std::vector<BlockIdxType>(group.devicePools().size(), 0);
     const auto tiles = getDeviceHostCopyTiles(group, blocks);
     for (size_t index = 0; index < tiles.size(); ++index) {
-        const auto& tile            = tiles[index];
-        const auto  prefix          = "layout_tile_" + std::to_string(index) + "_";
-        const auto& tag             = group.groupTags()[tile.member_group_id];
-        metadata[prefix + "member"] = std::to_string(tile.member_group_id);
-        metadata[prefix + "tag"]    = tag;
-        metadata[prefix + "layer_id"] =
-            std::to_string(group.topologyPtr()->layerIdsForGroup(tag)[tile.local_layer_index]);
-        metadata[prefix + "offset"] = std::to_string(tile.host_offset);
-        metadata[prefix + "bytes"]  = std::to_string(tile.buffer.size_bytes);
+        const auto& tile                     = tiles[index];
+        const auto  prefix                   = "layout_tile_" + std::to_string(index) + "_";
+        const auto& tag                      = group.groupTags()[tile.member_group_id];
+        const auto  local_layer_ids          = group.localLayerIdsForMember(tag);
+        const auto  local_layer_id           = local_layer_ids.at(tile.local_layer_index);
+        metadata[prefix + "member"]          = std::to_string(tile.member_group_id);
+        metadata[prefix + "tag"]             = tag;
+        metadata[prefix + "layer_id"]        = std::to_string(local_layer_id);
+        const auto module_id                 = std::to_string(group.cacheConfig()->moduleOfTag(tag));
+        metadata[prefix + "module_id"]       = module_id;
+        metadata[prefix + "module_layer_id"] = module_id + ":" + std::to_string(local_layer_id);
+        metadata[prefix + "offset"]          = std::to_string(tile.host_offset);
+        metadata[prefix + "bytes"]           = std::to_string(tile.buffer.size_bytes);
     }
     metadata["layout_tile_count"] = std::to_string(tiles.size());
     for (size_t i = 0; i < descriptor.source_blocks.size(); ++i)

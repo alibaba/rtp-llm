@@ -1181,7 +1181,7 @@ protected:
             size_t scale_bytes = 0;
             for (const auto& group : cache_config.topology().groups()) {
                 for (int layer : cache_config.layerIdsForGroup(group.tag)) {
-                    scale_bytes += cache_config.physicalGroupForLayer(layer, group.tag).kvScaleStrideBytes();
+                    scale_bytes += cache_config.groupForLayer(layer, group.tag).kvScaleStrideBytes();
                 }
             }
             ASSERT_GT(scale_bytes, 0u);

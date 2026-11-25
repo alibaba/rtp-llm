@@ -17,9 +17,32 @@ public:
                             const PDSepConfig&                 pd_sep_config,
                             const ProfilingDebugLoggingConfig& profiling_debug_logging_config,
                             const CacheConfig&                 cache_config,
+                            size_t                             module_id,
                             const SpeculativeExecutionConfig&  sp_config,
                             bool                               warm_up):
-        NormalBatchStreamProcessor(model_config, pd_sep_config, profiling_debug_logging_config, cache_config, warm_up),
+        NormalBatchStreamProcessor(
+            model_config, pd_sep_config, profiling_debug_logging_config, cache_config, module_id, warm_up),
+        propose_step_(sp_config.gen_num_per_cycle),
+        vocab_size_(model_config.vocab_size),
+        is_block_draft_(isBlockDraftType(sp_config.type)),
+        dspark_mask_token_id_(static_cast<int32_t>(sp_config.sp_dspark_mask_token_id)),
+        dspark_sample_from_anchor_(sp_config.sp_dspark_sample_from_anchor) {}
+
+    MtpBatchStreamProcessor(const ModelConfig&                 model_config,
+                            const PDSepConfig&                 pd_sep_config,
+                            const ProfilingDebugLoggingConfig& profiling_debug_logging_config,
+                            const CacheTopology&              topology,
+                            bool                               use_opaque_kv_cache_store,
+                            size_t                             seq_size_per_block,
+                            const SpeculativeExecutionConfig&  sp_config,
+                            bool                               warm_up):
+        NormalBatchStreamProcessor(model_config,
+                                  pd_sep_config,
+                                  profiling_debug_logging_config,
+                                  topology,
+                                  use_opaque_kv_cache_store,
+                                  seq_size_per_block,
+                                  warm_up),
         propose_step_(sp_config.gen_num_per_cycle),
         vocab_size_(model_config.vocab_size),
         is_block_draft_(isBlockDraftType(sp_config.type)),

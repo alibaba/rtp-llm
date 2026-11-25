@@ -18,8 +18,8 @@ size_t checkedProduct(size_t a, size_t b) {
 }
 
 bool compatible(const CacheConfig& config, const std::string& lhs_tag, const std::string& rhs_tag) {
-    const auto& lhs = config.topology().group(lhs_tag);
-    const auto& rhs = config.topology().group(rhs_tag);
+    const auto& lhs = config.group(lhs_tag);
+    const auto& rhs = config.group(rhs_tag);
     return lhs.policy.group_type == rhs.policy.group_type && lhs.seqSizePerBlock() == rhs.seqSizePerBlock()
            && lhs.policy.cp_mapping == rhs.policy.cp_mapping
            && (lhs.policy.group_type != CacheGroupType::SWA
@@ -39,7 +39,8 @@ size_t positive(int64_t value, const char* name) {
 
 bool buildBlockTreeGroupMembers(const CacheConfig& config, std::vector<std::vector<std::string>>& members) {
     members.clear();
-    for (const auto& group : config.topology().groups()) {
+    for (const auto& tag : config.allGroupTags()) {
+        const auto& group = config.group(tag);
         if (!group.policy.enable_prefix_reuse)
             continue;
         const auto type = group.policy.group_type;
@@ -48,7 +49,7 @@ bool buildBlockTreeGroupMembers(const CacheConfig& config, std::vector<std::vect
             return false;
         }
         auto it = std::find_if(members.begin(), members.end(), [&](const auto& tags) {
-            return config.topology().group(tags.front()).policy.group_type == type;
+            return config.group(tags.front()).policy.group_type == type;
         });
         if (it == members.end()) {
             members.push_back({group.tag});
@@ -71,17 +72,18 @@ BackingLayout computeBlockTreeBackingLayout(const CacheConfig&              conf
                                             size_t                          alignment) {
     BackingLayout layout;
     for (const auto& tag : members) {
-        const auto bytes = config.blockSizeBytesForGroup(tag);
-        if (bytes == 0 && config.layerIdsForGroup(tag).empty())
+        const auto module = config.moduleOfTag(tag);
+        if (config.layerIdsForGroup(module, tag).empty())
             continue;
+        const auto bytes = config.topology(module).blockSizeBytesForGroup(tag);
         RTP_LLM_CHECK_WITH_INFO(bytes > 0 && bytes <= std::numeric_limits<size_t>::max() - layout.payload_bytes,
                                 "invalid group set payload for tag=%s",
                                 tag.c_str());
         layout.payload_bytes += bytes;
-        if (enable_crc && config.topology().group(tag).policy.memory_placement != CacheMemoryPlacement::DEVICE)
+        if (enable_crc && config.group(tag).policy.memory_placement != CacheMemoryPlacement::DEVICE)
             throw std::invalid_argument("CRC transfer requires GPU-resident device pool: " + tag);
     }
-    if (layout.payload_bytes == 0)
+    if (!layout.payload_bytes)
         return layout;
     layout.crc_enabled   = enable_crc;
     layout.storage_bytes = enable_crc ? CrcCopyWorkspace::encodedBytes(layout.payload_bytes) : layout.payload_bytes;
@@ -109,11 +111,13 @@ planBlockTreeCrcWorkspaces(const CacheConfig& config, const KVCacheConfig& optio
     for (const auto& tags : members) {
         const auto layout = computeBlockTreeBackingLayout(config, tags, true, 16);
         size_t tiles = 0;
-        for (const auto& tag : tags)
-            for (const auto layer : config.layerIdsForGroup(tag)) {
-                const auto& physical = config.physicalGroupForLayer(layer, tag);
+        for (const auto& tag : tags) {
+            const auto module = config.moduleOfTag(tag);
+            for (const auto layer : config.layerIdsForGroup(module, tag)) {
+                const auto& physical = config.topology(module).groupForLayer(layer, tag);
                 tiles += (physical.kvBlockStrideBytes() > 0) + (physical.kvScaleStrideBytes() > 0);
             }
+        }
         max_payload = std::max(max_payload, layout.payload_bytes);
         max_tiles   = std::max(max_tiles, tiles);
     }

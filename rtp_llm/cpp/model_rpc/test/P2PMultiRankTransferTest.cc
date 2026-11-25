@@ -169,9 +169,11 @@ class Converter: public LayerBlockConverter {
 public:
     explicit Converter(std::shared_ptr<CoordinatorCacheManager> allocator): allocator_(std::move(allocator)) {}
     std::vector<BlockInfo> convertIndexToBuffer(int layer, const std::string& tag, int block,
-                                               int partitions, int partition) const override {
-        return allocator_->convertIndexToBuffer(layer, tag, block, partitions, partition);
+                                               int partitions, int partition, size_t module_id) const override {
+        return allocator_->convertIndexToBuffer(layer, tag, block, partitions, partition, module_id);
     }
+    size_t moduleOfTag(const std::string& tag) const override { return allocator_->moduleOfTag(tag); }
+    bool tagOwnsLayer(const std::string& tag, int layer) const override { return allocator_->tagOwnsLayer(tag, layer); }
     std::vector<std::pair<BlockInfo, size_t>> getAllBuffers() const override { return {}; } // TCP needs no MR.
 private:
     std::shared_ptr<CoordinatorCacheManager> allocator_;

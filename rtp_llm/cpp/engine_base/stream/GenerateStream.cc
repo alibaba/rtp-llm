@@ -391,7 +391,7 @@ int GenerateStream::estimatePeakNeedBlocks(int remaining_tokens, const std::stri
 
 void GenerateStream::drainLinearHistoryForAdmission() {
     const auto& manager = stream_cache_resource_->resourceContext().cache_manager;
-    if (!manager || !manager->cacheConfig().enable_linear_cache_reclaim) {
+    if (!manager || !manager->cacheConfig().anyLinearCacheReclaim()) {
         return;
     }
     {
@@ -1300,7 +1300,7 @@ bool GenerateStream::prepareMtpCacheForNextStep() {
     if (config.linear_replay.enabled() && !stream_cache_resource_->linearReplayLease()) {
         return false;
     }
-    const auto& tags     = config.groupTags();
+    const auto& tags     = state.next_kv_cache_row_tags;
     const auto& resource = stream_cache_resource_->kvCache();
     RTP_LLM_CHECK_WITH_INFO(state.next_kv_cache_block_id_gpu.size(0) == static_cast<int64_t>(tags.size()),
                             "MTP cache snapshot must match the allocator topology");
@@ -1309,7 +1309,7 @@ bool GenerateStream::prepareMtpCacheForNextStep() {
     std::vector<BlockIndicesType> previous_linear_blocks(tags.size());
     std::vector<size_t>           previous_kernel_sizes(tags.size(), 0);
     for (size_t row = 0; row < tags.size(); ++row) {
-        if (config.isLegacyLinearGroup(static_cast<int>(row))) {
+        if (config.isLegacyLinearGroup(tags[row])) {
             previous_linear_blocks[row] = resource.blocks(0, tags[row]);
             previous_kernel_sizes[row]  = resource.kernelBlocks(0, tags[row]).size();
         }
@@ -1659,12 +1659,11 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info,
 
     // for spec-decode linear attention, we need to adjust cache blocks
     if (accept_token_num > 1 && stream_cache_resource_) {
-        const auto& config   = stream_cache_resource_->resourceContext().cache_manager->cacheConfig();
-        const auto& topology = config.topology();
-        for (const auto& group : topology.groups()) {
-            const int group_id = static_cast<int>(topology.groupIdForTag(group.tag));
+        const auto& config = stream_cache_resource_->resourceContext().cache_manager->cacheConfig();
+        for (const auto& tag : config.allGroupTags()) {
+            const auto& group = config.group(tag);
             // Replay commits accepted state through its log, without proposal-slot swaps.
-            if (!config.isLegacyLinearGroup(group_id)) {
+            if (!config.isLegacyLinearGroup(tag)) {
                 continue;
             }
             // Calculate the two swaps in this LINEAR group's block-table coordinates.

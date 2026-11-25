@@ -2,10 +2,9 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <memory>
-#include <limits>
-#include <sstream>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -18,7 +17,6 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
-#include "rtp_llm/cpp/utils/StringUtil.h"
 
 namespace rtp_llm {
 
@@ -34,116 +32,107 @@ inline void checkGroupResidencyBudget(const CacheGroupPolicy& policy, const std:
         static_cast<int>(policy.memory_placement));
 }
 
-struct CacheConfig {
-private:
-    /** Group tags describe the model's logical topology. Layer bindings identify groups with local storage. */
-    std::shared_ptr<const CacheTopology> cache_topology;
+// Narrow per-module runtime metadata that still has direct consumers. The
+// module's logical topology itself lives in the immutable CacheTopology
+// snapshot owned by CacheConfig; group geometry never appears here.
+struct CacheModuleMetadata {
+    rtp_llm::DataType dtype   = rtp_llm::DataType::TYPE_INVALID;
+    bool              use_mla = false;
+    bool              is_sparse = false;
 
-public:
+    // Attention-specific configuration
+    bool enable_linear_cache_reclaim = false;
+    int  reuse_cache_tail_blocks     = std::numeric_limits<int>::max();
+
+    bool use_opaque_kv_cache_store                = false;
+    bool disable_decode_first_malloc_device_reuse = false;
+};
+
+// Module container: one main module plus N MTP modules, plus the cross-module
+// shared runtime fields. Module 0 is the main model. Each module keeps an
+// independently published, immutable topology snapshot with module-local layer
+// IDs; module selection happens through the topology()/topology(module_id)
+// queries and the tag-based cross-module accessors.
+struct CacheConfig {
+    // === Shared fields (cross-module invariants) ===
     int     cache_min_replay_tokens = 1;
     int64_t cache_key_hash_seed     = 0;
+    // Global cache-key block granularity (tokens/base cache-key block).
+    // Main and MTP share one token sequence, so the block granularity must be
+    // identical across modules — kept here as a shared invariant, not per-module.
+    size_t seq_size_per_block = 1;
+    // FULL PageRR groups use compact local tables on this rank.
+    bool local_kv_cache_sharded = false;
+    // First main-model layer on this PP stage in the global layer space used by P2P and cache-store keys.
+    uint32_t global_layer_begin = 0;
+    // Deployment weights are keyed by physical pool tag.
+    std::map<std::string, uint32_t> pool_block_weights;
+    LinearReplayPlan linear_replay;
+
+    CacheConfig() {}
+
+public:
+    // === Module slots (0=main, 1..N=mtp) ===
+    size_t moduleCount() const {
+        return modules_.size();
+    }
+
+    // === Module topology queries ===
+    // The topology reference queries fail closed when the module slot was
+    // never published; the owning-pointer queries expose the null state so
+    // consumers can distinguish a default slot from a published snapshot.
+    int groupNums() const {
+        return groupNums(0);
+    }
+
+    int groupNums(size_t module_id) const {
+        const auto& topology = topologyPtr(module_id);
+        return topology == nullptr ? 0 : static_cast<int>(topology->groups().size());
+    }
+
+    const CacheTopology& topology(size_t module_id = 0) const {
+        const auto& topology = topologyPtr(module_id);
+        RTP_LLM_CHECK_WITH_INFO(topology != nullptr, "cache module %zu topology is not initialized", module_id);
+        return *topology;
+    }
+
+    const std::shared_ptr<const CacheTopology>& topologyPtr(size_t module_id = 0) const {
+        return moduleRecord(module_id).topology;
+    }
+
+    // === Module metadata (narrow runtime fields with direct consumers) ===
+    CacheModuleMetadata& moduleMetadata(size_t module_id) {
+        return moduleRecord(module_id).metadata;
+    }
+
+    const CacheModuleMetadata& moduleMetadata(size_t module_id) const {
+        return moduleRecord(module_id).metadata;
+    }
+
+    bool anyLinearCacheReclaim() const {
+        for (size_t module_id = 0; module_id < moduleCount(); ++module_id) {
+            if (moduleMetadata(module_id).enable_linear_cache_reclaim) {
+                return true;
+            }
+        }
+        return false;
+    }
 
     int maxPrefixReuseTokens(int prompt_tokens) const {
         return std::max(0, prompt_tokens - std::max(1, cache_min_replay_tokens));
     }
 
-    bool use_typed_cache_regions                  = false;
-    bool use_opaque_kv_cache_store                = false;
-    bool disable_decode_first_malloc_device_reuse = false;
-    /** Keep the target's group transfer policy in the MTP cache config. */
-    bool model_has_multiple_cache_groups = false;
-    // Resolved before allocator construction. Only FULL/BLOCK_ROUND_ROBIN
-    // groups use compact owned-page tables; LINEAR state keeps its own policy.
-    bool local_kv_cache_sharded = false;
-
-    rtp_llm::DataType dtype              = rtp_llm::DataType::TYPE_INVALID;
-    uint32_t          layer_num          = 0;  // the number of main model layers
-    uint32_t          global_layer_begin = 0;
-    // Legacy model-level transport/event metadata; never determines per-group storage layout.
-    bool              use_mla            = false;
-    bool              is_sparse          = false;
-
-    // Block configuration
-    size_t seq_size_per_block = 1;  // tokens/base cache-key block; groups may cover multiple key blocks
-
-    // Attention-specific configuration
-    bool enable_linear_cache_reclaim = false;
-    // Reusable tail retention (main #1574): number of trailing blocks kept
-    // reusable per group; replaces the old linear_step field.
-    int reuse_cache_tail_blocks = std::numeric_limits<int>::max();
-    // Deployment sizing only; never part of a cache Spec or group policy identity.
-    std::map<std::string, uint32_t> pool_block_weights;
-
-    // Accepted-prefix replay is enabled for target LINEAR groups during MTP.
-    // Group IDs follow the merged physical topology; the draft groups are excluded.
-    LinearReplayPlan linear_replay;
-
-    // mtp-model configurations
-    std::vector<std::shared_ptr<CacheConfig>> mtp_sub_configs;
-
-    CacheConfig() {}
-
-    uint32_t layer_all_num() const {
-        if (cache_topology == nullptr) {
-            return layer_num;
-        }
-        RTP_LLM_CHECK_WITH_INFO(cache_topology->layers().size() <= std::numeric_limits<uint32_t>::max(),
-                                "CacheConfig layer count exceeds uint32_t range");
-        return static_cast<uint32_t>(cache_topology->layers().size());
-    }
-
-    uint32_t cacheKeyLayerId(int local_layer_id) const {
-        return global_layer_begin + static_cast<uint32_t>(local_layer_id);
-    }
-
-    static uint32_t
-    mtpGlobalLayerId(uint32_t main_layer_num, int module_index, uint32_t module_layer_num, int local_layer_id) {
-        constexpr uint32_t invalid = std::numeric_limits<uint32_t>::max();
-        if (module_index < 0 || module_layer_num == 0 || local_layer_id < 0
-            || static_cast<uint32_t>(local_layer_id) >= module_layer_num) {
-            return invalid;
-        }
-        const uint64_t global_layer_id = static_cast<uint64_t>(main_layer_num)
-                                         + static_cast<uint64_t>(module_index) * module_layer_num
-                                         + static_cast<uint32_t>(local_layer_id);
-        return global_layer_id < invalid ? static_cast<uint32_t>(global_layer_id) : invalid;
-    }
-
-    int groupNums() const {
-        return cache_topology == nullptr ? 0 : static_cast<int>(cache_topology->groups().size());
-    }
-
+    // === Main-model topology accessors ===
     bool usesGroupCacheTransferPolicy() const {
-        return model_has_multiple_cache_groups || groupNums() > 1;
+        return usesGroupCacheTransferPolicy(0);
     }
 
-    const CacheTopology& topology() const {
-        RTP_LLM_CHECK_WITH_INFO(cache_topology != nullptr, "CacheConfig topology is not initialized");
-        return *cache_topology;
-    }
-
-    const std::shared_ptr<const CacheTopology>& topologyPtr() const {
-        RTP_LLM_CHECK_WITH_INFO(cache_topology != nullptr, "CacheConfig topology is not initialized");
-        return cache_topology;
-    }
-
-    const GroupBase& group(const std::string& tag) const {
-        return topology().group(tag);
+    bool usesGroupCacheTransferPolicy(size_t module_id) const {
+        return groupNums(module_id) > 1;
     }
 
     const std::vector<GroupBase>& groups() const {
         return topology().groups();
-    }
-
-    // Startup resolves the replay switch for all eligible target LINEAR groups.
-    // Group consumers share that decision instead of checking runtime flags.
-    bool isLinearReplayGroup(int group_id) const {
-        return linear_replay.containsGroup(group_id);
-    }
-
-    bool isLegacyLinearGroup(int group_id) const {
-        return groups()[static_cast<size_t>(group_id)].policy.group_type == CacheGroupType::LINEAR
-               && !isLinearReplayGroup(group_id);
     }
 
     CacheTopology::GroupRefs groupsForLayer(int layer_id) const {
@@ -154,70 +143,153 @@ public:
         return topology().groupForLayer(layer_id, tag);
     }
 
-    const GroupBase& soleGroupForLayer(int layer_id) const {
-        return topology().soleGroupForLayer(layer_id);
+    bool isLinearReplayGroup(std::string_view tag) const {
+        return linear_replay.containsGroup(tag);
     }
 
-    std::vector<int> layerIdsForGroup(std::string_view group_tag) const {
-        return topology().layerIdsForGroup(group_tag);
-    }
-
-    size_t blockSizeBytesForGroup(std::string_view group_tag) const {
-        size_t      total = 0;
-        const auto& tag   = topology().group(group_tag).tag;
-        for (int layer_id : layerIdsForGroup(group_tag)) {
-            const auto&  physical_group = physicalGroupForLayer(layer_id, tag);
-            const size_t kv_bytes       = physical_group.kvBlockStrideBytes();
-            const size_t scale_bytes    = physical_group.kvScaleStrideBytes();
-            RTP_LLM_CHECK_WITH_INFO(scale_bytes <= std::numeric_limits<size_t>::max() - kv_bytes,
-                                    "CacheConfig tag=%s layer=%d stride overflow",
-                                    tag.c_str(),
-                                    layer_id);
-            const size_t layer_bytes = kv_bytes + scale_bytes;
-            RTP_LLM_CHECK_WITH_INFO(layer_bytes <= std::numeric_limits<size_t>::max() - total,
-                                    "CacheConfig tag=%s block size overflow",
-                                    tag.c_str());
-            total += layer_bytes;
-        }
-        return total;
-    }
-
-    size_t totalGroupBlockSizeBytes() const {
-        size_t total = 0;
-        for (const auto& group : topology().groups()) {
-            const size_t group_bytes = blockSizeBytesForGroup(group.tag);
-            RTP_LLM_CHECK_WITH_INFO(group_bytes <= std::numeric_limits<size_t>::max() - total,
-                                    "CacheConfig total block size overflow");
-            total += group_bytes;
-        }
-        return total;
+    bool isLegacyLinearGroup(std::string_view tag) const {
+        return group(tag).policy.group_type == CacheGroupType::LINEAR && !isLinearReplayGroup(tag);
     }
 
     size_t layerBlockStrideBytes(size_t layer_id) const {
         size_t total = 0;
         for (const auto& group : groupsForLayer(static_cast<int>(layer_id))) {
-            const auto& physical_group = physicalGroupForLayer(static_cast<int>(layer_id), group.get().tag);
-            total += physical_group.kvBlockStrideBytes() + physical_group.kvScaleStrideBytes();
+            total += group.get().kvBlockStrideBytes() + group.get().kvScaleStrideBytes();
         }
         return total;
     }
 
-    // The merged topology owns logical tag membership, while each MTP child
-    // remains the authority for its physical byte layout. Resolve that owner
-    // on demand instead of copying a second geometry table into the topology.
-    const GroupBase& physicalGroupForLayer(int layer_id, const std::string& tag) const;
+    const GroupBase& soleGroupForLayer(int layer_id) const {
+        return topology().soleGroupForLayer(layer_id);
+    }
+
+    std::vector<int> layerIdsForGroup(std::string_view group_tag) const {
+        return layerIdsForGroup(0, group_tag);
+    }
+
+    std::vector<int> layerIdsForGroup(size_t module_id, std::string_view group_tag) const {
+        const auto& topology = topologyPtr(module_id);
+        if (topology == nullptr) {
+            return {};
+        }
+        return topology->layerIdsForGroup(group_tag);
+    }
 
     const std::vector<std::string>& groupTags() const {
         return topology().groupTags();
+    }
+
+    // === Main-model block sizing ===
+    // Each module owns its layers exclusively now, so this is a pure per-module
+    // sum over the module's own group geometry. Tags are globally unique, so
+    // the query resolves the owning module first.
+    size_t blockSizeBytesForGroup(std::string_view group_tag) const {
+        return topology(moduleOfTag(group_tag)).blockSizeBytesForGroup(group_tag);
+    }
+
+    size_t totalGroupBlockSizeBytes(size_t module_id = 0) const {
+        return topology(module_id).totalGroupBlockSizeBytes();
+    }
+
+    // Sum of every module's total block size; used for the paged-HBM budget.
+    size_t totalAllModulesBlockSizeBytes() const {
+        size_t total = 0;
+        for (size_t module_id = 0; module_id < moduleCount(); ++module_id) {
+            const auto& topology = topologyPtr(module_id);
+            if (topology == nullptr) {
+                continue;
+            }
+            const size_t module_bytes = topology->totalGroupBlockSizeBytes();
+            RTP_LLM_CHECK_WITH_INFO(module_bytes <= std::numeric_limits<size_t>::max() - total,
+                                    "CacheConfig total block size overflow across modules");
+            total += module_bytes;
+        }
+        return total;
+    }
+
+    // === Cross-module accessors (all modules; block-table / snapshot / GroupSet) ===
+    // Modules declare globally unique tags, so the union is a
+    // simple concatenation: main module groups first, then each MTP module's
+    // groups in order.
+
+    // Union of every module's group tags, in main-then-sub traversal order.
+    // Computed on demand from current module topologies — never cached.
+    std::vector<std::string> allGroupTags() const {
+        std::vector<std::string> tags;
+        for (size_t module_id = 0; module_id < moduleCount(); ++module_id) {
+            const auto& topology = topologyPtr(module_id);
+            if (topology == nullptr || topology->groups().empty()) {
+                continue;
+            }
+            const auto& module_tags = topology->groupTags();
+            tags.insert(tags.end(), module_tags.begin(), module_tags.end());
+        }
+        return tags;
+    }
+
+    int allGroupNums() const {
+        int total = 0;
+        for (size_t module_id = 0; module_id < moduleCount(); ++module_id) {
+            total += groupNums(module_id);
+        }
+        return total;
+    }
+
+    // Module that owns a group tag (0 = main, 1..N = MTP).
+    size_t moduleOfTag(std::string_view tag) const {
+        for (size_t module_id = 0; module_id < moduleCount(); ++module_id) {
+            const auto& topology = topologyPtr(module_id);
+            if (topology == nullptr) {
+                continue;
+            }
+            const auto& tags = topology->groupTags();
+            if (std::find(tags.begin(), tags.end(), tag) != tags.end()) {
+                return module_id;
+            }
+        }
+        RTP_LLM_FAIL("unknown cache group tag %.*s", static_cast<int>(tag.size()), tag.data());
+    }
+
+    const GroupBase& group(std::string_view tag) const {
+        return topology(moduleOfTag(tag)).group(tag);
+    }
+
+    // === Cross-module invariants ===
+    void validateCrossModuleInvariants() const;
+
+    // === Main-model field accessors ===
+    // Layer count derives from the published topology; a default-constructed or
+    // layer-less slot answers zero.
+    uint32_t layer_num() const {
+        const auto& topology = topologyPtr(0);
+        return topology == nullptr ? 0 : static_cast<uint32_t>(topology->layers().size());
+    }
+    rtp_llm::DataType dtype() const {
+        return moduleMetadata(0).dtype;
+    }
+    bool use_mla() const {
+        return moduleMetadata(0).use_mla;
+    }
+    bool is_sparse() const {
+        return moduleMetadata(0).is_sparse;
+    }
+    bool enable_linear_cache_reclaim() const {
+        return moduleMetadata(0).enable_linear_cache_reclaim;
+    }
+    int reuse_cache_tail_blocks() const {
+        return moduleMetadata(0).reuse_cache_tail_blocks;
+    }
+    bool use_opaque_kv_cache_store() const {
+        return moduleMetadata(0).use_opaque_kv_cache_store;
+    }
+    bool disable_decode_first_malloc_device_reuse() const {
+        return moduleMetadata(0).disable_decode_first_malloc_device_reuse;
     }
 
     void setGroupBlockLayout(const std::vector<std::string>& group_tags,
                              const std::vector<uint32_t>&    block_nums,
                              const std::vector<size_t>&      kv_block_stride_bytes,
                              const std::vector<size_t>&      kv_scale_stride_bytes);
-
-    std::shared_ptr<CacheConfig>
-    mergeMTPModule(const CacheConfig& propose_config, int module_index, uint32_t main_layer_num);
 
     static bool samePolicy(const CacheGroupPolicy& lhs, const CacheGroupPolicy& rhs);
 
@@ -227,16 +299,53 @@ public:
     uint32_t blockNumForGroup(const GroupBase& group, uint32_t baseline) const;
     uint32_t maxBaselineBlockNum() const;
 
-    void        setTopology(std::vector<GroupBase> new_groups, std::vector<LayerBase> new_layers);
-    void        fromGroupedSpecs(const std::vector<KVCacheSpecPtr>&   specs,
-                                 const std::vector<std::vector<int>>& layers_by_group,
-                                 const std::vector<CacheGroupType>&   types,
-                                 const std::vector<std::string>&      tags     = {},
-                                 const std::vector<CacheGroupPolicy>& policies = {});
+    // Slot 0 is the main model and slots 1..N are drafts. Publication clones
+    // the mutable Specs and validates the layout before swapping the snapshot.
+    void setTopology(size_t module_id, std::vector<GroupBase> new_groups, std::vector<LayerBase> new_layers);
+
+    void fromGroupedSpecs(size_t                               module_id,
+                          const std::vector<KVCacheSpecPtr>&   specs,
+                          uint32_t                             layer_num,
+                          const std::vector<std::vector<int>>& layers_by_group,
+                          const std::vector<CacheGroupType>&   types,
+                          const std::vector<std::string>&      tags     = {},
+                          const std::vector<CacheGroupPolicy>& policies = {});
+
     void        finalizeBlockNums(uint32_t                   global_block_num,
                                   const RuntimeConfig&       runtime_config,
                                   const PPBlockNumOverrides* pp_overrides = nullptr);
     std::string debugString(size_t indent = 0) const;
+
+private:
+    friend class CacheConfigCreator;
+
+    void addMtpModule(std::shared_ptr<const CacheTopology> topology, CacheModuleMetadata metadata);
+
+    // Per-module record: the immutable topology snapshot plus the narrow
+    // runtime metadata. Slot 0 is the main model; the default-constructed
+    // slot keeps a null topology and answers zero-group queries.
+    struct ModuleRecord {
+        std::shared_ptr<const CacheTopology> topology;
+        CacheModuleMetadata                 metadata{};
+    };
+
+    ModuleRecord& moduleRecord(size_t module_id) {
+        RTP_LLM_CHECK_WITH_INFO(module_id < modules_.size(),
+                                "cache module id %zu out of range [0, %zu)",
+                                module_id,
+                                modules_.size());
+        return modules_[module_id];
+    }
+
+    const ModuleRecord& moduleRecord(size_t module_id) const {
+        RTP_LLM_CHECK_WITH_INFO(module_id < modules_.size(),
+                                "cache module id %zu out of range [0, %zu)",
+                                module_id,
+                                modules_.size());
+        return modules_[module_id];
+    }
+
+    std::vector<ModuleRecord> modules_{ModuleRecord{}};
 };
 
 }  // namespace rtp_llm

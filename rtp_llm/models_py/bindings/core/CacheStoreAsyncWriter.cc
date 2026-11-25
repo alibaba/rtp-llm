@@ -49,11 +49,21 @@ CacheStoreAsyncWriter::CacheStoreAsyncWriter(int                                
     cache_manager_(std::move(cache_manager)),
     cache_model_id_(cache_model_id) {
     if (cache_manager_) {
-        const CacheConfig* selected_config = &cache_manager_->cacheConfig();
+        const CacheConfig& config = cache_manager_->cacheConfig();
         if (mtp_cache_config_index.has_value()) {
-            selected_config = &cache_manager_->getMTPModuleCacheConfig(*mtp_cache_config_index);
+            // Checked entry that replaced the old getMTPModuleCacheConfig(): rejects negative and
+            // out-of-range draft indices. Without it a -1 index wraps through size_t and silently
+            // selects the main module instead of failing.
+            cache_manager_->getMTPCacheTopology(*mtp_cache_config_index);
+            cache_module_id_ = static_cast<size_t>(*mtp_cache_config_index) + 1;
         }
-        cache_config_ = std::shared_ptr<const CacheConfig>(cache_manager_, selected_config);
+        const CacheModuleMetadata& module_metadata = config.moduleMetadata(cache_module_id_);
+        module_use_opaque_kv_cache_store_ = module_metadata.use_opaque_kv_cache_store;
+        cache_topology_                   = config.topologyPtr(cache_module_id_);
+        module_layer_num_                 = cache_topology_ == nullptr ?
+                                                0 :
+                                                static_cast<uint32_t>(cache_topology_->layers().size());
+        module_seq_size_per_block_        = config.seq_size_per_block;
 
         // Cache-store key/offset projection follows physical KV ownership, not
         // forward-only CP execution. An unsharded allocator deliberately leaves
@@ -380,7 +390,7 @@ void CacheStoreAsyncWriter::waitAllDone() {
 
 void CacheStoreAsyncWriter::write(const torch_ext::PyCacheStoreInputs& cache_store_inputs,
                                   const torch_ext::LayerKVCache&       layer_kv) {
-    if ((!active_cache_store_ && !cache_store_inputs.p2p_layer_write) || !cache_config_) {
+    if ((!active_cache_store_ && !cache_store_inputs.p2p_layer_write) || !cache_manager_) {
         // Fail closed when publication is tracked: the executor waits on this
         // cycle and reduces the result across TP before dispatching decode. A
         // silent skip here would leave zero pending callbacks, so the wait would
@@ -396,11 +406,21 @@ void CacheStoreAsyncWriter::write(const torch_ext::PyCacheStoreInputs& cache_sto
         return;
     }
 
+    const auto& stage_config = cache_manager_->cacheConfig();
+    RTP_LLM_CHECK_WITH_INFO(layer_kv.layer_id >= 0
+                                && static_cast<uint32_t>(layer_kv.layer_id) < module_layer_num_,
+                            "invalid cache layer %d for module %zu",
+                            layer_kv.layer_id,
+                            cache_module_id_);
+    const uint32_t cache_key_layer_begin = cache_module_id_ == 0 ? stage_config.global_layer_begin : 0;
+    const uint32_t cache_key_layer_id    = cache_key_layer_begin + static_cast<uint32_t>(layer_kv.layer_id);
+    const bool     group_transfer_policy = stage_config.usesGroupCacheTransferPolicy(cache_module_id_);
+
     // Capture tensors by value so their underlying storage stays alive in the background thread.
     // A torch::Tensor copy only increments the reference count.
     auto                          captured_cache_store_inputs = cache_store_inputs;
     auto                          captured_layer_kv           = layer_kv;
-    auto                          cache_config                = cache_config_;
+    auto                          cache_topology              = cache_topology_;
     auto                          cache_store                 = active_cache_store_;
     CacheStoreCompletionRegistrar register_store_completion;
     {
@@ -409,14 +429,14 @@ void CacheStoreAsyncWriter::write(const torch_ext::PyCacheStoreInputs& cache_sto
                                 "CacheStoreAsyncWriter::write() called when not RUNNING. Call init() first.");
         auto completion_state = active_store_completion_state_;
         if (cache_store)
-            register_store_completion = [completion_state, cache_manager = cache_manager_, cache_config](
-                                            const std::vector<int64_t>& cache_keys,
-                                            const std::vector<int32_t>& block_ids,
-                                            const std::string&          tag) {
+            register_store_completion = [completion_state,
+                                         cache_manager = cache_manager_](const std::vector<int64_t>& cache_keys,
+                                                                         const std::vector<int32_t>& block_ids,
+                                                                         const std::string&          tag) {
                 std::shared_ptr<KVCacheResource> publication_lease;
                 if (cache_manager->initialized() && cache_manager->isAllocatorOwner()) {
                     KVCacheResource lease_resource;
-                    lease_resource.initGroups(cache_config->topologyPtr());
+                    lease_resource.initGroups(cache_manager->cacheConfig());
                     lease_resource.setCacheKeys(cache_keys);
                     lease_resource.mutableBlockIds(tag).assign(block_ids);
                     publication_lease =
@@ -430,24 +450,36 @@ void CacheStoreAsyncWriter::write(const torch_ext::PyCacheStoreInputs& cache_sto
     }
     // Create the event on the main thread to avoid event-record contention in worker threads.
     auto event = runtimeCreateEvent();
+    // The manager is captured alongside the topology snapshot: the old writer held an
+    // aliasing pointer over the manager, and P2P writes without an active store carry no
+    // registrar to keep it alive for the duration of the background task.
     auto run   = [captured_cache_store_inputs,
                 captured_layer_kv,
-                cache_config,
+                cache_topology,
                 cache_store,
+                cache_manager          = cache_manager_,
                 register_store_completion,
-                cache_model_id = cache_model_id_,
-                cp_rank        = cp_rank_,
-                cp_size        = cp_size_,
-                event          = std::move(event)]() mutable {
+                cache_model_id          = cache_model_id_,
+                cp_rank                 = cp_rank_,
+                cp_size                 = cp_size_,
+                base_seq_size_per_block = module_seq_size_per_block_,
+                use_opaque_kv_cache_store = module_use_opaque_kv_cache_store_,
+                cache_key_layer_id,
+                group_transfer_policy,
+                event = std::move(event)]() mutable {
         runtimeWriteCacheStore(captured_cache_store_inputs,
                                captured_layer_kv,
-                               *cache_config,
+                               *cache_topology,
+                               use_opaque_kv_cache_store,
+                               base_seq_size_per_block,
                                cache_store,
                                cache_model_id,
                                cp_rank,
                                cp_size,
                                std::move(event),
-                               register_store_completion);
+                               register_store_completion,
+                               cache_key_layer_id,
+                               group_transfer_policy);
     };
     submit(std::move(run));
 }

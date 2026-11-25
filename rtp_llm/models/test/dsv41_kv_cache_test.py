@@ -8,7 +8,7 @@ from unittest.mock import patch
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory import ModelFactory
-from rtp_llm.models.deepseek_v41 import DeepSeekV41
+from rtp_llm.models.deepseek_v41 import DeepSeekV41, DeepSeekV41DSpark
 from rtp_llm.server.server_args.server_args import setup_args
 
 
@@ -102,6 +102,17 @@ class Dsv41KvCacheConfigTest(TestCase):
                     settings.dsv4_fixed_pool_blocks = 0
                     DeepSeekV41._apply_kv_cache_config(config, settings)
                     self.assertIsNone(capacity(descriptors(config)["decoder_swa_kv"]))
+
+    def test_draft_owns_the_bounded_decoder_swa_pool(self):
+        with patch.dict(os.environ, {"DSV41_SWA_BOUNDED_REPLAY": "1"}, clear=True):
+            draft = model_config(draft=True)
+            settings = KVCacheConfig()
+            settings.dsv41_decoder_swa_pool_blocks = 16
+            DeepSeekV41DSpark._apply_kv_cache_config(draft, settings)
+            DeepSeekV41DSpark._post_build_model_config(draft)
+            groups = descriptors(draft)
+            self.assertEqual(set(groups), {"mtp_decoder_swa_kv"})
+            self.assertEqual(capacity(groups["mtp_decoder_swa_kv"]), 16)
 
     def test_single_pool_override_without_shared_fixed_count(self):
         with patch.dict(os.environ, {"DSV41_SWA_BOUNDED_REPLAY": "1"}, clear=True):

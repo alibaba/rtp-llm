@@ -1159,9 +1159,9 @@ TEST_F(PPSchedulerTest, StopReleasesPendingDecodeAndRetainsInflightChunksUntilFi
 }
 
 TEST_F(PPSchedulerTest, ChunkAdmissionRetainsTheCommonCacheCompatibilityCheck) {
-    cache_config_                         = test::makeSimpleHybridMhaCacheConfig(4, 21, 64, DataType::TYPE_FP16);
-    cache_config_.reuse_cache_tail_blocks = 2;
-    cache_manager_                        = std::make_shared<KVCacheManager>(cache_config_);
+    cache_config_ = test::makeSimpleHybridMhaCacheConfig(4, 21, 64, DataType::TYPE_FP16);
+    cache_config_.moduleMetadata(0).reuse_cache_tail_blocks = 2;
+    cache_manager_                                    = std::make_shared<KVCacheManager>(cache_config_);
     ASSERT_TRUE(cache_manager_->init());
     auto scheduler = createScheduler(100, RoleType::PDFUSION, SP_TYPE_NONE, false, 128);
     auto stream    = createStream(std::vector<int>(193, 1), true, false, 8, {}, RoleType::PDFUSION, 128);

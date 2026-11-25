@@ -24,7 +24,8 @@ public:
             int                  block_count                = -1,
             int                  cp_rank                    = 0,
             int                  cp_size                    = 1,
-            size_t               cache_key_tokens_per_block = 1);
+            size_t               cache_key_tokens_per_block = 1,
+            size_t               module_id                  = 0);
 
     [[nodiscard]] static ErrorResult<std::vector<std::shared_ptr<LayerCacheBuffer>>>
     convertLayer(KVCacheResource&     resource,
@@ -34,7 +35,8 @@ public:
                  int                  block_count,
                  int                  cp_rank                    = 0,
                  int                  cp_size                    = 1,
-                 size_t               cache_key_tokens_per_block = 1);
+                 size_t               cache_key_tokens_per_block = 1,
+                 size_t               module_id                  = 0);
 
     [[nodiscard]] static ErrorResult<std::shared_ptr<LayerCacheBuffer>>
     convertLayerTag(KVCacheResource& resource,
@@ -44,21 +46,28 @@ public:
                     int              block_count,
                     int              cp_rank                    = 0,
                     int              cp_size                    = 1,
-                    size_t           cache_key_tokens_per_block = 1);
+                    size_t           cache_key_tokens_per_block = 1,
+                    size_t           module_id                  = 0);
 
     /// @brief Route 驱动的投影：只取 logical_positions 指定的逻辑位置。
     ///
     /// 不重新裁剪 logical_positions；state/SWA 位置必须命中与发布端相同的物理尾块投影。
     /// cache_key_tokens_per_block 是基础 key 粒度，不能用传输 CP 数替代 group 的块跨度。
     [[nodiscard]] static ErrorResult<std::shared_ptr<LayerCacheBuffer>>
-    convertLayerTagForRoute(KVCacheResource&           resource,
-                            const GroupBase&           group,
-                            int                        layer_id,
-                            const std::vector<size_t>& logical_positions,
-                            int                        cp_rank,
-                            int                        cp_size,
-                            size_t                     cache_key_tokens_per_block = 1,
-                            bool                       shared_pp_block_table      = false);
+    convertModuleLayerTagForRoute(CacheModuleId              module,
+                                  KVCacheResource&           resource,
+                                  const GroupBase&           group,
+                                  int                        layer_id,
+                                  const std::vector<size_t>& logical_positions,
+                                  int                        cp_rank,
+                                  int                        cp_size,
+                                  size_t                     cache_key_tokens_per_block);
+
+    // Stage 0 owns the shared allocation by tag. Target layer placement belongs to the PP route.
+    [[nodiscard]] static ErrorResult<LayerCacheBuffer::BlockIdMap>
+    projectPipelineRouteBlocks(const KVCacheResource& resource,
+                               const TransferRoute& route,
+                               const std::vector<size_t>& positions);
 
     /// @brief 对某个 tag 覆盖的每一层各产出一个 buffer（route 与 layer 无关，故在此展开）。
     [[nodiscard]] static ErrorResult<std::vector<std::shared_ptr<LayerCacheBuffer>>>
@@ -69,7 +78,19 @@ public:
                        int                        cp_rank,
                        int                        cp_size,
                        size_t                     cache_key_tokens_per_block = 1,
-                       int                        layer_end = std::numeric_limits<int>::max());
+                       int                        layer_end = std::numeric_limits<int>::max(),
+                       size_t                     module_id = 0);
+
+    /// @brief Whether the (module-local layer, tag) window contains at least one transferable block.
+    /// module_id == 0 is the main model; 1..N are MTP sub-modules.
+    static bool hasTransferableBlocks(const KVCacheResource& resource,
+                                      int                    layer_id,
+                                      const std::string&     cache_tag,
+                                      int                    start_block_idx,
+                                      int                    block_count,
+                                      int                    cp_rank,
+                                      int                    cp_size,
+                                      size_t                 module_id = 0);
 
     /// @brief 将 LayerCacheBuffer 转换为 transfer 层需要的 KeyBlockInfoMap
     [[nodiscard]] static ErrorResult<transfer::KeyBlockInfoMap>

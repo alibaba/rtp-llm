@@ -18,6 +18,7 @@ from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
 )
 from rtp_llm.models.qwen4_exp.qwen4_exp_mtp import Qwen4ExpMTP, Qwen4ExpMTPWeight
 from rtp_llm.models.qwen4_exp.test.config_fixture import qwen4_config
+from rtp_llm.models_py.utils.kvcache import DRAFT_CACHE_TAG_PREFIX
 from rtp_llm.ops import (
     HWKernelConfig,
     HybridAttentionType,
@@ -160,9 +161,19 @@ class Qwen4ExpMTPComponentTest(unittest.TestCase):
             self.config.kv_cache_spec_descs[0][0].cache_type,
             KVCacheSpecType.MHA,
         )
+        self.assertEqual(self.config.cache_tag_prefix, DRAFT_CACHE_TAG_PREFIX)
+        self.assertTrue(
+            all(
+                desc.tag.startswith(DRAFT_CACHE_TAG_PREFIX)
+                for desc in self.config.kv_cache_spec_descs[0]
+            )
+        )
         self.assertEqual(
             [desc.tag for desc in self.config.kv_cache_spec_descs[0][1:]],
-            [INDEXER_KV_TAG, INDEXER_STATE_TAG],
+            [
+                DRAFT_CACHE_TAG_PREFIX + INDEXER_KV_TAG,
+                DRAFT_CACHE_TAG_PREFIX + INDEXER_STATE_TAG,
+            ],
         )
         self.assertFalse(Qwen4ExpMTP.__new__(Qwen4ExpMTP).support_cuda_graph())
 

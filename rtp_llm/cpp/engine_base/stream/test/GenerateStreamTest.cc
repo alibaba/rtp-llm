@@ -278,6 +278,7 @@ protected:
         GenerateStream::MtpAsyncDeviceState state;
         state.next_kv_cache_block_id_gpu        = cacheTable(stream).to(torch::kCUDA);
         state.next_kv_cache_kernel_block_id_gpu = cacheTable(stream, true).to(torch::kCUDA);
+        state.next_kv_cache_row_tags            = stream->kvCache().cacheResource().groupTags();
         state.previous_seq_len_upper_bound      = stream->seqLength();
         state.next_seq_len_upper_bound          = next_bound;
         stream->setMtpAsyncDeviceState(std::move(state));
@@ -1843,7 +1844,7 @@ TEST_F(GenerateStreamTest, MtpCacheReservationExtendsFullAndPageRRTablesWithoutJ
         if (cp_size > 1) {
             auto groups                      = config.groups();
             groups.front().policy.cp_mapping = CpBlockMappingMode::BLOCK_ROUND_ROBIN;
-            config.setTopology(std::move(groups), config.topology().layers());
+            config.setTopology(0, std::move(groups), config.topology().layers());
             config.local_kv_cache_sharded = true;
         }
         auto       stream            = createMtpCacheStream(config, 5, 2, cp_size);
@@ -1916,7 +1917,7 @@ TEST_F(GenerateStreamTest, MtpCacheReservationPreservesLegacyLinearDevicePermuta
 
 TEST_F(GenerateStreamTest, MtpCacheReservationExtendsLinearReplayWithoutInvalidatingItsAnchor) {
     auto config          = test::makeSimpleLinearCacheConfig(1, 32, 4, DataType::TYPE_BF16, 1, 2);
-    config.linear_replay = LinearReplayPlan::create({0}, 1, 4, {1, 2}, {1, 2}, false, DataType::TYPE_BF16, 1);
+    config.linear_replay = LinearReplayPlan::create({"linear"}, 1, 4, {1, 2}, {1, 2}, false, DataType::TYPE_BF16, 1);
     auto stream          = createMtpCacheStream(config, 4, 4);
     ASSERT_TRUE(stream->stream_cache_resource_->prepareLinearReplayResources().ok());
     const auto round = stream->prepareLinearReplayRound();
@@ -1947,7 +1948,8 @@ TEST_F(GenerateStreamTest, ReplayPdTailPreparationMatchesCapacityCheck) {
     for (const int reserve_step : {0, 4}) {
         SCOPED_TRACE(reserve_step);
         auto config          = test::makeSimpleLinearCacheConfig(1, 32, block_tokens, DataType::TYPE_BF16, 1, 2);
-        config.linear_replay = LinearReplayPlan::create({0}, 1, 4, {1, 2}, {1, 2}, false, DataType::TYPE_BF16, 1);
+        config.linear_replay =
+            LinearReplayPlan::create({"linear"}, 1, 4, {1, 2}, {1, 2}, false, DataType::TYPE_BF16, 1);
         auto       stream    = createMtpCacheStream(config, host_length, reserve_step, 1, /*prepare_decode=*/false);
         auto&      resource  = stream->streamCacheResource();
         auto&      blocks    = stream->kvCacheMutable();

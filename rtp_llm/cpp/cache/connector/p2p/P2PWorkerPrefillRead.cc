@@ -231,7 +231,30 @@ bool P2PWorkerPrefillRead::writeByLayerTag(int                                  
                                                 const std::shared_ptr<torch::Event>& event,
                                                 int64_t                              request_deadline_ms,
                                                 int                                  chunk_id) {
-    if (!resource || resource->cacheKeys().size() != resource->blocksForLayer(layer_id, tag).size()) {
+    // Resolve the owning module from the publication tag before touching the
+    // resource: KVCacheResource accessors are module-scoped, and a wrong module
+    // would silently read another module's block table.
+    size_t module_id = 0;
+    if (layer_block_converter_) {
+        try {
+            module_id = layer_block_converter_->moduleOfTag(tag);
+            if (!layer_block_converter_->tagOwnsLayer(tag, layer_id)) {
+                return rejectLayer(
+                    request_id,
+                    request_deadline_ms,
+                    ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
+                              "layer=" + std::to_string(layer_id) + " tag=" + tag + ": tag does not own layer"));
+            }
+        } catch (const std::exception& e) {
+            return rejectLayer(request_id,
+                               request_deadline_ms,
+                               ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
+                                         "layer=" + std::to_string(layer_id) + " tag=" + tag
+                                             + ": unknown cache tag for module mapping"));
+        }
+    }
+    if (!resource
+        || resource->cacheKeys().size() != resource->blocksForLayer(CacheModuleId{module_id}, layer_id, tag).size()) {
         return rejectLayer(request_id,
                            request_deadline_ms,
                            ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
@@ -239,12 +262,12 @@ bool P2PWorkerPrefillRead::writeByLayerTag(int                                  
                                          + ": missing resource or mismatched key/block counts"));
     }
 
-    auto        layer_cache_buffer = std::make_shared<LayerCacheBuffer>(layer_id, tag, chunk_id);
+    auto        layer_cache_buffer = std::make_shared<LayerCacheBuffer>(layer_id, tag, chunk_id, module_id);
     if (config_.tp_rank == 0) {
         layer_cache_buffer->setKVCacheResource(resource);
     }
     const auto& cache_keys         = resource->cacheKeys();
-    const auto& block_ids          = resource->blocksForLayer(layer_id, tag);
+    const auto& block_ids          = resource->blocksForLayer(CacheModuleId{module_id}, layer_id, tag);
     for (size_t i = 0; i < cache_keys.size(); ++i) {
         if (isNullBlockIdx(block_ids[i]) || block_ids[i] < 0 || layer_cache_buffer->blockIdMap().count(cache_keys[i])) {
             return rejectLayer(request_id,
@@ -458,7 +481,8 @@ int P2PWorkerPrefillRead::sendLayerToPartitions(const std::shared_ptr<LayerCache
         }
         auto route_buffer = layer_cache_buffer;
         if (!route.prefill_cache_keys.empty()) {
-            route_buffer = std::make_shared<LayerCacheBuffer>(layer_id, route.cache_tag, chunk_id);
+            route_buffer =
+                std::make_shared<LayerCacheBuffer>(layer_id, route.cache_tag, chunk_id, layer_cache_buffer->moduleId());
             for (const auto& [key, block_id] : layer_cache_buffer->blockIdMap()) {
                 if (route.prefill_cache_keys.count(key) != 0) {
                     route_buffer->addBlockId(key, block_id);
@@ -469,9 +493,17 @@ int P2PWorkerPrefillRead::sendLayerToPartitions(const std::shared_ptr<LayerCache
                 continue;
             }
         }
-        const auto*  spec = config_.topology ? config_.topology->group(route.cache_tag).spec.get() : nullptr;
-        const size_t payload_bytes =
-            route.slice_payload_bytes != 0 ? route.slice_payload_bytes : (spec ? spec->k_block_payload_bytes() : 0);
+        size_t payload_bytes = route.slice_payload_bytes;
+        if (payload_bytes == 0 && config_.topology) {
+            try {
+                payload_bytes = config_.topology->group(route.cache_tag).spec->k_block_payload_bytes();
+            } catch (const std::exception& e) {
+                mark_dispatch_failure(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED,
+                                      "sendKVCache: unknown cache tag=" + route.cache_tag
+                                          + " unique_key=" + unique_key + ": " + e.what());
+                return count;
+            }
+        }
 
         // partition / slice 均来自 route（本侧那一半）。§2.3 的修正就在这里生效：
         // NP1D 下 planner 给源端的是 {1,0}（整块），不再对本地 block 二次切分。
@@ -518,7 +550,7 @@ int P2PWorkerPrefillRead::sendLayerToPartitions(const std::shared_ptr<LayerCache
 
         // Keep stage-local indices for buffer lookup. On the wire, main layers
         // and the draft layers on the last stage follow the full model's order.
-        const auto wire_layer_id = static_cast<int>(config_.global_layer_begin + layer_id);
+        const auto wire_layer_id = config_.wireLayerId(layer_cache_buffer->cacheTag(), layer_id);
         std::string route_layer_key = P2PKeyUtil::makeRouteLayerKey(
             unique_key, wire_layer_id, layer_cache_buffer->cacheTag(), route.route_id, worker_plan.plan_digest);
 

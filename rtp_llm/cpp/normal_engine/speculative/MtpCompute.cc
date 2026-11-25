@@ -279,11 +279,11 @@ bool reduceDSparkCacheStoreStatus(bool local_ok, int tp_size, const torch::Strea
 
 }  // namespace
 
-void applyCacheStrideToModelInput(GptModelInputs& model_input, const CacheConfig& cache_config) {
+void applyCacheStrideToModelInput(GptModelInputs& model_input, const CacheTopology& cache_topology) {
     model_input.kv_block_stride_bytes = 0;
     model_input.kv_scale_stride_bytes = 0;
-    if (cache_config.groupNums() == 1) {
-        const auto& group                 = cache_config.topology().groups().front();
+    if (cache_topology.groups().size() == 1) {
+        const auto& group                 = cache_topology.groups().front();
         model_input.kv_block_stride_bytes = group.kvBlockStrideBytes();
         model_input.kv_scale_stride_bytes = group.kvScaleStrideBytes();
     }
@@ -464,8 +464,7 @@ void prepareDraftPrefillAfterVerify(GptModelInputs&                             
             memcpy(combo_tokens_ptr + token_offset,
                    accept_tokens_ptr + i * (propose_step + 1),
                    accept_lens[i] * sizeof(int32_t));
-            hidden_states_list.push_back(
-                target_hidden_states.narrow(0, i * (propose_step + 1), accept_lens[i]));
+            hidden_states_list.push_back(target_hidden_states.narrow(0, i * (propose_step + 1), accept_lens[i]));
             input_lengths_ptr[i] = accept_lens[i];
             token_offset += accept_lens[i];
             output_indexes_ptr[i] = static_cast<int32_t>(token_offset - 1);

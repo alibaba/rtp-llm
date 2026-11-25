@@ -160,7 +160,8 @@ TEST_F(LayerCacheBufferUtilFilterTest, SwaPhysicalTailMatchesPublicationForCpFou
         ASSERT_EQ(plan.plan.routes.size(), 1u);
         const auto resolved = KVCacheTransferPlanner::resolveKeys(plan.plan.routes.front().src_keys, key_count);
         EXPECT_EQ(resolved, positions);
-        auto decode  = LayerCacheBufferUtil::convertLayerTagForRoute(resource, group, 0, resolved, 0, 1, 16);
+        auto decode = LayerCacheBufferUtil::convertModuleLayerTagForRoute(
+            CacheModuleId::Main, resource, group, 0, resolved, 0, 1, 16);
         auto prefill = LayerCacheBufferUtil::convertLayerTag(resource, group, 0, 0, -1, 0, 4, 16);
         ASSERT_TRUE(decode.ok()) << decode.status().ToString();
         ASSERT_TRUE(prefill.ok()) << prefill.status().ToString();
@@ -180,7 +181,8 @@ TEST_F(LayerCacheBufferUtilFilterTest, SwaPhysicalTailMatchesPublicationForCpFou
         EXPECT_EQ(suffix.value()->getBlockId(keys.back()), 102);
 
         resource.mutableBlockIds(resource.groupTags().at(0)).setAt(slots - 2, -1);
-        auto missing = LayerCacheBufferUtil::convertLayerTagForRoute(resource, group, 0, positions, 0, 1, 16);
+        auto missing = LayerCacheBufferUtil::convertModuleLayerTagForRoute(
+            CacheModuleId::Main, resource, group, 0, positions, 0, 1, 16);
         ASSERT_FALSE(missing.ok());
         EXPECT_NE(missing.status().ToString().find("null/invalid block"), std::string::npos);
     }
@@ -190,13 +192,18 @@ TEST_F(LayerCacheBufferUtilFilterTest, UnscaledSwaUsesDirectSlotsEvenOnFourPrefi
     auto resource = makeResource(
         1, 1, {0}, {CacheGroupType::SWA}, {-1, -1, -1, -1, -1, -1, 31, 32}, {100, 101, 102, 103, 104, 105, 106, 107});
     const auto& group  = topology_->group("group0");
-    auto        result = LayerCacheBufferUtil::convertLayerTagForRoute(resource, group, 0, {6, 7}, 0, 4, 1);
+    auto        result =
+        LayerCacheBufferUtil::convertModuleLayerTagForRoute(CacheModuleId::Main, resource, group, 0, {6, 7}, 0, 4, 1);
     ASSERT_TRUE(result.ok()) << result.status().ToString();
     ASSERT_NE(result.value(), nullptr);
     EXPECT_EQ(result.value()->getBlockId(106), 31);
     EXPECT_EQ(result.value()->getBlockId(107), 32);
-    EXPECT_FALSE(LayerCacheBufferUtil::convertLayerTagForRoute(resource, group, 0, {5, 7}, 0, 4, 1).ok());
-    EXPECT_FALSE(LayerCacheBufferUtil::convertLayerTagForRoute(resource, group, 0, {6, 7}, 0, 4, 0).ok());
+    EXPECT_FALSE(
+        LayerCacheBufferUtil::convertModuleLayerTagForRoute(CacheModuleId::Main, resource, group, 0, {5, 7}, 0, 4, 1)
+            .ok());
+    EXPECT_FALSE(
+        LayerCacheBufferUtil::convertModuleLayerTagForRoute(CacheModuleId::Main, resource, group, 0, {6, 7}, 0, 4, 0)
+            .ok());
 }
 
 TEST_F(LayerCacheBufferUtilFilterTest, ConvertWithLayerAttnTypes) {
@@ -253,7 +260,9 @@ TEST_F(LayerCacheBufferUtilFilterTest, CpOwnershipFilteringDoesNotHideRequiredMi
     ASSERT_NE(projected.value(), nullptr);
     EXPECT_EQ(projected.value()->blockIdMap().size(), 1u);
     EXPECT_EQ(projected.value()->getBlockId(101), 10);
-    EXPECT_FALSE(LayerCacheBufferUtil::convertLayerTagForRoute(resource, group, 0, {0}, 1, 2).ok());
+    EXPECT_FALSE(
+        LayerCacheBufferUtil::convertModuleLayerTagForRoute(CacheModuleId::Main, resource, group, 0, {0}, 1, 2, 1)
+            .ok());
 }
 
 TEST_F(LayerCacheBufferUtilFilterTest, CpInventorySkipsOwnedNullButRouteRejectsIt) {
@@ -266,8 +275,11 @@ TEST_F(LayerCacheBufferUtilFilterTest, CpInventorySkipsOwnedNullButRouteRejectsI
     ASSERT_EQ(inventory.value()->blockIdMap().size(), 1u);
     EXPECT_EQ(inventory.value()->getBlockId(103), 12);
     EXPECT_EQ(inventory.value()->getBlockId(101), -1);
-    EXPECT_FALSE(LayerCacheBufferUtil::convertLayerTagForRoute(resource, group, 0, {1, 3}, 1, 2).ok());
-    auto available_route = LayerCacheBufferUtil::convertLayerTagForRoute(resource, group, 0, {3}, 1, 2);
+    EXPECT_FALSE(
+        LayerCacheBufferUtil::convertModuleLayerTagForRoute(CacheModuleId::Main, resource, group, 0, {1, 3}, 1, 2, 1)
+            .ok());
+    auto available_route =
+        LayerCacheBufferUtil::convertModuleLayerTagForRoute(CacheModuleId::Main, resource, group, 0, {3}, 1, 2, 1);
     ASSERT_TRUE(available_route.ok()) << available_route.status().ToString();
     EXPECT_EQ(available_route.value()->getBlockId(103), 12);
 }
@@ -283,7 +295,7 @@ class CheckedBlockConverter: public LayerBlockConverter {
 public:
     mutable char           storage[16]    = {};
     bool                   missing_second = false;
-    std::vector<BlockInfo> convertIndexToBuffer(int, const std::string&, int block_id, int, int) const override {
+    std::vector<BlockInfo> convertIndexToBuffer(int, const std::string&, int block_id, int, int, size_t) const override {
         if (missing_second && block_id == 2) {
             return {};
         }
@@ -292,6 +304,8 @@ public:
         info.size_bytes = sizeof(storage);
         return {info};
     }
+    size_t moduleOfTag(const std::string&) const override { return 0; }
+    bool tagOwnsLayer(const std::string& tag, int layer_id) const override { return tag == "full" && layer_id == 0; }
     std::vector<std::pair<BlockInfo, size_t>> getAllBuffers() const override {
         return {};
     }

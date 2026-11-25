@@ -5,6 +5,7 @@ from unittest.mock import patch
 import torch
 from torch import nn
 
+from rtp_llm.models_py.model_desc.block_map import get_attention_inputs_value
 from rtp_llm.models_py.model_desc.qwen4_exp import Qwen4ExpModel
 from rtp_llm.models_py.model_desc.qwen4_exp_mtp import (
     Qwen4ExpMTPInputProjection,
@@ -35,6 +36,29 @@ def _raw_gamma_rms_norm(
 
 
 class Qwen4ExpMTPInputProjectionTest(unittest.TestCase):
+    def test_prefixed_draft_tags_resolve_attention_and_inputs(self):
+        tags = ("mtp_full", "mtp_indexer_kv", "mtp_indexer_state")
+        cache = SimpleNamespace(
+            get_layer_cache_groups=lambda layer_idx: [
+                SimpleNamespace(tag=tag) for tag in tags
+            ]
+        )
+        model = Qwen4ExpMTPModel.__new__(Qwen4ExpMTPModel)
+        nn.Module.__init__(model)
+        model.kv_cache = cache
+        self.assertEqual(model._attention_tag(0), "full")
+
+        groups = {tag: object() for tag in tags}
+        local = get_attention_inputs_value(SimpleNamespace(attention_inputs=groups))
+        self.assertEqual(set(local), {"full", "indexer_kv", "indexer_state"})
+        self.assertIs(local["full"], groups["mtp_full"])
+        with self.assertRaisesRegex(RuntimeError, "collide"):
+            get_attention_inputs_value(
+                SimpleNamespace(
+                    attention_inputs={"full": object(), "mtp_full": object()}
+                )
+            )
+
     def test_prepare_normalizes_unpublished_cold_and_prefix_hit_positions(self):
         # Match updatePrefillPostDraftModelInput: shift each prompt's position
         # rows left, then retain its native tail anchor. Include a cold row

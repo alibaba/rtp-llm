@@ -232,7 +232,7 @@ TEST_F(SystemPromptConstructorTest, testNormalEnginePreservesSchedulerReserveWit
 
     auto resource = std::make_shared<BatchKVCacheResource>();
     resource->resetBatchSize(1);
-    resource->initGroups(manager->cacheConfig().topologyPtr());
+    resource->initGroups(manager->cacheConfig());
     auto input       = makeSystemPromptInput();
     input->input_ids = torch::arange(190, torch::kInt32);
     auto tokens      = std::make_shared<CompleteTokenIds>(1, 1, 198, manager->cacheConfig().seq_size_per_block);
@@ -268,19 +268,20 @@ TEST_F(SystemPromptConstructorTest, testNormalEngineWaitsForAllocatorObserverBef
     ON_CALL(*mock_allocator, free(testing::_)).WillByDefault(testing::Invoke([&](const FreeInfo& info) {
         real_allocator->free(info);
     }));
-    ON_CALL(*mock_allocator, convertIndexToAddr(testing::_, testing::_))
-        .WillByDefault(testing::Invoke(
-            [&](int layer_id, int block_id) { return real_allocator->convertIndexToAddr(layer_id, block_id); }));
-    ON_CALL(*mock_allocator, convertIndexToBuffer(testing::_, testing::_))
-        .WillByDefault(testing::Invoke(
-            [&](int layer_id, int block_id) { return real_allocator->convertIndexToBuffer(layer_id, block_id); }));
-    ON_CALL(*mock_allocator, convertIndexToBuffer(testing::_, testing::_, testing::_, testing::_))
-        .WillByDefault(testing::Invoke([&](int layer_id, int block_id, int partition_count, int partition_id) {
-            return real_allocator->convertIndexToBuffer(layer_id, block_id, partition_count, partition_id);
+    ON_CALL(*mock_allocator, convertIndexToAddr(testing::_, testing::_, testing::_))
+        .WillByDefault(testing::Invoke([&](int layer_id, int block_id, size_t module_id) {
+            return real_allocator->convertIndexToAddr(layer_id, block_id, module_id);
         }));
-    ON_CALL(*mock_allocator, allLayerCacheBase()).WillByDefault(testing::Invoke([&] {
-        return real_allocator->allLayerCacheBase();
-    }));
+    ON_CALL(*mock_allocator, convertIndexToBuffer(testing::_, testing::_, testing::_))
+        .WillByDefault(testing::Invoke([&](int layer_id, int block_id, size_t module_id) {
+            return real_allocator->convertIndexToBuffer(layer_id, block_id, module_id);
+        }));
+    ON_CALL(*mock_allocator, convertIndexToBuffer(testing::_, testing::_, testing::_, testing::_, testing::_))
+        .WillByDefault(
+            testing::Invoke([&](int layer_id, int block_id, int partition_count, int partition_id, size_t module_id) {
+                return real_allocator->convertIndexToBuffer(
+                    layer_id, block_id, partition_count, partition_id, module_id);
+            }));
     ON_CALL(*mock_allocator, seqSizePerBlock()).WillByDefault(testing::Invoke([&] {
         return real_allocator->seqSizePerBlock();
     }));

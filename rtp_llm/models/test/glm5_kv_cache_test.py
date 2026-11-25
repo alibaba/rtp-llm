@@ -25,7 +25,9 @@ class Glm5KVCacheTest(TestCase):
         return config
 
     def tags(self, config):
-        model_cls = Glm5 if config.model_type == "glm_5" else DeepSeekV2
+        model_cls = Glm5Mtp if config.is_mtp else Glm5
+        if config.model_type != "glm_5":
+            model_cls = DeepSeekV2
         model_cls._post_build_model_config(config)
         return [[desc.tag for desc in layer] for layer in config.kv_cache_spec_descs]
 
@@ -78,7 +80,7 @@ class Glm5KVCacheTest(TestCase):
     def test_mtp_owns_indexer_even_with_shared_target_pattern(self):
         self.assertEqual(
             self.tags(self.config(is_mtp=True)),
-            [["default", "indexer_kv"]] * 6,
+            [["mtp_default", "mtp_indexer_kv"]] * 6,
         )
 
     def test_generic_sparse_mla_topology_is_preserved(self):

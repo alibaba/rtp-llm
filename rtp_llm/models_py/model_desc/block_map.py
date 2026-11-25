@@ -1,6 +1,7 @@
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Protocol, TypeVar
 
+from rtp_llm.models_py.utils.kvcache import canonical_cache_tag
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs, PyModelInputs
 
 AttentionInputs = PyAttentionInputs | Mapping[str, PyAttentionInputs]
@@ -18,10 +19,21 @@ def get_attention_inputs_value(inputs: PyModelInputs) -> AttentionInputs:
     if isinstance(value, PyAttentionInputs):
         return value
     if isinstance(value, Mapping) and value:
-        return value
+        return canonical_attention_inputs(value)
     raise RuntimeError(
         "PyModelInputs.attention_inputs must be PyAttentionInputs or a non-empty tag mapping"
     )
+
+
+def canonical_attention_inputs(
+    groups: Mapping[str, PyAttentionInputs],
+) -> Mapping[str, PyAttentionInputs]:
+    if all(canonical_cache_tag(tag) == tag for tag in groups):
+        return groups
+    canonical = {canonical_cache_tag(tag): inputs for tag, inputs in groups.items()}
+    if len(canonical) != len(groups):
+        raise RuntimeError("cache group tags collide after module-local conversion")
+    return canonical
 
 
 def get_primary_attention_inputs(
@@ -54,7 +66,7 @@ def get_layer_tags(kv_cache: LayeredKVCache | None, local_layer_idx: int) -> lis
     if kv_cache is None:
         return []
     layer_caches = kv_cache.get_layer_cache_groups(local_layer_idx)
-    tags = [str(cache.tag) for cache in layer_caches]
+    tags = [canonical_cache_tag(cache.tag) for cache in layer_caches]
     if not tags or any(not tag for tag in tags):
         raise RuntimeError(f"local layer {local_layer_idx} has no cache group tag")
     if len(tags) != len(set(tags)):
@@ -73,13 +85,15 @@ def get_layer_cache_for_group(
             "KV cache is not initialized"
         )
     layer_caches = kv_cache.get_layer_cache_groups(local_layer_idx)
-    matches = [cache for cache in layer_caches if str(cache.tag) == group_tag]
+    matches = [
+        cache for cache in layer_caches if canonical_cache_tag(cache.tag) == group_tag
+    ]
     if len(matches) > 1:
         raise RuntimeError(
             f"local layer {local_layer_idx} has duplicate KV cache group {group_tag!r}"
         )
     if not matches:
-        available_tags = [str(cache.tag) for cache in layer_caches]
+        available_tags = [canonical_cache_tag(cache.tag) for cache in layer_caches]
         raise RuntimeError(
             f"KV cache group {group_tag!r} is missing for local layer {local_layer_idx}; "
             f"available tags={available_tags}"
@@ -110,7 +124,7 @@ def get_layer_caches_for_groups(
     layer_caches = kv_cache.get_layer_cache_groups(local_layer_idx)
     by_tag: dict[str, LayerKVCache] = {}
     for cache in layer_caches:
-        cache_tag = str(cache.tag)
+        cache_tag = canonical_cache_tag(cache.tag)
         if not cache_tag:
             raise RuntimeError(f"local layer {local_layer_idx} has no cache group tag")
         if cache_tag in by_tag:

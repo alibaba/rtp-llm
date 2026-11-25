@@ -115,12 +115,12 @@ TEST(KVCMLocalTest, ManagerKeepsRemoteControlIndependentOfHbmPublicationSettings
             auto groups                               = manager_config.topology().groups();
             groups.front().policy.enable_prefix_reuse = false;
             auto layers                               = manager_config.topology().layers();
-            manager_config.setTopology(std::move(groups), std::move(layers));
+            manager_config.setTopology(0, std::move(groups), std::move(layers));
         }
         KVCacheManager manager(manager_config, false, nullptr, config, singleRankConfig(), runtime);
         auto           full =
             std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{environment.device_pool}, nullptr, nullptr);
-        full->initialize(0, manager_config.topologyPtr(), {"default"});
+        full->initialize(0, std::make_shared<CacheConfig>(manager_config), {"default"});
         manager.block_tree_cache_                   = block_tree_cache_test::makeBlockTreeCacheForTest({full});
         manager.block_tree_cache_->storage_backend_ = backend;
         backend->setReclaimer(manager.block_tree_cache_->reclaimer_);
@@ -193,17 +193,20 @@ TEST(KVCMLocalTest, Dsv41PublisherUsesEffectiveBackendFullSpecMerge) {
             SCOPED_TRACE(tair_backend);
             std::vector<std::string> tags{"hca_kv", "csa_kv", "indexer_kv"};
             BackendEnvironment       environment;
-            environment.cache_config.dtype              = DataType::TYPE_FP16;
-            environment.cache_config.layer_num          = tags.size();
-            environment.cache_config.seq_size_per_block = 8;
+            environment.cache_config.moduleMetadata(0).dtype     = DataType::TYPE_FP16;
+            environment.cache_config.seq_size_per_block    = 8;
             std::vector<KVCacheSpecPtr>   specs;
             std::vector<std::vector<int>> layers;
             for (size_t index = 0; index < tags.size(); ++index) {
                 specs.push_back(test::makeMhaSpec(tags[index], 8, DataType::TYPE_FP16, 1, 2));
                 layers.push_back({static_cast<int>(index)});
             }
-            environment.cache_config.fromGroupedSpecs(
-                specs, layers, std::vector<CacheGroupType>(tags.size(), CacheGroupType::FULL), tags);
+            environment.cache_config.fromGroupedSpecs(0,
+                                                      specs,
+                                                      static_cast<uint32_t>(tags.size()),
+                                                      layers,
+                                                      std::vector<CacheGroupType>(tags.size(), CacheGroupType::FULL),
+                                                      tags);
             environment.cache_config.finalizeBlockNums(8, RuntimeConfig{});
             initializeEnvironmentPools(environment, "kvcm_three_full_control", 8);
 
@@ -244,7 +247,7 @@ TEST(KVCMLocalTest, Dsv41PublisherUsesEffectiveBackendFullSpecMerge) {
                 pools.push_back(environment.pools_by_tag.at(tag));
             }
             auto full = std::make_shared<FullGroupSet>(std::move(pools), nullptr, nullptr);
-            full->initialize(0, environment.cache_config.topologyPtr(), tags);
+            full->initialize(0, std::make_shared<CacheConfig>(environment.cache_config), tags);
             manager.block_tree_cache_                   = block_tree_cache_test::makeBlockTreeCacheForTest({full});
             manager.block_tree_cache_->storage_backend_ = backend;
             backend->setReclaimer(manager.block_tree_cache_->reclaimer_);
@@ -398,8 +401,6 @@ TEST(KVCMLocalTest, InitRejectsMissingTopologyAndInvalidPoolShape) {
     };
 
     EXPECT_ANY_THROW(backend->init(nullptr, {}, resolver));
-    EXPECT_ANY_THROW(backend->init(environment.cache_config.topologyPtr(), {}, resolver));
-    EXPECT_ANY_THROW(backend->init(environment.cache_config.topologyPtr(), {{"default", nullptr}}, resolver));
 }
 
 TEST(KVCMLocalTest, GdrRegistrationUsesActualAllocationSpan) {
@@ -880,11 +881,7 @@ TEST(KVCMLocalTest, TP2DuplicateRankMatchReportsNoHitAndDoesNotDispatchPayload) 
     auto broadcast_manager =
         std::make_shared<BroadcastManager>(std::vector<std::string>{"unused-rank-0", "unused-rank-1"});
     auto backend = makeBackend(environment, parallelism_config, client_wrapper, std::move(broadcast_manager));
-    ASSERT_TRUE(backend->init(environment.cache_config.topologyPtr(),
-                              environment.pools_by_tag,
-                              [&](int layer_id, const std::string&, int block_id) {
-                                  return environment.device_pool->convertIndexToBuffer(layer_id, block_id);
-                              }));
+    ASSERT_TRUE(initSingleRank(*backend.backend, environment));
 
     kv_cache_manager::Locations locations{kv_cache_manager::Location{
         kv_cache_manager::LocationSpecUnit{"tp0_Fdefault", "rank0_uri"},

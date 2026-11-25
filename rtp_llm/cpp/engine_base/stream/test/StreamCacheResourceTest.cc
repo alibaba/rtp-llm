@@ -487,8 +487,8 @@ protected:
     void prepareLinearHistoryResource(bool enable_reclaim = true) {
         auto config = test::makeSimpleHybridMhaCacheConfig(
             /*layer_num=*/4, /*block_num=*/32, /*tokens_per_block=*/2, DataType::TYPE_FP16);
-        config.reuse_cache_tail_blocks     = std::numeric_limits<int>::max();
-        config.enable_linear_cache_reclaim = enable_reclaim;
+        config.moduleMetadata(0).reuse_cache_tail_blocks     = std::numeric_limits<int>::max();
+        config.moduleMetadata(0).enable_linear_cache_reclaim = enable_reclaim;
         prepareResourceWithCacheConfig(
             config, {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}, true, RoleType::PDFUSION, {}, 1, 32);
         // PERF_TEST emits zero tokens, which is also the model's default EOS.
@@ -731,8 +731,8 @@ TEST_F(StreamCacheResourceTest, LinearHistoryIneligibleGuardsFoldToDecodeTail) {
 
 TEST_F(StreamCacheResourceTest, LinearHistoryPeakForecastIncludesFutureDecodeForFreshContext) {
     auto config                        = test::makeSimpleLinearCacheConfig(1, 64, 2, DataType::TYPE_FP16);
-    config.reuse_cache_tail_blocks     = std::numeric_limits<int>::max();
-    config.enable_linear_cache_reclaim = true;
+    config.moduleMetadata(0).reuse_cache_tail_blocks     = std::numeric_limits<int>::max();
+    config.moduleMetadata(0).enable_linear_cache_reclaim = true;
     prepareResourceWithCacheConfig(config, {1, 2}, true, RoleType::PDFUSION, {}, 1, 64);
     stream_->generateConfig()->reuse_cache = true;
     auto& resource                         = stream_->streamCacheResource();
@@ -827,8 +827,8 @@ TEST_F(StreamCacheResourceTest, PDLinearTailHandoffKeepsInitialAdmissionEqualToA
     for (bool enable_reclaim : {false, true}) {
         SCOPED_TRACE(enable_reclaim);
         auto config                        = test::makeSimpleHybridMhaCacheConfig(4, 64, 2, DataType::TYPE_FP16);
-        config.reuse_cache_tail_blocks     = std::numeric_limits<int>::max();
-        config.enable_linear_cache_reclaim = enable_reclaim;
+        config.moduleMetadata(0).reuse_cache_tail_blocks = std::numeric_limits<int>::max();
+        config.moduleMetadata(0).enable_linear_cache_reclaim = enable_reclaim;
         prepareResourceWithCacheConfig(
             config, {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}, true, RoleType::PDFUSION, {}, 1, 32);
         auto& resource                                 = stream_->streamCacheResource();
@@ -860,8 +860,8 @@ TEST_F(StreamCacheResourceTest, LinearCacheSwitchCombinationsPreserveRoleOwnersh
                 SCOPED_TRACE(testing::Message() << "role=" << roleTypeToString(role) << " reclaim=" << enable_reclaim
                                                 << " tail=" << enable_tail_only);
                 auto config                    = test::makeSimpleHybridMhaCacheConfig(4, 64, 2, DataType::TYPE_FP16);
-                config.reuse_cache_tail_blocks = std::numeric_limits<int>::max();
-                config.enable_linear_cache_reclaim = enable_reclaim;
+                config.moduleMetadata(0).reuse_cache_tail_blocks     = std::numeric_limits<int>::max();
+                config.moduleMetadata(0).enable_linear_cache_reclaim = enable_reclaim;
                 prepareResourceWithCacheConfig(config, {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}, true, role, {}, 1, 64);
                 auto& resource                                 = stream_->streamCacheResource();
                 resource.resource_context_.enable_device_cache = true;
@@ -978,23 +978,22 @@ TEST_F(StreamCacheResourceTest, LinearHistoryReclaimRequiresLegacyGroupWhenRepla
     for (const bool has_legacy_group : {false, true}) {
         SCOPED_TRACE(has_legacy_group);
         auto config                        = test::makeSimpleHybridMhaCacheConfig(4, 16, 2, DataType::TYPE_FP16, 2);
-        config.enable_linear_cache_reclaim = true;
+        config.moduleMetadata(0).enable_linear_cache_reclaim = true;
         if (has_legacy_group) {
             auto groups = config.groups();
             auto layers = config.topology().layers();
             auto legacy = config.group("linear");
             legacy.tag  = "legacy_linear";
             legacy.spec = test::makeLinearSpec(
-                legacy.tag, config.seq_size_per_block, config.dtype, /*local_head_num_kv=*/1, /*size_per_head=*/1);
+                legacy.tag, config.seq_size_per_block, config.dtype(), /*local_head_num_kv=*/1, /*size_per_head=*/1);
             const auto layer_ids = config.layerIdsForGroup("linear");
             ASSERT_GT(layer_ids.size(), 1u);
             layers.at(static_cast<size_t>(layer_ids.back())).group_tags = {legacy.tag};
             groups.push_back(std::move(legacy));
-            config.setTopology(std::move(groups), std::move(layers));
+            config.setTopology(0, std::move(groups), std::move(layers));
         }
-        const auto replay_group = static_cast<int>(config.topology().groupIdForTag("linear"));
         config.linear_replay =
-            LinearReplayPlan::create({replay_group}, 1, 4, {1, 1}, {1, 1}, false, DataType::TYPE_FP16, 1);
+            LinearReplayPlan::create({"linear"}, 1, 4, {1, 1}, {1, 1}, false, DataType::TYPE_FP16, 1);
         prepareResourceWithCacheConfig(config, {1, 2, 3, 4}, false, RoleType::PDFUSION, {}, 1);
 
         EXPECT_EQ(stream_->streamCacheResource().canReclaimLinearHistory(1), has_legacy_group);
@@ -1041,9 +1040,7 @@ TEST_F(StreamCacheResourceTest, testWarmUpFakeInitUsesTaggedTopology) {
 
 TEST_F(StreamCacheResourceTest, LinearReplayLeaseFollowsExecutorConfigAcrossRequestFlags) {
     auto config = test::makeSimpleHybridMhaCacheConfig(4, 16, 2, DataType::TYPE_FP16, 2);
-    const auto linear_group = static_cast<int>(config.topology().groupIdForTag("linear"));
-    config.linear_replay =
-        LinearReplayPlan::create({linear_group}, 2, 4, {1, 1}, {1, 1}, false, DataType::TYPE_FP16, 1);
+    config.linear_replay = LinearReplayPlan::create({"linear"}, 2, 4, {1, 1}, {1, 1}, false, DataType::TYPE_FP16, 1);
     prepareResourceWithCacheConfig(config, {1, 2, 3, 4, 5, 6}, false, RoleType::DECODE);
 
     auto& resource = stream_->streamCacheResource();
@@ -1059,9 +1056,7 @@ TEST_F(StreamCacheResourceTest, LinearReplayLeaseFollowsExecutorConfigAcrossRequ
 
 TEST_F(StreamCacheResourceTest, CancelledReplayRoundRetainsLeaseUntilBookkeepingFinishes) {
     auto       config       = test::makeSimpleHybridMhaCacheConfig(4, 16, 2, DataType::TYPE_FP16, 2);
-    const auto linear_group = static_cast<int>(config.topology().groupIdForTag("linear"));
-    config.linear_replay =
-        LinearReplayPlan::create({linear_group}, 1, 4, {1, 1}, {1, 1}, false, DataType::TYPE_FP16, 1);
+    config.linear_replay    = LinearReplayPlan::create({"linear"}, 1, 4, {1, 1}, {1, 1}, false, DataType::TYPE_FP16, 1);
     prepareResourceWithCacheConfig(config, {1, 2, 3, 4, 5, 6}, false, RoleType::DECODE);
 
     auto& resource = stream_->streamCacheResource();
@@ -1108,9 +1103,7 @@ TEST_F(StreamCacheResourceTest, CancelledReplayRoundRetainsLeaseUntilBookkeeping
 
 TEST_F(StreamCacheResourceTest, ReplayWindowRequiresTheCurrentRequestLease) {
     auto       config       = test::makeSimpleHybridMhaCacheConfig(4, 16, 2, DataType::TYPE_FP16, 2);
-    const auto linear_group = static_cast<int>(config.topology().groupIdForTag("linear"));
-    config.linear_replay =
-        LinearReplayPlan::create({linear_group}, 2, 4, {1, 1}, {1, 1}, false, DataType::TYPE_FP16, 1);
+    config.linear_replay    = LinearReplayPlan::create({"linear"}, 2, 4, {1, 1}, {1, 1}, false, DataType::TYPE_FP16, 1);
     prepareResourceWithCacheConfig(config, {1, 2, 3, 4, 5, 6}, false, RoleType::DECODE);
     auto& resource = stream_->streamCacheResource();
     ASSERT_TRUE(resource.initKVBlock().ok());
@@ -1135,8 +1128,7 @@ TEST_F(StreamCacheResourceTest, ReplayWindowRequiresTheCurrentRequestLease) {
 
 TEST_F(StreamCacheResourceTest, ReplayBankAdvancesOnlyWithPublishedWindows) {
     auto       config       = test::makeSimpleHybridMhaCacheConfig(4, 16, 2, DataType::TYPE_FP16, 2);
-    const auto linear_group = static_cast<int>(config.topology().groupIdForTag("linear"));
-    config.linear_replay = LinearReplayPlan::create({linear_group}, 1, 4, {1, 1}, {1, 1}, true, DataType::TYPE_FP16, 1);
+    config.linear_replay    = LinearReplayPlan::create({"linear"}, 1, 4, {1, 1}, {1, 1}, true, DataType::TYPE_FP16, 1);
     prepareResourceWithCacheConfig(config, {1, 2, 3, 4, 5, 6}, false, RoleType::DECODE);
     auto& resource = stream_->streamCacheResource();
     ASSERT_TRUE(resource.initKVBlock().ok());
@@ -1173,8 +1165,7 @@ TEST_F(StreamCacheResourceTest, ReplayBankAdvancesOnlyWithPublishedWindows) {
 TEST_F(StreamCacheResourceTest, PendingReplayBookkeepingRetainsFutureDestinationPages) {
     auto       config       = test::makeSimpleHybridMhaCacheConfig(4, 16, 2, DataType::TYPE_FP16, 2);
     const auto linear_group = static_cast<int>(config.topology().groupIdForTag("linear"));
-    config.linear_replay =
-        LinearReplayPlan::create({linear_group}, 2, 4, {1, 1}, {1, 1}, false, DataType::TYPE_FP16, 1);
+    config.linear_replay    = LinearReplayPlan::create({"linear"}, 2, 4, {1, 1}, {1, 1}, false, DataType::TYPE_FP16, 1);
     prepareResourceWithCacheConfig(config, {1, 2, 3, 4, 5, 6}, false, RoleType::DECODE);
 
     auto& resource = stream_->streamCacheResource();
@@ -1204,9 +1195,8 @@ TEST_F(StreamCacheResourceTest, PendingReplayBookkeepingRetainsFutureDestination
 TEST_F(StreamCacheResourceTest, InflightReplayReservationPrunesAtCommittedSnapshot) {
     auto              config   = test::makeSimpleHybridMhaCacheConfig(4, 32, 2, DataType::TYPE_FP16, 2);
     const std::string tag      = "linear";
-    const int         group_id = static_cast<int>(config.topology().groupIdForTag(tag));
     ASSERT_EQ(config.topology().group(tag).policy.group_type, CacheGroupType::LINEAR);
-    config.linear_replay = LinearReplayPlan::create({group_id}, 2, 4, {1, 1}, {1, 1}, false, DataType::TYPE_FP16, 1);
+    config.linear_replay = LinearReplayPlan::create({tag}, 2, 4, {1, 1}, {1, 1}, false, DataType::TYPE_FP16, 1);
     prepareResourceWithCacheConfig(config, {1, 2, 3, 4, 5, 6}, false, RoleType::DECODE);
 
     auto& resource = stream_->streamCacheResource();
@@ -1273,11 +1263,11 @@ TEST_F(StreamCacheResourceTest, SwapLinearBlocksUsesPolicyAndTagAfterGroupReorde
         if (reversed) {
             auto groups = config.topology().groups();
             std::reverse(groups.begin(), groups.end());
-            config.setTopology(std::move(groups), config.topology().layers());
+            config.setTopology(0, std::move(groups), config.topology().layers());
         }
         auto& batch = resource.kvCacheMutable();
         // Only the resource order changes; the manager keeps its original topology.
-        batch.initGroups(config.topologyPtr());
+        batch.initGroups(config);
         for (const auto& group : config.topology().groups()) {
             batch.mutableBlockIds(0, group.tag).assign({2, 5});
         }
@@ -1295,7 +1285,7 @@ TEST_F(StreamCacheResourceTest, PrefillIncrementAfterHostLoadPreservesLinearReus
         SCOPED_TRACE(tail_blocks);
         // Full-checkpoint materialization window (pre-#1574 linear_step=1).
         auto config                    = test::makeSimpleHybridMhaCacheConfig(4, 16, 2, DataType::TYPE_FP16, 2);
-        config.reuse_cache_tail_blocks = tail_blocks;
+        config.moduleMetadata(0).reuse_cache_tail_blocks = tail_blocks;
         KVCacheConfig tiered_config;
         tiered_config.enable_device_cache  = true;
         tiered_config.enable_memory_cache  = true;
@@ -1423,17 +1413,16 @@ TEST_F(StreamCacheResourceTest, SpeculativeLinearSwapSkipsReplayGroupsAcrossChec
     auto config = test::makeSimpleHybridMhaCacheConfig(4, 9, 2, DataType::TYPE_FP16, 2);
     auto groups = config.topology().groups();
     const auto layers = config.topology().layers();
-    for (size_t group_id = 0; group_id < groups.size(); ++group_id) {
-        auto& group = groups[group_id];
+    for (auto& group : groups) {
         if (group.policy.group_type == CacheGroupType::LINEAR) {
             auto spec = group.spec->clone();
             spec->seq_size_per_block = 32768;
             group.spec = std::move(spec);
-            config.linear_replay.group_ids.push_back(static_cast<int>(group_id));
+            config.linear_replay.group_tags.push_back(group.tag);
         }
     }
-    ASSERT_EQ(config.linear_replay.group_ids.size(), 1);
-    config.setTopology(std::move(groups), layers);
+    ASSERT_EQ(config.linear_replay.group_tags.size(), 1);
+    config.setTopology(0, std::move(groups), layers);
     ResourceContext context;
     context.cache_manager = std::make_shared<KVCacheManager>(config);
     StreamCacheResource resource(nullptr, context, /*need_release_resource=*/false);
@@ -1678,9 +1667,8 @@ TEST_F(StreamCacheResourceTest, ReviewRegressionPrefillPublishesBeforeReplayPrun
     for (const bool speculative : {false, true}) {
         for (const int length : {5, 6}) {
             auto       config       = test::makeSimpleHybridMhaCacheConfig(4, 32, 2, DataType::TYPE_FP16, 2);
-            const auto linear_group = static_cast<int>(config.topology().groupIdForTag("linear"));
             config.linear_replay =
-                LinearReplayPlan::create({linear_group}, 2, 4, {1, 1}, {1, 1}, false, DataType::TYPE_FP16, 1);
+                LinearReplayPlan::create({"linear"}, 2, 4, {1, 1}, {1, 1}, false, DataType::TYPE_FP16, 1);
             prepareResourceWithCacheConfig(config, {1, 2, 3, 4, 5, 6}, true, RoleType::PDFUSION);
             ModelConfig model;
             model.max_seq_len                  = 128;
@@ -1887,7 +1875,7 @@ TEST_F(StreamCacheResourceTest, testDecodeInitKVBlock_DisablesDeviceCacheOnlyFor
                                                              /*tokens_per_block=*/2,
                                                              rtp_llm::DataType::TYPE_FP16,
                                                              /*group_layer_num=*/2);
-    cache_config.disable_decode_first_malloc_device_reuse = true;
+    cache_config.moduleMetadata(0).disable_decode_first_malloc_device_reuse = true;
     prepareResourceWithCacheConfig(cache_config, {1, 2, 3, 4, 5, 6}, /*reuse_cache=*/true, RoleType::DECODE);
     auto& resource = stream_->streamCacheResource();
     ASSERT_GT(cache_manager_->cacheConfig().groupNums(), 1);
@@ -2944,9 +2932,8 @@ TEST_F(StreamCacheResourceTest, PrefillPublicationKeepsAllCompletedLogicalKeysUn
     }
     test::setTestGroupPolicies(config, policies);
     prepareResourceWithCacheConfig(config, {1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, true, RoleType::PREFILL);
-    const auto linear_group = static_cast<int>(config.topology().groupIdForTag("linear"));
     cache_manager_->config_.linear_replay =
-        LinearReplayPlan::create({linear_group}, 1, 4, {1, 1}, {1, 1}, false, DataType::TYPE_FP16, 1);
+        LinearReplayPlan::create({"linear"}, 1, 4, {1, 1}, {1, 1}, false, DataType::TYPE_FP16, 1);
     const auto mapper               = std::make_shared<CPSlotMapper>(0, 2, 2);
     cache_manager_->cp_slot_mapper_ = mapper;
     auto&               resource    = stream_->streamCacheResource();
@@ -3012,7 +2999,7 @@ TEST_F(StreamCacheResourceTest, testPrefillAllocatorLoadFailureKeepsDeviceReadyR
 
 TEST_F(StreamCacheResourceTest, ChunkedPrefillLoadFailureRejectsOnlyForLinearSuffixHole) {
     auto config                    = test::makeSimpleHybridMhaCacheConfig(4, 16, 2, DataType::TYPE_FP16);
-    config.reuse_cache_tail_blocks = 6;
+    config.moduleMetadata(0).reuse_cache_tail_blocks = 6;
     // The ready prefix ends at slot 1. Slot 0 can be sparse, but slot 2 is the next checkpoint.
     for (const size_t pos : {0u, 2u}) {
         SCOPED_TRACE(pos);

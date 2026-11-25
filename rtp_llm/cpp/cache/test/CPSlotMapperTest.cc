@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include <stdexcept>
 #include <limits>
+#include "rtp_llm/cpp/cache/test/CacheConfigTestAccess.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
@@ -54,7 +55,6 @@ TEST_F(CPSlotMapperTest, ReuseWithoutFullGroupUsesCanonicalStride) {
     for (const auto type : {CacheGroupType::LINEAR, CacheGroupType::SWA}) {
         CacheConfig config;
         config.seq_size_per_block = 256;
-        config.layer_num          = 1;
         GroupBase group;
         group.tag    = type == CacheGroupType::LINEAR ? "linear" : "swa";
         group.policy = defaultCacheGroupPolicy(type);
@@ -63,7 +63,7 @@ TEST_F(CPSlotMapperTest, ReuseWithoutFullGroupUsesCanonicalStride) {
         } else {
             group.spec = std::make_shared<MHAKVCacheSpec>(group.tag, 256, 256);
         }
-        config.setTopology({group}, {{0, {group.tag}}});
+        config.setTopology(0, {group}, {{0, {group.tag}}});
 
         EXPECT_EQ(CPSlotMapper(0, 8, 256).reuseBlockTokens(config), 2048);
         EXPECT_EQ(CPSlotMapper(0, 1, 256).reuseBlockTokens(config), 256);
@@ -210,8 +210,7 @@ TEST_F(CPSlotMapperTest, BuildStorePlanUsesPolicyActiveTailBlocks) {
 
 TEST_F(CPSlotMapperTest, FullGroupIgnoresByteSlicePolicy) {
     CacheConfig config;
-    config.seq_size_per_block = 8;
-    config.layer_num          = 1;
+    config.seq_size_per_block    = 8;
 
     auto full_spec = std::make_shared<MHAKVCacheSpec>();
     full_spec->tag = "full";
@@ -229,13 +228,36 @@ TEST_F(CPSlotMapperTest, FullGroupIgnoresByteSlicePolicy) {
     swa_group.spec            = swa_spec;
     swa_group.policy          = defaultCacheGroupPolicy(CacheGroupType::SWA);
     swa_group.policy.cp_slice = CpBlockSliceMode::EQUAL_BYTES;
-    config.setTopology({std::move(full_group), std::move(swa_group)}, {{0, {"full", "swa"}}});
+    config.setTopology(0, {std::move(full_group), std::move(swa_group)}, {{0, {"full", "swa"}}});
 
     CPSlotMapper mapper(0, 2, 8);
 
-    EXPECT_EQ(mapper.layoutForGroup(config, "full").mapping, CpBlockMappingMode::BLOCK_ROUND_ROBIN);
-    EXPECT_EQ(mapper.layoutForGroup(config, "full").slice, CpBlockSliceMode::NONE);
-    EXPECT_EQ(mapper.layoutForGroup(config, "swa").slice, CpBlockSliceMode::EQUAL_BYTES);
+    EXPECT_EQ(mapper.layoutForGroup(config.topology(), "full").mapping, CpBlockMappingMode::BLOCK_ROUND_ROBIN);
+    EXPECT_EQ(mapper.layoutForGroup(config.topology(), "full").slice, CpBlockSliceMode::NONE);
+    EXPECT_EQ(mapper.layoutForGroup(config.topology(), "swa").slice, CpBlockSliceMode::EQUAL_BYTES);
+}
+
+TEST_F(CPSlotMapperTest, ResolvesMtpGroupOutsideMainTopology) {
+    CacheConfig config;
+    config.seq_size_per_block = 8;
+
+    GroupBase main_group;
+    main_group.tag    = "full";
+    main_group.spec   = std::make_shared<MHAKVCacheSpec>("full", 8, 8, 1);
+    main_group.policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    config.setTopology(0, {main_group}, {{0, {"full"}}});
+
+    GroupBase mtp_group;
+    mtp_group.tag    = "mtp_swa";
+    mtp_group.spec   = std::make_shared<MHAKVCacheSpec>("mtp_swa", 16, 8, 1);
+    mtp_group.policy = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    ::rtp_llm::test::CacheConfigTestAccess::addMtpModule(
+        config, CacheTopology::create({mtp_group}, {{0, {"mtp_swa"}}}), CacheModuleMetadata{});
+
+    CPSlotMapper mapper(0, 2, 8);
+    EXPECT_EQ(mapper.logicalSeqSizePerBlock(config, "mtp_swa"), 16u);
+    EXPECT_FALSE(mapper.blockRoundRobinGroup(config, "mtp_swa"));
+    EXPECT_NO_THROW(mapper.buildStorePlan(config, "mtp_swa", 2, 0, true));
 }
 
 }  // namespace test

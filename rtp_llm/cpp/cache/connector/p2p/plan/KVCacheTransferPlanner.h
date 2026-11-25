@@ -17,6 +17,7 @@ struct PipelineTransferLayout {
         // in publication order; Decode may have additional draft layers after those.
         std::vector<std::vector<std::string>> layer_tags;
         std::vector<int>                      worker_indices;  // TP lane -> index in the side's worker list
+        std::vector<std::string>              block_table_tags;
         ShardLayout                           main_shards;
         ShardLayout                           draft_shards;
     };

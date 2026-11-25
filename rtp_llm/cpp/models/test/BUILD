@@ -76,6 +76,7 @@ cc_library(
     alwayslink = True,
     copts = test_copts,
     deps = [
+        "//rtp_llm/cpp/cache/test:cache_config_test_access",
         "//rtp_llm/cpp/cache",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
         "//rtp_llm/cpp/metrics:metrics",

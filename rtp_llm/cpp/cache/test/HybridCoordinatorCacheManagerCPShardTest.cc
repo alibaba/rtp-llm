@@ -52,26 +52,30 @@ private:
 // Two-group hybrid with rank-local FULL pages and unsharded LINEAR state.
 CacheConfig makeCPHybridConfig() {
     CacheConfig config;
-    config.dtype              = rtp_llm::DataType::TYPE_FP16;
-    config.layer_num          = 4;
-    config.seq_size_per_block = 4;
-    config.reuse_cache_tail_blocks = 2;
+    config.moduleMetadata(0).dtype                   = rtp_llm::DataType::TYPE_FP16;
+    config.seq_size_per_block                        = 4;
+    config.moduleMetadata(0).reuse_cache_tail_blocks = 2;
 
-    auto linear_spec = makeResolvedLinearSpec(config.dtype,
+    auto linear_spec = makeResolvedLinearSpec(config.dtype(),
                                               1,
                                               1,
                                               1,
                                               1,
                                               2,
                                               static_cast<uint32_t>(config.seq_size_per_block),
-                                              config.dtype,
-                                              config.dtype,
+                                              config.dtype(),
+                                              config.dtype(),
                                               "linear");
-    auto full_spec = makeResolvedMhaSpec(config.dtype, 1, 1, static_cast<uint32_t>(config.seq_size_per_block), "full");
+    auto full_spec =
+        makeResolvedMhaSpec(config.dtype(), 1, 1, static_cast<uint32_t>(config.seq_size_per_block), "full");
     full_spec->kernel_seq_size_per_block = 2;
 
-    config.fromGroupedSpecs(
-        {linear_spec, full_spec}, {{0, 1}, {2, 3}}, {CacheGroupType::LINEAR, CacheGroupType::FULL}, {"linear", "full"});
+    config.fromGroupedSpecs(0,
+                            {linear_spec, full_spec},
+                            /*layer_num=*/4,
+                            {{0, 1}, {2, 3}},
+                            {CacheGroupType::LINEAR, CacheGroupType::FULL},
+                            {"linear", "full"});
 
     config.finalizeBlockNums(32, RuntimeConfig{});  // headroom for cp_size=2 expansion
     return config;
@@ -94,7 +98,7 @@ CompleteTokenIdsPtr makeTokens(int batch_size, int seq_length, int seq_size_per_
 BatchKVCacheResourcePtr makeBatchRes(int batch_size, const CacheConfig& config, CacheKeysType keys) {
     auto res = std::make_shared<BatchKVCacheResource>();
     res->resetBatchSize(batch_size);
-    res->initGroups(config.topologyPtr());
+    res->initGroups(config);
     for (int b = 0; b < batch_size; ++b) {
         res->setBatchCacheKeys(b, keys);
     }
@@ -112,8 +116,8 @@ protected:
 };
 
 TEST_F(HybridCoordinatorCacheManagerCPShardTest, PrefillNeedBlocksUsesEachGroupsReuseLength) {
-    auto config                    = makeCPHybridConfig();
-    config.reuse_cache_tail_blocks = 3;
+    auto config                                = makeCPHybridConfig();
+    config.moduleMetadata(0).reuse_cache_tail_blocks = 3;
     auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
     allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(0, 2, 4));

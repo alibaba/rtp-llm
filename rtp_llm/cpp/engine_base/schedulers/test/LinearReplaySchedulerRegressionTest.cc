@@ -165,7 +165,7 @@ protected:
                 group.block_num = 5;  // Four usable blocks after the reserved zero block.
             }
         }
-        config.setTopology(std::move(groups), config.topology().layers());
+        config.setTopology(0, std::move(groups), config.topology().layers());
         ASSERT_EQ(config.linear_replay.slotCount(), 2);
         KVCacheConfig options;
         options.reserve_block_ratio = 0;
@@ -345,7 +345,7 @@ TEST_F(LinearReplaySchedulerRegressionTest, PipelineExecutorKeepsLegacyLinearCac
     // there would require metadata its existing attention path never receives.
     auto config = replayConfig();
     EXPECT_FALSE(config.linear_replay.enabled());
-    EXPECT_TRUE(config.isLegacyLinearGroup(static_cast<int>(config.topology().groupIdForTag("linear"))));
+    EXPECT_TRUE(config.isLegacyLinearGroup("linear"));
 }
 
 TEST_F(LinearReplaySchedulerRegressionTest, FixedBatchCapacityIncludesItsConfiguredBatchSize) {
@@ -526,7 +526,8 @@ TEST_F(LinearReplaySchedulerRegressionTest, ReplayTailPrivatizationCanReclaimEvi
     for (const bool spare : {false, true}) {
         SCOPED_TRACE(spare);
         auto config          = test::makeSimpleLinearCacheConfig(1, spare ? 3 : 2, 4, DataType::TYPE_FP16, 1, 1);
-        config.linear_replay = LinearReplayPlan::create({0}, 1, 4, {1, 1}, {1, 1}, false, DataType::TYPE_FP16, 1);
+        config.linear_replay =
+            LinearReplayPlan::create({"linear"}, 1, 4, {1, 1}, {1, 1}, false, DataType::TYPE_FP16, 1);
         auto manager         = std::make_shared<KVCacheManager>(config);
         ASSERT_TRUE(manager->init());
         const auto cache = manager->blockTreeCache();
