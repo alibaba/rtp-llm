@@ -125,6 +125,8 @@ void CudaGraphRunner::capturePrefill() {
         graph_instances_[seq_len].mem_hold_ = createCaptureMemoryHold(inputs, output_capacity);
         graph_instances_[seq_len].mem_hold_.attn_pyobj_ =
             prepareFmhaImpl(graph_instances_[seq_len].mem_hold_.py_model_inputs_, true);
+        graph_instances_[seq_len].mem_hold_.device_attention_preparation_ =
+            supportsDeviceAttentionPreparation(graph_instances_[seq_len].mem_hold_.attn_pyobj_);
         // HC-shaped MTP draft prefill keeps its output at fixed graph capacity.
         // Other paths produce the real flattened seq_len and must keep their
         // metadata shapes aligned.

@@ -1,6 +1,7 @@
 """Fixed-capacity MTP draft metadata and validation before graph replay."""
 
 from collections.abc import Mapping
+import os
 
 import torch
 
@@ -69,11 +70,33 @@ class DraftPrefillGraphReplay(Mapping):
     def __len__(self):
         return len(self.impls)
 
+    def supports_device_cuda_graph_inputs(self) -> bool:
+        """Allow zero-D2H graph-captured preparation unless strict host validation is requested."""
+        if os.getenv("RTP_QWEN4_STRICT_DRAFT_GRAPH_VALIDATE", "0") == "1":
+            return False
+        return bool(self.impls) and all(
+            hasattr(impl, "supports_device_cuda_graph_inputs")
+            and impl.supports_device_cuda_graph_inputs()
+            for impl in self.impls.values()
+        )
+
     def prepare_cuda_graph(self, groups):
         anchor = groups[next(iter(self.impls))]
         lengths = anchor.input_lengths
         prefixes = anchor.prefix_lengths
         cu = anchor.cu_seqlens
+        # Under device_attention_preparation the graph runner captures this hook
+        # with device-resident views. Refresh only the device RoPE page offsets
+        # without host mirrors or capture-illegal CPU/.item() checks.
+        if (
+            lengths.is_cuda
+            and prefixes.is_cuda
+            and cu.is_cuda
+            and os.getenv("RTP_QWEN4_STRICT_DRAFT_GRAPH_VALIDATE", "0") != "1"
+        ):
+            for tag, impl in self.impls.items():
+                impl.prepare_cuda_graph(groups[tag])
+            return
         if any(value.device.type != "cpu" for value in (lengths, prefixes, cu)):
             raise RuntimeError("QSA draft graph replay requires host length mirrors")
         lengths = lengths.tolist()

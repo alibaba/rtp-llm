@@ -374,13 +374,14 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         )
 
     def supports_device_cuda_graph_inputs(self) -> bool:
-        # Decode RoPE refreshes its captured device buffer directly. The
-        # runner can capture this preparation before attention: it reads only
-        # stable device tensors and has no host planner or mutable host state.
+        # Decode, target verify, and bounded MTP draft prefill refresh their
+        # captured device RoPE offsets directly. The runner can capture this
+        # preparation before attention: it reads only stable device tensors and
+        # has no host planner or mutable host state.
         return bool(
             not torch.version.hip
             and self.support_cuda_graph()
-            and not self.is_prefill
+            and (not self.is_prefill or self.is_target_verify or self._is_draft_graph())
         )
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs) -> None:

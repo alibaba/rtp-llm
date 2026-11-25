@@ -282,9 +282,24 @@ def _target_verify_geometry(
         raise RuntimeError(
             "qwen4_exp QSA target-verify prefix lengths must be non-negative"
         )
-    prefixes_device = prefixes.to(
-        device=device, dtype=torch.int32, non_blocking=True
-    ).contiguous()
+    prefixes_device_src = (
+        getattr(self.main_inputs, "prefix_lengths_device", None)
+        if graph_target
+        else None
+    )
+    if (
+        isinstance(prefixes_device_src, torch.Tensor)
+        and prefixes_device_src.is_cuda
+        and prefixes_device_src.device == device
+        and prefixes_device_src.dtype == torch.int32
+        and prefixes_device_src.dim() == 1
+        and int(prefixes_device_src.numel()) == batch_size
+    ):
+        prefixes_device = prefixes_device_src.contiguous()
+    else:
+        prefixes_device = prefixes.to(
+            device=device, dtype=torch.int32, non_blocking=True
+        ).contiguous()
 
     expected_cu = torch.arange(
         0,

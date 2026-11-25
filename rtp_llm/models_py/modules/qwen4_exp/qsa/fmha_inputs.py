@@ -133,9 +133,24 @@ def _prepare_paged_inputs(
         ):
             raise RuntimeError("qwen4_exp main target metadata owner/geometry changed")
     else:
-        sequence_lengths = lengths_source.to(
-            device=qkv.device, dtype=torch.int32, non_blocking=True
-        ).contiguous()
+        device_source = (
+            getattr(self.attn_inputs, "prefix_lengths_device", None)
+            if (graph_paged and self.is_target_verify)
+            else None
+        )
+        if (
+            isinstance(device_source, torch.Tensor)
+            and device_source.is_cuda
+            and device_source.device == qkv.device
+            and device_source.dtype == torch.int32
+            and device_source.dim() == 1
+            and int(device_source.numel()) == batch
+        ):
+            sequence_lengths = device_source.contiguous()
+        else:
+            sequence_lengths = lengths_source.to(
+                device=qkv.device, dtype=torch.int32, non_blocking=True
+            ).contiguous()
         if not graph_paged:
             if lengths_mirror.device.type == "cpu":
                 invalid_lengths = bool(torch.any(lengths_mirror < 0).item())
