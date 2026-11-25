@@ -1,0 +1,67 @@
+#include "rtp_llm/cpp/http_server/HttpServer.h"
+
+#include "rtp_llm/cpp/http_server/HttpRouter.h"
+#include "rtp_llm/cpp/http_server/HttpServerAdapter.h"
+#include <stdexcept>
+
+namespace http_server {
+
+AUTIL_LOG_SETUP(http_server, HttpServer);
+
+HttpServer::HttpServer(
+    anet::Transport* transport, size_t threadNum, size_t queueSize, bool orderedResponses, int requestAwareIdleMs):
+    _anetApp(transport), _requestAwareIdleMs(requestAwareIdleMs) {
+    if (requestAwareIdleMs < 0 || (requestAwareIdleMs > 0 && !orderedResponses))
+        throw std::invalid_argument("request-aware idle requires ordered responses and a nonnegative timeout");
+    _router = std::make_shared<HttpRouter>();
+    _serverAdapter =
+        std::make_shared<HttpServerAdapter>(_router, threadNum, queueSize, orderedResponses, requestAwareIdleMs);
+}
+
+HttpServer::~HttpServer() {
+    Stop();
+    _serverAdapter.reset();
+    _router.reset();
+}
+
+bool HttpServer::RegisterRoute(const std::string& method, const std::string& endpoint, const ResponseHandler& func) {
+    if (!_router) {
+        AUTIL_LOG(
+            WARN, "register route failed, router is null, method: %s, endpoint: %s", method.c_str(), endpoint.c_str());
+        return false;
+    }
+    return _router->RegisterRoute(method, endpoint, func);
+}
+
+bool HttpServer::Start(
+    const std::string& address, int timeout, int maxIdleTime, int backlog, bool reusePort, size_t maxPacketBytes) {
+    _listenIoc = _anetApp.Listen(address,
+                                 _serverAdapter.get(),
+                                 timeout,
+                                 _requestAwareIdleMs > 0 ? -1 : maxIdleTime,
+                                 backlog,
+                                 reusePort,
+                                 maxPacketBytes);
+
+    if (_listenIoc == nullptr) {
+        AUTIL_LOG(ERROR, "listen on %s failed", address.c_str());
+        return false;
+    }
+
+    return _anetApp.StartPrivateTransport();
+}
+
+bool HttpServer::Stop() {
+    if (_isStopped) {
+        return true;
+    }
+    if (_listenIoc) {
+        _listenIoc->close();
+        _listenIoc->subRef();
+    }
+    _anetApp.StopPrivateTransport();
+    _isStopped = true;
+    return true;
+}
+
+}  // namespace http_server
