@@ -1170,6 +1170,26 @@ class HostEngramEmbedding:
         return rows.to(device=device)
 
 
+def _default_engram_prefetch_max_rows():
+    """Cover the SM90 decode graph geometry, not only the old 256-row batch.
+
+    The prefetcher allocates only the rows actually present in a batch, so this
+    limit is a scheduling gate rather than a preallocated buffer. Decode
+    operating points reach ``BS * (gamma + 1)`` rows (352-384 at 60 tps); a
+    256-row gate silently skipped prefetch and serialized both host lookups.
+    """
+    default = 1024
+    graph_rows = os.environ.get("DSV41_SM90_DECODE_GRAPH_MAX_ROWS", "").strip()
+    if graph_rows:
+        try:
+            graph_rows = int(graph_rows)
+        except ValueError:
+            graph_rows = 0
+        if graph_rows > 0:
+            default = max(default, graph_rows)
+    return default
+
+
 def create_engram_prefetch(device, layer_embeddings):
     """Select an optional lookup prefetcher without exposing backend policy.
 
@@ -1190,7 +1210,12 @@ def create_engram_prefetch(device, layer_embeddings):
         embedding._uva is None for _, embedding in layer_embeddings
     ):
         return None, 0
-    max_rows = int(os.environ.get("DSV41_ENGRAM_PREFETCH_MAX_ROWS", "256"))
+    configured = os.environ.get("DSV41_ENGRAM_PREFETCH_MAX_ROWS")
+    max_rows = (
+        int(configured)
+        if configured is not None
+        else _default_engram_prefetch_max_rows()
+    )
     if max_rows <= 0:
         raise ValueError("DSV41_ENGRAM_PREFETCH_MAX_ROWS must be positive")
     from .engram_prefetch import UvaEngramPrefetch

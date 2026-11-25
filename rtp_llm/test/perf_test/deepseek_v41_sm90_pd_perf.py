@@ -64,6 +64,10 @@ class DeepSeekV41Sm90PDPerf(pd.DeepSeekV41Sm90PDContractTest):
         assert max(self.batches) * (self.gamma + 1) <= int(
             self.extra_server_env["DSV41_SM90_DECODE_GRAPH_MAX_ROWS"]
         )
+        # D1: the inherited SM90 contract decode_env owns the stream-async
+        # bookkeeping and front-loaded broad-sync skip for the decode role.
+        assert self.decode_env.get("RTP_LLM_STREAM_ASYNC") == "1"
+        assert self.decode_env.get("RTP_LLM_DROP_BROAD_SYNC") == "1"
         super().setUp()
         for manager in (self.server, self.graph_server):
             response = self.session.post(

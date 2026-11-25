@@ -110,11 +110,77 @@ class EngramPrefetchFactoryTest(unittest.TestCase):
                     "cuda:0", [(1, types.SimpleNamespace(_uva=object()))]
                 )
                 if expected:
-                    self.assertEqual(actual, (constructor.return_value, 256))
+                    self.assertEqual(actual, (constructor.return_value, 1024))
                     constructor.assert_called_once_with(torch.device("cuda:0"), [1])
                 else:
                     self.assertEqual(actual, (None, 0))
                     constructor.assert_not_called()
+
+    def test_default_limit_covers_decode_graph_rows_and_env_override_wins(self):
+        constructor = mock.Mock()
+        tables = [(1, types.SimpleNamespace(_uva=object()))]
+
+        def factory(environ):
+            with (
+                mock.patch("torch.cuda.is_available", return_value=True),
+                mock.patch("torch.version.hip", None),
+                mock.patch("torch.cuda.get_device_capability", return_value=(9, 0)),
+                mock.patch.dict(os.environ, environ, clear=True),
+                mock.patch.dict(
+                    "sys.modules",
+                    {
+                        "rtp_llm.models_py.modules.dsv41.engram_prefetch": types.SimpleNamespace(
+                            UvaEngramPrefetch=constructor
+                        ),
+                    },
+                ),
+            ):
+                return create_engram_prefetch("cuda:0", tables)
+
+        # The old 256-row gate skipped every 60-tps decode geometry
+        # (BS * (gamma + 1) = 320..384). The default must cover all of them.
+        for rows in (352, 512, 1024):
+            with self.subTest(rows=rows):
+                _, max_rows = factory(
+                    {
+                        "PPU_HOME": "",
+                        "DSV41_SM90_DECODE_GRAPH_MAX_ROWS": str(rows),
+                    }
+                )
+                self.assertGreaterEqual(max_rows, rows)
+                self.assertGreaterEqual(max_rows, 1024)
+        self.assertEqual(factory({"PPU_HOME": ""})[1], 1024)
+        # A larger graph geometry raises the default rather than being skipped.
+        self.assertEqual(
+            factory(
+                {
+                    "PPU_HOME": "",
+                    "DSV41_SM90_DECODE_GRAPH_MAX_ROWS": "2048",
+                }
+            )[1],
+            2048,
+        )
+        # Invalid graph geometry falls back to the fixed default.
+        self.assertEqual(
+            factory(
+                {
+                    "PPU_HOME": "",
+                    "DSV41_SM90_DECODE_GRAPH_MAX_ROWS": "invalid",
+                }
+            )[1],
+            1024,
+        )
+        # An explicit prefetch limit still wins over the graph-derived default.
+        self.assertEqual(
+            factory(
+                {
+                    "PPU_HOME": "",
+                    "DSV41_SM90_DECODE_GRAPH_MAX_ROWS": "2048",
+                    "DSV41_ENGRAM_PREFETCH_MAX_ROWS": "352",
+                }
+            )[1],
+            352,
+        )
 
     def test_disabled_or_unregistered_sm90_keeps_per_layer_lookup(self):
         for enabled, uva in (("0", object()), ("1", None)):
@@ -141,24 +207,30 @@ class EngramPrefetchFactoryTest(unittest.TestCase):
                 tables = [(1, types.SimpleNamespace(_uva=uva))]
                 self.assertEqual(create_engram_prefetch("cuda:0", tables), (None, 0))
 
-    def test_enabled_sm90_rejects_nonpositive_limit(self):
-        with (
-            mock.patch("torch.cuda.is_available", return_value=True),
-            mock.patch("torch.version.hip", None),
-            mock.patch("torch.cuda.get_device_capability", return_value=(9, 0)),
-            mock.patch.dict(
-                os.environ,
-                {
-                    "DSV41_ENGRAM_PREFETCH": "1",
-                    "DSV41_ENGRAM_PREFETCH_MAX_ROWS": "0",
-                    "PPU_HOME": "",
-                },
-            ),
+    def test_enabled_sm90_rejects_invalid_or_nonpositive_limit(self):
+        for value, message in (
+            ("0", "must be positive"),
+            ("-1", "must be positive"),
+            ("invalid", "invalid literal"),
         ):
-            with self.assertRaisesRegex(ValueError, "must be positive"):
-                create_engram_prefetch(
-                    "cuda:0", [(1, types.SimpleNamespace(_uva=object()))]
-                )
+            with (
+                self.subTest(value=value),
+                mock.patch("torch.cuda.is_available", return_value=True),
+                mock.patch("torch.version.hip", None),
+                mock.patch("torch.cuda.get_device_capability", return_value=(9, 0)),
+                mock.patch.dict(
+                    os.environ,
+                    {
+                        "DSV41_ENGRAM_PREFETCH": "1",
+                        "DSV41_ENGRAM_PREFETCH_MAX_ROWS": value,
+                        "PPU_HOME": "",
+                    },
+                ),
+            ):
+                with self.assertRaisesRegex(ValueError, message):
+                    create_engram_prefetch(
+                        "cuda:0", [(1, types.SimpleNamespace(_uva=object()))]
+                    )
 
 
 class Sm90EngramTest(unittest.TestCase):

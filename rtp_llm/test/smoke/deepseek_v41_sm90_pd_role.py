@@ -159,7 +159,14 @@ def recipe(args):
         env["DSV4_PREFILL_CP_OVERLAP"] = "1"
         env["DSV41_SM90_DECODE_GRAPH"] = "0"
     else:
-        env.update(DSV41_SM90_DECODE_GRAPH="1", DSV41_SM90_DECODE_GRAPH_MAX_ROWS=str(graph_rows))
+        # Decode already runs stream-async bookkeeping; skipping the front-loaded
+        # broad sync removes the step-boundary bubble (D1). Non-linear V4.1
+        # keeps its device-state overlap.
+        env.update(
+            DSV41_SM90_DECODE_GRAPH="1",
+            DSV41_SM90_DECODE_GRAPH_MAX_ROWS=str(graph_rows),
+            RTP_LLM_DROP_BROAD_SYNC="1",
+        )
         if args.gamma:
             env.update(SP_DSPARK_CONFIDENCE_MODE="bounded", SP_DSPARK_VERIFY_MODE="packed",
                        SP_DSPARK_VERIFY_BUDGET_MODE="fixed", SP_DSPARK_VERIFY_BUDGET=str(args.verify_budget))

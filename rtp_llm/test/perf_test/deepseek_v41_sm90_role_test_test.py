@@ -60,6 +60,8 @@ class FixedRoleTest(unittest.TestCase):
             self.assertEqual(env["DSV41_SM90_MOE_COMM"], "v2")
             self.assertEqual(env["DSV4_MOE_STRATEGY"], "mega_sm90")
             self.assertEqual(env["DSV41_SM90_DECODE_GRAPH"], "0")
+            self.assertNotIn("RTP_LLM_DROP_BROAD_SYNC", env)
+            self.assertNotIn("RTP_LLM_STREAM_ASYNC", env)
             self.assertEqual((batches, output, LENGTHS), ((1,), 1, (32768, 65536)))
 
     def test_decode_dp8_capacity_matches_fixed_batches(self):
@@ -71,6 +73,8 @@ class FixedRoleTest(unittest.TestCase):
             self.assertNotIn("cp_rotate_method", options)
             self.assertEqual(int(env["DSV41_SM90_DECODE_GRAPH_MAX_ROWS"]), max(batches))
             self.assertEqual(env["DSV41_SM90_DECODE_GRAPH"], "1")
+            self.assertEqual(env["RTP_LLM_STREAM_ASYNC"], "1")
+            self.assertEqual(env["RTP_LLM_DROP_BROAD_SYNC"], "1")
             self.assertEqual(env["ROLE_TYPE"], "DECODE")
             self.assertEqual(
                 (batches, output),
