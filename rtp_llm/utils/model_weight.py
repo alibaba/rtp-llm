@@ -1296,6 +1296,7 @@ class W:
     mla_indexer_qb_w = "self_attention_weights.mla.indexer.wq_b.kernel"
     mla_indexer_qb_s = "self_attention_weights.mla.indexer.wq_b.weight_only_quant_scale"
     mla_indexer_k_w = "self_attention_weights.mla.indexer.wk.kernel"
+    mla_indexer_k_gate_w = "self_attention_weights.mla.indexer.wk_gate.kernel"
     mla_indexer_k_s = "self_attention_weights.mla.indexer.wk.weight_only_quant_scale"
     mla_indexer_k_norm_w = "self_attention_weights.mla.indexer.k_norm.kernel"
     mla_indexer_k_norm_b = "self_attention_weights.mla.indexer.k_norm.bias"
@@ -1663,6 +1664,7 @@ class W:
         mla_indexer_k_norm_w: sp_id,
         mla_indexer_k_norm_b: sp_id,
         mla_indexer_weights_proj_w: sp_id,
+        mla_indexer_k_gate_w: sp_id,
         mla_indexer_qb_w: sp_id,
         mla_indexer_k_w: sp_id,
         # ---- DSv4 (TP=1 today; all sp_id placeholders) ----
