@@ -16,7 +16,7 @@ import torch.nn.functional as F
 
 from rtp_llm.models_py.model_desc import qwen3_next as model
 from rtp_llm.models_py.modules.qwen4_exp.gdn_prefill_adapter import Qwen4Sm120GdnPrefill
-from rtp_llm.models_py.modules.qwen4_exp.gdn_prefill_norm_triton import (
+from rtp_llm.models_py.modules.qwen4_exp.gdn_prefill_norm import (
     Qwen4PrefillGatedNorm,
 )
 from rtp_llm.models_py.triton_kernels.common.layernorm_gated import RmsNormGated

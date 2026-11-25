@@ -50,7 +50,7 @@ class GdnSm90PreparationTest(unittest.TestCase):
         return packed, a, b, alog, bias
 
     def test_norm_exact_strided_gate_and_tail(self):
-        from rtp_llm.models_py.modules.qwen4_exp.gdn_prefill_norm_triton import (
+        from rtp_llm.models_py.modules.qwen4_exp.gdn_prefill_norm import (
             Qwen4PrefillGatedNorm,
         )
         from rtp_llm.models_py.triton_kernels.common.layernorm_gated import RmsNormGated
@@ -70,7 +70,7 @@ class GdnSm90PreparationTest(unittest.TestCase):
                 self.assertFalse(model._supports_prefill(x, gate))
 
     def test_norm_default_dispatch(self):
-        from rtp_llm.models_py.modules.qwen4_exp.gdn_prefill_norm_triton import (
+        from rtp_llm.models_py.modules.qwen4_exp.gdn_prefill_norm import (
             Qwen4PrefillGatedNorm,
         )
         from rtp_llm.models_py.triton_kernels.common.layernorm_gated import RmsNormGated

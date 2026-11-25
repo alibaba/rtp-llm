@@ -971,6 +971,17 @@ class CaseRunner(object):
             else task_info.model_path
         )
 
+        timeout_value = env_dict.get("SMOKE_SERVER_START_TIMEOUT_S", "3600")
+        try:
+            server_start_timeout_s = int(timeout_value)
+        except (TypeError, ValueError):
+            server_start_timeout_s = 0
+        if server_start_timeout_s <= 0:
+            raise ValueError(
+                "SMOKE_SERVER_START_TIMEOUT_S must be a positive integer, "
+                f"got {timeout_value!r}"
+            )
+
         ret = server_manager.start_server(
             task_info.model_path,
             task_info.model_type,
@@ -978,7 +989,7 @@ class CaseRunner(object):
             task_info.lora_infos,
             task_info.ptuning_path,
             True,
-            3600,
+            server_start_timeout_s,
         )
         if task_info.update_lora_infos != None:
             for update_lora_info in task_info.update_lora_infos:

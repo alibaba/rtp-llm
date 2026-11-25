@@ -35,7 +35,7 @@ def baseline(*args, **kwargs):
 
 
 def candidate(*args, **kwargs):
-    from rtp_llm.models_py.modules.qwen4_exp.qsa.draft_writer_triton import (
+    from rtp_llm.models_py.modules.qwen4_exp.qsa.draft_writer import (
         try_write_draft_window,
     )
 
@@ -45,7 +45,7 @@ def candidate(*args, **kwargs):
         return undo
 
     with patch(
-        "rtp_llm.models_py.modules.qwen4_exp.qsa.draft_writer_triton.try_write_draft_window",
+        "rtp_llm.models_py.modules.qwen4_exp.qsa.draft_writer.try_write_draft_window",
         side_effect=checked,
     ):
         return write_draft_window_with_undo_(*args, **kwargs)

@@ -18,16 +18,23 @@ from rtp_llm.models_py.modules.qwen4_exp.tp2_ar_hc_fused import (
 _PROCESS_LIFETIME_TARGET_REDUCE = []
 
 
-def install_target_graph_all_reduce(attention, mlp, dispatch=None, *, fp8_gdn_decode=False):
+def install_target_graph_all_reduce(
+    attention, mlp, dispatch=None, *, fp8_gdn_decode=False, hopper_communicator=None
+):
     """Include the actual routed finalizer, even when shared FFN is unsharded."""
     from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.pure_tp_router import (
         PureTpRouterNvfp4Cutlass,
     )
 
-    dispatch = all_reduce_target_graph if dispatch is None else dispatch
+    standalone_reduce = (
+        all_reduce_target_graph
+        if hopper_communicator is None
+        else partial(all_reduce_target_graph, hopper_communicator=hopper_communicator)
+    )
+    dispatch = standalone_reduce if dispatch is None else dispatch
     attention.tp_all_reduce = dispatch
     if fp8_gdn_decode:
-        attention.tp_all_reduce_decode = partial(all_reduce_target_graph, inplace=None)
+        attention.tp_all_reduce_decode = partial(standalone_reduce, inplace=None)
     mlp.tp_all_reduce = dispatch
     router = getattr(getattr(mlp, "fused_moe", None), "router", None)
     if type(router) is PureTpRouterNvfp4Cutlass:
@@ -130,12 +137,16 @@ def prepare_target_reduce(config, parallelism):
         return None
 
 
-def all_reduce_target_graph(tensor, group, *, inplace=True):
+def all_reduce_target_graph(tensor, group, *, inplace=True, hopper_communicator=None):
     deferred = try_defer_sublayer_tp2(tensor, group)
     if deferred is not None:
         return deferred
     with record_function_range("qwen4.tp_all_reduce"):
         if tensor.is_cuda and group == collective_torch.Group.TP:
+            if hopper_communicator is not None and hopper_communicator.should_use(tensor):
+                if inplace is True:
+                    return hopper_communicator.all_reduce_into(tensor, tensor)
+                return hopper_communicator.all_reduce(tensor)
             communicator = get_all_reduce()
             if communicator is not None and communicator.should_use_registered_graph_input(
                 tensor

@@ -730,7 +730,7 @@ class Qwen4ExpPLELayer(nn.Module):
             hyper_states, token_history, padding_mask, embeddings=embeddings
         )
         if padding_mask is None and hyper_states.is_cuda and torch.version.hip is None:
-            from .ple_conv_triton import try_ple_conv
+            from rtp_llm.models_py.kernels.cuda.qwen4_ple.conv import try_ple_conv
 
             fused = try_ple_conv(
                 gated_value,

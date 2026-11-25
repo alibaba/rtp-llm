@@ -19,7 +19,7 @@ import torch
 from rtp_llm.models_py.kernels.cuda.qsa.sparse_paged_fmha import (
     sparse_paged_gqa_attn,
 )
-from rtp_llm.models_py.modules.qwen4_exp.test.sparse_paged_fmha_test import (
+from rtp_llm.models_py.kernels.cuda.qsa.test.reference.sparse_paged import (
     _reference,
 )
 

@@ -26,7 +26,7 @@ from rtp_llm.models_py.modules.qwen4_exp.gdn_fp8_input_projection import (
 from rtp_llm.models_py.modules.qwen4_exp.qsa.qsa_fp8_input_projection import (
     try_prepare_qsa_triple,
 )
-from rtp_llm.models_py.triton_kernels.common.gated_residual_mix_triton import (
+from rtp_llm.models_py.triton_kernels.gated_residual.mix import (
     fused_mix_reduce,
 )
 from rtp_llm.models_py.triton_kernels.common.gated_residual_sm90_up_mix_triton import (

@@ -56,13 +56,13 @@ def custom_all_reduce_enabled(
     return value is None or value.strip().lower() not in ("1", "true", "on", "yes")
 
 
-def log_comm_backend_summary(*, tp2_ar_hc=None, head_ipc=None) -> None:
+def log_comm_backend_summary(*, tp2_ar_hc=None, head_ipc=None, flashinfer_ar=None) -> None:
     """Emit a single rank-0 startup summary of active collective backends."""
     if _parallelism_config is None or _parallelism_config.tp_size <= 1:
         return
     if _parallelism_config.tp_rank != 0:
         return
-    fi_status = "ready" if _get_all_reduce_module().get_all_reduce() is not None else "disabled"
+    fi_status = flashinfer_ar.status_summary() if flashinfer_ar is not None else "disabled"
     symm_comm = _get_symm_mem().get_symm_mem_communicator()
     if symm_comm is None or getattr(symm_comm, "disabled", True):
         symm_status = "disabled"
@@ -164,17 +164,14 @@ def _init_all_reduce(
     _canonical_p2p = module.get_canonical_p2p()
 
 
-def _init_tp2_p2p_allgather(
-    parallelism_config: ParallelismConfig,
-    collective_config: CollectiveConfig,
-) -> None:
+def prepare_tp2_p2p_allgather(parallelism_config: ParallelismConfig) -> None:
+    """Prepare the SM90 TP2 all-gather for models with byte or vocabulary shards."""
     global _tp2_p2p_allgather
-    if _tp2_p2p_allgather is not None or collective_config.all_reduce_backend != "auto":
-        return
     if (
-        parallelism_config.tp_size != 2
-        or parallelism_config.tp_size > parallelism_config.local_world_size
+        _tp2_p2p_allgather is not None
+        or parallelism_config.tp_size != 2
         or not torch.distributed.is_initialized()
+        or not _tp_group_is_single_node(parallelism_config)
     ):
         return
     from rtp_llm.models_py.distributed.tp2_p2p_all_gather import init_tp2_p2p_allgather
@@ -284,7 +281,7 @@ def init_distributed_environment(
     if collective_config is None:
         collective_config = CollectiveConfig()
     _disable_custom_all_reduce_override = (
-        True if collective_config.all_reduce_backend == "nccl" else None
+        True if collective_config.all_reduce_backend != "auto" else None
     )
 
     # Check if already initialized (and not destroyed)
@@ -309,7 +306,6 @@ def init_distributed_environment(
             rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
         _init_all_reduce(parallelism_config, collective_config)
         _init_glm5_cp_comm(parallelism_config)
-        _init_tp2_p2p_allgather(parallelism_config, collective_config)
         return
 
     _normalize_parallelism_ranks(parallelism_config)
@@ -345,7 +341,6 @@ def init_distributed_environment(
             rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
         _init_all_reduce(parallelism_config, collective_config)
         _init_glm5_cp_comm(parallelism_config)
-        _init_tp2_p2p_allgather(parallelism_config, collective_config)
         return
 
     logging.info(
@@ -387,7 +382,6 @@ def init_distributed_environment(
     _init_glm5_cp_comm(parallelism_config)
     init_user_buffers_environment(parallelism_config)
     _init_all_reduce(parallelism_config, collective_config)
-    _init_tp2_p2p_allgather(parallelism_config, collective_config)
 
 
 def _create_process_groups(

@@ -21,7 +21,7 @@ from rtp_llm.models_py.modules.qwen4_exp.tp2_ar_hc_fused import (
     try_defer_moe_packed_tp2,
     try_defer_sublayer_tp2,
 )
-from rtp_llm.models_py.triton_kernels.common.gated_residual_prefill_inject_norm_triton import (
+from rtp_llm.models_py.triton_kernels.gated_residual.prefill_inject_norm import (
     try_inject_grouped_norm,
 )
 

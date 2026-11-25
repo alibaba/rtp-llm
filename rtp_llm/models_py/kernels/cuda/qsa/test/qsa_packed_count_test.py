@@ -124,8 +124,8 @@ class QsaPackedCountTest(unittest.TestCase):
                 run(packed, True, False)
 
     def test_fp16_pv_against_independent_fp64_and_large_value_fallback(self):
-        import rtp_llm.models_py.modules.qwen4_exp.qsa.grouped_sparse_paged_fmha as grouped_backend
-        import rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_paged_fmha as generic_backend
+        import rtp_llm.models_py.kernels.cuda.qsa.grouped_sparse_paged_fmha as grouped_backend
+        import rtp_llm.models_py.kernels.cuda.qsa.sparse_paged_fmha as generic_backend
 
         torch.manual_seed(77991)
         q = torch.randn(1, 12, 4, 256, device="cuda", dtype=torch.bfloat16)

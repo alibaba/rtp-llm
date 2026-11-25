@@ -4,7 +4,7 @@ import itertools
 import unittest
 
 import torch
-from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_paged_fmha import (
+from rtp_llm.models_py.kernels.cuda.qsa.sparse_paged_fmha import (
     sparse_paged_gqa_attn,
     try_sm90_packed_paged_decode,
     try_sm90_packed_paged_prefill,

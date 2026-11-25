@@ -117,7 +117,7 @@ class DraftQsaLayoutTest(unittest.TestCase):
     def test_sm90_layout_keeps_sm120_attention_qualification(self):
         if torch.cuda.get_device_capability() != (9, 0):
             self.skipTest("SM90 qualification check")
-        from rtp_llm.models_py.modules.qwen4_exp.qsa.draft_paged_fmha import (
+        from rtp_llm.models_py.kernels.cuda.qsa.draft_paged_fmha import (
             try_draft_paged_attention,
         )
 

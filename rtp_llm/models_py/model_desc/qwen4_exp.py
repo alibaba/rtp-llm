@@ -1072,6 +1072,12 @@ class Qwen4ExpModel(Qwen35Model):
         py_hw_kernel_config=None,
     ):
         config = model_config
+        if parallelism_config.tp_size == 2:
+            from rtp_llm.models_py.distributed.collective_torch import (
+                prepare_tp2_p2p_allgather,
+            )
+
+            prepare_tp2_p2p_allgather(parallelism_config)
         compute_weights = (
             prepare_compute_weights(weights)
             if getattr(config, "_qwen4_full_fp8", False)
@@ -1149,21 +1155,27 @@ class Qwen4ExpModel(Qwen35Model):
         for layer in self.layers:
             if isinstance(layer, Qwen4ExpDecoderLayer):
                 layer._tp2_ar_hc = self._tp2_ar_hc
-        if getattr(parallelism_config, "tp_size", 1) > 1:
+        hopper_communicator = None
+        if parallelism_config.tp_size == parallelism_config.local_world_size == 2:
             from rtp_llm.models_py.distributed import collective_torch
-            from rtp_llm.models_py.distributed.flashinfer_all_reduce import (
-                get_flashinfer_allreduce,
+            from rtp_llm.models_py.modules.qwen4_exp.moe.moe_tp_reduce import (
+                prepare_moe_communicator,
             )
 
-            flashinfer_ar = get_flashinfer_allreduce()
-            if flashinfer_ar is not None and torch.cuda.is_available():
-                flashinfer_ar.warmup(
-                    int(getattr(config, "hidden_size", 2560)),
-                    torch.bfloat16,
+            device = self.embed_tokens.weight.device
+            if (
+                device.type == "cuda"
+                and config.hidden_size == 2560
+                and torch.version.hip is None
+                and torch.cuda.get_device_capability(device) == (9, 0)
+            ):
+                hopper_communicator = prepare_moe_communicator(
+                    device, max_decode_rows=512
                 )
             collective_torch.log_comm_backend_summary(
                 tp2_ar_hc=self._tp2_ar_hc,
                 head_ipc=self._head_ipc_gather,
+                flashinfer_ar=hopper_communicator,
             )
         from rtp_llm.models_py.modules.qwen4_exp.cpu_target_status import (
             prepare_cpu_target_status,
@@ -1180,9 +1192,17 @@ class Qwen4ExpModel(Qwen35Model):
 
         self._target_reduce = prepare_target_reduce(config, parallelism_config)
         dispatch = self._target_reduce
-        if dispatch is not None:
+        if dispatch is not None or hopper_communicator is not None:
             for layer in self.layers:
-                install_target_graph_all_reduce(layer.self_attn, layer.mlp, dispatch)
+                install_target_graph_all_reduce(
+                    layer.self_attn,
+                    layer.mlp,
+                    dispatch,
+                    fp8_gdn_decode=getattr(
+                        layer.self_attn, "use_sm90_gdn_fp8_decode", False
+                    ),
+                    hopper_communicator=hopper_communicator,
+                )
 
         offline_nvfp4 = bool(getattr(config, "_qwen4_nvfp4_source", False))
         if compute_weights is not weights or offline_nvfp4:
