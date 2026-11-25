@@ -12,7 +12,11 @@ from rtp_llm.models_py.layers.linear import (
 )
 from rtp_llm.models_py.layers.norm import decoder_rms_norm
 from rtp_llm.models_py.module_base import RtpModule
-from rtp_llm.models_py.new_models.model_base import required_config_value
+from rtp_llm.models_py.new_models.model_base import (
+    positive_int as _positive_int,
+    required_config_value,
+    resolve_head_dim as _resolve_head_dim,
+)
 from rtp_llm.models_py.new_models.qwen2.trt_checkpoint import Qwen2CheckpointMapper
 from rtp_llm.models_py.new_models.qwen3.language import Qwen3ForCausalLM
 from rtp_llm.models_py.quant_methods.base import QuantizationConfig
@@ -197,25 +201,6 @@ class Qwen2DecoderLayer(RtpModule):
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
         return hidden_states
-
-
-def _positive_int(value: Any, name: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        raise ValueError(f"{name} must be a positive integer, got {value!r}")
-    return value
-
-
-def _resolve_head_dim(hidden_size: Any, num_heads: Any, configured: Any) -> int:
-    hidden_size = _positive_int(hidden_size, "hidden_size")
-    num_heads = _positive_int(num_heads, "num_heads")
-    if configured is not None:
-        return _positive_int(configured, "head_dim")
-    if hidden_size % num_heads != 0:
-        raise ValueError(
-            f"hidden_size={hidden_size} must be divisible by num_heads={num_heads} "
-            "when head_dim is not configured"
-        )
-    return hidden_size // num_heads
 
 
 def _extract_config_values(

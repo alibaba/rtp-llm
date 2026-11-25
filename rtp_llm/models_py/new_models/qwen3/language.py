@@ -25,7 +25,9 @@ from rtp_llm.models_py.model_desc.block_map import get_primary_attention_inputs
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.module_base import CheckpointLoadTarget, RtpModule
 from rtp_llm.models_py.new_models.model_base import (
+    positive_int as _positive_int,
     required_config_value,
+    resolve_head_dim as _resolve_head_dim,
     select_fmha_impl_for_layer,
 )
 from rtp_llm.models_py.quant_methods.base import QuantizationConfig
@@ -284,25 +286,6 @@ class Qwen3DecoderLayer(RtpModule):
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
         return hidden_states
-
-
-def _positive_int(value: Any, name: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        raise ValueError(f"{name} must be a positive integer, got {value!r}")
-    return value
-
-
-def _resolve_head_dim(hidden_size: Any, num_heads: Any, configured: Any) -> int:
-    hidden_size = _positive_int(hidden_size, "hidden_size")
-    num_heads = _positive_int(num_heads, "num_heads")
-    if configured is not None:
-        return _positive_int(configured, "head_dim")
-    if hidden_size % num_heads != 0:
-        raise ValueError(
-            f"hidden_size={hidden_size} must be divisible by num_heads={num_heads} "
-            "when head_dim is not configured"
-        )
-    return hidden_size // num_heads
 
 
 def _extract_config_values(
