@@ -128,6 +128,15 @@ def _prepare_paged_inputs(
         sequence_lengths = device_source.to(
             device=qkv.device, dtype=torch.int32, non_blocking=True
         ).contiguous()
+        if not graph_paged:
+            if lengths_source.device.type == "cpu":
+                invalid_lengths = bool(torch.any(lengths_source < 0).item())
+            else:
+                invalid_lengths = bool(torch.any(sequence_lengths < 0).item())
+            if invalid_lengths:
+                raise ValueError(
+                    "qwen4_exp sparse GQA sequence lengths must be non-negative"
+                )
         query_offsets = torch.arange(
             1, query_len + 1, device=qkv.device, dtype=torch.int32
         )

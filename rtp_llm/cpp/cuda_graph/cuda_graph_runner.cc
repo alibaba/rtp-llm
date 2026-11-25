@@ -141,7 +141,8 @@ bool streamAsyncReplayPrepEnabled() {
             const char* value = std::getenv(name);
             return value != nullptr && std::string(value) == "1";
         };
-        return is_on("RTP_LLM_STREAM_ASYNC") || is_on("RTP_LLM_MTP_ASYNC_PREPARE");
+        return is_on("RTP_LLM_STREAM_ASYNC") || is_on("RTP_LLM_MTP_ASYNC_PREPARE")
+               || is_on("RTP_LLM_MTP_ASYNC_DEVICE_STATE");
     }();
     return enabled;
 }
@@ -191,7 +192,9 @@ PyModelInputs deviceAttentionPrepareView(const PyModelInputs& captured, const to
         attn.decode_cu_seqlens        = attn.decode_cu_seqlens_device;
         attn.kv_cache_kernel_block_id = attn.kv_cache_kernel_block_id_device;
         attn.kv_cache_block_id        = attn.kv_cache_block_id_device;
-        attn.sequence_lengths         = sequence_lengths;
+        if (sequence_lengths.defined()) {
+            attn.sequence_lengths = sequence_lengths;
+        }
     };
     use_device_metadata(view.attention_inputs);
     for (auto& [tag, attn] : view.attention_inputs_by_tag) {
@@ -322,7 +325,9 @@ py::object CudaGraphRunner::prepareFmhaImpl(const PyModelInputs& inputs, bool is
 }
 
 bool CudaGraphRunner::supportsDeviceAttentionPreparation(const py::object& impl) const {
-    if (role_ != CudaGraphRole::DECODE || !impl || impl.is_none()) {
+    if ((role_ != CudaGraphRole::DECODE && role_ != CudaGraphRole::MTP_DRAFT_PREFILL
+         && role_ != CudaGraphRole::TARGET_VERIFY)
+        || !impl || impl.is_none()) {
         return false;
     }
     auto supports = [](py::handle backend) {
@@ -334,6 +339,11 @@ bool CudaGraphRunner::supportsDeviceAttentionPreparation(const py::object& impl)
         return !impls.empty()
                && std::all_of(impls.begin(), impls.end(), [&](auto item) { return supports(item.second); });
     }
+    if (role_ == CudaGraphRole::MTP_DRAFT_PREFILL) {
+        // Bounded MTP draft prefill wrappers (e.g. DraftPrefillGraphReplay) explicitly
+        // declare device-only preparation across all of their cache groups.
+        return supports(impl);
+    }
     // Model-wide mapping planners may read host lengths even when their
     // individual attention implementations only need device metadata.
     return kv_cache_group_tags_.empty() && supports(impl);
@@ -341,10 +351,49 @@ bool CudaGraphRunner::supportsDeviceAttentionPreparation(const py::object& impl)
 
 bool CudaGraphRunner::usesDeviceAttentionPreparation(const PyModelInputs& inputs, const CudaGraphState& state) const {
     const auto graph_idx = is_prefill_cuda_graph_mode_ ? state.current_real_graph_seq_len : state.current_real_graph_bs;
-    const auto& lengths  = inputs.attention_inputs.sequence_lengths;
-    return graph_instances_.at(graph_idx).mem_hold_.device_attention_preparation_
-           && state.current_batch_size <= state.current_real_graph_bs && lengths.defined() && lengths.is_cuda()
-           && lengths.numel() == state.current_batch_size;
+    const auto& mem_hold = graph_instances_.at(graph_idx).mem_hold_;
+    if (!mem_hold.device_attention_preparation_) {
+        return false;
+    }
+    const int selected_graph_batch_size =
+        is_prefill_cuda_graph_mode_ ? static_cast<int>(mem_hold.py_model_inputs_.attention_inputs.input_lengths.numel()) :
+                                      state.current_real_graph_bs;
+    if (state.current_batch_size > selected_graph_batch_size) {
+        return false;
+    }
+    if (is_prefill_cuda_graph_mode_ || is_target_verify_) {
+        const auto& input_lengths  = inputs.attention_inputs.input_lengths;
+        const auto& prefix_lengths = inputs.attention_inputs.prefix_lengths;
+        const auto& cu_seqlens     = inputs.attention_inputs.cu_seqlens_device;
+        const bool  has_device_lengths =
+            input_lengths.defined() && input_lengths.is_cuda() && input_lengths.numel() == state.current_batch_size
+            && prefix_lengths.defined() && prefix_lengths.is_cuda() && prefix_lengths.numel() == state.current_batch_size
+            && cu_seqlens.defined() && cu_seqlens.is_cuda() && cu_seqlens.numel() >= state.current_batch_size + 1;
+        if (!has_device_lengths) {
+            return false;
+        }
+        if (is_target_verify_) {
+            const auto& cu_kv_seqlens = inputs.attention_inputs.cu_kv_seqlens_device;
+            const auto& seq_plus_1    = inputs.attention_inputs.sequence_lengths_plus_1_device;
+            if (!cu_kv_seqlens.defined() || !cu_kv_seqlens.is_cuda()
+                || cu_kv_seqlens.numel() < state.current_batch_size + 1 || !seq_plus_1.defined()
+                || !seq_plus_1.is_cuda() || seq_plus_1.numel() < state.current_batch_size) {
+                return false;
+            }
+            return true;
+        }
+        if (usesFixedCapacityMtpDraftPrefillCudaGraph()) {
+            const auto& captured_padding = mem_hold.py_model_inputs_.attention_inputs.padding_offset;
+            const auto& live_padding     = inputs.attention_inputs.padding_offset;
+            if (!captured_padding.defined() || !captured_padding.is_cuda() || !live_padding.defined()
+                || !live_padding.is_cuda()) {
+                return false;
+            }
+        }
+        return true;
+    }
+    const auto& lengths = inputs.attention_inputs.sequence_lengths;
+    return lengths.defined() && lengths.is_cuda() && lengths.numel() == state.current_batch_size;
 }
 
 // clang-format off
@@ -784,6 +833,21 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                                                     selected_graph_batch_size + 1,
                                                     inputs.attention_inputs.cu_kv_seqlens_device,
                                                     state.current_batch_size);
+            if (py_model_inputs_.attention_inputs.padding_offset.defined()
+                && py_model_inputs_.attention_inputs.padding_offset.is_cuda()
+                && inputs.attention_inputs.padding_offset.defined()
+                && inputs.attention_inputs.padding_offset.is_cuda() && state.current_seq_len > 0) {
+                // Exact device equivalent of rebuildPrefillPaddingOffsetTail:
+                // dst[live_tokens + i] = (src[live_tokens - 1] - 1) - i.
+                addCudaGraphPrepareFillRegionFromDevice(fill_params,
+                                                        py_model_inputs_.attention_inputs.padding_offset,
+                                                        state.current_seq_len,
+                                                        py_model_inputs_.attention_inputs.padding_offset.numel(),
+                                                        inputs.attention_inputs.padding_offset,
+                                                        state.current_seq_len - 1,
+                                                        /*value_offset=*/-1,
+                                                        /*step=*/-1);
+            }
         } else if (has_padded_rows && !isGenerationPrefillCudaGraph()) {
             // Plain decode also captures one query per graph row. Point its
             // rounded rows at position 0 of reserved block 0.
@@ -902,6 +966,34 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                       py_model_inputs_.attention_inputs.decode_cu_seqlens_device,
                       (state.current_batch_size + 1) * sizeof(int));
     } else if (!isGenerationPrefillCudaGraph()) {
+        if (py_model_inputs_.attention_inputs.padding_offset.defined()
+            && py_model_inputs_.attention_inputs.padding_offset.is_cuda()
+            && inputs.attention_inputs.padding_offset.defined() && state.current_seq_len > 0) {
+            if (inputs.attention_inputs.padding_offset.is_cuda()) {
+                tryAddD2DCopy(inputs.attention_inputs.padding_offset,
+                              py_model_inputs_.attention_inputs.padding_offset,
+                              state.current_seq_len * sizeof(int));
+            } else {
+                optimizedCopyAsync(inputs.attention_inputs.padding_offset,
+                                   py_model_inputs_.attention_inputs.padding_offset,
+                                   state.current_seq_len * sizeof(int));
+#if USING_CUDA || USING_ROCM
+                if (state.current_seq_len < py_model_inputs_.attention_inputs.padding_offset.numel()) {
+                    CudaGraphPrepareFillParams tail_fill;
+                    addCudaGraphPrepareFillRegionFromDevice(
+                        tail_fill,
+                        py_model_inputs_.attention_inputs.padding_offset,
+                        state.current_seq_len,
+                        py_model_inputs_.attention_inputs.padding_offset.numel(),
+                        py_model_inputs_.attention_inputs.padding_offset,
+                        state.current_seq_len - 1,
+                        /*value_offset=*/-1,
+                        /*step=*/-1);
+                    invokeCudaGraphPrepareFill(tail_fill, cuda_graph::graphGetCurrentStream().stream());
+                }
+#endif
+            }
+        }
         // Legacy embedding/MTP prefill keeps its BERT ID copies in attention
         // preparation. Generation-prefill refreshes them in prepareInputData().
         if (inputs.bert_embedding_inputs.position_encoding.numel() > 0) {
@@ -1063,7 +1155,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                         cu_seqlens[batch_idx + 1] = token_idx;
                         cumulative_padding += state.current_real_graph_seq_len - input_length;
                     }
-                } else {
+                } else if (!py_model_inputs_.attention_inputs.padding_offset.is_cuda()) {
                     copyToHostMirror(inputs.attention_inputs.padding_offset,
                                      py_model_inputs_.attention_inputs.padding_offset,
                                      state.current_seq_len * sizeof(int));
@@ -1121,7 +1213,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
 
     // Keep the host mirrors consistent with the device-side replay contract.
     // CUDA/HIP device tails were already prepared by the single fused launch above.
-    if (has_padded_rows && is_target_verify_) {
+    if (!device_attention_preparation && has_padded_rows && is_target_verify_) {
         py_model_inputs_.attention_inputs.prefix_lengths.slice(0, state.current_batch_size, selected_graph_batch_size)
             .fill_(0);
         py_model_inputs_.attention_inputs.input_lengths.slice(0, state.current_batch_size, selected_graph_batch_size)
@@ -1152,7 +1244,8 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
             .slice(0, state.current_batch_size, selected_graph_batch_size)
             .fill_(num_tokens_per_bs_);
 #endif
-    } else if (has_padded_rows && is_prefill_cuda_graph_mode_ && !isGenerationPrefillCudaGraph()) {
+    } else if (!device_attention_preparation && has_padded_rows && is_prefill_cuda_graph_mode_
+               && !isGenerationPrefillCudaGraph()) {
         py_model_inputs_.attention_inputs.prefix_lengths.slice(0, state.current_batch_size, selected_graph_batch_size)
             .fill_(0);
         py_model_inputs_.attention_inputs.input_lengths.slice(0, state.current_batch_size, selected_graph_batch_size)
@@ -1182,7 +1275,8 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     // would keep a previous replay's slot mapping, resolve batch_idx beyond the
     // live batch and touch freed page-table rows, so rebuild them to alias the
     // last live row for every replay.
-    if (is_prefill_cuda_graph_mode_ && !isGenerationPrefillCudaGraph()) {
+    if (is_prefill_cuda_graph_mode_ && !isGenerationPrefillCudaGraph()
+        && !py_model_inputs_.attention_inputs.padding_offset.is_cuda()) {
         auto& padding_offset_host = py_model_inputs_.attention_inputs.padding_offset;
         RTP_LLM_CHECK_WITH_INFO(rebuildPrefillPaddingOffsetTail(padding_offset_host.data_ptr<int32_t>(),
                                                                 static_cast<size_t>(padding_offset_host.numel()),
@@ -1895,6 +1989,13 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
         generation_prefill_cuda_graph_padding_offset_host_ =
             torch::zeros({padding_offset_capacity}, options_cpu_int32_).pin_memory();
         inputs.attention_inputs.padding_offset = torch::zeros({padding_offset_capacity}, options_cuda_int32_);
+#if USING_CUDA
+    } else if (usesFixedCapacityMtpDraftPrefillCudaGraph()) {
+        // Keep fixed-capacity MTP draft prefill padding_offset on CUDA so replay
+        // refreshes live rows via fused D2D copy and rebuilds padding tails on GPU
+        // without host-mirror D2H or host synchronization.
+        inputs.attention_inputs.padding_offset = torch::zeros({padding_offset_capacity}, options_cuda_int32_);
+#endif
     } else {
         inputs.attention_inputs.padding_offset = torch::zeros({padding_offset_capacity}, options_cpu_int32_);
         inputs.attention_inputs.padding_offset = inputs.attention_inputs.padding_offset.pin_memory();
@@ -2186,9 +2287,12 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
     const auto prepare_device_attention = [&]() {
         if (graph_instances_[key].mem_hold_.device_attention_preparation_) {
             // Use graph-owned storage, never a tensor from an individual
-            // request. The subtraction and backend refresh run on each replay
-            // after prepareAttentionInputs has copied the live device lengths.
-            auto view = deviceAttentionPrepareView(inputs, inputs.attention_inputs.sequence_lengths_plus_1_device - 1);
+            // request. The backend refresh runs on each replay after
+            // prepareAttentionInputs has copied the live device metadata.
+            const auto seq_lens = (is_prefill_cuda_graph_mode_ || is_target_verify_) ?
+                                      torch::Tensor() :
+                                      (inputs.attention_inputs.sequence_lengths_plus_1_device - 1);
+            auto view = deviceAttentionPrepareView(inputs, seq_lens);
             callPrepareCudaGraph(graph_instances_[key].mem_hold_.attn_pyobj_, view);
         }
     };

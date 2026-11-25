@@ -18,10 +18,8 @@ from typing import Optional
 import torch
 import torch.distributed as dist
 
-from rtp_llm.models_py.distributed.symm_mem import (
-    _agree_across_group,
-    _custom_all_reduce_enabled,
-)
+from rtp_llm.models_py.distributed.collective_torch import custom_all_reduce_enabled
+from rtp_llm.models_py.distributed.symm_mem import _agree_across_group
 
 _SHARED_IPC_BUFFERS = {}
 _H200_MIN_TOTAL_MEMORY_BYTES = 110 * (1024 ** 3)
@@ -182,7 +180,7 @@ def init_tp2_p2p_allgather(
     if os.getenv("RTP_LLM_DISABLE_TP2_P2P_ALL_GATHER", "0") == "1":
         logging.info("TP2 P2P IPC AllGather disabled by RTP_LLM_DISABLE_TP2_P2P_ALL_GATHER=1")
         return None
-    if not _custom_all_reduce_enabled(disable_custom_all_reduce):
+    if not custom_all_reduce_enabled(disable_custom_all_reduce):
         logging.info(
             "TP2 P2P IPC AllGather disabled by custom AR switch (override=%s, FT_DISABLE_CUSTOM_AR=%r)",
             disable_custom_all_reduce,

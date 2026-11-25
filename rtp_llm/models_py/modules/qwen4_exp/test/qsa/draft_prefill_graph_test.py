@@ -1,3 +1,4 @@
+import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -219,6 +220,30 @@ class DraftPrefillGraphTest(unittest.TestCase):
         groups[INDEXER_STATE_TAG].kv_cache_block_id_device[1, 1] = 0
         with self.assertRaisesRegex(RuntimeError, "raw-state pages"):
             hook.prepare_cuda_graph(groups)
+
+    def test_supports_device_cuda_graph_inputs_and_strict_override(self):
+        hook, groups, delegate = self._replay()
+        delegate.supports_device_cuda_graph_inputs.return_value = True
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertTrue(hook.supports_device_cuda_graph_inputs())
+        with patch.dict(
+            os.environ, {"RTP_QWEN4_STRICT_DRAFT_GRAPH_VALIDATE": "1"}, clear=True
+        ):
+            self.assertFalse(hook.supports_device_cuda_graph_inputs())
+        delegate.supports_device_cuda_graph_inputs.return_value = False
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(hook.supports_device_cuda_graph_inputs())
+
+    def test_device_view_prepare_skips_host_mirror_validation(self):
+        hook, groups, delegate = self._replay()
+        fake_cuda = SimpleNamespace(is_cuda=True)
+        for group in groups.values():
+            group.input_lengths = fake_cuda
+            group.prefix_lengths = fake_cuda
+            group.cu_seqlens = fake_cuda
+        with patch.dict(os.environ, {}, clear=True):
+            hook.prepare_cuda_graph(groups)
+        delegate.prepare_cuda_graph.assert_called_once_with(groups["full"])
 
 
 if __name__ == "__main__":

@@ -168,7 +168,10 @@ void CudaGraphRunner::captureDecode() {
         // as a partially captured graph instead of deleting in-flight storage.
         capture_session_may_be_dirty_.store(false, std::memory_order_release);
         captureDraftLoop(bs);
-        RTP_LLM_LOG_INFO("capture success for batch size: %d", bs);
+        RTP_LLM_LOG_INFO("capture success for batch size: %d (role=%d, device_attention_preparation=%d)",
+                         bs,
+                         static_cast<int>(role_),
+                         static_cast<int>(graph_instances_[bs].mem_hold_.device_attention_preparation_));
     }
     RTP_LLM_LOG_INFO("Capture Decode End");
 }
