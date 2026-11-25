@@ -3,8 +3,18 @@ import os
 
 import torch
 
-from ....mhc.norm_fn_kernel import _mhc_pre_norm_fn_fwd_mul, round_to_tf32
+from ....mhc.norm_fn_kernel import (
+    _mhc_pre_norm_fn_fwd_mul,
+    prepare_tf32_rne_weight,
+    round_to_tf32,
+)
 from ....mhc.pre_big_fuse_kernel import _mhc_pre_big_fuse
+from .norm_fn import _tilelang_num_splits
+
+# ``_mhc_pre_norm_fn_fwd_mul`` stores whole 256-column tiles and a fixed
+# 24-wide mix row, so the split-K kernel only covers that geometry.
+_TILELANG_SPLITK_HIDDEN_BLOCK = 256
+_TILELANG_SPLITK_MIX_WIDTH = 24
 
 
 def _ceil_div(x: int, y: int) -> int:
@@ -32,6 +42,7 @@ def _requested_backend() -> str:
         "dg": "deepgemm",
         "tilelang": "tilelang_single",
         "single": "tilelang_single",
+        "splitk": "tilelang_splitk",
     }
     return aliases.get(requested, requested)
 
@@ -70,6 +81,34 @@ def _run_deepgemm_splitk_gemm(
         gemm_out_mul,
         gemm_out_sqrsum,
         n_splits,
+    )
+
+
+def _run_tilelang_splitk_gemm(
+    residual_flat: torch.Tensor,
+    fn: torch.Tensor,
+    gemm_out_mul: torch.Tensor,
+    gemm_out_sqrsum: torch.Tensor,
+    mhc_mult3: int,
+    mhc_hidden_size: int,
+    n_splits: int,
+) -> None:
+    """Kernel 1 of the split-K pair: per-split projection partials and x^2.
+
+    ``n_splits`` comes from the runtime TileLang planner, so the launch matches
+    the reducer's split-major layout without a caller hint. Weights are
+    materialized as TF32 RN-even first: the kernel's MMA truncates its operands,
+    and the pre-rounded value is identical to the native TMA conversion the
+    DeepGEMM backend performs, so both backends consume one weight contract.
+    """
+    fwd_mul_kernel = _mhc_pre_norm_fn_fwd_mul(
+        mhc_mult3, n_splits, mhc_hidden_size // n_splits
+    )
+    fwd_mul_kernel(
+        residual_flat,
+        prepare_tf32_rne_weight(fn),
+        gemm_out_mul,
+        gemm_out_sqrsum,
     )
 
 
@@ -112,11 +151,24 @@ def mhc_pre_big_fuse(
     backend = gemm_backend or _requested_backend()
     block_k = 64
     block_m = 64
-    n_splits = (
-        _compute_num_split(block_k, mhc_hidden_size, _ceil_div(num_tokens, block_m))
-        if backend in ("deepgemm", "tilelang_splitk")
-        else 1
-    )
+    if backend == "tilelang_splitk" and (
+        mhc_hidden_size % _TILELANG_SPLITK_HIDDEN_BLOCK
+        or mhc_mult3 > _TILELANG_SPLITK_MIX_WIDTH
+    ):
+        # The split-K mul kernel stores whole 256-column tiles and a fixed
+        # 24-wide mix row; keep every other geometry on the single-split kernel.
+        backend = "tilelang_single"
+    if backend == "tilelang_splitk":
+        # Runtime planner: one SM wave of whole 256-column/32-token tiles.
+        n_splits = _tilelang_num_splits(
+            residual_flat.view(num_tokens, mhc_hidden_size), mhc_hidden_size
+        )
+    elif backend == "deepgemm":
+        n_splits = _compute_num_split(
+            block_k, mhc_hidden_size, _ceil_div(num_tokens, block_m)
+        )
+    else:
+        n_splits = 1
 
     post_mix = torch.empty(
         num_tokens, mhc_mult, dtype=torch.float32, device=residual.device
@@ -163,9 +215,14 @@ def mhc_pre_big_fuse(
         gemm_out_mul = gemm_out_mul[:1]
         gemm_out_sqrsum = gemm_out_sqrsum[:1]
     elif backend == "tilelang_splitk":
-        raise RuntimeError(
-            "DSV4_MHC_PRE_GEMM_BACKEND=tilelang_splitk is not wired in this "
-            "RTP TileKernels snapshot; use deepgemm or tilelang_single."
+        _run_tilelang_splitk_gemm(
+            residual_flat.view(num_tokens, mhc_hidden_size),
+            fn_flat,
+            gemm_out_mul,
+            gemm_out_sqrsum,
+            mhc_mult3,
+            mhc_hidden_size,
+            n_splits,
         )
     else:
         raise ValueError(

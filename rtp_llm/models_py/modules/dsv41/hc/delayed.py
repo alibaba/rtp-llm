@@ -45,15 +45,52 @@ def collapse_delayed(x: torch.Tensor, pre_mix: torch.Tensor) -> torch.Tensor:
     return (x.float() * pre_mix.unsqueeze(-1)).sum(dim=-2).to(x.dtype)
 
 
+_EXPLICIT_TILELANG_BACKENDS = frozenset(
+    ("tilelang_single", "tilelang", "single", "tilelang_splitk", "splitk")
+)
+
+
 def can_fuse_big_pre() -> bool:
     backend = os.environ.get("DSV4_MHC_PRE_GEMM_BACKEND", "").strip().lower()
-    if backend in ("tilelang_single", "tilelang", "single"):
+    if backend in _EXPLICIT_TILELANG_BACKENDS:
         return True
     if backend in ("", "auto", "deepgemm", "dg"):
         from rtp_llm.models_py.modules.dsv41.hc.v41_prenorm import _has_prenorm_gemm
 
         return _has_prenorm_gemm()
     return False
+
+
+# SM90 decode fuses the whole pre chain into two kernels. Measured on L20Z,
+# DeepGEMM's combined projection/square-sum primitive is at least as fast as
+# the TileLang split-K planner across the decode window (17.4 us vs 18.8 us at
+# 128 rows, 23.3 us vs 25.2 us at 264, 39.6 us vs 42.2 us at 512; only 256 rows
+# is a ~1 us split-K win), so the fused chain uses it whenever it is installed
+# and split-K otherwise. Large prefill keeps the standalone chain so a fused
+# launch never becomes the long-sequence bottleneck.
+_SM90_BIG_PRE_MAX_ROWS = 512
+
+
+def _sm90_big_pre_rows(rows: int, capability: tuple[int, int]) -> bool:
+    return capability[0] == 9 and 64 < rows <= _SM90_BIG_PRE_MAX_ROWS
+
+
+def _big_pre_backend(capability: tuple[int, int], deepgemm_ok: bool):
+    """Fused-pre GEMM backend, or ``None`` to let the op resolve its default.
+
+    SM100 keeps its established DeepGEMM-first contract. On SM90 an explicit
+    TileLang selection keeps the single-split kernel; otherwise DeepGEMM is
+    used when its fused row budget accepts the batch and split-K covers the
+    rest (no DeepGEMM install, or an unsupported geometry).
+    """
+    if capability[0] == 9:
+        if deepgemm_ok:
+            return "deepgemm"
+        requested = os.environ.get("DSV4_MHC_PRE_GEMM_BACKEND", "").strip().lower()
+        if requested in _EXPLICIT_TILELANG_BACKENDS:
+            return None
+        return "tilelang_splitk"
+    return "deepgemm" if deepgemm_ok else None
 
 
 class DelayedHCUnit(HCUnitBase):
@@ -94,6 +131,17 @@ class DelayedHCUnit(HCUnitBase):
             ops = _tile_ops()
             residual = x.reshape(1, -1, self.hc_mult, self.dim)
             previous = self._previous_ref() if self._previous_ref is not None else None
+            capability = torch.cuda.get_device_capability(x.device)
+            rows = residual.shape[1]
+            # The fused chain has no standalone reduction, so on SM90 it may
+            # spend DeepGEMM across the whole decode window.
+            deepgemm_ok = is_supported(
+                residual,
+                self.fn,
+                max_tokens=(
+                    _SM90_BIG_PRE_MAX_ROWS if capability[0] == 9 else None
+                ),
+            )
             if (
                 previous is not None
                 and not torch.is_grad_enabled()
@@ -101,10 +149,11 @@ class DelayedHCUnit(HCUnitBase):
                 and residual.shape[-2:] == (4, 5120)
                 and residual.is_contiguous()
                 and self.fn.is_contiguous()
-                and torch.cuda.get_device_capability(x.device)[0] == 10
-                and (residual.shape[1] > 64 or is_supported(residual, self.fn))
+                and (
+                    (capability[0] == 10 and (rows > 64 or deepgemm_ok))
+                    or _sm90_big_pre_rows(rows, capability)
+                )
             ):
-                use_deepgemm = is_supported(residual, self.fn)
                 pre, post, comb, y = ops.mhc_pre_big_fuse(
                     residual,
                     self.fn,
@@ -116,7 +165,7 @@ class DelayedHCUnit(HCUnitBase):
                     mhc_post_mult_value=2.0,
                     sinkhorn_repeat=self.hc_sinkhorn_iters,
                     previous_pre_mix=previous.pre_mix_out,
-                    gemm_backend="deepgemm" if use_deepgemm else None,
+                    gemm_backend=_big_pre_backend(capability, deepgemm_ok),
                 )
                 self.pre_mix_out = pre.reshape(*shape[:-1])
                 return (

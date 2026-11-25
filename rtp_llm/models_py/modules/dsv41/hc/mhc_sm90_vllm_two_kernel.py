@@ -22,6 +22,11 @@ from rtp_llm.models_py.modules.dsv4 import (  # noqa: F401
     tilelang_kernels as _tilelang_kernels,
 )
 
+# ``3rdparty`` is not importable through a normal statement (leading digit).
+prepare_tf32_rne_weight = importlib.import_module(
+    "rtp_llm.models_py.3rdparty.tile_kernels.mhc.norm_fn_kernel"
+).prepare_tf32_rne_weight
+
 _mhc_pre_big_fuse_with_norm = importlib.import_module(
     "rtp_llm.models_py.modules.dsv41.hc.mhc_sm90_vllm_prenorm"
 ).mhc_pre_big_fuse_with_norm_tilelang
@@ -43,24 +48,10 @@ def prepare_sm90_tf32_rne_weight(fn: torch.Tensor) -> torch.Tensor:
 
     Standalone prenorm passes raw weights to DeepGEMM's TMA conversion. The
     fused projection uses FP32 arithmetic, so it must perform that conversion
-    explicitly, including exact halfway values. Keep its cache separate from
-    the older biased/truncating helper and retain immutable inference weights.
+    explicitly, including exact halfway values. The split-K TileLang projection
+    consumes the same cached values, so both SM90 backends see one TF32 weight.
     """
-    if torch.is_inference(fn):
-        version = None
-    else:
-        try:
-            version = int(fn._version)
-        except RuntimeError:
-            version = None
-    key = (version, fn.data_ptr(), tuple(fn.shape), tuple(fn.stride()), fn.device)
-    cached = getattr(fn, "_dsv41_sm90_tf32_rne_cache", None)
-    if cached is not None and cached[0] == key:
-        return cached[1]
-    bits = fn.view(torch.int32)
-    weight = ((bits + 0xFFF + ((bits >> 13) & 1)) & -8192).view(torch.float32)
-    fn._dsv41_sm90_tf32_rne_cache = (key, weight)
-    return weight
+    return prepare_tf32_rne_weight(fn)
 
 
 _PASS_CONFIGS = {

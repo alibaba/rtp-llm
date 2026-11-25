@@ -63,6 +63,7 @@ class V41HCJitWarmupCPU(unittest.TestCase):
         norm = _mhc_tests.MHCLazyBackwardTest().load_norm()
         norm_kernel = ModuleType("_test_tile.mhc.norm_fn_kernel")
         norm_kernel.round_to_tf32 = lambda value: value
+        norm_kernel.prepare_tf32_rne_weight = lambda value: value
         norm_kernel._mhc_pre_norm_fn_fwd_mul = Mock()
         with patch.dict(sys.modules, {norm_kernel.__name__: norm_kernel}):
             fused_pre = _mhc_tests.MHCLazyBackwardTest().load_kernels(
@@ -328,6 +329,47 @@ class V41HCJitWarmupCPU(unittest.TestCase):
             min(80, 148 // ((call.args[1] + 63) // 64)) for call in fused.call_args_list
         }
         self.assertEqual(covered, {80, 74, 49, 37, 29, 24, 21, 18})
+
+    def test_sm90_splitk_prewarm_covers_planner_splits(self):
+        with contextlib.ExitStack() as stack:
+            self._mock_device(stack)
+            stack.enter_context(
+                patch.object(torch.cuda, "get_device_capability", return_value=(9, 0))
+            )
+            stack.enter_context(
+                patch.object(warmup.v41_mega_mhc, "_get_sm90_mega_mhc", return_value=None)
+            )
+            stack.enter_context(
+                patch.dict(os.environ, {"DSV4_MHC_PRE_GEMM_BACKEND": "deepgemm"})
+            )
+            for name in (
+                "_launch_small_prenorm",
+                "_launch_mega",
+                "_launch_tilelang_chain",
+                "_launch_tilelang_norm",
+            ):
+                stack.enter_context(patch.object(warmup, name))
+            stack.enter_context(
+                patch.object(warmup, "can_fuse_big_pre", return_value=True)
+            )
+            stack.enter_context(
+                patch.object(
+                    warmup.v41_prenorm, "_has_prenorm_gemm", return_value=False
+                )
+            )
+            fused = stack.enter_context(patch.object(warmup, "_launch_fused_pre"))
+            warmup.warmup_v41_hc_jit(model(block()), max_m=512, device="cpu")
+            tokens = {call.args[1] for call in fused.call_args_list}
+            # Without DeepGEMM the planner specializations are the reachable
+            # fused-pre launches, one per distinct n_splits.
+            expected = {
+                t
+                for _, t in warmup._fused_pre_splitk_specs(
+                    512, 20480, torch.device("cpu")
+                )
+            }
+        self.assertEqual(len(expected), 4)
+        self.assertTrue(expected <= tokens)
 
     def test_mega_representatives_cover_pinned_dg_heuristic_with_bounded_memory(self):
         for sms in (1, 16, 132, 148):

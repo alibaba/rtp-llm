@@ -42,8 +42,15 @@ def max_supported_tokens(capability: tuple[int, int] | None = None) -> int:
     return 0
 
 
-def is_supported(residual: torch.Tensor, fn: torch.Tensor) -> bool:
-    """Static inference gate; large prefills retain the existing implementation."""
+def is_supported(
+    residual: torch.Tensor, fn: torch.Tensor, *, max_tokens: int | None = None
+) -> bool:
+    """Static inference gate; large prefills retain the existing implementation.
+
+    ``max_tokens`` overrides the standalone row budget. The fused pre chain
+    consumes the same primitive without the standalone Triton reduction, so it
+    can use a wider window than ``max_supported_tokens`` allows.
+    """
     if (
         not is_cuda()
         or residual.device.type != "cuda"
@@ -58,10 +65,14 @@ def is_supported(residual: torch.Tensor, fn: torch.Tensor) -> bool:
         or (torch.is_grad_enabled() and (residual.requires_grad or fn.requires_grad))
     ):
         return False
-    max_tokens = max_supported_tokens(torch.cuda.get_device_capability(residual.device))
+    limit = (
+        max_supported_tokens(torch.cuda.get_device_capability(residual.device))
+        if max_tokens is None
+        else int(max_tokens)
+    )
     return (
-        max_tokens > 0
-        and residual.numel() // 20480 <= max_tokens
+        limit > 0
+        and residual.numel() // 20480 <= limit
         and _has_prenorm_gemm()
     )
 

@@ -325,3 +325,36 @@ def _mhc_pre_norm_fn_bwd_mul(
 
 def round_to_tf32(x: torch.Tensor) -> torch.Tensor:
     return (x.view(torch.int32) + 0x1000).view(torch.float32)
+
+
+def round_to_tf32_rne(x: torch.Tensor) -> torch.Tensor:
+    """Round FP32 to TF32 with round-to-nearest-even and clear the low 13 bits.
+
+    ``round_to_tf32`` biases halfway values away from zero and relies on the
+    TensorCore conversion to truncate. This variant materializes the exact
+    values a native TMA tensor map produces, so a kernel that truncates and a
+    kernel that rounds see the same weight.
+    """
+    bits = x.view(torch.int32)
+    return ((bits + 0xFFF + ((bits >> 13) & 1)) & -8192).view(torch.float32)
+
+
+def prepare_tf32_rne_weight(fn: torch.Tensor) -> torch.Tensor:
+    """Cache the TF32 RN-even weights for one immutable inference tensor."""
+    # Inference tensors have no version counter; reading ``_version`` on them
+    # raises, so branch on the metadata flag instead of paying the raise/catch
+    # on every serving call.
+    if torch.is_inference(fn):
+        version = None
+    else:
+        try:
+            version = int(fn._version)
+        except RuntimeError:
+            version = None
+    key = (version, fn.data_ptr(), tuple(fn.shape), tuple(fn.stride()), fn.device)
+    cached = getattr(fn, "_dsv41_tf32_rne_cache", None)
+    if cached is not None and cached[0] == key:
+        return cached[1]
+    weight = round_to_tf32_rne(fn)
+    fn._dsv41_tf32_rne_cache = (key, weight)
+    return weight

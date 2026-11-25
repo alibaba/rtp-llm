@@ -30,7 +30,9 @@ import torch
 from rtp_llm.models_py.modules.dsv41 import dsv4_kernel_jit_warmup as common
 from rtp_llm.models_py.modules.dsv41.hc import v41_mega_mhc, v41_prenorm
 from rtp_llm.models_py.modules.dsv41.hc.delayed import (
+    _SM90_BIG_PRE_MAX_ROWS,
     DelayedHCUnit,
+    _big_pre_backend,
     _tile_ops,
     can_fuse_big_pre,
 )
@@ -154,6 +156,31 @@ def _fused_pre_warmup_specs(max_m: int, k_value: int) -> tuple[tuple[int, int], 
     return tuple(specs)
 
 
+def _fused_pre_splitk_specs(
+    max_m: int, k_value: int, device
+) -> tuple[tuple[int, int], ...]:
+    """One representative M per reachable TileLang split-K specialization.
+
+    The fused pre chain only selects split-K above 64 rows on SM90, and its
+    planner keys on ``ceil(M / 32)``; reuse that runtime planner so warmup
+    covers exactly the reachable ``n_splits`` values.
+    """
+    if int(max_m) <= 64:
+        return ()
+    _tile_ops()
+    norm = importlib.import_module(
+        "rtp_llm.models_py.3rdparty.tile_kernels.modeling.mhc.ops.norm_fn"
+    )
+    index = device.index if device.index is not None else torch.cuda.current_device()
+    num_sms = norm._tilelang_device_num_sms(index)
+    return tuple(
+        (norm._tilelang_split_plan(tokens, k_value, num_sms), tokens)
+        for tokens in norm._tilelang_representative_ms(
+            max_m, k_value, num_sms, min_m=65
+        )
+    )
+
+
 def _tilelang_norm_ms(max_m, hidden, device, *, use_small):
     min_m = 65 if use_small else 1
     if int(max_m) < min_m:
@@ -249,10 +276,28 @@ def _launch_sm90_mega(pair, tokens, device):
         raise RuntimeError("V4.1 HC warmup SM90 combine rejected a reachable shape")
 
 
+def _warmup_capability(device) -> tuple[int, int]:
+    device = torch.device(device)
+    if device.type != "cuda":
+        # CPU contract tests exercise the dispatch without a GPU.
+        return (10, 0)
+    return tuple(torch.cuda.get_device_capability(device))
+
+
+def _fused_pre_row_budget(capability: tuple[int, int]) -> int:
+    """Mirror the runtime fused-pre DeepGEMM row budget."""
+    if capability[0] == 9:
+        return _SM90_BIG_PRE_MAX_ROWS
+    return v41_prenorm.max_supported_tokens(capability)
+
+
 def _launch_fused_pre(unit, tokens, device):
     residual = torch.ones((1, tokens, 4, unit.dim), dtype=torch.bfloat16, device=device)
     previous = torch.full((1, tokens, 4), 0.25, dtype=torch.float32, device=device)
-    use_deepgemm = tokens <= v41_prenorm.configured_max_tokens()
+    capability = _warmup_capability(device)
+    # Mirror the runtime token gate. The tensor-level probe in the serving path
+    # cannot run here: contract tests reuse disposable CPU fixtures.
+    deepgemm_ok = tokens <= _fused_pre_row_budget(capability)
     _tile_ops().mhc_pre_big_fuse(
         residual,
         unit.fn,
@@ -264,7 +309,7 @@ def _launch_fused_pre(unit, tokens, device):
         2.0,
         unit.hc_sinkhorn_iters,
         previous_pre_mix=previous,
-        gemm_backend="deepgemm" if use_deepgemm else None,
+        gemm_backend=_big_pre_backend(capability, deepgemm_ok),
     )
 
 
@@ -337,12 +382,30 @@ def warmup_v41_hc_jit(v4, *, max_m, device):
     mega_num_sms = common._get_deep_gemm_num_sms(device) if mega_enabled else 0
     fused_enabled = can_fuse_big_pre()
     fused_deepgemm = fused_enabled and v41_prenorm.configured_max_tokens() > 64
+    # SM90 falls back to the TileLang split-K planner only when DeepGEMM is
+    # not installed (or an explicit TileLang backend is selected).
+    dg_pre_available = v41_prenorm._has_prenorm_gemm()
+    fused_splitk = (
+        fused_enabled
+        and arch_major == 9
+        and _big_pre_backend(capability, dg_pre_available) == "tilelang_splitk"
+    )
     small_ms = _small_prenorm_ms(max_m, capability) if small_enabled else ()
     mega_ms = _mega_representative_ms(int(max_m), mega_num_sms) if mega_enabled else ()
+    deepgemm_max_m = (
+        min(int(max_m), _SM90_BIG_PRE_MAX_ROWS) if arch_major == 9 else int(max_m)
+    )
     fused_specs = {
-        config: _fused_pre_warmup_specs(int(max_m), source.dim * source.hc_mult)
+        config: _fused_pre_warmup_specs(deepgemm_max_m, source.dim * source.hc_mult)
         for config, source in units.items()
         if fused_deepgemm and source.dim == 5120
+    }
+    splitk_specs = {
+        config: _fused_pre_splitk_specs(
+            min(int(max_m), 512), source.dim * source.hc_mult, device
+        )
+        for config, source in units.items()
+        if fused_splitk and source.dim == 5120
     }
     tile_ms = {
         config: _tilelang_norm_ms(
@@ -364,8 +427,10 @@ def warmup_v41_hc_jit(v4, *, max_m, device):
         mega_ms,
         mega_num_sms,
         tuple(sorted(fused_specs.items())),
+        tuple(sorted(splitk_specs.items())),
         tuple(sorted(tile_ms.items())),
         fused_enabled,
+        fused_splitk,
         sm90_mega_enabled,
         os.environ.get("DSV4_MHC_PRE_GEMM_BACKEND", ""),
     )
@@ -422,15 +487,16 @@ def warmup_v41_hc_jit(v4, *, max_m, device):
                     device=device,
                 )
             if fused_enabled and unit.dim == 5120:
-                if fused_deepgemm:
-                    fused_ms = tuple(tokens for _, tokens in fused_specs[config])
-                else:
+                fused_ms = {tokens for _, tokens in fused_specs.get(config, ())}
+                fused_ms.update(tokens for _, tokens in splitk_specs.get(config, ()))
+                if not fused_deepgemm:
                     # Explicit TileLang backend: DG only at M<=64, followed
                     # by the runtime-M TileLang single-split specialization.
-                    fused_ms = ((1,) if use_small else ()) + (
-                        (65,) if int(max_m) > 64 else ()
-                    )
-                for tokens in fused_ms:
+                    if use_small:
+                        fused_ms.add(1)
+                    if int(max_m) > 64:
+                        fused_ms.add(65)
+                for tokens in sorted(fused_ms):
                     common._run_tilelang_warmup_launch_with_retry(
                         "V41 HC fused pre",
                         f"config={config} m={tokens}",

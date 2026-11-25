@@ -189,13 +189,23 @@ class MHCLazyBackwardTest(unittest.TestCase):
             setattr(kernel, key, value)
         config = types.ModuleType("_test_tile.config")
         config.get_num_sms = Mock(return_value=2)
+        # Ops may import a sibling op module (the fused pre op reuses the
+        # split-K planner); give the fake package the same module path.
+        planner = types.ModuleType("_test_tile.modeling.mhc.ops.norm_fn")
+        planner._tilelang_num_splits = Mock(return_value=1)
+        planner._tilelang_split_plan = Mock(return_value=1)
         spec = importlib.util.spec_from_file_location(
             f"_test_tile.modeling.mhc.ops.{name}",
             root / f"modeling/mhc/ops/{name}.py",
         )
         module = importlib.util.module_from_spec(spec)
         with patch.dict(
-            sys.modules, {kernel.__name__: kernel, config.__name__: config}
+            sys.modules,
+            {
+                kernel.__name__: kernel,
+                config.__name__: config,
+                planner.__name__: planner,
+            },
         ):
             spec.loader.exec_module(module)
         return module
@@ -366,6 +376,7 @@ class MHCLazyBackwardTest(unittest.TestCase):
         mul = Mock()
         norm = types.ModuleType("_test_tile.mhc.norm_fn_kernel")
         norm.round_to_tf32 = lambda x: x
+        norm.prepare_tf32_rne_weight = lambda x: x
         norm._mhc_pre_norm_fn_fwd_mul = Mock(return_value=mul)
         with patch.dict(sys.modules, {norm.__name__: norm}):
             op = self.load_kernels("pre_big_fuse", {"_mhc_pre_big_fuse": Mock()})
