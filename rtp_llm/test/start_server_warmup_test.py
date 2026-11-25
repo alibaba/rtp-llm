@@ -1,17 +1,17 @@
 import unittest
 from contextlib import ExitStack
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 from rtp_llm import start_server
-from rtp_llm.ops import RoleType, SpeculativeType
+from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.ops import RoleType, SpeculativeType, VitSeparation
 from rtp_llm.utils.drain_flag import DrainFlag
 
 
 class ServiceDrainingPropagationTest(unittest.TestCase):
     def test_each_launch_passes_a_fresh_event_to_all_process_groups(self):
-        configs = Mock()
-        configs.parallelism_config.dp_size = 1
+        configs = PyEnvConfigs()
         # Without in-place restart every process group shares the instance's event.
         configs.server_config.engine_restart_limit = 0
         with ExitStack() as stack:
@@ -38,16 +38,29 @@ class ServiceDrainingPropagationTest(unittest.TestCase):
                 patch.object(start_server, "start_vit_server_impl")
             )
             previous = None
-            for role in (RoleType.PDFUSION, RoleType.PDFUSION, RoleType.VIT):
+            for role, separation, expected in (
+                (RoleType.PDFUSION, VitSeparation.VIT_SEPARATION_LOCAL, starters),
+                (RoleType.PDFUSION, VitSeparation.VIT_SEPARATION_ROLE, [vit]),
+                (RoleType.VIT, VitSeparation.VIT_SEPARATION_LOCAL, [vit]),
+                (RoleType.FRONTEND, VitSeparation.VIT_SEPARATION_LOCAL, starters[1:]),
+            ):
                 configs.role_config.role_type = role
+                configs.vit_config.vit_separation = separation
+                self.assertEqual(configs.runs_backend, starters[0] in expected)
+                self.assertEqual(configs.role_config.role_type, role)
+                for starter in [vit, *starters]:
+                    starter.reset_mock()
                 start_server.start_server(configs)
                 event = manager_class.call_args.kwargs["service_draining"]
                 # multiprocessing.Event.set() hangs once a waiter was killed.
                 self.assertIsInstance(event, DrainFlag)
                 self.assertIsNot(event, previous)
                 self.assertFalse(event.is_set())
-                for starter in [vit] if role == RoleType.VIT else starters:
-                    self.assertIs(starter.call_args.args[-1], event)
+                for starter in [vit, *starters]:
+                    if starter in expected:
+                        self.assertIs(starter.call_args.args[-1], event)
+                    else:
+                        starter.assert_not_called()
                 event.set()
                 previous = event
 

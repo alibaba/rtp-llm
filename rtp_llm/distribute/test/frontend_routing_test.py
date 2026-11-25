@@ -5,6 +5,7 @@ from unittest.mock import patch
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import set_parallelism_config
 from rtp_llm.distribute.distributed_server import get_dp_rpc_addresses
+from rtp_llm.distribute.worker_info import WorldInfo
 
 
 class FrontendRoutingTest(unittest.TestCase):
@@ -54,6 +55,16 @@ class FrontendRoutingTest(unittest.TestCase):
             ):
                 self.assertEqual(get_dp_rpc_addresses(config), expected)
                 store.assert_not_called()
+
+    def test_prepared_world_routes_only_to_workers_on_this_host(self):
+        config = self.config(pp=1, dp=4, local_size=4, world_rank=4)
+        config.distribute_config.world_info = WorldInfo(
+            host_addresses=("127.0.0.1:8000", "127.0.0.2:9000"),
+            collective_master=("127.0.0.42", 7000),
+        )
+        self.assertEqual(
+            get_dp_rpc_addresses(config), ["127.0.0.2:9001", "127.0.0.2:9021"]
+        )
 
     def test_no_local_serving_rank_does_not_discover_remote_backends(self):
         for config in (

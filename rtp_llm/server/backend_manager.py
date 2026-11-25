@@ -9,7 +9,7 @@ from rtp_llm.config.engine_config import EngineConfig, update_worker_addrs
 from rtp_llm.config.log_config import get_log_path
 from rtp_llm.config.mega_moe import MEGA_MOE_STRATEGIES
 from rtp_llm.config.py_config_modules import PyEnvConfigs
-from rtp_llm.distribute.distributed_server import DistributedServer, get_world_info
+from rtp_llm.distribute.worker_topology import WorkerTopology
 from rtp_llm.metrics import kmonitor
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.models_py.distributed.collective_torch import init_distributed_environment
@@ -34,7 +34,7 @@ class BackendManager(object):
             py_env_configs.server_config.frontend_server_id,
             disable_access_log=py_env_configs.misc_config.disable_access_log,
         )
-        self._distributed_server = DistributedServer(py_env_configs)
+        self._topology = WorkerTopology(py_env_configs)
         self.thread_lock_ = threading.Lock()
         self._global_controller = get_global_controller()
         # just rank 0 report metric
@@ -57,11 +57,10 @@ class BackendManager(object):
 
     def start(self):
         """Initialize backend server without entering service loop"""
-        self._distributed_server.start(self.py_env_configs)
         # Create EngineConfig from py_env_configs (server/distribute config already adjusted for this rank)
         engine_config = EngineConfig.create(
             self.py_env_configs,
-            nccl_comm_config=self._distributed_server.get_nccl_comm_config(),
+            nccl_comm_config=self._topology.get_nccl_comm_config(),
         )
 
         from rtp_llm.models_py.distributed import pynccl_cp
@@ -71,22 +70,16 @@ class BackendManager(object):
         if engine_config.parallelism_config.world_size > 1:
             init_distributed_environment(
                 engine_config.parallelism_config,
-                nccl_comm_config=self._distributed_server.get_nccl_comm_config(),
-                nccl_init_port=self._distributed_server.get_nccl_init_port(),
+                nccl_comm_config=self._topology.get_nccl_comm_config(),
+                nccl_init_port=self._topology.get_nccl_init_port(),
                 backend="nccl",
                 collective_config=engine_config.collective_config,
                 timeout=self.py_env_configs.distribute_config.dist_comm_timeout,
             )
-        world_info = get_world_info(
-            self.py_env_configs.server_config,
-            self.py_env_configs.distribute_config,
-            self.py_env_configs.parallelism_config,
-            distributed_server=self._distributed_server,
-        )
         update_worker_addrs(
             engine_config.runtime_config,
             engine_config.parallelism_config,
-            world_info,
+            self._topology.world_info.members(self.py_env_configs),
             role_type=engine_config.pd_sep_config.role_type,
         )
         # Build main model_config
@@ -107,7 +100,7 @@ class BackendManager(object):
             engine_config=engine_config,
             model_config=model_config,
         )
-        self._distributed_server.validate_pp_partition_consistency(
+        self._topology.validate_pp_partition_consistency(
             engine_config.parallelism_config
         )
         # Generation-prefill is a secondary runner owned only by the normalized
@@ -196,7 +189,6 @@ class BackendManager(object):
         self.engine = ModelFactory.from_model_configs(
             model_config=model_config,
             engine_config=engine_config,
-            world_info=world_info,
             vit_config=self.py_env_configs.vit_config,
             merge_lora=self.py_env_configs.lora_config.merge_lora,
             propose_model_config=propose_model_config,

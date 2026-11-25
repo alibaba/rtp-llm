@@ -1,121 +1,54 @@
-import datetime
 import ipaddress
 import json
 import logging
 import os
 import socket
-import time
-from dataclasses import dataclass
+from contextlib import contextmanager
 from datetime import timedelta
-from typing import Any, Dict, List, NamedTuple, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 from torch.distributed import TCPStore
+from torch.distributed.elastic.utils.store import get_all
 
-from rtp_llm.config.layer_partition import validate_pp_partition_snapshots
-from rtp_llm.config.py_config_modules import (
-    COORDINATOR_INFO_PORT_NUM,
-    DistributeConfig,
-    PyEnvConfigs,
-    ServerConfig,
-)
-from rtp_llm.distribute.worker_info import WorkerInfo
+from rtp_llm.config.py_config_modules import DistributeConfig, PyEnvConfigs
+from rtp_llm.distribute.worker_info import WorkerInfo, WorldInfo, workers_on_host
 from rtp_llm.models_py.distributed.rank_layout import Coord, RankLayout
-from rtp_llm.ops import NcclCommConfig, ParallelismConfig
+from rtp_llm.ops import ParallelismConfig
+from rtp_llm.utils.util import split_ip_port
 
 
-@dataclass
-class WorldInfo:
-    members: List[WorkerInfo]
-    master: Optional[WorkerInfo]  # None until bootstrap completes
-    self: Optional[WorkerInfo]  # None in default-constructed state
-    num_nodes: int
-    initialized: bool
-
-    def workers(self) -> List[WorkerInfo]:
-        if self.master is None:
-            return []
-        return [member for member in self.members if not member.equals(self.master)]
-
-
-def _build_nccl_comm_config(ip: str, base_port: int, dp_rank: int) -> NcclCommConfig:
-    """Build NcclCommConfig from ip, base_port, dp_rank (same port layout as former NodeCommInfo)."""
-    rank_base_port = base_port - dp_rank * COORDINATOR_INFO_PORT_NUM
-    return NcclCommConfig(
-        nccl_ip=ip,
-        tp_nccl_port=rank_base_port - 2,
-        dp_tp_nccl_port=base_port - 10,
-        ffn_tp_nccl_port=rank_base_port - 5,
-    )
-
-
-def get_world_info(
-    server_config: ServerConfig,
-    distribute_config: DistributeConfig,
-    parallelism_config: ParallelismConfig,
-    distributed_server: Optional["DistributedServer"] = None,
-) -> WorldInfo:
-    """Get world info. When distributed_server is provided (e.g. from backend), returns
-    its member world_info; otherwise returns local/single-rank world info."""
-    if distributed_server is not None:
-        return distributed_server.get_world_info(
-            server_config, distribute_config, parallelism_config
+def get_local_workers(configs: PyEnvConfigs) -> list[WorkerInfo]:
+    """Return only the current host's workers, with their global rank numbers."""
+    pc = configs.parallelism_config
+    sc = configs.server_config
+    host_index = pc.world_rank // pc.local_world_size
+    world = configs.distribute_config.world_info
+    if world is not None:
+        ip, start_port = split_ip_port(world.host_addresses[host_index])
+    else:
+        # Standalone frontends route multi-rank requests to their local hostname.
+        ip = (
+            sc.ip
+            if pc.world_size == 1 and sc.ip
+            else socket.gethostbyname(socket.gethostname())
         )
-
-    if parallelism_config.world_size == 1:
-        ip = server_config.ip or socket.gethostbyname(socket.gethostname())
-        self_info = WorkerInfo(
-            ip=ip,
-            local_rank=parallelism_config.local_rank,
-            world_rank=parallelism_config.world_rank,
-            name="",
-            server_port=server_config.start_port,
-            worker_info_port_num=server_config.worker_info_port_num,
-            remote_server_port=distribute_config.remote_server_port,
-        )
-        return WorldInfo(
-            members=[self_info],
-            self=self_info,
-            master=self_info,
-            num_nodes=1,
-            initialized=True,
-        )
-
-    return get_local_world_info(
-        server_config,
-        distribute_config,
-        parallelism_config,
-    )
-
-
-def get_dp_addrs_from_world_info(
-    world_info: WorldInfo, parallelism_config: ParallelismConfig
-) -> list[str]:
-    """Select TP=0, PP=0 serving RPC addresses from the supplied members only.
-
-    Missing serving ranks are not discovered or replaced with remote ranks.
-    """
-    layout = RankLayout.from_parallelism_config(parallelism_config)
-    members = [
-        member
-        for member in world_info.members
-        if (coord := layout.coord_of(member.world_rank)).tp == 0 and coord.pp == 0
-    ]
-
-    addresses = [f"{member.ip}:{member.rpc_server_port}" for member in members]
-    logging.info(
-        f"[world_rank: {parallelism_config.world_rank}] "
-        f"using addresses from world_info: {addresses}"
-    )
-    return addresses
+        start_port = sc.start_port
+    return workers_on_host(configs, ip, start_port, host_index * pc.local_world_size)
 
 
 def get_dp_rpc_addresses(py_env_configs: PyEnvConfigs) -> list[str]:
-    """Select serving backends from the frontend's local world info."""
+    """Select local serving RPC addresses at TP=0 and PP=0."""
     pc = py_env_configs.parallelism_config
-    world_info = get_world_info(
-        py_env_configs.server_config, py_env_configs.distribute_config, pc
+    layout = RankLayout.from_parallelism_config(pc)
+    addresses = [
+        f"{member.ip}:{member.rpc_server_port}"
+        for member in get_local_workers(py_env_configs)
+        if (coord := layout.coord_of(member.world_rank)).tp == 0 and coord.pp == 0
+    ]
+    logging.info(
+        "[world_rank: %d] local serving RPC addresses: %s", pc.world_rank, addresses
     )
-    return get_dp_addrs_from_world_info(world_info, pc)
+    return addresses
 
 
 def get_eplb_stage_root_addresses(py_env_configs: PyEnvConfigs) -> list[str]:
@@ -125,12 +58,16 @@ def get_eplb_stage_root_addresses(py_env_configs: PyEnvConfigs) -> list[str]:
     root_ranks = [
         layout.world_rank_of(Coord(pp=stage)) for stage in range(layout.pp_size)
     ]
-    world_info = get_world_info(
-        py_env_configs.server_config, py_env_configs.distribute_config, pc
-    )
+    world = py_env_configs.distribute_config.world_info
+    if world is not None:
+        members = world.members(py_env_configs)
+        return [
+            f"{members[rank].ip}:{members[rank].rpc_server_port}" for rank in root_ranks
+        ]
+
     addresses = {
         member.world_rank: f"{member.ip}:{member.rpc_server_port}"
-        for member in world_info.members
+        for member in get_local_workers(py_env_configs)
         if member.world_rank in root_ranks
     }
     missing = [rank for rank in root_ranks if rank not in addresses]
@@ -155,318 +92,100 @@ def get_eplb_stage_root_addresses(py_env_configs: PyEnvConfigs) -> list[str]:
     return [addresses[rank] for rank in root_ranks]
 
 
-def get_local_world_info(
-    server_config: ServerConfig,
-    distribute_config: DistributeConfig,
-    parallelism_config: ParallelismConfig,
-) -> WorldInfo:
-    ip = server_config.ip or socket.gethostbyname(socket.gethostname())
-    self_info = WorkerInfo(
-        ip=ip,
-        local_rank=parallelism_config.local_rank,
-        world_rank=parallelism_config.world_rank,
-        name="",
-        server_port=server_config.start_port,
-        worker_info_port_num=server_config.worker_info_port_num,
-        remote_server_port=distribute_config.remote_server_port,
-    )
-    num_nodes = (
-        parallelism_config.world_size + parallelism_config.local_world_size - 1
-    ) // parallelism_config.local_world_size
-    all_members: List[WorkerInfo] = []
-    logging.info(
-        f"get_local_world_info world_size: {parallelism_config.world_size}, local_world_size: {parallelism_config.local_world_size}"
-    )
-    for local_rank in range(parallelism_config.local_world_size):
-        logging.info(
-            f"get_local_world_info local_world_size: {parallelism_config.local_world_size} local_rank: {local_rank}"
-        )
-        rank = (
-            parallelism_config.world_rank
-            // parallelism_config.local_world_size
-            * parallelism_config.local_world_size
-            + local_rank
-        )
-        new_member = WorkerInfo(
-            ip=socket.gethostbyname(socket.gethostname()),
-            local_rank=local_rank,
-            world_rank=rank,
-            name=f"{distribute_config.zone_name}_rank_{rank}_{local_rank}",
-            server_port=server_config.start_port,
-            worker_info_port_num=server_config.worker_info_port_num,
-            remote_server_port=distribute_config.remote_server_port,
-        )
-        all_members.append(new_member)
-
-    return WorldInfo(
-        members=all_members,
-        self=self_info,
-        master=None,
-        num_nodes=num_nodes,
-        initialized=True,
-    )
-
-
-class DistributedServer(object):
-    """Registry key prefix for rank address in TCPStore."""
+class DistributedServer:
+    """Own the TCPStore rendezvous in the host launcher, before workers exist."""
 
     REGISTRY_RANK_ADDRESS_KEY = "registry_rank_address_"
-    PP_PARTITION_SNAPSHOT_KEY = "pp_partition_snapshot_"
 
-    def __init__(
-        self,
-        py_env_configs: PyEnvConfigs,
-        rank: int = -1,
-        world_size: int = -1,
-        wait_for_workers=True,
-    ):
-        server_config = py_env_configs.server_config
-        distribute_config = py_env_configs.distribute_config
-        pc = py_env_configs.parallelism_config
-        ip = server_config.ip or socket.gethostbyname(socket.gethostname())
-        self.worker_info = WorkerInfo(
-            ip=ip,
-            local_rank=pc.local_rank,
-            world_rank=pc.world_rank,
-            name="",
-            server_port=server_config.start_port,
-            worker_info_port_num=server_config.worker_info_port_num,
-            remote_server_port=distribute_config.remote_server_port,
-        )
-        logging.info(
-            f"init DistributedServer, rank: {pc.world_rank},  size: {pc.world_size}"
-        )
-        self._world_info = WorldInfo(
-            members=[],
-            master=None,
-            self=self.worker_info,
-            num_nodes=(
-                (pc.world_size + pc.local_world_size - 1) // pc.local_world_size
-                if pc.world_size > 1
-                else -1
-            ),
-            initialized=False,
-        )
-
-        if pc.world_size == 1:
-            logging.info("world_size == 1, do not start distributed_server")
-            self.master_server_port = server_config.start_port
-            self._nccl_comm_config = _build_nccl_comm_config(
-                self.worker_info.ip, server_config.start_port, pc.dp_rank
-            )
-            return
-
-        if rank == -1:
-            rank = pc.world_rank
-        if world_size == -1:
-            world_size = pc.world_size
-        self._initialized = True
+    def __init__(self, py_env_configs: PyEnvConfigs):
         self.py_env_configs = py_env_configs
-        self.rank = rank
-        self.world_size = world_size
-
-        self.master_ip, master_server_port = get_master(
-            self.py_env_configs.distribute_config,
-            self.py_env_configs.parallelism_config,
-        )
-        if master_server_port == "":
-            self.master_server_port = py_env_configs.server_config.start_port
-        else:
-            self.master_server_port = int(master_server_port)
-
-        self._nccl_comm_config = _build_nccl_comm_config(
-            self.master_ip, self.master_server_port, pc.dp_rank
-        )
-
-        logging.info(
-            f"{pc} init tcpstore " f"{self.master_ip}:{self.master_server_port - 1}"
-        )
-
-        init_process_timeout = py_env_configs.distribute_config.dist_comm_timeout
-        if init_process_timeout is not None:
-            init_process_timeout = timedelta(seconds=init_process_timeout)
-        store = TCPStore(
-            host_name=self._nccl_comm_config.nccl_ip,
-            port=self.master_server_port - 1,
-            world_size=world_size,
-            is_master=(rank == 0),
-            wait_for_workers=wait_for_workers,
-            timeout=init_process_timeout,
-        )
-        logging.info(f"{pc} init tcpstore done")
-        self.store = store
-
-    def get_world_info(
-        self,
-        server_config: ServerConfig,
-        distribute_config: DistributeConfig,
-        parallelism_config: ParallelismConfig,
-    ) -> WorldInfo:
-        """Return this server's world_info (filled after start/bootstrap)."""
-        if parallelism_config.world_size == 1:
-            return WorldInfo(
-                members=[self.worker_info],
-                self=self.worker_info,
-                master=self.worker_info,
-                num_nodes=1,
-                initialized=True,
+        pc = py_env_configs.parallelism_config
+        self.rank = pc.world_rank
+        self.world_size = pc.world_size
+        self.local_world_size = pc.local_world_size
+        if (
+            self.local_world_size <= 0
+            or self.world_size <= 0
+            or (self.world_size > 1 and self.world_size % self.local_world_size)
+        ):
+            raise ValueError(
+                f"Invalid host layout: WORLD_SIZE={self.world_size}, LOCAL_WORLD_SIZE={self.local_world_size}"
             )
-        return self._world_info
+        if not 0 <= self.rank < self.world_size or self.rank % self.local_world_size:
+            raise ValueError(
+                f"WORLD_RANK={self.rank} must identify the first rank on this host"
+            )
+        self.host_index = self.rank // self.local_world_size
 
-    def get_nccl_comm_config(self) -> NcclCommConfig:
-        """Return the NCCL communication config (ip and ports)."""
-        return self._nccl_comm_config
+        sc = py_env_configs.server_config
+        local_ip = sc.ip or socket.gethostbyname(socket.gethostname())
+        self.local_address = f"{local_ip}:{sc.start_port}"
+        # Indexed by the original host_index before selection.
+        self.host_addresses: list[str] = []
+        self.master_ip = local_ip
+        self.master_base_port = sc.start_port
+        self.store: Optional[TCPStore] = None
 
-    def get_nccl_init_port(self) -> int:
-        """Return the port used for torch.distributed init (base_port - 11)."""
-        return self.master_server_port - 11
+    @contextmanager
+    def rendezvous(self) -> Iterator["DistributedServer"]:
+        """Keep the startup store alive through the last host exchange."""
+        try:
+            self.start()
+            yield self
+        finally:
+            self.store = None
 
-    def validate_pp_partition_consistency(
-        self, parallelism_config: ParallelismConfig
-    ) -> None:
-        """Validate every rank's finalized PP partition through TCPStore."""
-        pp_size = int(parallelism_config.pp_size)
-        if pp_size <= 1:
+    @property
+    def world_info(self) -> WorldInfo:
+        return WorldInfo(
+            tuple(self.host_addresses), (self.master_ip, self.master_base_port)
+        )
+
+    def start(self) -> None:
+        dc = self.py_env_configs.distribute_config
+        if self.world_size > 1:
+            self.master_ip, port = get_master(
+                dc, self.py_env_configs.parallelism_config
+            )
+            if port:
+                self.master_base_port = int(port)
+        if self.world_size == 1 or self.world_size == self.local_world_size:
+            self.host_addresses = [self.local_address]
             return
-
-        world_rank = int(parallelism_config.world_rank)
-        world_size = int(parallelism_config.world_size)
-        snapshot = [
-            int(count) for count in parallelism_config.pp_stage_layer_counts
-        ]
-        self.safe_store_set(
-            self.PP_PARTITION_SNAPSHOT_KEY + str(world_rank), json.dumps(snapshot)
+        self.store = TCPStore(
+            self.master_ip,
+            self.master_base_port - 1,
+            world_size=self.world_size // self.local_world_size,
+            is_master=self.rank == 0,
+            wait_for_workers=True,
+            timeout=timedelta(minutes=dc.gang_timeout_min),
         )
-
-        snapshots = []
-        for rank in range(world_size):
-            payload = self.safe_store_get(
-                self.PP_PARTITION_SNAPSHOT_KEY + str(rank)
-            )
-            if not payload:
-                raise RuntimeError(
-                    "timed out waiting for PP partition snapshot from "
-                    f"world_rank={rank}"
-                )
-            snapshots.append(json.loads(payload))
-        validate_pp_partition_snapshots(snapshots)
-
-    def safe_store_set(self, key: str, value: str) -> None:
-        if not isinstance(value, str):
-            raise TypeError("Value must be a string for safe serialization")
-
-        try:
-            self.store.set(key, value)
-            logging.debug(f"Set key '{key}' successfully")
-        except RuntimeError as e:
-            logging.error(f"Failed to set key '{key}': {e}")
-            raise
-        except Exception as e:
-            logging.error(f"Unexpected error when setting key '{key}': {e}")
-            raise
-
-    def safe_store_get(self, key: str, encoding: str = "utf-8") -> str:
-        try:
-            value_bytes = self.store.get(key)  # 阻塞直到 key 出现或超时
-            try:
-                value_str = value_bytes.decode(encoding)
-                return value_str
-            except UnicodeDecodeError as e:
-                logging.error(f"Failed to decode value for key '{key}': {e}")
-                return ""
-        except RuntimeError as e:
-            # 通常是 timeout 或 connection error
-            logging.error(f"Failed to get key '{key}': {e}")
-            return ""
-        except Exception as e:
-            logging.error(f"Unexpected error when getting key '{key}': {e}")
-            return ""
+        self.bootstrap()
 
     def regist(self) -> None:
-        key = self.REGISTRY_RANK_ADDRESS_KEY + str(self.rank)
-        self.safe_store_set(
-            key, f"{self.worker_info.ip}:{self.worker_info.server_port}"
+        """Register this host once, using the master's original gang dimensions."""
+        layout = [self.world_size, self.local_world_size]
+        if (
+            self.host_index
+            and layout != json.loads(self.store.get("startup_host/0"))["layout"]
+        ):
+            raise ValueError(
+                f"Host rank {self.rank} layout {layout} disagrees with the original master"
+            )
+        self.store.set(
+            f"startup_host/{self.host_index}",
+            json.dumps({"layout": layout, "address": self.local_address}),
         )
 
     def bootstrap(self) -> None:
-        timeout_minutes = self.py_env_configs.distribute_config.gang_timeout_min
-        sleep_time = self.py_env_configs.distribute_config.gang_sleep_time
-
-        start_time = datetime.datetime.now()
-        retry_time = 0
-        while True:
-            self.regist()
-            members_address: Dict[int, str] = {}
-
-            for i in range(self.world_size):
-                key = self.REGISTRY_RANK_ADDRESS_KEY + str(i)
-                address = self.safe_store_get(key)
-                if not address:
-                    logging.info(
-                        "get regist members failed, address is empty, "
-                        f"key {key}, retry_time {retry_time}, "
-                        f"start_time {start_time}"
-                    )
-                    continue
-                members_address[i] = address
-                logging.info(f"get rank {i} address: {address}")
-
-            if len(members_address) == self.world_size:
-                for i in range(self.world_size):
-                    rank = i
-                    ip, server_port = split_ip_port(members_address[i])
-                    if ip == "":
-                        raise Exception(
-                            f"rank {rank} error address: {members_address[i]}"
-                        )
-                    local_rank = (
-                        rank % self.py_env_configs.parallelism_config.local_world_size
-                    )
-                    # server_port from address is already the base port for this worker
-                    new_member = WorkerInfo(
-                        ip=ip,
-                        local_rank=local_rank,
-                        world_rank=rank,
-                        name=f"{self.py_env_configs.distribute_config.zone_name}_rank_{rank}_{local_rank}",
-                        server_port=server_port,
-                        worker_info_port_num=0,
-                        remote_server_port=self.py_env_configs.distribute_config.remote_server_port,
-                    )
-                    self._world_info.members.append(new_member)
-                    if rank == 0:
-                        self._world_info.master = new_member
-                self._world_info.initialized = True
-                self._world_info.bootstrap = True
-                return
-
-            cur_time = datetime.datetime.now()
-            if cur_time - start_time > datetime.timedelta(minutes=timeout_minutes):
-                raise Exception(
-                    "regist members failed, timeout "
-                    f"{timeout_minutes} minutes, retry_time {retry_time}, "
-                    f"start_time {start_time}"
-                )
-
-            retry_time += 1
-            time.sleep(sleep_time)
-
-    def start(self, py_env_configs: PyEnvConfigs) -> None:
-        pc = py_env_configs.parallelism_config
+        self.regist()
+        host_count = self.world_size // self.local_world_size
+        records = get_all(self.store, self.host_index, "startup_host/", host_count)
+        self.host_addresses = [json.loads(record)["address"] for record in records]
         logging.info(
-            f"DistributedServer start, rank: {pc.world_rank},  size: {pc.world_size}"
-        )
-        if pc.world_size == 1:
-            return
-        self.bootstrap()
-
-        master_url = (
-            f"tcp://{self._nccl_comm_config.nccl_ip}:{self.master_server_port - 1}"
-        )
-        logging.info(
-            f"DistributedServer bootstrap done, rank: {pc.world_rank},  size: {pc.world_size}, master {master_url}"
-        )
-        logging.info(
-            f"DistributedServer started, rank: {pc.world_rank},  size: {pc.world_size}, master {master_url}"
+            "DistributedServer bootstrap complete: host=%d hosts=%s",
+            self.host_index,
+            self.host_addresses,
         )
 
 
@@ -478,32 +197,15 @@ def get_ip(leader_address: str) -> str:
         return socket.gethostbyname(leader_address)
 
 
-def split_ip_port(addr: str):
-    addr = addr.strip()
-    if not addr:
-        return "", 0
-
-    if ":" not in addr:
-        logging.warning(f"error address: {addr}")
-        return "", 0
-
-    ip, port_str = addr.rsplit(":", 1)
-    if not ip:
-        logging.warning(f"error address: {addr}")
-        return "", 0
-
-    if not port_str.isdigit():
-        logging.warning(f"error address: {addr}")
-        return "", 0
-
-    port = int(port_str)
-    return ip, port
-
-
 def get_master(
     distribute_config: DistributeConfig,
     parallelism_config: ParallelismConfig,
-) -> (str, str):
+) -> tuple[str, str]:
+    """Resolve the communication endpoint used for distributed initialization."""
+    if distribute_config.world_info is not None:
+        ip, base_port = distribute_config.world_info.collective_master
+        return ip, str(base_port)
+
     port = ""
     if parallelism_config.local_world_size < parallelism_config.world_size:
         # from config file

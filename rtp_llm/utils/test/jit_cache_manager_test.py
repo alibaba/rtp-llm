@@ -1499,6 +1499,7 @@ class BackendTest(JitCacheTestBase):
         configs.jit_config.jit_cache_setup_timeout_s = 5
         configs.jit_config.manage_jit_cache = True
         configs.parallelism_config.world_size = world_size
+        configs.parallelism_config.local_world_size = world_size
         return configs
 
     def patched_backend(self, *, cuda=True, device_count=1, signal_handler=None):
@@ -1593,11 +1594,48 @@ class BackendTest(JitCacheTestBase):
         self.assertIs(ranks.call_args.kwargs["cleanup"], manager.stop)
         manager.stop.assert_called_once_with()
 
+    def test_backend_uses_configured_width_when_more_gpus_are_visible(self):
+        configs = self.make_configs(world_size=12)
+        configs.parallelism_config.local_world_size = 4
+        with (
+            self.patched_backend(device_count=8),
+            mock.patch.object(jit, "start_from_config", return_value=None),
+            mock.patch.object(backend, "multi_rank_start") as ranks,
+        ):
+            backend.start_backend_server(None, configs)
+        ranks.assert_called_once()
+
+    def test_backend_rejects_more_local_ranks_than_visible_gpus(self):
+        configs = self.make_configs(world_size=4)
+        with (
+            self.patched_backend(device_count=2),
+            self.assertRaisesRegex(ValueError, "LOCAL_WORLD_SIZE=4"),
+        ):
+            backend.start_backend_server(None, configs)
+
+    def test_spawn_uses_local_width_and_inherits_device_order(self):
+        configs = self.make_configs(world_size=12)
+        pc = configs.parallelism_config
+        pc.world_rank, pc.local_world_size, pc.dp_size = 8, 4, 1
+        ctx = mock.Mock()
+        ctx.Pipe.return_value = (mock.Mock(), mock.Mock())
+        devices = "7,5,3,1,6,4,2,0"
+        with mock.patch.dict(
+            os.environ, {"LOCAL_WORLD_SIZE": "8", "CUDA_VISIBLE_DEVICES": devices}
+        ):
+            backend._create_rank_processes(None, configs, ctx, [], [])
+            self.assertEqual(os.environ["CUDA_VISIBLE_DEVICES"], devices)
+        self.assertEqual(
+            [call.kwargs["args"][2] for call in ctx.Process.call_args_list],
+            [8, 9, 10, 11],
+        )
+
     def test_single_rank_returns_after_stopping_the_manager(self):
         events = []
         manager = mock.Mock()
         manager.stop.side_effect = lambda: events.append("stop")
         configs = self.make_configs(remote="/r", world_size=1)
+        configs.parallelism_config.local_world_size = 4
         with self.patched_backend(device_count=1), mock.patch.object(
             jit, "start_from_config", return_value=manager
         ), mock.patch.object(
@@ -1730,7 +1768,7 @@ class BackendTest(JitCacheTestBase):
         self.assertIn("signal 15 during startup", status.call_args[0][3])
 
     def test_spawn_failure_terminates_already_started_ranks(self):
-        configs = self.make_configs(remote="/r")
+        configs = self.make_configs(remote="/r", world_size=2)
         configs.distribute_config.fake_gang_env = False
         configs.parallelism_config.world_rank = 0
         configs.parallelism_config.dp_size = 1
@@ -1743,14 +1781,12 @@ class BackendTest(JitCacheTestBase):
         ctx = mock.Mock()
         ctx.Process.side_effect = [first, second]
         ctx.Pipe.return_value = (mock.Mock(), mock.Mock())
-        with mock.patch.object(
-            backend.multiprocessing, "get_context", return_value=ctx
-        ), mock.patch.object(
-            backend, "_get_local_world_size", return_value=2
-        ), mock.patch.object(
-            backend, "_get_cuda_device_list", return_value=["0", "1"]
-        ), mock.patch.object(
-            backend, "_send_pipe_status"
+        with (
+            mock.patch.object(backend.multiprocessing, "get_context", return_value=ctx),
+            mock.patch.object(
+                backend, "_get_cuda_device_list", return_value=["0", "1"]
+            ),
+            mock.patch.object(backend, "_send_pipe_status"),
         ):
             with self.assertRaisesRegex(Exception, "spawn failed"):
                 backend.multi_rank_start(None, configs)

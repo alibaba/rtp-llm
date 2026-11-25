@@ -6,7 +6,7 @@ from rtp_llm.distribute.distributed_server import (
     DistributedServer,
     get_eplb_stage_root_addresses,
 )
-from rtp_llm.distribute.worker_info import WorkerInfo
+from rtp_llm.distribute.worker_info import WorkerInfo, WorldInfo
 from rtp_llm.utils.grpc_client_wrapper import GrpcClientWrapper
 
 
@@ -21,8 +21,10 @@ class EplbStageRootTest(unittest.TestCase):
                 tp_size=2,
                 local_world_size=8,
             ),
-            server_config=SimpleNamespace(start_port=8000),
-            distribute_config=SimpleNamespace(),
+            server_config=SimpleNamespace(start_port=8000, worker_info_port_num=10),
+            distribute_config=SimpleNamespace(
+                world_info=None, zone_name="", remote_server_port=0
+            ),
         )
 
     def member(self, rank):
@@ -38,10 +40,8 @@ class EplbStageRootTest(unittest.TestCase):
     def test_local_roots_are_ordered_and_selected_once(self):
         with (
             patch(
-                "rtp_llm.distribute.distributed_server.get_world_info",
-                return_value=SimpleNamespace(
-                    members=[self.member(rank) for rank in reversed(range(8))]
-                ),
+                "rtp_llm.distribute.distributed_server.get_local_workers",
+                return_value=[self.member(rank) for rank in reversed(range(8))],
             ),
             patch("rtp_llm.distribute.distributed_server.TCPStore") as store,
         ):
@@ -51,12 +51,26 @@ class EplbStageRootTest(unittest.TestCase):
             )
             store.assert_not_called()
 
+    def test_prepared_frontend_resolves_remote_stage_from_host_snapshot(self):
+        config = self.config()
+        config.parallelism_config.local_world_size = 4
+        config.distribute_config.world_info = WorldInfo(
+            host_addresses=("127.0.0.1:8000", "198.51.100.2:9000"),
+            collective_master=("127.0.0.1", 8000),
+        )
+        with patch("rtp_llm.distribute.distributed_server.TCPStore") as store:
+            self.assertEqual(
+                get_eplb_stage_root_addresses(config),
+                ["127.0.0.1:8001", "198.51.100.2:9001"],
+            )
+            store.assert_not_called()
+
     def test_missing_root_uses_registered_port_without_another_rank_offset(self):
         # Root rank 4 has a nonzero local rank; its registered port already includes it.
         with (
             patch(
-                "rtp_llm.distribute.distributed_server.get_world_info",
-                return_value=SimpleNamespace(members=[self.member(0), self.member(2)]),
+                "rtp_llm.distribute.distributed_server.get_local_workers",
+                return_value=[self.member(0), self.member(2)],
             ),
             patch(
                 "rtp_llm.distribute.distributed_server.get_master",

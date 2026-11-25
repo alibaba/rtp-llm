@@ -233,9 +233,6 @@ class AccessLoggerTest(unittest.TestCase):
                     )
                 )
                 stack.enter_context(
-                    patch("rtp_llm.server.backend_manager.DistributedServer")
-                )
-                stack.enter_context(
                     patch(
                         "rtp_llm.multimodal.mm_process_engine.get_log_path",
                         return_value="unused",

@@ -4,10 +4,13 @@ import re
 import sys
 import time
 from dataclasses import dataclass, replace
-from typing import Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_args import ModelArgs
+
+if TYPE_CHECKING:
+    from rtp_llm.distribute.worker_info import WorldInfo
 
 st = time.time()
 from rtp_llm.ops import (
@@ -356,6 +359,10 @@ class DistributeConfig:
 
     def __init__(self):
         self.fake_gang_env: bool = False
+        self.enable_startup_rank_selection: bool = False
+        # Local CUDA ordinals: None means unchecked/all healthy; [] means none.
+        self.startup_healthy_gpu_ids: Optional[List[int]] = None
+        self.world_info: Optional["WorldInfo"] = None
         self.gang_annocation_path: str = "/etc/podinfo/annotations"
         self.gang_config_string: Optional[str] = None
         self.zone_name: str = ""
@@ -391,6 +398,8 @@ class DistributeConfig:
     def to_string(self):
         return (
             f"fake_gang_env: {self.fake_gang_env}\n"
+            f"enable_startup_rank_selection: {self.enable_startup_rank_selection}\n"
+            f"startup_healthy_gpu_ids: {self.startup_healthy_gpu_ids}\n"
             f"gang_annocation_path: {self.gang_annocation_path}\n"
             f"gang_config_string: {self.gang_config_string}\n"
             f"zone_name: {self.zone_name}\n"
@@ -921,6 +930,20 @@ class PyEnvConfigs:
         self.grammar_admission_config = GrammarAdmissionConfig()
         self.deep_ep_config = DeepEPConfig()
         self.prefill_cp_config = PrefillCPConfig()
+
+    @property
+    def effective_role_type(self) -> RoleType:
+        role = self.role_config.role_type
+        if (
+            role == RoleType.PDFUSION
+            and self.vit_config.vit_separation == VitSeparation.VIT_SEPARATION_ROLE
+        ):
+            return RoleType.VIT
+        return role
+
+    @property
+    def runs_backend(self) -> bool:
+        return self.effective_role_type not in (RoleType.VIT, RoleType.FRONTEND)
 
     def to_string(self):
         return (

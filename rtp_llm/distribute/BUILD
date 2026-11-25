@@ -4,6 +4,7 @@ py_library(
     name = "distribute",
     srcs = glob(["*.py"]),
     deps = [
+        "//rtp_llm:utils",
         "//rtp_llm/models_py/distributed:rank_layout",
     ],
 )

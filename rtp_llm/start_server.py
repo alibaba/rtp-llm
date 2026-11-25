@@ -22,9 +22,10 @@ from rtp_llm.config.server_config_setup import (
     load_gpu_nic_affinity,
     setup_and_configure_server,
 )
-from rtp_llm.distribute.distributed_server import get_local_world_info
+from rtp_llm.distribute.distributed_server import get_local_workers
+from rtp_llm.distribute.host_bootstrap import prepare_host
 from rtp_llm.models_py.distributed.rank_layout import RankLayout
-from rtp_llm.ops import RoleType, SpeculativeType, VitSeparation
+from rtp_llm.ops import RoleType, SpeculativeType
 from rtp_llm.server.server_args.server_args import setup_args
 from rtp_llm.utils.backend_restart import ShutdownRequested
 from rtp_llm.utils.concurrency_controller import init_controller
@@ -242,13 +243,8 @@ def _iter_serving_world_ranks(py_env_configs: PyEnvConfigs) -> Iterator[int]:
     the same serving ranks as the HTTP frontend.
     """
     pc = py_env_configs.parallelism_config
-    local_world_info = get_local_world_info(
-        py_env_configs.server_config,
-        py_env_configs.distribute_config,
-        pc,
-    )
     layout = RankLayout.from_parallelism_config(pc)
-    for member in local_world_info.members:
+    for member in get_local_workers(py_env_configs):
         coord = layout.coord_of(member.world_rank)
         if member.local_rank == 0 or (coord.tp == 0 and coord.pp == 0):
             yield member.world_rank
@@ -881,6 +877,10 @@ def _create_backend_restarter(
 def main():
     py_env_configs: PyEnvConfigs = setup_args()
     _install_hot_hook_runtime("main", py_env_configs)
+    if not prepare_host(py_env_configs):
+        from rtp_llm.server.unhealthy_server import serve_unhealthy_host
+
+        return serve_unhealthy_host(py_env_configs)
     setup_and_configure_server(py_env_configs)
     start_server(py_env_configs)
 
@@ -932,19 +932,16 @@ def start_server(py_env_configs: PyEnvConfigs):
             py_env_configs.server_config.backend_post_frontend_drain_seconds
         ),
     )
-    # Backward compat: VIT_SEPARATION=ROLE without ROLE_TYPE=VIT
-    if (
-        py_env_configs.vit_config.vit_separation == VitSeparation.VIT_SEPARATION_ROLE
-        and py_env_configs.role_config.role_type == RoleType.PDFUSION
-    ):
+    role = py_env_configs.effective_role_type
+    if role != py_env_configs.role_config.role_type:
         logging.warning(
             "VIT_SEPARATION=ROLE detected without ROLE_TYPE=VIT. "
             "Auto-setting ROLE_TYPE=VIT for backward compatibility. "
             "Please migrate to ROLE_TYPE=VIT explicitly."
         )
-        py_env_configs.role_config.role_type = RoleType.VIT
+        py_env_configs.role_config.role_type = role
 
-    dash_sc_enabled = py_env_configs.role_config.role_type != RoleType.VIT
+    dash_sc_enabled = role != RoleType.VIT
     py_env_configs.server_config.validate_port_layout(dash_sc_enabled=dash_sc_enabled)
 
     resident_store_name = (
@@ -970,14 +967,11 @@ def start_server(py_env_configs: PyEnvConfigs):
             )
             process_manager.backend_restarter = backend_restarter
 
-        if py_env_configs.role_config.role_type == RoleType.VIT:
+        if role == RoleType.VIT:
             logging.info("start vit server")
             start_vit_server_impl(py_env_configs, process_manager, service_draining)
 
-        if (
-            py_env_configs.role_config.role_type != RoleType.FRONTEND
-            and py_env_configs.role_config.role_type != RoleType.VIT
-        ):
+        if py_env_configs.runs_backend:
             # For backend server, vit_process_engine is None when vit is separated
             logging.info("start backend server")
             start_backend_server_impl(
@@ -989,7 +983,7 @@ def start_server(py_env_configs: PyEnvConfigs):
                 ),
             )
 
-        if py_env_configs.role_config.role_type != RoleType.VIT:
+        if role != RoleType.VIT:
             # vit has its own frontend server
             logging.info("start frontend server")
             start_frontend_server_impl(

@@ -1,4 +1,19 @@
+import argparse
+
 from rtp_llm.server.server_args.util import str2bool
+
+
+def parse_healthy_gpu_ids(value: str):
+    """Parse local CUDA ordinals; an explicitly empty value means no healthy GPU."""
+    try:
+        gpu_ids = [int(item) for item in value.split(",")] if value.strip() else []
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(
+            "Expected comma-separated GPU indices"
+        ) from error
+    if any(gpu_id < 0 for gpu_id in gpu_ids):
+        raise argparse.ArgumentTypeError("GPU indices must be non-negative")
+    return gpu_ids
 
 
 def init_gang_group_args(parser, distribute_config):
@@ -6,6 +21,27 @@ def init_gang_group_args(parser, distribute_config):
     # Gang Configuration
     ##############################################################################################################
     gang_group = parser.add_argument_group("Gang Configuration")
+    gang_group.add_argument(
+        "--enable_startup_rank_selection",
+        env_name="ENABLE_STARTUP_RANK_SELECTION",
+        bind_to=(distribute_config, "enable_startup_rank_selection"),
+        type=str2bool,
+        default=False,
+        help="Keep fully healthy hosts after CPU rendezvous and before GPU communication",
+    )
+    gang_group.add_argument(
+        "--startup_healthy_gpu_ids",
+        env_name="STARTUP_HEALTHY_GPU_IDS",
+        bind_to=(distribute_config, "startup_healthy_gpu_ids"),
+        type=parse_healthy_gpu_ids,
+        default=None,
+        help=(
+            "GPU health result supplied before start_server: comma-separated local "
+            "CUDA ordinals (local_rank, after CUDA_VISIBLE_DEVICES mapping). "
+            "Unset means all healthy; an empty value means none healthy. "
+            "Used when ENABLE_STARTUP_RANK_SELECTION=1."
+        ),
+    )
     gang_group.add_argument(
         "--fake_gang_env",
         env_name="FAKE_GANG_ENV",
@@ -68,7 +104,7 @@ def init_gang_group_args(parser, distribute_config):
         bind_to=(distribute_config, "gang_timeout_min"),
         type=int,
         default=30,
-        help="心跳超时的最小时间",
+        help="启动时 TCPStore 建连及各次等待的超时时间（分钟）",
     )
     gang_group.add_argument(
         "--remote_server_port",

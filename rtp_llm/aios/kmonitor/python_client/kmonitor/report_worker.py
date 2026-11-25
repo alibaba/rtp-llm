@@ -105,6 +105,14 @@ class ReportWorker(object):
                     events.append(event)
         return events
 
+    def report_once(self, name: str, value: float, tags: Dict[str, str]) -> None:
+        """Send an individual event even before periodic service metrics are enabled."""
+        if self.flume:
+            point = MetricDataPoint(value, {**self.init_tags, **tags})
+            event = self.render_event(name, int(time.time()), point)
+            with self.report_lock:
+                self.flume.send_batch([event])
+
     def do_report(self) -> None:
         # Explicit flushes and the background cycle share one Flume transport.
         with self.report_lock:

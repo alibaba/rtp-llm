@@ -2,7 +2,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional, Sequence
 
 import torch
 
@@ -35,6 +35,9 @@ from rtp_llm.ops import (
     SpeculativeExecutionConfig,
     VitSeparation,
 )
+
+if TYPE_CHECKING:
+    from rtp_llm.distribute.worker_info import WorkerInfo
 
 
 @dataclass
@@ -157,7 +160,7 @@ class EngineConfig:
 
         Args:
             py_env_configs: PyEnvConfigs instance containing all configuration
-            nccl_comm_config: Optional NcclCommConfig from DistributedServer.get_nccl_comm_config().
+            nccl_comm_config: Optional NCCL communication config for this worker.
                 When provided, NCCL ip/ports are taken from it.
 
         Returns:
@@ -273,7 +276,7 @@ class EngineConfig:
 def update_worker_addrs(
     runtime_config: RuntimeConfig,
     parallelism_config: ParallelismConfig,
-    world_info,
+    members: Optional[Sequence["WorkerInfo"]],
     role_type: RoleType = RoleType.PDFUSION,
 ) -> None:
     """Update worker addresses in runtime_config based on gang info.
@@ -283,10 +286,10 @@ def update_worker_addrs(
     `cache_store_listen_port + 1` and is validated before publishing.
     """
     p2p_enabled = role_type in (RoleType.PREFILL, RoleType.DECODE)
-    if world_info is None:
+    if members is None:
         # For standalone mode, skip worker address updates
         logging.warning(
-            "world_info is None, skipping worker address updates (standalone mode)"
+            "No worker members supplied, skipping worker address updates (standalone mode)"
         )
         return
     worker_addrs = []
@@ -296,7 +299,7 @@ def update_worker_addrs(
     # P2P rank0 builds CP-local plans by worker_grpc_addrs index. Canonicalize
     # the address lists so index order is the world-rank order regardless of
     # gang discovery/refresh ordering.
-    for member in sorted(world_info.members, key=lambda item: item.world_rank):
+    for member in sorted(members, key=lambda item: item.world_rank):
         p2p_transfer_port = (
             member.cache_store_listen_port + 1
             if member.cache_store_listen_port > 0

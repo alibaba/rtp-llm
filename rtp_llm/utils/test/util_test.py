@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from rtp_llm.utils import flash_attn_utils
-from rtp_llm.utils.util import has_overlap_kmp
+from rtp_llm.utils.util import has_overlap_kmp, split_ip_port
 
 
 class TestUtil(unittest.TestCase):
@@ -13,6 +13,13 @@ class TestUtil(unittest.TestCase):
 
     def tearDown(self):
         pass
+
+    def test_split_registered_address(self):
+        self.assertEqual(split_ip_port("127.0.0.1:20000"), ("127.0.0.1", 20000))
+        self.assertEqual(split_ip_port(" 2001:db8::1:20000 "), ("2001:db8::1", 20000))
+        for address in ("", "127.0.0.1", "127.0.0.1:x", ":20000"):
+            with self.subTest(address=address):
+                self.assertEqual(split_ip_port(address), ("", 0))
 
     def test_basic_overlap(self):
         self.assertTrue(has_overlap_kmp("abcde", "de"))
