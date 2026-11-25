@@ -291,6 +291,321 @@ class TestQwen4_5E2E(unittest.TestCase):
             self.assertGreater(summary[key], 0.0)
 
 
+
+    @torch.no_grad()
+    def test_05_tp4_ep4_checkpoint_reload_and_module_parity(self) -> None:
+        """Verify TP=4 checkpoint streaming, bind_qwen4_5_model_weights, GDN/QSA/DenseMLP/LMHead parity."""
+        import tempfile
+        from dataclasses import replace
+        from rtp_llm.models_py.modules.qwen4_5.checkpoint_loader import (
+            load_qwen4_5_from_checkpoint,
+            save_qwen4_5_safetensors_checkpoint,
+        )
+
+        # Exercise QSA sparse (8Q->2Q/rank, 1KV+8-head indexer replicated) + GDN + DenseMLP + LatentMoE + LMHead
+        cfg_qsa = replace(
+            self.cfg,
+            indexer_n_heads=8,
+            indexer_kv_heads=1,
+            indexer_head_dim=64,
+            indexer_compress_ratio=4,
+            indexer_budget=16,
+        )
+        ref = Qwen4_5ForCausalLM(cfg_qsa, dtype=torch.bfloat16, device=self.device)
+        ref.init_synthetic_weights(seed=808, ple_mode="gpu_full")
+        _stabilize_router_margins(ref)
+        ref.prepare_weights()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            save_qwen4_5_safetensors_checkpoint(ref, tmpdir)
+            tp_ranks = []
+            for r in range(4):
+                m_r = Qwen4_5ForCausalLM(
+                    cfg_qsa,
+                    dtype=torch.bfloat16,
+                    device=self.device,
+                    ep_size=4,
+                    ep_rank=r,
+                    tp_size=4,
+                    tp_rank=r,
+                )
+                load_qwen4_5_from_checkpoint(m_r, tmpdir, ple_mode="gpu_sharded", num_workers=2)
+                m_r.prepare_weights()
+                tp_ranks.append(m_r)
+
+        # Verify sharded shapes on rank 0 vs TP=1
+        r0 = tp_ranks[0]
+        self.assertEqual(r0.lm_head.weight.shape[0], cfg_qsa.vocab_size // 4)
+        self.assertEqual(r0.model.layers[0].mlp.local_intermediate_size, cfg_qsa.intermediate_size // 4)
+        self.assertEqual(r0.model.layers[0].linear_attn.num_k_heads, 1)
+        self.assertEqual(r0.model.layers[0].linear_attn.num_v_heads, 4)
+        self.assertEqual(r0.model.layers[0].linear_attn.conv1d.weight.shape[0], 384)
+        self.assertEqual(r0.model.layers[5].linear_attn.conv1d.weight.shape[0], 64)
+        self.assertEqual(r0.model.layers[3].self_attn.num_heads, 2)
+        self.assertEqual(r0.model.layers[3].self_attn.num_kv_heads, 1)
+        self.assertTrue(cfg_qsa.has_qsa)
+        self.assertIsNotNone(r0.model.layers[3].self_attn.indexer)
+
+        # Also exercise bind_qwen4_5_model_weights from unsharded ModelWeights -> TP=4
+        from rtp_llm.model_loader.model_weight_info import ModelWeights
+        from rtp_llm.models.qwen4_5.qwen4_5_weight import QWEN4_5_W
+        from rtp_llm.models_py.modules.qwen4_5.checkpoint_loader import bind_qwen4_5_model_weights
+        mw_unsharded = ModelWeights(cfg_qsa.num_hidden_layers, device=self.device, dtype=torch.bfloat16)
+        mw_unsharded.set_global_weight(QWEN4_5_W.embedding, ref.model.embed_tokens.weight.detach())
+        mw_unsharded.set_global_weight(QWEN4_5_W.lm_head, ref.lm_head.weight.detach())
+        mx = ref.model.hyper_connection_mixer
+        mw_unsharded.set_global_weight(QWEN4_5_W.hc_mixer_norm_w, mx.hc_norm_weight.detach())
+        mw_unsharded.set_global_weight(QWEN4_5_W.hc_mixer_norm_b, mx.hc_norm_bias.detach())
+        mw_unsharded.set_global_weight(QWEN4_5_W.hc_mixer_mix_down, mx.input_mix_weight_down.detach())
+        mw_unsharded.set_global_weight(QWEN4_5_W.hc_mixer_mix_up, mx.input_mix_weight_up.detach())
+        for lid, lyr in enumerate(ref.model.layers):
+            mw_unsharded.set_layer_weight(lid, QWEN4_5_W.hc_attn_norm_w, lyr.attn_hyper_connection.hc_norm_weight.detach())
+            mw_unsharded.set_layer_weight(lid, QWEN4_5_W.hc_attn_norm_b, lyr.attn_hyper_connection.hc_norm_bias.detach())
+            mw_unsharded.set_layer_weight(lid, QWEN4_5_W.hc_attn_inject, lyr.attn_hyper_connection.block_inject_weight.detach())
+            mw_unsharded.set_layer_weight(lid, QWEN4_5_W.hc_attn_mix_down, lyr.attn_hyper_connection.input_mix_weight_down.detach())
+            mw_unsharded.set_layer_weight(lid, QWEN4_5_W.hc_attn_mix_up, lyr.attn_hyper_connection.input_mix_weight_up.detach())
+            mw_unsharded.set_layer_weight(lid, QWEN4_5_W.hc_mlp_norm_w, lyr.mlp_hyper_connection.hc_norm_weight.detach())
+            mw_unsharded.set_layer_weight(lid, QWEN4_5_W.hc_mlp_norm_b, lyr.mlp_hyper_connection.hc_norm_bias.detach())
+            mw_unsharded.set_layer_weight(lid, QWEN4_5_W.hc_mlp_inject, lyr.mlp_hyper_connection.block_inject_weight.detach())
+            if lyr.mlp_hyper_connection.input_mix_weight_down is not None:
+                mw_unsharded.set_layer_weight(lid, QWEN4_5_W.hc_mlp_mix_down, lyr.mlp_hyper_connection.input_mix_weight_down.detach())
+            mw_unsharded.set_layer_weight(lid, QWEN4_5_W.hc_mlp_mix_up, lyr.mlp_hyper_connection.input_mix_weight_up.detach())
+            if lyr.ple is not None:
+                ple = lyr.ple
+                mw_unsharded.set_layer_weight(lid, QWEN4_5_W.ple_key_proj_w, ple.key_proj.weight.detach())
+                mw_unsharded.set_layer_weight(lid, QWEN4_5_W.ple_value_proj_w, ple.value_proj.weight.detach())
+                mw_unsharded.set_layer_weight(lid, QWEN4_5_W.ple_conv_w, ple.conv1d.weight.detach())
+                mw_unsharded.set_layer_weight(lid, QWEN4_5_W.ple_norm_key_w, ple.norm_key.detach())
+                mw_unsharded.set_layer_weight(lid, QWEN4_5_W.ple_norm_query_w, ple.norm_query.detach())
+                mw_unsharded.set_layer_weight(lid, QWEN4_5_W.ple_norm_conv_w, ple.norm_conv.detach())
+                mw_unsharded.set_layer_weight(lid, QWEN4_5_W.ple_multipliers, ple.layer_multipliers.detach())
+                mw_unsharded.set_layer_weight(lid, QWEN4_5_W.ple_ngram_offsets, ple.ngram_heads_offsets.detach())
+                mw_unsharded.set_layer_weight(lid, QWEN4_5_W.ple_ngram_vocab_sizes, ple.ngram_heads_vocab_sizes.detach())
+                mw_unsharded.set_layer_weight(lid, QWEN4_5_W.ple_ngram_shards, ple._ngram_shards[2:4])
+                mw_unsharded.set_layer_weight(lid, QWEN4_5_W.ple_ngram_scale, ple.weight_scale.detach())
+            if lyr.linear_attn is not None:
+                la = lyr.linear_attn
+                mw_unsharded.set_layer_weight(lid, QWEN4_5_W.linear_in_proj_qkvz, la.in_proj_qkvz.weight.detach())
+                if not lyr.is_consumer:
+                    mw_unsharded.set_layer_weight(lid, QWEN4_5_W.linear_in_proj_ba, la.in_proj_ba.weight.detach())
+                    mw_unsharded.set_layer_weight(lid, QWEN4_5_W.linear_a_log, la.A_log.detach())
+                    mw_unsharded.set_layer_weight(lid, QWEN4_5_W.linear_dt_bias, la.dt_bias.detach())
+                mw_unsharded.set_layer_weight(lid, QWEN4_5_W.linear_conv1d, la.conv1d.weight.detach())
+                mw_unsharded.set_layer_weight(lid, QWEN4_5_W.linear_norm_w, la.norm.weight.detach())
+                mw_unsharded.set_layer_weight(lid, QWEN4_5_W.linear_out_proj, la.out_proj.weight.detach())
+                if lyr.attn_output_sconv is not None:
+                    mw_unsharded.set_layer_weight(lid, QWEN4_5_W.linear_attn_output_sconv, lyr.attn_output_sconv.weight.detach())
+            else:
+                sa = lyr.self_attn
+                mw_unsharded.set_layer_weight(lid, QWEN4_5_W.full_q_proj, sa.q_proj.weight.detach())
+                mw_unsharded.set_layer_weight(lid, QWEN4_5_W.full_q_norm_w, sa.q_norm.weight.detach())
+                mw_unsharded.set_layer_weight(lid, QWEN4_5_W.full_o_proj, sa.o_proj.weight.detach())
+                if not lyr.is_consumer:
+                    mw_unsharded.set_layer_weight(lid, QWEN4_5_W.full_k_proj, sa.k_proj.weight.detach())
+                    mw_unsharded.set_layer_weight(lid, QWEN4_5_W.full_v_proj, sa.v_proj.weight.detach())
+                    mw_unsharded.set_layer_weight(lid, QWEN4_5_W.full_k_norm_w, sa.k_norm.weight.detach())
+                    mw_unsharded.set_layer_weight(lid, QWEN4_5_W.full_k_sconv, sa.k_sconv.weight.detach())
+                    mw_unsharded.set_layer_weight(lid, QWEN4_5_W.full_v_sconv, sa.v_sconv.weight.detach())
+                if lyr.attn_output_sconv is not None:
+                    mw_unsharded.set_layer_weight(lid, QWEN4_5_W.full_attn_output_sconv, lyr.attn_output_sconv.weight.detach())
+                if sa.indexer is not None:
+                    mw_unsharded.set_layer_weight(lid, QWEN4_5_W.full_indexer_qk_proj, sa.indexer.index_qk_proj.weight.detach())
+                    mw_unsharded.set_layer_weight(lid, QWEN4_5_W.full_indexer_q_norm_w, sa.indexer.q_layernorm.weight.detach())
+                    mw_unsharded.set_layer_weight(lid, QWEN4_5_W.full_indexer_k_norm_w, sa.indexer.k_layernorm.weight.detach())
+            if lyr.is_moe:
+                moe = lyr.mlp
+                mw_unsharded.set_layer_weight(lid, QWEN4_5_W.moe_latent_down_proj, moe.latent_down_proj.weight.detach())
+                mw_unsharded.set_layer_weight(lid, QWEN4_5_W.moe_latent_gate_proj, moe.latent_gate_proj.weight.detach())
+                mw_unsharded.set_layer_weight(lid, QWEN4_5_W.moe_latent_up_proj, moe.latent_up_proj.weight.detach())
+                mw_unsharded.set_layer_weight(lid, QWEN4_5_W.moe_latent_scale_gate, moe.latent_scale_gate.weight.detach())
+                mw_unsharded.set_layer_weight(lid, QWEN4_5_W.moe_pre_latent_ln_w, moe.pre_moe_latent_layernorm.weight.detach())
+                mw_unsharded.set_layer_weight(lid, QWEN4_5_W.moe_router_gate, moe.gate.weight.detach())
+                mw_unsharded.set_layer_weight(lid, QWEN4_5_W.moe_expert_bias, moe.expert_bias.detach())
+                mw_unsharded.set_layer_weight(lid, QWEN4_5_W.moe_shared_gate_proj, moe.shared_expert.gate_proj.weight.detach())
+                mw_unsharded.set_layer_weight(lid, QWEN4_5_W.moe_shared_up_proj, moe.shared_expert.up_proj.weight.detach())
+                mw_unsharded.set_layer_weight(lid, QWEN4_5_W.moe_shared_down_proj, moe.shared_expert.down_proj.weight.detach())
+                mw_unsharded.set_layer_weight(lid, QWEN4_5_W.moe_shared_expert_gate, moe.shared_expert_gate.weight.detach())
+                m_i = cfg_qsa.moe_intermediate_size
+                for e in range(cfg_qsa.num_experts):
+                    mw_unsharded.set_layer_weight(lid, QWEN4_5_W.moe_expert_gate_w.format(e=e), moe.w13_u8[e, :m_i])
+                    mw_unsharded.set_layer_weight(lid, QWEN4_5_W.moe_expert_gate_scale.format(e=e), moe.w13_scale[e, :m_i])
+                    mw_unsharded.set_layer_weight(lid, QWEN4_5_W.moe_expert_up_w.format(e=e), moe.w13_u8[e, m_i:])
+                    mw_unsharded.set_layer_weight(lid, QWEN4_5_W.moe_expert_up_scale.format(e=e), moe.w13_scale[e, m_i:])
+                    mw_unsharded.set_layer_weight(lid, QWEN4_5_W.moe_expert_down_w.format(e=e), moe.w2_u8[e])
+                    mw_unsharded.set_layer_weight(lid, QWEN4_5_W.moe_expert_down_scale.format(e=e), moe.w2_scale[e])
+            else:
+                mlp = lyr.mlp
+                mw_unsharded.set_layer_weight(lid, QWEN4_5_W.dense_gate_proj, mlp.gate_proj.weight.detach())
+                mw_unsharded.set_layer_weight(lid, QWEN4_5_W.dense_up_proj, mlp.up_proj.weight.detach())
+                mw_unsharded.set_layer_weight(lid, QWEN4_5_W.dense_down_proj, mlp.down_proj.weight.detach())
+            if lyr.ffn_output_sconv is not None:
+                mw_unsharded.set_layer_weight(lid, QWEN4_5_W.ffn_output_sconv, lyr.ffn_output_sconv.weight.detach())
+
+        m_bind = Qwen4_5ForCausalLM(
+            cfg_qsa, dtype=torch.bfloat16, device=self.device, ep_size=4, ep_rank=1, tp_size=4, tp_rank=1
+        )
+        bind_qwen4_5_model_weights(
+            m_bind.model, mw_unsharded, cfg_qsa, lm_head=m_bind.lm_head, ep_size=4, ep_rank=1, tp_size=4, tp_rank=1
+        )
+        self.assertTrue(torch.equal(m_bind.lm_head.weight, tp_ranks[1].lm_head.weight))
+        self.assertTrue(torch.equal(m_bind.model.layers[0].linear_attn.conv1d.weight, tp_ranks[1].model.layers[0].linear_attn.conv1d.weight))
+        self.assertTrue(torch.equal(m_bind.model.layers[3].self_attn.q_proj.weight, tp_ranks[1].model.layers[3].self_attn.q_proj.weight))
+        self.assertTrue(torch.equal(m_bind.model.layers[0].mlp.down_proj.weight, tp_ranks[1].model.layers[0].mlp.down_proj.weight))
+
+        # Check DenseMLP Layer 0 partial sums across TP=4 ranks match TP=1
+        B, T = 2, 12
+        x_in = torch.randn((B, T, cfg_qsa.hidden_size), dtype=torch.bfloat16, device=self.device) * 0.25
+        ref_dense = ref.model.layers[0].mlp(x_in)
+        tp_dense_sum = torch.zeros_like(ref_dense, dtype=torch.float32)
+        for m_r in tp_ranks:
+            tp_dense_sum.add_(m_r.model.layers[0].mlp(x_in).float())
+        self.assertGreater(_cos_sim(tp_dense_sum, ref_dense), 0.9999)
+
+        # Check GDN Layer 0 (prefill T=12 + decode T=1) partial sums across TP=4 match TP=1
+        st_ref_gdn = ref.model.layers[0].linear_attn.create_state(B, device=self.device)
+        ref_gdn_p, _ = ref.model.layers[0].linear_attn(x_in[:, :10], state=st_ref_gdn)
+        ref_gdn_d, _ = ref.model.layers[0].linear_attn(x_in[:, 10:11], state=st_ref_gdn)
+        tp_gdn_p_sum = torch.zeros_like(ref_gdn_p, dtype=torch.float32)
+        tp_gdn_d_sum = torch.zeros_like(ref_gdn_d, dtype=torch.float32)
+        for m_r in tp_ranks:
+            st_r = m_r.model.layers[0].linear_attn.create_state(B, device=self.device)
+            self.assertEqual(st_r.ssm_state.shape, (B, 4, 64, 64))
+            self.assertEqual(st_r.conv_state.shape, (B, 384, 3))
+            gp, _ = m_r.model.layers[0].linear_attn(x_in[:, :10], state=st_r)
+            gd, _ = m_r.model.layers[0].linear_attn(x_in[:, 10:11], state=st_r)
+            tp_gdn_p_sum.add_(gp.float())
+            tp_gdn_d_sum.add_(gd.float())
+        self.assertGreater(_cos_sim(tp_gdn_p_sum, ref_gdn_p), 0.9998)
+        self.assertGreater(_cos_sim(tp_gdn_d_sum, ref_gdn_d), 0.9998)
+
+        # Check QSA FullAttn Layer 3 partial sums across TP=4 match TP=1
+        pos = torch.arange(10, device=self.device).unsqueeze(0).expand(B, 10)
+        self.assertTrue(
+            torch.equal(
+                r0.model.layers[3].self_attn.indexer.index_qk_proj.weight,
+                ref.model.layers[3].self_attn.indexer.index_qk_proj.weight,
+            )
+        )
+        kv_ref, _ = ref.model.layers[3].self_attn(x_in[:, :10], positions=pos)
+        tp_sa_sum = torch.zeros_like(kv_ref, dtype=torch.float32)
+        for m_r in tp_ranks:
+            o_r, _ = m_r.model.layers[3].self_attn(x_in[:, :10], positions=pos)
+            tp_sa_sum.add_(o_r.float())
+        self.assertGreater(_cos_sim(tp_sa_sum, kv_ref), 0.9999)
+
+        # Check Vocab-Parallel LMHead concatenation matches full TP=1 LMHead
+        h_final = torch.randn((B, 4, cfg_qsa.hidden_size), dtype=torch.bfloat16, device=self.device) * 0.25
+        ref_logits = ref.lm_head(h_final)
+        tp_logits = torch.cat([m_r.lm_head(h_final) for m_r in tp_ranks], dim=-1)
+        self.assertLess((tp_logits.float() - ref_logits.float()).abs().max().item(), 1e-4)
+
+    def test_06_distributed_gloo_tp4_ep4_8layer_e2e(self) -> None:
+        """Real 4-process Gloo distributed TP=4 + EP=4 8-layer QSA/GDN/MoE/LMHead vs TP=1 parity."""
+        import socket
+        import torch.multiprocessing as mp
+
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+
+        ctx = mp.get_context("spawn")
+        err_q = ctx.Queue()
+        procs = [
+            ctx.Process(target=_gloo_tp4_ep4_worker, args=(r, 4, port, err_q))
+            for r in range(4)
+        ]
+        for p in procs:
+            p.start()
+        for p in procs:
+            p.join(timeout=120)
+        errors = []
+        while not err_q.empty():
+            errors.append(err_q.get())
+        for r, p in enumerate(procs):
+            if p.is_alive():
+                p.terminate()
+                self.fail(f"Gloo TP=4 worker {r} timed out")
+            self.assertEqual(p.exitcode, 0, f"Gloo TP=4 worker {r} exited {p.exitcode}: {errors}")
+        self.assertEqual(errors, [])
+
+
+@torch.no_grad()
+def _gloo_tp4_ep4_worker(rank: int, world_size: int, port: int, err_q) -> None:
+    try:
+        from dataclasses import replace
+        os.environ["MASTER_ADDR"] = "127.0.0.1"
+        os.environ["MASTER_PORT"] = str(port)
+        torch.cuda.set_device(0)
+        device = torch.device("cuda:0")
+        dist.init_process_group(backend="gloo", rank=rank, world_size=world_size)
+        try:
+            cfg = replace(
+                make_mini_qwen4_5_config(),
+                    indexer_n_heads=8,
+                indexer_kv_heads=1,
+                indexer_head_dim=64,
+                indexer_compress_ratio=4,
+                indexer_budget=16,
+            )
+            tp_model = Qwen4_5ForCausalLM(
+                cfg,
+                dtype=torch.bfloat16,
+                device=device,
+                ep_size=world_size,
+                ep_rank=rank,
+                ep_group=dist.group.WORLD,
+                tp_size=world_size,
+                tp_rank=rank,
+                tp_group=dist.group.WORLD,
+            )
+            tp_model.init_synthetic_weights(seed=2027, ple_mode="gpu_sharded")
+            _stabilize_router_margins(tp_model)
+            tp_model.prepare_weights()
+
+            B, T_prompt, T_gen = 2, 16, 4
+            g = torch.Generator(device=device).manual_seed(5151)
+            tokens = torch.randint(10, cfg.vocab_size, (B, T_prompt + T_gen), device=device, generator=g)
+
+            st_tp = tp_model.create_runtime_state(B, max_seq_len=64, enable_yoco_decode=True)
+            tp_outs = [tp_model(tokens[:, :T_prompt], state=st_tp, enable_yoco_decode=True)]
+            for t in range(T_prompt, T_prompt + T_gen):
+                tp_outs.append(tp_model(tokens[:, t : t + 1], state=st_tp, enable_yoco_decode=True))
+            logits_tp = torch.cat(tp_outs, dim=1)
+
+            r0_logits = logits_tp.clone()
+            dist.broadcast(r0_logits, src=0)
+            sync_diff = float((logits_tp.float() - r0_logits.float()).abs().max().item())
+            assert sync_diff < 1e-4, f"Rank {rank} diverged from rank 0: {sync_diff}"
+
+            if rank == 0:
+                ref_model = Qwen4_5ForCausalLM(
+                    cfg, dtype=torch.bfloat16, device=device
+                )
+                ref_model.init_synthetic_weights(seed=2027, ple_mode="gpu_full")
+                _stabilize_router_margins(ref_model)
+                ref_model.prepare_weights()
+
+                st_ref = ref_model.create_runtime_state(B, max_seq_len=64, enable_yoco_decode=True)
+                ref_outs = [ref_model(tokens[:, :T_prompt], state=st_ref, enable_yoco_decode=True)]
+                for t in range(T_prompt, T_prompt + T_gen):
+                    ref_outs.append(ref_model(tokens[:, t : t + 1], state=st_ref, enable_yoco_decode=True))
+                logits_ref = torch.cat(ref_outs, dim=1)
+
+                cos_p = _cos_sim(logits_tp[:, :T_prompt], logits_ref[:, :T_prompt])
+                cos_d = _cos_sim(logits_tp[:, T_prompt:], logits_ref[:, T_prompt:])
+                max_p = float((logits_tp[:, :T_prompt].float() - logits_ref[:, :T_prompt].float()).abs().max().item())
+                max_d = float((logits_tp[:, T_prompt:].float() - logits_ref[:, T_prompt:].float()).abs().max().item())
+                assert cos_p > 0.999 and cos_d > 0.999, (
+                    f"TP4+EP4 E2E cos mismatch: prefill={cos_p} (max={max_p}), decode={cos_d} (max={max_d})"
+                )
+            dist.barrier()
+        finally:
+            dist.destroy_process_group()
+    except BaseException as exc:
+        err_q.put(f"rank {rank}: {exc!r}")
+        raise
+
+
 @torch.no_grad()
 def run_distributed_ep_test() -> None:
     """Multi-GPU NCCL EP=4 vs single-GPU EP=1 equivalence test.

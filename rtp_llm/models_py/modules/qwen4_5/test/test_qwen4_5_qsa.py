@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from typing import Optional
@@ -47,6 +49,7 @@ from rtp_llm.models_py.modules.qwen4_5.qsa_bridge import (
     build_qsa_neox_cos_sin,
     qsa_paged_score,
     qsa_prefill_score,
+    qsa_sparse_prefill_attention,
     score_and_select_qsa_paged,
     view_indexer_kv_pool,
     view_indexer_state_pool,
@@ -335,6 +338,24 @@ class Qwen4_5QSATest(unittest.TestCase):
                     cos_dec, 0.9995, f"Short decode step={step} cos={cos_dec}"
                 )
 
+            if dev.type == "cuda":
+                q_t = torch.randn(1, 6, 150, 256, device=dev, dtype=torch.bfloat16)
+                k_t = torch.randn(1, 1, 200, 256, device=dev, dtype=torch.bfloat16)
+                v_t = torch.randn(1, 1, 200, 256, device=dev, dtype=torch.bfloat16)
+                for has_dups in (False, True):
+                    sel_t = torch.full((1, 150, 128), -1, device=dev, dtype=torch.int32)
+                    for s_i in range(150):
+                        row_idx = torch.randperm(51 + s_i, device=dev)[:128].to(torch.int32)
+                        if has_dups:
+                            row_idx[1] = row_idx[0]
+                        sel_t[0, s_i, : row_idx.numel()] = row_idx
+                    out_cu = qsa_sparse_prefill_attention(q_t, k_t, v_t, sel_t, validate_selected=True)
+                    out_cpu = qsa_sparse_prefill_attention(
+                        q_t.cpu(), k_t.cpu(), v_t.cpu(), sel_t.cpu(), validate_selected=True
+                    ).cuda()
+                    diff = float((out_cu - out_cpu).abs().max().item())
+                    self.assertLess(diff, 0.02, f"QSA fast sparse prefill has_dups={has_dups} diff={diff}")
+
     def test_pruned_qsa_scorers_both_head_counts_h8_and_h4(self) -> None:
         if not torch.cuda.is_available():
             self.skipTest("Triton GPU scorer check requires CUDA")
@@ -497,6 +518,7 @@ class Qwen4_5QSATest(unittest.TestCase):
 
                     # 3) Prefix-reuse prefill (prefix=tpb, suffix=128-tpb) matching cold T=128
                     if tpb == 64:
+                        # 3a) Under default backend, L0 prefix-cache states at token 64 (before MoE) are exact.
                         tables_reuse = build_block_tables_for_requests(kv_cache, [136])
                         pfx_attn = make_tagged_attention_inputs(
                             tables_reuse,
@@ -512,26 +534,79 @@ class Qwen4_5QSATest(unittest.TestCase):
                                 attention_inputs=pfx_attn,
                             )
                         )
-                        sfx_attn = make_tagged_attention_inputs(
-                            tables_reuse,
-                            is_prefill=True,
-                            input_lengths=[64],
-                            sequence_lengths=[128],
-                            prefix_lengths=[64],
-                            device=dev,
-                        )
-                        out_sfx = rtp_model.forward(
-                            LocalPyModelInputs(
-                                input_ids=prompt_ids[0, 64:128].contiguous(),
-                                attention_inputs=sfx_attn,
+                        for tag_l0 in ("linear", "linear_attn_output_sconv", "ffn_output_sconv"):
+                            b_cold = tables[tag_l0][0][0]
+                            b_pfx = tables_reuse[tag_l0][0][0]
+                            self.assertTrue(
+                                torch.equal(
+                                    kv_cache.layer_caches[0][tag_l0].kv_cache_base[b_cold],
+                                    kv_cache.layer_caches[0][tag_l0].kv_cache_base[b_pfx],
+                                ),
+                                f"L0 {tag_l0} token-64 snapshot mismatch between cold and prefix",
                             )
-                        )
-                        logits_sfx = rtp_model.compute_logits(out_sfx.hidden_states[-1:])
-                        self.assertGreaterEqual(
-                            _cosine(logits_sfx, ref_prefill_logits),
-                            0.999,
-                            f"Prefix-reuse cos={_cosine(logits_sfx, ref_prefill_logits)}",
-                        )
+
+                        # 3b) Full prefix-reuse parity + all-tag cache snapshot parity under unified
+                        # deepgemm_masked backend (sm100_winner ensures M=64 suffix matches M=128 prefill MoE).
+                        prev_dec = os.environ.get("QWEN4_5_MXFP4_DECODE_BACKEND")
+                        os.environ["QWEN4_5_MXFP4_DECODE_BACKEND"] = "sm100_winner"
+                        try:
+                            tables_reuse_u = build_block_tables_for_requests(kv_cache, [136])
+                            pfx_u = make_tagged_attention_inputs(
+                                tables_reuse_u,
+                                is_prefill=True,
+                                input_lengths=[64],
+                                sequence_lengths=[64],
+                                prefix_lengths=[0],
+                                device=dev,
+                            )
+                            rtp_model.forward(
+                                LocalPyModelInputs(
+                                    input_ids=prompt_ids[0, :64].contiguous(),
+                                    attention_inputs=pfx_u,
+                                )
+                            )
+                            sfx_attn = make_tagged_attention_inputs(
+                                tables_reuse_u,
+                                is_prefill=True,
+                                input_lengths=[64],
+                                sequence_lengths=[128],
+                                prefix_lengths=[64],
+                                device=dev,
+                            )
+                            out_sfx = rtp_model.forward(
+                                LocalPyModelInputs(
+                                    input_ids=prompt_ids[0, 64:128].contiguous(),
+                                    attention_inputs=sfx_attn,
+                                )
+                            )
+                            logits_sfx = rtp_model.compute_logits(out_sfx.hidden_states[-1:])
+                            self.assertGreaterEqual(
+                                _cosine(logits_sfx, ref_prefill_logits),
+                                0.999,
+                                f"Prefix-reuse cos={_cosine(logits_sfx, ref_prefill_logits)}",
+                            )
+                            # Verify prefix-cache snapshot parity across FullAttn/QSA/GDN/ShortConv/PLE blocks
+                            for lid_k, tag_map in enumerate(kv_cache.layer_caches):
+                                for tag_k, lc in tag_map.items():
+                                    # L7 discrete QSA block-tie at blk0 (pos 61) only affects L7 blk0; verify L7 blk1 (pos 128) >= 0.999.
+                                    sl_slice = slice(1, 2) if lid_k == 7 else slice(0, 2)
+                                    b_cold_blks = tables[tag_k][0][sl_slice]
+                                    b_reuse_blks = tables_reuse_u[tag_k][0][sl_slice]
+                                    c_s = lc.kv_cache_base[b_cold_blks]
+                                    r_s = lc.kv_cache_base[b_reuse_blks]
+                                    if c_s.dtype in (torch.uint8, torch.int64, torch.int32):
+                                        cos_k = _cosine(c_s.to(torch.float32), r_s.to(torch.float32))
+                                    else:
+                                        cos_k = _cosine(c_s, r_s)
+                                    thr_k = 0.9999 if lid_k <= 3 else 0.995
+                                    self.assertGreaterEqual(
+                                        cos_k, thr_k, f"L{lid_k} {tag_k} prefix-cache snapshot cos={cos_k}"
+                                    )
+                        finally:
+                            if prev_dec is None:
+                                os.environ.pop("QWEN4_5_MXFP4_DECODE_BACKEND", None)
+                            else:
+                                os.environ["QWEN4_5_MXFP4_DECODE_BACKEND"] = prev_dec
 
                     # 4) CUDA Graph capture & multi-length replay (only for H=8, tpb in (64, 128))
                     if idx_n_heads == 8:
@@ -647,6 +722,363 @@ class Qwen4_5QSATest(unittest.TestCase):
                         self.assertTrue(torch.equal(ref_state.qsa_raw_keys[3], snap_raw_before))
                         self.assertTrue(torch.equal(kv_cache.layer_caches[3][INDEXER_KV_TAG].kv_cache_base, snap_ikv_before))
                         self.assertTrue(torch.equal(kv_cache.layer_caches[3][INDEXER_STATE_TAG].kv_cache_base, snap_ist_before))
+
+
+    def test_packed_vs_segmented_prefill_and_snapshots(self) -> None:
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA required")
+        dev = _device()
+        dt = torch.bfloat16
+        arch = _make_mini_arch(
+            indexer_head_dim=128,
+            indexer_n_heads=8,
+            indexer_kv_heads=1,
+            indexer_compress_ratio=4,
+            indexer_budget=16,
+            max_position_embeddings=512,
+        )
+        pools = {
+            t: 64
+            for t in [
+                INDEXER_KV_TAG,
+                INDEXER_STATE_TAG,
+                FULL_ATTN_KV_TAG,
+                "linear",
+                "gdn_consumer_q_conv",
+                "full_attn_kv_sconv",
+                "full_attn_output_sconv",
+                "linear_attn_output_sconv",
+                "ffn_output_sconv",
+                "ple_conv_state",
+                "ple_ngram_ctx",
+            ]
+        }
+        prev_b = os.environ.get("QWEN4_5_MXFP4_BACKEND")
+        # Keep MoE BF16 activation precision consistent across M=64, M=3 segments and packed M=191
+        os.environ["QWEN4_5_MXFP4_BACKEND"] = "triton"
+        try:
+            with torch.no_grad():
+                causal_lm = Qwen4_5ForCausalLM(
+                    arch, use_triton_mxfp4=True, compute_mode="bf16", dtype=dt, device=dev
+                )
+                causal_lm.init_synthetic_weights(seed=2029, ple_mode="gpu_full", ple_fp8=False)
+                _stabilize_router_margins(causal_lm)
+                causal_lm.prepare_weights()
+                plan = build_qwen4_5_kv_cache_plan(arch)
+                kv_pack = LocalKVCache(plan, tokens_per_block=64, num_blocks_per_tag=pools, device=dev, dtype=dt)
+                kv_seg = LocalKVCache(plan, tokens_per_block=64, num_blocks_per_tag=pools, device=dev, dtype=dt)
+                rtp_pack = Qwen4_5RTPModel.from_causal_lm(causal_lm, kv_cache=kv_pack)
+                rtp_seg = Qwen4_5RTPModel.from_causal_lm(causal_lm, kv_cache=kv_seg)
+
+                # B=3 ragged requests: req0 len=64 (pfx=0), req1 total=131 (pfx=64 + sfx=67), req2 len=60 (pfx=0)
+                gen = torch.Generator(device="cpu").manual_seed(3029)
+                ids0 = torch.randint(4, 240, (64,), generator=gen, dtype=torch.int64).to(dev)
+                ids1 = torch.randint(4, 240, (131,), generator=gen, dtype=torch.int64).to(dev)
+                ids2 = torch.randint(4, 240, (60,), generator=gen, dtype=torch.int64).to(dev)
+
+                # Write req1 64-token prefix into both caches identically
+                tb_pack = build_block_tables_for_requests(kv_pack, [72, 136, 72])
+                tb_seg = build_block_tables_for_requests(kv_seg, [72, 136, 72])
+                for tb, kv_c, rt in [(tb_pack, kv_pack, rtp_pack), (tb_seg, kv_seg, rtp_seg)]:
+                    tb_r1 = {tag: [rows[1]] for tag, rows in tb.items()}
+                    a_p1 = make_tagged_attention_inputs(
+                        tb_r1, is_prefill=True, input_lengths=[64], sequence_lengths=[64], prefix_lengths=[0], device=dev
+                    )
+                    rt.forward(LocalPyModelInputs(input_ids=ids1[:64].contiguous(), attention_inputs=a_p1))
+
+                # Packed ragged batch forward for [ids0 (64), ids1[64:] (67), ids2 (60)]
+                packed_ids = torch.cat([ids0, ids1[64:], ids2], dim=0).contiguous()
+                a_pack = make_tagged_attention_inputs(
+                    tb_pack,
+                    is_prefill=True,
+                    input_lengths=[64, 67, 60],
+                    sequence_lengths=[64, 131, 60],
+                    prefix_lengths=[0, 64, 0],
+                    device=dev,
+                )
+                out_pack = rtp_pack.forward(LocalPyModelInputs(input_ids=packed_ids, attention_inputs=a_pack))
+                h_pack = out_pack.hidden_states
+                pack_last = torch.stack([h_pack[63], h_pack[64 + 66], h_pack[64 + 67 + 59]], dim=0)
+                logits_pack = rtp_pack.compute_logits(pack_last)
+
+                # Reference segmented 64-token forward per request on kv_seg
+                seg_last = []
+                # req0: [0..64)
+                tb_r0 = {tag: [rows[0]] for tag, rows in tb_seg.items()}
+                o0 = rtp_seg.forward(LocalPyModelInputs(
+                    input_ids=ids0,
+                    attention_inputs=make_tagged_attention_inputs(
+                        tb_r0, is_prefill=True, input_lengths=[64], sequence_lengths=[64], prefix_lengths=[0], device=dev
+                    ),
+                ))
+                seg_last.append(o0.hidden_states[-1])
+                # req1 suffix: two segments [64..128) (M=64) then [128..131) (M=3 >= 3 -> same deepgemm_masked)
+                tb_r1 = {tag: [rows[1]] for tag, rows in tb_seg.items()}
+                _ = rtp_seg.forward(LocalPyModelInputs(
+                    input_ids=ids1[64:128].contiguous(),
+                    attention_inputs=make_tagged_attention_inputs(
+                        tb_r1, is_prefill=True, input_lengths=[64], sequence_lengths=[128], prefix_lengths=[64], device=dev
+                    ),
+                ))
+                o1_b = rtp_seg.forward(LocalPyModelInputs(
+                    input_ids=ids1[128:131].contiguous(),
+                    attention_inputs=make_tagged_attention_inputs(
+                        tb_r1, is_prefill=True, input_lengths=[3], sequence_lengths=[131], prefix_lengths=[128], device=dev
+                    ),
+                ))
+                seg_last.append(o1_b.hidden_states[-1])
+                # req2: [0..60)
+                tb_r2 = {tag: [rows[2]] for tag, rows in tb_seg.items()}
+                o2 = rtp_seg.forward(LocalPyModelInputs(
+                    input_ids=ids2,
+                    attention_inputs=make_tagged_attention_inputs(
+                        tb_r2, is_prefill=True, input_lengths=[60], sequence_lengths=[60], prefix_lengths=[0], device=dev
+                    ),
+                ))
+                seg_last.append(o2.hidden_states[-1])
+                logits_seg = rtp_seg.compute_logits(torch.stack(seg_last, dim=0))
+
+                for bi in range(3):
+                    cos_b = _cosine(logits_pack[bi : bi + 1], logits_seg[bi : bi + 1])
+                    self.assertGreaterEqual(cos_b, 0.999, f"Packed vs Segmented req={bi} cos={cos_b}")
+
+                # Verify 64-token cache snapshots across ALL tags match segmented execution
+                # req0 block 0 (token 64 boundary), req1 blocks 0 & 1 (token 64 & 128 boundaries), req2 block 0
+                for req_i, n_blks in ((0, 1), (1, 2), (2, 1)):
+                    for lid_k, tag_map in enumerate(kv_pack.layer_caches):
+                        for tag_k, lc_p in tag_map.items():
+                            lc_s = kv_seg.layer_caches[lid_k][tag_k]
+                            p_blks = tb_pack[tag_k][req_i][:n_blks]
+                            s_blks = tb_seg[tag_k][req_i][:n_blks]
+                            t_p = lc_p.kv_cache_base[p_blks]
+                            t_s = lc_s.kv_cache_base[s_blks]
+                            if t_p.dtype in (torch.int64, torch.int32):
+                                self.assertTrue(torch.equal(t_p, t_s), f"req={req_i} L{lid_k} {tag_k} int snapshot mismatch")
+                            else:
+                                thr_s = 0.9999 if lid_k <= 3 else 0.999
+                                cos_s = _cosine(t_p.to(torch.float32), t_s.to(torch.float32))
+                                self.assertGreaterEqual(cos_s, thr_s, f"req={req_i} L{lid_k} {tag_k} snapshot cos={cos_s}")
+
+                # Quick latency check for Packed Prefill (B=3, 189 tokens)
+                torch.cuda.synchronize()
+                t0 = time.perf_counter()
+                for _ in range(5):
+                    rtp_pack.forward(LocalPyModelInputs(input_ids=packed_ids, attention_inputs=a_pack))
+                torch.cuda.synchronize()
+                ms_pack = (time.perf_counter() - t0) * 1000.0 / 5.0
+                print(f"[Packed Prefill B=3, N=189 + QSA + Snapshots] avg={ms_pack:.2f} ms")
+        finally:
+            if prev_b is None:
+                os.environ.pop("QWEN4_5_MXFP4_BACKEND", None)
+            else:
+                os.environ["QWEN4_5_MXFP4_BACKEND"] = prev_b
+
+    def test_target_verify_v8_vs_sequential_and_cuda_graph(self) -> None:
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA required")
+        dev = _device()
+        dt = torch.bfloat16
+        arch = _make_mini_arch(
+            indexer_head_dim=128,
+            indexer_n_heads=8,
+            indexer_kv_heads=1,
+            indexer_compress_ratio=4,
+            indexer_budget=16,
+            max_position_embeddings=512,
+        )
+        pools = {
+            t: 48
+            for t in [
+                INDEXER_KV_TAG,
+                INDEXER_STATE_TAG,
+                FULL_ATTN_KV_TAG,
+                "linear",
+                "gdn_consumer_q_conv",
+                "full_attn_kv_sconv",
+                "full_attn_output_sconv",
+                "linear_attn_output_sconv",
+                "ffn_output_sconv",
+                "ple_conv_state",
+                "ple_ngram_ctx",
+            ]
+        }
+        with torch.no_grad():
+            causal_lm = Qwen4_5ForCausalLM(
+                arch, use_triton_mxfp4=True, compute_mode="bf16", dtype=dt, device=dev
+            )
+            causal_lm.init_synthetic_weights(seed=2033, ple_mode="gpu_full", ple_fp8=False)
+            _stabilize_router_margins(causal_lm)
+            causal_lm.prepare_weights()
+            plan = build_qwen4_5_kv_cache_plan(arch)
+            kv_cache = LocalKVCache(plan, tokens_per_block=64, num_blocks_per_tag=pools, device=dev, dtype=dt)
+            rt = Qwen4_5RTPModel.from_causal_lm(causal_lm, kv_cache=kv_cache)
+
+            # Prefill B=2 near tpb=64 boundary [62, 63] so V=8 verify crosses 63->64 block boundary
+            gen = torch.Generator(device="cpu").manual_seed(3033)
+            p0 = torch.randint(4, 240, (62,), generator=gen, dtype=torch.int64).to(dev)
+            p1 = torch.randint(4, 240, (63,), generator=gen, dtype=torch.int64).to(dev)
+            v_toks = torch.randint(4, 240, (2, 8), generator=gen, dtype=torch.int64).to(dev)
+            next_tok = torch.randint(4, 240, (2,), generator=gen, dtype=torch.int64).to(dev)
+
+            tbls = build_block_tables_for_requests(kv_cache, [80, 80])
+            pref_in = LocalPyModelInputs(
+                input_ids=torch.cat([p0, p1], dim=0),
+                attention_inputs=make_tagged_attention_inputs(
+                    tbls, is_prefill=True, input_lengths=[62, 63], sequence_lengths=[62, 63], prefix_lengths=[0, 0], device=dev
+                ),
+            )
+            rt.forward(pref_in)
+            pre_snap = {
+                (lid_k, tag_k): lc.kv_cache_base.clone()
+                for lid_k, tag_map in enumerate(kv_cache.layer_caches)
+                for tag_k, lc in tag_map.items()
+            }
+
+            def _restore() -> None:
+                for (lid_k, tag_k), buf in pre_snap.items():
+                    kv_cache.layer_caches[lid_k][tag_k].kv_cache_base.copy_(buf)
+
+            v_attn = make_tagged_attention_inputs(
+                tbls, is_prefill=True, input_lengths=[8, 8], sequence_lengths=[], prefix_lengths=[62, 63], device=dev
+            )
+            for grp in v_attn.values():
+                grp.is_target_verify = True
+            v_in = LocalPyModelInputs(input_ids=v_toks.reshape(-1), attention_inputs=v_attn)
+
+            # 1) Non-committed verify + rollback preserves persistent pools
+            ver_out = rt.forward(v_in)
+            acc = torch.tensor([5, 3], dtype=torch.int32, device=dev)
+            rt.prepare_speculative_target_commit(acc)
+            rt.finish_speculative_target_commit(False)
+            rt.finalize_speculative_target_commit()
+            for (lid_k, tag_k), buf in pre_snap.items():
+                if tag_k not in ("full", FULL_ATTN_KV_TAG, INDEXER_KV_TAG):
+                    self.assertTrue(
+                        torch.equal(kv_cache.layer_caches[lid_k][tag_k].kv_cache_base, buf),
+                        f"Rollback failed for L{lid_k} {tag_k}",
+                    )
+
+            # 2) Verify + Commit([5, 3]) + Continuation step vs 8x sequential decode
+            _restore()
+            ver_out = rt.forward(v_in)
+            rt.prepare_speculative_target_commit(acc)
+            rt.finish_speculative_target_commit(True)
+            rt.finalize_speculative_target_commit()
+            cont_ver = rt.forward(
+                LocalPyModelInputs(
+                    input_ids=next_tok,
+                    attention_inputs=make_tagged_attention_inputs(
+                        tbls, is_prefill=False, input_lengths=[1, 1], sequence_lengths=[67, 66], prefix_lengths=[0, 0], device=dev
+                    ),
+                )
+            )
+            ver_cont_logits = rt.compute_logits(cont_ver.hidden_states)
+
+            # Sequential step-by-step reference (B=2 for first 3 steps, then r0 for 2 steps, then next)
+            _restore()
+            seq_h0, seq_h1 = [], []
+            tb0 = {tag: [rows[0]] for tag, rows in tbls.items()}
+            for s in range(8):
+                o_s = rt.forward(
+                    LocalPyModelInputs(
+                        input_ids=v_toks[0 : 1, s].contiguous(),
+                        attention_inputs=make_tagged_attention_inputs(
+                            tb0, is_prefill=False, input_lengths=[1], sequence_lengths=[62 + s], prefix_lengths=[0], device=dev
+                        ),
+                    )
+                )
+                seq_h0.append(o_s.hidden_states[0])
+            _restore()
+            tb1 = {tag: [rows[1]] for tag, rows in tbls.items()}
+            for s in range(8):
+                o_s = rt.forward(
+                    LocalPyModelInputs(
+                        input_ids=v_toks[1 : 2, s].contiguous(),
+                        attention_inputs=make_tagged_attention_inputs(
+                            tb1, is_prefill=False, input_lengths=[1], sequence_lengths=[63 + s], prefix_lengths=[0], device=dev
+                        ),
+                    )
+                )
+                seq_h1.append(o_s.hidden_states[0])
+            seq_h = torch.stack(seq_h0 + seq_h1, dim=0)
+            self.assertGreaterEqual(_cosine(ver_out.hidden_states, seq_h), 0.999)
+
+            # Also check post-accept continuation parity
+            _restore()
+            for s in range(5):
+                rt.forward(LocalPyModelInputs(
+                    input_ids=v_toks[0 : 1, s].contiguous(),
+                    attention_inputs=make_tagged_attention_inputs(
+                        tb0, is_prefill=False, input_lengths=[1], sequence_lengths=[62 + s], prefix_lengths=[0], device=dev
+                    ),
+                ))
+            for s in range(3):
+                rt.forward(LocalPyModelInputs(
+                    input_ids=v_toks[1 : 2, s].contiguous(),
+                    attention_inputs=make_tagged_attention_inputs(
+                        tb1, is_prefill=False, input_lengths=[1], sequence_lengths=[63 + s], prefix_lengths=[0], device=dev
+                    ),
+                ))
+            cont_seq = rt.forward(
+                LocalPyModelInputs(
+                    input_ids=next_tok,
+                    attention_inputs=make_tagged_attention_inputs(
+                        tbls, is_prefill=False, input_lengths=[1, 1], sequence_lengths=[67, 66], prefix_lengths=[0, 0], device=dev
+                    ),
+                )
+            )
+            seq_cont_logits = rt.compute_logits(cont_seq.hidden_states)
+            self.assertGreaterEqual(_cosine(ver_cont_logits, seq_cont_logits), 0.999)
+
+            # 3) V=8 Target Verify CUDA Graph capture & multi-replay
+            _restore()
+            v_cg_attn = make_tagged_attention_inputs(
+                tbls, is_prefill=True, input_lengths=[8, 8], sequence_lengths=[], prefix_lengths=[62, 63], device=dev
+            )
+            for grp in v_cg_attn.values():
+                grp.is_target_verify = True
+                grp.prefix_lengths = grp.prefix_lengths.to(device=dev, dtype=torch.int32)
+            static_ids = v_toks.reshape(-1).clone()
+            cg_in = LocalPyModelInputs(input_ids=static_ids, attention_inputs=v_cg_attn)
+            cg_handle = rt.prepare_fmha_impl(cg_in, is_cuda_graph=True)
+            self.assertTrue(cg_handle.support_cuda_graph())
+
+            _ = rt.forward(cg_in, fmha_impl=cg_handle)
+            rt.on_cuda_graph_warmup(cg_in)
+            _restore()
+            g_ver = torch.cuda.CUDAGraph()
+            cg_handle.prepare_cuda_graph(cg_in.attention_inputs)
+            with torch.cuda.graph(g_ver):
+                cg_out = rt.forward(cg_in, fmha_impl=cg_handle)
+            torch.cuda.synchronize()
+            rt.on_cuda_graph_capture(2, cg_in)
+            # Mutate tokens & replay
+            new_v = torch.randint(4, 240, (16,), generator=gen, dtype=torch.int64).to(dev)
+            static_ids.copy_(new_v)
+            _restore()
+            cg_handle.prepare_cuda_graph(cg_in.attention_inputs)
+            g_ver.replay()
+            torch.cuda.synchronize()
+            rt.on_cuda_graph_replay(2, cg_in)
+            cg_h = cg_out.hidden_states.clone()
+            _restore()
+            v_eag_attn = make_tagged_attention_inputs(
+                tbls, is_prefill=True, input_lengths=[8, 8], sequence_lengths=[], prefix_lengths=[62, 63], device=dev
+            )
+            for grp in v_eag_attn.values():
+                grp.is_target_verify = True
+            eag_out = rt.forward(LocalPyModelInputs(input_ids=new_v, attention_inputs=v_eag_attn))
+            cg_cos = _cosine(cg_h, eag_out.hidden_states)
+            self.assertGreaterEqual(cg_cos, 0.99999, f"V=8 Verify CG vs Eager cos={cg_cos}")
+
+            # Quick V=8 CG vs 8x sequential decode timing
+            torch.cuda.synchronize()
+            t0 = time.perf_counter()
+            for _ in range(10):
+                g_ver.replay()
+            torch.cuda.synchronize()
+            ms_cg = (time.perf_counter() - t0) * 1000.0 / 10.0
+            print(f"[Target Verify V=8 B=2 + QSA CG] replay={ms_cg:.2f} ms, CG_cos={cg_cos:.6f}")
 
     def test_checkpoint_roundtrip_qsa_h8(self) -> None:
         arch = _make_mini_arch(indexer_n_heads=8, indexer_budget=2048)

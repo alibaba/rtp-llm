@@ -395,7 +395,7 @@ def hc_combine_and_norm_triton(
         return combined, normed
 
     block = max(128, triton.next_power_of_2(hidden_size))
-    num_warps = 8 if block >= 4096 else 4
+    num_warps = 4
     _hc_combine_and_norm_kernel[(rows, hc_count)](
         res_c,
         sub_c,
@@ -608,7 +608,7 @@ class Qwen4_5HyperConnection(nn.Module):
         w_down = self.input_mix_weight_down
         w_inj = self.block_inject_weight
         assert w_down is not None and w_inj is not None
-        if torch.is_grad_enabled() or w_down.requires_grad or w_inj.requires_grad:
+        if torch.is_grad_enabled() and (w_down.requires_grad or w_inj.requires_grad):
             return torch.cat([w_down, w_inj], dim=0)
         key = (w_down.data_ptr(), w_down._version, w_inj.data_ptr(), w_inj._version)
         if self._fused_down_inject_key != key or self._fused_down_inject_weight is None:

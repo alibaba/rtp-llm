@@ -22,7 +22,7 @@ Architecture (1109-bf16-re-mxfp4-ple-fp8):
 
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -169,32 +169,48 @@ def _rms_norm_gated_kernel(
     Z_ptr,
     W_ptr,
     Y_ptr,
-    stride_xb,
-    stride_xt,
-    stride_xh,
-    stride_xd,
-    stride_zb,
-    stride_zt,
-    stride_zh,
-    stride_zd,
-    stride_yb,
-    stride_yt,
-    stride_yh,
-    stride_yd,
+    stride_xb: tl.int64,
+    stride_xt: tl.int64,
+    stride_xh: tl.int64,
+    stride_xd: tl.int64,
+    stride_zb: tl.int64,
+    stride_zt: tl.int64,
+    stride_zhk: tl.int64,
+    stride_zsub: tl.int64,
+    stride_zd: tl.int64,
+    stride_yb: tl.int64,
+    stride_yt: tl.int64,
+    stride_yh: tl.int64,
+    stride_yd: tl.int64,
     T,
     eps,
+    GQA_RATIO: tl.constexpr,
     D: tl.constexpr,
     USE_SIGMOID: tl.constexpr,
 ):
     """Per-head RMSNorm (standard weight, NOT 1+w) followed by sigmoid/silu gating."""
-    bt = tl.program_id(0)
-    h = tl.program_id(1)
+    bt = tl.program_id(0).to(tl.int64)
+    h = tl.program_id(1).to(tl.int64)
     b = bt // T
     t = bt % T
 
     offs = tl.arange(0, D)
     x = tl.load(X_ptr + b * stride_xb + t * stride_xt + h * stride_xh + offs * stride_xd).to(tl.float32)
-    z = tl.load(Z_ptr + b * stride_zb + t * stride_zt + h * stride_zh + offs * stride_zd).to(tl.float32)
+    if GQA_RATIO > 1:
+        h_k = h // GQA_RATIO
+        h_sub = h % GQA_RATIO
+        z = tl.load(
+            Z_ptr
+            + b * stride_zb
+            + t * stride_zt
+            + h_k * stride_zhk
+            + h_sub * stride_zsub
+            + offs * stride_zd
+        ).to(tl.float32)
+    else:
+        z = tl.load(
+            Z_ptr + b * stride_zb + t * stride_zt + h * stride_zhk + offs * stride_zd
+        ).to(tl.float32)
     w = tl.load(W_ptr + offs).to(tl.float32)
 
     rstd = tl.rsqrt(tl.sum(x * x, axis=0) * (1.0 / D) + eps)
@@ -229,6 +245,13 @@ class RMSNormGated(nn.Module):
         self.weight = nn.Parameter(torch.ones(dim))
 
     def forward(self, x: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
+        is_5d_gate = (
+            gate.ndim == 5
+            and x.ndim == 4
+            and gate.shape[:2] == x.shape[:2]
+            and gate.shape[2] * gate.shape[3] == x.shape[2]
+            and gate.shape[4] == self.dim
+        )
         if (
             self.norm_before_gate
             and self.activation in ("sigmoid", "silu")
@@ -236,6 +259,7 @@ class RMSNormGated(nn.Module):
             and gate.is_cuda
             and self.weight.is_cuda
             and x.ndim == 4
+            and (gate.ndim == 4 or is_5d_gate)
             and x.shape[-1] == self.dim
             and (self.dim & (self.dim - 1)) == 0
             and self.dim <= 512
@@ -243,6 +267,24 @@ class RMSNormGated(nn.Module):
         ):
             bsz, seq_len, num_heads, dim = x.shape
             out = torch.empty((bsz, seq_len, num_heads, dim), dtype=x.dtype, device=x.device)
+            if is_5d_gate:
+                gqa_ratio = int(gate.shape[3])
+                z_sb, z_st, z_shk, z_zsub, z_sd = (
+                    gate.stride(0),
+                    gate.stride(1),
+                    gate.stride(2),
+                    gate.stride(3),
+                    gate.stride(4),
+                )
+            else:
+                gqa_ratio = 1
+                z_sb, z_st, z_shk, z_zsub, z_sd = (
+                    gate.stride(0),
+                    gate.stride(1),
+                    gate.stride(2),
+                    0,
+                    gate.stride(3),
+                )
             _rms_norm_gated_kernel[(bsz * seq_len, num_heads)](
                 x,
                 gate,
@@ -252,16 +294,18 @@ class RMSNormGated(nn.Module):
                 x.stride(1),
                 x.stride(2),
                 x.stride(3),
-                gate.stride(0),
-                gate.stride(1),
-                gate.stride(2),
-                gate.stride(3),
+                z_sb,
+                z_st,
+                z_shk,
+                z_zsub,
+                z_sd,
                 out.stride(0),
                 out.stride(1),
                 out.stride(2),
                 out.stride(3),
                 seq_len,
                 float(self.eps),
+                GQA_RATIO=gqa_ratio,
                 D=dim,
                 USE_SIGMOID=(self.activation == "sigmoid"),
                 num_warps=2 if dim <= 64 else 4,
@@ -269,7 +313,8 @@ class RMSNormGated(nn.Module):
             return out
 
         x_f = x.float()
-        g_f = gate.float()
+        g_t = gate.reshape(x.shape) if is_5d_gate else gate
+        g_f = g_t.float()
         gate_val = torch.sigmoid(g_f) if self.activation == "sigmoid" else F.silu(g_f)
         if not self.norm_before_gate:
             x_f = x_f * gate_val
@@ -1211,6 +1256,1287 @@ def gdn_chunk_prefill_triton(
 
 
 # ---------------------------------------------------------------------------
+# Fused Unpack + Conv1d Kernels (Decode, Target Verify, Packed Ragged Prefill)
+# ---------------------------------------------------------------------------
+
+
+@triton.jit
+def _gdn_map_conv_tile(
+    c_start,
+    offs,
+    KEY_DIM: tl.constexpr,
+    D_K: tl.constexpr,
+    D_V: tl.constexpr,
+    GQA_RATIO: tl.constexpr,
+    GROUP_STRIDE: tl.constexpr,
+    IS_CONSUMER: tl.constexpr,
+):
+    """Map a 64-wide conv channel tile to (qkvz_col, dst_kind 0=Q/1=K/2=V, dst_offset)."""
+    if IS_CONSUMER:
+        h_k = c_start // D_K
+        qkvz_col = h_k * GROUP_STRIDE + offs
+        return qkvz_col, 0, c_start + offs
+    if c_start < KEY_DIM:
+        h_k = c_start // D_K
+        qkvz_col = h_k * GROUP_STRIDE + offs
+        return qkvz_col, 0, c_start + offs
+    if c_start < 2 * KEY_DIM:
+        c2 = c_start - KEY_DIM
+        h_k = c2 // D_K
+        qkvz_col = h_k * GROUP_STRIDE + D_K + offs
+        return qkvz_col, 1, c2 + offs
+    c3 = c_start - 2 * KEY_DIM
+    v_group: tl.constexpr = GQA_RATIO * D_V
+    h_k = c3 // v_group
+    in_v = c3 % v_group
+    qkvz_col = h_k * GROUP_STRIDE + 2 * D_K + in_v + offs
+    return qkvz_col, 2, c3 + offs
+
+
+@triton.jit
+def _gdn_fused_unpack_conv1d_decode_k4_kernel(
+    QKVZ_ptr,
+    W_ptr,
+    STATE_ptr,
+    Q_ptr,
+    K_ptr,
+    V_ptr,
+    stride_qb: tl.int64,
+    stride_qc: tl.int64,
+    stride_sb: tl.int64,
+    stride_sc: tl.int64,
+    stride_sk: tl.int64,
+    stride_out_qb: tl.int64,
+    stride_out_kb: tl.int64,
+    stride_out_vb: tl.int64,
+    KEY_DIM: tl.constexpr,
+    D_K: tl.constexpr,
+    D_V: tl.constexpr,
+    GQA_RATIO: tl.constexpr,
+    GROUP_STRIDE: tl.constexpr,
+    IS_CONSUMER: tl.constexpr,
+    RESIDUAL: tl.constexpr,
+    BLOCK_C: tl.constexpr,
+):
+    """Fused T=1 unpack qkvz + K=4 causal dwconv1d + BF16 round + SiLU + state roll."""
+    b = tl.program_id(0).to(tl.int64)
+    c_start = tl.program_id(1).to(tl.int64) * BLOCK_C
+    offs = tl.arange(0, BLOCK_C).to(tl.int64)
+    c_offs = c_start + offs
+
+    qkvz_col, kind, dst_off = _gdn_map_conv_tile(
+        c_start, offs, KEY_DIM, D_K, D_V, GQA_RATIO, GROUP_STRIDE, IS_CONSUMER
+    )
+    x0_raw = tl.load(QKVZ_ptr + b * stride_qb + qkvz_col * stride_qc)
+
+    s_base = STATE_ptr + b * stride_sb + c_offs * stride_sc
+    s0_raw = tl.load(s_base + 0 * stride_sk)
+    s1_raw = tl.load(s_base + 1 * stride_sk)
+    s2_raw = tl.load(s_base + 2 * stride_sk)
+
+    w_base = W_ptr + c_offs * 4
+    w0 = tl.load(w_base + 0).to(tl.float32)
+    w1 = tl.load(w_base + 1).to(tl.float32)
+    w2 = tl.load(w_base + 2).to(tl.float32)
+    w3 = tl.load(w_base + 3).to(tl.float32)
+
+    x0_f = x0_raw.to(tl.float32)
+    y = s0_raw.to(tl.float32) * w0 + s1_raw.to(tl.float32) * w1 + s2_raw.to(tl.float32) * w2 + x0_f * w3
+    out_ty = Q_ptr.dtype.element_ty
+    y = y.to(out_ty).to(tl.float32)
+    y = y * tl.sigmoid(y)
+    if RESIDUAL:
+        y = y + x0_f
+
+    if kind == 0:
+        tl.store(Q_ptr + b * stride_out_qb + dst_off, y.to(out_ty))
+    elif kind == 1:
+        tl.store(K_ptr + b * stride_out_kb + dst_off, y.to(out_ty))
+    else:
+        tl.store(V_ptr + b * stride_out_vb + dst_off, y.to(out_ty))
+
+    st_ty = STATE_ptr.dtype.element_ty
+    tl.store(s_base + 0 * stride_sk, s1_raw.to(st_ty))
+    tl.store(s_base + 1 * stride_sk, s2_raw.to(st_ty))
+    tl.store(s_base + 2 * stride_sk, x0_raw.to(st_ty))
+
+
+@triton.jit
+def _gdn_fused_unpack_conv1d_verify_k4_kernel(
+    QKVZ_ptr,
+    W_ptr,
+    INIT_STATE_ptr,
+    STAGE_CONV_ptr,
+    Q_ptr,
+    K_ptr,
+    V_ptr,
+    stride_qb: tl.int64,
+    stride_qv: tl.int64,
+    stride_qc: tl.int64,
+    stride_sb: tl.int64,
+    stride_sc: tl.int64,
+    stride_sk: tl.int64,
+    stride_st_b: tl.int64,
+    stride_st_v: tl.int64,
+    stride_st_c: tl.int64,
+    stride_st_k: tl.int64,
+    stride_out_qb: tl.int64,
+    stride_out_qv: tl.int64,
+    stride_out_kb: tl.int64,
+    stride_out_kv: tl.int64,
+    stride_out_vb: tl.int64,
+    stride_out_vv: tl.int64,
+    V_STEPS: tl.constexpr,
+    KEY_DIM: tl.constexpr,
+    D_K: tl.constexpr,
+    D_V: tl.constexpr,
+    GQA_RATIO: tl.constexpr,
+    GROUP_STRIDE: tl.constexpr,
+    IS_CONSUMER: tl.constexpr,
+    RESIDUAL: tl.constexpr,
+    HAS_STAGE: tl.constexpr,
+    BLOCK_C: tl.constexpr,
+):
+    """Fused V-step verify unpack qkvz + K=4 causal dwconv1d + SiLU + rollback stage write."""
+    b = tl.program_id(0).to(tl.int64)
+    c_start = tl.program_id(1).to(tl.int64) * BLOCK_C
+    offs = tl.arange(0, BLOCK_C).to(tl.int64)
+    c_offs = c_start + offs
+
+    qkvz_col, kind, dst_off = _gdn_map_conv_tile(
+        c_start, offs, KEY_DIM, D_K, D_V, GQA_RATIO, GROUP_STRIDE, IS_CONSUMER
+    )
+
+    s_base = INIT_STATE_ptr + b * stride_sb + c_offs * stride_sc
+    s0_raw = tl.load(s_base + 0 * stride_sk)
+    s1_raw = tl.load(s_base + 1 * stride_sk)
+    s2_raw = tl.load(s_base + 2 * stride_sk)
+
+    w_base = W_ptr + c_offs * 4
+    w0 = tl.load(w_base + 0).to(tl.float32)
+    w1 = tl.load(w_base + 1).to(tl.float32)
+    w2 = tl.load(w_base + 2).to(tl.float32)
+    w3 = tl.load(w_base + 3).to(tl.float32)
+
+    out_ty = Q_ptr.dtype.element_ty
+    st_ty = STAGE_CONV_ptr.dtype.element_ty
+
+    for v in tl.static_range(V_STEPS):
+        x_raw = tl.load(QKVZ_ptr + b * stride_qb + v * stride_qv + qkvz_col * stride_qc)
+        x_f = x_raw.to(tl.float32)
+        y = s0_raw.to(tl.float32) * w0 + s1_raw.to(tl.float32) * w1 + s2_raw.to(tl.float32) * w2 + x_f * w3
+        y = y.to(out_ty).to(tl.float32)
+        y = y * tl.sigmoid(y)
+        if RESIDUAL:
+            y = y + x_f
+
+        if kind == 0:
+            tl.store(Q_ptr + b * stride_out_qb + v * stride_out_qv + dst_off, y.to(out_ty))
+        elif kind == 1:
+            tl.store(K_ptr + b * stride_out_kb + v * stride_out_kv + dst_off, y.to(out_ty))
+        else:
+            tl.store(V_ptr + b * stride_out_vb + v * stride_out_vv + dst_off, y.to(out_ty))
+
+        s0_raw = s1_raw
+        s1_raw = s2_raw
+        s2_raw = x_raw
+        if HAS_STAGE:
+            st_v = STAGE_CONV_ptr + b * stride_st_b + v * stride_st_v + c_offs * stride_st_c
+            tl.store(st_v + 0 * stride_st_k, s0_raw.to(st_ty))
+            tl.store(st_v + 1 * stride_st_k, s1_raw.to(st_ty))
+            tl.store(st_v + 2 * stride_st_k, s2_raw.to(st_ty))
+
+
+@triton.jit
+def _gdn_fused_unpack_conv1d_ragged_kernel(
+    QKVZ_ptr,
+    W_ptr,
+    INIT_STATE_ptr,
+    Q_ptr,
+    K_ptr,
+    V_ptr,
+    CU_SEQLENS_ptr,
+    TILE_REQ_ptr,
+    TILE_T0_ptr,
+    stride_qn: tl.int64,
+    stride_qc: tl.int64,
+    stride_ib: tl.int64,
+    stride_ic: tl.int64,
+    stride_ik: tl.int64,
+    stride_out_qn: tl.int64,
+    stride_out_kn: tl.int64,
+    stride_out_vn: tl.int64,
+    KEY_DIM: tl.constexpr,
+    D_K: tl.constexpr,
+    D_V: tl.constexpr,
+    GQA_RATIO: tl.constexpr,
+    GROUP_STRIDE: tl.constexpr,
+    IS_CONSUMER: tl.constexpr,
+    HAS_INIT: tl.constexpr,
+    RESIDUAL: tl.constexpr,
+    SUB_T: tl.constexpr,
+    SUB_NUM: tl.constexpr,
+    BLOCK_C: tl.constexpr,
+):
+    """1D register sliding-window fused unpack qkvz + K=4 causal dwconv1d + SiLU."""
+    pid0 = tl.program_id(0).to(tl.int64)
+    tile_id = pid0 // SUB_NUM
+    sub_id = pid0 % SUB_NUM
+    c_start = tl.program_id(1).to(tl.int64) * BLOCK_C
+    b = tl.load(TILE_REQ_ptr + tile_id).to(tl.int64)
+    t_start = tl.load(TILE_T0_ptr + tile_id).to(tl.int64) + sub_id * SUB_T
+    req_start = tl.load(CU_SEQLENS_ptr + b).to(tl.int64)
+    req_end = tl.load(CU_SEQLENS_ptr + b + 1).to(tl.int64)
+    req_len = req_end - req_start
+    if t_start >= req_len:
+        return
+    tile_len = tl.minimum(SUB_T, req_len - t_start)
+
+    offs = tl.arange(0, BLOCK_C).to(tl.int64)
+    c_offs = c_start + offs
+    qkvz_col, kind, dst_off = _gdn_map_conv_tile(
+        c_start, offs, KEY_DIM, D_K, D_V, GQA_RATIO, GROUP_STRIDE, IS_CONSUMER
+    )
+
+    w_base = W_ptr + c_offs * 4
+    w0 = tl.load(w_base + 0).to(tl.float32)
+    w1 = tl.load(w_base + 1).to(tl.float32)
+    w2 = tl.load(w_base + 2).to(tl.float32)
+    w3 = tl.load(w_base + 3).to(tl.float32)
+
+    q_col_off = qkvz_col * stride_qc
+    if t_start >= 3:
+        s0 = tl.load(QKVZ_ptr + (req_start + t_start - 3) * stride_qn + q_col_off).to(tl.float32)
+        s1 = tl.load(QKVZ_ptr + (req_start + t_start - 2) * stride_qn + q_col_off).to(tl.float32)
+        s2 = tl.load(QKVZ_ptr + (req_start + t_start - 1) * stride_qn + q_col_off).to(tl.float32)
+    else:
+        t0 = t_start - 3
+        t1 = t_start - 2
+        t2 = t_start - 1
+        s0 = tl.zeros((BLOCK_C,), dtype=tl.float32)
+        s1 = tl.zeros((BLOCK_C,), dtype=tl.float32)
+        s2 = tl.zeros((BLOCK_C,), dtype=tl.float32)
+        if t0 >= 0:
+            s0 = tl.load(QKVZ_ptr + (req_start + t0) * stride_qn + q_col_off).to(tl.float32)
+        elif HAS_INIT:
+            s0 = tl.load(INIT_STATE_ptr + b * stride_ib + c_offs * stride_ic + (t0 + 3) * stride_ik).to(tl.float32)
+        if t1 >= 0:
+            s1 = tl.load(QKVZ_ptr + (req_start + t1) * stride_qn + q_col_off).to(tl.float32)
+        elif HAS_INIT:
+            s1 = tl.load(INIT_STATE_ptr + b * stride_ib + c_offs * stride_ic + (t1 + 3) * stride_ik).to(tl.float32)
+        if t2 >= 0:
+            s2 = tl.load(QKVZ_ptr + (req_start + t2) * stride_qn + q_col_off).to(tl.float32)
+        elif HAS_INIT:
+            s2 = tl.load(INIT_STATE_ptr + b * stride_ib + c_offs * stride_ic + (t2 + 3) * stride_ik).to(tl.float32)
+
+    out_ty = Q_ptr.dtype.element_ty
+    in_ptr = QKVZ_ptr + (req_start + t_start) * stride_qn + q_col_off
+    if kind == 0:
+        out_ptr = Q_ptr + (req_start + t_start) * stride_out_qn + dst_off
+        stride_out = stride_out_qn
+    elif kind == 1:
+        out_ptr = K_ptr + (req_start + t_start) * stride_out_kn + dst_off
+        stride_out = stride_out_kn
+    else:
+        out_ptr = V_ptr + (req_start + t_start) * stride_out_vn + dst_off
+        stride_out = stride_out_vn
+
+    for _dt in range(tile_len):
+        xf = tl.load(in_ptr).to(tl.float32)
+        acc = s0 * w0 + s1 * w1 + s2 * w2 + xf * w3
+        acc = acc.to(out_ty).to(tl.float32)
+        acc = acc * tl.sigmoid(acc)
+        if RESIDUAL:
+            acc = acc + xf
+        tl.store(out_ptr, acc.to(out_ty))
+        s0 = s1
+        s1 = s2
+        s2 = xf
+        in_ptr += stride_qn
+        out_ptr += stride_out
+
+
+@triton.jit
+def _gdn_scatter_qkvz_conv_snapshots_ragged_kernel(
+    QKVZ_ptr,
+    INIT_STATE_ptr,
+    CU_SEQLENS_ptr,
+    SNAP_TOK_ptr,
+    SNAP_REQ_ptr,
+    SNAP_DST_ptr,
+    DST_ptr,
+    stride_qn: tl.int64,
+    stride_qc: tl.int64,
+    stride_ib: tl.int64,
+    stride_ic: tl.int64,
+    stride_ik: tl.int64,
+    dst_stride_row: tl.int64,
+    dst_col_offset: tl.int64,
+    dst_rows: tl.int64,
+    KEY_DIM: tl.constexpr,
+    D_K: tl.constexpr,
+    D_V: tl.constexpr,
+    GQA_RATIO: tl.constexpr,
+    GROUP_STRIDE: tl.constexpr,
+    IS_CONSUMER: tl.constexpr,
+    HAS_INIT: tl.constexpr,
+    SKIP_INVALID_PHYS: tl.constexpr,
+    BLOCK_C: tl.constexpr,
+):
+    """Scatter 3-token pre-conv boundary states directly from packed qkvz without intermediate buffer."""
+    s_id = tl.program_id(0).to(tl.int64)
+    dst_idx = tl.load(SNAP_DST_ptr + s_id).to(tl.int64)
+    if SKIP_INVALID_PHYS:
+        if dst_idx <= 0 or dst_idx >= dst_rows:
+            return
+    g_tok = tl.load(SNAP_TOK_ptr + s_id).to(tl.int64)
+    b = tl.load(SNAP_REQ_ptr + s_id).to(tl.int64)
+    req_start = tl.load(CU_SEQLENS_ptr + b).to(tl.int64)
+    local_t = g_tok - req_start
+
+    c_start = tl.program_id(1).to(tl.int64) * BLOCK_C
+    offs = tl.arange(0, BLOCK_C).to(tl.int64)
+    c_offs = c_start + offs
+    qkvz_col, _kind, _dst_off = _gdn_map_conv_tile(
+        c_start, offs, KEY_DIM, D_K, D_V, GQA_RATIO, GROUP_STRIDE, IS_CONSUMER
+    )
+
+    dst_base = DST_ptr + dst_idx * dst_stride_row + dst_col_offset + c_offs * 3
+    dst_ty = DST_ptr.dtype.element_ty
+    for j in tl.static_range(3):
+        src_local = local_t - 2 + j
+        if src_local >= 0:
+            val = tl.load(
+                QKVZ_ptr + (req_start + src_local) * stride_qn + qkvz_col * stride_qc
+            )
+        elif HAS_INIT:
+            val = tl.load(
+                INIT_STATE_ptr
+                + b * stride_ib
+                + c_offs * stride_ic
+                + (src_local + 3) * stride_ik
+            )
+        else:
+            val = tl.zeros((BLOCK_C,), dtype=dst_ty)
+        tl.store(dst_base + j, val.to(dst_ty))
+
+
+@triton.jit
+def _gdn_verify_scan_kernel(
+    Q_ptr,
+    K_ptr,
+    V_ptr,
+    G_ptr,
+    Beta_ptr,
+    InitState_ptr,
+    StageState_ptr,
+    Out_ptr,
+    stride_qb: tl.int64,
+    stride_qv: tl.int64,
+    stride_qhk: tl.int64,
+    stride_qd: tl.int64,
+    stride_kb: tl.int64,
+    stride_kv: tl.int64,
+    stride_khk: tl.int64,
+    stride_kd: tl.int64,
+    stride_vb: tl.int64,
+    stride_vv: tl.int64,
+    stride_vhv: tl.int64,
+    stride_vd: tl.int64,
+    stride_gb: tl.int64,
+    stride_gv: tl.int64,
+    stride_ghv: tl.int64,
+    stride_bb: tl.int64,
+    stride_bv: tl.int64,
+    stride_bhv: tl.int64,
+    stride_sb: tl.int64,
+    stride_shv: tl.int64,
+    stride_sk: tl.int64,
+    stride_sv: tl.int64,
+    stride_ssb: tl.int64,
+    stride_ssv: tl.int64,
+    stride_sshv: tl.int64,
+    stride_ssk: tl.int64,
+    stride_ssvv: tl.int64,
+    stride_ob: tl.int64,
+    stride_ov: tl.int64,
+    stride_ohv: tl.int64,
+    stride_od: tl.int64,
+    scale,
+    l2_eps,
+    V_STEPS: tl.constexpr,
+    GQA_RATIO: tl.constexpr,
+    D_K: tl.constexpr,
+    D_V: tl.constexpr,
+    BLOCK_DV: tl.constexpr,
+    HAS_INIT_STATE: tl.constexpr,
+    HAS_STAGE_STATE: tl.constexpr,
+):
+    """Single-launch GDN verify scan keeping [D_K, BLOCK_DV] FP32 SSM state in registers over V steps."""
+    b = tl.program_id(0).to(tl.int64)
+    h_v = tl.program_id(1).to(tl.int64)
+    dv_blk = tl.program_id(2).to(tl.int64)
+    h_k = h_v // GQA_RATIO
+
+    offs_k = tl.arange(0, D_K)
+    offs_v = dv_blk * BLOCK_DV + tl.arange(0, BLOCK_DV)
+
+    if HAS_INIT_STATE:
+        h = tl.load(
+            InitState_ptr
+            + b * stride_sb
+            + h_v * stride_shv
+            + offs_k[:, None] * stride_sk
+            + offs_v[None, :] * stride_sv
+        ).to(tl.float32)
+    else:
+        h = tl.zeros((D_K, BLOCK_DV), dtype=tl.float32)
+
+    q_base = Q_ptr + b * stride_qb + h_k * stride_qhk + offs_k * stride_qd
+    k_base = K_ptr + b * stride_kb + h_k * stride_khk + offs_k * stride_kd
+    v_base = V_ptr + b * stride_vb + h_v * stride_vhv + offs_v * stride_vd
+    g_base = G_ptr + b * stride_gb + h_v * stride_ghv
+    b_base = Beta_ptr + b * stride_bb + h_v * stride_bhv
+    o_base = Out_ptr + b * stride_ob + h_v * stride_ohv + offs_v * stride_od
+    st_base = (
+        StageState_ptr
+        + b * stride_ssb
+        + h_v * stride_sshv
+        + offs_k[:, None] * stride_ssk
+        + offs_v[None, :] * stride_ssvv
+    )
+    out_dtype = Out_ptr.dtype.element_ty
+
+    for t in tl.static_range(V_STEPS):
+        q_t = tl.load(q_base + t * stride_qv).to(tl.float32)
+        k_t = tl.load(k_base + t * stride_kv).to(tl.float32)
+        v_t = tl.load(v_base + t * stride_vv).to(tl.float32)
+        g_t = tl.load(g_base + t * stride_gv).to(tl.float32)
+        beta_t = tl.load(b_base + t * stride_bv).to(tl.float32)
+
+        q_t = q_t * (tl.rsqrt(tl.sum(q_t * q_t, axis=0) + l2_eps) * scale)
+        k_t = k_t * tl.rsqrt(tl.sum(k_t * k_t, axis=0) + l2_eps)
+
+        h = h * tl.exp(g_t)
+        v_pred = tl.sum(h * k_t[:, None], axis=0)
+        delta = (v_t - v_pred) * beta_t
+        h = h + k_t[:, None] * delta[None, :]
+        o_t = tl.sum(h * q_t[:, None], axis=0)
+
+        tl.store(o_base + t * stride_ov, o_t.to(out_dtype))
+        if HAS_STAGE_STATE:
+            tl.store(st_base + t * stride_ssv, h)
+
+
+@triton.jit
+def _yoco_gdn_verify_readout_kernel(
+    Q_ptr,
+    S_ptr,
+    Out_ptr,
+    stride_qb: tl.int64,
+    stride_qv: tl.int64,
+    stride_qhk: tl.int64,
+    stride_qd: tl.int64,
+    stride_sb: tl.int64,
+    stride_sv: tl.int64,
+    stride_shv: tl.int64,
+    stride_sk: tl.int64,
+    stride_svv: tl.int64,
+    stride_ob: tl.int64,
+    stride_ov: tl.int64,
+    stride_ohv: tl.int64,
+    stride_od: tl.int64,
+    V_STEPS: tl.constexpr,
+    scale,
+    eps,
+    GQA_RATIO: tl.constexpr,
+    D_K: tl.constexpr,
+    D_V: tl.constexpr,
+):
+    """Fused batched V-step YoCo GDN verify readout against source per-step SSM states."""
+    bv = tl.program_id(0).to(tl.int64)
+    h_v = tl.program_id(1).to(tl.int64)
+    b = bv // V_STEPS
+    t = bv % V_STEPS
+    h_k = h_v // GQA_RATIO
+
+    offs_k = tl.arange(0, D_K)
+    offs_v = tl.arange(0, D_V)
+
+    q = tl.load(
+        Q_ptr + b * stride_qb + t * stride_qv + h_k * stride_qhk + offs_k * stride_qd
+    ).to(tl.float32)
+    q_scaled = q * (tl.rsqrt(tl.sum(q * q, axis=0) + eps) * scale)
+
+    s = tl.load(
+        S_ptr
+        + b * stride_sb
+        + t * stride_sv
+        + h_v * stride_shv
+        + offs_k[:, None] * stride_sk
+        + offs_v[None, :] * stride_svv
+    ).to(tl.float32)
+
+    out = tl.sum(s * q_scaled[:, None], axis=0)
+    tl.store(
+        Out_ptr + b * stride_ob + t * stride_ov + h_v * stride_ohv + offs_v * stride_od,
+        out.to(Out_ptr.dtype.element_ty),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Packed Ragged GDN Chunked Parallel Prefill + Block-Boundary Snapshots
+# ---------------------------------------------------------------------------
+
+
+@triton.jit
+def _gdn_chunk_prep_wy_ragged_kernel(
+    K_ptr,
+    V_ptr,
+    G_ptr,
+    Beta_ptr,
+    CU_SEQLENS_ptr,
+    CHUNK_REQ_ptr,
+    CHUNK_T0_ptr,
+    GCum_ptr,
+    W_ptr,
+    U_ptr,
+    stride_kn,
+    stride_khk,
+    stride_kd,
+    stride_vn,
+    stride_vhv,
+    stride_vd,
+    stride_gn,
+    stride_ghv,
+    stride_bn,
+    stride_bhv,
+    stride_gch,
+    stride_gcc,
+    stride_gct,
+    stride_wh,
+    stride_wc,
+    stride_wt,
+    stride_wd,
+    stride_uh,
+    stride_uc,
+    stride_ut,
+    stride_ud,
+    l2_eps,
+    GQA_RATIO: tl.constexpr,
+    D_K: tl.constexpr,
+    D_V: tl.constexpr,
+):
+    """Ragged Stage 1: compute chunk cumsum G and exact block-16 WY factors (W, U)."""
+    h_v = tl.program_id(0)
+    c = tl.program_id(1)
+    h_k = h_v // GQA_RATIO
+
+    b = tl.load(CHUNK_REQ_ptr + c)
+    t0 = tl.load(CHUNK_T0_ptr + c)
+    req_start = tl.load(CU_SEQLENS_ptr + b)
+    req_end = tl.load(CU_SEQLENS_ptr + b + 1)
+    req_len = req_end - req_start
+
+    o16 = tl.arange(0, 16)
+    ok = tl.arange(0, D_K)
+    ov = tl.arange(0, D_V)
+    tril_mask = o16[:, None] > o16[None, :]
+
+    rs64 = req_start.to(tl.int64)
+    k_base = K_ptr + rs64 * stride_kn + h_k * stride_khk
+    v_base = V_ptr + rs64 * stride_vn + h_v * stride_vhv
+    g_base = G_ptr + rs64 * stride_gn + h_v * stride_ghv
+    b_base = Beta_ptr + rs64 * stride_bn + h_v * stride_bhv
+
+    # Load 4 sub-blocks of 16 tokens each
+    t_0 = t0 + o16
+    t_1 = t0 + 16 + o16
+    t_2 = t0 + 32 + o16
+    t_3 = t0 + 48 + o16
+    m_0 = t_0 < req_len
+    m_1 = t_1 < req_len
+    m_2 = t_2 < req_len
+    m_3 = t_3 < req_len
+
+    g_0 = tl.load(g_base + t_0 * stride_gn, mask=m_0, other=0.0).to(tl.float32)
+    g_1 = tl.load(g_base + t_1 * stride_gn, mask=m_1, other=0.0).to(tl.float32)
+    g_2 = tl.load(g_base + t_2 * stride_gn, mask=m_2, other=0.0).to(tl.float32)
+    g_3 = tl.load(g_base + t_3 * stride_gn, mask=m_3, other=0.0).to(tl.float32)
+
+    G_0 = tl.cumsum(g_0, axis=0)
+    s0 = tl.sum(g_0, axis=0)
+    G_1 = tl.cumsum(g_1, axis=0) + s0
+    s1 = s0 + tl.sum(g_1, axis=0)
+    G_2 = tl.cumsum(g_2, axis=0) + s1
+    s2 = s1 + tl.sum(g_2, axis=0)
+    G_3 = tl.cumsum(g_3, axis=0) + s2
+
+    gc_base = GCum_ptr + h_v * stride_gch + c * stride_gcc
+    tl.store(gc_base + o16 * stride_gct, G_0)
+    tl.store(gc_base + (16 + o16) * stride_gct, G_1)
+    tl.store(gc_base + (32 + o16) * stride_gct, G_2)
+    tl.store(gc_base + (48 + o16) * stride_gct, G_3)
+
+    beta_0 = tl.load(b_base + t_0 * stride_bn, mask=m_0, other=0.0).to(tl.float32)
+    beta_1 = tl.load(b_base + t_1 * stride_bn, mask=m_1, other=0.0).to(tl.float32)
+    beta_2 = tl.load(b_base + t_2 * stride_bn, mask=m_2, other=0.0).to(tl.float32)
+    beta_3 = tl.load(b_base + t_3 * stride_bn, mask=m_3, other=0.0).to(tl.float32)
+
+    k_0 = tl.load(k_base + t_0[:, None] * stride_kn + ok[None, :] * stride_kd, mask=m_0[:, None], other=0.0).to(tl.float32)
+    k_1 = tl.load(k_base + t_1[:, None] * stride_kn + ok[None, :] * stride_kd, mask=m_1[:, None], other=0.0).to(tl.float32)
+    k_2 = tl.load(k_base + t_2[:, None] * stride_kn + ok[None, :] * stride_kd, mask=m_2[:, None], other=0.0).to(tl.float32)
+    k_3 = tl.load(k_base + t_3[:, None] * stride_kn + ok[None, :] * stride_kd, mask=m_3[:, None], other=0.0).to(tl.float32)
+
+    k_0 = k_0 * tl.rsqrt(tl.sum(k_0 * k_0, axis=1) + l2_eps)[:, None]
+    k_1 = k_1 * tl.rsqrt(tl.sum(k_1 * k_1, axis=1) + l2_eps)[:, None]
+    k_2 = k_2 * tl.rsqrt(tl.sum(k_2 * k_2, axis=1) + l2_eps)[:, None]
+    k_3 = k_3 * tl.rsqrt(tl.sum(k_3 * k_3, axis=1) + l2_eps)[:, None]
+
+    v_0 = tl.load(v_base + t_0[:, None] * stride_vn + ov[None, :] * stride_vd, mask=m_0[:, None], other=0.0).to(tl.float32)
+    v_1 = tl.load(v_base + t_1[:, None] * stride_vn + ov[None, :] * stride_vd, mask=m_1[:, None], other=0.0).to(tl.float32)
+    v_2 = tl.load(v_base + t_2[:, None] * stride_vn + ov[None, :] * stride_vd, mask=m_2[:, None], other=0.0).to(tl.float32)
+    v_3 = tl.load(v_base + t_3[:, None] * stride_vn + ov[None, :] * stride_vd, mask=m_3[:, None], other=0.0).to(tl.float32)
+
+    # Scaled RHS for W and U
+    ks_0 = k_0 * (beta_0 * tl.exp(G_0))[:, None]
+    ks_1 = k_1 * (beta_1 * tl.exp(G_1))[:, None]
+    ks_2 = k_2 * (beta_2 * tl.exp(G_2))[:, None]
+    ks_3 = k_3 * (beta_3 * tl.exp(G_3))[:, None]
+
+    vs_0 = v_0 * beta_0[:, None]
+    vs_1 = v_1 * beta_1[:, None]
+    vs_2 = v_2 * beta_2[:, None]
+    vs_3 = v_3 * beta_3[:, None]
+
+    # Block 0: (I + A_00) W_0 = ks_0
+    diff_00 = tl.where(tril_mask, G_0[:, None] - G_0[None, :], -1e9)
+    A_00 = tl.where(tril_mask, beta_0[:, None] * tl.exp(diff_00) * tl.dot(k_0, tl.trans(k_0), input_precision="tf32"), 0.0)
+    M_00 = _invert_unit_tril_16(A_00)
+    W_0 = tl.dot(M_00, ks_0, input_precision="tf32")
+    U_0 = tl.dot(M_00, vs_0, input_precision="tf32")
+
+    # Block 1: (I + A_11) W_1 = ks_1 - A_10 W_0
+    A_10 = beta_1[:, None] * tl.exp(G_1[:, None] - G_0[None, :]) * tl.dot(k_1, tl.trans(k_0), input_precision="tf32")
+    diff_11 = tl.where(tril_mask, G_1[:, None] - G_1[None, :], -1e9)
+    A_11 = tl.where(tril_mask, beta_1[:, None] * tl.exp(diff_11) * tl.dot(k_1, tl.trans(k_1), input_precision="tf32"), 0.0)
+    M_11 = _invert_unit_tril_16(A_11)
+    W_1 = tl.dot(M_11, ks_1 - tl.dot(A_10, W_0, input_precision="tf32"), input_precision="tf32")
+    U_1 = tl.dot(M_11, vs_1 - tl.dot(A_10, U_0, input_precision="tf32"), input_precision="tf32")
+
+    # Block 2: (I + A_22) W_2 = ks_2 - A_20 W_0 - A_21 W_1
+    A_20 = beta_2[:, None] * tl.exp(G_2[:, None] - G_0[None, :]) * tl.dot(k_2, tl.trans(k_0), input_precision="tf32")
+    A_21 = beta_2[:, None] * tl.exp(G_2[:, None] - G_1[None, :]) * tl.dot(k_2, tl.trans(k_1), input_precision="tf32")
+    diff_22 = tl.where(tril_mask, G_2[:, None] - G_2[None, :], -1e9)
+    A_22 = tl.where(tril_mask, beta_2[:, None] * tl.exp(diff_22) * tl.dot(k_2, tl.trans(k_2), input_precision="tf32"), 0.0)
+    M_22 = _invert_unit_tril_16(A_22)
+    rhs_w2 = ks_2 - tl.dot(A_20, W_0, input_precision="tf32") - tl.dot(A_21, W_1, input_precision="tf32")
+    rhs_u2 = vs_2 - tl.dot(A_20, U_0, input_precision="tf32") - tl.dot(A_21, U_1, input_precision="tf32")
+    W_2 = tl.dot(M_22, rhs_w2, input_precision="tf32")
+    U_2 = tl.dot(M_22, rhs_u2, input_precision="tf32")
+
+    # Block 3: (I + A_33) W_3 = ks_3 - A_30 W_0 - A_31 W_1 - A_32 W_2
+    A_30 = beta_3[:, None] * tl.exp(G_3[:, None] - G_0[None, :]) * tl.dot(k_3, tl.trans(k_0), input_precision="tf32")
+    A_31 = beta_3[:, None] * tl.exp(G_3[:, None] - G_1[None, :]) * tl.dot(k_3, tl.trans(k_1), input_precision="tf32")
+    A_32 = beta_3[:, None] * tl.exp(G_3[:, None] - G_2[None, :]) * tl.dot(k_3, tl.trans(k_2), input_precision="tf32")
+    diff_33 = tl.where(tril_mask, G_3[:, None] - G_3[None, :], -1e9)
+    A_33 = tl.where(tril_mask, beta_3[:, None] * tl.exp(diff_33) * tl.dot(k_3, tl.trans(k_3), input_precision="tf32"), 0.0)
+    M_33 = _invert_unit_tril_16(A_33)
+    rhs_w3 = (
+        ks_3
+        - tl.dot(A_30, W_0, input_precision="tf32")
+        - tl.dot(A_31, W_1, input_precision="tf32")
+        - tl.dot(A_32, W_2, input_precision="tf32")
+    )
+    rhs_u3 = (
+        vs_3
+        - tl.dot(A_30, U_0, input_precision="tf32")
+        - tl.dot(A_31, U_1, input_precision="tf32")
+        - tl.dot(A_32, U_2, input_precision="tf32")
+    )
+    W_3 = tl.dot(M_33, rhs_w3, input_precision="tf32")
+    U_3 = tl.dot(M_33, rhs_u3, input_precision="tf32")
+
+    w_base = W_ptr + h_v * stride_wh + c * stride_wc
+    u_base = U_ptr + h_v * stride_uh + c * stride_uc
+    w_dtype = W_ptr.dtype.element_ty
+    u_dtype = U_ptr.dtype.element_ty
+
+    tl.store(w_base + o16[:, None] * stride_wt + ok[None, :] * stride_wd, W_0.to(w_dtype))
+    tl.store(w_base + (16 + o16)[:, None] * stride_wt + ok[None, :] * stride_wd, W_1.to(w_dtype))
+    tl.store(w_base + (32 + o16)[:, None] * stride_wt + ok[None, :] * stride_wd, W_2.to(w_dtype))
+    tl.store(w_base + (48 + o16)[:, None] * stride_wt + ok[None, :] * stride_wd, W_3.to(w_dtype))
+
+    tl.store(u_base + o16[:, None] * stride_ut + ov[None, :] * stride_ud, U_0.to(u_dtype))
+    tl.store(u_base + (16 + o16)[:, None] * stride_ut + ov[None, :] * stride_ud, U_1.to(u_dtype))
+    tl.store(u_base + (32 + o16)[:, None] * stride_ut + ov[None, :] * stride_ud, U_2.to(u_dtype))
+    tl.store(u_base + (48 + o16)[:, None] * stride_ut + ov[None, :] * stride_ud, U_3.to(u_dtype))
+
+
+@triton.jit
+def _gdn_chunk_state_recurrence_ragged_kernel(
+    K_ptr,
+    GCum_ptr,
+    W_ptr,
+    U_ptr,
+    CU_SEQLENS_ptr,
+    REQ_CHUNK_START_ptr,
+    InitState_ptr,
+    HAll_ptr,
+    VNewAll_ptr,
+    FinalState_ptr,
+    REQ_SNAP_START_ptr,
+    SNAP_LOCAL_END_ptr,
+    SNAP_PHYS_ptr,
+    DST_SSM_ptr,
+    stride_kn,
+    stride_khk,
+    stride_kd,
+    stride_gch,
+    stride_gcc,
+    stride_gct,
+    stride_wh,
+    stride_wc,
+    stride_wt,
+    stride_wd,
+    stride_uh,
+    stride_uc,
+    stride_ut,
+    stride_ud,
+    stride_sb,
+    stride_shv,
+    stride_sk,
+    stride_sv,
+    stride_hah,
+    stride_hac,
+    stride_hak,
+    stride_hav,
+    stride_vnh,
+    stride_vnc,
+    stride_vnt,
+    stride_vnd,
+    stride_fsb,
+    stride_fshv,
+    stride_fsk,
+    stride_fsv,
+    dst_ssm_stride_blk: tl.int64,
+    dst_ssm_rows: tl.int64,
+    H_V: tl.constexpr,
+    l2_eps,
+    GQA_RATIO: tl.constexpr,
+    D_K: tl.constexpr,
+    D_V: tl.constexpr,
+    HAS_INIT_STATE: tl.constexpr,
+    STORE_FINAL_STATE: tl.constexpr,
+    HAS_SNAPS: tl.constexpr,
+    SKIP_INVALID_PHYS: tl.constexpr,
+):
+    """Ragged Stage 2: inter-chunk FP32 state recurrence + direct block-boundary FP32 SSM scatter."""
+    b = tl.program_id(0)
+    h_v = tl.program_id(1)
+    h_k = h_v // GQA_RATIO
+
+    oc = tl.arange(0, 64)
+    ok = tl.arange(0, D_K)
+    ov = tl.arange(0, D_V)
+
+    if HAS_INIT_STATE:
+        h = tl.load(
+            InitState_ptr
+            + b * stride_sb
+            + h_v * stride_shv
+            + ok[:, None] * stride_sk
+            + ov[None, :] * stride_sv
+        ).to(tl.float32)
+    else:
+        h = tl.zeros((D_K, D_V), dtype=tl.float32)
+
+    req_start = tl.load(CU_SEQLENS_ptr + b)
+    req_end = tl.load(CU_SEQLENS_ptr + b + 1)
+    req_len = req_end - req_start
+    c_start = tl.load(REQ_CHUNK_START_ptr + b)
+    c_end = tl.load(REQ_CHUNK_START_ptr + b + 1)
+
+    snap_ptr = tl.load(REQ_SNAP_START_ptr + b) if HAS_SNAPS else 0
+    snap_end = tl.load(REQ_SNAP_START_ptr + b + 1) if HAS_SNAPS else 0
+
+    k_base = K_ptr + req_start.to(tl.int64) * stride_kn + h_k * stride_khk
+    gc_head = GCum_ptr + h_v * stride_gch
+    w_head = W_ptr + h_v * stride_wh
+    u_head = U_ptr + h_v * stride_uh
+    ha_head = HAll_ptr + h_v * stride_hah
+    vn_head = VNewAll_ptr + h_v * stride_vnh
+    ha_dtype = HAll_ptr.dtype.element_ty
+    vn_dtype = VNewAll_ptr.dtype.element_ty
+
+    for c in range(c_start, c_end):
+        t0 = (c - c_start) * 64
+        tl.store(
+            ha_head + c * stride_hac + ok[:, None] * stride_hak + ov[None, :] * stride_hav,
+            h.to(ha_dtype),
+        )
+
+        b_w = tl.load(w_head + c * stride_wc + oc[:, None] * stride_wt + ok[None, :] * stride_wd)
+        b_u = tl.load(u_head + c * stride_uc + oc[:, None] * stride_ut + ov[None, :] * stride_ud).to(tl.float32)
+        b_v_new = b_u - tl.dot(b_w.to(tl.bfloat16), h.to(tl.bfloat16), out_dtype=tl.float32)
+        tl.store(
+            vn_head + c * stride_vnc + oc[:, None] * stride_vnt + ov[None, :] * stride_vnd,
+            b_v_new.to(vn_dtype),
+        )
+
+        b_gc = tl.load(gc_head + c * stride_gcc + oc * stride_gct).to(tl.float32)
+        g_last = tl.sum(tl.where(oc == 63, b_gc, 0.0), axis=0)
+
+        t_offs = t0 + oc
+        m_t = t_offs < req_len
+        b_k = tl.load(
+            k_base + t_offs[:, None] * stride_kn + ok[None, :] * stride_kd,
+            mask=m_t[:, None],
+            other=0.0,
+        ).to(tl.float32)
+        b_k = b_k * tl.rsqrt(tl.sum(b_k * b_k, axis=1) + l2_eps)[:, None]
+        b_k_decay = b_k * tl.exp(g_last - b_gc)[:, None]
+
+        h_next = h * tl.exp(g_last) + tl.dot(
+            tl.trans(b_k_decay.to(tl.bfloat16)),
+            b_v_new.to(tl.bfloat16),
+            out_dtype=tl.float32,
+        )
+
+        if HAS_SNAPS:
+            chunk_end = tl.minimum(req_len, t0 + 64)
+            done_snaps = 0
+            while snap_ptr < snap_end and done_snaps == 0:
+                s_end = tl.load(SNAP_LOCAL_END_ptr + snap_ptr)
+                if s_end > chunk_end:
+                    done_snaps = 1
+                else:
+                    phys = tl.load(SNAP_PHYS_ptr + snap_ptr).to(tl.int64)
+                    valid_phys = True
+                    if SKIP_INVALID_PHYS:
+                        valid_phys = (phys > 0) & (phys < dst_ssm_rows)
+                    if valid_phys:
+                        m = s_end - t0
+                        if s_end == chunk_end:
+                            h_snap = h_next
+                        else:
+                            g_m = tl.sum(tl.where(oc == (m - 1), b_gc, 0.0), axis=0)
+                            sub_m = oc < m
+                            k_sub = tl.where(
+                                sub_m[:, None], b_k * tl.exp(g_m - b_gc)[:, None], 0.0
+                            )
+                            v_sub = tl.where(sub_m[:, None], b_v_new, 0.0)
+                            h_snap = h * tl.exp(g_m) + tl.dot(
+                                tl.trans(k_sub.to(tl.bfloat16)),
+                                v_sub.to(tl.bfloat16),
+                                out_dtype=tl.float32,
+                            )
+                        tl.store(
+                            DST_SSM_ptr
+                            + phys * dst_ssm_stride_blk
+                            + h_v * (D_K * D_V)
+                            + ok[:, None] * D_V
+                            + ov[None, :],
+                            h_snap,
+                        )
+                    snap_ptr += 1
+
+        h = h_next
+
+    if STORE_FINAL_STATE:
+        tl.store(
+            FinalState_ptr
+            + b * stride_fsb
+            + h_v * stride_fshv
+            + ok[:, None] * stride_fsk
+            + ov[None, :] * stride_fsv,
+            h,
+        )
+
+
+@triton.jit
+def _gdn_chunk_output_ragged_kernel(
+    Q_ptr,
+    K_ptr,
+    GCum_ptr,
+    HAll_ptr,
+    VNewAll_ptr,
+    CU_SEQLENS_ptr,
+    CHUNK_REQ_ptr,
+    CHUNK_T0_ptr,
+    Out_ptr,
+    stride_qn,
+    stride_qhk,
+    stride_qd,
+    stride_kn,
+    stride_khk,
+    stride_kd,
+    stride_gch,
+    stride_gcc,
+    stride_gct,
+    stride_hah,
+    stride_hac,
+    stride_hak,
+    stride_hav,
+    stride_vnh,
+    stride_vnc,
+    stride_vnt,
+    stride_vnd,
+    stride_on,
+    stride_ohv,
+    stride_od,
+    scale,
+    l2_eps,
+    GQA_RATIO: tl.constexpr,
+    D_K: tl.constexpr,
+    D_V: tl.constexpr,
+):
+    """Ragged Stage 3: combine inter-chunk and causal intra-chunk outputs."""
+    h_v = tl.program_id(0)
+    c = tl.program_id(1)
+    h_k = h_v // GQA_RATIO
+
+    b = tl.load(CHUNK_REQ_ptr + c)
+    t0 = tl.load(CHUNK_T0_ptr + c)
+    req_start = tl.load(CU_SEQLENS_ptr + b)
+    req_end = tl.load(CU_SEQLENS_ptr + b + 1)
+    req_len = req_end - req_start
+
+    oc = tl.arange(0, 64)
+    ok = tl.arange(0, D_K)
+    ov = tl.arange(0, D_V)
+
+    t_offs = t0 + oc
+    m_t = t_offs < req_len
+    rs64 = req_start.to(tl.int64)
+    q_base = Q_ptr + rs64 * stride_qn + h_k * stride_qhk
+    k_base = K_ptr + rs64 * stride_kn + h_k * stride_khk
+    out_base = Out_ptr + rs64 * stride_on + h_v * stride_ohv
+
+    b_q = tl.load(
+        q_base + t_offs[:, None] * stride_qn + ok[None, :] * stride_qd,
+        mask=m_t[:, None],
+        other=0.0,
+    ).to(tl.float32)
+    b_k = tl.load(
+        k_base + t_offs[:, None] * stride_kn + ok[None, :] * stride_kd,
+        mask=m_t[:, None],
+        other=0.0,
+    ).to(tl.float32)
+
+    b_q = b_q * tl.rsqrt(tl.sum(b_q * b_q, axis=1) + l2_eps)[:, None]
+    b_k = b_k * tl.rsqrt(tl.sum(b_k * b_k, axis=1) + l2_eps)[:, None]
+
+    b_gc = tl.load(
+        GCum_ptr + h_v * stride_gch + c * stride_gcc + oc * stride_gct
+    ).to(tl.float32)
+    b_h = tl.load(
+        HAll_ptr
+        + h_v * stride_hah
+        + c * stride_hac
+        + ok[:, None] * stride_hak
+        + ov[None, :] * stride_hav
+    )
+    b_v_new = tl.load(
+        VNewAll_ptr
+        + h_v * stride_vnh
+        + c * stride_vnc
+        + oc[:, None] * stride_vnt
+        + ov[None, :] * stride_vnd
+    )
+
+    b_q_decay = b_q * tl.exp(b_gc)[:, None]
+    o_inter = tl.dot(b_q_decay.to(tl.bfloat16), b_h.to(tl.bfloat16), out_dtype=tl.float32)
+
+    qk = tl.dot(b_q.to(tl.bfloat16), tl.trans(b_k.to(tl.bfloat16)), out_dtype=tl.float32)
+    causal = oc[:, None] >= oc[None, :]
+    g_diff = tl.where(causal, b_gc[:, None] - b_gc[None, :], -1e9)
+    attn = tl.where(causal, qk * tl.exp(g_diff), 0.0)
+    o_intra = tl.dot(attn.to(tl.bfloat16), b_v_new.to(tl.bfloat16), out_dtype=tl.float32)
+
+    o = (o_inter + o_intra) * scale
+    tl.store(
+        out_base + t_offs[:, None] * stride_on + ov[None, :] * stride_od,
+        o.to(Out_ptr.dtype.element_ty),
+        mask=m_t[:, None],
+    )
+
+
+def gdn_chunk_prefill_ragged_with_snapshots_triton(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    chunk_req: torch.Tensor,
+    chunk_t0: torch.Tensor,
+    req_chunk_start: torch.Tensor,
+    *,
+    initial_state: Optional[torch.Tensor] = None,
+    req_snap_start: Optional[torch.Tensor] = None,
+    snap_local_end: Optional[torch.Tensor] = None,
+    snap_phys: Optional[torch.Tensor] = None,
+    ssm_dst_pool: Optional[torch.Tensor] = None,
+    skip_invalid_phys: bool = True,
+    output_final_states: bool = False,
+    l2_eps: float = 1e-6,
+) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    """Packed ragged 3-stage Triton chunked prefill (CHUNK_SIZE=64) with exact FP32 SSM snapshots."""
+    N, num_k_heads, d_k = int(q.shape[0]), int(q.shape[1]), int(q.shape[2])
+    num_v_heads, d_v = int(v.shape[1]), int(v.shape[2])
+    bsz = int(cu_seqlens.numel()) - 1
+    device = v.device
+
+    if N == 0 or bsz == 0:
+        out_empty = torch.empty((N, num_v_heads, d_v), dtype=v.dtype, device=device)
+        fs_empty = (
+            torch.zeros((bsz, num_v_heads, d_k, d_v), dtype=torch.float32, device=device)
+            if output_final_states
+            else None
+        )
+        return out_empty, fs_empty
+
+    if (
+        not (q.is_cuda and k.is_cuda and v.is_cuda and g.is_cuda and beta.is_cuda)
+        or d_k != 64
+        or d_v != 64
+        or num_v_heads % num_k_heads != 0
+    ):
+        # Fallback for CPU / non-64 head dims
+        out = torch.empty((N, num_v_heads, d_v), dtype=v.dtype, device=device)
+        cu_list = cu_seqlens.tolist()
+        fs_list = []
+        has_snaps = (
+            req_snap_start is not None
+            and snap_local_end is not None
+            and snap_phys is not None
+            and ssm_dst_pool is not None
+        )
+        req_ss_list = req_snap_start.tolist() if has_snaps and req_snap_start is not None else None
+        s_end_list = snap_local_end.tolist() if has_snaps and snap_local_end is not None else None
+        s_phys_list = snap_phys.tolist() if has_snaps and snap_phys is not None else None
+        for b in range(bsz):
+            s, e = int(cu_list[b]), int(cu_list[b + 1])
+            init_b = initial_state[b : b + 1].clone() if initial_state is not None else None
+            o_b, fs_b = gdn_recurrent_ref(
+                q[s:e].unsqueeze(0),
+                k[s:e].unsqueeze(0),
+                v[s:e].unsqueeze(0),
+                g[s:e].unsqueeze(0),
+                beta[s:e].unsqueeze(0),
+                initial_state=init_b,
+                output_final_state=True,
+                l2_eps=l2_eps,
+            )
+            out[s:e].copy_(o_b.squeeze(0))
+            if output_final_states and fs_b is not None:
+                fs_list.append(fs_b)
+            if has_snaps and req_ss_list is not None and s_end_list is not None and s_phys_list is not None and ssm_dst_pool is not None:
+                ss0, ss1 = int(req_ss_list[b]), int(req_ss_list[b + 1])
+                if ss1 > ss0:
+                    prev_e = 0
+                    cur_st = init_b
+                    for idx_s in range(ss0, ss1):
+                        end_loc = int(s_end_list[idx_s])
+                        phys = int(s_phys_list[idx_s])
+                        if end_loc > prev_e:
+                            _, cur_st = gdn_recurrent_ref(
+                                q[s + prev_e : s + end_loc].unsqueeze(0),
+                                k[s + prev_e : s + end_loc].unsqueeze(0),
+                                v[s + prev_e : s + end_loc].unsqueeze(0),
+                                g[s + prev_e : s + end_loc].unsqueeze(0),
+                                beta[s + prev_e : s + end_loc].unsqueeze(0),
+                                initial_state=cur_st,
+                                output_final_state=True,
+                                l2_eps=l2_eps,
+                            )
+                            prev_e = end_loc
+                        if cur_st is not None and (not skip_invalid_phys or (0 < phys < ssm_dst_pool.shape[0])):
+                            ssm_dst_pool[phys].view(-1)[: num_v_heads * d_k * d_v].copy_(cur_st.reshape(-1))
+        fs_out = torch.cat(fs_list, dim=0) if output_final_states and fs_list else None
+        return out, fs_out
+
+    gqa_ratio = num_v_heads // num_k_heads
+    num_chunks = int(chunk_req.numel())
+    g_cum = torch.empty((num_v_heads, num_chunks, 64), dtype=torch.float32, device=device)
+    w_buf = torch.empty((num_v_heads, num_chunks, 64, 64), dtype=torch.bfloat16, device=device)
+    u_buf = torch.empty((num_v_heads, num_chunks, 64, 64), dtype=torch.float32, device=device)
+    h_all = torch.empty((num_v_heads, num_chunks, 64, 64), dtype=torch.bfloat16, device=device)
+    v_new_all = torch.empty((num_v_heads, num_chunks, 64, 64), dtype=torch.bfloat16, device=device)
+    out = torch.empty((N, num_v_heads, 64), dtype=v.dtype, device=device)
+
+    final_states = (
+        torch.empty((bsz, num_v_heads, 64, 64), dtype=torch.float32, device=device)
+        if output_final_states
+        else None
+    )
+
+    _gdn_chunk_prep_wy_ragged_kernel[(num_v_heads, num_chunks)](
+        k,
+        v,
+        g,
+        beta,
+        cu_seqlens,
+        chunk_req,
+        chunk_t0,
+        g_cum,
+        w_buf,
+        u_buf,
+        k.stride(0),
+        k.stride(1),
+        k.stride(2),
+        v.stride(0),
+        v.stride(1),
+        v.stride(2),
+        g.stride(0),
+        g.stride(1),
+        beta.stride(0),
+        beta.stride(1),
+        g_cum.stride(0),
+        g_cum.stride(1),
+        g_cum.stride(2),
+        w_buf.stride(0),
+        w_buf.stride(1),
+        w_buf.stride(2),
+        w_buf.stride(3),
+        u_buf.stride(0),
+        u_buf.stride(1),
+        u_buf.stride(2),
+        u_buf.stride(3),
+        float(l2_eps),
+        GQA_RATIO=gqa_ratio,
+        D_K=64,
+        D_V=64,
+        num_warps=4,
+    )
+
+    has_init = initial_state is not None
+    has_snaps = (
+        req_snap_start is not None
+        and snap_local_end is not None
+        and snap_phys is not None
+        and ssm_dst_pool is not None
+        and int(snap_local_end.numel()) > 0
+    )
+    init_arg = initial_state if has_init else out
+    fs_arg = final_states if output_final_states else out
+    rss_arg = req_snap_start if has_snaps else cu_seqlens
+    sle_arg = snap_local_end if has_snaps else cu_seqlens
+    sp_arg = snap_phys if has_snaps else cu_seqlens
+    dst_arg = ssm_dst_pool if has_snaps else out
+    dst_stride_blk = (
+        int(ssm_dst_pool.view(-1).shape[0] // ssm_dst_pool.shape[0])
+        if has_snaps and ssm_dst_pool is not None
+        else 0
+    )
+    if has_snaps and ssm_dst_pool is not None:
+        elem_scale = ssm_dst_pool.element_size() // 4
+        if elem_scale <= 0:
+            raise ValueError(f"ssm_dst_pool dtype {ssm_dst_pool.dtype} must be >= 4 bytes")
+        dst_stride_blk = int(ssm_dst_pool.stride(0)) * elem_scale
+
+    _gdn_chunk_state_recurrence_ragged_kernel[(bsz, num_v_heads)](
+        k,
+        g_cum,
+        w_buf,
+        u_buf,
+        cu_seqlens,
+        req_chunk_start,
+        init_arg,
+        h_all,
+        v_new_all,
+        fs_arg,
+        rss_arg,
+        sle_arg,
+        sp_arg,
+        dst_arg,
+        k.stride(0),
+        k.stride(1),
+        k.stride(2),
+        g_cum.stride(0),
+        g_cum.stride(1),
+        g_cum.stride(2),
+        w_buf.stride(0),
+        w_buf.stride(1),
+        w_buf.stride(2),
+        w_buf.stride(3),
+        u_buf.stride(0),
+        u_buf.stride(1),
+        u_buf.stride(2),
+        u_buf.stride(3),
+        initial_state.stride(0) if has_init else 0,
+        initial_state.stride(1) if has_init else 0,
+        initial_state.stride(2) if has_init else 0,
+        initial_state.stride(3) if has_init else 0,
+        h_all.stride(0),
+        h_all.stride(1),
+        h_all.stride(2),
+        h_all.stride(3),
+        v_new_all.stride(0),
+        v_new_all.stride(1),
+        v_new_all.stride(2),
+        v_new_all.stride(3),
+        final_states.stride(0) if output_final_states else 0,
+        final_states.stride(1) if output_final_states else 0,
+        final_states.stride(2) if output_final_states else 0,
+        final_states.stride(3) if output_final_states else 0,
+        dst_stride_blk,
+        int(ssm_dst_pool.shape[0]) if has_snaps and ssm_dst_pool is not None else 0,
+        num_v_heads,
+        float(l2_eps),
+        GQA_RATIO=gqa_ratio,
+        D_K=64,
+        D_V=64,
+        HAS_INIT_STATE=has_init,
+        STORE_FINAL_STATE=output_final_states,
+        HAS_SNAPS=has_snaps,
+        SKIP_INVALID_PHYS=skip_invalid_phys,
+        num_warps=4,
+    )
+
+    _gdn_chunk_output_ragged_kernel[(num_v_heads, num_chunks)](
+        q,
+        k,
+        g_cum,
+        h_all,
+        v_new_all,
+        cu_seqlens,
+        chunk_req,
+        chunk_t0,
+        out,
+        q.stride(0),
+        q.stride(1),
+        q.stride(2),
+        k.stride(0),
+        k.stride(1),
+        k.stride(2),
+        g_cum.stride(0),
+        g_cum.stride(1),
+        g_cum.stride(2),
+        h_all.stride(0),
+        h_all.stride(1),
+        h_all.stride(2),
+        h_all.stride(3),
+        v_new_all.stride(0),
+        v_new_all.stride(1),
+        v_new_all.stride(2),
+        v_new_all.stride(3),
+        out.stride(0),
+        out.stride(1),
+        out.stride(2),
+        float(64 ** -0.5),
+        float(l2_eps),
+        GQA_RATIO=gqa_ratio,
+        D_K=64,
+        D_V=64,
+        num_warps=4,
+    )
+
+    return out, final_states
+
+
+# ---------------------------------------------------------------------------
 # Qwen4_5GatedDeltaNet Module
 # ---------------------------------------------------------------------------
 
@@ -1234,6 +2560,11 @@ class Qwen4_5GatedDeltaNet(nn.Module):
         is_consumer: bool = False,
         publishes_shared: bool = False,
         source_layer_idx: Optional[int] = None,
+        *,
+        tp_size: int = 1,
+        tp_rank: int = 0,
+        tp_group: Any = None,
+        fast_all_reduce: Any = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -1243,10 +2574,25 @@ class Qwen4_5GatedDeltaNet(nn.Module):
         self.source_layer_idx = source_layer_idx
         self.enable_yoco_decode = config.enable_yoco_decode
 
+        self.tp_size = max(1, int(tp_size))
+        self.tp_rank = int(tp_rank)
+        self.tp_group = tp_group
+        self.fast_all_reduce = fast_all_reduce
+        if config.linear_num_key_heads % self.tp_size != 0:
+            raise ValueError(
+                f"linear_num_key_heads ({config.linear_num_key_heads}) not divisible by tp_size ({self.tp_size})"
+            )
+        if config.linear_num_value_heads % self.tp_size != 0:
+            raise ValueError(
+                f"linear_num_value_heads ({config.linear_num_value_heads}) not divisible by tp_size ({self.tp_size})"
+            )
+
         self.hidden_size = config.hidden_size
-        self.num_k_heads = config.linear_num_key_heads
+        self.global_num_k_heads = config.linear_num_key_heads
+        self.global_num_v_heads = config.linear_num_value_heads
+        self.num_k_heads = config.linear_num_key_heads // self.tp_size
         self.head_k_dim = config.linear_key_head_dim
-        self.num_v_heads = config.linear_num_value_heads
+        self.num_v_heads = config.linear_num_value_heads // self.tp_size
         self.head_v_dim = config.linear_value_head_dim
         self.key_dim = self.num_k_heads * self.head_k_dim
         self.value_dim = self.num_v_heads * self.head_v_dim
@@ -1301,6 +2647,11 @@ class Qwen4_5GatedDeltaNet(nn.Module):
         config: Qwen4_5ArchConfig,
         layer_idx: int,
         sharing_plan: Optional[YoCoSharingPlan] = None,
+        *,
+        tp_size: int = 1,
+        tp_rank: int = 0,
+        tp_group: Any = None,
+        fast_all_reduce: Any = None,
     ) -> "Qwen4_5GatedDeltaNet":
         plan = sharing_plan if sharing_plan is not None else YoCoSharingPlan.from_config(config)
         return cls(
@@ -1309,6 +2660,10 @@ class Qwen4_5GatedDeltaNet(nn.Module):
             is_consumer=plan.is_gdn_consumer(layer_idx),
             publishes_shared=plan.is_gdn_source(layer_idx),
             source_layer_idx=plan.source_for(layer_idx),
+            tp_size=tp_size,
+            tp_rank=tp_rank,
+            tp_group=tp_group,
+            fast_all_reduce=fast_all_reduce,
         )
 
     @property
@@ -1423,16 +2778,40 @@ class Qwen4_5GatedDeltaNet(nn.Module):
                     f"Consumer GDN layer {self.layer_idx} requires SharedGDNInputs from source layer"
                 )
             qz = self.in_proj_qkvz(hidden_states)
-            q_flat, z = self._unpack_qz_consumer(qz)
-            if not self.gdn_no_q_conv:
-                q_flat = causal_dwconv1d(
-                    q_flat,
-                    self.conv1d.weight,
-                    state=conv_state_wrap,
-                    residual=self.gdn_conv_residual,
-                    use_silu=True,
+            z_view = self._view_z_strided(qz, is_consumer=True)
+            if (
+                not self.gdn_no_q_conv
+                and seq_len == 1
+                and state is not None
+                and self._can_use_fused_unpack_conv(qz)
+            ):
+                q = torch.empty(
+                    (bsz, 1, self.num_k_heads, self.head_k_dim),
+                    dtype=qz.dtype,
+                    device=qz.device,
                 )
-            q = q_flat.reshape(bsz, seq_len, self.num_k_heads, self.head_k_dim)
+                self._launch_fused_unpack_conv_decode(qz, state.conv_state, q, q, q, is_consumer=True)
+            elif (
+                not self.gdn_no_q_conv
+                and seq_len > 1
+                and bsz > 0
+                and self._can_use_fused_unpack_conv(qz)
+                and self._can_use_conv_state_pool(state.conv_state if state is not None else None)
+            ):
+                q, _, _ = self._launch_fused_unpack_conv_seq(
+                    qz, state.conv_state if state is not None else None, is_consumer=True
+                )
+            else:
+                q_flat, z_view = self._unpack_qz_consumer(qz)
+                if not self.gdn_no_q_conv:
+                    q_flat = causal_dwconv1d(
+                        q_flat,
+                        self.conv1d.weight,
+                        state=conv_state_wrap,
+                        residual=self.gdn_conv_residual,
+                        use_silu=True,
+                    )
+                q = q_flat.reshape(bsz, seq_len, self.num_k_heads, self.head_k_dim)
 
             # YoCo Decode fast path: readout directly from source layer's post-update FP32 SSM state
             if seq_len == 1 and yoco_decode_on and shared.ssm_state is not None:
@@ -1467,8 +2846,9 @@ class Qwen4_5GatedDeltaNet(nn.Module):
                         inplace_state=need_final,
                     )
 
-            out = self.norm(core_out, z)
+            out = self.norm(core_out, z_view)
             out = self.out_proj(out.reshape(bsz, seq_len, self.value_dim))
+            out = self._maybe_all_reduce(out)
             return out, None
 
         # Normal / YoCo Source layer
@@ -1476,20 +2856,42 @@ class Qwen4_5GatedDeltaNet(nn.Module):
         qkvz = self.in_proj_qkvz(hidden_states)
         ba = self.in_proj_ba(hidden_states)
 
-        mixed_qkv, z = self._unpack_qkvz_normal(qkvz)
-        mixed_qkv = causal_dwconv1d(
-            mixed_qkv,
-            self.conv1d.weight,
-            state=conv_state_wrap,
-            residual=self.gdn_conv_residual,
-            use_silu=True,
-        )
-        q_flat, k_flat, v_flat = mixed_qkv.split(
-            [self.key_dim, self.key_dim, self.value_dim], dim=-1
-        )
-        q = q_flat.reshape(bsz, seq_len, self.num_k_heads, self.head_k_dim)
-        k = k_flat.reshape(bsz, seq_len, self.num_k_heads, self.head_k_dim)
-        v = v_flat.reshape(bsz, seq_len, self.num_v_heads, self.head_v_dim)
+        if (
+            seq_len == 1
+            and state is not None
+            and self._can_use_fused_unpack_conv(qkvz)
+        ):
+            q = torch.empty((bsz, 1, self.num_k_heads, self.head_k_dim), dtype=qkvz.dtype, device=qkvz.device)
+            k = torch.empty((bsz, 1, self.num_k_heads, self.head_k_dim), dtype=qkvz.dtype, device=qkvz.device)
+            v = torch.empty((bsz, 1, self.num_v_heads, self.head_v_dim), dtype=qkvz.dtype, device=qkvz.device)
+            self._launch_fused_unpack_conv_decode(qkvz, state.conv_state, q, k, v, is_consumer=False)
+            z_view = self._view_z_strided(qkvz, is_consumer=False)
+        elif (
+            seq_len > 1
+            and bsz > 0
+            and self._can_use_fused_unpack_conv(qkvz)
+            and self._can_use_conv_state_pool(state.conv_state if state is not None else None)
+        ):
+            q, k, v = self._launch_fused_unpack_conv_seq(
+                qkvz, state.conv_state if state is not None else None, is_consumer=False
+            )
+            assert k is not None and v is not None
+            z_view = self._view_z_strided(qkvz, is_consumer=False)
+        else:
+            mixed_qkv, z_view = self._unpack_qkvz_normal(qkvz)
+            mixed_qkv = causal_dwconv1d(
+                mixed_qkv,
+                self.conv1d.weight,
+                state=conv_state_wrap,
+                residual=self.gdn_conv_residual,
+                use_silu=True,
+            )
+            q_flat, k_flat, v_flat = mixed_qkv.split(
+                [self.key_dim, self.key_dim, self.value_dim], dim=-1
+            )
+            q = q_flat.reshape(bsz, seq_len, self.num_k_heads, self.head_k_dim)
+            k = k_flat.reshape(bsz, seq_len, self.num_k_heads, self.head_k_dim)
+            v = v_flat.reshape(bsz, seq_len, self.num_v_heads, self.head_v_dim)
 
         g, beta = compute_gdn_gating(
             ba,
@@ -1537,8 +2939,9 @@ class Qwen4_5GatedDeltaNet(nn.Module):
                 inplace_state=inplace_ssm,
             )
 
-        out = self.norm(core_out, z)
+        out = self.norm(core_out, z_view)
         out = self.out_proj(out.reshape(bsz, seq_len, self.value_dim))
+        out = self._maybe_all_reduce(out)
 
         published: Optional[SharedGDNInputs] = None
         if self.publishes_shared:
@@ -1551,12 +2954,797 @@ class Qwen4_5GatedDeltaNet(nn.Module):
             )
         return out, published
 
+    def _maybe_all_reduce(self, out: torch.Tensor) -> torch.Tensor:
+        if self.fast_all_reduce is not None:
+            return self.fast_all_reduce(out)
+        if self.tp_size > 1 and self.tp_group is not None:
+            torch.distributed.all_reduce(
+                out, op=torch.distributed.ReduceOp.SUM, group=self.tp_group
+            )
+        return out
+
+    def _view_z_strided(self, projected: torch.Tensor, *, is_consumer: bool) -> torch.Tensor:
+        v_group = self.gqa_ratio * self.head_v_dim
+        if is_consumer:
+            grouped = projected.unflatten(-1, (self.num_k_heads, self.head_k_dim + v_group))
+            z_g = grouped[..., self.head_k_dim :]
+        else:
+            grouped = projected.unflatten(
+                -1, (self.num_k_heads, self.head_k_dim * 2 + v_group * 2)
+            )
+            z_g = grouped[..., self.head_k_dim * 2 + v_group :]
+        return z_g.unflatten(-1, (self.gqa_ratio, self.head_v_dim))
+
+    def _can_use_fused_unpack_conv(self, projected: torch.Tensor) -> bool:
+        return (
+            projected.is_cuda
+            and self.conv1d.weight.is_cuda
+            and self.conv_kernel_size == 4
+            and self.head_k_dim == 64
+            and self.head_v_dim == 64
+            and projected.stride(-1) == 1
+            and self.conv1d.weight.is_contiguous()
+        )
+
+    def _launch_fused_unpack_conv_decode(
+        self,
+        projected: torch.Tensor,
+        conv_state: torch.Tensor,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        *,
+        is_consumer: bool,
+    ) -> None:
+        bsz = int(projected.shape[0])
+        if bsz == 0:
+            return
+        v_group = self.gqa_ratio * self.head_v_dim
+        group_stride = (self.head_k_dim + v_group) if is_consumer else (2 * self.head_k_dim + 2 * v_group)
+        grid = (bsz, self.conv_dim // 64)
+        _gdn_fused_unpack_conv1d_decode_k4_kernel[grid](
+            projected,
+            self.conv1d.weight,
+            conv_state,
+            q,
+            k,
+            v,
+            projected.stride(0),
+            projected.stride(-1),
+            conv_state.stride(0),
+            conv_state.stride(1),
+            conv_state.stride(2),
+            q.stride(0),
+            k.stride(0),
+            v.stride(0),
+            KEY_DIM=self.key_dim,
+            D_K=64,
+            D_V=64,
+            GQA_RATIO=self.gqa_ratio,
+            GROUP_STRIDE=group_stride,
+            IS_CONSUMER=is_consumer,
+            RESIDUAL=self.gdn_conv_residual,
+            BLOCK_C=64,
+            num_warps=2,
+        )
+
+    @staticmethod
+    def _can_use_conv_state_pool(conv_state: Optional[torch.Tensor]) -> bool:
+        return conv_state is None or (
+            conv_state.is_cuda
+            and conv_state.ndim == 3
+            and conv_state.shape[-1] == 3
+            and conv_state.stride(-1) == 1
+            and conv_state.stride(-2) == 3
+        )
+
+    def _launch_fused_unpack_conv_ragged(
+        self,
+        projected_2d: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        tile_req: torch.Tensor,
+        tile_t0: torch.Tensor,
+        *,
+        is_consumer: bool,
+        init_conv_state: Optional[torch.Tensor] = None,
+        snap_tok_idx: Optional[torch.Tensor] = None,
+        snap_req_idx: Optional[torch.Tensor] = None,
+        conv_dst_pool: Optional[torch.Tensor] = None,
+        conv_snap_phys: Optional[torch.Tensor] = None,
+        conv_dst_stride_row: int = 0,
+        conv_dst_col_offset: int = 0,
+        skip_invalid_phys: bool = True,
+        block_t: int = 32,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+        """Run fused unpack + K=4 causal dwconv1d (+ optional 3-token state scatter) on packed [N, P]."""
+        N = int(projected_2d.shape[0])
+        dtype = projected_2d.dtype
+        device = projected_2d.device
+        q = torch.empty((N, self.num_k_heads, self.head_k_dim), dtype=dtype, device=device)
+        if is_consumer:
+            k = None
+            v = None
+            k_arg, v_arg = q, q
+        else:
+            k = torch.empty((N, self.num_k_heads, self.head_k_dim), dtype=dtype, device=device)
+            v = torch.empty((N, self.num_v_heads, self.head_v_dim), dtype=dtype, device=device)
+            k_arg, v_arg = k, v
+
+        has_init_c = init_conv_state is not None
+        init_c_arg = init_conv_state if has_init_c else q
+        v_group = self.gqa_ratio * self.head_v_dim
+        group_stride = (
+            (self.head_k_dim + v_group)
+            if is_consumer
+            else (2 * self.head_k_dim + 2 * v_group)
+        )
+        num_tiles = int(tile_req.numel())
+        if num_tiles > 0:
+            sub_num = 2 if block_t % 2 == 0 else 1
+            sub_t = block_t // sub_num
+            _gdn_fused_unpack_conv1d_ragged_kernel[(num_tiles * sub_num, self.conv_dim // 64)](
+                projected_2d,
+                self.conv1d.weight,
+                init_c_arg,
+                q,
+                k_arg,
+                v_arg,
+                cu_seqlens,
+                tile_req,
+                tile_t0,
+                projected_2d.stride(0),
+                projected_2d.stride(1),
+                init_conv_state.stride(0) if has_init_c else 0,
+                init_conv_state.stride(1) if has_init_c else 0,
+                init_conv_state.stride(2) if has_init_c else 0,
+                q.stride(0),
+                k_arg.stride(0),
+                v_arg.stride(0),
+                KEY_DIM=self.key_dim,
+                D_K=64,
+                D_V=64,
+                GQA_RATIO=self.gqa_ratio,
+                GROUP_STRIDE=group_stride,
+                IS_CONSUMER=is_consumer,
+                HAS_INIT=has_init_c,
+                RESIDUAL=self.gdn_conv_residual,
+                SUB_T=sub_t,
+                SUB_NUM=sub_num,
+                BLOCK_C=64,
+                num_warps=4,
+            )
+        if (
+            snap_tok_idx is not None
+            and snap_req_idx is not None
+            and conv_dst_pool is not None
+            and conv_snap_phys is not None
+            and int(snap_tok_idx.numel()) > 0
+        ):
+            row_st = (
+                int(conv_dst_stride_row)
+                if conv_dst_stride_row > 0
+                else int(conv_dst_pool.stride(0))
+            )
+            _gdn_scatter_qkvz_conv_snapshots_ragged_kernel[
+                (int(snap_tok_idx.numel()), self.conv_dim // 64)
+            ](
+                projected_2d,
+                init_c_arg,
+                cu_seqlens,
+                snap_tok_idx,
+                snap_req_idx,
+                conv_snap_phys,
+                conv_dst_pool,
+                projected_2d.stride(0),
+                projected_2d.stride(1),
+                init_conv_state.stride(0) if has_init_c else 0,
+                init_conv_state.stride(1) if has_init_c else 0,
+                init_conv_state.stride(2) if has_init_c else 0,
+                row_st,
+                int(conv_dst_col_offset),
+                int(conv_dst_pool.shape[0]),
+                KEY_DIM=self.key_dim,
+                D_K=64,
+                D_V=64,
+                GQA_RATIO=self.gqa_ratio,
+                GROUP_STRIDE=group_stride,
+                IS_CONSUMER=is_consumer,
+                HAS_INIT=has_init_c,
+                SKIP_INVALID_PHYS=skip_invalid_phys,
+                BLOCK_C=64,
+                num_warps=2,
+            )
+        return q, k, v
+
+    def _launch_fused_unpack_conv_seq(
+        self,
+        projected: torch.Tensor,
+        conv_state: Optional[torch.Tensor],
+        *,
+        is_consumer: bool,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+        """Run fused unpack + K=4 causal dwconv1d (+ in-place conv_state update) on [B, T, P]."""
+        bsz, seq_len, _ = projected.shape
+        device = projected.device
+        proj_2d = projected.contiguous().view(bsz * seq_len, -1)
+        block_t = 32
+        nt_per_req = (seq_len + block_t - 1) // block_t
+        cu_seqlens = torch.arange(
+            0, (bsz + 1) * seq_len, seq_len, device=device, dtype=torch.int32
+        )
+        tile_req = torch.arange(bsz, device=device, dtype=torch.int32).repeat_interleave(
+            nt_per_req
+        )
+        tile_t0 = (
+            torch.arange(nt_per_req, device=device, dtype=torch.int32) * block_t
+        ).repeat(bsz)
+        init_c = conv_state.clone() if (conv_state is not None and seq_len < 3) else conv_state
+        snap_tok = (cu_seqlens[1:] - 1) if conv_state is not None else None
+        req_idx = (
+            torch.arange(bsz, device=device, dtype=torch.int32)
+            if conv_state is not None
+            else None
+        )
+        q, k, v = self._launch_fused_unpack_conv_ragged(
+            proj_2d,
+            cu_seqlens,
+            tile_req,
+            tile_t0,
+            is_consumer=is_consumer,
+            init_conv_state=init_c,
+            snap_tok_idx=snap_tok,
+            snap_req_idx=req_idx,
+            conv_dst_pool=conv_state,
+            conv_snap_phys=req_idx,
+            conv_dst_stride_row=int(conv_state.stride(0)) if conv_state is not None else 0,
+            conv_dst_col_offset=0,
+            skip_invalid_phys=False,
+            block_t=block_t,
+        )
+        q = q.view(bsz, seq_len, self.num_k_heads, self.head_k_dim)
+        if k is not None:
+            k = k.view(bsz, seq_len, self.num_k_heads, self.head_k_dim)
+        if v is not None:
+            v = v.view(bsz, seq_len, self.num_v_heads, self.head_v_dim)
+        return q, k, v
+
+    def _launch_gdn_verify_scan(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        g: torch.Tensor,
+        beta: torch.Tensor,
+        init_ssm_state: Optional[torch.Tensor],
+        stage_ssm_state: Optional[torch.Tensor],
+        *,
+        verify_w: int,
+    ) -> torch.Tensor:
+        """Run split-D_V Triton GDN verify scan across all speculative steps."""
+        bsz = int(q.shape[0])
+        core_out = torch.empty(
+            (bsz, verify_w, self.num_v_heads, self.head_v_dim),
+            dtype=q.dtype,
+            device=q.device,
+        )
+        has_init_s = init_ssm_state is not None
+        has_stage_s = stage_ssm_state is not None
+        block_dv = 16 if self.head_v_dim % 16 == 0 else self.head_v_dim
+        _gdn_verify_scan_kernel[(bsz, self.num_v_heads, self.head_v_dim // block_dv)](
+            q,
+            k,
+            v,
+            g,
+            beta,
+            init_ssm_state if has_init_s else core_out,
+            stage_ssm_state if has_stage_s else core_out,
+            core_out,
+            q.stride(0),
+            q.stride(1),
+            q.stride(2),
+            q.stride(3),
+            k.stride(0),
+            k.stride(1),
+            k.stride(2),
+            k.stride(3),
+            v.stride(0),
+            v.stride(1),
+            v.stride(2),
+            v.stride(3),
+            g.stride(0),
+            g.stride(1),
+            g.stride(2),
+            beta.stride(0),
+            beta.stride(1),
+            beta.stride(2),
+            init_ssm_state.stride(0) if has_init_s else 0,
+            init_ssm_state.stride(1) if has_init_s else 0,
+            init_ssm_state.stride(2) if has_init_s else 0,
+            init_ssm_state.stride(3) if has_init_s else 0,
+            stage_ssm_state.stride(0) if has_stage_s else 0,
+            stage_ssm_state.stride(1) if has_stage_s else 0,
+            stage_ssm_state.stride(2) if has_stage_s else 0,
+            stage_ssm_state.stride(3) if has_stage_s else 0,
+            stage_ssm_state.stride(4) if has_stage_s else 0,
+            core_out.stride(0),
+            core_out.stride(1),
+            core_out.stride(2),
+            core_out.stride(3),
+            float(self.head_k_dim ** -0.5),
+            1e-6,
+            V_STEPS=verify_w,
+            GQA_RATIO=self.gqa_ratio,
+            D_K=self.head_k_dim,
+            D_V=self.head_v_dim,
+            BLOCK_DV=block_dv,
+            HAS_INIT_STATE=has_init_s,
+            HAS_STAGE_STATE=has_stage_s,
+            num_warps=2 if block_dv <= 16 else 4,
+        )
+        return core_out
+
+    def forward_verify(
+        self,
+        hidden_states: torch.Tensor,
+        *,
+        init_conv_state: Optional[torch.Tensor] = None,
+        init_ssm_state: Optional[torch.Tensor] = None,
+        stage_conv_state: Optional[torch.Tensor] = None,
+        stage_ssm_state: Optional[torch.Tensor] = None,
+        shared: Optional[SharedGDNInputs] = None,
+        enable_yoco_decode: Optional[bool] = None,
+    ) -> Tuple[torch.Tensor, Optional[SharedGDNInputs]]:
+        """Single-pass batched V-step verify forward keeping SSM & conv state in registers."""
+        bsz, verify_w, _ = int(hidden_states.shape[0]), int(hidden_states.shape[1]), int(hidden_states.shape[2])
+        if bsz == 0 or verify_w == 0:
+            return torch.empty_like(hidden_states), None
+        yoco_decode_on = (
+            self.enable_yoco_decode if enable_yoco_decode is None else bool(enable_yoco_decode)
+        )
+        device = hidden_states.device
+        dtype = hidden_states.dtype
+
+        if self.is_consumer:
+            if shared is None:
+                raise ValueError(
+                    f"Consumer GDN layer {self.layer_idx} requires SharedGDNInputs from source layer"
+                )
+            qz = self.in_proj_qkvz(hidden_states)
+            z_view = self._view_z_strided(qz, is_consumer=True)
+            if self.gdn_no_q_conv:
+                q_g = qz.unflatten(-1, (self.num_k_heads, self.head_k_dim + self.gqa_ratio * self.head_v_dim))[
+                    ..., : self.head_k_dim
+                ]
+                q = q_g.contiguous()
+            elif self._can_use_fused_unpack_conv(qz) and init_conv_state is not None:
+                q = torch.empty((bsz, verify_w, self.num_k_heads, self.head_k_dim), dtype=dtype, device=device)
+                has_stage_c = stage_conv_state is not None
+                sc_arg = stage_conv_state if has_stage_c else q
+                v_group = self.gqa_ratio * self.head_v_dim
+                _gdn_fused_unpack_conv1d_verify_k4_kernel[(bsz, self.conv_dim // 64)](
+                    qz,
+                    self.conv1d.weight,
+                    init_conv_state,
+                    sc_arg,
+                    q,
+                    q,
+                    q,
+                    qz.stride(0),
+                    qz.stride(1),
+                    qz.stride(2),
+                    init_conv_state.stride(0),
+                    init_conv_state.stride(1),
+                    init_conv_state.stride(2),
+                    stage_conv_state.stride(0) if has_stage_c else 0,
+                    stage_conv_state.stride(1) if has_stage_c else 0,
+                    stage_conv_state.stride(2) if has_stage_c else 0,
+                    stage_conv_state.stride(3) if has_stage_c else 0,
+                    q.stride(0),
+                    q.stride(1),
+                    q.stride(0),
+                    q.stride(1),
+                    q.stride(0),
+                    q.stride(1),
+                    V_STEPS=verify_w,
+                    KEY_DIM=self.key_dim,
+                    D_K=64,
+                    D_V=64,
+                    GQA_RATIO=self.gqa_ratio,
+                    GROUP_STRIDE=self.head_k_dim + v_group,
+                    IS_CONSUMER=True,
+                    RESIDUAL=self.gdn_conv_residual,
+                    HAS_STAGE=has_stage_c,
+                    BLOCK_C=64,
+                    num_warps=2,
+                )
+            else:
+                q_flat, z_view = self._unpack_qz_consumer(qz)
+                st_c = ShortConvState(init_conv_state.clone()) if init_conv_state is not None else None
+                steps_q = []
+                for s in range(verify_w):
+                    qs = causal_dwconv1d(
+                        q_flat[:, s : s + 1],
+                        self.conv1d.weight,
+                        state=st_c,
+                        residual=self.gdn_conv_residual,
+                        use_silu=True,
+                    )
+                    if stage_conv_state is not None and st_c is not None:
+                        stage_conv_state[:, s].copy_(st_c.conv_state)
+                    steps_q.append(qs)
+                q = torch.cat(steps_q, dim=1).reshape(bsz, verify_w, self.num_k_heads, self.head_k_dim)
+
+            if yoco_decode_on and shared.ssm_state is not None:
+                # shared.ssm_state has shape [B, V, H_v, D_k, D_v] (possibly strided inside packed linear stage)
+                core_out = torch.empty(
+                    (bsz, verify_w, self.num_v_heads, self.head_v_dim),
+                    dtype=dtype,
+                    device=device,
+                )
+                s_st = shared.ssm_state
+                _yoco_gdn_verify_readout_kernel[(bsz * verify_w, self.num_v_heads)](
+                    q,
+                    s_st,
+                    core_out,
+                    q.stride(0),
+                    q.stride(1),
+                    q.stride(2),
+                    q.stride(3),
+                    s_st.stride(0),
+                    s_st.stride(1),
+                    s_st.stride(2),
+                    s_st.stride(3),
+                    s_st.stride(4),
+                    core_out.stride(0),
+                    core_out.stride(1),
+                    core_out.stride(2),
+                    core_out.stride(3),
+                    V_STEPS=verify_w,
+                    scale=float(self.head_k_dim ** -0.5),
+                    eps=1e-6,
+                    GQA_RATIO=self.gqa_ratio,
+                    D_K=self.head_k_dim,
+                    D_V=self.head_v_dim,
+                    num_warps=4,
+                )
+            else:
+                core_out = self._launch_gdn_verify_scan(
+                    q,
+                    shared.key,
+                    shared.value,
+                    shared.g,
+                    shared.beta,
+                    init_ssm_state,
+                    stage_ssm_state,
+                    verify_w=verify_w,
+                )
+
+            out = self.norm(core_out, z_view)
+            out = self.out_proj(out.reshape(bsz, verify_w, self.value_dim))
+            out = self._maybe_all_reduce(out)
+            return out, None
+
+        # Normal / YoCo Source verify
+        assert self.in_proj_ba is not None and self.A_log is not None and self.dt_bias is not None
+        assert init_conv_state is not None
+        qkvz = self.in_proj_qkvz(hidden_states)
+        ba = self.in_proj_ba(hidden_states)
+        g, beta = compute_gdn_gating(
+            ba,
+            self.A_log,
+            self.dt_bias,
+            num_k_heads=self.num_k_heads,
+            num_v_heads=self.num_v_heads,
+        )
+
+        if self._can_use_fused_unpack_conv(qkvz):
+            q = torch.empty((bsz, verify_w, self.num_k_heads, self.head_k_dim), dtype=dtype, device=device)
+            k = torch.empty((bsz, verify_w, self.num_k_heads, self.head_k_dim), dtype=dtype, device=device)
+            v = torch.empty((bsz, verify_w, self.num_v_heads, self.head_v_dim), dtype=dtype, device=device)
+            has_stage_c = stage_conv_state is not None
+            sc_arg = stage_conv_state if has_stage_c else q
+            v_group = self.gqa_ratio * self.head_v_dim
+            _gdn_fused_unpack_conv1d_verify_k4_kernel[(bsz, self.conv_dim // 64)](
+                qkvz,
+                self.conv1d.weight,
+                init_conv_state,
+                sc_arg,
+                q,
+                k,
+                v,
+                qkvz.stride(0),
+                qkvz.stride(1),
+                qkvz.stride(2),
+                init_conv_state.stride(0),
+                init_conv_state.stride(1),
+                init_conv_state.stride(2),
+                stage_conv_state.stride(0) if has_stage_c else 0,
+                stage_conv_state.stride(1) if has_stage_c else 0,
+                stage_conv_state.stride(2) if has_stage_c else 0,
+                stage_conv_state.stride(3) if has_stage_c else 0,
+                q.stride(0),
+                q.stride(1),
+                k.stride(0),
+                k.stride(1),
+                v.stride(0),
+                v.stride(1),
+                V_STEPS=verify_w,
+                KEY_DIM=self.key_dim,
+                D_K=64,
+                D_V=64,
+                GQA_RATIO=self.gqa_ratio,
+                GROUP_STRIDE=2 * self.head_k_dim + 2 * v_group,
+                IS_CONSUMER=False,
+                RESIDUAL=self.gdn_conv_residual,
+                HAS_STAGE=has_stage_c,
+                BLOCK_C=64,
+                num_warps=2,
+            )
+            z_view = self._view_z_strided(qkvz, is_consumer=False)
+        else:
+            mixed_qkv, z_view = self._unpack_qkvz_normal(qkvz)
+            st_c = ShortConvState(init_conv_state.clone())
+            steps_qkv = []
+            for s in range(verify_w):
+                ms = causal_dwconv1d(
+                    mixed_qkv[:, s : s + 1],
+                    self.conv1d.weight,
+                    state=st_c,
+                    residual=self.gdn_conv_residual,
+                    use_silu=True,
+                )
+                if stage_conv_state is not None:
+                    stage_conv_state[:, s].copy_(st_c.conv_state)
+                steps_qkv.append(ms)
+            mixed_all = torch.cat(steps_qkv, dim=1)
+            qf, kf, vf = mixed_all.split([self.key_dim, self.key_dim, self.value_dim], dim=-1)
+            q = qf.reshape(bsz, verify_w, self.num_k_heads, self.head_k_dim)
+            k = kf.reshape(bsz, verify_w, self.num_k_heads, self.head_k_dim)
+            v = vf.reshape(bsz, verify_w, self.num_v_heads, self.head_v_dim)
+
+        core_out = self._launch_gdn_verify_scan(
+            q,
+            k,
+            v,
+            g,
+            beta,
+            init_ssm_state,
+            stage_ssm_state,
+            verify_w=verify_w,
+        )
+
+        out = self.norm(core_out, z_view)
+        out = self.out_proj(out.reshape(bsz, verify_w, self.value_dim))
+        out = self._maybe_all_reduce(out)
+
+        published: Optional[SharedGDNInputs] = None
+        if self.publishes_shared:
+            published = SharedGDNInputs(
+                key=k,
+                value=v,
+                g=g,
+                beta=beta,
+                ssm_state=stage_ssm_state,
+            )
+        return out, published
+
+    def forward_packed_prefill(
+        self,
+        hidden_states: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        tile_req: torch.Tensor,
+        tile_t0: torch.Tensor,
+        chunk_req: torch.Tensor,
+        chunk_t0: torch.Tensor,
+        req_chunk_start: torch.Tensor,
+        *,
+        init_conv_state: Optional[torch.Tensor] = None,
+        init_ssm_state: Optional[torch.Tensor] = None,
+        shared: Optional[SharedGDNInputs] = None,
+        snap_tok_idx: Optional[torch.Tensor] = None,
+        snap_req_idx: Optional[torch.Tensor] = None,
+        conv_dst_pool: Optional[torch.Tensor] = None,
+        conv_snap_phys: Optional[torch.Tensor] = None,
+        conv_dst_stride_row: int = 0,
+        conv_dst_col_offset: int = 0,
+        req_snap_start: Optional[torch.Tensor] = None,
+        snap_local_end: Optional[torch.Tensor] = None,
+        ssm_dst_pool: Optional[torch.Tensor] = None,
+        ssm_snap_phys: Optional[torch.Tensor] = None,
+        skip_invalid_phys: bool = True,
+        block_t: int = 32,
+        enable_yoco_decode: Optional[bool] = None,
+    ) -> Tuple[torch.Tensor, Optional[SharedGDNInputs]]:
+        """Whole-batch packed ragged prefill [N, H] with 64-token SSM & 3-token conv snapshots."""
+        del enable_yoco_decode
+        N = int(hidden_states.shape[0])
+        if N == 0:
+            return torch.empty_like(hidden_states), None
+        device = hidden_states.device
+        dtype = hidden_states.dtype
+
+        if self.is_consumer:
+            if shared is None:
+                raise ValueError(
+                    f"Consumer GDN layer {self.layer_idx} requires SharedGDNInputs from source layer"
+                )
+            qz = self.in_proj_qkvz(hidden_states)
+            z_view = self._view_z_strided(qz.unsqueeze(0), is_consumer=True)
+            if self.gdn_no_q_conv:
+                q_g = qz.unflatten(-1, (self.num_k_heads, self.head_k_dim + self.gqa_ratio * self.head_v_dim))[
+                    ..., : self.head_k_dim
+                ]
+                q = q_g.contiguous()
+            elif self._can_use_fused_unpack_conv(qz):
+                q, _, _ = self._launch_fused_unpack_conv_ragged(
+                    qz,
+                    cu_seqlens,
+                    tile_req,
+                    tile_t0,
+                    is_consumer=True,
+                    init_conv_state=init_conv_state,
+                    snap_tok_idx=snap_tok_idx,
+                    snap_req_idx=snap_req_idx,
+                    conv_dst_pool=conv_dst_pool,
+                    conv_snap_phys=conv_snap_phys,
+                    conv_dst_stride_row=conv_dst_stride_row,
+                    conv_dst_col_offset=conv_dst_col_offset,
+                    skip_invalid_phys=skip_invalid_phys,
+                    block_t=block_t,
+                )
+            else:
+                from rtp_llm.models_py.modules.qwen4_5.short_conv import (
+                    causal_dwconv1d_ragged_prefill_with_snapshots_triton,
+                )
+                q_flat, z_v = self._unpack_qz_consumer(qz.unsqueeze(0))
+                z_view = z_v
+                q_conv = causal_dwconv1d_ragged_prefill_with_snapshots_triton(
+                    q_flat.squeeze(0),
+                    self.conv1d.weight,
+                    cu_seqlens,
+                    tile_req,
+                    tile_t0,
+                    init_state=init_conv_state,
+                    snap_tok_idx=snap_tok_idx,
+                    snap_req_idx=snap_req_idx,
+                    dst_pool=conv_dst_pool,
+                    snap_dst_idx=conv_snap_phys,
+                    dst_stride_row=conv_dst_stride_row,
+                    dst_col_offset=conv_dst_col_offset,
+                    skip_invalid_phys=skip_invalid_phys,
+                    residual=self.gdn_conv_residual,
+                    use_activation=True,
+                    round_pre_act=True,
+                    block_t=block_t,
+                )
+                q = q_conv.view(N, self.num_k_heads, self.head_k_dim)
+
+            core_out, _ = gdn_chunk_prefill_ragged_with_snapshots_triton(
+                q,
+                shared.key,
+                shared.value,
+                shared.g,
+                shared.beta,
+                cu_seqlens,
+                chunk_req,
+                chunk_t0,
+                req_chunk_start,
+                initial_state=init_ssm_state,
+                req_snap_start=req_snap_start,
+                snap_local_end=snap_local_end,
+                snap_phys=ssm_snap_phys,
+                ssm_dst_pool=ssm_dst_pool,
+                skip_invalid_phys=skip_invalid_phys,
+                output_final_states=False,
+            )
+            out = self.norm(core_out.unsqueeze(0), z_view).squeeze(0)
+            out = self.out_proj(out.reshape(N, self.value_dim))
+            out = self._maybe_all_reduce(out)
+            return out, None
+
+        # Normal / YoCo Source packed prefill
+        assert self.in_proj_ba is not None and self.A_log is not None and self.dt_bias is not None
+        qkvz = self.in_proj_qkvz(hidden_states)
+        ba = self.in_proj_ba(hidden_states)
+        g, beta = compute_gdn_gating(
+            ba.unsqueeze(0),
+            self.A_log,
+            self.dt_bias,
+            num_k_heads=self.num_k_heads,
+            num_v_heads=self.num_v_heads,
+        )
+        g_2d = g.squeeze(0)
+        beta_2d = beta.squeeze(0)
+
+        if self._can_use_fused_unpack_conv(qkvz):
+            q, k, v = self._launch_fused_unpack_conv_ragged(
+                qkvz,
+                cu_seqlens,
+                tile_req,
+                tile_t0,
+                is_consumer=False,
+                init_conv_state=init_conv_state,
+                snap_tok_idx=snap_tok_idx,
+                snap_req_idx=snap_req_idx,
+                conv_dst_pool=conv_dst_pool,
+                conv_snap_phys=conv_snap_phys,
+                conv_dst_stride_row=conv_dst_stride_row,
+                conv_dst_col_offset=conv_dst_col_offset,
+                skip_invalid_phys=skip_invalid_phys,
+                block_t=block_t,
+            )
+            assert k is not None and v is not None
+            z_view = self._view_z_strided(qkvz.unsqueeze(0), is_consumer=False)
+        else:
+            from rtp_llm.models_py.modules.qwen4_5.short_conv import (
+                causal_dwconv1d_ragged_prefill_with_snapshots_triton,
+            )
+            mixed_qkv, z_view = self._unpack_qkvz_normal(qkvz.unsqueeze(0))
+            mixed_conv = causal_dwconv1d_ragged_prefill_with_snapshots_triton(
+                mixed_qkv.squeeze(0),
+                self.conv1d.weight,
+                cu_seqlens,
+                tile_req,
+                tile_t0,
+                init_state=init_conv_state,
+                snap_tok_idx=snap_tok_idx,
+                snap_req_idx=snap_req_idx,
+                dst_pool=conv_dst_pool,
+                snap_dst_idx=conv_snap_phys,
+                dst_stride_row=conv_dst_stride_row,
+                dst_col_offset=conv_dst_col_offset,
+                skip_invalid_phys=skip_invalid_phys,
+                residual=self.gdn_conv_residual,
+                use_activation=True,
+                round_pre_act=True,
+                block_t=block_t,
+            )
+            qf, kf, vf = mixed_conv.split([self.key_dim, self.key_dim, self.value_dim], dim=-1)
+            q = qf.view(N, self.num_k_heads, self.head_k_dim)
+            k = kf.view(N, self.num_k_heads, self.head_k_dim)
+            v = vf.view(N, self.num_v_heads, self.head_v_dim)
+
+        core_out, final_ssm = gdn_chunk_prefill_ragged_with_snapshots_triton(
+            q,
+            k,
+            v,
+            g_2d,
+            beta_2d,
+            cu_seqlens,
+            chunk_req,
+            chunk_t0,
+            req_chunk_start,
+            initial_state=init_ssm_state,
+            req_snap_start=req_snap_start,
+            snap_local_end=snap_local_end,
+            snap_phys=ssm_snap_phys,
+            ssm_dst_pool=ssm_dst_pool,
+            skip_invalid_phys=skip_invalid_phys,
+            output_final_states=False,
+        )
+
+        out = self.norm(core_out.unsqueeze(0), z_view).squeeze(0)
+        out = self.out_proj(out.reshape(N, self.value_dim))
+        out = self._maybe_all_reduce(out)
+
+        published: Optional[SharedGDNInputs] = None
+        if self.publishes_shared:
+            published = SharedGDNInputs(
+                key=k,
+                value=v,
+                g=g_2d,
+                beta=beta_2d,
+                ssm_state=final_ssm,
+            )
+        return out, published
+
 
 __all__ = [
     "Qwen4_5GatedDeltaNet",
     "RMSNormGated",
     "SSM_STATE_LAYOUT",
     "compute_gdn_gating",
+    "gdn_chunk_prefill_ragged_with_snapshots_triton",
     "gdn_chunk_prefill_triton",
     "gdn_recurrent_ref",
     "gdn_recurrent_triton",

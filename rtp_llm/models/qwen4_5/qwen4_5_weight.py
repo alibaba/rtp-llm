@@ -29,14 +29,27 @@ try:
         ModelWeightInfo,
     )
     from rtp_llm.model_loader.tensor_source import TensorSource
-    from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
-    from rtp_llm.utils.model_weight import CkptWeightInfo, identity
+    import functools
+    from rtp_llm.model_loader.weight_module import (
+        AtomicWeight,
+        CustomAtomicWeight,
+        WeightModule,
+    )
+    from rtp_llm.utils.model_weight import (
+        CkptWeightInfo,
+        identity,
+        sp_0,
+        sp_0_pad8,
+        sp_id,
+        sp_neg1,
+    )
 
     _HAS_RTP_WEIGHT_LOADER = True
 except Exception:  # pragma: no cover - pure-Python fallback without C++ ops
     _BaseWeightInfo = object  # type: ignore[assignment,misc]
     ModelWeightInfo = Any  # type: ignore[assignment,misc]
     AtomicWeight = Any  # type: ignore[assignment,misc]
+    CustomAtomicWeight = Any  # type: ignore[assignment,misc]
     WeightModule = Any  # type: ignore[assignment,misc]
     CkptWeightInfo = Any  # type: ignore[assignment,misc]
     LoadConfig = Any  # type: ignore[assignment,misc]
@@ -1251,20 +1264,65 @@ class Qwen4_5Weight(_BaseWeightInfo):
                 "use get_global_weight_descriptors() / get_all_layer_weight_descriptors()."
             )
 
+        def _split_gdn_conv1d(
+            t: torch.Tensor,
+            *,
+            tp: int = 1,
+            tp_rank: int = 0,
+            k_dim: int = 0,
+            v_dim: int = 0,
+            is_consumer: bool = False,
+            **kwargs: Any,
+        ) -> torch.Tensor:
+            del kwargs
+            if tp <= 1:
+                return t
+            if is_consumer:
+                return sp_0(t, tp=tp, tp_rank=tp_rank)
+            q_seg, k_seg, v_seg = torch.split(t, [k_dim, k_dim, v_dim], dim=0)
+            return torch.cat(
+                [
+                    sp_0(q_seg, tp=tp, tp_rank=tp_rank),
+                    sp_0(k_seg, tp=tp, tp_rank=tp_rank),
+                    sp_0(v_seg, tp=tp, tp_rank=tp_rank),
+                ],
+                dim=0,
+            ).contiguous()
+
+        row_split_names = {
+            QWEN4_5_W.lm_head: sp_0_pad8,
+            QWEN4_5_W.full_q_proj: sp_0,
+            QWEN4_5_W.dense_gate_proj: sp_0,
+            QWEN4_5_W.dense_up_proj: sp_0,
+            QWEN4_5_W.linear_in_proj_qkvz: sp_0,
+            QWEN4_5_W.linear_in_proj_ba: sp_0,
+            QWEN4_5_W.linear_a_log: sp_0,
+            QWEN4_5_W.linear_dt_bias: sp_0,
+            QWEN4_5_W.full_o_proj: sp_neg1,
+            QWEN4_5_W.dense_down_proj: sp_neg1,
+            QWEN4_5_W.linear_out_proj: sp_neg1,
+        }
+
         global_weights: List[WeightModule] = [
-            AtomicWeight(
+            CustomAtomicWeight(
                 desc.name,
                 [CkptWeightInfo(desc.ckpt_name, identity)],
                 data_type=DTYPE_TO_TORCH[desc.dtype],
+                split_func=row_split_names.get(desc.name, sp_id),
             )
             for desc in self.get_global_weight_descriptors()
         ]
+
+        full_k = self.arch_config.linear_num_key_heads * self.arch_config.linear_key_head_dim
+        full_v = self.arch_config.linear_num_value_heads * self.arch_config.linear_value_head_dim
+        share_map = validate_qwen4_5_arch_config(self.arch_config)
 
         layer_weights: List[List[WeightModule]] = []
         for layer_idx, layer_descs in enumerate(self.get_all_layer_weight_descriptors()):
             mods: List[WeightModule] = []
             ple_shard_infos: List[CkptWeightInfo] = []
             ple_scale_info: Optional[CkptWeightInfo] = None
+            is_consumer = layer_idx in share_map
             for desc in layer_descs:
                 if desc.is_ple_shard:
                     ple_shard_infos.append(CkptWeightInfo(desc.ckpt_name, identity))
@@ -1272,11 +1330,21 @@ class Qwen4_5Weight(_BaseWeightInfo):
                 if desc.name == QWEN4_5_W.ple_ngram_scale:
                     ple_scale_info = CkptWeightInfo(desc.ckpt_name, identity)
                     continue
+                if desc.name == QWEN4_5_W.linear_conv1d:
+                    split_fn = functools.partial(
+                        _split_gdn_conv1d,
+                        k_dim=full_k,
+                        v_dim=full_v,
+                        is_consumer=is_consumer,
+                    )
+                else:
+                    split_fn = row_split_names.get(desc.name, sp_id)
                 mods.append(
-                    AtomicWeight(
+                    CustomAtomicWeight(
                         desc.name,
                         [CkptWeightInfo(desc.ckpt_name, identity)],
                         data_type=DTYPE_TO_TORCH[desc.dtype],
+                        split_func=split_fn,
                     )
                 )
             if ple_shard_infos:

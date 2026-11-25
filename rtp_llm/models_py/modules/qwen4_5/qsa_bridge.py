@@ -696,6 +696,229 @@ def write_qsa_prefill_cache(
     )
 
 
+if _HAS_TRITON:
+
+    @triton.jit
+    def _write_verify_qsa_cache_k4_kernel(
+        raw_ptr,
+        seq_before_ptr,
+        valid_ptr,
+        cos_ptr,
+        sin_ptr,
+        gamma_ptr,
+        init_state_ptr,
+        stage_state_ptr,
+        kv_pool_ptr,
+        kv_table_ptr,
+        stride_rb: tl.int64,
+        stride_rv: tl.int64,
+        stride_cb: tl.int64,
+        stride_cv: tl.int64,
+        stride_ib: tl.int64,
+        stride_is: tl.int64,
+        stride_stb: tl.int64,
+        stride_stv: tl.int64,
+        stride_sts: tl.int64,
+        KV_TABLE_WIDTH: tl.constexpr,
+        KV_POOL_BLOCKS: tl.constexpr,
+        KV_TOKENS_PER_BLOCK: tl.constexpr,
+        KV_ENTRIES_PER_BLOCK: tl.constexpr,
+        V_STEPS: tl.constexpr,
+        D: tl.constexpr,
+        ROTARY: tl.constexpr,
+        EPS: tl.constexpr,
+        HAS_VALID: tl.constexpr,
+    ):
+        """Batched V-step QSA indexer cache write + per-step ring state staging in registers."""
+        request = tl.program_id(0).to(tl.int64)
+        d = tl.arange(0, D)
+        ring_offs = tl.arange(0, 8)
+        active = (tl.load(valid_ptr + request) != 0) if HAS_VALID else True
+        pos0 = tl.load(seq_before_ptr + request).to(tl.int64)
+
+        ring = tl.load(
+            init_state_ptr + request * stride_ib + ring_offs[:, None] * stride_is + d[None, :]
+        ).to(tl.float32)
+        gain = 1.0 + tl.load(gamma_ptr + d).to(tl.float32)
+
+        partner = tl.where(
+            d < ROTARY,
+            tl.where(d < ROTARY // 2, d + ROTARY // 2, d - ROTARY // 2),
+            d,
+        )
+        half_sign = tl.where(d < ROTARY // 2, -1.0, 1.0)
+
+        for v in tl.static_range(V_STEPS):
+            pos = pos0 + v
+            is_step_active = active & (pos >= 0)
+            raw = tl.load(
+                raw_ptr + request * stride_rb + v * stride_rv + d,
+                mask=is_step_active,
+                other=0.0,
+            ).to(tl.float32)
+            slot = pos % 8
+            ring = tl.where(is_step_active & (ring_offs[:, None] == slot), raw[None, :], ring)
+
+            tl.store(
+                stage_state_ptr
+                + request * stride_stb
+                + v * stride_stv
+                + ring_offs[:, None] * stride_sts
+                + d[None, :],
+                ring,
+            )
+
+            if is_step_active and (pos + 1) % 4 == 0:
+                use_hi = (pos % 8) >= 4
+                grp_mask = (ring_offs >= 4) if use_hi else (ring_offs < 4)
+                grp_sum = tl.sum(tl.where(grp_mask[:, None], ring, 0.0), axis=0)
+                pooled = (grp_sum * 0.25).to(tl.bfloat16).to(tl.float32)
+                rms = tl.rsqrt(tl.sum(pooled * pooled, axis=0) / D + EPS)
+                normalized = (pooled * rms * gain).to(tl.bfloat16)
+
+                rotated_half = tl.gather(normalized, partner, axis=0)
+                cosine = tl.load(
+                    cos_ptr + request * stride_cb + v * stride_cv + d,
+                    mask=d < ROTARY,
+                    other=1.0,
+                )
+                sine = tl.load(
+                    sin_ptr + request * stride_cb + v * stride_cv + d,
+                    mask=d < ROTARY,
+                    other=0.0,
+                )
+                left = (normalized.to(tl.float32) * cosine.to(tl.float32)).to(tl.bfloat16)
+                right = (rotated_half.to(tl.float32) * sine.to(tl.float32) * half_sign).to(
+                    tl.bfloat16
+                )
+                value = tl.where(
+                    d < ROTARY,
+                    (left.to(tl.float32) + right.to(tl.float32)).to(tl.bfloat16),
+                    normalized,
+                )
+
+                kv_column = pos // KV_TOKENS_PER_BLOCK
+                kv_id = tl.load(
+                    kv_table_ptr + request * KV_TABLE_WIDTH + kv_column,
+                    mask=kv_column < KV_TABLE_WIDTH,
+                    other=0,
+                ).to(tl.int64)
+                kv_valid = (kv_id > 0) & (kv_id < KV_POOL_BLOCKS)
+                entry = (pos // 4) % KV_ENTRIES_PER_BLOCK
+                tl.store(
+                    kv_pool_ptr + (kv_id * KV_ENTRIES_PER_BLOCK + entry) * D + d,
+                    value,
+                    mask=kv_valid,
+                )
+
+
+def write_qsa_verify_cache_gpu_(
+    raw_keys: torch.Tensor,
+    seq_lens_before_dev: torch.Tensor,
+    k_norm_gamma: torch.Tensor,
+    kv_pool: torch.Tensor,
+    kv_table: torch.Tensor,
+    init_state: torch.Tensor,
+    stage_state: torch.Tensor,
+    *,
+    kv_tokens_per_block: int,
+    state_tokens_per_block: int,
+    ratio: int,
+    rotary_dim: int,
+    rope_theta: float,
+    norm_eps: float,
+    valid: Optional[torch.Tensor] = None,
+) -> None:
+    """Zero-sync batched V-step QSA indexer cache write + rollback ring staging."""
+    bsz, verify_w, head_dim = int(raw_keys.shape[0]), int(raw_keys.shape[1]), int(raw_keys.shape[2])
+    if bsz == 0 or verify_w == 0:
+        return
+    if (
+        _HAS_TRITON
+        and raw_keys.is_cuda
+        and ratio == 4
+        and head_dim == 128
+        and rotary_dim == 64
+        and verify_w <= 16
+        and kv_tokens_per_block >= 4
+        and kv_tokens_per_block % 4 == 0
+        and state_tokens_per_block >= 4
+        and raw_keys.stride(-1) == 1
+    ):
+        steps = torch.arange(verify_w, dtype=torch.int64, device=raw_keys.device).unsqueeze(0)
+        pos = seq_lens_before_dev.to(dtype=torch.int64).unsqueeze(1) + steps
+        block_starts = pos - torch.remainder(pos, ratio)
+        block_cos, block_sin = build_qsa_neox_cos_sin(
+            block_starts, rotary_dim, rope_theta, raw_keys.dtype
+        )
+        valid_arg = (
+            valid.to(dtype=torch.int8).contiguous()
+            if valid is not None
+            else seq_lens_before_dev
+        )
+        _write_verify_qsa_cache_k4_kernel[(bsz,)](
+            raw_keys,
+            seq_lens_before_dev.to(dtype=torch.int32).contiguous(),
+            valid_arg,
+            block_cos,
+            block_sin,
+            k_norm_gamma,
+            init_state,
+            stage_state,
+            kv_pool,
+            kv_table.contiguous(),
+            int(raw_keys.stride(0)),
+            int(raw_keys.stride(1)),
+            int(block_cos.stride(0)),
+            int(block_cos.stride(1)),
+            int(init_state.stride(0)),
+            int(init_state.stride(1)),
+            int(stage_state.stride(0)),
+            int(stage_state.stride(1)),
+            int(stage_state.stride(2)),
+            KV_TABLE_WIDTH=int(kv_table.shape[1]),
+            KV_POOL_BLOCKS=int(kv_pool.shape[0]),
+            KV_TOKENS_PER_BLOCK=kv_tokens_per_block,
+            KV_ENTRIES_PER_BLOCK=kv_tokens_per_block // ratio,
+            V_STEPS=verify_w,
+            D=head_dim,
+            ROTARY=rotary_dim,
+            EPS=float(norm_eps),
+            HAS_VALID=valid is not None,
+        )
+        return
+
+    # Fallback path for non-4 ratio / CPU
+    scratch_pool = torch.zeros(
+        (bsz + 1, *init_state.shape[1:]), dtype=torch.float32, device=raw_keys.device
+    )
+    scratch_pool[1 : bsz + 1].copy_(init_state)
+    row_ids = (
+        torch.where(valid, torch.arange(1, bsz + 1, dtype=torch.int32, device=raw_keys.device), 0)
+        if valid is not None
+        else torch.arange(1, bsz + 1, dtype=torch.int32, device=raw_keys.device)
+    )
+    scratch_bt = row_ids.unsqueeze(1).expand(bsz, int(kv_table.shape[1])).contiguous()
+    for step in range(verify_w):
+        write_qsa_decode_cache_gpu_(
+            raw_keys[:, step],
+            seq_lens_before_dev + step,
+            k_norm_gamma,
+            kv_pool,
+            kv_table,
+            scratch_pool,
+            scratch_bt,
+            kv_tokens_per_block=kv_tokens_per_block,
+            state_tokens_per_block=state_tokens_per_block,
+            ratio=ratio,
+            rotary_dim=rotary_dim,
+            rope_theta=rope_theta,
+            norm_eps=norm_eps,
+            valid=valid,
+        )
+        stage_state[:, step].copy_(scratch_pool[1 : bsz + 1])
+
+
 def write_qsa_decode_cache_gpu_(
     raw_keys: torch.Tensor,
     seq_lens_before_dev: torch.Tensor,
@@ -788,6 +1011,236 @@ def write_qsa_decode_cache_gpu_(
     )
 
 
+if _HAS_TRITON:
+
+    @triton.jit(do_not_specialize=["T", "WORDS"])
+    def _qsa_pack_bitmap_words_kernel(
+        ids_ptr,
+        packed_ptr,
+        ends_ptr,
+        dup_ptr,
+        T,
+        K: tl.constexpr,
+        BK: tl.constexpr,
+        WORDS,
+    ):
+        """Pack per-query selected indices into 1-bit uint32 words and detect duplicates."""
+        row = tl.program_id(0).to(tl.int64)
+        row_end = tl.full((), -1, tl.int32)
+        has_bad = tl.zeros((), dtype=tl.int32)
+        base_ptr = ids_ptr + row * K
+        pack_base = packed_ptr + row * WORDS
+        for start in range(0, K, BK):
+            slots = start + tl.arange(0, BK)
+            in_k = slots < K
+            idx = tl.load(base_ptr + slots, mask=in_k, other=-1)
+            valid = in_k & (idx >= 0) & (idx < T)
+            safe_idx = tl.where(valid, idx, 0)
+            bit = tl.full((BK,), 1, tl.uint32) << (safe_idx & 31)
+            old = tl.atomic_or(
+                pack_base + (safe_idx >> 5), bit, mask=valid, sem="relaxed"
+            ).to(tl.uint32)
+            repeated = valid & ((old & bit) != 0)
+            invalid = in_k & (idx >= T)
+            if tl.max((repeated | invalid).to(tl.int32), 0) != 0:
+                has_bad = 1
+            row_end = tl.maximum(row_end, tl.max(tl.where(valid, idx, -1), 0))
+        if has_bad != 0:
+            tl.store(dup_ptr, 1)
+        tl.store(ends_ptr + row, row_end + 1)
+
+    @triton.jit(do_not_specialize=["S", "T", "WORDS"])
+    def _qsa_bitmap_packed_gqa_kernel(
+        q_ptr,
+        k_ptr,
+        v_ptr,
+        packed_ptr,
+        ends_ptr,
+        out_ptr,
+        S,
+        T,
+        WORDS,
+        HQ: tl.constexpr,
+        HK: tl.constexpr,
+        D: tl.constexpr,
+        SCALE: tl.constexpr,
+        G: tl.constexpr,
+        QS: tl.constexpr,
+        M_ROWS: tl.constexpr,
+        KT: tl.constexpr,
+    ):
+        """Multi-query GQA sparse prefill reading 1-bit packed bitmap + split-BF16 P@V."""
+        b = tl.program_id(0).to(tl.int64)
+        hk = tl.program_id(1).to(tl.int64)
+        n_groups = tl.num_programs(2).to(tl.int64)
+        group = n_groups - 1 - tl.program_id(2).to(tl.int64)
+
+        r = tl.arange(0, M_ROWS)
+        pos = group * QS + r // G
+        live = (r < QS * G) & (pos < S)
+        h = hk * G + (r % G)
+        d = tl.arange(0, D)
+
+        qv = tl.load(
+            q_ptr + ((b * HQ + h[:, None]) * S + pos[:, None]) * D + d[None, :],
+            mask=live[:, None],
+            other=0.0,
+        )
+        last = tl.max(tl.load(ends_ptr + b * S + pos, mask=live, other=0), 0)
+        mx = tl.full((M_ROWS,), float("-inf"), tl.float32)
+        z = tl.zeros((M_ROWS,), tl.float32)
+        acc = tl.zeros((M_ROWS, D), tl.float32)
+
+        t_rel = tl.arange(0, KT)
+        word_idx = t_rel >> 5
+        bit_mask = tl.full((KT,), 1, tl.uint32) << (t_rel & 31)
+        WORDS_PER_TILE: tl.constexpr = KT // 32
+
+        for tile in range(tl.cdiv(last, KT)):
+            w_base = tile * WORDS_PER_TILE
+            if KT == 32:
+                words = tl.load(
+                    packed_ptr + (b * S + pos) * WORDS + w_base,
+                    mask=live & (w_base < WORDS),
+                    other=0,
+                ).to(tl.uint32)
+                valid = live[:, None] & ((words[:, None] & bit_mask[None, :]) != 0)
+            else:
+                w_off = w_base + word_idx[None, :]
+                words = tl.load(
+                    packed_ptr + (b * S + pos[:, None]) * WORDS + w_off,
+                    mask=live[:, None] & (w_off < WORDS),
+                    other=0,
+                ).to(tl.uint32)
+                valid = live[:, None] & ((words & bit_mask[None, :]) != 0)
+            t = tile * KT + t_rel
+            t_live = t < T
+            kval = tl.load(
+                k_ptr + ((b * HK + hk) * T + t[:, None]) * D + d[None, :],
+                mask=t_live[:, None],
+                other=0.0,
+            )
+            logits = tl.dot(qv, tl.trans(kval)) * SCALE
+            logits = tl.where(valid, logits, float("-inf"))
+            nxt = tl.maximum(mx, tl.max(logits, 1))
+            rescale = tl.where(nxt == float("-inf"), 0.0, tl.exp(mx - nxt))
+            prob = tl.where(valid, tl.exp(logits - nxt[:, None]), 0.0)
+            vv = tl.load(
+                v_ptr + ((b * HK + hk) * T + t[:, None]) * D + d[None, :],
+                mask=t_live[:, None],
+                other=0.0,
+            )
+            high = prob.to(tl.bfloat16)
+            low = (prob - high.to(tl.float32)).to(tl.bfloat16)
+            acc = acc * rescale[:, None]
+            acc = tl.dot(high, vv, acc)
+            acc = tl.dot(low, vv, acc)
+            z = z * rescale + tl.sum(prob, 1)
+            mx = nxt
+
+        res = tl.where(z[:, None] > 0, acc / z[:, None], 0.0)
+        tl.store(
+            out_ptr + ((b * HQ + h[:, None]) * S + pos[:, None]) * D + d[None, :],
+            res.to(out_ptr.dtype.element_ty),
+            mask=live[:, None],
+        )
+
+    @triton.jit
+    def _qsa_sparse_prefill_grouped_fast_kernel(
+        q_ptr,
+        k_ptr,
+        v_ptr,
+        idx_ptr,
+        out_ptr,
+        stride_q_b,
+        stride_q_h,
+        stride_q_s,
+        stride_out_b,
+        stride_out_h,
+        stride_out_s,
+        stride_k_b,
+        stride_k_h,
+        stride_k_t,
+        stride_v_b,
+        stride_v_h,
+        stride_v_t,
+        stride_idx_b,
+        stride_idx_s,
+        K,
+        T,
+        D: tl.constexpr,
+        SCALE: tl.constexpr,
+        q_per_kv: tl.constexpr,
+        MAX_BLKS: tl.constexpr,
+        BLK_K: tl.constexpr,
+        BLK_H: tl.constexpr,
+    ):
+        """Grouped sparse FMHA with empty-block skip and split-BF16 P@V for SM80+/SM103."""
+        pid_s = tl.num_programs(0).to(tl.int64) - 1 - tl.program_id(0).to(tl.int64)
+        pid_b = tl.program_id(1).to(tl.int64)
+        pid_kv = tl.program_id(2).to(tl.int64)
+
+        rh = tl.arange(0, BLK_H)
+        rd = tl.arange(0, D)
+        live_h = rh < q_per_kv
+        q = tl.load(
+            q_ptr
+            + pid_b * stride_q_b
+            + (pid_kv * q_per_kv + rh[:, None]) * stride_q_h
+            + pid_s * stride_q_s
+            + rd[None, :],
+            mask=live_h[:, None],
+            other=0.0,
+        )
+        idx_base = idx_ptr + pid_b * stride_idx_b + pid_s * stride_idx_s
+        k_base = k_ptr + pid_b * stride_k_b + pid_kv * stride_k_h
+        v_base = v_ptr + pid_b * stride_v_b + pid_kv * stride_v_h
+        max_score = tl.full((BLK_H,), float("-inf"), tl.float32)
+        sum_exp = tl.zeros((BLK_H,), tl.float32)
+        acc = tl.zeros((BLK_H, D), tl.float32)
+
+        for blk in range(MAX_BLKS):
+            tr = blk * BLK_K + tl.arange(0, BLK_K)
+            idx = tl.load(idx_base + tr, mask=tr < K, other=-1)
+            valid = (tr < K) & (idx >= 0) & (idx < T)
+            if tl.sum(valid.to(tl.int32), 0) > 0:
+                k = tl.load(
+                    k_base + idx[:, None] * stride_k_t + rd[None, :],
+                    mask=valid[:, None],
+                    other=0.0,
+                )
+                score = tl.dot(q, tl.trans(k)) * SCALE
+                score = tl.where(valid[None, :], score, float("-inf"))
+                next_max = tl.maximum(max_score, tl.max(score, axis=1))
+                rescale = tl.where(
+                    next_max == float("-inf"), 0.0, tl.exp(max_score - next_max)
+                )
+                weights = tl.where(valid[None, :], tl.exp(score - next_max[:, None]), 0.0)
+                v = tl.load(
+                    v_base + idx[:, None] * stride_v_t + rd[None, :],
+                    mask=valid[:, None],
+                    other=0.0,
+                )
+                high = weights.to(tl.bfloat16)
+                low = (weights - high.to(tl.float32)).to(tl.bfloat16)
+                acc = acc * rescale[:, None]
+                acc = tl.dot(high, v, acc)
+                acc = tl.dot(low, v, acc)
+                sum_exp = sum_exp * rescale + tl.sum(weights, axis=1)
+                max_score = next_max
+
+        out = tl.where(sum_exp[:, None] > 0, acc / sum_exp[:, None], 0.0)
+        tl.store(
+            out_ptr
+            + pid_b * stride_out_b
+            + (pid_kv * q_per_kv + rh[:, None]) * stride_out_h
+            + pid_s * stride_out_s
+            + rd[None, :],
+            out.to(out_ptr.dtype.element_ty),
+            mask=live_h[:, None],
+        )
+
+
 def qsa_sparse_prefill_attention(
     q_bhtd: torch.Tensor,
     k_bhtd: torch.Tensor,
@@ -798,6 +1251,136 @@ def qsa_sparse_prefill_attention(
 ) -> torch.Tensor:
     """Sparse prefill attention ``[B, H_q, S, D]`` over selected token indices."""
     if q_bhtd.is_cuda:
+        B, H_q, S, D = q_bhtd.shape
+        H_kv = int(k_bhtd.shape[1])
+        T = int(k_bhtd.shape[2])
+        K = int(selected.shape[-1])
+        if B == 0 or S == 0:
+            return torch.empty_like(q_bhtd)
+        q_per_kv = H_q // max(H_kv, 1)
+        can_triton_fast = (
+            _HAS_TRITON
+            and torch.version.hip is None
+            and q_bhtd.dtype == torch.bfloat16
+            and k_bhtd.dtype == torch.bfloat16
+            and v_bhtd.dtype == torch.bfloat16
+            and selected.dtype == torch.int32
+            and k_bhtd.shape == v_bhtd.shape
+            and int(k_bhtd.shape[0]) == B
+            and int(k_bhtd.shape[3]) == D
+            and tuple(selected.shape[:2]) == (B, S)
+            and H_kv > 0
+            and H_q % H_kv == 0
+            and D in (64, 128, 256)
+            and torch.cuda.get_device_capability(q_bhtd.device)[0] >= 8
+        )
+        if can_triton_fast:
+            if validate_selected and selected.numel() > 0:
+                max_selected = int(selected.max().item())
+                if max_selected >= T:
+                    raise ValueError(
+                        f"selected index {max_selected} is outside KV sequence length {T}"
+                    )
+            if T == 0 or K == 0:
+                return torch.zeros_like(q_bhtd)
+            q_c = q_bhtd.contiguous()
+            k_c = k_bhtd.contiguous()
+            v_c = v_bhtd.contiguous()
+            sel_c = selected.contiguous()
+
+            # 1) Packed 1-bit bitmap multi-query path for unique selections
+            words = triton.cdiv(T, 32)
+            if (
+                not torch.cuda.is_current_stream_capturing()
+                and S >= 128
+                and T >= 64
+                and q_per_kv <= 16
+                and (B * S * words) <= 32 * 1024 * 1024
+            ):
+                qs32 = 32 // q_per_kv
+                qs16 = max(1, 16 // q_per_kv)
+                if (5 <= q_per_kv <= 7) or (qs32 > qs16 and q_per_kv <= 12):
+                    m_rows, qs = 32, qs32
+                else:
+                    m_rows, qs = 16, qs16
+                kt = 64 if T >= 64 else 32
+                packed = torch.zeros((B, S, words), device=q_c.device, dtype=torch.int32)
+                ends = torch.empty((B, S), device=q_c.device, dtype=torch.int32)
+                dup = torch.zeros((1,), device=q_c.device, dtype=torch.int32)
+                bk = 512 if K >= 256 else max(16, triton.next_power_of_2(K))
+                _qsa_pack_bitmap_words_kernel[(B * S,)](
+                    sel_c,
+                    packed,
+                    ends,
+                    dup,
+                    T=T,
+                    K=K,
+                    BK=bk,
+                    WORDS=words,
+                    num_warps=4,
+                )
+                if not bool(dup.item()):
+                    out = torch.empty_like(q_c)
+                    _qsa_bitmap_packed_gqa_kernel[(B, H_kv, triton.cdiv(S, qs))](
+                        q_c,
+                        k_c,
+                        v_c,
+                        packed,
+                        ends,
+                        out,
+                        S=S,
+                        T=T,
+                        WORDS=words,
+                        HQ=H_q,
+                        HK=H_kv,
+                        D=D,
+                        SCALE=D**-0.5,
+                        G=q_per_kv,
+                        QS=qs,
+                        M_ROWS=m_rows,
+                        KT=kt,
+                        num_warps=4,
+                        num_stages=1,
+                    )
+                    return out
+
+            # 2) Fast grouped SM80+/SM103 fallback (handles duplicates & long contexts)
+            if S >= 128 and K >= 32 and 3 <= q_per_kv <= 16:
+                blk_k = 64 if D <= 256 else 32
+                out = torch.empty_like(q_c)
+                _qsa_sparse_prefill_grouped_fast_kernel[(S, B, H_kv)](
+                    q_c,
+                    k_c,
+                    v_c,
+                    sel_c,
+                    out,
+                    q_c.stride(0),
+                    q_c.stride(1),
+                    q_c.stride(2),
+                    out.stride(0),
+                    out.stride(1),
+                    out.stride(2),
+                    k_c.stride(0),
+                    k_c.stride(1),
+                    k_c.stride(2),
+                    v_c.stride(0),
+                    v_c.stride(1),
+                    v_c.stride(2),
+                    sel_c.stride(0),
+                    sel_c.stride(1),
+                    K,
+                    T,
+                    D=D,
+                    SCALE=D**-0.5,
+                    q_per_kv=q_per_kv,
+                    MAX_BLKS=triton.cdiv(K, blk_k),
+                    BLK_K=blk_k,
+                    BLK_H=16,
+                    num_warps=4,
+                    num_stages=1,
+                )
+                return out
+
         from rtp_llm.models_py.kernels.cuda.qsa.sparse_fmha import (
             sparse_prefill_attn,
         )
@@ -895,5 +1478,6 @@ __all__ = [
     "view_indexer_state_pool",
     "view_mha_kv_hnd",
     "write_qsa_decode_cache_gpu_",
+    "write_qsa_verify_cache_gpu_",
     "write_qsa_prefill_cache",
 ]

@@ -22,7 +22,11 @@ import triton
 import triton.language as tl
 
 from .contracts import PLELayerState
-from .short_conv import Qwen4_5ShortConv
+from .short_conv import (
+    Qwen4_5ShortConv,
+    causal_dwconv1d_ragged_prefill_with_snapshots_triton,
+    causal_dwconv1d_verify_triton,
+)
 
 # Real Qwen 4.5-Flash Layer 1 PLE constants
 DEFAULT_PLE_LAYER_MULTIPLIERS: Tuple[int, ...] = (
@@ -133,6 +137,9 @@ def _ple_hash_ngram_ids_kernel(
     OFFSETS_PTR,
     MULT_PTR,
     OUT_PTR,
+    STAGE_CTX_PTR,
+    STAGE_SB: tl.int64,
+    STAGE_SV: tl.int64,
     BATCH,
     SEQ,
     EOS: tl.constexpr,
@@ -142,6 +149,7 @@ def _ple_hash_ngram_ids_kernel(
     BLOCK_ROWS: tl.constexpr,
     HAS_CTX: tl.constexpr,
     UPDATE_CTX_T1: tl.constexpr,
+    WRITE_STAGE_CTX: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64) * BLOCK_ROWS + tl.arange(0, BLOCK_ROWS).to(tl.int64)
     total_rows = BATCH.to(tl.int64) * SEQ.to(tl.int64)
@@ -165,6 +173,10 @@ def _ple_hash_ngram_ids_kernel(
     else:
         prev = prev_from_ids
         prev2 = prev2_from_ids
+
+    if WRITE_STAGE_CTX:
+        tl.store(STAGE_CTX_PTR + batch * STAGE_SB + t * STAGE_SV + 0, prev, mask=valid_row)
+        tl.store(STAGE_CTX_PTR + batch * STAGE_SB + t * STAGE_SV + 1, cur, mask=valid_row)
 
     # EOS barrier: if previous token is EOS, 2-step history resets to EOS as well.
     prev2 = tl.where(prev == EOS, EOS, prev2)
@@ -191,6 +203,108 @@ def _ple_hash_ngram_ids_kernel(
         out_ids,
         mask=valid_row[:, None] & head_mask[None, :],
     )
+
+
+@triton.jit(do_not_specialize=["N"])
+def _ple_hash_ngram_ids_ragged_kernel(
+    PREV_CTX_PTR,
+    IDS_PTR,
+    CU_SEQLENS_PTR,
+    TOK_REQ_PTR,
+    VOCAB_PTR,
+    OFFSETS_PTR,
+    MULT_PTR,
+    OUT_PTR,
+    N,
+    EOS: tl.constexpr,
+    NUM_HEADS: tl.constexpr,
+    HEADS_PER_NGRAM: tl.constexpr,
+    HEAD_BLOCK: tl.constexpr,
+    BLOCK_ROWS: tl.constexpr,
+    HAS_CTX: tl.constexpr,
+):
+    """Packed ragged 2-gram + 3-gram hashing across variable-length requests."""
+    row = tl.program_id(0).to(tl.int64) * BLOCK_ROWS + tl.arange(0, BLOCK_ROWS).to(tl.int64)
+    valid_row = row < N
+    b = tl.load(TOK_REQ_PTR + row, mask=valid_row, other=0).to(tl.int64)
+    req_start = tl.load(CU_SEQLENS_PTR + b, mask=valid_row, other=0).to(tl.int64)
+    t = row - req_start
+
+    cur = tl.load(IDS_PTR + row, mask=valid_row, other=EOS)
+    prev_from_ids = tl.load(IDS_PTR + row - 1, mask=valid_row & (t >= 1), other=EOS)
+    prev2_from_ids = tl.load(IDS_PTR + row - 2, mask=valid_row & (t >= 2), other=EOS)
+
+    if HAS_CTX:
+        ctx1 = tl.load(PREV_CTX_PTR + b * 2 + 1, mask=valid_row & (t < 2), other=EOS)
+        ctx0 = tl.load(PREV_CTX_PTR + b * 2 + 0, mask=valid_row & (t == 0), other=EOS)
+        prev = tl.where(t >= 1, prev_from_ids, ctx1)
+        prev2_ctx = tl.where(t == 1, ctx1, ctx0)
+        prev2 = tl.where(t >= 2, prev2_from_ids, prev2_ctx)
+    else:
+        prev = prev_from_ids
+        prev2 = prev2_from_ids
+
+    prev2 = tl.where(prev == EOS, EOS, prev2)
+
+    m0 = tl.load(MULT_PTR + 0)
+    m1 = tl.load(MULT_PTR + 1)
+    m2 = tl.load(MULT_PTR + 2)
+    mix2 = (cur * m0) ^ (prev * m1)
+    mix3 = mix2 ^ (prev2 * m2)
+
+    head = tl.arange(0, HEAD_BLOCK)
+    head_mask = head < NUM_HEADS
+    mixed = tl.where(head[None, :] < HEADS_PER_NGRAM, mix2[:, None], mix3[:, None])
+    vocab = tl.load(VOCAB_PTR + head, mask=head_mask, other=1)
+    offsets = tl.load(OFFSETS_PTR + head, mask=head_mask, other=0)
+
+    rem = mixed % vocab[None, :]
+    rem = tl.where(rem < 0, rem + vocab[None, :], rem)
+    out_ids = rem + offsets[None, :]
+
+    tl.store(
+        OUT_PTR + row[:, None] * NUM_HEADS + head[None, :],
+        out_ids,
+        mask=valid_row[:, None] & head_mask[None, :],
+    )
+
+
+@triton.jit
+def _scatter_ple_ctx_snapshots_ragged_kernel(
+    PREV_CTX_PTR,
+    IDS_PTR,
+    CU_SEQLENS_PTR,
+    SNAP_TOK_PTR,
+    SNAP_REQ_PTR,
+    SNAP_DST_PTR,
+    DST_PTR,
+    dst_stride_row: tl.int64,
+    dst_rows: tl.int64,
+    EOS: tl.constexpr,
+    HAS_CTX: tl.constexpr,
+    SKIP_INVALID_PHYS: tl.constexpr,
+):
+    """Scatter boundary 2-token ngram_context snapshots for packed ragged prefill."""
+    s_id = tl.program_id(0).to(tl.int64)
+    dst_idx = tl.load(SNAP_DST_PTR + s_id).to(tl.int64)
+    if SKIP_INVALID_PHYS:
+        if dst_idx <= 0 or dst_idx >= dst_rows:
+            return
+    g_tok = tl.load(SNAP_TOK_PTR + s_id).to(tl.int64)
+    b = tl.load(SNAP_REQ_PTR + s_id).to(tl.int64)
+    req_start = tl.load(CU_SEQLENS_PTR + b).to(tl.int64)
+    local_t = g_tok - req_start
+
+    c1 = tl.load(IDS_PTR + g_tok).to(tl.int64)
+    if local_t >= 1:
+        c0 = tl.load(IDS_PTR + g_tok - 1).to(tl.int64)
+    elif HAS_CTX:
+        c0 = tl.load(PREV_CTX_PTR + b * 2 + 1).to(tl.int64)
+    else:
+        c0 = tl.full((), EOS, tl.int64)
+
+    tl.store(DST_PTR + dst_idx * dst_stride_row + 0, c0)
+    tl.store(DST_PTR + dst_idx * dst_stride_row + 1, c1)
 
 
 @triton.jit(do_not_specialize=["N", "SHARD_ROWS"])
@@ -333,6 +447,7 @@ def ple_hash_ngram_ids_triton(
     prev_context: Optional[torch.Tensor] = None,
     *,
     update_context_inplace: bool = False,
+    stage_context: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Fused Triton 2-gram + 3-gram hashing with exact int64 & EOS reset semantics."""
     B, T = input_ids.shape
@@ -351,6 +466,7 @@ def ple_hash_ngram_ids_triton(
         if not prev_context.is_contiguous():
             raise ValueError("prev_context must be contiguous for Triton hash")
 
+    has_stage = stage_context is not None
     update_t1 = has_ctx and update_context_inplace and (T == 1)
     head_block = max(16, triton.next_power_of_2(num_heads))
     block_rows = 1 if (B * T) <= 4 else (16 if (B * T) <= 64 else 64)
@@ -362,6 +478,9 @@ def ple_hash_ngram_ids_triton(
         offsets.contiguous(),
         multipliers.contiguous(),
         out,
+        stage_context if has_stage else ids_c,
+        int(stage_context.stride(0)) if has_stage else 0,
+        int(stage_context.stride(1)) if has_stage else 0,
         BATCH=B,
         SEQ=T,
         EOS=eos_token_id,
@@ -371,6 +490,7 @@ def ple_hash_ngram_ids_triton(
         BLOCK_ROWS=block_rows,
         HAS_CTX=has_ctx,
         UPDATE_CTX_T1=update_t1,
+        WRITE_STAGE_CTX=has_stage,
         num_warps=4,
     )
 
@@ -476,7 +596,7 @@ def ple_gate_and_norm_triton(
         return u, u_norm
 
     block = max(128, triton.next_power_of_2(hidden_size))
-    num_warps = 8 if block >= 4096 else 4
+    num_warps = 4
     _ple_gate_and_norm_kernel[(B * T, hc_count)](
         key_2d,
         val_2d,
@@ -552,6 +672,10 @@ class Qwen4_5PLELayer(nn.Module):
         weight_scale: float = DEFAULT_PLE_WEIGHT_SCALE,
         dtype: torch.dtype = torch.bfloat16,
         device: Optional[torch.device] = None,
+        tp_size: int = 1,
+        tp_rank: int = 0,
+        tp_group: Any = None,
+        fast_all_reduce: Any = None,
     ) -> None:
         super().__init__()
         if ngram_size < 2:
@@ -669,6 +793,11 @@ class Qwen4_5PLELayer(nn.Module):
         self._weight_scale_cuda: Optional[torch.Tensor] = None
         self._cpu_uva_active: bool = False
 
+        self.tp_size = max(1, int(tp_size))
+        self.tp_rank = int(tp_rank)
+        self.tp_group = tp_group
+        self.fast_all_reduce = fast_all_reduce
+
         # Inference cache for fused [key_proj.weight; value_proj.weight]
         self._fused_kv_key: Optional[Tuple[int, int, int, int]] = None
         self._fused_kv_weight: Optional[torch.Tensor] = None
@@ -694,6 +823,7 @@ class Qwen4_5PLELayer(nn.Module):
         shard_offset: int = 0,
         total_shards: Optional[int] = None,
         ep_group: Any = None,
+        fast_all_reduce: Any = None,
     ) -> None:
         """Attach a flat [total_rows, head_dim] or sharded list[Tensor] FP8/BF16 table.
 
@@ -738,6 +868,8 @@ class Qwen4_5PLELayer(nn.Module):
         self._shard_offset = int(shard_offset)
         self._total_shards = eff_total_shards
         self._ple_ep_group = ep_group
+        if fast_all_reduce is not None:
+            self.fast_all_reduce = fast_all_reduce
         self._table_pin_cpu = pin_cpu
         self._table_enable_cpu_uva = enable_cpu_uva
         self._pointer_cache_device = None
@@ -817,7 +949,7 @@ class Qwen4_5PLELayer(nn.Module):
     def _get_fused_kv_weight(self) -> torch.Tensor:
         wk = self.key_proj.weight
         wv = self.value_proj.weight
-        if torch.is_grad_enabled() or wk.requires_grad or wv.requires_grad:
+        if torch.is_grad_enabled() and (wk.requires_grad or wv.requires_grad):
             return torch.cat([wk, wv], dim=0)
         key = (wk.data_ptr(), wk._version, wv.data_ptr(), wv._version)
         if self._fused_kv_key != key or self._fused_kv_weight is None:
@@ -943,10 +1075,8 @@ class Qwen4_5PLELayer(nn.Module):
                 out_dtype=dtype,
             )
             out = gathered.reshape(B, T, self.ple_embed_dim)
-            if self._ple_ep_group is not None and self._total_shards > len(shards):
-                torch.distributed.all_reduce(
-                    out, op=torch.distributed.ReduceOp.SUM, group=self._ple_ep_group
-                )
+            if self._total_shards > len(shards):
+                out = self._reduce_sharded_embeddings(out)
             return out
 
         # Fallback: host-side gather (keeps compact 1-byte FP8 over H2D) or generic device gather
@@ -979,11 +1109,245 @@ class Qwen4_5PLELayer(nn.Module):
         elif rows.dtype != dtype:
             rows = rows.to(dtype)
         out = rows.reshape(B, T, self.ple_embed_dim)
-        if self._ple_ep_group is not None and self._total_shards > len(shards):
+        if self._total_shards > len(shards):
+            out = self._reduce_sharded_embeddings(out)
+        return out
+
+    def _reduce_sharded_embeddings(self, out: torch.Tensor) -> torch.Tensor:
+        reduce_group = self._ple_ep_group if self._ple_ep_group is not None else self.tp_group
+        if self.fast_all_reduce is not None:
+            ar_group = getattr(self.fast_all_reduce, "group", reduce_group)
+            if reduce_group is None or ar_group is reduce_group:
+                return self.fast_all_reduce(out)
+        if reduce_group is not None:
             torch.distributed.all_reduce(
-                out, op=torch.distributed.ReduceOp.SUM, group=self._ple_ep_group
+                out, op=torch.distributed.ReduceOp.SUM, group=reduce_group
             )
         return out
+
+    def _project_kv_fused(self, emb: torch.Tensor, *, use_fused_cuda: bool) -> Tuple[torch.Tensor, torch.Tensor]:
+        if use_fused_cuda and self.hidden_size <= 8192:
+            w_kv = self._get_fused_kv_weight()
+            kv = F.linear(emb, w_kv)
+            return kv[..., : self.hc_hidden_size], kv[..., self.hc_hidden_size :]
+        return self.key_proj(emb), self.value_proj(emb)
+
+    def forward_verify(
+        self,
+        hidden_states: torch.Tensor,
+        input_ids_2d: torch.Tensor,
+        init_ngram_ctx: torch.Tensor,
+        init_conv_state: torch.Tensor,
+        stage_ctx: Optional[torch.Tensor] = None,
+        stage_conv: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Batched V-step verify forward writing per-step rollback states in one pass."""
+        B, V, W = hidden_states.shape
+        if W != self.hc_hidden_size:
+            raise ValueError(
+                f"Expected hidden_states width {self.hc_hidden_size}, got {W}"
+            )
+        if B == 0 or V == 0:
+            return hidden_states.clone()
+
+        if input_ids_2d.is_cuda and self.ngram_size == 3:
+            ngram_ids = ple_hash_ngram_ids_triton(
+                input_ids_2d,
+                self.ngram_heads_vocab_sizes,
+                self.ngram_heads_offsets,
+                self.layer_multipliers,
+                self.eos_token_id,
+                prev_context=init_ngram_ctx,
+                update_context_inplace=False,
+                stage_context=stage_ctx,
+            )
+        else:
+            ngram_ids = self.compute_ngram_ids_ref(
+                input_ids_2d,
+                state=PLELayerState(ngram_context=init_ngram_ctx.clone(), conv_state=init_conv_state),
+                update_state=False,
+            )
+            if stage_ctx is not None:
+                full = torch.cat([init_ngram_ctx, input_ids_2d.to(torch.int64)], dim=1)
+                for step in range(V):
+                    stage_ctx[:, step].copy_(full[:, step + 1 : step + 3])
+
+        emb = self.gather_embeddings(ngram_ids, out_dtype=hidden_states.dtype)
+        key, value = self._project_kv_fused(emb, use_fused_cuda=hidden_states.is_cuda)
+        u, u_norm = ple_gate_and_norm_triton(
+            key,
+            value,
+            hidden_states,
+            self.norm_key,
+            self.norm_query,
+            self.norm_conv,
+            self.hc_count,
+            self.eps,
+        )
+        conv_out = causal_dwconv1d_verify_triton(
+            u_norm,
+            self.conv1d.weight,
+            init_conv_state,
+            stage_conv,
+            residual=False,
+            use_activation=False,
+        )
+        return ple_add3_triton(hidden_states, u, conv_out)
+
+    def forward_packed_prefill(
+        self,
+        hidden_states: torch.Tensor,
+        flat_input_ids: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        tok_req: torch.Tensor,
+        tile_req: torch.Tensor,
+        tile_t0: torch.Tensor,
+        *,
+        prev_ngram_ctx: Optional[torch.Tensor] = None,
+        init_conv_state: Optional[torch.Tensor] = None,
+        snap_tok_idx: Optional[torch.Tensor] = None,
+        snap_req_idx: Optional[torch.Tensor] = None,
+        conv_dst_pool: Optional[torch.Tensor] = None,
+        conv_snap_phys: Optional[torch.Tensor] = None,
+        ctx_dst_pool: Optional[torch.Tensor] = None,
+        ctx_snap_phys: Optional[torch.Tensor] = None,
+        skip_invalid_phys: bool = True,
+        block_t: int = 16,
+    ) -> torch.Tensor:
+        """Whole-batch packed ragged prefill with boundary snapshot scatter."""
+        N, W = hidden_states.shape
+        if W != self.hc_hidden_size:
+            raise ValueError(
+                f"Expected hidden_states width {self.hc_hidden_size}, got {W}"
+            )
+        if N == 0:
+            return hidden_states.clone()
+
+        if flat_input_ids.is_cuda and self.ngram_size == 3:
+            ids_c = flat_input_ids.to(torch.int64).contiguous()
+            ngram_ids = torch.empty(
+                (N, self.ngram_heads), device=ids_c.device, dtype=torch.int64
+            )
+            has_ctx = prev_ngram_ctx is not None
+            head_block = max(16, triton.next_power_of_2(self.ngram_heads))
+            block_rows = 1 if N <= 4 else (16 if N <= 64 else 64)
+            _ple_hash_ngram_ids_ragged_kernel[(triton.cdiv(N, block_rows),)](
+                prev_ngram_ctx.contiguous() if has_ctx else ids_c,
+                ids_c,
+                cu_seqlens,
+                tok_req,
+                self.ngram_heads_vocab_sizes.contiguous(),
+                self.ngram_heads_offsets.contiguous(),
+                self.layer_multipliers.contiguous(),
+                ngram_ids,
+                N=N,
+                EOS=self.eos_token_id,
+                NUM_HEADS=self.ngram_heads,
+                HEADS_PER_NGRAM=self.heads_per_ngram,
+                HEAD_BLOCK=head_block,
+                BLOCK_ROWS=block_rows,
+                HAS_CTX=has_ctx,
+                num_warps=4,
+            )
+            if (
+                snap_tok_idx is not None
+                and snap_req_idx is not None
+                and ctx_dst_pool is not None
+                and ctx_snap_phys is not None
+                and int(snap_tok_idx.numel()) > 0
+            ):
+                _scatter_ple_ctx_snapshots_ragged_kernel[(int(snap_tok_idx.numel()),)](
+                    prev_ngram_ctx.contiguous() if has_ctx else ids_c,
+                    ids_c,
+                    cu_seqlens,
+                    snap_tok_idx,
+                    snap_req_idx,
+                    ctx_snap_phys,
+                    ctx_dst_pool,
+                    int(ctx_dst_pool.stride(0)),
+                    int(ctx_dst_pool.shape[0]),
+                    EOS=self.eos_token_id,
+                    HAS_CTX=has_ctx,
+                    SKIP_INVALID_PHYS=skip_invalid_phys,
+                    num_warps=1,
+                )
+        else:
+            cu_list = cu_seqlens.tolist()
+            ng_chunks = []
+            for b in range(len(cu_list) - 1):
+                s, e = int(cu_list[b]), int(cu_list[b + 1])
+                if e <= s:
+                    continue
+                st_b = (
+                    PLELayerState(
+                        ngram_context=prev_ngram_ctx[b : b + 1].clone(),
+                        conv_state=torch.empty(0),
+                    )
+                    if prev_ngram_ctx is not None
+                    else None
+                )
+                ng_chunks.append(
+                    self.compute_ngram_ids_ref(
+                        flat_input_ids[s:e].unsqueeze(0), state=st_b, update_state=False
+                    ).squeeze(0)
+                )
+            ngram_ids = torch.cat(ng_chunks, dim=0)
+            if (
+                snap_tok_idx is not None
+                and snap_req_idx is not None
+                and ctx_dst_pool is not None
+                and ctx_snap_phys is not None
+            ):
+                for idx_s in range(int(snap_tok_idx.numel())):
+                    phys = int(ctx_snap_phys[idx_s].item())
+                    if skip_invalid_phys and (phys <= 0 or phys >= int(ctx_dst_pool.shape[0])):
+                        continue
+                    g_tok = int(snap_tok_idx[idx_s].item())
+                    b = int(snap_req_idx[idx_s].item())
+                    req_start = int(cu_list[b])
+                    local_t = g_tok - req_start
+                    c1 = int(flat_input_ids[g_tok].item())
+                    if local_t >= 1:
+                        c0 = int(flat_input_ids[g_tok - 1].item())
+                    elif prev_ngram_ctx is not None:
+                        c0 = int(prev_ngram_ctx[b, 1].item())
+                    else:
+                        c0 = self.eos_token_id
+                    ctx_dst_pool[phys, 0] = c0
+                    ctx_dst_pool[phys, 1] = c1
+
+        emb = self.gather_embeddings(
+            ngram_ids.unsqueeze(0), out_dtype=hidden_states.dtype
+        )
+        key, value = self._project_kv_fused(emb, use_fused_cuda=hidden_states.is_cuda)
+        h_3d = hidden_states.unsqueeze(0)
+        u, u_norm = ple_gate_and_norm_triton(
+            key,
+            value,
+            h_3d,
+            self.norm_key,
+            self.norm_query,
+            self.norm_conv,
+            self.hc_count,
+            self.eps,
+        )
+        conv_out = causal_dwconv1d_ragged_prefill_with_snapshots_triton(
+            u_norm.squeeze(0),
+            self.conv1d.weight,
+            cu_seqlens,
+            tile_req,
+            tile_t0,
+            init_state=init_conv_state,
+            snap_tok_idx=snap_tok_idx,
+            snap_req_idx=snap_req_idx,
+            dst_pool=conv_dst_pool,
+            snap_dst_idx=conv_snap_phys,
+            skip_invalid_phys=skip_invalid_phys,
+            residual=False,
+            use_activation=False,
+            block_t=block_t,
+        )
+        return ple_add3_triton(h_3d, u, conv_out.unsqueeze(0)).squeeze(0)
 
     def forward(
         self,
@@ -1005,14 +1369,7 @@ class Qwen4_5PLELayer(nn.Module):
         emb = self.gather_embeddings(ngram_ids, out_dtype=hidden_states.dtype)
 
         # 2. Fused K/V projection (single GEMM, zero-copy strided split consumed by Triton gate)
-        if hidden_states.is_cuda and self.hidden_size <= 8192:
-            w_kv = self._get_fused_kv_weight()
-            kv = F.linear(emb, w_kv)
-            key = kv[..., : self.hc_hidden_size]
-            value = kv[..., self.hc_hidden_size :]
-        else:
-            key = self.key_proj(emb)
-            value = self.value_proj(emb)
+        key, value = self._project_kv_fused(emb, use_fused_cuda=hidden_states.is_cuda)
 
         # 3. Fused norm_key + norm_query + signed-sqrt dot gate + U + norm_conv
         u, u_norm = ple_gate_and_norm_triton(

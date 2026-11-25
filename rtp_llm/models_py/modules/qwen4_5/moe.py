@@ -29,6 +29,7 @@ are applied immediately after ``Qwen4_5DenseMLP`` / ``Qwen4_5LatentMoE`` inside
 
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import Any, Optional, Tuple
 
 import torch
@@ -217,10 +218,10 @@ def _qwen45_sigmoid_topk_router_kernel(
 
 
 class Qwen4_5DenseMLP(nn.Module):
-    """Dense gated MLP with SiTU-GLU activation.
+    """Dense gated MLP with SiTU-GLU activation and optional TP=4 sharding.
 
     Used for:
-      - Layer 0 Dense MLP (``hidden_size=5120, intermediate_size=12800``)
+      - Layer 0 Dense MLP (``hidden_size=5120, intermediate_size=12800 -> 3200/rank at TP=4``)
       - Layers 1..39 Shared Expert (``hidden_size=5120, intermediate_size=1280``)
     """
 
@@ -232,20 +233,48 @@ class Qwen4_5DenseMLP(nn.Module):
         gate_beta: float = 4.0,
         up_beta: float = 25.0,
         use_triton: bool = True,
+        tp_size: int = 1,
+        tp_rank: int = 0,
+        tp_group: Any = None,
+        fast_all_reduce: Any = None,
         dtype: torch.dtype = torch.bfloat16,
         device: Optional[torch.device] = None,
     ) -> None:
         super().__init__()
         self.hidden_size = int(hidden_size)
-        self.intermediate_size = int(intermediate_size)
+        self.full_intermediate_size = int(intermediate_size)
+        self.tp_size = int(tp_size)
+        self.tp_rank = int(tp_rank)
+        self.tp_group = tp_group
+        self.fast_all_reduce = fast_all_reduce
+        if self.tp_size < 1 or self.full_intermediate_size % self.tp_size != 0:
+            raise ValueError(
+                f"intermediate_size={self.full_intermediate_size} must be divisible by tp_size={self.tp_size}"
+            )
+        if not (0 <= self.tp_rank < self.tp_size):
+            raise ValueError(f"tp_rank={self.tp_rank} out of range for tp_size={self.tp_size}")
+        self.local_intermediate_size = self.full_intermediate_size // self.tp_size
+        self.intermediate_size = self.local_intermediate_size
         self.gate_proj = nn.Linear(
-            hidden_size, intermediate_size, bias=False, dtype=dtype, device=device
+            self.hidden_size,
+            self.local_intermediate_size,
+            bias=False,
+            dtype=dtype,
+            device=device,
         )
         self.up_proj = nn.Linear(
-            hidden_size, intermediate_size, bias=False, dtype=dtype, device=device
+            self.hidden_size,
+            self.local_intermediate_size,
+            bias=False,
+            dtype=dtype,
+            device=device,
         )
         self.down_proj = nn.Linear(
-            intermediate_size, hidden_size, bias=False, dtype=dtype, device=device
+            self.local_intermediate_size,
+            self.hidden_size,
+            bias=False,
+            dtype=dtype,
+            device=device,
         )
         self.act_fn = SituAndMul(
             gate_beta=gate_beta, up_beta=up_beta, use_triton=use_triton
@@ -259,6 +288,10 @@ class Qwen4_5DenseMLP(nn.Module):
         *,
         is_shared_expert: bool = False,
         use_triton: bool = True,
+        tp_size: int = 1,
+        tp_rank: int = 0,
+        tp_group: Any = None,
+        fast_all_reduce: Any = None,
         dtype: torch.dtype = torch.bfloat16,
         device: Optional[torch.device] = None,
     ) -> "Qwen4_5DenseMLP":
@@ -273,9 +306,51 @@ class Qwen4_5DenseMLP(nn.Module):
             gate_beta=config.hidden_act_gate_beta,
             up_beta=config.hidden_act_up_beta,
             use_triton=use_triton,
+            tp_size=tp_size,
+            tp_rank=tp_rank,
+            tp_group=tp_group,
+            fast_all_reduce=fast_all_reduce,
             dtype=dtype,
             device=device,
         )
+
+    @torch.no_grad()
+    def load_tp_weights(
+        self,
+        gate_weight: torch.Tensor,
+        up_weight: torch.Tensor,
+        down_weight: torch.Tensor,
+        *,
+        already_sharded: bool = False,
+    ) -> None:
+        """Load full or pre-sharded gate/up/down weights onto the local TP rank."""
+        if already_sharded or self.tp_size == 1:
+            g_local, u_local, d_local = gate_weight, up_weight, down_weight
+        else:
+            start = self.tp_rank * self.local_intermediate_size
+            end = start + self.local_intermediate_size
+            g_local = gate_weight[start:end, :]
+            u_local = up_weight[start:end, :]
+            d_local = down_weight[:, start:end]
+
+        if tuple(g_local.shape) != tuple(self.gate_proj.weight.shape):
+            raise ValueError(
+                f"gate_weight shard shape {tuple(g_local.shape)} != {tuple(self.gate_proj.weight.shape)}"
+            )
+        if tuple(u_local.shape) != tuple(self.up_proj.weight.shape):
+            raise ValueError(
+                f"up_weight shard shape {tuple(u_local.shape)} != {tuple(self.up_proj.weight.shape)}"
+            )
+        if tuple(d_local.shape) != tuple(self.down_proj.weight.shape):
+            raise ValueError(
+                f"down_weight shard shape {tuple(d_local.shape)} != {tuple(self.down_proj.weight.shape)}"
+            )
+
+        self.gate_proj.weight.data.copy_(g_local)
+        self.up_proj.weight.data.copy_(u_local)
+        self.down_proj.weight.data.copy_(d_local)
+        if self._gate_up_weight is not None:
+            self.prepare_weights(fuse_gate_up=True)
 
     @torch.no_grad()
     def prepare_weights(self, *, fuse_gate_up: bool = True) -> None:
@@ -288,30 +363,58 @@ class Qwen4_5DenseMLP(nn.Module):
             self._gate_up_weight = None
 
     def forward(
-        self, hidden_states: torch.Tensor, *, use_triton: Optional[bool] = None
+        self,
+        hidden_states: torch.Tensor,
+        *,
+        use_triton: Optional[bool] = None,
+        skip_allreduce: bool = False,
     ) -> torch.Tensor:
+        if hidden_states.numel() == 0:
+            return torch.empty_like(hidden_states)
+
         if self._gate_up_weight is not None and (use_triton is None or use_triton):
             gate_up = F.linear(hidden_states, self._gate_up_weight)
             act = self.act_fn(gate_up)
-            return self.down_proj(act)
-
-        gate = self.gate_proj(hidden_states)
-        up = self.up_proj(hidden_states)
-        if use_triton is None:
-            act = self.act_fn(gate, up)
+            out = self.down_proj(act)
         else:
-            orig_flag = self.act_fn.use_triton
-            try:
-                self.act_fn.use_triton = use_triton
+            gate = self.gate_proj(hidden_states)
+            up = self.up_proj(hidden_states)
+            if use_triton is None:
                 act = self.act_fn(gate, up)
-            finally:
-                self.act_fn.use_triton = orig_flag
-        return self.down_proj(act)
+            else:
+                orig_flag = self.act_fn.use_triton
+                try:
+                    self.act_fn.use_triton = use_triton
+                    act = self.act_fn(gate, up)
+                finally:
+                    self.act_fn.use_triton = orig_flag
+            out = self.down_proj(act)
+
+        if self.tp_size > 1 and not skip_allreduce:
+            if self.fast_all_reduce is not None:
+                orig_shape = out.shape
+                out_2d = out.reshape(-1, self.hidden_size)
+                if not out_2d.is_contiguous():
+                    out_2d = out_2d.contiguous()
+                out = self.fast_all_reduce(out_2d).reshape(orig_shape)
+            elif self.tp_group is not None:
+                if not out.is_contiguous():
+                    out = out.contiguous()
+                torch.distributed.all_reduce(
+                    out, op=torch.distributed.ReduceOp.SUM, group=self.tp_group
+                )
+        return out
 
 
 # ---------------------------------------------------------------------------
 # Layers 1..39 Latent MoE + Shared Expert (MXFP4 Routed Experts)
 # ---------------------------------------------------------------------------
+
+
+@lru_cache(maxsize=None)
+def _shared_stream_for_device(device_index: int) -> torch.cuda.Stream:
+    """Reuse one auxiliary CUDA stream per device for shared-expert overlap."""
+    return torch.cuda.Stream(device=torch.device("cuda", int(device_index)))
 
 
 class Qwen4_5LatentMoE(nn.Module):
@@ -346,6 +449,12 @@ class Qwen4_5LatentMoE(nn.Module):
         ep_size: int = 1,
         ep_rank: int = 0,
         ep_group: Any = None,
+        tp_size: int = 1,
+        tp_rank: int = 0,
+        tp_group: Any = None,
+        fast_all_reduce: Any = None,
+        enable_shared_overlap: bool = True,
+        backend: str = "auto",
     ) -> None:
         super().__init__()
         if config is not None:
@@ -395,9 +504,19 @@ class Qwen4_5LatentMoE(nn.Module):
         self.up_beta = float(up_beta)
         self.router_precision = str(router_precision)
         self.normalize_topk_scores = bool(router_normalize_topk_scores)
+        self.tp_size = int(tp_size)
+        self.tp_rank = int(tp_rank)
+        self.tp_group = tp_group
+        self.fast_all_reduce = fast_all_reduce
+        self.enable_shared_overlap = bool(enable_shared_overlap)
+        self.backend = str(backend)
         self.use_triton_mxfp4 = bool(use_triton_mxfp4)
         self.compute_mode = str(compute_mode)
         self.weights_transposed = False
+        self._mxfp4_weights_cache: Optional[MXFP4MoEWeights] = None
+        self._shared_stream: Optional[torch.cuda.Stream] = None
+        self._shared_input_ready: Optional[torch.cuda.Event] = None
+        self._shared_output_ready: Optional[torch.cuda.Event] = None
 
         # Latent projections & pre-MoE Gemma RMSNorm (BF16)
         self.latent_down_proj = nn.Linear(
@@ -506,6 +625,11 @@ class Qwen4_5LatentMoE(nn.Module):
             self.register_buffer("w2_u8", None)
             self.register_buffer("w2_scale", None)
 
+        if self.enable_shared_overlap and device is not None:
+            dev = torch.device(device)
+            if dev.type == "cuda":
+                self.prepare_shared_expert_overlap(device=dev)
+
     @classmethod
     def from_config(
         cls,
@@ -519,6 +643,12 @@ class Qwen4_5LatentMoE(nn.Module):
         ep_size: int = 1,
         ep_rank: int = 0,
         ep_group: Any = None,
+        tp_size: int = 1,
+        tp_rank: int = 0,
+        tp_group: Any = None,
+        fast_all_reduce: Any = None,
+        enable_shared_overlap: bool = True,
+        backend: str = "auto",
     ) -> "Qwen4_5LatentMoE":
         return cls(
             config=config,
@@ -530,6 +660,12 @@ class Qwen4_5LatentMoE(nn.Module):
             ep_size=ep_size,
             ep_rank=ep_rank,
             ep_group=ep_group,
+            tp_size=tp_size,
+            tp_rank=tp_rank,
+            tp_group=tp_group,
+            fast_all_reduce=fast_all_reduce,
+            enable_shared_overlap=enable_shared_overlap,
+            backend=backend,
         )
 
     @torch.no_grad()
@@ -563,6 +699,21 @@ class Qwen4_5LatentMoE(nn.Module):
         self.w2_u8 = prepared.w2_u8
         self.w2_scale = prepared.w2_scale
         self.weights_transposed = prepared.weights_transposed
+        self._mxfp4_weights_cache = None
+
+    def prepare_shared_expert_overlap(
+        self, device: Optional[torch.device] = None
+    ) -> None:
+        """Initialize auxiliary CUDA stream and event pair for shared-expert overlap."""
+        if not self.enable_shared_overlap or not torch.cuda.is_available() or torch.version.hip is not None:
+            return
+        dev = device if device is not None else self.shared_expert.gate_proj.weight.device
+        if dev.type != "cuda":
+            return
+        dev_idx = 0 if dev.index is None else int(dev.index)
+        self._shared_stream = _shared_stream_for_device(dev_idx)
+        self._shared_input_ready = torch.cuda.Event()
+        self._shared_output_ready = torch.cuda.Event()
 
     @torch.no_grad()
     def prepare_weights(
@@ -570,8 +721,10 @@ class Qwen4_5LatentMoE(nn.Module):
         *,
         transpose_mxfp4: bool = False,
         fuse_shared_gate_up: bool = True,
+        prepare_deepgemm: bool = False,
+        prepare_flashinfer: bool = False,
     ) -> None:
-        """Prepare MXFP4 routed weights and shared expert fused gate_up weights."""
+        """Prepare MXFP4 routed weights, SM100 scale caches, shared expert, and overlap stream."""
         if self.w13_u8 is not None and self.w2_u8 is not None:
             if transpose_mxfp4 and not self.weights_transposed:
                 self.w13_u8 = self.w13_u8.transpose(1, 2).contiguous()
@@ -586,7 +739,14 @@ class Qwen4_5LatentMoE(nn.Module):
                 self.w13_scale = self.w13_scale.contiguous()
                 self.w2_u8 = self.w2_u8.contiguous()
                 self.w2_scale = self.w2_scale.contiguous()
+            self._mxfp4_weights_cache = None
+            weights = self._mxfp4_weights()
+            if prepare_deepgemm and not self.weights_transposed:
+                weights.get_deepgemm_pair()
+            if prepare_flashinfer and not self.weights_transposed:
+                weights.get_flashinfer_pair()
         self.shared_expert.prepare_weights(fuse_gate_up=fuse_shared_gate_up)
+        self.prepare_shared_expert_overlap()
 
     def _mxfp4_weights(self) -> MXFP4MoEWeights:
         if (
@@ -598,13 +758,24 @@ class Qwen4_5LatentMoE(nn.Module):
             raise RuntimeError(
                 "MXFP4 routed expert weights are not initialized; call load_mxfp4_weights() first."
             )
-        return MXFP4MoEWeights(
+        cached = self._mxfp4_weights_cache
+        if (
+            cached is not None
+            and cached.w13_u8 is self.w13_u8
+            and cached.w13_scale is self.w13_scale
+            and cached.w2_u8 is self.w2_u8
+            and cached.w2_scale is self.w2_scale
+            and cached.weights_transposed == self.weights_transposed
+        ):
+            return cached
+        self._mxfp4_weights_cache = MXFP4MoEWeights(
             w13_u8=self.w13_u8,
             w13_scale=self.w13_scale,
             w2_u8=self.w2_u8,
             w2_scale=self.w2_scale,
             weights_transposed=self.weights_transposed,
         )
+        return self._mxfp4_weights_cache
 
     def route(
         self, routed: torch.Tensor, *, use_triton: Optional[bool] = None
@@ -678,28 +849,14 @@ class Qwen4_5LatentMoE(nn.Module):
         topk_weights = topk_weights.to(routed.dtype).float()
         return topk_ids, topk_weights
 
-    def forward(
+    def _forward_routed(
         self,
-        hidden_states: torch.Tensor,
+        x: torch.Tensor,
         *,
-        use_triton_mxfp4: Optional[bool] = None,
-        compute_mode: Optional[str] = None,
+        run_triton: bool,
+        mode: str,
+        backend: str,
     ) -> torch.Tensor:
-        """Run Latent MoE + Shared Expert forward pass.
-
-        Accepts 2D ``[M, hidden_size]`` or 3D ``[B, T, hidden_size]`` tensors.
-        """
-        orig_shape = hidden_states.shape
-        x = hidden_states.reshape(-1, self.hidden_size)
-        if x.shape[0] == 0:
-            return torch.empty_like(hidden_states)
-
-        use_triton = (
-            self.use_triton_mxfp4 if use_triton_mxfp4 is None else bool(use_triton_mxfp4)
-        )
-        mode = self.compute_mode if compute_mode is None else compute_mode
-        run_triton = use_triton and x.is_cuda and supports_triton_mxfp4(x.device)
-
         # 1. Latent down projection (5120 -> 2560)
         routed = F.linear(x, self.latent_down_proj.weight)
 
@@ -726,6 +883,7 @@ class Qwen4_5LatentMoE(nn.Module):
                 use_triton=True,
                 ep_start=self.ep_start,
                 ep_size=self.ep_size,
+                backend=backend,
             )
         else:
             routed = mxfp4_moe_forward_ref(
@@ -739,21 +897,115 @@ class Qwen4_5LatentMoE(nn.Module):
                 ep_size=self.ep_size,
             )
         if self.ep_size > 1 and self.ep_group is not None:
-            torch.distributed.all_reduce(
-                routed, op=torch.distributed.ReduceOp.SUM, group=self.ep_group
-            )
+            if (
+                self.fast_all_reduce is not None
+                and self.fast_all_reduce.group is self.ep_group
+            ):
+                routed = self.fast_all_reduce(routed)
+            else:
+                if not routed.is_contiguous():
+                    routed = routed.contiguous()
+                torch.distributed.all_reduce(
+                    routed, op=torch.distributed.ReduceOp.SUM, group=self.ep_group
+                )
 
         # 6. Latent up projection (2560 -> 5120)
         routed = F.linear(routed, self.latent_up_proj.weight)
 
         # 7. Latent output scale gate ([M, 1])
         scale = torch.sigmoid(F.linear(x, self.latent_scale_gate.weight))
-        routed = routed * scale
+        return routed * scale
 
-        # 8. Shared expert on original hidden_states ([M, 5120])
-        shared = self.shared_expert(x, use_triton=run_triton)
+    def _forward_shared(self, x: torch.Tensor, *, run_triton: bool) -> torch.Tensor:
+        shared = self.shared_expert(x, use_triton=run_triton, skip_allreduce=True)
         if self.shared_expert_gate is not None:
             shared = shared * torch.sigmoid(F.linear(x, self.shared_expert_gate.weight))
+        return shared
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        *,
+        use_triton_mxfp4: Optional[bool] = None,
+        compute_mode: Optional[str] = None,
+        backend: Optional[str] = None,
+    ) -> torch.Tensor:
+        """Run Latent MoE + Shared Expert forward pass with optional aux_stream overlap.
+
+        Accepts 2D ``[M, hidden_size]`` or 3D ``[B, T, hidden_size]`` tensors.
+        """
+        orig_shape = hidden_states.shape
+        x = hidden_states.reshape(-1, self.hidden_size)
+        if x.shape[0] == 0:
+            return torch.empty_like(hidden_states)
+
+        use_triton = (
+            self.use_triton_mxfp4 if use_triton_mxfp4 is None else bool(use_triton_mxfp4)
+        )
+        mode = self.compute_mode if compute_mode is None else compute_mode
+        eff_backend = self.backend if backend is None else backend
+        run_triton = use_triton and x.is_cuda and supports_triton_mxfp4(x.device)
+
+        if self.enable_shared_overlap and x.is_cuda and torch.version.hip is None:
+            if not x.is_contiguous():
+                x = x.contiguous()
+            capturing = torch.cuda.is_current_stream_capturing()
+            if (
+                self._shared_stream is None
+                or self._shared_input_ready is None
+                or self._shared_output_ready is None
+                or self._shared_stream.device != x.device
+            ) and not capturing:
+                self.prepare_shared_expert_overlap(device=x.device)
+
+            stream = self._shared_stream
+            if (
+                stream is not None
+                and self._shared_input_ready is not None
+                and self._shared_output_ready is not None
+                and stream.device == x.device
+            ):
+                main = torch.cuda.current_stream(x.device)
+                self._shared_input_ready.record(main)
+                shared: Optional[torch.Tensor] = None
+                inner_exc = False
+                try:
+                    with torch.cuda.stream(stream):
+                        self._shared_input_ready.wait(stream)
+                        shared_exc = False
+                        try:
+                            # Collective-free replicated shared branch overlaps with
+                            # routed MXFP4 + 2560-dim EP AllReduce on main stream.
+                            shared = self._forward_shared(x, run_triton=run_triton)
+                        except BaseException:
+                            shared_exc = True
+                            raise
+                        finally:
+                            if not (capturing and shared_exc):
+                                self._shared_output_ready.record(stream)
+                    routed = self._forward_routed(
+                        x, run_triton=run_triton, mode=mode, backend=eff_backend
+                    )
+                except BaseException:
+                    inner_exc = True
+                    raise
+                finally:
+                    if capturing and inner_exc:
+                        try:
+                            self._shared_output_ready.wait(main)
+                        except Exception:
+                            pass
+                    else:
+                        self._shared_output_ready.wait(main)
+                assert shared is not None
+                if not capturing:
+                    shared.record_stream(main)
+                return (routed + shared).reshape(orig_shape)
+
+        routed = self._forward_routed(
+            x, run_triton=run_triton, mode=mode, backend=eff_backend
+        )
+        shared = self._forward_shared(x, run_triton=run_triton)
 
         # 9. Combine routed + shared (ffn_output_sconv + clamp(-1000, 1000) in DecoderLayer)
         return (routed + shared).reshape(orig_shape)

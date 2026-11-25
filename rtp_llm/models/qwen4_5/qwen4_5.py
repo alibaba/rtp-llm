@@ -142,6 +142,7 @@ class Qwen4_5(_BaseModel):
                 config.max_seq_len = int(arch_cfg.max_position_embeddings)
                 config.config_dtype = "bfloat16"
                 config.has_lm_head = True
+                config.enable_fp32_lm_head = False
                 config.has_post_decoder_layernorm = False
                 config.has_pre_decoder_layernorm = False
                 config.inter_size = arch_cfg.intermediate_size
@@ -292,6 +293,9 @@ class Qwen4_5(_BaseModel):
         from rtp_llm.models_py.modules.qwen4_5.checkpoint_loader import (
             load_qwen4_5_from_checkpoint,
         )
+        from rtp_llm.models_py.modules.qwen4_5.fast_comm import (
+            get_qwen4_5_fast_all_reduce,
+        )
         from rtp_llm.utils.model_weight import W
 
         self.device = device
@@ -301,29 +305,78 @@ class Qwen4_5(_BaseModel):
         dp_size = int(self.parallelism_config.dp_size)
         ep_size_cfg = int(getattr(self.parallelism_config, "ep_size", 1))
 
+        tp_group = None
+        if tp_size > 1 and dist.is_available() and dist.is_initialized():
+            try:
+                from rtp_llm.models_py.distributed import collective_torch
+
+                if getattr(collective_torch, "_initialized", False):
+                    from rtp_llm.models_py.distributed.collective_torch import _get_group
+                    from rtp_llm.models_py.distributed.rank_layout import Group
+
+                    tp_group = _get_group(Group.TP)
+            except Exception:
+                pass
+            if tp_group is None and dist.get_world_size() >= tp_size:
+                tp_group = dist.group.WORLD
+
         eff_ep_size = 1
         eff_ep_rank = 0
         ep_group = None
         if tp_size > 1 and dp_size == 1:
             eff_ep_size = tp_size
             eff_ep_rank = tp_rank
-            if dist.is_initialized():
-                from rtp_llm.models_py.distributed.collective_torch import _get_group
-                from rtp_llm.models_py.distributed.rank_layout import Group
-
-                ep_group = _get_group(Group.TP)
+            ep_group = tp_group
         elif ep_size_cfg > 1:
             eff_ep_size = ep_size_cfg
             eff_ep_rank = int(getattr(self.parallelism_config, "ep_rank", 0))
-            if dist.is_initialized():
-                from rtp_llm.models_py.distributed.collective_torch import _get_group
-                from rtp_llm.models_py.distributed.rank_layout import Group
+            if dist.is_available() and dist.is_initialized():
+                try:
+                    from rtp_llm.models_py.distributed import collective_torch
 
-                ep_group = _get_group(Group.WORLD)
+                    if getattr(collective_torch, "_initialized", False):
+                        from rtp_llm.models_py.distributed.collective_torch import _get_group
+                        from rtp_llm.models_py.distributed.rank_layout import Group
+
+                        ep_group = _get_group(Group.WORLD)
+                except Exception:
+                    pass
+                if ep_group is None:
+                    ep_group = dist.group.WORLD
+
+        # Refresh TP-aware KV/GDN cache plan and KVCacheSpecDescs before engine pool creation.
+        if tp_size > 1:
+            self.model_config.qwen4_5_kv_cache_plan = self.build_kv_cache_plan(
+                arch_cfg, tp_size=tp_size
+            )
+            try:
+                self.model_config.kv_cache_spec_descs = build_qwen4_5_kv_cache_spec_descs(
+                    self.model_config,
+                    arch_cfg,
+                    tp_size=tp_size,
+                    allow_small_block_explicit=True,
+                )
+            except Exception:
+                pass
 
         torch_dev = torch.device(device)
         if torch_dev.type == "cuda":
             torch.cuda.set_device(torch_dev)
+
+        fast_all_reduce = None
+        if (
+            tp_size > 1
+            and tp_group is not None
+            and torch_dev.type == "cuda"
+            and dist.is_available()
+            and dist.is_initialized()
+        ):
+            fast_all_reduce = get_qwen4_5_fast_all_reduce(
+                tp_group,
+                device=torch_dev,
+                dtype=torch.bfloat16,
+                hidden_dims=(int(arch_cfg.hidden_size), int(arch_cfg.routed_expert_hidden_size)),
+            )
 
         causal_lm = Qwen4_5ForCausalLM(
             arch_cfg,
@@ -335,6 +388,10 @@ class Qwen4_5(_BaseModel):
             ep_size=eff_ep_size,
             ep_rank=eff_ep_rank,
             ep_group=ep_group,
+            tp_size=tp_size,
+            tp_rank=tp_rank,
+            tp_group=tp_group,
+            fast_all_reduce=fast_all_reduce,
         )
         num_workers = int(os.environ.get("QWEN4_5_LOAD_WORKERS", "8"))
         load_qwen4_5_from_checkpoint(
@@ -354,18 +411,18 @@ class Qwen4_5(_BaseModel):
         weights.global_weights[W.embedding] = (
             causal_lm.model.embed_tokens.weight.detach().contiguous()
         )
-        full_lm_head = causal_lm.lm_head.weight.detach()
-        if tp_size > 1:
-            vocab_size = full_lm_head.shape[0]
+        lm_w = causal_lm.lm_head.weight.detach()
+        if tp_size > 1 and int(lm_w.shape[0]) == int(arch_cfg.vocab_size):
+            vocab_size = int(lm_w.shape[0])
             if vocab_size % tp_size != 0:
                 raise ValueError(
                     f"Qwen4_5 vocab_size ({vocab_size}) must be divisible by tp_size ({tp_size})"
                 )
             vocab_per_rank = vocab_size // tp_size
             start = tp_rank * vocab_per_rank
-            lm_head_slice = full_lm_head[start : start + vocab_per_rank].contiguous()
+            lm_head_slice = lm_w[start : start + vocab_per_rank].contiguous()
         else:
-            lm_head_slice = full_lm_head.contiguous()
+            lm_head_slice = lm_w.contiguous()
         # Do NOT populate W.final_ln_gamma; Qwen4_5Model outputs already post-normed hidden states.
         weights.global_weights[W.lm_head] = lm_head_slice
         self.weight = weights
@@ -388,11 +445,13 @@ class Qwen4_5(_BaseModel):
         cls,
         arch_cfg: Qwen4_5ArchConfig,
         *,
+        tp_size: int = 1,
         enable_yoco_decode: Optional[bool] = None,
         kv_dtype: str = "BF16",
     ) -> Qwen4_5KVCachePlan:
         return build_qwen4_5_kv_cache_plan(
             arch_cfg,
+            tp_size=tp_size,
             enable_yoco_decode=enable_yoco_decode,
             kv_dtype=kv_dtype,
         )

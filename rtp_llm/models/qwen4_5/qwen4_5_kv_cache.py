@@ -289,12 +289,29 @@ class Qwen4_5KVCachePlan:
 def build_qwen4_5_kv_cache_plan(
     arch_cfg: Qwen4_5ArchConfig,
     *,
+    tp_size: int = 1,
     enable_yoco_decode: Optional[bool] = None,
     kv_dtype: str = "BF16",
     state_dtype: str = "BF16",
 ) -> Qwen4_5KVCachePlan:
-    """Build the exact pure-Python KV/SSM/ShortConv/PLE cache plan for Qwen 4.5-Flash."""
+    """Build the exact pure-Python KV/SSM/ShortConv/PLE cache plan for Qwen 4.5-Flash.
+
+    When ``tp_size > 1`` (with matching ``P_tp == D_tp`` RDMA rank pairing),
+    GDN SSM state and conv1d states are sharded per TP rank across heads
+    (e.g. 32K/128V -> 8K/32V/rank at TP=4), while replicated MQA-1 KV/indexer
+    and full-hidden output sconv/PLE states keep their full per-rank shape.
+    """
     share_map = validate_qwen4_5_arch_config(arch_cfg)
+    tp = max(1, int(tp_size or 1))
+    if tp > 1:
+        if arch_cfg.linear_num_key_heads % tp != 0:
+            raise ValueError(
+                f"linear_num_key_heads ({arch_cfg.linear_num_key_heads}) must be divisible by tp_size ({tp})"
+            )
+        if arch_cfg.linear_num_value_heads % tp != 0:
+            raise ValueError(
+                f"linear_num_value_heads ({arch_cfg.linear_num_value_heads}) must be divisible by tp_size ({tp})"
+            )
     use_yoco = (
         arch_cfg.enable_yoco_decode
         if enable_yoco_decode is None
@@ -313,8 +330,10 @@ def build_qwen4_5_kv_cache_plan(
     h = arch_cfg.hidden_size
     h_hc = arch_cfg.hc_count * h
     k_conv_state = max(0, arch_cfg.linear_conv_kernel_dim - 1)
-    k_dim = arch_cfg.linear_num_key_heads * arch_cfg.linear_key_head_dim
-    v_dim = arch_cfg.linear_num_value_heads * arch_cfg.linear_value_head_dim
+    local_linear_k_heads = arch_cfg.linear_num_key_heads // tp
+    local_linear_v_heads = arch_cfg.linear_num_value_heads // tp
+    k_dim = local_linear_k_heads * arch_cfg.linear_key_head_dim
+    v_dim = local_linear_v_heads * arch_cfg.linear_value_head_dim
     full_kv_dim = arch_cfg.num_key_value_heads * arch_cfg.head_dim
     ple_zero_based = {lid - 1 for lid in arch_cfg.ple_layer_ids}
 
@@ -418,7 +437,7 @@ def build_qwen4_5_kv_cache_plan(
 
             if allocates_ssm:
                 ssm_shape = (
-                    arch_cfg.linear_num_value_heads,
+                    local_linear_v_heads,
                     arch_cfg.linear_key_head_dim,
                     arch_cfg.linear_value_head_dim,
                 )
@@ -569,6 +588,7 @@ def build_qwen4_5_kv_cache_spec_descs(
     config: Any,
     arch_cfg: Optional[Qwen4_5ArchConfig] = None,
     *,
+    tp_size: int = 1,
     enable_yoco_decode: Optional[bool] = None,
     allow_small_block_explicit: bool = False,
 ) -> List[List[Any]]:
@@ -593,6 +613,7 @@ def build_qwen4_5_kv_cache_spec_descs(
 
     plan = build_qwen4_5_kv_cache_plan(
         resolved_arch,
+        tp_size=tp_size,
         enable_yoco_decode=enable_yoco_decode,
     )
 

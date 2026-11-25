@@ -325,24 +325,45 @@ class SafetensorsShardReader:
 
     def stream_copy_targets(
         self,
-        tasks: Sequence[Tuple[str, torch.Tensor, Optional[torch.dtype]]],
+        tasks: Sequence[Tuple[Any, ...]],
         *,
         num_workers: int = 8,
         chunk_bytes: int = 64 * 1024 * 1024,
     ) -> int:
-        """Load many checkpoint tensors in parallel, sorted by (shard, file offset).
+        """Load many checkpoint tensors (or TP slices) in parallel, sorted by offset.
 
-        Copies each tensor slice directly into its pre-allocated target GPU/CPU tensor
-        with bounded host memory (huge 2D tensors >= ``chunk_bytes`` stream in row chunks).
-        Returns total bytes copied.
+        Each task may be ``(key, dst, expected_dtype)`` or
+        ``(key, dst, expected_dtype, (slice_dim, start, end))``. Row slices
+        (``slice_dim == 0``) read only the needed byte range from disk.
+        Returns total bytes read.
         """
         if not tasks:
             return 0
 
-        shard_plans: Dict[str, List[Tuple[int, int, str, torch.dtype, Tuple[int, ...], torch.Tensor, Optional[torch.dtype]]]] = {}
-        # Pre-populate header cache sequentially for all referenced shards (very fast, small JSON)
+        shard_plans: Dict[
+            str,
+            List[
+                Tuple[
+                    int,
+                    int,
+                    str,
+                    torch.dtype,
+                    Tuple[int, ...],
+                    torch.Tensor,
+                    Optional[torch.dtype],
+                    Optional[Tuple[int, int, int]],
+                ]
+            ],
+        ] = {}
         seen_shards: set[str] = set()
-        for key, dst, expected_dtype in tasks:
+        for task in tasks:
+            if len(task) == 3:
+                key, dst, expected_dtype = task
+                slice_spec: Optional[Tuple[int, int, int]] = None
+            elif len(task) == 4:
+                key, dst, expected_dtype, slice_spec = task
+            else:
+                raise ValueError(f"Invalid copy task length {len(task)}")
             if key not in self.weight_map:
                 raise KeyError(f"Tensor {key!r} not present in {self.ckpt_dir}")
             sname = self.weight_map[key]
@@ -353,7 +374,16 @@ class SafetensorsShardReader:
             src_dt = _SAFETENSORS_TO_TORCH[info["dtype"]]
             shape = tuple(int(d) for d in info["shape"])
             shard_plans.setdefault(sname, []).append(
-                (data_base + int(start), data_base + int(end), key, src_dt, shape, dst, expected_dtype)
+                (
+                    data_base + int(start),
+                    data_base + int(end),
+                    key,
+                    src_dt,
+                    shape,
+                    dst,
+                    expected_dtype,
+                    slice_spec,
+                )
             )
 
         for sname in shard_plans:
@@ -361,25 +391,106 @@ class SafetensorsShardReader:
 
         total_bytes_read = 0
 
-        def _worker(shard_name: str, items: List[Tuple[int, int, str, torch.dtype, Tuple[int, ...], torch.Tensor, Optional[torch.dtype]]]) -> int:
+        def _worker(
+            shard_name: str,
+            items: List[
+                Tuple[
+                    int,
+                    int,
+                    str,
+                    torch.dtype,
+                    Tuple[int, ...],
+                    torch.Tensor,
+                    Optional[torch.dtype],
+                    Optional[Tuple[int, int, int]],
+                ]
+            ],
+        ) -> int:
             local_bytes = 0
             fd = os.open(str(self.ckpt_dir / shard_name), os.O_RDONLY)
             try:
-                for abs_start, abs_end, key, src_dt, shape, dst, expected_dtype in items:
+                for abs_start, abs_end, key, src_dt, shape, dst, expected_dtype, slice_spec in items:
                     nbytes = abs_end - abs_start
-                    local_bytes += nbytes
                     target_dt = expected_dtype if expected_dtype is not None else dst.dtype
                     if dst.device.type == "cuda":
                         torch.cuda.set_device(dst.device)
                     if nbytes == 0:
                         continue
+                    elem_bytes = max(1, src_dt.itemsize)
+
+                    if slice_spec is not None:
+                        s_dim, s0, s1 = slice_spec
+                        s_len = s1 - s0
+                        if s_dim == 0:
+                            if not shape or int(dst.shape[0]) != s_len or tuple(dst.shape[1:]) != shape[1:]:
+                                raise ValueError(
+                                    f"Row-slice mismatch loading {key!r}: target={tuple(dst.shape)} "
+                                    f"vs slice=[{s0}:{s1}] of {shape}"
+                                )
+                            row_elems = math.prod(shape[1:]) if len(shape) >= 2 else 1
+                            row_bytes = row_elems * elem_bytes
+                            slice_abs = abs_start + s0 * row_bytes
+                            slice_bytes = s_len * row_bytes
+                            local_bytes += slice_bytes
+                            if slice_bytes > chunk_bytes and len(shape) >= 2 and row_bytes > 0:
+                                rows_per_chunk = max(1, chunk_bytes // row_bytes)
+                                for r0 in range(0, s_len, rows_per_chunk):
+                                    r1 = min(s_len, r0 + rows_per_chunk)
+                                    c_off = slice_abs + r0 * row_bytes
+                                    c_len = (r1 - r0) * row_bytes
+                                    raw = self._pread_exact(fd, c_len, c_off)
+                                    t_cpu = (
+                                        torch.frombuffer(raw, dtype=torch.uint8)
+                                        .view(src_dt)
+                                        .reshape((r1 - r0, *shape[1:]))
+                                    )
+                                    if t_cpu.dtype != target_dt:
+                                        t_cpu = t_cpu.to(dtype=target_dt)
+                                    dst.data[r0:r1].copy_(t_cpu, non_blocking=False)
+                            else:
+                                raw = self._pread_exact(fd, slice_bytes, slice_abs)
+                                t_cpu = (
+                                    torch.frombuffer(raw, dtype=torch.uint8)
+                                    .view(src_dt)
+                                    .reshape((s_len, *shape[1:]))
+                                )
+                                if t_cpu.dtype != target_dt:
+                                    t_cpu = t_cpu.to(dtype=target_dt)
+                                dst.data.copy_(t_cpu, non_blocking=False)
+                            continue
+                        if s_dim == 1:
+                            if len(shape) != 2 or tuple(dst.shape) != (shape[0], s_len):
+                                raise ValueError(
+                                    f"Col-slice mismatch loading {key!r}: target={tuple(dst.shape)} "
+                                    f"vs slice=[:, {s0}:{s1}] of {shape}"
+                                )
+                            local_bytes += nbytes
+                            row_bytes = shape[1] * elem_bytes
+                            rows_per_chunk = max(1, chunk_bytes // max(1, row_bytes))
+                            total_rows = shape[0]
+                            for r0 in range(0, total_rows, rows_per_chunk):
+                                r1 = min(total_rows, r0 + rows_per_chunk)
+                                c_off = abs_start + r0 * row_bytes
+                                c_len = (r1 - r0) * row_bytes
+                                raw = self._pread_exact(fd, c_len, c_off)
+                                t_cpu = (
+                                    torch.frombuffer(raw, dtype=torch.uint8)
+                                    .view(src_dt)
+                                    .reshape((r1 - r0, shape[1]))[:, s0:s1]
+                                )
+                                if t_cpu.dtype != target_dt:
+                                    t_cpu = t_cpu.to(dtype=target_dt)
+                                dst.data[r0:r1].copy_(t_cpu, non_blocking=False)
+                            continue
+                        raise ValueError(f"Unsupported slice_dim={s_dim} for {key!r}")
+
+                    local_bytes += nbytes
                     if tuple(dst.shape) != shape:
                         raise ValueError(
                             f"Shape mismatch loading {key!r}: target={tuple(dst.shape)} vs ckpt={shape}"
                         )
                     # Stream very large row-major tensors in row slices to keep CPU RAM bounded
                     if nbytes > chunk_bytes and len(shape) >= 2 and math.prod(shape[1:]) > 0:
-                        elem_bytes = max(1, src_dt.itemsize)
                         row_elems = math.prod(shape[1:])
                         row_bytes = row_elems * elem_bytes
                         rows_per_chunk = max(1, chunk_bytes // row_bytes)
@@ -459,8 +570,8 @@ def save_qwen4_5_safetensors_checkpoint(
     backbone = causal_lm.model if hasattr(causal_lm, "model") else causal_lm
     lm_head = getattr(causal_lm, "lm_head", None)
     cfg: Qwen4_5ArchConfig = backbone.config
-    if getattr(backbone, "ep_size", 1) != 1:
-        raise ValueError("save_qwen4_5_safetensors_checkpoint expects an unsharded ep_size=1 model")
+    if getattr(backbone, "ep_size", 1) != 1 or getattr(backbone, "tp_size", 1) != 1:
+        raise ValueError("save_qwen4_5_safetensors_checkpoint expects an unsharded ep_size=1, tp_size=1 model")
 
     tensors: Dict[str, torch.Tensor] = {}
     tensors[f"{prefix}embed_tokens.weight"] = backbone.embed_tokens.weight
@@ -667,17 +778,28 @@ def load_qwen4_5_from_checkpoint(
     ep_size = getattr(backbone, "ep_size", 1)
     ep_rank = getattr(backbone, "ep_rank", 0)
     ep_group = getattr(backbone, "ep_group", None)
+    tp_size = max(1, int(getattr(backbone, "tp_size", 1) or 1))
+    tp_rank = int(getattr(backbone, "tp_rank", 0) or 0)
 
     device = backbone.embed_tokens.weight.device
-    ops: List[Tuple[str, torch.Tensor, Optional[torch.dtype]]] = []
+    ops: List[Tuple[Any, ...]] = []
     ple_plans: List[Tuple[Any, List[torch.Tensor], Optional[torch.Tensor], int, int]] = []
 
     with SafetensorsShardReader(ckpt_path) as reader:
         ops.append((f"{prefix}embed_tokens.weight", backbone.embed_tokens.weight, None))
-        if lm_head is not None and not cfg.tie_word_embeddings:
-            ops.append(("lm_head.weight", lm_head.weight, None))
-        elif lm_head is not None and cfg.tie_word_embeddings:
-            lm_head.weight = backbone.embed_tokens.weight
+        if lm_head is not None:
+            v_local = int(lm_head.weight.shape[0])
+            v0, v1 = tp_rank * v_local, (tp_rank + 1) * v_local
+            if not cfg.tie_word_embeddings:
+                if tp_size > 1:
+                    ops.append(("lm_head.weight", lm_head.weight, None, (0, v0, v1)))
+                else:
+                    ops.append(("lm_head.weight", lm_head.weight, None))
+            else:
+                if tp_size > 1:
+                    ops.append((f"{prefix}embed_tokens.weight", lm_head.weight, None, (0, v0, v1)))
+                else:
+                    lm_head.weight = backbone.embed_tokens.weight
 
         _enqueue_hc_copy_ops(
             backbone.hyper_connection_mixer,
@@ -748,25 +870,57 @@ def load_qwen4_5_from_checkpoint(
             if layer.linear_attn is not None:
                 la_mod = layer.linear_attn
                 la = f"{p}linear_attn."
-                ops.append((f"{la}in_proj_qkvz.weight", la_mod.in_proj_qkvz.weight, None))
+                qkvz_loc = int(la_mod.in_proj_qkvz.weight.shape[0])
+                out_loc = int(la_mod.out_proj.weight.shape[1])
+                if tp_size > 1:
+                    ops.append((f"{la}in_proj_qkvz.weight", la_mod.in_proj_qkvz.weight, None, (0, tp_rank * qkvz_loc, (tp_rank + 1) * qkvz_loc)))
+                else:
+                    ops.append((f"{la}in_proj_qkvz.weight", la_mod.in_proj_qkvz.weight, None))
                 if not layer.is_consumer:
-                    assert la_mod.in_proj_ba is not None
-                    ops.append((f"{la}in_proj_ba.weight", la_mod.in_proj_ba.weight, None))
-                    ops.append((f"{la}A_log", la_mod.A_log, torch.float32))
-                    ops.append((f"{la}dt_bias", la_mod.dt_bias, None))
+                    assert la_mod.in_proj_ba is not None and la_mod.A_log is not None and la_mod.dt_bias is not None
+                    ba_loc = int(la_mod.in_proj_ba.weight.shape[0])
+                    vh_loc = int(la_mod.num_v_heads)
+                    if tp_size > 1:
+                        ops.append((f"{la}in_proj_ba.weight", la_mod.in_proj_ba.weight, None, (0, tp_rank * ba_loc, (tp_rank + 1) * ba_loc)))
+                        ops.append((f"{la}A_log", la_mod.A_log, torch.float32, (0, tp_rank * vh_loc, (tp_rank + 1) * vh_loc)))
+                        ops.append((f"{la}dt_bias", la_mod.dt_bias, None, (0, tp_rank * vh_loc, (tp_rank + 1) * vh_loc)))
+                    else:
+                        ops.append((f"{la}in_proj_ba.weight", la_mod.in_proj_ba.weight, None))
+                        ops.append((f"{la}A_log", la_mod.A_log, torch.float32))
+                        ops.append((f"{la}dt_bias", la_mod.dt_bias, None))
                 if la_mod.conv1d is not None:
-                    ops.append((f"{la}conv1d.weight", la_mod.conv1d.weight, None))
+                    if tp_size > 1:
+                        loc_k = int(la_mod.key_dim)
+                        loc_v = int(la_mod.value_dim)
+                        if layer.is_consumer:
+                            ops.append((f"{la}conv1d.weight", la_mod.conv1d.weight, None, (0, tp_rank * loc_k, (tp_rank + 1) * loc_k)))
+                        else:
+                            full_k = loc_k * tp_size
+                            ops.append((f"{la}conv1d.weight", la_mod.conv1d.weight[:loc_k], None, (0, tp_rank * loc_k, (tp_rank + 1) * loc_k)))
+                            ops.append((f"{la}conv1d.weight", la_mod.conv1d.weight[loc_k : 2 * loc_k], None, (0, full_k + tp_rank * loc_k, full_k + (tp_rank + 1) * loc_k)))
+                            ops.append((f"{la}conv1d.weight", la_mod.conv1d.weight[2 * loc_k :], None, (0, 2 * full_k + tp_rank * loc_v, 2 * full_k + (tp_rank + 1) * loc_v)))
+                    else:
+                        ops.append((f"{la}conv1d.weight", la_mod.conv1d.weight, None))
                 ops.append((f"{la}norm.weight", la_mod.norm.weight, None))
-                ops.append((f"{la}out_proj.weight", la_mod.out_proj.weight, None))
+                if tp_size > 1:
+                    ops.append((f"{la}out_proj.weight", la_mod.out_proj.weight, None, (1, tp_rank * out_loc, (tp_rank + 1) * out_loc)))
+                else:
+                    ops.append((f"{la}out_proj.weight", la_mod.out_proj.weight, None))
                 if layer.attn_output_sconv is not None:
                     ops.append((f"{p}linear_attn_output_sconv.weight", layer.attn_output_sconv.weight, None))
             else:
                 sa_mod = layer.self_attn
                 assert sa_mod is not None
                 sa = f"{p}self_attn."
-                ops.append((f"{sa}q_proj.weight", sa_mod.q_proj.weight, None))
+                q_out_loc = int(sa_mod.q_proj.weight.shape[0])
+                o_in_loc = int(sa_mod.o_proj.weight.shape[1])
+                if tp_size > 1:
+                    ops.append((f"{sa}q_proj.weight", sa_mod.q_proj.weight, None, (0, tp_rank * q_out_loc, (tp_rank + 1) * q_out_loc)))
+                    ops.append((f"{sa}o_proj.weight", sa_mod.o_proj.weight, None, (1, tp_rank * o_in_loc, (tp_rank + 1) * o_in_loc)))
+                else:
+                    ops.append((f"{sa}q_proj.weight", sa_mod.q_proj.weight, None))
+                    ops.append((f"{sa}o_proj.weight", sa_mod.o_proj.weight, None))
                 ops.append((f"{sa}q_norm.weight", sa_mod.q_norm.weight, None))
-                ops.append((f"{sa}o_proj.weight", sa_mod.o_proj.weight, None))
                 if not layer.is_consumer:
                     assert sa_mod.k_proj is not None and sa_mod.v_proj is not None and sa_mod.k_norm is not None
                     ops.append((f"{sa}k_proj.weight", sa_mod.k_proj.weight, None))
@@ -797,9 +951,15 @@ def load_qwen4_5_from_checkpoint(
             # FFN
             if isinstance(layer.mlp, Qwen4_5DenseMLP):
                 mlp = layer.mlp
-                ops.append((f"{p}mlp.gate_proj.weight", mlp.gate_proj.weight, None))
-                ops.append((f"{p}mlp.up_proj.weight", mlp.up_proj.weight, None))
-                ops.append((f"{p}mlp.down_proj.weight", mlp.down_proj.weight, None))
+                inter_loc = int(mlp.gate_proj.weight.shape[0])
+                if tp_size > 1:
+                    ops.append((f"{p}mlp.gate_proj.weight", mlp.gate_proj.weight, None, (0, tp_rank * inter_loc, (tp_rank + 1) * inter_loc)))
+                    ops.append((f"{p}mlp.up_proj.weight", mlp.up_proj.weight, None, (0, tp_rank * inter_loc, (tp_rank + 1) * inter_loc)))
+                    ops.append((f"{p}mlp.down_proj.weight", mlp.down_proj.weight, None, (1, tp_rank * inter_loc, (tp_rank + 1) * inter_loc)))
+                else:
+                    ops.append((f"{p}mlp.gate_proj.weight", mlp.gate_proj.weight, None))
+                    ops.append((f"{p}mlp.up_proj.weight", mlp.up_proj.weight, None))
+                    ops.append((f"{p}mlp.down_proj.weight", mlp.down_proj.weight, None))
             else:
                 assert isinstance(layer.mlp, Qwen4_5LatentMoE)
                 moe = layer.mlp
@@ -877,6 +1037,22 @@ def load_qwen4_5_from_checkpoint(
         )
 
 
+def _copy_tp_param(
+    dst: torch.Tensor,
+    src: torch.Tensor,
+    tp_size: int,
+    tp_rank: int,
+    *,
+    dim: int = 0,
+    dtype: Optional[torch.dtype] = None,
+) -> None:
+    if tuple(src.shape) != tuple(dst.shape) and tp_size > 1 and int(src.shape[dim]) == int(dst.shape[dim]) * tp_size:
+        local = int(dst.shape[dim])
+        src = src.narrow(dim, tp_rank * local, local)
+    t_dt = dtype if dtype is not None else dst.dtype
+    dst.data.copy_(src.to(device=dst.device, dtype=t_dt))
+
+
 @torch.no_grad()
 def bind_qwen4_5_model_weights(
     backbone: Any,
@@ -887,18 +1063,30 @@ def bind_qwen4_5_model_weights(
     ep_size: int = 1,
     ep_rank: int = 0,
     ep_group: Any = None,
+    tp_size: int = 1,
+    tp_rank: int = 0,
+    tp_group: Any = None,
 ) -> None:
     """Bind RTP-LLM ``ModelWeights`` (keyed by ``QWEN4_5_W.*``) onto ``Qwen4_5Model``.
 
-    Enables seamless startup through RTP-LLM native FastSafetensors ``ModelLoader``.
+    Enables seamless startup through RTP-LLM native FastSafetensors ``ModelLoader``
+    for both unsharded and TP/EP-sharded weight tensors.
     """
+    del tp_group
+    from rtp_llm.models.qwen4_5.qwen4_5_weight import QWEN4_5_W
+
+    eff_tp = max(1, int(tp_size or getattr(backbone, "tp_size", 1) or 1))
+    eff_rank = int(tp_rank if tp_size > 1 else getattr(backbone, "tp_rank", tp_rank))
     device = backbone.embed_tokens.weight.device
     _copy_param(backbone.embed_tokens.weight, model_weights.get_global_weight(QWEN4_5_W.embedding))
     if lm_head is not None:
         if arch_cfg.tie_word_embeddings:
-            lm_head.weight = backbone.embed_tokens.weight
+            if eff_tp > 1:
+                _copy_tp_param(lm_head.weight, backbone.embed_tokens.weight, eff_tp, eff_rank, dim=0)
+            else:
+                lm_head.weight = backbone.embed_tokens.weight
         else:
-            _copy_param(lm_head.weight, model_weights.get_global_weight(QWEN4_5_W.lm_head))
+            _copy_tp_param(lm_head.weight, model_weights.get_global_weight(QWEN4_5_W.lm_head), eff_tp, eff_rank, dim=0)
 
     mixer = backbone.hyper_connection_mixer
     _copy_param(mixer.hc_norm_weight, model_weights.get_global_weight(QWEN4_5_W.hc_mixer_norm_w))
@@ -958,24 +1146,37 @@ def bind_qwen4_5_model_weights(
         # Attention
         if layer.linear_attn is not None:
             la = layer.linear_attn
-            _copy_param(la.in_proj_qkvz.weight, lw[QWEN4_5_W.linear_in_proj_qkvz])
+            _copy_tp_param(la.in_proj_qkvz.weight, lw[QWEN4_5_W.linear_in_proj_qkvz], eff_tp, eff_rank, dim=0)
             if not layer.is_consumer:
-                assert la.in_proj_ba is not None
-                _copy_param(la.in_proj_ba.weight, lw[QWEN4_5_W.linear_in_proj_ba])
-                la.A_log.data.copy_(lw[QWEN4_5_W.linear_a_log].to(device=device, dtype=torch.float32))
-                _copy_param(la.dt_bias, lw[QWEN4_5_W.linear_dt_bias])
+                assert la.in_proj_ba is not None and la.A_log is not None and la.dt_bias is not None
+                _copy_tp_param(la.in_proj_ba.weight, lw[QWEN4_5_W.linear_in_proj_ba], eff_tp, eff_rank, dim=0)
+                _copy_tp_param(la.A_log, lw[QWEN4_5_W.linear_a_log], eff_tp, eff_rank, dim=0, dtype=torch.float32)
+                _copy_tp_param(la.dt_bias, lw[QWEN4_5_W.linear_dt_bias], eff_tp, eff_rank, dim=0)
             if la.conv1d is not None:
-                _copy_param(la.conv1d.weight, lw[QWEN4_5_W.linear_conv1d])
+                conv_src = lw[QWEN4_5_W.linear_conv1d]
+                if tuple(conv_src.shape) != tuple(la.conv1d.weight.shape) and eff_tp > 1:
+                    if layer.is_consumer:
+                        _copy_tp_param(la.conv1d.weight, conv_src, eff_tp, eff_rank, dim=0)
+                    else:
+                        full_k = int(la.key_dim) * eff_tp
+                        full_v = int(la.value_dim) * eff_tp
+                        q_seg, k_seg, v_seg = torch.split(conv_src, [full_k, full_k, full_v], dim=0)
+                        q_loc = q_seg.narrow(0, eff_rank * int(la.key_dim), int(la.key_dim))
+                        k_loc = k_seg.narrow(0, eff_rank * int(la.key_dim), int(la.key_dim))
+                        v_loc = v_seg.narrow(0, eff_rank * int(la.value_dim), int(la.value_dim))
+                        _copy_param(la.conv1d.weight, torch.cat([q_loc, k_loc, v_loc], dim=0))
+                else:
+                    _copy_param(la.conv1d.weight, conv_src)
             _copy_param(la.norm.weight, lw[QWEN4_5_W.linear_norm_w])
-            _copy_param(la.out_proj.weight, lw[QWEN4_5_W.linear_out_proj])
+            _copy_tp_param(la.out_proj.weight, lw[QWEN4_5_W.linear_out_proj], eff_tp, eff_rank, dim=1)
             if layer.attn_output_sconv is not None:
                 _copy_param(layer.attn_output_sconv.weight, lw[QWEN4_5_W.linear_attn_output_sconv])
         else:
             sa = layer.self_attn
             assert sa is not None
-            _copy_param(sa.q_proj.weight, lw[QWEN4_5_W.full_q_proj])
+            _copy_tp_param(sa.q_proj.weight, lw[QWEN4_5_W.full_q_proj], eff_tp, eff_rank, dim=0)
             _copy_param(sa.q_norm.weight, lw[QWEN4_5_W.full_q_norm_w])
-            _copy_param(sa.o_proj.weight, lw[QWEN4_5_W.full_o_proj])
+            _copy_tp_param(sa.o_proj.weight, lw[QWEN4_5_W.full_o_proj], eff_tp, eff_rank, dim=1)
             if not layer.is_consumer:
                 assert sa.k_proj is not None and sa.v_proj is not None and sa.k_norm is not None
                 _copy_param(sa.k_proj.weight, lw[QWEN4_5_W.full_k_proj])
@@ -1006,9 +1207,9 @@ def bind_qwen4_5_model_weights(
 
         # FFN
         if isinstance(layer.mlp, Qwen4_5DenseMLP):
-            _copy_param(layer.mlp.gate_proj.weight, lw[QWEN4_5_W.dense_gate_proj])
-            _copy_param(layer.mlp.up_proj.weight, lw[QWEN4_5_W.dense_up_proj])
-            _copy_param(layer.mlp.down_proj.weight, lw[QWEN4_5_W.dense_down_proj])
+            _copy_tp_param(layer.mlp.gate_proj.weight, lw[QWEN4_5_W.dense_gate_proj], eff_tp, eff_rank, dim=0)
+            _copy_tp_param(layer.mlp.up_proj.weight, lw[QWEN4_5_W.dense_up_proj], eff_tp, eff_rank, dim=0)
+            _copy_tp_param(layer.mlp.down_proj.weight, lw[QWEN4_5_W.dense_down_proj], eff_tp, eff_rank, dim=1)
         else:
             assert isinstance(layer.mlp, Qwen4_5LatentMoE)
             moe = layer.mlp

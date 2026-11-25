@@ -24,9 +24,13 @@ from contextlib import contextmanager
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple, Union
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 
 from rtp_llm.models_py.modules.qwen4_5.attention import Qwen4_5Attention
+from rtp_llm.models_py.modules.qwen4_5.fast_comm import (
+    get_qwen4_5_fast_all_reduce,
+)
 from rtp_llm.models_py.modules.qwen4_5.contracts import (
     GDNLayerState,
     Qwen4_5ArchConfig,
@@ -43,6 +47,23 @@ from rtp_llm.models_py.modules.qwen4_5.ple import (
 )
 from rtp_llm.models_py.modules.qwen4_5.short_conv import Qwen4_5ShortConv
 from rtp_llm.models_py.modules.qwen4_5.yoco import YoCoSharingPlan
+
+
+def _resolve_tp_group_safe(tp_size: int) -> Any:
+    if tp_size <= 1 or not dist.is_available() or not dist.is_initialized():
+        return None
+    try:
+        from rtp_llm.models_py.distributed import collective_torch
+
+        if getattr(collective_torch, "_initialized", False):
+            from rtp_llm.models_py.distributed.collective_torch import Group, _get_group
+
+            return _get_group(Group.TP)
+    except Exception:
+        pass
+    if dist.get_world_size() >= tp_size:
+        return dist.group.WORLD
+    return None
 
 
 class Qwen4_5ProfileRecorder:
@@ -96,6 +117,10 @@ class Qwen4_5DecoderLayer(nn.Module):
         ep_size: int = 1,
         ep_rank: int = 0,
         ep_group: Any = None,
+        tp_size: int = 1,
+        tp_rank: int = 0,
+        tp_group: Any = None,
+        fast_all_reduce: Any = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -105,6 +130,10 @@ class Qwen4_5DecoderLayer(nn.Module):
         self.is_source = sharing_plan.is_source(layer_idx)
         self.source_layer_idx = sharing_plan.source_for(layer_idx)
         self.kv_cache_owner = sharing_plan.kv_cache_owner(layer_idx)
+        self.tp_size = max(1, int(tp_size or 1))
+        self.tp_rank = int(tp_rank or 0)
+        self.tp_group = tp_group
+        self.fast_all_reduce = fast_all_reduce
 
         is_first_layer = layer_idx == 0
         is_last_layer = layer_idx == (config.num_hidden_layers - 1)
@@ -125,6 +154,10 @@ class Qwen4_5DecoderLayer(nn.Module):
                 ngram_vocab_size_base=config.ngram_vocab_size_base,
                 dtype=dtype,
                 device=device,
+                tp_size=self.tp_size,
+                tp_rank=self.tp_rank,
+                tp_group=tp_group,
+                fast_all_reduce=fast_all_reduce,
             )
         else:
             self.ple = None
@@ -143,11 +176,17 @@ class Qwen4_5DecoderLayer(nn.Module):
             device=device,
         )
 
-        # 3. Attention block (GDN or dense MQA-1 Full Attention)
+        # 3. Attention block (GDN or dense MQA-1 Full Attention / QSA)
         if self.layer_type == "linear_attention":
             self.linear_attn: Optional[Qwen4_5GatedDeltaNet] = (
                 Qwen4_5GatedDeltaNet.from_config(
-                    config, layer_idx, sharing_plan=sharing_plan
+                    config,
+                    layer_idx,
+                    sharing_plan=sharing_plan,
+                    tp_size=self.tp_size,
+                    tp_rank=self.tp_rank,
+                    tp_group=tp_group,
+                    fast_all_reduce=fast_all_reduce,
                 ).to(device=device, dtype=dtype)
             )
             self.self_attn: Optional[Qwen4_5Attention] = None
@@ -156,7 +195,13 @@ class Qwen4_5DecoderLayer(nn.Module):
                 self.linear_attn.A_log.data = self.linear_attn.A_log.data.float()
         elif self.layer_type == "full_attention":
             self.self_attn = Qwen4_5Attention.from_config(
-                config, layer_idx, sharing_plan=sharing_plan
+                config,
+                layer_idx,
+                sharing_plan=sharing_plan,
+                tp_size=self.tp_size,
+                tp_rank=self.tp_rank,
+                tp_group=tp_group,
+                fast_all_reduce=fast_all_reduce,
             ).to(device=device, dtype=dtype)
             self.linear_attn = None
             # Keep RoPE inv_freq in FP32
@@ -209,6 +254,10 @@ class Qwen4_5DecoderLayer(nn.Module):
                 ep_size=ep_size,
                 ep_rank=ep_rank,
                 ep_group=ep_group,
+                tp_size=self.tp_size,
+                tp_rank=self.tp_rank,
+                tp_group=tp_group,
+                fast_all_reduce=fast_all_reduce,
             )
         else:
             self.mlp = Qwen4_5DenseMLP.from_config(
@@ -217,6 +266,10 @@ class Qwen4_5DecoderLayer(nn.Module):
                 use_triton=use_triton_mxfp4,
                 dtype=dtype,
                 device=device,
+                tp_size=self.tp_size,
+                tp_rank=self.tp_rank,
+                tp_group=tp_group,
+                fast_all_reduce=fast_all_reduce,
             )
 
         # 7. Optional FFN output ShortConv (k=4, residual=True)
@@ -522,14 +575,44 @@ class Qwen4_5Model(nn.Module):
         ep_size: int = 1,
         ep_rank: int = 0,
         ep_group: Any = None,
+        tp_size: int = 1,
+        tp_rank: int = 0,
+        tp_group: Any = None,
+        fast_all_reduce: Any = None,
     ) -> None:
         super().__init__()
         self.config = config
+        self.tp_size = max(1, int(tp_size or 1))
+        self.tp_rank = int(tp_rank or 0)
+        if not (0 <= self.tp_rank < self.tp_size):
+            raise ValueError(f"tp_rank={self.tp_rank} out of range for tp_size={self.tp_size}")
+        if tp_group is None and self.tp_size > 1:
+            tp_group = _resolve_tp_group_safe(self.tp_size)
+        self.tp_group = tp_group
+
+        if (
+            fast_all_reduce is None
+            and self.tp_size > 1
+            and tp_group is not None
+            and device is not None
+            and torch.device(device).type == "cuda"
+            and dist.is_available()
+            and dist.is_initialized()
+        ):
+            fast_all_reduce = get_qwen4_5_fast_all_reduce(
+                tp_group,
+                device=torch.device(device),
+                dtype=dtype,
+                hidden_dims=(int(config.hidden_size), int(config.routed_expert_hidden_size)),
+            )
+        self.fast_all_reduce = fast_all_reduce
+
         self.ep_size = int(ep_size)
         self.ep_rank = int(ep_rank)
         self.ep_group = ep_group
         self.sharing_plan = YoCoSharingPlan.from_config(config)
 
+        # Target embed_tokens stays replicated [vocab_size, hidden_size]
         self.embed_tokens = nn.Embedding(
             config.vocab_size, config.hidden_size, dtype=dtype, device=device
         )
@@ -547,6 +630,10 @@ class Qwen4_5Model(nn.Module):
                     ep_size=ep_size,
                     ep_rank=ep_rank,
                     ep_group=ep_group,
+                    tp_size=self.tp_size,
+                    tp_rank=self.tp_rank,
+                    tp_group=tp_group,
+                    fast_all_reduce=fast_all_reduce,
                 )
                 for i in range(config.num_hidden_layers)
             ]
@@ -564,12 +651,18 @@ class Qwen4_5Model(nn.Module):
             dtype=dtype,
             device=device,
         )
+        # Freeze inference parameters so Qwen4_5HyperConnection / PLE hit cached fused weights.
+        self.requires_grad_(False)
 
     @torch.no_grad()
     def prepare_weights(self, *, transpose_mxfp4: bool = False) -> None:
+        self.requires_grad_(False)
         for layer in self.layers:
             assert isinstance(layer, Qwen4_5DecoderLayer)
             layer.prepare_weights(transpose_mxfp4=transpose_mxfp4)
+            for hc in (layer.attn_hyper_connection, layer.mlp_hyper_connection):
+                if hc.emits_latent and hc.use_combine and hasattr(hc, "_get_fused_down_inject_weight"):
+                    hc._get_fused_down_inject_weight()
 
     def create_runtime_state(
         self,
@@ -668,32 +761,100 @@ class Qwen4_5Model(nn.Module):
             lid = layer.layer_idx
             base_seed = 10_000 + lid * 1_000
 
-            # Deterministic small-variance init for replicated BF16/FP32 weights
+            def _slice_for_tp_param(p_name: str, full_t: torch.Tensor) -> torch.Tensor:
+                if self.tp_size <= 1:
+                    return full_t
+                tp_s = self.tp_size
+                tp_r = self.tp_rank
+                if p_name == "self_attn.q_proj.weight":
+                    local = full_t.shape[0] // tp_s
+                    return full_t[tp_r * local : (tp_r + 1) * local]
+                if p_name in ("self_attn.o_proj.weight", "mlp.down_proj.weight", "linear_attn.out_proj.weight"):
+                    local = full_t.shape[1] // tp_s
+                    return full_t[:, tp_r * local : (tp_r + 1) * local]
+                if p_name in (
+                    "mlp.gate_proj.weight",
+                    "mlp.up_proj.weight",
+                    "linear_attn.in_proj_qkvz.weight",
+                    "linear_attn.in_proj_ba.weight",
+                    "linear_attn.A_log",
+                    "linear_attn.dt_bias",
+                ):
+                    local = full_t.shape[0] // tp_s
+                    return full_t[tp_r * local : (tp_r + 1) * local]
+                if p_name == "linear_attn.conv1d.weight":
+                    if layer.is_consumer:
+                        local = full_t.shape[0] // tp_s
+                        return full_t[tp_r * local : (tp_r + 1) * local]
+                    full_k = cfg.linear_num_key_heads * cfg.linear_key_head_dim
+                    full_v = cfg.linear_num_value_heads * cfg.linear_value_head_dim
+                    loc_k = full_k // tp_s
+                    loc_v = full_v // tp_s
+                    q_seg, k_seg, v_seg = torch.split(full_t, [full_k, full_k, full_v], dim=0)
+                    return torch.cat(
+                        [
+                            q_seg[tp_r * loc_k : (tp_r + 1) * loc_k],
+                            k_seg[tp_r * loc_k : (tp_r + 1) * loc_k],
+                            v_seg[tp_r * loc_v : (tp_r + 1) * loc_v],
+                        ],
+                        dim=0,
+                    )
+                return full_t
+
+            def _full_shape_for_tp_param(p_name: str, local_shape: Tuple[int, ...]) -> Tuple[int, ...]:
+                if self.tp_size <= 1:
+                    return local_shape
+                tp_s = self.tp_size
+                if p_name == "self_attn.q_proj.weight":
+                    return (local_shape[0] * tp_s, *local_shape[1:])
+                if p_name in ("self_attn.o_proj.weight", "mlp.down_proj.weight", "linear_attn.out_proj.weight"):
+                    return (local_shape[0], local_shape[1] * tp_s, *local_shape[2:])
+                if p_name in (
+                    "mlp.gate_proj.weight",
+                    "mlp.up_proj.weight",
+                    "linear_attn.in_proj_qkvz.weight",
+                    "linear_attn.in_proj_ba.weight",
+                    "linear_attn.A_log",
+                    "linear_attn.dt_bias",
+                    "linear_attn.conv1d.weight",
+                ):
+                    return (local_shape[0] * tp_s, *local_shape[1:])
+                return local_shape
+
+            # Deterministic small-variance init (sliced identically across TP ranks)
             for p_idx, (name, param) in enumerate(layer.named_parameters()):
                 g = _gen(base_seed + p_idx)
+                full_shape = _full_shape_for_tp_param(name, tuple(param.shape))
+                buf = (
+                    param
+                    if full_shape == tuple(param.shape)
+                    else torch.empty(full_shape, dtype=param.dtype, device=param.device)
+                )
                 if name.endswith("A_log"):
                     # Match BF16 storage precision of real 1109 checkpoint (cast to FP32 at runtime)
-                    param.uniform_(-2.0, -0.5, generator=g)
-                    param.copy_(param.to(torch.bfloat16).float())
+                    buf.uniform_(-2.0, -0.5, generator=g)
+                    buf.copy_(buf.to(torch.bfloat16).float())
                 elif name.endswith("dt_bias"):
-                    param.uniform_(-1.0, 0.5, generator=g)
+                    buf.uniform_(-1.0, 0.5, generator=g)
                 elif "expert_bias" in name:
-                    param.uniform_(-0.05, 0.05, generator=g)
-                elif param.ndim == 1:
+                    buf.uniform_(-0.05, 0.05, generator=g)
+                elif buf.ndim == 1:
                     if "norm" in name and "linear_attn" in name:
-                        param.fill_(1.0)
+                        buf.fill_(1.0)
                     else:
-                        param.zero_()
-                elif param.ndim == 3:
+                        buf.zero_()
+                elif buf.ndim == 3:
                     # Depthwise ShortConv / GDN conv1d weights
-                    param.normal_(0.0, 0.05, generator=g)
+                    buf.normal_(0.0, 0.05, generator=g)
                 elif name == "mlp.gate.weight":
                     # Realistic O(1) router logit scale so top-k routing is well-conditioned
-                    std = 2.0 / math.sqrt(max(param.shape[-1], 1))
-                    param.normal_(0.0, std, generator=g)
+                    std = 2.0 / math.sqrt(max(full_shape[-1], 1))
+                    buf.normal_(0.0, std, generator=g)
                 else:
-                    std = min(0.02, 1.0 / math.sqrt(max(param.shape[-1], 1)))
-                    param.normal_(0.0, std, generator=g)
+                    std = min(0.02, 1.0 / math.sqrt(max(full_shape[-1], 1)))
+                    buf.normal_(0.0, std, generator=g)
+                if buf is not param:
+                    param.copy_(_slice_for_tp_param(name, buf))
 
             # Deterministic per-expert MXFP4 routed weights (exact across EP sizes)
             if isinstance(layer.mlp, Qwen4_5LatentMoE):
@@ -888,7 +1049,7 @@ class Qwen4_5Model(nn.Module):
 
 
 class Qwen4_5ForCausalLM(nn.Module):
-    """Causal LM wrapper around ``Qwen4_5Model`` with untied ``lm_head``."""
+    """Causal LM wrapper around ``Qwen4_5Model`` with vocab-parallel ``lm_head``."""
 
     def __init__(
         self,
@@ -902,6 +1063,10 @@ class Qwen4_5ForCausalLM(nn.Module):
         ep_size: int = 1,
         ep_rank: int = 0,
         ep_group: Any = None,
+        tp_size: int = 1,
+        tp_rank: int = 0,
+        tp_group: Any = None,
+        fast_all_reduce: Any = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -915,10 +1080,23 @@ class Qwen4_5ForCausalLM(nn.Module):
             ep_size=ep_size,
             ep_rank=ep_rank,
             ep_group=ep_group,
+            tp_size=tp_size,
+            tp_rank=tp_rank,
+            tp_group=tp_group,
+            fast_all_reduce=fast_all_reduce,
         )
+        self.tp_size = self.model.tp_size
+        self.tp_rank = self.model.tp_rank
+        self.tp_group = self.model.tp_group
+        if config.vocab_size % self.tp_size != 0:
+            raise ValueError(
+                f"vocab_size ({config.vocab_size}) must be divisible by tp_size ({self.tp_size})"
+            )
+        self.local_vocab_size = config.vocab_size // self.tp_size
         self.lm_head = nn.Linear(
-            config.hidden_size, config.vocab_size, bias=False, dtype=dtype, device=device
+            config.hidden_size, self.local_vocab_size, bias=False, dtype=dtype, device=device
         )
+        self.requires_grad_(False)
 
     @torch.no_grad()
     def prepare_weights(self, *, transpose_mxfp4: bool = False) -> None:
@@ -958,7 +1136,17 @@ class Qwen4_5ForCausalLM(nn.Module):
         )
         g = torch.Generator(device=self.lm_head.weight.device)
         g.manual_seed(seed + 7_777_777)
-        self.lm_head.weight.normal_(0.0, 0.02, generator=g)
+        if self.tp_size > 1:
+            full_lm = torch.empty(
+                (self.config.vocab_size, self.config.hidden_size),
+                dtype=self.lm_head.weight.dtype,
+                device=self.lm_head.weight.device,
+            )
+            full_lm.normal_(0.0, 0.02, generator=g)
+            s0 = self.tp_rank * self.local_vocab_size
+            self.lm_head.weight.copy_(full_lm[s0 : s0 + self.local_vocab_size])
+        else:
+            self.lm_head.weight.normal_(0.0, 0.02, generator=g)
 
     def forward(
         self,
@@ -988,6 +1176,15 @@ class Qwen4_5ForCausalLM(nn.Module):
                 logits = self.lm_head(hidden)
         else:
             logits = self.lm_head(hidden)
+        if (
+            self.tp_size > 1
+            and self.tp_group is not None
+            and dist.is_available()
+            and dist.is_initialized()
+        ):
+            gathered = [torch.empty_like(logits) for _ in range(self.tp_size)]
+            dist.all_gather(gathered, logits.contiguous(), group=self.tp_group)
+            logits = torch.cat(gathered, dim=-1)
         return logits
 
 

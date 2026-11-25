@@ -1,5 +1,4 @@
-"""MXFP4 quantization, dequantization, and B300 (SM103) Triton ``tl.dot_scaled``
-Grouped MoE GEMM engine for Qwen 4.5-Flash (1109-bf16-re-mxfp4-ple-fp8).
+"""MXFP4 quantization, dequantization, and SM100/SM103 Grouped MoE engines for Qwen 4.5-Flash.
 
 Checkpoint format (OCP MXFP4 / PyTorch ``float4_e2m1fn_x2``):
   - Weight tensor: ``[..., N, K // 2]`` ``uint8``
@@ -11,33 +10,45 @@ Checkpoint format (OCP MXFP4 / PyTorch ``float4_e2m1fn_x2``):
   - Scale tensor: ``[..., N, K // 32]`` ``uint8`` (UE8M0)
       Exponent-only scale: ``2^(scale_u8 - 127)`` in FP32 for ``0..254``; ``255`` is NaN.
 
-Hardware path on B300 (SM103, Triton 3.6+):
-  - Uses native ``tl.dot_scaled(a, None, "bf16", b, b_scale, "e2m1")`` (W4A16) by
-    default — empirically both faster (1.5x-3.0x on MoE token-per-expert counts
-    m_e=1..32) and far more accurate (zero activation quantization loss, exact
-    0.0 error on integer-BF16 x E2M1) than W4A8 ``e4m3 x e2m1``.
-  - Optional ``compute_mode="e4m3"`` path is also provided for benchmarking.
-  - All inter-expert pointer offsets use ``tl.int64`` scalar arithmetic outside
-    the K-loop (mandatory because ``640 * 5120 * 1280 = 4.19 GB > INT32_MAX``),
-    while keeping intra-tile offsets in ``tl.int32`` for 128-bit coalesced loads.
+Selectable & regime-dispatched backends on SM100 / SM103:
+  1. ``triton_splitk``: Optimized Persistent Split-K Triton ``tl.dot_scaled``
+     Decode GEMV (zero ``-1`` wasted empty tiles, fused SiTU-GLU epilogue,
+     single-pass weighted scatter-reduce for ``M=1..64``).
+  2. ``deepgemm_contiguous``: DeepGEMM ``m_grouped_fp8_fp4_gemm_nt_contiguous``
+     with pure-Triton block-32 UE8M0 quantization & fused ``situ_glu_fp8_quant_packed``.
+  3. ``deepgemm_masked``: DeepGEMM ``m_grouped_fp8_fp4_gemm_nt_masked`` (zero-sync
+     CUDA-Graph Decode) with fused ``situ_glu_fp8_quant_masked_packed``.
+  4. ``flashinfer`` / ``flashinfer_noswap``: FlashInfer
+     ``group_gemm_mxfp4_nt_groupwise`` (``swap_ab=True`` / ``False``) with pure-Triton
+     128x4 swizzled UE8M0 quantization.
+  5. ``triton``: Baseline grouped ``tl.dot_scaled`` engine.
+  6. ``ref``: Exact PyTorch dequant-BF16 reference.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Optional, Tuple
+from dataclasses import dataclass, field
+import functools
+import os
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import torch
 import torch.nn.functional as F
 import triton
 import triton.language as tl
+from triton.language.extra import libdevice
 
 from rtp_llm.models_py.modules.qwen4_5.activation import (
+    per_token_group_quant_fp8_ue8m0,
+    per_token_group_quant_fp8_ue8m0_ref,
     situ_and_mul_ref,
     situ_and_mul_triton,
+    situ_glu_fp8_quant_masked_packed,
+    situ_glu_fp8_quant_packed,
 )
 
 MXFP4_BLOCK_SIZE = 32
+_DG_CONTIG_ALIGN = 128
 
 _E2M1_LUT_CPU = torch.tensor(
     [
@@ -61,6 +72,7 @@ _E2M1_LUT_CPU = torch.tensor(
     dtype=torch.float32,
 )
 _E2M1_LUT_CACHE: dict[torch.device, torch.Tensor] = {}
+_SM_COUNT_CACHE: dict[int, int] = {}
 
 
 def _get_e2m1_lut(device: torch.device) -> torch.Tensor:
@@ -71,6 +83,15 @@ def _get_e2m1_lut(device: torch.device) -> torch.Tensor:
     return lut
 
 
+def _get_sm_count(device: torch.device) -> int:
+    idx = int(device.index or 0)
+    cached = _SM_COUNT_CACHE.get(idx)
+    if cached is None:
+        cached = int(torch.cuda.get_device_properties(device).multi_processor_count)
+        _SM_COUNT_CACHE[idx] = cached
+    return cached
+
+
 def supports_triton_mxfp4(device: torch.device) -> bool:
     """Return True if ``tl.dot_scaled`` MXFP4 hardware/Triton execution is supported."""
     if device.type != "cuda":
@@ -79,22 +100,45 @@ def supports_triton_mxfp4(device: torch.device) -> bool:
     return major >= 9 and hasattr(tl, "dot_scaled")
 
 
+@functools.lru_cache(maxsize=8)
+def has_deepgemm_fp8_fp4(device_index: int = 0) -> bool:
+    """True iff ``deep_gemm`` ships SM100 FP8xFP4 grouped kernels."""
+    if not torch.cuda.is_available():
+        return False
+    cap = torch.cuda.get_device_capability(device_index)
+    if cap[0] != 10:
+        return False
+    try:
+        import deep_gemm
+    except Exception:
+        return False
+    return hasattr(deep_gemm, "m_grouped_fp8_fp4_gemm_nt_contiguous") and hasattr(
+        deep_gemm, "m_grouped_fp8_fp4_gemm_nt_masked"
+    )
+
+
+@functools.lru_cache(maxsize=8)
+def has_flashinfer_mxfp4(device_index: int = 0) -> bool:
+    """True iff ``flashinfer.gemm.group_gemm_mxfp4_nt_groupwise`` is supported."""
+    if not torch.cuda.is_available():
+        return False
+    cap = torch.cuda.get_device_capability(device_index)
+    if cap[0] not in (10, 11, 12):
+        return False
+    try:
+        import flashinfer.gemm as fi_gemm
+    except Exception:
+        return False
+    return hasattr(fi_gemm, "group_gemm_mxfp4_nt_groupwise")
+
+
 # ---------------------------------------------------------------------------
 # MXFP4 Quantize & Dequantize (Reference + Triton)
 # ---------------------------------------------------------------------------
 
 
 def quantize_mxfp4(w: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Quantize floating-point tensor ``[..., N, K]`` into MXFP4 ``(w_u8, scale_u8)``.
-
-    Args:
-        w: Input tensor of shape ``[..., N, K]`` with ``K % 32 == 0``.
-
-    Returns:
-        w_u8: Packed E2M1 ``uint8`` tensor of shape ``[..., N, K // 2]``
-              (low nibble = even K, high nibble = odd K).
-        scale_u8: UE8M0 ``uint8`` tensor of shape ``[..., N, K // 32]``.
-    """
+    """Quantize floating-point tensor ``[..., N, K]`` into MXFP4 ``(w_u8, scale_u8)``."""
     if w.ndim < 2:
         raise ValueError(f"Expected weight tensor with ndim >= 2, got {w.shape}")
     K = w.shape[-1]
@@ -107,10 +151,9 @@ def quantize_mxfp4(w: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     num_groups = K // MXFP4_BLOCK_SIZE
 
     w_f32 = w.float().reshape(*prefix_shape, num_groups, MXFP4_BLOCK_SIZE)
-    amax = w_f32.abs().amax(dim=-1)  # [..., N, K // 32]
+    amax = w_f32.abs().amax(dim=-1)
 
     is_zero = amax == 0.0
-    # Shared exponent: smallest power of two >= amax / 6.0 so max value maps <= 6.0.
     safe_amax = torch.where(is_zero, torch.ones_like(amax), amax)
     exp = torch.ceil(torch.log2(safe_amax / 6.0)).clamp(-127.0, 127.0).to(torch.int32)
     exp = torch.where(is_zero, torch.zeros_like(exp), exp)
@@ -120,7 +163,6 @@ def quantize_mxfp4(w: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     inv_scale = torch.where(is_zero, torch.zeros_like(inv_scale), inv_scale)
     scaled = w_f32 * inv_scale.unsqueeze(-1)
 
-    # IEEE-754 round-to-nearest-even to E2M1 grid {0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0}
     abs_v = scaled.abs()
     mag = (
         (abs_v > 0.25).to(torch.uint8)
@@ -142,13 +184,7 @@ def dequantize_mxfp4_ref(
     scale_u8: torch.Tensor,
     dtype: torch.dtype = torch.bfloat16,
 ) -> torch.Tensor:
-    """Exact vectorized PyTorch reference MXFP4 dequantizer.
-
-    Args:
-        w_u8: ``[..., N, K // 2]`` ``uint8`` packed E2M1 weights.
-        scale_u8: ``[..., N, K // 32]`` ``uint8`` UE8M0 scales.
-        dtype: Target floating-point dtype.
-    """
+    """Exact vectorized PyTorch reference MXFP4 dequantizer."""
     if w_u8.dtype != torch.uint8 or scale_u8.dtype != torch.uint8:
         raise TypeError("w_u8 and scale_u8 must be torch.uint8")
     prefix_shape = w_u8.shape[:-1]
@@ -208,7 +244,9 @@ def _dequantize_mxfp4_kernel(
         tl.float32, bitcast=True
     )
     sc_nan = tl.full(sc_i32.shape, 0x7FC00000, tl.int32).to(tl.float32, bitcast=True)
-    sc_f32 = tl.where(sc_i32 == 0, sc_subnormal, tl.where(sc_i32 == 255, sc_nan, sc_normal))
+    sc_f32 = tl.where(
+        sc_i32 == 0, sc_subnormal, tl.where(sc_i32 == 255, sc_nan, sc_normal)
+    )
 
     lo_n = b & 0x0F
     hi_n = (b >> 4) & 0x0F
@@ -217,8 +255,6 @@ def _dequantize_mxfp4_kernel(
     lo_sign = tl.where((lo_n & 8) != 0, -1.0, 1.0)
     hi_sign = tl.where((hi_n & 8) != 0, -1.0, 1.0)
 
-    # For mag >= 2: value = (1 + 0.5 * (mag & 1)) * 2^((mag >> 1) - 1)
-    # In IEEE 754 FP32 bits: exp = (mag >> 1) + 126, mantissa MSB = (mag & 1) << 22.
     lo_norm = (((lo_mag >> 1) + 126) << 23 | ((lo_mag & 1) << 22)).to(
         tl.float32, bitcast=True
     )
@@ -287,7 +323,7 @@ def dequantize_mxfp4(
 
 
 # ---------------------------------------------------------------------------
-# MXFP8 (E4M3 + UE8M0) Dynamic Activation Quantizer (for optional W4A8 path)
+# MXFP8 (E4M3 + UE8M0) Dynamic Activation Quantizer
 # ---------------------------------------------------------------------------
 
 
@@ -317,9 +353,7 @@ def _quant_mxfp8_e4m3_kernel(
     amax = tl.max(tl.abs(x), axis=1)
     is_zero = amax == 0.0
     safe_amax = tl.where(is_zero, 1.0, amax)
-    # E4M3FN max finite value is 448.0
     ratio = safe_amax * (1.0 / 448.0)
-    # ceil(log2(ratio)) via FP32 exponent bits:
     bits = ratio.to(tl.int32, bitcast=True)
     raw_exp = ((bits >> 23) & 0xFF) - 127
     has_mant = (bits & 0x007FFFFF) != 0
@@ -372,6 +406,232 @@ def quantize_mxfp8_e4m3(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
 
 
 # ---------------------------------------------------------------------------
+# DeepGEMM & FlashInfer Weight Scale Layout Converters (Pure Triton + Fast)
+# ---------------------------------------------------------------------------
+
+
+@triton.jit
+def _pack_fp4_scale_deepgemm_kernel(
+    in_ptr,
+    out_ptr,
+    E,
+    N,
+    num_groups,
+    num_packs,
+    stride_ie: tl.int64,
+    stride_in: tl.int64,
+    stride_oe: tl.int64,
+    stride_op: tl.int64,
+    BLOCK_N: tl.constexpr,
+    BLOCK_P: tl.constexpr,
+):
+    e = tl.program_id(0).to(tl.int64)
+    pid_n = tl.program_id(1)
+    pid_p = tl.program_id(2)
+
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    offs_p = pid_p * BLOCK_P + tl.arange(0, BLOCK_P)
+    mask_n = offs_n < N
+    mask_p = offs_p < num_packs
+
+    in_base = in_ptr + e * stride_ie + offs_n[:, None].to(tl.int64) * stride_in
+    packed = tl.zeros((BLOCK_N, BLOCK_P), dtype=tl.uint32)
+    for b_idx in tl.static_range(4):
+        g_idx = offs_p * 4 + b_idx
+        mask_g = mask_n[:, None] & (g_idx[None, :] < num_groups)
+        v = tl.load(in_base + g_idx[None, :], mask=mask_g, other=0).to(tl.uint32)
+        packed |= v << (b_idx * 8)
+
+    out_ptrs = (
+        out_ptr
+        + e * stride_oe
+        + offs_p[None, :].to(tl.int64) * stride_op
+        + offs_n[:, None]
+    )
+    tl.store(out_ptrs, packed.to(tl.int32), mask=mask_n[:, None] & mask_p[None, :])
+
+
+def prepare_fp4_weight_scale_for_deepgemm(
+    scale: torch.Tensor,
+    mn: int,
+    k: int,
+    num_groups: Optional[int] = None,
+) -> torch.Tensor:
+    """Convert raw MXFP4 UE8M0 weight scales to DeepGEMM Section-3 packed ``int32`` layout.
+
+    Accepts:
+      - Already-packed ``torch.int32`` (validated & returned zero-copy)
+      - Checkpoint ``torch.uint8`` UE8M0 ``[..., mn, ceil_div(k, 32)]``
+      - ``torch.float8_e8m0fnu`` (zero-copy ``.view(torch.uint8)``)
+      - ``torch.float32`` exact powers of 2 (extracts biased exponent bits)
+    """
+    if scale.dtype == torch.int32:
+        return scale
+
+    if scale.dtype == torch.uint8:
+        sc_u8 = scale
+    elif hasattr(torch, "float8_e8m0fnu") and scale.dtype == torch.float8_e8m0fnu:
+        sc_u8 = scale.view(torch.uint8)
+    elif scale.dtype == torch.float32:
+        bits = scale.contiguous().view(torch.int32)
+        sc_u8 = ((bits >> 23) & 0xFF).to(torch.uint8)
+    else:
+        raise TypeError(
+            f"Expected uint8, float8_e8m0fnu, float32, or int32 scale, got {scale.dtype}"
+        )
+
+    num_k_groups = (k + MXFP4_BLOCK_SIZE - 1) // MXFP4_BLOCK_SIZE
+    expected_shape = (
+        (num_groups, mn, num_k_groups) if num_groups is not None else (mn, num_k_groups)
+    )
+    if tuple(sc_u8.shape) != expected_shape:
+        raise ValueError(f"FP4 scale shape {tuple(sc_u8.shape)} != {expected_shape}")
+
+    num_packs = (num_k_groups + 3) // 4
+    mn_align = ((mn + 3) // 4) * 4
+    G = 1 if num_groups is None else int(num_groups)
+    sc_3d = sc_u8.reshape(G, mn, num_k_groups)
+    if sc_3d.stride(-1) != 1:
+        sc_3d = sc_3d.contiguous()
+
+    if not sc_3d.is_cuda:
+        padded_groups = num_packs * 4
+        if padded_groups != num_k_groups:
+            pad = torch.zeros(
+                (G, mn, padded_groups - num_k_groups),
+                dtype=torch.uint8,
+                device=sc_3d.device,
+            )
+            sc_p = torch.cat([sc_3d, pad], dim=-1)
+        else:
+            sc_p = sc_3d
+        sc_i = sc_p.reshape(G, mn, num_packs, 4).to(torch.int64)
+        packed = (
+            sc_i[..., 0] | (sc_i[..., 1] << 8) | (sc_i[..., 2] << 16) | (sc_i[..., 3] << 24)
+        ).to(torch.int32)
+        buf = torch.zeros((G, num_packs, mn_align), dtype=torch.int32, device=sc_3d.device)
+        buf[:, :, :mn] = packed.transpose(1, 2)
+        out = buf.transpose(1, 2)[:, :mn, :]
+        return out[0] if num_groups is None else out
+
+    buf = torch.zeros((G, num_packs, mn_align), dtype=torch.int32, device=sc_3d.device)
+    BLOCK_N = 64
+    BLOCK_P = 32 if num_packs >= 32 else max(4, triton.next_power_of_2(num_packs))
+    grid = (G, triton.cdiv(mn, BLOCK_N), triton.cdiv(num_packs, BLOCK_P))
+    _pack_fp4_scale_deepgemm_kernel[grid](
+        sc_3d,
+        buf,
+        G,
+        mn,
+        num_k_groups,
+        num_packs,
+        sc_3d.stride(0),
+        sc_3d.stride(1),
+        buf.stride(0),
+        buf.stride(1),
+        BLOCK_N=BLOCK_N,
+        BLOCK_P=BLOCK_P,
+        num_warps=4,
+    )
+    out = buf.transpose(1, 2)[:, :mn, :]
+    return out[0] if num_groups is None else out
+
+
+@triton.jit
+def _swizzle_fp4_scale_128x4_kernel(
+    in_ptr,
+    out_ptr,
+    N,
+    C,
+    n_pad,
+    c_pad,
+    stride_ie: tl.int64,
+    stride_in: tl.int64,
+    stride_oe: tl.int64,
+    BLOCK_N: tl.constexpr,
+    BLOCK_C: tl.constexpr,
+):
+    e = tl.program_id(0).to(tl.int64)
+    pid_n = tl.program_id(1)
+    pid_c = tl.program_id(2)
+
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    offs_c = pid_c * BLOCK_C + tl.arange(0, BLOCK_C)
+    mask = (offs_n[:, None] < N) & (offs_c[None, :] < C)
+
+    vals = tl.load(
+        in_ptr + e * stride_ie + offs_n[:, None].to(tl.int64) * stride_in + offs_c[None, :],
+        mask=mask,
+        other=0,
+    )
+
+    r_blk = offs_n // 128
+    r_rem = offs_n % 128
+    r4 = r_rem // 32
+    r32 = r_rem % 32
+    c_blk = offs_c // 4
+    c4 = offs_c % 4
+
+    c_blocks = c_pad // 4
+    sw_off = (
+        ((r_blk[:, None] * c_blocks + c_blk[None, :]) * 32 + r32[:, None]) * 4
+        + r4[:, None]
+    ) * 4 + c4[None, :]
+
+    out_mask = (offs_n[:, None] < n_pad) & (offs_c[None, :] < c_pad)
+    tl.store(
+        out_ptr + e * stride_oe + sw_off.to(tl.int64),
+        vals,
+        mask=out_mask,
+    )
+
+
+def prepare_fp4_weight_scale_for_flashinfer(scale_u8: torch.Tensor) -> torch.Tensor:
+    """Swizzle ``[E, N, K // 32] uint8`` scales to CUTLASS 128x4 layout ``[E, N_pad, C_pad] uint8``."""
+    if scale_u8.dtype != torch.uint8:
+        if hasattr(torch, "float8_e8m0fnu") and scale_u8.dtype == torch.float8_e8m0fnu:
+            scale_u8 = scale_u8.view(torch.uint8)
+        else:
+            raise TypeError(f"Expected uint8 scale, got {scale_u8.dtype}")
+    if scale_u8.ndim != 3:
+        raise ValueError(f"Expected 3D [E, N, C] scale, got {scale_u8.shape}")
+    E, N, C = scale_u8.shape
+    n_pad = ((N + 127) // 128) * 128
+    c_pad = ((C + 3) // 4) * 4
+
+    sc_c = scale_u8 if scale_u8.stride(-1) == 1 else scale_u8.contiguous()
+    if not sc_c.is_cuda:
+        buf = torch.zeros((E, n_pad, c_pad), dtype=torch.uint8, device=sc_c.device)
+        buf[:, :N, :C] = sc_c
+        return (
+            buf.reshape(E, n_pad // 128, 4, 32, c_pad // 4, 4)
+            .permute(0, 1, 4, 3, 2, 5)
+            .reshape(E, n_pad, c_pad)
+            .contiguous()
+        )
+
+    out = torch.zeros((E, n_pad, c_pad), dtype=torch.uint8, device=sc_c.device)
+    BLOCK_N = 64
+    BLOCK_C = 32 if c_pad >= 32 else max(4, triton.next_power_of_2(c_pad))
+    grid = (E, triton.cdiv(n_pad, BLOCK_N), triton.cdiv(c_pad, BLOCK_C))
+    _swizzle_fp4_scale_128x4_kernel[grid](
+        sc_c,
+        out,
+        N,
+        C,
+        n_pad,
+        c_pad,
+        sc_c.stride(0),
+        sc_c.stride(1),
+        out.stride(0),
+        BLOCK_N=BLOCK_N,
+        BLOCK_C=BLOCK_C,
+        num_warps=4,
+    )
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Single-Matrix MXFP4 Linear (BF16 x E2M1 via tl.dot_scaled)
 # ---------------------------------------------------------------------------
 
@@ -396,17 +656,19 @@ def _mxfp4_linear_bf16_kernel(
 ):
     pid_n = tl.program_id(0)
     pid_m = tl.program_id(1)
+
     offs_m = pid_m * BM + tl.arange(0, BM)
     offs_n = pid_n * BN + tl.arange(0, BN)
-    offs_k = tl.arange(0, BK)
-    offs_k2 = tl.arange(0, BK // 2)
-    offs_ks = tl.arange(0, BK // 32)
     mask_m = offs_m < M
     mask_n = offs_n < N
 
+    offs_k = tl.arange(0, BK)
+    offs_k2 = tl.arange(0, BK // 2)
+    offs_ks = tl.arange(0, BK // 32)
+
     a_ptrs = a_ptr + offs_m[:, None].to(tl.int64) * stride_am + offs_k[None, :]
-    b_ptrs = b_ptr + offs_n[:, None] * stride_bn + offs_k2[None, :]
-    bs_ptrs = b_sc_ptr + offs_n[:, None] * stride_bsn + offs_ks[None, :]
+    b_ptrs = b_ptr + offs_n[:, None].to(tl.int64) * stride_bn + offs_k2[None, :]
+    bs_ptrs = b_sc_ptr + offs_n[:, None].to(tl.int64) * stride_bsn + offs_ks[None, :]
 
     acc = tl.zeros((BM, BN), dtype=tl.float32)
     K_half = K // 2
@@ -445,10 +707,7 @@ def mxfp4_linear(
     use_triton: bool = True,
     out_dtype: Optional[torch.dtype] = None,
 ) -> torch.Tensor:
-    """Single-matrix MXFP4 GEMM: ``x @ dequant(w_u8, scale_u8).T``.
-
-    Uses native SM103 ``tl.dot_scaled(bf16, e2m1)`` when available.
-    """
+    """Single-matrix MXFP4 GEMM: ``x @ dequant(w_u8, scale_u8).T``."""
     target_dtype = out_dtype if out_dtype is not None else x.dtype
     orig_shape = x.shape[:-1]
     K = x.shape[-1]
@@ -508,24 +767,23 @@ def mxfp4_linear(
 
 
 # ---------------------------------------------------------------------------
-# Weight Layout Preparation
+# Weight Layout Preparation & Lazy Backend Scale Caching
 # ---------------------------------------------------------------------------
 
 
 @dataclass
 class MXFP4MoEWeights:
-    """Container for packed MXFP4 routed expert weights ready for SM103 GEMM.
-
-    Stores native checkpoint K-major layout ``[E, N, K // 2]`` by default
-    (zero extra copy/transpose on B300 SM103, since ``tl.trans`` inside
-    ``tl.dot_scaled`` is faster on MoE tile sizes and avoids doubling HBM).
-    """
+    """Container for packed MXFP4 routed expert weights ready for SM100/SM103 GEMMs."""
 
     w13_u8: torch.Tensor  # [E, 2*I, L//2] uint8 (or [E, L//2, 2*I] if transposed)
     w13_scale: torch.Tensor  # [E, 2*I, L//32] uint8
     w2_u8: torch.Tensor  # [E, L, I//2] uint8 (or [E, I//2, L] if transposed)
     w2_scale: torch.Tensor  # [E, L, I//32] uint8
     weights_transposed: bool = False
+    _dg_w13_s: Optional[torch.Tensor] = field(default=None, repr=False, compare=False)
+    _dg_w2_s: Optional[torch.Tensor] = field(default=None, repr=False, compare=False)
+    _fi_w13_s: Optional[torch.Tensor] = field(default=None, repr=False, compare=False)
+    _fi_w2_s: Optional[torch.Tensor] = field(default=None, repr=False, compare=False)
 
     @property
     def num_experts(self) -> int:
@@ -538,6 +796,41 @@ class MXFP4MoEWeights:
     @property
     def intermediate_size(self) -> int:
         return int(self.w13_scale.shape[1] // 2)
+
+    def invalidate_backend_caches(self) -> None:
+        self._dg_w13_s = None
+        self._dg_w2_s = None
+        self._fi_w13_s = None
+        self._fi_w2_s = None
+
+    def get_deepgemm_pair(self) -> Tuple[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor, torch.Tensor]]:
+        if self.weights_transposed:
+            raise ValueError("DeepGEMM FP8xFP4 requires K-major weights (weights_transposed=False)")
+        if self._dg_w13_s is None:
+            E = self.num_experts
+            two_I = int(self.w13_scale.shape[1])
+            L = self.latent_dim
+            I = two_I // 2
+            self._dg_w13_s = prepare_fp4_weight_scale_for_deepgemm(
+                self.w13_scale, two_I, L, num_groups=E
+            )
+            self._dg_w2_s = prepare_fp4_weight_scale_for_deepgemm(
+                self.w2_scale, L, I, num_groups=E
+            )
+        assert self._dg_w2_s is not None
+        return (
+            (self.w13_u8.view(torch.int8), self._dg_w13_s),
+            (self.w2_u8.view(torch.int8), self._dg_w2_s),
+        )
+
+    def get_flashinfer_pair(self) -> Tuple[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor, torch.Tensor]]:
+        if self.weights_transposed:
+            raise ValueError("FlashInfer MXFP4 requires K-major weights (weights_transposed=False)")
+        if self._fi_w13_s is None:
+            self._fi_w13_s = prepare_fp4_weight_scale_for_flashinfer(self.w13_scale)
+            self._fi_w2_s = prepare_fp4_weight_scale_for_flashinfer(self.w2_scale)
+        assert self._fi_w2_s is not None
+        return (self.w13_u8, self._fi_w13_s), (self.w2_u8, self._fi_w2_s)
 
     def nbytes(self) -> int:
         return (
@@ -560,12 +853,7 @@ def prepare_mxfp4_moe_weights(
     w2_scale: torch.Tensor,
     transpose_weights: bool = False,
 ) -> MXFP4MoEWeights:
-    """Prepare MXFP4 routed-expert weights from checkpoint tensors.
-
-    Accepts either fused ``(w13_u8, w13_scale)`` or separate
-    ``(w_gate_u8, w_gate_scale, w_up_u8, w_up_scale)`` alongside ``(w2_u8, w2_scale)``.
-    All input tensors use checkpoint layout ``[E, N, K // 2]`` and ``[E, N, K // 32]``.
-    """
+    """Prepare MXFP4 routed-expert weights from checkpoint tensors."""
     if w13_u8 is None or w13_scale is None:
         if (
             w_gate_u8 is None
@@ -598,7 +886,7 @@ def prepare_mxfp4_moe_weights(
 
 
 # ---------------------------------------------------------------------------
-# Zero-Sync GPU MoE Tile Schedule Builder
+# Zero-Sync GPU MoE Tile Schedule Builder (Standard + Compact Active-Only)
 # ---------------------------------------------------------------------------
 
 
@@ -612,6 +900,25 @@ class MoETileSchedule:
     tile_m_start: torch.Tensor  # [max_num_tiles] int32
     tile_m_count: torch.Tensor  # [max_num_tiles] int32
     max_num_tiles: int
+    top_k: int
+    num_tokens: int
+    block_m: int
+
+
+@dataclass
+class CompactMoETileSchedule:
+    """Zero-empty-tile active schedule + GPU task count (no CPU-GPU sync)."""
+
+    sorted_tok_ids: torch.Tensor  # [M_total] int32
+    sorted_weights: torch.Tensor  # [M_total] float32
+    inv_slots: torch.Tensor  # [M, top_k] int32 mapping (tok, k) -> slot (-1 if remote)
+    tile_expert_id: torch.Tensor  # [max_num_tiles] int32 (first num_active_tiles valid)
+    tile_m_start: torch.Tensor  # [max_num_tiles] int32
+    tile_m_count: torch.Tensor  # [max_num_tiles] int32
+    num_active_tiles_buf: torch.Tensor  # [1] int32 on device
+    num_active_slots_buf: torch.Tensor  # [1] int32 on device
+    max_num_tiles: int
+    max_slots: int
     top_k: int
     num_tokens: int
     block_m: int
@@ -643,6 +950,73 @@ def _scatter_moe_tile_schedule_kernel(
         tl.store(tile_m_count_ptr + t, cnt)
 
 
+@triton.jit
+def _scatter_compact_tile_schedule_kernel(
+    counts_ptr,
+    m_starts_ptr,
+    tile_starts_ptr,
+    tile_expert_id_ptr,
+    tile_m_start_ptr,
+    tile_m_count_ptr,
+    num_active_tiles_ptr,
+    num_active_slots_ptr,
+    num_experts,
+    BM: tl.constexpr,
+):
+    e = tl.program_id(0)
+    c = tl.load(counts_ptr + e).to(tl.int32)
+    m0 = tl.load(m_starts_ptr + e).to(tl.int32)
+    t0 = tl.load(tile_starts_ptr + e).to(tl.int32)
+    nt = (c + BM - 1) // BM
+    if e == num_experts - 1:
+        tl.store(num_active_tiles_ptr, t0 + nt)
+        tl.store(num_active_slots_ptr, m0 + c)
+    if c == 0:
+        return
+    for i in range(nt):
+        t = t0 + i
+        rem = c - i * BM
+        cnt = tl.minimum(rem, BM)
+        tl.store(tile_expert_id_ptr + t, e)
+        tl.store(tile_m_start_ptr + t, m0 + i * BM)
+        tl.store(tile_m_count_ptr + t, cnt)
+
+
+@triton.jit
+def _build_m1_compact_schedule_kernel(
+    topk_ids_ptr,
+    topk_weights_ptr,
+    sorted_tok_ids_ptr,
+    sorted_weights_ptr,
+    inv_slots_ptr,
+    tile_expert_id_ptr,
+    tile_m_start_ptr,
+    tile_m_count_ptr,
+    num_active_tiles_ptr,
+    num_active_slots_ptr,
+    ep_start,
+    num_experts,
+    TOP_K: tl.constexpr,
+):
+    cnt = 0
+    for k in tl.static_range(TOP_K):
+        gid = tl.load(topk_ids_ptr + k).to(tl.int32)
+        local_e = gid - ep_start
+        if local_e >= 0 and local_e < num_experts:
+            w = tl.load(topk_weights_ptr + k).to(tl.float32)
+            tl.store(tile_expert_id_ptr + cnt, local_e)
+            tl.store(tile_m_start_ptr + cnt, cnt)
+            tl.store(tile_m_count_ptr + cnt, 1)
+            tl.store(sorted_tok_ids_ptr + cnt, 0)
+            tl.store(sorted_weights_ptr + cnt, w)
+            tl.store(inv_slots_ptr + k, cnt)
+            cnt += 1
+        else:
+            tl.store(inv_slots_ptr + k, -1)
+    tl.store(num_active_tiles_ptr, cnt)
+    tl.store(num_active_slots_ptr, cnt)
+
+
 _M1_SCHED_CACHE: dict[tuple[torch.device, int], tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = {}
 
 
@@ -659,7 +1033,6 @@ def _get_m1_static_tensors(
         cached = (perm, sorted_tok_ids, tile_m_start, tile_m_count)
         _M1_SCHED_CACHE[key] = cached
     return cached
-
 
 
 @triton.jit
@@ -709,13 +1082,7 @@ def build_moe_tile_schedule(
     ep_start: int = 0,
     ep_size: int = 1,
 ) -> MoETileSchedule:
-    """Sort token-expert pairs and build a block-aligned M-tile table on GPU.
-
-    Performs ZERO CPU-GPU synchronization and skips every expert with 0 tokens
-    (and every remote expert outside ``[ep_start, ep_start + num_experts)``
-    when ``ep_size > 1``). When ``num_tokens == 1`` and ``unique_per_token=True``
-    (guaranteed by ``torch.topk``), bypasses sort/bincount/cumsum/scatter completely.
-    """
+    """Sort token-expert pairs and build a block-aligned M-tile table on GPU."""
     if topk_ids.ndim != 2:
         raise ValueError(f"Expected topk_ids of shape [M, top_k], got {topk_ids.shape}")
     num_tokens, top_k = topk_ids.shape
@@ -782,8 +1149,6 @@ def build_moe_tile_schedule(
     num_tiles_per_e = (counts + block_m - 1) // block_m
     tile_starts = torch.cumsum(num_tiles_per_e, dim=0) - num_tiles_per_e
 
-    # Tight mathematical upper bound on total active tiles:
-    # A_max = min(E, M_total); sum_e ceil(c_e / BM) <= A_max + (M_total - A_max) // BM.
     a_max = min(num_experts, m_total)
     max_num_tiles = a_max + (m_total - a_max) // block_m
 
@@ -817,8 +1182,136 @@ def build_moe_tile_schedule(
     )
 
 
+def _build_compact_decode_schedule(
+    topk_ids: torch.Tensor,
+    topk_weights: torch.Tensor,
+    num_experts: int,
+    block_m: int,
+    *,
+    ep_start: int = 0,
+    ep_size: int = 1,
+) -> CompactMoETileSchedule:
+    """Build zero-empty-tile compact schedule with zero CPU-GPU sync."""
+    num_tokens, top_k = topk_ids.shape
+    m_total = num_tokens * top_k
+    device = topk_ids.device
+
+    if num_tokens == 1 and top_k <= 32:
+        sorted_tok_ids = torch.empty((top_k,), dtype=torch.int32, device=device)
+        sorted_weights = torch.empty((top_k,), dtype=torch.float32, device=device)
+        inv_slots = torch.empty((1, top_k), dtype=torch.int32, device=device)
+        tile_expert_id = torch.empty((top_k,), dtype=torch.int32, device=device)
+        tile_m_start = torch.empty((top_k,), dtype=torch.int32, device=device)
+        tile_m_count = torch.empty((top_k,), dtype=torch.int32, device=device)
+        num_active_tiles_buf = torch.empty((1,), dtype=torch.int32, device=device)
+        num_active_slots_buf = torch.empty((1,), dtype=torch.int32, device=device)
+        _build_m1_compact_schedule_kernel[(1,)](
+            topk_ids[0].contiguous(),
+            topk_weights[0].float().contiguous(),
+            sorted_tok_ids,
+            sorted_weights,
+            inv_slots.view(-1),
+            tile_expert_id,
+            tile_m_start,
+            tile_m_count,
+            num_active_tiles_buf,
+            num_active_slots_buf,
+            int(ep_start) if ep_size > 1 else 0,
+            num_experts,
+            TOP_K=top_k,
+            num_warps=1,
+        )
+        return CompactMoETileSchedule(
+            sorted_tok_ids=sorted_tok_ids,
+            sorted_weights=sorted_weights,
+            inv_slots=inv_slots,
+            tile_expert_id=tile_expert_id,
+            tile_m_start=tile_m_start,
+            tile_m_count=tile_m_count,
+            num_active_tiles_buf=num_active_tiles_buf,
+            num_active_slots_buf=num_active_slots_buf,
+            max_num_tiles=top_k,
+            max_slots=top_k,
+            top_k=top_k,
+            num_tokens=1,
+            block_m=block_m,
+        )
+
+    flat_ids = topk_ids.reshape(-1)
+    flat_weights = topk_weights.float().reshape(-1)
+    slot_idx = torch.arange(m_total, dtype=torch.int32, device=device)
+    if ep_size > 1:
+        ep_end = int(ep_start) + num_experts
+        in_range = (flat_ids >= ep_start) & (flat_ids < ep_end)
+        flat_local = torch.where(
+            in_range,
+            flat_ids - int(ep_start),
+            torch.full_like(flat_ids, num_experts),
+        )
+        _, perm_i64 = torch.sort(flat_local, stable=True)
+        sorted_tok_ids = (perm_i64 // top_k).to(torch.int32)
+        sorted_weights = flat_weights.index_select(0, perm_i64)
+        slot_vals = torch.where(
+            in_range.index_select(0, perm_i64),
+            slot_idx,
+            torch.full_like(slot_idx, -1),
+        )
+        counts = _gpu_expert_bincount(flat_local, num_experts)
+    else:
+        _, perm_i64 = torch.sort(flat_ids, stable=True)
+        sorted_tok_ids = (perm_i64 // top_k).to(torch.int32)
+        sorted_weights = flat_weights.index_select(0, perm_i64)
+        slot_vals = slot_idx
+        counts = _gpu_expert_bincount(flat_ids, num_experts)
+    inv_slots_flat = torch.empty((m_total,), dtype=torch.int32, device=device)
+    inv_slots_flat.index_copy_(0, perm_i64, slot_vals)
+    inv_slots = inv_slots_flat.reshape(num_tokens, top_k)
+
+    m_starts = torch.cumsum(counts, dim=0) - counts
+    num_tiles_per_e = (counts + block_m - 1) // block_m
+    tile_starts = torch.cumsum(num_tiles_per_e, dim=0) - num_tiles_per_e
+
+    a_max = min(num_experts, m_total)
+    max_num_tiles = max(1, a_max + (m_total - a_max) // block_m)
+    tile_expert_id = torch.empty((max_num_tiles,), dtype=torch.int32, device=device)
+    tile_m_start = torch.empty((max_num_tiles,), dtype=torch.int32, device=device)
+    tile_m_count = torch.empty((max_num_tiles,), dtype=torch.int32, device=device)
+    num_active_tiles_buf = torch.empty((1,), dtype=torch.int32, device=device)
+    num_active_slots_buf = torch.empty((1,), dtype=torch.int32, device=device)
+
+    _scatter_compact_tile_schedule_kernel[(num_experts,)](
+        counts,
+        m_starts,
+        tile_starts,
+        tile_expert_id,
+        tile_m_start,
+        tile_m_count,
+        num_active_tiles_buf,
+        num_active_slots_buf,
+        num_experts,
+        BM=block_m,
+        num_warps=1,
+    )
+
+    return CompactMoETileSchedule(
+        sorted_tok_ids=sorted_tok_ids,
+        sorted_weights=sorted_weights,
+        inv_slots=inv_slots,
+        tile_expert_id=tile_expert_id,
+        tile_m_start=tile_m_start,
+        tile_m_count=tile_m_count,
+        num_active_tiles_buf=num_active_tiles_buf,
+        num_active_slots_buf=num_active_slots_buf,
+        max_num_tiles=max_num_tiles,
+        max_slots=m_total,
+        top_k=top_k,
+        num_tokens=num_tokens,
+        block_m=block_m,
+    )
+
+
 # ---------------------------------------------------------------------------
-# B300 SM103 Triton tl.dot_scaled Grouped MXFP4 GEMM Kernels
+# Baseline Triton tl.dot_scaled Grouped MXFP4 GEMM Kernels
 # ---------------------------------------------------------------------------
 
 
@@ -874,13 +1367,11 @@ def _mxfp4_grouped_gemm_bf16_kernel(
     offs_k2 = tl.arange(0, BK // 2)
     offs_ks = tl.arange(0, BK // 32)
 
-    # Scalar 64-bit expert base offset computed ONCE outside the K-loop
-    # (avoids int32 overflow for E=640 weights > 2 GiB while keeping inner offsets int32).
     expert_id_64 = expert_id.to(tl.int64)
     b_base = b_ptr + expert_id_64 * stride_be
     bs_base = b_sc_ptr + expert_id_64 * stride_bse
 
-    a_ptrs = a_ptr + row_ids_a[:, None] * stride_am + offs_k[None, :]
+    a_ptrs = a_ptr + row_ids_a[:, None].to(tl.int64) * stride_am + offs_k[None, :]
     if TRANS_B:
         b_ptrs = b_base + offs_n[:, None] * stride_b0 + offs_k2[None, :]
         b_step = BK // 2
@@ -952,7 +1443,7 @@ def _mxfp4_grouped_gemm_bf16_kernel(
     else:
         row_ids_c = slot_ids
 
-    c_ptrs = c_ptr + row_ids_c[:, None] * stride_cm + offs_n[None, :]
+    c_ptrs = c_ptr + row_ids_c[:, None].to(tl.int64) * stride_cm + offs_n[None, :]
     tl.store(
         c_ptrs,
         acc.to(c_ptr.dtype.element_ty),
@@ -1018,8 +1509,8 @@ def _mxfp4_grouped_gemm_e4m3_kernel(
     b_base = b_ptr + expert_id_64 * stride_be
     bs_base = b_sc_ptr + expert_id_64 * stride_bse
 
-    a_ptrs = a_ptr + row_ids_a[:, None] * stride_am + offs_k[None, :]
-    as_ptrs = a_sc_ptr + row_ids_a[:, None] * stride_asm + offs_ks[None, :]
+    a_ptrs = a_ptr + row_ids_a[:, None].to(tl.int64) * stride_am + offs_k[None, :]
+    as_ptrs = a_sc_ptr + row_ids_a[:, None].to(tl.int64) * stride_asm + offs_ks[None, :]
     if TRANS_B:
         b_ptrs = b_base + offs_n[:, None] * stride_b0 + offs_k2[None, :]
         b_step = BK // 2
@@ -1094,7 +1585,7 @@ def _mxfp4_grouped_gemm_e4m3_kernel(
     else:
         row_ids_c = slot_ids
 
-    c_ptrs = c_ptr + row_ids_c[:, None] * stride_cm + offs_n[None, :]
+    c_ptrs = c_ptr + row_ids_c[:, None].to(tl.int64) * stride_cm + offs_n[None, :]
     tl.store(
         c_ptrs,
         acc.to(c_ptr.dtype.element_ty),
@@ -1183,7 +1674,7 @@ def _select_grouped_gemm_config(
     K: int,
     block_m: Optional[int] = None,
 ) -> Tuple[int, int, int, int, int]:
-    """Select tuned B300 SM103 ``(BM, BN, BK, num_warps, num_stages)``."""
+    """Select tuned SM100/SM103 ``(BM, BN, BK, num_warps, num_stages)``."""
     m_total = num_tokens * top_k
     est_active = max(1, min(num_experts, m_total))
     avg_m_per_e = m_total / est_active
@@ -1201,18 +1692,13 @@ def _select_grouped_gemm_config(
     if N < 128:
         BN = 64 if N >= 64 else max(16, triton.next_power_of_2(N))
     elif num_tokens <= 4 and N <= 2560:
-        # Increase CTA wave utilization on 148-SM B300 during tiny-batch decode Stage 2.
         BN = 64
     else:
         BN = 128
 
     if K < 128 or (K % 128 != 0):
         BK = 64
-    elif BM >= 32:
-        # Empirically optimal at Prefill M=2048 (BM=32, BN=128, BK=64 -> 1748 GB/s).
-        BK = 64
     else:
-        # Empirically optimal at Decode M=1..64 & Prefill M=512 (BM=16, BN=128, BK=128 -> 1800 GB/s).
         BK = 128
 
     num_warps = 4
@@ -1233,27 +1719,7 @@ def mxfp4_grouped_moe_gemm(
     compute_mode: str = "bf16",
     use_triton: bool = True,
 ) -> torch.Tensor:
-    """Execute one grouped MXFP4 GEMM over active MoE experts.
-
-    Args:
-        x: Activations of shape ``[M, K]`` (when ``gather_input=True``) or
-           ``[M_total, K]`` (when ``gather_input=False``), BF16.
-        w_u8: Packed MXFP4 weights ``[E, N, K // 2]`` (or ``[E, K // 2, N]`` if
-              ``weights_transposed=True``).
-        scale_u8: UE8M0 scales ``[E, N, K // 32]``.
-        schedule: Prebuilt :class:`MoETileSchedule` (optional; built from
-                  ``topk_ids`` if omitted).
-        topk_ids: ``[M, top_k]`` routing indices (required if ``schedule is None``).
-        gather_input: Gather rows from ``[M, K]`` using ``schedule.sorted_tok_ids``.
-        scatter_output: Scatter output rows to ``schedule.perm`` order.
-        weights_transposed: False for native checkpoint layout ``[E, N, K // 2]``;
-                            True for pre-transposed ``[E, K // 2, N]``.
-        compute_mode: ``"bf16"`` (default, W4A16 exact) or ``"e4m3"`` (W4A8).
-        use_triton: Use Triton SM103 ``tl.dot_scaled`` kernel when True.
-
-    Returns:
-        Output tensor of shape ``[M_total, N]`` (BF16).
-    """
+    """Execute one grouped MXFP4 GEMM over active MoE experts."""
     num_experts = int(scale_u8.shape[0])
     N = int(scale_u8.shape[1])
     K = int(x.shape[-1])
@@ -1276,7 +1742,6 @@ def mxfp4_grouped_moe_gemm(
         or not supports_triton_mxfp4(x.device)
         or x.dtype != torch.bfloat16
     ):
-        # Clean dequant-BF16 fallback (only dequantizes experts that appear in schedule)
         w_nk = w_u8.transpose(1, 2).contiguous() if weights_transposed else w_u8
         tile_e = schedule.tile_expert_id.tolist()
         tile_s = schedule.tile_m_start.tolist()
@@ -1387,8 +1852,1304 @@ def mxfp4_grouped_moe_gemm(
 
 
 # ---------------------------------------------------------------------------
-# Full 2-Stage Routed MXFP4 Experts Forward (Triton SM103 + Reference)
+# Optimized Persistent Split-K Triton Decode GEMV (M = 1..64)
+#   - Zero -1 wasted empty tiles (compact active-task queue on GPU)
+#   - Fused SiTU-GLU epilogue (inline at SPLIT_K=1, fused reduce+SiTU at SPLIT_K>1)
+#   - Single-pass weighted scatter-reduce in Stage 2 (atomic_add into FP32)
 # ---------------------------------------------------------------------------
+
+
+@triton.jit
+def _mxfp4_decode_stage1_persistent_kernel(
+    a_ptr,
+    b_ptr,
+    b_sc_ptr,
+    out_g_ptr,  # if SPLIT_K==1: act_ptr [M_slots, I] BF16; else partial_g [SPLIT_K, M_slots, I] FP32
+    out_u_ptr,  # if SPLIT_K==1: unused; else partial_u [SPLIT_K, M_slots, I] FP32
+    sorted_tok_ids_ptr,
+    tile_expert_id_ptr,
+    tile_m_start_ptr,
+    tile_m_count_ptr,
+    num_active_tiles_ptr,
+    I,
+    K,
+    stride_am,
+    stride_be: tl.int64,
+    stride_b0,
+    stride_bse: tl.int64,
+    stride_bsn,
+    stride_os: tl.int64,
+    stride_om,
+    gate_beta: tl.constexpr,
+    up_beta: tl.constexpr,
+    BM: tl.constexpr,
+    BN: tl.constexpr,
+    BK: tl.constexpr,
+    SPLIT_K: tl.constexpr,
+    N_BLOCKS: tl.constexpr,
+    NUM_CTAS: tl.constexpr,
+    TRANS_B: tl.constexpr,
+    K_DIVISIBLE: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    num_active = tl.load(num_active_tiles_ptr).to(tl.int32)
+    total_tasks = num_active * N_BLOCKS * SPLIT_K
+    if total_tasks == 0:
+        return
+
+    K_split = K // SPLIT_K
+    offs_local = tl.arange(0, BM)
+    offs_k_base = tl.arange(0, BK)
+    offs_k2_base = tl.arange(0, BK // 2)
+    offs_ks_base = tl.arange(0, BK // 32)
+    K_half = K // 2
+    K_sc = K // 32
+
+    for task_id in range(pid, total_tasks, NUM_CTAS):
+        split_id = task_id % SPLIT_K
+        tmp = task_id // SPLIT_K
+        n_blk = tmp % N_BLOCKS
+        tile_id = tmp // N_BLOCKS
+
+        expert_id = tl.load(tile_expert_id_ptr + tile_id).to(tl.int64)
+        m_start = tl.load(tile_m_start_ptr + tile_id)
+        m_count = tl.load(tile_m_count_ptr + tile_id)
+
+        mask_m = offs_local < m_count
+        slot_ids = m_start + offs_local
+        row_ids_a = tl.load(sorted_tok_ids_ptr + slot_ids, mask=mask_m, other=0)
+
+        offs_ng = n_blk * BN + tl.arange(0, BN)
+        offs_nu = I + offs_ng
+        mask_n = offs_ng < I
+
+        k_start = split_id * K_split
+        k_end = K if split_id == SPLIT_K - 1 else k_start + K_split
+
+        b_base = b_ptr + expert_id * stride_be
+        bs_base = b_sc_ptr + expert_id * stride_bse
+
+        a_ptrs = (
+            a_ptr
+            + row_ids_a[:, None].to(tl.int64) * stride_am
+            + (k_start + offs_k_base)[None, :]
+        )
+        if TRANS_B:
+            bg_ptrs = b_base + offs_ng[:, None] * stride_b0 + (k_start // 2 + offs_k2_base)[None, :]
+            bu_ptrs = b_base + offs_nu[:, None] * stride_b0 + (k_start // 2 + offs_k2_base)[None, :]
+            b_step = BK // 2
+        else:
+            bg_ptrs = b_base + (k_start // 2 + offs_k2_base)[:, None] * stride_b0 + offs_ng[None, :]
+            bu_ptrs = b_base + (k_start // 2 + offs_k2_base)[:, None] * stride_b0 + offs_nu[None, :]
+            b_step = (BK // 2) * stride_b0
+
+        bsg_ptrs = bs_base + offs_ng[:, None] * stride_bsn + (k_start // 32 + offs_ks_base)[None, :]
+        bsu_ptrs = bs_base + offs_nu[:, None] * stride_bsn + (k_start // 32 + offs_ks_base)[None, :]
+
+        acc_g = tl.zeros((BM, BN), dtype=tl.float32)
+        acc_u = tl.zeros((BM, BN), dtype=tl.float32)
+
+        for k0 in range(k_start, k_end, BK):
+            if K_DIVISIBLE:
+                a = tl.load(a_ptrs, mask=mask_m[:, None], other=0.0)
+                if TRANS_B:
+                    bg = tl.load(bg_ptrs, mask=mask_n[:, None], other=0, eviction_policy="evict_first")
+                    bu = tl.load(bu_ptrs, mask=mask_n[:, None], other=0, eviction_policy="evict_first")
+                    bg = tl.trans(bg)
+                    bu = tl.trans(bu)
+                else:
+                    bg = tl.load(bg_ptrs, mask=mask_n[None, :], other=0, eviction_policy="evict_first")
+                    bu = tl.load(bu_ptrs, mask=mask_n[None, :], other=0, eviction_policy="evict_first")
+                bsg = tl.load(bsg_ptrs, mask=mask_n[:, None], other=127, eviction_policy="evict_first")
+                bsu = tl.load(bsu_ptrs, mask=mask_n[:, None], other=127, eviction_policy="evict_first")
+            else:
+                mask_k = (k0 + offs_k_base) < k_end
+                mask_k2 = (k0 // 2 + offs_k2_base) < K_half
+                mask_ks = (k0 // 32 + offs_ks_base) < K_sc
+                a = tl.load(a_ptrs, mask=mask_m[:, None] & mask_k[None, :], other=0.0)
+                if TRANS_B:
+                    bg = tl.load(bg_ptrs, mask=mask_n[:, None] & mask_k2[None, :], other=0, eviction_policy="evict_first")
+                    bu = tl.load(bu_ptrs, mask=mask_n[:, None] & mask_k2[None, :], other=0, eviction_policy="evict_first")
+                    bg = tl.trans(bg)
+                    bu = tl.trans(bu)
+                else:
+                    bg = tl.load(bg_ptrs, mask=mask_k2[:, None] & mask_n[None, :], other=0, eviction_policy="evict_first")
+                    bu = tl.load(bu_ptrs, mask=mask_k2[:, None] & mask_n[None, :], other=0, eviction_policy="evict_first")
+                bsg = tl.load(bsg_ptrs, mask=mask_n[:, None] & mask_ks[None, :], other=127, eviction_policy="evict_first")
+                bsu = tl.load(bsu_ptrs, mask=mask_n[:, None] & mask_ks[None, :], other=127, eviction_policy="evict_first")
+
+            acc_g = tl.dot_scaled(a, None, "bf16", bg, bsg, "e2m1", acc=acc_g)
+            acc_u = tl.dot_scaled(a, None, "bf16", bu, bsu, "e2m1", acc=acc_u)
+            a_ptrs += BK
+            bg_ptrs += b_step
+            bu_ptrs += b_step
+            bsg_ptrs += BK // 32
+            bsu_ptrs += BK // 32
+
+        if SPLIT_K == 1:
+            # Round gate/up to BF16 to match unfused Stage1 -> SiTU-GLU parity
+            gf = acc_g.to(tl.bfloat16).to(tl.float32)
+            uf = acc_u.to(tl.bfloat16).to(tl.float32)
+            sig_g = tl.div_rn(1.0, 1.0 + libdevice.exp(-gf))
+            g_val = gate_beta * libdevice.tanh(tl.div_rn(gf, gate_beta)) * sig_g
+            u_val = up_beta * libdevice.tanh(tl.div_rn(uf, up_beta))
+            act = (g_val * u_val).to(out_g_ptr.dtype.element_ty)
+            c_ptrs = out_g_ptr + slot_ids[:, None].to(tl.int64) * stride_om + offs_ng[None, :]
+            tl.store(c_ptrs, act, mask=mask_m[:, None] & mask_n[None, :])
+        else:
+            s_off = split_id.to(tl.int64) * stride_os
+            og_ptrs = out_g_ptr + s_off + slot_ids[:, None].to(tl.int64) * stride_om + offs_ng[None, :]
+            ou_ptrs = out_u_ptr + s_off + slot_ids[:, None].to(tl.int64) * stride_om + offs_ng[None, :]
+            tl.store(og_ptrs, acc_g, mask=mask_m[:, None] & mask_n[None, :])
+            tl.store(ou_ptrs, acc_u, mask=mask_m[:, None] & mask_n[None, :])
+
+
+@triton.jit
+def _splitk_reduce_situ_glu_kernel(
+    pg_ptr,
+    pu_ptr,
+    act_ptr,
+    num_active_slots_ptr,
+    I,
+    stride_s: tl.int64,
+    stride_m,
+    gate_beta: tl.constexpr,
+    up_beta: tl.constexpr,
+    SPLIT_K: tl.constexpr,
+    BLOCK_I: tl.constexpr,
+):
+    slot = tl.program_id(0).to(tl.int64)
+    n_active = tl.load(num_active_slots_ptr).to(tl.int64)
+    if slot >= n_active:
+        return
+    pid_i = tl.program_id(1)
+    offs_i = pid_i * BLOCK_I + tl.arange(0, BLOCK_I)
+    mask_i = offs_i < I
+
+    acc_g = tl.zeros((BLOCK_I,), dtype=tl.float32)
+    acc_u = tl.zeros((BLOCK_I,), dtype=tl.float32)
+    row_off = slot * stride_m + offs_i
+    for s in tl.static_range(SPLIT_K):
+        acc_g += tl.load(pg_ptr + s * stride_s + row_off, mask=mask_i, other=0.0)
+        acc_u += tl.load(pu_ptr + s * stride_s + row_off, mask=mask_i, other=0.0)
+
+    gf = acc_g.to(tl.bfloat16).to(tl.float32)
+    uf = acc_u.to(tl.bfloat16).to(tl.float32)
+    sig_g = tl.div_rn(1.0, 1.0 + libdevice.exp(-gf))
+    g_val = gate_beta * libdevice.tanh(tl.div_rn(gf, gate_beta)) * sig_g
+    u_val = up_beta * libdevice.tanh(tl.div_rn(uf, up_beta))
+    out = (g_val * u_val).to(act_ptr.dtype.element_ty)
+    tl.store(act_ptr + row_off, out, mask=mask_i)
+
+
+@triton.jit
+def _mxfp4_decode_stage2_persistent_kernel(
+    act_ptr,
+    b_ptr,
+    b_sc_ptr,
+    partial_ptr,
+    tile_expert_id_ptr,
+    tile_m_start_ptr,
+    tile_m_count_ptr,
+    num_active_tiles_ptr,
+    N,
+    K,
+    stride_am,
+    stride_be: tl.int64,
+    stride_b0,
+    stride_bse: tl.int64,
+    stride_bsn,
+    stride_ps: tl.int64,
+    stride_pm: tl.int64,
+    BM: tl.constexpr,
+    BN: tl.constexpr,
+    BK: tl.constexpr,
+    SPLIT_K: tl.constexpr,
+    N_BLOCKS: tl.constexpr,
+    NUM_CTAS: tl.constexpr,
+    TRANS_B: tl.constexpr,
+    K_DIVISIBLE: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    num_active = tl.load(num_active_tiles_ptr).to(tl.int32)
+    total_tasks = num_active * N_BLOCKS * SPLIT_K
+    if total_tasks == 0:
+        return
+
+    K_split = K // SPLIT_K
+    offs_local = tl.arange(0, BM)
+    offs_k_base = tl.arange(0, BK)
+    offs_k2_base = tl.arange(0, BK // 2)
+    offs_ks_base = tl.arange(0, BK // 32)
+    K_half = K // 2
+    K_sc = K // 32
+
+    for task_id in range(pid, total_tasks, NUM_CTAS):
+        split_id = task_id % SPLIT_K
+        tmp = task_id // SPLIT_K
+        n_blk = tmp % N_BLOCKS
+        tile_id = tmp // N_BLOCKS
+
+        expert_id = tl.load(tile_expert_id_ptr + tile_id).to(tl.int64)
+        m_start = tl.load(tile_m_start_ptr + tile_id)
+        m_count = tl.load(tile_m_count_ptr + tile_id)
+
+        mask_m = offs_local < m_count
+        slot_ids = m_start + offs_local
+        offs_n = n_blk * BN + tl.arange(0, BN)
+        mask_n = offs_n < N
+
+        k_start = split_id * K_split
+        k_end = K if split_id == SPLIT_K - 1 else k_start + K_split
+
+        b_base = b_ptr + expert_id * stride_be
+        bs_base = b_sc_ptr + expert_id * stride_bse
+
+        a_ptrs = (
+            act_ptr
+            + slot_ids[:, None].to(tl.int64) * stride_am
+            + (k_start + offs_k_base)[None, :]
+        )
+        if TRANS_B:
+            b_ptrs = b_base + offs_n[:, None] * stride_b0 + (k_start // 2 + offs_k2_base)[None, :]
+            b_step = BK // 2
+        else:
+            b_ptrs = b_base + (k_start // 2 + offs_k2_base)[:, None] * stride_b0 + offs_n[None, :]
+            b_step = (BK // 2) * stride_b0
+        bs_ptrs = bs_base + offs_n[:, None] * stride_bsn + (k_start // 32 + offs_ks_base)[None, :]
+
+        acc = tl.zeros((BM, BN), dtype=tl.float32)
+        for k0 in range(k_start, k_end, BK):
+            if K_DIVISIBLE:
+                a = tl.load(a_ptrs, mask=mask_m[:, None], other=0.0)
+                if TRANS_B:
+                    b = tl.load(b_ptrs, mask=mask_n[:, None], other=0, eviction_policy="evict_first")
+                    b = tl.trans(b)
+                else:
+                    b = tl.load(b_ptrs, mask=mask_n[None, :], other=0, eviction_policy="evict_first")
+                b_sc = tl.load(bs_ptrs, mask=mask_n[:, None], other=127, eviction_policy="evict_first")
+            else:
+                mask_k = (k0 + offs_k_base) < k_end
+                mask_k2 = (k0 // 2 + offs_k2_base) < K_half
+                mask_ks = (k0 // 32 + offs_ks_base) < K_sc
+                a = tl.load(a_ptrs, mask=mask_m[:, None] & mask_k[None, :], other=0.0)
+                if TRANS_B:
+                    b = tl.load(b_ptrs, mask=mask_n[:, None] & mask_k2[None, :], other=0, eviction_policy="evict_first")
+                    b = tl.trans(b)
+                else:
+                    b = tl.load(b_ptrs, mask=mask_k2[:, None] & mask_n[None, :], other=0, eviction_policy="evict_first")
+                b_sc = tl.load(bs_ptrs, mask=mask_n[:, None] & mask_ks[None, :], other=127, eviction_policy="evict_first")
+
+            acc = tl.dot_scaled(a, None, "bf16", b, b_sc, "e2m1", acc=acc)
+            a_ptrs += BK
+            b_ptrs += b_step
+            bs_ptrs += BK // 32
+
+        out_ptrs = (
+            partial_ptr
+            + split_id.to(tl.int64) * stride_ps
+            + slot_ids[:, None].to(tl.int64) * stride_pm
+            + offs_n[None, :]
+        )
+        tl.store(out_ptrs, acc, mask=mask_m[:, None] & mask_n[None, :])
+
+
+@triton.jit
+def _decode_stage2_deterministic_reduce_kernel(
+    partial_ptr,
+    inv_slots_ptr,
+    topk_weights_ptr,
+    out_ptr,
+    L,
+    stride_ps: tl.int64,
+    stride_pm: tl.int64,
+    stride_wm,
+    stride_om: tl.int64,
+    SPLIT_K: tl.constexpr,
+    TOP_K: tl.constexpr,
+    BLOCK_L: tl.constexpr,
+):
+    tok = tl.program_id(0).to(tl.int64)
+    pid_l = tl.program_id(1)
+    offs_l = pid_l * BLOCK_L + tl.arange(0, BLOCK_L)
+    mask_l = offs_l < L
+
+    acc = tl.zeros((BLOCK_L,), dtype=tl.float32)
+    slot_base = inv_slots_ptr + tok * TOP_K
+    w_base = topk_weights_ptr + tok * stride_wm
+    for k_idx in tl.static_range(TOP_K):
+        slot = tl.load(slot_base + k_idx).to(tl.int64)
+        if slot >= 0:
+            w = tl.load(w_base + k_idx).to(tl.float32)
+            if w != 0.0:
+                val = tl.zeros((BLOCK_L,), dtype=tl.float32)
+                for s in tl.static_range(SPLIT_K):
+                    val += tl.load(
+                        partial_ptr + s * stride_ps + slot * stride_pm + offs_l,
+                        mask=mask_l,
+                        other=0.0,
+                    )
+                acc += val * w
+
+    tl.store(
+        out_ptr + tok * stride_om + offs_l,
+        acc.to(out_ptr.dtype.element_ty),
+        mask=mask_l,
+    )
+
+
+def mxfp4_moe_triton_splitk(
+    x: torch.Tensor,
+    topk_ids: torch.Tensor,
+    topk_weights: torch.Tensor,
+    weights: MXFP4MoEWeights,
+    *,
+    gate_beta: float = 4.0,
+    up_beta: float = 25.0,
+    ep_start: int = 0,
+    ep_size: int = 1,
+) -> torch.Tensor:
+    """Persistent Split-K Triton ``tl.dot_scaled`` Decode GEMV (M=1..64).
+
+    Eliminates all ``-1`` wasted empty tiles via a compact GPU task queue,
+    fuses ``SiTU-GLU`` into Stage 1, and performs a single-pass FP32 weighted
+    scatter-reduce directly from Stage 2. 100% CUDA Graph capture/replay safe.
+    """
+    M, L = x.shape
+    if M == 0:
+        return torch.empty_like(x)
+    if not x.is_cuda or x.dtype != torch.bfloat16 or not supports_triton_mxfp4(x.device):
+        return mxfp4_moe_forward_ref(
+            x, topk_ids, topk_weights, weights,
+            gate_beta=gate_beta, up_beta=up_beta, ep_start=ep_start, ep_size=ep_size,
+        )
+
+    x_c = x if x.stride(-1) == 1 else x.contiguous()
+    w13 = weights.w13_u8 if weights.w13_u8.stride(-1) == 1 else weights.w13_u8.contiguous()
+    w13_sc = weights.w13_scale if weights.w13_scale.stride(-1) == 1 else weights.w13_scale.contiguous()
+    w2 = weights.w2_u8 if weights.w2_u8.stride(-1) == 1 else weights.w2_u8.contiguous()
+    w2_sc = weights.w2_scale if weights.w2_scale.stride(-1) == 1 else weights.w2_scale.contiguous()
+
+    E_local = weights.num_experts
+    I = weights.intermediate_size
+    top_k = topk_ids.shape[1]
+
+    BM = 16
+    BN1 = 64 if I >= 64 else max(16, triton.next_power_of_2(I))
+    BK1 = 128 if (L >= 128 and L % 128 == 0) else 64
+    if M <= 4 and L % (4 * BK1) == 0:
+        SPLIT_K1 = 4
+    elif M <= 16 and L % (2 * BK1) == 0:
+        SPLIT_K1 = 2
+    else:
+        SPLIT_K1 = 1
+
+    BN2 = 64 if L >= 64 else max(16, triton.next_power_of_2(L))
+    BK2 = 128 if (I >= 128 and I % 128 == 0) else 64
+    if M <= 4 and I % (4 * BK2) == 0:
+        SPLIT_K2 = 4
+    elif M <= 16 and I % (2 * BK2) == 0:
+        SPLIT_K2 = 2
+    else:
+        SPLIT_K2 = 1
+
+    sched = _build_compact_decode_schedule(
+        topk_ids, topk_weights, E_local, BM, ep_start=ep_start, ep_size=ep_size
+    )
+
+    sm_count = _get_sm_count(x.device)
+    N1_BLOCKS = triton.cdiv(I, BN1)
+    N2_BLOCKS = triton.cdiv(L, BN2)
+    num_ctas1 = max(1, min(sm_count * 2, sched.max_num_tiles * N1_BLOCKS * SPLIT_K1))
+    num_ctas2 = max(1, min(sm_count * 2, sched.max_num_tiles * N2_BLOCKS * SPLIT_K2))
+
+    act = torch.empty((sched.max_slots, I), dtype=x.dtype, device=x.device)
+    if SPLIT_K1 == 1:
+        _mxfp4_decode_stage1_persistent_kernel[(num_ctas1,)](
+            x_c,
+            w13,
+            w13_sc,
+            act,
+            act,
+            sched.sorted_tok_ids,
+            sched.tile_expert_id,
+            sched.tile_m_start,
+            sched.tile_m_count,
+            sched.num_active_tiles_buf,
+            I,
+            L,
+            x_c.stride(0),
+            w13.stride(0),
+            w13.stride(1),
+            w13_sc.stride(0),
+            w13_sc.stride(1),
+            0,
+            act.stride(0),
+            gate_beta=float(gate_beta),
+            up_beta=float(up_beta),
+            BM=BM,
+            BN=BN1,
+            BK=BK1,
+            SPLIT_K=1,
+            N_BLOCKS=N1_BLOCKS,
+            NUM_CTAS=num_ctas1,
+            TRANS_B=not weights.weights_transposed,
+            K_DIVISIBLE=(L % BK1 == 0),
+            num_warps=4,
+            num_stages=3,
+        )
+    else:
+        pg = torch.empty((SPLIT_K1, sched.max_slots, I), dtype=torch.float32, device=x.device)
+        pu = torch.empty((SPLIT_K1, sched.max_slots, I), dtype=torch.float32, device=x.device)
+        _mxfp4_decode_stage1_persistent_kernel[(num_ctas1,)](
+            x_c,
+            w13,
+            w13_sc,
+            pg,
+            pu,
+            sched.sorted_tok_ids,
+            sched.tile_expert_id,
+            sched.tile_m_start,
+            sched.tile_m_count,
+            sched.num_active_tiles_buf,
+            I,
+            L,
+            x_c.stride(0),
+            w13.stride(0),
+            w13.stride(1),
+            w13_sc.stride(0),
+            w13_sc.stride(1),
+            pg.stride(0),
+            pg.stride(1),
+            gate_beta=float(gate_beta),
+            up_beta=float(up_beta),
+            BM=BM,
+            BN=BN1,
+            BK=BK1,
+            SPLIT_K=SPLIT_K1,
+            N_BLOCKS=N1_BLOCKS,
+            NUM_CTAS=num_ctas1,
+            TRANS_B=not weights.weights_transposed,
+            K_DIVISIBLE=(L % BK1 == 0),
+            num_warps=4,
+            num_stages=3,
+        )
+        BLOCK_I = 512 if I >= 512 else triton.next_power_of_2(max(I, 64))
+        _splitk_reduce_situ_glu_kernel[(sched.max_slots, triton.cdiv(I, BLOCK_I))](
+            pg,
+            pu,
+            act,
+            sched.num_active_slots_buf,
+            I,
+            pg.stride(0),
+            pg.stride(1),
+            gate_beta=float(gate_beta),
+            up_beta=float(up_beta),
+            SPLIT_K=SPLIT_K1,
+            BLOCK_I=BLOCK_I,
+            num_warps=4,
+        )
+
+    partial_out = torch.empty((SPLIT_K2, sched.max_slots, L), dtype=torch.float32, device=x.device)
+    _mxfp4_decode_stage2_persistent_kernel[(num_ctas2,)](
+        act,
+        w2,
+        w2_sc,
+        partial_out,
+        sched.tile_expert_id,
+        sched.tile_m_start,
+        sched.tile_m_count,
+        sched.num_active_tiles_buf,
+        L,
+        I,
+        act.stride(0),
+        w2.stride(0),
+        w2.stride(1),
+        w2_sc.stride(0),
+        w2_sc.stride(1),
+        partial_out.stride(0),
+        partial_out.stride(1),
+        BM=BM,
+        BN=BN2,
+        BK=BK2,
+        SPLIT_K=SPLIT_K2,
+        N_BLOCKS=N2_BLOCKS,
+        NUM_CTAS=num_ctas2,
+        TRANS_B=not weights.weights_transposed,
+        K_DIVISIBLE=(I % BK2 == 0),
+        num_warps=4,
+        num_stages=3,
+    )
+    out = torch.empty((M, L), dtype=x.dtype, device=x.device)
+    BLOCK_L = 512 if L >= 512 else triton.next_power_of_2(max(L, 64))
+    w_f = topk_weights.float().contiguous()
+    _decode_stage2_deterministic_reduce_kernel[(M, triton.cdiv(L, BLOCK_L))](
+        partial_out,
+        sched.inv_slots,
+        w_f,
+        out,
+        L,
+        partial_out.stride(0),
+        partial_out.stride(1),
+        w_f.stride(0),
+        out.stride(0),
+        SPLIT_K=SPLIT_K2,
+        TOP_K=top_k,
+        BLOCK_L=BLOCK_L,
+        num_warps=4,
+    )
+    return out
+
+
+# ---------------------------------------------------------------------------
+# DeepGEMM SM100 FP8xMXFP4 Backends (Contiguous Prefill + Masked CG Decode)
+#   + FlashInfer group_gemm_mxfp4_nt_groupwise
+# ---------------------------------------------------------------------------
+
+
+@triton.jit
+def _init_m_indices_kernel(
+    counts_ptr,
+    aligned_counts_ptr,
+    offsets_ptr,
+    m_indices_ptr,
+    BLOCK: tl.constexpr,
+):
+    e = tl.program_id(0)
+    c = tl.load(counts_ptr + e)
+    if c == 0:
+        return
+    ac = tl.load(aligned_counts_ptr + e)
+    start = tl.load(offsets_ptr + e)
+    for base in range(0, ac, BLOCK):
+        offs = base + tl.arange(0, BLOCK)
+        mask = offs < ac
+        tl.store(m_indices_ptr + start + offs, e, mask=mask)
+
+
+@triton.jit(do_not_specialize=["stride_q_row", "stride_sc_row", "stride_out_q_row", "stride_out_sc_k"])
+def _scatter_fp8_to_contig_kernel(
+    x_q_ptr,
+    x_sc_ptr,
+    topk_ids_ptr,
+    offsets_ptr,
+    write_cnt_ptr,
+    out_q_ptr,
+    out_sc_ptr,
+    dst_slots_ptr,
+    M_total,
+    top_k,
+    K,
+    num_groups,
+    num_packs,
+    ep_start,
+    num_experts,
+    stride_q_row: tl.int64,
+    stride_sc_row: tl.int64,
+    stride_out_q_row: tl.int64,
+    stride_out_sc_k: tl.int64,
+    BLOCK_K: tl.constexpr,
+):
+    idx = tl.program_id(0).to(tl.int64)
+    if idx >= M_total:
+        return
+    tok = idx // top_k
+    gid = tl.load(topk_ids_ptr + idx).to(tl.int32)
+    local_e = gid - ep_start
+    if local_e < 0 or local_e >= num_experts:
+        tl.store(dst_slots_ptr + idx, -1)
+        return
+
+    pos = tl.atomic_add(write_cnt_ptr + local_e, 1)
+    slot = (tl.load(offsets_ptr + local_e) + pos).to(tl.int64)
+    tl.store(dst_slots_ptr + idx, slot.to(tl.int32))
+
+    for k0 in range(0, K, BLOCK_K):
+        offs_k = k0 + tl.arange(0, BLOCK_K)
+        mk = offs_k < K
+        vals = tl.load(x_q_ptr + tok * stride_q_row + offs_k, mask=mk, other=0)
+        tl.store(out_q_ptr + slot * stride_out_q_row + offs_k, vals, mask=mk)
+
+    PACKS_BLK: tl.constexpr = BLOCK_K // 128
+    for p0 in range(0, num_packs, PACKS_BLK):
+        offs_p = p0 + tl.arange(0, PACKS_BLK)
+        mp = offs_p < num_packs
+        packed = tl.zeros((PACKS_BLK,), dtype=tl.uint32)
+        sc_base = x_sc_ptr + tok * stride_sc_row
+        for b_idx in tl.static_range(4):
+            g = offs_p * 4 + b_idx
+            v = tl.load(sc_base + g, mask=mp & (g < num_groups), other=0).to(tl.uint32)
+            packed |= v << (b_idx * 8)
+        tl.store(
+            out_sc_ptr + offs_p.to(tl.int64) * stride_out_sc_k + slot,
+            packed.to(tl.int32),
+            mask=mp,
+        )
+
+
+@triton.jit
+def _gather_slot_weighted_reduce_kernel(
+    down_ptr,
+    dst_slots_ptr,
+    topk_weights_ptr,
+    out_ptr,
+    K,
+    stride_dm: tl.int64,
+    stride_wm,
+    stride_om: tl.int64,
+    TOP_K: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    tok = tl.program_id(0).to(tl.int64)
+    pid_k = tl.program_id(1)
+    offs_k = pid_k * BLOCK_K + tl.arange(0, BLOCK_K)
+    mask_k = offs_k < K
+
+    acc = tl.zeros((BLOCK_K,), dtype=tl.float32)
+    slot_base = dst_slots_ptr + tok * TOP_K
+    w_base = topk_weights_ptr + tok * stride_wm
+    for k_idx in tl.static_range(TOP_K):
+        slot = tl.load(slot_base + k_idx).to(tl.int64)
+        if slot >= 0:
+            w = tl.load(w_base + k_idx).to(tl.float32)
+            if w != 0.0:
+                v = tl.load(down_ptr + slot * stride_dm + offs_k, mask=mask_k, other=0.0).to(
+                    tl.float32
+                )
+                acc += v * w
+
+    tl.store(
+        out_ptr + tok * stride_om + offs_k,
+        acc.to(out_ptr.dtype.element_ty),
+        mask=mask_k,
+    )
+
+
+def mxfp4_moe_deepgemm_contiguous(
+    x: torch.Tensor,
+    topk_ids: torch.Tensor,
+    topk_weights: torch.Tensor,
+    weights: MXFP4MoEWeights,
+    *,
+    gate_beta: float = 4.0,
+    up_beta: float = 25.0,
+    ep_start: int = 0,
+    ep_size: int = 1,
+) -> torch.Tensor:
+    """DeepGEMM SM100 ``m_grouped_fp8_fp4_gemm_nt_contiguous`` (Prefill / large-M)."""
+    import deep_gemm
+
+    M, L = x.shape
+    if M == 0:
+        return torch.empty_like(x)
+    top_k = topk_ids.shape[1]
+    E_local = weights.num_experts
+    I = weights.intermediate_size
+    if L % 128 != 0 or I % 128 != 0:
+        raise ValueError(f"DeepGEMM FP8xFP4 requires L={L}, I={I} divisible by 128")
+
+    alignment = int(deep_gemm.get_mk_alignment_for_contiguous_layout())
+    flat_ids = topk_ids.reshape(-1)
+    e_lo = int(ep_start) if ep_size > 1 else 0
+    if ep_size > 1:
+        in_range = (flat_ids >= e_lo) & (flat_ids < e_lo + E_local)
+        flat_local = torch.where(
+            in_range, flat_ids - e_lo, torch.full_like(flat_ids, E_local)
+        )
+    else:
+        flat_local = flat_ids
+    counts = _gpu_expert_bincount(flat_local, E_local)
+    aligned_counts = ((counts + alignment - 1) // alignment) * alignment
+    offsets = torch.cumsum(aligned_counts, dim=0) - aligned_counts
+    all_tokens = int(aligned_counts.sum().item())
+    if all_tokens == 0:
+        return torch.zeros((M, L), dtype=x.dtype, device=x.device)
+
+    (w13_i8, w13_s), (w2_i8, w2_s) = weights.get_deepgemm_pair()
+
+    x_q, x_sc_raw = per_token_group_quant_fp8_ue8m0(x, scale_format="raw")
+    a_fp8 = torch.zeros((all_tokens, L), dtype=torch.float8_e4m3fn, device=x.device)
+    num_groups = L // 32
+    num_packs = num_groups // 4
+    tma_m = ((all_tokens + 3) // 4) * 4
+    a_scale = torch.zeros((num_packs, tma_m), dtype=torch.int32, device=x.device).T[:all_tokens]
+
+    m_indices = torch.zeros((all_tokens,), dtype=torch.int32, device=x.device)
+    _init_m_indices_kernel[(E_local,)](
+        counts, aligned_counts, offsets, m_indices, BLOCK=256, num_warps=4
+    )
+
+    M_total = M * top_k
+    write_cnt = torch.zeros((E_local,), dtype=torch.int32, device=x.device)
+    dst_slots = torch.empty((M, top_k), dtype=torch.int32, device=x.device)
+    _scatter_fp8_to_contig_kernel[(M_total,)](
+        x_q.view(torch.uint8),
+        x_sc_raw,
+        topk_ids.contiguous(),
+        offsets,
+        write_cnt,
+        a_fp8.view(torch.uint8),
+        a_scale,
+        dst_slots.view(-1),
+        M_total,
+        top_k,
+        L,
+        num_groups,
+        num_packs,
+        e_lo,
+        E_local,
+        x_q.stride(0),
+        x_sc_raw.stride(0),
+        a_fp8.stride(0),
+        a_scale.stride(1),
+        BLOCK_K=512,
+        num_warps=4,
+    )
+
+    gate_up = torch.empty((all_tokens, 2 * I), dtype=torch.bfloat16, device=x.device)
+    deep_gemm.m_grouped_fp8_fp4_gemm_nt_contiguous(
+        (a_fp8, a_scale),
+        (w13_i8, w13_s),
+        gate_up,
+        m_indices,
+        recipe_a=(1, 32),
+        recipe_b=(1, 32),
+    )
+
+    h_fp8, h_scale = situ_glu_fp8_quant_packed(
+        gate_up, gate_beta=gate_beta, up_beta=up_beta, scale_format="deepgemm"
+    )
+
+    down_out = torch.empty((all_tokens, L), dtype=torch.bfloat16, device=x.device)
+    deep_gemm.m_grouped_fp8_fp4_gemm_nt_contiguous(
+        (h_fp8, h_scale),
+        (w2_i8, w2_s),
+        down_out,
+        m_indices,
+        recipe_a=(1, 32),
+        recipe_b=(1, 32),
+    )
+
+    out = torch.empty((M, L), dtype=x.dtype, device=x.device)
+    BLOCK_K = 512 if L >= 512 else triton.next_power_of_2(max(L, 64))
+    w_f = topk_weights.float().contiguous()
+    _gather_slot_weighted_reduce_kernel[(M, triton.cdiv(L, BLOCK_K))](
+        down_out,
+        dst_slots,
+        w_f,
+        out,
+        L,
+        down_out.stride(0),
+        w_f.stride(0),
+        out.stride(0),
+        TOP_K=top_k,
+        BLOCK_K=BLOCK_K,
+        num_warps=4,
+    )
+    return out
+
+
+@triton.jit(do_not_specialize=["stride_q_row", "stride_sc_row", "stride_aqe", "stride_aqm", "stride_asce", "stride_asck"])
+def _scatter_fp8_to_masked_kernel(
+    x_q_ptr,
+    x_sc_ptr,
+    topk_ids_ptr,
+    masked_m_ptr,
+    a_q_ptr,
+    a_sc_ptr,
+    dst_pos_ptr,
+    M_total,
+    top_k,
+    K,
+    num_groups,
+    num_packs,
+    ep_start,
+    num_experts,
+    stride_q_row: tl.int64,
+    stride_sc_row: tl.int64,
+    stride_aqe: tl.int64,
+    stride_aqm: tl.int64,
+    stride_asce: tl.int64,
+    stride_asck: tl.int64,
+    BLOCK_K: tl.constexpr,
+):
+    idx = tl.program_id(0).to(tl.int64)
+    if idx >= M_total:
+        return
+    tok = idx // top_k
+    gid = tl.load(topk_ids_ptr + idx).to(tl.int32)
+    local_e = gid - ep_start
+    if local_e < 0 or local_e >= num_experts:
+        tl.store(dst_pos_ptr + idx, -1)
+        return
+
+    pos = tl.atomic_add(masked_m_ptr + local_e, 1).to(tl.int64)
+    tl.store(dst_pos_ptr + idx, pos.to(tl.int32))
+    e64 = local_e.to(tl.int64)
+
+    dst_q_base = a_q_ptr + e64 * stride_aqe + pos * stride_aqm
+    for k0 in range(0, K, BLOCK_K):
+        offs_k = k0 + tl.arange(0, BLOCK_K)
+        mk = offs_k < K
+        vals = tl.load(x_q_ptr + tok * stride_q_row + offs_k, mask=mk, other=0)
+        tl.store(dst_q_base + offs_k, vals, mask=mk)
+
+    PACKS_BLK: tl.constexpr = BLOCK_K // 128
+    dst_sc_base = a_sc_ptr + e64 * stride_asce + pos
+    src_sc_base = x_sc_ptr + tok * stride_sc_row
+    for p0 in range(0, num_packs, PACKS_BLK):
+        offs_p = p0 + tl.arange(0, PACKS_BLK)
+        mp = offs_p < num_packs
+        packed = tl.zeros((PACKS_BLK,), dtype=tl.uint32)
+        for b_idx in tl.static_range(4):
+            g = offs_p * 4 + b_idx
+            v = tl.load(src_sc_base + g, mask=mp & (g < num_groups), other=0).to(tl.uint32)
+            packed |= v << (b_idx * 8)
+        tl.store(
+            dst_sc_base + offs_p.to(tl.int64) * stride_asck,
+            packed.to(tl.int32),
+            mask=mp,
+        )
+
+
+@triton.jit
+def _gather_masked_weighted_reduce_kernel(
+    down_ptr,
+    topk_ids_ptr,
+    dst_pos_ptr,
+    topk_weights_ptr,
+    out_ptr,
+    K,
+    ep_start,
+    num_experts,
+    stride_de: tl.int64,
+    stride_dm: tl.int64,
+    stride_wm,
+    stride_om: tl.int64,
+    TOP_K: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    tok = tl.program_id(0).to(tl.int64)
+    pid_k = tl.program_id(1)
+    offs_k = pid_k * BLOCK_K + tl.arange(0, BLOCK_K)
+    mask_k = offs_k < K
+
+    acc = tl.zeros((BLOCK_K,), dtype=tl.float32)
+    id_base = topk_ids_ptr + tok * TOP_K
+    pos_base = dst_pos_ptr + tok * TOP_K
+    w_base = topk_weights_ptr + tok * stride_wm
+    for k_idx in tl.static_range(TOP_K):
+        pos = tl.load(pos_base + k_idx).to(tl.int64)
+        if pos >= 0:
+            local_e = (tl.load(id_base + k_idx).to(tl.int32) - ep_start).to(tl.int64)
+            w = tl.load(w_base + k_idx).to(tl.float32)
+            if local_e >= 0 and local_e < num_experts and w != 0.0:
+                v = tl.load(
+                    down_ptr + local_e * stride_de + pos * stride_dm + offs_k,
+                    mask=mask_k,
+                    other=0.0,
+                ).to(tl.float32)
+                acc += v * w
+
+    tl.store(
+        out_ptr + tok * stride_om + offs_k,
+        acc.to(out_ptr.dtype.element_ty),
+        mask=mask_k,
+    )
+
+
+def mxfp4_moe_deepgemm_masked(
+    x: torch.Tensor,
+    topk_ids: torch.Tensor,
+    topk_weights: torch.Tensor,
+    weights: MXFP4MoEWeights,
+    *,
+    gate_beta: float = 4.0,
+    up_beta: float = 25.0,
+    ep_start: int = 0,
+    ep_size: int = 1,
+) -> torch.Tensor:
+    """DeepGEMM SM100 ``m_grouped_fp8_fp4_gemm_nt_masked`` (100% CUDA-Graph Decode)."""
+    import deep_gemm
+
+    M, L = x.shape
+    if M == 0:
+        return torch.empty_like(x)
+    top_k = topk_ids.shape[1]
+    E_local = weights.num_experts
+    I = weights.intermediate_size
+    if L % 128 != 0 or I % 128 != 0:
+        raise ValueError(f"DeepGEMM FP8xFP4 requires L={L}, I={I} divisible by 128")
+
+    # DeepGEMM SM100 MGroupedMasked uses BLOCK_M=128 (alignment=128) TMA descriptors along M;
+    # max_m must be aligned to get_mk_alignment_for_contiguous_layout() for exact M < 128 parity.
+    align = int(deep_gemm.get_mk_alignment_for_contiguous_layout())
+    max_m = ((M + align - 1) // align) * align
+    total_e = E_local * max(int(ep_size), 1)
+    expected_m = max(1, (M * top_k + total_e - 1) // total_e)
+    e_lo = int(ep_start) if ep_size > 1 else 0
+
+    (w13_i8, w13_s), (w2_i8, w2_s) = weights.get_deepgemm_pair()
+
+    x_q, x_sc_raw = per_token_group_quant_fp8_ue8m0(x, scale_format="raw")
+    # Active slots [0..masked_m[e]-1] are fully overwritten and masked_m==0 groups
+    # are skipped by DeepGEMM, avoiding costly FillFunctors inside CUDA Graphs.
+    a_fp8 = torch.empty((E_local, max_m, L), dtype=torch.float8_e4m3fn, device=x.device)
+    num_groups = L // 32
+    num_packs = num_groups // 4
+    a_scale = torch.empty(
+        (E_local, num_packs, max_m), dtype=torch.int32, device=x.device
+    ).transpose(1, 2)
+    masked_m = torch.zeros((E_local,), dtype=torch.int32, device=x.device)
+    dst_pos = torch.empty((M, top_k), dtype=torch.int32, device=x.device)
+
+    M_total = M * top_k
+    _scatter_fp8_to_masked_kernel[(M_total,)](
+        x_q.view(torch.uint8),
+        x_sc_raw,
+        topk_ids.contiguous(),
+        masked_m,
+        a_fp8.view(torch.uint8),
+        a_scale,
+        dst_pos.view(-1),
+        M_total,
+        top_k,
+        L,
+        num_groups,
+        num_packs,
+        e_lo,
+        E_local,
+        x_q.stride(0),
+        x_sc_raw.stride(0),
+        a_fp8.stride(0),
+        a_fp8.stride(1),
+        a_scale.stride(0),
+        a_scale.stride(2),
+        BLOCK_K=512,
+        num_warps=4,
+    )
+    del x_q, x_sc_raw
+
+    gate_up = torch.empty((E_local, max_m, 2 * I), dtype=torch.bfloat16, device=x.device)
+    deep_gemm.m_grouped_fp8_fp4_gemm_nt_masked(
+        (a_fp8, a_scale),
+        (w13_i8, w13_s),
+        gate_up,
+        masked_m,
+        expected_m,
+        recipe_a=(1, 32),
+        recipe_b=(1, 32),
+    )
+    del a_fp8, a_scale
+
+    h_fp8, h_scale = situ_glu_fp8_quant_masked_packed(
+        gate_up,
+        masked_m,
+        gate_beta=gate_beta,
+        up_beta=up_beta,
+        zero_unused_scales=False,
+    )
+    del gate_up
+
+    down_out = torch.empty((E_local, max_m, L), dtype=torch.bfloat16, device=x.device)
+    deep_gemm.m_grouped_fp8_fp4_gemm_nt_masked(
+        (h_fp8, h_scale),
+        (w2_i8, w2_s),
+        down_out,
+        masked_m,
+        expected_m,
+        recipe_a=(1, 32),
+        recipe_b=(1, 32),
+    )
+    del h_fp8, h_scale
+
+    out = torch.empty((M, L), dtype=x.dtype, device=x.device)
+    BLOCK_K = 512 if L >= 512 else triton.next_power_of_2(max(L, 64))
+    w_f = (
+        topk_weights
+        if (topk_weights.dtype == torch.float32 and topk_weights.is_contiguous())
+        else topk_weights.float().contiguous()
+    )
+    _gather_masked_weighted_reduce_kernel[(M, triton.cdiv(L, BLOCK_K))](
+        down_out,
+        topk_ids.contiguous(),
+        dst_pos,
+        w_f,
+        out,
+        L,
+        e_lo,
+        E_local,
+        down_out.stride(0),
+        down_out.stride(1),
+        w_f.stride(0),
+        out.stride(0),
+        TOP_K=top_k,
+        BLOCK_K=BLOCK_K,
+        num_warps=4,
+    )
+    return out
+
+
+@triton.jit(do_not_specialize=["stride_q_row", "stride_sc_row", "stride_out_q_row"])
+def _scatter_fp8_to_flashinfer_kernel(
+    x_q_ptr,
+    x_sc_ptr,
+    topk_ids_ptr,
+    m_indptr_ptr,
+    write_cnt_ptr,
+    out_q_ptr,
+    out_sc_ptr,
+    dst_slots_ptr,
+    M_total,
+    top_k,
+    K,
+    num_groups,
+    sf_cols_pad,
+    ep_start,
+    num_experts,
+    stride_q_row: tl.int64,
+    stride_sc_row: tl.int64,
+    stride_out_q_row: tl.int64,
+    BLOCK_K: tl.constexpr,
+):
+    idx = tl.program_id(0).to(tl.int64)
+    if idx >= M_total:
+        return
+    tok = idx // top_k
+    gid = tl.load(topk_ids_ptr + idx).to(tl.int32)
+    local_e = gid - ep_start
+    if local_e < 0 or local_e >= num_experts:
+        tl.store(dst_slots_ptr + idx, -1)
+        return
+
+    pos = tl.atomic_add(write_cnt_ptr + local_e, 1).to(tl.int64)
+    m_off = tl.load(m_indptr_ptr + local_e).to(tl.int64)
+    slot = m_off + pos
+    tl.store(dst_slots_ptr + idx, slot.to(tl.int32))
+
+    for k0 in range(0, K, BLOCK_K):
+        offs_k = k0 + tl.arange(0, BLOCK_K)
+        mk = offs_k < K
+        vals = tl.load(x_q_ptr + tok * stride_q_row + offs_k, mask=mk, other=0)
+        tl.store(out_q_ptr + slot * stride_out_q_row + offs_k, vals, mask=mk)
+
+    sf_m_off = ((m_off + local_e * 127) // 128) * 128
+    r_blk = pos // 128
+    r_rem = pos % 128
+    r4 = r_rem // 32
+    r32 = r_rem % 32
+    c_blocks = sf_cols_pad // 4
+
+    for g0 in range(0, num_groups, 128):
+        offs_g = g0 + tl.arange(0, 128)
+        mg = offs_g < num_groups
+        vals_sc = tl.load(x_sc_ptr + tok * stride_sc_row + offs_g, mask=mg, other=0)
+        c_blk = offs_g // 4
+        c4 = offs_g % 4
+        sw_off = (
+            (sf_m_off + r_blk * 128) * sf_cols_pad
+            + ((c_blk * 32 + r32) * 4 + r4) * 4
+            + c4
+        )
+        tl.store(out_sc_ptr + sw_off, vals_sc, mask=mg)
+
+
+def mxfp4_moe_flashinfer(
+    x: torch.Tensor,
+    topk_ids: torch.Tensor,
+    topk_weights: torch.Tensor,
+    weights: MXFP4MoEWeights,
+    *,
+    gate_beta: float = 4.0,
+    up_beta: float = 25.0,
+    ep_start: int = 0,
+    ep_size: int = 1,
+    swap_ab: bool = True,
+) -> torch.Tensor:
+    """FlashInfer ``group_gemm_mxfp4_nt_groupwise`` SM100/SM103 MXFP4 MoE backend."""
+    import flashinfer.gemm as fi_gemm
+
+    M, L = x.shape
+    if M == 0:
+        return torch.empty_like(x)
+    top_k = topk_ids.shape[1]
+    E_local = weights.num_experts
+    I = weights.intermediate_size
+    if L % 128 != 0 or I % 128 != 0:
+        raise ValueError(f"FlashInfer group_gemm_mxfp4 requires L={L}, I={I} divisible by 128")
+
+    e_lo = int(ep_start) if ep_size > 1 else 0
+    flat_ids = topk_ids.reshape(-1)
+    if ep_size > 1:
+        in_range = (flat_ids >= e_lo) & (flat_ids < e_lo + E_local)
+        flat_local = torch.where(
+            in_range, flat_ids - e_lo, torch.full_like(flat_ids, E_local)
+        )
+    else:
+        flat_local = flat_ids
+    counts = _gpu_expert_bincount(flat_local, E_local)
+    aligned_counts = ((counts + 3) // 4) * 4
+    m_indptr = torch.zeros((E_local + 1,), dtype=torch.int32, device=x.device)
+    torch.cumsum(aligned_counts, dim=0, out=m_indptr[1:])
+    cum_m = int(m_indptr[-1].item())
+    if cum_m == 0:
+        return torch.zeros((M, L), dtype=x.dtype, device=x.device)
+
+    (w13_u8, w13_fi_s), (w2_u8, w2_fi_s) = weights.get_flashinfer_pair()
+
+    x_q, x_sc_raw = per_token_group_quant_fp8_ue8m0(x, scale_format="raw")
+    a_fp8 = torch.zeros((cum_m, L), dtype=torch.float8_e4m3fn, device=x.device)
+    num_groups = L // 32
+    sf_cols_pad = ((num_groups + 3) // 4) * 4
+    total_sf_rows = ((cum_m + max(E_local - 1, 0) * 127 + 127) // 128) * 128
+    a_scale = torch.zeros((total_sf_rows * sf_cols_pad,), dtype=torch.uint8, device=x.device)
+
+    M_total = M * top_k
+    write_cnt = torch.zeros((E_local,), dtype=torch.int32, device=x.device)
+    dst_slots = torch.empty((M, top_k), dtype=torch.int32, device=x.device)
+    _scatter_fp8_to_flashinfer_kernel[(M_total,)](
+        x_q.view(torch.uint8),
+        x_sc_raw,
+        topk_ids.contiguous(),
+        m_indptr,
+        write_cnt,
+        a_fp8.view(torch.uint8),
+        a_scale,
+        dst_slots.view(-1),
+        M_total,
+        top_k,
+        L,
+        num_groups,
+        sf_cols_pad,
+        e_lo,
+        E_local,
+        x_q.stride(0),
+        x_sc_raw.stride(0),
+        a_fp8.stride(0),
+        BLOCK_K=512,
+        num_warps=4,
+    )
+
+    gate_up = torch.empty((cum_m, 2 * I), dtype=torch.bfloat16, device=x.device)
+    fi_gemm.group_gemm_mxfp4_nt_groupwise(
+        a=a_fp8,
+        b=w13_u8,
+        a_scale=a_scale,
+        b_scale=w13_fi_s,
+        m_indptr=m_indptr,
+        swap_ab=swap_ab,
+        out=gate_up,
+        out_dtype=torch.bfloat16,
+    )
+
+    h_fp8, h_scale = situ_glu_fp8_quant_packed(
+        gate_up,
+        gate_beta=gate_beta,
+        up_beta=up_beta,
+        scale_format="flashinfer",
+        m_indptr=m_indptr,
+    )
+
+    down_out = torch.empty((cum_m, L), dtype=torch.bfloat16, device=x.device)
+    fi_gemm.group_gemm_mxfp4_nt_groupwise(
+        a=h_fp8,
+        b=w2_u8,
+        a_scale=h_scale,
+        b_scale=w2_fi_s,
+        m_indptr=m_indptr,
+        swap_ab=swap_ab,
+        out=down_out,
+        out_dtype=torch.bfloat16,
+    )
+
+    out = torch.empty((M, L), dtype=x.dtype, device=x.device)
+    BLOCK_K = 512 if L >= 512 else triton.next_power_of_2(max(L, 64))
+    w_f = topk_weights.float().contiguous()
+    _gather_slot_weighted_reduce_kernel[(M, triton.cdiv(L, BLOCK_K))](
+        down_out,
+        dst_slots,
+        w_f,
+        out,
+        L,
+        down_out.stride(0),
+        w_f.stride(0),
+        out.stride(0),
+        TOP_K=top_k,
+        BLOCK_K=BLOCK_K,
+        num_warps=4,
+    )
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Full 2-Stage Routed MXFP4 Experts Forward (Regime-Dispatched + Reference)
+# ---------------------------------------------------------------------------
+
+
+def _resolve_moe_backend(
+    x: torch.Tensor,
+    weights: MXFP4MoEWeights,
+    backend: str,
+    use_triton: bool,
+) -> str:
+    if backend == "ref" or not use_triton or not x.is_cuda or not supports_triton_mxfp4(x.device):
+        return "ref"
+    req = backend if backend != "auto" else os.environ.get("QWEN4_5_MXFP4_BACKEND", "auto")
+    capturing = (
+        torch.cuda.is_current_stream_capturing()
+        or os.environ.get("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD") == "1"
+    )
+    M, L = x.shape
+    I = weights.intermediate_size
+    dev_idx = int(x.device.index or 0)
+    dg_masked_ok = (
+        not weights.weights_transposed
+        and L % 128 == 0
+        and I % 128 == 0
+        and has_deepgemm_fp8_fp4(dev_idx)
+    )
+
+    if req != "auto":
+        if capturing and req in ("deepgemm_contiguous", "flashinfer", "flashinfer_noswap"):
+            # Contiguous / FlashInfer scatter allocates dynamic shapes via .item().
+            return "deepgemm_masked" if dg_masked_ok else ("triton_splitk" if M <= 64 else "triton")
+        return req
+
+    fi_ok = (
+        not weights.weights_transposed
+        and L % 128 == 0
+        and I % 128 == 0
+        and has_flashinfer_mxfp4(dev_idx)
+    )
+
+    if M <= 64:
+        dec_env = os.environ.get("QWEN4_5_MXFP4_DECODE_BACKEND", "triton_splitk")
+        if dec_env == "sm100_winner":
+            # Empirical P-001 (4x L20A) Pareto frontier: triton_splitk at M=1..2, deepgemm_masked at M>=3
+            return "deepgemm_masked" if (M >= 3 and dg_masked_ok) else "triton_splitk"
+        if capturing and dec_env in ("deepgemm_contiguous", "flashinfer", "flashinfer_noswap"):
+            return "deepgemm_masked" if dg_masked_ok else "triton_splitk"
+        if dec_env == "deepgemm_masked" and not dg_masked_ok:
+            return "triton_splitk"
+        if dec_env in ("flashinfer", "flashinfer_noswap") and not fi_ok:
+            return "triton_splitk"
+        return dec_env
+
+    pref_env = os.environ.get("QWEN4_5_MXFP4_PREFILL_BACKEND", "auto")
+    if pref_env != "auto":
+        if capturing and pref_env in ("deepgemm_contiguous", "flashinfer", "flashinfer_noswap"):
+            return "deepgemm_masked" if dg_masked_ok else "triton"
+        return pref_env
+    if capturing:
+        return "deepgemm_masked" if dg_masked_ok else "triton"
+    # Empirical P-001 (4x L20A) winners: deepgemm_masked for M<=256 (also CG-safe), flashinfer for M>=512.
+    if M <= 256 and dg_masked_ok:
+        return "deepgemm_masked"
+    if fi_ok:
+        return "flashinfer"
+    if dg_masked_ok:
+        return "deepgemm_contiguous"
+    return "triton"
 
 
 def mxfp4_moe_forward(
@@ -1403,16 +3164,29 @@ def mxfp4_moe_forward(
     use_triton: bool = True,
     ep_start: int = 0,
     ep_size: int = 1,
+    backend: str = "auto",
 ) -> torch.Tensor:
-    """Full 2-stage MXFP4 Routed Experts execution:
-      Stage 1: fused gate+up MXFP4 grouped GEMM -> SiTU-GLU
-      Stage 2: down_proj MXFP4 grouped GEMM -> deterministic FP32 weighted reduce
+    """Full 2-stage MXFP4 Routed Experts execution with regime dispatch.
 
-    When ``ep_size > 1``, ``weights`` holds only the ``local_E`` experts covering
-    global ids ``[ep_start, ep_start + local_E)``. Remote slots are skipped with
-    zero CPU-GPU synchronization and receive weight ``0.0`` in the weighted sum.
+    Supported ``backend`` values:
+      - ``"auto"``: Regime-dispatched winner (``triton_splitk`` for Decode ``M <= 64``,
+        or ``sm100_winner`` via ``QWEN4_5_MXFP4_DECODE_BACKEND=sm100_winner`` for
+        ``triton_splitk`` at ``M<=2`` + ``deepgemm_masked`` at ``M>=3``; ``deepgemm_masked``
+        for ``64 < M <= 256`` / CG capture; ``flashinfer`` -> ``deepgemm_contiguous`` ->
+        ``triton`` for Prefill ``M > 256``).
+      - ``"triton_splitk"``: Persistent Split-K Triton ``tl.dot_scaled`` Decode GEMV.
+      - ``"deepgemm_contiguous"``: DeepGEMM ``m_grouped_fp8_fp4_gemm_nt_contiguous``.
+      - ``"deepgemm_masked"``: DeepGEMM ``m_grouped_fp8_fp4_gemm_nt_masked``.
+      - ``"flashinfer"`` / ``"flashinfer_noswap"``: FlashInfer ``group_gemm_mxfp4_nt_groupwise``.
+      - ``"triton"``: Baseline grouped Triton ``tl.dot_scaled``.
+      - ``"ref"``: Exact dequant-BF16 reference.
     """
-    if not use_triton or not x.is_cuda or not supports_triton_mxfp4(x.device):
+    chosen = _resolve_moe_backend(x, weights, backend, use_triton)
+    M, L = x.shape
+    if M == 0:
+        return torch.empty_like(x)
+
+    if chosen == "ref":
         return mxfp4_moe_forward_ref(
             x,
             topk_ids,
@@ -1423,12 +3197,67 @@ def mxfp4_moe_forward(
             ep_start=ep_start,
             ep_size=ep_size,
         )
+    if chosen == "triton_splitk":
+        return mxfp4_moe_triton_splitk(
+            x,
+            topk_ids,
+            topk_weights,
+            weights,
+            gate_beta=gate_beta,
+            up_beta=up_beta,
+            ep_start=ep_start,
+            ep_size=ep_size,
+        )
+    if chosen == "deepgemm_contiguous":
+        return mxfp4_moe_deepgemm_contiguous(
+            x,
+            topk_ids,
+            topk_weights,
+            weights,
+            gate_beta=gate_beta,
+            up_beta=up_beta,
+            ep_start=ep_start,
+            ep_size=ep_size,
+        )
+    if chosen == "deepgemm_masked":
+        return mxfp4_moe_deepgemm_masked(
+            x,
+            topk_ids,
+            topk_weights,
+            weights,
+            gate_beta=gate_beta,
+            up_beta=up_beta,
+            ep_start=ep_start,
+            ep_size=ep_size,
+        )
+    if chosen == "flashinfer":
+        return mxfp4_moe_flashinfer(
+            x,
+            topk_ids,
+            topk_weights,
+            weights,
+            gate_beta=gate_beta,
+            up_beta=up_beta,
+            ep_start=ep_start,
+            ep_size=ep_size,
+            swap_ab=True,
+        )
+    if chosen == "flashinfer_noswap":
+        return mxfp4_moe_flashinfer(
+            x,
+            topk_ids,
+            topk_weights,
+            weights,
+            gate_beta=gate_beta,
+            up_beta=up_beta,
+            ep_start=ep_start,
+            ep_size=ep_size,
+            swap_ab=False,
+        )
+    if chosen != "triton":
+        raise ValueError(f"Unknown MXFP4 MoE backend={chosen!r}")
 
-    M, L = x.shape
     top_k = topk_ids.shape[1]
-    if M == 0:
-        return torch.empty_like(x)
-
     num_experts = weights.num_experts
     two_I = weights.w13_scale.shape[1]
     BM, _, _, _, _ = _select_grouped_gemm_config(M, top_k, num_experts, two_I, L)
@@ -1441,7 +3270,6 @@ def mxfp4_moe_forward(
         ep_size=ep_size,
     )
 
-    # Stage 1: fused gate_proj + up_proj ([M, L] -> [M_total, 2*I])
     gate_up = mxfp4_grouped_moe_gemm(
         x,
         weights.w13_u8,
@@ -1453,11 +3281,7 @@ def mxfp4_moe_forward(
         compute_mode=compute_mode,
         use_triton=True,
     )
-
-    # Fused SiTU-GLU activation ([M_total, 2*I] -> [M_total, I])
     act = situ_and_mul_triton(gate_up, gate_beta=gate_beta, up_beta=up_beta)
-
-    # Stage 2: down_proj ([M_total, I] -> [M * top_k, L] scattered to original token/k slots)
     down_out = mxfp4_grouped_moe_gemm(
         act,
         weights.w2_u8,
@@ -1479,8 +3303,12 @@ def mxfp4_moe_forward(
     else:
         reduce_weights = topk_weights
 
-    # Deterministic FP32 weighted sum over top_k -> [M, L] BF16
     return moe_weighted_reduce_triton(down_out.view(M, top_k, L), reduce_weights)
+
+
+def _dequant_fp8_ue8m0_ref(q: torch.Tensor, sc_u8: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+    scale = torch.pow(2.0, sc_u8.to(torch.float32) - 127.0)
+    return (q.float().reshape(q.shape[0], -1, 32) * scale.unsqueeze(-1)).reshape(q.shape).to(dtype)
 
 
 def mxfp4_moe_forward_ref(
@@ -1493,15 +3321,16 @@ def mxfp4_moe_forward_ref(
     up_beta: float = 25.0,
     ep_start: int = 0,
     ep_size: int = 1,
+    fp8_activations: bool = False,
 ) -> torch.Tensor:
-    """Exact dequant-BF16 reference for MXFP4 Routed Experts.
-
-    Only dequantizes active local experts present in ``topk_ids`` so large
-    ``E=640`` tests remain fast and memory-light.
-    """
+    """Exact dequant reference for MXFP4 Routed Experts (BF16 or FP8+UE8M0 activations)."""
     M, L = x.shape
     if M == 0:
         return torch.empty_like(x)
+    x_eff = x
+    if fp8_activations:
+        x_q, x_s = per_token_group_quant_fp8_ue8m0_ref(x, scale_format="raw")
+        x_eff = _dequant_fp8_ue8m0_ref(x_q, x_s, x.dtype)
 
     out_fp32 = torch.zeros((M, L), dtype=torch.float32, device=x.device)
     w13_nk = (
@@ -1533,12 +3362,200 @@ def mxfp4_moe_forward_ref(
             w2_nk[local_e], weights.w2_scale[local_e], dtype=x.dtype
         )
 
-        x_e = x.index_select(0, tok_idx)
+        x_e = x_eff.index_select(0, tok_idx)
         gate_up = F.linear(x_e, w13_bf16)
         act = situ_and_mul_ref(gate_up, gate_beta=gate_beta, up_beta=up_beta)
+        if fp8_activations:
+            a_q, a_s = per_token_group_quant_fp8_ue8m0_ref(act, scale_format="raw")
+            act = _dequant_fp8_ue8m0_ref(a_q, a_s, x.dtype)
         down = F.linear(act, w2_bf16)
 
         w_e = topk_weights[tok_idx, k_idx].float().unsqueeze(-1)
         out_fp32.index_add_(0, tok_idx, down.float() * w_e)
 
     return out_fp32.to(x.dtype)
+
+
+# ---------------------------------------------------------------------------
+# Standalone SM100 Shootout Benchmark (for @infra-bench on P-001)
+# ---------------------------------------------------------------------------
+
+
+def bench_sm100_shootout(
+    *,
+    ep_size: int = 4,
+    num_experts: int = 640,
+    top_k: int = 10,
+    latent_dim: int = 2560,
+    intermediate_dim: int = 2560,
+    m_values: Sequence[int] = (1, 4, 8, 16, 32, 64, 512, 2048),
+    warmup: int = 8,
+    iters: int = 30,
+    device: Optional[torch.device] = None,
+    group: Any = None,
+) -> Dict[str, Any]:
+    """Benchmark all available SM100 MXFP4 MoE backends (and AllReduce if distributed)
+    across Decode & Prefill regimes to pick empirical winners per (M, K, N).
+    """
+    dev = device or torch.device("cuda", torch.cuda.current_device())
+    cap = torch.cuda.get_device_capability(dev)
+    dev_idx = int(dev.index or 0)
+    local_e = num_experts // ep_size
+
+    g = torch.Generator(device=dev)
+    g.manual_seed(2026)
+    w13_u8 = torch.randint(0, 256, (local_e, 2 * intermediate_dim, latent_dim // 2), dtype=torch.uint8, device=dev, generator=g)
+    w13_sc = torch.randint(120, 124, (local_e, 2 * intermediate_dim, latent_dim // 32), dtype=torch.uint8, device=dev, generator=g)
+    w2_u8 = torch.randint(0, 256, (local_e, latent_dim, intermediate_dim // 2), dtype=torch.uint8, device=dev, generator=g)
+    w2_sc = torch.randint(120, 124, (local_e, latent_dim, intermediate_dim // 32), dtype=torch.uint8, device=dev, generator=g)
+    weights = MXFP4MoEWeights(w13_u8=w13_u8, w13_scale=w13_sc, w2_u8=w2_u8, w2_scale=w2_sc)
+
+    backends: List[str] = ["triton", "triton_splitk"]
+    if has_deepgemm_fp8_fp4(dev_idx):
+        weights.get_deepgemm_pair()
+        backends.extend(["deepgemm_contiguous", "deepgemm_masked"])
+    if has_flashinfer_mxfp4(dev_idx):
+        weights.get_flashinfer_pair()
+        backends.extend(["flashinfer", "flashinfer_noswap"])
+
+    def _time_ms(fn) -> float:
+        for _ in range(warmup):
+            fn()
+        torch.cuda.synchronize(dev)
+        s = torch.cuda.Event(enable_timing=True)
+        e = torch.cuda.Event(enable_timing=True)
+        s.record()
+        for _ in range(iters):
+            fn()
+        e.record()
+        torch.cuda.synchronize(dev)
+        return float(s.elapsed_time(e) / iters)
+
+    print(
+        f"\n=== SM100 MXFP4 MoE Shootout ({torch.cuda.get_device_name(dev)}, SM{cap}, "
+        f"E={num_experts}, EP={ep_size}, local_E={local_e}, L={latent_dim}, I={intermediate_dim}, top_k={top_k}) ==="
+    )
+    results: Dict[str, Any] = {"device": torch.cuda.get_device_name(dev), "sm": cap, "moe": {}, "allreduce": {}}
+
+    for M in m_values:
+        x = torch.randn((M, latent_dim), dtype=torch.bfloat16, device=dev, generator=g) * 0.5
+        logits = torch.randn((M, num_experts), dtype=torch.float32, device=dev, generator=g)
+        topk_ids = torch.topk(logits, k=top_k, dim=-1).indices.to(torch.int32)
+        topk_weights = torch.softmax(logits.gather(-1, topk_ids.long()), dim=-1).to(torch.float32)
+
+        if ep_size > 1 and int((topk_ids < local_e).sum().item()) == 0:
+            topk_ids[0, 0] = 0
+        y_bf16_ref = mxfp4_moe_forward_ref(x, topk_ids, topk_weights, weights, ep_start=0, ep_size=ep_size)
+        y_fp8_ref = mxfp4_moe_forward_ref(x, topk_ids, topk_weights, weights, ep_start=0, ep_size=ep_size, fp8_activations=True)
+        row: Dict[str, Any] = {}
+        best_b, best_ms = None, 1e9
+        for b in backends:
+            if b == "deepgemm_masked" and M > 512:
+                continue
+            if b == "triton_splitk" and M > 256:
+                continue
+            try:
+                y_b = mxfp4_moe_forward(x, topk_ids, topk_weights, weights, ep_start=0, ep_size=ep_size, backend=b)
+                cos_bf16 = F.cosine_similarity(y_b.float().reshape(-1), y_bf16_ref.float().reshape(-1), dim=0).item()
+                cos_fp8 = F.cosine_similarity(y_b.float().reshape(-1), y_fp8_ref.float().reshape(-1), dim=0).item()
+                ms = _time_ms(lambda b=b: mxfp4_moe_forward(x, topk_ids, topk_weights, weights, ep_start=0, ep_size=ep_size, backend=b))
+                is_fp8 = b.startswith("deepgemm") or b.startswith("flashinfer")
+                gate_cos = cos_fp8 if is_fp8 else cos_bf16
+                row[b] = {"ms": round(ms, 4), "cos_bf16": round(cos_bf16, 6), "cos_fp8": round(cos_fp8, 6)}
+                if gate_cos >= 0.999 and ms < best_ms:
+                    best_ms = ms
+                    best_b = b
+            except Exception as exc:
+                row[b] = {"error": str(exc)}
+        row["winner"] = best_b
+        results["moe"][int(M)] = row
+        summary = " | ".join(
+            f"{k}={v['ms']:.3f}ms(bf16={v['cos_bf16']:.4f},fp8={v['cos_fp8']:.5f})" if "ms" in v else f"{k}=ERR"
+            for k, v in row.items() if k != "winner"
+        )
+        print(f"  M={M:4d}: {summary}  --> WINNER={best_b}")
+
+    if group is not None:
+        import torch.distributed as dist
+        from rtp_llm.models_py.modules.qwen4_5.fast_comm import Qwen4_5FastAllReduce
+
+        if dist.is_initialized() and dist.get_world_size(group) > 1:
+            is_r0 = dist.get_rank(group) == 0
+            if is_r0:
+                print("\n--- AllReduce Shootout (Eager & CUDA Graph) ---")
+            ar_backends = {}
+            for ab, backend_arg, oneshot_arg in (
+                ("nccl", "nccl", None),
+                ("symm_mem", "symm_mem", None),
+                ("flashinfer_oneshot", "flashinfer", True),
+                ("flashinfer_twoshot", "flashinfer", False),
+            ):
+                inst = Qwen4_5FastAllReduce(
+                    group, dev, backend=backend_arg, max_tokens=1024,
+                    hidden_dims=(5120, 2560), use_oneshot=oneshot_arg,
+                )
+                if inst.active_backend == backend_arg:
+                    ar_backends[ab] = inst
+                else:
+                    inst.destroy()
+            ws_ar = dist.get_world_size(group)
+            for H in (2560, 5120):
+                for M in (1, 4, 8, 16, 32, 64, 128, 256, 512, 1024):
+                    x_ar = torch.randn((M, H), dtype=torch.bfloat16, device=dev)
+                    ar_row: Dict[str, Any] = {}
+                    best_ab, best_ar_ms = None, 1e9
+                    for ab, inst in ar_backends.items():
+                        if ab == "flashinfer_twoshot" and M <= ws_ar:
+                            continue
+                        ms_e = _time_ms(lambda inst=inst: inst(x_ar))
+                        for _ in range(3):
+                            inst(x_ar)
+                        torch.cuda.synchronize(dev)
+                        g_ar = torch.cuda.CUDAGraph()
+                        with torch.cuda.graph(g_ar):
+                            inst(x_ar)
+                        ms_cg = _time_ms(lambda g_ar=g_ar: g_ar.replay())
+                        del g_ar
+                        ar_row[ab] = {"eager_ms": round(ms_e, 4), "cg_ms": round(ms_cg, 4)}
+                        if ms_cg < best_ar_ms:
+                            best_ar_ms = ms_cg
+                            best_ab = ab
+                    ar_row["winner"] = best_ab
+                    results["allreduce"][f"M{M}_H{H}"] = ar_row
+                    if is_r0:
+                        print(f"  H={H} M={M:4d}: {ar_row}")
+            for inst in ar_backends.values():
+                inst.destroy()
+
+    return results
+
+
+__all__ = [
+    "CompactMoETileSchedule",
+    "MXFP4MoEWeights",
+    "MXFP4_BLOCK_SIZE",
+    "MoETileSchedule",
+    "bench_sm100_shootout",
+    "build_moe_tile_schedule",
+    "dequantize_mxfp4",
+    "dequantize_mxfp4_ref",
+    "has_deepgemm_fp8_fp4",
+    "has_flashinfer_mxfp4",
+    "moe_weighted_reduce_triton",
+    "mxfp4_grouped_moe_gemm",
+    "mxfp4_linear",
+    "mxfp4_moe_deepgemm_contiguous",
+    "mxfp4_moe_deepgemm_masked",
+    "mxfp4_moe_flashinfer",
+    "mxfp4_moe_forward",
+    "mxfp4_moe_forward_ref",
+    "mxfp4_moe_triton_splitk",
+    "per_token_group_quant_fp8_ue8m0",
+    "per_token_group_quant_fp8_ue8m0_ref",
+    "prepare_fp4_weight_scale_for_deepgemm",
+    "prepare_fp4_weight_scale_for_flashinfer",
+    "prepare_mxfp4_moe_weights",
+    "quantize_mxfp4",
+    "quantize_mxfp8_e4m3",
+    "supports_triton_mxfp4",
+]

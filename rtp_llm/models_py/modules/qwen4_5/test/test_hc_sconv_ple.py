@@ -21,7 +21,12 @@ from rtp_llm.models_py.modules.qwen4_5.ple import (
     Qwen4_5PLELayer,
     compute_ngram_vocab_sizes,
 )
-from rtp_llm.models_py.modules.qwen4_5.short_conv import Qwen4_5ShortConv
+from rtp_llm.models_py.modules.qwen4_5.short_conv import (
+    Qwen4_5ShortConv,
+    causal_dwconv1d_prefill_with_snapshots_triton,
+    causal_dwconv1d_ragged_prefill_with_snapshots_triton,
+    causal_dwconv1d_verify_triton,
+)
 
 
 def _diff_stats(a: torch.Tensor, b: torch.Tensor) -> Tuple[float, float]:
@@ -432,6 +437,341 @@ def test_ple_layer() -> None:
     print(f"  [PASS] FP32_exact_math        | tri_vs_ref={f32_abs:.2e} (rel={f32_rel:.2e})")
 
 
+
+
+# ---------------------------------------------------------------------------
+# 3e. Phase 1 & 5 Tests: ShortConv/PLE Packed Prefill, Verify + CG, TP Hooks
+# ---------------------------------------------------------------------------
+
+
+@torch.no_grad()
+def test_short_conv_verify_and_packed_prefill() -> None:
+    print("\n=== [3b] ShortConv Verify (CUDA Graph + Rollback) & Packed-Snapshot Prefill ===")
+    device = torch.device("cuda")
+    dtype = torch.bfloat16
+    torch.manual_seed(2026)
+
+    C = 5120
+    B, T_total = 2, 192
+    for residual, use_act in [(True, False), (True, True)]:
+        sc = Qwen4_5ShortConv(
+            channels=C,
+            kernel_size=4,
+            residual=residual,
+            use_activation=use_act,
+            dtype=dtype,
+            device=device,
+        ).eval()
+        sc.weight.normal_(0.0, 0.15)
+        x = torch.randn((B, T_total, C), device=device, dtype=dtype)
+        init_st = torch.randn((B, C, 3), device=device, dtype=dtype)
+
+        # 1. Whole-sequence causal_dwconv1d_prefill_with_snapshots_triton vs 64-token segmented prefill
+        out_snap, snaps = causal_dwconv1d_prefill_with_snapshots_triton(
+            x,
+            sc.weight,
+            init_state=init_st,
+            seq_size_per_block=64,
+            prefix_lengths=[64, 0],
+            residual=residual,
+            use_activation=use_act,
+            clamp_val=1000.0,
+        )
+        assert snaps.shape == (6, C, 3), f"Expected 6 boundary snapshots, got {snaps.shape}"
+
+        st_seg = ShortConvState(init_st.clone())
+        seg_outs = []
+        seg_snaps = []
+        for s0 in range(0, T_total, 64):
+            seg_outs.append(
+                sc(x[:, s0 : s0 + 64], state=st_seg).clamp(-1000.0, 1000.0)
+            )
+            seg_snaps.append(st_seg.conv_state.clone())
+        out_seg = torch.cat(seg_outs, dim=1)
+        out_abs, _ = _diff_stats(out_snap, out_seg)
+        assert out_abs < 1e-2, f"ShortConv prefill snapshot out diff: {out_abs}"
+        for b_idx in range(B):
+            for s_idx in range(3):
+                snap_abs, _ = _diff_stats(snaps[b_idx * 3 + s_idx], seg_snaps[s_idx][b_idx])
+                assert snap_abs == 0.0, f"ShortConv snapshot b={b_idx} s={s_idx} diff={snap_abs}"
+
+        # Also check seq_size_per_block=16 snapshot count
+        _, snaps_16 = causal_dwconv1d_prefill_with_snapshots_triton(
+            x[:, :32],
+            sc.weight,
+            init_state=init_st,
+            seq_size_per_block=16,
+            residual=residual,
+            use_activation=use_act,
+        )
+        assert snaps_16.shape[0] == 4, f"Expected 4 snaps at tpb=16, got {snaps_16.shape}"
+
+        # 2. Ragged prefill with non-uniform lengths [64, 70, 128] & opaque pool boundary snapshots
+        lens = [64, 70, 128]
+        cu_list = [0]
+        for l in lens:
+            cu_list.append(cu_list[-1] + l)
+        cu = torch.tensor(cu_list, device=device, dtype=torch.int32)
+        t_req, t_t0, s_tok, s_req, s_dst = [], [], [], [], []
+        blk_t = 32
+        snap_meta = []
+        blk_id = 1
+        for bi, l in enumerate(lens):
+            for t0 in range(0, l, blk_t):
+                t_req.append(bi)
+                t_t0.append(t0)
+            for bnd in range(64, l + 1, 64):
+                s_tok.append(cu_list[bi] + bnd - 1)
+                s_req.append(bi)
+                s_dst.append(blk_id)
+                snap_meta.append((bi, bnd, blk_id))
+                blk_id += 1
+        x_rag = torch.cat([torch.randn((l, C), device=device, dtype=dtype) for l in lens], dim=0)
+        init_rag = torch.randn((len(lens), C, 3), device=device, dtype=dtype)
+        dst_pool = torch.zeros((blk_id + 1, C * 3), device=device, dtype=dtype)
+        out_rag = causal_dwconv1d_ragged_prefill_with_snapshots_triton(
+            x_rag,
+            sc.weight,
+            cu,
+            torch.tensor(t_req, device=device, dtype=torch.int32),
+            torch.tensor(t_t0, device=device, dtype=torch.int32),
+            init_state=init_rag,
+            snap_tok_idx=torch.tensor(s_tok, device=device, dtype=torch.int32),
+            snap_req_idx=torch.tensor(s_req, device=device, dtype=torch.int32),
+            dst_pool=dst_pool,
+            snap_dst_idx=torch.tensor(s_dst, device=device, dtype=torch.int32),
+            residual=residual,
+            use_activation=use_act,
+            clamp_val=1000.0,
+            block_t=blk_t,
+        )
+        for bi, l in enumerate(lens):
+            st_ref = ShortConvState(init_rag[bi : bi + 1].clone())
+            y_ref = sc(x_rag[cu_list[bi] : cu_list[bi + 1]].unsqueeze(0), state=st_ref).squeeze(0).clamp(-1000.0, 1000.0)
+            rd, _ = _diff_stats(out_rag[cu_list[bi] : cu_list[bi + 1]], y_ref)
+            assert rd < 1e-2, f"Ragged ShortConv req={bi} diff={rd}"
+        for bi, bnd, phys in snap_meta:
+            st_bnd = ShortConvState(init_rag[bi : bi + 1].clone())
+            _ = sc(x_rag[cu_list[bi] : cu_list[bi] + bnd].unsqueeze(0), state=st_bnd)
+            sd, _ = _diff_stats(dst_pool[phys].view(C, 3), st_bnd.conv_state[0])
+            assert sd == 0.0, f"Ragged ShortConv snapshot diff req={bi} bnd={bnd}: {sd}"
+
+        # 3. Fused Verify (B=4, V=8) + rollback states + CUDA Graph capture/replay
+        Bv, V = 4, 8
+        xv = torch.randn((Bv, V, C), device=device, dtype=dtype)
+        st_v_init = torch.randn((Bv, C, 3), device=device, dtype=dtype)
+        stage_v = torch.empty((Bv, V, C, 3), device=device, dtype=dtype)
+        out_v = causal_dwconv1d_verify_triton(
+            xv,
+            sc.weight,
+            st_v_init,
+            stage_v,
+            residual=residual,
+            use_activation=use_act,
+            clamp_val=1000.0,
+        )
+        st_dec = ShortConvState(st_v_init.clone())
+        dec_steps = []
+        for s in range(V):
+            y_s = sc(xv[:, s : s + 1], state=st_dec).clamp(-1000.0, 1000.0)
+            dec_steps.append(y_s)
+            rb_d, _ = _diff_stats(stage_v[:, s], st_dec.conv_state)
+            assert rb_d == 0.0, f"Verify rollback step={s} diff={rb_d}"
+        out_dec = torch.cat(dec_steps, dim=1)
+        vd, _ = _diff_stats(out_v, out_dec)
+        assert vd < 1e-2, f"Verify out vs 8x decode diff={vd}"
+
+        # CUDA Graph capture/replay for verify kernel
+        static_x = xv.clone()
+        static_init = st_v_init.clone()
+        static_stage = torch.empty_like(stage_v)
+        # warmup
+        causal_dwconv1d_verify_triton(
+            static_x, sc.weight, static_init, static_stage, residual=residual, use_activation=use_act, clamp_val=1000.0
+        )
+        torch.cuda.synchronize()
+        g = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g):
+            static_out = causal_dwconv1d_verify_triton(
+                static_x, sc.weight, static_init, static_stage, residual=residual, use_activation=use_act, clamp_val=1000.0
+            )
+        static_x.normal_(0.0, 0.5)
+        static_init.normal_(0.0, 0.5)
+        g.replay()
+        torch.cuda.synchronize()
+        eager_chk = causal_dwconv1d_verify_triton(
+            static_x, sc.weight, static_init, torch.empty_like(stage_v), residual=residual, use_activation=use_act, clamp_val=1000.0
+        )
+        cg_abs, _ = _diff_stats(static_out, eager_chk)
+        assert cg_abs == 0.0, f"ShortConv verify CUDA Graph mismatch: {cg_abs}"
+        print(f"  [PASS] ShortConv res={residual} act={use_act}: packed_snap=0.0, ragged=0.0, verify_v8+rb=0.0, CG={cg_abs:.1e}")
+
+
+@torch.no_grad()
+def test_ple_packed_prefill_verify_and_tp_hooks() -> None:
+    print("\n=== [3c] PLE Packed Prefill, Verify (Rollback + CG), and TP=4 Hook Parity ===")
+    device = torch.device("cuda")
+    dtype = torch.bfloat16
+    torch.manual_seed(2027)
+
+    H, HC, PLE_DIM, HEADS_PER_NGRAM = 128, 4, 256, 4
+    num_shards = 8
+    primes = compute_ngram_vocab_sizes(256, 2 * HEADS_PER_NGRAM)
+    total_vocab = sum(primes)
+    shard_rows = (total_vocab + num_shards - 1) // num_shards
+    ple = Qwen4_5PLELayer(
+        hidden_size=H,
+        hc_count=HC,
+        ple_embed_dim=PLE_DIM,
+        ngram_size=3,
+        heads_per_ngram=HEADS_PER_NGRAM,
+        conv_kernel_size=4,
+        split_ngram_parts=num_shards,
+        eos_token_id=248044,
+        ngram_heads_vocab_sizes=primes,
+        weight_scale=DEFAULT_PLE_WEIGHT_SCALE,
+        dtype=dtype,
+        device=device,
+    ).eval()
+    ple.norm_key.normal_(0.0, 0.1)
+    ple.norm_query.normal_(0.0, 0.1)
+    ple.norm_conv.normal_(0.0, 0.1)
+    ple.conv1d.weight.normal_(0.0, 0.15)
+    shards = [
+        (torch.randn((shard_rows, 32), device=device, dtype=torch.float32) * 0.5).to(torch.float8_e4m3fn)
+        for _ in range(num_shards)
+    ]
+    ple.set_ngram_table(shards)
+
+    # 1. forward_packed_prefill (B=3 ragged, with boundary snapshots at token 64/128)
+    lens = [70, 64, 130]
+    cu_list = [0]
+    for l in lens:
+        cu_list.append(cu_list[-1] + l)
+    cu = torch.tensor(cu_list, device=device, dtype=torch.int32)
+    tok_req, t_req, t_t0, s_tok, s_req, s_dst = [], [], [], [], [], []
+    snap_meta = []
+    blk_id = 1
+    for bi, l in enumerate(lens):
+        tok_req.extend([bi] * l)
+        for t0 in range(0, l, 16):
+            t_req.append(bi)
+            t_t0.append(t0)
+        for bnd in range(64, l + 1, 64):
+            s_tok.append(cu_list[bi] + bnd - 1)
+            s_req.append(bi)
+            s_dst.append(blk_id)
+            snap_meta.append((bi, bnd, blk_id))
+            blk_id += 1
+    N = cu_list[-1]
+    h_rag = torch.randn((N, HC * H), device=device, dtype=dtype)
+    ids_rag = torch.randint(0, 1000, (N,), device=device, dtype=torch.int64)
+    init_conv = torch.randn((len(lens), HC * H, 3), device=device, dtype=dtype)
+    prev_ctx = torch.randint(0, 1000, (len(lens), 2), device=device, dtype=torch.int64)
+    conv_pool = torch.zeros((blk_id + 1, HC * H * 3), device=device, dtype=dtype)
+    ctx_pool = torch.zeros((blk_id + 1, 2), device=device, dtype=torch.int64)
+    snap_phys_t = torch.tensor(s_dst, device=device, dtype=torch.int32)
+
+    out_rag = ple.forward_packed_prefill(
+        h_rag,
+        ids_rag,
+        cu,
+        torch.tensor(tok_req, device=device, dtype=torch.int32),
+        torch.tensor(t_req, device=device, dtype=torch.int32),
+        torch.tensor(t_t0, device=device, dtype=torch.int32),
+        prev_ngram_ctx=prev_ctx,
+        init_conv_state=init_conv,
+        snap_tok_idx=torch.tensor(s_tok, device=device, dtype=torch.int32),
+        snap_req_idx=torch.tensor(s_req, device=device, dtype=torch.int32),
+        conv_dst_pool=conv_pool,
+        conv_snap_phys=snap_phys_t,
+        ctx_dst_pool=ctx_pool,
+        ctx_snap_phys=snap_phys_t,
+        block_t=16,
+    )
+    for bi, l in enumerate(lens):
+        st_ref = PLELayerState(conv_state=init_conv[bi : bi + 1].clone(), ngram_context=prev_ctx[bi : bi + 1].clone())
+        y_ref = ple(
+            h_rag[cu_list[bi] : cu_list[bi + 1]].unsqueeze(0),
+            ids_rag[cu_list[bi] : cu_list[bi + 1]].unsqueeze(0),
+            state=st_ref,
+        )
+        pd, _ = _diff_stats(out_rag[cu_list[bi] : cu_list[bi + 1]], y_ref.squeeze(0))
+        assert pd < 1e-2, f"PLE packed_prefill req={bi} diff={pd}"
+    for bi, bnd, phys in snap_meta:
+        st_bnd = PLELayerState(conv_state=init_conv[bi : bi + 1].clone(), ngram_context=prev_ctx[bi : bi + 1].clone())
+        _ = ple(
+            h_rag[cu_list[bi] : cu_list[bi] + bnd].unsqueeze(0),
+            ids_rag[cu_list[bi] : cu_list[bi] + bnd].unsqueeze(0),
+            state=st_bnd,
+        )
+        assert torch.equal(ctx_pool[phys], st_bnd.ngram_context[0]), "PLE ctx snapshot mismatch"
+        cd, _ = _diff_stats(conv_pool[phys].view(HC * H, 3), st_bnd.conv_state[0])
+        assert cd < 1e-3, f"PLE conv snapshot req={bi} bnd={bnd} diff={cd}"
+
+    # 2. forward_verify (B=3, V=8) + rollback states + CUDA Graph capture/replay
+    Bv, V = 3, 8
+    hv = torch.randn((Bv, V, HC * H), device=device, dtype=dtype)
+    idsv = torch.randint(0, 1000, (Bv, V), device=device, dtype=torch.int64)
+    init_ctx_v = torch.randint(0, 1000, (Bv, 2), device=device, dtype=torch.int64)
+    init_conv_v = torch.randn((Bv, HC * H, 3), device=device, dtype=dtype)
+    stage_ctx = torch.empty((Bv, V, 2), device=device, dtype=torch.int64)
+    stage_conv = torch.empty((Bv, V, HC * H, 3), device=device, dtype=dtype)
+    out_v = ple.forward_verify(hv, idsv, init_ctx_v, init_conv_v, stage_ctx=stage_ctx, stage_conv=stage_conv)
+
+    st_step = PLELayerState(conv_state=init_conv_v.clone(), ngram_context=init_ctx_v.clone())
+    step_outs = []
+    for s in range(V):
+        ys = ple(hv[:, s : s + 1], idsv[:, s : s + 1], state=st_step)
+        step_outs.append(ys)
+        assert torch.equal(stage_ctx[:, s], st_step.ngram_context), f"PLE verify ctx step={s}"
+        sc_d, _ = _diff_stats(stage_conv[:, s], st_step.conv_state)
+        assert sc_d < 1e-3, f"PLE verify conv step={s} diff={sc_d}"
+    vd, _ = _diff_stats(out_v, torch.cat(step_outs, dim=1))
+    assert vd < 1e-2, f"PLE forward_verify diff={vd}"
+
+    # CUDA Graph replay parity for forward_verify
+    sh, sids = hv.clone(), idsv.clone()
+    sictx, siconv = init_ctx_v.clone(), init_conv_v.clone()
+    sst_ctx, sst_conv = torch.empty_like(stage_ctx), torch.empty_like(stage_conv)
+    ple.forward_verify(sh, sids, sictx, siconv, stage_ctx=sst_ctx, stage_conv=sst_conv)
+    torch.cuda.synchronize()
+    g = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(g):
+        s_out = ple.forward_verify(sh, sids, sictx, siconv, stage_ctx=sst_ctx, stage_conv=sst_conv)
+    sh.normal_(0.0, 0.5)
+    sids.random_(0, 1000)
+    g.replay()
+    torch.cuda.synchronize()
+    eager_v = ple.forward_verify(sh, sids, sictx, siconv)
+    cg_d, _ = _diff_stats(s_out, eager_v)
+    assert cg_d < 1e-4, f"PLE verify CG mismatch={cg_d}"
+
+    # 3. TP=4 sharded fast_all_reduce hook parity
+    embs_tp = []
+    for r in range(4):
+        cap = []
+        ple_r = Qwen4_5PLELayer(
+            hidden_size=H, hc_count=HC, ple_embed_dim=PLE_DIM, ngram_size=3,
+            heads_per_ngram=HEADS_PER_NGRAM, conv_kernel_size=4, split_ngram_parts=num_shards,
+            ngram_heads_vocab_sizes=primes, weight_scale=DEFAULT_PLE_WEIGHT_SCALE,
+            dtype=dtype, device=device, tp_size=4, tp_rank=r,
+        ).eval()
+        ple_r.set_ngram_table(
+            shards[2 * r : 2 * r + 2],
+            shard_offset=2 * r,
+            total_shards=num_shards,
+            fast_all_reduce=lambda t, _cap=cap: (_cap.append(t.clone()) or t),
+        )
+        ple_r.load_state_dict(ple.state_dict())
+        _ = ple_r(hv[:, :1], idsv[:, :1], state=ple_r.alloc_state(Bv, device, dtype))
+        embs_tp.append(cap[0])
+    emb_ref = ple.gather_embeddings(ple.compute_ngram_ids(idsv[:, :1]))
+    tp_d, _ = _diff_stats(sum(embs_tp), emb_ref)
+    assert tp_d < 1e-2, f"PLE TP=4 sharded embedding sum mismatch={tp_d}"
+    print(f"  [PASS] PLE packed_prefill(3 reqs), verify(V=8)+rollback+CG(diff={cg_d:.1e}), TP=4 hook(diff={tp_d:.1e})")
+
+
 # ---------------------------------------------------------------------------
 # 4. B300 GPU Micro-Benchmarks at REAL Qwen 4.5-Flash Shapes
 # ---------------------------------------------------------------------------
@@ -488,6 +828,13 @@ def run_benchmarks() -> None:
             st = sc.alloc_state(B, device=device, dtype=dtype)
             t_sc = _bench_us(lambda: sc(x, state=st))
             print(f"    {label:28s} B={B:2d}, T={T:4d} | latency={t_sc:7.2f} us")
+    sc_v = Qwen4_5ShortConv(channels=5120, kernel_size=4, residual=True, use_activation=False, dtype=dtype, device=device).eval()
+    xv_b = torch.randn(4, 8, 5120, device=device, dtype=dtype)
+    stv_b = sc_v.alloc_state(4, device=device, dtype=dtype)
+    stg_b = torch.empty(4, 8, 5120, 3, device=device, dtype=dtype)
+    t_dec8 = _bench_us(lambda: [sc_v(xv_b[:, i : i + 1], state=stv_b) for i in range(8)])
+    t_ver8 = _bench_us(lambda: causal_dwconv1d_verify_triton(xv_b, sc_v.weight, stv_b.conv_state, stg_b, residual=True))
+    print(f"    Out_sconv B=4,V=8: 8xDecode={t_dec8:7.2f} us vs Verify={t_ver8:7.2f} us (speedup={t_dec8/max(t_ver8,1e-6):.2f}x)")
 
     # 4c. PLE Layer benchmarks (both CUDA table and CPU Pinned UVA 128-shard table)
     print("\n  [PLELayer] hidden=5120, hc=4, ple_dim=5120, 20 heads x 256, FP8 per-tensor:")
@@ -549,6 +896,8 @@ def main() -> int:
     test_hyper_connection()
     test_short_conv()
     test_ple_layer()
+    test_short_conv_verify_and_packed_prefill()
+    test_ple_packed_prefill_verify_and_tp_hooks()
     run_benchmarks()
     print(f"\nALL TESTS & BENCHMARKS PASSED in {time.perf_counter() - t0:.2f}s!")
     return 0

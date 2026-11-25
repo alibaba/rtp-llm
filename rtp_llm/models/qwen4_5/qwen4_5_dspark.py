@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 import functools
+import inspect
 import json
 import os
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -16,7 +17,7 @@ from rtp_llm.config.qwen4_5_config import (
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight, AttnConfig
 from rtp_llm.model_loader.model_weight_info import ModelDeployWeightInfo, ModelWeightInfo
-from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
+from rtp_llm.model_loader.weight_module import AtomicWeight, CustomAtomicWeight, WeightModule
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.qwen4_5.qwen4_5_kv_cache import FULL_ATTN_KV_TAG
 from rtp_llm.ops import (
@@ -36,6 +37,8 @@ from rtp_llm.utils.model_weight import (
     choose_available,
     identity,
     merge_qkv_hf,
+    sp_0,
+    sp_id,
     tolerate_failed,
     transpose,
 )
@@ -573,10 +576,11 @@ class Qwen4_5DSparkWeight(ModelDeployWeightInfo):
 
         if spec.use_attn_output_gate:
             layer_weights.append(
-                AtomicWeight(
+                CustomAtomicWeight(
                     DFLASH2_W.attn_output_gate,
                     [CkptWeightInfo(f"{sa}output_gate_proj.weight", identity)],
                     identity,
+                    split_func=sp_0,
                 )
             )
 
@@ -586,12 +590,13 @@ class Qwen4_5DSparkWeight(ModelDeployWeightInfo):
         ):
             layer_weights.extend(
                 [
-                    AtomicWeight(
+                    CustomAtomicWeight(
                         base_name,
                         [CkptWeightInfo(f"{p}{conv_prefix}.base_kernel", identity)],
                         identity,
+                    split_func=sp_id,
                     ),
-                    AtomicWeight(
+                    CustomAtomicWeight(
                         proj_name,
                         [
                             CkptWeightInfo(
@@ -599,6 +604,7 @@ class Qwen4_5DSparkWeight(ModelDeployWeightInfo):
                             )
                         ],
                         identity,
+                    split_func=sp_id,
                     ),
                 ]
             )
@@ -616,17 +622,19 @@ class Qwen4_5DSparkWeight(ModelDeployWeightInfo):
             )
             layer_weights.extend(
                 [
-                    AtomicWeight(
+                    CustomAtomicWeight(
                         DFLASH2_W.attn_hc_norm_w,
                         [CkptWeightInfo(f"{hc_p_attn}hc_norm.weight", identity)],
                         identity,
+                    split_func=sp_id,
                     ),
-                    AtomicWeight(
+                    CustomAtomicWeight(
                         DFLASH2_W.attn_hc_norm_b,
                         [CkptWeightInfo(f"{hc_p_attn}hc_norm.bias", identity)],
                         identity,
+                    split_func=sp_id,
                     ),
-                    AtomicWeight(
+                    CustomAtomicWeight(
                         DFLASH2_W.attn_hc_inject,
                         [
                             CkptWeightInfo(
@@ -634,8 +642,9 @@ class Qwen4_5DSparkWeight(ModelDeployWeightInfo):
                             )
                         ],
                         identity,
+                    split_func=sp_id,
                     ),
-                    AtomicWeight(
+                    CustomAtomicWeight(
                         DFLASH2_W.attn_hc_down,
                         [
                             CkptWeightInfo(
@@ -643,8 +652,9 @@ class Qwen4_5DSparkWeight(ModelDeployWeightInfo):
                             )
                         ],
                         identity,
+                    split_func=sp_id,
                     ),
-                    AtomicWeight(
+                    CustomAtomicWeight(
                         DFLASH2_W.attn_hc_up,
                         [
                             CkptWeightInfo(
@@ -652,18 +662,21 @@ class Qwen4_5DSparkWeight(ModelDeployWeightInfo):
                             )
                         ],
                         identity,
+                    split_func=sp_id,
                     ),
-                    AtomicWeight(
+                    CustomAtomicWeight(
                         DFLASH2_W.mlp_hc_norm_w,
                         [CkptWeightInfo(f"{hc_p_mlp}hc_norm.weight", identity)],
                         identity,
+                    split_func=sp_id,
                     ),
-                    AtomicWeight(
+                    CustomAtomicWeight(
                         DFLASH2_W.mlp_hc_norm_b,
                         [CkptWeightInfo(f"{hc_p_mlp}hc_norm.bias", identity)],
                         identity,
+                    split_func=sp_id,
                     ),
-                    AtomicWeight(
+                    CustomAtomicWeight(
                         DFLASH2_W.mlp_hc_inject,
                         [
                             CkptWeightInfo(
@@ -671,8 +684,9 @@ class Qwen4_5DSparkWeight(ModelDeployWeightInfo):
                             )
                         ],
                         identity,
+                    split_func=sp_id,
                     ),
-                    AtomicWeight(
+                    CustomAtomicWeight(
                         DFLASH2_W.mlp_hc_up,
                         [
                             CkptWeightInfo(
@@ -680,12 +694,13 @@ class Qwen4_5DSparkWeight(ModelDeployWeightInfo):
                             )
                         ],
                         identity,
+                    split_func=sp_id,
                     ),
                 ]
             )
             if not spec.hc_prev_mix or layer_id + 1 < self._num_layers:
                 layer_weights.append(
-                    AtomicWeight(
+                    CustomAtomicWeight(
                         DFLASH2_W.mlp_hc_down,
                         [
                             CkptWeightInfo(
@@ -693,6 +708,7 @@ class Qwen4_5DSparkWeight(ModelDeployWeightInfo):
                             )
                         ],
                         identity,
+                    split_func=sp_id,
                     )
                 )
 
@@ -705,56 +721,71 @@ class Qwen4_5DSparkWeight(ModelDeployWeightInfo):
         ):
             chosen = self._pick_key(f"{raw_name}.weight", raw_name)
             layer_weights.append(
-                AtomicWeight(wname, [CkptWeightInfo(chosen, identity)], identity)
+                CustomAtomicWeight(wname, [CkptWeightInfo(chosen, identity)], identity, split_func=sp_id)
             )
 
         layer_weights.extend(
             [
-                AtomicWeight(
+                CustomAtomicWeight(
                     DFLASH2_W.moe_pre_latent_ln_w,
                     [CkptWeightInfo(f"{mlp}pre_moe_latent_layernorm.weight", identity)],
                     identity,
+                split_func=sp_id,
                 ),
-                AtomicWeight(
+                CustomAtomicWeight(
                     DFLASH2_W.moe_gate_w,
                     [CkptWeightInfo(f"{mlp}gate.weight", identity)],
                     identity,
+                split_func=sp_id,
                 ),
-                AtomicWeight(
+                CustomAtomicWeight(
                     DFLASH2_W.moe_shared_gate_proj,
                     [CkptWeightInfo(f"{mlp}shared_expert.gate_proj.weight", identity)],
                     identity,
+                split_func=sp_id,
                 ),
-                AtomicWeight(
+                CustomAtomicWeight(
                     DFLASH2_W.moe_shared_up_proj,
                     [CkptWeightInfo(f"{mlp}shared_expert.up_proj.weight", identity)],
                     identity,
+                split_func=sp_id,
                 ),
-                AtomicWeight(
+                CustomAtomicWeight(
                     DFLASH2_W.moe_shared_down_proj,
                     [CkptWeightInfo(f"{mlp}shared_expert.down_proj.weight", identity)],
                     identity,
+                split_func=sp_id,
                 ),
             ]
         )
         if spec.moe_router_enable_expert_bias:
             layer_weights.append(
-                AtomicWeight(
+                CustomAtomicWeight(
                     DFLASH2_W.moe_expert_bias,
                     [CkptWeightInfo(f"{mlp}expert_bias", identity)],
                     identity,
                     data_type=torch.float32,
+                split_func=sp_id,
                 )
             )
         if spec.shared_expert_gate:
             layer_weights.append(
-                AtomicWeight(
+                CustomAtomicWeight(
                     DFLASH2_W.moe_shared_expert_gate,
                     [CkptWeightInfo(f"{mlp}shared_expert_gate.weight", identity)],
                     identity,
+                split_func=sp_id,
                 )
             )
-        for e in range(spec.num_experts):
+        ep_size, ep_rank = self._effective_ep()
+        if spec.num_experts % ep_size != 0:
+            raise ValueError(
+                f"DFlash2 num_experts={spec.num_experts} must be divisible by ep_size={ep_size}"
+            )
+        local_experts = spec.num_experts // ep_size
+        ep_start = ep_rank * local_experts
+        ep_end = ep_start + local_experts
+        for e in range(ep_start, ep_end):
             ep = f"{mlp}experts.{e}."
             for wfmt, ckpt_suffix in (
                 (DFLASH2_W.moe_expert_gate_w, "gate_proj.weight"),
@@ -765,11 +796,12 @@ class Qwen4_5DSparkWeight(ModelDeployWeightInfo):
                 (DFLASH2_W.moe_expert_down_s, "down_proj.weight_scale"),
             ):
                 layer_weights.append(
-                    AtomicWeight(
+                    CustomAtomicWeight(
                         wfmt.format(e=e),
                         [CkptWeightInfo(f"{ep}{ckpt_suffix}", identity)],
                         identity,
                         data_type=torch.uint8,
+                    split_func=sp_id,
                     )
                 )
 
@@ -816,6 +848,9 @@ class Qwen4_5DSparkWeight(ModelDeployWeightInfo):
                 W.lm_head,
                 [CkptWeightInfo(lm_head_key, identity)],
                 identity,
+                # Keep BF16 checkpoint dtype unless enable_fp32_lm_head is explicitly requested,
+                # so PyWrappedModel::computeLogits dispatches BF16 TensorCore GEMM instead of FP32 sgemm.
+                data_type=torch.float32 if getattr(self, "enable_fp32_lm_head", False) else None,
             ),
             AtomicWeight(
                 W.dspark_fc_w,
@@ -847,7 +882,7 @@ class Qwen4_5DSparkWeight(ModelDeployWeightInfo):
                 shape=(draft_vocab, markov_rank),
                 dtype=weight_dtype,
             ),
-            AtomicWeight(
+            CustomAtomicWeight(
                 DFLASH2_W.selector_hidden_proj,
                 [
                     CkptWeightInfo(
@@ -859,6 +894,7 @@ class Qwen4_5DSparkWeight(ModelDeployWeightInfo):
                     )
                 ],
                 identity,
+            split_func=sp_id,
             ),
         ]
 
@@ -892,17 +928,19 @@ class Qwen4_5DSparkWeight(ModelDeployWeightInfo):
             )
             weights.extend(
                 [
-                    AtomicWeight(
+                    CustomAtomicWeight(
                         DFLASH2_W.hc_mixer_norm_w,
                         [CkptWeightInfo(f"{mixer_p}hc_norm.weight", identity)],
                         identity,
+                    split_func=sp_id,
                     ),
-                    AtomicWeight(
+                    CustomAtomicWeight(
                         DFLASH2_W.hc_mixer_norm_b,
                         [CkptWeightInfo(f"{mixer_p}hc_norm.bias", identity)],
                         identity,
+                    split_func=sp_id,
                     ),
-                    AtomicWeight(
+                    CustomAtomicWeight(
                         DFLASH2_W.hc_mixer_down,
                         [
                             CkptWeightInfo(
@@ -910,8 +948,9 @@ class Qwen4_5DSparkWeight(ModelDeployWeightInfo):
                             )
                         ],
                         identity,
+                    split_func=sp_id,
                     ),
-                    AtomicWeight(
+                    CustomAtomicWeight(
                         DFLASH2_W.hc_mixer_up,
                         [
                             CkptWeightInfo(
@@ -919,6 +958,7 @@ class Qwen4_5DSparkWeight(ModelDeployWeightInfo):
                             )
                         ],
                         identity,
+                    split_func=sp_id,
                     ),
                 ]
             )
@@ -940,6 +980,16 @@ class Qwen4_5DSparkWeight(ModelDeployWeightInfo):
         ]
         return ModelWeightInfo(layer_weights=layer_weights, weights=weights)
 
+    def _effective_ep(self) -> Tuple[int, int]:
+        ep_size = int(getattr(self, "ep_size", 1) or 1)
+        ep_rank = int(getattr(self, "ep_rank", 0) or 0)
+        tp_size = int(getattr(self, "tp_size", 1) or 1)
+        tp_rank = int(getattr(self, "tp_rank", 0) or 0)
+        dp_size = int(getattr(self, "dp_size", 1) or 1)
+        if ep_size <= 1 and tp_size > 1 and dp_size == 1:
+            return tp_size, tp_rank
+        return max(1, ep_size), max(0, ep_rank)
+
     def get_weight_info(
         self, database: Optional[Any] = None
     ) -> ModelWeightInfo:
@@ -950,7 +1000,10 @@ class Qwen4_5DSparkWeight(ModelDeployWeightInfo):
         saved_quant_algo = self._quant_algo
         self._quant_algo = None
         try:
-            return super().get_weight_info(database)
+            parent_fn = super().get_weight_info
+            if len(inspect.signature(parent_fn).parameters) == 0:
+                return parent_fn()
+            return parent_fn(database)
         finally:
             self._quant_algo = saved_quant_algo
 
@@ -1076,6 +1129,8 @@ class Qwen4_5DSpark(BaseModel):
         config.has_post_decoder_layernorm = spec.has_final_layernorm
         config.has_lm_head = True
         config.tie_word_embeddings = spec.tie_word_embeddings
+        # Keep LM head in checkpoint BF16 dtype instead of framework default FP32 upcast.
+        config.enable_fp32_lm_head = False
         config.data_type = data_type_str
         config.config_dtype = dtype_str
         config.gen_num_per_cycle = spec.block_size

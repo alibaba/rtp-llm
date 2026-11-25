@@ -12,7 +12,7 @@ Architecture (1109-bf16-re-mxfp4-ple-fp8, dense MQA-1, NO QSA indexer):
 
 from __future__ import annotations
 
-from typing import Callable, Optional, Tuple
+from typing import Any, Callable, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -332,6 +332,98 @@ def gemma_rmsnorm_and_partial_rope(
     return apply_partial_neox_rope(normed.to(x.dtype), positions, inv_freq, rotary_dim)
 
 
+@triton.jit
+def _fused_attn_output_gate_kernel(
+    ATTN_ptr,
+    GATE_ptr,
+    OUT_ptr,
+    stride_ab: tl.int64,
+    stride_ah: tl.int64,
+    stride_at: tl.int64,
+    stride_ad: tl.int64,
+    stride_gb: tl.int64,
+    stride_gt: tl.int64,
+    stride_gh: tl.int64,
+    stride_gd: tl.int64,
+    stride_ob: tl.int64,
+    stride_ot: tl.int64,
+    stride_oh: tl.int64,
+    stride_od: tl.int64,
+    T,
+    D: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+):
+    """Fused [B, H_q, T, D] transpose + sigmoid(strided gate) + [B, T, H_q*D] flatten."""
+    bt = tl.program_id(0).to(tl.int64)
+    h = tl.program_id(1).to(tl.int64)
+    b = bt // T
+    t = bt % T
+    offs = tl.arange(0, BLOCK_D)
+    mask = offs < D
+    a = tl.load(
+        ATTN_ptr + b * stride_ab + h * stride_ah + t * stride_at + offs * stride_ad,
+        mask=mask,
+        other=0.0,
+    ).to(tl.float32)
+    g = tl.load(
+        GATE_ptr + b * stride_gb + t * stride_gt + h * stride_gh + offs * stride_gd,
+        mask=mask,
+        other=0.0,
+    ).to(tl.float32)
+    out = a * tl.sigmoid(g)
+    tl.store(
+        OUT_ptr + b * stride_ob + t * stride_ot + h * stride_oh + offs * stride_od,
+        out.to(OUT_ptr.dtype.element_ty),
+        mask=mask,
+    )
+
+
+def apply_attn_output_gate_flatten(
+    attn_bhtd: torch.Tensor,
+    gate_bthd: Optional[torch.Tensor],
+) -> torch.Tensor:
+    """Apply optional sigmoid output gate and return contiguous [B, T, H_q * D]."""
+    bsz, num_heads, seq_len, head_dim = attn_bhtd.shape
+    if gate_bthd is None:
+        return attn_bhtd.transpose(1, 2).reshape(bsz, seq_len, num_heads * head_dim)
+    if (
+        attn_bhtd.is_cuda
+        and gate_bthd.is_cuda
+        and head_dim <= 512
+        and bsz * seq_len > 0
+    ):
+        out = torch.empty(
+            (bsz, seq_len, num_heads * head_dim),
+            dtype=attn_bhtd.dtype,
+            device=attn_bhtd.device,
+        )
+        block_d = max(16, triton.next_power_of_2(head_dim))
+        _fused_attn_output_gate_kernel[(bsz * seq_len, num_heads)](
+            attn_bhtd,
+            gate_bthd,
+            out,
+            attn_bhtd.stride(0),
+            attn_bhtd.stride(1),
+            attn_bhtd.stride(2),
+            attn_bhtd.stride(3),
+            gate_bthd.stride(0),
+            gate_bthd.stride(1),
+            gate_bthd.stride(2),
+            gate_bthd.stride(3),
+            out.stride(0),
+            out.stride(1),
+            head_dim,
+            1,
+            seq_len,
+            D=head_dim,
+            BLOCK_D=block_d,
+            num_warps=4,
+        )
+        return out
+    attn_out = attn_bhtd.transpose(1, 2) * torch.sigmoid(gate_bthd)
+    return attn_out.reshape(bsz, seq_len, num_heads * head_dim)
+
+
 class Qwen4_5QSAIndexer(Qwen4ExpQSAIndexer):
     """``nn.Module`` owner wrapping ``Qwen4ExpQSAIndexer`` with registered BF16 parameters."""
 
@@ -381,6 +473,11 @@ class Qwen4_5Attention(nn.Module):
         layer_idx: int,
         is_consumer: bool = False,
         source_layer_idx: Optional[int] = None,
+        *,
+        tp_size: int = 1,
+        tp_rank: int = 0,
+        tp_group: Any = None,
+        fast_all_reduce: Any = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -388,8 +485,18 @@ class Qwen4_5Attention(nn.Module):
         self.is_consumer = is_consumer
         self.source_layer_idx = source_layer_idx
 
+        self.tp_size = max(1, int(tp_size))
+        self.tp_rank = int(tp_rank)
+        self.tp_group = tp_group
+        self.fast_all_reduce = fast_all_reduce
+        if config.num_attention_heads % self.tp_size != 0:
+            raise ValueError(
+                f"num_attention_heads ({config.num_attention_heads}) not divisible by tp_size ({self.tp_size})"
+            )
+
         self.hidden_size = config.hidden_size
-        self.num_heads = config.num_attention_heads
+        self.global_num_heads = config.num_attention_heads
+        self.num_heads = config.num_attention_heads // self.tp_size
         self.num_kv_heads = config.num_key_value_heads
         self.head_dim = config.head_dim
         self.attn_output_gate = config.attn_output_gate
@@ -466,6 +573,11 @@ class Qwen4_5Attention(nn.Module):
         config: Qwen4_5ArchConfig,
         layer_idx: int,
         sharing_plan: Optional[YoCoSharingPlan] = None,
+        *,
+        tp_size: int = 1,
+        tp_rank: int = 0,
+        tp_group: Any = None,
+        fast_all_reduce: Any = None,
     ) -> "Qwen4_5Attention":
         plan = sharing_plan if sharing_plan is not None else YoCoSharingPlan.from_config(config)
         is_consumer = plan.is_full_attn_consumer(layer_idx)
@@ -475,7 +587,20 @@ class Qwen4_5Attention(nn.Module):
             layer_idx=layer_idx,
             is_consumer=is_consumer,
             source_layer_idx=source_idx,
+            tp_size=tp_size,
+            tp_rank=tp_rank,
+            tp_group=tp_group,
+            fast_all_reduce=fast_all_reduce,
         )
+
+    def _maybe_all_reduce(self, out: torch.Tensor) -> torch.Tensor:
+        if self.fast_all_reduce is not None:
+            return self.fast_all_reduce(out)
+        if self.tp_size > 1 and self.tp_group is not None:
+            torch.distributed.all_reduce(
+                out, op=torch.distributed.ReduceOp.SUM, group=self.tp_group
+            )
+        return out
 
     @property
     def k_sconv_weight(self) -> Optional[torch.Tensor]:
@@ -781,11 +906,8 @@ class Qwen4_5Attention(nn.Module):
             )
 
         # 6. Output gate & output projection
-        attn_out = attn_out.transpose(1, 2)  # [B, T, 32, 256]
-        if gate is not None:
-            attn_out = attn_out * torch.sigmoid(gate)
-        out_flat = attn_out.reshape(bsz, seq_len, self.num_heads * self.head_dim)
-        return self.o_proj(out_flat)
+        out_flat = apply_attn_output_gate_flatten(attn_out, gate)
+        return self._maybe_all_reduce(self.o_proj(out_flat))
 
     def forward_paged_decode(
         self,
@@ -871,13 +993,14 @@ class Qwen4_5Attention(nn.Module):
         if gate is not None:
             attn_out = attn_out * torch.sigmoid(gate)
         out_flat = attn_out.reshape(bsz, seq_len, self.num_heads * self.head_dim)
-        return self.o_proj(out_flat)
+        return self._maybe_all_reduce(self.o_proj(out_flat))
 
 
 __all__ = [
     "GemmaRMSNorm",
     "Qwen4_5Attention",
     "Qwen4_5QSAIndexer",
+    "apply_attn_output_gate_flatten",
     "apply_partial_neox_rope",
     "causal_dwconv1d",
     "gemma_rmsnorm_and_partial_rope",

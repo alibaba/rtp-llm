@@ -532,5 +532,98 @@ class TestQwen4_5ConfigWeightKVCache(unittest.TestCase):
         )
 
 
+    def test_7_tp4_gdn_opaque_state_sharding_and_weight_split(self) -> None:
+        from rtp_llm.config.qwen4_5_config import estimate_qwen4_5_params_and_state
+        from rtp_llm.model_loader.load_config import LoadConfig
+        from rtp_llm.model_loader.weight_module import AtomicWeight
+        from rtp_llm.models.qwen4_5 import (
+            GDN_CONSUMER_Q_CONV_TAG,
+            GDN_CONV_STATE_TAG,
+            GDN_SSM_STATE_TAG,
+            build_qwen4_5_kv_cache_spec_descs,
+        )
+        from rtp_llm.ops import HWKernelConfig, KVCacheSpecType, ParallelismConfig, TpCacheTransferMode
+        from rtp_llm.utils.database import BaseDatabase
+        import torch
+
+        plan_tp1 = build_qwen4_5_kv_cache_plan(
+            self.arch_cfg, tp_size=1, enable_yoco_decode=True
+        )
+        plan_tp4 = build_qwen4_5_kv_cache_plan(
+            self.arch_cfg, tp_size=4, enable_yoco_decode=True
+        )
+        # GDN 32K/128V -> 8K/32V per TP=4 rank; SSM state drops 4x (40 MiB -> 10 MiB)
+        self.assertAlmostEqual(plan_tp4.ssm_mib_per_req, plan_tp1.ssm_mib_per_req / 4.0, places=6)
+        self.assertEqual(plan_tp4.layers[0].ssm_state_shape, (32, 64, 64))
+        self.assertEqual(plan_tp4.layers[0].gdn_conv_channels, 3072)  # 2*512 + 8192 -> 1024+8192? No, (1024+8192)/4 wait: 2*512+2048=3072
+        self.assertEqual(plan_tp4.layers[21].gdn_conv_channels, 512)  # consumer Q-only: 8*64
+
+        # FullAttn 1KV head + kv_sconv + output_sconv + PLE stay replicated on all TP ranks
+        self.assertEqual(plan_tp4.kv_bytes_per_token, plan_tp1.kv_bytes_per_token)
+        self.assertEqual(plan_tp4.layers[3].num_kv_heads, 1)
+        self.assertEqual(plan_tp4.layers[3].k_sconv_shape, (256, 3))
+        self.assertEqual(plan_tp4.ple_ngram_ctx_bytes_per_req, 16)
+        for lp1, lp4 in zip(plan_tp1.layers, plan_tp4.layers):
+            if lp1.has_kv_sconv:
+                self.assertEqual(lp4.k_sconv_shape, lp1.k_sconv_shape)
+                self.assertEqual(lp4.v_sconv_shape, lp1.v_sconv_shape)
+            for r1, r4 in zip(lp1.opaque_regions, lp4.opaque_regions):
+                if r1.tag not in (GDN_SSM_STATE_TAG, GDN_CONV_STATE_TAG, GDN_CONSUMER_Q_CONV_TAG):
+                    self.assertEqual(r4.shape, r1.shape)
+
+        # KVCacheSpecDescs reflect per-rank GDN sizing with REPLICATED transfer for 1:1 P_r->D_r
+        mcfg = Qwen4_5.create_config(REF_CONFIG_PATH)
+        descs = build_qwen4_5_kv_cache_spec_descs(mcfg, self.arch_cfg, tp_size=4)
+        l0_by_tag = {d.tag: d for d in descs[0]}
+        self.assertEqual(l0_by_tag[GDN_SSM_STATE_TAG].explicit_entry_count, 32)
+        self.assertEqual(l0_by_tag[GDN_SSM_STATE_TAG].entry_elems, 64 * 64)
+        self.assertEqual(l0_by_tag[GDN_SSM_STATE_TAG].tp_transfer_mode, TpCacheTransferMode.REPLICATED)
+        self.assertEqual(l0_by_tag[GDN_CONV_STATE_TAG].explicit_entry_count, 3)
+        self.assertEqual(l0_by_tag[GDN_CONV_STATE_TAG].entry_elems, 3072)
+        self.assertEqual(l0_by_tag[GDN_CONV_STATE_TAG].tp_transfer_mode, TpCacheTransferMode.REPLICATED)
+        l21_by_tag = {d.tag: d for d in descs[21]}
+        self.assertEqual(l21_by_tag[GDN_CONSUMER_Q_CONV_TAG].entry_elems, 512)
+        self.assertEqual(l21_by_tag[GDN_CONSUMER_Q_CONV_TAG].tp_transfer_mode, TpCacheTransferMode.REPLICATED)
+        l3_full = [d for d in descs[3] if d.cache_type == KVCacheSpecType.MHA][0]
+        self.assertEqual(l3_full.tp_transfer_mode, TpCacheTransferMode.MHA_HEADS)
+
+        # Qwen4_5Weight CustomAtomicWeight _split safety under TP=4 + EP=4
+        class _DummyDB(BaseDatabase):
+            def get_pretrain_tensor_names(self): return []
+            def get_lora_tensor_names(self, name): return []
+            def load_tensor(self, name, data_type=torch.float16): return []
+
+        pc = ParallelismConfig()
+        pc.tp_size = 4; pc.tp_rank = 1; pc.ep_size = 4; pc.ep_rank = 1
+        pc.world_size = 4; pc.world_rank = 1
+        wb = Qwen4_5Weight(mcfg, parallelism_config=pc, hw_kernel_config=HWKernelConfig())
+        winfo = wb._get_weight_info()
+        lc = LoadConfig(
+            database=_DummyDB(),
+            num_layers=self.arch_cfg.num_hidden_layers,
+            hidden_size=self.arch_cfg.hidden_size,
+            head_num=self.arch_cfg.num_attention_heads,
+            head_num_kv=self.arch_cfg.num_key_value_heads,
+            size_per_head=self.arch_cfg.head_dim,
+            moe_pure_tp_mode=False,
+            align_size=1,
+            moe_align_size=1,
+            moe_layer_index=list(range(self.arch_cfg.first_k_dense_replace, self.arch_cfg.num_hidden_layers)),
+            moe_n_group=1,
+            expert_num=self.arch_cfg.num_experts,
+            enable_eplb=False,
+            phy_exp_num=self.arch_cfg.num_experts,
+            tp_size=4, tp_rank=1, ep_size=4, ep_rank=1, dp_size=1, dp_rank=0,
+            lm_head_tp_size=4, lm_head_tp_rank=1, ffn_tp_size=4, ffn_tp_rank=1,
+            num_nodes=1, layer_range=range(self.arch_cfg.num_hidden_layers),
+        )
+        # Check normal GDN conv1d split [Q(2048), K(2048), V(8192)] -> [3072, 1, 4]
+        w_conv0 = next(w for w in winfo.layer_weights[0] if w.name == QWEN4_5_W.linear_conv1d)
+        conv_full = torch.arange(12288 * 4, dtype=torch.bfloat16).view(12288, 1, 4)
+        conv_p1 = w_conv0._split(conv_full, lc)[QWEN4_5_W.linear_conv1d]
+        self.assertEqual(tuple(conv_p1.shape), (3072, 1, 4))
+        expected_p1 = torch.cat([conv_full[512:1024], conv_full[2048+512:2048+1024], conv_full[4096+2048:4096+4096]], dim=0)
+        self.assertTrue(torch.equal(conv_p1, expected_p1))
+
 if __name__ == "__main__":
     unittest.main()

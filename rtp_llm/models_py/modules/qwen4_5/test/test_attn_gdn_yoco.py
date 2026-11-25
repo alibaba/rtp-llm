@@ -20,6 +20,7 @@ from rtp_llm.models_py.modules.qwen4_5.gdn import (
     Qwen4_5GatedDeltaNet,
     RMSNormGated,
     compute_gdn_gating,
+    gdn_chunk_prefill_ragged_with_snapshots_triton,
     gdn_chunk_prefill_triton,
     gdn_recurrent_ref,
     gdn_recurrent_triton,
@@ -427,6 +428,273 @@ def test_yoco_shared_gdn_source_and_consumer() -> None:
     print("  PASS: YoCo Shared GDN Source (L20) + Consumer (L21) Prefill & Decode readout verified.")
 
 
+
+
+@torch.no_grad()
+def _build_ragged_meta_for_test(
+    lengths: list[int],
+    *,
+    block_t: int = 32,
+    chunk_size: int = 64,
+    tpb: int = 64,
+    device: torch.device,
+):
+    cu_list = [0]
+    for l in lengths:
+        cu_list.append(cu_list[-1] + int(l))
+    cu = torch.tensor(cu_list, device=device, dtype=torch.int32)
+    t_req, t_t0 = [], []
+    c_req, c_t0 = [], []
+    req_c_start = [0]
+    snap_tok, snap_req, snap_phys = [], [], []
+    req_snap_start = [0]
+    snap_local_end = []
+    snap_meta = []  # (bi, bnd, phys)
+    phys = 1
+    for bi, l in enumerate(lengths):
+        for t0 in range(0, l, block_t):
+            t_req.append(bi)
+            t_t0.append(t0)
+        for c0 in range(0, l, chunk_size):
+            c_req.append(bi)
+            c_t0.append(c0)
+        req_c_start.append(len(c_req))
+        for bnd in range(tpb, l + 1, tpb):
+            snap_tok.append(cu_list[bi] + bnd - 1)
+            snap_req.append(bi)
+            snap_local_end.append(bnd)
+            snap_phys.append(phys)
+            snap_meta.append((bi, bnd, phys))
+            phys += 1
+        req_snap_start.append(len(snap_local_end))
+    return (
+        cu_list,
+        cu,
+        torch.tensor(t_req, device=device, dtype=torch.int32),
+        torch.tensor(t_t0, device=device, dtype=torch.int32),
+        torch.tensor(c_req, device=device, dtype=torch.int32),
+        torch.tensor(c_t0, device=device, dtype=torch.int32),
+        torch.tensor(req_c_start, device=device, dtype=torch.int32),
+        torch.tensor(snap_tok, device=device, dtype=torch.int32),
+        torch.tensor(snap_req, device=device, dtype=torch.int32),
+        torch.tensor(req_snap_start, device=device, dtype=torch.int32),
+        torch.tensor(snap_local_end, device=device, dtype=torch.int32),
+        torch.tensor(snap_phys, device=device, dtype=torch.int32),
+        snap_meta,
+        phys + 1,
+    )
+
+
+@torch.no_grad()
+def test_gdn_fused_unpack_verify_ragged_and_tp() -> None:
+    print("\n=== Test 4: GDN Packed-Ragged Snapshot Prefill, V=8 Verify (+CG/Rollback) & TP=4 Hooks ===")
+    device = torch.device("cuda")
+    dtype = torch.bfloat16
+    torch.manual_seed(2028)
+
+    cfg = make_config(hidden_size=5120)
+    plan = YoCoSharingPlan.from_config(cfg)
+    gdn_norm = Qwen4_5GatedDeltaNet.from_config(cfg, layer_idx=0, sharing_plan=plan).to(device=device, dtype=dtype).eval()
+    gdn_src = Qwen4_5GatedDeltaNet.from_config(cfg, layer_idx=20, sharing_plan=plan).to(device=device, dtype=dtype).eval()
+    gdn_cons = Qwen4_5GatedDeltaNet.from_config(cfg, layer_idx=21, sharing_plan=plan).to(device=device, dtype=dtype).eval()
+    for m in (gdn_norm, gdn_src, gdn_cons):
+        init_realistic_weights(m)
+
+    # 4a. Ragged forward_packed_prefill (B=3, lens=[64, 130, 75]) + 64-token SSM & conv snapshots
+    lens = [64, 130, 75]
+    (
+        cu_list, cu, t_req, t_t0, c_req, c_t0, r_c_start,
+        s_tok, s_req, r_s_start, s_end, s_phys, snap_meta, num_pool_blks,
+    ) = _build_ragged_meta_for_test(lens, block_t=32, chunk_size=64, tpb=64, device=device)
+    B = len(lens)
+    N = cu_list[-1]
+    h_src = torch.randn((N, cfg.hidden_size), device=device, dtype=dtype)
+    h_cons = torch.randn((N, cfg.hidden_size), device=device, dtype=dtype)
+    init_conv_s = torch.randn((B, gdn_src.conv_dim, 3), device=device, dtype=dtype)
+    init_ssm_s = torch.randn((B, gdn_src.num_v_heads, 64, 64), device=device, dtype=torch.float32) * 0.05
+    init_conv_c = torch.randn((B, gdn_cons.conv_dim, 3), device=device, dtype=dtype)
+
+    conv_pool_s = torch.zeros((num_pool_blks, gdn_src.conv_dim * 3), device=device, dtype=dtype)
+    ssm_pool_s = torch.zeros((num_pool_blks, gdn_src.num_v_heads, 64, 64), device=device, dtype=torch.float32)
+    conv_pool_c = torch.zeros((num_pool_blks, gdn_cons.conv_dim * 3), device=device, dtype=dtype)
+
+    out_src_rag, sh_rag = gdn_src.forward_packed_prefill(
+        h_src, cu, t_req, t_t0, c_req, c_t0, r_c_start,
+        init_conv_state=init_conv_s, init_ssm_state=init_ssm_s,
+        snap_tok_idx=s_tok, snap_req_idx=s_req,
+        conv_dst_pool=conv_pool_s, conv_snap_phys=s_phys,
+        req_snap_start=r_s_start, snap_local_end=s_end,
+        ssm_dst_pool=ssm_pool_s, ssm_snap_phys=s_phys,
+    )
+    assert sh_rag is not None
+    out_cons_rag, _ = gdn_cons.forward_packed_prefill(
+        h_cons, cu, t_req, t_t0, c_req, c_t0, r_c_start,
+        init_conv_state=init_conv_c, init_ssm_state=init_ssm_s, shared=sh_rag,
+        snap_tok_idx=s_tok, snap_req_idx=s_req,
+        conv_dst_pool=conv_pool_c, conv_snap_phys=s_phys,
+        req_snap_start=r_s_start, snap_local_end=s_end,
+    )
+    for bi, l in enumerate(lens):
+        st_s = gdn_src.create_state(1, device, dtype)
+        st_s.conv_state.copy_(init_conv_s[bi : bi + 1])
+        st_s.ssm_state.copy_(init_ssm_s[bi : bi + 1])
+        ys_ref, sh_ref = gdn_src(h_src[cu_list[bi] : cu_list[bi + 1]].unsqueeze(0), state=st_s)
+        ds, _ = report_diff(f"GDN Source ragged req={bi}", out_src_rag[cu_list[bi] : cu_list[bi + 1]], ys_ref.squeeze(0))
+        assert ds < 1e-2
+
+        st_c = gdn_cons.create_state(1, device, dtype)
+        st_c.conv_state.copy_(init_conv_c[bi : bi + 1])
+        st_c.ssm_state = init_ssm_s[bi : bi + 1].clone()
+        yc_ref, _ = gdn_cons(h_cons[cu_list[bi] : cu_list[bi + 1]].unsqueeze(0), state=st_c, shared=sh_ref)
+        dc, _ = report_diff(f"GDN Consumer ragged req={bi}", out_cons_rag[cu_list[bi] : cu_list[bi + 1]], yc_ref.squeeze(0))
+        assert dc < 1e-2
+
+    for bi, bnd, phys in snap_meta:
+        st_bnd = gdn_src.create_state(1, device, dtype)
+        st_bnd.conv_state.copy_(init_conv_s[bi : bi + 1])
+        st_bnd.ssm_state.copy_(init_ssm_s[bi : bi + 1])
+        _ = gdn_src(h_src[cu_list[bi] : cu_list[bi] + bnd].unsqueeze(0), state=st_bnd)
+        d_conv_s, _ = report_diff(f"GDN Src conv snap req={bi} bnd={bnd}", conv_pool_s[phys].view(gdn_src.conv_dim, 3), st_bnd.conv_state[0])
+        d_ssm_s, _ = report_diff(f"GDN Src ssm snap req={bi} bnd={bnd}", ssm_pool_s[phys], st_bnd.ssm_state[0])
+        assert d_conv_s == 0.0 and d_ssm_s < 1e-3
+
+        st_cbnd = gdn_cons.create_state(1, device, dtype)
+        st_cbnd.conv_state.copy_(init_conv_c[bi : bi + 1])
+        # Only verify consumer conv snapshot
+        st_cbnd_tmp = gdn_src.create_state(1, device, dtype)
+        st_cbnd_tmp.conv_state.copy_(init_conv_s[bi : bi + 1])
+        st_cbnd_tmp.ssm_state.copy_(init_ssm_s[bi : bi + 1])
+        _, sh_b = gdn_src(h_src[cu_list[bi] : cu_list[bi] + bnd].unsqueeze(0), state=st_cbnd_tmp)
+        st_cbnd.ssm_state = init_ssm_s[bi : bi + 1].clone()
+        _ = gdn_cons(h_cons[cu_list[bi] : cu_list[bi] + bnd].unsqueeze(0), state=st_cbnd, shared=sh_b)
+        d_conv_c, _ = report_diff(f"GDN Cons conv snap req={bi} bnd={bnd}", conv_pool_c[phys].view(gdn_cons.conv_dim, 3), st_cbnd.conv_state[0])
+        assert d_conv_c == 0.0
+
+    # 4b. GDN forward_verify (B=3, V=8) + rollback states + CUDA Graph capture/replay (Source L20 + Consumer L21 + Normal L0)
+    Bv, V = 3, 8
+    hv_s = torch.randn((Bv, V, cfg.hidden_size), device=device, dtype=dtype)
+    hv_c = torch.randn((Bv, V, cfg.hidden_size), device=device, dtype=dtype)
+    ic_s = torch.randn((Bv, gdn_src.conv_dim, 3), device=device, dtype=dtype)
+    is_s = torch.randn((Bv, gdn_src.num_v_heads, 64, 64), device=device, dtype=torch.float32) * 0.05
+    ic_c = torch.randn((Bv, gdn_cons.conv_dim, 3), device=device, dtype=dtype)
+    sc_s = torch.empty((Bv, V, gdn_src.conv_dim, 3), device=device, dtype=dtype)
+    ss_s = torch.empty((Bv, V, gdn_src.num_v_heads, 64, 64), device=device, dtype=torch.float32)
+    sc_c = torch.empty((Bv, V, gdn_cons.conv_dim, 3), device=device, dtype=dtype)
+
+    ov_s, shv = gdn_src.forward_verify(hv_s, init_conv_state=ic_s, init_ssm_state=is_s, stage_conv_state=sc_s, stage_ssm_state=ss_s)
+    assert shv is not None and shv.ssm_state is not None
+    ov_c, _ = gdn_cons.forward_verify(hv_c, init_conv_state=ic_c, stage_conv_state=sc_c, shared=shv, enable_yoco_decode=True)
+
+    st_step_s = gdn_src.create_state(Bv, device, dtype)
+    st_step_s.conv_state.copy_(ic_s)
+    st_step_s.ssm_state.copy_(is_s)
+    st_step_c = gdn_cons.create_state(Bv, device, dtype)
+    st_step_c.conv_state.copy_(ic_c)
+    step_s_outs, step_c_outs = [], []
+    for s in range(V):
+        ys, shs = gdn_src(hv_s[:, s : s + 1], state=st_step_s)
+        yc, _ = gdn_cons(hv_c[:, s : s + 1], state=st_step_c, shared=shs, enable_yoco_decode=True)
+        step_s_outs.append(ys)
+        step_c_outs.append(yc)
+        assert (sc_s[:, s] - st_step_s.conv_state).abs().max().item() <= 2e-2
+        assert (ss_s[:, s] - st_step_s.ssm_state).abs().max().item() < 1.5e-2
+        assert (sc_c[:, s] - st_step_c.conv_state).abs().max().item() <= 2e-2
+
+    d_vs, _ = report_diff("GDN Source forward_verify vs 8x decode", ov_s, torch.cat(step_s_outs, dim=1))
+    d_vc, _ = report_diff("GDN Consumer forward_verify vs 8x YoCo decode", ov_c, torch.cat(step_c_outs, dim=1))
+    assert d_vs < 1e-2 and d_vc < 1e-2
+
+    # CUDA Graph replay for forward_verify (Source + Consumer)
+    shs_g, shc_g = hv_s.clone(), hv_c.clone()
+    ics_g, iss_g, icc_g = ic_s.clone(), is_s.clone(), ic_c.clone()
+    scs_g, sss_g, scc_g = torch.empty_like(sc_s), torch.empty_like(ss_s), torch.empty_like(sc_c)
+    _, _sh_w = gdn_src.forward_verify(shs_g, init_conv_state=ics_g, init_ssm_state=iss_g, stage_conv_state=scs_g, stage_ssm_state=sss_g)
+    _ = gdn_cons.forward_verify(shc_g, init_conv_state=icc_g, stage_conv_state=scc_g, shared=_sh_w, enable_yoco_decode=True)
+    torch.cuda.synchronize()
+    cg = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(cg):
+        cg_os, cg_sh = gdn_src.forward_verify(shs_g, init_conv_state=ics_g, init_ssm_state=iss_g, stage_conv_state=scs_g, stage_ssm_state=sss_g)
+        cg_oc, _ = gdn_cons.forward_verify(shc_g, init_conv_state=icc_g, stage_conv_state=scc_g, shared=cg_sh, enable_yoco_decode=True)
+    shs_g.normal_(0.0, 0.5)
+    shc_g.normal_(0.0, 0.5)
+    cg.replay()
+    torch.cuda.synchronize()
+    cg_os_chk, cg_oc_chk = cg_os.clone(), cg_oc.clone()
+    eg_scs, eg_sss, eg_scc = torch.empty_like(sc_s), torch.empty_like(ss_s), torch.empty_like(sc_c)
+    eg_os, eg_sh = gdn_src.forward_verify(shs_g, init_conv_state=ics_g, init_ssm_state=iss_g, stage_conv_state=eg_scs, stage_ssm_state=eg_sss)
+    eg_oc, _ = gdn_cons.forward_verify(shc_g, init_conv_state=icc_g, stage_conv_state=eg_scc, shared=eg_sh, enable_yoco_decode=True)
+    d_cgs, _ = report_diff("GDN Source Verify CG vs Eager", cg_os_chk, eg_os)
+    d_cgc, _ = report_diff("GDN Consumer Verify CG vs Eager", cg_oc_chk, eg_oc)
+    assert d_cgs < 1e-4 and d_cgc < 1e-4
+
+    # 4c. TP=4 + fast_all_reduce Hook Parity for Qwen4_5Attention (MQA-1 L19) & Qwen4_5GatedDeltaNet (L0)
+    cfg_tp = Qwen4_5ArchConfig(
+        hidden_size=512, num_attention_heads=8, num_key_value_heads=1, head_dim=64,
+        linear_num_key_heads=4, linear_num_value_heads=8, linear_key_head_dim=64, linear_value_head_dim=64,
+        share_map=QWEN45_SHARE_MAP,
+    )
+    attn_tp1 = Qwen4_5Attention.from_config(cfg_tp, layer_idx=19, tp_size=1).to(device=device, dtype=dtype).eval()
+    init_realistic_weights(attn_tp1)
+    xt = torch.randn((2, 16, 512), device=device, dtype=dtype)
+    post = torch.arange(16, device=device).unsqueeze(0).expand(2, -1)
+    kv1 = attn_tp1.create_kv_cache(2, 32, device, dtype)
+    ks1, vs1 = attn_tp1.create_sconv_states(2, device, dtype)
+    oa1 = attn_tp1(xt, positions=post, kv_cache=kv1, k_sconv_state=ks1, v_sconv_state=vs1, seq_offset=0)
+    oa_sum = torch.zeros_like(oa1)
+    hq = (cfg_tp.num_attention_heads // 4) * cfg_tp.head_dim
+    hq_out = hq * (2 if cfg_tp.attn_output_gate else 1)
+    for r in range(4):
+        ar_hits = [0]
+        ar_r = Qwen4_5Attention.from_config(
+            cfg_tp, layer_idx=19, tp_size=4, tp_rank=r,
+            fast_all_reduce=lambda t, _h=ar_hits: (_h.__setitem__(0, _h[0] + 1) or t),
+        ).to(device=device, dtype=dtype).eval()
+        ar_r.q_proj.weight.copy_(attn_tp1.q_proj.weight[r * hq_out : (r + 1) * hq_out])
+        ar_r.o_proj.weight.copy_(attn_tp1.o_proj.weight[:, r * hq : (r + 1) * hq])
+        ar_r.q_norm.weight.copy_(attn_tp1.q_norm.weight)
+        ar_r.k_proj.weight.copy_(attn_tp1.k_proj.weight)
+        ar_r.v_proj.weight.copy_(attn_tp1.v_proj.weight)
+        ar_r.k_norm.weight.copy_(attn_tp1.k_norm.weight)
+        if ar_r.k_sconv is not None: ar_r.k_sconv.weight.copy_(attn_tp1.k_sconv.weight)
+        if ar_r.v_sconv is not None: ar_r.v_sconv.weight.copy_(attn_tp1.v_sconv.weight)
+        kv_r = ar_r.create_kv_cache(2, 32, device, dtype)
+        ks_r, vs_r = ar_r.create_sconv_states(2, device, dtype)
+        oa_sum += ar_r(xt, positions=post, kv_cache=kv_r, k_sconv_state=ks_r, v_sconv_state=vs_r, seq_offset=0)
+        assert ar_hits[0] == 1
+    d_att_tp, _ = report_diff("Qwen4_5Attention L19 TP=4 vs TP=1", oa_sum, oa1)
+    assert d_att_tp < 1e-2
+
+    gdn_tp1 = Qwen4_5GatedDeltaNet.from_config(cfg_tp, layer_idx=0).to(device=device, dtype=dtype).eval()
+    init_realistic_weights(gdn_tp1)
+    og1, _ = gdn_tp1(xt, state=gdn_tp1.create_state(2, device, dtype))
+    og_sum = torch.zeros_like(og1)
+    gs1 = 2 * gdn_tp1.head_k_dim + 2 * gdn_tp1.gqa_ratio * gdn_tp1.head_v_dim
+    lk = gdn_tp1.num_k_heads // 4
+    lv = gdn_tp1.num_v_heads // 4
+    q_s, k_s, v_s = gdn_tp1.conv1d.weight.split([gdn_tp1.key_dim, gdn_tp1.key_dim, gdn_tp1.value_dim], dim=0)
+    lk_d, lv_d = gdn_tp1.key_dim // 4, gdn_tp1.value_dim // 4
+    for r in range(4):
+        ar_hits = [0]
+        gr = Qwen4_5GatedDeltaNet.from_config(
+            cfg_tp, layer_idx=0, tp_size=4, tp_rank=r,
+            fast_all_reduce=lambda t, _h=ar_hits: (_h.__setitem__(0, _h[0] + 1) or t),
+        ).to(device=device, dtype=dtype).eval()
+        gr.in_proj_qkvz.weight.copy_(gdn_tp1.in_proj_qkvz.weight[r * lk * gs1 : (r + 1) * lk * gs1])
+        gr.in_proj_ba.weight.copy_(gdn_tp1.in_proj_ba.weight[r * lk * 2 * gdn_tp1.gqa_ratio : (r + 1) * lk * 2 * gdn_tp1.gqa_ratio])
+        gr.conv1d.weight.copy_(torch.cat([q_s[r * lk_d : (r + 1) * lk_d], k_s[r * lk_d : (r + 1) * lk_d], v_s[r * lv_d : (r + 1) * lv_d]], dim=0))
+        gr.A_log.copy_(gdn_tp1.A_log[r * lv : (r + 1) * lv])
+        gr.dt_bias.copy_(gdn_tp1.dt_bias[r * lv : (r + 1) * lv])
+        gr.norm.weight.copy_(gdn_tp1.norm.weight)
+        gr.out_proj.weight.copy_(gdn_tp1.out_proj.weight[:, r * lv_d : (r + 1) * lv_d])
+        or_g, _ = gr(xt, state=gr.create_state(2, device, dtype))
+        assert ar_hits[0] == 1
+        og_sum += or_g
+    d_gdn_tp, _ = report_diff("Qwen4_5GatedDeltaNet L0 TP=4 vs TP=1", og_sum, og1)
+    assert d_gdn_tp < 1e-2
+
+    print("  PASS: GDN Ragged Snapshots, V=8 Verify (+Rollback+CG), and Attention/GDN TP=4 hooks verified.")
+
+
 @torch.no_grad()
 def bench_cuda(fn, warmup: int = 10, iters: int = 50) -> tuple[float, float]:
     """Return (median_ms, mean_ms) using CUDA events."""
@@ -576,6 +844,29 @@ def run_b300_benchmarks() -> None:
         print(f"  [Prefill T={T:4d}] GDN Consumer(L21 YoCo): median={med_gc:.4f} ms (mean={mean_gc:.4f} ms)")
         print(f"  [Prefill T={T:4d}]   kernel gdn_chunk_prefill_triton: median={med_chk:.4f} ms")
 
+    # ---- Verify (B=4, V=8) vs 8x Decode & Packed Ragged Prefill (T=1024) ----
+    print("\n  -- GDN Verify (B=4, V=8) vs 8x Decode & Packed Prefill (T=1024) --")
+    Bv, V = 4, 8
+    hv = torch.randn((Bv, V, 5120), device=device, dtype=dtype)
+    st_vn = gdn_norm.create_state(Bv, device, dtype)
+    st_vs = gdn_src.create_state(Bv, device, dtype)
+    st_vc = gdn_cons.create_state(Bv, device, dtype)
+    sc_vb = torch.empty((Bv, V, gdn_src.conv_dim, 3), device=device, dtype=dtype)
+    ss_vb = torch.empty((Bv, V, gdn_src.num_v_heads, 64, 64), device=device, dtype=torch.float32)
+    sc_vcb = torch.empty((Bv, V, gdn_cons.conv_dim, 3), device=device, dtype=dtype)
+    med_dec8_n, _ = bench_cuda(lambda: [gdn_norm(hv[:, i : i + 1], state=st_vn) for i in range(V)])
+    med_ver8_n, _ = bench_cuda(lambda: gdn_norm.forward_verify(hv, init_conv_state=st_vn.conv_state, init_ssm_state=st_vn.ssm_state, stage_conv_state=sc_vb, stage_ssm_state=ss_vb))
+    med_ver8_s, _ = bench_cuda(lambda: gdn_src.forward_verify(hv, init_conv_state=st_vs.conv_state, init_ssm_state=st_vs.ssm_state, stage_conv_state=sc_vb, stage_ssm_state=ss_vb))
+    _, sh_vb = gdn_src.forward_verify(hv, init_conv_state=st_vs.conv_state, init_ssm_state=st_vs.ssm_state, stage_conv_state=sc_vb, stage_ssm_state=ss_vb)
+    med_ver8_c, _ = bench_cuda(lambda: gdn_cons.forward_verify(hv, init_conv_state=st_vc.conv_state, stage_conv_state=sc_vcb, shared=sh_vb, enable_yoco_decode=True))
+    print(f"  [Verify B=4,V=8] GDN Normal(L0):  8xDecode={med_dec8_n:.4f} ms vs Verify={med_ver8_n:.4f} ms ({med_dec8_n/max(med_ver8_n,1e-6):.2f}x)")
+    print(f"  [Verify B=4,V=8] GDN Source(L20): Verify={med_ver8_s:.4f} ms | Consumer(L21): Verify={med_ver8_c:.4f} ms")
+
+    _, cu_p, tr_p, tt0_p, cr_p, ct0_p, rcs_p, _, _, _, _, _, _, _ = _build_ragged_meta_for_test([1024], device=device)
+    hp = torch.randn((1024, 5120), device=device, dtype=dtype)
+    med_packed, _ = bench_cuda(lambda: gdn_norm.forward_packed_prefill(hp, cu_p, tr_p, tt0_p, cr_p, ct0_p, rcs_p), warmup=5, iters=20)
+    print(f"  [Packed Prefill T=1024] GDN Normal(L0) forward_packed_prefill: median={med_packed:.4f} ms")
+
 
 def main() -> None:
     t0 = time.time()
@@ -583,6 +874,7 @@ def main() -> None:
     test_full_attention_producer_and_consumer()
     test_gdn_kernels_and_module()
     test_yoco_shared_gdn_source_and_consumer()
+    test_gdn_fused_unpack_verify_ragged_and_tp()
     run_b300_benchmarks()
     print(f"\nALL TESTS & BENCHMARKS PASSED in {time.time() - t0:.2f}s")
 
