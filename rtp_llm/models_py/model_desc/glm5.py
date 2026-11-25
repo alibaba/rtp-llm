@@ -6,6 +6,8 @@ import torch
 from torch import nn
 
 from rtp_llm.config.mega_moe import MEGA_MOE_STRATEGIES, MegaMoeExecutionPolicy
+from rtp_llm.models_py.kernels.cuda.mtp_frontend import no_module_hooks
+from rtp_llm.models_py.modules.hybrid.cmp_moe_streams import CmpMoeStreams
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.block_map import get_layer_caches_for_groups
@@ -87,6 +89,15 @@ class Glm5MoeLayer(GenericMoeLayer):
             hw_kernel_config,
         )
 
+        self._cmp_moe_streams = None
+        if (
+            parallelism_config.role_type == RoleType.DECODE
+            and parallelism_config.get_attn_tp_size() == 1 and self.ffn_tp_size == 1
+            and moe_config.moe_strategy in ("mega_moe", "mega_moe_fp8")
+            and self.shared_expert is not None and self.shared_expert_gate is None
+        ):
+            self._cmp_moe_streams = CmpMoeStreams.from_env()
+
     def _create_fused_moe(
         self,
         weights: Dict[str, torch.Tensor],
@@ -135,6 +146,7 @@ class Glm5MoeLayer(GenericMoeLayer):
         clone.parallelism_config = self.parallelism_config
         clone.layer_idx = self.layer_idx
         clone.hidden_dim = self.hidden_dim
+        clone._cmp_moe_streams = self._cmp_moe_streams
         clone.ffn_dim = self.ffn_dim
         clone.num_experts = self.num_experts
         clone.top_k = self.top_k
@@ -174,6 +186,19 @@ class Glm5MoeLayer(GenericMoeLayer):
         """Consume router/quant resources already prepared by GLM5 CMP."""
         if self.fake_balance_expert is not None:
             self.fake_balance_expert(topk_ids, topk_weights)
+        if (
+            self._cmp_moe_streams is not None and not torch.is_grad_enabled()
+            and hidden_states.is_cuda and hidden_states.dtype == torch.bfloat16
+            and hidden_states.ndim == 2 and 0 < hidden_states.size(0) <= 32
+            and no_module_hooks(self) and no_module_hooks(self.fused_moe)
+            and all(no_module_hooks(module) for module in self.shared_expert.modules())
+        ):
+            routed, shared = self._cmp_moe_streams.run(
+                lambda: self.fused_moe.forward_prepacked(hidden_states),
+                lambda: self.shared_expert(hidden_states),
+                (hidden_states, topk_ids, topk_weights),
+            )
+            return routed + shared
         return self._add_shared_expert(
             hidden_states, self.fused_moe.forward_prepacked(hidden_states)
         )
@@ -618,6 +643,7 @@ class Glm5ModelBase(CpMtpHiddenHandoff, GenericMoeModel):
         *,
         force_reuse_topk_indices: bool = False,
         capture: Optional[CaptureContext] = None,
+        residual: Optional[torch.Tensor] = None,
     ) -> DecodeLayerOutput:
         default_fmha = (
             fmha_impl["default"] if isinstance(fmha_impl, Mapping) else fmha_impl
@@ -649,7 +675,8 @@ class Glm5ModelBase(CpMtpHiddenHandoff, GenericMoeModel):
                 self.kv_cache,
                 force_reuse_topk_indices=force_reuse_topk_indices,
             )
-            residual = torch.zeros_like(hidden_states)
+            if residual is None or residual.shape != hidden_states.shape or residual.dtype != hidden_states.dtype or residual.device != hidden_states.device:
+                residual = torch.zeros_like(hidden_states)
             for idx, layer in enumerate(self.layers[: self.layer_num]):
                 caches = None
                 if self.kv_cache is not None:
