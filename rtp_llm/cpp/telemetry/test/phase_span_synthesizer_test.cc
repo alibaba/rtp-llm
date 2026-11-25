@@ -282,12 +282,12 @@ TEST_F(PhaseSpanSynthesizerTest, PrefillLoadTailAfterPreviousBatchHasNoPreviousB
     EXPECT_EQ(findSpan(spans, "prefill_previous_batch_wait"), nullptr);
 }
 
-TEST_F(PhaseSpanSynthesizerTest, InvalidDispatchPreservesAdmissionQueueAndReportsReason) {
+TEST_F(PhaseSpanSynthesizerTest, MissingKvReadyPreservesAdmissionQueueAndReportsReason) {
     auto parent                      = createParentSpan("parent");
     auto timing                      = completedTiming(1000000, 1009000, 1015000, 1016000, 1017000);
     timing.scheduler_enqueue_time_us = 1000500;
     timing.can_run_time_us           = 1001000;
-    timing.prefill_dispatch_time_us  = 1008000;  // Before RUNNING: invalid ordering.
+    timing.prefill_dispatch_time_us  = 1008000;  // Also before RUNNING; KV readiness is the missing phase boundary.
     timing.prefill_forward_time_us   = 1012000;
     synthesizePhaseSpans(parent, timing, PhaseRole::Fusion, true);
     parent->End();
@@ -299,7 +299,7 @@ TEST_F(PhaseSpanSynthesizerTest, InvalidDispatchPreservesAdmissionQueueAndReport
     EXPECT_EQ(getInt64Attribute(exported_parent, kAttrRtpLlmPrefillAdmissionQueueWaitUs), 500);
     EXPECT_EQ(getInt64Attribute(exported_parent, kAttrRtpLlmPrefillCacheExposedWaitUs), 0);
     EXPECT_EQ(getInt64Attribute(exported_parent, kAttrRtpLlmPrefillFinalPrepareWallUs), -1);
-    EXPECT_EQ(getStringAttribute(exported_parent, kAttrRtpLlmPrefillTimingError), "dispatch_before_running");
+    EXPECT_EQ(getStringAttribute(exported_parent, kAttrRtpLlmPrefillTimingError), "kv_ready_order_invalid");
 }
 
 TEST_F(PhaseSpanSynthesizerTest, MissingForwardPreservesAdmissionQueueAndReportsReason) {
@@ -317,6 +317,94 @@ TEST_F(PhaseSpanSynthesizerTest, MissingForwardPreservesAdmissionQueueAndReports
     EXPECT_EQ(getInt64Attribute(exported_parent, kAttrRtpLlmPrefillAdmissionQueueWaitUs), 500);
     EXPECT_EQ(getInt64Attribute(exported_parent, kAttrRtpLlmPrefillFinalPrepareWallUs), -1);
     EXPECT_EQ(getStringAttribute(exported_parent, kAttrRtpLlmPrefillTimingError), "forward_missing");
+}
+
+TEST_F(PhaseSpanSynthesizerTest, SuccessfulPdPrefillWithoutGenerateDoneReportsMissingForward) {
+    auto parent                      = createParentSpan("parent");
+    auto timing                      = completedTiming(1000000, 1009000, 1015000, 1016000, 1017000);
+    timing.generation_done           = false;  // Prefill can hand off to Decode without GenerateDone.
+    timing.generation_done_time_us   = 0;
+    timing.scheduler_enqueue_time_us = 1000500;
+    timing.can_run_time_us           = 1001000;
+    synthesizePhaseSpans(parent, timing, PhaseRole::Prefill, true);
+    parent->End();
+    ASSERT_TRUE(TelemetryRuntime::shutdown(5000));
+    auto  spans           = span_data_->GetSpans();
+    auto* exported_parent = findSpan(spans, "parent");
+    ASSERT_NE(exported_parent, nullptr);
+    EXPECT_EQ(getInt64Attribute(exported_parent, kAttrRtpLlmPrefillAdmissionQueueWaitUs), 500);
+    EXPECT_EQ(getStringAttribute(exported_parent, kAttrRtpLlmPrefillTimingError), "forward_missing");
+}
+
+TEST_F(PhaseSpanSynthesizerTest, MissingRunningMarkerKeepsCompletePreForwardTimeline) {
+    auto parent                        = createParentSpan("parent");
+    auto timing                        = completedTiming(1000000, 1009000, 1015000, 1016000, 1017000);
+    timing.running_started             = false;
+    timing.running_started_time_us     = 0;
+    timing.generation_done             = false;
+    timing.generation_done_time_us     = 0;
+    timing.scheduler_enqueue_time_us   = 1000500;
+    timing.can_run_time_us             = 1001000;
+    timing.kv_ready_time_us            = 1005000;
+    timing.prefill_previous_release_us = 1008000;
+    timing.prefill_dispatch_time_us    = 1010000;
+    timing.prefill_forward_time_us     = 1012000;
+    synthesizePhaseSpans(parent, timing, PhaseRole::Prefill, true);
+    parent->End();
+    ASSERT_TRUE(TelemetryRuntime::shutdown(5000));
+    auto  spans           = span_data_->GetSpans();
+    auto* exported_parent = findSpan(spans, "parent");
+    ASSERT_NE(exported_parent, nullptr);
+    EXPECT_EQ(getInt64Attribute(exported_parent, kAttrRtpLlmPrefillAdmissionQueueWaitUs), 500);
+    EXPECT_EQ(getInt64Attribute(exported_parent, kAttrRtpLlmPrefillKvCacheAcquireWallUs), 4000);
+    EXPECT_EQ(getInt64Attribute(exported_parent, kAttrRtpLlmPrefillEarlyBatchPrepareWallUs), 0);
+    EXPECT_EQ(getInt64Attribute(exported_parent, kAttrRtpLlmPrefillPreviousBatchWaitUs), 3000);
+    EXPECT_EQ(getInt64Attribute(exported_parent, kAttrRtpLlmPrefillFinalPrepareWallUs), 4000);
+    EXPECT_EQ(getStringAttribute(exported_parent, kAttrRtpLlmPrefillTimingError), "");
+}
+
+TEST_F(PhaseSpanSynthesizerTest, LateRunningMarkerDoesNotDiscardPreForwardTimeline) {
+    auto parent                        = createParentSpan("parent");
+    auto timing                        = completedTiming(1000000, 1009000, 1015000, 1016000, 1017000);
+    timing.scheduler_enqueue_time_us   = 1000500;
+    timing.can_run_time_us             = 1001000;
+    timing.kv_ready_time_us            = 1005000;
+    timing.prefill_previous_release_us = 1007000;
+    timing.prefill_dispatch_time_us    = 1008000;  // RUNNING is late; the five phase boundaries are valid.
+    timing.prefill_forward_time_us     = 1012000;
+    synthesizePhaseSpans(parent, timing, PhaseRole::Prefill, true);
+    parent->End();
+    ASSERT_TRUE(TelemetryRuntime::shutdown(5000));
+    auto  spans           = span_data_->GetSpans();
+    auto* exported_parent = findSpan(spans, "parent");
+    ASSERT_NE(exported_parent, nullptr);
+    EXPECT_EQ(getInt64Attribute(exported_parent, kAttrRtpLlmPrefillAdmissionQueueWaitUs), 500);
+    EXPECT_EQ(getInt64Attribute(exported_parent, kAttrRtpLlmPrefillKvCacheAcquireWallUs), 4000);
+    EXPECT_EQ(getInt64Attribute(exported_parent, kAttrRtpLlmPrefillEarlyBatchPrepareWallUs), 0);
+    EXPECT_EQ(getInt64Attribute(exported_parent, kAttrRtpLlmPrefillPreviousBatchWaitUs), 2000);
+    EXPECT_EQ(getInt64Attribute(exported_parent, kAttrRtpLlmPrefillFinalPrepareWallUs), 5000);
+    EXPECT_EQ(getStringAttribute(exported_parent, kAttrRtpLlmPrefillTimingError), "dispatch_before_running");
+}
+
+TEST_F(PhaseSpanSynthesizerTest, FailedPrefillAfterForwardWithoutRunningDoesNotReportFullWait) {
+    auto parent                        = createParentSpan("parent");
+    auto timing                        = completedTiming(1000000, 1009000, 1015000, 1016000, 1017000);
+    timing.running_started             = false;
+    timing.running_started_time_us     = 0;
+    timing.scheduler_enqueue_time_us   = 1000500;
+    timing.can_run_time_us             = 1001000;
+    timing.kv_ready_time_us            = 1005000;
+    timing.prefill_previous_release_us = 1008000;
+    timing.prefill_dispatch_time_us    = 1010000;
+    timing.prefill_forward_time_us     = 1012000;
+    synthesizePhaseSpans(parent, timing, PhaseRole::Prefill, false);
+    parent->End();
+    ASSERT_TRUE(TelemetryRuntime::shutdown(5000));
+    auto spans = span_data_->GetSpans();
+    EXPECT_EQ(findSpan(spans, "wait"), nullptr);
+    auto* exported_parent = findSpan(spans, "parent");
+    ASSERT_NE(exported_parent, nullptr);
+    EXPECT_EQ(getInt64Attribute(exported_parent, kAttrRtpLlmPrefillFinalPrepareWallUs), 4000);
 }
 
 TEST_F(PhaseSpanSynthesizerTest, CacheLoadFailurePreservesCompletedAdmissionQueue) {

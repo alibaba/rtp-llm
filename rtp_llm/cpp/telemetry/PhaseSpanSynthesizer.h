@@ -260,6 +260,7 @@ inline void synthesizePhaseSpans(const opentelemetry::nostd::shared_ptr<opentele
     }
     // Enqueue-to-CanRun is independently valid even if later engine milestones
     // are missing. Keep the observable queue time instead of dropping all phases.
+    bool prefill_timeline_valid = false;
     if (role != PhaseRole::Decode) {
         const auto enqueue       = timing.scheduler_enqueue_time_us;
         const auto can_run       = timing.can_run_time_us;
@@ -269,11 +270,12 @@ inline void synthesizePhaseSpans(const opentelemetry::nostd::shared_ptr<opentele
         const auto forward       = timing.prefill_forward_time_us;
         const bool queue_valid   = enqueue >= begin && enqueue <= can_run && can_run <= end;
         const bool running_valid = timing.running_started && can_run <= running && running <= end;
-        const bool forward_valid =
-            forward > 0 && forward <= end && running_valid && running <= dispatch && dispatch <= forward;
-        const bool cache_valid = can_run <= kv_ready && kv_ready <= dispatch;
+        // RUNNING controls wait/prefill spans, not the five pre-forward stages.
+        const bool forward_valid = forward > 0 && forward <= end && dispatch > 0 && dispatch <= forward;
+        const bool cache_valid   = can_run <= kv_ready && kv_ready <= dispatch;
         const bool release_valid =
             timing.prefill_previous_release_us == 0 || timing.prefill_previous_release_us <= dispatch;
+        prefill_timeline_valid = queue_valid && forward_valid && cache_valid && release_valid;
         try {
             if (queue_valid) {
                 parent_span->SetAttribute(kAttrRtpLlmPrefillAdmissionQueueWaitUs, can_run - enqueue);
@@ -283,7 +285,7 @@ inline void synthesizePhaseSpans(const opentelemetry::nostd::shared_ptr<opentele
                     parent_span->SetAttribute(kAttrRtpLlmPrefillCacheExposedWaitUs, int64_t{0});
                 }
             }
-            if (queue_valid && forward_valid && cache_valid && release_valid) {
+            if (prefill_timeline_valid) {
                 const auto release = std::max(kv_ready, timing.prefill_previous_release_us);
                 parent_span->SetAttribute(kAttrRtpLlmPrefillKvCacheAcquireWallUs, kv_ready - can_run);
                 parent_span->SetAttribute(kAttrRtpLlmPrefillEarlyBatchPrepareWallUs, int64_t{0});
@@ -299,17 +301,18 @@ inline void synthesizePhaseSpans(const opentelemetry::nostd::shared_ptr<opentele
                                             nullptr);
                 detail::synthesizeChildSpan(
                     parent_span, "prefill_final_prepare", release, forward - release, timing.request_id, nullptr);
-            } else if (request_ok && timing.generation_done) {
-                const char* reason = !queue_valid            ? "queue_order_invalid" :
-                                     !timing.running_started ? "running_missing" :
-                                     !running_valid          ? "running_order_invalid" :
-                                     forward <= 0            ? "forward_missing" :
-                                     forward > end           ? "forward_after_synthesis_end" :
-                                     dispatch <= 0           ? "dispatch_missing" :
-                                     dispatch < running      ? "dispatch_before_running" :
-                                     dispatch > forward      ? "dispatch_after_forward" :
-                                     !cache_valid            ? "kv_ready_order_invalid" :
-                                                               "previous_release_after_dispatch";
+                if (request_ok && timing.running_started && (!running_valid || dispatch < running)) {
+                    parent_span->SetAttribute(kAttrRtpLlmPrefillTimingError,
+                                              !running_valid ? "running_order_invalid" : "dispatch_before_running");
+                }
+            } else if (request_ok) {
+                const char* reason = !queue_valid       ? "queue_order_invalid" :
+                                     forward <= 0       ? "forward_missing" :
+                                     forward > end      ? "forward_after_synthesis_end" :
+                                     dispatch <= 0      ? "dispatch_missing" :
+                                     dispatch > forward ? "dispatch_after_forward" :
+                                     !cache_valid       ? "kv_ready_order_invalid" :
+                                                          "previous_release_after_dispatch";
                 parent_span->SetAttribute(kAttrRtpLlmPrefillTimingError, reason);
             }
         } catch (...) {}
@@ -320,7 +323,7 @@ inline void synthesizePhaseSpans(const opentelemetry::nostd::shared_ptr<opentele
     // never carries a PD role.
     constexpr const char* kWaitPdRole = nullptr;
     if (!timing.running_started) {
-        if (!request_ok) {
+        if (!request_ok && !prefill_timeline_valid) {
             detail::synthesizeChildSpan(parent_span,
                                         "wait",
                                         begin,
