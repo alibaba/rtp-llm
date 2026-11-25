@@ -28,6 +28,7 @@ import javax.annotation.PreDestroy;
 import java.io.IOException;
 import java.util.Objects;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.RejectedExecutionHandler;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -339,7 +340,7 @@ public class FlexlbGrpcServer {
     }
 
     /**
-     * Preserves gRPC callbacks on the submitting thread when the pool cannot accept them.
+     * Preserves gRPC callbacks on saturation and rejects new DIRECT placement work.
      */
     private static class ReportingCallerRunsHandler implements RejectedExecutionHandler {
         private final FlexMonitor monitor;
@@ -350,6 +351,9 @@ public class FlexlbGrpcServer {
 
         @Override
         public void rejectedExecution(Runnable callback, ThreadPoolExecutor executor) {
+            if (callback instanceof GrpcOverloadInterceptor.DirectScheduleTask) {
+                throw new RejectedExecutionException("FlexLB gRPC executor saturated");
+            }
             try {
                 monitor.report(MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS, 1.0);
             } catch (RuntimeException error) {
