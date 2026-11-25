@@ -144,21 +144,6 @@ class FusedRopeKVCachePrefillOpBase:
         # shuffle indices are only a fallback for models without position IDs.
         position_ids = select_prefill_position_ids(attn_inputs)
 
-        # CUDA graph capture binds tensor pointers once; when a runner uses
-        # device-only attention preparation on replay, only prefix_lengths_device
-        # is refreshed on GPU while host mirrors remain untouched.
-        prefix_lengths_device = getattr(attn_inputs, "prefix_lengths_device", None)
-        prefix_lengths = (
-            prefix_lengths_device
-            if (
-                getattr(attn_inputs, "is_cuda_graph", False)
-                and isinstance(prefix_lengths_device, torch.Tensor)
-                and prefix_lengths_device.is_cuda
-                and prefix_lengths_device.numel() > 0
-            )
-            else attn_inputs.prefix_lengths
-        )
-
         params = FusedRopeAttnParams(
             kv_cache_offset,
             kv_cache_offset_h,
@@ -167,7 +152,7 @@ class FusedRopeKVCachePrefillOpBase:
             attn_inputs.cu_seqlens_device,
             attn_inputs.cu_kv_seqlens_device,
             attn_inputs.input_lengths,
-            prefix_lengths,
+            attn_inputs.prefix_lengths,
             attn_inputs.sequence_lengths,
             attn_inputs.input_lengths.max().item(),
             attn_inputs.prefix_lengths.max().item(),
@@ -176,7 +161,16 @@ class FusedRopeKVCachePrefillOpBase:
             get_scalar_type(attn_inputs.dtype),
         )
         if attn_inputs.is_cuda_graph:
+            # Validate capacity with the host length mirrors during capture
+            # setup. The kernel needs the device prefixes that replay refreshes.
             self._prepare_graph_rope_cache(params)
+            prefixes_device = getattr(attn_inputs, "prefix_lengths_device", None)
+            if (
+                isinstance(prefixes_device, torch.Tensor)
+                and prefixes_device.is_cuda
+                and prefixes_device.numel() > 0
+            ):
+                params.prefix_lengths = prefixes_device
         return params
 
     def _forward(
