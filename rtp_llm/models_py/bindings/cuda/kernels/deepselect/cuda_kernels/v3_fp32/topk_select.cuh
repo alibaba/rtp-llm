@@ -8,8 +8,6 @@ Usage caveats:
 
 #pragma once
 
-#include "topk_select.h"
-
 // The unused CUTLASS launch header is omitted for CUDA 12.9 compatibility.
 #include <cute/arch/copy_sm90_tma.hpp>
 #include "rtp_llm/models_py/bindings/cuda/kernels/deepselect/kerutils/include/kerutils/kerutils.cuh"
@@ -29,7 +27,6 @@ public:
     using OutIdxT              = typename Base::OutIdxT;
     using TmaParams            = typename Base::TmaParams;
     using SharedMemoryPlanBase = typename Base::SharedMemoryPlanBase;
-    using EpilogueT            = typename Base::EpilogueT;
     using Base::NUM_THREADS;
     using Base::NUM_WARPS;
     using Base::MAX_TOPK;
@@ -102,12 +99,8 @@ public:
             if (pick) {
                 const uint32_t slot = first + __popc(mask & ((1u << lane) - 1u));
                 if (slot < args.topk) {
-                    output[slot] = static_cast<OutIdxT>(
-                        args.index_map ? args.index_map[uint64_t(batch_idx) * args.stride_index_map_batch + index] :
-                                         index);
-                    if constexpr (Config::return_value) {
-                        output_values[slot] = value;
-                    }
+                    output[slot]        = static_cast<OutIdxT>(index);
+                    output_values[slot] = value;
                 }
             }
         };
@@ -134,44 +127,14 @@ public:
 
     static __device__ __forceinline__ void topk_select_kernel_devfunc(const TopkSelectArgs& args,
                                                                       const TmaParams&      tma_params) {
-        uint32_t batch_idx = blockIdx.x;
-        if (args.candidate_counts) {
-            const int  count = __ldg(args.candidate_counts + batch_idx);
-            const bool valid = count >= 4096 && count <= 8192;
-            if (valid == args.skip_valid_candidates)
-                return;
-        }
-        int32_t requested_end =
-            args.end_ptr == nullptr ? static_cast<int32_t>(args.vocab_size) : __ldg(args.end_ptr + batch_idx);
-        uint32_t end_vocab_idx = requested_end <= 0 ? 0u : min(static_cast<uint32_t>(requested_end), args.vocab_size);
+        const uint32_t batch_idx     = blockIdx.x;
+        const uint32_t end_vocab_idx = args.vocab_size;
 
         extern __shared__ CUTE_ALIGNAS(1024) char wksp_buf[];
         SharedMemoryPlanFP32&                     smem = *reinterpret_cast<SharedMemoryPlanFP32*>(wksp_buf);
 
         uint32_t warp_idx = cutlass::canonical_warp_idx_sync();
         uint32_t lane_idx = threadIdx.x % 32;
-
-        if (end_vocab_idx <= args.topk) {
-            const float* input = static_cast<const float*>(args.input) + uint64_t(batch_idx) * args.stride_input_batch;
-            OutIdxT*     output =
-                static_cast<OutIdxT*>(args.output_index) + uint64_t(batch_idx) * args.stride_output_index_batch;
-            float* output_values = Config::return_value ? static_cast<float*>(args.output_value)
-                                                              + uint64_t(batch_idx) * args.stride_output_value_batch :
-                                                          nullptr;
-            for (uint32_t slot = threadIdx.x; slot < args.topk; slot += NUM_THREADS) {
-                const bool valid = slot < end_vocab_idx;
-                output[slot] =
-                    valid ?
-                        static_cast<OutIdxT>(
-                            args.index_map ? args.index_map[uint64_t(batch_idx) * args.stride_index_map_batch + slot] :
-                                             slot) :
-                        static_cast<OutIdxT>(-1);
-                if constexpr (Config::return_value) {
-                    output_values[slot] = valid ? input[slot] : args.value_oob_fill_value;
-                }
-            }
-            return;
-        }
 
         uint32_t threshold_bits   = NEG_INF_BITS;
         uint32_t num_incomers     = 0;
@@ -690,9 +653,8 @@ public:
         __syncthreads();
         OutIdxT* output =
             static_cast<OutIdxT*>(args.output_index) + uint64_t(batch_idx) * args.stride_output_index_batch;
-        float* output_values = Config::return_value ? static_cast<float*>(args.output_value)
-                                                          + uint64_t(batch_idx) * args.stride_output_value_batch :
-                                                      nullptr;
+        float* output_values =
+            static_cast<float*>(args.output_value) + uint64_t(batch_idx) * args.stride_output_value_batch;
         if (threshold_bits == NEG_INF_BITS) {
             select_sparse_row(args,
                               batch_idx,
@@ -704,26 +666,17 @@ public:
             return;
         }
         for (uint32_t slot = threadIdx.x; slot < args.topk; slot += NUM_THREADS) {
-            uint64_t pair  = smem.surviving_topk_pairs[survivor_buf_idx][slot];
-            uint32_t index = static_cast<uint32_t>(pair);
-            const bool valid = index < end_vocab_idx;
-            output[slot] =
-                valid ?
-                    static_cast<OutIdxT>(args.index_map ?
-                                             args.index_map[uint64_t(batch_idx) * args.stride_index_map_batch + index] :
-                                             index) :
-                    static_cast<OutIdxT>(-1);
-            if constexpr (Config::return_value) {
-                uint32_t value_bits = static_cast<uint32_t>(pair >> 32);
-                float    value      = __uint_as_float(value_bits);
-                // Selection canonicalizes NaNs to +inf; the old gather returned
-                // the original payload, so reload only exceptional values.
-                if (valid && (value_bits & 0x7fffffffu) == 0x7f800000u) {
-                    value =
-                        static_cast<const float*>(args.input)[uint64_t(batch_idx) * args.stride_input_batch + index];
-                }
-                output_values[slot] = valid ? value : args.value_oob_fill_value;
+            uint64_t   pair       = smem.surviving_topk_pairs[survivor_buf_idx][slot];
+            uint32_t   index      = static_cast<uint32_t>(pair);
+            const bool valid      = index < end_vocab_idx;
+            uint32_t   value_bits = static_cast<uint32_t>(pair >> 32);
+            float      value      = __uint_as_float(value_bits);
+            // Selection canonicalizes NaNs to +inf; return their original payload.
+            if (valid && (value_bits & 0x7fffffffu) == 0x7f800000u) {
+                value = static_cast<const float*>(args.input)[uint64_t(batch_idx) * args.stride_input_batch + index];
             }
+            output[slot]        = valid ? static_cast<OutIdxT>(index) : static_cast<OutIdxT>(-1);
+            output_values[slot] = valid ? value : args.value_oob_fill_value;
         }
     }
 };
@@ -742,8 +695,8 @@ void run_topk_select_kernel(const TopkSelectArgs& args) {
     KU_ASSERT(args.return_value == Config::return_value, "Dispatch failure");
     static_assert(cute::is_same_v<typename Config::ValueT, float>);
     static_assert(cute::is_same_v<typename Config::OutIdxT, int32_t>);
-    static_assert(Config::max_topk == 1024 && !Config::sorted_index && !Config::sorted_value);
-    KU_ASSERT(args.vocab_size < MAX_VOCAB_SIZE, "`vocab_size` is too big");
+    static_assert(Config::max_topk == 1024 && Config::return_value && !Config::sorted_index && !Config::sorted_value);
+    KU_ASSERT(args.vocab_size > Config::max_topk && args.vocab_size < MAX_VOCAB_SIZE, "invalid vocabulary width");
 
     using Kernel = TopkSelectKernelFP32<Config>;
     KU_ASSERT(args.topk == Kernel::MAX_TOPK, "Expected K1024");

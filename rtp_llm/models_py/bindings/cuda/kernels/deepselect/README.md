@@ -1,4 +1,4 @@
-# DeepSelect BF16 K512 subset
+# DeepSelect kernels
 
 Vendored from [vllm-project/DeepSelect](https://github.com/vllm-project/DeepSelect)
 at commit `d96d33afe1fab0d6066da49cdc91e64c2bee65ea`, the revision pinned by
@@ -12,11 +12,11 @@ and kerutils sources match the pinned vLLM fork; the fork changes the host API
 to the Torch stable ABI. The RTP adaptations below remain necessary. This
 integration does not convert FP32 dense or candidate scores to BF16.
 
-Only the BF16 normal selector and its required headers are included. The
-FP32 selector, cluster selector, Torch stable-ABI API, tests, generated
-instantiations, and CUTLASS submodule are excluded. CUTLASS comes from RTP's
-existing Bazel dependency. `deepselect_bf16.cu` instantiates the upstream
-K512 configurations (512 threads / occupancy 1 for one wave, 256 threads /
+Sparse attention uses the BF16 K512 selector. Target verification uses a separate
+FP32 K1024 specialization that returns both scores and vocabulary IDs for Top-P.
+Both use the same DeepSelect kernel base, TMA helpers and RTP CUTLASS dependency.
+
+`deepselect_bf16.cu` instantiates the upstream K512 configurations (512 threads / occupancy 1 for one wave, 256 threads /
 occupancy 2 otherwise) for int32 output without sorting or value output.
 
 Local changes to the vendored headers:
@@ -37,7 +37,7 @@ Local changes to the vendored headers:
   upstream prefix shortcut, and the caller filters nonfinite selected values
   during remapping. This exception contract does not match Torch NaN ordering.
 
-The native wrapper accepts widths divisible by 512, 1024-byte-aligned row
+The BF16 wrapper accepts widths divisible by 512, 1024-byte-aligned row
 strides and 16-byte-aligned input bases. This guarantees the TMA row padding
 is backed by input storage, including the last row of a strided view.
 Outputs have 32-byte-aligned bases/row strides. Indices are unsorted, with

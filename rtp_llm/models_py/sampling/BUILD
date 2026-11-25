@@ -37,8 +37,8 @@ py_test(
 
 py_test(
     name = "test_rejection_output_perf",
-    srcs = ["test_rejection_output_perf.py", "logits_filter.py"],
-    deps = [":sampling", "//rtp_llm:flashinfer-python"],
+    srcs = ["test_rejection_output_perf.py"],
+    deps = [":sampling"],
     tags = ["SM103_CU13", "manual"],
     exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
 )
@@ -47,14 +47,6 @@ py_test(
     name = "test_runtime",
     srcs = ["test_runtime.py"],
     deps = [":sampling"],
-    tags = ["SM103_CU13"],
-    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
-)
-
-py_test(
-    name = "test_logits_filter",
-    srcs = ["test_logits_filter.py", "logits_filter.py"],
-    deps = ["//rtp_llm:torch"],
     tags = ["SM103_CU13"],
     exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
 )

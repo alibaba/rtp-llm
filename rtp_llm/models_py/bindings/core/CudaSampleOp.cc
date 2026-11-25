@@ -299,14 +299,10 @@ std::map<DeferredPlanKey, std::weak_ptr<DeferredGraphPlan>>& deferredGraphPlans(
     return plans;
 }
 
-pybind11::capsule registerDeferredGraphPlan(const pybind11::object& owner,
-                                            uint64_t                graph_exec,
-                                            uint64_t                ready_event,
-                                            const torch::Tensor&    addresses,
-                                            const DeferredPlanKey&  key) {
-    TORCH_CHECK(graph_exec && ready_event && addresses.is_cuda(), "invalid deferred Graph registration");
-    TORCH_CHECK(std::get<0>(key) == addresses.get_device(), "deferred Graph registration device mismatch");
-    auto& plans = deferredGraphPlans();
+template<typename Key, typename Plan>
+pybind11::capsule storeDeferredPlan(std::map<Key, std::weak_ptr<Plan>>& plans,
+                                    const Key&                          key,
+                                    std::shared_ptr<Plan>               plan) {
     for (auto it = plans.begin(); it != plans.end();) {
         it = it->second.expired() ? plans.erase(it) : std::next(it);
     }
@@ -314,11 +310,21 @@ pybind11::capsule registerDeferredGraphPlan(const pybind11::object& owner,
     if (plans.size() >= max_plan_keys && plans.find(key) == plans.end()) {
         plans.erase(plans.begin());
     }
+    plans[key] = plan;
+    return pybind11::capsule(new std::shared_ptr<Plan>(std::move(plan)),
+                             [](void* pointer) { delete static_cast<std::shared_ptr<Plan>*>(pointer); });
+}
+
+pybind11::capsule registerDeferredGraphPlan(const pybind11::object& owner,
+                                            uint64_t                graph_exec,
+                                            uint64_t                ready_event,
+                                            const torch::Tensor&    addresses,
+                                            const DeferredPlanKey&  key) {
+    TORCH_CHECK(graph_exec && ready_event && addresses.is_cuda(), "invalid deferred Graph registration");
+    TORCH_CHECK(std::get<0>(key) == addresses.get_device(), "deferred Graph registration device mismatch");
     auto plan = std::make_shared<DeferredGraphPlan>(
         DeferredGraphPlan{pybind11::weakref(owner), graph_exec, ready_event, addresses});
-    plans[key] = plan;
-    return pybind11::capsule(new std::shared_ptr<DeferredGraphPlan>(std::move(plan)),
-                             [](void* pointer) { delete static_cast<std::shared_ptr<DeferredGraphPlan>*>(pointer); });
+    return storeDeferredPlan(deferredGraphPlans(), key, std::move(plan));
 }
 
 std::optional<DeferredPlanKey> deferredSamplingLayout(const RejectionSamplingParams& params, bool capacity_bucket) {
@@ -380,9 +386,6 @@ bool tryReplayDeferredGraph(const RejectionSamplingParams& params,
                             const torch::Tensor&           positions) {
     if (params.target_candidate_ids_d.defined())
         return false;
-    if (!params.draft_probs_point_mass || params.cum_log_probs.defined()) {
-        return false;
-    }
     const auto layout = deferredSamplingLayout(params, false);
     if (!layout) {
         return false;
@@ -561,15 +564,7 @@ pybind11::capsule registerDeferredKernelPlan(const pybind11::object&  owner,
     for (const auto& descriptor : descriptors) {
         plan->kernels.emplace_back(pybind11::cast<pybind11::tuple>(descriptor));
     }
-    auto& plans = deferredKernelPlans();
-    for (auto it = plans.begin(); it != plans.end();) {
-        it = it->second.expired() ? plans.erase(it) : std::next(it);
-    }
-    if (plans.size() >= 64 && plans.find(key) == plans.end())
-        plans.erase(plans.begin());
-    plans[key] = plan;
-    return pybind11::capsule(new std::shared_ptr<DeferredKernelPlan>(std::move(plan)),
-                             [](void* pointer) { delete static_cast<std::shared_ptr<DeferredKernelPlan>*>(pointer); });
+    return storeDeferredPlan(deferredKernelPlans(), key, std::move(plan));
 }
 
 pybind11::object pyDeferredRejectionFn();
@@ -577,9 +572,6 @@ pybind11::object pyDeferredRejectionFn();
 bool trySubmitDeferredKernels(const RejectionSamplingParams& params,
                               const torch::Tensor&           seeds,
                               const torch::Tensor&           positions) {
-    if (!params.draft_probs_point_mass || params.cum_log_probs.defined()) {
-        return false;
-    }
     const auto layout = deferredSamplingLayout(params, true);
     if (!layout)
         return false;
@@ -885,7 +877,7 @@ static GreedyOutput tryCompactDeferredSampling(const GreedyParams& params, float
            })) {
         torch::Tensor log_normalizer;
         auto          compact = torch_ext::deferred_compact_topk_topp(
-            params.logits, 1024, compact_p, temperature, &log_normalizer, requested_k[0]);
+            params.logits, requested_k[0], compact_p, temperature, &log_normalizer);
         if (std::get<0>(compact).defined()) {
             torch::Tensor prepared_rng;
             if (params.deferred_rejection_rows > 0) {
@@ -949,7 +941,7 @@ static GreedyOutput prepareDeferredTarget(const GreedyParams& params) {
         && std::all_of(requested_p,
                        requested_p + batch_size,
                        [compact_p, normalize_p](float value) { return normalize_p(value) == compact_p; })
-        && torch_ext::deferred_topk_topp_filter(params.logits, 1024, compact_p)) {
+        && torch_ext::deferred_topk_topp_filter(params.logits, compact_p)) {
         return GreedyOutput{torch::Tensor(), true};
     }
     auto top_k = params.top_k.clone();
@@ -1252,10 +1244,14 @@ void rejectionSampling(const RejectionSamplingParams& params) {
                 params.generator, batch_size, std::max<int64_t>(32, ((rows + 3) / 4) * 4), prefix);
         }
         pybind11::gil_scoped_acquire gil;
-        if (trySubmitDeferredKernels(params, state_h.select(0, 0), state_h.select(0, 1))
-            || tryReplayDeferredGraph(params, state_h.select(0, 0), state_h.select(0, 1))) {
-            check_cuda_error();
-            return;
+        if (params.draft_probs_point_mass && !params.cum_log_probs.defined()) {
+            const auto seeds_h     = state_h.select(0, 0);
+            const auto positions_h = state_h.select(0, 1);
+            if (trySubmitDeferredKernels(params, seeds_h, positions_h)
+                || tryReplayDeferredGraph(params, seeds_h, positions_h)) {
+                check_cuda_error();
+                return;
+            }
         }
         auto state_d = state_h.to(torch::kCUDA, /*non_blocking=*/true);
         if (params.buffer_holder != nullptr) {

@@ -399,6 +399,16 @@ deepselect_cuda_copts = [
     "--cuda-include-ptx=sm_103a", "--cuda-gpu-arch=sm_103a",
 ]
 
+deepselect_deps = torch_deps() + [
+    "@local_config_cuda//cuda:cuda_headers",
+    "@local_config_cuda//cuda:cudart",
+] + select({
+    "@//:using_cuda13_x86": ["@cutlass4.0//:cutlass"],
+    "@//:using_cuda13_arm": ["@cutlass4.0//:cutlass"],
+    "@//:using_cuda12_9": ["@cutlass4.0//:cutlass"],
+    "//conditions:default": [],
+})
+
 cc_library(
     name = "deepselect_bf16",
     srcs = ["deepselect_bf16.cu"],
@@ -412,15 +422,7 @@ cc_library(
         "@//:using_cuda12_9": deepselect_cuda_copts + ["-DRTP_DEEPSELECT_BF16_ENABLED"],
         "//conditions:default": [],
     }),
-    deps = torch_deps() + [
-        "@local_config_cuda//cuda:cuda_headers",
-        "@local_config_cuda//cuda:cudart",
-    ] + select({
-        "@//:using_cuda13_x86": ["@cutlass4.0//:cutlass"],
-        "@//:using_cuda13_arm": ["@cutlass4.0//:cutlass"],
-        "@//:using_cuda12_9": ["@cutlass4.0//:cutlass"],
-        "//conditions:default": [],
-    }),
+    deps = deepselect_deps,
     visibility = ["//visibility:public"],
 )
 
@@ -437,14 +439,6 @@ cc_library(
         "@//:using_cuda12_9": deepselect_cuda_copts + ["-DRTP_DEEPSELECT_FP32_ENABLED"],
         "//conditions:default": [],
     }),
-    deps = torch_deps() + [
-        "@local_config_cuda//cuda:cuda_headers",
-        "@local_config_cuda//cuda:cudart",
-    ] + select({
-        "@//:using_cuda13_x86": ["@cutlass4.0//:cutlass"],
-        "@//:using_cuda13_arm": ["@cutlass4.0//:cutlass"],
-        "@//:using_cuda12_9": ["@cutlass4.0//:cutlass"],
-        "//conditions:default": [],
-    }),
+    deps = deepselect_deps,
     visibility = ["//visibility:public"],
 )

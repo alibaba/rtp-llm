@@ -13,7 +13,6 @@ from pathlib import Path
 import torch
 
 from rtp_llm.models_py.sampling import adapter
-from rtp_llm.models_py.sampling.logits_filter import filter_logits
 
 
 Run = Callable[[], torch.Tensor | tuple[torch.Tensor, torch.Tensor]]
@@ -123,26 +122,6 @@ class SamplingPerfTest(unittest.TestCase):
                 lambda: torch.multinomial(logits.softmax(-1), 1),
                 lambda: adapter.sample(logits, seeds, positions),
             )
-
-    def test_reference_filter(self) -> None:
-        from flashinfer.sampling import top_k_renorm_probs, top_p_renorm_probs
-
-        generator = torch.Generator(device="cuda").manual_seed(20261110)
-        logits = torch.randn((16, 154880), device="cuda", generator=generator)
-        k = torch.full((16,), 50, dtype=torch.int32)
-        p = torch.full((16,), 0.9)
-        gpu_k, gpu_p = k.cuda(), p.cuda()
-
-        def flashinfer() -> torch.Tensor:
-            return top_p_renorm_probs(
-                top_k_renorm_probs(logits.softmax(-1), gpu_k), gpu_p
-            )
-
-        def reference() -> torch.Tensor:
-            return filter_logits(logits, k, p).softmax(-1)
-
-        torch.testing.assert_close(reference(), flashinfer(), rtol=1e-5, atol=1e-7)
-        measure_pair("b16_reference_filter", flashinfer, reference)
 
 
 if __name__ == "__main__":

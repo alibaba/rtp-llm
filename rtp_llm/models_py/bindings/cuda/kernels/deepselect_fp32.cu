@@ -122,27 +122,26 @@ __device__ __forceinline__ float compactApplyTemperature(float value, float scal
     return result;
 }
 
-template<int items>
-__device__ void compactTopKTopPBody(float*         dense,
-                                    const float*   selected,
-                                    const int32_t* selected_ids,
-                                    float*         compact,
-                                    int32_t*       ids,
-                                    int32_t*       fallback,
-                                    float*         log_normalizer,
-                                    int            vocab,
-                                    int            request_top_k,
-                                    float          top_p,
-                                    float          temperature_scale,
-                                    bool           scale_temperature) {
-    constexpr int threads = 256;
-    using Sort            = cub::BlockRadixSort<float, threads, items, int32_t>;
-    using Reduce          = cub::BlockReduce<float, threads>;
-    using Scan            = cub::BlockScan<float, threads>;
+__global__ void compactTopKTopP(float*   dense,
+                                float*   candidates,
+                                int32_t* ids,
+                                int32_t* fallback,
+                                float*   log_normalizer,
+                                int      vocab,
+                                int      request_top_k,
+                                float    top_p,
+                                float    temperature) {
+    const bool    scale_temperature = temperature != 1.0f;
+    const float   temperature_scale = scale_temperature ? compactTemperatureScale(temperature) : 1.0f;
+    constexpr int threads           = 256;
+    constexpr int items             = 4;
+    using Sort                      = cub::BlockRadixSort<float, threads, items, int32_t>;
+    using Reduce                    = cub::BlockReduce<float, threads>;
+    using Scan                      = cub::BlockScan<float, threads>;
     __shared__ union {
-        typename Sort::TempStorage   sort;
-        typename Reduce::TempStorage reduce;
-        typename Scan::TempStorage   scan;
+        Sort::TempStorage   sort;
+        Reduce::TempStorage reduce;
+        Scan::TempStorage   scan;
     } temporary;
     __shared__ float maximum, boundary, total, cutoff;
     __shared__ int   overflow;
@@ -152,9 +151,9 @@ __device__ void compactTopKTopPBody(float*         dense,
 #pragma unroll
     for (int i = 0; i < items; ++i) {
         const int   slot = threadIdx.x * items + i;
-        const float raw  = selected[row * 1024 + slot];
+        const float raw  = candidates[row * 1024 + slot];
         values[i]        = scale_temperature ? compactApplyTemperature(raw, temperature_scale) : raw;
-        keys[i]          = selected_ids[row * 1024 + slot];
+        keys[i]          = ids[row * 1024 + slot];
     }
     Sort(temporary.sort).SortDescending(values, keys);
     __syncthreads();
@@ -201,10 +200,8 @@ __device__ void compactTopKTopPBody(float*         dense,
 #pragma unroll
     for (int i = 0; i < items; ++i) {
         const int slot = threadIdx.x * items + i;
-        if (slot < 1024) {
-            compact[row * 1024 + slot] = slot < request_top_k && values[i] >= cutoff ? values[i] : -INFINITY;
-            ids[row * 1024 + slot]     = keys[i];
-        }
+        candidates[row * 1024 + slot] = slot < request_top_k && values[i] >= cutoff ? values[i] : -INFINITY;
+        ids[row * 1024 + slot]        = keys[i];
     }
     if (log_normalizer) {
         float retained = 0.0f;
@@ -216,41 +213,10 @@ __device__ void compactTopKTopPBody(float*         dense,
             log_normalizer[row] = overflow ? nanf("") : maximum + logf(mass);
     }
     if (overflow) {
-        const float threshold = isfinite(maximum) ? cutoff : nanf("");
         for (int token = threadIdx.x; token < vocab; token += threads) {
-            const auto  offset = static_cast<int64_t>(row) * vocab + token;
-            const float raw    = dense[offset];
-            const float value  = scale_temperature ? compactApplyTemperature(raw, temperature_scale) : raw;
-            dense[offset]      = isnan(threshold) ? threshold : (value >= threshold ? value : -INFINITY);
+            dense[static_cast<int64_t>(row) * vocab + token] = nanf("");
         }
     }
-}
-
-__global__ void compactTopKTopP(float*         dense,
-                                const float*   selected,
-                                const int32_t* selected_ids,
-                                float*         compact,
-                                int32_t*       ids,
-                                int32_t*       fallback,
-                                float*         log_normalizer,
-                                int            vocab,
-                                int            request_top_k,
-                                float          top_p,
-                                float          temperature) {
-    const bool  scale_temperature = temperature != 1.0f;
-    const float temperature_scale = scale_temperature ? compactTemperatureScale(temperature) : 1.0f;
-    compactTopKTopPBody<4>(dense,
-                           selected,
-                           selected_ids,
-                           compact,
-                           ids,
-                           fallback,
-                           log_normalizer,
-                           vocab,
-                           request_top_k,
-                           top_p,
-                           temperature_scale,
-                           scale_temperature);
 }
 
 __global__ void deferredMaskLogits(float* logits, const float* thresholds, int vocab) {
@@ -263,9 +229,10 @@ __global__ void deferredMaskLogits(float* logits, const float* thresholds, int v
         logits[offset]        = isnan(threshold) ? threshold : (value >= threshold ? value : -INFINITY);
     }
 }
-bool supportsDeferredTopK1024(const torch::Tensor& logits, int64_t k, float top_p) {
-    if (k != 1024 || !logits.is_cuda() || logits.scalar_type() != torch::kFloat32 || logits.dim() != 2
-        || !logits.is_contiguous() || logits.size(0) > 65535 || logits.size(1) <= k || logits.size(1) >= MAX_VOCAB_SIZE
+
+bool supportsDeferredTopK1024(const torch::Tensor& logits, float top_p) {
+    if (!logits.is_cuda() || logits.scalar_type() != torch::kFloat32 || logits.dim() != 2 || !logits.is_contiguous()
+        || logits.size(0) > 65535 || logits.size(1) <= 1024 || logits.size(1) >= MAX_VOCAB_SIZE
         || logits.stride(0) % 256 != 0 || reinterpret_cast<uintptr_t>(logits.data_ptr()) % 16 != 0
         || !(top_p > 0.0f && top_p <= 1.0f))
         return false;
@@ -301,15 +268,15 @@ std::tuple<torch::Tensor, torch::Tensor> selectTopK1024(const torch::Tensor& log
 }  // namespace
 #endif
 
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> deferred_compact_topk_topp(const torch::Tensor& logits,
-                                                                                   int64_t              k,
-                                                                                   float                top_p,
-                                                                                   float                temperature,
-                                                                                   torch::Tensor*       log_normalizer,
-                                                                                   int64_t              request_top_k) {
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
+deferred_compact_topk_topp(const torch::Tensor& logits,
+                           int64_t              request_top_k,
+                           float                top_p,
+                           float                temperature,
+                           torch::Tensor*       log_normalizer) {
 #if defined(RTP_DEEPSELECT_FP32_ENABLED) && !defined(USE_ROCM)
-    if (request_top_k < 2 || request_top_k > k || !std::isfinite(temperature) || temperature <= 0.0f
-        || !supportsDeferredTopK1024(logits, k, top_p))
+    if (request_top_k < 2 || request_top_k > 1024 || !std::isfinite(temperature) || temperature <= 0.0f
+        || !supportsDeferredTopK1024(logits, top_p))
         return {};
     const c10::cuda::CUDAGuard guard(logits.device());
     const auto                 stream = at::cuda::getCurrentCUDAStream(logits.get_device());
@@ -320,17 +287,13 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> deferred_compact_topk_to
         if (capture_status != cudaStreamCaptureStatusNone)
             return {};
     }
-    auto selected = selectTopK1024(logits, stream);
-    auto compact  = torch::empty({logits.size(0), 1024}, logits.options());
-    auto ids      = torch::empty({logits.size(0), 1024}, logits.options().dtype(torch::kInt32));
-    auto fallback = torch::empty({logits.size(0)}, logits.options().dtype(torch::kInt32));
+    auto [candidates, ids] = selectTopK1024(logits, stream);
+    auto fallback          = torch::empty({logits.size(0)}, logits.options().dtype(torch::kInt32));
     if (log_normalizer)
         *log_normalizer = torch::empty({logits.size(0)}, logits.options());
     if (logits.size(0)) {
         compactTopKTopP<<<logits.size(0), 256, 0, stream>>>(logits.data_ptr<float>(),
-                                                            std::get<0>(selected).data_ptr<float>(),
-                                                            std::get<1>(selected).data_ptr<int32_t>(),
-                                                            compact.data_ptr<float>(),
+                                                            candidates.data_ptr<float>(),
                                                             ids.data_ptr<int32_t>(),
                                                             fallback.data_ptr<int32_t>(),
                                                             log_normalizer ? log_normalizer->data_ptr<float>() :
@@ -341,15 +304,15 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> deferred_compact_topk_to
                                                             temperature);
         C10_CUDA_KERNEL_LAUNCH_CHECK();
     }
-    return {compact, ids, fallback};
+    return {candidates, ids, fallback};
 #else
     return {};
 #endif
 }
 
-bool deferred_topk_topp_filter(const torch::Tensor& logits, int64_t k, float top_p) {
+bool deferred_topk_topp_filter(const torch::Tensor& logits, float top_p) {
 #if defined(RTP_DEEPSELECT_FP32_ENABLED) && !defined(USE_ROCM)
-    if (!supportsDeferredTopK1024(logits, k, top_p))
+    if (!supportsDeferredTopK1024(logits, top_p))
         return false;
     const c10::cuda::CUDAGuard guard(logits.device());
     const auto                 stream     = at::cuda::getCurrentCUDAStream(logits.get_device());

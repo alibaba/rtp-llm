@@ -1016,7 +1016,7 @@ TEST_F(CudaSamplerTest, testDeferredCompactFilterHonorsRequestTopKAndTopP) {
     auto          ids    = torch::arange(4096, options);
     auto          logits = torch::stack({-ids, ids - 4095});
     torch::Tensor normalizer;
-    auto          selected = torch_ext::deferred_compact_topk_topp(logits, 1024, 0.8f, 1.0f, &normalizer, 3);
+    auto          selected = torch_ext::deferred_compact_topk_topp(logits, 3, 0.8f, 1.0f, &normalizer);
     if (properties->major != 10 || (properties->minor != 0 && properties->minor != 3)) {
         EXPECT_FALSE(std::get<0>(selected).defined());
         EXPECT_FALSE(normalizer.defined());
@@ -1030,6 +1030,22 @@ TEST_F(CudaSamplerTest, testDeferredCompactFilterHonorsRequestTopKAndTopP) {
     EXPECT_EQ(toHostInt(std::get<2>(selected)), (std::vector<int32_t>{0, 0}));
     EXPECT_TRUE(torch::allclose(normalizer, torch::full_like(normalizer, std::log1p(std::exp(-1.0f))), 1e-5, 1e-6));
 
-    selected = torch_ext::deferred_compact_topk_topp(logits, 1024, 1.0f, 1.0f, nullptr, 1025);
+    // Top-P uses the mass inside Top-2: 0.4 / (0.4 + 0.3) > 0.55.
+    auto weighted = torch::full({1, 4096}, -std::numeric_limits<float>::infinity(), options);
+    weighted[0].slice(0, 0, 4).copy_(torch::tensor({0.4f, 0.3f, 0.2f, 0.1f}, options).log());
+    selected = torch_ext::deferred_compact_topk_topp(weighted, 2, 0.55f);
+    ASSERT_TRUE(std::get<0>(selected).defined());
+    kept = torch::isfinite(std::get<0>(selected));
+    EXPECT_EQ(toHostInt(std::get<1>(selected).masked_select(kept)), (std::vector<int32_t>{0}));
+
+    // The compact output has exactly K slots. The dense mask keeps all boundary ties.
+    auto tied = torch::zeros({1, 4096}, options);
+    selected  = torch_ext::deferred_compact_topk_topp(tied, 1024, 0.35f);
+    ASSERT_TRUE(std::get<0>(selected).defined());
+    EXPECT_EQ(torch::isfinite(std::get<0>(selected)).sum().item<int>(), 1024);
+    ASSERT_TRUE(torch_ext::deferred_topk_topp_filter(tied, 0.35f));
+    EXPECT_EQ(torch::isfinite(tied).sum().item<int>(), 4096);
+
+    selected = torch_ext::deferred_compact_topk_topp(logits, 1025, 1.0f);
     EXPECT_FALSE(std::get<0>(selected).defined());
 }

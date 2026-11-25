@@ -4,7 +4,7 @@ import torch
 import triton
 import triton.language as tl
 from rtp_llm.models_py.sampling.draft_logits import DraftLogitsCache, draft_logits_row
-from rtp_llm.models_py.sampling.vllm_gumbel import gumbel_block_argmax, tl_rand32
+from rtp_llm.models_py.sampling.vllm_gumbel import gumbel_noised_argmax, tl_rand32
 from triton.language.extra.cuda import libdevice as tldevice
 
 
@@ -468,42 +468,6 @@ def _rejection_kernel(
 
 
 @triton.jit
-def _seeded_resample_argmax(
-    residual_logits,
-    block,
-    mask,
-    resample_token_idx,
-    expanded_idx_mapping_ptr,
-    temp_ptr,
-    seed_ptr,
-    pos_ptr,
-    vocab_size,
-    USE_FP64: tl.constexpr,
-):
-    return gumbel_block_argmax(
-        residual_logits,
-        block,
-        mask,
-        resample_token_idx,
-        expanded_idx_mapping_ptr,
-        temp_ptr,
-        seed_ptr,
-        pos_ptr,
-        None,  # logits_cache_ptr
-        0,  # logits_cache_stride_0
-        0,  # logits_cache_stride_1
-        None,  # logits_cache_col_ptr
-        None,  # logits_cache_source_ptr
-        0,  # logits_cache_source_stride
-        None,  # logits_cache_row_mapping_ptr
-        vocab_size,
-        IS_DRAFTING=False,
-        APPLY_TEMPERATURE=False,
-        USE_FP64=USE_FP64,
-    )
-
-
-@triton.jit
 def _resample_kernel(
     # [num_reqs, num_blocks]
     resampled_local_argmax_ptr,
@@ -562,7 +526,9 @@ def _resample_kernel(
     resample_token_idx = start_idx + resample_idx
     req_state_idx = tl.load(expanded_idx_mapping_ptr + resample_token_idx).to(tl.int64)
 
-    temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
+    temp = tl.load(temp_ptr + req_state_idx, mask=req_state_idx >= 0, other=0.0).to(
+        tl.float32
+    )
     is_bonus = resample_token_idx == end_idx - 1
     if temp == 0.0 and not is_bonus:
         # Greedy + non-bonus token. No resampling needed because
@@ -652,17 +618,16 @@ def _resample_kernel(
         ).to(tl.float32)
 
     # Resample the rejected/bonus token.
-    value, idx = _seeded_resample_argmax(
+    value, idx = gumbel_noised_argmax(
         residual_logits,
         block,
         mask,
-        resample_token_idx,
-        expanded_idx_mapping_ptr,
-        temp_ptr,
-        seed_ptr,
-        pos_ptr,
-        vocab_size,
+        tl.load(seed_ptr + req_state_idx, mask=req_state_idx >= 0, other=0),
+        tl.load(pos_ptr + resample_token_idx),
+        temp,
+        IS_DRAFTING=False,
         USE_FP64=USE_FP64,
+        APPLY_TEMPERATURE=False,
     )
     token_id = block_idx * BLOCK_SIZE + idx
     tl.store(

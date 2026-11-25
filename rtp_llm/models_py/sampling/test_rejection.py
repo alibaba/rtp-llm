@@ -85,12 +85,13 @@ class RejectionSourceTest(unittest.TestCase):
         expected = bodies(
             Path(reference) / "vllm/v1/worker/gpu/spec_decode/rejection_sampler_utils.py"
         )
-        block_only = {
+        omitted = {
             "_compute_global_residual_mass",
             "_compute_cumulative_log_p_kernel",
             "_compute_local_residual_mass_kernel",
+            "_seeded_resample_argmax",
         }
-        self.assertEqual(actual.keys(), expected.keys() - block_only)
+        self.assertEqual(actual.keys(), expected.keys() - omitted)
         # RTP adapts these functions for direct output, graph addresses, fused draft
         # probability logs and sequential verification. GPU tests cover those paths.
         adapted = {

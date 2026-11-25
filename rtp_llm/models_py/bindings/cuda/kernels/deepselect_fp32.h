@@ -7,11 +7,10 @@ namespace torch_ext {
 // Unsupported inputs return undefined tensors without modifying logits.
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
 deferred_compact_topk_topp(const torch::Tensor& logits,
-                           int64_t              k,
+                           int64_t              request_top_k,
                            float                top_p,
                            float                temperature    = 1.0f,
-                           torch::Tensor*       log_normalizer = nullptr,
-                           int64_t              request_top_k  = 1024);
+                           torch::Tensor*       log_normalizer = nullptr);
 // Returns false without modifying logits when this fast path is unsupported.
-bool deferred_topk_topp_filter(const torch::Tensor& logits, int64_t k, float top_p);
+bool deferred_topk_topp_filter(const torch::Tensor& logits, float top_p);
 }  // namespace torch_ext
