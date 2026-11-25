@@ -183,7 +183,6 @@ py_test(
 )
 
 # Pass --test_arg=--checkpoint_path=/path/to/checkpoint for these manual targets.
-# Both DP8 targets need --test_env=QWEN4_PLE_SHARED_TABLE=/path/to/manifest.json.
 # Grid batch_size is per DP rank: decode 4 * DP8 = 32 concurrent requests.
 [
     py_test(
@@ -242,10 +241,7 @@ py_test(
 py_test(
     name = "qwen4_m11_mxfp4_sm10x_timeline",
     main = "qwen4_m11_timeline.py",
-    srcs = [
-        "qwen4_m11_ple.py",
-        "qwen4_m11_timeline.py",
-    ],
+    srcs = ["qwen4_m11_timeline.py"],
     timeout = "eternal",
     deps = [":perf_test_lib"],
     data = ["//rtp_llm:sdk"],

@@ -486,8 +486,8 @@ def main() -> None:
     os.environ.pop("ENABLE_FP32_LM_HEAD", None)
     logging.basicConfig(level=logging.INFO)
 
-    from rtp_llm.test.perf_test.qwen4_m11_ple import shared_ple
     from rtp_llm.test.utils.maga_server_manager import MagaServerManager
+    from rtp_llm.utils.qwen4_ple import shared_ple
 
     server_args = """
         --role_type PDFUSION --frontend_server_count 1
@@ -528,7 +528,7 @@ def main() -> None:
     server_args += f" --reuse_cache {int(reuse_cache)}"
     if reuse_cache:
         server_args += " --reuse_cache_tail_blocks 4"
-    with shared_ple(checkpoint, output) as manifest:
+    with shared_ple(checkpoint) as table_fd:
         server_env = {
             "BATCH_DECODE_SCHEDULER_WARMUP_TYPE": "0",
             "FT_SERVER_TEST": "1",
@@ -544,7 +544,6 @@ def main() -> None:
             "QUANTIZATION": "",
             "SP_QUANTIZATION": "",
             "QWEN4_GDN_BACKEND": "flashinfer",
-            "QWEN4_PLE_SHARED_TABLE": str(manifest),
             "QWEN4_QSA_FUSED_INDEXER_PREP": "1",
             "QWEN4_QSA_INDEXER_BACKEND": "flashinfer",
             "QWEN4_QSA_INDEXER_CHUNK_SIZE": "4096",
@@ -566,6 +565,7 @@ def main() -> None:
                 model_type="qwen4_exp",
                 tokenizer_path=str(checkpoint),
                 timeout=3000,
+                pass_fds=(table_fd,),
             ):
                 raise RuntimeError(f"Qwen4 did not start. See {server.log_file_path}")
             phases = ("mtp",) if mtp else ("decode",)

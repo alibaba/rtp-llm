@@ -383,6 +383,9 @@ class ModelFactory:
         """
         model_cls = ModelFactory.get_model_cls(model_args.model_type)
         model_config = model_cls._create_config(model_args.ckpt_path)
+        ple_table_path = getattr(model_args, "_qwen4_ple_table_path", None)
+        if ple_table_path is not None:
+            model_config._qwen4_ple_table_path = ple_table_path
         build_model_config(
             model_config=model_config,
             model_args=model_args,

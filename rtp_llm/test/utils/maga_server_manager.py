@@ -155,6 +155,8 @@ class MagaServerManager(object):
         ptuning_path: Optional[str] = None,
         log_to_file: bool = True,
         timeout: int = 1600,
+        *,
+        pass_fds: tuple[int, ...] = (),
     ):
         if model_path is None:
             model_path = os.environ.get("CHECKPOINT_PATH")
@@ -258,6 +260,7 @@ class MagaServerManager(object):
             stdout=self._file_stream,
             stderr=self._file_stream,
             cwd=cwd_path,
+            pass_fds=pass_fds,
         )
         with self._state_lock:
             self._server_process = p

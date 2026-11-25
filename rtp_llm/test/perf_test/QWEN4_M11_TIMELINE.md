@@ -61,11 +61,10 @@ with MTP disabled, pass one of these options (Bazel `--test_arg`):
 Set `QWEN4_PROFILE_VERIFY_GRAPH_EVENT=1` (Bazel `--test_env`) to add an external
 event after the first 12 MTP target verify layers.
 
-Set `QWEN4_PLE_SHARED_TABLE` (Bazel `--test_env`) to reuse
-a matching shared PLE manifest whose backing remains readable throughout the
-test. If unset, the driver stages the roughly 305 GiB PLE table from the checkpoint
-in a Linux memfd and keeps it alive until the server stops. Allow an additional
-96 GiB of available host RAM for the rest of the run.
+The driver stages the roughly 305 GiB PLE table from the checkpoint in a Linux
+memfd and keeps it alive until the server stops. Ranks derive their shard offsets
+from the checkpoint index and safetensors headers. Allow an additional 96 GiB of
+available host RAM for the rest of the run.
 
 The default run writes one raw trace and separate `-mtp-prefill-` and
 `-mtp-decode-` traces per rank in `timelines/`. The phase traces preserve GPU
@@ -78,4 +77,4 @@ server arguments and backend environment in `launch.json`.
 The manual smoke target `//rtp_llm/test/smoke:qwen4_m11_mxfp4_sm10x` also checks
 that a changed continuation hits the seeded page-aligned prefix and generates
 the same token IDs as a cold request. Give it the same checkpoint through
-`QWEN4_M11_CHECKPOINT` and the shared PLE manifest through `QWEN4_PLE_SHARED_TABLE`.
+`QWEN4_M11_CHECKPOINT`.
