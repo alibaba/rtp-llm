@@ -875,7 +875,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
         model_.reset(new PyWrappedModel(
             model_init_params, params.py_model, false, true, DSparkModelRole::NONE, true, dspark_prefill_commit_only_));
     }
-    if (!warm_up_ && !is_block_draft_ && !enable_ffn_disaggregate_ && role_type_ != RoleType::PREFILL && model_
+    if (!warm_up_ && !is_block_draft_ && role_type_ != RoleType::PREFILL && model_
         && model_->supportsDeviceSpeculativeHandoff()) {
         if (model_->supportsAsyncSpeculativeTargetVerdict()) {
             target_verdict_runner_.emplace(cuda_graph::graphGetStreamFromPool(false));
@@ -1204,9 +1204,8 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
                                   0;
 
     // Root can announce an empty prefill with just the existing TP header.
-    // Peers still gather their local cache topology for a possible real root
-    // batch; disaggregated FFN workers retain the full alignment input.
-    if (!streams.empty() || !isTpRank0() || enable_ffn_disaggregate_) {
+    // Peers still gather their local cache topology for a possible real root batch.
+    if (!streams.empty() || !isTpRank0()) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(gather_model_input)");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         auto    model_input_status =
@@ -4070,7 +4069,7 @@ void MtpExecutor::publishSyncMtpDeviceState(const StreamGroups&                 
     }
 
     auto next_position_ids_all =
-        is_block_draft_ ? advanceDSparkPositionIds(
+        is_block_draft_ ? advanceVerifyPositionIds(
                               verify_position_ids, accept_len_all, batch_size, static_cast<int64_t>(propose_step_ + 1)) :
                           torch::Tensor();
 
@@ -4196,7 +4195,7 @@ bool MtpExecutor::proactivelyGrowMtpKvCacheForNextRound(const StreamGroups&     
                                                         const std::vector<std::string>& group_tags,
                                                         torch::Tensor&                  kv_cache_block_id,
                                                         torch::Tensor&                  kv_cache_kernel_block_id) {
-    if (!is_linear_attention_model_ || !useDeviceInput() || is_dspark_ || group_tags.empty() || !batch_stream_processor_
+    if (!is_linear_attention_model_ || !useDeviceInput() || is_block_draft_ || group_tags.empty() || !batch_stream_processor_
         || !kv_cache_block_id.defined() || !kv_cache_block_id.is_cuda() || !kv_cache_kernel_block_id.defined()
         || !kv_cache_kernel_block_id.is_cuda()) {
         return false;

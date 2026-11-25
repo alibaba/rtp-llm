@@ -1393,7 +1393,7 @@ void MtpBatchStreamProcessor::prepareDecodeDraftModelInput(const StreamGroups& s
                 // Idle rows may publish only a proposal, even with device state disabled.
                 auto proposal = state.propose_tokens_gpu.defined() && state.propose_tokens_gpu.is_cuda() ?
                                     lastColumnAsFlat(state.propose_tokens_gpu) :
-                                    pickOneStepDraftToken(stream);
+                                    pickOneStepDraftToken(stream, useMtpDeviceState());
                 proposals.push_back(toCudaInt32(proposal, host_holder));
                 prefixes.push_back(toCudaInt32(model_input.sequence_lengths.narrow(0, row, 1), host_holder));
             }
@@ -1486,8 +1486,10 @@ bool MtpBatchStreamProcessor::gatherMtpDecodeModelInputFromDeviceState(const Str
     for (const auto& stream : all_streams) {
         const auto& state = states[row];
         if (missingMtpStateReason(state)) {
-            target_last_slices_gpu.push_back(toCudaInt32(pickOneStepTargetLastToken(stream), host_holder));
-            propose_slices_gpu.push_back(toCudaInt32(pickOneStepDraftToken(stream), host_holder));
+            target_last_slices_gpu.push_back(
+                toCudaInt32(pickOneStepTargetLastToken(stream, useMtpDeviceState()), host_holder));
+            propose_slices_gpu.push_back(
+                toCudaInt32(pickOneStepDraftToken(stream, useMtpDeviceState()), host_holder));
             next_seq_len_slices_gpu.push_back(toCudaInt32(model_input.sequence_lengths.narrow(0, row, 1), host_holder)
                                               + 1);
             ++row;
@@ -1744,6 +1746,7 @@ void MtpBatchStreamProcessor::updateDecodePostDraftModelInput(
     const size_t                                 batch_size,
     TensorHolder&                                host_holder) {
     model_input.is_draft_extend = true;
+    torch::Tensor hidden_states_d_t;
     mtp::prepareDraftPrefillAfterVerify(model_input,
                                         model_output.all_hidden_states,
                                         speculative_sampler_output,
@@ -1898,7 +1901,6 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
     const auto& draft_model_output   = draft_prefill_output.model_output;
     const auto& draft_sampler_output = draft_prefill_output.sampler_output;
 
-    int batch_idx_in      = 0;
     int batch_idx_out     = 0;
     int token_offset      = 0;
     int target_row_offset = 0;
@@ -1967,7 +1969,6 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
         // dense (propose_step_+1) rows/stream layout, while the default sync
         // path compacts draft inputs (and thus hidden rows) to accept_len.
         token_offset += draftInputLayout() == mtp::DraftInputLayout::FIXED_WIDTH ? (propose_step_ + 1) : cur_accept_len;
-        batch_idx_in += cur_batch_size;
         batch_idx_out += next_batch_size;
     }
 }

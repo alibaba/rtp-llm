@@ -300,7 +300,7 @@ TEST(MtpExecutorPolicyTest, TorchSpecDSparkGammaFiveAndSevenAdvanceEveryAccepted
             // every accepted_draft count advances by one through gamma + 1.
             auto accept_len = torch::tensor({accepted_draft + 1, gamma - accepted_draft + 1},
                                             torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
-            auto next = MtpExecutor::advanceDSparkPositionIds(verify_positions, accept_len, batch_size, verify_width);
+            auto next = MtpExecutor::advanceVerifyPositionIds(verify_positions, accept_len, batch_size, verify_width);
             auto expected = torch::tensor(std::vector<int32_t>{accepted_draft + 1,
                                              accepted_draft + 2,
                                              accepted_draft + 3,
