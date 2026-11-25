@@ -90,14 +90,19 @@ def _legacy(m, mode):
 def _dependencies():
     import deep_gemm
 
-    include = Path(deep_gemm.__file__).resolve().parent / "include"
-    for name, expected in _VENDOR_HASHES.items():
-        path = include / "deep_gemm" / name
-        if (
-            not path.is_file()
-            or hashlib.sha256(path.read_bytes()).hexdigest() != expected
-        ):
-            return None
+    # Bazel may symlink individual package files into the runfiles tree.
+    # Look beside the imported package before following its __init__.py symlink.
+    module = Path(deep_gemm.__file__)
+    for include in dict.fromkeys((module.parent / "include", module.resolve().parent / "include")):
+        for name, expected in _VENDOR_HASHES.items():
+            header = include / "deep_gemm" / name
+            if not header.is_file() or hashlib.sha256(header.read_bytes()).hexdigest() != expected:
+                logging.warning("Missing or incompatible V41 epilogue header: %s", header)
+                break
+        else:
+            break
+    else:
+        return None
     cuda = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
     nvcc = str(Path(cuda) / "bin/nvcc") if cuda else shutil.which("nvcc")
     cxx = os.environ.get("CXX") or shutil.which("c++")

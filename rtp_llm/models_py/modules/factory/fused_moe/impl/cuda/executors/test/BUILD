@@ -1,3 +1,4 @@
+load("@pip_dsv4_test//:requirements.bzl", test_requirement = "requirement")
 load("//rtp_llm/test/utils:cuda13_sm100_test.bzl", "cuda13_sm100_py_test")
 load("//rtp_llm/models_py/modules/dsv4/test:defs.bzl", "dsv4_sm100_py_test")
 
@@ -51,6 +52,7 @@ py_test (
         "deepgemm_masked_executor_test.py",
     ],
     deps = [
+        test_requirement("pytest"),
         ":fused_moe_executor_test_util",
         "//rtp_llm:config",
         "//rtp_llm:testlib",
@@ -202,6 +204,7 @@ py_test (
     name = "trtllm_fp4_executor_test",
     srcs = ["trtllm_fp4_executor_test.py"],
     deps = [
+        test_requirement("pytest"),
         "//rtp_llm:config",
         "//rtp_llm:flashinfer-python",
         "//rtp_llm:nvidia-cutlass-dsl",
