@@ -1,9 +1,6 @@
 import ast
-import json
 import os
-import statistics
 import unittest
-from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import patch
 
@@ -77,44 +74,35 @@ class RejectionSourceTest(unittest.TestCase):
         reference = os.environ.get("VLLM_GUMBEL_REFERENCE_DIR")
         if reference is None:
             self.skipTest("VLLM_GUMBEL_REFERENCE_DIR is unset")
-        sources = {
-            "vllm_rejection.py": "worker/gpu/spec_decode/rejection_sampler_utils.py",
-            "vllm_watermark.py": "worker/gpu/sample/watermark.py",
-            "vllm_philox.py": "watermarking/prfs/philox.py",
-            "vllm_prf_base.py": "watermarking/prfs/base.py",
-            "vllm_fly.py": "spec_decode/fly.py",
+        def bodies(path: Path) -> dict[str, str]:
+            return {
+                node.name: ast.dump(node)
+                for node in ast.parse(path.read_text()).body
+                if isinstance(node, (ast.FunctionDef, ast.ClassDef))
+            }
+
+        actual = bodies(Path(adapter.__file__).with_name("vllm_rejection.py"))
+        expected = bodies(
+            Path(reference) / "vllm/v1/worker/gpu/spec_decode/rejection_sampler_utils.py"
+        )
+        block_only = {
+            "_compute_global_residual_mass",
+            "_compute_cumulative_log_p_kernel",
+            "_compute_local_residual_mass_kernel",
         }
-        for local, original in sources.items():
-            with self.subTest(source=local):
-
-                def bodies(path: Path) -> dict[str, str]:
-                    return {
-                        node.name: ast.dump(node)
-                        for node in ast.parse(path.read_text()).body
-                        if isinstance(node, (ast.FunctionDef, ast.ClassDef))
-                    }
-
-                actual = bodies(Path(adapter.__file__).with_name(local))
-                expected = bodies(Path(reference) / "vllm/v1" / original)
-                self.assertEqual(actual.keys(), expected.keys())
-                # These functions fuse draft probability logs; behavioral equivalence
-                # is covered by FusedDraftLogTest instead of upstream AST equality.
-                adapted = (
-                    {
-                        "_compute_global_logprobs_and_logsumexp",
-                        "_compute_local_logits_stats_kernel",
-                        "_compute_cumulative_log_p_kernel",
-                        "_compute_local_residual_mass_kernel",
-                        "_rejection_kernel",
-                        "_resample_kernel",
-                        "rejection_sample",
-                        "_insert_resampled_kernel",
-                    }
-                    if local == "vllm_rejection.py"
-                    else set()
-                )
-                for name in actual.keys() - adapted:
-                    self.assertEqual(actual[name], expected[name], name)
+        self.assertEqual(actual.keys(), expected.keys() - block_only)
+        # RTP adapts these functions for direct output, graph addresses, fused draft
+        # probability logs and sequential verification. GPU tests cover those paths.
+        adapted = {
+            "_compute_global_logprobs_and_logsumexp",
+            "_compute_local_logits_stats_kernel",
+            "_rejection_kernel",
+            "_resample_kernel",
+            "_insert_resampled_kernel",
+            "rejection_sample",
+        }
+        for name in actual.keys() - adapted:
+            self.assertEqual(actual[name], expected[name], name)
 
 
 class DirectOutputTest(unittest.TestCase):
@@ -843,208 +831,6 @@ class FusedDraftLogTest(unittest.TestCase):
                         actual[valid], expected[valid], rtol=0, atol=0
                     )
                 torch.testing.assert_close(probabilities, original, rtol=0, atol=0)
-
-
-@unittest.skipUnless(
-    os.environ.get("RTP_LLM_PROFILE_DRAFT_LOG") == "1",
-    "set RTP_LLM_PROFILE_DRAFT_LOG=1 for graph timing and CUDA traces",
-)
-class DraftLogProfileTest(unittest.TestCase):
-    graph_calls = 8
-    replay_count = 10
-    rounds = 6
-
-    def capture(
-        self, draw: Callable[[], tuple[torch.Tensor, torch.Tensor]]
-    ) -> tuple[torch.cuda.CUDAGraph, tuple[torch.Tensor, torch.Tensor]]:
-        for _ in range(5):
-            draw()
-        torch.cuda.synchronize()
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph):
-            for _ in range(self.graph_calls):
-                output = draw()
-        graph.replay()
-        torch.cuda.synchronize()
-        return graph, output
-
-    def trace(self, graph: torch.cuda.CUDAGraph, path: Path) -> None:
-        with torch.profiler.profile(
-            activities=[
-                torch.profiler.ProfilerActivity.CPU,
-                torch.profiler.ProfilerActivity.CUDA,
-            ]
-        ) as profile:
-            graph.replay()
-            torch.cuda.synchronize()
-        profile.export_chrome_trace(str(path))
-        events = json.loads(path.read_text())["traceEvents"]
-        kernels = [event for event in events if event.get("cat") == "kernel"]
-        self.assertTrue(kernels, "CUDA kernel events are required")
-        durations: dict[str, list[float]] = {}
-        for event in kernels:
-            durations.setdefault(event["name"], []).append(event["dur"])
-        stages = [
-            {
-                "kernel": name,
-                "calls": len(values),
-                "total_us": sum(values),
-                "mean_us": statistics.mean(values),
-                "us_per_sampler_call": sum(values) / self.graph_calls,
-                "launch_metadata": next(
-                    event.get("args", {}) for event in kernels if event["name"] == name
-                ),
-            }
-            for name, values in durations.items()
-        ]
-        stages.sort(key=lambda stage: stage["total_us"], reverse=True)
-        span = max(event["ts"] + event["dur"] for event in kernels) - min(
-            event["ts"] for event in kernels
-        )
-        summary = {
-            "graph_calls": self.graph_calls,
-            "kernel_count": len(kernels),
-            "kernel_sum_us": sum(event["dur"] for event in kernels),
-            "graph_span_us": span,
-            "stages": stages,
-        }
-        path.with_suffix(".kernels.json").write_text(json.dumps(summary, indent=2))
-        print(
-            f"DRAFT_LOG_TRACE {path.name} span_us={span:.3f} "
-            f"kernel_sum_us={summary['kernel_sum_us']:.3f} "
-            f"kernels={len(kernels)}",
-            flush=True,
-        )
-        for stage in stages:
-            print(
-                f"  {stage['kernel']} calls={stage['calls']} "
-                f"total_us={stage['total_us']:.3f}",
-                flush=True,
-            )
-
-    def benchmark_case(
-        self, batch: int, random: bool, full_support: bool, reject: bool
-    ) -> None:
-        steps, vocab = 3, 154880
-        generator = torch.Generator(device="cuda").manual_seed(20261109 + batch)
-        logits = torch.zeros(batch, steps + 1, vocab, device="cuda")
-        if full_support:
-            q = torch.rand(
-                batch, steps, vocab, device="cuda", generator=generator
-            ).add_(0.01)
-            q.div_(q.sum(-1, keepdim=True))
-            logits[:, :steps].copy_(q.log())
-            logits[:, steps].normal_(generator=generator)
-            # FP32 log can turn distinct probabilities into tied target logits.
-            draft = logits[:, :steps].argmax(-1).int()
-            if reject:
-                logits[:, 0].scatter_(1, draft[:, :1].long(), -torch.inf)
-        else:
-            q = torch.zeros(batch, steps, vocab, device="cuda")
-            q[:, :, 0] = 1
-            draft = torch.zeros(batch, steps, device="cuda", dtype=torch.int32)
-            logits[:, :, 0] = -80 if reject else 80
-        seeds = torch.arange(batch, device="cuda", dtype=torch.int64) + 104729
-        positions = seeds * 13 + (1 << 33)
-        do_sample = torch.full((batch,), random, device="cuda", dtype=torch.bool)
-
-        def draw() -> tuple[torch.Tensor, torch.Tensor]:
-            return adapter.rejection_sample_logits(
-                logits, q, draft, seeds, positions, do_sample
-            )
-
-        name = (
-            f"b{batch}_{'random' if random else 'greedy'}_"
-            f"{'fullsupport' if full_support else 'onehot'}_"
-            f"{'firstreject' if reject else 'allaccept'}"
-        )
-        graphs = []
-        expected = None
-        for enabled in ["0", "1"]:
-            with compare_draft_log_mode(enabled):
-                actual = tuple(tensor.cpu() for tensor in draw())
-                self.assertEqual(actual[1].tolist(), [1 if reject else 4] * batch)
-                if expected is None:
-                    expected = actual
-                else:
-                    for result, reference in zip(actual, expected):
-                        torch.testing.assert_close(result, reference, rtol=0, atol=0)
-                graph, outputs = self.capture(draw)
-                for result, reference in zip(outputs, expected):
-                    torch.testing.assert_close(result.cpu(), reference, rtol=0, atol=0)
-                graphs.append(graph)
-        samples: list[list[float]] = [[], []]
-        for round_index in range(self.rounds):
-            for enabled in [0, 1] if round_index % 2 == 0 else [1, 0]:
-                start = torch.cuda.Event(enable_timing=True)
-                end = torch.cuda.Event(enable_timing=True)
-                start.record()
-                for _ in range(self.replay_count):
-                    graphs[enabled].replay()
-                end.record()
-                end.synchronize()
-                samples[enabled].append(
-                    start.elapsed_time(end)
-                    * 1000
-                    / (self.replay_count * self.graph_calls)
-                )
-        medians = [statistics.median(values) for values in samples]
-        result = {
-            "case": name,
-            "batch": batch,
-            "steps": steps,
-            "vocab": vocab,
-            "draft_dtype": str(q.dtype),
-            "cache_scope": "hot repeated identical inputs; timing excludes profiler",
-            "exact_ids_and_lengths": True,
-            "expected_length": 1 if reject else 4,
-            "graph_calls": self.graph_calls,
-            "replay_count": self.replay_count,
-            "rounds": self.rounds,
-            "flag0_us": samples[0],
-            "flag1_us": samples[1],
-            "median_flag0_us": medians[0],
-            "median_flag1_us": medians[1],
-            "flag1_over_flag0": medians[1] / medians[0],
-        }
-        output_dir = Path(os.environ["TEST_UNDECLARED_OUTPUTS_DIR"])
-        (output_dir / f"{name}.timing.json").write_text(json.dumps(result, indent=2))
-        print(
-            f"DRAFT_LOG_GRAPH {name} exact=PASS flag0_us={medians[0]:.3f} "
-            f"flag1_us={medians[1]:.3f} ratio={medians[1] / medians[0]:.4f}",
-            flush=True,
-        )
-        if batch == 128 and random:
-            for enabled, graph in enumerate(graphs):
-                self.trace(graph, output_dir / f"{name}_flag{enabled}.trace.json")
-
-    def test_graph_timing_and_cuda_profiles(self) -> None:
-        output_dir = Path(os.environ["TEST_UNDECLARED_OUTPUTS_DIR"])
-        output_dir.mkdir(parents=True, exist_ok=True)
-        (output_dir / "draft_log_environment.json").write_text(
-            json.dumps(
-                {
-                    "torch": torch.__version__,
-                    "cuda": torch.version.cuda,
-                    "device": torch.cuda.get_device_name(),
-                    "method": (
-                        "CUDA events around replay of 8-call graphs; alternating A/B"
-                    ),
-                },
-                indent=2,
-            )
-        )
-        for batch in [16, 20, 24, 32, 64, 128]:
-            for random in [False, True]:
-                for full_support in [False, True]:
-                    for reject in [False, True]:
-                        with self.subTest(
-                            batch=batch,
-                            random=random,
-                            full_support=full_support,
-                            reject=reject,
-                        ):
-                            self.benchmark_case(batch, random, full_support, reject)
 
 
 if __name__ == "__main__":

@@ -14,10 +14,6 @@ py_library(
         "rejection_compact.py",
         "vllm_gumbel.py",
         "vllm_rejection.py",
-        "vllm_watermark.py",
-        "vllm_philox.py",
-        "vllm_prf_base.py",
-        "vllm_fly.py",
     ],
     deps = ["//rtp_llm:numpy", "//rtp_llm:torch"] + triton_deps(["triton"]),
     visibility = ["//visibility:public"],
@@ -41,8 +37,8 @@ py_test(
 
 py_test(
     name = "test_rejection_output_perf",
-    srcs = ["test_rejection_output_perf.py"],
-    deps = [":sampling"],
+    srcs = ["test_rejection_output_perf.py", "logits_filter.py"],
+    deps = [":sampling", "//rtp_llm:flashinfer-python"],
     tags = ["SM103_CU13", "manual"],
     exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
 )

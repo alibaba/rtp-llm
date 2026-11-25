@@ -22,9 +22,6 @@
 #endif
 
 namespace torch_ext {
-static std::tuple<torch::Tensor, torch::Tensor>
-deepselect_fp32_topk_impl(const torch::Tensor& logits, int64_t k, bool* used_deepselect, bool int64_indices);
-
 #if defined(RTP_DEEPSELECT_FP32_ENABLED) && !defined(USE_ROCM)
 namespace {
 // Sorting only the candidates makes the nucleus boundary inexpensive. The
@@ -266,6 +263,41 @@ __global__ void deferredMaskLogits(float* logits, const float* thresholds, int v
         logits[offset]        = isnan(threshold) ? threshold : (value >= threshold ? value : -INFINITY);
     }
 }
+bool supportsDeferredTopK1024(const torch::Tensor& logits, int64_t k, float top_p) {
+    if (k != 1024 || !logits.is_cuda() || logits.scalar_type() != torch::kFloat32 || logits.dim() != 2
+        || !logits.is_contiguous() || logits.size(0) > 65535 || logits.size(1) <= k || logits.size(1) >= MAX_VOCAB_SIZE
+        || logits.stride(0) % 256 != 0 || reinterpret_cast<uintptr_t>(logits.data_ptr()) % 16 != 0
+        || !(top_p > 0.0f && top_p <= 1.0f))
+        return false;
+    const auto* properties = at::cuda::getDeviceProperties(logits.get_device());
+    return properties->major == 10 && (properties->minor == 0 || properties->minor == 3);
+}
+
+std::tuple<torch::Tensor, torch::Tensor> selectTopK1024(const torch::Tensor& logits, cudaStream_t stream) {
+    auto values  = torch::empty({logits.size(0), 1024}, logits.options());
+    auto indices = torch::empty({logits.size(0), 1024}, logits.options().dtype(torch::kInt32));
+    if (logits.size(0)) {
+        TopkSelectArgs args{};
+        args.batch_size                = static_cast<uint32_t>(logits.size(0));
+        args.vocab_size                = static_cast<uint32_t>(logits.size(1));
+        args.topk                      = 1024;
+        args.input                     = logits.data_ptr();
+        args.output_index              = indices.data_ptr();
+        args.output_value              = values.data_ptr();
+        args.return_value              = true;
+        args.stride_input_batch        = logits.stride(0);
+        args.stride_output_index_batch = indices.stride(0);
+        args.stride_output_value_batch = values.stride(0);
+        args.idx_oob_fill_value        = -1;
+        args.value_oob_fill_value      = -std::numeric_limits<float>::infinity();
+        args.shared_memory_size_per_sm = at::cuda::getDeviceProperties(logits.get_device())->sharedMemPerBlockOptin;
+        args.stream                    = stream;
+        using Config = TopkSelectConfig<float, int32_t, false, false, true, 1024, 512, 1, 8192, 4096, 3>;
+        topk_select_fp32::run_topk_select_kernel<Config>(args);
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
+    }
+    return {values, indices};
+}
 }  // namespace
 #endif
 
@@ -276,14 +308,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> deferred_compact_topk_to
                                                                                    torch::Tensor*       log_normalizer,
                                                                                    int64_t              request_top_k) {
 #if defined(RTP_DEEPSELECT_FP32_ENABLED) && !defined(USE_ROCM)
-    if (k != 1024 || request_top_k < 2 || request_top_k > k || !logits.is_cuda()
-        || logits.scalar_type() != torch::kFloat32 || logits.dim() != 2 || !logits.is_contiguous()
-        || logits.size(1) <= k || logits.size(1) >= MAX_VOCAB_SIZE || logits.size(0) > 65535
-        || logits.stride(0) % 256 != 0 || reinterpret_cast<uintptr_t>(logits.data_ptr()) % 16 != 0
-        || !(top_p > 0 && top_p <= 1) || !std::isfinite(temperature) || temperature <= 0.0f)
-        return {};
-    const auto* properties = at::cuda::getDeviceProperties(logits.get_device());
-    if (properties->major != 10 || (properties->minor != 0 && properties->minor != 3))
+    if (request_top_k < 2 || request_top_k > k || !std::isfinite(temperature) || temperature <= 0.0f
+        || !supportsDeferredTopK1024(logits, k, top_p))
         return {};
     const c10::cuda::CUDAGuard guard(logits.device());
     const auto                 stream = at::cuda::getCurrentCUDAStream(logits.get_device());
@@ -294,7 +320,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> deferred_compact_topk_to
         if (capture_status != cudaStreamCaptureStatusNone)
             return {};
     }
-    auto selected = deepselect_fp32_topk_impl(logits, 1024, nullptr, false);
+    auto selected = selectTopK1024(logits, stream);
     auto compact  = torch::empty({logits.size(0), 1024}, logits.options());
     auto ids      = torch::empty({logits.size(0), 1024}, logits.options().dtype(torch::kInt32));
     auto fallback = torch::empty({logits.size(0)}, logits.options().dtype(torch::kInt32));
@@ -323,18 +349,12 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> deferred_compact_topk_to
 
 bool deferred_topk_topp_filter(const torch::Tensor& logits, int64_t k, float top_p) {
 #if defined(RTP_DEEPSELECT_FP32_ENABLED) && !defined(USE_ROCM)
-    if (k != 1024 || !logits.is_cuda() || logits.scalar_type() != torch::kFloat32 || logits.dim() != 2
-        || !logits.is_contiguous() || logits.size(0) > 65535 || logits.size(1) <= k || logits.size(1) >= MAX_VOCAB_SIZE
-        || logits.stride(0) % 256 != 0 || reinterpret_cast<uintptr_t>(logits.data_ptr()) % 16 != 0
-        || !(top_p > 0.0f && top_p <= 1.0f))
-        return false;
-    const auto* properties = at::cuda::getDeviceProperties(logits.get_device());
-    if (properties->major != 10 || (properties->minor != 0 && properties->minor != 3))
+    if (!supportsDeferredTopK1024(logits, k, top_p))
         return false;
     const c10::cuda::CUDAGuard guard(logits.device());
-    auto                       selected   = deepselect_fp32_topk(logits, k);
-    auto                       thresholds = torch::empty({logits.size(0)}, logits.options());
     const auto                 stream     = at::cuda::getCurrentCUDAStream(logits.get_device());
+    auto                       selected   = selectTopK1024(logits, stream);
+    auto                       thresholds = torch::empty({logits.size(0)}, logits.options());
     if (logits.size(0)) {
         deferredTopKTopPThreshold<<<logits.size(0), 256, 0, stream>>>(logits.data_ptr<float>(),
                                                                       std::get<0>(selected).data_ptr<float>(),
@@ -349,77 +369,5 @@ bool deferred_topk_topp_filter(const torch::Tensor& logits, int64_t k, float top
 #else
     return false;
 #endif
-}
-static std::tuple<torch::Tensor, torch::Tensor>
-deepselect_fp32_topk_impl(const torch::Tensor& logits, int64_t k, bool* used_deepselect, bool int64_indices) {
-    if (used_deepselect)
-        *used_deepselect = false;
-#if defined(RTP_DEEPSELECT_FP32_ENABLED) && !defined(USE_ROCM)
-    if ((k == 1024 || k == 1025 || k == 4096) && logits.is_cuda() && logits.scalar_type() == torch::kFloat32
-        && logits.dim() == 2 && logits.size(0) <= std::numeric_limits<int32_t>::max() && logits.size(1) >= k
-        && logits.size(1) < MAX_VOCAB_SIZE && logits.is_contiguous() && logits.stride(0) % 256 == 0
-        && reinterpret_cast<uintptr_t>(logits.data_ptr()) % 16 == 0) {
-        const auto* properties = at::cuda::getDeviceProperties(logits.get_device());
-        if (properties->major == 10 && (properties->minor == 0 || properties->minor == 3)) {
-            const c10::cuda::CUDAGuard guard(logits.device());
-            const auto                 stream = at::cuda::getCurrentCUDAStream(logits.get_device());
-            auto                       values = torch::empty({logits.size(0), k}, logits.options());
-            auto indices = torch::empty({logits.size(0), k}, logits.options().dtype(torch::kInt32));
-            if (logits.size(0) > 0) {
-                TopkSelectArgs args{};
-                args.batch_size                = static_cast<uint32_t>(logits.size(0));
-                args.vocab_size                = static_cast<uint32_t>(logits.size(1));
-                args.topk                      = static_cast<uint32_t>(k);
-                args.input                     = logits.data_ptr();
-                args.output_index              = indices.data_ptr();
-                args.output_value              = values.data_ptr();
-                args.return_value              = true;
-                args.end_ptr                   = nullptr;
-                args.stride_input_batch        = logits.stride(0);
-                args.stride_output_index_batch = indices.stride(0);
-                args.stride_output_value_batch = values.stride(0);
-                args.idx_oob_fill_value        = -1;
-                args.value_oob_fill_value      = -std::numeric_limits<float>::infinity();
-                args.shared_memory_size_per_sm = properties->sharedMemPerBlockOptin;
-                args.stream                    = stream;
-                if (k == 1024) {
-                    using Config = TopkSelectConfig<float, int32_t, false, false, true, 1024, 512, 1, 8192, 4096, 3>;
-                    topk_select_fp32::run_topk_select_kernel<Config, false>(args);
-                } else if (k == 1025) {
-                    // Keep the extra boundary candidate while using the wide scan
-                    // of K1024. The smaller survivor capacity fits in one SM.
-                    using Config = TopkSelectConfig<float, int32_t, false, false, true, 1536, 512, 1, 8192, 4096, 3>;
-                    using Kernel = topk_select_fp32::TopkSelectKernelFP32<Config, false>;
-                    // Static shared variables also consume the opt-in limit.
-                    // Leave 8 KiB headroom and validate the loaded function's
-                    // actual static allocation before setting its dynamic size.
-                    constexpr size_t dynamic_bytes = sizeof(typename Kernel::SharedMemoryPlanFP32);
-                    static_assert(dynamic_bytes <= (227 - 8) * 1024);
-                    cudaFuncAttributes attributes{};
-                    C10_CUDA_CHECK(cudaFuncGetAttributes(&attributes, topk_select_fp32::topk_kernel<Kernel>));
-                    TORCH_CHECK(dynamic_bytes + attributes.sharedSizeBytes <= properties->sharedMemPerBlockOptin,
-                                "K1025 selector exceeds the combined static and dynamic shared-memory limit");
-                    topk_select_fp32::run_topk_select_kernel<Config, false>(args);
-                } else {
-                    using Config = TopkSelectConfig<float, int32_t, false, false, true, 4096, 256, 1, 4096, 4096, 3>;
-                    topk_select_fp32::run_topk_select_kernel<Config, false>(args);
-                }
-                C10_CUDA_KERNEL_LAUNCH_CHECK();
-            }
-            if (used_deepselect)
-                *used_deepselect = true;
-            return {values, int64_indices ? indices.to(torch::kInt64) : indices};
-        }
-    }
-#endif
-    auto result = torch::topk(logits, k, -1, true, false);
-    if (!int64_indices)
-        std::get<1>(result) = std::get<1>(result).to(torch::kInt32);
-    return result;
-}
-
-std::tuple<torch::Tensor, torch::Tensor>
-deepselect_fp32_topk(const torch::Tensor& logits, int64_t k, bool* used_deepselect) {
-    return deepselect_fp32_topk_impl(logits, k, used_deepselect, true);
 }
 }  // namespace torch_ext

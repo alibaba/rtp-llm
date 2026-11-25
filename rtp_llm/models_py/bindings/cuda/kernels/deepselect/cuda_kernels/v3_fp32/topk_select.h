@@ -7,7 +7,7 @@
 
 namespace topk_select_fp32 {
 
-template<typename Config, bool FILTER_FINITE>
+template<typename Config>
 void run_topk_select_kernel(const TopkSelectArgs& args);
 
 }  // namespace topk_select_fp32

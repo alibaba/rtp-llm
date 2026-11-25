@@ -20,7 +20,7 @@ Usage caveats:
 
 namespace topk_select_fp32 {
 
-template<typename Config, bool FILTER_FINITE>
+template<typename Config>
 class TopkSelectKernelFP32: public topk_select_common::TopkSelectKernelBase<Config> {
     using Base = topk_select_common::TopkSelectKernelBase<Config>;
 
@@ -62,11 +62,10 @@ public:
     static constexpr uint32_t PLACEHOLDER  = 0xff800000;  // -INF
     static constexpr uint32_t NEG_INF_BITS = 0xFF800000;
     // RTP: preserve all finite FP32 bits while giving both signs of NaN the
-    // +inf ordering used by the finite-filtered token TopK contract.
+    // +inf ordering used for token TopK selection.
     static __device__ __forceinline__ uint32_t canonicalize_nan(uint32_t bits) {
         return (bits & 0x7fffffffu) > 0x7f800000u ? 0x7f800000u : bits;
     }
-    static_assert(MAX_TOPK == 512 || MAX_TOPK == 1024 || MAX_TOPK == 1536 || MAX_TOPK == 2048 || MAX_TOPK == 4096);
     static constexpr bool HAS_PARTIAL_ROUNDS = NUM_SEGS_PER_ROUND > NUM_TAIL_SEGS;
 
     struct SharedMemoryPlanFP32: SharedMemoryPlanBase {};
@@ -160,12 +159,7 @@ public:
                                                               + uint64_t(batch_idx) * args.stride_output_value_batch :
                                                           nullptr;
             for (uint32_t slot = threadIdx.x; slot < args.topk; slot += NUM_THREADS) {
-                bool valid = slot < end_vocab_idx;
-                if constexpr (FILTER_FINITE) {
-                    if (valid) {
-                        valid = (__float_as_uint(__ldg(input + slot)) & 0x7fffffffu) < 0x7f800000u;
-                    }
-                }
+                const bool valid = slot < end_vocab_idx;
                 output[slot] =
                     valid ?
                         static_cast<OutIdxT>(
@@ -699,25 +693,20 @@ public:
         float* output_values = Config::return_value ? static_cast<float*>(args.output_value)
                                                           + uint64_t(batch_idx) * args.stride_output_value_batch :
                                                       nullptr;
-        if constexpr (!FILTER_FINITE) {
-            if ((args.topk == 4096 || args.topk == 1024 || args.topk == 1025) && threshold_bits == NEG_INF_BITS) {
-                select_sparse_row(args,
-                                  batch_idx,
-                                  end_vocab_idx,
-                                  smem.surviving_topk_pairs[survivor_buf_idx],
-                                  smem.warp_cnt,
-                                  output,
-                                  output_values);
-                return;
-            }
+        if (threshold_bits == NEG_INF_BITS) {
+            select_sparse_row(args,
+                              batch_idx,
+                              end_vocab_idx,
+                              smem.surviving_topk_pairs[survivor_buf_idx],
+                              smem.warp_cnt,
+                              output,
+                              output_values);
+            return;
         }
         for (uint32_t slot = threadIdx.x; slot < args.topk; slot += NUM_THREADS) {
             uint64_t pair  = smem.surviving_topk_pairs[survivor_buf_idx][slot];
             uint32_t index = static_cast<uint32_t>(pair);
-            bool     valid = index < end_vocab_idx;
-            if constexpr (FILTER_FINITE) {
-                valid = valid && ((static_cast<uint32_t>(pair >> 32) & 0x7fffffffu) < 0x7f800000u);
-            }
+            const bool valid = index < end_vocab_idx;
             output[slot] =
                 valid ?
                     static_cast<OutIdxT>(args.index_map ?
@@ -746,20 +735,18 @@ __launch_bounds__(Kernel::NUM_THREADS, Kernel::TARGET_OCCUPANCY, 1) __global__
     Kernel::topk_select_kernel_devfunc(args, tma_params);
 }
 
-template<typename Config, bool FILTER_FINITE>
+template<typename Config>
 void run_topk_select_kernel(const TopkSelectArgs& args) {
     KU_ASSERT(args.sorted_value == Config::sorted_value, "Dispatch failure");
     KU_ASSERT(args.sorted_index == Config::sorted_index, "Dispatch failure");
     KU_ASSERT(args.return_value == Config::return_value, "Dispatch failure");
     static_assert(cute::is_same_v<typename Config::ValueT, float>);
     static_assert(cute::is_same_v<typename Config::OutIdxT, int32_t>);
-    static_assert((Config::max_topk == 512 || Config::max_topk == 1024 || Config::max_topk == 1536
-                   || Config::max_topk == 2048 || Config::max_topk == 4096)
-                  && !Config::sorted_index && !Config::sorted_value);
+    static_assert(Config::max_topk == 1024 && !Config::sorted_index && !Config::sorted_value);
     KU_ASSERT(args.vocab_size < MAX_VOCAB_SIZE, "`vocab_size` is too big");
 
-    using Kernel = TopkSelectKernelFP32<Config, FILTER_FINITE>;
-    KU_ASSERT(args.topk <= Kernel::MAX_TOPK, "topk is too large. Maximum allowed: %d\n", Kernel::MAX_TOPK);
+    using Kernel = TopkSelectKernelFP32<Config>;
+    KU_ASSERT(args.topk == Kernel::MAX_TOPK, "Expected K1024");
     static_assert(INPUT_STRIDE_ALIGNMENT_REQUIREMENT % 16 == 0);
 
     auto             kernel    = topk_kernel<Kernel>;

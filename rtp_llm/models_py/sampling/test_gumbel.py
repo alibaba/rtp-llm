@@ -198,38 +198,6 @@ class GumbelTest(unittest.TestCase):
                 sigma = (count * probability * (1 - probability)) ** 0.5
                 self.assertLessEqual(abs(observed - count * probability), 6 * sigma)
 
-    @unittest.skipUnless(os.environ.get("VLLM_GUMBEL_BENCH") == "1", "NOT_RUN: opt-in benchmark")
-    def test_benchmark_torch_multinomial_baseline(self) -> None:
-        flush = torch.empty(128 * 1024 * 1024, device="cuda", dtype=torch.float32)
-        for batch in [1, 32, 64, 128]:
-            logits = torch.randn(batch, 154880, device="cuda")
-            seeds = torch.arange(batch, device="cuda", dtype=torch.int64)
-            timings = []
-            for operation in [
-                lambda: torch.multinomial(torch.softmax(logits, -1), 1),
-                lambda: adapter.sample(logits, seeds, seeds),
-            ]:
-                for _ in range(10):
-                    operation()
-                torch.cuda.synchronize()
-                start, stop = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
-                elapsed = 0.0
-                for _ in range(50):
-                    flush.zero_()
-                    start.record()
-                    output = operation()
-                    stop.record()
-                    stop.synchronize()
-                    elapsed += start.elapsed_time(stop) * 1000
-                self.assertTrue(bool(((output >= 0) & (output < 154880)).all()))
-                timings.append(elapsed / 50)
-            print(
-                f"[gumbel-benchmark] batch={batch} vocab=154880 "
-                f"torch_softmax_multinomial_us={timings[0]:.3f} gumbel_us={timings[1]:.3f} "
-                "warmup=10 iterations=50 l2_flush_bytes=536870912 flush_timing=excluded "
-                "baseline_is_rtp_flashinfer=false", flush=True,
-            )
-
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

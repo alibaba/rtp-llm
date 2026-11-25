@@ -27,13 +27,12 @@ generator. Consumers requiring probabilities continue through the existing sampl
 
 ## MTP rejection verification
 
-The following files originate from the same commit:
-
-- `vllm_rejection.py`: `vllm/v1/worker/gpu/spec_decode/rejection_sampler_utils.py`
-- `vllm_watermark.py`: `vllm/v1/worker/gpu/sample/watermark.py`
-- `vllm_philox.py`: `vllm/v1/watermarking/prfs/philox.py`
-- `vllm_prf_base.py`: `vllm/v1/watermarking/prfs/base.py`
-- `vllm_fly.py`: `vllm/v1/spec_decode/fly.py`
+`vllm_rejection.py` adapts the sequential verifier in
+`vllm/v1/worker/gpu/spec_decode/rejection_sampler_utils.py` at the same commit.
+Random requests use `tl_rand32` for each acceptance draw. After a rejection,
+Gumbel sampling draws from the residual distribution. When all draft tokens
+are accepted, it draws the bonus from the target distribution. RTP omits the
+upstream FLy, watermarking and block-verification modes.
 
 The rejection verifier also has local probability-input support: a cache flag
 selects conversion with CUDA log at the three draft-value load sites, avoiding
@@ -42,10 +41,8 @@ remains logits. The probability path preserves source-dtype rounding for FP16
 and BF16; unsupported dtypes fall back to materialized log probabilities.
 The eager adapter accepts an explicit materialized-log option for numerical
 comparisons. Both paths preserve the caller's draft probabilities.
-The RTP adapter uses ordinary sequential verification, not optional block
-verification, FLy or watermarking. `DraftLogitsCache` is a tensor view over RTP's
-existing draft probability storage (or materialized log probabilities); upstream's
-persistent cache allocator is not needed for RTP's request lifecycle.
+`DraftLogitsCache` views RTP's existing draft probability storage or materialized
+log probabilities for the lifetime of the request.
 
 RTP target temperature, penalties and masks are applied before verification, so
 the verifier receives unit temperature for random requests and zero for greedy.
