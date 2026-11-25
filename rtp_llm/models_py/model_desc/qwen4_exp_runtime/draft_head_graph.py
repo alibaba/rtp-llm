@@ -31,12 +31,7 @@ class DraftHeadGraph:
         self.active = None
 
     def activate(self, graph_batch: int) -> None:
-        self.active = None
-        if not self.enabled:
-            return
-        if graph_batch not in self.outputs:
-            raise RuntimeError("draft graph has no captured FP8 head for this batch")
-        self.active = self.outputs[graph_batch]
+        self.active = self.outputs.get(graph_batch) if self.enabled else None
 
     def take(self, hidden: torch.Tensor):
         logits, self.active = self.active, None
@@ -45,9 +40,7 @@ class DraftHeadGraph:
         if (
             hidden.ndim != 2
             or hidden.device != logits.device
-            or not 0 < hidden.shape[0] <= logits.shape[0]
+            or hidden.shape[0] != logits.shape[0]
         ):
-            raise RuntimeError(
-                "draft graph head rows do not cover the live hidden rows"
-            )
-        return logits[: hidden.shape[0]]
+            return None
+        return logits

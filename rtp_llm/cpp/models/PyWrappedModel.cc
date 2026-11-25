@@ -1412,12 +1412,40 @@ torch::Tensor PyWrappedModel::computeLogits(const torch::Tensor& hidden) {
     return logits;
 }
 
-torch::Tensor PyWrappedModel::tpSyncEmbeddingOrLogits(const torch::Tensor& input) {
+torch::Tensor PyWrappedModel::tpSyncEmbeddingOrLogits(const torch::Tensor& input, bool fp32_logits) {
     RTP_LLM_PROFILE_SCOPE("py_model.tpSyncEmbeddingOrLogits");
     const auto tp_size     = device_props_.tp_size;
     const auto tp_rank     = device_props_.tp_rank;
     const auto rows        = input.size(0);
     const auto cols        = input.size(1);
+    if (fp32_logits) {
+        TORCH_CHECK(input.scalar_type() == torch::kBFloat16, "FP8 TP head gather requires BF16 local logits");
+        {
+            py::gil_scoped_acquire gil;
+            if (py::hasattr(py_model_, "try_gather_fp8_lm_head_for_tp")) {
+                auto result = py_model_.attr("try_gather_fp8_lm_head_for_tp")(input);
+                if (!result.is_none()) {
+                    auto logits = result.cast<torch::Tensor>();
+                    TORCH_CHECK(logits.is_cuda() && logits.device() == input.device()
+                                    && logits.scalar_type() == torch::kFloat32 && logits.dim() == 2
+                                    && logits.size(0) == rows && logits.size(1) == cols * static_cast<int64_t>(tp_size)
+                                    && logits.is_contiguous(),
+                                "Head IPC returned an invalid gathered tensor");
+                    return logits;
+                }
+            }
+        }
+        // Send local logits directly. A single strided copy both orders rank
+        // shards by row and widens BF16 to FP32 for the sampler.
+        const auto ranks = static_cast<int64_t>(tp_size);
+        auto send = input.contiguous();
+        auto gathered = torch::empty({rows * ranks, cols}, input.options());
+        execAllGather({{gathered}, ParallelMode::TP, {send}, false});
+        auto logits = torch::empty({rows, ranks, cols}, input.options().dtype(torch::kFloat32));
+        logits.copy_(gathered.reshape({ranks, rows, cols}).permute({1, 0, 2}));
+        cudaCheckLastError();
+        return logits.reshape({rows, cols * ranks});
+    }
     const auto local_numel = input.numel();
     auto       all_data    = torch::empty({rows, cols * (int64_t)tp_size}, input.options());
     // Copy local data into the correct rank position
@@ -1540,7 +1568,7 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
                 }
             }
             if (!tp_argmax_done) {
-                logits = tpSyncEmbeddingOrLogits(logits).to(torch::kFloat32);
+                logits = tpSyncEmbeddingOrLogits(logits, use_bf16_tp_head);
             }
         }
         if (description_.output_vocab_size > 0 && !tp_argmax_done) {
@@ -1617,7 +1645,7 @@ GptModelOutputs PyWrappedModel::forwardPostLayersLastHidden(torch::Tensor hidden
             }
         }
         if (!tp_argmax_done) {
-            logits = tpSyncEmbeddingOrLogits(logits).to(torch::kFloat32);
+            logits = tpSyncEmbeddingOrLogits(logits, use_bf16_tp_head);
         }
     }
     if (check_nan_) {

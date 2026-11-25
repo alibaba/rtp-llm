@@ -1886,6 +1886,11 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state,
     } else if (!tryGetRealGraphDecodeBatchSize(inputs, state, observe_fallback)) {
         return false;
     }
+    if (draft_decode_steps_ > 0 && state.current_batch_size != state.current_real_graph_bs) {
+        // The loop captures FP8 head scaling across every captured row.
+        // A padded group needs per-step heads over its live rows.
+        return false;
+    }
     const bool can_replay = canReplaySelectedGraph(inputs, state, mode);
     if (!can_replay && isGenerationPrefillCudaGraph()
         && state.generation_prefill_status == GenerationPrefillCudaGraphStatus::NOT_REQUESTED) {
