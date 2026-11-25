@@ -212,18 +212,34 @@ class WritebackSmokeTest(unittest.TestCase):
         self.assertEqual(followup["result"]["output_ids"][0], source[len(target):])
         reuse = followup["result"]["aux_info"]["prefill_local_reuse_len"]
         self.assertGreater(reuse, first["result"]["aux_info"]["input_len"])
-        self.assertEqual(reuse, ((len(source) - 1) // 8) * 8)
+        block_size = wait["result"]["block_size"]
+        self.assertEqual(reuse, ((len(source) - 1) // block_size) * block_size)
+        aux = followup["result"]["aux_info"]
+        self.assertEqual(aux["actual_reuse_len"], reuse)
+        self.assertEqual(aux["reuse_len"], block_size)
+        self.assertEqual(aux["writeback_first_use_len"], reuse - block_size)
         self.assertEqual(wait["server_role"], "prefill")
-        self.assertEqual(wait["wait_for_cache"]["min_cached_blocks"] * 8, reuse)
+        self.assertEqual(wait["wait_for_cache"]["min_cached_blocks"] * block_size, reuse)
 
     def test_decode_local_hit_cannot_hide_missing_prefill_writeback(self):
         expected = self.fixture["query_result"][2]["result"]
         actual = copy.deepcopy(expected)
-        actual["aux_info"]["prefill_local_reuse_len"] = 8
-        actual["aux_info"]["prefill_total_reuse_len"] = 8
+        block_size = self.fixture["query_result"][1]["result"]["block_size"]
+        actual["aux_info"]["prefill_local_reuse_len"] -= block_size
+        actual["aux_info"]["prefill_total_reuse_len"] -= block_size
         comparer = NormalComparer(self.decode, "/", {}, Tracer(), False)
         with self.assertRaisesRegex(SmokeException, "prefill_local_reuse_len"):
             comparer.compare_result(SmokeResponse(**expected), SmokeResponse(**actual))
+
+    def test_first_use_accounting_is_compared(self):
+        expected = self.fixture["query_result"][2]["result"]
+        comparer = NormalComparer(self.decode, "/", {}, Tracer(), False)
+        for field in ("actual_reuse_len", "writeback_first_use_len"):
+            with self.subTest(field=field):
+                actual = copy.deepcopy(expected)
+                actual["aux_info"][field] = 0
+                with self.assertRaisesRegex(SmokeException, field):
+                    comparer.compare_result(SmokeResponse(**expected), SmokeResponse(**actual))
 
     def test_missing_aux_info_cannot_skip_writeback_assertions(self):
         expected = self.fixture["query_result"][2]["result"]

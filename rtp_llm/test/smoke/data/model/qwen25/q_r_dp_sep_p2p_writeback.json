@@ -5,9 +5,9 @@
     "query_result": [
         {
             "query": {
-                "prompt": "Write a detailed analogy between mathematics and a lighthouse.",
+                "prompt": "Write a detailed explanation of database transactions. In your explanation, include the different types of transactions, their purpose, and the conditions under which they can be",
                 "generate_config": {
-                    "max_new_tokens": 10,
+                    "max_new_tokens": 5,
                     "top_k": 1,
                     "top_p": 0,
                     "enable_device_cache": true,
@@ -17,19 +17,21 @@
                 }
             },
             "result": {
-                "response": " Mathematics is like a lighthouse, a beacon of",
-                "input_ids": [[7985, 264, 11682, 55103, 1948, 37596, 323, 264, 326, 57909, 13]],
-                "output_ids": [[49795, 374, 1075, 264, 326, 57909, 11, 264, 51302, 315]],
+                "response": " used. Additionally, provide",
+                "input_ids": [[7985, 264, 11682, 16148, 315, 4625, 14131, 13, 758, 697, 16148, 11, 2924, 279, 2155, 4494, 315, 14131, 11, 862, 7428, 11, 323, 279, 4682, 1212, 892, 807, 646, 387]],
+                "output_ids": [[1483, 13, 22406, 11, 3410]],
                 "aux_info": {
-                    "input_len": 11,
+                    "input_len": 30,
                     "reuse_len": 0,
+                    "actual_reuse_len": 0,
+                    "writeback_first_use_len": 0,
                     "local_reuse_len": 0,
                     "prefill_total_reuse_len": 0,
                     "prefill_local_reuse_len": 0,
                     "decode_total_reuse_len": 0,
                     "decode_local_reuse_len": 0,
-                    "output_len": 10,
-                    "iter_count": 10
+                    "output_len": 5,
+                    "iter_count": 5
                 }
             }
         },
@@ -38,13 +40,13 @@
             "endpoint": "/rtp_llm/cache_status",
             "query": {"latest_cache_version": -1},
             "wait_for_cache": {"min_cached_blocks": 2, "timeout_seconds": 35},
-            "result": {"block_size": 8}
+            "result": {"block_size": 16}
         },
         {
             "query": {
-                "prompt": "Write a detailed analogy between mathematics and a lighthouse. Mathematics is like a lighthouse",
+                "prompt": "Write a detailed explanation of database transactions. In your explanation, include the different types of transactions, their purpose, and the conditions under which they can be used. Additionally",
                 "generate_config": {
-                    "max_new_tokens": 4,
+                    "max_new_tokens": 2,
                     "top_k": 1,
                     "top_p": 0,
                     "enable_device_cache": true,
@@ -54,19 +56,21 @@
                 }
             },
             "result": {
-                "response": ", a beacon of",
-                "input_ids": [[7985, 264, 11682, 55103, 1948, 37596, 323, 264, 326, 57909, 13, 49795, 374, 1075, 264, 326, 57909]],
-                "output_ids": [[11, 264, 51302, 315]],
+                "response": ", provide",
+                "input_ids": [[7985, 264, 11682, 16148, 315, 4625, 14131, 13, 758, 697, 16148, 11, 2924, 279, 2155, 4494, 315, 14131, 11, 862, 7428, 11, 323, 279, 4682, 1212, 892, 807, 646, 387, 1483, 13, 22406]],
+                "output_ids": [[11, 3410]],
                 "aux_info": {
-                    "input_len": 17,
-                    "reuse_len": 8,
-                    "local_reuse_len": 16,
-                    "prefill_total_reuse_len": 16,
-                    "prefill_local_reuse_len": 16,
-                    "decode_total_reuse_len": 16,
-                    "decode_local_reuse_len": 16,
-                    "output_len": 4,
-                    "iter_count": 4
+                    "input_len": 33,
+                    "reuse_len": 16,
+                    "actual_reuse_len": 32,
+                    "writeback_first_use_len": 16,
+                    "local_reuse_len": 32,
+                    "prefill_total_reuse_len": 32,
+                    "prefill_local_reuse_len": 32,
+                    "decode_total_reuse_len": 32,
+                    "decode_local_reuse_len": 32,
+                    "output_len": 2,
+                    "iter_count": 2
                 }
             }
         }

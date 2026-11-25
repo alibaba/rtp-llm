@@ -1006,6 +1006,9 @@ class OpenaiComparer(BaseComparer):
         for field in fields_to_compare:
             value1 = getattr(obj1, field)
             value2 = getattr(obj2, field)
+            if field == "actual_reuse_len" and isinstance(raw_aux, dict) and field not in raw_aux:
+                # Older goldens only recorded the components of total physical reuse.
+                value1 = expect_aux.reuse_len + expect_aux.writeback_first_use_len
 
             if field in nested_ignore and nested_ignore[field]:
                 if isinstance(value1, list) and isinstance(value2, list):
