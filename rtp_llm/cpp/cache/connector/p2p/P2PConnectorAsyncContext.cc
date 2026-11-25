@@ -195,7 +195,8 @@ bool P2PConnectorAsyncReadContext::expireLeaseHoldIfNeeded(int64_t now_us) {
     DoneNotifier                done_notifier{*this};
     std::lock_guard<std::mutex> lock(state_mutex_);
     const auto                  hold_start_us = lease_hold_start_us_.load();
-    if (!resourceHoldPending() || hold_start_us <= 0 || now_us - hold_start_us < kv_force_release_timeout_ms_ * 1000) {
+    if (!resourceHoldPending() || hold_start_us <= 0 || now_us < hold_start_us
+        || (now_us - hold_start_us) / 1000 < kv_force_release_timeout_ms_) {
         return false;
     }
     const auto released_blocks = resource_ ? resource_->debugString() : std::string{};
@@ -690,7 +691,10 @@ int64_t P2PConnectorAsyncReadContext::nextWakeupMs(bool allow_control) const {
     if (resourceHoldPending()) {
         const auto hold_start_us = lease_hold_start_us_.load();
         if (hold_start_us > 0) {
-            next = std::min(next, (hold_start_us + 999) / 1000 + kv_force_release_timeout_ms_);
+            const auto hold_start_ms = hold_start_us / 1000 + (hold_start_us % 1000 != 0);
+            if (kv_force_release_timeout_ms_ <= next - hold_start_ms) {
+                next = hold_start_ms + kv_force_release_timeout_ms_;
+            }
         }
         if (lease_query_timeout_ms_ > 0 && allow_control && calls_ready_.load(std::memory_order_acquire)
             && cancel_confirmed_.load()) {

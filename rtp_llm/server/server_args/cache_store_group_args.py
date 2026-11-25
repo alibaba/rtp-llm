@@ -111,7 +111,8 @@ def init_cache_store_group_args(parser, cache_store_config):
         bind_to=(cache_store_config, "p2p_kv_force_release_timeout_ms"),
         type=int,
         default=cache_store_config.p2p_kv_force_release_timeout_ms,
-        help="Decode 隔离目标 KV 后强制释放的期限（正整数毫秒，默认 300000）。",
+        help="Decode 隔离目标 KV 后强制释放的期限（正整数毫秒，默认 300000）。"
+        "RDMA 模式下低于断连宽限期时，按宽限期生效并记录告警。",
     )
     cache_store_group.add_argument(
         "--p2p_cancel_broadcast_timeout_ms",

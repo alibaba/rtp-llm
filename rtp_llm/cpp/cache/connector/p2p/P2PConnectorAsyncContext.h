@@ -39,7 +39,7 @@ public:
                                  bool                                                 no_transfer          = false,
                                  int64_t                                              request_deadline_ms  = 0,
                                  int64_t                                              transfer_deadline_ms = 0,
-                                 int kv_force_release_timeout_ms = CacheStoreConfig::kDefaultP2PKvForceReleaseTimeoutMs,
+                                 int64_t kv_force_release_timeout_ms = CacheStoreConfig::kDefaultP2PKvForceReleaseTimeoutMs,
                                  int64_t request_id = 0):
         resource_(resource),
         unique_key_(std::move(unique_key)),

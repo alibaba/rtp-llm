@@ -425,6 +425,27 @@ TEST(P2PConnectorConfigTest, LoadTimeoutComesFromSharedPDSepConfig) {
     EXPECT_EQ(config.load_cache_timeout_ms, 900000);
 }
 
+TEST(P2PConnectorConfigTest, DecodeRdmaForceReleaseTimeoutUsesDisconnectGraceAsFloor) {
+    RuntimeConfig runtime;
+    CacheStoreConfig cache_store;
+    ParallelismConfig parallelism;
+    PDSepConfig pd_sep;
+    pd_sep.role_type = RoleType::DECODE;
+    cache_store.cache_store_rdma_mode = true;
+    cache_store.p2p_transfer_not_done_resource_hold_ms = 10000;
+
+    for (const int configured_ms : {1, 10000, 300000}) {
+        cache_store.p2p_kv_force_release_timeout_ms = configured_ms;
+        const auto config = P2PConnectorSchedulerConfig::create(runtime, cache_store, parallelism, pd_sep);
+        EXPECT_EQ(config.p2p_kv_force_release_timeout_ms, std::max(configured_ms, 10000));
+    }
+    cache_store.cache_store_rdma_mode = false;
+    cache_store.p2p_kv_force_release_timeout_ms = 1;
+    EXPECT_EQ(P2PConnectorSchedulerConfig::create(runtime, cache_store, parallelism, pd_sep)
+                  .p2p_kv_force_release_timeout_ms,
+              1);
+}
+
 // ==================== sendKVCache 测试 (Prefill 端功能) ====================
 
 // 测试：broadcast 成功
