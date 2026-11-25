@@ -131,7 +131,12 @@ class MhcSm90MegaCudaTest(unittest.TestCase):
                 _assert_outputs(self, actual, expected)
 
     @torch.inference_mode()
-    def test_above_64_rows_falls_back_without_launching(self):
+    def test_above_64_rows_leave_two_kernel_and_use_three_kernel(self):
+        """The two-kernel MAX_TOKENS contract stays at 64.
+
+        Phase-2 opens a separate three-kernel backend for ``64 < M <= 512``;
+        the low-token backend must still decline without launching.
+        """
         case = _case(65, 20261120 + 65)
         residual = case["residual"].clone()
         with mock.patch(
@@ -139,7 +144,7 @@ class MhcSm90MegaCudaTest(unittest.TestCase):
             side_effect=AssertionError("out-of-range rows must not launch fused HC"),
         ):
             self.assertIsNone(try_vllm_two_kernel_post_pre(**case))
-            self.assertIsNone(try_fused_post_pre(**case))
+        self.assertIsNotNone(try_fused_post_pre(**case))
         self.assertTrue(torch.equal(case["residual"], residual))
 
     @torch.inference_mode()

@@ -181,6 +181,39 @@ def _fused_pre_splitk_specs(
     )
 
 
+def _largebs_representative_ms(
+    max_m: int, k_value: int, backend: str, device
+) -> tuple[int, ...]:
+    """One M per reachable Phase-2 three-kernel split specialization."""
+    max_m = min(int(max_m), 512)
+    if max_m <= 64:
+        return ()
+    if backend == "deepgemm":
+        _tile_ops()
+        fused_pre = importlib.import_module(
+            "rtp_llm.models_py.3rdparty.tile_kernels.modeling.mhc.ops.pre_big_fuse"
+        )
+        seen, representatives = set(), []
+        tokens = 65
+        while tokens <= max_m:
+            splits = fused_pre._compute_num_split(64, k_value, (tokens + 63) // 64)
+            if splits not in seen:
+                seen.add(splits)
+                representatives.append(tokens)
+            tokens += 64
+        if max_m not in representatives:
+            representatives.append(max_m)
+        return tuple(representatives)
+    _tile_ops()
+    norm = importlib.import_module(
+        "rtp_llm.models_py.3rdparty.tile_kernels.modeling.mhc.ops.norm_fn"
+    )
+    index = device.index if device.index is not None else torch.cuda.current_device()
+    return norm._tilelang_representative_ms(
+        max_m, k_value, norm._tilelang_device_num_sms(index), min_m=65
+    )
+
+
 def _tilelang_norm_ms(max_m, hidden, device, *, use_small):
     min_m = 65 if use_small else 1
     if int(max_m) < min_m:
@@ -274,6 +307,34 @@ def _launch_sm90_mega(pair, tokens, device):
         is None
     ):
         raise RuntimeError("V4.1 HC warmup SM90 combine rejected a reachable shape")
+
+
+def _launch_sm90_largebs(pair, tokens, device, *, combine):
+    """Compile the Phase-2 three-kernel boundary for one reachable split."""
+    previous, next_hc, norm = pair
+    previous.pre_mix_out = torch.full(
+        (1, tokens, 4), 0.25, dtype=torch.float32, device=device
+    )
+    residual = torch.ones((1, tokens, 4, 5120), dtype=torch.bfloat16, device=device)
+    hidden = torch.zeros((1, tokens, 5120), dtype=torch.bfloat16, device=device)
+    post = torch.full((1, tokens, 4, 1), 0.25, dtype=torch.float32, device=device)
+    comb = (
+        torch.eye(4, dtype=torch.float32, device=device)
+        .expand(1, tokens, 4, 4)
+        .contiguous()
+    )
+    kwargs = {}
+    if combine:
+        kwargs["combine"] = (torch.zeros_like(hidden), torch.zeros_like(hidden))
+    if (
+        v41_mega_mhc.try_fused_post_pre(
+            hidden, residual, post, comb, previous, next_hc, norm, **kwargs
+        )
+        is None
+    ):
+        raise RuntimeError(
+            "V4.1 HC warmup SM90 three-kernel rejected a reachable shape"
+        )
 
 
 def _warmup_capability(device) -> tuple[int, int]:
@@ -379,6 +440,28 @@ def warmup_v41_hc_jit(v4, *, max_m, device):
         and bool(pairs)
         and v41_mega_mhc._get_sm90_mega_mhc() is not None
     )
+    sm90_largebs_enabled = (
+        capability == (9, 0)
+        and device.type == "cuda"
+        and int(max_m) > 64
+        and bool(pairs)
+        and v41_mega_mhc._get_sm90_largebs_mega_mhc() is not None
+    )
+    largebs_backend = ""
+    largebs_ms: dict[tuple, tuple[int, ...]] = {}
+    if sm90_largebs_enabled:
+        largebs_module = v41_mega_mhc._get_sm90_largebs_mega_mhc()
+        largebs_backend = largebs_module._select_gemm_backend()
+        largebs_ms = {
+            config: _largebs_representative_ms(
+                min(int(max_m), largebs_module.MAX_TOKENS),
+                source[1].dim * source[1].hc_mult,
+                largebs_backend,
+                device,
+            )
+            for config, source in pairs.items()
+            if source[1].dim == 5120
+        }
     mega_num_sms = common._get_deep_gemm_num_sms(device) if mega_enabled else 0
     fused_enabled = can_fuse_big_pre()
     fused_deepgemm = fused_enabled and v41_prenorm.configured_max_tokens() > 64
@@ -432,14 +515,18 @@ def warmup_v41_hc_jit(v4, *, max_m, device):
         fused_enabled,
         fused_splitk,
         sm90_mega_enabled,
+        sm90_largebs_enabled,
+        largebs_backend,
+        tuple(sorted(largebs_ms.items())),
         os.environ.get("DSV4_MHC_PRE_GEMM_BACKEND", ""),
     )
     if key in _WARMED_KEYS:
         return
     logging.info(
-        "[V41 HC] JIT warmup: small M=%s mega M=%s configs=%d seams=%d",
+        "[V41 HC] JIT warmup: small M=%s mega M=%s largebs M=%s configs=%d seams=%d",
         small_ms,
         mega_ms,
+        largebs_ms,
         len(units),
         len(pairs),
     )
@@ -533,6 +620,40 @@ def warmup_v41_hc_jit(v4, *, max_m, device):
                         partial(_launch_sm90_mega, pair, tokens, device),
                         device=device,
                     )
+                del pair
+                common._sync_cuda(device)
+                common._release_cuda_cache(device)
+        if sm90_largebs_enabled:
+            retry = (
+                common._run_deepgemm_warmup_launch_with_retry
+                if largebs_backend == "deepgemm"
+                else common._run_tilelang_warmup_launch_with_retry
+            )
+            for config, source in pairs.items():
+                tokens_ms = largebs_ms.get(config, ())
+                if not tokens_ms:
+                    continue
+                pair = _clone_pair(source, device)
+                for tokens in tokens_ms:
+                    # The plain and deferred-combine seams share the projection
+                    # and epilogue specializations but not the post kernel.
+                    for combine in (False, True):
+                        detail = (
+                            f"config={config} m={tokens} three-kernel "
+                            f"combine={combine} backend={largebs_backend}"
+                        )
+                        retry(
+                            "V41 SM90 largebs mHC",
+                            detail,
+                            partial(
+                                _launch_sm90_largebs,
+                                pair,
+                                tokens,
+                                device,
+                                combine=combine,
+                            ),
+                            device=device,
+                        )
                 del pair
                 common._sync_cuda(device)
                 common._release_cuda_cache(device)

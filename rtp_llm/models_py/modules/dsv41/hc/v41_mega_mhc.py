@@ -13,7 +13,10 @@ retains the unfused path instead of initializing barriers during capture.
 
 SM90 low-token decode uses the vLLM two-kernel boundary: post mapping and the
 next projection are fused first, followed by coefficient reduction, Sinkhorn,
-delayed readout and RMSNorm in one epilogue kernel.
+delayed readout and RMSNorm in one epilogue kernel.  SM90 mid/large-batch
+decode (``64 < M <= 512``) instead uses a three-kernel boundary: post mapping
+(optionally consuming the deferred routed/shared pair), a split-K TF32
+projection, and one epilogue that also applies the downstream layer RMSNorm.
 """
 
 from __future__ import annotations
@@ -59,6 +62,17 @@ def _get_sm90_mega_mhc():
     try:
         return importlib.import_module(
             "rtp_llm.models_py.modules.dsv41.hc.mhc_sm90_vllm_two_kernel"
+        )
+    except (ImportError, OSError):
+        # Optional TileLang dependencies are not present in every build.
+        return None
+
+
+@lru_cache(maxsize=1)
+def _get_sm90_largebs_mega_mhc():
+    try:
+        return importlib.import_module(
+            "rtp_llm.models_py.modules.dsv41.hc.mhc_sm90_largebs_three_kernel"
         )
     except (ImportError, OSError):
         # Optional TileLang dependencies are not present in every build.
@@ -145,6 +159,24 @@ def _can_try_sm90_mega_mhc(attn_out: torch.Tensor) -> bool:
         backend is not None
         and 0 < attn_out.numel() // attn_out.shape[-1] <= backend.MAX_TOKENS
     )
+
+
+def _can_try_sm90_largebs_mega_mhc(attn_out: torch.Tensor) -> bool:
+    """Phase-2 three-kernel window: ``64 < M <= 512`` on SM90."""
+    if (
+        not isinstance(attn_out, torch.Tensor)
+        or attn_out.device.type != "cuda"
+        or attn_out.ndim != 3
+        or attn_out.shape[-1] != 5120
+    ):
+        return False
+    if tuple(torch.cuda.get_device_capability(attn_out.device)) != (9, 0):
+        return False
+    backend = _get_sm90_largebs_mega_mhc()
+    if backend is None:
+        return False
+    tokens = attn_out.numel() // attn_out.shape[-1]
+    return backend.MIN_TOKENS < tokens <= backend.MAX_TOKENS
 
 
 def _check_units(previous, next_hc, norm, device) -> bool:
@@ -388,30 +420,64 @@ def try_fused_post_pre(
     if moe_inputs is not None and original_tokens is not None:
         return None
     if combine is not None:
-        if original_tokens is not None or reuse_residual or output_fp8 or moe_inputs is not None:
+        if (
+            original_tokens is not None
+            or reuse_residual
+            or output_fp8
+            or moe_inputs is not None
+        ):
             return None
-        if not _can_try_sm90_mega_mhc(attn_out):
-            return None
-        sm90_backend = _get_sm90_mega_mhc()
-        if sm90_backend is None:
-            return None
-        return sm90_backend.try_vllm_two_kernel_post_pre(
-            attn_out, residual, post, comb, previous, next_hc, norm, combine=combine
-        )
+        if _can_try_sm90_mega_mhc(attn_out):
+            sm90_backend = _get_sm90_mega_mhc()
+            if sm90_backend is not None:
+                result = sm90_backend.try_vllm_two_kernel_post_pre(
+                    attn_out,
+                    residual,
+                    post,
+                    comb,
+                    previous,
+                    next_hc,
+                    norm,
+                    combine=combine,
+                )
+                if result is not None:
+                    return result
+        if _can_try_sm90_largebs_mega_mhc(attn_out):
+            largebs_backend = _get_sm90_largebs_mega_mhc()
+            if largebs_backend is not None:
+                return largebs_backend.try_sm90_largebs_post_pre(
+                    attn_out,
+                    residual,
+                    post,
+                    comb,
+                    previous,
+                    next_hc,
+                    norm,
+                    combine=combine,
+                )
+        return None
     if (
         original_tokens is None
         and not reuse_residual
         and not output_fp8
         and moe_inputs is None
-        and _can_try_sm90_mega_mhc(attn_out)
     ):
-        sm90_backend = _get_sm90_mega_mhc()
-        if sm90_backend is not None:
-            result = sm90_backend.try_vllm_two_kernel_post_pre(
-                attn_out, residual, post, comb, previous, next_hc, norm
-            )
-            if result is not None:
-                return result
+        if _can_try_sm90_mega_mhc(attn_out):
+            sm90_backend = _get_sm90_mega_mhc()
+            if sm90_backend is not None:
+                result = sm90_backend.try_vllm_two_kernel_post_pre(
+                    attn_out, residual, post, comb, previous, next_hc, norm
+                )
+                if result is not None:
+                    return result
+        if _can_try_sm90_largebs_mega_mhc(attn_out):
+            largebs_backend = _get_sm90_largebs_mega_mhc()
+            if largebs_backend is not None:
+                result = largebs_backend.try_sm90_largebs_post_pre(
+                    attn_out, residual, post, comb, previous, next_hc, norm
+                )
+                if result is not None:
+                    return result
     if not is_supported(
         attn_out,
         residual,
