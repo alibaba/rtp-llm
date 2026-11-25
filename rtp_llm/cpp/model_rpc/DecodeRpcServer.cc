@@ -1195,16 +1195,12 @@ DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext&                     
         auto& worker  = all_context[i];
         auto  request = use_mla ? constructRemoteLoadRequestForMla(load_context, i, decode_context.peer_addrs) :
                                   constructRemoteLoadRequest(load_context, i, decode_context.peer_addrs);
-        request.set_destination_blocks_held(true);
         *request.mutable_write_lease() = worker.lease;
-        const auto& masked             = destination_hold->maskedPositions();
-        for (auto& row : *request.mutable_tagged_group_block_ids()) {
-            auto it = masked.find(row.tag());
-            if (it != masked.end()) {
-                for (const auto pos : it->second) {
-                    row.add_masked_positions(pos);
-                }
-            }
+        auto* scope                    = request.mutable_protected_destinations();
+        for (const auto& [tag, ids] : destination_hold->protectedBlocks()) {
+            auto* row = scope->add_groups();
+            row->set_tag(tag);
+            row->mutable_block_ids()->Add(ids.begin(), ids.end());
         }
         worker.client_context->set_deadline(rpc_deadline);
         worker.dispatched = true;
@@ -1869,8 +1865,8 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
     if (!resource_.cache_store || !resource_.cache_store->getMemoryUtil()) {
         return reject_before_load("worker cache store transport is unavailable");
     }
-    if (resource_.cache_store->getMemoryUtil()->isRdmaMode() && !request->destination_blocks_held()) {
-        return reject_before_load("RDMA load requires the allocating rank to hold the destination blocks");
+    if (!request->has_protected_destinations()) {
+        return reject_before_load("P/D load requires the allocating rank to specify protected destination blocks");
     }
 
     std::vector<CacheKeyType> cache_keys(request->cache_keys().begin(), request->cache_keys().end());
@@ -1879,31 +1875,22 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
     GroupBlockIds             group_block_ids;
     try {
         group_block_ids = decodeGroupBlockIds(*request, topology);
-        // A worker with a different main/MTP layout must not silently skip
-        // pages that its own plan would have written.
-        std::unordered_map<std::string, std::unordered_set<size_t>> masked;
-        for (const auto& row : request->tagged_group_block_ids()) {
-            for (int32_t pos : row.masked_positions()) {
-                if (pos < 0 || pos >= row.block_ids_size() || !isNullBlockIdx(row.block_ids(pos))) {
-                    return reject_before_load("invalid masked Decode target position");
-                }
-                masked[row.tag()].insert(static_cast<size_t>(pos));
-            }
+        std::unordered_map<std::string, std::unordered_set<BlockIdxType>> protected_blocks;
+        for (const auto& row : request->protected_destinations().groups()) {
+            auto& ids = protected_blocks[row.tag()];
+            ids.insert(row.block_ids().begin(), row.block_ids().end());
         }
-        if (!masked.empty()) {
-            bool incompatible = false;
-            visitLoadDestinations(group_block_ids,
-                                  cache_keys.size(),
-                                  request->reuse_block_size(),
-                                  [&](const std::string& tag, size_t pos) {
-                                      const auto it = masked.find(tag);
-                                      if (it != masked.end() && it->second.count(pos)) {
-                                          incompatible = true;
-                                      }
-                                  });
-            if (incompatible) {
-                return reject_before_load("worker load plan requires an unheld Decode target block");
-            }
+        bool unprotected_target = false;
+        visitLoadDestinations(
+            group_block_ids, cache_keys.size(), request->reuse_block_size(), [&](const std::string& tag, size_t pos) {
+                const auto id = group_block_ids.blocks(tag).at(pos);
+                const auto it = protected_blocks.find(tag);
+                if (!isNullBlockIdx(id) && (it == protected_blocks.end() || !it->second.count(id))) {
+                    unprotected_target = true;
+                }
+            });
+        if (unprotected_target) {
+            return reject_before_load("worker load plan requires an unprotected Decode target block");
         }
     } catch (const std::exception& error) {
         RTP_LLM_LOG_WARNING("remote load destination validation failed: %s", error.what());

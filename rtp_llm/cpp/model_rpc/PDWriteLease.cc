@@ -77,6 +77,9 @@ grpc::Status preparePDWriteLeases(std::vector<PDWriteLeasePeer>&        peers,
         if (peer.lease.worker_epoch().empty() || peer.lease.token() == 0) {
             return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "worker returned no P/D write lease");
         }
+        if (!peer.lease.supports_protected_destinations()) {
+            return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "worker cannot validate protected P/D targets");
+        }
     }
     return grpc::Status::OK;
 }
@@ -98,6 +101,7 @@ PDWriteLeasePB PDWriteLeaseRegistry::prepare(const PreparePDWriteLeaseRequestPB&
     PDWriteLeasePB lease;
     lease.set_worker_epoch(epoch_);
     lease.set_token(++issued_);
+    lease.set_supports_protected_destinations(true);
     const auto ttl    = std::chrono::milliseconds(std::clamp<int64_t>(request.timeout_ms(), 1, INT32_MAX));
     auto       expiry = expiry_.emplace(now + ttl, lease.token());
     try {

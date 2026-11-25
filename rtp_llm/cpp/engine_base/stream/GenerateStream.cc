@@ -2329,7 +2329,7 @@ std::shared_ptr<PDLoadDestinationHold> GenerateStream::holdPDLoadDestination(Cac
     }
     stream_cache_resource_->trackPDLoad(hold->publicationStatus());
     keys         = cache_keys;
-    groups       = hold->remoteBlockIds();
+    groups       = hold->blockIdsSnapshot();
     reuse_blocks = reused;
     return hold;
 }

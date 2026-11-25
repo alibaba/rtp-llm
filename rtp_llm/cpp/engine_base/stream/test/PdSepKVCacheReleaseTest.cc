@@ -447,12 +447,10 @@ TEST_F(PdSepKVCacheReleaseTest, DecodePDLoadSnapshotAndPinsSurviveRelease) {
     ASSERT_TRUE(row);
     const auto ids = row->blocks();
     ASSERT_GE(ids.size(), 2u);
-    BlockIndicesType expected(ids.size(), NULL_BLOCK_IDX);
-    expected.back() = ids.back();
-    EXPECT_EQ(groups.blocks(tag), expected);
-    EXPECT_EQ(row->blocks(), ids);
+    EXPECT_EQ(groups.blocks(tag), ids);
+    EXPECT_EQ(hold->protectedBlocks().at(tag), BlockIndicesType{ids.back()});
     row->swap(0, 1);
-    EXPECT_EQ(groups.blocks(tag), expected);
+    EXPECT_EQ(groups.blocks(tag), ids);
     row->swap(0, 1);
 
     stream_->releaseResource();
@@ -2231,7 +2229,7 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreUsesTensorDeviceForCpuKvScale
     EXPECT_FALSE(scale_block->gpu_mem);
 }
 
-TEST_F(PdSepKVCacheReleaseTest, RdmaWorkerRejectsUnheldOrMaskedTargetBeforeLoading) {
+TEST_F(PdSepKVCacheReleaseTest, RdmaWorkerRejectsMissingScopeOrUnprotectedTargetBeforeLoading) {
     prepareStreamWithConfig({1, 2, 3}, makeConfig(), 8, RoleType::DECODE);
     auto             store = std::make_shared<DelayedRdmaCacheStore>();
     EngineInitParams params;
@@ -2246,24 +2244,37 @@ TEST_F(PdSepKVCacheReleaseTest, RdmaWorkerRejectsUnheldOrMaskedTargetBeforeLoadi
     request.add_cache_keys(42);
     auto* row = request.add_tagged_group_block_ids();
     row->set_tag("default");
-    row->add_block_ids(NULL_BLOCK_IDX);
-    row->add_masked_positions(0);
+    request.add_cache_keys(43);
+    request.add_peer_addrs("127.0.0.1:12345:12346");
+    request.set_partition_count(1);
+    row->add_block_ids(1);
+    row->add_block_ids(2);
 
     grpc::ServerContext     context;
     BroadcastLoadResponsePB legacy_reply;
     EXPECT_FALSE(server.RemoteLoad(&context, &request, &legacy_reply).ok());
     EXPECT_FALSE(store->pending);
-    for (bool held : {false, true}) {
+    for (bool has_scope : {false, true}) {
         PreparePDWriteLeaseRequestPB prepare;
         prepare.set_dp_rank(request.dp_rank());
         prepare.set_timeout_ms(10000);
         ASSERT_TRUE(server.PreparePDWriteLease(&context, &prepare, request.mutable_write_lease()).ok());
-        request.set_destination_blocks_held(held);
+        if (has_scope) {
+            // A matching numeric ID in another group does not protect this target.
+            auto* scope         = request.mutable_protected_destinations();
+            auto* protected_row = scope->add_groups();
+            protected_row->set_tag("default");
+            protected_row->add_block_ids(1);
+            auto* wrong_group = scope->add_groups();
+            wrong_group->set_tag("other");
+            wrong_group->add_block_ids(2);
+        }
         BroadcastLoadResponsePB response;
         ASSERT_TRUE(server.RemoteLoad(&context, &request, &response).ok());
         EXPECT_NE(response.error_info().error_code(), ErrorCodePB::NONE_ERROR);
         EXPECT_TRUE(response.destination_writes_quiesced());
-        EXPECT_NE(response.error_info().error_message().find(held ? "plan" : "hold"), std::string::npos);
+        EXPECT_NE(response.error_info().error_message().find(has_scope ? "unprotected" : "requires"),
+                  std::string::npos);
         EXPECT_FALSE(store->pending);
         EXPECT_TRUE(store->load_buffer_requests_.empty());
     }
@@ -2308,12 +2319,12 @@ TEST_F(PdSepKVCacheReleaseTest, WorkerSealArmsInflightRecoveryAndRequiresTranspo
     request.set_dp_rank(prepare.dp_rank());
     request.set_partition_count(1);
     request.set_timeout_ms(10000);
-    request.set_destination_blocks_held(true);
     request.add_peer_addrs("127.0.0.1:12345:12346");
     request.add_cache_keys(42);
     auto* row = request.add_tagged_group_block_ids();
     row->set_tag("default");
     row->add_block_ids(rows.blocks("default").front());
+    *request.mutable_protected_destinations()->add_groups() = *row;
     BroadcastLoadResponsePB response;
     auto                    submitted = store->submitted.get_future();
     auto outcome = std::async(std::launch::async, [&] { return server.RemoteLoad(&context, &request, &response); });
@@ -2384,7 +2395,7 @@ public:
         auto writer = leases->claim(*request);
         if (!writer)
             return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "not prepared");
-        EXPECT_TRUE(request->destination_blocks_held());
+        EXPECT_TRUE(request->has_protected_destinations());
         entered.set_value();
         if (reply.wait_for(std::chrono::seconds(10)) != std::future_status::ready) {
             return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "test worker timed out");

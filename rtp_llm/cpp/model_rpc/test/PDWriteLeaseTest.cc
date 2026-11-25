@@ -100,6 +100,7 @@ public:
                                      const PreparePDWriteLeaseRequestPB* request,
                                      PDWriteLeasePB*                     response) override {
         *response = registry->prepare(*request);
+        response->set_supports_protected_destinations(supports_protected_destinations.load());
         return grpc::Status::OK;
     }
     grpc::Status
@@ -117,6 +118,7 @@ public:
     }
 
     std::shared_ptr<PDWriteLeaseRegistry> registry = std::make_shared<PDWriteLeaseRegistry>();
+    std::atomic<bool>                     supports_protected_destinations{true};
     std::atomic<int>                      seal_calls{0};
     std::promise<void>                    lost_reply;
 };
@@ -138,6 +140,11 @@ TEST(PDWriteLeaseTest, RetriesLostStopReceiptAndWaitsForEveryWriter) {
     request.set_request_id(23);
     request.set_request_key("delayed-stop");
     request.set_timeout_ms(10000);
+    service.supports_protected_destinations.store(false);
+    const auto unsupported =
+        preparePDWriteLeases(peers, request, std::chrono::system_clock::now() + 5s, [] { return false; });
+    EXPECT_EQ(unsupported.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
+    service.supports_protected_destinations.store(true);
     ASSERT_TRUE(preparePDWriteLeases(peers, request, std::chrono::system_clock::now() + 5s, [] { return false; }).ok());
     ASSERT_NE(peers[0].lease.token(), peers[1].lease.token());
     BroadcastLoadRequestPB load;

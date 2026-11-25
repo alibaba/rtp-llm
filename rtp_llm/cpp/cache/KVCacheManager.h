@@ -46,12 +46,11 @@ public:
     void markLoadSuccessful() {
         content_ready_->store(true, std::memory_order_release);
     }
-    const GroupBlockIds& remoteBlockIds() const {
-        return remote_block_ids_;
+    const GroupBlockIds& blockIdsSnapshot() const {
+        return block_ids_snapshot_;
     }
-    // Original non-hole slots masked on the wire because they have no write pin.
-    const std::unordered_map<std::string, std::vector<int32_t>>& maskedPositions() const {
-        return masked_positions_;
+    const PDLoadDestinationBlocks& protectedBlocks() const {
+        return protected_blocks_;
     }
 
 private:
@@ -61,9 +60,9 @@ private:
         DeviceBlockPoolPtr                pool;
         std::vector<RemotePublicationPin> pins;  // Destroy before the strong pool owner.
     };
-    GroupBlockIds                                         remote_block_ids_;
-    std::unordered_map<std::string, std::vector<int32_t>> masked_positions_;
-    std::vector<PoolPins>                                 pools_;
+    GroupBlockIds           block_ids_snapshot_;
+    PDLoadDestinationBlocks protected_blocks_;
+    std::vector<PoolPins>   pools_;
 };
 
 class KVCacheManager {
