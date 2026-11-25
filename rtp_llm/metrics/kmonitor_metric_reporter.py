@@ -201,6 +201,7 @@ class GaugeMetrics(Enum):
     FRONTEND_CACHE_HIT_RATIO_METRIC = "py_rtp_frontend_cache_hit_ratio"
     FRONTEND_CONCURRENCY_METRIC = "py_rtp_frontend_concurrency"
     FRONTEND_TTFT_MS_METRIC = "py_rtp_frontend_ttft_ms"
+    FRONTEND_REQUEST_TPOT_MS = "py_rtp_frontend_request_tpot_ms"
     FRONTEND_TPOT_MS_METRIC = "py_rtp_frontend_tpot_ms"
     FRONTEND_REQUEST_RT_MS_METRIC = "py_rtp_frontend_request_rt_ms"
     FRONTEND_SPECULATIVE_ACCEPT_RATE_METRIC = "py_rtp_frontend_speculative_accept_rate"

@@ -1148,6 +1148,38 @@ class FrontendServerTest(TestCase):
         payload = json.loads(response.body)
         self.assertEqual(payload["aux_info"], {"input_len": 10})
 
+    def test_stream_request_tpot_uses_final_usage_and_terminal_frame(self):
+        class Frame(BaseModel):
+            choices: list
+            usage: dict | None = None
+
+        async def run():
+            async def frames():
+                yield Frame(choices=[{"delta": {"tool_calls": [{"index": 0}]}}])
+                yield Frame(choices=[{"delta": {"reasoning_content": "a"}}])
+                yield Frame(choices=[{"delta": {"content": "b"}}])
+                yield Frame(choices=[], usage={"completion_tokens": 5})
+
+            stream = CompleteResponseAsyncGenerator(
+                frames(), CompleteResponseAsyncGenerator.get_last_value
+            )
+            async for _ in self.frontend_server.stream_response(
+                {"stream": True}, stream, {"server_id": "0"}, lambda: None
+            ):
+                pass
+
+        complete = {"choices": [{}], "usage": {"completion_tokens": 5}}
+        module = "rtp_llm.frontend.frontend_server"
+        with patch.object(
+            self.frontend_server, "_collect_complete_response_and_record_access_log",
+            new=AsyncMock(return_value=complete),
+        ), patch(module + ".time") as clock, patch(module + ".kmonitor") as reporter:
+            clock.monotonic_ns.side_effect = [1, 2_000_000, 15_000_000, 22_000_000]
+            asyncio.run(run())
+            reporter.report.assert_called_once_with(
+                GaugeMetrics.FRONTEND_REQUEST_TPOT_MS, 5.0, {"server_id": "0"}
+            )
+
     def test_stream_error_response_preserves_existing_aux_info_contract(self):
         async def failing_stream():
             error = RuntimeError("stream backend failed")

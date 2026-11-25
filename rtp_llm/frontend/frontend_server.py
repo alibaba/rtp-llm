@@ -448,17 +448,51 @@ class FrontendServer(object):
         # finish() (manual instrumentation, no ASGI middleware).
         trace_state = CURRENT_TRACE_STATE.get()
         is_openai_response = request.get("stream", False)
+        first_token_ns = None
+        last_frame_ns = None
         response_data_prefix = "data: " if is_openai_response else "data:"
         try:
             async for res in response:
                 data_str = res.model_dump_json(exclude_none=True)
+                last_frame_ns = time.monotonic_ns()
+                if first_token_ns is None:
+                    choices = _field(res, "choices")
+                    if choices is None:
+                        visible = _visible_output_count(res)
+                    else:
+                        delta = _field(choices[0], "delta") if choices else None
+                        visible = any(
+                            _field(delta, key)
+                            for key in ("content", "reasoning_content", "reasoning")
+                        )
+                    if visible:
+                        first_token_ns = last_frame_ns
                 yield response_data_prefix + data_str + "\r\n\r\n"
                 await asyncio.sleep(0)
             if not is_openai_response:
+                last_frame_ns = time.monotonic_ns()
                 yield f"data:[done]\r\n\r\n"
-            await self._collect_complete_response_and_record_access_log(
+            complete = await self._collect_complete_response_and_record_access_log(
                 request, response
             )
+            output_tokens = _output_token_total(complete)
+            lanes = _field(complete, "choices")
+            if lanes is None:
+                lanes = _field(complete, "response")
+            if (
+                first_token_ns is not None
+                and last_frame_ns is not None
+                and last_frame_ns > first_token_ns
+                and output_tokens is not None
+                and output_tokens > 1
+                and _field(complete, "response_batch") is None
+                and (not isinstance(lanes, (list, tuple)) or len(lanes) == 1)
+            ):
+                kmonitor.report(
+                    GaugeMetrics.FRONTEND_REQUEST_TPOT_MS,
+                    (last_frame_ns - first_token_ns) / 1e6 / (output_tokens - 1),
+                    metric_tags,
+                )
             if trace_state is not None:
                 _record_http_status(trace_state, 200)
                 trace_state.finish()

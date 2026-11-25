@@ -1007,6 +1007,22 @@ class GrpcMetricsTest(TestCase):
         self.assertEqual(self._for(GaugeMetrics.OUTPUT_TOKEN_SIZE_METRIC)[0][1], 5)
         self.assertEqual(self._for(GaugeMetrics.RESPONSE_ITERATE_COUNT)[0][1], 2)
 
+    def test_request_tpot_counts_tokens_after_first_not_frames(self) -> None:
+        for status, tokens, expected in (
+            ("OK", 5, [5.0]), ("OK", 1, []), ("CANCELLED", 5, []),
+        ):
+            with self.subTest(status=status, tokens=tokens):
+                self.calls.clear()
+                rec = _make_record(
+                    output_len=tokens, first_token_ts=0.0, terminal_ts=0.020,
+                    terminal_seen=True, token_frame_count=2,
+                )
+                grpc_metrics.report_frontend_rpc_done(
+                    rec, rank_id=self.rank_id, server_id=self.server_id, status=status
+                )
+                samples = self._for(GaugeMetrics.FRONTEND_REQUEST_TPOT_MS)
+                self.assertEqual([value for _, value, _ in samples], expected)
+
     def test_done_cancel(self) -> None:
         grpc_metrics.report_frontend_rpc_done(
             _make_record(),

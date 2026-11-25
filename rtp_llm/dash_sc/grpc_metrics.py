@@ -227,6 +227,19 @@ def report_frontend_rpc_done(
     """Mirror ``_call_generate_with_report`` frontend tail metrics."""
     _report_rpc_done_common(record, rank_id=rank_id, server_id=server_id, status=status)
     _report_frontend_structured_metrics(record, rank_id=rank_id, server_id=server_id)
+    if (
+        status == "OK"
+        and record.terminal_seen
+        and record.first_token_ts is not None
+        and record.terminal_ts is not None
+        and record.terminal_ts > record.first_token_ts
+        and record.output_len > 1
+    ):
+        kmonitor.report(
+            GaugeMetrics.FRONTEND_REQUEST_TPOT_MS,
+            (record.terminal_ts - record.first_token_ts) * 1000 / (record.output_len - 1),
+            {**_metric_tags(rank_id, server_id), "priority": _priority_tag(record)},
+        )
 
 
 def report_forwarder_rpc_done(
