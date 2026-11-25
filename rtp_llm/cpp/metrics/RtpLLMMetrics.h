@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <set>
 #include <optional>
 #include <string>
 #include <thread>
@@ -653,6 +654,29 @@ public:
         return collectors;
     }
 
+    // Remember series across windows: a missing bucket means zero, not a missing sample.
+    // Keep known series alive across idle windows; QPS snapshots include zero before their next update.
+    std::map<int32_t, RtpLLMTokenPSMetricsCollector>
+    priorityCollectorsForReport(std::set<int32_t>& known_priorities) const {
+        auto collectors = priorityCollectorsForReport();
+        if (collectors.empty() && (hasMetrics() || known_priorities.empty())) {
+            collectors.emplace(0, *this);
+        }
+        for (const auto& [priority, collector] : collectors) {
+            if (hasMetrics()) {
+                known_priorities.insert(priority);
+            }
+        }
+        for (int32_t priority : known_priorities) {
+            auto [it, inserted] = collectors.try_emplace(priority);
+            if (inserted) {
+                it->second.setReportWindowUs(report_window_us_);
+                it->second.markIdleWindow();
+            }
+        }
+        return collectors;
+    }
+
 private:
     static double calcTps(int64_t token_num, int64_t time_us) {
         if (time_us > 0) {
@@ -933,23 +957,22 @@ private:
                 } else if (collector_.hasMetrics()) {
                     should_report = takeReportCollector(now, report_collector);
                 } else if (active_count_ == 0) {
-                    // Idle service reports 0 wall TPS with priority="0". In-flight long steps stay
-                    // silent so their eventual wall window includes the full in-flight time since
-                    // the last wall report.
+                    // Idle service reports zero for every known priority.
                     collector_.markIdleWindow();
                     should_report = takeReportCollector(now, report_collector);
+                } else {
+                    // Keep QPS series alive during long active steps. Otherwise Kmonitor recycles
+                    // them after 20 untouched snapshots and downstream averages omit the gap.
+                    // A zero-window heartbeat neither drains tokens nor advances last_report_time_.
+                    report_collector.markIdleWindow();
+                    should_report = true;
                 }
             }
             if (should_report) {
-                auto priority_collectors = report_collector.priorityCollectorsForReport();
-                if (priority_collectors.empty()) {
-                    kmonitor::MetricsTags tags("priority", "0");
-                    metrics_reporter_->report<MetricsType, CollectType>(&tags, &report_collector);
-                } else {
-                    for (auto& [priority, collector] : priority_collectors) {
-                        kmonitor::MetricsTags tags("priority", std::to_string(priority));
-                        metrics_reporter_->report<MetricsType, CollectType>(&tags, &collector);
-                    }
+                auto priority_collectors = report_collector.priorityCollectorsForReport(known_priorities_);
+                for (auto& [priority, collector] : priority_collectors) {
+                    kmonitor::MetricsTags tags("priority", std::to_string(priority));
+                    metrics_reporter_->report<MetricsType, CollectType>(&tags, &collector);
                 }
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms_));
@@ -957,6 +980,8 @@ private:
     }
 
 private:
+    // Accessed only by the reporting thread; retained across idle windows.
+    std::set<int32_t>                     known_priorities_;
     std::mutex                            mutex_;
     std::atomic_bool                      stop_{false};
     CollectType                           collector_;
