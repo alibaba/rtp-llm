@@ -22,12 +22,13 @@ def prepare_moe_communicator(device: torch.device, max_decode_rows: int = 128):
         raise RuntimeError("MoE communicator must be prepared before graph capture")
     if max_decode_rows not in (64, 128, 256, 512):
         raise ValueError("MoE decode row capacity must be 64, 128, 256, or 512")
-    if os.getenv("FT_DISABLE_CUSTOM_AR", "").strip().lower() in (
-        "1",
-        "true",
-        "on",
-        "yes",
-    ):
+    if not collective_torch.custom_all_reduce_enabled():
+        logging.getLogger(__name__).info(
+            "MoE private custom AR disabled by custom AR switch "
+            "(FT_DISABLE_CUSTOM_AR=%r, cli_override=%s)",
+            os.getenv("FT_DISABLE_CUSTOM_AR"),
+            getattr(collective_torch, "_disable_custom_all_reduce_override", None),
+        )
         return None
     if not dist.is_initialized() or not collective_torch._initialized:
         return None

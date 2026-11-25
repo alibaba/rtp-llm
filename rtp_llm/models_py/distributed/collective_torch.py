@@ -38,6 +38,69 @@ _symm_mem = None
 _all_reduce_module = None
 _canonical_p2p = None
 _tp2_p2p_allgather = None
+_disable_custom_all_reduce_override: Optional[bool] = None
+
+
+def custom_all_reduce_enabled(
+    disable_custom_all_reduce: Optional[bool] = None,
+) -> bool:
+    """Unified check honoring explicit override, server-wide override, then FT_DISABLE_CUSTOM_AR."""
+    override = (
+        disable_custom_all_reduce
+        if disable_custom_all_reduce is not None
+        else _disable_custom_all_reduce_override
+    )
+    if override is not None:
+        return not override
+    value = os.getenv("FT_DISABLE_CUSTOM_AR")
+    return value is None or value.strip().lower() not in ("1", "true", "on", "yes")
+
+
+def log_comm_backend_summary(*, tp2_ar_hc=None, head_ipc=None) -> None:
+    """Emit a single rank-0 startup summary of active collective backends."""
+    if _parallelism_config is None or _parallelism_config.tp_size <= 1:
+        return
+    if _parallelism_config.tp_rank != 0:
+        return
+    fi_status = "ready" if _get_all_reduce_module().get_all_reduce() is not None else "disabled"
+    symm_comm = _get_symm_mem().get_symm_mem_communicator()
+    if symm_comm is None or getattr(symm_comm, "disabled", True):
+        symm_status = "disabled"
+    else:
+        symm_status = (
+            f"ready(multicast={getattr(symm_comm, '_has_multicast', False)},"
+            f"one_shot={getattr(symm_comm, '_one_shot_copy_out', None) is not None})"
+        )
+    ag_status = (
+        f"ready(max_shard_mib={_tp2_p2p_allgather.max_shard_bytes // (1024 * 1024)})"
+        if _tp2_p2p_allgather is not None
+        else "disabled"
+    )
+    tp2_status = (
+        f"ready(max_rows={tp2_ar_hc.max_rows},"
+        f"lamport_rows={getattr(tp2_ar_hc, 'max_lamport_rows', 0)})"
+        if tp2_ar_hc is not None
+        else f"disabled(RTP_QWEN4_DISABLE_TP2_AR_HC_FUSED={os.getenv('RTP_QWEN4_DISABLE_TP2_AR_HC_FUSED', '1')!r})"
+    )
+    head_status = (
+        f"ready(max_rows={head_ipc.max_rows})" if head_ipc is not None else "disabled"
+    )
+    logging.info(
+        "[CommBackendSummary] tp=%s dp=%s local_world=%s "
+        "FT_DISABLE_CUSTOM_AR=%r cli_override=%s | "
+        "tp2_ar_hc_fused=%s | flashinfer_ar=%s | symm_mem=%s | "
+        "tp2_p2p_allgather=%s | head_ipc=%s",
+        _parallelism_config.tp_size,
+        _parallelism_config.dp_size,
+        _parallelism_config.local_world_size,
+        os.getenv("FT_DISABLE_CUSTOM_AR"),
+        _disable_custom_all_reduce_override,
+        tp2_status,
+        fi_status,
+        symm_status,
+        ag_status,
+        head_status,
+    )
 
 
 def _get_rocm_rccl():
@@ -119,7 +182,7 @@ def _init_tp2_p2p_allgather(
     _tp2_p2p_allgather = init_tp2_p2p_allgather(
         _get_group(Group.TP),
         torch.device("cuda", parallelism_config.local_rank),
-        disable_custom_all_reduce=False,
+        disable_custom_all_reduce=_disable_custom_all_reduce_override,
     )
 
 
@@ -217,9 +280,12 @@ def init_distributed_environment(
         RuntimeError: If changing a live collective policy without destroying it
     """
     global _group_map, _parallelism_config, _initialized, _cpu_tp_broadcaster_base_path
-
+    global _disable_custom_all_reduce_override
     if collective_config is None:
         collective_config = CollectiveConfig()
+    _disable_custom_all_reduce_override = (
+        True if collective_config.all_reduce_backend == "nccl" else None
+    )
 
     # Check if already initialized (and not destroyed)
     if _initialized and torch.distributed.is_initialized():
@@ -842,7 +908,8 @@ def destroy_distributed_environment():
     to reinitialize the distributed environment.
     """
     global _group_map, _parallelism_config, _initialized, _cpu_tp_broadcaster_base_path
-    global _canonical_p2p, _tp2_p2p_allgather
+    global _canonical_p2p, _tp2_p2p_allgather, _disable_custom_all_reduce_override
+    _disable_custom_all_reduce_override = None
 
     rank = torch.distributed.get_rank()
     logging.info(f"[rank: {rank}] Destroying distributed environment")
@@ -1122,11 +1189,6 @@ def all_gather(tensor: torch.Tensor, group: Group) -> torch.Tensor:
         (shape: [world_size * tensor.shape[0]] + list(tensor.shape)[1:])
     """
     return _all_gather_impl(tensor, group)
-
-    # reference old implementation
-    # tensor_list = [torch.zeros_like(tensor) for _ in range(world_size)]
-    # torch.distributed.all_gather(tensor_list, tensor, group=process_group)
-    # return torch.cat(tensor_list, dim=0)
 
 
 def reduce_scatter(input_tensor: torch.Tensor, group: Group) -> torch.Tensor:

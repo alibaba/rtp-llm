@@ -180,8 +180,14 @@ def init_tp2_p2p_allgather(
     disable_custom_all_reduce: Optional[bool] = None,
 ) -> Optional[Tp2P2pAllGather]:
     if os.getenv("RTP_LLM_DISABLE_TP2_P2P_ALL_GATHER", "0") == "1":
+        logging.info("TP2 P2P IPC AllGather disabled by RTP_LLM_DISABLE_TP2_P2P_ALL_GATHER=1")
         return None
     if not _custom_all_reduce_enabled(disable_custom_all_reduce):
+        logging.info(
+            "TP2 P2P IPC AllGather disabled by custom AR switch (override=%s, FT_DISABLE_CUSTOM_AR=%r)",
+            disable_custom_all_reduce,
+            os.getenv("FT_DISABLE_CUSTOM_AR"),
+        )
         return None
     if (
         not torch.cuda.is_available()
@@ -206,12 +212,21 @@ def init_tp2_p2p_allgather(
             and torch.cuda.get_device_capability(device) == (9, 0)
             and hasattr(rtp_llm_ops, "tp2_p2p_all_gather")
         )
-    except Exception:
+    except Exception as exc:
+        logging.info("TP2 P2P IPC AllGather prerequisite check failed: %s", exc)
         local_ok = False
 
     if not _agree_across_group(group, local_ok, "tp2_p2p_ag_prereq"):
+        logging.info(
+            "TP2 P2P IPC AllGather disabled: group prerequisite check failed (local_ok=%s)",
+            local_ok,
+        )
         return None
     if not _tp2_peers_can_access(group, device):
+        logging.info(
+            "TP2 P2P IPC AllGather disabled: TP2 peer access unavailable on device=%s",
+            device,
+        )
         return None
 
     comm = Tp2P2pAllGather(group, device)
