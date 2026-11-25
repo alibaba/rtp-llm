@@ -26,7 +26,7 @@ public:
 protected:
     std::shared_ptr<BlockBufferInfo> getAndEraseUnLoadedBlock(const std::string& block_key);
     void                             stopTimer();
-    void                             runSuccess(bool direct_write, bool rdma_writes_placed = false);
+    void                             runSuccess(bool direct_write);
 
 protected:
     const CacheLoadRequest* request_;

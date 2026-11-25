@@ -1196,11 +1196,13 @@ DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext&                     
         auto  request = use_mla ? constructRemoteLoadRequestForMla(load_context, i, decode_context.peer_addrs) :
                                   constructRemoteLoadRequest(load_context, i, decode_context.peer_addrs);
         *request.mutable_write_lease() = worker.lease;
-        auto* scope                    = request.mutable_protected_destinations();
-        for (const auto& [tag, ids] : destination_hold->protectedBlocks()) {
+        auto* scope                    = request.mutable_protected_positions();
+        for (const auto& [tag, positions] : destination_hold->protectedPositions()) {
             auto* row = scope->add_groups();
             row->set_tag(tag);
-            row->mutable_block_ids()->Add(ids.begin(), ids.end());
+            for (const auto pos : positions) {
+                row->add_protected_positions(pos);
+            }
         }
         worker.client_context->set_deadline(rpc_deadline);
         worker.dispatched = true;
@@ -1865,8 +1867,8 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
     if (!resource_.cache_store || !resource_.cache_store->getMemoryUtil()) {
         return reject_before_load("worker cache store transport is unavailable");
     }
-    if (!request->has_protected_destinations()) {
-        return reject_before_load("P/D load requires the allocating rank to specify protected destination blocks");
+    if (!request->has_protected_positions()) {
+        return reject_before_load("P/D load requires the allocating rank to specify protected destination positions");
     }
 
     std::vector<CacheKeyType> cache_keys(request->cache_keys().begin(), request->cache_keys().end());
@@ -1875,17 +1877,23 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
     GroupBlockIds             group_block_ids;
     try {
         group_block_ids = decodeGroupBlockIds(*request, topology);
-        std::unordered_map<std::string, std::unordered_set<BlockIdxType>> protected_blocks;
-        for (const auto& row : request->protected_destinations().groups()) {
-            auto& ids = protected_blocks[row.tag()];
-            ids.insert(row.block_ids().begin(), row.block_ids().end());
+        std::unordered_map<std::string, std::unordered_set<size_t>> protected_positions;
+        for (const auto& row : request->protected_positions().groups()) {
+            const auto& ids       = group_block_ids.blocks(row.tag());
+            auto&       positions = protected_positions[row.tag()];
+            for (const auto pos : row.protected_positions()) {
+                if (pos < 0 || static_cast<size_t>(pos) >= ids.size() || isNullBlockIdx(ids[pos])) {
+                    return reject_before_load("invalid protected Decode target position");
+                }
+                positions.insert(static_cast<size_t>(pos));
+            }
         }
         bool unprotected_target = false;
         visitLoadDestinations(
             group_block_ids, cache_keys.size(), request->reuse_block_size(), [&](const std::string& tag, size_t pos) {
                 const auto id = group_block_ids.blocks(tag).at(pos);
-                const auto it = protected_blocks.find(tag);
-                if (!isNullBlockIdx(id) && (it == protected_blocks.end() || !it->second.count(id))) {
+                const auto it = protected_positions.find(tag);
+                if (!isNullBlockIdx(id) && (it == protected_positions.end() || !it->second.count(pos))) {
                     unprotected_target = true;
                 }
             });

@@ -55,7 +55,8 @@ message CacheLoadResponse {
     optional bool direct_write_response = 3[default=false]; // true is rdma, false is tcp
     repeated BlockBufferInfo blocks = 4;
     optional bool exact_rdma_channels = 5;
-    optional bool rdma_writes_placed = 6;
+    reserved 6;
+    reserved "rdma_writes_placed";
 };
 
 message CacheTransferInfo {

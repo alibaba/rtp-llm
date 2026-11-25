@@ -207,7 +207,7 @@ TEST_F(KVCacheManagerTest, PDLoadPinsOnlyPlannedPrivatePhysicalPagesAndRollsBack
         EXPECT_EQ(f.refs(tag, 1), 2u);
         EXPECT_EQ(f.refs(tag, 2), 2u);
         EXPECT_EQ(hold->blockIdsSnapshot().blocks(tag), rows.blocks(tag));
-        EXPECT_EQ(hold->protectedBlocks().at(tag), (BlockIndicesType{f.block(tag, 1), f.block(tag, 2)}));
+        EXPECT_EQ(hold->protectedPositions().at(tag), (std::vector<int32_t>{2, 3}));
         EXPECT_EQ(rows.blocks(tag).front(), f.block(tag, 0));
     }
     hold.reset();
@@ -217,7 +217,7 @@ TEST_F(KVCacheManagerTest, PDLoadPinsOnlyPlannedPrivatePhysicalPagesAndRollsBack
     for (const auto& tag : f.tags) {
         EXPECT_EQ(empty->blockIdsSnapshot().blocks(tag), rows.blocks(tag));
     }
-    EXPECT_TRUE(empty->protectedBlocks().empty());
+    EXPECT_TRUE(empty->protectedPositions().empty());
 
     const auto& tag = f.tags.back();
     targets[tag].push_back(f.block(tag, 0));  // Shared cache page cannot be a write target.

@@ -652,20 +652,26 @@ KVCacheManager::holdPDLoadDestination(const GroupBlockIds& rows, const PDLoadDes
             selected.erase(NULL_BLOCK_IDX);
         }
 
-        const auto&      original = rows.blockIds(tag);
-        BlockIndicesType protected_ids;
-        for (const auto id : original.blocks()) {
-            if (selected.erase(id)) {
-                protected_ids.push_back(id);
+        const auto& original = rows.blockIds(tag);
+        const auto& ids      = original.blocks();
+        if (ids.size() > static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
+            return nullptr;
+        }
+        std::unordered_set<BlockIdxType> found;
+        std::vector<int32_t>             positions;
+        for (size_t pos = 0; pos < ids.size(); ++pos) {
+            if (selected.count(ids[pos])) {
+                found.insert(ids[pos]);
+                positions.push_back(static_cast<int32_t>(pos));
             }
         }
-        if (!selected.empty()) {
+        if (found.size() != selected.size()) {
             return nullptr;  // The selector named a physical page outside this request's row.
         }
-        if (!protected_ids.empty()) {
+        if (!positions.empty()) {
             auto& pool_pages = pages[pools[group]];
-            pool_pages.insert(protected_ids.begin(), protected_ids.end());
-            hold->protected_blocks_.emplace(tag, std::move(protected_ids));
+            pool_pages.insert(found.begin(), found.end());
+            hold->protected_positions_.emplace(tag, std::move(positions));
         }
         auto snapshot = std::make_shared<BlockIds>(original.kernelBlocksPerKvBlock());
         snapshot->assign(original.blocks());

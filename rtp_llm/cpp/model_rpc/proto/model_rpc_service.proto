@@ -494,12 +494,19 @@ message BroadcastLoadRequestPB {
     reserved 15;
     reserved "destination_blocks_held";
     PDWriteLeasePB write_lease = 16;
-    PDProtectedDestinationsPB protected_destinations = 17;
+    reserved 17;
+    reserved "protected_destinations";
+    PDProtectedPositionsPB protected_positions = 18;
 }
 
 // Presence is required even for a load with no writes.
-message PDProtectedDestinationsPB {
-    repeated TaggedBlockIdsPB groups = 1;
+message PDProtectedPositionsPB {
+    message Group {
+        string tag = 1;
+        // Indices into the unchanged tagged_group_block_ids row for this group.
+        repeated int32 protected_positions = 2;
+    }
+    repeated Group groups = 1;
 }
 
 message BroadcastLoadResponsePB {
@@ -521,7 +528,9 @@ message PreparePDWriteLeaseRequestPB {
 message PDWriteLeasePB {
     string worker_epoch = 1;
     uint64 token = 2;
-    bool supports_protected_destinations = 3;
+    reserved 3;
+    reserved "supports_protected_destinations";
+    bool supports_protected_positions = 4;
 }
 message SealPDWriteLeaseResponsePB {
     PDWriteLeasePB lease = 1;

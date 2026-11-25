@@ -448,7 +448,7 @@ TEST_F(PdSepKVCacheReleaseTest, DecodePDLoadSnapshotAndPinsSurviveRelease) {
     const auto ids = row->blocks();
     ASSERT_GE(ids.size(), 2u);
     EXPECT_EQ(groups.blocks(tag), ids);
-    EXPECT_EQ(hold->protectedBlocks().at(tag), BlockIndicesType{ids.back()});
+    EXPECT_EQ(hold->protectedPositions().at(tag), std::vector<int32_t>{static_cast<int32_t>(ids.size() - 1)});
     row->swap(0, 1);
     EXPECT_EQ(groups.blocks(tag), ids);
     row->swap(0, 1);
@@ -2260,14 +2260,10 @@ TEST_F(PdSepKVCacheReleaseTest, RdmaWorkerRejectsMissingScopeOrUnprotectedTarget
         prepare.set_timeout_ms(10000);
         ASSERT_TRUE(server.PreparePDWriteLease(&context, &prepare, request.mutable_write_lease()).ok());
         if (has_scope) {
-            // A matching numeric ID in another group does not protect this target.
-            auto* scope         = request.mutable_protected_destinations();
-            auto* protected_row = scope->add_groups();
+            // The first block is protected, but the worker also plans to load the second.
+            auto* protected_row = request.mutable_protected_positions()->add_groups();
             protected_row->set_tag("default");
-            protected_row->add_block_ids(1);
-            auto* wrong_group = scope->add_groups();
-            wrong_group->set_tag("other");
-            wrong_group->add_block_ids(2);
+            protected_row->add_protected_positions(0);
         }
         BroadcastLoadResponsePB response;
         ASSERT_TRUE(server.RemoteLoad(&context, &request, &response).ok());
@@ -2324,7 +2320,9 @@ TEST_F(PdSepKVCacheReleaseTest, WorkerSealArmsInflightRecoveryAndRequiresTranspo
     auto* row = request.add_tagged_group_block_ids();
     row->set_tag("default");
     row->add_block_ids(rows.blocks("default").front());
-    *request.mutable_protected_destinations()->add_groups() = *row;
+    auto* protected_row = request.mutable_protected_positions()->add_groups();
+    protected_row->set_tag("default");
+    protected_row->add_protected_positions(0);
     BroadcastLoadResponsePB response;
     auto                    submitted = store->submitted.get_future();
     auto outcome = std::async(std::launch::async, [&] { return server.RemoteLoad(&context, &request, &response); });
@@ -2395,7 +2393,7 @@ public:
         auto writer = leases->claim(*request);
         if (!writer)
             return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "not prepared");
-        EXPECT_TRUE(request->has_protected_destinations());
+        EXPECT_TRUE(request->has_protected_positions());
         entered.set_value();
         if (reply.wait_for(std::chrono::seconds(10)) != std::future_status::ready) {
             return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "test worker timed out");

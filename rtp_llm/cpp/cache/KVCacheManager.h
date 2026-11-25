@@ -49,8 +49,8 @@ public:
     const GroupBlockIds& blockIdsSnapshot() const {
         return block_ids_snapshot_;
     }
-    const PDLoadDestinationBlocks& protectedBlocks() const {
-        return protected_blocks_;
+    const std::unordered_map<std::string, std::vector<int32_t>>& protectedPositions() const {
+        return protected_positions_;
     }
 
 private:
@@ -60,9 +60,9 @@ private:
         DeviceBlockPoolPtr                pool;
         std::vector<RemotePublicationPin> pins;  // Destroy before the strong pool owner.
     };
-    GroupBlockIds           block_ids_snapshot_;
-    PDLoadDestinationBlocks protected_blocks_;
-    std::vector<PoolPins>   pools_;
+    GroupBlockIds                                         block_ids_snapshot_;
+    std::unordered_map<std::string, std::vector<int32_t>> protected_positions_;
+    std::vector<PoolPins>                                 pools_;
 };
 
 class KVCacheManager {
