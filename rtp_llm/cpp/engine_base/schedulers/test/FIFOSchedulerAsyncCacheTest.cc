@@ -1655,6 +1655,7 @@ TEST_F(FIFOSchedulerAsyncCacheTest, PrefillExecutionBoundaryAdmitsLateReadyReque
     ASSERT_TRUE(prepared.ok());
     ASSERT_EQ(prepared->size(), 1);
     ASSERT_EQ(prepared->front(), b);
+    b->recordPrefillEarlyPrepareDoneTime(autil::TimeUtility::currentTimeInMicroSeconds());
     ASSERT_TRUE(scheduler->enqueue(late).ok());
     a->reportEvent(StreamEvents::GenerateDone);
     scheduler->completePrefillExecution();
@@ -1663,6 +1664,8 @@ TEST_F(FIFOSchedulerAsyncCacheTest, PrefillExecutionBoundaryAdmitsLateReadyReque
     ASSERT_EQ(prepared->size(), 2);
     EXPECT_EQ(prepared->front(), b);
     EXPECT_EQ(prepared->back(), late);
+    EXPECT_GT(b->getTimeInfo().prefill_early_prepare_done_us, 0);
+    EXPECT_EQ(late->getTimeInfo().prefill_early_prepare_done_us, 0);
     EXPECT_EQ(scheduler->waitingStreamsSize(), 0);
     ASSERT_TRUE(scheduler->beginPrefillExecution());
     b->reportEvent(StreamEvents::GenerateDone);

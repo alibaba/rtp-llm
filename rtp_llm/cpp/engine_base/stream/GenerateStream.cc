@@ -195,6 +195,7 @@ void GenerateStream::resetBeginTime(int64_t begin_time_us) {
     scheduler_enqueue_time_us_         = 0;
     can_run_time_us_                   = 0;
     kv_ready_time_us_                  = 0;
+    prefill_early_prepare_done_us_     = 0;
     prefill_previous_release_us_       = 0;
     prefill_previous_release_recorded_ = false;
     loading_cache_start_time_us_       = 0;
@@ -943,6 +944,13 @@ void GenerateStream::recordPrefillDispatchTime(int64_t time_us) {
     std::lock_guard<std::mutex> lock(*mutex_);
     if (prefill_dispatch_time_us_ == 0) {
         prefill_dispatch_time_us_ = time_us;
+    }
+}
+
+void GenerateStream::recordPrefillEarlyPrepareDoneTime(int64_t time_us) {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    if (prefill_early_prepare_done_us_ == 0) {
+        prefill_early_prepare_done_us_ = time_us;
     }
 }
 
@@ -2266,7 +2274,8 @@ GenerateStream::TimeInfo GenerateStream::getTimeInfo() {
     time_info.scheduler_enqueue_time_us   = scheduler_enqueue_time_us_;
     time_info.can_run_time_us             = can_run_time_us_;
     time_info.kv_ready_time_us            = kv_ready_time_us_;
-    time_info.prefill_previous_release_us = prefill_previous_release_us_;
+    time_info.prefill_early_prepare_done_us = prefill_early_prepare_done_us_;
+    time_info.prefill_previous_release_us   = prefill_previous_release_us_;
     time_info.prefill_dispatch_time_us    = prefill_dispatch_time_us_;
     time_info.prefill_forward_time_us     = prefill_forward_time_us_;
     time_info.cache_exposed_wait_us       = cache_exposed_wait_us_;

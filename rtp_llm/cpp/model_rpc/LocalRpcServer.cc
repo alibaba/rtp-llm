@@ -443,7 +443,8 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
         phase_timing.scheduler_enqueue_time_us   = time_info.scheduler_enqueue_time_us;
         phase_timing.can_run_time_us             = time_info.can_run_time_us;
         phase_timing.kv_ready_time_us            = time_info.kv_ready_time_us;
-        phase_timing.prefill_previous_release_us = time_info.prefill_previous_release_us;
+        phase_timing.prefill_early_prepare_done_us = time_info.prefill_early_prepare_done_us;
+        phase_timing.prefill_previous_release_us   = time_info.prefill_previous_release_us;
         phase_timing.prefill_dispatch_time_us    = time_info.prefill_dispatch_time_us;
         phase_timing.prefill_forward_time_us     = time_info.prefill_forward_time_us;
         phase_timing.cache_exposed_wait_us       = time_info.cache_exposed_wait_us;

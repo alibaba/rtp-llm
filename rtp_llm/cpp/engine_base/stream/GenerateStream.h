@@ -324,6 +324,7 @@ public:
     void    recordLoadingCacheDoneTime();
     void    recordKvReadyTime(int64_t time_us);
     void    recordRunningTime();
+    void    recordPrefillEarlyPrepareDoneTime(int64_t time_us);
     void    recordPrefillPreviousReleaseTime(int64_t time_us);
     void    recordPrefillDispatchTime(int64_t time_us);
     void    recordPrefillForwardTime(int64_t time_us);
@@ -941,7 +942,8 @@ public:
         int64_t scheduler_enqueue_time_us   = 0;
         int64_t can_run_time_us             = 0;
         int64_t kv_ready_time_us            = 0;
-        int64_t prefill_previous_release_us = 0;
+        int64_t prefill_early_prepare_done_us = 0;
+        int64_t prefill_previous_release_us   = 0;
         int64_t prefill_dispatch_time_us    = 0;
         int64_t prefill_forward_time_us     = 0;
         int64_t cache_exposed_wait_us       = 0;
@@ -993,6 +995,7 @@ protected:
     int64_t                               scheduler_enqueue_time_us_         = 0;
     int64_t                               can_run_time_us_                   = 0;
     int64_t                               kv_ready_time_us_                  = 0;
+    int64_t                               prefill_early_prepare_done_us_     = 0;
     int64_t                               prefill_previous_release_us_       = 0;
     bool                                  prefill_previous_release_recorded_ = false;
     int64_t                               loading_cache_start_time_us_       = 0;

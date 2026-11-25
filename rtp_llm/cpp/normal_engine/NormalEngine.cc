@@ -930,6 +930,14 @@ void NormalEngine::startNextPrefillPrepare() {
         while (prepared.streams.empty() && running_) {
             prepared = prepareNextPrefillBatch();
         }
+        if (telemetry::TelemetryRuntime::isActive() && !prepared.streams.empty()) {
+            const auto prepared_us = autil::TimeUtility::currentTimeInMicroSeconds();
+            for (const auto& stream : prepared.streams) {
+                if (stream->isContextStream()) {
+                    stream->recordPrefillEarlyPrepareDoneTime(prepared_us);
+                }
+            }
+        }
         return prepared;
     }));
 }

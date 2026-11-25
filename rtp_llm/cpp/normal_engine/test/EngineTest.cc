@@ -186,6 +186,12 @@ TEST_F(NormalEngineTest, testPrefillPrepareRetriesEmptyPollAndSealsReadyBatch) {
     engine->prefill_prepare_pool_ = std::make_unique<autil::LockFreeThreadPool>(1, 1, nullptr, "PrefillRetryTest");
     ASSERT_TRUE(engine->prefill_prepare_pool_->start());
 
+    telemetry::TelemetryRuntime::shutdown(5000);
+    std::shared_ptr<opentelemetry::exporter::memory::InMemorySpanData> span_data;
+    auto exporter = opentelemetry::exporter::memory::InMemorySpanExporterFactory::Create(span_data);
+    telemetry::TelemetryConfig trace_config;
+    trace_config.enabled = true;
+    ASSERT_TRUE(telemetry::TelemetryRuntime::initWithExporter(std::move(exporter), trace_config));
     engine->startNextPrefillPrepare();
     ASSERT_EQ(observed_scheduler->first_poll.get_future().wait_for(std::chrono::seconds(5)), std::future_status::ready);
     observed_scheduler->makeRunnable();
@@ -195,9 +201,11 @@ TEST_F(NormalEngineTest, testPrefillPrepareRetriesEmptyPollAndSealsReadyBatch) {
     EXPECT_EQ(engine->prepared_prefill_batch_->wait_for(std::chrono::seconds(5)), std::future_status::ready);
     auto batch = engine->prepared_prefill_batch_->get();
     EXPECT_EQ(batch.streams, std::list<GenerateStreamPtr>{stream});
+    EXPECT_GT(stream->getTimeInfo().prefill_early_prepare_done_us, 0);
     EXPECT_EQ(observed_scheduler->calls.load(), 2);
     engine->prepared_prefill_batch_.reset();
     ASSERT_TRUE(engine->stop().ok());
+    EXPECT_TRUE(telemetry::TelemetryRuntime::shutdown(5000));
 }
 
 TEST_F(NormalEngineTest, testPrefillPrepareStopWakesEmptyRetry) {
@@ -975,6 +983,7 @@ TEST_F(NormalEngineTest, testPrefillTimelineFromActualForward) {
     }
 
     EXPECT_TRUE(request_ok);
+    EXPECT_EQ(times.prefill_early_prepare_done_us, 0);
     EXPECT_GT(times.begin_time_us, 0);
     EXPECT_TRUE(times.running_started);
     EXPECT_GE(times.scheduler_enqueue_time_us, times.begin_time_us);
@@ -995,8 +1004,9 @@ TEST_F(NormalEngineTest, testPrefillTimelineFromActualForward) {
     timing.synthesis_end_time_us       = autil::TimeUtility::currentTimeInMicroSeconds();
     timing.scheduler_enqueue_time_us   = times.scheduler_enqueue_time_us;
     timing.can_run_time_us             = times.can_run_time_us;
-    timing.kv_ready_time_us            = times.kv_ready_time_us;
-    timing.prefill_previous_release_us = times.prefill_previous_release_us;
+    timing.kv_ready_time_us              = times.kv_ready_time_us;
+    timing.prefill_early_prepare_done_us = times.prefill_early_prepare_done_us;
+    timing.prefill_previous_release_us   = times.prefill_previous_release_us;
     timing.prefill_dispatch_time_us    = times.prefill_dispatch_time_us;
     timing.prefill_forward_time_us     = times.prefill_forward_time_us;
     EXPECT_LE(times.prefill_forward_time_us, timing.synthesis_end_time_us);

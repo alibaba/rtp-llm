@@ -36,7 +36,8 @@ struct PhaseTiming {
     int64_t     scheduler_enqueue_time_us   = 0;
     int64_t     can_run_time_us             = 0;
     int64_t     kv_ready_time_us            = 0;
-    int64_t     prefill_previous_release_us = 0;
+    int64_t     prefill_early_prepare_done_us = 0;
+    int64_t     prefill_previous_release_us   = 0;
     int64_t     prefill_dispatch_time_us    = 0;
     int64_t     prefill_forward_time_us     = 0;
     int64_t     cache_exposed_wait_us       = 0;
@@ -266,6 +267,7 @@ inline void synthesizePhaseSpans(const opentelemetry::nostd::shared_ptr<opentele
         const auto can_run       = timing.can_run_time_us;
         const auto kv_ready      = timing.kv_ready_time_us;
         const auto running       = timing.running_started_time_us;
+        const auto early_done    = timing.prefill_early_prepare_done_us;
         const auto dispatch      = timing.prefill_dispatch_time_us;
         const auto forward       = timing.prefill_forward_time_us;
         const bool queue_valid   = enqueue >= begin && enqueue <= can_run && can_run <= end;
@@ -275,6 +277,7 @@ inline void synthesizePhaseSpans(const opentelemetry::nostd::shared_ptr<opentele
         const bool cache_valid   = can_run <= kv_ready && kv_ready <= dispatch;
         const bool release_valid =
             timing.prefill_previous_release_us == 0 || timing.prefill_previous_release_us <= dispatch;
+        const bool early_valid = early_done == 0 || (kv_ready <= early_done && early_done <= dispatch);
         prefill_timeline_valid = queue_valid && forward_valid && cache_valid && release_valid;
         try {
             if (queue_valid) {
@@ -286,23 +289,31 @@ inline void synthesizePhaseSpans(const opentelemetry::nostd::shared_ptr<opentele
                 }
             }
             if (prefill_timeline_valid) {
-                const auto release = std::max(kv_ready, timing.prefill_previous_release_us);
+                const auto release   = std::max(kv_ready, timing.prefill_previous_release_us);
+                const auto early_end = early_valid && early_done > 0 ? std::min(early_done, release) : kv_ready;
                 parent_span->SetAttribute(kAttrRtpLlmPrefillKvCacheAcquireWallUs, kv_ready - can_run);
-                parent_span->SetAttribute(kAttrRtpLlmPrefillEarlyBatchPrepareWallUs, int64_t{0});
-                parent_span->SetAttribute(kAttrRtpLlmPrefillPreviousBatchWaitUs, release - kv_ready);
+                parent_span->SetAttribute(kAttrRtpLlmPrefillEarlyBatchPrepareWallUs, early_end - kv_ready);
+                parent_span->SetAttribute(kAttrRtpLlmPrefillPreviousBatchWaitUs, release - early_end);
                 parent_span->SetAttribute(kAttrRtpLlmPrefillFinalPrepareWallUs, forward - release);
                 detail::synthesizeChildSpan(
                     parent_span, "prefill_kv_cache_acquire", can_run, kv_ready - can_run, timing.request_id, nullptr);
                 detail::synthesizeChildSpan(parent_span,
-                                            "prefill_previous_batch_wait",
+                                            "prefill_early_batch_prepare",
                                             kv_ready,
-                                            release - kv_ready,
+                                            early_end - kv_ready,
+                                            timing.request_id,
+                                            nullptr);
+                detail::synthesizeChildSpan(parent_span,
+                                            "prefill_previous_batch_wait",
+                                            early_end,
+                                            release - early_end,
                                             timing.request_id,
                                             nullptr);
                 detail::synthesizeChildSpan(
                     parent_span, "prefill_final_prepare", release, forward - release, timing.request_id, nullptr);
-                if (request_ok && timing.running_started && (!running_valid || dispatch < running)) {
+                if (!early_valid || (request_ok && timing.running_started && (!running_valid || dispatch < running))) {
                     parent_span->SetAttribute(kAttrRtpLlmPrefillTimingError,
+                                              !early_valid   ? "early_prepare_order_invalid" :
                                               !running_valid ? "running_order_invalid" : "dispatch_before_running");
                 }
             } else if (request_ok) {
