@@ -720,6 +720,17 @@ class AttentionV41FP8(AttentionFP8):
             self._sm90_wo_a = Sm90GroupedOutputProjection(
                 self._wo_a_stk_w, self._wo_a_stk_s
             )
+            from ._sm90_small_m_fp8_gemm import attach_sm90_small_m_fp8_gemm
+
+            for _sm90_dense in (
+                self.wq_a_wkv,
+                self.wq_a,
+                self.wkv,
+                self.wq_b,
+                self.wo_b,
+                getattr(self, "index_wq", None),
+            ):
+                attach_sm90_small_m_fp8_gemm(_sm90_dense)
         else:
             scale_block = self.wo_a_w.shape[1] // self.wo_a_s.shape[1]
             for group in range(self.n_groups):
