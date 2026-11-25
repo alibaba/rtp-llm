@@ -23,6 +23,21 @@ namespace rtp_llm {
 
 namespace {
 
+bool bitmaskAllowsAnyToken(const int32_t* bitmask, size_t words, size_t vocab_size) {
+    const size_t required_words = SpecLogitsProcessorRequest::bitmaskWordCount(vocab_size);
+    if (required_words == 0 || words < required_words) {
+        return false;
+    }
+    for (size_t word_idx = 0; word_idx + 1 < required_words; ++word_idx) {
+        if (bitmask[word_idx] != 0) {
+            return true;
+        }
+    }
+    const size_t   tail_bits = vocab_size % 32;
+    const uint32_t tail_mask = tail_bits == 0 ? ~0u : (1u << tail_bits) - 1u;
+    return (static_cast<uint32_t>(bitmask[required_words - 1]) & tail_mask) != 0u;
+}
+
 ErrorResult<int32_t> validateVocabSize(RtpGrammarMatcher& matcher, size_t model_vocab_size, const char* path) {
     auto grammar_vocab_size_or = matcher.vocabSize();
     if (!grammar_vocab_size_or.ok()) {
@@ -90,6 +105,12 @@ prepareSpecMask(RtpGrammarMatcher& matcher, int64_t eos_token_id, const SpecLogi
             if (!filled.ok()) {
                 verify_error = filled.status();
                 cap          = offset;
+                break;
+            }
+            if (filled.value() && !bitmaskAllowsAnyToken(row, bitmask_words, grammar_vocab_size)) {
+                verify_error = ErrorInfo(ErrorCode::INVALID_PARAMS, "grammar has no valid next token");
+                forceTokenInBitmask(row, bitmask_words, eos_token_id);
+                cap = offset;
                 break;
             }
             // xgrammar returns false for an all-true mask; the row is still active.
