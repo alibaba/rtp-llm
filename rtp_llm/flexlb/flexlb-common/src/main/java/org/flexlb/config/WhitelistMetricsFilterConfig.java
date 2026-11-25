@@ -67,7 +67,7 @@ public class WhitelistMetricsFilterConfig {
     private static final String COUNTER_SUFFIX = "_total";
 
     /**
-     * Default whitelist preset: the six core link latency metrics
+     * Default whitelist preset: the core link latency metrics
      * (prometheus form; the counter exposition {@code _total} suffix is
      * matched as well). These are the metrics retained when no
      * {@code flexlb.monitor.metric-whitelist} property is set, keeping the
@@ -77,6 +77,7 @@ public class WhitelistMetricsFilterConfig {
      *   <li>gRPC server processing: server entry to BalanceContext start</li>
      *   <li>Master decision: route+submit time (decision start to batcher queue placement)</li>
      *   <li>Queue wait: batcher queue wait time (enqueue to dispatch trigger)</li>
+     *   <li>Single-route dispatch: queue wait broken down by stage</li>
      *   <li>Dispatch: dispatch-to-ACK time (gRPC dispatch to engine ACK)</li>
      *   <li>Batch decision: exact dispatch count grouped by trigger reason</li>
      * </ul>
@@ -86,6 +87,7 @@ public class WhitelistMetricsFilterConfig {
                     + "flexlb_app_grpc_server_process_ms,"
                     + "flexlb_app_flexlb_route_submit_time_ms,"
                     + "flexlb_app_routing_queue_wait_time_ms,"
+                    + "flexlb_app_flexlb_route_dispatch_stage_ms,"
                     + "flexlb_app_flexlb_dispatch_ack_time_ms,"
                     + "flexlb_app_engine_balancing_master_dispatch_reason";
 

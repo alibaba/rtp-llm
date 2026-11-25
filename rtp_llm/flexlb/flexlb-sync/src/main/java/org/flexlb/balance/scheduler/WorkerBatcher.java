@@ -1,6 +1,8 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.delivery.CapacityBoundary;
+import org.flexlb.balance.delivery.RouteDispatchTiming;
+import org.flexlb.balance.delivery.RouteDispatchTiming.Stage;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.endpoint.DecodeEndpoint.DecodeRoutingView;
 import org.flexlb.balance.endpoint.PrefillActiveIndex;
@@ -1410,6 +1412,17 @@ public final class WorkerBatcher {
             return BatcherCycleResult.NO_ACTION;
         }
 
+        RouteDispatchTiming timing = head.dispatchTiming();
+        if (timing == null) { return processSingleHead(snapshot, head); }
+        timing.enter(Stage.DISPATCH_ATTEMPT, System.nanoTime());
+        try {
+            return processSingleHead(snapshot, head);
+        } finally {
+            timing.enter(Stage.QUEUE_OR_RESELECTION, System.nanoTime());
+        }
+    }
+
+    private BatcherCycleResult processSingleHead(ActiveQueueSnapshot snapshot, ScheduledRequest head) {
         long nowMs = now();
         if (head.requestExpired(nowMs)) {
             Logger.debug("flexlb_single_drop request_id={} "
@@ -1763,6 +1776,17 @@ public final class WorkerBatcher {
                 if (expiresAtMs <= nowMs) {
                     return;
                 }
+                RouteDispatchTiming timing = item.dispatchTiming();
+                if (timing != null) {
+                    Stage stage;
+                    if (blocked.unavailable().projectionSemantics() == PrefillAdmissionResources.DECODE_BLOCK) {
+                        stage = Stage.DECODE_CAPACITY;
+                    } else {
+                        stage = prefillState.routeCapacityBlockUnderLock(config.getDispatcher().getMaxInflightPerPrefillWorker());
+                        if (stage == null) { stage = Stage.PREFILL_OTHER; }
+                    }
+                    timing.enter(stage, System.nanoTime());
+                }
                 if (expiresAtMs == Long.MAX_VALUE) {
                     awaitStateChange();
                 } else {
@@ -1771,6 +1795,9 @@ public final class WorkerBatcher {
             }
         } finally {
             try {
+                if (item.dispatchTiming() != null) {
+                    item.dispatchTiming().enter(Stage.QUEUE_OR_RESELECTION, System.nanoTime());
+                }
                 if (waitingDecision == blocked) { setWaitingDecisionUnderLock(null); }
             } finally {
                 queueLock.unlock();
@@ -1797,6 +1824,10 @@ public final class WorkerBatcher {
                 if (waiting.wakeAtMs() <= nowMs) {
                     return;
                 }
+                if (waiting.request().dispatchTiming() != null) {
+                    // SINGLE has only one scheduling-policy wait: insufficient Prefill KV.
+                    waiting.request().dispatchTiming().enter(Stage.PREFILL_KV, System.nanoTime());
+                }
                 if (waiting.wakeAtMs() == Long.MAX_VALUE) {
                     awaitStateChange();
                 } else {
@@ -1805,6 +1836,9 @@ public final class WorkerBatcher {
             }
         } finally {
             try {
+                if (waiting.request().dispatchTiming() != null) {
+                    waiting.request().dispatchTiming().enter(Stage.QUEUE_OR_RESELECTION, System.nanoTime());
+                }
                 if (waitingDecision == waiting) { setWaitingDecisionUnderLock(null); }
             } finally {
                 queueLock.unlock();
@@ -1848,6 +1882,10 @@ public final class WorkerBatcher {
         queueLock.lock();
         try {
             if (waitingDecision != null && waitingDecision.capacityBlocked()) {
+                RouteDispatchTiming timing = waitingDecision.request().dispatchTiming();
+                if (timing != null && waitingDecision.unavailable().availability().isAvailable()) {
+                    timing.enter(Stage.REOPEN_TO_RESUME, System.nanoTime());
+                }
                 schedulingInputsChangedUnderLock();
                 stateChanged.signal();
             }

@@ -32,12 +32,13 @@ public final class DeliveryMetrics {
                     PREFILL_ROLE, engineIp,
                     remainingQueueDepth);
             long nowMs = System.currentTimeMillis();
+            long nowNanos = System.nanoTime();
             for (ScheduledRequest item : exactItems) {
-                reporter.reportBatchWaitTimeMs(
-                        PREFILL_ROLE,
-                        engineIp,
-                        Math.max(0L, nowMs - item.enqueuedAtMs()),
-                        item.priority());
+                long waitMs = Math.max(0L, nowMs - item.enqueuedAtMs());
+                reporter.reportBatchWaitTimeMs(PREFILL_ROLE, engineIp, waitMs, item.priority());
+                if (item.dispatchTiming() != null) {
+                    item.dispatchTiming().report(reporter, engineIp, item.priority(), waitMs, nowNanos);
+                }
             }
         } catch (Throwable failure) {
             Logger.warn("Route delivery telemetry isolated", failure);

@@ -31,6 +31,7 @@ import static org.flexlb.constant.MetricConstant.INFLIGHT_MAX_AGE_MS;
 import static org.flexlb.constant.MetricConstant.INFLIGHT_REQUEST_COUNT;
 import static org.flexlb.constant.MetricConstant.INFLIGHT_TTL_EXPIRED_QPS;
 import static org.flexlb.constant.MetricConstant.PREFILL_QUEUED_COMPUTE_TOKENS;
+import static org.flexlb.constant.MetricConstant.ROUTE_DISPATCH_STAGE_MS;
 import static org.flexlb.constant.MetricConstant.ROUTE_SUBMIT_TIME_MS;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_LENGTH;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_WAIT_TIME_MS;
@@ -71,6 +72,7 @@ public class BatchSchedulerReporter {
         // Queue — same type as RoutingQueueReporter
         monitor.register(ROUTING_QUEUE_LENGTH, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(ROUTING_QUEUE_WAIT_TIME_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
+        monitor.register(ROUTE_DISPATCH_STAGE_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
 
         // Dispatch reason — independent metric for batch path
         monitor.register(ENGINE_BALANCING_MASTER_DISPATCH_REASON, FlexMetricType.QPS, FlexPriorityType.PRECISE);
@@ -173,6 +175,12 @@ public class BatchSchedulerReporter {
                 "role", role,
                 "priority", String.valueOf(priority));
         monitor.report(ROUTING_QUEUE_WAIT_TIME_MS, tags, waitMs);
+    }
+
+    public void reportRouteDispatchStage(String engineIp, int priority, String stage, long elapsedMs) {
+        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp, "role", "PREFILL",
+                "priority", String.valueOf(priority), "stage", stage);
+        monitor.report(ROUTE_DISPATCH_STAGE_MS, tags, elapsedMs);
     }
 
     // ==================== Dispatch reason metrics ====================

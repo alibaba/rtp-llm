@@ -1,6 +1,7 @@
 package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.delivery.CapacityBoundary;
+import org.flexlb.balance.delivery.RouteDispatchTiming.Stage;
 import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.projection.WorkSnapshot.Phase;
@@ -1025,12 +1026,18 @@ public final class PrefillState {
 
     private boolean routeCapacityAvailableUnderLock(long maximum) {
         requireLock();
-        if (!runningCapacityAvailable(latestActivity)) {
-            return false;
+        return routeCapacityBlockUnderLock(maximum) == null;
+    }
+
+    /** First closed hard gate in reservation order. Null means the route has capacity. */
+    public Stage routeCapacityBlockUnderLock(long maximum) {
+        requireLock();
+        if (!runningCapacityAvailable(latestActivity)) { return Stage.PREFILL_RUNNING; }
+        if (maximum == 0L) { return null; }
+        if (routeLeasesInUse >= maximum || unknownEngineRequestCount >= maximum - routeLeasesInUse) {
+            return Stage.PREFILL_INFLIGHT;
         }
-        return maximum == 0L || routeLeasesInUse < maximum
-                && unknownEngineRequestCount < maximum - routeLeasesInUse
-                && engineQueueAdmissionAvailableUnderLock();
+        return engineQueueAdmissionAvailableUnderLock() ? null : Stage.PREFILL_ENGINE_WAITING;
     }
 
     private boolean runningCapacityAvailable(ActiveObservations activity) {

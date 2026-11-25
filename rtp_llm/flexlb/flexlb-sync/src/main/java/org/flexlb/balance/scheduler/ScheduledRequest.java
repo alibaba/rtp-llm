@@ -3,6 +3,7 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.delivery.CapacityBoundary;
+import org.flexlb.balance.delivery.RouteDispatchTiming;
 import org.flexlb.balance.prediction.DecodeCostFormula;
 import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.PrefillTokenWorkload;
@@ -37,6 +38,7 @@ public final class ScheduledRequest implements Prioritized {
     private final BalanceContext ctx;
     private final CompletableFuture<Response> future;
     private final RequestExecution execution;
+    private final RouteDispatchTiming dispatchTiming;
     private final PrefillTokenWorkload.Reservation prefillTokenReservation;
     private volatile DecodePreemptionWait pendingDecodePreemption;
 
@@ -127,6 +129,7 @@ public final class ScheduledRequest implements Prioritized {
         FlexlbConfig schedulingConfig = Objects.requireNonNull(
                 ctx.getConfig(), "request scheduling config");
         boolean routeDelivery = schedulingConfig.getDispatcher().getType() == DispatcherConfig.Type.NON_BATCH;
+        dispatchTiming = routeDelivery && schedulingConfig.isSingleDecision() ? new RouteDispatchTiming() : null;
         this.execution = new RequestExecution(
                 routeResponse, prefill, prefillEp,
                 frozenDecode.bind(decode, decodeEp, decodeReservation),
@@ -136,6 +139,8 @@ public final class ScheduledRequest implements Prioritized {
     }
 
     // -- accessors --
+
+    public RouteDispatchTiming dispatchTiming() { return dispatchTiming; }
 
     public BalanceContext ctx() { return ctx; }
 

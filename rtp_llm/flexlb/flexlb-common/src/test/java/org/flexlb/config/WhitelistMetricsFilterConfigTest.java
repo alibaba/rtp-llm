@@ -92,7 +92,7 @@ class WhitelistMetricsFilterConfigTest {
 
     @Test
     void defaultPresetKeepsCoreLinkLatencyMetrics() {
-        // Property default: the six core link latency meters stay exposed
+        // Property default: the core link latency meters stay exposed
         // (the DEFAULT_METRIC_WHITELIST preset), everything else flexlb.* is
         // denied, non-flexlb metrics unaffected.
         WhitelistMetricsFilterConfig config = new WhitelistMetricsFilterConfig(
@@ -104,6 +104,7 @@ class WhitelistMetricsFilterConfigTest {
                 "app.grpc.server.process.ms",
                 "app.flexlb.route.submit.time.ms",
                 "app.routing.queue.wait.time.ms",
+                "app.flexlb.route.dispatch.stage.ms",
                 "app.flexlb.dispatch.ack.time.ms",
                 "app.engine.balancing.master.dispatch.reason",
         };
@@ -116,7 +117,7 @@ class WhitelistMetricsFilterConfigTest {
         Meter.Id jvm = registry.counter("jvm.test.metric").getId();
         assertEquals(MeterFilterReply.DENY, filter.accept(inflightBatch));
         assertEquals(MeterFilterReply.NEUTRAL, filter.accept(jvm));
-        assertEquals(6, WhitelistMetricsFilterConfig.parseWhitelist(
+        assertEquals(7, WhitelistMetricsFilterConfig.parseWhitelist(
                 WhitelistMetricsFilterConfig.DEFAULT_METRIC_WHITELIST).size());
     }
 

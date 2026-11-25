@@ -441,6 +441,7 @@ public class MetricConstant {
      * Wait time in milliseconds
      */
     public static final String ROUTING_QUEUE_WAIT_TIME_MS = "app.routing.queue.wait.time.ms";
+    public static final String ROUTE_DISPATCH_STAGE_MS = "app.flexlb.route.dispatch.stage.ms";
 
     /**
      * Routing execution time in milliseconds
