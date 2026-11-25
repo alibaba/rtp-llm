@@ -29,6 +29,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe im
     _mega_intermediate_size,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_se import (
+    MegaMoeFusedBackend,
     MegaMoeSEExecutor,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.test.grouped_moe_equivalence_test import (
@@ -515,7 +516,7 @@ class MegaMoeSEResidentTest(_ResidentCase):
             if not hasattr(deep_gemm, name):
                 raise AssertionError(f"deep_gemm.{name} is required by this target")
 
-    def test_routed_key_distinguishes_source_widths_with_the_same_padding(self):
+    def test_routed_key_distinguishes_source_widths_and_backend_layouts(self):
         module = (
             "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe"
         )
@@ -526,8 +527,15 @@ class MegaMoeSEResidentTest(_ResidentCase):
                 cfg = _mega_cfg()
                 cfg.moe_inter_dim = source_inter
                 _mega_executor(cfg)._transform_routed_weights({}, None, 512)
+            fused = MegaMoeFusedBackend.__new__(MegaMoeFusedBackend)
+            torch.nn.Module.__init__(fused)
+            fused.cfg = cfg
+            fused._transform_routed_weights({}, None, 512)
         keys = [call.kwargs["transform_key"] for call in record.call_args_list]
         self.assertNotEqual(keys[0], keys[1])
+        # These names are persisted in resident manifests written by main.
+        self.assertTrue(keys[1].endswith(":transform_weights_for_mega_moe"))
+        self.assertEqual(keys[2], keys[1] + "_fused")
 
     def test_routed_and_shared_transforms_replay_after_a_restart(self):
         import deep_gemm
