@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
+#include <numeric>
 #include <optional>
 
 namespace rtp_llm {
@@ -153,7 +154,14 @@ void CudaGraphRunner::capturePrefill() {
 std::vector<int> CudaGraphRunner::getPrefillSequenceLengthsToCapture() {
     // MTP draft prefill: capture at multiples of num_tokens_per_bs_
     if (isMtpDraftPrefillCudaGraph()) {
-        auto buckets = getDecodeBatchSizesToCapture();
+        std::vector<int> buckets;
+        if (decode_capture_batch_sizes_.empty()) {
+            // Draft prefill historically captures every request count unless a deployment selects buckets.
+            buckets.resize(max_bs_);
+            std::iota(buckets.begin(), buckets.end(), 1);
+        } else {
+            buckets = getDecodeBatchSizesToCapture();
+        }
         for (int& batch : buckets) {
             batch *= num_tokens_per_bs_;
         }

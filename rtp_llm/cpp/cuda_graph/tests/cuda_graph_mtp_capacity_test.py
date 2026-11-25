@@ -58,13 +58,17 @@ class MtpGraphCapacityTest(unittest.TestCase):
             with self.subTest(lanes=lanes, hc_mult=hc_mult):
                 self._check_request_capacity(lanes, hc_mult)
 
-    def _check_request_capacity(self, lanes, hc_mult):
+    def test_configured_draft_buckets_replay_intermediate_batches(self):
+        self._check_request_capacity(3, 1, [8, 1, 4, 4])
+
+    def _check_request_capacity(self, lanes, hc_mult, decode_buckets=None):
         torch.cuda.set_device(0)
         model = DraftCapacityModel(lanes, hc_mult)
         runner = CudaGraphRunner()
-        runner.init_mtp_draft_prefill(model, 8, 4, lanes, hc_mult)
+        runner.init_mtp_draft_prefill(model, 8, 4, lanes, hc_mult, decode_buckets or [])
+        expected_buckets = decode_buckets or range(1, 9)
         self.assertEqual(
-            model.shapes, {(lanes * batch, batch) for batch in range(1, 9)}
+            model.shapes, {(lanes * batch, batch) for batch in expected_buckets}
         )
 
         # The same graph keys are revisited after both larger and smaller
@@ -112,7 +116,8 @@ class MtpGraphCapacityTest(unittest.TestCase):
                     + (positions + inputs.input_ids).to(expected.dtype)[:, None]
                 )
                 self.assertTrue(runner.canRun(inputs))
-                self.assertEqual(runner.getCurrentRealGraphSize(), lanes * len(lengths))
+                bucket = min(size for size in expected_buckets if size >= len(lengths))
+                self.assertEqual(runner.getCurrentRealGraphSize(), lanes * bucket)
                 output = runner.forward(inputs).hidden_states.clone()
                 torch.cuda.synchronize()
                 torch.testing.assert_close(output, expected, rtol=0, atol=0)
