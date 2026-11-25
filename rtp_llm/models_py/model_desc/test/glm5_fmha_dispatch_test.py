@@ -703,8 +703,9 @@ class Glm5FmhaDispatchTest(unittest.TestCase):
         self.assertFalse(default.force_sparse_prefill)
         self.assertIs(default.pinned_mla_context.writer, writer)
         self.assertIsNone(default.write_cache_store_impl)
+        # Compact page 0 is reserved for invalid entries.
         self.assertEqual(
-            default.attn_inputs.kv_cache_kernel_block_id.tolist(), [[0, 1, 2]]
+            default.attn_inputs.kv_cache_kernel_block_id.tolist(), [[1, 2, 3]]
         )
         self.assertEqual(primary.kv_cache_kernel_block_id.tolist(), [[1, 2, 5]])
         self.assertIs(routes["indexer_kv"].attn_inputs, indexer)
