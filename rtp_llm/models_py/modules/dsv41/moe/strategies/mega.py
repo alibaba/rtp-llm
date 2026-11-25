@@ -260,6 +260,40 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
 
     def _apply_routed_weight_transform(self, layer_weights: Dict) -> None:
         """Transform checkpoint weights into the resident kernel layout."""
+        from rtp_llm.resident_weights import resident_init_tensors
+        from rtp_llm.utils.model_weight import W
+
+        cfg = self.cfg
+        key = (
+            f"v41.mega_moe.routed:experts{cfg.n_local_experts}:dim{cfg.dim}"
+            f":inter{_mega_intermediate_size(cfg)}"
+        )
+        (
+            self._mega_l1_w,
+            self._mega_l1_sf,
+            self._mega_l2_w,
+            self._mega_l2_sf,
+        ) = resident_init_tensors(
+            layer_weights,
+            transform_key=key,
+            output_names=(
+                f"{key}.l1_w",
+                f"{key}.l1_sf",
+                f"{key}.l2_w",
+                f"{key}.l2_sf",
+            ),
+            consumed_names=(
+                W.v4_routed_w1_w,
+                W.v4_routed_w1_s,
+                W.v4_routed_w3_w,
+                W.v4_routed_w3_s,
+                W.v4_routed_w2_w,
+                W.v4_routed_w2_s,
+            ),
+            builder=lambda: self._transform_routed_weights(layer_weights),
+        )
+
+    def _transform_routed_weights(self, layer_weights: Dict):
         import deep_gemm
 
         from rtp_llm.utils.model_weight import W
@@ -308,12 +342,9 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         (l1_w, l1_sf), (l2_w, l2_sf) = deep_gemm.transform_weights_for_mega_moe(
             (w13, s13_int), (w2, s2_int)
         )
-        self._mega_l1_w = l1_w
-        self._mega_l1_sf = l1_sf
-        self._mega_l2_w = l2_w
-        self._mega_l2_sf = l2_sf
         del w13, s13_int, w2, s2_int
         torch.cuda.empty_cache()
+        return l1_w, l1_sf, l2_w, l2_sf
 
     def get_eplb_weights(self) -> tuple[torch.Tensor, ...]:
         return (self._mega_l1_w, self._mega_l1_sf, self._mega_l2_w, self._mega_l2_sf)

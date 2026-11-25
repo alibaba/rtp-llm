@@ -16,6 +16,7 @@ from rtp_llm.eplb.shuffle import (
     expert_model_parallel_shuffle_inplace,
     expert_model_parallel_shuffle_inplace_intranode,
 )
+from rtp_llm.resident_weights import resident_weights_of, writable_view
 
 
 class EplbLayer:
@@ -38,7 +39,9 @@ class EplbLayer:
         self.layer_id = layer_id
         self.logical_to_physical = logical_to_physical
         self.logical_count = logical_count
-        self.weights = tuple(weights)
+        # Resident weights are mapped read-only; the shuffle writes through a second mapping.
+        self.resident = resident_weights_of(weights[0]) if weights else None
+        self.weights = tuple(writable_view(w) for w in weights)
         self.ep_rank = ep_rank
         # PureTP peers reduce partial outputs and must select the same copy.
         # Independent dispatch streams may rotate by their own rank.
@@ -256,6 +259,10 @@ class _ExpertLayoutGroup:
         # The window remains a physical-slot ring, exactly as in DeepInfer.
         # Do not replace it with a logical history or clear it after a shuffle.
         changed_slots = (physical != self.physical_to_logical).sum(-1).tolist()
+        # A restart must not attach experts that were half moved: mark the record until committed.
+        resident = self.layers[0].resident
+        if resident is not None:
+            resident.eplb_begin()
         if self.intranode_shuffle:
             expert_model_parallel_shuffle_inplace_intranode(
                 self.ipc_weight_buffers,
@@ -280,6 +287,13 @@ class _ExpertLayoutGroup:
         # RTP's completion records cover every rank. Wait for the actual
         # weights and graph-stable maps, once per group rather than per layer.
         torch.cuda.synchronize(self.device)
+        if resident is not None:
+            resident.eplb_commit(
+                {
+                    layer.layer_id: physical[index].tolist()
+                    for index, layer in enumerate(self.layers)
+                }
+            )
         logging.info(
             "[EPLB] applied model_id=%s layers=%s update=%d "
             "changed_slots=%s ep_rank=%d",

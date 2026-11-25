@@ -34,6 +34,7 @@ from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
     recompute_topk_ids_sum_expert_count,
 )
 from rtp_llm.models_py.utils.math import align, ceil_div
+from rtp_llm.resident_weights import resident_init_tensors
 
 from ...quant_layouts import FP4_BLOCK, FP8_BLOCK, prepare_fp4_weight_scale_for_deepgemm
 from .._silu_mul_fp8_quant_triton import silu_mul_fp8_quant_packed
@@ -103,6 +104,43 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
         from rtp_llm.utils.model_weight import W
 
         cfg = self.cfg
+        key = (
+            f"v41.grouped_fp4.routed:experts{cfg.physical_expert_num}"
+            f":dim{cfg.dim}:inter{cfg.moe_inter_dim}"
+        )
+        (
+            self._w13,
+            self._s13,
+            self._w2,
+            self._s2,
+            self._s13_dense_t,
+            self._s2_dense_t,
+        ) = resident_init_tensors(
+            layer_weights,
+            transform_key=key,
+            output_names=(
+                f"{key}.w13",
+                f"{key}.s13",
+                f"{key}.w2",
+                f"{key}.s2",
+                f"{key}.s13_dense_t",
+                f"{key}.s2_dense_t",
+            ),
+            consumed_names=(
+                W.v4_routed_w1_w,
+                W.v4_routed_w1_s,
+                W.v4_routed_w2_w,
+                W.v4_routed_w2_s,
+                W.v4_routed_w3_w,
+                W.v4_routed_w3_s,
+            ),
+            builder=lambda: self._transform_routed_weights(layer_weights),
+        )
+
+    def _transform_routed_weights(self, layer_weights: Dict):
+        from rtp_llm.utils.model_weight import W
+
+        cfg = self.cfg
         E, D, inter = (cfg.physical_expert_num, cfg.dim, cfg.moe_inter_dim)
         stacked_w1_w = layer_weights.pop(W.v4_routed_w1_w)
         stacked_w1_s = layer_weights.pop(W.v4_routed_w1_s)
@@ -111,36 +149,37 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
         stacked_w3_w = layer_weights.pop(W.v4_routed_w3_w)
         stacked_w3_s = layer_weights.pop(W.v4_routed_w3_s)
         device = stacked_w1_w.device
-        self._w13 = torch.empty((E, 2 * inter, D // 2), dtype=torch.int8, device=device)
-        self._w2 = torch.empty((E, D, inter // 2), dtype=torch.int8, device=device)
+        w13 = torch.empty((E, 2 * inter, D // 2), dtype=torch.int8, device=device)
+        w2 = torch.empty((E, D, inter // 2), dtype=torch.int8, device=device)
         s13_raw = torch.empty(
             (E, 2 * inter, D // FP4_BLOCK), dtype=torch.float8_e8m0fnu, device=device
         )
         s2_raw = torch.empty(
             (E, D, inter // FP4_BLOCK), dtype=torch.float8_e8m0fnu, device=device
         )
-        self._w13[:, :inter].copy_(stacked_w1_w)
+        w13[:, :inter].copy_(stacked_w1_w)
         s13_raw[:, :inter].copy_(stacked_w1_s)
-        self._w13[:, inter:].copy_(stacked_w3_w)
+        w13[:, inter:].copy_(stacked_w3_w)
         s13_raw[:, inter:].copy_(stacked_w3_s)
-        self._w2.copy_(stacked_w2_w)
+        w2.copy_(stacked_w2_w)
         s2_raw.copy_(stacked_w2_s)
         del stacked_w1_w, stacked_w1_s, stacked_w2_w, stacked_w2_s
         del stacked_w3_w, stacked_w3_s
-        self._s13 = prepare_fp4_weight_scale_for_deepgemm(s13_raw, 2 * inter, D, E)
-        self._s2 = prepare_fp4_weight_scale_for_deepgemm(s2_raw, D, inter, E)
+        s13 = prepare_fp4_weight_scale_for_deepgemm(s13_raw, 2 * inter, D, E)
+        s2 = prepare_fp4_weight_scale_for_deepgemm(s2_raw, D, inter, E)
         s13_dense = prepare_fp4_weight_scale_for_deepgemm(
             s13_raw.reshape(E * 2 * inter, D // FP4_BLOCK), E * 2 * inter, D
         )
-        self._s13_dense_t = s13_dense.as_strided(
+        s13_dense_t = s13_dense.as_strided(
             (E, s13_dense.size(1), 2 * inter), (2 * inter, E * 2 * inter, 1)
         )
         s2_dense = prepare_fp4_weight_scale_for_deepgemm(
             s2_raw.reshape(E * D, inter // FP4_BLOCK), E * D, inter
         )
-        self._s2_dense_t = s2_dense.as_strided((E, s2_dense.size(1), D), (D, E * D, 1))
+        s2_dense_t = s2_dense.as_strided((E, s2_dense.size(1), D), (D, E * D, 1))
         del s13_raw, s2_raw
         torch.cuda.empty_cache()
+        return w13, s13, w2, s2, s13_dense_t, s2_dense_t
 
     def get_eplb_weights(self) -> tuple[torch.Tensor, ...]:
         return (

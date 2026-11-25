@@ -280,13 +280,14 @@ class BaseModel(object):
                 device=device, global_weight_aliases=aliases
             )
         else:
-            # The routing tables are rebuilt from the configured placement on every start.
+            # The routing tables are rebuilt from the configured or recovered placement on every start.
             weights = self._resident_weights.attach_or_load_weights(
                 self.model_weights_loader,
                 device,
                 aliases,
                 excluded_names=(W.log2phy, W.logic_expert_cnt),
                 synchronize_ranks=synchronize_ranks,
+                eplb_enabled=self.model_config.eplb_config.enable_eplb(),
             )
         if synchronize_ranks:
             self._wait_for_loading_ranks()
@@ -326,11 +327,6 @@ class BaseModel(object):
             logging.warning(
                 "resident weights disabled: CUDA VMM with POSIX FD export is unavailable"
             )
-            return None
-        if self.model_config.eplb_config.enable_eplb():
-            # The expert balancer copies reloaded experts into the weight tensors in place,
-            # which read-only resident mappings would fault on.
-            logging.warning("resident weights disabled: not supported with EPLB")
             return None
         offload_after_s, idle_ttl_s = self.resident_weights_config.store_timers()
         host_reserve_ratio, host_reserve_min_gb = (

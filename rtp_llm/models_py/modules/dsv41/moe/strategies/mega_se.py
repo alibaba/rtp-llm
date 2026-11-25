@@ -161,6 +161,38 @@ class MegaMoEStrategySE(MegaMoEStrategy):
         self._maybe_warmup_jit_once()
 
     def _setup_shared_expert_weights(self, layer_weights, deep_gemm, W, D, inter):
+        from rtp_llm.resident_weights import resident_init_tensors
+
+        key = (
+            f"v41.mega_se.shared:block{self.cfg.shared_fp8_block_size}"
+            f":dim{D}:inter{inter}"
+        )
+        (
+            self._se_l1_w,
+            self._se_l1_sf,
+            self._se_l2_w,
+            self._se_l2_sf,
+        ) = resident_init_tensors(
+            layer_weights,
+            transform_key=key,
+            output_names=(
+                f"{key}.l1_w",
+                f"{key}.l1_sf",
+                f"{key}.l2_w",
+                f"{key}.l2_sf",
+            ),
+            consumed_names=(
+                W.v4_shared_w13_w,
+                W.v4_shared_w13_s,
+                W.v4_shared_w2_w,
+                W.v4_shared_w2_s,
+            ),
+            builder=lambda: self._transform_shared_expert_weights(
+                layer_weights, deep_gemm, W, D, inter
+            ),
+        )
+
+    def _transform_shared_expert_weights(self, layer_weights, deep_gemm, W, D, inter):
         w13_fp8 = layer_weights.pop(W.v4_shared_w13_w)
         w13_scale = layer_weights.pop(W.v4_shared_w13_s)
         w2_fp8 = layer_weights.pop(W.v4_shared_w2_w)
@@ -203,14 +235,8 @@ class MegaMoEStrategySE(MegaMoEStrategy):
             )
         del w13_fp8, w13_sf_int, w2_fp8, w2_sf_int
         del w2_tagged, w2_sf_tagged
-        for name, rebuilt in (
-            ("_se_l1_w", se_l1_w),
-            ("_se_l1_sf", se_l1_sf),
-            ("_se_l2_w", se_l2_w),
-            ("_se_l2_sf", se_l2_sf),
-        ):
-            setattr(self, name, rebuilt)
         torch.cuda.empty_cache()
+        return se_l1_w, se_l1_sf, se_l2_w, se_l2_sf
 
     @staticmethod
     def _shared_expert_sf_to_int(deep_gemm, scale, mn, k, block_size=128):

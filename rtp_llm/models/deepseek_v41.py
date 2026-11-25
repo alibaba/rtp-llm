@@ -7,7 +7,10 @@ import torch
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
-from rtp_llm.model_loader.model_weight_info import ModelWeightInfo
+from rtp_llm.model_loader.model_weight_info import (
+    ModelDeployWeightInfo,
+    ModelWeightInfo,
+)
 from rtp_llm.model_loader.weight_module import AtomicWeight
 from rtp_llm.models.deepseek_v4 import (
     DeepSeekV4,
@@ -18,8 +21,24 @@ from rtp_llm.models.deepseek_v4 import (
 from rtp_llm.ops import HybridAttentionType
 from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity, sp_id
 
+# Switches that pick which initialization-time transforms build the resident layouts:
+# the MoE strategy (moe/strategies/base.py), the MegaMoE-SE shared expert, Mega Attention's
+# merged Q-B and DSpARK's stacked commit wkv.
+_V41_RESIDENT_WEIGHTS_ENV = (
+    "DSV4_MOE_STRATEGY",
+    "DSV4_USE_MEGA_MOE",
+    "DSV4_USE_MEGA_MOE_SE",
+    "DSV4_USE_GROUPED_FP4",
+    "DSV41_MEGA_SHARED_EXPERT",
+    "DSV41_MEGA_ATTENTION",
+    "DSV4_DSPARK_COMMIT_WKV",
+)
+
 
 class DeepSeekV41Weight(DeepSeekV4Weight):
+    resident_weights_env_vars = (
+        ModelDeployWeightInfo.resident_weights_env_vars + _V41_RESIDENT_WEIGHTS_ENV
+    )
 
     def _process_meta(self, meta_dict, weight_keys):
         super()._process_meta(meta_dict, weight_keys)
@@ -160,6 +179,10 @@ class DeepSeekV41(DeepSeekV4):
 
 
 class DeepSeekV41DSparkWeight(DeepSeekV4DSparkWeight):
+    resident_weights_env_vars = (
+        ModelDeployWeightInfo.resident_weights_env_vars + _V41_RESIDENT_WEIGHTS_ENV
+    )
+
     def _get_weight_info(self):
         info = super()._get_weight_info()
         obsolete_head = {W.v4_hc_head_base, W.v4_hc_head_fn, W.v4_hc_head_scale}

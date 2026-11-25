@@ -5,6 +5,7 @@ import os
 import torch
 
 from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
+from rtp_llm.resident_weights import resident_init_tensors
 from rtp_llm.utils.model_weight import W
 
 
@@ -26,21 +27,32 @@ class MergedQB(torch.nn.Module):
             and mega.query_weight.device == index.weight.device
         ):
             return None
-        result = cls(mega, index, layer_weights[W.v4_indexer_wq_b_s])
+        weight, scales = resident_init_tensors(
+            layer_weights,
+            transform_key="v41.merged_qb",
+            output_names=("v41.merged_qb.w", "v41.merged_qb.s"),
+            consumed_names=(W.v4_indexer_wq_b_w,),
+            builder=lambda: cls._merge(mega, index),
+        )
+        result = cls(mega, index, layer_weights[W.v4_indexer_wq_b_s], weight, scales)
         # Reload writes into this view, not a redundant checkpoint allocation.
         layer_weights[W.v4_indexer_wq_b_w] = index.weight
         return result
 
-    def __init__(self, mega, index, index_scale_source):
+    @staticmethod
+    def _merge(mega, index):
+        weight = torch.cat(
+            (mega.query_weight.view(torch.uint8), index.weight.view(torch.uint8))
+        ).view(mega.query_weight.dtype)
+        scales = torch.cat((mega.query_scale, index.weight_scales)).T.contiguous().T
+        return weight, scales
+
+    def __init__(self, mega, index, index_scale_source, weight, scales):
         super().__init__()
         self.main_width = mega.query_weight.shape[0]
         self.index_width = index.N
         self.K = index.K
         self.index_scale_source = index_scale_source
-        weight = torch.cat(
-            (mega.query_weight.view(torch.uint8), index.weight.view(torch.uint8))
-        ).view(mega.query_weight.dtype)
-        scales = torch.cat((mega.query_scale, index.weight_scales)).T.contiguous().T
         self.register_buffer("weight", weight, persistent=False)
         self.register_buffer("weight_scales", scales, persistent=False)
         mega.query_weight, index.weight = weight.split(

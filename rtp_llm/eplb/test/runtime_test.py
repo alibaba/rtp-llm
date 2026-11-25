@@ -348,6 +348,53 @@ class RuntimeTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "EP=WORLD"):
             RuntimeExpertBalancer([make_layer(ep_size=2)], make_config(), 0, 2, 0)
 
+    def test_resident_weights_writable_view_and_eplb_notifications(self):
+        events = []
+
+        class _FakeResident:
+            def eplb_begin(self):
+                events.append(("begin",))
+
+            def eplb_commit(self, placement):
+                events.append(("commit", placement))
+
+        resident = _FakeResident()
+        raw_weight = torch.zeros((2, 4), dtype=torch.float32)
+        writable_weight = torch.zeros((2, 4), dtype=torch.float32)
+        with patch(
+            "rtp_llm.eplb.runtime.resident_weights_of", return_value=resident
+        ), patch(
+            "rtp_llm.eplb.runtime.writable_view", return_value=writable_weight
+        ) as wrap:
+            layer = EplbLayer(
+                3,
+                torch.tensor([[0], [1]], dtype=torch.int32),
+                torch.tensor([1, 1], dtype=torch.int32),
+                [raw_weight],
+            )
+        wrap.assert_called_once_with(raw_weight)
+        self.assertIs(layer.resident, resident)
+        self.assertIs(layer.weights[0], writable_weight)
+
+        ep_group = SimpleNamespace(rank=lambda: 0, size=lambda: 1)
+        group = _ExpertLayoutGroup([layer], make_config(), ep_group, "target", False)
+        group.intranode_shuffle = False
+        new_physical = torch.tensor([[1, 0]], dtype=torch.int32)
+        new_inverse = torch.tensor([[[1], [0]]], dtype=torch.int32)
+        new_replicas = torch.tensor([[1, 1]], dtype=torch.int32)
+        with patch.object(
+            group, "_plan", return_value=(new_physical, new_inverse, new_replicas)
+        ), patch(
+            "rtp_llm.eplb.runtime.expert_model_parallel_shuffle_inplace",
+            side_effect=lambda *a, **kw: events.append(("shuffle",)),
+        ), patch("torch.cuda.synchronize"):
+            changed = group.rearrange()
+        self.assertTrue(changed)
+        self.assertEqual(
+            events,
+            [("begin",), ("shuffle",), ("commit", {3: [1, 0]})],
+        )
+
 
 if __name__ == "__main__":
     torch.set_num_threads(1)

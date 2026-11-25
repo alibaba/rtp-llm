@@ -32,7 +32,7 @@ import weakref
 from concurrent.futures import CancelledError, ThreadPoolExecutor, TimeoutError
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
-from typing import Mapping, Optional
+from typing import Mapping, Optional, Sequence, Union
 
 import numpy as np
 import torch
@@ -330,6 +330,21 @@ def _shared_table_prefix() -> str:
     return f"rtp_llm_engram_{os.getuid()}_"
 
 
+def _shared_table_path(source_identity: str) -> Path:
+    digest = hashlib.sha256(source_identity.encode()).hexdigest()[:_DIGEST_CHARS]
+    return _SHARED_TABLE_DIR / (_shared_table_prefix() + digest)
+
+
+def _table_identity(root: Path, weight_map, prefix: str) -> str:
+    """What makes one Engram layer's table distinct: the checkpoint files behind it."""
+    identity = [str(root.resolve()), prefix]
+    for suffix in ("embed.weight", "embed.scale"):
+        path = root / weight_map[prefix + suffix]
+        stat = path.stat()
+        identity.extend([str(path.resolve()), str(stat.st_size), str(stat.st_mtime_ns)])
+    return "|".join(identity)
+
+
 def _lock_table(lock_path: Path, timeout: Optional[float] = None) -> Optional[int]:
     """Return an fd holding ``lock_path`` exclusively, or None on timeout.
 
@@ -417,7 +432,9 @@ def _reclaim_with_lock(data_path: Path, timeout: Optional[float]) -> None:
         os.close(fd)
 
 
-def reclaim_stale_shared_tables(keep: Optional[Path] = None) -> None:
+def reclaim_stale_shared_tables(
+    keep: Union[Path, Sequence[Path], None] = (),
+) -> None:
     """Remove this user's tables left by crashed or SIGKILLed workers.
 
     A table is keyed by checkpoint identity, so a restart with another
@@ -426,13 +443,19 @@ def reclaim_stale_shared_tables(keep: Optional[Path] = None) -> None:
     """
     prefix = _shared_table_prefix()
     table_name = re.compile(re.escape(prefix) + rf"[0-9a-f]{{{_DIGEST_CHARS}}}(?=\.|$)")
+    if keep is None:
+        kept = set()
+    elif isinstance(keep, Path):
+        kept = {keep.name}
+    else:
+        kept = {Path(path).name for path in keep}
     names = set()
     for path in _SHARED_TABLE_DIR.glob(prefix + "*"):
         match = table_name.match(path.name)
         if match:
             names.add(match.group())
     for name in sorted(names):
-        if keep is None or name != keep.name:
+        if name not in kept:
             try:
                 _reclaim_with_lock(_SHARED_TABLE_DIR / name, timeout=0)
             except OSError as error:
@@ -489,15 +512,19 @@ class _PinnedSharedTable:
     any checkpoint, are reclaimed when the next table is loaded.
     """
 
-    def __init__(self, weight, scales, source_identity, device):
-        digest = hashlib.sha256(source_identity.encode()).hexdigest()[:_DIGEST_CHARS]
-        data_path = _SHARED_TABLE_DIR / (_shared_table_prefix() + digest)
+    def __init__(self, weight, scales, source_identity, device, sibling_identities=()):
+        data_path = _shared_table_path(source_identity)
         weight_bytes = weight.numel()
         total_bytes = weight_bytes + scales.numel()
         if weight.element_size() != 1 or scales.element_size() != 1:
             raise ValueError("Pinned Engram tables require native FP8/E8M0 bytes")
-        # Free orphans first so they do not count against the space check.
-        reclaim_stale_shared_tables(keep=data_path)
+        # Free orphans first so they do not count against the space check. The checkpoint's
+        # other Engram layers are about to be reopened, so they are not orphans: without this
+        # a 61-layer restart kept only the first layer's table and rebuilt the rest at ~95 GiB
+        # each.
+        reclaim_stale_shared_tables(
+            keep=[data_path] + [_shared_table_path(i) for i in sibling_identities]
+        )
         lock = _lock_table(Path(str(data_path) + ".lock"))
         try:
             _prune_stale_files(data_path)
@@ -547,6 +574,10 @@ class _PinnedSharedTable:
             )
         finally:
             os.close(lock)
+        # Keep the /dev/shm table leased by the resident store so a clean exit does not unlink it.
+        from rtp_llm.resident_weights import retain_host_file
+
+        retain_host_file(str(data_path), str(data_path) + ".lock")
         self.storage = torch.frombuffer(mapping, dtype=torch.uint8)
         self.weight = self.storage[:weight_bytes].view(weight.dtype).view(weight.shape)
         self.scales = self.storage[weight_bytes:].view(torch.uint8).view(scales.shape)
@@ -2140,19 +2171,16 @@ class Engram(nn.Module):
                 pinned = None
                 identity = None
                 if target.type == "cuda":
-                    parts = [str(root.resolve()), prefix]
-                    for suffix in ("embed.weight", "embed.scale"):
-                        path = root / weight_map[prefix + suffix]
-                        stat = path.stat()
-                        parts.extend(
-                            [
-                                str(path.resolve()),
-                                str(stat.st_size),
-                                str(stat.st_mtime_ns),
-                            ]
-                        )
-                    identity = "|".join(parts)
-                    pinned = _PinnedSharedTable(table, scales, identity, target)
+                    identity = _table_identity(root, weight_map, prefix)
+                    siblings = [
+                        _table_identity(root, weight_map, f"layers.{other}.engram.")
+                        for other in layout.layer_ids
+                        if other != layer_id
+                        and f"layers.{other}.engram.embed.weight" in weight_map
+                    ]
+                    pinned = _PinnedSharedTable(
+                        table, scales, identity, target, sibling_identities=siblings
+                    )
                     table, scales = pinned.weight, pinned.scales
                 else:
                     _prefault_host_tensor(table, prefix + "embed.weight")

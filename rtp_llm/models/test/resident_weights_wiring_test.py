@@ -47,6 +47,7 @@ class _Manager:
         global_weight_aliases,
         excluded_names=(),
         synchronize_ranks=False,
+        eplb_enabled=False,
     ):
         self.load_args = (
             loader,
@@ -54,6 +55,7 @@ class _Manager:
             dict(global_weight_aliases),
             tuple(excluded_names),
         )
+        self.eplb_enabled = eplb_enabled
         return "resident weights"
 
     def finalize_after_initialize(self, py_model):
@@ -72,6 +74,9 @@ def _model(
     model = BaseModel.__new__(BaseModel)
     model.resident_weights_config = config or ResidentWeightsConfig()
     model.parallelism_config = SimpleNamespace(local_rank=0, pp_size=1)
+    model.model_config = SimpleNamespace(
+        eplb_config=SimpleNamespace(enable_eplb=lambda: False)
+    )
     model._resident_weights = None
     model.model_weights_loader = loader if loader is not None else _Loader()
     model.py_model = None
@@ -204,6 +209,7 @@ def _distributed_load(rank, world_size, rendezvous, mixed):
     try:
         manager = ResidentWeights.__new__(ResidentWeights)
         manager.verify = False
+        manager.eplb_placement = None
         manager.attach = Mock(return_value=[] if not mixed or rank == 0 else None)
         manager.discard_attach = Mock()
         manager.move_to_vmm = Mock()
@@ -304,7 +310,7 @@ class ResidentWeightsRegressionTest(unittest.TestCase):
     def test_a_rank_without_a_manager_cold_loads_without_contacting_the_store(self):
         self.assertEqual(self._consensus_failure_load(None), ["cold load"])
 
-    def test_manager_creation_checks_capability_and_eplb(self):
+    def test_manager_creation_checks_capability_and_allows_eplb(self):
         for available, eplb in ((False, False), (True, False), (True, True)):
             with self.subTest(available=available, eplb=eplb):
                 model = _model(
@@ -319,7 +325,7 @@ class ResidentWeightsRegressionTest(unittest.TestCase):
                     model, "_resident_fingerprint", return_value={}
                 ):
                     result = model._create_resident_weights()
-                if available and not eplb:
+                if available:
                     self.assertIs(result, create.return_value)
                     create.assert_called_once_with(
                         "draft", 0, {}, True, StoreSettings(600.0, 3600.0)
@@ -327,6 +333,53 @@ class ResidentWeightsRegressionTest(unittest.TestCase):
                 else:
                     self.assertIsNone(result)
                     create.assert_not_called()
+
+    def test_eplb_placement_agreement_and_disagreement(self):
+        for disagree in (False, True):
+            with self.subTest(disagree=disagree):
+                manager = ResidentWeights.__new__(ResidentWeights)
+                manager.slot_key = "gpu0/target"
+                manager.verify = False
+                manager._restore_error = None
+                manager.eplb_placement = {0: [1, 0]}
+                manager.attach = Mock(return_value=["restored"])
+                manager.discard_attach = Mock()
+                manager.move_to_vmm = Mock()
+                manager.bind = Mock()
+                loader = Mock()
+                loader.assemble_weights.return_value = "warm"
+                loader.load_weights.return_value = "cold"
+
+                def fake_all_gather(out, value):
+                    out[0] = value
+                    out[1] = '{"0": [0, 1]}' if disagree else value
+
+                with patch(
+                    "rtp_llm.resident_weights.weights.all_ranks_min_state",
+                    return_value=2,
+                ), patch("torch.distributed.is_initialized", return_value=True), patch(
+                    "torch.distributed.get_world_size", return_value=2
+                ), patch(
+                    "torch.distributed.all_gather_object", side_effect=fake_all_gather
+                ):
+                    result = manager.attach_or_load_weights(
+                        loader,
+                        "cpu",
+                        {},
+                        synchronize_ranks=True,
+                        eplb_enabled=True,
+                    )
+                if disagree:
+                    self.assertEqual(result, "cold")
+                    manager.discard_attach.assert_called_once_with()
+                    loader.assemble_weights.assert_not_called()
+                    loader.load_weights.assert_called_once()
+                else:
+                    self.assertEqual(result, "warm")
+                    manager.discard_attach.assert_not_called()
+                    loader.assemble_weights.assert_called_once_with(
+                        "cpu", {}, ["restored"], eplb_placement={0: [1, 0]}
+                    )
 
     def test_resident_configuration_refuses_weight_updates_on_every_rank(self):
         from rtp_llm.model_loader.weight_manager import WeightManager

@@ -219,6 +219,7 @@ py_library(
         ":device",
         ":torch",
         ":utils",
+        "//rtp_llm/resident_weights",
     ] + select({
         "@//:using_cuda13_x86": [":deep_ep"],
         "@//:using_cuda13_arm": [":deep_ep"],

@@ -450,6 +450,7 @@ class ResidentWeights:
         global_weight_aliases: Mapping[str, torch.Tensor],
         excluded_names: Sequence[str] = (),
         synchronize_ranks: bool = False,
+        eplb_enabled: bool = False,
     ) -> "ModelWeights":
         """This model's weights: the published record when there is one, else the checkpoint.
 
@@ -488,8 +489,37 @@ class ResidentWeights:
         if synchronize_ranks and state == _ATTACH_MISS:
             restored = None
             self.discard_attach()
+        if (
+            eplb_enabled
+            and synchronize_ranks
+            and restored is not None
+            and torch.distributed.is_initialized()
+            and torch.distributed.get_world_size() > 1
+        ):
+            # Expert placement is global: either every rank restores the same one or all reload.
+            placement = json.dumps(self.eplb_placement, sort_keys=True)
+            placements = [None] * torch.distributed.get_world_size()
+            torch.distributed.all_gather_object(placements, placement)
+            if len(set(placements)) > 1:
+                logging.warning(
+                    "resident weights %s: ranks disagree on the published expert placement; "
+                    "every rank reloads from the checkpoint",
+                    self.slot_key,
+                )
+                restored = None
+                self.discard_attach()
         if restored is not None:
-            weights = loader.assemble_weights(device, global_weight_aliases, restored)
+            if self.eplb_placement:
+                weights = loader.assemble_weights(
+                    device,
+                    global_weight_aliases,
+                    restored,
+                    eplb_placement=self.eplb_placement,
+                )
+            else:
+                weights = loader.assemble_weights(
+                    device, global_weight_aliases, restored
+                )
             self.bind(weights)
             return weights
         weights = loader.load_weights(
@@ -502,6 +532,7 @@ class ResidentWeights:
         """Drop this process's local mappings and hold without deleting the store's record."""
         self._replay = None
         self._attached = False
+        self.eplb_placement = None
         self._allocation_refs.clear()
         self.initialize_gpu_growth_bytes = 0
         self._release_hold()

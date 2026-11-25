@@ -203,6 +203,7 @@ class MoE(nn.Module):
         self.n_local_experts = self.n_physical_experts // max(ep_size, 1)
         self.local_expert_start = ep_rank * self.n_local_experts
         self.local_expert_end = self.local_expert_start + self.n_local_experts
+        from rtp_llm.resident_weights import resident_init_scalar
         from rtp_llm.utils.model_weight import W
 
         logical_to_physical = resolved_layer_weights.get(W.log2phy)
@@ -210,16 +211,24 @@ class MoE(nn.Module):
         if (logical_to_physical is None) != (logical_count is None):
             raise ValueError("EPLB requires both log2phy and logic_expert_cnt")
         self.eplb_layer = None
-        shared_weight = resolved_layer_weights[W.v4_shared_w13_w]
-        shared_scale = resolved_layer_weights[W.v4_shared_w13_s]
-        shared_fp8_block_size = (
-            32
-            if tuple(shared_scale.shape)
-            == (
-                (shared_weight.shape[0] + 31) // 32,
-                (shared_weight.shape[1] + 31) // 32,
+
+        def _shared_fp8_block_size():
+            shared_weight = resolved_layer_weights[W.v4_shared_w13_w]
+            shared_scale = resolved_layer_weights[W.v4_shared_w13_s]
+            return (
+                32
+                if tuple(shared_scale.shape)
+                == (
+                    (shared_weight.shape[0] + 31) // 32,
+                    (shared_weight.shape[1] + 31) // 32,
+                )
+                else 128
             )
-            else 128
+
+        shared_fp8_block_size = resident_init_scalar(
+            resolved_layer_weights,
+            "v41.moe.shared_fp8_block_size",
+            _shared_fp8_block_size,
         )
         self.gate = Gate(
             layer_id,

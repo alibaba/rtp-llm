@@ -738,6 +738,7 @@ class ModelLoader:
         device: str,
         global_weight_aliases: Mapping[str, torch.Tensor],
         restored: Sequence[RestoredTensor],
+        eplb_placement: Optional[Mapping[int, List[int]]] = None,
     ) -> ModelWeights:
         """ModelWeights from tensors resident weights mapped back, instead of the checkpoint."""
         self._global_weight_aliases = dict(global_weight_aliases or {})
@@ -748,7 +749,7 @@ class ModelLoader:
             else:
                 weights.set_layer_weight(item.scope, item.name, item.tensor)
         self._apply_loaded_shapes(weights)
-        self._init_eplb_weight(weights, device)
+        self._init_eplb_weight(weights, device, eplb_placement=eplb_placement)
         return weights
 
     def _apply_loaded_shapes(self, weight: ModelWeights):
@@ -821,7 +822,12 @@ class ModelLoader:
             phy2log_path=phy2log_path,
         )
 
-    def _init_eplb_weight(self, weight: ModelWeights, device: str):
+    def _init_eplb_weight(
+        self,
+        weight: ModelWeights,
+        device: str,
+        eplb_placement: Optional[Mapping[int, List[int]]] = None,
+    ):
         expert_num = self._load_config.expert_num
         redundant_expert = self._load_config.phy_exp_num - expert_num
         layer_num = self._load_config.num_layers
@@ -838,7 +844,12 @@ class ModelLoader:
             log2phy = torch.empty(
                 (expert_num, redundant_expert + 1), dtype=torch.int32
             ).fill_(-1)
-            layer_phy2log = phy2log[layer_id]
+            if eplb_placement is not None and layer_id in eplb_placement:
+                layer_phy2log = eplb_placement[layer_id]
+                if phy2log is not None:
+                    self._load_config.update_layer_phy2log(layer_id, layer_phy2log)
+            else:
+                layer_phy2log = phy2log[layer_id]
 
             for phy_exp_id, expert_id in enumerate(layer_phy2log):
                 cnt = logic_expert_cnt[expert_id]

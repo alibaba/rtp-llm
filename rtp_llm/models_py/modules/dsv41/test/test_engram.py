@@ -329,8 +329,16 @@ class SharedTableLeaseTest(unittest.TestCase):
         )
         for suffix in suffixes:
             Path(str(stale) + suffix).touch()
-        engram.reclaim_stale_shared_tables(keep=kept)
+        engram.reclaim_stale_shared_tables(keep=[kept])
         self.assertEqual(self._names(), [kept.name])
+
+    def test_keeps_every_table_of_the_loading_checkpoint(self):
+        # Loading one Engram layer must not reclaim the other layers' tables that the same
+        # checkpoint reopens next: each is ~95 GiB for DeepSeek-V4.1-Flash.
+        orphan, current, sibling = self._table("a"), self._table("b"), self._table("c")
+        engram.reclaim_stale_shared_tables(keep=[current, sibling])
+        self.assertFalse(orphan.exists())
+        self.assertEqual(self._names(), sorted([current.name, sibling.name]))
 
     def test_live_legacy_lease_or_partial_keeps_table(self):
         for marker in (".lease.", ".partial."):

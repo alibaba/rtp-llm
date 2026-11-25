@@ -13,6 +13,7 @@ from typing import Optional, Sequence
 import torch
 
 from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
+from rtp_llm.resident_weights import resident_init_tensors
 from rtp_llm.utils.model_weight import W
 
 
@@ -90,22 +91,27 @@ class DSparkCommitWKV(torch.nn.Module):
             stacked = V41MXFP8Linear.__new__(V41MXFP8Linear)
             torch.nn.Module.__init__(stacked)
             stacked.N, stacked.K = sum(w.N for w in linears), first.K
-            stacked.register_buffer(
-                "weight",
-                torch.cat([w.weight.view(torch.uint8) for w in linears]).view(
-                    first.weight.dtype
+            key = f"dspark.commit_wkv.stacked:{len(linears)}"
+            # The sources are the per-layer linears' own buffers, not weight-dict entries, so
+            # this consumes nothing the publish-time account tracks.
+            weight, scales = resident_init_tensors(
+                layer_weights[0] if layer_weights else {},
+                transform_key=key,
+                output_names=(f"{key}.w", f"{key}.s"),
+                consumed_names=(),
+                builder=lambda: (
+                    torch.cat([w.weight.view(torch.uint8) for w in linears]).view(
+                        first.weight.dtype
+                    ),
+                    # Transposed concatenation preserves the logical packed bytes and
+                    # gives each scale column the NEW total-N leading dimension.
+                    torch.cat([w.weight_scales.t() for w in linears], dim=1)
+                    .contiguous()
+                    .t(),
                 ),
-                persistent=False,
             )
-            # Transposed concatenation preserves the logical packed bytes and
-            # gives each scale column the NEW total-N leading dimension.
-            stacked.register_buffer(
-                "weight_scales",
-                torch.cat([w.weight_scales.t() for w in linears], dim=1)
-                .contiguous()
-                .t(),
-                persistent=False,
-            )
+            stacked.register_buffer("weight", weight, persistent=False)
+            stacked.register_buffer("weight_scales", scales, persistent=False)
             self.stacked = stacked
             for linear, view in zip(linears, stacked.weight.split(first.N, dim=0)):
                 linear.weight = view
