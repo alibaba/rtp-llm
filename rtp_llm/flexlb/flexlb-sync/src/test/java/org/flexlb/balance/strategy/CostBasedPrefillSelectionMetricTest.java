@@ -3,6 +3,7 @@ package org.flexlb.balance.strategy;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.balance.scheduler.PlacementKey;
 import org.flexlb.balance.scheduler.ScheduledRequest;
@@ -15,10 +16,12 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.PreemptionConfig;
 import org.flexlb.config.QueueOrderingConfig;
 import org.flexlb.config.RoutingConfig;
+import org.flexlb.config.SchedulerConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.cache.HostCacheMatch;
 import org.flexlb.dao.loadbalance.Request;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
@@ -41,6 +44,7 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -305,10 +309,13 @@ class CostBasedPrefillSelectionMetricTest {
         }
     }
 
-    @Test
-    void directAdmissionReportsTheSelectedCacheWorkerWhenFull() {
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void fullCacheLeaderIsSkippedByDirectAndStillEligibleForQueue(boolean direct) {
         registry.close();
-        config.setScheduler(org.flexlb.config.SchedulerConfig.direct());
+        if (direct) {
+            config.setScheduler(SchedulerConfig.direct());
+        }
         config.getDispatcher().setMaxInflightPerPrefillWorker(1);
         ConfigService service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
@@ -316,37 +323,28 @@ class CostBasedPrefillSelectionMetricTest {
         strategy = new CostBasedPrefillStrategy(new WorkerDirectory(registry), cache, reporter);
         publish("10.0.0.1", 8080);
         configureAffinity(1_000L, 30.0);
-        String hotAddress = "10.0.0.2:8080@0";
-        PrefillEndpoint hot = (PrefillEndpoint) registry.get(RoleType.PREFILL, hotAddress);
+        var hot = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.2:8080@0");
+        var cold = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.1:8080@0");
 
-        BalanceContext occupiedContext = new BalanceContext(config);
-        Request occupied = new Request();
-        occupied.setRequestId("10002");
-        occupied.setSeqLen(100);
-        occupiedContext.setRequest(occupied);
-        occupiedContext.setSchedulingMetadata(
-                SchedulingMetadata.explicit(50, System.currentTimeMillis() + 60_000L));
-        ScheduledRequest incumbent =
-                new ScheduledRequest(
-                        occupiedContext,
-                        new CompletableFuture<>(),
-                        null,
-                        null,
-                        null,
-                        hot,
-                        null,
-                        null,
-                        System.currentTimeMillis());
-        try (var pin = hot.tryPinGeneration();
-                var reservation = hot.reserveUnqueuedRoute(pin, incumbent, 1L).reservation()) {
-            assertNotNull(reservation);
-            var result = strategy.select(context, RoleType.PREFILL, null);
-            try (var unexpectedSelection = result.value()) {
-                assertEquals(PlacementResult.Status.BLOCKED, result.status());
+        try (var hotReservation = occupyRouteSlot(hot, "10002")) {
+            assertFalse(hot.canAcceptRequest());
+            try (var selected = select()) {
                 assertEquals(
-                        PlacementKey.exact(RoleType.PREFILL, null, hotAddress), result.blocker());
+                        direct ? "10.0.0.1" : "10.0.0.2", selected.serverStatus().getServerIp());
+            }
+            if (direct) {
+                try (var coldReservation = occupyRouteSlot(cold, "10003")) {
+                    var result = strategy.select(context, RoleType.PREFILL, null);
+                    assertEquals(PlacementResult.Status.BLOCKED, result.status());
+                    assertEquals(
+                            StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(),
+                            result.failure().getCode());
+                }
+            } else {
+                assertFalse(hot.routeAdmissionAvailability().isAvailable());
             }
         }
+        assertTrue(hot.routeAdmissionAvailability().isAvailable());
         try (var selected = select()) {
             assertEquals("10.0.0.2", selected.serverStatus().getServerIp());
         }
@@ -475,6 +473,32 @@ class CostBasedPrefillSelectionMetricTest {
         assertEquals(PlacementResult.Status.SUCCESS, result.status());
         try (SelectedRole selected = result.value()) {
             assertEquals("10.0.0.1", selected.serverStatus().getServerIp());
+        }
+    }
+
+    private PrefillState.RouteReservation occupyRouteSlot(PrefillEndpoint endpoint, String id) {
+        BalanceContext occupiedContext = new BalanceContext(config);
+        Request occupied = new Request();
+        occupied.setRequestId(id);
+        occupied.setSeqLen(100);
+        occupiedContext.setRequest(occupied);
+        occupiedContext.setSchedulingMetadata(
+                SchedulingMetadata.explicit(50, System.currentTimeMillis() + 60_000L));
+        ScheduledRequest incumbent =
+                new ScheduledRequest(
+                        occupiedContext,
+                        new CompletableFuture<>(),
+                        null,
+                        null,
+                        null,
+                        endpoint,
+                        null,
+                        null,
+                        System.currentTimeMillis());
+        try (var pin = endpoint.tryPinGeneration()) {
+            var reservation = endpoint.reserveUnqueuedRoute(pin, incumbent, 1L).reservation();
+            assertNotNull(reservation);
+            return reservation;
         }
     }
 
