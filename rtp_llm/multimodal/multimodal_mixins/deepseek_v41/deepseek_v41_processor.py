@@ -20,6 +20,7 @@ from urllib3.exceptions import ProtocolError, ReadTimeoutError
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.mm_download_domains import check_download_urls
+from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.metrics import AccMetrics, GaugeMetrics
 from rtp_llm.models_py.modules.dsv41.vision_preprocess_tables import resize_geometry
 from rtp_llm.multimodal.mm_error_messages import MMErr, media_error_detail
@@ -70,7 +71,7 @@ def _image_download_chunks(response, deadline, cancellation_event):
 def load_image_source(
     url,
     download_headers="",
-    max_file_size_kb=10 * 1024,
+    max_file_size_kb=VitConfig.DEFAULT_MM_IMAGE_MAX_FILE_SIZE_KB,
     *,
     deadline=None,
     cancellation_event=None,
@@ -87,15 +88,12 @@ def load_image_source(
         url_data_cache_,
     )
 
-    max_bytes = 10 * 1024 * 1024
-    if max_file_size_kb is not None and max_file_size_kb > 0:
-        max_bytes = min(max_bytes, max_file_size_kb * 1024)
     deadline = image_download_deadline(deadline)
     if not url.startswith(("http://", "https://")):
         return get_bytes_io_from_url(
             url,
             download_headers,
-            max_file_size_kb=max_bytes // 1024,
+            max_file_size_kb=max_file_size_kb,
             deadline=deadline,
             cancellation_event=cancellation_event,
         )
@@ -103,6 +101,7 @@ def load_image_source(
 
     from rtp_llm.multimodal.media_network import current_network, read_native_source
 
+    max_bytes = max(0, max_file_size_kb or 0) * 1024
     network = current_network.get()
     if network is not None:
         return read_native_source(
@@ -131,7 +130,7 @@ def load_image_source(
                 ExceptionType.MM_DOWNLOAD_FAILED,
                 f"{MMErr.DL_TIMEOUT}: {media_error_detail(error)}",
             ) from error
-        if content.getbuffer().nbytes > max_bytes:
+        if max_bytes and content.getbuffer().nbytes > max_bytes:
             raise FtRuntimeException(
                 ExceptionType.INVALID_PARAMS, "Multimodal file size is too large"
             )
@@ -181,7 +180,7 @@ def _download_image_source(
                         response, deadline, cancellation_event
                     ):
                         _check_download(deadline, cancellation_event)
-                        if content.tell() + len(chunk) > max_bytes:
+                        if max_bytes and content.tell() + len(chunk) > max_bytes:
                             raise ValueError("Multimodal file size is too large")
                         content.write(chunk)
                     _check_download(deadline, cancellation_event)
