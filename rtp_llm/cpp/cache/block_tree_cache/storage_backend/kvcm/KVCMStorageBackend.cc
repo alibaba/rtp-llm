@@ -50,6 +50,7 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
+constexpr auto kMaxReadSafetyQueryDuration = std::chrono::seconds(1);
 constexpr std::array<const char*, 5> kCompletionUnknownReasons{
     "sdk_timeout", "rpc_timeout", "rpc_error", "invalid_response", "sdk_error"};
 
@@ -664,7 +665,7 @@ public:
             rethrowPayloadFailure(source_may_be_touched);
         } catch (const StorageOperationCompletionUnknown&) {
             if (!read_trace.empty()) {
-                reclaimer_->freezeTargetBlocksWithTraceIDAndStillIOWorkerID(read_trace, {}, {});
+                reclaimer_->freezeTargetBlocksWithTraceIDAndStillIOWorkerID(read_trace, {});
                 std::rethrow_exception(withTargetProtection(std::current_exception(),
                                                                       StorageTargetProtection::PROTECTED_BY_BACKEND));
             }
@@ -1085,13 +1086,11 @@ public:
         BlockTreeReclaimer::QueryCallback query;
         const auto id = request.trace_id();
         if (client_wrapper_ && parallelism_config_.role_type != RoleType::DECODE) {
-            query = [client = client_wrapper_, registry = std::weak_ptr<BlockTreeReclaimer>(reclaimer_),
-                     id, timeout = 1000](Clock::time_point deadline) {
+            query = [client = client_wrapper_, id](Clock::time_point deadline) {
                 const auto now = Clock::now();
-                deadline = std::min(deadline, now + std::chrono::milliseconds(timeout));
+                deadline = std::min(deadline, now + kMaxReadSafetyQueryDuration);
                 const auto deadline_ms = std::chrono::duration_cast<std::chrono::milliseconds>(deadline.time_since_epoch()).count();
-                if (auto owner = registry.lock(); owner && now < deadline && client->queryReadBufferSafety(id, deadline_ms))
-                    owner->ioFinishedOnWorkerWithTraceID(id);
+                return now < deadline && client->queryReadBufferSafety(id, deadline_ms);
             };
         }
         auto discard = [self = weak_from_this(), cancelled = execution->recovery_cancelled, id](bool forced) {
@@ -1827,7 +1826,7 @@ private:
                               PrepareCompletion               prepare_completion,
                               std::string                     read_trace = {}) {
         if (broadcast_manager_) {
-            auto result = dispatchRemoteRequests(requests, request, source_may_be_touched, read_trace);
+            auto result = dispatchRemoteRequests(requests, request, source_may_be_touched);
             onPayloadDone(result, prepare_completion([this, result, read_trace](bool& touched, bool& sdk_failed) {
                               return collectResponses(result, touched, sdk_failed, read_trace);
                           }));
@@ -1904,8 +1903,7 @@ private:
 
     std::shared_ptr<PayloadResult> dispatchRemoteRequests(std::vector<FunctionRequestPB>& requests,
                                                           const StorageRequest&           storage_request,
-                                                          bool&                           source_may_be_touched,
-                                                          const std::string&              read_trace = {}) {
+                                                          bool&                           source_may_be_touched) {
         const int timeout_ms = remainingTimeout(storage_request, "before payload dispatch");
         for (auto& request : requests) {
             request.mutable_remote_request()->set_timeout_ms(timeout_ms);
@@ -1959,7 +1957,7 @@ private:
         if (track_workers) {
             source_may_be_touched = !pending.empty();
             if (!pending.empty())
-                reclaimer_->freezeTargetBlocksWithTraceIDAndStillIOWorkerID(read_trace, {}, pending);
+                reclaimer_->freezeTargetBlocksWithTraceIDAndStillIOWorkerID(read_trace, pending);
         }
         if (!success) {
             if (result->deadlineExceeded()) {
@@ -2010,7 +2008,7 @@ private:
                                                      ReadExecutionPtr                execution   = nullptr,
                                                      const std::string&              read_trace = {}) {
         if (broadcast_manager_) {
-            auto result = dispatchRemoteRequests(requests, storage_request, source_may_be_touched, read_trace);
+            auto result = dispatchRemoteRequests(requests, storage_request, source_may_be_touched);
             (void)result->waitDone(/*timeout_ms=*/0, /*fatal_on_error=*/false);
             return collectResponses(result, source_may_be_touched, sdk_failed, read_trace);
         }

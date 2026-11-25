@@ -2,13 +2,14 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/test/CompletionRpcTestServer.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test/KVCMMockTestBase.h"
 
+#include <atomic>
 #include <chrono>
+#include <future>
 #include <memory>
 #include <thread>
 #include <unistd.h>
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 
@@ -90,12 +91,6 @@ struct NativeWorker {
     std::shared_ptr<kvcm::ClientWrapper> client;
     std::shared_ptr<KVCMStorageBackend> backend;
     std::shared_ptr<KVCacheManager> manager;
-    ~NativeWorker() {
-        if (manager && manager->block_tree_cache_)
-            manager->block_tree_cache_->stopBackgroundTasks();
-        if (backend)
-            backend->shutdown();
-    }
 
     bool init(const FilePayload& file, int rank, int ranks, std::shared_ptr<BroadcastManager> broadcast = nullptr) {
         kv_cache_manager::Locations locations(1);
@@ -124,14 +119,15 @@ struct NativeWorker {
         manager = std::make_shared<KVCacheManager>(environment.cache_config, false, nullptr, config, parallel);
         auto full = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{environment.device_pool}, nullptr, nullptr);
         full->initialize(0, environment.cache_config.topologyPtr(), {"default"});
-        manager->block_tree_cache_ = block_tree_cache_test::makeBlockTreeCacheForTest({full});
-        manager->block_tree_cache_->stopBackgroundTasks();
-        manager->block_tree_cache_->storage_backend_ = backend;
-        manager->block_tree_cache_->reclaimer().configure(parallel.tp_rank,
-            10, 1000,
-            config.block_tree_frozen_force_release_timeout_ms, std::move(broadcast));
-        backend->setReclaimer(manager->block_tree_cache_->reclaimer_);
-        return initSingleRank(*backend, environment);
+        BlockTreeCacheConfig cache_config;
+        cache_config.enable_remote_cache = true;
+        block_tree_cache_test::RecoveryTestOptions recovery;
+        recovery.rank = rank;
+        recovery.interval_ms = 10;
+        recovery.force_release_timeout_ms = config.block_tree_frozen_force_release_timeout_ms;
+        manager->block_tree_cache_ = block_tree_cache_test::makeBlockTreeCacheForTest(
+            {full}, cache_config, backend, std::move(broadcast), nullptr, recovery);
+        return manager->block_tree_cache_ != nullptr;
     }
 
     StorageRequest request(std::chrono::milliseconds timeout, const std::vector<BlockIdxType>& blocks) const {
@@ -179,15 +175,28 @@ TEST_F(KVCMTimeoutRecoverySmokeTest, LostNativeReadReplyRecoversThroughWorkerQue
     FilePayload file;
     NativeWorker owner, peer;
     std::atomic<size_t> queries_to_safe_worker{0};
+    std::atomic<bool> peer_query_received{false};
+    std::atomic<bool> allow_peer_proof{false};
+    std::promise<std::string> lost_read_trace;
+    auto trace_future = lost_read_trace.get_future();
     auto handle = [&](size_t rank, const FunctionRequestPB& request, FunctionResponsePB& response) {
-        if (rank == 0 && request.has_completion_query())
-            ++queries_to_safe_worker;
+        if (request.has_completion_query()) {
+            if (rank == 0) {
+                ++queries_to_safe_worker;
+            } else {
+                peer_query_received = true;
+                if (!allow_peer_proof)
+                    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "completion proof withheld");
+            }
+        }
         auto& worker = rank == 0 ? owner : peer;
         if (!worker.manager->executeFunction(request, response))
             return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "unhandled request");
         if (rank == 1 && request.has_remote_request() && request.remote_request().op() == REMOTE_OPERATION_READ
-            && response.remote_response().transfer_status() == REMOTE_TRANSFER_STATUS_SUCCESS)
+            && response.remote_response().transfer_status() == REMOTE_TRANSFER_STATUS_SUCCESS) {
+            lost_read_trace.set_value(request.remote_request().trace_id());
             return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "lost read reply");
+        }
         return grpc::Status::OK;
     };
     block_tree_cache_test::CompletionRpcTestServer server0(0, handle), server1(1, handle);
@@ -203,17 +212,20 @@ TEST_F(KVCMTimeoutRecoverySmokeTest, LostNativeReadReplyRecoversThroughWorkerQue
     auto meta = owner.matched(target.get());
     ASSERT_NE(meta, nullptr);
     ASSERT_EQ(readResult(*owner.backend, owner.request(10s, target.get()), meta).code(), ErrorCode::DEADLINE_EXCEEDED);
+    ASSERT_EQ(trace_future.wait_for(0s), std::future_status::ready);
+    const auto trace = trace_future.get();
+    ASSERT_FALSE(trace.empty());
+    ASSERT_TRUE(waitForRecovery([&] { return peer_query_received.load(); }));
     ASSERT_TRUE(owner.environment.device_pool->isFrozen(target.get().front()));
     auto& reclaimer = owner.manager->block_tree_cache_->reclaimer();
-    ASSERT_EQ(reclaimer.frozen_.size(), 1u);
-    EXPECT_EQ(reclaimer.frozen_.begin()->second.pending, (std::vector<size_t>{1}));
-    const auto trace = reclaimer.frozen_.begin()->first;
-    ASSERT_TRUE(reclaimer.start());
-    block_tree_cache_detail::ScopeRollback stop([&] { reclaimer.stop(); });
+    auto& peer_reclaimer = peer.manager->block_tree_cache_->reclaimer();
+    EXPECT_EQ(reclaimer.localState(trace), BlockTreeReclaimer::State::BUFFER_SAFE);
+    EXPECT_EQ(peer_reclaimer.localState(trace), BlockTreeReclaimer::State::BUFFER_SAFE);
+    allow_peer_proof = true;
     ASSERT_TRUE(waitForRecovery([&] {
         return !owner.environment.device_pool->isFrozen(target.get().front())
                && reclaimer.localState(trace) == BlockTreeReclaimer::State::UNKNOWN
-               && peer.manager->block_tree_cache_->reclaimer().localState(trace) == BlockTreeReclaimer::State::UNKNOWN;
+               && peer_reclaimer.localState(trace) == BlockTreeReclaimer::State::UNKNOWN;
     }));
     EXPECT_EQ(queries_to_safe_worker.load(), 0u);
 }

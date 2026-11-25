@@ -1076,7 +1076,6 @@ message RemoteBlockMaskPB {
 }
 
 // Query existing worker evidence without admitting, cancelling or replaying I/O.
-// Numeric transfer traces and KVCM READ string traces are separate namespaces.
 message TransferCompletionKeyPB {
     oneof trace {
         uint64 transfer_trace_id = 1;

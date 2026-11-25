@@ -27,7 +27,7 @@ class BlockTreeReclaimer final {
 public:
     enum class State { UNKNOWN, RUNNING, BUFFER_SAFE, REJECTED };
     enum class ForgetResult { FAILED, DONE, RUNNING, INVALID };
-    using QueryCallback = std::function<void(std::chrono::steady_clock::time_point)>;
+    using QueryCallback = std::function<bool(std::chrono::steady_clock::time_point)>;
     using ForgetCallback = std::function<void(bool)>;
 
     explicit BlockTreeReclaimer(std::shared_ptr<BlockTreeCacheMetricsReporter> metrics = {});
@@ -53,7 +53,6 @@ public:
                       std::vector<TransferTargetBlock> targets, std::string backend = "local");
     void unregisterTask(const TransferCompletionKey& trace);
     void freezeTargetBlocksWithTraceIDAndStillIOWorkerID(const TransferCompletionKey& trace,
-                                                         std::vector<TransferTargetBlock> target_blocks,
                                                          const std::vector<size_t>& pending_workers) noexcept;
     bool markWorkerSafe(const TransferCompletionKey& trace, size_t worker);
 

@@ -48,7 +48,7 @@ struct BlockTransferDispatcher::TargetBlockSafetyHandler {
         if (claimed.exchange(true))
             return;
         if (result.checkNeedFreeze())
-            reclaimer->freezeTargetBlocksWithTraceIDAndStillIOWorkerID(key, {}, result.still_io_worker_ids);
+            reclaimer->freezeTargetBlocksWithTraceIDAndStillIOWorkerID(key, result.still_io_worker_ids);
         else
             reclaimer->unregisterTask(key);
         auto       notify  = std::move(done);

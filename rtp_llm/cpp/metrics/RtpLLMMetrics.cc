@@ -729,7 +729,7 @@ void RtpLLMCachePoolMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCac
                 kmonitor::MetricsTags unfreeze_tags = tags ? *tags : kmonitor::MetricsTags{};
                 unfreeze_tags.AddTag("backend", backend);
                 unfreeze_tags.AddTag("forced", forced);
-                unfreeze_blocks_qps_metric->Report(&unfreeze_tags, 0);
+                reportKmonMetric(unfreeze_blocks_qps_metric, &unfreeze_tags, 0);
             }
         }
     }

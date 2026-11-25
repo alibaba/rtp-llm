@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <climits>
+#include <exception>
+#include <mutex>
 #include <numeric>
 #include <optional>
 #include <set>
@@ -11,6 +13,7 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 namespace {
@@ -165,15 +168,12 @@ void BlockTreeReclaimer::unregisterTask(const TransferCompletionKey& trace) {
 }
 
 void BlockTreeReclaimer::freezeTargetBlocksWithTraceIDAndStillIOWorkerID(const TransferCompletionKey& trace,
-                                                                         std::vector<TransferTargetBlock> target_blocks,
                                                                          const std::vector<size_t>& workers) noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     const auto it = registered_.find(trace.trace_id);
     if (it == registered_.end())
         return;
     auto& task = it->second;
-    if (!target_blocks.empty())
-        task.targets = std::move(target_blocks);
     const auto ranks = task.forget.front().participants.ranks;
     auto& pending = task.pending;
     pending = workers;
@@ -519,8 +519,12 @@ BlockTreeReclaimer::State BlockTreeReclaimer::queryOne(const std::string& id, Cl
         ++record.queries;
         lock.unlock();
         try {
-            record.query(deadline);
+            if (record.query(deadline))
+                ioFinishedOnWorkerWithTraceID(id);
+        } catch (const std::exception& error) {
+            RTP_LLM_LOG_WARNING("worker buffer safety query failed: trace=%s, reason=%s", id.c_str(), error.what());
         } catch (...) {
+            RTP_LLM_LOG_WARNING("worker buffer safety query failed: trace=%s, reason=unknown exception", id.c_str());
         }
         lock.lock();
         --record.queries;

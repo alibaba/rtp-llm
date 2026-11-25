@@ -475,7 +475,8 @@ std::unique_ptr<BlockTreeCache> makeBlockTreeCacheForTest(std::vector<GroupSetPt
                                                           BlockTreeCacheConfig                       config,
                                                           std::shared_ptr<StorageBackend>            storage_backend,
                                                           std::shared_ptr<BroadcastManager>          broadcast_manager,
-                                                          std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter) {
+                                                          std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter,
+                                                          RecoveryTestOptions                        recovery) {
     group_sets = workLoopTestGroups(std::move(group_sets));
     if (config.disk_cache_evict_max_pending_bytes == 0) {
         config.disk_cache_evict_max_pending_bytes = KVCacheConfig{}.disk_cache_evict_max_pending_bytes;
@@ -511,6 +512,8 @@ std::unique_ptr<BlockTreeCache> makeBlockTreeCacheForTest(std::vector<GroupSetPt
     }
     auto cache_metrics_reporter = std::make_shared<BlockTreeCacheMetricsReporter>(std::move(metrics_reporter));
     auto reclaimer = std::make_shared<BlockTreeReclaimer>(cache_metrics_reporter);
+    reclaimer->configure(
+        recovery.rank, recovery.interval_ms, recovery.query_timeout_ms, recovery.force_release_timeout_ms, broadcast_manager);
     auto per_rank_engine        = std::make_shared<PerRankBlockTransferEngine>(group_sets,
                                                                         config.enable_disk_cache,
                                                                         config.device_disk_staging_block_count,
@@ -518,7 +521,7 @@ std::unique_ptr<BlockTreeCache> makeBlockTreeCacheForTest(std::vector<GroupSetPt
                                                                         config.transfer_worker_count,
                                                                         config.transfer_queue_max_size,
                                                                         cache_metrics_reporter,
-                                                                        0,
+                                                                        recovery.rank,
                                                                         kDefaultCrcSlotsPerWorkLoop);
     std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine;
     if (broadcast_manager != nullptr) {

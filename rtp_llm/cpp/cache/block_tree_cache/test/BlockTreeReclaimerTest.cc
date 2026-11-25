@@ -46,7 +46,7 @@ TEST(BlockTreeReclaimerTest, OnlyTheLastPendingWorkerReleasesTheTrace) {
     const auto block = heldBlock(pool);
     const TransferCompletionKey key{uint64_t{41}};
     ASSERT_TRUE(owner.registerTask(key, {true, 3}, {{pool, block}}));
-    owner.freezeTargetBlocksWithTraceIDAndStillIOWorkerID(key, {}, {1, 2, 1});
+    owner.freezeTargetBlocksWithTraceIDAndStillIOWorkerID(key, {1, 2, 1});
     EXPECT_FALSE(owner.markWorkerSafe(key, 0));
     EXPECT_FALSE(owner.markWorkerSafe(key, 2));
     EXPECT_FALSE(owner.markWorkerSafe(key, 2));
@@ -81,10 +81,10 @@ TEST(BlockTreeReclaimerTest, ReleasesEachOwnedTargetOnceBeforeSubmittingForget) 
         EXPECT_FALSE(secondary->isAllocated(other));
     });
     ASSERT_TRUE(owner.registerTask(36, {false, 1}, {{primary, shared}, {primary, shared}, {primary, unique}, {secondary, other}}));
-    owner.freezeTargetBlocksWithTraceIDAndStillIOWorkerID(36, {}, {0});
+    owner.freezeTargetBlocksWithTraceIDAndStillIOWorkerID(36, {0});
     primary->setCapacityChangeCallback({});
     ASSERT_TRUE(owner.registerTask(37, {false, 1}, {{primary, shared}}));
-    owner.freezeTargetBlocksWithTraceIDAndStillIOWorkerID(37, {}, {0});
+    owner.freezeTargetBlocksWithTraceIDAndStillIOWorkerID(37, {0});
     primary->decTreeRef({unique, shared}, BlockTreeRefType::CACHE);
     secondary->decTreeRef(other, BlockTreeRefType::CACHE);
     EXPECT_TRUE(owner.markWorkerSafe(36, 0));
@@ -157,7 +157,7 @@ TEST(BlockTreeReclaimerTest, RecoveryRequiresEvidenceForTheOriginalTraceAndEvery
     owner.configure(0, 0, 2000, 0, manager);
     for (const TransferCompletionKey& key : {TransferCompletionKey{uint64_t{91}}, TransferCompletionKey{std::string("read-92")}}) {
         ASSERT_TRUE(owner.registerTask(key, {true, addresses.size()}, {}));
-        owner.freezeTargetBlocksWithTraceIDAndStillIOWorkerID(key, {}, {0, 1});
+        owner.freezeTargetBlocksWithTraceIDAndStillIOWorkerID(key, {0, 1});
         reply = Reply::RUNNING;
         owner.queryFrozen();
         EXPECT_EQ(owner.frozen_.at(key.trace_id).pending, (std::vector<size_t>{1}));
@@ -173,7 +173,7 @@ TEST(BlockTreeReclaimerTest, RecoveryRequiresEvidenceForTheOriginalTraceAndEvery
     }
     for (const TransferCompletionKey& key : {TransferCompletionKey{uint64_t{93}}, TransferCompletionKey{std::string("read-94")}}) {
         ASSERT_TRUE(owner.registerTask(key, {true, addresses.size()}, {}));
-        owner.freezeTargetBlocksWithTraceIDAndStillIOWorkerID(key, {}, {0, 1});
+        owner.freezeTargetBlocksWithTraceIDAndStillIOWorkerID(key, {0, 1});
     }
     reply = Reply::RUNNING;
     owner.queryFrozen();
@@ -258,10 +258,10 @@ TEST(BlockTreeReclaimerTest, StopDuringQueryDiscardsReleaseAndWaitsForTheCallbac
     ASSERT_TRUE(owner.registerOnWorkerTaskWithTraceID("51", [&](auto) {
         entered.set_value();
         wait.wait_for(std::chrono::seconds(5));
-        owner.ioFinishedOnWorkerWithTraceID("51");
+        return true;
     }));
     ASSERT_TRUE(owner.registerTask(51, {false, 1}, {}));
-    owner.freezeTargetBlocksWithTraceIDAndStillIOWorkerID(51, {}, {0});
+    owner.freezeTargetBlocksWithTraceIDAndStillIOWorkerID(51, {0});
     owner.configure(0, 10, 2000, 0, nullptr);
     ASSERT_TRUE(owner.start());
     ASSERT_EQ(entered.get_future().wait_for(std::chrono::seconds(2)), std::future_status::ready);
@@ -286,7 +286,7 @@ TEST(BlockTreeReclaimerTest, OptionalCallbacksCanPublishCompletionAndRetryForget
     int forgets = 0;
     ASSERT_TRUE(worker.registerOnWorkerTaskWithTraceID("read", [&](auto) {
         ++queries;
-        worker.ioFinishedOnWorkerWithTraceID("read");
+        return true;
     }, [&](bool) {
         if (++forgets == 1)
             throw std::runtime_error("retry forget");
@@ -302,11 +302,35 @@ TEST(BlockTreeReclaimerTest, OptionalCallbacksCanPublishCompletionAndRetryForget
     EXPECT_EQ(forgets, 2);
 }
 
+TEST(BlockTreeReclaimerTest, QueryWithoutProofPreservesConcurrentIoCompletion) {
+    for (bool query_throws : {false, true}) {
+        SCOPED_TRACE(query_throws);
+        Registry worker;
+        std::promise<void> query_started, io_finished;
+        auto finished = io_finished.get_future();
+        ASSERT_TRUE(worker.registerOnWorkerTaskWithTraceID("read", [&](auto) {
+            query_started.set_value();
+            EXPECT_EQ(finished.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+            if (query_throws)
+                throw std::runtime_error("query failed");
+            return false;
+        }));
+        auto result = std::async(std::launch::async, [&] {
+            return worker.queryIfIoFinishedInOneWorkerWithTraceIDs({"read"}).front();
+        });
+        EXPECT_EQ(query_started.get_future().wait_for(std::chrono::seconds(2)), std::future_status::ready);
+        EXPECT_TRUE(worker.ioFinishedOnWorkerWithTraceID("read"));
+        io_finished.set_value();
+        EXPECT_EQ(result.get(), State::BUFFER_SAFE);
+    }
+}
+
 TEST(BlockTreeReclaimerTest, ForcedForgetRemovesRunningRecordAfterActiveQuery) {
     Registry worker;
     bool discarded = false;
     ASSERT_TRUE(worker.registerOnWorkerTaskWithTraceID("read", [&](auto) {
         EXPECT_EQ(worker.forgetTaskInfoOnWorker({"read"}, true).front(), ForgetResult::RUNNING);
+        return false;
     }, [&](bool forced) { discarded = forced; }));
     EXPECT_EQ(worker.forgetTaskInfoOnWorker({"read"}).front(), ForgetResult::RUNNING);
     EXPECT_EQ(worker.queryIfIoFinishedInOneWorkerWithTraceIDs({"read"}).front(), State::RUNNING);
