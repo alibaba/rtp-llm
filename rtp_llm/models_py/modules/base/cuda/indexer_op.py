@@ -148,8 +148,13 @@ def _fp8_mqa_logits_chunk_rows(num_rows: int, num_keys: int, topk: int = 0, head
     """Fit padded DeepGEMM scores, indices and writer scratch into 256 MiB."""
     tile = max(1, 128 // heads)
     stride = ((num_keys + 256) * 4 + 1023) // 1024 * 1024
-    tile_bytes = tile * max(stride + topk * 4, topk * 64)
-    return min(max(num_rows, 1), max(1, (256 << 20) // tile_bytes) * tile)
+    row_bytes = max(stride + topk * 4, topk * 64)
+    budget_rows = max(1, (256 << 20) // row_bytes)
+    # Keep normal chunks tile-aligned. For very long contexts a complete
+    # query tile can exceed the logical score budget even for a single head.
+    if budget_rows >= tile:
+        budget_rows = (budget_rows // tile) * tile
+    return min(max(num_rows, 1), budget_rows)
 
 
 def _canonicalize_topk_indices(indices: torch.Tensor) -> torch.Tensor:
