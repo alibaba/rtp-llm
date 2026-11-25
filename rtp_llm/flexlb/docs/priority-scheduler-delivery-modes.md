@@ -224,14 +224,16 @@ accepted.
 FIFO has no additional fields. PRIORITY can optionally contain
 `scheduler.ordering.preemption`:
 
-| JSON path                                |   Default | Meaning                                                                            |
-| ---------------------------------------- | --------: | ---------------------------------------------------------------------------------- |
-| `allowedVictimStages`                    |   omitted | Non-empty subset of `PREFILL_QUEUED`, `DECODE_RESERVED`, and `DECODE_ENGINE_OWNED` |
-| `engineCancellation.ackTimeoutMs`        |   `50` ms | Cancel RPC acknowledgement bound                                                   |
-| `engineCancellation.completionTimeoutMs` | `1000` ms | Typed cancellation completion bound                                                |
+| JSON path                                |   Default | Meaning                                                                                         |
+| ---------------------------------------- | --------: | ----------------------------------------------------------------------------------------------- |
+| `allowedVictimStages`                    |   omitted | Defaults to `DECODE_RESERVED` and `DECODE_ENGINE_OWNED`. Use `[]` to disable Decode preemption. |
+| `engineCancellation.ackTimeoutMs`        |   `50` ms | Cancel RPC acknowledgement bound                                                                |
+| `engineCancellation.completionTimeoutMs` | `1000` ms | Typed cancellation completion bound                                                             |
 
 `engineCancellation` is required when `DECODE_ENGINE_OWNED` is allowed and is
-rejected otherwise. Omit the whole `preemption` object to disable preemption.
+rejected otherwise. Omitted `preemption` uses both Decode defaults. For rolling upgrades,
+`PREFILL_QUEUED` is accepted with a warning and removed from the active stages. A legacy
+list containing only `PREFILL_QUEUED` disables Decode preemption.
 
 Schema v2 gives every setting exactly one owner. `scheduler.decision` owns group
 formation and defaults to `FIXED_WINDOW`; it is independent of who delivers the
@@ -258,13 +260,9 @@ reported changes before deploying the resulting JSON:
   capacity release. Unknown fields, malformed numbers and conflicting field
   owners fail conversion.
 
-At the global outstanding bound, PRIORITY admission can transfer a lower-priority
-queued request's permit directly to the new request. Unplaced requests are eligible;
-placed requests also require the existing `PREFILL_QUEUED` victim-stage policy.
-Equal/lower priorities and FIFO never displace work. Delivery claims and in-progress
-admission mutations cannot yield their permits. Candidate lookup excludes delivered
-and terminal generations; endpoint cleanup and completion callbacks run outside the
-short admission critical section. Rejected submissions publish no lifecycle object.
+PRIORITY ordering still serves higher-priority queued requests first, with FIFO
+within each priority. NON_BATCH counts Prefill concurrency at delivery. Entering
+a Prefill queue no longer evicts lower-priority queued requests to make room.
 
 ### Dispatcher
 
@@ -368,7 +366,7 @@ A fuller PRIORITY example with explicit FIXED_WINDOW decision and BATCH delivery
       "type": "PRIORITY",
       "defaultPriority": 50,
       "preemption": {
-        "allowedVictimStages": ["PREFILL_QUEUED", "DECODE_RESERVED"]
+        "allowedVictimStages": ["DECODE_RESERVED"]
       }
     },
     "decision": {

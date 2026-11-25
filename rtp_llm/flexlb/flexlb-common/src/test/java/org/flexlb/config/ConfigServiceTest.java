@@ -2,6 +2,7 @@ package org.flexlb.config;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.flexlb.service.config.merger.FlexlbConfigMerger;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Files;
@@ -527,7 +528,7 @@ class ConfigServiceTest {
             FlexlbConfig config =
                     ConfigTestFixtures.parse("{\"scheduler\":{\"ordering\":" + ordering + "}}");
             assertEquals(
-                    java.util.Set.of(VictimStage.PREFILL_QUEUED),
+                    java.util.Set.of(),
                     config.priorityOrdering().getPreemption().getAllowedVictimStages());
             assertFalse(
                     config.priorityOrdering()
@@ -536,11 +537,17 @@ class ConfigServiceTest {
         }
         FlexlbConfig fifo = ConfigTestFixtures.parse("{}");
         assertTrue(fifo.queueScheduler().getOrdering().preemptionPolicy().isEmpty());
+        FlexlbConfig disabled =
+                ConfigTestFixtures.parse(
+                        """
+                        {"scheduler":{"ordering":{"type":"PRIORITY","preemption":{"allowedVictimStages":[]}}}}
+                        """);
+        assertTrue(disabled.priorityOrdering().preemptionPolicy().isEmpty());
         assertInvalid(
                 """
-                {"scheduler":{"ordering":{"type":"PRIORITY","preemption":{"allowedVictimStages":[]}}}}
+                {"scheduler":{"ordering":{"type":"PRIORITY","preemption":{"allowedVictimStages":["UNKNOWN"]}}}}
                 """,
-                "allowedVictimStages");
+                "UNKNOWN");
     }
 
     @Test
@@ -591,21 +598,30 @@ class ConfigServiceTest {
     }
 
     @Test
-    void queued_prefill_preemption_is_valid_alone_or_with_decode_preemption() {
+    void legacy_prefill_stage_never_enables_decode_preemption() {
         FlexlbConfig config =
                 ConfigTestFixtures.parse(
                         """
                 {"scheduler":{"ordering":{"type":"PRIORITY","preemption":{
                   "allowedVictimStages":["PREFILL_QUEUED"]}}}}
                 """);
-        assertTrue(config.priorityOrdering().getPreemption().allows(VictimStage.PREFILL_QUEUED));
+        assertTrue(config.priorityOrdering().getPreemption().getAllowedVictimStages().isEmpty());
+        assertTrue(config.priorityOrdering().preemptionPolicy().isEmpty());
+        FlexlbConfig merged =
+                FlexlbConfigMerger.merge(
+                        config,
+                        "{\"scheduler\":{\"ordering\":{\"defaultPriority\":60}}}",
+                        "test override");
+        assertEquals(60, merged.priorityOrdering().getDefaultPriority());
+        assertTrue(merged.priorityOrdering().preemptionPolicy().isEmpty());
         config =
                 ConfigTestFixtures.parse(
                         """
                 {"scheduler":{"ordering":{"type":"PRIORITY","preemption":{
                   "allowedVictimStages":["DECODE_RESERVED","PREFILL_QUEUED"]}}}}
                 """);
-        assertTrue(config.priorityOrdering().getPreemption().allows(VictimStage.PREFILL_QUEUED));
+        assertFalse(
+                config.priorityOrdering().getPreemption().allows(VictimStage.DECODE_ENGINE_OWNED));
         assertTrue(config.priorityOrdering().getPreemption().allows(VictimStage.DECODE_RESERVED));
         assertInvalid(
                 """

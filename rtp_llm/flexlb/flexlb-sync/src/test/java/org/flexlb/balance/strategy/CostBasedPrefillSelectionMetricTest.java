@@ -15,7 +15,6 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.PreemptionConfig;
 import org.flexlb.config.QueueOrderingConfig;
 import org.flexlb.config.RoutingConfig;
-import org.flexlb.config.VictimStage;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.cache.HostCacheMatch;
@@ -168,16 +167,16 @@ class CostBasedPrefillSelectionMetricTest {
     @ParameterizedTest
     @CsvSource({"5,1,false", "50,1,false", "5,2,false", "50,1,true", "10,1,true", "5,1,true"})
     void queuedNonBatchRequestsRemainSelectableAndKeepTheirQueuePosition(
-            int incomingPriority, int requestLimit, boolean preemptQueued) {
+            int incomingPriority, int requestLimit, boolean preemptionConfigured) {
         registry.close();
         config.queueScheduler().getDecision().setMaxRequests(2);
         config.getDispatcher().setMaxInflightPerPrefillWorker(requestLimit);
         config.queueScheduler().getDecision().setMaxCollectionWaitMs(60_000L);
         QueueOrderingConfig ordering = QueueOrderingConfig.priority();
         ordering.setPreemption(null);
-        if (preemptQueued) {
+        if (preemptionConfigured) {
             PreemptionConfig preemption = new PreemptionConfig();
-            preemption.setAllowedVictimStages(Set.of(VictimStage.PREFILL_QUEUED));
+            preemption.setAllowedVictimStages(Set.of());
             ordering.setPreemption(preemption);
         }
         config.queueScheduler().setOrdering(ordering);
