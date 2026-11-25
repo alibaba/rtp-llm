@@ -287,6 +287,12 @@ class MasterClient:
                 e.details(),
                 elapsed,
             )
+            if e.code() == grpc.StatusCode.RESOURCE_EXHAUSTED:
+                raise FtRuntimeException(
+                    exception_type=ExceptionType.RESOURCE_EXHAUSTED,
+                    message=e.details() or "FlexLB schedule capacity exhausted",
+                    admission_reject_reason=AdmissionRejectReason.RESOURCE_EXHAUSTED,
+                ) from e
             if e.code() == grpc.StatusCode.DEADLINE_EXCEEDED:
                 if not request_pb.vit_route_only:
                     await self._best_effort_cancel(
