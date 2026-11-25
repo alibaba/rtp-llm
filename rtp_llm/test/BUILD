@@ -532,3 +532,28 @@ py_test(
     srcs = ["compact_logprobs_renderer_test.py"],
     deps = ["//rtp_llm:testlib"],
 )
+
+py_test(
+    name = "single_req_oom_h20_test",
+    srcs = ["single_req_oom_h20_test.py"],
+    data = ["//rtp_llm:sdk"],
+    deps = [
+        "//rtp_llm:Pillow",
+        "//rtp_llm:fastapi",
+        "//rtp_llm:openai",
+        "//rtp_llm:psutil",
+        "//rtp_llm:testlib",
+        "//rtp_llm:tiktoken",
+        "//rtp_llm:uvicorn",
+        "//rtp_llm/test/utils:maga_server_manager",
+    ],
+    env = {
+        "GPU_COUNT": "1",
+        "WORLD_SIZE": "1",
+        "PYTHONNOUSERSITE": "1",
+    },
+    env_inherit = ["REMOTE_JIT_DIR"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+    tags = ["H20_CU13"],
+    timeout = "eternal",
+)

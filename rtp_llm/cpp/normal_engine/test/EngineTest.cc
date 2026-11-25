@@ -2197,4 +2197,106 @@ TEST_F(NormalEngineTest, testAllowsUnsupportedCombosWithoutOutputVocab) {
     EXPECT_NE(dynamic_cast<MtpExecutor*>(engine.executor_.get()), nullptr);
 }
 
+TEST(NormalEnginePolicyTest, stepGpuOomRecoveryRequiresLocalExecutionOrTpRootBeforeSync) {
+    struct OomRecoveryPolicy: NormalExecutor {
+        using NormalExecutor::canIsolateStepGpuOom;
+    };
+    const auto can_isolate = OomRecoveryPolicy::canIsolateStepGpuOom;
+
+    ParallelismConfig config;
+    EXPECT_TRUE(can_isolate(config, true));
+    EXPECT_TRUE(can_isolate(config, false));
+
+    config.tp_size = 2;
+    config.ep_size = 2;
+    EXPECT_TRUE(can_isolate(config, true));
+    EXPECT_FALSE(can_isolate(config, false));
+    config.tp_rank = 1;
+    EXPECT_FALSE(can_isolate(config, true));
+    EXPECT_FALSE(can_isolate(config, false));
+
+    config         = ParallelismConfig{};
+    config.dp_size = 2;
+    config.ep_size = 2;
+    EXPECT_FALSE(can_isolate(config, true));
+    EXPECT_FALSE(can_isolate(config, false));
+
+    config.tp_size = 2;
+    config.ep_size = 4;
+    EXPECT_FALSE(can_isolate(config, true));
+
+    config         = ParallelismConfig{};
+    config.pp_size = 2;
+    EXPECT_FALSE(can_isolate(config, true));
+    EXPECT_FALSE(can_isolate(config, false));
+}
+
+TEST_F(NormalEngineTest, testSingleRequestGpuOomDoesNotCrashEngineAndServesSubsequentRequests) {
+    ModelConfig   model_config;
+    RuntimeConfig runtime_config;
+    KVCacheConfig kv_cache_config;
+    CustomConfig  config;
+    auto          params = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
+
+    std::atomic<int> forward_calls{0};
+    NormalExecutor::test_model_factory = [vocab = model_config.vocab_size, &forward_calls](const GptModelInitParams&) {
+        return std::make_unique<MockModel>(vocab, [&forward_calls](const GptModelInputs&) {
+            const int call_idx = forward_calls.fetch_add(1) + 1;
+            if (call_idx == 2) {
+                throw std::runtime_error("[ERROR] CUDA runtime error: out of memory at test_forward");
+            }
+        });
+    };
+    struct FactoryResetGuard {
+        ~FactoryResetGuard() {
+            NormalExecutor::test_model_factory = nullptr;
+        }
+    } reset_guard;
+
+    auto engine = std::make_shared<NormalEngine>(params, nullptr);
+    const auto free_blocks_before = engine->resourceContext().cache_manager->freeBlocksNum();
+
+    auto make_query = [](std::initializer_list<int32_t> tokens) {
+        auto query                             = std::make_shared<GenerateInput>();
+        query->input_ids                       = torch::tensor(std::vector<int32_t>(tokens), torch::kInt32);
+        query->generate_config                 = std::make_shared<GenerateConfig>();
+        query->generate_config->max_new_tokens = 1;
+        return query;
+    };
+
+    // Request #1: normal request succeeds before OOM.
+    {
+        auto stream  = engine->enqueue(make_query({1, 2, 3, 4}));
+        auto output1 = stream->nextOutput();
+        ASSERT_TRUE(output1.ok());
+        EXPECT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
+        EXPECT_FALSE(stream->nextOutput().ok());
+    }
+
+    // Request #2: worst-case single request raises GPU OOM -> request fails with EXECUTION_EXCEPTION,
+    // without terminating the engine loop or leaking KV blocks.
+    {
+        auto stream  = engine->enqueue(make_query({5, 6, 7, 8}));
+        auto output1 = stream->nextOutput();
+        ASSERT_FALSE(output1.ok());
+        EXPECT_EQ(output1.status().code(), ErrorCode::EXECUTION_EXCEPTION);
+    }
+
+    // Wait briefly for scheduler's next tick to reap errored stream and release its KV blocks.
+    for (int i = 0; i < 50 && engine->resourceContext().cache_manager->freeBlocksNum() < free_blocks_before; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    EXPECT_EQ(engine->resourceContext().cache_manager->freeBlocksNum(), free_blocks_before);
+
+    // Request #3: subsequent normal request on the exact same engine succeeds cleanly.
+    {
+        auto stream  = engine->enqueue(make_query({9, 10, 11, 12}));
+        auto output1 = stream->nextOutput();
+        ASSERT_TRUE(output1.ok());
+        EXPECT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
+        EXPECT_FALSE(stream->nextOutput().ok());
+    }
+    EXPECT_GE(forward_calls.load(), 3);
+}
+
 }  // namespace rtp_llm

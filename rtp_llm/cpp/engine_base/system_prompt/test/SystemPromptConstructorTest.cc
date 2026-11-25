@@ -20,8 +20,10 @@
 #include <chrono>
 #include <cstdlib>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 
 using namespace std;
 
@@ -70,8 +72,10 @@ private:
 };
 
 template<typename EngineType>
-std::shared_ptr<EngineType>
-createFocusedEngine(int64_t max_context_batch_size = 128, int64_t max_batch_tokens = 4096, bool multi_group = false) {
+std::shared_ptr<EngineType> createFocusedEngine(int64_t                max_context_batch_size = 128,
+                                                int64_t                max_batch_tokens       = 4096,
+                                                bool                   multi_group            = false,
+                                                MockModel::ForwardHook forward_hook           = {}) {
     CustomConfig  config;
     ModelConfig   model_config;
     RuntimeConfig runtime_config;
@@ -89,8 +93,9 @@ createFocusedEngine(int64_t max_context_batch_size = 128, int64_t max_batch_toke
         params.model_config_.attn_config.sliding_window    = 4;
     }
 
-    NormalExecutor::test_model_factory = [vocab_size = model_config.vocab_size](const GptModelInitParams&) {
-        return std::unique_ptr<ModelBase>(new MockModel(vocab_size));
+    NormalExecutor::test_model_factory = [vocab_size   = model_config.vocab_size,
+                                          forward_hook = std::move(forward_hook)](const GptModelInitParams&) {
+        return std::make_unique<MockModel>(vocab_size, forward_hook);
     };
     auto engine                        = std::make_shared<EngineType>(params, nullptr);
     NormalExecutor::test_model_factory = nullptr;
@@ -186,6 +191,28 @@ TEST_F(SystemPromptConstructorTest, testResidentInsertFailureFailsWarmupAndRelea
     EXPECT_EQ(result.status().code(), absl::StatusCode::kFailedPrecondition);
     EXPECT_NE(result.status().message().find("blocked_prompt"), std::string::npos);
     EXPECT_EQ(pool->referencedBlocksNum(), request_blocks_before);
+}
+
+TEST_F(SystemPromptConstructorTest, testIsolatedGpuOomDoesNotPublishResidentPrefix) {
+    auto engine  = createFocusedEngine<NormalEngine>(128, 4096, /*multi_group=*/false, [](const GptModelInputs&) {
+        throw std::runtime_error("CUDA out of memory in system prompt forward");
+    });
+    auto manager = engine->resourceContext().cache_manager;
+    ASSERT_NE(manager->blockTreeCache(), nullptr);
+    const auto&   pool         = manager->blockTreeCache()->groupSets().front()->devicePools().front();
+    const auto    free_before  = manager->freeBlocksNum();
+    const auto    request_refs = pool->referencedBlocksNum();
+    const auto    cache_refs   = pool->referencedBlocksNum(BlockTreeRefType::CACHE);
+    KVCacheConfig config;
+    config.multi_task_prompt_tokens = {{"oom_prompt", {1, 2, 3}}};
+
+    const auto result = SystemPromptConstructor::construct(config, engine.get(), manager.get(), true);
+    ASSERT_FALSE(result.ok());
+    EXPECT_EQ(result.status().code(), absl::StatusCode::kInternal);
+    EXPECT_NE(result.status().message().find("CUDA out of memory"), std::string::npos);
+    EXPECT_EQ(manager->freeBlocksNum(), free_before);
+    EXPECT_EQ(pool->referencedBlocksNum(), request_refs);
+    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::CACHE), cache_refs);
 }
 
 TEST_F(SystemPromptConstructorTest, testSecondTaskFailureReleasesEarlierRequestOwnership) {

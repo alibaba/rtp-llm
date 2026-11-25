@@ -9,9 +9,11 @@
 #include <algorithm>
 #include <limits>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "rtp_llm/cpp/utils/TorchCudaOom.h"
 #include "rtp_llm/cpp/models/ModelInputsLogger.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
@@ -25,6 +27,19 @@ using namespace std;
 namespace rtp_llm {
 
 namespace {
+
+class AsyncDispatchError final: public std::runtime_error {
+public:
+    AsyncDispatchError(std::list<GenerateStreamPtr> streams, const std::string& message):
+        std::runtime_error(message), streams_(std::move(streams)) {}
+
+    const std::list<GenerateStreamPtr>& streams() const {
+        return streams_;
+    }
+
+private:
+    std::list<GenerateStreamPtr> streams_;
+};
 
 bool readEnvFlagOnce(const char* env_name, const char* log_tag, const char* label) {
     const char* env = std::getenv(env_name);
@@ -263,6 +278,73 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     cudaProfilerBegin();
 }
 
+bool NormalExecutor::canIsolateStepGpuOom(const ParallelismConfig& parallelism_config, bool before_tp_sync) {
+    // A TP skip only reaches this group. In DP/EP mode, peers in other TP groups can
+    // still enter model collectives. Within one TP group, only rank 0 can broadcast
+    // a skip, and only before it has sent the model inputs for this step.
+    return parallelism_config.pp_size == 1 && parallelism_config.dp_size == 1
+           && parallelism_config.ep_size <= parallelism_config.tp_size
+           && (parallelism_config.tp_size == 1 || (before_tp_sync && parallelism_config.tp_rank == 0));
+}
+
+bool NormalExecutor::tryIsolateStepGpuOom(const std::list<GenerateStreamPtr>& streams,
+                                          const std::exception&               error,
+                                          const char*                         stage,
+                                          bool&                               profile_started,
+                                          bool                                before_tp_sync,
+                                          bool&                               worker_synced) noexcept {
+    const char* disable_env = std::getenv("RTP_LLM_DISABLE_STEP_OOM_ISOLATION");
+    if (disable_env != nullptr && disable_env[0] == '1' && disable_env[1] == '\0') {
+        return false;
+    }
+    const auto* async_error    = dynamic_cast<const AsyncDispatchError*>(&error);
+    const auto& failed_streams = async_error ? async_error->streams() : streams;
+    if (warm_up_ || accuracy_check_mode_ || failed_streams.empty()
+        || !canIsolateStepGpuOom(parallelism_config_, before_tp_sync) || !isTorchCudaOom(error)) {
+        return false;
+    }
+
+    try {
+        if (useStreamAsync() && !worker_synced) {
+            dispatch_runner_.sync(cuda_graph::graphGetCurrentStream());
+            worker_synced = true;
+        }
+        if (!recoverCudaAfterOom()) {
+            return false;
+        }
+        // Synchronize completed before reclaiming host staging tensors used by async H2D/D2H.
+        buffer_holder_.clear();
+        if (model_) {
+            model_->clearBuffersAfterError();
+        }
+
+        RTP_LLM_LOG_WARNING(
+            "[normal-executor-oom] isolated GPU OOM at stage=%s (tp_rank=%d, tp_size=%ld, streams=%zu): %s",
+            stage,
+            tp_rank_,
+            parallelism_config_.tp_size,
+            failed_streams.size(),
+            error.what());
+
+        const std::string err_msg = std::string("GPU OOM during ") + stage + ": " + error.what();
+        for (const auto& stream : failed_streams) {
+            if (stream && !stream->hasError()) {
+                stream->reportError(ErrorCode::EXECUTION_EXCEPTION, err_msg);
+            }
+        }
+        if (profile_started && profile_step_finish_) {
+            profile_step_finish_();
+            profile_started = false;
+        }
+        return true;
+    } catch (const std::exception& recovery_error) {
+        RTP_LLM_LOG_ERROR("[normal-executor-oom] recovery failed at stage=%s: %s", stage, recovery_error.what());
+    } catch (...) {
+        RTP_LLM_LOG_ERROR("[normal-executor-oom] recovery failed at stage=%s with unknown exception", stage);
+    }
+    return false;
+}
+
 absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int64_t schedule_time_us) {
     const auto&   streams               = schedule_output.streams;
     const int64_t process_start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
@@ -275,33 +357,79 @@ absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int6
                                                           && tp_rank_ == 0 && !warm_up_ && !streams.empty());
     auto wall_tps_active_guard = wall_tps_reporter_.makeActiveGuard(isKmonMetricReportingEnabled() && metrics_reporter_
                                                                     && tp_rank_ == 0 && !warm_up_ && !streams.empty());
-    GptModelInputs  model_input;
-    GptModelOutputs model_output;
-    SamplerOutput   sampler_output;
+    GptModelInputs               model_input;
+    GptModelOutputs              model_output;
+    SamplerOutput                sampler_output;
+    std::optional<StreamGroups>  stream_groups_opt;
+    bool                         uses_normal_snapshot = false;
+    bool                         worker_synced        = false;
+    bool                         profile_started      = false;
     RTP_LLM_PROFILE_FUNCTION();
-    // Choose one input epoch before StreamGroups reads any host metadata.
-    // The gatherer owns the eligibility predicate, including position IDs;
-    // grouping and gathering must never independently choose different paths.
-    bool worker_synced = false;
-    if (useStreamAsync() && !useDropBroadSync()) {
-        RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.wait_prev_dispatch(stream_count=%zu)", streams.size());
-        dispatch_runner_.sync(cuda_graph::graphGetCurrentStream());
-        worker_synced = true;
-    }
 
-    prepareGrpcNormalDeviceState(streams);
-    auto normal_device_states = batch_stream_processor_->prepareDeviceStateInputs(streams);
+    try {
+        // Choose one input epoch before StreamGroups reads any host metadata.
+        // The gatherer owns the eligibility predicate, including position IDs;
+        // grouping and gathering must never independently choose different paths.
+        if (useStreamAsync() && !useDropBroadSync()) {
+            RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.wait_prev_dispatch(stream_count=%zu)", streams.size());
+            dispatch_runner_.sync(cuda_graph::graphGetCurrentStream());
+            worker_synced = true;
+        }
 
-    if (useStreamAsync() && !worker_synced && normal_device_states.empty()) {
-        RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.wait_prev_dispatch(stream_count=%zu)", streams.size());
-        dispatch_runner_.sync(cuda_graph::graphGetCurrentStream());
-        worker_synced = true;
         prepareGrpcNormalDeviceState(streams);
-        normal_device_states = batch_stream_processor_->prepareDeviceStateInputs(streams);
+        auto normal_device_states = batch_stream_processor_->prepareDeviceStateInputs(streams);
+
+        if (useStreamAsync() && !worker_synced && normal_device_states.empty()) {
+            RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.wait_prev_dispatch(stream_count=%zu)", streams.size());
+            dispatch_runner_.sync(cuda_graph::graphGetCurrentStream());
+            worker_synced = true;
+            prepareGrpcNormalDeviceState(streams);
+            normal_device_states = batch_stream_processor_->prepareDeviceStateInputs(streams);
+        }
+        uses_normal_snapshot = !normal_device_states.empty();
+        stream_groups_opt.emplace(streams, std::move(normal_device_states));
+
+        auto&      execution_recorder = ExecutionRecorder::instance();
+        const bool record_owner =
+            execution_recorder.enabled() && !warm_up_ && !is_propose_ && !accuracy_check_mode_ && tp_rank_ == 0;
+        const bool has_request_stream =
+            std::any_of(streams.begin(), streams.end(), [](const GenerateStreamPtr& s) { return !s->isFakeStream(); });
+        const bool    decode_batch = stream_groups_opt->totalDecodeBatchSize() > 0;
+        const int64_t record_id    = shouldRecordBatch(record_owner, has_request_stream, stream_groups_opt->totalModelBatchSize())
+                                          && (!decode_batch || sampleDecodeStep()) ?
+                                      execution_recorder.nextId() :
+                                      0;
+        {
+            RTP_LLM_PROFILE_SCOPE("executor.gather_model_input");
+            int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+            auto    model_input_status =
+                batch_stream_processor_->gatherModelInput(*stream_groups_opt, buffer_holder_, record_id != 0);
+            RETURN_IF_STATUS_OR_ERROR(model_input_status);
+            model_input                              = std::move(model_input_status.value());
+            model_input.record_execution_id          = record_id;
+            executor_collector.gather_model_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        }
+        model_input.skip_run = streams.empty();
+        // Move metadata to CUDA before tpSyncModelInputs so broadcasts use the
+        // GPU packed-buffer path instead of CPU execBroadcastCpu/unpack loops.
+        ensureModelInputsOnCuda(model_input, "process.before_tp_sync");
+    } catch (const std::exception& error) {
+        model_input = GptModelInputs{};
+        stream_groups_opt.reset();
+        if (tryIsolateStepGpuOom(
+                streams, error, "input_preparation", profile_started, /*before_tp_sync=*/true, worker_synced)) {
+            if (parallelism_config_.tp_size > 1) {
+                GptModelInputs skip_inputs;
+                skip_inputs.skip_run = true;
+                tpSyncModelInputs(skip_inputs, parallelism_config_);
+            }
+            return absl::OkStatus();
+        }
+        throw;
     }
-    const bool   uses_normal_snapshot = !normal_device_states.empty();
-    StreamGroups stream_groups(streams, std::move(normal_device_states));
-    auto         finish_snapshot_gather = [&] {
+
+    StreamGroups& stream_groups = *stream_groups_opt;
+    auto          finish_snapshot_gather = [&] {
         if (uses_normal_snapshot) {
             // The previous worker reads iter_count when producing its output.
             // Advance it only after joining that worker, even though this
@@ -312,269 +440,250 @@ absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int6
         }
     };
 
-    auto&      execution_recorder = ExecutionRecorder::instance();
-    const bool record_owner =
-        execution_recorder.enabled() && !warm_up_ && !is_propose_ && !accuracy_check_mode_ && tp_rank_ == 0;
-    // dp>1 idle steps fill batches with fake streams (mayAddFakeStream); a
-    // fake-only batch carries no request slots and would drain the recorder's
-    // total-bytes budget with is_fake lines, exactly like an idle alignment
-    // round. Mixed real+fake batches keep recording (rows carry is_fake).
-    const bool has_request_stream =
-        std::any_of(streams.begin(), streams.end(), [](const GenerateStreamPtr& s) { return !s->isFakeStream(); });
-    // Filter before CPU snapshot allocation/JSON work. Never emit a partial
-    // mixed batch that could be mistaken for a replayable model input, and
-    // skip idle alignment rounds: empty batches still enter process() under
-    // FFN disaggregation and TP collectives, carry no request slots, and
-    // would drain the recorder's total-bytes budget with requests:[] lines.
-    // Decode-containing batches are thinned by record_decode_sample_rate_
-    // (Bresenham-style credit): a step that fails sampling is skipped whole
-    // (rate 0.0 records no decode step at all), so a mixed batch may lose its
-    // prefill rows to a failed decode sample. sampleDecodeStep() sits last in
-    // the short-circuit chain: warmup/propose/non-tp0 or batch-less steps
-    // never spend credit.
-    const bool    decode_batch = stream_groups.totalDecodeBatchSize() > 0;
-    const int64_t record_id = shouldRecordBatch(record_owner, has_request_stream, stream_groups.totalModelBatchSize())
-                                      && (!decode_batch || sampleDecodeStep()) ?
-                                  execution_recorder.nextId() :
-                                  0;
-    {
-        RTP_LLM_PROFILE_SCOPE("executor.gather_model_input");
-        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        auto    model_input_status =
-            batch_stream_processor_->gatherModelInput(stream_groups, buffer_holder_, record_id != 0);
-        RETURN_IF_STATUS_OR_ERROR(model_input_status);
-        model_input                              = std::move(model_input_status.value());
-        model_input.record_execution_id          = record_id;
-        executor_collector.gather_model_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-    }
-    {
-        RTP_LLM_PROFILE_SCOPE("executor.tp_sync_input");
-        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        model_input.skip_run  = streams.empty();
+    try {
+        {
+            RTP_LLM_PROFILE_SCOPE("executor.tp_sync_input");
+            int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+            tpSyncModelInputs(model_input, parallelism_config_);
+            if (model_input.skip_run) {
+                return absl::OkStatus();
+            }
 
-        // Move metadata to CUDA before tpSyncModelInputs so broadcasts use the
-        // GPU packed-buffer path instead of CPU execBroadcastCpu/unpack loops.
-        ensureModelInputsOnCuda(model_input, "process.before_tp_sync");
+            // Post-sync guard for fields not covered by the root device bitmap
+            // (notably sequence_lengths_plus_1) before model_->forward.
+            ensureModelInputsOnCuda(model_input, "process.after_tp_sync");
 
-        tpSyncModelInputs(model_input, parallelism_config_);
-        if (model_input.skip_run) {
+            executor_collector.tp_sync_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        }
+
+        if (profile_step_start_) {
+            profile_step_start_();
+            profile_started = true;
+        }
+
+        std::shared_ptr<RecordedBatch> recorded_batch;
+        if (tp_rank_ == 0 && model_input.record_execution_id) {
+            try {
+                recorded_batch = recordBatchInputs(model_input, stream_groups);
+            } catch (const std::exception& e) {
+                ExecutionRecorder::instance().reportSnapshotError(e.what());
+            }
+        }
+
+        // make sure last model input is released before forward
+        // TensorHolder release point (NormalExecutor): after current TP sync has
+        // consumed model-input H2D staging, advance the one-extra-round hold window
+        // for model-input sources and previous sampler-input host tensors.
+        buffer_holder_.release();
+        // PyWrappedModel TensorHolder release point for the previous model forward.
+        model_->releaseBuffers();
+
+        {
+            // update kv cache
+            if (model_input.kv_cache_update_mapping.defined() && model_input.kv_cache_update_mapping.numel() > 0) {
+                RTP_LLM_PROFILE_SCOPE("executor.kv_cache_update");
+                RTP_LLM_CHECK_WITH_INFO(static_cast<bool>(cache_manager_),
+                                        "cache update mapping requires a cache manager");
+                cache_manager_->blockBatchCopyForForward(model_input.kv_cache_update_mapping,
+                                                         model_input.kv_cache_group_tags,
+                                                         model_input.kv_cache_copy_token_lengths);
+            }
+        }
+        {
+            bool force = tp_rank_ == 0 && enable_detail_log_;
+            if (force) {
+                RTP_LLM_LOG_INFO("model_input: %s", model_input.debugString(force).c_str());
+            } else {
+                RTP_LLM_LOG_TRACE("model_input: %s", model_input.debugString(force).c_str());
+            }
+            RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.model_forward(ctx_batch=%zu,gen_batch=%zu,tokens=%zu,max_seq=%zu)",
+                                          stream_groups.totalContextBatchSize(),
+                                          stream_groups.totalDecodeBatchSize(),
+                                          stream_groups.modelExecuteTokenSize(),
+                                          stream_groups.maxSeqLen());
+            int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+            if (model_inputs_logger_) {
+                const auto role = is_propose_ ? ModelInputsModelRole::DRAFT : ModelInputsModelRole::NORMAL;
+                model_inputs_logger_->log(model_input, role, model_->model_id_);
+            }
+            if (telemetry::TelemetryRuntime::isActive()) {
+                const auto forward_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+                for (const auto& stream : streams) {
+                    if (stream->isContextStream()) {
+                        stream->recordPrefillForwardTime(forward_time_us);
+                    }
+                }
+            }
+            model_output                        = std::move(model_->forward(model_input));
+            executor_collector.model_forward_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        }
+        if (expert_balancer_) {
+            int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+            expert_balancer_->stepForward(*model_, executor_collector);
+            executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        }
+
+        if (auto capture_error = model_->takeDeferredHiddenStateCaptureError(); capture_error.has_value()) {
+            cudaSyncAndCheck();
+            model_->releaseBuffers();
+            for (const auto& stream : streams) {
+                stream->reportError(ErrorCode::EXECUTION_EXCEPTION, *capture_error);
+            }
+            if (profile_started && profile_step_finish_) {
+                profile_step_finish_();
+                profile_started = false;
+            }
             return absl::OkStatus();
         }
 
-        // Post-sync guard for fields not covered by the root device bitmap
-        // (notably sequence_lengths_plus_1) before model_->forward.
-        ensureModelInputsOnCuda(model_input, "process.after_tp_sync");
-
-        executor_collector.tp_sync_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-    }
-
-    if (profile_step_start_) {
-        profile_step_start_();
-    }
-
-    std::shared_ptr<RecordedBatch> recorded_batch;
-    if (tp_rank_ == 0 && model_input.record_execution_id) {
-        try {
-            recorded_batch = recordBatchInputs(model_input, stream_groups);
-        } catch (const std::exception& e) {
-            execution_recorder.reportSnapshotError(e.what());
+        if (cache_manager_ && model_input.pd_separation && !model_input.warmup && !model_input.is_fake_stream
+            && !model_input.skip_lm_head) {
+            cache_manager_->finishP2PPublication(model_input.p2p_final_prefill,
+                                                 model_input.request_pd_separation,
+                                                 model_input.request_id,
+                                                 model_input.request_deadline_ms,
+                                                 model_input.p2p_deadline_clock_offset_ms);
         }
-    }
 
-    // make sure last model input is released before forward
-    // TensorHolder release point (NormalExecutor): after current TP sync has
-    // consumed model-input H2D staging, advance the one-extra-round hold window
-    // for model-input sources and previous sampler-input host tensors.
-    buffer_holder_.release();
-    // PyWrappedModel TensorHolder release point for the previous model forward.
-    model_->releaseBuffers();
-
-    {
-        // update kv cache
-        if (model_input.kv_cache_update_mapping.defined() && model_input.kv_cache_update_mapping.numel() > 0) {
-            RTP_LLM_PROFILE_SCOPE("executor.kv_cache_update");
-            RTP_LLM_CHECK_WITH_INFO(static_cast<bool>(cache_manager_), "cache update mapping requires a cache manager");
-            cache_manager_->blockBatchCopyForForward(model_input.kv_cache_update_mapping,
-                                                     model_input.kv_cache_group_tags,
-                                                     model_input.kv_cache_copy_token_lengths);
-        }
-    }
-    {
-        bool force = tp_rank_ == 0 && enable_detail_log_;
-        if (force) {
-            RTP_LLM_LOG_INFO("model_input: %s", model_input.debugString(force).c_str());
-        } else {
-            RTP_LLM_LOG_TRACE("model_input: %s", model_input.debugString(force).c_str());
-        }
-        RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.model_forward(ctx_batch=%zu,gen_batch=%zu,tokens=%zu,max_seq=%zu)",
-                                      stream_groups.totalContextBatchSize(),
-                                      stream_groups.totalDecodeBatchSize(),
-                                      stream_groups.modelExecuteTokenSize(),
-                                      stream_groups.maxSeqLen());
-        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        if (model_inputs_logger_) {
-            const auto role = is_propose_ ? ModelInputsModelRole::DRAFT : ModelInputsModelRole::NORMAL;
-            model_inputs_logger_->log(model_input, role, model_->model_id_);
-        }
-        if (telemetry::TelemetryRuntime::isActive()) {
-            const auto forward_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-            for (const auto& stream : streams) {
-                if (stream->isContextStream()) {
-                    stream->recordPrefillForwardTime(forward_time_us);
-                }
-            }
-        }
-        model_output                        = std::move(model_->forward(model_input));
-        executor_collector.model_forward_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-    }
-    if (expert_balancer_) {
-        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        expert_balancer_->stepForward(*model_, executor_collector);
-        executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-    }
-
-    if (auto capture_error = model_->takeDeferredHiddenStateCaptureError(); capture_error.has_value()) {
-        cudaSyncAndCheck();
-        model_->releaseBuffers();
-        for (const auto& stream : streams) {
-            stream->reportError(ErrorCode::EXECUTION_EXCEPTION, *capture_error);
-        }
-        if (profile_step_finish_) {
-            profile_step_finish_();
-        }
-        return absl::OkStatus();
-    }
-
-    if (cache_manager_ && model_input.pd_separation && !model_input.warmup && !model_input.is_fake_stream
-        && !model_input.skip_lm_head) {
-        cache_manager_->finishP2PPublication(model_input.p2p_final_prefill,
-                                             model_input.request_pd_separation,
-                                             model_input.request_id,
-                                             model_input.request_deadline_ms,
-                                             model_input.p2p_deadline_clock_offset_ms);
-    }
-
-    if (tp_rank_ > 0 || warm_up_ || streams.size() == 0) {
-        // Make all model streams quiescent before releasing borrowed buffers.
-        cudaSyncAndCheck();
-        // Warmup does not launch dispatch workers; non-root streams are empty.
-        finish_snapshot_gather();
-        model_->releaseBuffers();
-        if (profile_step_finish_) {
-            profile_step_finish_();
-        }
-        return absl::OkStatus();
-    }
-
-    // Gather selects the execution mode from non-errored streams in model order.
-    // Use that same decision: streams.front() may already have failed or be reordered.
-    const bool zero_token_batch = model_input.skip_lm_head;
-    if (!zero_token_batch) {
-        RTP_LLM_PROFILE_SCOPE("executor.sampler_forward");
-        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-
-        // Sampler input still reads CPU stream state mutated by the previous
-        // worker. DROP_BROAD_SYNC therefore needs this narrow sync unless an
-        // earlier host-fallback gather already waited.
-        if (useStreamAsync() && useDropBroadSync() && !worker_synced) {
-            RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.wait_prev_dispatch_pre_sampler(stream_count=%zu)", streams.size());
-            dispatch_runner_.sync(cuda_graph::graphGetCurrentStream());
-            worker_synced = true;
-            // Rebuild after waiting so sampler buffers use the current seqLength
-            // instead of appending one column behind.
-            stream_groups = StreamGroups(streams);
-        }
-        finish_snapshot_gather();
-
-        CHECK_AND_RETURN_REF(sampler_input,
-                             batch_stream_processor_->gatherSamplerInput(stream_groups, model_input, model_output));
-        holdSamplerInputHostBuffers(buffer_holder_, sampler_input);
-        sampler_output = std::move(sampler_->forward(sampler_input));
-        RTP_LLM_LOG_DEBUG("sampler forward done");
-        executor_collector.sample_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-    }
-
-    // Stream-async dispatch is opt-in and only useful for decode-only batches:
-    // the next iteration can overlap forward prep with worker D2H/update work.
-    // Prefill gets no overlap benefit and would only add worker startup cost.
-    const bool is_decode_only = stream_groups.totalContextBatchSize() == 0 && stream_groups.totalDecodeBatchSize() > 0;
-    // Beam fanout changes host batch sizes and KV ownership. The scheduler and
-    // StreamGroups must observe that bookkeeping before starting another step;
-    // NormalAsyncDeviceState only mirrors single-sequence decode today.
-    const bool single_sequence_streams = std::none_of(streams.begin(), streams.end(), [](const auto& stream) {
-        return stream->hasNumBeams() || stream->numReturnSequences() > 1;
-    });
-    StreamGroups::TokenCountsByPriority token_counts_by_priority;
-    if (metrics_reporter_ && tp_rank_ == 0) {
-        token_counts_by_priority = stream_groups.tokenCountsByPriority();
-    }
-    if (recorded_batch) {
-        recorded_batch->setStepDurationUs(autil::TimeUtility::currentTimeInMicroSeconds() - process_start_time_us);
-    }
-    FrontendMetricsStep<GenerateStreamPtr> frontend_step(stream_groups.allStreams(),
-                                                         isKmonMetricReportingEnabled() && tp_rank_ == 0 && !warm_up_);
-    if (useStreamAsync() && is_decode_only && single_sequence_streams && !zero_token_batch) {
-        RTP_LLM_PROFILE_SCOPE("executor.dispatch_output(stream_async)");
-        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-
-        // Record as soon as sampler outputs are valid so the worker waits with
-        // cudaStreamWaitEvent before pinned D2H staging.
-        auto sampler_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
-        sampler_event->record(cuda_graph::graphGetCurrentStream());
-
-        // Metrics and KV release stay on the main thread; dispatch_output_us
-        // now measures launch cost, while worker time is in async_runner.thread.
-        executor_collector.dispatch_output_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-        int64_t tps_execute_time_us           = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
-        if (tps_execute_time_us <= 0) {
-            tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - process_start_time_us;
-        }
-        frontend_step.publish({static_cast<int64_t>(stream_groups.contextExecuteTokenSize()),
-                               static_cast<int64_t>(stream_groups.contextExecuteTokenSizeWithCache()),
-                               static_cast<int64_t>(stream_groups.totalDecodeBatchSize()),
-                               tps_execute_time_us,
-                               std::nullopt});
-        reportMetrics(stream_groups, executor_collector, tps_collector, tps_execute_time_us, token_counts_by_priority);
-
-        return dispatchOutputAsync(stream_groups,
-                                   std::move(model_output),
-                                   std::move(sampler_output),
-                                   std::move(sampler_event),
-                                   profile_step_finish_,
-                                   std::move(recorded_batch));
-    }
-
-    {
-        RTP_LLM_PROFILE_SCOPE("executor.dispatch_output");
-        int64_t      start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        absl::Status result;
-        if (zero_token_batch) {
+        if (tp_rank_ > 0 || warm_up_ || streams.size() == 0) {
+            // Make all model streams quiescent before releasing borrowed buffers.
             cudaSyncAndCheck();
-            result = batch_stream_processor_->dispatchPrefillOnly(stream_groups,
-                                                                  model_output.generation_prefill_cuda_graph_status);
-        } else {
-            MergedOutput merge_outputs{std::move(model_output), std::move(sampler_output), std::move(recorded_batch)};
-            if (useDeviceInput()) {
-                publishNormalDeviceState(stream_groups, merge_outputs.sampler_output);
+            // Warmup does not launch dispatch workers; non-root streams are empty.
+            finish_snapshot_gather();
+            model_->releaseBuffers();
+            if (profile_started && profile_step_finish_) {
+                profile_step_finish_();
+                profile_started = false;
             }
-            result = batch_stream_processor_->dispatch(stream_groups, merge_outputs);
+            return absl::OkStatus();
         }
-        executor_collector.dispatch_output_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-        int64_t tps_execute_time_us           = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
-        if (tps_execute_time_us <= 0) {
-            tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - process_start_time_us;
-        }
-        frontend_step.publish({static_cast<int64_t>(stream_groups.contextExecuteTokenSize()),
-                               static_cast<int64_t>(stream_groups.contextExecuteTokenSizeWithCache()),
-                               static_cast<int64_t>(stream_groups.totalDecodeBatchSize()),
-                               tps_execute_time_us,
-                               std::nullopt});
-        reportMetrics(stream_groups, executor_collector, tps_collector, tps_execute_time_us, token_counts_by_priority);
 
-        if (profile_step_finish_) {
-            profile_step_finish_();
+        // Gather selects the execution mode from non-errored streams in model order.
+        // Use that same decision: streams.front() may already have failed or be reordered.
+        const bool zero_token_batch = model_input.skip_lm_head;
+        if (!zero_token_batch) {
+            RTP_LLM_PROFILE_SCOPE("executor.sampler_forward");
+            int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+
+            // Sampler input still reads CPU stream state mutated by the previous
+            // worker. DROP_BROAD_SYNC therefore needs this narrow sync unless an
+            // earlier host-fallback gather already waited.
+            if (useStreamAsync() && useDropBroadSync() && !worker_synced) {
+                RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.wait_prev_dispatch_pre_sampler(stream_count=%zu)",
+                                              streams.size());
+                dispatch_runner_.sync(cuda_graph::graphGetCurrentStream());
+                worker_synced = true;
+                // Rebuild after waiting so sampler buffers use the current seqLength
+                // instead of appending one column behind.
+                stream_groups = StreamGroups(streams);
+            }
+            finish_snapshot_gather();
+
+            CHECK_AND_RETURN_REF(
+                sampler_input, batch_stream_processor_->gatherSamplerInput(stream_groups, model_input, model_output));
+            holdSamplerInputHostBuffers(buffer_holder_, sampler_input);
+            sampler_output = std::move(sampler_->forward(sampler_input));
+            RTP_LLM_LOG_DEBUG("sampler forward done");
+            executor_collector.sample_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
         }
-        return result;
+
+        // Stream-async dispatch is opt-in and only useful for decode-only batches:
+        // the next iteration can overlap forward prep with worker D2H/update work.
+        // Prefill gets no overlap benefit and would only add worker startup cost.
+        const bool is_decode_only =
+            stream_groups.totalContextBatchSize() == 0 && stream_groups.totalDecodeBatchSize() > 0;
+        // Beam fanout changes host batch sizes and KV ownership. The scheduler and
+        // StreamGroups must observe that bookkeeping before starting another step;
+        // NormalAsyncDeviceState only mirrors single-sequence decode today.
+        const bool single_sequence_streams = std::none_of(streams.begin(), streams.end(), [](const auto& stream) {
+            return stream->hasNumBeams() || stream->numReturnSequences() > 1;
+        });
+        StreamGroups::TokenCountsByPriority token_counts_by_priority;
+        if (metrics_reporter_ && tp_rank_ == 0) {
+            token_counts_by_priority = stream_groups.tokenCountsByPriority();
+        }
+        if (recorded_batch) {
+            recorded_batch->setStepDurationUs(autil::TimeUtility::currentTimeInMicroSeconds() - process_start_time_us);
+        }
+        FrontendMetricsStep<GenerateStreamPtr> frontend_step(
+            stream_groups.allStreams(), isKmonMetricReportingEnabled() && tp_rank_ == 0 && !warm_up_);
+        if (useStreamAsync() && is_decode_only && single_sequence_streams && !zero_token_batch) {
+            RTP_LLM_PROFILE_SCOPE("executor.dispatch_output(stream_async)");
+            int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+
+            // Record as soon as sampler outputs are valid so the worker waits with
+            // cudaStreamWaitEvent before pinned D2H staging.
+            auto sampler_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
+            sampler_event->record(cuda_graph::graphGetCurrentStream());
+
+            // Metrics and KV release stay on the main thread; dispatch_output_us
+            // now measures launch cost, while worker time is in async_runner.thread.
+            executor_collector.dispatch_output_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+            int64_t tps_execute_time_us           = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
+            if (tps_execute_time_us <= 0) {
+                tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - process_start_time_us;
+            }
+            frontend_step.publish({static_cast<int64_t>(stream_groups.contextExecuteTokenSize()),
+                                   static_cast<int64_t>(stream_groups.contextExecuteTokenSizeWithCache()),
+                                   static_cast<int64_t>(stream_groups.totalDecodeBatchSize()),
+                                   tps_execute_time_us,
+                                   std::nullopt});
+            reportMetrics(
+                stream_groups, executor_collector, tps_collector, tps_execute_time_us, token_counts_by_priority);
+
+            auto finish_cb  = profile_started ? profile_step_finish_ : std::function<void()>{};
+            profile_started = false;
+            return dispatchOutputAsync(stream_groups,
+                                       std::move(model_output),
+                                       std::move(sampler_output),
+                                       std::move(sampler_event),
+                                       std::move(finish_cb),
+                                       std::move(recorded_batch));
+        }
+
+        {
+            RTP_LLM_PROFILE_SCOPE("executor.dispatch_output");
+            int64_t      start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+            absl::Status result;
+            if (zero_token_batch) {
+                cudaSyncAndCheck();
+                result = batch_stream_processor_->dispatchPrefillOnly(
+                    stream_groups, model_output.generation_prefill_cuda_graph_status);
+            } else {
+                MergedOutput merge_outputs{std::move(model_output), std::move(sampler_output), std::move(recorded_batch)};
+                if (useDeviceInput()) {
+                    publishNormalDeviceState(stream_groups, merge_outputs.sampler_output);
+                }
+                result = batch_stream_processor_->dispatch(stream_groups, merge_outputs);
+            }
+            executor_collector.dispatch_output_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+            int64_t tps_execute_time_us           = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
+            if (tps_execute_time_us <= 0) {
+                tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - process_start_time_us;
+            }
+            frontend_step.publish({static_cast<int64_t>(stream_groups.contextExecuteTokenSize()),
+                                   static_cast<int64_t>(stream_groups.contextExecuteTokenSizeWithCache()),
+                                   static_cast<int64_t>(stream_groups.totalDecodeBatchSize()),
+                                   tps_execute_time_us,
+                                   std::nullopt});
+            reportMetrics(
+                stream_groups, executor_collector, tps_collector, tps_execute_time_us, token_counts_by_priority);
+
+            if (profile_started && profile_step_finish_) {
+                profile_step_finish_();
+                profile_started = false;
+            }
+            return result;
+        }
+    } catch (const std::exception& error) {
+        model_input    = GptModelInputs{};
+        model_output   = GptModelOutputs{};
+        sampler_output = SamplerOutput{};
+        if (tryIsolateStepGpuOom(
+                streams, error, "execution", profile_started, /*before_tp_sync=*/false, worker_synced)) {
+            return absl::OkStatus();
+        }
+        throw;
     }
 }
 
@@ -924,16 +1033,24 @@ absl::Status NormalExecutor::dispatchOutputAsync(const StreamGroups&            
             }
         });
 
-        // Queue a stream wait, then do pinned D2H on the worker stream while
-        // the main thread continues to the next gather.
-        if (sampler_event) {
-            sampler_event->block(cuda_graph::graphGetCurrentStream());
-        }
+        try {
+            // Queue a stream wait, then do pinned D2H on the worker stream while
+            // the main thread continues to the next gather.
+            if (sampler_event) {
+                sampler_event->block(cuda_graph::graphGetCurrentStream());
+            }
 
-        auto status = processor->dispatch(stream_groups_copy,
-                                          {std::move(model_output_copy), std::move(sampler_output_copy), batch_record});
-        if (!status.ok()) {
-            RTP_LLM_LOG_ERROR("[normal-stream-async] dispatch (worker) failed: %s", status.ToString().c_str());
+            auto status = processor->dispatch(
+                stream_groups_copy, {std::move(model_output_copy), std::move(sampler_output_copy), batch_record});
+            if (!status.ok()) {
+                RTP_LLM_LOG_ERROR("[normal-stream-async] dispatch (worker) failed: %s", status.ToString().c_str());
+            }
+        } catch (const std::exception& error) {
+            // AsyncRunner rethrows on a later engine-loop round. Keep the failing
+            // batch attached so recovery cannot charge the next round's streams.
+            throw AsyncDispatchError(worker_streams, std::string("async output dispatch failed: ") + error.what());
+        } catch (...) {
+            throw AsyncDispatchError(worker_streams, "async output dispatch failed with unknown exception");
         }
         // dec_guard destructs here, dec'ing each stream's pending count.
     });

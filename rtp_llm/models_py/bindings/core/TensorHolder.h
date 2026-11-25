@@ -35,6 +35,13 @@ struct TensorHolder {
             clear_tensors.pop();
         }
     }
+
+    void clear() noexcept {
+        tensors.clear();
+        while (!clear_tensors.empty()) {
+            clear_tensors.pop();
+        }
+    }
 };
 
 }  // namespace rtp_llm
