@@ -187,7 +187,7 @@ class Qwen4ProfilerRangesTest(unittest.TestCase):
             ),
         ), patch.object(
             tp_reduce_module,
-            "get_flashinfer_allreduce",
+            "get_all_reduce",
             return_value=None,
         ):
             tp_reduce_module.all_reduce_target_graph(torch.zeros(1), "tp")
