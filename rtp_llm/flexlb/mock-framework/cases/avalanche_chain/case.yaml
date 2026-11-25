@@ -42,11 +42,11 @@ phases:
     timeout: 600s
     steps:
       - id: start_frontend
-        describe: prefix-shared 0.25 倍速预热 45s 后 qps 55 全速（2P 深队列容量约 96/s 可承载，1P 约 48/s 明确不足）。
+        describe: prefix-shared 0.25 倍速预热 45s 后 qps 35 全速（2P 上限 44.4/s 可承载，1P 上限 22.2/s 明确不足）。
         interface: frontend/start/playback
         args:
           requests_file: data/traffic/prefix-shared.mckidx
-          qps: 55
+          qps: 35
           total_concurrency: 512
           queue_capacity: 1024
           request_timeout: 60s
@@ -74,21 +74,21 @@ phases:
             - 0s
           statistic: p95
       - id: scale_in_prefill
-        describe: 缩掉一半 prefill（2→1，容量 96→48/s 跌破负载 55/s）。
+        describe: 缩掉一半 prefill（2→1，容量 44.4→22.2/s 跌破负载 35/s），等待 25s 让排队与降级稳态建立。
         interface: engine/scale
         args:
           direction: in
           role: prefill
           count: 1
         within: 60s
+        wait_after: 25s
       - id: check_queue_growth
         describe: 链条第一环：全局排队明显堆积（≥30；缩容前近 0）。
         interface: prometheus/query_scalar
         args:
-          promql: sum(max_over_time(flexlb_app_routing_queue_length[30s])) or vector(0)
+          promql: sum(max_over_time(flexlb_app_flexlb_batcher_queue_size[30s])) or vector(0)
         expect:
           gte: 30
-        wait_after: 25s
       - id: check_ttft_growth
         describe: 链条第二环：TTFT p95 上行（≥缩容前，排队等待注入）。
         interface: frontend/query/ttft

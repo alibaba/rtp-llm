@@ -1,7 +1,7 @@
 id: avalanche_boundary
 name: 雪崩边界扫描
 describe:
-  G2.1 降级版：uniform-2k 冷流量（无缓存亲和干扰）同负载 qps 20 下轻（3→2）重（2→1）两档缩容画相对分界——轻档恢复（成功率 ≥90%、排队有界），重档严格劣化（排队 ≥30 且不低于轻档、成功率不优于轻档）。相对判定对宿主 CPU 噪声稳健；绝对阈值给出雪崩形态证据。缩容瞬间被清子队列的请求以
+  G2.1 降级版：uniform-2k 冷流量（无缓存亲和干扰）同负载 qps 30 下轻（3→2，容量 66.7→44.4/s）重（2→1，容量 44.4→22.2/s 跌破负载）两档缩容画相对分界——轻档恢复（成功率 ≥90%、排队有界），重档严格劣化（排队 ≥30 且不低于轻档、成功率不优于轻档）。相对判定对宿主 CPU 噪声稳健；绝对阈值给出雪崩形态证据。缩容瞬间被清子队列的请求以
   UNAVAILABLE 批量终结（属缩容代价，轻档窗口避开瞬间）。真机锚点：25→12 恢复、70→65 雪崩。
 environment:
   master:
@@ -42,12 +42,12 @@ phases:
     timeout: 600s
     steps:
       - id: start_frontend
-        describe: uniform-2k 冷流量 qps 20（并发 512 防自降速，master gRPC 队列 4096）。
+        describe: uniform-2k 冷流量 qps 30（单 P 上限 22.2/s，2P 上限 44.4/s；并发 768 防自降速，master gRPC 队列 4096）。
         interface: frontend/start/playback
         args:
           requests_file: data/traffic/uniform-2k.mckidx
-          qps: 20
-          total_concurrency: 512
+          qps: 30
+          total_concurrency: 768
           queue_capacity: 2048
           request_timeout: 60s
           drain_timeout: 60s
@@ -62,15 +62,16 @@ phases:
         expect:
           gte: 0.85
       - id: scale_mild
-        describe: 轻度缩容 3→2（容量仍高于负载）。
+        describe: 轻度缩容 3→2（容量 44.4/s 仍高于负载 30/s），等待 35s 避开缩容瞬间子队列清洗。
         interface: engine/scale
         args:
           direction: in
           role: prefill
           count: 1
         within: 60s
+        wait_after: 35s
       - id: check_mild_recovers
-        describe: 轻档恢复：避开缩容瞬间的被清子队列，25s 后窗口成功率 ≥90%。
+        describe: 轻档恢复：避开缩容瞬间的被清子队列，25s 窗口成功率 ≥90%。
         interface: frontend/query/success_rate
         args:
           range:
@@ -78,36 +79,34 @@ phases:
             - 0s
         expect:
           gte: 0.9
-        wait_after: 25s
       - id: record_mild_queue
-        describe: 轻档排队水位（作为重档的对照基准；瞬态清队已过 40s）。
+        describe: 轻档排队水位（作为重档的对照基准；瞬态清队已过 35s）。
         interface: prometheus/query_scalar
         args:
-          promql: sum(flexlb_app_routing_queue_length) or vector(0)
+          promql: sum(flexlb_app_flexlb_batcher_queue_size) or vector(0)
         expect:
           lte: 100
-        wait_after: 15s
       - id: scale_severe
-        describe: 重度缩容 2→1（容量跌破负载）。
+        describe: 重度缩容 2→1（容量 22.2/s 明确跌破负载 30/s），等待 40s 让重档排队充分堆积。
         interface: engine/scale
         args:
           direction: in
           role: prefill
           count: 1
         within: 60s
+        wait_after: 40s
       - id: check_severe_queue_worse
         describe: 重档排队严格高于轻档（分界相对判定）且绝对量 ≥30。
         interface: prometheus/query_scalar
         args:
-          promql: sum(max_over_time(flexlb_app_routing_queue_length[30s])) or vector(0)
+          promql: sum(max_over_time(flexlb_app_flexlb_batcher_queue_size[30s])) or vector(0)
         expect:
           gte: 30
-        wait_after: 40s
       - id: check_severe_queue_vs_mild
         describe: 重档排队不低于轻档基准（相对分界证据）。
         interface: prometheus/query_scalar
         args:
-          promql: sum(max_over_time(flexlb_app_routing_queue_length[30s])) or vector(0)
+          promql: sum(max_over_time(flexlb_app_flexlb_batcher_queue_size[30s])) or vector(0)
         expect:
           gte:
             ref: steps.record_mild_queue
@@ -116,7 +115,7 @@ phases:
         interface: frontend/query/success_rate
         args:
           range:
-            - -40s
+            - -30s
             - 0s
         expect:
           lte:
