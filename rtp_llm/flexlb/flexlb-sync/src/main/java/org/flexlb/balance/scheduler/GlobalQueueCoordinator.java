@@ -2,7 +2,6 @@ package org.flexlb.balance.scheduler;
 
 import io.opentelemetry.api.common.Attributes;
 import org.flexlb.balance.PlacementResult;
-import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.eviction.EvictionManager;
 import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
@@ -65,13 +64,11 @@ final class GlobalQueueCoordinator implements AutoCloseable {
     private final boolean priorityOrdering;
     private final int plannerCount;
     private final double scanBudgetMultiplier;
-    private final boolean trackPendingPrefixes;
     private final ConfigService configService;
     private final PrefillSheddingMonitor shedding;
     private final ReentrantLock lock = new ReentrantLock();
     private final Condition changed = lock.newCondition();
     private final OrderedRequestQueue orderedQueue;
-    private final PendingPrefillPrefixes prefixes;
     private final PlacementWaitQueue waitingRequests;
     /** Retained until response completion so withdrawal reuses the original FIFO identity. */
     private final Map<CompletableFuture<Response>, GlobalQueueEntry> registered = new ConcurrentHashMap<>();
@@ -110,10 +107,8 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         this.shedding = sheddingConfig == null ? null : new PrefillSheddingMonitor(
                 sheddingConfig, router, priorityOrdering, this::evictPoolVictim);
         this.orderedQueue = new OrderedRequestQueue(priorityOrdering);
-        this.prefixes = new PendingPrefillPrefixes(orderedQueue::markRequestReadyForRetry);
         this.waitingRequests = new PlacementWaitQueue(priorityOrdering, availability);
         this.scanBudgetMultiplier = checkedConfig.loadBalanceConfig().queueScheduler().getScanBudgetMultiplier();
-        this.trackPendingPrefixes = checkedConfig.loadBalanceConfig().isPrefillCostOrder();
 
         AtomicInteger plannerId = new AtomicInteger();
         ThreadFactory plannerFactory = task -> {
@@ -209,7 +204,6 @@ final class GlobalQueueCoordinator implements AutoCloseable {
     boolean requeue(ScheduledRequest previous) {
         lock.lock();
         try {
-            if (prefixes.finished(previous.execution(), false)) { changed.signal(); }
             if (previous.future().isDone()) { return true; }
             GlobalQueueEntry entry = registered.get(previous.future());
             if (closed.get() || entry == null) { return false; }
@@ -294,12 +288,10 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         try {
             // Check under the same lock as arrivals and result publication: a signal
             // between processing and this check must not leave completed work asleep.
-            long nextPrefixWakeMs = prefixes.resumeExpired(System.currentTimeMillis());
             if (closed.get() || !completedPlans.isEmpty()) { return; }
             if (inFlight.size() < plannerCount && (orderedQueue.hasUnscannedRequests()
                     || waitingRequests.hasReadyRequests())) { return; }
-            if (nextPrefixWakeMs == Long.MAX_VALUE) { changed.await(); }
-            else { changed.await(nextPrefixWakeMs, TimeUnit.MILLISECONDS); }
+            changed.await();
         } catch (InterruptedException interruption) {
             if (closed.get()) { Thread.currentThread().interrupt(); }
         } finally {
@@ -389,7 +381,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
                         return false;
                     }
                     return !entry.removed && !inFlight.contains(entry)
-                            && !waitingRequests.isWaiting(entry) && !prefixes.isWaiting(entry);
+                            && !waitingRequests.isWaiting(entry);
                 });
     }
 
@@ -477,29 +469,9 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         }
         RouteAdmission admission = plan.admission();
         try {
-            if (!entry.cacheableBlocks.isEmpty()) {
-                lock.lock();
-                try {
-                    if (!entry.removed && prefixes.awaitBetterPrefix(entry, admission.prefillStatus(),
-                            admission.residentPrefixTokens(), System.currentTimeMillis())) {
-                        admission.noteHotspotAbandon("WAIT_FOR_BETTER_PREFIX");
-                        return Outcome.DONE;
-                    }
-                } finally {
-                    lock.unlock();
-                }
-            }
             PlacementResult<ScheduledRequest, PlacementKey> publication =
                     admission.tryEnqueue(entry.context, entry.future, lifecycle);
             if (publication.status() == PlacementResult.Status.SUCCESS) {
-                if (!entry.cacheableBlocks.isEmpty()) {
-                    lock.lock();
-                    try {
-                        prefixes.published(entry, publication.value().execution(), admission.residentPrefixTokens());
-                    } finally {
-                        lock.unlock();
-                    }
-                }
                 removeRequest(entry);
                 reportRouteSubmitted(entry.context, publication.value());
                 return Outcome.DONE;
@@ -589,26 +561,6 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         return parked;
     }
 
-    void cachePollCompleted(PrefillEndpoint endpoint) {
-        if (!prefixes.observingCache(endpoint)) { return; }
-        lock.lock();
-        try {
-            if (prefixes.cachePollCompleted(endpoint)) { changed.signal(); }
-        } finally {
-            lock.unlock();
-        }
-    }
-
-    void prefillEnded(RequestExecution item, boolean completed) {
-        if (item == null || !trackPendingPrefixes) { return; }
-        lock.lock();
-        try {
-            if (prefixes.finished(item, completed)) { changed.signal(); }
-        } finally {
-            lock.unlock();
-        }
-    }
-
     private void removeRequest(GlobalQueueEntry entry) {
         if (entry.removed) {
             return;
@@ -627,7 +579,6 @@ final class GlobalQueueCoordinator implements AutoCloseable {
      * Caller holds {@link #lock}.
      */
     private void removeRequestUnderLock(GlobalQueueEntry entry) {
-        prefixes.removeWait(entry);
         if (shedding != null) { shedding.remove(entry); }
         if (orderedQueue.remove(entry)) {
             waitingRequests.remove(entry);
@@ -737,7 +688,6 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             abandoned = orderedQueue.drain();
             waitingRequests.clear();
             registered.clear();
-            prefixes.clear();
             completed = List.copyOf(completedPlans);
             completedPlans.clear();
             inFlight.clear();

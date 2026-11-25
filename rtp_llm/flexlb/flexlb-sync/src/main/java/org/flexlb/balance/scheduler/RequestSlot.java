@@ -921,10 +921,6 @@ public final class RequestSlot {
 
     // ── Worker 事实与 Endpoint 退出：接收、核验、推进 ──
 
-    void prefillEnded(RequestExecution execution, boolean completed) {
-        if (globalQueue != null) { globalQueue.prefillEnded(execution, completed); }
-    }
-
     void processPrefillStatus(PrefillEndpoint source, RoleType role, PrefillState.WorkerStatusFact fact) {
         EngineObservation observation;
         RequestEffect work;
@@ -937,9 +933,6 @@ public final class RequestSlot {
             // A selected close action already owns cleanup; only a released protocol needs resuming.
             cleanupUnblocked = previous != null && preemption == null && cleanupProgress != null
                     && work.terminal() == null && work.delivery() == null;
-        }
-        if (observation != EngineObservation.STALE && fact.kind() != PrefillState.WorkerStatusFact.Kind.ACTIVE) {
-            prefillEnded(fact.item(), fact.kind() == PrefillState.WorkerStatusFact.Kind.COMPLETED);
         }
         if (cleanupUnblocked) {
             resumeCleanup();

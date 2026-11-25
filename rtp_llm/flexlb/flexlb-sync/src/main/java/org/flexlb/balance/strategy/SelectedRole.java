@@ -23,7 +23,6 @@ public final class SelectedRole implements AutoCloseable {
     private final ServerStatus serverStatus;
     private final long prefillWorkMs;
     private final long placementVersion;
-    private final long residentPrefixTokens;
     private PrefillTokenWorkload.Reservation tokenReservation;
     private HotspotRedirect hotspotRedirect;
 
@@ -31,7 +30,7 @@ public final class SelectedRole implements AutoCloseable {
             WorkerEndpoint.GenerationPin generationPin,
             ServerStatus serverStatus,
             long prefillWorkMs,
-            long placementVersion, long residentPrefixTokens,
+            long placementVersion,
             PrefillTokenWorkload.Reservation tokenReservation, HotspotRedirect hotspotRedirect) {
         this.generationPin = generationPin;
         this.serverStatus = serverStatus;
@@ -68,7 +67,6 @@ public final class SelectedRole implements AutoCloseable {
                     "placementVersion must be non-negative");
         }
         this.placementVersion = placementVersion;
-        this.residentPrefixTokens = residentPrefixTokens;
         this.tokenReservation = tokenReservation;
         this.hotspotRedirect = hotspotRedirect;
     }
@@ -99,11 +97,11 @@ public final class SelectedRole implements AutoCloseable {
             long prefillWorkMs,
             long placementVersion,
             PrefillTokenWorkload.Reservation tokenReservation) {
-        return prefill(generationPin, serverStatus, prefillWorkMs, placementVersion, 0L, tokenReservation, null);
+        return prefill(generationPin, serverStatus, prefillWorkMs, placementVersion, tokenReservation, null);
     }
 
     static SelectedRole prefill(WorkerEndpoint.GenerationPin generationPin, ServerStatus serverStatus,
-            long prefillWorkMs, long placementVersion, long residentPrefixTokens,
+            long prefillWorkMs, long placementVersion,
             PrefillTokenWorkload.Reservation tokenReservation, HotspotRedirect hotspotRedirect) {
         if (prefillWorkMs < 0L) {
             try (generationPin; tokenReservation; hotspotRedirect) {
@@ -111,7 +109,7 @@ public final class SelectedRole implements AutoCloseable {
             }
         }
         return createOwned(generationPin, serverStatus, prefillWorkMs,
-                placementVersion, residentPrefixTokens, tokenReservation, hotspotRedirect);
+                placementVersion, tokenReservation, hotspotRedirect);
     }
 
     public static SelectedRole decode(
@@ -132,26 +130,26 @@ public final class SelectedRole implements AutoCloseable {
             }
             throw new IllegalArgumentException("Decode selection requires Decode metadata");
         }
-        return createOwned(generationPin, serverStatus, -1L, placementVersion, 0L, null, null);
+        return createOwned(generationPin, serverStatus, -1L, placementVersion, null, null);
     }
 
     public static SelectedRole stateless(
             WorkerEndpoint.GenerationPin generationPin,
             ServerStatus serverStatus) {
         return createOwned(
-                generationPin, serverStatus, -1L, 0L, 0L, null, null);
+                generationPin, serverStatus, -1L, 0L, null, null);
     }
 
     private static SelectedRole createOwned(
             WorkerEndpoint.GenerationPin generationPin,
             ServerStatus serverStatus,
             long prefillWorkMs,
-            long placementVersion, long residentPrefixTokens,
+            long placementVersion,
             PrefillTokenWorkload.Reservation tokenReservation, HotspotRedirect hotspotRedirect) {
         try {
             return new SelectedRole(
                     generationPin, serverStatus, prefillWorkMs,
-                    placementVersion, residentPrefixTokens, tokenReservation, hotspotRedirect);
+                    placementVersion, tokenReservation, hotspotRedirect);
         } catch (RuntimeException | Error failure) {
             try (generationPin; tokenReservation; hotspotRedirect) {
                 throw failure;
@@ -170,9 +168,6 @@ public final class SelectedRole implements AutoCloseable {
         }
         return prefillWorkMs;
     }
-
-    /** Resident KV match before accounting for work on the last prompt block. */
-    public long residentPrefixTokens() { return residentPrefixTokens; }
 
     public long placementVersion() {
         return placementVersion;

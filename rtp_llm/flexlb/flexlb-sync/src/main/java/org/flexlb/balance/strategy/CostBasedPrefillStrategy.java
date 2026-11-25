@@ -159,9 +159,8 @@ public class CostBasedPrefillStrategy {
                 long ttft = candidates.projectedTtftMs(index);
                 var status = prefillStatus(endpoint, role, context.getRequestId(), ttft, hit);
                 long version = candidates.ownershipVersion(index);
-                long matchedTokens = candidates.routingCacheMatchTokens(index);
                 transferred = true; // The factory consumes the pin, work and redirect even on failure.
-                SelectedRole selected = SelectedRole.prefill(pin, status, duration, version, matchedTokens, work, redirect);
+                SelectedRole selected = SelectedRole.prefill(pin, status, duration, version, work, redirect);
                 try {
                     ranking.report(candidates, role, group, index, choice.reason());
                     reportSelectedEstimates(role, endpoint, config, ttft, duration);

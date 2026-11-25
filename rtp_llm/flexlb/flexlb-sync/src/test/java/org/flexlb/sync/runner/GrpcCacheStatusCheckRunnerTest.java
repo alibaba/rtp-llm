@@ -2,7 +2,6 @@ package org.flexlb.sync.runner;
 
 import io.grpc.Status;
 import org.flexlb.balance.endpoint.EndpointRegistry;
-import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.cache.service.DynamicCacheIntervalService;
@@ -27,7 +26,6 @@ import java.net.SocketException;
 import java.nio.channels.AsynchronousCloseException;
 import java.nio.channels.ClosedByInterruptException;
 import java.util.ArrayList;
-import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.RejectedExecutionException;
@@ -641,53 +639,6 @@ class GrpcCacheStatusCheckRunnerTest {
         assertEquals(80, status.getCacheStatus().getAvailableKvCache());
         assertEquals(7, status.cacheIndexSnapshot().indexedVersion());
         verify(localKvCacheAwareManager, times(1)).updateEngineBlockCache(eq(status), any(EndpointTrace.Poll.class));
-    }
-
-    @Test
-    void notifiesOnlyIndexedOrUnchangedCachePollsAfterUnlockOnTheExactGeneration() {
-        var status = workerStatus();
-        var registry = Mockito.mock(EndpointRegistry.class);
-        var endpoint = Mockito.mock(PrefillEndpoint.class);
-        when(registry.get(RoleType.PREFILL, status.getIpPort(), status)).thenReturn(endpoint);
-        List<Long> observedStarts = new ArrayList<>();
-        List<Long> observedVersions = new ArrayList<>();
-        Mockito.doAnswer(call -> {
-            assertFalse(status.cacheMutationLock.isHeldByCurrentThread());
-            observedStarts.add(call.getArgument(0));
-            observedVersions.add(status.cacheIndexSnapshot().indexedVersion());
-            return null;
-        }).when(endpoint).cachePollCompleted(anyLong());
-
-        var firstRpc = new CompletableFuture<EngineRpcService.CacheStatusPB>();
-        var v7 = EngineRpcService.CacheStatusPB.newBuilder().setVersion(7).build();
-        var v8 = EngineRpcService.CacheStatusPB.newBuilder().setVersion(8).build();
-        when(engineGrpcService.getCacheStatusAsync(anyString(), anyInt(), eq(status),
-                anyLong(), anyLong(), eq(RoleType.PREFILL)))
-                .thenReturn(firstRpc, CompletableFuture.completedFuture(v8), CompletableFuture.completedFuture(v7),
-                        CompletableFuture.completedFuture(v8), CompletableFuture.completedFuture(v8));
-        var success = WorkerCacheUpdateResult.builder().success(true).build();
-        when(localKvCacheAwareManager.updateEngineBlockCache(eq(status), any()))
-                .thenReturn(success, WorkerCacheUpdateResult.builder().success(false).build(), success);
-
-        var directory = new WorkerDirectory(registry);
-        try {
-            directory.currentOrDiscover(RoleType.PREFILL, status.getIpPort(), () -> status);
-            long before = System.nanoTime();
-            runCachePoll(status.getIpPort(), status, directory, false);
-            long beforeResponse = System.nanoTime();
-            firstRpc.complete(v7);
-            assertEquals(List.of(7L), observedVersions);
-            assertTrue(observedStarts.getFirst() >= before && observedStarts.getFirst() <= beforeResponse);
-            runCachePoll(status.getIpPort(), status, directory, false); // indexing v8 fails
-            runCachePoll(status.getIpPort(), status, directory, true);  // old response after observing v8
-            assertEquals(List.of(7L), observedVersions);
-            runCachePoll(status.getIpPort(), status, directory, false); // v8 retry succeeds
-            runCachePoll(status.getIpPort(), status, directory, false); // unchanged v8 confirms visibility
-            assertEquals(List.of(7L, 8L, 8L), observedVersions);
-            assertTrue(observedStarts.get(0) < observedStarts.get(1) && observedStarts.get(1) < observedStarts.get(2));
-        } finally {
-            directory.close();
-        }
     }
 
     @Test

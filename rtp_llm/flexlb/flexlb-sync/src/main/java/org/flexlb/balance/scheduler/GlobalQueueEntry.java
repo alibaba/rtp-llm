@@ -3,7 +3,6 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 
-import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
 /** One request identity retained by the model-wide ordered queue. */
@@ -12,7 +11,6 @@ final class GlobalQueueEntry {
     final BalanceContext context;
     final CompletableFuture<Response> future;
     final int priority;
-    final List<Long> cacheableBlocks;
     final String routingGroup;
     /** Arrival marker for shedding controllers; captured once at offer time. */
     final long queuedAtNanos = System.nanoTime();
@@ -38,7 +36,6 @@ final class GlobalQueueEntry {
     GlobalQueueEntry(BalanceContext context, CompletableFuture<Response> future,
             int priority, String routingGroup) {
         this.context = context;
-        this.cacheableBlocks = PendingPrefillPrefixes.cacheableBlocks(context);
         this.future = future;
         this.priority = priority;
         this.routingGroup = routingGroup;

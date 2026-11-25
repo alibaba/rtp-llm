@@ -17,8 +17,6 @@ import java.util.Objects;
  */
 public final class RequestExecution implements Prioritized {
 
-    // Set under the global queue lock; a fast completion can precede publication bookkeeping.
-    boolean prefillEnded;
     private final Response routeResponse;
     private final ServerStatus prefill;
     private final PrefillEndpoint prefillEp;

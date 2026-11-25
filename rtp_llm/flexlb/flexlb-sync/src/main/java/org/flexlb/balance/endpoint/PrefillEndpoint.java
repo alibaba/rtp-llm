@@ -28,7 +28,6 @@ import org.slf4j.LoggerFactory;
 import java.util.List;
 import java.util.Map;
 import java.util.OptionalLong;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongPredicate;
 
 public class PrefillEndpoint extends WorkerEndpoint {
@@ -86,7 +85,6 @@ public class PrefillEndpoint extends WorkerEndpoint {
     private final PrefillTimePredictor predictor;
     private final long inflightRequestLimit;
     private final boolean reportPendingTokenWork;
-    private final AtomicLong lastIndexedCachePollStartNanos = new AtomicLong(Long.MIN_VALUE);
 
     /** Engine waiting-queue admission gate; null when tokenBalance disables the gate. */
     private final EngineQueueAdmission engineQueueAdmission;
@@ -141,23 +139,6 @@ public class PrefillEndpoint extends WorkerEndpoint {
         RoutingConfig.HotspotReleaseConfig hotspotRelease =
                 prefillRouting == null ? null : prefillRouting.getHotspotRelease();
         this.reportPendingTokenWork = tokenBalance != null || hotspotRelease != null && hotspotRelease.isEnabled();
-    }
-
-    /** Start of the most recent poll whose returned cache version is visible in routing. */
-    public long lastIndexedCachePollStartNanos() {
-        return lastIndexedCachePollStartNanos.get();
-    }
-
-    public boolean awaitingCachePollAfter(long nanos) {
-        long lastIndexed = lastIndexedCachePollStartNanos();
-        return lastIndexed < nanos && (getStatus().cachePollingStarted() || lastIndexed != Long.MIN_VALUE)
-                && !isGenerationRetiringOrRetired();
-    }
-
-    public void cachePollCompleted(long startedNanos) {
-        if (startedNanos > lastIndexedCachePollStartNanos.getAndAccumulate(startedNanos, Math::max)) {
-            endpointEvents.onCachePollCompleted(this);
-        }
     }
 
     /** Sustained Engine waiting-queue congestion verdict; UNKNOWN before the first status. */
@@ -264,12 +245,6 @@ public class PrefillEndpoint extends WorkerEndpoint {
         } catch (Throwable committedRetirementFailure) {
             retirementFailure = appendRetirementFailure(
                     retirementFailure, committedRetirementFailure);
-        }
-        try {
-            // Followers may still be waiting for a cache poll after the last Prefill owner finished.
-            endpointEvents.onCachePollCompleted(this);
-        } catch (Throwable callbackFailure) {
-            retirementFailure = appendRetirementFailure(retirementFailure, callbackFailure);
         }
         rethrowEndpointRetirementFailure(retirementFailure);
     }

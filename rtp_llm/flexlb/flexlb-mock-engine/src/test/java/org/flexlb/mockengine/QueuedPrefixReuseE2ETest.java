@@ -11,7 +11,6 @@ import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
-import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -21,10 +20,7 @@ import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.flexlb.mockengine.MockEngineTestSupport.batch;
@@ -33,7 +29,6 @@ import static org.flexlb.mockengine.MockEngineTestSupport.inputWithBlockKeys;
 import static org.flexlb.mockengine.MockEngineTestSupport.slot;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.when;
@@ -43,117 +38,31 @@ class QueuedPrefixReuseE2ETest {
     private static final int BLOCK_SIZE = 1024;
     private static final int INPUT = BLOCK_SIZE * PREFIX.size();
 
-    @Test
+    @ParameterizedTest(name = "fixed-window producer cancelled={0}")
+    @ValueSource(booleans = {false, true})
     @Timeout(25)
-    void queuedFollowerReusesThePrefixProducedByTheFirstRequest() throws Exception {
-        verifyQueuedPrefixReuse(false);
-    }
-
-    @Test
-    @Timeout(25)
-    void cancelledProducerLetsFollowerUseTheRemainingResidentPrefix() throws Exception {
-        verifyQueuedPrefixReuse(true);
-    }
-
-    private static void verifyQueuedPrefixReuse(boolean cancelProducer) throws Exception {
+    void followerEntersTheResidentPeerQueueWhileProducerIsStillQueued(boolean cancelProducer) throws Exception {
         var config = cacheAwareConfig();
-        var decision = config.queueScheduler().getDecision();
+        config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(2L);
         try (var h = new AutoTpmE2EHarness(63200, 2, 1, "10", 1.0, false,
-                true, decision, true, config)) {
+                true, config.queueScheduler().getDecision(), true, config)) {
             when(h.cache.findMatchingEngines(any(), any(), any())).thenAnswer(call ->
                     prefixMatches(h, call.getArgument(0)));
             h.startAutoPump(5);
             var first = h.scheduler.submit(request(h, 101));
-            AutoTpmE2EHarness.await(() -> h.prefillEndpoint(0).queuedRequestCount() + h.prefillEndpoint(1).queuedRequestCount() == 1,
-                    3000, "first request placed before its dispatch window opens");
-            int other = h.prefillEndpoint(0).queuedRequestCount() == 1 ? 1 : 0;
-            if (cancelProducer) {
-                h.prefillEndpoint(1 - other).cachePollCompleted(System.nanoTime());
-            }
-            // A partial copy is already available elsewhere when the follower arrives.
-            warmPrefix(h, other, 99L, PREFIX.subList(0, 1));
-            assertTrue(h.engineArrivalOrder.isEmpty(), "producer must still be queued");
-            long initialInput = prefillTokens(h, "context_tps_with_cache");
-            long initialReused = prefillTokens(h, "hit_tokens_total");
-            assertEquals(BLOCK_SIZE, initialInput);
-            assertEquals(0, initialReused);
+            AutoTpmE2EHarness.await(() -> h.prefillEndpoint(0).queuedRequestCount()
+                    + h.prefillEndpoint(1).queuedRequestCount() == 1, 1500, "first request placed");
+            int peer = h.prefillEndpoint(0).queuedRequestCount() == 1 ? 1 : 0;
+            warmPrefix(h, peer, 99L, PREFIX.subList(0, 1));
             var follower = h.scheduler.submit(request(h, 102));
+            AutoTpmE2EHarness.await(() -> h.prefillEndpoint(peer).queuedRequestCount() == 1,
+                    1500, "follower placed before producer dispatch");
+            assertTrue(h.engineArrivalOrder.isEmpty());
             if (cancelProducer) {
-                AutoTpmE2EHarness.await(() -> h.scheduler.getQueuedRequestCount() == 2, 1500,
-                        "both requests pending before producer cancellation");
                 h.scheduler.cancelRequest(101L, 0L, CancelReason.CLIENT_CANCELLED);
-                assertFalse(first.get(3, TimeUnit.SECONDS).isSuccess());
-            } else {
-                assertTrue(first.get(10, TimeUnit.SECONDS).isSuccess());
             }
-            assertTrue(follower.get(10, TimeUnit.SECONDS).isSuccess());
-            int expectedCompletions = cancelProducer ? 1 : 2;
-            AutoTpmE2EHarness.await(() -> h.decodeEngines.get(0).getCompletedCount() == expectedCompletions,
-                    3000, "all live requests completed");
-            h.assertAutoPumpHealthy();
-
-            long reused = prefillTokens(h, "hit_tokens_total") - initialReused;
-            long input = prefillTokens(h, "context_tps_with_cache") - initialInput;
-            assertEquals((long) expectedCompletions * INPUT, input);
-            if (cancelProducer) {
-                assertEquals(List.of(102L), h.engineArrivalOrder);
-                assertEquals(BLOCK_SIZE, reused, "only the surviving one-block prefix exists");
-                return;
-            }
-            // One cold producer + one full-prefix follower, aggregated over BOTH workers.
-            assertEquals(0.5, (double) reused / input, "aggregate reused/input tokens: " + reused + "/" + input);
-        }
-    }
-
-    @Test
-    @Timeout(20)
-    void producerCompletionWaitsForItsOwnFreshCachePollBeforeReleasingFollower() throws Exception {
-        var config = cacheAwareConfig();
-        var decision = DecisionPolicyConfig.single();
-        config.queueScheduler().setDecision(decision);
-        config.getDispatcher().setType(DispatcherConfig.Type.NON_BATCH);
-        config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(2L);
-
-        try (var h = new AutoTpmE2EHarness(63260, 2, 1, "10", 1.0, false,
-                true, decision, true, config)) {
-            // The Engine's resident prefix and the Master's indexed view advance independently.
-            var indexed = new AtomicReference<Map<String, Integer>>(Map.of());
-            var followerLookup = new CountDownLatch(1);
-            when(h.cache.findMatchingEngines(any(), any(), any())).thenAnswer(call -> {
-                var view = indexed.get();
-                if (!view.isEmpty()) { followerLookup.countDown(); }
-                return view;
-            });
-            h.startAutoPump(5);
-            h.prefillEndpoint(0).cachePollCompleted(System.nanoTime());
-            h.prefillEndpoint(1).cachePollCompleted(System.nanoTime());
-            var producerRoute = h.scheduler.submit(request(h, 501)).get(3, TimeUnit.SECONDS);
-            int producer = port(producerRoute, RoleType.PREFILL) == h.prefillEngines.get(0).getGrpcPort() ? 0 : 1;
-            int peer = 1 - producer;
-            warmPrefix(h, peer, 500L, PREFIX.subList(0, 1));
-            indexed.set(prefixMatches(h, PREFIX));
-            long staleProducerPoll = System.nanoTime();
-            var follower = h.scheduler.submit(request(h, 502));
-            assertTrue(followerLookup.await(3, TimeUnit.SECONDS), "follower considered the indexed one-block peer");
-
-            generate(h, producerRoute, 501);
-            h.pumpOnce();
-            String producerAddress = h.prefillEndpoint(producer).ipPort();
-            assertEquals(PREFIX.size(), prefixMatches(h, PREFIX).get(producerAddress));
-            assertEquals(0, indexed.get().get(producerAddress));
-            h.prefillEndpoint(peer).cachePollCompleted(System.nanoTime());
-            h.prefillEndpoint(producer).cachePollCompleted(staleProducerPoll);
-            assertThrows(TimeoutException.class, () -> follower.get(150, TimeUnit.MILLISECONDS),
-                    "neither a peer poll nor a producer poll started before completion can release B");
-
-            long pollStarted = System.nanoTime();
-            indexed.set(prefixMatches(h, PREFIX));
-            h.prefillEndpoint(producer).cachePollCompleted(pollStarted);
-            var followerRoute = follower.get(3, TimeUnit.SECONDS);
-            assertEquals(port(producerRoute, RoleType.PREFILL), port(followerRoute, RoleType.PREFILL));
-            long before = prefillTokens(h, "hit_tokens_total");
-            generate(h, followerRoute, 502);
-            assertEquals(INPUT, prefillTokens(h, "hit_tokens_total") - before);
+            assertEquals(!cancelProducer, first.get(10, TimeUnit.SECONDS).isSuccess());
+            assertEquals(h.prefillEngines.get(peer).getGrpcPort(), port(follower.get(10, TimeUnit.SECONDS), RoleType.PREFILL));
             h.assertAutoPumpHealthy();
         }
     }
@@ -171,8 +80,6 @@ class QueuedPrefixReuseE2ETest {
                 true, decision, true, config)) {
             var indexed = new AtomicReference<Map<String, Integer>>(Map.of());
             when(h.cache.findMatchingEngines(any(), any(), any())).thenAnswer(call -> indexed.get());
-            h.prefillEndpoint(0).cachePollCompleted(System.nanoTime());
-            h.prefillEndpoint(1).cachePollCompleted(System.nanoTime());
             var producerRoute = h.scheduler.submit(request(h, 701)).get(3, TimeUnit.SECONDS);
             int producer = port(producerRoute, RoleType.PREFILL) == h.prefillEngines.get(0).getGrpcPort() ? 0 : 1;
             int peer = 1 - producer;
@@ -191,9 +98,7 @@ class QueuedPrefixReuseE2ETest {
             var resident = prefixMatches(h, PREFIX);
             assertEquals(PREFIX.size(), resident.get(endpoint.ipPort()));
             if (refreshed) {
-                long pollStarted = System.nanoTime();
                 indexed.set(resident);
-                endpoint.cachePollCompleted(pollStarted);
             }
 
             var followerRoute = h.scheduler.submit(request(h, 702)).get(3, TimeUnit.SECONDS);
@@ -297,7 +202,7 @@ class QueuedPrefixReuseE2ETest {
     @ParameterizedTest(name = "SINGLE/NON_BATCH: {0} prefix blocks already cached on the idle worker")
     @ValueSource(ints = {1, 4})
     @Timeout(20)
-    void waitForAProducerOnlyWhenItCanImproveActualReuse(int residentBlocks) throws Exception {
+    void followerUsesResidentPrefixBeforeProducerCompletes(int residentBlocks) throws Exception {
         var config = cacheAwareConfig();
         var decision = DecisionPolicyConfig.single();
         config.queueScheduler().setDecision(decision);
@@ -305,8 +210,7 @@ class QueuedPrefixReuseE2ETest {
         config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(2L);
 
         try (var h = new AutoTpmE2EHarness(63240, 2, 1, "sum(computeTokens) / 4 + 10", 1.0,
-                false, true, decision, true, config);
-             var frontend = Executors.newVirtualThreadPerTaskExecutor()) {
+                false, true, decision, true, config)) {
             when(h.cache.findMatchingEngines(any(), any(), any())).thenAnswer(call ->
                     prefixMatches(h, call.getArgument(0)));
             h.startAutoPump(5);
@@ -316,22 +220,12 @@ class QueuedPrefixReuseE2ETest {
             int idle = 1 - producer;
             warmPrefix(h, idle, 400L, PREFIX.subList(0, residentBlocks));
             long before = prefillTokens(h, "hit_tokens_total");
-            var producing = frontend.submit(() -> generate(h, producerRoute, 401));
-            AutoTpmE2EHarness.await(() -> h.prefillEngines.get(producer).getRunningCount() == 1,
-                    2000, "producer started computing the missing prefix");
-
             var followerRoute = h.scheduler.submit(request(h, 402)).get(5, TimeUnit.SECONDS);
-            boolean producerStillRunning = h.prefillEngines.get(producer).getRunningCount() == 1;
+            assertEquals(h.prefillEngines.get(idle).getGrpcPort(), port(followerRoute, RoleType.PREFILL));
             generate(h, followerRoute, 402);
-            producing.get(5, TimeUnit.SECONDS);
+            assertEquals((long) residentBlocks * BLOCK_SIZE, prefillTokens(h, "hit_tokens_total") - before);
+            generate(h, producerRoute, 401);
             h.assertAutoPumpHealthy();
-            assertEquals(2L, h.decodeEngines.get(0).getCompletedCount());
-            assertEquals(INPUT, prefillTokens(h, "hit_tokens_total") - before,
-                    "follower must reuse the full prefix with a real Decode slot available");
-            if (residentBlocks == PREFIX.size()) {
-                assertTrue(producerStillRunning, "the full resident copy can serve B immediately");
-                assertEquals(h.prefillEngines.get(idle).getGrpcPort(), port(followerRoute, RoleType.PREFILL));
-            }
         }
     }
 

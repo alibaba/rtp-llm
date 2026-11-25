@@ -130,17 +130,8 @@ worker generation and permit together before handing off the route. The
 frontend calls `GenerateStream` for `NON_BATCH`. Master calls `EnqueueBatch`
 for `BATCH`.
 
-With `dispatcher.prefillCostOrder` and a positive cache-affinity wait budget, a
-request can wait in the global queue for a matching prefix being produced by
-an equal- or higher-priority request. The projected prefix must improve its
-resident hit and meet `minPrefixHitPercent`. Producers and waiters must share
-the model, Prefill role and group, cache block size and cache affinity keys.
-The request competes for placement again when the producer leaves Prefill.
-If the producer completed successfully and the expected blocks are still missing
-from the cache index, the request can wait for one successful cache poll started
-after completion on that Prefill generation. An eligible full resident match can
-serve immediately. Cancellation, retirement and the remaining `maxExtraTtftMs`
-budget also end the wait.
+After placement succeeds, Master offers the request to the selected Prefill queue immediately.
+Cache affinity uses indexed resident prefixes. `dispatcher.prefillCostOrder` ranks queued requests for dispatch.
 
 Under `router.roles.prefill.hotspotRelease`, a cache leader becomes a hotspot
 when either of two independently measured loads exceeds its pool threshold

@@ -151,11 +151,6 @@ public class RequestRegistry {
         }
     }
 
-    void cachePollCompleted(PrefillEndpoint endpoint) {
-        var queue = globalQueue;
-        if (queue != null) { queue.cachePollCompleted(endpoint); }
-    }
-
     void replanIfCacheImproved(ScheduledRequest item) {
         GlobalQueueCoordinator queue = globalQueue;
         var binding = item.decodeBinding();

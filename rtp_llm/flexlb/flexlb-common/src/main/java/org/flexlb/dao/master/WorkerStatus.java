@@ -398,7 +398,6 @@ public class WorkerStatus {
     private final AtomicReference<PollLease> statusApplication = new AtomicReference<>();
     private final AtomicReference<PollLease> cachePollLease =
             new AtomicReference<>();
-    private volatile boolean cachePollingStarted;
 
     private enum PollKind {
         STATUS,
@@ -760,13 +759,7 @@ public class WorkerStatus {
 
     /** Acquire the independent cache-poll slot for this generation. */
     public PollLease tryBeginCachePoll(long syncCycleId) {
-        PollLease lease = tryBeginPoll(PollKind.CACHE, cachePollLease, syncCycleId);
-        if (lease != null) { cachePollingStarted = true; }
-        return lease;
-    }
-
-    public boolean cachePollingStarted() {
-        return cachePollingStarted;
+        return tryBeginPoll(PollKind.CACHE, cachePollLease, syncCycleId);
     }
 
     public void requireCachePollLease(PollLease lease) {

@@ -1,6 +1,5 @@
 package org.flexlb.sync.runner;
 
-import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.cache.service.DynamicCacheIntervalService;
@@ -183,7 +182,6 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
             logger.debug("gRPC Cache Status - handled for {}, role:{}", ipPort, roleType.name());
 
             long successfulIntervalUs;
-            boolean indexedResponse = false;
             pollLease.pollTrace().record(Stage.CACHE_MUTATION_LOCK_ATTEMPT);
             workerStatus.cacheMutationLock.lock();
             try {
@@ -204,7 +202,6 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                             && current.indexedVersion() == newCacheStatus.getVersion()
                             && current.cacheStatus().getVersion() == newCacheStatus.getVersion()) {
                         workerStatus.publishCacheStatus(newCacheStatus);
-                        indexedResponse = true;
                     }
                 }
 
@@ -216,7 +213,6 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                 }
                 if (result != null && result.isSuccess()) {
                     workerStatus.publishCacheIndexedVersion(newCacheStatus.getVersion());
-                    indexedResponse = true;
                 }
                 successfulIntervalUs = workerStatus.recordSuccessfulCachePoll();
                 if (updateRequired) {
@@ -229,10 +225,6 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                 pollLease.pollTrace().record(Stage.CACHE_MUTATION_LOCK_RELEASED);
             }
 
-            if (indexedResponse && roleType.supportsPrefill()
-                    && workerDirectory.exactEndpoint(roleType, ipPort, workerStatus) instanceof PrefillEndpoint endpoint) {
-                endpoint.cachePollCompleted(pollStartNanos);
-            }
             engineHealthReporter.reportCacheStatusCheckRemoteInfo(
                     modelName, roleType.name(), startTime);
             engineHealthReporter.reportCacheStatusCheckerSuccess(
