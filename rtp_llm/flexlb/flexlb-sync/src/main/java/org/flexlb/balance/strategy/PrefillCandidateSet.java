@@ -52,26 +52,42 @@ final class PrefillCandidateSet {
         if (!candidate.hasPrediction()) {
             throw new IllegalArgumentException("candidate requires a work prediction");
         }
+        int index = addEndpoint(address, endpoint, candidate.cacheHitTokens(), candidate.routingCacheMatchTokens());
+        workloads[index] = workload;
+        projectedTtftMs[index] = saturatedAdd(candidate.projectedTtftMsValue(), workload.plannedDurationMs());
+        incomingPrefillMs[index] = candidate.incomingPrefillMs();
+        ownershipVersions[index] = ownershipVersion;
+        admissionBlocks[index] = admissionBlock;
+        minimumProjectedTtftMs = Math.min(minimumProjectedTtftMs, projectedTtftMs[index]);
+    }
+
+    /** The source owns the queued request already. Only its prefix is needed to price the move. */
+    void addQueuedSource(String address, PrefillEndpoint source, long hit, long routingHit) {
+        int index = addEndpoint(address, source, hit, routingHit);
+        projectedTtftMs[index] = Long.MAX_VALUE;
+        incomingPrefillMs[index] = 0L;
+    }
+
+    private int addEndpoint(String address, PrefillEndpoint endpoint, long hit, long routingHit) {
         ensureCapacity(size + 1);
-        endpointAddresses[size] = address;
-        endpoints[size] = endpoint;
-        workloads[size] = workload;
-        projectedTtftMs[size] = saturatedAdd(
-                candidate.projectedTtftMsValue(), workload.plannedDurationMs());
-        incomingPrefillMs[size] = candidate.incomingPrefillMs();
-        cacheHitTokens[size] = candidate.cacheHitTokens();
-        routingCacheMatchTokens[size] = candidate.routingCacheMatchTokens();
-        ownershipVersions[size] = ownershipVersion;
-        admissionBlocks[size] = admissionBlock;
-        minimumProjectedTtftMs = Math.min(minimumProjectedTtftMs, projectedTtftMs[size]);
-        maximumCacheHit = Math.max(maximumCacheHit, cacheHitTokens[size]);
-        maximumRoutingCacheMatchTokens = Math.max(
-                maximumRoutingCacheMatchTokens, routingCacheMatchTokens[size]);
-        size++;
+        int index = size++;
+        endpointAddresses[index] = address;
+        endpoints[index] = endpoint;
+        cacheHitTokens[index] = hit;
+        routingCacheMatchTokens[index] = routingHit;
+        maximumCacheHit = Math.max(maximumCacheHit, hit);
+        maximumRoutingCacheMatchTokens = Math.max(maximumRoutingCacheMatchTokens, routingHit);
+        return index;
     }
 
     void setHotspots(PrefillHotspots.Snapshot hotspots) { this.hotspots = hotspots; }
     boolean isHotspot(int index) { return hotspots.isRedirectSource(endpoints[index]); }
+    int indexOf(PrefillEndpoint endpoint) {
+        for (int i = 0; i < size; i++) {
+            if (endpoints[i] == endpoint) { return i; }
+        }
+        return -1;
+    }
     boolean mayRedirect(int source, int target) {
         return hotspots.mayRedirect(endpoints[source], endpoints[target], workloads[target]);
     }

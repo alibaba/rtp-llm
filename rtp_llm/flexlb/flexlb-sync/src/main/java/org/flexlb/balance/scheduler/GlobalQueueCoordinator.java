@@ -2,11 +2,14 @@ package org.flexlb.balance.scheduler;
 
 import io.opentelemetry.api.common.Attributes;
 import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.eviction.EvictionManager;
 import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.PrefillQueueSheddingConfig;
+import org.flexlb.config.RoutingConfig.HotspotReleaseConfig;
+import org.flexlb.config.RoutingConfig.QueuedRequestPolicy;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
@@ -28,6 +31,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -66,6 +70,10 @@ final class GlobalQueueCoordinator implements AutoCloseable {
     private final double scanBudgetMultiplier;
     private final ConfigService configService;
     private final PrefillSheddingMonitor shedding;
+    private final ScheduledExecutorService queuedMigration;
+    // Used only by the migration thread, and only for currently hot endpoint generations.
+    private final Map<PrefillEndpoint, QueuedMigrationCandidates.Cursor> migrationCursors =
+            new IdentityHashMap<>();
     private final ReentrantLock lock = new ReentrantLock();
     private final Condition changed = lock.newCondition();
     private final OrderedRequestQueue orderedQueue;
@@ -131,7 +139,49 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         availability.addListener(availabilityListener);
         lifecycle.attachGlobalQueue(this);
         if (shedding != null) { shedding.start(); }
+        var startup = checkedConfig.loadBalanceConfig();
+        HotspotReleaseConfig release = startup.getRouter().getRoles().getPrefill().getHotspotRelease();
+        queuedMigration = release != null && release.isEnabled() && release.getQueuedRequestPolicy() != QueuedRequestPolicy.DISABLED
+                ? Executors.newSingleThreadScheduledExecutor(Thread.ofPlatform().daemon()
+                        .name("flexlb-queued-hotspot-migration").factory()) : null;
+        if (queuedMigration != null) {
+            // The hotspot sampler refreshes every 100 ms, independently of new placements.
+            queuedMigration.scheduleWithFixedDelay(() -> {
+                try {
+                    migrateQueuedRequests(release, startup.isPrefillCostOrder());
+                } catch (RuntimeException failure) {
+                    Logger.error("Queued Prefill hotspot migration failed", failure);
+                }
+            }, 100L, 100L, TimeUnit.MILLISECONDS);
+        }
         decisionThread.start();
+    }
+
+    private void migrateQueuedRequests(HotspotReleaseConfig release, boolean costOrdered) {
+        if (closed.get()) { return; }
+        if (registered.isEmpty()) {
+            migrationCursors.clear();
+            return;
+        }
+        int maxAttempts = release.getMaxQueuedMigrationAttempts();
+        var sources = router.queuedMigrationSources(release);
+        migrationCursors.keySet().retainAll(sources);
+        for (var source : sources) {
+            if (closed.get()) { return; }
+            var cursor = migrationCursors.computeIfAbsent(source, ignored -> new QueuedMigrationCandidates.Cursor());
+            ScheduledRequest candidate = QueuedMigrationCandidates.candidate(source, release.getQueuedRequestPolicy(),
+                    costOrdered, item -> {
+                // Global placement may still be publishing its first route when the source queue is sampled.
+                GlobalQueueEntry entry = registered.get(item.future());
+                return entry != null && entry.removed && lifecycle.canMigrateQueued(item, maxAttempts);
+            }, cursor);
+            if (candidate != null && lifecycle.tryMigrateQueued(candidate, maxAttempts,
+                    () -> router.selectQueuedMigration(candidate))) {
+                // One committed transfer across the fleet. Resample before moving another request.
+                migrationCursors.remove(source);
+                return;
+            }
+        }
     }
 
     Map<String, Object> waitDiagnostics() {
@@ -247,6 +297,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         } finally {
             closed.set(true);
             availability.removeListener(availabilityListener);
+            if (queuedMigration != null) { queuedMigration.shutdownNow(); }
             planners.shutdown();
             if (shedding != null) { shedding.close(); }
             drainOnClose();
@@ -728,6 +779,13 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             }
         }
         awaitPlannerTermination();
+        if (queuedMigration != null) {
+            try {
+                queuedMigration.awaitTermination(decisionThreadJoinTimeoutMs(), TimeUnit.MILLISECONDS);
+            } catch (InterruptedException interruption) {
+                Thread.currentThread().interrupt();
+            }
+        }
     }
 
     private void awaitPlannerTermination() {

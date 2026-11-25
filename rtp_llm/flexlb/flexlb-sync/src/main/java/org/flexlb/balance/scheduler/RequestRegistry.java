@@ -5,11 +5,13 @@ import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
+import org.flexlb.balance.endpoint.WorkerEndpoint.GenerationPin;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.preemption.CancelTarget;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
+import org.flexlb.balance.strategy.SelectedRole;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
@@ -35,6 +37,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BiConsumer;
 import java.util.function.BooleanSupplier;
 import java.util.function.LongPredicate;
+import java.util.function.Supplier;
 
 import static org.flexlb.dao.loadbalance.Response.buildErrorResponse;
 
@@ -151,6 +154,74 @@ public class RequestRegistry {
         }
     }
 
+    public boolean canMigrateQueued(ScheduledRequest original, int maxAttempts) {
+        var slot = requestSlots.get(original.requestId());
+        return !shuttingDown.get() && slot != null && slot.canMigrateQueued(original, maxAttempts);
+    }
+
+    /** Keep the original request generation, future and deadlines while transferring one local queue owner. */
+    public boolean tryMigrateQueued(ScheduledRequest original, int maxAttempts, Supplier<SelectedRole> selectTarget) {
+        var slot = requestSlots.get(original.requestId());
+        if (shuttingDown.get() || slot == null || !slot.canMigrateQueued(original, maxAttempts)) { return false; }
+        // Selecting a target may read several cache indices. Normal source dispatch remains free to win.
+        try (var selected = selectTarget.get()) {
+            if (selected == null) { return false; }
+            try (var target = RouteAdmission.prepareMigration(original, selected);
+                    var sourcePin = original.prefillEp().tryPinGeneration()) {
+                if (target == null || sourcePin == null || !enterAdmissionHandleGate()) { return false; }
+                var claim = slot.tryBeginMigration(original, maxAttempts);
+                if (claim == null) {
+                    exitAdmissionHandleGate();
+                    return false;
+                }
+                try (claim) {
+                    return transferQueued(slot, claim, original, sourcePin, target);
+                } finally {
+                    if (claim.needsDispatchPreemptionRetry()) { tryPreemptForDispatch(original); }
+                }
+            }
+        }
+    }
+
+    private boolean transferQueued(RequestSlot slot, AdmissionHandle claim, ScheduledRequest original,
+                                  GenerationPin sourcePin, RouteAdmission target) {
+        var replacement = target.createScheduledRequest(original.ctx(), original.future(), original.enqueuedAtMs());
+        if (!original.prefillEp().takeWaitingForMigration(sourcePin, original)) { return false; }
+        slot.detachMigrationSource(claim, original);
+        boolean published = false;
+        try {
+            published = slot.commitRoute(replacement, () -> target.offerMigration(replacement))
+                    == PlacementResult.Status.SUCCESS;
+            if (published) {
+                slot.recordMigrationCommitted();
+                target.markCommitted();
+                original.prefillEp().signalPlacementCapacityChanged();
+            } else {
+                target.noteHotspotAbandon("PREFILL_ADMISSION_BLOCKED");
+            }
+            return published;
+        } finally {
+            if (!published && slot.isOpen()) { restoreAfterMigration(slot, claim, original, sourcePin); }
+        }
+    }
+
+    private void restoreAfterMigration(RequestSlot slot, AdmissionHandle claim, ScheduledRequest original,
+                                       GenerationPin sourcePin) {
+        try {
+            if (slot.commitRoute(original, () -> original.prefillEp().offerPinned(sourcePin, original))
+                    == PlacementResult.Status.SUCCESS) { return; }
+        } catch (RuntimeException publicationFailure) {
+            Logger.warn("Could not restore request " + original.requestId() + " to its original Prefill", publicationFailure);
+        }
+        // Republish to the same global queue generation only after the placement handle is free.
+        claim.close();
+        if (!slot.isOpen()) { return; }
+        var queue = globalQueue;
+        if (queue == null || !queue.requeue(original)) {
+            completeError(original.future(), StrategyErrorType.DISPATCH_FAILED, "scheduler closed during Prefill migration");
+        }
+    }
+
     void replanIfCacheImproved(ScheduledRequest item) {
         GlobalQueueCoordinator queue = globalQueue;
         var binding = item.decodeBinding();
@@ -167,7 +238,7 @@ public class RequestRegistry {
         }
         if (!enterAdmissionHandleGate()) { return; }
         RequestSlot slot = requestSlots.get(item.requestId());
-        AdmissionHandle claim = slot == null ? null : slot.tryBeginRouteWithdrawal(item);
+        AdmissionHandle claim = slot == null ? null : slot.tryBeginCacheReplan(item);
         if (claim == null) {
             exitAdmissionHandleGate();
             return;
@@ -612,10 +683,14 @@ public class RequestRegistry {
         var queue = globalQueue;
         var slot = entryFor(item);
         if (queue == null || slot == null || !isDispatchPending(item)) { return; }
+        var wait = slot.beginDispatchPreemption(item);
+        if (wait == null) { return; }
         try {
             var control = queue.preemptForDispatch(item);
-            if (control == null) { return; }
-            var wait = item.beginDecodePreemption();
+            if (control == null) {
+                item.finishDecodePreemption(wait);
+                return;
+            }
             control.whenComplete((response, failure) -> {
                 try {
                     if (failure != null) { slot.failDeliveryPreparation(item, failure); }
@@ -625,6 +700,7 @@ public class RequestRegistry {
                 }
             });
         } catch (RuntimeException failure) {
+            item.finishDecodePreemption(wait);
             slot.failDeliveryPreparation(item, failure);
         }
     }

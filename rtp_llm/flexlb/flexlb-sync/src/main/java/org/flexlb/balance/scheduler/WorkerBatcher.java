@@ -699,6 +699,21 @@ public final class WorkerBatcher {
 
     // ==================== endpoint queue operations ====================
 
+    public boolean takeWaitingForMigration(ScheduledRequest item) {
+        requireExactEndpoint(item, "migration source");
+        queueLock.lock();
+        try {
+            if (stopped || runtimeState != RuntimeState.RUNNING || !prefillState.removeWaitingForMigrationUnderLock(item)) {
+                return false;
+            }
+            queueVersion.incrementAndGet();
+            stateChanged.signal();
+            return true;
+        } finally {
+            queueLock.unlock();
+        }
+    }
+
     public boolean removeQueued(
             ScheduledRequest exactItem,
             String reason) {

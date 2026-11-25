@@ -75,6 +75,21 @@ class PrefillTokenBalanceConfigTest {
         assertThrows(ConfigValidationException.class, () -> hotspotParse("{\"targetPolicy\":\"UNKNOWN\"}"));
     }
 
+    @Test void queuedMigrationIsOptInAndBoundsAttemptsPerRequest() {
+        var defaults = hotspotParse("{}");
+        assertEquals(RoutingConfig.QueuedRequestPolicy.DISABLED, defaults.getQueuedRequestPolicy());
+        assertEquals(1, defaults.getMaxQueuedMigrationAttempts());
+        for (var policy : RoutingConfig.QueuedRequestPolicy.values()) {
+            var config = hotspotParse("{\"queuedRequestPolicy\":\"" + policy + "\",\"maxQueuedMigrationAttempts\":3}");
+            assertEquals(policy, config.getQueuedRequestPolicy());
+            assertEquals(3, config.getMaxQueuedMigrationAttempts());
+        }
+        assertThrows(ConfigValidationException.class, () -> hotspotParse("{\"queuedRequestPolicy\":null}"));
+        assertThrows(ConfigValidationException.class, () -> hotspotParse("{\"queuedRequestPolicy\":\"UNKNOWN\"}"));
+        assertThrows(ConfigValidationException.class, () -> hotspotParse("{\"maxQueuedMigrationAttempts\":0}"));
+        assertThrows(ConfigValidationException.class, () -> hotspotParse("{\"maxQueuedMigrationAttempts\":-1}"));
+    }
+
     /** The pre-1.5-fleet-release boolean switch was replaced by the object form; keep it loud. */
     @Test void removedHotspotReleaseBooleanSwitchIsRejected() {
         assertThrows(ConfigValidationException.class,

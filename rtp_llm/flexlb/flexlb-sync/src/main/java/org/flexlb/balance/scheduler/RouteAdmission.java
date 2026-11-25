@@ -151,6 +151,28 @@ public final class RouteAdmission implements AutoCloseable {
         return prepare(context, selections, response, DecodeBinding.capture(context));
     }
 
+    static RouteAdmission prepareMigration(ScheduledRequest original, SelectedRole target) {
+        var from = original.prefill();
+        var to = target.serverStatus();
+        if (to.getRole() != from.getRole() || !Objects.equals(to.getGroup(), from.getGroup())
+                || Objects.equals(to.getServerIp(), from.getServerIp()) && to.getHttpPort() == from.getHttpPort()) {
+            return null;
+        }
+        Response response = Response.copyOf(original.execution().routeResponse());
+        var roles = response.getServerStatus();
+        for (int i = 0; i < roles.size(); i++) {
+            if (roles.get(i).getRole() == from.getRole()) {
+                roles.set(i, ServerStatus.copyOf(to));
+                return prepare(original.ctx(), List.of(target), response, original.decodeBinding());
+            }
+        }
+        throw new IllegalStateException("queued route has no source Prefill");
+    }
+
+    boolean offerMigration(ScheduledRequest replacement) {
+        return prefillEndpoint().offerPinned(prefillPin(), replacement);
+    }
+
     WorkerEndpoint blockedEndpoint() { return blockedEndpoint; }
 
     boolean blockedEndpointChanged() {
@@ -380,11 +402,14 @@ public final class RouteAdmission implements AutoCloseable {
         if (selection.hotspotRedirect() != null) { selection.hotspotRedirect().onAbandon(reason); }
     }
 
-    private void markCommitted() {
+    void markCommitted() {
         requireProvisional();
         ownership = Ownership.COMMITTED;
-        if (selection.hotspotRedirect() != null) { selection.hotspotRedirect().commit(); }
-        closePins();
+        try {
+            if (selection.hotspotRedirect() != null) { selection.hotspotRedirect().commit(); }
+        } finally {
+            closePins();
+        }
     }
 
     private void requireProvisional() {

@@ -813,6 +813,14 @@ public final class PrefillState {
         return true;
     }
 
+    /** Migration competes with queue commit and never takes an OPEN delivery reservation. */
+    public boolean removeWaitingForMigrationUnderLock(ScheduledRequest item) {
+        requireLock();
+        RequestEntry entry = requests.get(item.requestId());
+        return entry != null && entry.activeIdentity(item) && entry.reservation == null
+                && entry.queueMembership == QueueMembership.WAITING && terminalizeActiveUnderLock(item);
+    }
+
     public boolean terminalizeActiveUnderLock(ScheduledRequest item) {
         requireLock();
         RequestEntry entry = requests.get(item.requestId());

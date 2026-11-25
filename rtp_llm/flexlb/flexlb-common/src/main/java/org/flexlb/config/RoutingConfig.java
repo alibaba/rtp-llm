@@ -57,6 +57,10 @@ public final class RoutingConfig {
         private boolean enabled = true;
         /** Ranking among eligible receivers after a hotspot has been detected. */
         private HotspotTargetPolicy targetPolicy = HotspotTargetPolicy.ROUTING_STRATEGY;
+        /** Which waiting requests to move from a hot Prefill queue. */
+        private QueuedRequestPolicy queuedRequestPolicy = QueuedRequestPolicy.DISABLED;
+        /** Maximum queued migration attempts per request. */
+        private int maxQueuedMigrationAttempts = 1;
         /** Fleet-median multiple above which a worker counts as congested; at least 1.0. */
         private double outlierFactor = 1.5;
         /** Time above the pool's congestion threshold before declaring a hotspot. */
@@ -75,6 +79,12 @@ public final class RoutingConfig {
         ROUTING_STRATEGY,
         MIN_PENDING_COMPUTE,
         MIN_PENDING_COMPUTE_WITHIN_ONE_BLOCK
+    }
+
+    public enum QueuedRequestPolicy {
+        DISABLED,
+        HIGHEST_HIT_RATE_FIRST,
+        LOWEST_HIT_RATE_FIRST
     }
 
     /** Prefill selection by outstanding uncached tokens with hot/cold cache affinity. */

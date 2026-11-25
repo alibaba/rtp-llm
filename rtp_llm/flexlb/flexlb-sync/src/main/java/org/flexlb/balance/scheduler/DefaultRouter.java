@@ -2,6 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import org.apache.commons.lang3.StringUtils;
 import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.scheduler.ScheduledRequest.DecodeBinding;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy.PrefillPoolSnapshot;
@@ -11,6 +12,7 @@ import org.flexlb.balance.strategy.SelectedRole;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.ModelMetaConfig;
+import org.flexlb.config.RoutingConfig.HotspotReleaseConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -87,6 +89,17 @@ public class DefaultRouter {
 
     boolean hasBetterResidentPrefix(ScheduledRequest item, String policyGroup) {
         return prefillSelector.hasBetterResidentPrefix(item.ctx(), item.prefill().getRole(), policyGroup, item.prefillEp());
+    }
+
+    List<PrefillEndpoint> queuedMigrationSources(HotspotReleaseConfig config) {
+        RoleType role = prefillRole();
+        return role == null ? List.of() : prefillSelector.queuedMigrationSources(role, config);
+    }
+
+    SelectedRole selectQueuedMigration(ScheduledRequest item) {
+        // Deferred Decode and any previously selected VIT still belong to the original route's group.
+        return prefillSelector.selectQueuedMigration(item.ctx(), item.prefill().getRole(),
+                item.prefill().getGroup(), item.prefillEp()).value();
     }
 
     /** Sustained pool-wide Engine queue pressure evidence for global shedding. */

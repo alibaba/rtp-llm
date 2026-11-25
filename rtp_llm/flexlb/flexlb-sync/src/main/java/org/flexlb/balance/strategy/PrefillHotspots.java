@@ -101,10 +101,31 @@ final class PrefillHotspots {
         }
 
         boolean mayRedirect(PrefillEndpoint source, PrefillEndpoint target, PrefillTokenWorkload.Snapshot current) {
+            return mayRedirect(source, target, loads.get(source), current);
+        }
+
+        boolean mayMoveQueuedRequest(PrefillEndpoint source, PrefillEndpoint target) {
+            return mayRedirect(source, target, new Load(source.observedRequestCount(), source.pendingTokenWork()),
+                    target.tokenWorkloadSnapshot());
+        }
+
+        boolean hasQueuedMigrationReceiver(PrefillEndpoint source, List<PrefillRoutingEntry> members) {
+            if (!isRedirectSource(source)) { return false; }
+            Load from = new Load(source.observedRequestCount(), source.pendingTokenWork());
+            if (from.requests() <= requests.outlierLimit() && from.compute() <= compute.outlierLimit()) { return false; }
+            for (var entry : members) {
+                var target = entry.endpoint();
+                if (!isHot(target) && !target.engineQueueAdmissionBlocked()
+                        && mayRedirect(source, target, from, target.tokenWorkloadSnapshot())) { return true; }
+            }
+            return false;
+        }
+
+        private boolean mayRedirect(PrefillEndpoint source, PrefillEndpoint target, Load from,
+                                    PrefillTokenWorkload.Snapshot current) {
             if (!isRedirectSource(source) || isHot(target)) {
                 return false;
             }
-            Load from = loads.get(source);
             if (!loads.containsKey(target)) { return false; }
             long targetRequests = saturatedAdd(
                     current.observedRequests(), current.plannedRequests());

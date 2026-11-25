@@ -56,9 +56,22 @@ public final class RequestSlot {
 
         private final AtomicBoolean resolved = new AtomicBoolean();
         private final RequestSlot owner;
+        private enum Phase { STANDARD, MIGRATING_SOURCE, MIGRATING_DETACHED }
+        private Phase phase;
+        // Only the source worker can ask to preempt while this migration owns its queue item.
+        private boolean retryDispatchPreemption;
 
         AdmissionHandle(RequestSlot owner) {
+            this(owner, Phase.STANDARD);
+        }
+
+        private AdmissionHandle(RequestSlot owner, Phase phase) {
             this.owner = Objects.requireNonNull(owner, "owner");
+            this.phase = phase;
+        }
+
+        boolean needsDispatchPreemptionRetry() {
+            synchronized (owner) { return retryDispatchPreemption; }
         }
 
         /** A late placement attempt must not overwrite the frozen cancellation evidence. */
@@ -150,6 +163,8 @@ public final class RequestSlot {
     private AdmissionHandle admissionHandle;
     /** Pins a queued route while Decode capacity is transferred to a higher priority owner. */
     private ScheduledRequest withdrawingRoute;
+    private int queuedMigrationAttempts;
+    private boolean queuedMigrationCommitted;
     private CancelReason pendingAdmissionCancelReason;
     private boolean pendingAdmissionInactivityExpired;
     private DeferredTerminal admissionPendingTerminal;
@@ -416,7 +431,11 @@ public final class RequestSlot {
         return tryBeginRouteWithdrawal(pendingItem);
     }
 
-    synchronized AdmissionHandle tryBeginRouteWithdrawal(ScheduledRequest exact) {
+    synchronized AdmissionHandle tryBeginCacheReplan(ScheduledRequest exact) {
+        return queuedMigrationCommitted ? null : tryBeginRouteWithdrawal(exact);
+    }
+
+    private synchronized AdmissionHandle tryBeginRouteWithdrawal(ScheduledRequest exact) {
         if (exact == null || exact != pendingItem || !ownsPreparedDeliveryLocked(exact) || admissionHandle != null
                 || exact.pendingDecodePreemption() != null
                 || item.requestExpired(System.currentTimeMillis())) {
@@ -425,6 +444,45 @@ public final class RequestSlot {
         admissionHandle = new AdmissionHandle(this);
         withdrawingRoute = pendingItem;
         return admissionHandle;
+    }
+
+    synchronized boolean canMigrateQueued(ScheduledRequest exact, int maxAttempts) {
+        return exact != null && exact == pendingItem && admissionHandle == null
+                && !queuedMigrationCommitted && queuedMigrationAttempts < maxAttempts
+                && ownsPreparedDeliveryLocked(exact) && !exact.requestExpired(System.currentTimeMillis())
+                && exact.pendingDecodePreemption() == null
+                && (exact.decodeBinding().isDeferred() || exact.decodeBinding().isAbsent());
+    }
+
+    synchronized AdmissionHandle tryBeginMigration(ScheduledRequest exact, int maxAttempts) {
+        if (!canMigrateQueued(exact, maxAttempts)) { return null; }
+        // A source delivery already committed under the queue lock must still be able
+        // to claim this slot. The exact removal competes with that commit in PrefillState.
+        admissionHandle = new AdmissionHandle(this, AdmissionHandle.Phase.MIGRATING_SOURCE);
+        return admissionHandle;
+    }
+
+    synchronized void detachMigrationSource(AdmissionHandle claim, ScheduledRequest exact) {
+        if (admissionHandle != claim || item != exact.execution() || deliveryClaimKind != DeliveryClaimKind.NONE) {
+            throw new IllegalStateException("detached migration source lost its slot: " + requestId);
+        }
+        claim.phase = AdmissionHandle.Phase.MIGRATING_DETACHED;
+        queuedMigrationAttempts++;
+        item = null;
+        pendingItem = null;
+    }
+
+    synchronized void recordMigrationCommitted() {
+        queuedMigrationCommitted = true;
+    }
+
+    synchronized ScheduledRequest.DecodePreemptionWait beginDispatchPreemption(ScheduledRequest exact) {
+        if (!ownsPreparedDeliveryLocked(exact) || exact.pendingDecodePreemption() != null) { return null; }
+        if (admissionHandle != null && admissionHandle.phase == AdmissionHandle.Phase.MIGRATING_SOURCE) {
+            admissionHandle.retryDispatchPreemption = true;
+            return null;
+        }
+        return exact.beginDecodePreemption();
     }
 
     void detachWithdrawnRoute(AdmissionHandle claim, ScheduledRequest exact, String reason) {
@@ -1266,7 +1324,10 @@ public final class RequestSlot {
                 return;
             }
             admissionOpen = false;
-            if (admissionHandle != null) {
+            // Either worker may claim delivery before the migration handle closes.
+            // In that case normal dispatch has already satisfied the scheduling deadline.
+            if (admissionHandle != null
+                    && (admissionHandle.phase == AdmissionHandle.Phase.STANDARD || !deliveryClaimKind.isClaimed())) {
                 recordCancellationLocked(CancelReason.DEADLINE_EXCEEDED,
                         "request scheduling deadline exceeded during admission");
             } else if (deliveryClaimKind == DeliveryClaimKind.NONE

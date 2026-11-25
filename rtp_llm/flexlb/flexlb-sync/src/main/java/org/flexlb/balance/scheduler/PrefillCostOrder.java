@@ -19,7 +19,7 @@ final class PrefillCostOrder {
     }
 
     private static int compareCosts(long lengthA, long computeA, long lengthB, long computeB) {
-        int ratio = compareUnitCost(lengthA, computeA, lengthB, computeB);
+        int ratio = compareTokenRatios(computeA, lengthA, computeB, lengthB);
         if (ratio != 0) { return ratio; }
         int compute = Long.compare(computeA, computeB);
         return compute != 0 ? compute : Long.compare(lengthA, lengthB);
@@ -29,13 +29,13 @@ final class PrefillCostOrder {
      * For a common cache-read weight 0 <= a < 1, (C + a*H)/T has the same order.
      * Exact cross multiplication avoids floating-point ties and long overflow.
      */
-    private static int compareUnitCost(long lengthA, long computeA, long lengthB, long computeB) {
+    static int compareTokenRatios(long tokensA, long lengthA, long tokensB, long lengthB) {
         try {
-            return Long.compare(Math.multiplyExact(computeA, lengthB),
-                    Math.multiplyExact(computeB, lengthA));
+            return Long.compare(Math.multiplyExact(tokensA, lengthB),
+                    Math.multiplyExact(tokensB, lengthA));
         } catch (ArithmeticException overflow) {
-            return BigInteger.valueOf(computeA).multiply(BigInteger.valueOf(lengthB))
-                    .compareTo(BigInteger.valueOf(computeB).multiply(BigInteger.valueOf(lengthA)));
+            return BigInteger.valueOf(tokensA).multiply(BigInteger.valueOf(lengthB))
+                    .compareTo(BigInteger.valueOf(tokensB).multiply(BigInteger.valueOf(lengthA)));
         }
     }
 }

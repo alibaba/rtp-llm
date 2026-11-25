@@ -188,6 +188,11 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 getStatus().getRole(), topology.group(), ipPort());
     }
 
+    public boolean takeWaitingForMigration(GenerationPin pin, ScheduledRequest item) {
+        requirePinnedGeneration(pin);
+        return runtime.takeWaitingForMigration(item);
+    }
+
     /** Remove only the supplied canonical ACTIVE queue identity. */
     public boolean removeQueued(
             ScheduledRequest exactItem,

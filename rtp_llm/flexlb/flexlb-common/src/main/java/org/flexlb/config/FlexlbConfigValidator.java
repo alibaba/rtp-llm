@@ -339,6 +339,10 @@ final class FlexlbConfigValidator {
         if (hotspotRelease != null) {
             require(hotspotRelease.getTargetPolicy() != null,
                     "router.roles.prefill.hotspotRelease.targetPolicy", "is required");
+            require(hotspotRelease.getQueuedRequestPolicy() != null,
+                    "router.roles.prefill.hotspotRelease.queuedRequestPolicy", "is required");
+            positive(hotspotRelease.getMaxQueuedMigrationAttempts(),
+                    "router.roles.prefill.hotspotRelease.maxQueuedMigrationAttempts");
             require(hotspotRelease.getOutlierFactor() >= 1.0,
                     "router.roles.prefill.hotspotRelease.outlierFactor",
                     "must be at least 1.0");

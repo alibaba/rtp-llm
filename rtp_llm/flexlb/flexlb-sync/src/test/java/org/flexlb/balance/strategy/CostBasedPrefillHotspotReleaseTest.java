@@ -4,6 +4,7 @@ import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
+import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.QueueSnapshot;
 import org.flexlb.balance.projection.RouteProjection;
@@ -35,11 +36,13 @@ import static org.flexlb.balance.strategy.HotspotRedirectLimiter.Rejection.BUDGE
 import static org.flexlb.balance.strategy.HotspotRedirectLimiter.Rejection.PACING;
 import static org.flexlb.config.RoutingConfig.HotspotTargetPolicy.MIN_PENDING_COMPUTE_WITHIN_ONE_BLOCK;
 
+import static org.flexlb.balance.PlacementResult.Status.BLOCKED;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyDouble;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -140,6 +143,111 @@ class CostBasedPrefillHotspotReleaseTest {
         var current = assertInstanceOf(Ticket.class, budget.tryAcquire(1000, 1000));
         abandoned.close();
         assertEquals(BUDGET_EXHAUSTED, budget.tryAcquire(1, 1000), "closing an expired ticket must leave the new window intact");
+    }
+
+    @Test
+    void queuedMigrationHonorsOriginalPoolAndSharedBudgetWithoutCreditingAnotherArrival() {
+        var config = configWithHotspotRelease();
+        config.getScheduler().setType(SchedulerConfig.Type.QUEUE);
+        var release = config.getRouter().getRoles().getPrefill().getHotspotRelease();
+        release.setMaxExtraComputePermille(1000);
+        var source = tokenEndpoint("leader");
+        var receiver = tokenEndpoint("other");
+        when(source.observedRequestCount()).thenReturn(30L);
+        var strategy = tokenStrategy(source, receiver);
+        assertEquals(List.of(source), strategy.queuedMigrationSources(RoleType.PREFILL, release));
+
+        var request = tokenContext(config);
+        assertEquals(BLOCKED, strategy.selectQueuedMigration(request, RoleType.PREFILL, "another", source).status());
+        assertEquals(BLOCKED, strategy.selectQueuedMigration(request, RoleType.PREFILL, "g", source).status());
+        verify(reporter).reportPrefillHotspotDecision("leader", "FAILED", "BUDGET_EXHAUSTED");
+        assertTrue(request.claimPrefillComputeSample(), "moving queued work must not create another offered request");
+        verify(source, never()).tryPlanTokenWork(anyLong(), anyLong(), anyLong());
+
+        recordColdArrival(1000);
+        try (var selected = strategy.selectQueuedMigration(request, RoleType.PREFILL, "g", source).value()) {
+            assertEquals("other", selected.serverStatus().getServerIp());
+        }
+        try (var selected = strategy.selectQueuedMigration(request, RoleType.PREFILL, "", source).value()) {
+            assertEquals("other", selected.serverStatus().getServerIp(), "an abandoned move refunds its ticket");
+            var redirect = selected.takeHotspotRedirect();
+            redirect.commit();
+            redirect.close();
+        }
+        verify(reporter).reportPrefillHotspotDecision("leader", "SUCCESS", "QUEUED_ROUTE_COMMITTED");
+        assertEquals(BLOCKED, strategy.selectQueuedMigration(request, RoleType.PREFILL, "g", source).status());
+        verify(source, never()).tryPlanTokenWork(anyLong(), anyLong(), anyLong());
+    }
+
+    @Test
+    void queuedRequestCanLeaveItsFullSourceForFreeWhenAnotherBusyWorkerHasABetterPrefix() {
+        var config = configWithHotspotRelease();
+        config.getScheduler().setType(SchedulerConfig.Type.QUEUE);
+        var request = tokenContext(config);
+        var source = tokenEndpoint("leader");
+        var receiver = tokenEndpoint("other");
+        var busy = tokenEndpoint("busy");
+        when(source.observedRequestCount()).thenReturn(40L);
+        when(source.engineQueueAdmissionBlocked()).thenReturn(true);
+        when(source.canAcceptRequest()).thenReturn(false);
+        when(busy.engineQueueAdmissionBlocked()).thenReturn(true);
+        var resident = new GroupPlanner.Item(request.getRequestId(), 50, 1L, 10L, Long.MAX_VALUE, 1000L, 400L);
+        when(source.captureRouteProjectionInputs()).thenReturn(new RouteProjection.Inputs(
+                new QueueSnapshot(10L, true, null, null, List.of(resident), null),
+                new WorkSnapshot(10L, List.of(), List.of(), 0L)));
+        var strategy = tokenStrategy(Map.of("leader:8080", 4, "other:8080", 5, "busy:8080", 9),
+                source, receiver, busy);
+
+        try (var selected = strategy.selectQueuedMigration(request, RoleType.PREFILL, "g", source).value()) {
+            assertEquals("other", selected.serverStatus().getServerIp());
+            try (var redirect = selected.takeHotspotRedirect()) { redirect.commit(); }
+        }
+        verify(source, never()).captureRouteProjectionInputs();
+        verify(source, never()).tryPlanTokenWork(anyLong(), anyLong(), anyLong());
+        verify(reporter, never()).reportCacheHitMetrics(any(), anyLong(), anyDouble());
+        verify(reporter, never()).reportPrefillSelectedEstimates(any(), any(), any(), anyLong(), anyLong());
+        verify(reporter).reportPrefillHotspotDecision("leader", "SUCCESS", "QUEUED_ROUTE_COMMITTED");
+    }
+
+    @Test
+    void queuedMigrationSkipsPredictionWhenTheSourceCoolsOrAllReceiversAreBlocked() {
+        var config = configWithHotspotRelease();
+        config.getScheduler().setType(SchedulerConfig.Type.QUEUE);
+        var source = tokenEndpoint("leader");
+        var receiver = tokenEndpoint("other");
+        var pressure = new AtomicLong(30L);
+        when(source.observedRequestCount()).thenAnswer(call -> pressure.get());
+        var strategy = tokenStrategy(source, receiver);
+        var release = config.getRouter().getRoles().getPrefill().getHotspotRelease();
+        assertEquals(List.of(source), strategy.queuedMigrationSources(RoleType.PREFILL, release));
+        var request = tokenContext(config);
+        pressure.set(0L);
+        assertEquals(BLOCKED, strategy.selectQueuedMigration(request, RoleType.PREFILL, "g", source).status());
+        pressure.set(30L);
+        when(receiver.engineQueueAdmissionBlocked()).thenReturn(true);
+        assertEquals(BLOCKED, strategy.selectQueuedMigration(request, RoleType.PREFILL, "g", source).status());
+        verify(receiver, never()).captureRouteProjectionInputs();
+        verify(source, never()).tryPlanTokenWork(anyLong(), anyLong(), anyLong());
+    }
+
+    @Test
+    void queuedMoveRechecksSourceAfterTargetProjection() {
+        var config = configWithHotspotRelease();
+        config.getScheduler().setType(SchedulerConfig.Type.QUEUE);
+        var source = tokenEndpoint("leader");
+        var target = tokenEndpoint("other");
+        var pressure = new AtomicLong(30L);
+        when(source.observedRequestCount()).thenAnswer(call -> pressure.get());
+        var inputs = target.captureRouteProjectionInputs();
+        when(target.captureRouteProjectionInputs()).thenAnswer(call -> {
+            pressure.set(0L);
+            return inputs;
+        });
+        var strategy = tokenStrategy(source, target);
+
+        assertEquals(BLOCKED, strategy.selectQueuedMigration(tokenContext(config), RoleType.PREFILL, "g", source).status());
+        verify(reporter).reportPrefillHotspotDecision("leader", "FAILED", "NO_ELIGIBLE_TARGET");
+        verify(target, never()).tryPlanTokenWork(anyLong(), anyLong(), anyLong());
     }
 
     @Test
@@ -440,12 +548,12 @@ class CostBasedPrefillHotspotReleaseTest {
             var rejected = ranking.select(candidates, RoleType.PREFILL, "g", request);
             assertEquals(0, rejected.index());
             assertEquals("CACHE_LOSS_LIMIT", rejected.noTargetReason());
-            HotspotRedirect.observe(reporter, candidates, rejected);
+            HotspotRedirect.observe(reporter, candidates, rejected, false);
 
             when(candidates.endpoint(1).engineQueueAdmissionBlocked()).thenReturn(true);
             var blocked = ranking.select(candidates, RoleType.PREFILL, "g", request);
             assertEquals("NO_ELIGIBLE_TARGET", blocked.noTargetReason());
-            HotspotRedirect.observe(reporter, candidates, blocked);
+            HotspotRedirect.observe(reporter, candidates, blocked, false);
 
             var equalHits = candidates(10, 20, 900, 900);
             sampleRequestLoads(equalHits, 40, 1);
@@ -531,8 +639,14 @@ class CostBasedPrefillHotspotReleaseTest {
     }
 
     private CostBasedPrefillStrategy tokenStrategy(PrefillEndpoint leader, PrefillEndpoint other) {
-        var fleet = List.of(new EndpointRegistry.PrefillRoutingEntry("leader:8080", leader),
-                new EndpointRegistry.PrefillRoutingEntry("other:8080", other));
+        return tokenStrategy(Map.of("leader:8080", 9, "other:8080", 5), leader, other);
+    }
+
+    private CostBasedPrefillStrategy tokenStrategy(Map<String, Integer> matches, PrefillEndpoint... endpoints) {
+        var fleet = new ArrayList<EndpointRegistry.PrefillRoutingEntry>();
+        for (var endpoint : endpoints) {
+            fleet.add(new EndpointRegistry.PrefillRoutingEntry(endpoint.getIp() + ":8080", endpoint));
+        }
         WorkerDirectory directory = mock(WorkerDirectory.class);
         when(directory.prefillRoutingSnapshot(RoleType.PREFILL)).thenReturn(fleet);
         for (EndpointRegistry.PrefillRoutingEntry entry : fleet) {
@@ -544,8 +658,7 @@ class CostBasedPrefillHotspotReleaseTest {
             when(directory.captureEndpoint(RoleType.PREFILL, entry.address())).thenReturn(pin);
         }
         CacheAwareService cache = mock(CacheAwareService.class);
-        when(cache.findMatchingEngines(any(), eq(RoleType.PREFILL), any())).thenReturn(
-                Map.of("leader:8080", 9, "other:8080", 5));
+        when(cache.findMatchingEngines(any(), eq(RoleType.PREFILL), any())).thenReturn(matches);
         return new CostBasedPrefillStrategy(
                 directory, cache, reporter, budget, new PrefillHotspots(nowNanos::get));
     }

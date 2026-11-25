@@ -53,17 +53,16 @@ final class PrefillCandidateRanking {
             return Choice.ordinary(-1, false, null);
         }
         var prefill = request.getConfig().getRouter().getRoles().getPrefill();
-        var release = prefill.getHotspotRelease();
         boolean direct = request.getConfig().isDirect();
         return prefill.getTokenBalance() == null
-                ? selectByTtft(candidates, role, group, request.getRequest(), prefill.getCacheAffinity(), release, direct)
-                : selectTokenBalancedCandidate(candidates, role, group, request.getRequest(), prefill.getTokenBalance(), release, direct);
+                ? selectByTtft(candidates, role, group, request.getRequest(), prefill, direct)
+                : selectTokenBalancedCandidate(candidates, role, group, request.getRequest(), prefill, direct);
     }
 
     private static BitSet redirectTargets(PrefillCandidateSet candidates, int source, boolean direct) {
         BitSet targets = new BitSet(candidates.size());
         for (int i = 0; i < candidates.size(); i++) {
-            if (candidates.mayRedirect(source, i) && candidates.admissionBlock(i) == null
+            if (i != source && candidates.mayRedirect(source, i) && candidates.admissionBlock(i) == null
                     && !candidates.endpoint(i).engineQueueAdmissionBlocked()
                     && (!direct || candidates.endpoint(i).canAcceptRequest())) {
                 targets.set(i);
@@ -75,11 +74,11 @@ final class PrefillCandidateRanking {
     /** Cache leaders pin hot requests unless a detected hotspot can redirect under the shared limit. */
     private Choice selectTokenBalancedCandidate(PrefillCandidateSet survivors,
             RoleType roleType, String group, Request request,
-            RoutingConfig.TokenBalanceConfig tokenBalance, RoutingConfig.HotspotReleaseConfig release, boolean direct) {
+            RoutingConfig.PrefillConfig prefill, boolean direct) {
         long seqLen = request.getSeqLen();
-        boolean hotspotRelease = release.isEnabled();
+        boolean hotspotRelease = prefill.getHotspotRelease().isEnabled();
         boolean cacheFirst = PrefillTokenBalance.cacheFirst(
-                survivors.maximumCacheHit, seqLen, tokenBalance.getMinPrefixHitPercent());
+                survivors.maximumCacheHit, seqLen, prefill.getTokenBalance().getMinPrefixHitPercent());
         if (!cacheFirst) {
             int target = selectByTokenWork(survivors, roleType, group, seqLen, hotspotRelease,
                     i -> !survivors.endpoint(i).engineQueueAdmissionBlocked(), tieRotation);
@@ -99,17 +98,42 @@ final class PrefillCandidateRanking {
         Choice fallback = Choice.ordinary(openLeaders.get(source) ? source : -1, true, null);
         if (!hotspotRelease || !survivors.isHotspot(source)) { return fallback; }
 
-        BitSet targets = redirectTargets(survivors, source, direct);
-        if (targets.isEmpty()) { return fallback.noTarget(source, "NO_ELIGIBLE_TARGET"); }
-        if (release.getTargetPolicy() != RoutingConfig.HotspotTargetPolicy.ROUTING_STRATEGY) {
-            return selectLeastCompute(survivors, roleType, group, minimumReceiverHit(survivors, release, request), targets, source, fallback);
-        }
+        return selectReceiver(survivors, roleType, group, request, prefill, direct, source, fallback);
+    }
 
-        leaders.and(targets);
-        int selected = leaders.isEmpty()
-                ? selectByTokenWork(survivors, roleType, group, seqLen, true, targets::get, redirectRotation)
-                : selectTokenLeader(survivors, leaders, roleType, group, redirectRotation);
-        return selected >= 0 ? fallback.redirectTo(source, selected) : fallback.noTarget(source, "NO_ELIGIBLE_TARGET");
+    /** The source already owns this request. A failed redirect leaves that ownership intact. */
+    Choice selectQueuedMigration(PrefillCandidateSet candidates, RoleType role, String group, BalanceContext context,
+                                 int source) {
+        return selectReceiver(candidates, role, group, context.getRequest(),
+                context.getConfig().getRouter().getRoles().getPrefill(), false, source, Choice.ordinary(-1, false, null));
+    }
+
+    private Choice selectReceiver(PrefillCandidateSet candidates, RoleType role, String group, Request request,
+                                  RoutingConfig.PrefillConfig prefill, boolean direct, int source, Choice fallback) {
+        BitSet targets = redirectTargets(candidates, source, direct);
+        if (targets.isEmpty()) { return fallback.noTarget(source, "NO_ELIGIBLE_TARGET"); }
+        var release = prefill.getHotspotRelease();
+        if (release.getTargetPolicy() != RoutingConfig.HotspotTargetPolicy.ROUTING_STRATEGY) {
+            return selectLeastCompute(candidates, role, group, minimumReceiverHit(candidates, release, request),
+                    targets, source, fallback);
+        }
+        int target;
+        if (prefill.getTokenBalance() == null) {
+            target = rankByTtft(candidates, targets, role, group, request.getSeqLen(),
+                    prefill.getCacheAffinity(), true, redirectRotation).index();
+        } else {
+            BitSet leaders = new BitSet();
+            if (PrefillTokenBalance.cacheFirst(candidates.maximumCacheHit, request.getSeqLen(),
+                    prefill.getTokenBalance().getMinPrefixHitPercent())) {
+                for (int i = targets.nextSetBit(0); i >= 0; i = targets.nextSetBit(i + 1)) {
+                    if (candidates.cacheHit(i) == candidates.maximumCacheHit) { leaders.set(i); }
+                }
+            }
+            target = leaders.isEmpty()
+                    ? selectByTokenWork(candidates, role, group, request.getSeqLen(), true, targets::get, redirectRotation)
+                    : selectTokenLeader(candidates, leaders, role, group, redirectRotation);
+        }
+        return target >= 0 ? fallback.redirectTo(source, target) : fallback.noTarget(source, "NO_ELIGIBLE_TARGET");
     }
 
     private static int selectTokenLeader(PrefillCandidateSet survivors, BitSet leaders, RoleType role,
@@ -180,23 +204,17 @@ final class PrefillCandidateRanking {
 
     /** Apply the ordinary ranking first, then release its winner if that endpoint is hot. */
     private Choice selectByTtft(PrefillCandidateSet survivors, RoleType role, String group, Request request,
-                             RoutingConfig.CacheAffinityConfig affinity, RoutingConfig.HotspotReleaseConfig release,
-                             boolean direct) {
+                             RoutingConfig.PrefillConfig prefill, boolean direct) {
         long seqLen = request.getSeqLen();
         BitSet eligible = new BitSet(survivors.size());
         eligible.set(0, survivors.size());
-        TtftChoice choice = rankByTtft(survivors, eligible, role, group, seqLen, affinity,
-                release.isEnabled(), tieRotation);
+        boolean hotspotRelease = prefill.getHotspotRelease().isEnabled();
+        TtftChoice choice = rankByTtft(survivors, eligible, role, group, seqLen, prefill.getCacheAffinity(),
+                hotspotRelease, tieRotation);
         int selected = choice.index();
         Choice ordinary = Choice.ordinary(selected, "CACHE_LEADER".equals(choice.reason()), choice.reason());
-        if (release.isEnabled() && survivors.isHotspot(selected)) {
-            BitSet targets = redirectTargets(survivors, selected, direct);
-            if (targets.isEmpty()) { return ordinary.noTarget(selected, "NO_ELIGIBLE_TARGET"); }
-            if (release.getTargetPolicy() != RoutingConfig.HotspotTargetPolicy.ROUTING_STRATEGY) {
-                return selectLeastCompute(survivors, role, group, minimumReceiverHit(survivors, release, request), targets, selected, ordinary);
-            }
-            int alternate = rankByTtft(survivors, targets, role, group, seqLen, affinity, true, redirectRotation).index();
-            return ordinary.redirectTo(selected, alternate);
+        if (hotspotRelease && survivors.isHotspot(selected)) {
+            return selectReceiver(survivors, role, group, request, prefill, direct, selected, ordinary);
         }
         return ordinary;
     }

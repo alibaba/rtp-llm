@@ -6,17 +6,19 @@ import org.flexlb.service.monitor.EngineHealthReporter;
 public final class HotspotRedirect implements AutoCloseable {
     private final EngineHealthReporter reporter;
     private final String sourceIp;
+    private final String commitReason;
     private HotspotRedirectLimiter.Ticket ticket;
     private String abandonmentReason = "ROUTE_NOT_COMMITTED";
     private boolean finished;
 
-    private HotspotRedirect(EngineHealthReporter reporter, String sourceIp) {
+    private HotspotRedirect(EngineHealthReporter reporter, String sourceIp, String commitReason) {
         this.reporter = reporter;
         this.sourceIp = sourceIp;
+        this.commitReason = commitReason;
     }
 
     static HotspotRedirect observe(EngineHealthReporter reporter, PrefillCandidateSet candidates,
-                                   PrefillCandidateRanking.Choice choice) {
+                                   PrefillCandidateRanking.Choice choice, boolean queued) {
         if (choice.hotspotSource() < 0) {
             if (choice.index() >= 0) {
                 reporter.reportPrefillHotspotDecision(candidates.endpoint(choice.index()).getIp(),
@@ -30,7 +32,7 @@ public final class HotspotRedirect implements AutoCloseable {
             reporter.reportPrefillHotspotDecision(sourceIp, "FAILED", choice.noTargetReason());
             return null;
         }
-        return new HotspotRedirect(reporter, sourceIp);
+        return new HotspotRedirect(reporter, sourceIp, queued ? "QUEUED_ROUTE_COMMITTED" : "ROUTE_COMMITTED");
     }
 
     void attach(HotspotRedirectLimiter.Ticket ticket) {
@@ -46,7 +48,7 @@ public final class HotspotRedirect implements AutoCloseable {
         if (finished) { return; }
         ticket.commit();
         finished = true;
-        reporter.reportPrefillHotspotDecision(sourceIp, "SUCCESS", "ROUTE_COMMITTED");
+        reporter.reportPrefillHotspotDecision(sourceIp, "SUCCESS", commitReason);
     }
 
     @Override
