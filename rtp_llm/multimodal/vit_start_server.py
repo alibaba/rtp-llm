@@ -6,6 +6,7 @@ from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.log_config import setup_logging
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import setup_cuda_device_and_accl_env
+from rtp_llm.device.device_type import device_name
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.multimodal.mm_process_engine import MMProcessEngine
 from rtp_llm.multimodal.multimodal_mixin_factory import MultimodalMixinFactory
@@ -65,7 +66,7 @@ def vit_start_server(
         model_config=model_config,
         engine_config=engine_config,
         vit_config=py_env_configs.vit_config,
-        device=f"cuda:{local_rank}",
+        device=f"{device_name()}:{local_rank}",
         server_id=server_id,
         is_proxy_mode=is_proxy_mode,
     )
