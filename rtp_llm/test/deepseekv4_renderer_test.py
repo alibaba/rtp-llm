@@ -12,6 +12,8 @@ from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig, ThinkingMode
 from rtp_llm.config.py_config_modules import GenerateEnvConfig
 from rtp_llm.openai.api_datatype import (
+    ContentPart,
+    ContentPartTypeEnum,
     ChatCompletionRequest,
     ChatCompletionResponseStreamChoice,
     DeltaMessage,
@@ -19,6 +21,7 @@ from rtp_llm.openai.api_datatype import (
     FunctionCall,
     GPTFunctionDefinition,
     GPTToolDefinition,
+    ImageURL,
     RoleEnum,
     ToolCall,
 )
@@ -1850,6 +1853,85 @@ class ThinkTokensAccuracyTest(IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(reasoning_out, "".join(think_tokens))
                 self.assertEqual(content_out, "answer")
+
+
+@skipUnless(
+    DSV4_ENCODING_PATH.exists(),
+    f"DSV4 encoding module not found at {DSV4_ENCODING_PATH}",
+)
+class DeepseekV4ContentPartNormalizationTest(TestCase):
+    def test_tool_and_chat_messages_with_content_part_lists(self):
+        encoding_mod = _load_module("encoding_dsv4_content_test", DSV4_ENCODING_PATH)
+        renderer = _make_renderer(encoding_mod)
+        renderer.think_mode = True
+        renderer.default_thinking_mode = ThinkingMode.ENABLED
+
+        req = ChatCompletionRequest(
+            messages=[
+                {
+                    "role": "system",
+                    "content": [
+                        ContentPart(type=ContentPartTypeEnum.text, text="sys prompt"),
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        ContentPart(
+                            type=ContentPartTypeEnum.text, text="inspect image"
+                        ),
+                        ContentPart(
+                            type=ContentPartTypeEnum.image_url,
+                            image_url=ImageURL(url="data:image/png;base64,AAAA"),
+                        ),
+                    ],
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        ContentPart(type=ContentPartTypeEnum.text, text="reading"),
+                    ],
+                    "tool_calls": [
+                        ToolCall(
+                            id="call_1",
+                            type="function",
+                            function=FunctionCall(
+                                name="Read", arguments='{"file":"x.png"}'
+                            ),
+                        )
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_1",
+                    "content": [
+                        ContentPart(
+                            type=ContentPartTypeEnum.text, text="file metadata"
+                        ),
+                        ContentPart(
+                            type=ContentPartTypeEnum.image_url,
+                            image_url=ImageURL(url="data:image/png;base64,BBBB"),
+                        ),
+                    ],
+                },
+            ]
+        )
+        prompt = renderer._build_prompt(req)
+        self.assertIn("sys prompt", prompt)
+        self.assertIn("inspect image\n\n[Unsupported image_url]", prompt)
+        self.assertIn(
+            "<tool_result>file metadata\n\n[Unsupported image_url]</tool_result>",
+            prompt,
+        )
+
+    def test_normalize_message_content_preserves_string_and_none(self):
+        self.assertEqual(
+            DeepseekV4Renderer._normalize_message_content(RoleEnum.user, "hello"),
+            "hello",
+        )
+        self.assertIsNone(
+            DeepseekV4Renderer._normalize_message_content(RoleEnum.tool, None)
+        )
 
 
 if __name__ == "__main__":

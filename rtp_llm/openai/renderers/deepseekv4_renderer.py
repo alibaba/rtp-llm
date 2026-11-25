@@ -13,6 +13,7 @@ from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     DeltaMessage,
+    RoleEnum,
     ToolCall,
     get_tool_choice_function_name,
 )
@@ -369,6 +370,55 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
         ):
             encode_config["drop_thinking"] = bool(kwargs["clear_thinking"])
 
+    @staticmethod
+    def _content_part_to_dict(part: Any) -> dict[str, Any]:
+        if isinstance(part, str):
+            return {"type": "text", "text": part}
+        if isinstance(part, dict):
+            part_type = part.get("type")
+            if hasattr(part_type, "value"):
+                part_type = part_type.value
+            normalized = dict(part)
+            if part_type is not None:
+                normalized["type"] = part_type
+            if part_type == "text":
+                normalized["text"] = normalized.get("text") or ""
+            return normalized
+
+        part_type = getattr(part, "type", None)
+        if hasattr(part_type, "value"):
+            part_type = part_type.value
+        if part_type == "text":
+            return {"type": "text", "text": getattr(part, "text", None) or ""}
+        if hasattr(part, "model_dump"):
+            dumped = part.model_dump(mode="json", exclude_none=True)
+            if part_type is not None:
+                dumped["type"] = part_type
+            return dumped
+        return {
+            "type": part_type or "unknown",
+            "text": getattr(part, "text", None) or "",
+        }
+
+    @classmethod
+    def _normalize_message_content(cls, role: Any, content: Any) -> Any:
+        if content is None or isinstance(content, str):
+            return content
+        if not isinstance(content, list):
+            return str(content)
+        parts = [cls._content_part_to_dict(part) for part in content]
+        role_val = getattr(role, "value", role)
+        if role_val == RoleEnum.tool.value:
+            return parts
+        rendered_parts: List[str] = []
+        for part in parts:
+            part_type = part.get("type")
+            if part_type == "text":
+                rendered_parts.append(part.get("text") or "")
+            else:
+                rendered_parts.append(f"[Unsupported {part_type}]")
+        return "\n\n".join(rendered_parts)
+
     def _build_prompt(self, request: ChatCompletionRequest) -> str:
         """
         Build prompt string using the DeepSeek V4.0 encoding script.
@@ -382,7 +432,10 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
         # Convert request messages to the format expected by encoding_dsv4
         messages = []
         for msg in request.messages:
-            message_dict = {"role": msg.role.value, "content": msg.content}
+            message_dict = {
+                "role": msg.role.value,
+                "content": self._normalize_message_content(msg.role, msg.content),
+            }
             if msg.name:
                 message_dict["name"] = msg.name
             if msg.tool_call_id:
