@@ -107,6 +107,9 @@ def _mhc_pre_norm_fn_fwd_mul(
                     {x_smem_16: tilelang.layout.make_swizzled_layout(x_smem_16)}
                 )
 
+                # TMA zero-fills rows past ``num_tokens`` (and fn rows past
+                # ``mhc_mult3``), so the trailing partial tile never reads
+                # outside either global tensor.
                 T.copy(
                     x[pid_x * token_block, pid_y * rms_group_size + pz * hidden_block],
                     x_smem_16,
@@ -134,10 +137,15 @@ def _mhc_pre_norm_fn_fwd_mul(
                 )
             sqrsum_l = T.alloc_fragment(token_block, T.float32)
             T.reduce_sum(sqrsum_part, sqrsum_l)
+            # ``num_tokens`` is dynamic and may not be a multiple of
+            # ``token_block``. Predicate the tail explicitly so a store can
+            # never spill into the next split's row 0 (or past the tensor for
+            # the last split), independent of compiler bounds inference.
             for i in T.Parallel(token_block):
-                sqrsum[pid_y, pid_x * token_block + i] = sqrsum_l[i]
+                if pid_x * token_block + i < num_tokens:
+                    sqrsum[pid_y, pid_x * token_block + i] = sqrsum_l[i]
             for i, j in T.Parallel(token_block, 32):
-                if j < 24:
+                if j < 24 and pid_x * token_block + i < num_tokens:
                     out[pid_y, pid_x * token_block + i, j] = out_frag[i, j]
 
     return _mhc_pre_norm_fn_fwd_mul_kernel

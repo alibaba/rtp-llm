@@ -1,5 +1,6 @@
 """V4.1 split-K mHC prenorm: TF32 contract, delayed mixes and graph replay."""
 
+import importlib
 import json
 import os
 import unittest
@@ -278,6 +279,70 @@ class V41MHCPreNormCudaTest(unittest.TestCase):
                 residual, fn, _, _ = self._inputs(tokens)
                 self.assertFalse(is_supported(residual, fn))
                 self.assertIsNone(prenorm(residual, fn, _EPS))
+
+    @torch.no_grad()
+    def test_unaligned_tokens_keep_split_k_and_guard_tail_rows(self):
+        # D3 regression: unaligned decode batches (264/280/336/360 rows) used
+        # to force S=1. Verify the planner now keeps split-K for every tail
+        # shape, the kernel's tail stores never touch the next split or the
+        # allocation guard, and the full wrapper still matches FP32.
+        norm = importlib.import_module(
+            "rtp_llm.models_py.3rdparty.tile_kernels.modeling.mhc.ops.norm_fn"
+        )
+        kernel = importlib.import_module(
+            "rtp_llm.models_py.3rdparty.tile_kernels.mhc.norm_fn_kernel"
+        )
+        hidden, mult3, eps = 20480, 24, _EPS
+        num_sms = torch.cuda.get_device_properties(0).multi_processor_count
+        fn = torch.randn(mult3, hidden, device="cuda") * 0.003
+        rounded = ((fn.view(torch.int32) + 0x1000) & -8192).view(torch.float32)
+        for tokens in (1, 7, 16, 31, 32, 33, 63, 88, 264, 280, 336, 352, 360, 512):
+            with self.subTest(tokens=tokens):
+                splits = norm._tilelang_split_plan(tokens, hidden, num_sms)
+                self.assertGreaterEqual(splits, 1)
+                self.assertLessEqual(splits, 20)
+                self.assertEqual(hidden % (splits * 256), 0)
+                group = hidden // splits
+                x = torch.randn(tokens, hidden, device="cuda", dtype=torch.bfloat16)
+                pad = 4096
+                out_buf = torch.full(
+                    (splits * tokens * mult3 + pad,), float("nan"), device="cuda"
+                )
+                sqr_buf = torch.full(
+                    (splits * tokens + pad,), float("nan"), device="cuda"
+                )
+                out = out_buf[: splits * tokens * mult3].view(splits, tokens, mult3)
+                sqr = sqr_buf[: splits * tokens].view(splits, tokens)
+                kernel._mhc_pre_norm_fn_fwd_mul(mult3, splits, group)(
+                    x, rounded, out, sqr
+                )
+                xf = x.float()
+                for split in range(splits):
+                    part = slice(split * group, (split + 1) * group)
+                    torch.testing.assert_close(
+                        out[split],
+                        xf[:, part] @ rounded[:, part].T,
+                        rtol=2e-4,
+                        atol=2e-3,
+                    )
+                    torch.testing.assert_close(
+                        sqr[split],
+                        xf[:, part].square().sum(-1),
+                        rtol=1e-5,
+                        atol=5e-2,
+                    )
+                # Guard bytes past the exact scratch extents stay untouched.
+                self.assertTrue(torch.isnan(out_buf[splits * tokens * mult3 :]).all())
+                self.assertTrue(torch.isnan(sqr_buf[splits * tokens :]).all())
+                actual = _tile_ops().mhc_pre_norm_fn(
+                    x.view(1, tokens, 4, 5120), fn, None, eps, n_splits=1
+                )
+                expected = (xf @ rounded.T) * torch.rsqrt(
+                    xf.square().mean(-1, keepdim=True) + eps
+                )
+                torch.testing.assert_close(
+                    actual.view(tokens, mult3), expected, rtol=2e-4, atol=1e-4
+                )
 
     @torch.no_grad()
     def test_explicit_tilelang_backends_keep_large_token_fallback(self):

@@ -19,16 +19,21 @@ _TILELANG_SPLIT_CAP = 20
 
 
 def _tilelang_split_plan(num_tokens: int, mhc_hidden_size: int, num_sms: int) -> int:
-    """Bound split-K to one SM wave and whole 256-column/32-token tiles."""
+    """Bound split-K to one SM wave and whole 256-column/32-token tiles.
+
+    A partial trailing 32-token tile is still one launch block: the kernel
+    predicates its tail stores and TMA zero-fills out-of-range input rows.
+    Rejecting unaligned token counts here collapsed decode batches such as
+    264/280/336/360 rows to S=1 and left almost every SM idle.
+    """
     if (
         num_tokens <= 0
-        or num_tokens % _TILELANG_TOKEN_BLOCK
         or mhc_hidden_size <= 0
         or mhc_hidden_size % _TILELANG_HIDDEN_BLOCK
     ):
         return 1
     group_blocks = mhc_hidden_size // _TILELANG_HIDDEN_BLOCK
-    token_blocks = num_tokens // _TILELANG_TOKEN_BLOCK
+    token_blocks = (num_tokens + _TILELANG_TOKEN_BLOCK - 1) // _TILELANG_TOKEN_BLOCK
     splits = max(1, min(num_sms // token_blocks, _TILELANG_SPLIT_CAP, group_blocks))
     while group_blocks % splits:
         splits -= 1
@@ -56,26 +61,23 @@ def _tilelang_num_splits(x: torch.Tensor, mhc_hidden_size: int) -> int:
 def _tilelang_representative_ms(
     max_m: int, mhc_hidden_size: int, num_sms: int, *, min_m: int = 1
 ) -> tuple[int, ...]:
-    """One reachable M per split specialization, without large warmup tensors."""
+    """One reachable M per split specialization, without large warmup tensors.
+
+    ``_tilelang_split_plan`` only changes when ``ceil(M / 32)`` changes, so the
+    first token of each 32-token block represents that block. This also covers
+    unaligned M: the representative is the first token at or above ``min_m``,
+    which exercises the tail-predicated kernel during warmup.
+    """
     min_m, max_m = max(1, int(min_m)), int(max_m)
     if max_m < min_m:
         return ()
-    candidates = {min_m}
-    # Unaligned lengths use S=1. Beyond num_sms token blocks S=1 is stable.
-    if min_m % _TILELANG_TOKEN_BLOCK == 0 and min_m < max_m:
-        candidates.add(min_m + 1)
-    first_aligned = (
-        (min_m + _TILELANG_TOKEN_BLOCK - 1) // _TILELANG_TOKEN_BLOCK
-    ) * _TILELANG_TOKEN_BLOCK
-    candidates.update(
-        range(
-            first_aligned,
-            min(max_m, max(1, num_sms) * _TILELANG_TOKEN_BLOCK) + 1,
-            _TILELANG_TOKEN_BLOCK,
-        )
-    )
+    first_block = (min_m + _TILELANG_TOKEN_BLOCK - 1) // _TILELANG_TOKEN_BLOCK
+    last_block = (max_m + _TILELANG_TOKEN_BLOCK - 1) // _TILELANG_TOKEN_BLOCK
     seen, representatives = set(), []
-    for tokens in sorted(candidates):
+    for block in range(first_block, last_block + 1):
+        tokens = max(min_m, (block - 1) * _TILELANG_TOKEN_BLOCK + 1)
+        if tokens > max_m:
+            break
         splits = _tilelang_split_plan(tokens, mhc_hidden_size, num_sms)
         if splits not in seen:
             seen.add(splits)

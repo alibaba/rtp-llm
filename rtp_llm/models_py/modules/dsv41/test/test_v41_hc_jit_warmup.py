@@ -485,7 +485,7 @@ class V41HCJitWarmupCPU(unittest.TestCase):
             self.assertTrue(tile.call_args.kwargs["include_norm"])
             self.assertEqual(
                 [call.args[1] for call in norm.call_args_list],
-                [96, 256, 320, 480, 608, 960, 1216],
+                [225, 289, 449, 577, 929, 1185, 2369],
             )
             self.assertEqual(
                 [call.args[1] for call in mega.call_args_list], [1, 193, 321, 449]
@@ -555,9 +555,9 @@ class V41HCJitWarmupCPU(unittest.TestCase):
             (64, []),
             (65, [65]),
             (95, [65]),
-            (96, [65, 96]),
-            (192, [65, 96]),
-            (256, [65, 96, 256]),
+            (96, [65]),
+            (192, [65]),
+            (256, [65, 225]),
         ):
             with self.subTest(max_m=maximum), contextlib.ExitStack() as stack:
                 warmup._WARMED_KEYS.clear()
@@ -599,7 +599,9 @@ class V41HCJitWarmupCPU(unittest.TestCase):
             stack.enter_context(patch.object(warmup, "_launch_tilelang_chain"))
             norm = stack.enter_context(patch.object(warmup, "_launch_tilelang_norm"))
             warmup.warmup_v41_hc_jit(model(block()), max_m=64, device="cpu")
-            self.assertEqual([c.args[1] for c in norm.call_args_list], [32])
+            # Unaligned M now selects the same split specialization as the
+            # aligned block, so the chain launch at M=1 covers it alone.
+            self.assertEqual([c.args[1] for c in norm.call_args_list], [])
 
     def test_fused_small_prewarm_does_not_launch_standalone_norm(self):
         source = unit()

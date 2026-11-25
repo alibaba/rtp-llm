@@ -231,13 +231,21 @@ class MHCLazyBackwardTest(unittest.TestCase):
         op = self.load_norm()
         for tokens, expected in (
             (0, 1),
-            (65, 1),
-            (95, 1),
+            (1, 20),
+            (6, 20),
+            (31, 20),
+            (32, 20),
+            (65, 20),
+            (95, 20),
             (96, 20),
             (160, 20),
             (192, 20),
             (256, 16),
+            (264, 16),
+            (280, 16),
             (320, 10),
+            (336, 10),
+            (360, 10),
             (480, 8),
             (608, 5),
             (960, 4),
@@ -250,12 +258,13 @@ class MHCLazyBackwardTest(unittest.TestCase):
         for hidden in (0, 255, 256, 257):
             self.assertEqual(op._tilelang_split_plan(96, hidden, 148), 1)
         for hidden in (512, 768, 20480, 24576):
-            for tokens in range(32, 4097, 32):
+            for tokens in range(1, 4097):
                 splits = op._tilelang_split_plan(tokens, hidden, 132)
                 self.assertEqual(hidden % (splits * 256), 0)
                 self.assertLessEqual(splits, 20)
+                token_blocks = (tokens + 31) // 32
                 if splits > 1:
-                    self.assertLessEqual(tokens // 32 * splits, 132)
+                    self.assertLessEqual(token_blocks * splits, 132)
         with patch.object(torch.cuda, "get_device_properties") as properties:
             properties.side_effect = [
                 types.SimpleNamespace(multi_processor_count=148),
@@ -286,13 +295,13 @@ class MHCLazyBackwardTest(unittest.TestCase):
                             )
 
                             def reference(m):
-                                if m % 32:
-                                    return 1
+                                group_blocks = hidden // 256
+                                token_blocks = (m + 31) // 32
                                 return max(
                                     s
-                                    for s in range(1, 21)
-                                    if (hidden // 256) % s == 0
-                                    and (s == 1 or s * (m // 32) <= sms)
+                                    for s in range(1, min(20, group_blocks) + 1)
+                                    if group_blocks % s == 0
+                                    and (s == 1 or s * token_blocks <= sms)
                                 )
 
                             expected = {
@@ -302,11 +311,11 @@ class MHCLazyBackwardTest(unittest.TestCase):
                             self.assertEqual(len(reps), len(expected))
                             self.assertTrue(all(minimum <= m <= maximum for m in reps))
         self.assertEqual(
-            op._tilelang_representative_ms(192, 20480, 148, min_m=65), (65, 96)
+            op._tilelang_representative_ms(192, 20480, 148, min_m=65), (65,)
         )
         self.assertEqual(
             op._tilelang_representative_ms(131072, 20480, 148, min_m=65),
-            (65, 96, 256, 320, 480, 608, 960, 1216),
+            (65, 225, 289, 449, 577, 929, 1185, 2369),
         )
 
     def test_split_major_scratch_is_exact_and_reduced_with_full_hidden_size(self):
