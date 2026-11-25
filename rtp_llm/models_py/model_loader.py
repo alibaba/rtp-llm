@@ -1253,14 +1253,6 @@ class NewModelLoader:
         model._apply(allocate_parameter_or_move_buffer)
 
     @staticmethod
-    def _requires_staged_device_postprocess(model: nn.Module) -> bool:
-        return any(
-            isinstance(module, RtpModule)
-            and module.requires_staged_device_postprocess()
-            for module in model.modules()
-        )
-
-    @staticmethod
     def _staged_device_modules(model: nn.Module) -> List[RtpModule]:
         return [
             module
