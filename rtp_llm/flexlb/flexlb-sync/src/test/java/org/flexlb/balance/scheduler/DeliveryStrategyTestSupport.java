@@ -210,7 +210,10 @@ public final class DeliveryStrategyTestSupport {
             CapacityBoundary.Availability unavailable = unavailable().availability();
             Mockito.when(prefill.batchAdmissionAvailability(Mockito.anyInt()))
                     .thenReturn(unavailable);
-            Mockito.when(prefill.tryBeginRouteCommitAdmission()).thenReturn(routeCommit);
+            Mockito.when(prefill.tryBeginRouteCommitAdmission())
+                    .thenReturn(
+                            new PrefillState.ReservationResult<>(
+                                    PrefillState.CapacityStatus.ACQUIRED, routeCommit));
             Mockito.when(routeCommit.reserve(Mockito.any(), Mockito.anyLong()))
                     .thenAnswer(
                             invocation ->

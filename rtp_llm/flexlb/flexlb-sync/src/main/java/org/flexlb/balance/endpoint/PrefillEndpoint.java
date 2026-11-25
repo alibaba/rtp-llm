@@ -122,6 +122,12 @@ public class PrefillEndpoint extends WorkerEndpoint {
         return hasFreshSchedulingStatus() && runtime.offer(exactItem);
     }
 
+    @Override
+    public void signalSchedulingStatusRecovered() {
+        runtime.signalSchedulingInputsChanged();
+        signalPlacementCapacityChanged();
+    }
+
     /** Publish a role/group-scoped edge after real queue or status progress. */
     @Override
     public void signalPlacementCapacityChanged() {
@@ -165,13 +171,20 @@ public class PrefillEndpoint extends WorkerEndpoint {
         return result;
     }
 
-    /** Acquire the generation capability only for the final route commit. */
-    public RouteCommitAdmission tryBeginRouteCommitAdmission() {
-        if (!hasFreshSchedulingStatus()) {
-            return null;
-        }
+    /** Acquire the generation capability only when the final route commit can use fresh status. */
+    public PrefillState.ReservationResult<RouteCommitAdmission> tryBeginRouteCommitAdmission() {
         EndpointGenerationLifecycle.HandoffPermit handoffPermit = tryAcquireGenerationHandoff();
-        return handoffPermit == null ? null : new RouteCommitAdmission(handoffPermit);
+        if (handoffPermit == null) {
+            return new PrefillState.ReservationResult<>(
+                    PrefillState.CapacityStatus.ENDPOINT_RETIRED, null);
+        }
+        if (!hasFreshSchedulingStatus()) {
+            handoffPermit.close();
+            return new PrefillState.ReservationResult<>(
+                    PrefillState.CapacityStatus.STATUS_STALE, null);
+        }
+        return new PrefillState.ReservationResult<>(
+                PrefillState.CapacityStatus.ACQUIRED, new RouteCommitAdmission(handoffPermit));
     }
 
     /** Exact wake source for this generation's batch admission capacity. */
@@ -188,9 +201,9 @@ public class PrefillEndpoint extends WorkerEndpoint {
         return prefillState.canDispatchRoute(inflightRequestLimit);
     }
 
-    /** Wake delivery when this worker has a free NON_BATCH execution slot. */
+    /** Wake delivery when this worker has fresh scheduling status and a free execution slot. */
     public CapacityBoundary.Availability routeAdmissionAvailability() {
-        return prefillState.routeAvailability(inflightRequestLimit);
+        return prefillState.routeAvailability(inflightRequestLimit, this::hasFreshSchedulingStatus);
     }
 
     /** Advisory endpoint ownership revision captured by queue placement. */

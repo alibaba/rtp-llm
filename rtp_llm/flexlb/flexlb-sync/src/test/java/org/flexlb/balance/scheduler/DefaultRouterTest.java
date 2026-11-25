@@ -247,8 +247,9 @@ class DefaultRouterTest {
         verify(decode.pin).close();
     }
 
-    @Test
-    void directRouteRollsBackDecodeWhenPrefillAdmissionIsFull() {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void directRouteRollsBackDecodeWhenPrefillIsFullOrStale(boolean stale) {
         when(modelMeta.requiredRoles()).thenReturn(List.of(RoleType.PREFILL, RoleType.DECODE));
         DefaultRouter router = router();
         BalanceContext context = context(8L);
@@ -262,16 +263,24 @@ class DefaultRouterTest {
                 .thenReturn(PlacementResult.success(prefill.selection));
         when(decodeSelector.select(context, DecodeBinding.capture(context), "g1"))
                 .thenReturn(PlacementResult.success(decode.selection));
-        stubPrefillCommit((PrefillEndpoint) prefill.endpoint);
         when(((DecodeEndpoint) decode.endpoint)
                         .reserve(eq(decode.pin), eq("8"), eq(32L), eq(48L), eq(50)))
                 .thenReturn(reservation);
         stubDecodePermit((DecodeEndpoint) decode.endpoint, reservation);
-        when(((PrefillEndpoint) prefill.endpoint)
-                        .reserveUnqueuedRoute(eq(prefill.pin), any(ScheduledRequest.class), eq(1L)))
-                .thenReturn(
-                        new PrefillState.ReservationResult<>(
-                                PrefillState.CapacityStatus.CAPACITY_FULL, null));
+        if (stale) {
+            when(((PrefillEndpoint) prefill.endpoint).tryBeginRouteCommitAdmission())
+                    .thenReturn(
+                            new PrefillState.ReservationResult<>(
+                                    PrefillState.CapacityStatus.STATUS_STALE, null));
+        } else {
+            stubPrefillCommit((PrefillEndpoint) prefill.endpoint);
+            when(((PrefillEndpoint) prefill.endpoint)
+                            .reserveUnqueuedRoute(
+                                    eq(prefill.pin), any(ScheduledRequest.class), eq(1L)))
+                    .thenReturn(
+                            new PrefillState.ReservationResult<>(
+                                    PrefillState.CapacityStatus.CAPACITY_FULL, null));
+        }
 
         assertEquals(
                 StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(),
@@ -736,7 +745,10 @@ class DefaultRouterTest {
         var commit = mock(PrefillEndpoint.RouteCommitAdmission.class);
         var handoff = mock(PrefillState.CommittedHandoff.class);
         when(handoff.precedingWork()).thenReturn(precedingWork);
-        when(endpoint.tryBeginRouteCommitAdmission()).thenReturn(commit);
+        when(endpoint.tryBeginRouteCommitAdmission())
+                .thenReturn(
+                        new PrefillState.ReservationResult<>(
+                                PrefillState.CapacityStatus.ACQUIRED, commit));
         when(commit.commit(any(), any())).thenReturn(handoff);
     }
 

@@ -405,7 +405,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
                     boolean wasFresh = workerStatus.hasFreshSchedulingStatus(nowUs);
                     workerStatus.recordStatusApplied(received.receivedNanos() / 1000);
                     if (!wasFresh && workerStatus.hasFreshSchedulingStatus(nowUs)) {
-                        freshnessProjection = ep::signalPlacementCapacityChanged;
+                        freshnessProjection = ep::signalSchedulingStatusRecovered;
                     }
                 }
             } finally {
@@ -413,7 +413,6 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 try {
                     statusProjection.run();
                     activityProjection.run();
-                    freshnessProjection.run();
                 } finally {
                     if (generationRetiring) {
                         workerDirectory.completeRetirementAsync(
@@ -423,6 +422,8 @@ public class GrpcWorkerStatusRunner implements Runnable {
                                 endpointToRetire,
                                 cacheAwareService,
                                 logger);
+                    } else {
+                        freshnessProjection.run();
                     }
                 }
             }

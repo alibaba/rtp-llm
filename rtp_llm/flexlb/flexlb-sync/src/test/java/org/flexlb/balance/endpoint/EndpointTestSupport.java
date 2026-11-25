@@ -165,7 +165,7 @@ public final class EndpointTestSupport {
         ScheduledRequest item = org.mockito.Mockito.mock(ScheduledRequest.class);
         org.mockito.Mockito.when(item.requestId()).thenReturn(Long.toString(requestId));
         try (var reservation = reserveUnqueued(endpoint, item, predictedMs);
-                var commit = endpoint.tryBeginRouteCommitAdmission();
+                var commit = endpoint.tryBeginRouteCommitAdmission().reservation();
                 var handoff = commit.commit(List.of(item), List.of(reservation))) {
             // The endpoint ledger owns this request until authoritative termination.
         }
@@ -210,7 +210,7 @@ public final class EndpointTestSupport {
         List<ScheduledRequest> items = List.copyOf(exactItems);
         List<PrefillState.RouteReservation> reservations = new ArrayList<>(items.size());
         boolean committed = false;
-        var admission = endpoint.tryBeginRouteCommitAdmission();
+        var admission = endpoint.tryBeginRouteCommitAdmission().reservation();
         if (admission == null) {
             throw new IllegalStateException("route endpoint retired");
         }
