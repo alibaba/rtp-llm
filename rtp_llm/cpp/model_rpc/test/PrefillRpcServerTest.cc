@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/utils/DecodePublicationTest.h"
 #include <algorithm>
 #include <atomic>
+#include <thread>
 #include <functional>
 #include <limits>
 #include <memory>
@@ -105,6 +106,8 @@ public:
     }
 
     std::optional<bool> input_inspection_enabled;
+    std::vector<std::string> requested_urls;
+    bool                     return_test_hashes = false;
 
 private:
     ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<MultimodalInput>& mm_inputs,
@@ -120,7 +123,15 @@ private:
         }
         MultimodalOutput output;
         for (size_t i = 0; i < mm_inputs.size(); ++i) {
+            requested_urls.push_back(mm_inputs[i].url);
             output.mm_features.push_back(torch::zeros({2, 1}));
+            if (return_test_hashes) {
+                if (!output.mm_feature_hashes) {
+                    output.mm_feature_hashes.emplace();
+                }
+                const int base = mm_inputs[i].url == "first" ? 10 : 20;
+                output.mm_feature_hashes->push_back(torch::tensor({base + 1, base + 2}, torch::kInt32));
+            }
         }
         return output;
     }
@@ -1304,6 +1315,66 @@ TEST_F(PrefillRpcServerTest, retryRebuildsPbInputBeforeMultimodalProcessing) {
     EXPECT_TRUE(context->tokenIdsExpanded());
     EXPECT_TRUE(context->generate_input->generate_config->pd_separation);
     EXPECT_TRUE(context->generate_input->generate_config->force_disable_sp_run);
+}
+
+TEST_F(PrefillRpcServerTest, FetchesOnlyImagesNotFullyCoveredByKvReuse) {
+    PrefillRpcServer server;
+    auto             processor    = std::make_shared<TestMultimodalProcessor>(ErrorCode::NONE_ERROR);
+    processor->return_test_hashes = true;
+    server.mm_processor_          = processor;
+    server.maga_init_params_.model_config_.max_seq_len = 100;
+    server.media_pool_                                 = std::make_shared<autil::ThreadPool>(1, 4);
+    ASSERT_TRUE(server.media_pool_->start("prefill_mm_test"));
+
+    for (int reuse : {0, 2, 3, 5, 6}) {
+        SCOPED_TRACE(reuse);
+        GenerateInputPB request;
+        auto*           media = request.mutable_multimodal_inputs();
+        media->set_frontend_inspection_verified(true);
+        for (const auto& url : {"first", "second"}) {
+            auto* item = media->add_multimodal_inputs();
+            item->set_multimodal_url(url);
+            item->set_multimodal_type(1);
+        }
+        for (int base : {10, 20}) {
+            auto* hash = request.add_prefill_image_hashes();
+            hash->add_rows(base + 1);
+            hash->add_rows(base + 2);
+        }
+        auto context            = makeContext(&request);
+        context->generate_input = makeMultimodalInput();
+        auto& input             = *context->generate_input;
+        input.input_ids         = torch::tensor({8, 1, 9, 1, 10}, torch::kInt32);
+        processor->requested_urls.clear();
+        server.multimodalProcess(*context);
+        ASSERT_FALSE(context->hasError());
+        ASSERT_TRUE(input.prepare_prefill_media);
+        EXPECT_EQ(input.multimodalLengths().at(1), 4);
+        EXPECT_EQ(input.input_ids.numel(), 7);
+        EXPECT_TRUE(processor->requested_urls.empty());
+
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        for (;;) {
+            auto ready = input.prepare_prefill_media(input, reuse);
+            ASSERT_TRUE(ready.ok()) << ready.status().ToString();
+            if (ready.value()) {
+                break;
+            }
+            ASSERT_LT(std::chrono::steady_clock::now(), deadline);
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        std::vector<std::string> expected;
+        if (reuse < 3)
+            expected.emplace_back("first");
+        if (reuse < 6)
+            expected.emplace_back("second");
+        EXPECT_EQ(processor->requested_urls, expected);
+        ASSERT_TRUE(input.mm_locs.has_value());
+        EXPECT_EQ(input.mm_locs->numel(), expected.size());
+        if (!expected.empty()) {
+            EXPECT_EQ(input.mm_locs->data_ptr<int32_t>()[0], reuse < 3 ? 1 : 4);
+        }
+    }
 }
 
 TEST_F(PrefillRpcServerTest, multimodalProcessDoesNotMutateOriginalRequest) {

@@ -304,8 +304,16 @@ ErrorInfo LocalRpcServer::updateMultimodalFeaturesWithTrace(
     const opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>& parent_span,
     const MultimodalInputsPB&                                           mm_inputs,
     grpc::ServerContext*                                                server_context) {
-    if (!telemetry::TelemetryRuntime::isActive() || parent_span == nullptr || mm_inputs.multimodal_inputs().empty()) {
-        return mm_processor_->updateMultimodalFeatures(input, mm_inputs, server_context);
+    auto run = [&] { return mm_processor_->updateMultimodalFeatures(input, mm_inputs, server_context); };
+    return mm_inputs.multimodal_inputs().empty() ? run() : traceMultimodalWork(input.request_id, parent_span, run);
+}
+
+ErrorInfo
+LocalRpcServer::traceMultimodalWork(int64_t                                                             request_id,
+                                    const opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>& parent_span,
+                                    const std::function<ErrorInfo()>&                                   run) {
+    if (!telemetry::TelemetryRuntime::isActive() || parent_span == nullptr) {
+        return run();
     }
 
     opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span> span;
@@ -325,11 +333,11 @@ ErrorInfo LocalRpcServer::updateMultimodalFeaturesWithTrace(
         if (span != nullptr) {
             active_span = std::make_unique<opentelemetry::trace::Scope>(span);
         }
-        guard.setAttribute(telemetry::kAttrRequestId, std::to_string(input.request_id));
+        guard.setAttribute(telemetry::kAttrRequestId, std::to_string(request_id));
     } catch (...) {}
 
     // Include preprocessing, embedding transport and token expansion in one operation.
-    auto result = mm_processor_->updateMultimodalFeatures(input, mm_inputs, server_context);
+    auto result = run();
     if (!result.ok()) {
         status = grpc::Status(grpc::StatusCode::INTERNAL, "");
         try {

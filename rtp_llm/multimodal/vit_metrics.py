@@ -9,6 +9,13 @@ from typing import Dict, Iterator, List, Optional, Union
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 
+# Only the RPC caller owns a cache-access sample. Shared compute workers run
+# independently, so one producer may serve multiple operations concurrently.
+HASH_FILL = "hash_fill"
+REMOTE_EMBEDDING = "remote_multimodal_embedding"
+vit_request_source: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "vit_request_source", default=None
+)
 
 VIT_PHASE_METRICS = os.environ.get("MM_VIT_PHASE_METRICS") == "1"
 
@@ -72,7 +79,9 @@ def vit_preprocess_timer(
 def vit_http_phase_timer(phase):
     if not VIT_PHASE_METRICS:
         return contextlib.nullcontext()
-    return vit_preprocess_timer(GaugeMetrics.VIT_HTTP_PHASE_RT_US_METRIC, {"phase": phase})
+    return vit_preprocess_timer(
+        GaugeMetrics.VIT_HTTP_PHASE_RT_US_METRIC, {"phase": phase}
+    )
 
 
 def record_vit_preprocess_value(

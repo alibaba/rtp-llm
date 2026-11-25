@@ -62,6 +62,9 @@ class AccMetrics(Enum):
     IGRAPH_ERROR_QPS_METRIC = "py_rtp_igraph_error_qps"
     IGRAPH_EMPTY_QPS_METRIC = "py_rtp_igraph_empty_qps"
 
+    # Logical frontend requests, including warm requests that skip either ViT phase.
+    VIT_MULTIMODAL_REQUEST_QPS_METRIC = "py_rtp_vit_multimodal_request_qps"
+    VIT_PHASE_QPS_METRIC = "py_rtp_vit_phase_qps"
     VIT_QPS_METRIC = "py_rtp_vit_qps"
     VIT_ERROR_QPS_METRIC = "py_rtp_vit_error_qps"
     # Count rejected async submissions, not the number of media items in them.
@@ -100,6 +103,9 @@ class AccMetrics(Enum):
 
     VIT_EMBEDDING_CACHE_HIT_QPS_METRIC = "py_rtp_vit_embedding_cache_hit_qps"
     VIT_EMBEDDING_CACHE_MISS_QPS_METRIC = "py_rtp_vit_embedding_cache_miss_qps"
+    VIT_PREFILL_EMBEDDING_CACHE_MISS_QPS_METRIC = (
+        "py_rtp_vit_prefill_embedding_cache_miss_qps"
+    )
     VIT_EMBEDDING_CACHE_INFLIGHT_QPS_METRIC = "py_rtp_vit_embedding_cache_inflight_qps"
     VIT_EMBEDDING_CACHE_EVICTION_QPS_METRIC = "py_rtp_vit_embedding_cache_eviction_qps"
 
@@ -240,9 +246,13 @@ class GaugeMetrics(Enum):
     VIT_PREPROCESS_RT_METRIC = "py_rtp_vit_preprocess_rt"
     # Milliseconds from a blocking engine request's entry to return/error,
     # including CPU/GPU work, queue/cache and GreenNet waits, but not RPC output
-    # serialization. source distinguishes mm_embedding_cpp/get_embedding_result;
-    # status is success/error. Async submission ACKs are deliberately excluded.
+    # serialization. The legacy RT is for integrated ViT. Split ViT times only
+    # executed phases and counts the same attempts by source and success/error.
     VIT_REQUEST_RT_METRIC = "py_rtp_vit_request_rt"
+    VIT_HASH_FILL_RT_METRIC = "py_rtp_vit_hash_fill_rt"
+    VIT_REMOTE_MULTIMODAL_EMBEDDING_RT_METRIC = (
+        "py_rtp_vit_remote_multimodal_embedding_rt"
+    )
     # Full observed cache latency in milliseconds. A read hit includes metadata,
     # queueing, SDK read, validation, and the direct GDR restore fence. A successful
     # write includes planning, admission, snapshots, queueing, packing, and SDK save.

@@ -212,6 +212,8 @@ message MultimodalInputsPB {
     google.protobuf.BoolValue input_inspection_enabled = 7;
     // Issued by the selected ViT during hash routing.
     string inspection_ticket = 8;
+    // The frontend obtained clearance for these exact keys on the routed ViT.
+    bool frontend_inspection_verified = 9;
 }
 
 enum TensorDataTypePB {
@@ -287,6 +289,11 @@ message RequestInfoPB {
     TraceContextPB trace_context = 6;
 }
 
+// Complete row hashes for a single routed image, in media input order.
+message PrefillImageHashesPB {
+    repeated sint32 rows = 1;
+}
+
 message GenerateInputPB {
     int64 request_id = 1;
     repeated int32 token_ids = 2;
@@ -303,6 +310,7 @@ message GenerateInputPB {
     int32 priority = 10;
     reserved 11, 12;
     reserved "multimodal_token_layout", "v41_inputs";
+    repeated PrefillImageHashesPB prefill_image_hashes = 13;
 }
 
 message AuxInfoPB {
@@ -1281,6 +1289,8 @@ message MultimodalHashResponsePB {
     reserved 2;
     repeated MultimodalHashEntryPB entries = 3;
     string inspection_ticket = 4;
+    // The serving ViT determined that this request needs no input inspection.
+    bool input_inspection_disabled = 5;
 }
 
 service MultimodalRpcService {

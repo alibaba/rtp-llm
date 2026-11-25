@@ -973,7 +973,7 @@ void GenerateStream::startCacheExposedWait(int64_t time_us) {
     std::lock_guard<std::mutex> lock(*mutex_);
     // FIFO calls this only for the current LOADING_CACHE attempt; an earlier
     // retry may already have set the first-completion timestamp.
-    if (cache_exposed_wait_start_us_ == 0 && loading_cache_start_time_us_ > 0) {
+    if (!generate_status_->waitingForMedia() && cache_exposed_wait_start_us_ == 0 && loading_cache_start_time_us_ > 0) {
         cache_exposed_wait_start_us_ = time_us;
     }
 }

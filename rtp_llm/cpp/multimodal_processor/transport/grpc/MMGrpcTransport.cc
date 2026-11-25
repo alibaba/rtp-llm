@@ -91,8 +91,9 @@ public:
         auto                     server_context = budget.serverContext();
         grpc::PropagationOptions options;
         options.enable_deadline_propagation().enable_cancellation_propagation();
-        auto context = server_context ? grpc::ClientContext::FromServerContext(*server_context, options) :
-                                        std::make_unique<grpc::ClientContext>();
+        std::shared_ptr<grpc::ClientContext> context =
+            server_context ? grpc::ClientContext::FromServerContext(*server_context, options) :
+                             std::make_unique<grpc::ClientContext>();
         if (server_context) {
             for (const auto* key : {"x-dashscope-uid", "x-dashscope-service", "x-dashscope-request-id"}) {
                 auto it = server_context->client_metadata().find(key);
@@ -104,6 +105,10 @@ public:
         auto deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(budget.remainingMs());
         if (server_context) {
             deadline = std::min(deadline, server_context->deadline());
+        }
+        if (auto* deferred = budget.deferred()) {
+            deadline = std::min(deadline, deferred->deadline);
+            deferred->attach(context);
         }
         context->set_deadline(deadline);
         if (request_pb.support_rdma()) {

@@ -12,6 +12,7 @@ from rtp_llm.config.exceptions import (
     FtRuntimeException,
 )
 from rtp_llm.config.generate_config import RoleAddr, RoleType
+from rtp_llm.metrics import AccMetrics
 from rtp_llm.server.backend_rpc_server_visitor import (
     BackendRPCServerVisitor,
     get_role_names,
@@ -202,6 +203,21 @@ class BackendRPCServerVisitorRouteCacheKeysTest(unittest.TestCase):
                             physical * cp_size if sharded else physical,
                         )
 
+    def test_remote_vit_request_denominator(self):
+        visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor.remote_vit = True
+        with patch(
+            "rtp_llm.server.backend_rpc_server_visitor.kmonitor.report"
+        ) as report:
+            visitor._report_vit_requests(
+                [
+                    SimpleNamespace(mm_inputs=["a", "b"]),
+                    SimpleNamespace(mm_inputs=[]),
+                    SimpleNamespace(mm_inputs=["c"]),
+                ]
+            )
+        report.assert_called_once_with(AccMetrics.VIT_MULTIMODAL_REQUEST_QPS_METRIC, 2)
+
     @patch.dict(
         "os.environ",
         {
@@ -319,7 +335,7 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(visitor.master_client.calls[0]["request_id"], 456)
             if required:
-                build.assert_called_once_with(input)
+                build.assert_called_once_with(input, selected_vit=None)
                 self.assertIs(
                     visitor.master_client.calls[0]["input_pb"], build.return_value
                 )

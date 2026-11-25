@@ -460,7 +460,7 @@ class BackendRPCServerVisitor:
                     input=input,
                     request_id=input.request_id,
                     input_pb=(
-                        trans_input(input)
+                        trans_input(input, selected_vit=selected_vit)
                         if self.host_service.requires_generate_input(
                             self.host_service.get_master_addr()
                         )
@@ -587,7 +587,7 @@ class BackendRPCServerVisitor:
                         input=input,
                         request_id=input.request_id,
                         input_pb=(
-                            trans_input(input)
+                            trans_input(input, selected_vit=selected_vit)
                             if self.host_service.requires_generate_input(
                                 self.host_service.get_master_addr()
                             )
@@ -937,6 +937,16 @@ class BackendRPCServerVisitor:
                 f"request length is {input.prompt_length}, max_new_tokens is {max_new_tokens}",
             )
 
+    def _report_vit_requests(self, inputs):
+        if not getattr(self, "remote_vit", False):
+            return
+        count = sum(bool(item.mm_inputs) for item in inputs)
+        if count:
+            try:
+                kmonitor.report(AccMetrics.VIT_MULTIMODAL_REQUEST_QPS_METRIC, count)
+            except Exception:
+                route_logger.exception("failed to count frontend multimodal requests")
+
     @torch.inference_mode()
     async def enqueue(self, input: GenerateInput) -> AsyncGenerator[object, None]:
         """Route, then stream backend outputs.
@@ -979,6 +989,7 @@ class BackendRPCServerVisitor:
             set_aux_info(e)
             raise
 
+        self._report_vit_requests((input,))
         on_mm_routed = getattr(input, "on_mm_routed", None)
 
         async def route_only(attempt_input: GenerateInput) -> GenerateInput:
@@ -1116,6 +1127,7 @@ class BackendRPCServerVisitor:
             self.check_sp_supported(input)
             self.check_prefill_cp_supported(input)
 
+        self._report_vit_requests(inputs)
         if self.host_service.service_available:
             for input in inputs:
                 await self.route_ips(input)

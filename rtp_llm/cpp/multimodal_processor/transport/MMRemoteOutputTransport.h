@@ -4,6 +4,8 @@
 // data plane.
 
 #include <chrono>
+#include <grpcpp/client_context.h>
+#include <mutex>
 #include <grpcpp/server_context.h>
 #include <memory>
 #include <string>
@@ -28,10 +30,29 @@ int64_t resolveRpcTimeoutMs(const MultimodalInputsPB& request,
                             int64_t                   default_rpc_timeout_ms = kDefaultVitRpcTimeoutMs,
                             int64_t                   rpc_timeout_margin_ms  = kVitRpcTimeoutMarginMs);
 
+// A batch enqueue RPC can finish before the scheduler requests any media.
+class DeferredMMRpc {
+public:
+    DeferredMMRpc(grpc::ServerContext* parent, bool inherit_deadline);
+    void attach(const std::shared_ptr<grpc::ClientContext>& client);
+    void cancel();
+
+    std::chrono::system_clock::time_point deadline = std::chrono::system_clock::time_point::max();
+
+private:
+    std::vector<std::pair<std::string, std::string>> metadata_;
+    std::mutex                                       mutex_;
+    bool                                             cancelled_ = false;
+    std::weak_ptr<grpc::ClientContext>               active_;
+};
+
 // Shared deadline for RPC, RDMA reads, release and fallback.
 class DeadlineBudget {
 public:
-    explicit DeadlineBudget(int64_t total_ms, grpc::ServerContext* server_context = nullptr):
+    explicit DeadlineBudget(int64_t              total_ms,
+                            grpc::ServerContext* server_context = nullptr,
+                            DeferredMMRpc*       deferred       = nullptr):
+        deferred_(deferred),
         server_context_(server_context),
         deadline_(std::chrono::steady_clock::now() + std::chrono::milliseconds(total_ms)) {}
 
@@ -44,11 +65,16 @@ public:
         return remainingMs() <= 0;
     }
 
+    DeferredMMRpc* deferred() const {
+        return deferred_;
+    }
+
     grpc::ServerContext* serverContext() const {
         return server_context_;
     }
 
 private:
+    DeferredMMRpc*                        deferred_;
     grpc::ServerContext*                  server_context_;
     std::chrono::steady_clock::time_point deadline_;
 };
@@ -178,8 +204,10 @@ public:
         default_rpc_timeout_ms_(default_rpc_timeout_ms),
         rpc_timeout_margin_ms_(rpc_timeout_margin_ms) {}
 
-    ErrorResult<MultimodalOutput>
-    fetch(const std::string& endpoint, MultimodalInputsPB& request_pb, grpc::ServerContext* server_context = nullptr);
+    ErrorResult<MultimodalOutput> fetch(const std::string&   endpoint,
+                                        MultimodalInputsPB&  request_pb,
+                                        grpc::ServerContext* server_context = nullptr,
+                                        DeferredMMRpc*       deferred       = nullptr);
 
 private:
     // nullptr means the receipt is inline.

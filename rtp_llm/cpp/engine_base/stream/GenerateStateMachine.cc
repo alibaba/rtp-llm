@@ -117,6 +117,13 @@ void GenerateStateMachine::handleWaiting() {
 }
 
 void GenerateStateMachine::handleLoading() {
+    if (waiting_for_media_) {
+        if (pollPrefillMedia()) {
+            waiting_for_media_ = false;
+            status.store(StreamState::WAITING, std::memory_order_release);
+        }
+        return;
+    }
     if (stream_cache_resource_->loadCacheDone()) {
         auto stream = stream_cache_resource_->stream();
         if (stream != nullptr) {
@@ -126,12 +133,43 @@ void GenerateStateMachine::handleLoading() {
     }
 }
 
-void GenerateStateMachine::transitionToRunning() {
-    auto stream = stream_cache_resource_->stream();
-    if (stream != nullptr) {
-        stream->recordKvReadyTime(currentTimeUs());
-        stream->recordRunningTime();
+bool GenerateStateMachine::pollPrefillMedia() {
+    auto* stream = stream_cache_resource_->stream();
+    if (!stream)
+        return true;
+    const auto owned = stream->generateInput();
+    if (!owned || !owned->prepare_prefill_media)
+        return true;
+    auto& input = *owned;
+    try {
+        auto ready = input.prepare_prefill_media(input, stream->reuseLength());
+        if (ready.ok()) {
+            if (ready.value())
+                input.prepare_prefill_media = {};
+            return ready.value();
+        }
+        reportEvent(StreamEvents::Error, ready.status().code(), ready.status().ToString());
+    } catch (const std::exception& error) {
+        reportEvent(StreamEvents::Error, ErrorCode::MM_PROCESS_ERROR, error.what());
     }
+    status.store(StreamState::FINISHED, std::memory_order_release);
+    releaseResource();
+    return false;
+}
+
+void GenerateStateMachine::transitionToRunning() {
+    auto* stream = stream_cache_resource_->stream();
+    if (stream)
+        stream->recordKvReadyTime(currentTimeUs());
+    if (!pollPrefillMedia()) {
+        if (!events_.has(StreamEvents::Error)) {
+            waiting_for_media_ = true;
+            status.store(StreamState::LOADING_CACHE, std::memory_order_release);
+        }
+        return;
+    }
+    if (stream)
+        stream->recordRunningTime();
     status.store(StreamState::RUNNING, std::memory_order_release);
 }
 
@@ -217,6 +255,9 @@ void GenerateStateMachine::handleRunning() {
 }
 
 void GenerateStateMachine::releaseResource() {
+    if (auto* stream = stream_cache_resource_->stream(); stream && stream->generateInput()) {
+        stream->generateInput()->prepare_prefill_media = {};
+    }
     if (stream_cache_resource_->isResourceReleased()) {
         return;
     }

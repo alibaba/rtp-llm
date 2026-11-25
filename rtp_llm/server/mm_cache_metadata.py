@@ -131,6 +131,8 @@ def get_mm_cache_metadata(
     inspection_enabled = (
         greennet_enabled if input_inspection_enabled is not False else False
     )
+    if not inspection_enabled:
+        metadata["input_inspection_disabled"] = True
     ticket = inputs.inspection_ticket if inputs is not None else ""
     if (
         defer_inspection
@@ -253,6 +255,7 @@ def metadata_to_proto(metadata):
     response = MultimodalHashResponsePB(
         worker_instance=metadata["worker_instance"],
         inspection_ticket=metadata.get("inspection_ticket", ""),
+        input_inspection_disabled=metadata.get("input_inspection_disabled", False),
     )
     for entry in metadata["entries"]:
         response.entries.add(
@@ -302,6 +305,11 @@ def metadata_from_proto(response):
         )
     return {
         "worker_instance": response.worker_instance,
+        **(
+            {"input_inspection_disabled": True}
+            if response.input_inspection_disabled
+            else {}
+        ),
         **(
             {"inspection_ticket": response.inspection_ticket}
             if response.inspection_ticket

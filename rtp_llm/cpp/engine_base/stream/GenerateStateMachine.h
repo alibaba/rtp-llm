@@ -53,6 +53,11 @@ public:
 
     StreamState moveToNext();
 
+    // Read with the owning stream mutex held, like the other transition state.
+    bool waitingForMedia() const {
+        return waiting_for_media_;
+    }
+
     StreamState getStatus() const {
         return status.load(std::memory_order_acquire);
     }
@@ -87,6 +92,8 @@ private:
     void handleWaiting();
     void handleLoading();
     void handleRunning();
+    bool pollPrefillMedia();
+    bool waiting_for_media_ = false;
     void transitionToRunning();
     void releaseResource();
 

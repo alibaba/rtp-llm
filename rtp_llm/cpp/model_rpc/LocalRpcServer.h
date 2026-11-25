@@ -131,6 +131,11 @@ protected:
                                   WriterInterface*                 writer,
                                   std::shared_ptr<GenerateStream>& stream);
 
+    static ErrorInfo
+    traceMultimodalWork(int64_t                                                             request_id,
+                        const opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>& parent_span,
+                        const std::function<ErrorInfo()>&                                   run);
+
     // Shared helpers for single and batch paths
     ErrorInfo prepareInput(const GenerateInputPB&                                              input_pb,
                            std::shared_ptr<GenerateInput>&                                     output,

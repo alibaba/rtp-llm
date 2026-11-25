@@ -1,6 +1,6 @@
 #pragma once
 
-
+#include "autil/ThreadPool.h"
 #include <chrono>
 #include <cstdint>
 #include <map>
@@ -68,6 +68,8 @@ protected:
     }
 
 private:
+    std::shared_ptr<autil::ThreadPool> media_pool_;
+    ErrorInfo                          deferPrefillImages(PrefillGenerateContext& context);
     grpc::Status syncPrefix(PrefillGenerateContext& prefill_context);
     ErrorInfo    waitStreamBeforeRun(std::shared_ptr<GenerateStream> stream);
     void         prepareGenerateInput(PrefillGenerateContext& prefill_context);

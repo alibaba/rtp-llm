@@ -1,11 +1,25 @@
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Tuple, Union
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Dict,
+    List,
+    NamedTuple,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+)
 
 import torch
 
 from rtp_llm.config.generate_config import GenerateConfig, RoleAddr
 from rtp_llm.ops import MultimodalInput
+
+if TYPE_CHECKING:
+    from rtp_llm.server.mm_cache_metadata import MMRoutingSnapshot
+
 
 GENERATION_PREFILL_CUDA_GRAPH_STATUS_NOT_REQUESTED = "not_requested"
 
@@ -85,8 +99,11 @@ class GenerateInput:
     enqueued_by_master: bool = False
     headers: Dict[str, str] = field(default_factory=dict, repr=False)
     request_info: RequestInfo = field(default_factory=RequestInfo, repr=False)
+    mm_routing_snapshot: Optional["MMRoutingSnapshot"] = field(
+        default=None, init=False, repr=False
+    )
     # Internal receipt from ViT metadata, bound to the selected worker and media.
-    # It is not accepted from request headers/config or sent to the model RPC.
+    # It is not accepted from request headers/config as proof of approval.
     greennet_verified_vit: Optional[Tuple[str, int, Tuple[str, ...]]] = field(
         default=None, init=False, repr=False
     )

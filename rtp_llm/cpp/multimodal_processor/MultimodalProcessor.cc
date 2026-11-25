@@ -260,13 +260,60 @@ std::string vitRoleAddress(const GenerateInput& input) {
 ErrorResult<MultimodalOutput> MultimodalProcessor::MultimodalEmbeddingFromRpc(const MultimodalInputsPB& inputs,
                                                                               const std::string&        ip_port,
                                                                               int64_t                   request_id,
-                                                                              grpc::ServerContext*      context) {
+                                                                              grpc::ServerContext*      context,
+                                                                              DeferredMMRpc*) {
     std::optional<bool> inspect;
     if (inputs.has_input_inspection_enabled()) {
         inspect = inputs.input_inspection_enabled().value();
     }
     return MultimodalEmbedding(
         MultimodalPbConverter::mediaReferencesFromPb(inputs), ip_port, request_id, context, inspect);
+}
+
+ErrorResult<ExpandedOutput> MultimodalProcessor::preparePrefillLayout(const GenerateInput&              input,
+                                                                      const std::vector<torch::Tensor>& hashes) {
+    if (input.generate_config->calculate_loss) {
+        return ErrorInfo(ErrorCode::MM_NOT_SUPPORTED_ERROR, "cannot calculate loss in multimodal query");
+    }
+    // expandTokenIds needs the row count of each image and its known hashes.
+    // Reuse normal token expansion, including the model's separator and semantic-ID rules.
+    CHECK_AND_RETURN_REF(expanded, expandTokenIds(hashes, input.input_ids, {}, hashes));
+    RETURN_IF_STATUS_ERROR(checkExpandLength(expanded));
+    return std::move(expanded);
+}
+
+ErrorResult<MultimodalOutput> MultimodalProcessor::fetchPrefillImages(const MultimodalInputsPB&         request,
+                                                                      const std::string&                vit_address,
+                                                                      const std::vector<torch::Tensor>& hashes,
+                                                                      size_t                            first,
+                                                                      DeferredMMRpc*                    call) {
+#if USING_CUDA
+    ScopedMultimodalCudaStream mm_stream;
+#endif
+    CHECK_AND_RETURN_REF(output, MultimodalEmbeddingFromRpc(request, vit_address, request.request_id(), nullptr, call));
+    if (output.mm_features.size() != hashes.size() - first
+        || (output.mm_feature_hashes && output.mm_feature_hashes->size() != output.mm_features.size())) {
+        return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "ViT returned an unexpected number of image segments");
+    }
+    for (size_t i = 0; i < output.mm_features.size(); ++i) {
+        const auto& feature  = output.mm_features[i];
+        const auto& expected = hashes[first + i];
+        if (!feature.defined() || feature.dim() < 1 || feature.size(0) != expected.numel()) {
+            return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "ViT image length differs from routing metadata");
+        }
+        const auto actual =
+            output.mm_feature_hashes ? output.mm_feature_hashes->at(i) : getMultimodalFeatureHash(feature);
+        if (!actual.defined() || !actual.device().is_cpu() || actual.scalar_type() != torch::kInt32
+            || !actual.equal(expected)) {
+            return ErrorInfo(ErrorCode::MM_PROCESS_ERROR,
+                             "Prefill ViT feature hashes differ from the PD handoff tokens");
+        }
+    }
+    RETURN_IF_STATUS_ERROR(pinMultimodalTensors(output.mm_features, "embedding"));
+    if (output.mm_extra_input) {
+        RETURN_IF_STATUS_ERROR(pinMultimodalTensors(*output.mm_extra_input, "extra input"));
+    }
+    return std::move(output);
 }
 
 ErrorInfo MultimodalProcessor::updateMultimodalFeatures(GenerateInput& input) {

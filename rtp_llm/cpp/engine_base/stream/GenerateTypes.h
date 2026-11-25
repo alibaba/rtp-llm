@@ -1,5 +1,7 @@
 #pragma once
 #include <cstdint>
+#include <functional>
+#include <memory>
 #include <limits>
 #include <stdexcept>
 #include <optional>
@@ -44,6 +46,8 @@ public:
     }
 
     std::map<int, int> multimodalLengths() const {
+        if (prefill_media_lengths)
+            return *prefill_media_lengths;
         std::map<int, int> lengths;
         const bool         has_rpc_types = !multimodal_input_types.empty();
         if (!multimodal_features || (!has_rpc_types && !multimodal_inputs)) {
@@ -172,6 +176,10 @@ public:
     std::optional<std::vector<torch::Tensor>>   mm_position_ids;
     std::optional<std::vector<torch::Tensor>>   mm_extra_input;
     std::shared_ptr<const MultimodalCacheSpans> multimodal_cache_spans;
+
+    // Scheduler-owned barrier after KV lookup/load (including fallback). false means I/O is in flight.
+    std::function<ErrorResult<bool>(GenerateInput&, int)> prepare_prefill_media;
+    std::optional<std::map<int, int>>                     prefill_media_lengths;
 
     int     prefix_length        = 0;
     int64_t begin_time_us        = 0;

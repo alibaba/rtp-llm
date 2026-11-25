@@ -12,6 +12,12 @@
 #include "rtp_llm/cpp/telemetry/PhaseSpanSynthesizer.h"
 #include <algorithm>
 #include <chrono>
+#include <future>
+#include <thread>
+#include "rtp_llm/cpp/multimodal_processor/transport/MMRemoteOutputTransport.h"
+#if USING_CUDA
+#include <c10/cuda/CUDAFunctions.h>
+#endif
 #include <cstdint>
 #include <cstring>
 #include <memory>
@@ -201,6 +207,15 @@ grpc::Status PrefillRpcServer::init(const EngineInitParams&                     
     if (!ret.ok()) {
         return ret;
     }
+    if (mm_processor_ && mm_processor_->supportsDeferredPrefill()
+        && maga_init_params.model_config_.mm_model_config.mm_position_ids_style == 0) {
+        const auto capacity = std::max(1, maga_init_params.concurrency_config.concurrency_limit);
+        media_pool_         = std::make_shared<autil::ThreadPool>(std::min(capacity, 32), capacity);
+        if (!media_pool_->start("prefill_mm")) {
+            return grpc::Status(grpc::StatusCode::INTERNAL, "failed to start prefill media workers");
+        }
+    }
+
     if (autil::EnvUtil::getEnv("ENABLE_PREFILL_REQUEST_LOG", false)) {
         try {
             request_logger_ = std::make_unique<PrefillRequestLogger>(
@@ -342,6 +357,145 @@ void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context)
     RTP_LLM_LOG_DEBUG("request [%ld] get rpc connection done", prefill_context.request_id);
 }
 
+namespace {
+struct PrefillImageRead {
+    explicit PrefillImageRead(grpc::ServerContext* context): rpc(std::make_shared<DeferredMMRpc>(context, true)) {}
+    ~PrefillImageRead() {
+        rpc->cancel();
+    }
+    std::shared_ptr<DeferredMMRpc>             rpc;
+    std::future<ErrorResult<MultimodalOutput>> result;
+    size_t                                     first = 0;
+};
+}  // namespace
+
+ErrorInfo PrefillRpcServer::deferPrefillImages(PrefillGenerateContext& context) {
+    auto&              input   = *context.generate_input;
+    const auto&        request = *context.rpc_context.request;
+    const auto&        media   = request.multimodal_inputs();
+    auto               hashes  = std::make_shared<std::vector<torch::Tensor>>();
+    std::map<int, int> lengths;
+    int64_t            rows = 0;
+    for (int i = 0; i < request.prefill_image_hashes_size(); ++i) {
+        const auto& data = request.prefill_image_hashes(i).rows();
+        if (data.empty()) {
+            return {ErrorCode::MM_WRONG_FORMAT_ERROR, "empty prefill image hash segment"};
+        }
+        rows += data.size();
+        if (rows >= maga_init_params_.model_config_.max_seq_len
+            || rows + input.input_ids.numel() > std::numeric_limits<int32_t>::max()) {
+            return {ErrorCode::MM_LONG_PROMPT_ERROR, "prefill image layout exceeds the context limit"};
+        }
+        hashes->push_back(torch::from_blob(const_cast<int32_t*>(data.data()), {data.size()}, torch::kInt32).clone());
+        lengths[media.multimodal_inputs(i).multimodal_type()] += data.size();
+    }
+    CHECK_AND_RETURN_REF(layout, mm_processor_->preparePrefillLayout(input, *hashes));
+    input.input_ids              = std::move(layout.expanded_ids);
+    input.multimodal_cache_spans = std::move(layout.cache_spans);
+    input.text_tokens_mask       = std::move(layout.text_tokens_mask);
+    input.mm_locs                = torch::empty({0}, torch::kInt32);
+    input.prefill_media_lengths  = std::move(lengths);
+
+    auto job = std::make_shared<PrefillImageRead>(context.server_context);
+    if (context.request_deadline)
+        job->rpc->deadline = std::min(job->rpc->deadline, *context.request_deadline);
+    std::optional<c10::Device> device;
+#if USING_CUDA
+    if (c10::cuda::device_count())
+        device.emplace(torch::kCUDA, c10::cuda::current_device());
+#endif
+    std::string vit;
+    for (const auto& addr : input.generate_config->role_addrs) {
+        if (addr.role == RoleType::VIT) {
+            vit = addr.ip + ":" + std::to_string(addr.grpc_port);
+            break;
+        }
+    }
+    const auto                       span = context.trace_span_guard ? context.trace_span_guard->sharedSpan() :
+                                                                       opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>{};
+    std::weak_ptr<autil::ThreadPool> pool = media_pool_;
+    input.prepare_prefill_media           = [hashes,
+                                   locs = std::move(layout.locs),
+                                   media,
+                                   job,
+                                   vit,
+                                   span,
+                                   device,
+                                   pool,
+                                   processor = mm_processor_,
+                                   cancel    = context.cancel_state,
+                                   retries   = maga_init_params_.pd_sep_config.prefill_retry_times,
+                                   retry_ms  = maga_init_params_.pd_sep_config.prefill_retry_timeout_ms](
+                                      GenerateInput& admitted, int reuse) -> ErrorResult<bool> {
+        if (!job->result.valid()) {
+            const auto* offsets = locs.data_ptr<int32_t>();
+            size_t      first   = 0;
+            while (first < hashes->size()
+                   && offsets[first] + hashes->at(first).numel() <= reuse - admitted.prefix_length)
+                ++first;
+            if (first == hashes->size())
+                return true;
+            job->first = first;
+            auto task  = std::make_shared<std::packaged_task<ErrorResult<MultimodalOutput>()>>(
+                [hashes,
+                 first,
+                 media,
+                 processor,
+                 vit,
+                 device,
+                 call = job->rpc,
+                 span,
+                 cancel,
+                 retries,
+                 retry_ms,
+                 id = admitted.request_id]() -> ErrorResult<MultimodalOutput> {
+                    const c10::OptionalDeviceGuard device_guard(device);
+                    MultimodalInputsPB             suffix(media);
+                    suffix.set_request_id(id);
+                    suffix.mutable_multimodal_inputs()->DeleteSubrange(0, first);
+                    ErrorResult<MultimodalOutput> result(ErrorCode::MM_PROCESS_ERROR, "ViT output unavailable");
+                    const auto                    status = traceMultimodalWork(id, span, [&] {
+                        const auto start = std::chrono::steady_clock::now();
+                        for (int attempt = 0;; ++attempt) {
+                            if (cancel && cancel->load())
+                                return ErrorInfo(ErrorCode::CANCELLED, "prefill cancelled");
+                            if (std::chrono::system_clock::now() >= call->deadline)
+                                return ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "prefill media deadline exceeded");
+                            if (attempt && retry_ms > 0
+                                && std::chrono::steady_clock::now() - start >= std::chrono::milliseconds(retry_ms))
+                                return result.status();
+                            result = processor->fetchPrefillImages(suffix, vit, *hashes, first, call.get());
+                            if (result.ok() || attempt >= retries
+                                || !isRetryableMultimodalError(result.status().code()))
+                                return result.status();
+                            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                        }
+                    });
+                    if (!status.ok())
+                        return status;
+                    return result;
+                });
+            job->result   = task->get_future();
+            auto executor = pool.lock();
+            if (!executor || executor->pushTask([task] { (*task)(); }, false, false) != autil::ThreadPool::ERROR_NONE)
+                return {ErrorCode::CONCURRENCY_LIMIT_ERROR, "prefill media queue is full"};
+        }
+        if (job->result.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+            return false;
+        auto result = job->result.get();
+        if (!result.ok())
+            return result.status();
+        auto& output                 = result.value();
+        auto  suffix_locs            = locs.slice(0, job->first);
+        admitted.mm_locs             = admitted.prefix_length ? suffix_locs + admitted.prefix_length : suffix_locs;
+        admitted.multimodal_features = std::move(output.mm_features);
+        admitted.mm_position_ids     = std::move(output.mm_position_ids);
+        admitted.mm_extra_input      = std::move(output.mm_extra_input);
+        return true;
+    };
+    return ErrorInfo::OkStatus();
+}
+
 void PrefillRpcServer::multimodalProcess(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
     if (prefill_context.multimodalProcessed()) {
@@ -369,12 +523,21 @@ void PrefillRpcServer::multimodalProcess(PrefillGenerateContext& prefill_context
         return;
     }
 
-    auto result = updateMultimodalFeaturesWithTrace(*input,
-                                                    prefill_context.trace_span_guard ?
-                                                        prefill_context.trace_span_guard->sharedSpan() :
-                                                        opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>{},
-                                                    mm_inputs,
-                                                    prefill_context.server_context);
+    const bool defer =
+        media_pool_ && request->prefill_image_hashes_size() == mm_inputs.multimodal_inputs_size()
+        && (mm_inputs.frontend_inspection_verified() || !mm_inputs.inspection_ticket().empty()
+            || (mm_inputs.has_input_inspection_enabled() && !mm_inputs.input_inspection_enabled().value()))
+        && std::all_of(mm_inputs.multimodal_inputs().begin(), mm_inputs.multimodal_inputs().end(), [](const auto& m) {
+               return m.multimodal_type() == 0 || m.multimodal_type() == 1;
+           });
+    auto result =
+        defer ? deferPrefillImages(prefill_context) :
+                updateMultimodalFeaturesWithTrace(*input,
+                                                  prefill_context.trace_span_guard ?
+                                                      prefill_context.trace_span_guard->sharedSpan() :
+                                                      opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>{},
+                                                  mm_inputs,
+                                                  prefill_context.server_context);
     if (!result.ok()) {
         prefill_context.setRetryable(isRetryableMultimodalError(result.code()));
         setContextError(prefill_context, result);
@@ -392,6 +555,7 @@ GenerateRequestPB PrefillRpcServer::buildAllocateRequest(PrefillGenerateContext&
 
     GenerateInputPB* new_request = alloc_request.mutable_input();
     new_request->CopyFrom(*prefill_context.rpc_context.request);
+    new_request->clear_prefill_image_hashes();
     new_request->clear_group_size();
     new_request->clear_group_id();
     new_request->mutable_generate_config()->clear_group_timeout();

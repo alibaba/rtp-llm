@@ -26,6 +26,8 @@ class MultimodalInputsPB;
 
 namespace rtp_llm {
 
+class DeferredMMRpc;
+
 struct ExpandedOutput {
     torch::Tensor                               expanded_ids;
     torch::Tensor                               token_type_ids;
@@ -86,7 +88,8 @@ private:
     virtual ErrorResult<MultimodalOutput> MultimodalEmbeddingFromRpc(const MultimodalInputsPB& inputs,
                                                                      const std::string&        ip_port,
                                                                      int64_t                   request_id,
-                                                                     grpc::ServerContext*      context);
+                                                                     grpc::ServerContext*      context,
+                                                                     DeferredMMRpc*            deferred = nullptr);
 
     ErrorInfo setGenerateMultimodalFeatures(GenerateInput& input, MultimodalOutput& embedding);
 
@@ -101,6 +104,18 @@ private:
     ErrorInfo checkExpandLength(const ExpandedOutput& expand_output);
 
 public:
+    virtual bool supportsDeferredPrefill() const {
+        return false;
+    }
+
+    ErrorResult<ExpandedOutput>   preparePrefillLayout(const GenerateInput&              input,
+                                                       const std::vector<torch::Tensor>& hashes);
+    ErrorResult<MultimodalOutput> fetchPrefillImages(const MultimodalInputsPB&         request,
+                                                     const std::string&                vit_address,
+                                                     const std::vector<torch::Tensor>& hashes,
+                                                     size_t                            first,
+                                                     DeferredMMRpc*                    call);
+
     ErrorInfo updateMultimodalFeatures(GenerateInput& input);
 
     ErrorInfo updateMultimodalFeatures(GenerateInput&            input,

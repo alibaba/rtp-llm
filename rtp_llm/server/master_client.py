@@ -702,7 +702,9 @@ class MasterClient:
         if not missing:
             if ticket:
                 input.deferred_inspection = (address.ip, address.grpc_port, ticket)
-            self._record_greennet_approval(input, address, unique_keys, entries)
+            self._record_greennet_approval(
+                input, address, unique_keys, entries, metadata
+            )
             return metadata
 
         from rtp_llm.cpp.model_rpc.model_rpc_client import iter_multimodal_inputs
@@ -787,7 +789,7 @@ class MasterClient:
                 ExceptionType.MM_PROCESS_ERROR, "ViT returned incomplete feature hashes"
             )
         filled["entries"] = [entries[key] for key in unique_keys]
-        self._record_greennet_approval(input, address, unique_keys, entries)
+        self._record_greennet_approval(input, address, unique_keys, entries, filled)
         return filled
 
     @staticmethod
@@ -796,8 +798,12 @@ class MasterClient:
         address: RoleAddr,
         keys: List[str],
         entries: Dict[str, Any],
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
-        if keys and all(entries[key].get("greennet_passed") is True for key in keys):
+        if keys and (
+            (metadata or {}).get("input_inspection_disabled") is True
+            or all(entries[key].get("greennet_passed") is True for key in keys)
+        ):
             input.greennet_verified_vit = (address.ip, address.grpc_port, tuple(keys))
 
     async def _get_vit_metadata(
