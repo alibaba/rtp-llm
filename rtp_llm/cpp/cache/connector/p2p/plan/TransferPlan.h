@@ -12,11 +12,12 @@ namespace rtp_llm {
 
 /// @brief head 维切分参数，直接喂给 LayerBlockConverter::convertIndexToBuffer。
 struct PartitionSpec {
-    int count = 1;
-    int id    = 0;
+    int  count                = 1;
+    int  id                   = 0;
+    bool segment_linear_state = false;
 
     bool operator==(const PartitionSpec& o) const {
-        return count == o.count && id == o.id;
+        return count == o.count && id == o.id && segment_linear_state == o.segment_linear_state;
     }
     bool operator!=(const PartitionSpec& o) const {
         return !(*this == o);
@@ -92,10 +93,10 @@ struct TransferRoute {
     SliceSpec     dst_slice;
 
     // Step 5 的形状校验留痕，便于断言与排障。
-    size_t src_bytes = 0;
-    size_t dst_bytes = 0;
-    size_t cache_key_tokens_per_block = 0;
-    size_t group_tokens_per_block     = 0;
+    size_t                    src_bytes                  = 0;
+    size_t                    dst_bytes                  = 0;
+    size_t                    cache_key_tokens_per_block = 0;
+    size_t                    group_tokens_per_block     = 0;
     std::vector<LayerMapping> layers                     = {};
     size_t                    src_slice_payload_bytes    = 0;
     size_t                    dst_slice_payload_bytes    = 0;

@@ -243,7 +243,7 @@ TEST(PPStageCacheConfigTest, TransferPolicySurvivesSingletonStagesAndWarmup) {
 }
 
 TEST(PPStageCacheConfigTest, PoolBlockWeightsAcceptTagsOwnedByOtherStages) {
-    const auto model = makeHybridModelConfig(8);
+    const auto    model = makeHybridModelConfig(8);
     KVCacheConfig kv_cache_config;
     kv_cache_config.kv_cache_pool_block_weights = R"({"full":8,"linear":1})";
     // {4,3,1}: stage 1 owns only LINEAR layers, stage 2 only a FULL layer.
@@ -264,7 +264,7 @@ TEST(PPStageCacheConfigTest, PoolBlockWeightsAcceptTagsOwnedByOtherStages) {
 }
 
 TEST(PPStageCacheConfigTest, PoolBlockWeightsRejectUnknownTagOnSingleStage) {
-    const auto  model = makeHybridModelConfig(8);
+    const auto    model = makeHybridModelConfig(8);
     KVCacheConfig kv_cache_config;
     kv_cache_config.kv_cache_pool_block_weights = R"({"full":8,"swa":1})";
     // Without PP slicing the local topology is the whole model, so a tag no

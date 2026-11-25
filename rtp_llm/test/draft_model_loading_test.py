@@ -343,6 +343,7 @@ class DraftModelLoadingTest(unittest.TestCase):
                         )
                         with self.assertRaisesRegex(Exception, expected):
                             model.load()
+
     def test_dflash_rejects_pp_gt_1_before_weight_loading(self):
         from rtp_llm.models.qwen_3_dflash import Qwen3DFlash
 

@@ -91,8 +91,7 @@ struct StreamSpecUpdateInfo {
     torch::Tensor top_logprob_token_ids;
     torch::Tensor top_logprobs;
     int32_t       logprobs_offset = 0;
-    // Opt-in target output for ordinary MTP prefill. These owned host rows
-    // are distinct from the draft features retained for the next round.
+    // Owned host rows of the target output, distinct from the next draft step's features.
     torch::Tensor target_logits{};
     torch::Tensor target_hidden_states{};
 };
@@ -238,10 +237,10 @@ public:
     // Observe Engine release and Connector lease completion during cancellation.
     bool hasPendingLocalCleanup() const;
     // Callbacks may run on the Engine or transport thread and should only enqueue work.
-    void                 onLocalCleanupProgress(std::function<void()> callback);
-    int                  nextNeedBlockNums(int reserve_step) const;
-    int                  estimateInitialNeedBlocks(const std::string& pool_tag = {}) const;
-    int                  estimatePeakNeedBlocks(int remaining_tokens, const std::string& pool_tag = {}) const;
+    void onLocalCleanupProgress(std::function<void()> callback);
+    int  nextNeedBlockNums(int reserve_step) const;
+    int  estimateInitialNeedBlocks(const std::string& pool_tag = {}) const;
+    int  estimatePeakNeedBlocks(int remaining_tokens, const std::string& pool_tag = {}) const;
     // Scheduler boundary: commit pending output work, then expose reclaimed
     // history through the allocator's real available-block count for admission.
     void                 drainLinearHistoryForAdmission();
@@ -774,8 +773,7 @@ public:
         // monotonically while workers overlap and resets to exact host state
         // once bookkeeping catches up.
         // -1 = unset (first iter / cleared).
-        int           next_seq_len_upper_bound = -1;
-        torch::Tensor mtp_indexer_topk_gpu;
+        int next_seq_len_upper_bound = -1;
     };
 
     uint64_t setMtpAsyncDeviceState(MtpAsyncDeviceState state) {
@@ -1045,8 +1043,8 @@ protected:
     bool         consumerFinishedWithoutLock() const;
     virtual bool consumerReadyWithoutLock() const;
 
-    int estimateKVNeedBlocks(int remaining_tokens, int target_batch_size, const std::string& pool_tag = {}) const;
-    bool                     reportUpdateErrorWithoutLock(const std::optional<ErrorInfo>& error_info);
+    int  estimateKVNeedBlocks(int remaining_tokens, int target_batch_size, const std::string& pool_tag = {}) const;
+    bool reportUpdateErrorWithoutLock(const std::optional<ErrorInfo>& error_info);
     bool prepareUpdateWithoutLock(const std::optional<ErrorInfo>& error_info, bool force_update_info);
     std::optional<ErrorInfo> updateNormalLogitProcessorStatus(const StreamUpdateInfo& update_info);
     std::optional<ErrorInfo> updateLogitProcessorStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens);

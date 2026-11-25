@@ -98,7 +98,7 @@ inline std::vector<CacheStoreBlockPair> buildCacheStorePlan(const CacheGroupPoli
                                                             int                     cp_size,
                                                             size_t                  key_blocks_per_logical_block = 1,
                                                             size_t                  cache_key_count              = 0,
-                                                            size_t                  publish_start_block           = 0) {
+                                                            size_t                  publish_start_block          = 0) {
     std::vector<CacheStoreBlockPair> plan;
     if (total_logical_blocks == 0) {
         return plan;

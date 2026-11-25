@@ -114,7 +114,7 @@ LayerCacheBufferUtil::convertLayerTag(KVCacheResource& resource,
     if (block_count > 0 && static_cast<size_t>(block_count) > count - begin) {
         return conversionError(context + ": requested block range exceeds cache keys");
     }
-    const size_t end = block_count >= 0 ? begin + static_cast<size_t>(block_count) : count;
+    const size_t        end = block_count >= 0 ? begin + static_cast<size_t>(block_count) : count;
     std::vector<size_t> positions;
     if (group.policy.group_type != CacheGroupType::FULL) {
         try {
@@ -139,10 +139,10 @@ LayerCacheBufferUtil::convertLayerTag(KVCacheResource& resource,
         }
     }
     try {
-        const auto& blocks = resource.blocksForLayer(layer_id, group.tag);
-        const bool state_group = group.policy.group_type != CacheGroupType::FULL;
-        const auto state_slots = state_group ? stateProjection(group, count, cache_key_tokens_per_block) :
-                                               std::map<size_t, size_t>{};
+        const auto& blocks      = resource.blocksForLayer(layer_id, group.tag);
+        const bool  state_group = group.policy.group_type != CacheGroupType::FULL;
+        const auto  state_slots =
+            state_group ? stateProjection(group, count, cache_key_tokens_per_block) : std::map<size_t, size_t>{};
         std::vector<size_t> available;
         for (size_t pos : positions) {
             std::optional<size_t> physical;
@@ -186,14 +186,14 @@ LayerCacheBufferUtil::convertLayerTagForRoute(KVCacheResource&           resourc
         return std::shared_ptr<LayerCacheBuffer>{};
     }
     try {
-        const auto& keys   = resource.cacheKeys();
+        const auto& keys = resource.cacheKeys();
         // The PP scheduler has already checked target-layer ownership. The
         // shared allocation is keyed by tag in the Stage 0 resource.
         const auto& blocks =
             shared_pp_block_table ? resource.blocks(group.tag) : resource.blocksForLayer(layer_id, group.tag);
-        auto        buffer = std::make_shared<LayerCacheBuffer>(layer_id, group.tag);
-        const bool  state_group = group.policy.group_type != CacheGroupType::FULL;
-        const auto  state_slots =
+        auto       buffer      = std::make_shared<LayerCacheBuffer>(layer_id, group.tag);
+        const bool state_group = group.policy.group_type != CacheGroupType::FULL;
+        const auto state_slots =
             state_group ? stateProjection(group, keys.size(), cache_key_tokens_per_block) : std::map<size_t, size_t>{};
         // Resolve every requested key exactly; an inactive/missing slot is an error, never a silent skip.
         for (size_t pos : logical_positions) {
@@ -275,7 +275,8 @@ ErrorResult<transfer::KeyBlockInfoMap>
 LayerCacheBufferUtil::buildKeyBlockInfos(const std::shared_ptr<LayerBlockConverter>& converter,
                                          const std::shared_ptr<LayerCacheBuffer>&    buffer,
                                          int                                         partition_count,
-                                         int                                         partition_id) {
+                                         int                                         partition_id,
+                                         bool                                        segment_linear_state) {
     if (!converter || !buffer) {
         return conversionError("layer/tag/cache_key/block_id=<missing>: null converter or layer buffer");
     }
@@ -295,8 +296,13 @@ LayerCacheBufferUtil::buildKeyBlockInfos(const std::shared_ptr<LayerBlockConvert
         }
         std::vector<BlockInfo> parts;
         try {
-            parts = converter->convertIndexToBuffer(
-                buffer->getLayerId(), buffer->cacheTag(), block_id, partition_count, partition_id);
+            if (segment_linear_state) {
+                parts = converter->convertLinearStatePartition(
+                    buffer->getLayerId(), buffer->cacheTag(), block_id, partition_count, partition_id);
+            } else {
+                parts = converter->convertIndexToBuffer(
+                    buffer->getLayerId(), buffer->cacheTag(), block_id, partition_count, partition_id);
+            }
         } catch (const std::exception& error) {
             return conversionError(key_context + ": " + error.what());
         }
@@ -322,19 +328,21 @@ LayerCacheBufferUtil::buildKeyBlockInfosSliced(const std::shared_ptr<LayerBlockC
                                                int                                         partition_count,
                                                int                                         partition_id,
                                                const SliceSpec&                            slice,
-                                               size_t                                      payload_bytes) {
+                                               size_t                                      payload_bytes,
+                                               bool                                        segment_linear_state) {
     const std::string context =
         buffer ? "layer=" + std::to_string(buffer->getLayerId()) + " tag=" + buffer->cacheTag() : "layer/tag=<missing>";
     if (slice.count <= 0 || slice.index < 0 || slice.index >= slice.count
         || (slice.mode != CpBlockSliceMode::NONE && slice.mode != CpBlockSliceMode::EQUAL_BYTES
             && slice.mode != CpBlockSliceMode::PAYLOAD_BYTES)
-        || (slice.mode == CpBlockSliceMode::NONE && slice.count != 1) || (slice.count > 1 && partition_count != 1)) {
+        || (slice.mode == CpBlockSliceMode::NONE && slice.count != 1)
+        || (slice.count > 1 && (partition_count != 1 || segment_linear_state))) {
         return conversionError(context
                                + ": invalid/incompatible slice mode=" + std::to_string(static_cast<int>(slice.mode))
                                + " count=" + std::to_string(slice.count) + " index=" + std::to_string(slice.index)
                                + " partition_count=" + std::to_string(partition_count));
     }
-    auto blocks = buildKeyBlockInfos(converter, buffer, partition_count, partition_id);
+    auto blocks = buildKeyBlockInfos(converter, buffer, partition_count, partition_id, segment_linear_state);
     if (!blocks.ok() || slice.mode == CpBlockSliceMode::NONE || slice.count == 1) {
         return blocks;
     }

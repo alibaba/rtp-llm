@@ -92,9 +92,9 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DecodeTpReplicatesFullPagesWhilePrefillCp
             par.prefill_cp_config.kv_cache_sharded = true;
             par.prefill_cp_config.prefill_cp_size  = 2;
             PDSepConfig pd;
-            pd.role_type = role;
+            pd.role_type             = role;
             pd.cache_store_rdma_mode = false;
-            auto config  = finalizeCacheConfig(CacheConfigCreator::createConfig(model, par, {}), 20);
+            auto config              = finalizeCacheConfig(CacheConfigCreator::createConfig(model, par, {}), 20);
             EXPECT_EQ(config.group(full.tag).seqSizePerBlock(), 256u);
             EXPECT_EQ(config.group(swa.tag).seqSizePerBlock(), 512u);
             RuntimeConfig runtime;

@@ -6,6 +6,11 @@ from typing import Any, Dict, List, Optional, Union
 
 import torch
 from pydantic import BaseModel
+from smoke.base_comparer import BaseComparer
+from smoke.common_def import REL_PATH, QueryStatus, SmokeException
+from smoke.grammar_constraint_validator import validate_constraint
+from smoke.utils import create_temporary_copy
+
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -13,10 +18,6 @@ from rtp_llm.openai.api_datatype import (
     UsageInfo,
 )
 from rtp_llm.utils.base_model_datatypes import AuxInfo
-from smoke.base_comparer import BaseComparer
-from smoke.common_def import REL_PATH, QueryStatus, SmokeException
-from smoke.grammar_constraint_validator import validate_constraint
-from smoke.utils import create_temporary_copy
 
 
 def _detect_repetition(text: str, window: int = 20) -> Optional[str]:
@@ -1052,7 +1053,9 @@ class OpenaiComparer(BaseComparer):
                         )
                         continue
                     for idx, (item1, item2) in enumerate(zip(value1, value2)):
-                        if isinstance(item1, BaseModel) and isinstance(item2, BaseModel):
+                        if isinstance(item1, BaseModel) and isinstance(
+                            item2, BaseModel
+                        ):
                             dict1 = item1.model_dump(mode="json")
                             dict2 = item2.model_dump(mode="json")
                             for ignore_field in nested_ignore[field]:

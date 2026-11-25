@@ -46,8 +46,7 @@ protected:
     }
 };
 
-std::shared_ptr<TestPool> makeInitializedPool(size_t physical_block_count,
-                                              BlockPoolType type = BlockPoolType::HOST) {
+std::shared_ptr<TestPool> makeInitializedPool(size_t physical_block_count, BlockPoolType type = BlockPoolType::HOST) {
     auto pool = std::make_shared<TestPool>(std::make_shared<TestPoolConfig>("test", physical_block_count, type));
     pool->init();
     return pool;
@@ -120,7 +119,7 @@ TEST(IBlockPoolTest, SharedArenaBorrowsBytesOnlyAfterFinalActiveHold) {
     EXPECT_EQ(large->availableBlocksNum(), 3u);
     EXPECT_FALSE(large->malloc().has_value());  // CACHE metadata must be evicted first.
 
-    for (const auto hold : {BlockTreeRefType::LOAD, BlockTreeRefType::STORE, BlockTreeRefType::EVICTION}) {
+    for (const auto hold : {BlockTreeRefType::LOAD, BlockTreeRefType::EVICT}) {
         small->incTreeRef(ids[0], hold);
         EXPECT_EQ(arena->availableBytes(), 2560u);
         EXPECT_EQ(large->availableBlocksNum(), 2u);

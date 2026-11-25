@@ -23,6 +23,7 @@ public:
         pb->set_peer_index(peer_index);
         pb->set_partition_count(route.src_partition.count);
         pb->set_partition_id(route.src_partition.id);
+        pb->set_segment_linear_state(route.src_partition.segment_linear_state);
         pb->set_slice_mode(static_cast<int32_t>(route.src_slice.mode));
         pb->set_slice_count(route.src_slice.count);
         pb->set_slice_index(route.src_slice.index);
@@ -39,6 +40,7 @@ public:
         pb->set_cache_tag(route.cache_tag);
         pb->set_partition_count(route.dst_partition.count);
         pb->set_partition_id(route.dst_partition.id);
+        pb->set_segment_linear_state(route.dst_partition.segment_linear_state);
         pb->set_slice_mode(static_cast<int32_t>(route.dst_slice.mode));
         pb->set_slice_count(route.dst_slice.count);
         pb->set_slice_index(route.dst_slice.index);
@@ -56,11 +58,11 @@ public:
 
     static LocalRoute decode(const TransferRoutePB& pb) {
         LocalRoute out;
-        out.route_id    = pb.route_id();
-        out.cache_tag   = pb.cache_tag();
-        out.peer_index  = pb.peer_index();
-        out.partition   = PartitionSpec{pb.partition_count(), pb.partition_id()};
-        out.slice       = SliceSpec{toSliceMode(pb.slice_mode()), pb.slice_count(), pb.slice_index()};
+        out.route_id   = pb.route_id();
+        out.cache_tag  = pb.cache_tag();
+        out.peer_index = pb.peer_index();
+        out.partition  = PartitionSpec{pb.partition_count(), pb.partition_id(), pb.segment_linear_state()};
+        out.slice      = SliceSpec{toSliceMode(pb.slice_mode()), pb.slice_count(), pb.slice_index()};
         return out;
     }
 

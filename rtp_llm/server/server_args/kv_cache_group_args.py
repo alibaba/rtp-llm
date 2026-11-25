@@ -282,7 +282,7 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         default="",
         help=(
             "按 cache group tag 设置 pool block 数量权重的 JSON 对象，权重为正整数；"
-            "例如 {\"full\":8,\"linear\":1}。权重表示 block 数量比例而非显存比例，"
+            '例如 {"full":8,"linear":1}。权重表示 block 数量比例而非显存比例，'
             "PP>1 时各 stage 只需包含本 stage 拥有的 tag，其余 tag 自动忽略；"
             "空字符串保持默认分配策略。"
         ),

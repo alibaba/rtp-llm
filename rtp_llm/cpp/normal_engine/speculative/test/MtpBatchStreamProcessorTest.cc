@@ -131,7 +131,7 @@ public:
             query->generate_config->in_think_mode       = true;
             query->generate_config->max_thinking_tokens = 1024;
         }
-        query->generate_config->num_return_sequences  = num_return_sequences;
+        query->generate_config->num_return_sequences = num_return_sequences;
         auto stream =
             make_shared<ProcessorTestGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
         if (!end_think_token_ids.empty()) {
@@ -1446,7 +1446,7 @@ TEST_F(MtpBatchStreamProcessorTest, DSparkProposalSelectsGammaLogitsInBothAnchor
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testTorchSpecDSparkAnchorProposalAndVerifyWidthsFiveAndSeven) {
-    for (const int32_t gamma: {5, 7}) {
+    for (const int32_t gamma : {5, 7}) {
         SCOPED_TRACE(gamma);
         ModelConfig                 model_config;
         PDSepConfig                 pd_sep_config;
@@ -1457,15 +1457,14 @@ TEST_F(MtpBatchStreamProcessorTest, testTorchSpecDSparkAnchorProposalAndVerifyWi
         sp_config.gen_num_per_cycle            = gamma;
         sp_config.sp_dspark_mask_token_id      = 255;
         sp_config.sp_dspark_sample_from_anchor = true;
-        MtpBatchStreamProcessor processor(
-            model_config, pd_sep_config, logging_config, cache_config, sp_config, false);
+        MtpBatchStreamProcessor processor(model_config, pd_sep_config, logging_config, cache_config, sp_config, false);
 
-        TensorHolder holder;
-        auto anchors = torch::tensor({101, 202}, torch::kInt32).to(torch::kCUDA);
-        auto ends    = torch::tensor({10, 20}, torch::kInt32).to(torch::kCUDA);
-        auto positions = torch::tensor({10, 20}, torch::kInt32).reshape({2, 1}).to(torch::kCUDA);
+        TensorHolder          holder;
+        auto                  anchors   = torch::tensor({101, 202}, torch::kInt32).to(torch::kCUDA);
+        auto                  ends      = torch::tensor({10, 20}, torch::kInt32).to(torch::kCUDA);
+        auto                  positions = torch::tensor({10, 20}, torch::kInt32).reshape({2, 1}).to(torch::kCUDA);
         mtp::DSparkRoundState round{anchors, ends, positions};
-        GptModelInputs              propose_input;
+        GptModelInputs        propose_input;
         mtp::DSparkProposeInputBuffers propose_buffers;
         mtp::prepareDSparkProposeInput(propose_input,
                                        round,
@@ -1475,17 +1474,15 @@ TEST_F(MtpBatchStreamProcessorTest, testTorchSpecDSparkAnchorProposalAndVerifyWi
                                        propose_buffers,
                                        holder);
         std::vector<int32_t> expected_propose;
-        for (const int32_t anchor: {101, 202}) {
+        for (const int32_t anchor : {101, 202}) {
             expected_propose.push_back(anchor);
             expected_propose.insert(expected_propose.end(), gamma - 1, 255);
         }
         EXPECT_EQ(expected_propose, toVec<int32_t>(propose_input.combo_tokens));
-        EXPECT_EQ((std::vector<int32_t>{gamma, gamma}),
-                  toVec<int32_t>(propose_input.input_lengths));
+        EXPECT_EQ((std::vector<int32_t>{gamma, gamma}), toVec<int32_t>(propose_input.input_lengths));
         EXPECT_EQ(gamma * 2, propose_input.lm_output_indexes.numel());
 
-        auto proposals =
-            torch::arange(1, gamma * 2 + 1, torch::kInt32).reshape({2, gamma}).to(torch::kCUDA);
+        auto           proposals = torch::arange(1, gamma * 2 + 1, torch::kInt32).reshape({2, gamma}).to(torch::kCUDA);
         GptModelInputs verify_input;
         processor.prepareDSparkTargetVerifyModelInput(round, verify_input, proposals, holder);
         std::vector<int32_t> expected_verify{101};
@@ -1497,8 +1494,7 @@ TEST_F(MtpBatchStreamProcessorTest, testTorchSpecDSparkAnchorProposalAndVerifyWi
             expected_verify.push_back(token);
         }
         EXPECT_EQ(expected_verify, toVec<int32_t>(verify_input.combo_tokens));
-        EXPECT_EQ((std::vector<int32_t>{gamma + 1, gamma + 1}),
-                  toVec<int32_t>(verify_input.input_lengths));
+        EXPECT_EQ((std::vector<int32_t>{gamma + 1, gamma + 1}), toVec<int32_t>(verify_input.input_lengths));
         EXPECT_EQ((gamma + 1) * 2, verify_input.lm_output_indexes.numel());
         EXPECT_TRUE(verify_input.is_target_verify);
     }
@@ -1516,10 +1512,9 @@ TEST_F(MtpBatchStreamProcessorTest, DFlashSevenProposalsExcludeAnchorAndPreserve
     sp_config.sp_dspark_sample_from_anchor = false;
     MtpBatchStreamProcessor processor(model_config, pd_sep_config, logging_config, cache_config, sp_config, false);
 
-    GptModelInputs input;
-    TensorHolder   holder;
-    mtp::DSparkRoundState round{torch::tensor({101, 255}, torch::kInt32),
-                                torch::tensor({4096, 8192}, torch::kInt32)};
+    GptModelInputs        input;
+    TensorHolder          holder;
+    mtp::DSparkRoundState round{torch::tensor({101, 255}, torch::kInt32), torch::tensor({4096, 8192}, torch::kInt32)};
     mtp::DSparkProposeInputBuffers propose_buffers;
     mtp::prepareDSparkProposeInput(input,
                                    round,

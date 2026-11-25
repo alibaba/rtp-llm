@@ -614,6 +614,7 @@ class VitProxyRpcServerStatusTest(TestCase):
         # The stale dead probe result must not leak to subscribers either: the
         # newer forwarding success supersedes it.
         self.assertIsNone(results.get_nowait().worker_status)
+
         # Health reporting follows the load balancer's versioned verdict
         # instead of under-reporting from the stale probe result. A fresh
         # status probe observes the healthy worker again.

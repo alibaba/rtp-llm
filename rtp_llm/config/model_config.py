@@ -5,6 +5,7 @@ import os
 from typing import Any, Dict, Optional
 
 import torch
+
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.config.quant_config import (
     CompressedW4A8Int4PerChannelQuantConfig,

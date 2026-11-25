@@ -215,14 +215,14 @@ TEST(HostBlockPoolTest, SharedHostBudgetBorrowsOnlyAfterStoreAndCacheHoldsDrain)
     EXPECT_EQ(large.sharedBacking(), small.sharedBacking());
     EXPECT_EQ(arena->freeBytes(), 0u);
     EXPECT_FALSE(large.malloc().has_value());
-    small.incTreeRef((*ids)[0], BlockTreeRefType::STORE);
+    small.incTreeRef((*ids)[0], BlockTreeRefType::EVICT);
     small.decTreeRef(BlockIdList{(*ids)[0], (*ids)[1]}, BlockTreeRefType::CACHE);
     EXPECT_EQ(arena->freeBytes(), 4096u);
     EXPECT_FALSE(large.malloc().has_value());
-    small.decTreeRef((*ids)[0], BlockTreeRefType::STORE);
+    small.decTreeRef((*ids)[0], BlockTreeRefType::EVICT);
     const auto borrowed = large.malloc();
     ASSERT_TRUE(borrowed.has_value());
-    large.incTreeRef(*borrowed, BlockTreeRefType::STORE);
+    large.incTreeRef(*borrowed, BlockTreeRefType::EVICT);
     const auto output = large.blockBuffer(*borrowed);
     std::memset(output.addr, 0xAB, output.payload_bytes);
     const auto first = small.blockBuffer((*ids)[0]);
@@ -236,7 +236,7 @@ TEST(HostBlockPoolTest, SharedHostBudgetBorrowsOnlyAfterStoreAndCacheHoldsDrain)
         }
     }
     small.decTreeRef(BlockIdList(ids->begin() + 2, ids->end()), BlockTreeRefType::CACHE);
-    large.decTreeRef(*borrowed, BlockTreeRefType::STORE);
+    large.decTreeRef(*borrowed, BlockTreeRefType::EVICT);
     EXPECT_EQ(arena->freeBytes(), arena->usableBytes());
     EXPECT_EQ(arena->availableBytes(), arena->usableBytes());
 }

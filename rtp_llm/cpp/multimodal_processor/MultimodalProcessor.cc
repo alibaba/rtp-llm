@@ -138,8 +138,8 @@ MultimodalProcessor::expandInterleavedTokenIds(const std::vector<torch::Tensor>&
         }
         copyText(token_ids.data_ptr<int32_t>() + start, end - start);
     };
-    int64_t last_end = 0;
-    size_t  feature  = 0;
+    int64_t            last_end = 0;
+    size_t             feature  = 0;
     std::map<int, int> lengths;
     for (size_t media = 0; media < spans.size(); ++media) {
         const auto& [begin, end] = spans[media];
@@ -486,12 +486,12 @@ ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm:
     RETURN_IF_STATUS_ERROR(checkExpandLength(expanded_ids));
     RETURN_IF_STATUS_ERROR(pinMultimodalTensors(mm_features, "embedding"));
     RETURN_IF_STATUS_ERROR(pinMultimodalTensors(mm_extra_input, "extra input"));
-    input->multimodal_features = std::move(mm_features);
-    input->mm_position_ids     = std::move(mm_embedding_res.mm_position_ids);
-    input->mm_extra_input      = std::move(mm_extra_input);
-    input->input_ids           = expanded_ids.expanded_ids;
-    input->text_tokens_mask    = expanded_ids.text_tokens_mask;
-    input->mm_locs             = expanded_ids.locs;
+    input->multimodal_features            = std::move(mm_features);
+    input->mm_position_ids                = std::move(mm_embedding_res.mm_position_ids);
+    input->mm_extra_input                 = std::move(mm_extra_input);
+    input->input_ids                      = expanded_ids.expanded_ids;
+    input->text_tokens_mask               = expanded_ids.text_tokens_mask;
+    input->mm_locs                        = expanded_ids.locs;
     input->interleaved_multimodal_lengths = std::move(expanded_ids.multimodal_lengths);
     return ErrorInfo::OkStatus();
 }

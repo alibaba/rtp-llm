@@ -159,7 +159,9 @@ class BackendRPCServerVisitor:
         )
 
         host_args = HostServiceArgs.create_from_env()
-        self._prefill_has_decode_routing = bool(host_args.decode_domain or host_args.master_domain)
+        self._prefill_has_decode_routing = bool(
+            host_args.decode_domain or host_args.master_domain
+        )
         self.backend_role_list = self.get_backend_role_list(
             self.pd_sep_config, host_args, vit_separation
         )
@@ -795,7 +797,8 @@ class BackendRPCServerVisitor:
                     if addr.ip and addr.role in (RoleType.DECODE, RoleType.PDFUSION)
                 ),
                 None,
-            ) != RoleType.DECODE
+            )
+            != RoleType.DECODE
         ):
             return
         vit_addrs = [
@@ -1294,7 +1297,9 @@ class BackendRPCServerVisitor:
         return stream_with_aux_info()
 
     @torch.inference_mode()
-    async def batch_enqueue(self, inputs: list[GenerateInput]) -> list[GenerateOutputs | FtRuntimeException]:
+    async def batch_enqueue(
+        self, inputs: list[GenerateInput]
+    ) -> list[GenerateOutputs | FtRuntimeException]:
         if not inputs:
             return []
         for input in inputs:

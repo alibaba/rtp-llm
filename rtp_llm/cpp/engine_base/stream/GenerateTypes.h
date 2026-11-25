@@ -239,12 +239,6 @@ enum class CachePrepareResult {
     LACK_MEM,
 };
 
-enum class CachePrepareResult {
-    DONE,
-    WAIT,
-    LACK_MEM,
-};
-
 enum class StreamState {
     WAITING,
     LOADING_CACHE,  // GPU blocks allocated, waiting for connector H2D copy

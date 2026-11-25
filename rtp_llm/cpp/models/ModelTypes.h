@@ -25,12 +25,6 @@ namespace rtp_llm {
 
 class KVCacheManager;  // Forward declaration
 
-enum class MtpIndexerRole : int32_t {
-    NORMAL = 0,
-    SEED   = 1,
-    REUSE  = 2,
-};
-
 /** Model-level container for stage-boundary tensors, independent of PP transport. */
 struct PPIntermediateTensors {
     std::map<std::string, torch::Tensor> tensors;
@@ -301,11 +295,6 @@ public:
     // hidden buffer. Passing num_tokens < 0 asks the producer for its last
     // written row count.
     virtual torch::Tensor getMtpLastHiddenStates(int64_t /*num_tokens*/) {
-        return torch::Tensor();
-    }
-
-    virtual void          loadMtpIndexerTopk(const torch::Tensor& /*topk*/) {}
-    virtual torch::Tensor snapshotMtpIndexerTopk(int64_t /*batch_size*/) {
         return torch::Tensor();
     }
 

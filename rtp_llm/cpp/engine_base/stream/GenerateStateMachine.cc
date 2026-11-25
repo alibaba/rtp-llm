@@ -64,8 +64,8 @@ void GenerateStateMachine::handleWaiting() {
             stream->recordWaitLatency();
         }
         const auto allocation_start_us = currentTimeUs();
-        auto result = stream_cache_resource_->initKVBlock();
-        initial_kv_allocation_rt_us = currentTimeUs() - allocation_start_us;
+        auto       result              = stream_cache_resource_->initKVBlock();
+        initial_kv_allocation_rt_us    = currentTimeUs() - allocation_start_us;
         if (!result.ok()) {
             const auto role_type              = stream_cache_resource_->resourceContext().role_type;
             const bool retryable_context_init = (role_type == RoleType::PDFUSION || role_type == RoleType::PREFILL)

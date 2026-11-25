@@ -69,14 +69,15 @@ public:
                        int                        cp_rank,
                        int                        cp_size,
                        size_t                     cache_key_tokens_per_block = 1,
-                       int                        layer_end = std::numeric_limits<int>::max());
+                       int                        layer_end                  = std::numeric_limits<int>::max());
 
     /// @brief 将 LayerCacheBuffer 转换为 transfer 层需要的 KeyBlockInfoMap
     [[nodiscard]] static ErrorResult<transfer::KeyBlockInfoMap>
     buildKeyBlockInfos(const std::shared_ptr<LayerBlockConverter>& converter,
                        const std::shared_ptr<LayerCacheBuffer>&    layer_cache_buffer,
-                       int                                         partition_count = 1,
-                       int                                         partition_id    = 0);
+                       int                                         partition_count      = 1,
+                       int                                         partition_id         = 0,
+                       bool                                        segment_linear_state = false);
 
     /// @brief 带 CP 字节切分的版本。切分语义与 CPSlotMapper::sliceBlockForPeer 保持一致：
     ///   EQUAL_BYTES   -> 分母是 block.size_bytes（整个 stride）
@@ -90,7 +91,8 @@ public:
                              int                                         partition_count,
                              int                                         partition_id,
                              const SliceSpec&                            slice,
-                             size_t                                      k_block_payload_bytes);
+                             size_t                                      k_block_payload_bytes,
+                             bool                                        segment_linear_state = false);
 };
 
 }  // namespace rtp_llm

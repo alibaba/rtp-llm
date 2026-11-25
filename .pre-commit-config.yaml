@@ -7,7 +7,6 @@ repos:
       - id: check-symlinks
       - id: mixed-line-ending
       - id: trailing-whitespace
-        exclude: ^patches/blackwell/.*\.patch$
 
     # Formatters
   - repo: local

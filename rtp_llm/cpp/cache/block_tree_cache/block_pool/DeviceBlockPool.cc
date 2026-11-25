@@ -99,13 +99,11 @@ std::function<void()> DeviceBlockPool::pinForStorageIo(BlockIdxType block) {
     // At most all usable block IDs can be returned to the free list.
     // Reserve before pin acquisition so release never allocates.
     reserveAllReleasedBlocksNoLock();
-    auto notify = capacityChangeCallbackNoLock();
-    std::function<void()> release = [this, block, notify = std::move(notify)] {
-        releaseStorageIoPin(block, notify);
-    };
-    const auto type = static_cast<size_t>(DeviceBlockRefType::REMOTE_CONNECTOR);
-    const bool was_active = isActiveNoLock(block);
-    const bool was_available = isAvailableNoLock(block);
+    auto                  notify  = capacityChangeCallbackNoLock();
+    std::function<void()> release = [this, block, notify = std::move(notify)] { releaseStorageIoPin(block, notify); };
+    const auto            type    = static_cast<size_t>(DeviceBlockRefType::REMOTE_CONNECTOR);
+    const bool            was_active    = isActiveNoLock(block);
+    const bool            was_available = isAvailableNoLock(block);
     ++refcounts_[block];
     if (refcounts_by_type_[type][block]++ == 0) {
         ++referenced_block_counts_[type];
@@ -122,8 +120,8 @@ void DeviceBlockPool::releaseStorageIoPin(BlockIdxType block, const std::functio
         checkAllocatedNoLock(block);
         const auto type = static_cast<size_t>(DeviceBlockRefType::REMOTE_CONNECTOR);
         RTP_LLM_CHECK(refcounts_by_type_[type][block] > 0);
-        const auto free_before = availableFreeBlocksNoLock();
-        const bool was_active = isActiveNoLock(block);
+        const auto free_before   = availableFreeBlocksNoLock();
+        const bool was_active    = isActiveNoLock(block);
         const bool was_available = isAvailableNoLock(block);
         --refcounts_[block];
         if (--refcounts_by_type_[type][block] == 0) {
@@ -155,8 +153,8 @@ void DeviceBlockPool::incRef(const BlockIdList& blocks, DeviceBlockRefType ref_t
         blocks,
         [](BlockIdxType) {},
         [this, type_index](BlockIdxType block) {
-            const bool was_active     = isActiveNoLock(block);
-            const bool was_available  = isAvailableNoLock(block);
+            const bool was_active    = isActiveNoLock(block);
+            const bool was_available = isAvailableNoLock(block);
             ++refcounts_[block];
             if (refcounts_by_type_[type_index][block]++ == 0) {
                 ++referenced_block_counts_[type_index];
@@ -288,8 +286,8 @@ bool DeviceBlockPool::tryReplaceRequestReferences(const std::vector<RequestRefer
             capacity_increased |= !was_available && isAvailableNoLock(block);
         }
         for (const auto block : *fresh_blocks) {
-            const bool was_active = isActiveNoLock(block);
-            refcounts_[block]     = 1;
+            const bool was_active                                                       = isActiveNoLock(block);
+            refcounts_[block]                                                           = 1;
             refcounts_by_type_[static_cast<size_t>(DeviceBlockRefType::REQUEST)][block] = 1;
             ++referenced_block_counts_[static_cast<size_t>(DeviceBlockRefType::REQUEST)];
             updateActiveBlocksNumNoLock(block, was_active);
@@ -429,7 +427,7 @@ const DeviceBlockPoolConfig& DeviceBlockPool::config() const {
 }
 
 void DeviceBlockPool::initializeCacheBuffer() {
-    const auto& cfg = config();
+    const auto& cfg                   = config();
     allocation_size_bytes_            = 0;
     uses_dedicated_device_allocation_ = false;
     RTP_LLM_CHECK_WITH_INFO(
@@ -452,7 +450,7 @@ void DeviceBlockPool::initializeCacheBuffer() {
     } else if (cfg.use_device_malloc_backing) {
         initializeDeviceMallocBuffer();
     } else {
-        cache_aligned_buffer_ = torch::empty({static_cast<int64_t>(cfg.total_size_bytes)},
+        cache_aligned_buffer_  = torch::empty({static_cast<int64_t>(cfg.total_size_bytes)},
                                              torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
         allocation_size_bytes_ = cfg.total_size_bytes;
     }
@@ -524,9 +522,8 @@ void DeviceBlockPool::initializeDeviceMallocBuffer() {
 
     const long page_size = sysconf(_SC_PAGESIZE);
     RTP_LLM_CHECK_WITH_INFO(page_size > 0, "failed to query host page size for GDR allocation");
-    const size_t allocation_size =
-        (cfg.total_size_bytes + static_cast<size_t>(page_size) - 1) / static_cast<size_t>(page_size)
-        * static_cast<size_t>(page_size);
+    const size_t allocation_size = (cfg.total_size_bytes + static_cast<size_t>(page_size) - 1)
+                                   / static_cast<size_t>(page_size) * static_cast<size_t>(page_size);
     void*      ptr = nullptr;
     const auto err = cudaMalloc(&ptr, allocation_size);
     RTP_LLM_CHECK_WITH_INFO(err == cudaSuccess,
@@ -554,7 +551,7 @@ void DeviceBlockPool::initializeDeviceMallocBuffer() {
                          {static_cast<int64_t>(cfg.total_size_bytes)},
                          std::move(deleter),
                          torch::TensorOptions().dtype(torch::kUInt8).device(torch::Device(torch::kCUDA, device_id)));
-    allocation_size_bytes_ = allocation_size;
+    allocation_size_bytes_            = allocation_size;
     uses_dedicated_device_allocation_ = true;
     RTP_LLM_LOG_INFO("cudaMalloc block pool backing allocated, pool_name=%s, ptr=%p, logical_size=%zu bytes, "
                      "allocation_size=%zu bytes, device=%d",
@@ -600,7 +597,7 @@ void DeviceBlockPool::initializeDeviceMallocBuffer() {
                          {static_cast<int64_t>(cfg.total_size_bytes)},
                          std::move(deleter),
                          torch::TensorOptions().dtype(torch::kUInt8).device(torch::Device(torch::kCUDA, device_id)));
-    allocation_size_bytes_ = cfg.total_size_bytes;
+    allocation_size_bytes_            = cfg.total_size_bytes;
     uses_dedicated_device_allocation_ = true;
     RTP_LLM_LOG_INFO("hipMalloc block pool backing allocated, pool_name=%s, ptr=%p, total_size=%zu bytes, device=%d",
                      cfg.pool_name.c_str(),

@@ -346,9 +346,7 @@ class LoadBalancer:
         expected_version: Optional[int] = None,
     ) -> bool:
         """Apply a current observation and return the resulting alive state."""
-        return self.apply_worker_observation(
-            worker_address, alive, expected_version
-        )[1]
+        return self.apply_worker_observation(worker_address, alive, expected_version)[1]
 
     def get_alive_worker_addresses(self) -> list[str]:
         with self.lock:

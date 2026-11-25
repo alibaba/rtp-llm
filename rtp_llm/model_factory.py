@@ -688,7 +688,10 @@ class ModelFactory:
         layer_ids = [int(layer_id) for layer_id in layer_ids]
         if not layer_ids or layer_ids != sorted(set(layer_ids)):
             raise ValueError("dflash target layer ids must be unique and ordered")
-        if any(layer_id < 0 or layer_id >= model_config.num_layers for layer_id in layer_ids):
+        if any(
+            layer_id < 0 or layer_id >= model_config.num_layers
+            for layer_id in layer_ids
+        ):
             raise ValueError(
                 f"dflash target layer ids {layer_ids} are invalid for target layers={model_config.num_layers}"
             )
@@ -698,10 +701,15 @@ class ModelFactory:
                 "dflash layer_types count must equal draft num_layers: "
                 f"{len(layer_types)} != {propose_model_config.num_layers}"
             )
-        if any(layer_type not in ("sliding_attention", "full_attention") for layer_type in layer_types):
+        if any(
+            layer_type not in ("sliding_attention", "full_attention")
+            for layer_type in layer_types
+        ):
             raise ValueError(f"unsupported dflash layer types: {layer_types}")
         if "sliding_attention" in layer_types and (window is None or int(window) <= 0):
-            raise ValueError("dflash sliding_attention requires a positive sliding_window")
+            raise ValueError(
+                "dflash sliding_attention requires a positive sliding_window"
+            )
         if native_block_size is None:
             raise ValueError(
                 "sp_type dflash requires checkpoint dflash_native_block_size "
@@ -730,7 +738,9 @@ class ModelFactory:
                 "dflash requires input_vocab_size to match the target shared embedding: "
                 f"{input_vocab} != {target_input_vocab}"
             )
-        config_dtype = str(getattr(propose_model_config, "config_dtype", None) or "").lower()
+        config_dtype = str(
+            getattr(propose_model_config, "config_dtype", None) or ""
+        ).lower()
         effective_dtype = getattr(propose_model_config, "data_type", None)
         # The effective dtype is resolved by init_precision_config from
         # --act_type or the checkpoint dtype, so a checkpoint json without an
@@ -746,7 +756,11 @@ class ModelFactory:
                 "DFlash V1 supports BF16 draft weights and activations only, got "
                 f"config_dtype={config_dtype!r}, data_type={effective_dtype!r}"
             )
-        if getattr(propose_model_config, "quantization", None) not in (None, "", "none"):
+        if getattr(propose_model_config, "quantization", None) not in (
+            None,
+            "",
+            "none",
+        ):
             raise ValueError("DFlash V1 does not support quantized draft weights")
         if getattr(propose_model_config, "quant_config", None) is not None:
             raise ValueError("DFlash V1 does not support a draft quant_config")
@@ -771,9 +785,7 @@ class ModelFactory:
                 "the target cannot back a BF16-only DFlash draft"
             )
         for geometry_field in ("kv_head_num", "size_per_head"):
-            draft_value = int(
-                getattr(propose_model_config.attn_config, geometry_field)
-            )
+            draft_value = int(getattr(propose_model_config.attn_config, geometry_field))
             target_value = int(getattr(model_config.attn_config, geometry_field))
             if draft_value != target_value:
                 raise ValueError(

@@ -963,7 +963,9 @@ class PyEnvConfigs:
             + "[hot_hook_config]\n"
             + self.hot_hook_config.to_string()
             + "\n\n"
-            + "[kernel_tuning_config]\n" + self.kernel_tuning_config.to_string() + "\n\n"
+            + "[kernel_tuning_config]\n"
+            + self.kernel_tuning_config.to_string()
+            + "\n\n"
             "[py_hw_kernel_config]\n" + self.py_hw_kernel_config.to_string() + "\n\n"
             "[sp_config]\n" + self.sp_config.to_string() + "\n\n"
             "[sampler_config]\n" + self.sampler_config.to_string() + "\n\n"

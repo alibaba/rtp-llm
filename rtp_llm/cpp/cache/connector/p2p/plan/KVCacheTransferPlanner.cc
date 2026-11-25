@@ -66,7 +66,7 @@ std::vector<size_t> KVCacheTransferPlanner::resolveKeys(const KeyShardSpec& spec
         return out;
     }
     const size_t modulus = static_cast<size_t>(std::max(1, spec.modulus));
-    const size_t residue  = static_cast<size_t>(std::max(0, spec.residue)) % modulus;
+    const size_t residue = static_cast<size_t>(std::max(0, spec.residue)) % modulus;
 
     const size_t split_count = static_cast<size_t>(std::max(1, spec.replica_split_count));
     const size_t split_index = static_cast<size_t>(std::max(0, spec.replica_split_index));
@@ -115,8 +115,7 @@ bool KVCacheTransferPlanner::ownsPosition(
     return CPSlotMapper::physicalBlockPosition(policy, pos, count, cp_rank, side.physicalCpSize(tag)).has_value();
 }
 
-ErrorInfo
-KVCacheTransferPlanner::validateTag(const ShardLayout& src, const ShardLayout& dst, const std::string& tag) {
+ErrorInfo KVCacheTransferPlanner::validateTag(const ShardLayout& src, const ShardLayout& dst, const std::string& tag) {
     if (!src.hasGroup(tag) || !dst.hasGroup(tag)) {
         return planError("tag '" + tag + "' missing on " + (src.hasGroup(tag) ? "dst" : "src") + " layout");
     }
@@ -124,8 +123,9 @@ KVCacheTransferPlanner::validateTag(const ShardLayout& src, const ShardLayout& d
     const auto& dg = dst.group(tag);
 
     if (sg.policy.group_type != dg.policy.group_type) {
-        return planError(std::string("group_type mismatch for tag '") + tag + "': src="
-                         + cacheGroupTypeName(sg.policy.group_type) + " dst=" + cacheGroupTypeName(dg.policy.group_type));
+        return planError(std::string("group_type mismatch for tag '") + tag
+                         + "': src=" + cacheGroupTypeName(sg.policy.group_type)
+                         + " dst=" + cacheGroupTypeName(dg.policy.group_type));
     }
     if (src.cache_key_tokens_per_block == 0 || src.cache_key_tokens_per_block != dst.cache_key_tokens_per_block) {
         return planError("cache-key token stride mismatch or zero for tag '" + tag
@@ -154,15 +154,12 @@ KVCacheTransferPlanner::validateTag(const ShardLayout& src, const ShardLayout& d
         return planError(oss.str());
     }
     if (sg.spec_type != dg.spec_type) {
-        return planError(std::string("spec_type mismatch for tag '") + tag
-                         + "': src=" + KVCacheSpecTypeToString(sg.spec_type)
-                         + " dst=" + KVCacheSpecTypeToString(dg.spec_type));
+        return planError(std::string("spec_type mismatch for tag '") + tag + "': src="
+                         + KVCacheSpecTypeToString(sg.spec_type) + " dst=" + KVCacheSpecTypeToString(dg.spec_type));
     }
 
-    // Linear state is [ssm][conv], not equally sized K/V regions. The
-    // execution converter cannot repartition it across unequal head shards.
-    if (sg.spec_type == KVCacheSpecType::LinearAttention
-        && src.headShardCount(tag) != dst.headShardCount(tag)) {
+    if (sg.spec_type == KVCacheSpecType::LinearAttention && src.headShardCount(tag) != dst.headShardCount(tag)
+        && !(src.use_mla && dst.use_mla)) {
         return planError("LinearAttention asymmetric head sharding is unsupported for tag '" + tag + "'");
     }
     // The side with fewer shards must partition each larger block. Even an
@@ -209,8 +206,7 @@ KVCacheTransferPlanner::validateTag(const ShardLayout& src, const ShardLayout& d
         const size_t dst_global = dst.effectiveGlobalBlockBytes(tag);
         if (src_global != dst_global) {
             std::ostringstream oss;
-            oss << "global block bytes mismatch for tag '" << tag << "': src=" << src_global
-                << " dst=" << dst_global;
+            oss << "global block bytes mismatch for tag '" << tag << "': src=" << src_global << " dst=" << dst_global;
             return planError(oss.str());
         }
     }
@@ -227,8 +223,7 @@ KVCacheTransferPlanner::validateTag(const ShardLayout& src, const ShardLayout& d
     if (dst.cpSize() != 1 && dst.cpSize() != src.cpSize()) {
         std::ostringstream oss;
         oss << "unsupported CP topology for tag '" << tag << "': src cp_size=" << src.cpSize()
-            << " dst cp_size=" << dst.cpSize()
-            << "; dst must be either unsharded (1) or exactly match src";
+            << " dst cp_size=" << dst.cpSize() << "; dst must be either unsharded (1) or exactly match src";
         return planError(oss.str());
     }
 
@@ -272,8 +267,9 @@ KVCacheTransferPlanner::validateTag(const ShardLayout& src, const ShardLayout& d
         if (side.headShardCount(tag) > 1) {
             std::ostringstream oss;
             oss << "tag '" << tag << "' is double-sharded on " << sideName(is_src)
-                << " side: head_shard_count=" << side.headShardCount(tag) << " and block round-robin cp_size="
-                << side.cpSize() << "; rank r only holds (head r) x (block == r mod cp_size), "
+                << " side: head_shard_count=" << side.headShardCount(tag)
+                << " and block round-robin cp_size=" << side.cpSize()
+                << "; rank r only holds (head r) x (block == r mod cp_size), "
                 << "so most (head, block) pairs are held by nobody";
             return planError(oss.str());
         }
@@ -395,8 +391,8 @@ ErrorInfo KVCacheTransferPlanner::buildCpPairs(const ShardLayout&   src,
                 // 非 FULL group（COMPACT/SWA）本就只在部分位置有 cache 条目，跳过。
                 if (is_full_group) {
                     std::ostringstream oss;
-                    oss << "tag '" << tag << "' has no provider for logical position residue " << pos
-                        << " (mod " << modulus << ") needed by dst cp_rank " << dst_cp;
+                    oss << "tag '" << tag << "' has no provider for logical position residue " << pos << " (mod "
+                        << modulus << ") needed by dst cp_rank " << dst_cp;
                     return planError(oss.str());
                 }
                 continue;
@@ -426,8 +422,8 @@ ErrorInfo KVCacheTransferPlanner::buildCpPairs(const ShardLayout&   src,
         int collapsed_modulus = modulus;
         int collapsed_residue = residues.front();
         if (collapseResidues(residues, modulus, collapsed_modulus, collapsed_residue)) {
-            pair.keys.modulus = collapsed_modulus;
-            pair.keys.residue = collapsed_residue;
+            pair.keys.modulus           = collapsed_modulus;
+            pair.keys.residue           = collapsed_residue;
             pair.keys.include_final_key = is_compact;
             pair.keys.tail_count        = tail_count;
             if (is_compact) {
@@ -439,11 +435,11 @@ ErrorInfo KVCacheTransferPlanner::buildCpPairs(const ShardLayout&   src,
             std::set<int> unique(residues.begin(), residues.end());
             bool          first = true;
             for (int r : unique) {
-                CpPair per_residue      = pair;
-                per_residue.keys.modulus = modulus;
-                per_residue.keys.residue = r;
+                CpPair per_residue                 = pair;
+                per_residue.keys.modulus           = modulus;
+                per_residue.keys.residue           = r;
                 per_residue.keys.include_final_key = is_compact && first;
-                per_residue.keys.tail_count         = tail_count;
+                per_residue.keys.tail_count        = tail_count;
                 if (per_residue.keys.include_final_key) {
                     ++final_key_route_count[{dst_cp, slice_index}];
                 }
@@ -456,8 +452,8 @@ ErrorInfo KVCacheTransferPlanner::buildCpPairs(const ShardLayout&   src,
     for (const auto& [key, count] : final_key_route_count) {
         if (count > 1) {
             std::ostringstream oss;
-            oss << "tag '" << tag << "' would attach the COMPACT final key to " << count
-                << " routes for dst cp_rank " << key.first
+            oss << "tag '" << tag << "' would attach the COMPACT final key to " << count << " routes for dst cp_rank "
+                << key.first
                 << ", which would overlap their key sets; this src/dst CP mapping combination is unsupported";
             return planError(oss.str());
         }
@@ -608,10 +604,16 @@ PlanResult KVCacheTransferPlanner::plan(const ShardLayout&              src,
                     route.src_keys      = cp_pair.keys;
                     route.src_partition = head_pair.src_partition;
                     route.dst_partition = head_pair.dst_partition;
+                    if (src.group(tag).spec_type == KVCacheSpecType::LinearAttention
+                        && (route.src_partition.count > 1 || route.dst_partition.count > 1)) {
+                        // Both peers need the same segment order, including the peer sending a full head shard.
+                        route.src_partition.segment_linear_state = true;
+                        route.dst_partition.segment_linear_state = true;
+                    }
                     assignSlices(src, dst, tag, cp_pair, route.src_slice, route.dst_slice);
 
-                    route.src_bytes = viewBytes(src.group(tag), route.src_partition, route.src_slice);
-                    route.dst_bytes = viewBytes(dst.group(tag), route.dst_partition, route.dst_slice);
+                    route.src_bytes                  = viewBytes(src.group(tag), route.src_partition, route.src_slice);
+                    route.dst_bytes                  = viewBytes(dst.group(tag), route.dst_partition, route.dst_slice);
                     route.cache_key_tokens_per_block = src.cache_key_tokens_per_block;
                     route.group_tokens_per_block     = src.group(tag).seq_size_per_block;
 
@@ -815,9 +817,9 @@ PlanResult KVCacheTransferPlanner::planStages(const PipelineTransferLayout& pref
                     if (result.routes.size() >= static_cast<size_t>(std::numeric_limits<int>::max())) {
                         return planError("PP transfer has too many routes");
                     }
-                    route.route_id = static_cast<int>(result.routes.size());
-                    route.src_rank = src.worker_indices[route.src_rank];
-                    route.dst_rank = dst.worker_indices[route.dst_rank];
+                    route.route_id                = static_cast<int>(result.routes.size());
+                    route.src_rank                = src.worker_indices[route.src_rank];
+                    route.dst_rank                = dst.worker_indices[route.dst_rank];
                     route.src_slice_payload_bytes = src_shards.group(tag).k_block_payload_bytes;
                     route.dst_slice_payload_bytes = dst_shards.group(tag).k_block_payload_bytes;
                     for (int layer : layers) {
@@ -881,6 +883,9 @@ uint64_t TransferPlan::digest() const {
         mix(static_cast<uint64_t>(r.src_partition.id));
         mix(static_cast<uint64_t>(r.dst_partition.count));
         mix(static_cast<uint64_t>(r.dst_partition.id));
+        if (r.src_partition.segment_linear_state && r.dst_partition.segment_linear_state) {
+            mix(1);
+        }
         mix(static_cast<uint64_t>(r.src_slice.mode));
         mix(static_cast<uint64_t>(r.src_slice.count));
         mix(static_cast<uint64_t>(r.src_slice.index));
@@ -895,9 +900,7 @@ uint64_t TransferPlan::digest() const {
     return digest.hash;
 }
 
-ShardLayout ShardLayout::forPeer(const ShardLayout&       self,
-                                 const ParallelismConfig& peer_pc,
-                                 bool                     peer_is_prefill_role) {
+ShardLayout ShardLayout::forPeer(const ShardLayout& self, const ParallelismConfig& peer_pc, bool peer_is_prefill_role) {
     ShardLayout peer;
     peer.pc                              = peer_pc;
     peer.cache_key_tokens_per_block      = self.cache_key_tokens_per_block;
@@ -914,8 +917,8 @@ ShardLayout ShardLayout::forPeer(const ShardLayout&       self,
         g.pre_sliced = peer_is_prefill_role && slice_active;
 
         // 还原全局再除对端因子；等价于以替换后的 pc 调 localKvHeadNumForSpec。
-        const size_t global_kv    = self.effectiveGlobalBlockBytes(tag);
-        size_t       divisor      = static_cast<size_t>(std::max(1, peer.headShardCount(tag)));
+        const size_t global_kv = self.effectiveGlobalBlockBytes(tag);
+        size_t       divisor   = static_cast<size_t>(std::max(1, peer.headShardCount(tag)));
         if (g.pre_sliced) {
             divisor *= static_cast<size_t>(std::max(1, peer.cpSize()));
         }
@@ -924,8 +927,8 @@ ShardLayout ShardLayout::forPeer(const ShardLayout&       self,
         // PAYLOAD_BYTES changes the spec's payload as well as its stride.
         // EQUAL_BYTES only slices the stride; its spec still describes the full
         // payload, so it must not use the stride's CP divisor here.
-        size_t global_payload = self.group(tag).k_block_payload_bytes
-                                * static_cast<size_t>(std::max(1, self.headShardCount(tag)));
+        size_t global_payload =
+            self.group(tag).k_block_payload_bytes * static_cast<size_t>(std::max(1, self.headShardCount(tag)));
         if (self.group(tag).pre_sliced && self.effectiveSlice(tag) == CpBlockSliceMode::PAYLOAD_BYTES) {
             global_payload *= static_cast<size_t>(self.cpSize());
         }
@@ -936,12 +939,11 @@ ShardLayout ShardLayout::forPeer(const ShardLayout&       self,
         g.k_block_payload_bytes = global_payload / payload_divisor;
 
         if (self.group(tag).kv_scale_stride_bytes > 0) {
-            const size_t self_divisor = static_cast<size_t>(std::max(1, self.headShardCount(tag)))
-                                        * (self.group(tag).pre_sliced ?
-                                               static_cast<size_t>(std::max(1, self.cpSize())) :
-                                               1);
+            const size_t self_divisor =
+                static_cast<size_t>(std::max(1, self.headShardCount(tag)))
+                * (self.group(tag).pre_sliced ? static_cast<size_t>(std::max(1, self.cpSize())) : 1);
             const size_t global_scale = self.group(tag).kv_scale_stride_bytes * self_divisor;
-            g.kv_scale_stride_bytes    = global_scale / divisor;
+            g.kv_scale_stride_bytes   = global_scale / divisor;
         }
     }
     return peer;

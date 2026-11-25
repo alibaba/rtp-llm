@@ -23,6 +23,12 @@ public:
             coordinator_manager_->convertIndexToBuffer(layer_id, tag, block_id, partition_count, partition_id));
     }
 
+    std::vector<BlockInfo> convertLinearStatePartition(
+        int layer_id, const std::string& tag, int block_id, int partition_count, int partition_id) const override {
+        return coordinator_manager_->convertLinearStatePartition(
+            layer_id, tag, block_id, partition_count, partition_id);
+    }
+
     std::vector<std::pair<BlockInfo, size_t>> getAllBuffers() const override {
         const auto                                layout = coordinator_manager_->allLayerCacheBase();
         std::vector<std::pair<BlockInfo, size_t>> result;
@@ -33,11 +39,11 @@ public:
                 return;
             }
             BlockInfo info;
-            info.is_cuda         = t.is_cuda();
-            info.device_index    = t.is_cuda() ? static_cast<int32_t>(t.get_device()) : 0;
-            info.scalar_type     = static_cast<int32_t>(t.scalar_type());
-            info.addr            = t.data_ptr();
-            info.size_bytes      = static_cast<size_t>(t.nbytes());
+            info.is_cuda      = t.is_cuda();
+            info.device_index = t.is_cuda() ? static_cast<int32_t>(t.get_device()) : 0;
+            info.scalar_type  = static_cast<int32_t>(t.scalar_type());
+            info.addr         = t.data_ptr();
+            info.size_bytes   = static_cast<size_t>(t.nbytes());
             // Layer tensors are indexed by physical block on the leading axis.
             // An MR boundary may separate blocks but must not bisect one.
             const size_t aligned = static_cast<size_t>(t.stride(0)) * t.element_size();

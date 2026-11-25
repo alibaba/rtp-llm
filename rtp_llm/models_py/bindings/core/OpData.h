@@ -95,8 +95,8 @@ struct GptModelInputs {
     std::optional<std::vector<torch::Tensor>> input_embeddings;  // all input embeddings in gathered stream stored here
     torch::Tensor                             input_embeddings_locs;  // input embeddings index
 
-    torch::Tensor request_id;             // int64, [context_batch_size]
-    torch::Tensor request_deadline_ms;    // int64, [context_batch_size], absolute deadline in milliseconds
+    torch::Tensor request_id;           // int64, [context_batch_size]
+    torch::Tensor request_deadline_ms;  // int64, [context_batch_size], absolute deadline in milliseconds
     // Receiver-local clock offset for P2P layer retention. The tensor remains source identity.
     int64_t       p2p_deadline_clock_offset_ms = 0;
     torch::Tensor request_pd_separation;  // bool, [context_batch_size]
@@ -143,8 +143,6 @@ struct GptModelInputs {
     // Logging-only full prefill sequences, including cached prefixes; aligned with request_id.
     std::optional<std::vector<torch::Tensor>> all_input_token_ids;
     std::optional<std::vector<bool>>          request_is_multimodal;
-    // Incremental draft commit uses decode-shaped sparse-indexer metadata.
-    bool is_draft_extend = false;
 
 public:
     std::string debugString(bool force = false) const;
@@ -180,8 +178,6 @@ struct GptModelOutputs {
 
     /** Downstream activations from a non-last target stage. */
     std::map<std::string, torch::Tensor> pp_intermediates;
-    // Request-ordered, expanded raw-token indexer seed for the next MTP round.
-    torch::Tensor mtp_indexer_topk;
 };
 
 struct CopyParams {

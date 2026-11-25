@@ -1404,20 +1404,20 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, AllPrefixReuseDisabledPoolMetricsF
 static CachePoolMetrics makeMergeAllocatorInput(
     const std::string& pool_name, size_t seed, size_t total_blocks, size_t free_blocks, size_t available_blocks) {
     CachePoolMetrics metrics_data;
-    metrics_data.pool_index                 = seed;
-    metrics_data.pool_name                  = pool_name;
-    metrics_data.block_size_bytes           = 1000 + seed;
-    metrics_data.total_blocks               = total_blocks;
-    metrics_data.free_blocks                = free_blocks;
-    metrics_data.used_blocks                = total_blocks - free_blocks;
-    metrics_data.active_blocks              = 7 + seed;
-    metrics_data.available_blocks           = available_blocks;
-    metrics_data.reserve_blocks             = 5 + seed;
-    metrics_data.request_ref_blocks         = 11 + seed;
-    metrics_data.block_cache_ref_blocks     = 13 + seed;
-    metrics_data.load_ref_blocks            = 14 + seed;
-    metrics_data.eviction_ref_blocks = 15 + seed;
-    metrics_data.frozen_ref_blocks          = 17 + seed;
+    metrics_data.pool_index             = seed;
+    metrics_data.pool_name              = pool_name;
+    metrics_data.block_size_bytes       = 1000 + seed;
+    metrics_data.total_blocks           = total_blocks;
+    metrics_data.free_blocks            = free_blocks;
+    metrics_data.used_blocks            = total_blocks - free_blocks;
+    metrics_data.active_blocks          = 7 + seed;
+    metrics_data.available_blocks       = available_blocks;
+    metrics_data.reserve_blocks         = 5 + seed;
+    metrics_data.request_ref_blocks     = 11 + seed;
+    metrics_data.block_cache_ref_blocks = 13 + seed;
+    metrics_data.load_ref_blocks        = 14 + seed;
+    metrics_data.eviction_ref_blocks    = 15 + seed;
+    metrics_data.frozen_ref_blocks      = 17 + seed;
     metrics_data.used_ratio = static_cast<float>(100.0 * (metrics_data.total_blocks - metrics_data.available_blocks)
                                                  / static_cast<double>(metrics_data.total_blocks));
     return metrics_data;
@@ -1430,19 +1430,19 @@ static CachePoolMetrics makeMergeTreeInput(Tier               tier,
                                            size_t             free_blocks,
                                            size_t             available_blocks) {
     CachePoolMetrics metrics_data;
-    metrics_data.tier                       = tier;
-    metrics_data.pool_name                  = pool_name;
-    metrics_data.block_size_bytes           = 2000 + seed;
-    metrics_data.total_blocks               = total_blocks;
-    metrics_data.free_blocks                = free_blocks;
-    metrics_data.used_blocks                = total_blocks - free_blocks;
-    metrics_data.available_blocks           = available_blocks;
-    metrics_data.active_blocks              = total_blocks - available_blocks;
-    metrics_data.request_ref_blocks         = 31 + seed;
-    metrics_data.block_cache_ref_blocks     = 33 + seed;
-    metrics_data.load_ref_blocks            = 34 + seed;
-    metrics_data.eviction_ref_blocks = 35 + seed;
-    metrics_data.frozen_ref_blocks          = 37 + seed;
+    metrics_data.tier                   = tier;
+    metrics_data.pool_name              = pool_name;
+    metrics_data.block_size_bytes       = 2000 + seed;
+    metrics_data.total_blocks           = total_blocks;
+    metrics_data.free_blocks            = free_blocks;
+    metrics_data.used_blocks            = total_blocks - free_blocks;
+    metrics_data.available_blocks       = available_blocks;
+    metrics_data.active_blocks          = total_blocks - available_blocks;
+    metrics_data.request_ref_blocks     = 31 + seed;
+    metrics_data.block_cache_ref_blocks = 33 + seed;
+    metrics_data.load_ref_blocks        = 34 + seed;
+    metrics_data.eviction_ref_blocks    = 35 + seed;
+    metrics_data.frozen_ref_blocks      = 37 + seed;
     if (tier == Tier::DISK) {
         metrics_data.read_bytes                    = (int64_t{1} << 40) + seed;
         metrics_data.write_bytes                   = (int64_t{1} << 41) + seed;
@@ -1510,10 +1510,10 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, MergeCachePoolMetricsPreservesRepo
         float  used_ratio;
     };
     struct MergeCase {
-        std::string                               name;
-        std::vector<CachePoolMetrics>             allocator_metrics_list;
-        std::vector<CachePoolMetrics>             tree_metrics_list;
-        std::vector<ExpectedRow>                  expected_rows;
+        std::string                   name;
+        std::vector<CachePoolMetrics> allocator_metrics_list;
+        std::vector<CachePoolMetrics> tree_metrics_list;
+        std::vector<ExpectedRow>      expected_rows;
     };
 
     const std::vector<MergeCase> cases = {

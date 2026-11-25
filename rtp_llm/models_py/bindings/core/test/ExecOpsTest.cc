@@ -789,9 +789,9 @@ TEST_F(ExecOpsTest, testWriteCacheStoreMhaKernelViewKeepsExplicitKvAndScaleStrid
 }
 
 TEST_F(ExecOpsTest, testWriteCacheStoreDispatchesCpProjectedP2PLayerWithoutCacheStore) {
-    auto inputs = makePyCacheStoreInputs(256, 4);
-    inputs.cache_keys                         = torch::tensor({{int64_t(100), int64_t(101), int64_t(102), int64_t(103)}}, torch::kInt64);
-    inputs.request_deadline_ms                = torch::tensor({int64_t(123456)}, torch::kInt64);
+    auto inputs       = makePyCacheStoreInputs(256, 4);
+    inputs.cache_keys = torch::tensor({{int64_t(100), int64_t(101), int64_t(102), int64_t(103)}}, torch::kInt64);
+    inputs.request_deadline_ms = torch::tensor({int64_t(123456)}, torch::kInt64);
 
     int                  call_count = 0;
     std::vector<int64_t> captured_keys;
@@ -819,13 +819,13 @@ TEST_F(ExecOpsTest, testWriteCacheStoreDispatchesCpProjectedP2PLayerWithoutCache
     layer_cache.layer_id           = 0;
     layer_cache.tag                = "full";
 
-    auto input_lengths  = torch::tensor({512}, torch::kInt32);
-    auto prefix_lengths = torch::tensor({0}, torch::kInt32);
-    auto block_ids      = torch::tensor({{11, 13}}, torch::kInt32);
-    inputs.input_lengths_host = input_lengths;
-    inputs.prefix_lengths_host = prefix_lengths;
+    auto input_lengths          = torch::tensor({512}, torch::kInt32);
+    auto prefix_lengths         = torch::tensor({0}, torch::kInt32);
+    auto block_ids              = torch::tensor({{11, 13}}, torch::kInt32);
+    inputs.input_lengths_host   = input_lengths;
+    inputs.prefix_lengths_host  = prefix_lengths;
     inputs.host_kv_cache_offset = block_ids;
-    auto config = makeCacheConfig(128, 64, 0, 16, layer_cache.tag);
+    auto config                 = makeCacheConfig(128, 64, 0, 16, layer_cache.tag);
     ASSERT_NO_THROW(runtimeWriteCacheStore(inputs, layer_cache, config, nullptr, 0, 1, 2, nullptr));
 
     EXPECT_EQ(call_count, 1);
@@ -841,7 +841,7 @@ TEST_F(ExecOpsTest, testWriteCacheStorePreservesRequestDeadlinesWithSameRequestI
     inputs.request_pd_separation = torch::tensor({true, true}, torch::kBool);
     inputs.cache_keys            = torch::tensor({{int64_t(100)}, {int64_t(200)}}, torch::kInt64);
     std::vector<std::pair<int64_t, int64_t>> published_keys;
-    std::vector<std::vector<int32_t>> published_blocks;
+    std::vector<std::vector<int32_t>>        published_blocks;
     inputs.p2p_layer_write = [&](size_t,
                                  int,
                                  const std::string&,
@@ -862,20 +862,20 @@ TEST_F(ExecOpsTest, testWriteCacheStorePreservesRequestDeadlinesWithSameRequestI
     auto input_lengths             = torch::tensor({4, 4}, torch::kInt32);
     auto prefix_lengths            = torch::tensor({0, 0}, torch::kInt32);
     auto block_ids                 = torch::tensor({{1}, {2}}, torch::kInt32);
-    inputs.input_lengths_host = input_lengths;
-    inputs.prefix_lengths_host = prefix_lengths;
-    inputs.host_kv_cache_offset = block_ids;
-    auto config = makeCacheConfig(4, 64, 0, 16, layer_cache.tag);
+    inputs.input_lengths_host      = input_lengths;
+    inputs.prefix_lengths_host     = prefix_lengths;
+    inputs.host_kv_cache_offset    = block_ids;
+    auto config                    = makeCacheConfig(4, 64, 0, 16, layer_cache.tag);
     ASSERT_NO_THROW(runtimeWriteCacheStore(inputs, layer_cache, config, nullptr, 0, 0, 1, nullptr));
     EXPECT_EQ(published_keys, (std::vector<std::pair<int64_t, int64_t>>{{42, 123456}, {42, 123457}}));
     EXPECT_EQ(published_blocks, (std::vector<std::vector<int32_t>>{{1}, {2}}));
 }
 
 TEST_F(ExecOpsTest, testWriteCacheStoreSkipsEmptyCpProjection) {
-    auto inputs = makePyCacheStoreInputs(4, 1);
-    inputs.cache_keys              = torch::tensor({{int64_t(100), int64_t(101), int64_t(102), int64_t(103)}}, torch::kInt64);
+    auto inputs       = makePyCacheStoreInputs(4, 1);
+    inputs.cache_keys = torch::tensor({{int64_t(100), int64_t(101), int64_t(102), int64_t(103)}}, torch::kInt64);
 
-    int call_count = 0;
+    int call_count         = 0;
     inputs.p2p_layer_write = [&](size_t,
                                  int,
                                  const std::string&,
@@ -894,13 +894,13 @@ TEST_F(ExecOpsTest, testWriteCacheStoreSkipsEmptyCpProjection) {
     layer_cache.layer_id           = 0;
     layer_cache.tag                = "full";
 
-    auto input_lengths  = torch::tensor({1}, torch::kInt32);
-    auto prefix_lengths = torch::tensor({0}, torch::kInt32);
-    auto block_ids      = torch::tensor({{0}}, torch::kInt32);
-    inputs.input_lengths_host = input_lengths;
-    inputs.prefix_lengths_host = prefix_lengths;
+    auto input_lengths          = torch::tensor({1}, torch::kInt32);
+    auto prefix_lengths         = torch::tensor({0}, torch::kInt32);
+    auto block_ids              = torch::tensor({{0}}, torch::kInt32);
+    inputs.input_lengths_host   = input_lengths;
+    inputs.prefix_lengths_host  = prefix_lengths;
     inputs.host_kv_cache_offset = block_ids;
-    auto config = makeCacheConfig(1, 64, 0, 16, layer_cache.tag);
+    auto config                 = makeCacheConfig(1, 64, 0, 16, layer_cache.tag);
     ASSERT_NO_THROW(runtimeWriteCacheStore(inputs, layer_cache, config, nullptr, 0, 3, 4, nullptr));
     EXPECT_EQ(call_count, 0);
 }
@@ -934,18 +934,23 @@ TEST_F(ExecOpsTest, testWriteCacheStoreFailsBeforeDispatchingLaterRequestsOnP2PL
     inputs.input_lengths_host   = torch::tensor({4, 4}, torch::kInt32);
     inputs.prefix_lengths_host  = torch::tensor({0, 0}, torch::kInt32);
     inputs.host_kv_cache_offset = torch::tensor({{1}, {2}}, torch::kInt32);
-    auto config = makeCacheConfig(4, 64, 0, 16, layer_cache.tag);
+    auto config                 = makeCacheConfig(4, 64, 0, 16, layer_cache.tag);
     EXPECT_THROW(runtimeWriteCacheStore(inputs, layer_cache, config, nullptr, 0, 0, 1, nullptr), std::runtime_error);
     EXPECT_EQ(dispatched, (std::vector<int64_t>{42}));
 }
 
 TEST_F(ExecOpsTest, testWriteCacheStoreSkipsEmptySparseP2PProjection) {
-    auto inputs = makePyCacheStoreInputs(4, 2);
+    auto inputs            = makePyCacheStoreInputs(4, 2);
     inputs.cache_keys      = torch::tensor({{int64_t(100), int64_t(101)}}, torch::kInt64);
-    int calls = 0;
-    inputs.p2p_layer_write = [&](size_t, int, const std::string&,
-                                 const std::vector<int64_t>&, const std::vector<int32_t>&,
-                                 int64_t, const std::shared_ptr<torch::Event>&, int64_t) {
+    int calls              = 0;
+    inputs.p2p_layer_write = [&](size_t,
+                                 int,
+                                 const std::string&,
+                                 const std::vector<int64_t>&,
+                                 const std::vector<int32_t>&,
+                                 int64_t,
+                                 const std::shared_ptr<torch::Event>&,
+                                 int64_t) {
         ++calls;
         return true;
     };
@@ -960,16 +965,16 @@ TEST_F(ExecOpsTest, testWriteCacheStoreSkipsEmptySparseP2PProjection) {
     auto prefix_lengths = torch::tensor({0}, torch::kInt32);
     auto block_ids      = torch::tensor({{-1, -1}}, torch::kInt32);
 
-    inputs.input_lengths_host = input_lengths;
-    inputs.prefix_lengths_host = prefix_lengths;
+    inputs.input_lengths_host   = input_lengths;
+    inputs.prefix_lengths_host  = prefix_lengths;
     inputs.host_kv_cache_offset = block_ids;
-    auto config = makeCacheConfig(4, 64, 0, 16, layer_cache.tag);
+    auto config                 = makeCacheConfig(4, 64, 0, 16, layer_cache.tag);
     EXPECT_NO_THROW(runtimeWriteCacheStore(inputs, layer_cache, config, nullptr, 0, 0, 1, nullptr));
     EXPECT_EQ(calls, 0);
 }
 
 TEST_F(ExecOpsTest, testWriteCacheStoreRejectsNonIntegerP2PCacheKeyTensor) {
-    auto inputs = makePyCacheStoreInputs(4, 2);
+    auto inputs            = makePyCacheStoreInputs(4, 2);
     inputs.cache_keys      = torch::tensor({{100.f, 101.f}}, torch::kFloat32);
     inputs.p2p_layer_write = [](size_t,
                                 int,
@@ -990,17 +995,16 @@ TEST_F(ExecOpsTest, testWriteCacheStoreRejectsNonIntegerP2PCacheKeyTensor) {
     auto prefix_lengths = torch::tensor({0}, torch::kInt32);
     auto block_ids      = torch::tensor({{0, 1}}, torch::kInt32);
 
-    inputs.input_lengths_host = input_lengths;
-    inputs.prefix_lengths_host = prefix_lengths;
+    inputs.input_lengths_host   = input_lengths;
+    inputs.prefix_lengths_host  = prefix_lengths;
     inputs.host_kv_cache_offset = block_ids;
-    auto config = makeCacheConfig(4, 64, 0, 16, layer_cache.tag);
-    EXPECT_THROW(runtimeWriteCacheStore(inputs, layer_cache, config, nullptr, 0, 0, 1, nullptr),
-                 std::runtime_error);
+    auto config                 = makeCacheConfig(4, 64, 0, 16, layer_cache.tag);
+    EXPECT_THROW(runtimeWriteCacheStore(inputs, layer_cache, config, nullptr, 0, 0, 1, nullptr), std::runtime_error);
 }
 
 TEST_F(ExecOpsTest, testWriteCacheStoreRejectsMissingP2PCacheKeys) {
-    auto inputs = makePyCacheStoreInputs(4, 2);
-    inputs.cache_keys = torch::empty({1, 0}, torch::kInt64);
+    auto inputs            = makePyCacheStoreInputs(4, 2);
+    inputs.cache_keys      = torch::empty({1, 0}, torch::kInt64);
     inputs.p2p_layer_write = [](size_t,
                                 int,
                                 const std::string&,
@@ -1020,12 +1024,11 @@ TEST_F(ExecOpsTest, testWriteCacheStoreRejectsMissingP2PCacheKeys) {
     auto prefix_lengths = torch::tensor({0}, torch::kInt32);
     auto block_ids      = torch::tensor({{0, 1}}, torch::kInt32);
 
-    inputs.input_lengths_host = input_lengths;
-    inputs.prefix_lengths_host = prefix_lengths;
+    inputs.input_lengths_host   = input_lengths;
+    inputs.prefix_lengths_host  = prefix_lengths;
     inputs.host_kv_cache_offset = block_ids;
-    auto config = makeCacheConfig(4, 64, 0, 16, layer_cache.tag);
-    EXPECT_THROW(runtimeWriteCacheStore(inputs, layer_cache, config, nullptr, 0, 0, 1, nullptr),
-                 std::runtime_error);
+    auto config                 = makeCacheConfig(4, 64, 0, 16, layer_cache.tag);
+    EXPECT_THROW(runtimeWriteCacheStore(inputs, layer_cache, config, nullptr, 0, 0, 1, nullptr), std::runtime_error);
 }
 
 TEST_F(ExecOpsTest, testWriteCacheStoreSharedPoolUsesPhysicalBlockStrideInsteadOfLayerViewStride) {

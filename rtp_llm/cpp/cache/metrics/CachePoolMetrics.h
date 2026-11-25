@@ -34,6 +34,16 @@ struct CachePoolMetrics {
     std::optional<int64_t> write_bytes;
     std::optional<double>  read_bandwidth_bytes_per_sec;
     std::optional<double>  write_bandwidth_bytes_per_sec;
+
+    struct SharedArenaMemory {
+        int64_t total_bytes;
+        int64_t free_bytes;
+        int64_t available_bytes;
+    };
+    // Per-pool block counts describe a namespace. Physical bytes are
+    // reported once per arena.
+    bool                             shared_namespace = false;
+    std::optional<SharedArenaMemory> shared_arena_memory;
 };
 
 // Allocator metrics take precedence for device pools. Missing BlockTree pools are appended,
