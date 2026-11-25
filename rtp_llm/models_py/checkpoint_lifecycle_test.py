@@ -12,6 +12,17 @@ from rtp_llm.models_py.module_base import RtpModule
 
 
 class CheckpointLifecycleTest(unittest.TestCase):
+    def test_read_indices_do_not_treat_bool_as_int(self):
+        from rtp_llm.models_py.read_spec import ReadSpec
+
+        for index in (False, True):
+            with self.subTest(index=index), self.assertRaises(TypeError):
+                ReadSpec("w", "w", (2, 3), slices=(index, slice(None)))
+        for axis in (False, True):
+            with self.subTest(axis=axis), self.assertRaises(TypeError):
+                ReadSpec("w", "w", (2,), slices=(slice(None),), shard_dim=axis)
+        self.assertEqual(ReadSpec("w", "w", (2,), slices=(0,)).slices, (0,))
+
     def test_real_checkpoint_stage_order_and_reader_failure(self):
         from rtp_llm.models_py import weight_mapper
 

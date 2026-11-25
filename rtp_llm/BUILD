@@ -174,6 +174,7 @@ py_library(
 # database and LoRA both read checkpoint files. Give the common primitives
 # an owner below both libraries so importing database never requires the SDK.
 _CHECKPOINT_FILE_SRCS = [
+    "utils/checkpoint_shard_path.py",
     "utils/ckpt_file_info.py",
     "utils/dump_config_utils.py",
     "utils/meta_pickler.py",

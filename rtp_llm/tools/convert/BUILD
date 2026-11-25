@@ -3,7 +3,7 @@ package(default_visibility = ["//:__subpackages__"])
 py_library(
     name = "ft_export_engram",
     srcs = ["ft_export_engram.py"],
-    deps = ["//rtp_llm:safetensors_torch"],
+    deps = ["//rtp_llm:checkpoint_file_utils", "//rtp_llm:safetensors_torch"],
 )
 
 py_library(

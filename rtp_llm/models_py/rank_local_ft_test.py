@@ -124,6 +124,63 @@ class _ExpertModel(RtpModule):
 
 
 class RankLocalFTTest(unittest.TestCase):
+    def test_snapshot_blob_and_escaping_shards(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            root = repo / "snapshots" / "rev"
+            root.mkdir(parents=True)
+            blobs = repo / "blobs"
+            blobs.mkdir()
+            value = torch.arange(2)
+            write_ft_shards([(None, "weight", value)], str(root))
+            generate_ft_index(str(root), {"TP_SIZE": 1, "DP_SIZE": 1, "EP_SIZE": 1})
+            shard, = root.glob("*.safetensors")
+            blob = blobs / "0123456789abcdef"
+            shard.rename(blob)
+            shard.symlink_to(Path("../../blobs") / blob.name)
+            ft = FTCheckpoint.open(str(root), CheckpointTopology())
+            torch.testing.assert_close(ft.read("global.weight"), value)
+            unrelated = repo / "another-model"
+            blob.rename(unrelated)
+            blob.symlink_to(unrelated)
+            with self.assertRaisesRegex(ValueError, "escapes checkpoint directory"):
+                FTCheckpoint.open(str(root), CheckpointTopology())
+
+    def test_ft_writes_do_not_overlap_borrowed_storage(self):
+        from rtp_llm.models_py.borrowed_parameters import BorrowedParameter, bind_borrowed_parameters
+        from rtp_llm.models_py.module_base import _mark_loaded
+
+        with tempfile.TemporaryDirectory() as directory:
+            write_ft_shards([(None, "mirror", torch.full((2,), 9.0))], directory)
+            generate_ft_index(directory, {"TP_SIZE": 1, "DP_SIZE": 1, "EP_SIZE": 1})
+            ft = FTCheckpoint.open(directory, CheckpointTopology())
+            for kind in ("detach", "offset", "disjoint"):
+                with self.subTest(kind=kind):
+                    backing = torch.ones(4)
+                    owner = torch.nn.Module()
+                    owner.weight = torch.nn.Parameter(backing[:2], requires_grad=False)
+                    _mark_loaded(owner, "weight")
+                    draft = torch.nn.Module()
+                    draft.head = torch.nn.Module()
+                    draft.head.weight = torch.nn.Parameter(torch.empty(2), requires_grad=False)
+                    draft.prepare_borrowed_parameters = lambda bindings: None
+                    draft.preserved_ft_parameter_loans = {"head.weight": "global.head"}
+                    bind_borrowed_parameters(draft, {"head.weight": BorrowedParameter(owner, "weight")}, "cpu")
+                    mirror = {"detach": owner.weight.detach(), "offset": backing[1:3],
+                              "disjoint": backing[2:]}[kind]
+                    draft.register_buffer("mirror", mirror)
+                    bindings = (RuntimeTensorBinding(("global.mirror",), "mirror", lambda values: values[0]),)
+                    if kind == "disjoint":
+                        ft.load_parameters(draft, bindings)
+                        self.assertEqual(draft.mirror.tolist(), [9, 9])
+                    else:
+                        with self.assertRaisesRegex(PermissionError, "alias of a borrowed parameter"):
+                            ft.load_parameters(draft, bindings)
+                        self.assertEqual(backing.tolist(), [1, 1, 1, 1])
+                    self.assertIs(draft.head.weight, owner.weight)
+                    self.assertTrue(torch.equal(owner.weight.view(torch.uint8),
+                                                torch.ones(2).view(torch.uint8)))
+
     def _eplb_loader(self, root, method, *, rank=0, size=1):
         pc = SimpleNamespace(dp_size=1, dp_rank=0, pp_size=1, pp_rank=0)
         cfg = SimpleNamespace(

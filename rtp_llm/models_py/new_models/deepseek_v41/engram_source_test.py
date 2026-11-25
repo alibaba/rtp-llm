@@ -68,8 +68,8 @@ class EngramSourceTest(unittest.TestCase):
         from rtp_llm.tools.convert.ft_export_engram import export_v41_engram
 
         with tempfile.TemporaryDirectory() as work:
-            source, output = Path(work) / "hf", Path(work) / "ft"
-            source.mkdir()
+            source, output = Path(work) / "snapshots" / "rev", Path(work) / "ft"
+            source.mkdir(parents=True)
             output.mkdir()
             self.fixture(source)
             (source / "config.json").write_text(json.dumps({"text_config": self.cfg}))
@@ -81,6 +81,10 @@ class EngramSourceTest(unittest.TestCase):
             with safe_open(str(mixed), framework="pt") as shard:
                 before = {key: shard.get_tensor(key).clone() for key in shard.keys()}
             save_file({**before, "decoder.unrelated": torch.ones(10)}, mixed)
+            blobs = Path(work) / "blobs"
+            blobs.mkdir()
+            mixed.rename(blobs / "123abc")
+            mixed.symlink_to("../../blobs/123abc")
             specs = {"embed.weight": ((8, 32), "F8_E4M3", torch.float8_e4m3fn)}
             with self.assertRaisesRegex(ValueError, "original indexed HF"):
                 EngramSource(output, 1, specs, "scratch")

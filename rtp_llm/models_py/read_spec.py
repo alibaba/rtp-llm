@@ -106,7 +106,10 @@ class ReadSpec:
                     f"ReadSpec for {self.source_name!r} has {len(self.slices)} "
                     f"indices for a {len(self.source_shape)}-D tensor"
                 )
-            if any(not isinstance(index, (int, slice)) for index in self.slices):
+            if any(
+                isinstance(index, bool) or not isinstance(index, (int, slice))
+                for index in self.slices
+            ):
                 raise TypeError("ReadSpec indices must be int or slice")
         if not isinstance(self.partition, str) or not self.partition:
             raise ValueError("ReadSpec.partition must be a non-empty string")
@@ -125,6 +128,8 @@ class ReadSpec:
                 f"Invalid ReadSpec shard rank {self.shard_rank}/" f"{self.shard_count}"
             )
         if self.shard_dim is not None:
+            if isinstance(self.shard_dim, bool) or not isinstance(self.shard_dim, int):
+                raise TypeError("ReadSpec.shard_dim must be an integer axis")
             if not self.source_shape:
                 raise ValueError("Scalar ReadSpec cannot have shard_dim")
             if not 0 <= self.shard_dim < len(self.source_shape):

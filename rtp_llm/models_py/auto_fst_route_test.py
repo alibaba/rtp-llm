@@ -38,6 +38,50 @@ def _loader(root, device="cuda:0", **kwargs):
     )
 
 
+@register_model("_test_draft_loan_preflight")
+class _DraftWithLoan(_Owner):
+    def __init__(self, config, load):
+        super().__init__(config, load)
+        self.head = torch.nn.Linear(2, 1, bias=False).requires_grad_(False)
+
+    def prepare_borrowed_parameters(self, bindings):
+        assert set(bindings) == {"head.weight"}
+
+
+def _stage_loan_failure(rank, root, init):
+    from rtp_llm.models_py.borrowed_parameters import BorrowedParameter
+    from rtp_llm.models_py.module_base import _mark_loaded
+
+    dist.init_process_group(
+        "gloo", init_method=init, rank=rank, world_size=3, timeout=timedelta(seconds=10)
+    )
+    try:
+        tail = dist.new_group([1, 2], timeout=timedelta(seconds=5))
+        if rank != 0:
+            # Only the last PP stage constructs the draft. Its second rank has
+            # a three-column owner, while the draft expects two columns.
+            owner = torch.nn.Linear(rank + 1, 1, bias=False).requires_grad_(False)
+            _mark_loaded(owner, "weight")
+            for method in (Method.AUTO, Method.FASTSAFETENSORS):
+                loader = NewModelLoader(
+                    {"model_type": "_test_draft_loan_preflight", "is_mtp": True},
+                    NewLoaderConfig(device="cpu", load_method=method,
+                                    parallelism_config=SimpleNamespace(pp_size=2)),
+                    model_path=root,
+                    parameter_aliases={"head.weight": BorrowedParameter(owner, "weight")},
+                )
+                # Supply the real two-rank stage group without initializing
+                # the production GPU parallel runtime in this CPU test.
+                with patch.object(loader, "_stage_group", return_value=tail), unittest.TestCase().assertRaisesRegex(
+                    RuntimeError, "rank 1: ValueError: Borrowed parameter head.weight shape/dtype"
+                ):
+                    loader.load()
+                assert loader.loaded_method is None
+        dist.barrier()
+    finally:
+        dist.destroy_process_group()
+
+
 @contextmanager
 def _simulated_device(
     backend="Cuda", machine="x86_64", free=8 << 30, *, real_reader=False
@@ -123,6 +167,16 @@ def _rank_decision(rank, root, init):
             parallelism_config=SimpleNamespace(world_size=2, pp_size=1),
         )
         paths = [] if rank == 1 else loader._checkpoint_files()
+        # Exercise the real load() preflight, not just the backend vote.
+        for method in (Method.AUTO, Method.FASTSAFETENSORS):
+            consumer = _loader(root, "cpu", load_method=method)
+            with patch.object(consumer, "_model_checkpoint_name_filter",
+                              return_value=lambda key: key == ("weight" if rank == 0 else "absent")):
+                with unittest.TestCase().assertRaisesRegex(
+                    RuntimeError, "rank 1: ValueError: Checkpoint filter did not match"
+                ):
+                    consumer.load()
+            assert consumer.loaded_method is None
         with _simulated_device():
             assert _select(loader, paths=paths) == Method.SCRATCH
             case = unittest.TestCase()
@@ -151,6 +205,25 @@ class _CheckpointCase(unittest.TestCase):
 
 
 class DefaultFstRouteTest(_CheckpointCase):
+    def test_auto_memory_excludes_pure_host_but_not_mixed_shards(self):
+        from rtp_llm.models_py.borrowed_parameters import FixedHostCheckpointStorage
+
+        class HostLeaf(FixedHostCheckpointStorage, torch.nn.Module):
+            pass
+
+        loader = _loader(self.root, load_method=Method.AUTO)
+        model = _Owner({}, loader.load_config)
+        model.ple = HostLeaf()
+        path = str(self.root / "model.safetensors")
+        for mixed in (False, True):
+            tensors = {"ple.weight": self.expected}
+            if mixed:
+                tensors["weight"] = self.expected.clone()
+            save_file(tensors, path)
+            with self.subTest(mixed=mixed), _simulated_device(free=4096):
+                self.assertEqual(loader._select_load_method(Method.AUTO, model, [path]),
+                                 Method.SCRATCH if mixed else Method.FASTSAFETENSORS)
+
     def test_legacy_ptuning_bin_overrides_base_checkpoint(self):
         overlay = self.root / "overlay"
         overlay.mkdir()
@@ -244,6 +317,14 @@ class DefaultFstRouteTest(_CheckpointCase):
             _rank_decision,
             args=(str(self.root), (self.root / "rendezvous").as_uri()),
             nprocs=2,
+            start_method="fork",
+        )
+
+    def test_failed_draft_binding_only_votes_with_tail_stage(self):
+        torch.multiprocessing.start_processes(
+            _stage_loan_failure,
+            args=(str(self.root), (self.root / "stage-rendezvous").as_uri()),
+            nprocs=3,
             start_method="fork",
         )
 

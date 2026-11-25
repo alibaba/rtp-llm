@@ -15,6 +15,8 @@ from typing import Callable, Mapping
 import torch
 from safetensors import safe_open
 
+from rtp_llm.utils.checkpoint_shard_path import resolve_safetensors_shard
+
 _KEY = re.compile(r"^rank_(\d+)_(\d+)_(\d+)\.(global\..+|layers\.\d+\..+)$")
 
 
@@ -182,13 +184,7 @@ class FTCheckpoint:
                 raise ValueError(f"Invalid FT shard for {key}")
             path = paths.get(filename)
             if path is None:
-                path = (root / filename).resolve()
-                if Path(filename).is_absolute() or root not in path.parents:
-                    raise ValueError(
-                        f"FT shard escapes checkpoint directory: {filename!r}"
-                    )
-                if path.suffix != ".safetensors" or not path.is_file():
-                    raise ValueError(f"Missing or unsupported FT shard: {filename!r}")
+                path = resolve_safetensors_shard(root, filename)
                 paths[filename] = path
             rank_entries = by_rank.setdefault(ranks, {})
             suffix = match[4]
@@ -502,15 +498,39 @@ class FTCheckpoint:
         """
         preserved = validate_format_parameter_ownership(model, ft=True)
         targets = dict(model.named_parameters(remove_duplicate=False))
-        loan_ids = {id(targets[path]) for path in preserved}
+        loans = [targets[path] for path in preserved]
         for path in preserved:
             del targets[path]
         for path, module in model.named_modules():
             for name, value in module._buffers.items():
                 if value is not None and name not in module._non_persistent_buffers_set:
                     targets[f"{path}.{name}" if path else name] = value
-        if any(id(value) in loan_ids for value in targets.values()):
-            raise PermissionError("FT adapter cannot write an alias of a borrowed parameter")
+        if loans:
+            # detach(), narrow() and Parameter(view) create new Tensor objects,
+            # but writes still change the owner's bytes. For strided views use
+            # their enclosing byte span; fail closed on interleaved layouts.
+            def byte_span(tensor):
+                start = tensor.data_ptr()
+                extent = 1 + sum(
+                    (size - 1) * stride
+                    for size, stride in zip(tensor.shape, tensor.stride())
+                )
+                return start, start + extent * tensor.element_size()
+
+            spans = [(loan.device, *byte_span(loan)) for loan in loans if loan.numel()]
+            loan_ids = {id(loan) for loan in loans}
+            for name, value in targets.items():
+                overlaps = id(value) in loan_ids
+                if not overlaps and value.numel():
+                    start, end = byte_span(value)
+                    overlaps = any(
+                        dev == value.device and start < hi and lo < end
+                        for dev, lo, hi in spans
+                    )
+                if overlaps:
+                    raise PermissionError(
+                        f"FT adapter cannot write an alias of a borrowed parameter: {name}"
+                    )
         # Raw format adapters may build an online quantizer whose scale is
         # generated after import. Require the exact declared parameter; do not
         # silently exempt any other missing binding. Runtime FT snapshots

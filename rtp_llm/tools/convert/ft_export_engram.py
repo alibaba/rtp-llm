@@ -6,6 +6,8 @@ from pathlib import Path
 
 from safetensors import safe_open
 
+from rtp_llm.utils.checkpoint_shard_path import resolve_safetensors_shard
+
 
 def export_v41_engram(source, destination):
     source = Path(source).resolve()
@@ -30,9 +32,7 @@ def export_v41_engram(source, destination):
         index = json.load(stream)["weight_map"]
     shards = {}
     for key in sorted(names):
-        path = (source / index[key]).resolve()
-        if source not in path.parents or path.suffix != ".safetensors":
-            raise ValueError(f"Invalid Engram source shard for {key}")
+        path = resolve_safetensors_shard(source, index[key])
         shards.setdefault(path, []).append(key)
 
     # The coordinator invokes this once, after all rank workers finish and

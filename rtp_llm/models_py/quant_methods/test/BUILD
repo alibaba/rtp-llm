@@ -1,3 +1,5 @@
+load("//rtp_llm/models_py:checkpoint_test_platforms.bzl", "checkpoint_reader_test_env")
+
 py_test(
     name = "test_fp8_online_scale_layout",
     srcs = ["test_fp8_online_scale_layout.py"],
@@ -79,7 +81,7 @@ py_test(
 py_test(
     name = "test_weight_only_int8",
     srcs = ["test_weight_only_int8.py"],
-    env = {"CUDA_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"},
+    env = checkpoint_reader_test_env(),
     deps = ["//rtp_llm/models_py:new_weight_loader", "//rtp_llm:fastsafetensors", "//rtp_llm:safetensors"],
 )
 

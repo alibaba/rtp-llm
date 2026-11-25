@@ -130,40 +130,52 @@ class WeightOnlyInt8CheckpointTest(unittest.TestCase):
         torch.testing.assert_close(layer.bias, torch.arange(160).half())
         self.assertEqual(ptrs, [p.data_ptr() for p in (layer.weight, layer.weight_scale, layer.bias)])
 
-    def test_local_rank_before_quantization_and_native_fst_parity(self):
-        for method in ("scratch", "fastsafetensors"):
-            for rank in (0, 1):
-                with self.subTest(method=method, rank=rank):
-                    layer, q, scale, bias = load_fixture("cpu", 2, rank, method=method)
-                    expected = cuda_groupwise_layout(q, 8, 80)
-                    torch.testing.assert_close(layer.weight, expected, atol=0, rtol=0)
-                    torch.testing.assert_close(
-                        layer.weight_scale, scale, atol=0, rtol=0
-                    )
-                    torch.testing.assert_close(layer.bias, bias, atol=0, rtol=0)
-                    storage = layer.weight.data_ptr()
-                    layer.process_weights_after_loading()
-                    self.assertEqual(layer.weight.data_ptr(), storage)
+    def test_local_rank_before_quantization(self):
+        self._check_local_rank_before_quantization("scratch")
+
+    @unittest.skipIf(os.environ.get("NEWLOADER_TEST_NATIVE_FST") == "0", "platform lock has no native FST reader")
+    def test_local_rank_before_quantization_native_fst(self):
+        self._check_local_rank_before_quantization("fastsafetensors")
+
+    def _check_local_rank_before_quantization(self, method):
+        for rank in (0, 1):
+            with self.subTest(method=method, rank=rank):
+                layer, q, scale, bias = load_fixture("cpu", 2, rank, method=method)
+                expected = cuda_groupwise_layout(q, 8, 80)
+                torch.testing.assert_close(layer.weight, expected, atol=0, rtol=0)
+                torch.testing.assert_close(
+                    layer.weight_scale, scale, atol=0, rtol=0
+                )
+                torch.testing.assert_close(layer.bias, bias, atol=0, rtol=0)
+                storage = layer.weight.data_ptr()
+                layer.process_weights_after_loading()
+                self.assertEqual(layer.weight.data_ptr(), storage)
 
     def test_peft_merges_before_quantization_of_unaligned_local_shards(self):
-        for method in ("scratch", "fastsafetensors"):
-            for rank in (0, 1):
-                with self.subTest(method=method, rank=rank):
-                    layer, q, scale, _ = load_fixture(
-                        "cpu", 2, rank, method, dtype=torch.bfloat16,
-                        rows=160, width=192, startup=True,
-                    )
-                    # Logical rank-local K=96/N=160; the GEMM uses K=128/N=192.
-                    padded = torch.nn.functional.pad(q, (0, 32, 0, 32))
-                    expected = cuda_groupwise_layout(padded, 8, 80)
-                    torch.testing.assert_close(layer.weight, expected, atol=0, rtol=0)
-                    torch.testing.assert_close(
-                        layer.weight_scale, torch.nn.functional.pad(scale, (0, 32), value=1),
-                        atol=0, rtol=0,
-                    )
-                    self.assertFalse(hasattr(layer, "_startup_lora_update"))
-                    with self.assertRaisesRegex(NotImplementedError, "Quantized LoRA"):
-                        layer.prepare_lora_factors("weight", None, None)
+        self._check_peft_merges_before_quantization_of_unaligned_local_shards("scratch")
+
+    @unittest.skipIf(os.environ.get("NEWLOADER_TEST_NATIVE_FST") == "0", "platform lock has no native FST reader")
+    def test_peft_merges_before_quantization_of_unaligned_local_shards_native_fst(self):
+        self._check_peft_merges_before_quantization_of_unaligned_local_shards("fastsafetensors")
+
+    def _check_peft_merges_before_quantization_of_unaligned_local_shards(self, method):
+        for rank in (0, 1):
+            with self.subTest(method=method, rank=rank):
+                layer, q, scale, _ = load_fixture(
+                    "cpu", 2, rank, method, dtype=torch.bfloat16,
+                    rows=160, width=192, startup=True,
+                )
+                # Logical rank-local K=96/N=160; the GEMM uses K=128/N=192.
+                padded = torch.nn.functional.pad(q, (0, 32, 0, 32))
+                expected = cuda_groupwise_layout(padded, 8, 80)
+                torch.testing.assert_close(layer.weight, expected, atol=0, rtol=0)
+                torch.testing.assert_close(
+                    layer.weight_scale, torch.nn.functional.pad(scale, (0, 32), value=1),
+                    atol=0, rtol=0,
+                )
+                self.assertFalse(hasattr(layer, "_startup_lora_update"))
+                with self.assertRaisesRegex(NotImplementedError, "Quantized LoRA"):
+                    layer.prepare_lora_factors("weight", None, None)
 
     def test_reject_prequantized_weights(self):
         args = dict(quant_config=QuantizationConfig("INT8"), prefix="proj")

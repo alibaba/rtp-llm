@@ -1771,6 +1771,16 @@ class NewModelLoader:
         """The destination parameters and up to three staging buffers overlap."""
         return model_bytes + 3 * max(max_shard_bytes, bbuf_bytes)
 
+    def _fixed_host_key_filter(self, model):
+        prefixes = tuple(
+            name + "." if name else ""
+            for name, module in model.named_modules()
+            if isinstance(module, FixedHostCheckpointStorage)
+        )
+        if prefixes:
+            return lambda key: self._mapped_checkpoint_name(model, key).startswith(prefixes)
+        return None
+
     def _fastsafetensors_prerequisite_reason(
         self,
         model: nn.Module,
@@ -1927,16 +1937,27 @@ class NewModelLoader:
                 )
                 free_bytes, _ = torch.cuda.mem_get_info(device_index)
                 model_bytes = self._model_storage_bytes(model)
+                staging_files = checkpoint_files
+                fixed_host = self._fixed_host_key_filter(model)
+                if fixed_host is not None:
+                    from safetensors import safe_open
+
+                    # Pure host shards are read by range and never staged on
+                    # the GPU. Keep mixed files in the estimate: their non-host
+                    # ranges still need headroom even on the independent reader.
+                    staging_files = []
+                    for path in checkpoint_files:
+                        with safe_open(path, framework="pt", device="cpu") as shard:
+                            if any(not fixed_host(key) for key in shard.keys()):
+                                staging_files.append(path)
                 max_shard_bytes = max(
-                    os.path.getsize(path) for path in checkpoint_files
+                    (os.path.getsize(path) for path in staging_files), default=0
                 )
-                bbuf_bytes = (
-                    self._fastsafetensors_bbuf_size_kb(
-                        checkpoint_files,
-                        use_host_staging=use_nogds or use_shm,
+                bbuf_bytes = 0
+                if staging_files:
+                    bbuf_bytes = 1024 * self._fastsafetensors_bbuf_size_kb(
+                        staging_files, use_host_staging=use_nogds or use_shm
                     )
-                    * 1024
-                )
             except (OSError, RuntimeError, ValueError) as exc:
                 return f"cannot determine fastsafetensors memory safety: {exc}"
             required_bytes = self.fst_staging_required_bytes(
@@ -2002,6 +2023,27 @@ class NewModelLoader:
             else ""
         )
         return f"distributed prerequisite failure: {'; '.join(sample)}{suffix}"
+
+    @contextmanager
+    def _checkpoint_preflight(self, model, requested):
+        # Scratch and isolated owners do not participate in the FST vote.
+        if (
+            requested == NewLoaderLoadMethod.SCRATCH
+            or getattr(model, "fastsafetensors_load_isolated", False)
+            or not torch.distributed.is_initialized()
+        ):
+            yield
+            return
+        error = None
+        try:
+            yield
+        except Exception as exc:
+            error = exc
+        reason = self._synchronize_load_failure(
+            f"{type(error).__name__}: {error}" if error is not None else None
+        )
+        if reason is not None:
+            raise RuntimeError(f"Checkpoint preflight failed: {reason}") from error
 
     def _select_load_method(
         self,
@@ -2438,10 +2480,10 @@ class NewModelLoader:
             model = self._create_checkpoint_model(ft_checkpoint)
         if expert_filter is not None:
             expert_filter.checkpoint_to_runtime_layer = getattr(model, "checkpoint_to_runtime_expert_layer", None)
-        bind_borrowed_parameters(model, self.parameter_aliases, self.load_config.device)
         if ft_checkpoint is not None:
             # Format adapters own their import and return before the HF/FST
             # borrowed-parameter filters. Do not let them mutate target loans.
+            bind_borrowed_parameters(model, self.parameter_aliases, self.load_config.device)
             validate_format_parameter_ownership(model, ft=meta_checkpoint is None)
             overlay = self._finetune_overlay(checkpoint_files)
             if overlay is not None:
@@ -2557,46 +2599,50 @@ class NewModelLoader:
                 self.load_config.device,
             )
             return model
-        finish_lora = None
-        if startup_lora is not None:
-            from rtp_llm.models_py.lora_checkpoint import prepare_startup_lora_merge
+        with self._checkpoint_preflight(model, requested_method):
+            # A draft's owner can disagree on just one rank. Bind inside the
+            # existing participant vote, before any peer selects an FST backend.
+            bind_borrowed_parameters(model, self.parameter_aliases, self.load_config.device)
+            finish_lora = None
+            if startup_lora is not None:
+                from rtp_llm.models_py.lora_checkpoint import prepare_startup_lora_merge
 
-            finish_lora = prepare_startup_lora_merge(model, self, *startup_lora)
-        overlay = self._finetune_overlay()
-        if weight_mapper.is_rank_local_checkpoint(checkpoint_files) and not bool(
-            getattr(model, "supports_rank_local_checkpoint", False)
-        ):
-            raise ValueError(
-                f"{type(model).__name__} does not support rank-local consolidated "
-                "checkpoints; use a global HF checkpoint"
+                finish_lora = prepare_startup_lora_merge(model, self, *startup_lora)
+            overlay = self._finetune_overlay()
+            if weight_mapper.is_rank_local_checkpoint(checkpoint_files) and not bool(
+                getattr(model, "supports_rank_local_checkpoint", False)
+            ):
+                raise ValueError(
+                    f"{type(model).__name__} does not support rank-local consolidated "
+                    "checkpoints; use a global HF checkpoint"
+                )
+            self._validate_runtime_backends(model, self.load_config.device)
+            model_filter = self._model_checkpoint_name_filter(model)
+            model_filter = exclude_borrowed_checkpoint_weights(model, model_filter)
+            name_filter = self._checkpoint_name_filter(model_filter, expert_filter)
+            base_filter = (
+                overlay.base_filter(name_filter) if overlay is not None else name_filter
             )
-        self._validate_runtime_backends(model, self.load_config.device)
-        model_filter = self._model_checkpoint_name_filter(model)
-        model_filter = exclude_borrowed_checkpoint_weights(model, model_filter)
-        name_filter = self._checkpoint_name_filter(model_filter, expert_filter)
-        base_filter = (
-            overlay.base_filter(name_filter) if overlay is not None else name_filter
-        )
-        checkpoint_load_plan: Dict[str, CheckpointLoadTarget] = {}
-        read_spec_resolver = self._checkpoint_read_spec_resolver(
-            model, model_filter, expert_filter, checkpoint_load_plan
-        )
-        base_resolver = (
-            overlay.base_read_spec_resolver(read_spec_resolver)
-            if overlay is not None
-            else read_spec_resolver
-        )
-        base_expander = (
-            overlay.base_slice_expander(expert_filter)
-            if overlay is not None
-            else expert_filter
-        )
-        selected_files = weight_mapper.select_safetensor_files(
-            self._resolved_model_path(),
-            checkpoint_files,
-            model_filter,
-            self._safetensor_catalog(),
-        )
+            checkpoint_load_plan: Dict[str, CheckpointLoadTarget] = {}
+            read_spec_resolver = self._checkpoint_read_spec_resolver(
+                model, model_filter, expert_filter, checkpoint_load_plan
+            )
+            base_resolver = (
+                overlay.base_read_spec_resolver(read_spec_resolver)
+                if overlay is not None
+                else read_spec_resolver
+            )
+            base_expander = (
+                overlay.base_slice_expander(expert_filter)
+                if overlay is not None
+                else expert_filter
+            )
+            selected_files = weight_mapper.select_safetensor_files(
+                self._resolved_model_path(),
+                checkpoint_files,
+                model_filter,
+                self._safetensor_catalog(),
+            )
         if len(selected_files) != len(checkpoint_files):
             logger.info(
                 "Model checkpoint filter selected %d/%d shards",
@@ -2655,15 +2701,10 @@ class NewModelLoader:
             process_group = self._fastsafetensors_process_group(
                 single_group, selected_files, base_expander
             )
-            host_prefixes = tuple(
-                name + "." if name else "" for name, module in model.named_modules()
-                if isinstance(module, FixedHostCheckpointStorage)
-            )
             shared, independent = plan_fst_files(
                 selected_files, self._resolved_model_path(), process_group,
                 overlay.base_filter(model_filter) if overlay is not None else model_filter,
-                (lambda key: self._mapped_checkpoint_name(model,key).startswith(host_prefixes))
-                if host_prefixes else None,
+                self._fixed_host_key_filter(model),
                 catalog=self._checkpoint_catalog(),
             )
             if independent:
