@@ -2,7 +2,7 @@
 
 import torch
 
-from rtp_llm.models_py.quant_methods.groupwise import groupwise_settings
+from rtp_llm.models_py.quant_methods.groupwise import groupwise_settings, uses_gptq_v2
 from rtp_llm.models_py.quant_methods.groupwise_checkpoint import (
     GroupwiseCheckpointLayout,
     PackedGroupwiseWeights,
@@ -15,6 +15,7 @@ class GroupedControlSource:
         if dtype not in (torch.float16, torch.bfloat16, torch.float32):
             raise ValueError("GDN controls require a floating compute dtype")
         self.method, self.bits, self.group = groupwise_settings(quant)
+        self.gptq_v2 = uses_gptq_v2(quant)
         self.hidden, self.heads, self.dtype = hidden, heads, dtype
         self.ignored = {
             p
@@ -110,5 +111,6 @@ class GroupedControlSource:
             method=self.method,
             bits=self.bits,
             group_size=self.group,
+            gptq_v2=self.gptq_v2,
         )
         return packed.decode_control_weight(self.dtype).T

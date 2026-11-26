@@ -1,5 +1,6 @@
 """Real tiny CPU scratch/FST loads, not GPU/multicard/serving/golden tests."""
 
+import json
 import tempfile
 import unittest
 from dataclasses import replace
@@ -155,6 +156,69 @@ def decode(layer):
 
 
 class GroupwiseOwnerTest(unittest.TestCase):
+    def test_gptq_zero_encoding_from_checkpoint_to_dense_and_expert_owners(self):
+        from rtp_llm.config.quant_config import QuantizationConfig as SourceConfig
+        from rtp_llm.models_py.quant_methods.groupwise_runtime import prepare_groupwise_state
+
+        flags = ({}, {"format": "gptq"}, {"format": "gptq_v2"}, {"checkpoint_format": "gptq_v2"})
+        for bits in (4, 8):
+            pack = 32 // bits
+            # Low code is zero; other codes are 15/255. GPTQ v1 shifts all by one.
+            data = {
+                "proj.qweight": torch.zeros(64 // pack, 64, dtype=torch.int32),
+                "proj.qzeros": torch.full((4, 64 // pack), -1 << bits, dtype=torch.int32),
+                "proj.scales": torch.ones(4, 64, dtype=torch.float16),
+            }
+            with tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                save_file(data, str(root / "model.safetensors"))
+                for flag in flags:
+                    v2 = "gptq_v2" in flag.values()
+                    expected = torch.full((64,), (1 << bits) - int(v2), dtype=torch.int32)
+                    expected[::pack] = int(not v2)
+                    config = dict(quant_method="gptq", bits=bits, group_size=16, **flag)
+                    (root / "config.json").write_text(json.dumps({"quantization_config": config}))
+                    source = SourceConfig.load_from_ckpt(folder)
+                    quant = QuantizationConfig("gptq", source)
+                    for backend in ("scratch", "fastsafetensors"):
+                        with self.subTest(bits=bits, flag=flag, backend=backend):
+                            cfg = SimpleNamespace(
+                                model_type="_groupwise_dense_cpu_owner", bias=False,
+                                kind="column", quant_config=source,
+                            )
+                            load = NewLoaderConfig(
+                                device="cpu", compute_dtype=torch.float16,
+                                load_method=backend, quant_config=quant,
+                            )
+                            loader = NewModelLoader(cfg, load, model_path=folder)
+                            layer = loader.load().proj
+                            self.assertEqual(loader.loaded_method.value, backend)
+                            tensors = (layer.qweight, layer.qzeros, layer.scales)
+                            state = prepare_groupwise_state(*tensors, layer._groupwise_layout)
+                            native = state.zero[0, :, 0].int()
+                            if state.runtime_bits == 4:
+                                native = torch.stack((native & 15, native >> 4), 1).flatten()
+                            torch.testing.assert_close(native, expected, rtol=0, atol=0)
+                            packed = PackedGroupwiseWeights.from_tensors(
+                                *tensors, method="gptq", bits=bits, group_size=16,
+                                gptq_v2=layer._groupwise_layout["gptq_v2"],
+                            )
+                            expected_weight = -expected.half().expand(64, -1)
+                            torch.testing.assert_close(reconstruct(packed), expected_weight)
+                    cfg = SimpleNamespace(activation_type="SiGLU", quant_config=source)
+                    expert = ExpertOwner(cfg, load).experts
+                    for meta in expert._groupwise_layout.values():
+                        self.assertEqual(meta["gptq_v2"], v2)
+
+    def test_noncanonical_gptq_formats_do_not_silently_use_v1(self):
+        for fields in (
+            {"format": "marlin"}, {"format": "gptq_v2", "checkpoint_format": "gptq"}
+        ):
+            with self.subTest(fields=fields), self.assertRaisesRegex(
+                ValueError, "GPTQ checkpoint format"
+            ):
+                GPTQConfig(4, 16, True, **fields)
+
     def test_weight_only_stats_can_observe_but_never_install_experts(self):
         for method in ("awq", "gptq", "INT8"):
             source = (

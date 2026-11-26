@@ -4,6 +4,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 import torch
 from safetensors.torch import load_file, save_file
@@ -30,6 +31,31 @@ from rtp_llm.utils.model_weight import CkptWeightInfo, W, transpose
 
 
 class Int8FTExportTest(unittest.TestCase):
+    def test_groupwise_offline_dense_and_expert_zero_format(self):
+        # Run the real platform weight packers on CPU, not a native GPU kernel.
+        for impl in (CudaImpl, RocmImpl):
+            dev = impl.__new__(impl)
+            dev.py_env_configs = SimpleNamespace(runtime_config=SimpleNamespace(specify_gpu_arch="90"))
+            for bits in (4, 8):
+                pack = 32 // bits
+                weight = torch.zeros(64 // pack, 64, dtype=torch.int32)
+                zero = torch.full((4, 64 // pack), -1, dtype=torch.int32)
+                scale = torch.ones(4, 64, dtype=torch.float16)
+                for v2 in (False, True):
+                    args = ("cpu", True, False, bits)
+                    _, bias, _ = dev.preprocess_groupwise_weight_params(
+                        weight, zero, scale, *args, gptq_v2=v2
+                    )
+                    expected = torch.full_like(scale, -(1 << (bits - 1)) + int(v2))
+                    torch.testing.assert_close(bias, expected, atol=0, rtol=0)
+                    stacked = [torch.stack((x.T, x.T)) for x in (weight, zero, scale)]
+                    _, expert_bias, _ = dev.preprocess_moe_groupwise_weight_params(
+                        *stacked, *args, gptq_v2=v2
+                    )
+                    torch.testing.assert_close(
+                        expert_bias, torch.stack((expected, expected)), atol=0, rtol=0
+                    )
+
     def export(self, source, destination, tp=1):
         # Use production tensor descriptors and LoadConfig. This fixture
         # exercises FTExportWeights._records/write_ft_shards, not server init.

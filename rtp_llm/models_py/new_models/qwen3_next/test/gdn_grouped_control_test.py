@@ -22,7 +22,7 @@ from rtp_llm.models_py.quant_methods.base import QuantizationConfig
 from rtp_llm.models_py.weight_mapper import get_all_weights
 
 
-def owner(method, bits, rank=0, ignored=(), enabled=True):
+def owner(method, bits, rank=0, ignored=(), enabled=True, checkpoint_format=None):
     cfg = NS(
         linear_key_head_dim=16,
         linear_value_head_dim=16,
@@ -31,7 +31,8 @@ def owner(method, bits, rank=0, ignored=(), enabled=True):
         linear_conv_kernel_dim=4,
     )
     quant = QuantizationConfig(
-        method, NS(bits=bits, group_size=32), ignored_layers=ignored
+        method, NS(bits=bits, group_size=32, checkpoint_format=checkpoint_format),
+        ignored_layers=ignored,
     )
     return Qwen3NextGdnParameters(
         cfg,
@@ -46,11 +47,12 @@ def owner(method, bits, rank=0, ignored=(), enabled=True):
     )
 
 
-def encoded(method, bits, order):
+def encoded(method, bits, order, *, gptq_v2=False):
     rng = torch.Generator().manual_seed(771)
     q = torch.randint(1 << bits, (128, 32), generator=rng)
     z = torch.randint(1 << bits, (4, 32), generator=rng)
     z[0, 0] = (1 << bits) - 1  # GPTQ zero offset may be 16 or 256; never wrap.
+    z[0, 1] = 0
     scale = torch.randint(1, 20, (4, 32), generator=rng).float() / 8
     raw = {}
     for component, cols in order.items():
@@ -68,12 +70,26 @@ def encoded(method, bits, order):
             raw[key + "bias"] = torch.zeros(len(cols))
     groups = torch.arange(128) // 32
     decoded = (
-        (q - z[groups] - int(method == "gptq")).float() * scale[groups]
+        (q - z[groups] - int(method == "gptq" and not gptq_v2)).float() * scale[groups]
     ).bfloat16()
     return raw, decoded
 
 
 class ControlTest(unittest.TestCase):
+    def test_gptq_v2_control_zero_points_include_zero_and_upper_bound(self):
+        columns = {"b": list(range(16)), "a": list(range(16, 32))}
+        for bits in (4, 8):
+            source, reference = encoded("gptq", bits, columns, gptq_v2=True)
+            for rank in range(4):
+                leaf = owner("gptq", bits, rank, checkpoint_format="gptq_v2")
+                for name, tensor in source.items():
+                    leaf.load_weights({name: tensor})
+                cols = list(range(4 * rank, 4 * rank + 4))
+                torch.testing.assert_close(
+                    leaf.in_proj_ba_w, reference[:, cols + [c + 16 for c in cols]],
+                    rtol=0, atol=0,
+                )
+
     def test_production_qwen35_owner_routes_checkpoint_keys(self):
         cfg, _, _ = _fixture("gptq", 4)
         cfg.hybrid_attention_config.hybrid_attention_types = [

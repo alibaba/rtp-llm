@@ -14,6 +14,7 @@ from rtp_llm.models_py.quant_methods.groupwise import (
     checked_piece,
     groupwise_settings,
     runtime_module,
+    uses_gptq_v2,
 )
 from rtp_llm.models_py.quant_methods.groupwise_checkpoint import (
     GroupwiseCheckpointLayout,
@@ -46,9 +47,11 @@ class GroupwiseMoEMethod(FusedMoEMethodBase):
                 self.group_size,
                 hidden_size,
                 2 * intermediate_size,
+                uses_gptq_v2(self.quant_config),
             ),
             "w2": GroupwiseCheckpointLayout(
-                self.method, self.bits, self.group_size, intermediate_size, hidden_size
+                self.method, self.bits, self.group_size, intermediate_size, hidden_size,
+                uses_gptq_v2(self.quant_config),
             ),
         }
         layer._groupwise_checkpoint_layouts = layouts

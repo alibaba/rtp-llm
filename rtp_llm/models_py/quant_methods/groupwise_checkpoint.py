@@ -52,8 +52,11 @@ class GroupwiseCheckpointLayout:
     group_size: int
     input_size: int
     output_size: int
+    gptq_v2: bool = False
 
     def __post_init__(self):
+        if not isinstance(self.gptq_v2, bool) or (self.gptq_v2 and self.method != "gptq"):
+            raise ValueError("GPTQ v2 zero points require a GPTQ checkpoint")
         if self.method not in ("awq", "gptq") or self.bits not in (4, 8):
             raise ValueError("Expected AWQ/GPTQ with four- or eight-bit weights")
         if self.group_size <= 0 or self.input_size <= 0 or self.output_size <= 0:
@@ -93,7 +96,7 @@ class GroupwiseCheckpointLayout:
         if partition_dim == 0 and tp_size > 1 and dimensions[0] % self.group_size:
             raise ValueError("TP partitions must contain complete quantization groups")
         return GroupwiseCheckpointLayout(
-            self.method, self.bits, self.group_size, *dimensions
+            self.method, self.bits, self.group_size, *dimensions, self.gptq_v2
         )
 
     def read_spec(self, name, shape, partition_dim=1, tp_size=1, tp_rank=0):
@@ -136,7 +139,9 @@ class PackedGroupwiseWeights(nn.Module):
             )
 
     @classmethod
-    def from_tensors(cls, qweight, qzeros, scales, *, method, bits, group_size):
+    def from_tensors(
+        cls, qweight, qzeros, scales, *, method, bits, group_size, gptq_v2=False
+    ):
         """Adopt already-sharded checkpoint storage without allocating a copy.
 
         The offline loader has already performed model-specific padding/fusion.
@@ -154,7 +159,7 @@ class PackedGroupwiseWeights(nn.Module):
             raise ValueError("Grouped projection tensors must be on the same device")
         k = qweight.shape[0] * (32 // bits if method == "gptq" else 1)
         n = qweight.shape[1] * (32 // bits if method == "awq" else 1)
-        layout = GroupwiseCheckpointLayout(method, bits, group_size, k, n)
+        layout = GroupwiseCheckpointLayout(method, bits, group_size, k, n, gptq_v2)
         module = cls.__new__(cls)
         nn.Module.__init__(module)
         module.layout = layout
@@ -220,6 +225,7 @@ class PackedGroupwiseWeights(nn.Module):
             projection._check_complete()
             if (
                 projection.layout.method,
+                projection.layout.gptq_v2,
                 projection.layout.bits,
                 projection.layout.group_size,
                 projection.layout.input_size,
@@ -227,6 +233,7 @@ class PackedGroupwiseWeights(nn.Module):
                 projection.scales.device,
             ) != (
                 first.layout.method,
+                first.layout.gptq_v2,
                 first.layout.bits,
                 first.layout.group_size,
                 first.layout.input_size,
@@ -240,6 +247,7 @@ class PackedGroupwiseWeights(nn.Module):
             first.layout.group_size,
             first.layout.input_size,
             sum(p.layout.output_size for p in projections),
+            first.layout.gptq_v2,
         )
         result = cls(layout, first.scales.dtype, device=first.scales.device)
         result.load_checkpoint(
@@ -258,7 +266,9 @@ class PackedGroupwiseWeights(nn.Module):
             zeros = _reverse_awq(_unpack_last(self.qzeros, bits))
         else:
             values = _unpack_last(self.qweight.T, bits).T.contiguous()
-            zeros = _unpack_last(self.qzeros, bits) + 1
+            zeros = _unpack_last(self.qzeros, bits)
+            if not self.layout.gptq_v2:
+                zeros = zeros + 1
         return values, zeros
 
     def decode_control_weight(self, dtype):

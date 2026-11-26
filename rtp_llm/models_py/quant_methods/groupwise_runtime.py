@@ -20,14 +20,21 @@ class GroupwiseLayout:
     group_size: int
     input_size: int
     output_size: int
+    gptq_v2: bool = False
 
     @classmethod
     def parse(cls, value):
+        if isinstance(value, dict):
+            value = {"gptq_v2": False, **value}
         if not isinstance(value, dict) or set(value) != set(cls.__dataclass_fields__):
             raise ValueError(
                 "Groupwise runtime requires explicit local parameter layout"
             )
         result = cls(**value)
+        if not isinstance(result.gptq_v2, bool) or (
+            result.gptq_v2 and result.method != "gptq"
+        ):
+            raise ValueError("GPTQ v2 zero points require a GPTQ checkpoint")
         if result.method not in ("awq", "gptq"):
             raise ValueError("Groupwise runtime method must be awq or gptq")
         for name in ("bits", "group_size", "input_size", "output_size"):
@@ -100,7 +107,7 @@ def _undo_awq_order(values):
 def prepare_groupwise_state(qweight, qzeros, scales, layout):
     """Pure integer repacking, usable on CPU for exact checkpoint regressions.
 
-    GPTQ can have an effective zero point of 16 (stored nibble 15 + 1). A
+    GPTQ v1 can have an effective zero point of 16 (stored nibble 15 + 1). A
     four-bit zero-point ABI cannot represent it. Select the native W8A16
     branch for that projection, retaining integer values and recording the 2x
     weight-storage promotion. Never clip, wrap, or dequantize to float weights.
@@ -147,7 +154,7 @@ def prepare_groupwise_state(qweight, qzeros, scales, layout):
     zero = _unpack_last(qzeros, layout.bits).to(torch.int16)
     if layout.method == "awq":
         zero = _undo_awq_order(zero)
-    else:
+    elif not layout.gptq_v2:
         zero = zero + 1
     promoted = layout.bits == 4 and bool((zero > 15).any())
     runtime_bits = 8 if promoted else layout.bits

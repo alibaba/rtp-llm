@@ -103,6 +103,7 @@ class GroupwiseExportModule(nn.Module):
         method,
         bits,
         group_size,
+        gptq_v2=False,
         stacked=False,
         activation_scale=None,
     ):
@@ -127,7 +128,8 @@ class GroupwiseExportModule(nn.Module):
         self.projections = nn.ModuleList(
             [
                 PackedGroupwiseWeights.from_tensors(
-                    weight, zero, scale, method=method, bits=bits, group_size=group_size
+                    weight, zero, scale, method=method, bits=bits,
+                    group_size=group_size, gptq_v2=gptq_v2,
                 )
                 for weight, zero, scale in inputs
             ]

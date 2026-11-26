@@ -59,6 +59,7 @@ class DeviceBase:
         gptq: bool,
         awq: bool,
         weight_bits: int,
+        gptq_v2: bool = False,
     ):
         raise NotImplementedError(
             "preprocess_groupwise_weight_params is not implemented"
@@ -73,6 +74,7 @@ class DeviceBase:
         gptq: bool,
         awq: bool,
         weight_bits: int,
+        gptq_v2: bool = False,
     ):
         raise NotImplementedError(
             "preprocess_moe_groupwise_weight_params is not implemented"

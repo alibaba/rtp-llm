@@ -420,6 +420,10 @@ class QuantizationConfig(ABC):
         if quant_config.get("scale_fmt") is not None:
             normalized_config["scale_fmt"] = quant_config["scale_fmt"]
         if quant_method in ("awq", "gptq"):
+            if quant_method == "gptq":
+                for key in ("format", "checkpoint_format"):
+                    if key in quant_config:
+                        normalized_config[key] = quant_config[key]
             for key in ("modules_to_not_convert", "exclude", "exclude_modules"):
                 if key in quant_config:
                     normalized_config[key] = quant_config[key]
@@ -842,6 +846,16 @@ class GPTQConfig(QuantizationConfig):
     def __init__(self, bits: int, group_size: int, is_quanted: bool, **kwargs: Any):
         super().__init__(bits=bits, group_size=group_size, is_quanted=is_quanted)
         self.exclude_modules = _groupwise_exclusions(kwargs)
+        formats = [
+            kwargs[key] for key in ("format", "checkpoint_format")
+            if kwargs.get(key) is not None
+        ]
+        if any(fmt not in ("gptq", "gptq_v2") for fmt in formats):
+            raise ValueError(f"Unsupported GPTQ checkpoint format: {formats!r}")
+        if len(set(formats)) > 1:
+            raise ValueError(f"Conflicting GPTQ checkpoint formats: {formats!r}")
+        # Original AutoGPTQ files without a format encode zero - 1.
+        self.checkpoint_format = formats[0] if formats else "gptq"
 
     @classmethod
     def get_method(cls) -> str:

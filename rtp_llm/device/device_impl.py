@@ -73,8 +73,9 @@ class ArmCpuImpl(CpuImpl):
         gptq: bool,
         awq: bool,
         weight_bits: int,
+        gptq_v2: bool = False,
     ):
-        GPTQ_FLAG = 1 if gptq == True else 0
+        GPTQ_FLAG = int(gptq and not gptq_v2)
         qweight = qweight_int32.reshape(qweight_int32.shape[0], -1).cpu()
         qzeros = qzeros_int32.reshape(qzeros_int32.shape[0], -1).cpu()
         scales_fp16 = scales_fp16.reshape(scales_fp16.shape[0], -1).cpu()
@@ -233,8 +234,9 @@ class GpuImpl(DeviceBase):
         gptq: bool,
         awq: bool,
         weight_bits: int,
+        gptq_v2: bool = False,
     ):
-        GPTQ_FLAG = 1 if gptq == True else 0
+        GPTQ_FLAG = int(gptq and not gptq_v2)
         qweight = qweight_int32.reshape(qweight_int32.shape[0], -1)
         qzeros = qzeros_int32.reshape(qzeros_int32.shape[0], -1)
         scales_fp16 = scales_fp16.reshape(scales_fp16.shape[0], -1)
@@ -293,6 +295,7 @@ class GpuImpl(DeviceBase):
         gptq: bool,
         awq: bool,
         weight_bits: int,
+        gptq_v2: bool = False,
     ):
         assert qweight_int32.dim() == 3
 
@@ -307,7 +310,7 @@ class GpuImpl(DeviceBase):
             z = torch.squeeze(z).transpose(1, 0).contiguous()
             s = torch.squeeze(s).transpose(1, 0).contiguous()
             p_w, p_z, p_s = self.preprocess_groupwise_weight_params(
-                w, z, s, device, gptq, awq, weight_bits
+                w, z, s, device, gptq, awq, weight_bits, gptq_v2
             )
             processed_weights.append(p_w)
             processed_zeros.append(p_z)
@@ -825,8 +828,9 @@ class RocmImpl(GpuImpl):
         gptq: bool,
         awq: bool,
         weight_bits: int,
+        gptq_v2: bool = False,
     ):
-        GPTQ_FLAG = 1 if gptq == True else 0
+        GPTQ_FLAG = int(gptq and not gptq_v2)
         qweight = qweight_int32.reshape(qweight_int32.shape[0], -1)
         qzeros = qzeros_int32.reshape(qzeros_int32.shape[0], -1)
         scales_fp16 = scales_fp16.reshape(scales_fp16.shape[0], -1)

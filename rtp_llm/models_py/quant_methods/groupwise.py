@@ -37,6 +37,12 @@ def groupwise_settings(config):
     return method, bits, size
 
 
+def uses_gptq_v2(config):
+    return config.quant_type == "gptq" and getattr(
+        config.source_config, "checkpoint_format", "gptq"
+    ) == "gptq_v2"
+
+
 def runtime_module():
     try:
         from rtp_llm.models_py.quant_methods import groupwise_runtime
@@ -88,7 +94,8 @@ class GroupwiseLinearMethod(QuantizeMethodBase):
 
     def create_weights(self, layer, input_size, output_size, params_dtype, **kwargs):
         layout = GroupwiseCheckpointLayout(
-            self.method, self.bits, self.group_size, input_size, output_size
+            self.method, self.bits, self.group_size, input_size, output_size,
+            uses_gptq_v2(self.quant_config),
         )
         layer._groupwise_checkpoint_layout = layout
         layer._groupwise_layout = asdict(layout)

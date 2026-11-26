@@ -406,6 +406,12 @@ class GroupWiseWeight(CompositeWeight, QuantWeight):
         else:
             raise ValueError(f"Unsupported weight name {self.kernel.name}")
 
+        # Preserve the legacy exporter ABI for formats without the new encoding.
+        format_kwargs = (
+            {"gptq_v2": True}
+            if getattr(self.quant_config, "checkpoint_format", None) == "gptq_v2"
+            else {}
+        )
         weight, zero, scale = post_func(
             kernel,
             zero,
@@ -414,6 +420,7 @@ class GroupWiseWeight(CompositeWeight, QuantWeight):
             isinstance(self.quant_config, GPTQConfig),
             isinstance(self.quant_config, AWQConfig),
             self.quant_config.bits,
+            **format_kwargs,
         )
         sub_tensors = {
             self.kernel.name: weight,
