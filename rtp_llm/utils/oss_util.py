@@ -22,5 +22,15 @@ def get_bytes_io_from_oss_path(url: str, oss_endpoint: str):
     # Specify the name of the bucket. Example: examplebucket.
     bucket = oss2.Bucket(auth, oss_endpoint, bucket_name, connect_timeout=100)
     object = bucket.get_object(path)
-    io = BytesIO(object.read())
+    payload = object.read()
+    io = BytesIO(payload)
+    try:
+        from internal_source.rtp_llm.utils.media_download_metrics import (
+            observe_oss_payload,
+        )
+
+        observe_oss_payload(len(payload))
+    except Exception:
+        # Optional metrics must not fail a successful download.
+        pass
     return io
