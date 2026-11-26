@@ -72,9 +72,8 @@ public final class RtpMetrics {
         this.clock = Objects.requireNonNull(clock);
         prefill = role.equals("prefill");
         windowStarted = clock.getAsLong();
-        var physical = new HashMap<>(MetricTags.fromEnvironment(System.getenv()));
+        var physical = MetricTags.rtpEngineTags(System.getenv());
         physical.remove("priority"); // Request priority belongs to each TPS bucket, not the process.
-        physical.put("dp_rank", "0"); // The current Engine supports exactly one DP worker.
         tags = Map.copyOf(physical);
         events = new EventMetrics(role, tags);
         events.register(registry);

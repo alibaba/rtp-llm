@@ -5,12 +5,52 @@ import importlib.util
 import json
 import os
 import subprocess
+import time
 import zipfile
 from pathlib import Path
 
 import pytest
 
 ROOT = FRAMEWORK
+
+
+@pytest.mark.parametrize("role", ["PREFILL", "DECODE"])
+def test_whale_multi_dp_starts_independent_jvms(role, tmp_path):
+    java = tmp_path / "bin/java"
+    java.parent.mkdir()
+    java.write_text(
+        "#!/bin/sh\n"
+        'printf "%s %s %s\\n" "$START_PORT" "$DP_RANK" "$MOCK_NODE_ID"\n'
+        "exec sleep 30\n"
+    )
+    java.chmod(0o755)
+    env = dict(
+        os.environ,
+        JAVA_HOME=str(tmp_path),
+        ROLE_TYPE=role,
+        DP_SIZE="8",
+        TP_SIZE="1",
+        PP_SIZE="1",
+        LOCAL_WORLD_SIZE="8",
+        START_PORT="8088",
+        WORKER_INFO_PORT_NUM="10",
+        MOCK_NODE_ID=role.lower(),
+    )
+    log = tmp_path / "workers.log"
+    with log.open("w") as output:
+        child = subprocess.Popen(
+            ["bash", str(ROOT / "docker/whale_start.sh")], env=env, stdout=output
+        )
+        try:
+            deadline = time.monotonic() + 5
+            while len(log.read_text().splitlines()) < 8 and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert sorted(log.read_text().splitlines()) == sorted(
+                f"{8088 + 10 * rank} {rank} {role.lower()}-{rank}" for rank in range(8)
+            )
+        finally:
+            child.terminate()
+            child.wait(timeout=5)
 
 
 def packager():
