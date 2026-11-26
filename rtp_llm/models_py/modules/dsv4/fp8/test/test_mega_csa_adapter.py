@@ -649,6 +649,26 @@ class MegaCSARuntimeTest(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "must be int64"):
             runtime.slot_mappings(metadata, 2)
 
+    def test_persistent_topk_chunk_bound_graph_ceil_and_no_cache_poisoning(
+        self,
+    ) -> None:
+        from rtp_llm.models_py.modules.dsv4.fp8.decode.mega_csa_adapter import (
+            _persistent_topk_chunk_bound,
+        )
+
+        # Warmup eager step followed by graph capture on the SAME metadata object
+        # must never cache/poison capture with warmup width, and must round
+        # 131076 / 4 up to 32769 -> bucket 65536 (above 32768 RADIX_THRESHOLD).
+        metadata = SimpleNamespace(max_seq_len=131076, is_cuda_graph=False)
+        width = 131072
+        self.assertEqual(_persistent_topk_chunk_bound(metadata, width), width)
+
+        with patch("torch.cuda.is_current_stream_capturing", return_value=True):
+            self.assertEqual(_persistent_topk_chunk_bound(metadata, width), 65536)
+
+        metadata.is_cuda_graph = True
+        self.assertEqual(_persistent_topk_chunk_bound(metadata, width), 65536)
+
 
 if __name__ == "__main__":
     unittest.main()

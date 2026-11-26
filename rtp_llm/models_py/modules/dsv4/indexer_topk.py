@@ -18,6 +18,26 @@ _FAST_TOPK_VALUES = (2048,)
 _PERSISTENT_TOPK_VALUES = (512, 1024, 2048)
 
 
+def persistent_topk_bucket_bound(max_row_len: int, width: int) -> int:
+    """Bucket ``max_row_len`` up to a power of two, clamped to ``[1, width]``.
+
+    ``rtp_llm_ops.dsv4_persistent_topk`` sizes its launch geometry (CTAs per
+    row group, chunk size, shared memory) from the host-supplied
+    ``max_seq_len`` bound while addressing rows with the real padded stride.
+    Bucketing the bound to powers of two keeps the distinct geometries on a
+    small fixed ladder — the length-domain analogue of the fixed
+    ``DECODE_CAPTURE_CONFIG`` decode-capture batch ladder — so launch shapes
+    stay stable under CUDA-graph capture and repeat little between steps.
+    The result is never below ``max_row_len``, so it remains an upper bound
+    of every row length and per-row chunk coverage is unchanged.
+    """
+    width = max(int(width), 1)
+    value = max(int(max_row_len), 0)
+    if value <= 1:
+        return min(1, width)
+    return min(1 << (value - 1).bit_length(), width)
+
+
 def _flatten_score(score: torch.Tensor) -> tuple[torch.Tensor, tuple[int, ...]]:
     shape = tuple(score.shape)
     if score.dim() == 2:
@@ -199,18 +219,35 @@ class PersistentIndexerTopKBackend(IndexerTopKBackend):
                 f"got device={score.device}, dtype={score.dtype}, topk={int(topk)}"
             )
         flat, shape = _flatten_score(score)
+        if flat.shape[0] == 0:
+            out = torch.empty((0, int(topk)), dtype=torch.int32, device=flat.device)
+            return _reshape_indices(out, shape)
+        width = int(flat.shape[1])
+        if width == 0:
+            out = torch.full(
+                (flat.shape[0], int(topk)), -1, dtype=torch.int32, device=flat.device
+            )
+            return _reshape_indices(out, shape)
+
         lengths_i32 = _normalize_lengths(score, topk, lengths)
 
         from rtp_llm.ops.compute_ops import rtp_llm_ops
 
-        persistent_topk = getattr(rtp_llm_ops, "persistent_topk")
+        dsv4_persistent_topk = getattr(rtp_llm_ops, "dsv4_persistent_topk")
         out = torch.empty(
             (flat.shape[0], int(topk)), dtype=torch.int32, device=flat.device
         )
         workspace = torch.empty((1 << 20,), dtype=torch.uint8, device=flat.device)
-        persistent_topk(
-            flat, lengths_i32, out, workspace, int(topk), int(flat.shape[1])
-        )
+        # Launch-geometry bound: dsv4_persistent_topk chunks on ``max_seq_len``
+        # and addresses with the real row stride. A host-resident ``lengths``
+        # tensor gives the real max row length without a device sync;
+        # otherwise (device lengths / varlen edge) fall back to the full row
+        # width, which reproduces the legacy full-width launch.
+        if lengths is None or lengths.is_cuda:
+            chunk_bound = width
+        else:
+            chunk_bound = persistent_topk_bucket_bound(int(lengths.max().item()), width)
+        dsv4_persistent_topk(flat, lengths_i32, out, workspace, int(topk), chunk_bound)
         out = _apply_offset(out, offset)
         return _reshape_indices(out, shape)
 

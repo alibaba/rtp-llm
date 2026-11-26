@@ -7,6 +7,10 @@ from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import torch
 
+from rtp_llm.models_py.modules.dsv4.indexer_topk import (
+    persistent_topk_bucket_bound,
+)
+
 from .mega_csa_runtime import MegaCSARuntime, MegaCSASlotMappings
 from .mega_csa_weights import (
     COMPRESS_RATIO,
@@ -47,6 +51,30 @@ class MegaCSAPoolContext:
     indexer_stride_bytes: int
     swa_stride_bytes: int
     slots: MegaCSASlotMappings
+
+
+def _persistent_topk_chunk_bound(metadata: Any, width: int) -> int:
+    """Bucketed upper bound of the compressed row lengths for TopK launch.
+
+    ``dsv4_persistent_topk`` chunks on the host-supplied ``max_seq_len``
+    bound while addressing rows with the real padded stride. Under CUDA-graph
+    capture or replay, derive the upper bound from ``ceil(max_seq_len /
+    COMPRESS_RATIO)`` (without mutable per-metadata caches or warmup length
+    poisoning); in eager mode use the full padded ``width`` with zero D2H
+    synchronization.
+    """
+    is_capturing = False
+    try:
+        is_capturing = torch.cuda.is_current_stream_capturing()
+    except Exception:
+        is_capturing = False
+    is_graph = bool(getattr(metadata, "is_cuda_graph", False))
+    if is_capturing or is_graph:
+        config_max = int(getattr(metadata, "max_seq_len", 0))
+        if config_max > 0:
+            raw = (config_max + COMPRESS_RATIO - 1) // COMPRESS_RATIO
+            return persistent_topk_bucket_bound(raw, int(width))
+    return max(int(width), 1)
 
 
 class MegaCSAAdapter:
@@ -381,6 +409,7 @@ class MegaCSAAdapter:
             compressed_lengths_2d, pools.indexer_entries
         )
         topk_workspace = _get_topk_workspace(hidden.device)
+        topk_chunk_bound = _persistent_topk_chunk_bound(metadata, int(logits.shape[1]))
 
         tf32_hc_prenorm_gemm(
             hidden_rows.view(token_count, HC * g.dim),
@@ -517,7 +546,7 @@ class MegaCSAAdapter:
             topk_output,
             topk_workspace,
             topk,
-            int(logits.shape[1]),
+            topk_chunk_bound,
         )
         attention = attn._forward_decode_compressed(
             q_ready,

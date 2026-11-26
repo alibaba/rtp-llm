@@ -20,8 +20,16 @@ namespace torch_ext {
 //   output   : [num_rows, k]      int32   — written
 //   workspace: uint8 buffer, ≥ ``RADIX_TOPK_WORKSPACE_SIZE = 1MB``
 //   k        : 512, 1024, or 2048 (compile-time dispatched)
-//   max_seq_len: max possible stride across rows; controls cooperative
-//                launch threshold inside the kernel
+//   max_seq_len: host-known upper bound on the per-row ``lengths`` values
+//                (must satisfy max_seq_len >= max(lengths)). Drives the
+//                launch geometry — CTAs per row group, chunk size, shared
+//                memory, grid — and the cooperative-launch threshold; row
+//                addressing always uses the real ``logits.stride(0)``.
+//                Callers without a host-known bound (varlen edge) pass the
+//                full row width, which reproduces the legacy full-width
+//                launch. Decode callers bucket the real max row length up
+//                to a power of two so the grid is chosen from a small fixed
+//                ladder and stays CUDA-graph-capture stable.
 //
 // Notes:
 //   * Only CUDA — ROCm path raises.

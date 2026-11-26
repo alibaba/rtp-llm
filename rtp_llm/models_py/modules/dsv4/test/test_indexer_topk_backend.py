@@ -118,9 +118,7 @@ class TestIndexerTopKBackend(unittest.TestCase):
     def test_persistent_backend_topk_512_matches_torch_sets(self):
         torch.manual_seed(2)
         score = torch.randn(4, 16384, device="cuda", dtype=torch.float32)
-        lengths = torch.tensor(
-            [16384, 9000, 512, 17], device="cuda", dtype=torch.int32
-        )
+        lengths = torch.tensor([16384, 9000, 512, 17], device="cuda", dtype=torch.int32)
         persistent = PersistentIndexerTopKBackend().select(score, 512, lengths=lengths)
         ref = TorchIndexerTopKBackend().select(score, 512, lengths=lengths)
         _assert_topk_sets(self, persistent.cpu(), ref.cpu())
@@ -153,9 +151,7 @@ class TestIndexerTopKBackend(unittest.TestCase):
     def test_fast_backend_topk_2048_matches_torch_sets(self):
         torch.manual_seed(3)
         score = torch.randn(4, 4096, device="cuda", dtype=torch.float32)
-        lengths = torch.tensor(
-            [4096, 3000, 2048, 17], device="cuda", dtype=torch.int32
-        )
+        lengths = torch.tensor([4096, 3000, 2048, 17], device="cuda", dtype=torch.int32)
         fast = FastIndexerTopKBackend().select(score, 2048, lengths=lengths)
         ref = TorchIndexerTopKBackend().select(score, 2048, lengths=lengths)
         _assert_topk_sets(self, fast.cpu(), ref.cpu())
@@ -177,6 +173,20 @@ class TestIndexerTopKBackend(unittest.TestCase):
         lengths = torch.tensor([1024, 33], dtype=torch.int32)
         with self.assertRaisesRegex(RuntimeError, "requires CUDA float32"):
             PersistentIndexerTopKBackend().select(score, 512, lengths=lengths)
+
+    @unittest.skipIf(not torch.cuda.is_available(), "CUDA required")
+    def test_persistent_backend_handles_empty_rows_and_width(self):
+        empty_rows = torch.empty(0, 1024, device="cuda", dtype=torch.float32)
+        got_empty_rows = PersistentIndexerTopKBackend().select(empty_rows, 512)
+        self.assertEqual(got_empty_rows.shape, (0, 512))
+        self.assertEqual(got_empty_rows.dtype, torch.int32)
+
+        empty_width = torch.empty(2, 0, device="cuda", dtype=torch.float32)
+        got_empty_width = PersistentIndexerTopKBackend().select(empty_width, 512)
+        self.assertEqual(got_empty_width.shape, (2, 512))
+        self.assertTrue(
+            torch.equal(got_empty_width, torch.full_like(got_empty_width, -1))
+        )
 
 
 if __name__ == "__main__":
