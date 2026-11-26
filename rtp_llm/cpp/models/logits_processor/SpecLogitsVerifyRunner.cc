@@ -6,6 +6,10 @@
 #include <utility>
 
 #include <c10/util/Exception.h>
+#if USING_CUDA
+#include <c10/cuda/CUDACachingAllocator.h>
+#include <c10/cuda/CUDAGuard.h>
+#endif
 
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/models/logits_processor/BitmaskUtils.h"
@@ -52,6 +56,34 @@ SpecLogitsVerifyRunner::LaunchResult makeFailureResultForActiveStreams(const Spe
 }
 
 }  // namespace
+
+SpecLogitsVerifyRunner::~SpecLogitsVerifyRunner() {
+#if USING_CUDA
+    // Never drop an in-flight draft-token copy: its source must outlive the
+    // transfer, so sync a pending event before the members (and the keep-alive
+    // source tensor) are destroyed. Best effort only: destruction must not throw.
+    try {
+        waitDraftTokensOnCpu();
+    } catch (...) {
+        // A failed sync here means the CUDA context is already broken; nothing
+        // further can be done in a destructor.
+    }
+#endif
+}
+
+void SpecLogitsVerifyRunner::waitDraftTokensOnCpu() {
+#if USING_CUDA
+    if (draft_transfer_event_.has_value()) {
+        // Wait for just the draft-token transfer (and, transitively, the producer
+        // event it was ordered after) instead of synchronizing the whole current
+        // stream. An event whose record() never succeeded is an inert no-op.
+        draft_transfer_event_->synchronize();
+        draft_transfer_event_.reset();
+        // The in-flight copy has completed; the materialized source can go.
+        draft_transfer_src_ = torch::Tensor();
+    }
+#endif
+}
 
 void SpecLogitsVerifyRunner::applyMaskToLogits(torch::Tensor& logits, const LaunchResult& result, size_t vocab_size) {
 #if USING_CUDA
@@ -147,9 +179,70 @@ void SpecLogitsVerifyRunner::materializeDraftTokensToCpu(const LaunchTask& task)
                             static_cast<long long>(P + 1),
                             static_cast<long long>(draft_cols));
 #if USING_CUDA
-    if (task.draft_tokens_ready_event && draft_tokens.is_cuda()) {
-        // Async MTP records this on the producer stream; order our D2H after it.
-        task.draft_tokens_ready_event->block(cuda_graph::graphGetCurrentStream());
+    if (draft_tokens.is_cuda()) {
+        // Guard the copy device so ensure/pool streams match draft_tokens.
+        c10::cuda::CUDAGuard device_guard(draft_tokens.device());
+        if (draft_copy_stream_.has_value() && draft_copy_stream_->device() != draft_tokens.device()) {
+            draft_copy_stream_.reset();
+        }
+        if (!draft_copy_stream_.has_value()) {
+            // Pool stream on the runner's device; matches how MtpExecutor owns
+            // its AsyncRunner streams.
+            draft_copy_stream_ = cuda_graph::graphGetStreamFromPool(/*is_high_priority=*/true);
+        }
+        std::optional<torch::Event> current_stream_done;
+        if (!task.draft_tokens_ready_event) {
+            // No producer event: preserve the old same-stream ordering by
+            // ordering the copy after work already enqueued on the current
+            // stream. Recorded before the guard below switches streams.
+            current_stream_done = cuda_graph::makeGraphEvent();
+            current_stream_done->record(cuda_graph::graphGetCurrentStream());
+        }
+
+        // Guarantee an unwind before commit never leaves an unrecorded
+        // draft_transfer_event_ (whose synchronize() would be a no-op) or a
+        // dangling source reference.
+        struct CopyRollbackGuard {
+            SpecLogitsVerifyRunner* runner;
+            bool                    committed = false;
+            ~CopyRollbackGuard() {
+                if (!committed) {
+                    if (runner->draft_copy_stream_.has_value()) {
+                        try {
+                            runner->draft_copy_stream_->synchronize();
+                        } catch (...) {}
+                    }
+                    runner->draft_transfer_event_.reset();
+                    runner->draft_transfer_src_ = torch::Tensor();
+                }
+            }
+        } rollback_guard{this};
+
+        cuda_graph::GraphStreamGuard copy_guard(cuda_graph::toGraphStream(*draft_copy_stream_));
+        if (task.draft_tokens_ready_event) {
+            // Async MTP records this on the producer stream after draft_tokens
+            // are final; order our D2H after it.
+            task.draft_tokens_ready_event->block(*draft_copy_stream_);
+        } else {
+            current_stream_done->block(*draft_copy_stream_);
+        }
+        auto draft = draft_tokens.reshape({B, draft_cols}).narrow(1, draft_offset, P);
+        auto dst   = draft_tokens_cpu_.narrow(0, 0, B).narrow(1, 0, P);
+        auto cuda_copy_stream = cuda_graph::toGraphStream(*draft_copy_stream_);
+        // Protect caller's producer buffer while reshaped/read on the copy stream.
+        c10::cuda::CUDACachingAllocator::recordStream(draft_tokens.storage().data_ptr(), cuda_copy_stream);
+        // Pinned destination + the explicit event ordering above make the async
+        // copy safe; the source is captured and recorded on the copy stream so
+        // the caching allocator cannot recycle it before D2H finishes.
+        draft_transfer_src_ =
+            draft.scalar_type() == torch::kInt32 ? draft.contiguous() : draft.to(torch::kInt32).contiguous();
+        c10::cuda::CUDACachingAllocator::recordStream(draft_transfer_src_.storage().data_ptr(), cuda_copy_stream);
+        auto transfer_event = cuda_graph::makeGraphEvent();
+        dst.copy_(draft_transfer_src_, /*non_blocking=*/true);
+        transfer_event.record(*draft_copy_stream_);
+        draft_transfer_event_.emplace(std::move(transfer_event));
+        rollback_guard.committed = true;
+        return;
     }
 #endif
     auto draft     = draft_tokens.reshape({B, draft_cols}).narrow(1, draft_offset, P);
@@ -249,6 +342,10 @@ SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::run(const LaunchTas
         return LaunchResult{};
     }
 #if USING_CUDA
+    std::optional<c10::cuda::CUDAGuard> device_guard;
+    if (task.draft_tokens.defined() && task.draft_tokens.is_cuda()) {
+        device_guard.emplace(task.draft_tokens.device());
+    }
     if (last_consumed_event_) {
         // Pinned scratch is reused across rounds; wait for the previous
         // consumer's recorded GPU work before overwriting it. An event the
@@ -256,6 +353,10 @@ SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::run(const LaunchTas
         last_consumed_event_->synchronize();
         last_consumed_event_.reset();
     }
+    // A previously aborted round can leave a draft-token transfer in flight;
+    // complete it before this round reuses the pinned scratch or the source
+    // keep-alive.
+    waitDraftTokensOnCpu();
 #endif
     try {
         const size_t B = task.total_streams;
@@ -284,6 +385,10 @@ SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::run(const LaunchTas
         std::fill_n(spec_cap_cpu_.data_ptr<int32_t>(), B, P);
         materializeDraftTokensToCpu(task);
         initializeCompactRows(layout, shape);
+        // CPU-side mask processing waits here, at the explicit transfer-event
+        // sync point; initializeCompactRows above ran while the GPU was still
+        // executing the propose graph and the draft-token D2H.
+        waitDraftTokensOnCpu();
         auto merge_result       = mergeProcessorMasks(task, layout, shape);
         auto result             = makeResult(shape);
         result.processor_errors = std::move(merge_result.processor_errors);

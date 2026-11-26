@@ -58,6 +58,7 @@ public:
     };
 
     SpecLogitsVerifyRunner() = default;
+    ~SpecLogitsVerifyRunner();
 
     SpecLogitsVerifyRunner(const SpecLogitsVerifyRunner&)            = delete;
     SpecLogitsVerifyRunner& operator=(const SpecLogitsVerifyRunner&) = delete;
@@ -87,6 +88,10 @@ private:
     ActiveStreamLayout buildActiveStreamLayout(const LaunchTask& task) const;
     void               ensureBuffersFit(const VerifyShape& shape);
     void               materializeDraftTokensToCpu(const LaunchTask& task);
+    // Explicit sync point for the non-blocking draft-token D2H: blocks only on
+    // the transfer event (which transitively covers the producer event), not on
+    // the whole current stream. No-op when no transfer is in flight.
+    void               waitDraftTokensOnCpu();
     void               initializeCompactRows(const ActiveStreamLayout& layout, const VerifyShape& shape);
     MergeProcessorMasksResult
     mergeProcessorMasks(const LaunchTask& task, const ActiveStreamLayout& layout, const VerifyShape& shape);
@@ -102,6 +107,16 @@ private:
 #if USING_CUDA
     torch::Tensor                 spec_cap_gpu_;
     std::shared_ptr<torch::Event> last_consumed_event_;
+    // Non-blocking draft-token D2H: the dtype/contiguity materialization and
+    // the copy run on draft_copy_stream_ (a pool stream), ordered after the
+    // producer's draft_tokens_ready_event. waitDraftTokensOnCpu() synchronizes
+    // draft_transfer_event_ instead of draining the current stream.
+    // draft_transfer_src_ keeps the materialized source alive until the copy
+    // completes: a freed CUDA block can be handed to another stream while the
+    // copy still reads it.
+    std::optional<torch::Stream> draft_copy_stream_;
+    std::optional<torch::Event>  draft_transfer_event_;
+    torch::Tensor                draft_transfer_src_;
 #endif
 };
 

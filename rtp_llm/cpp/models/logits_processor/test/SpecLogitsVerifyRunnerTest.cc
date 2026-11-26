@@ -5,6 +5,11 @@
 
 #include <gtest/gtest.h>
 #include <torch/torch.h>
+#if USING_CUDA
+#include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
+#include <c10/cuda/CUDAStream.h>
+#endif
 
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
@@ -309,5 +314,62 @@ TEST(SpecLogitsVerifyRunnerTest, LeadingVerifyAnchorIsNotPassedAsProposal) {
     EXPECT_TRUE(result.has_active_processor);
     EXPECT_EQ((std::vector<int32_t>{11, 12, 13}), processor->observedTokens());
 }
+
+#if USING_CUDA
+// CUDA async draft-token path: draft_tokens on GPU written by a producer stream
+// must be safely synchronized via draft_tokens_ready_event on the internal copy
+// stream, preserve int64/anchor slicing, apply packed allow-masks cleanly, and
+// allow subsequent single-flight runner reuse without stale buffer corruption.
+TEST(SpecLogitsVerifyRunnerTest, CudaDraftTokensAsyncOverlapAndReuse) {
+    constexpr size_t kStreams = 2;
+    constexpr int    kStep    = 3;
+    constexpr size_t kVocab   = 64;
+
+    SpecLogitsVerifyRunner runner;
+
+    auto producer_stream = at::cuda::getStreamFromPool(/*isHighPriority=*/false);
+    auto opts_i64        = torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA);
+
+    // Round 1: int64 [B, P+1] on GPU with leading verify anchor stripped.
+    auto                               proc1 = std::make_shared<StubSpecVerifyProcessor>(/*masked_token=*/9);
+    SpecLogitsVerifyRunner::LaunchTask task1;
+    task1.total_streams            = kStreams;
+    task1.propose_step             = kStep;
+    task1.vocab_size               = kVocab;
+    task1.draft_tokens             = torch::tensor({{99, 5, 6, 7}, {88, 15, 16, 17}}, opts_i64);
+    task1.draft_tokens_ready_event = std::make_shared<torch::Event>(torch::kCUDA);
+    {
+        c10::cuda::CUDAStreamGuard guard(producer_stream);
+        task1.draft_tokens.add_(1);
+        task1.draft_tokens_ready_event->record(producer_stream);
+    }
+    task1.active.push_back({proc1, /*stream_idx=*/1});
+
+    auto result1 = runner.run(task1);
+    ASSERT_TRUE(result1.ready_event != nullptr);
+    syncResult(result1);
+    EXPECT_EQ((std::vector<int32_t>{16, 17, 18}), proc1->observedTokens());
+
+    auto logits = torch::zeros({static_cast<int64_t>(kStreams) * (kStep + 1), static_cast<int64_t>(kVocab)},
+                               torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+    SpecLogitsVerifyRunner::applyMaskToLogits(logits, result1, kVocab);
+    result1.consumed_event->record(at::cuda::getCurrentCUDAStream());
+
+    auto logits_cpu = logits.cpu();
+    EXPECT_EQ(logits_cpu[kStep + 1][9].item<float>(), -std::numeric_limits<float>::max());
+    EXPECT_EQ(logits_cpu[0][9].item<float>(), 0.0f);
+
+    // Round 2: immediate runner reuse checks last_consumed_event_ wait and clean buffer overwrite.
+    auto proc2         = std::make_shared<StubSpecVerifyProcessor>(/*masked_token=*/21, /*cap=*/1);
+    auto task2         = makeTask(kStreams, kStep, kVocab);
+    task2.draft_tokens = torch::tensor({{1, 2, 3}, {31, 32, 33}}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+    task2.active.push_back({proc2, /*stream_idx=*/0});
+
+    auto result2 = runner.run(task2);
+    syncResult(result2);
+    EXPECT_EQ((std::vector<int32_t>{1, 2, 3}), proc2->observedTokens());
+    EXPECT_EQ(result2.spec_cap_cpu[0].item<int32_t>(), 1);
+}
+#endif
 
 }  // namespace rtp_llm
