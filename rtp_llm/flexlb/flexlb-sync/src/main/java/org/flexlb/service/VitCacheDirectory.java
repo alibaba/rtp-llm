@@ -79,14 +79,14 @@ public class VitCacheDirectory {
             if (!isRoutable(worker)) {
                 continue;
             }
-            Snapshot snapshot = snapshots.get(worker.getLogicalIpPort());
+            Snapshot snapshot = snapshots.get(worker.routingAddress());
             int hashHits = 0;
             int gpuHits = 0;
             int cpuHits = 0;
             List<String> matchingKeys =
                     group == null || Objects.equals(group, worker.getGroup()) ? keys : List.of();
             for (String key : matchingKeys) {
-                if (owners.getOrDefault(key, Set.of()).contains(worker.getLogicalIpPort())) {
+                if (owners.getOrDefault(key, Set.of()).contains(worker.routingAddress())) {
                     hashHits++;
                 }
                 if (snapshot != null) {
@@ -98,7 +98,7 @@ public class VitCacheDirectory {
                 }
             }
             matches.put(
-                    worker.getLogicalIpPort(),
+                    worker.routingAddress(),
                     new Candidate(
                             worker,
                             snapshot == null ? null : snapshot.instance(),
@@ -126,9 +126,9 @@ public class VitCacheDirectory {
                 }
                 for (WorkerStatus worker : live.values()) {
                     if (isRoutable(worker)
-                            && now - attempts.getOrDefault(worker.getLogicalIpPort(), 0L)
+                            && now - attempts.getOrDefault(worker.routingAddress(), 0L)
                                     >= SYNC_INTERVAL_MS) {
-                        attempts.put(worker.getLogicalIpPort(), now);
+                        attempts.put(worker.routingAddress(), now);
                         due.add(worker);
                     }
                 }
@@ -158,7 +158,7 @@ public class VitCacheDirectory {
                                                     error -> {
                                                         Logger.debug(
                                                                 "ViT cache snapshot unavailable for {}: {}",
-                                                                worker.getLogicalIpPort(),
+                                                                worker.routingAddress(),
                                                                 error.toString());
                                                         return Mono.empty();
                                                     }),
@@ -172,7 +172,7 @@ public class VitCacheDirectory {
 
     synchronized boolean replace(WorkerStatus worker, MultimodalCacheStatusPB response) {
         Map<String, WorkerStatus> live = liveWorkers();
-        if (live.get(worker.getLogicalIpPort()) != worker
+        if (live.get(worker.routingAddress()) != worker
                 || !isRoutable(worker)
                 || StringUtils.isBlank(response.getWorkerInstance())
                 || !validKeys(response.getKeysList())
@@ -189,7 +189,7 @@ public class VitCacheDirectory {
         if (allKeys.size() > 100_000 || gpuKeys.stream().anyMatch(cpuKeys::contains)) {
             return false;
         }
-        String address = worker.getLogicalIpPort();
+        String address = worker.routingAddress();
         removeSnapshot(address);
         snapshots.put(
                 address,
@@ -231,7 +231,7 @@ public class VitCacheDirectory {
         if (worker == null) {
             return false;
         }
-        try (var pin = workers.captureEndpoint(RoleType.VIT, worker.getLogicalIpPort())) {
+        try (var pin = workers.captureEndpoint(RoleType.VIT, worker.routingAddress())) {
             return pin != null && pin.endpoint().getStatus() == worker;
         }
     }

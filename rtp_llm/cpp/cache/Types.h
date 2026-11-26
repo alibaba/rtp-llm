@@ -106,6 +106,10 @@ struct MallocInfo {
     // Initial chunk admission reserves fixed sparse banks for this maximum grant.
     int max_chunk_tokens = 0;
 
+    // Reserve every intervening destination up to the length bound without
+    // pruning pages that an unfinished decode round may still use.
+    bool preserve_inflight = false;
+
     int incrSeqLen() const;
 };
 

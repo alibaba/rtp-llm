@@ -4,6 +4,8 @@
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
+#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamGroups.h"
@@ -232,6 +234,55 @@ protected:
         EXPECT_EQ(stream->reuseLength(), original_reuse_length);
         EXPECT_EQ(stream->seqLength(), original_seq_length);
         EXPECT_TRUE(stream->isContextStream());
+    }
+
+    static GenerateStreamPtr createMtpCacheStream(
+        CacheConfig config, int seq_len, int reserve_step, int cp_size = 1, bool prepare_decode = true) {
+        auto manager = std::make_shared<KVCacheManager>(config);
+        EXPECT_TRUE(manager->init());
+        if (cp_size > 1) {
+            auto mapper              = std::make_shared<CPSlotMapper>(0, cp_size, config.seq_size_per_block);
+            manager->cp_slot_mapper_ = mapper;
+            manager->coordinator_manager_->setCPSlotMapper(mapper);
+        }
+        ResourceContext resource;
+        resource.cache_manager = manager;
+        resource.role_type     = RoleType::DECODE;
+        auto input             = std::make_shared<GenerateInput>();
+        input->input_ids       = torch::tensor(makeInputIds(seq_len), torch::kInt32);
+        input->generate_config = std::make_shared<GenerateConfig>();
+        input->begin_time_us   = autil::TimeUtility::currentTimeInMicroSeconds();
+        ModelConfig model;
+        model.max_seq_len                  = 256;
+        model.vocab_size                   = 1024;
+        model.attn_config.tokens_per_block = config.seq_size_per_block;
+        auto stream = std::make_shared<NormalGenerateStream>(input, model, RuntimeConfig{}, resource, nullptr);
+        stream->setReserveStep(reserve_step);
+        EXPECT_TRUE(stream->initKVBlock().ok());
+        if (prepare_decode) {
+            stream->setIsContextStream(false);
+            EXPECT_TRUE(stream->streamCacheResource().incrKVBlock().ok());
+        }
+        markRunning(stream);
+        return stream;
+    }
+
+    static torch::Tensor cacheTable(const GenerateStreamPtr& stream, bool kernel = false) {
+        const auto& resource = stream->kvCache();
+        const auto  tag      = resource.cacheResource().groupTags().front();
+        const auto& ids      = kernel ? resource.kernelBlocks(0, tag) : resource.blocks(0, tag);
+        return torch::tensor(ids, torch::kInt32).reshape({1, 1, static_cast<int64_t>(ids.size())});
+    }
+
+    static std::shared_ptr<void> pendingMtpCacheSnapshot(const GenerateStreamPtr& stream, int next_bound) {
+        GenerateStream::MtpAsyncDeviceState state;
+        state.next_kv_cache_block_id_gpu        = cacheTable(stream).to(torch::kCUDA);
+        state.next_kv_cache_kernel_block_id_gpu = cacheTable(stream, true).to(torch::kCUDA);
+        state.previous_seq_len_upper_bound      = stream->seqLength();
+        state.next_seq_len_upper_bound          = next_bound;
+        stream->setMtpAsyncDeviceState(std::move(state));
+        stream->incPendingAsyncBookkeeping();
+        return std::shared_ptr<void>(nullptr, [stream](void*) { stream->decPendingAsyncBookkeepingAndMaybeRelease(); });
     }
 };
 
@@ -1793,6 +1844,220 @@ TEST_F(GenerateStreamTest, testMtpAsyncDeviceStateTracksRealAndUpperBoundSeqLen)
     ASSERT_EQ(stream->getMtpAsyncDeviceState().next_seq_len_upper_bound, stream->seqLength() + 2);
 }
 
+TEST_F(GenerateStreamTest, MtpCacheReservationExtendsFullAndPageRRTablesWithoutJoiningWorker) {
+    for (const int cp_size : {1, 4}) {
+        SCOPED_TRACE(cp_size);
+        auto spec                       = test::makeResolvedMhaSpec(DataType::TYPE_FP16, 1, 2, 4);
+        spec->kernel_seq_size_per_block = 2;
+        auto config                     = test::makeSingleGroupCacheConfig(spec, CacheGroupType::FULL, 1, 32);
+        if (cp_size > 1) {
+            auto groups                      = config.groups();
+            groups.front().policy.cp_mapping = CpBlockMappingMode::BLOCK_ROUND_ROBIN;
+            config.setTopology(std::move(groups), config.topology().layers());
+            config.local_kv_cache_sharded = true;
+        }
+        auto       stream            = createMtpCacheStream(config, 5, 2, cp_size);
+        auto       pending           = pendingMtpCacheSnapshot(stream, 33);
+        const auto original          = stream->getMtpAsyncDeviceState();
+        const auto original_physical = original.next_kv_cache_block_id_gpu.cpu();
+        const auto original_kernel   = original.next_kv_cache_kernel_block_id_gpu.cpu();
+
+        ASSERT_TRUE(stream->prepareMtpCacheForNextStep());
+        EXPECT_TRUE(stream->hasPendingAsyncBookkeeping());
+        const auto next = stream->getMtpAsyncDeviceState();
+        EXPECT_EQ(next.epoch, original.epoch);
+        EXPECT_EQ(next.next_seq_len_upper_bound, 33);
+        EXPECT_EQ(stream->seqLength(), 5);
+        EXPECT_GT(next.next_kv_cache_block_id_gpu.size(2), original_physical.size(2));
+        EXPECT_EQ(next.next_kv_cache_kernel_block_id_gpu.size(2), 2 * next.next_kv_cache_block_id_gpu.size(2));
+        EXPECT_TRUE(torch::equal(next.next_kv_cache_block_id_gpu.cpu(), cacheTable(stream)));
+        EXPECT_TRUE(torch::equal(next.next_kv_cache_kernel_block_id_gpu.cpu(), cacheTable(stream, true)));
+        EXPECT_TRUE(torch::equal(original.next_kv_cache_block_id_gpu.cpu(), original_physical));
+        EXPECT_TRUE(torch::equal(original.next_kv_cache_kernel_block_id_gpu.cpu(), original_kernel));
+
+        // The same pending round already has capacity; avoid another allocation
+        // or snapshot replacement, including when Page-RR has fewer local pages.
+        ASSERT_TRUE(stream->prepareMtpCacheForNextStep());
+        EXPECT_EQ(stream->getMtpAsyncDeviceState().next_kv_cache_block_id_gpu.data_ptr(),
+                  next.next_kv_cache_block_id_gpu.data_ptr());
+    }
+}
+
+TEST_F(GenerateStreamTest, MtpCacheReservationPreservesLegacyLinearDevicePermutation) {
+    for (const bool host_commit_complete : {false, true}) {
+        SCOPED_TRACE(host_commit_complete);
+        auto       config   = test::makeSimpleLinearCacheConfig(1, 32, 4, DataType::TYPE_BF16, 1, 2);
+        auto       stream   = createMtpCacheStream(config, 5, 4);
+        auto&      resource = stream->kvCacheMutable();
+        const auto tag      = config.groupTags().front();
+        ASSERT_GE(resource.blocks(0, tag).size(), 3u);
+        ASSERT_GT(resource.blocks(0, tag)[1], 0);
+        ASSERT_GT(resource.blocks(0, tag)[2], 0);
+
+        // The device snapshot already represents accepted-slot permutation.
+        // Host bookkeeping can be either before or after the equivalent swap
+        // while its pending counter is still nonzero.
+        resource.swapBlocks(0, tag, 1, 2);
+        auto       pending  = pendingMtpCacheSnapshot(stream, 9);
+        const auto original = stream->getMtpAsyncDeviceState();
+        if (!host_commit_complete) {
+            resource.swapBlocks(0, tag, 1, 2);
+        }
+        ASSERT_TRUE(stream->prepareMtpCacheForNextStep());
+        EXPECT_TRUE(stream->hasPendingAsyncBookkeeping());
+        const auto next = stream->getMtpAsyncDeviceState();
+        EXPECT_EQ(next.epoch, original.epoch);
+        // Nine tokens at four tokens per block, plus three proposal slots.
+        ASSERT_EQ(next.next_kv_cache_block_id_gpu.size(2), 6);
+        EXPECT_FALSE(isNullBlockIdx(resource.blocks(0, tag).back()));
+        EXPECT_TRUE(
+            torch::equal(next.next_kv_cache_block_id_gpu.narrow(2, 0, original.next_kv_cache_block_id_gpu.size(2)),
+                         original.next_kv_cache_block_id_gpu));
+        EXPECT_TRUE(torch::equal(
+            next.next_kv_cache_kernel_block_id_gpu.narrow(2, 0, original.next_kv_cache_kernel_block_id_gpu.size(2)),
+            original.next_kv_cache_kernel_block_id_gpu));
+        if (!host_commit_complete) {
+            resource.swapBlocks(0, tag, 1, 2);
+        }
+        EXPECT_TRUE(torch::equal(next.next_kv_cache_block_id_gpu.cpu(), cacheTable(stream)));
+        EXPECT_TRUE(torch::equal(next.next_kv_cache_kernel_block_id_gpu.cpu(), cacheTable(stream, true)));
+    }
+}
+
+TEST_F(GenerateStreamTest, MtpCacheReservationExtendsLinearReplayWithoutInvalidatingItsAnchor) {
+    auto config          = test::makeSimpleLinearCacheConfig(1, 32, 4, DataType::TYPE_BF16, 1, 2);
+    config.linear_replay = LinearReplayPlan::create({0}, 1, 4, {1, 2}, {1, 2}, false, DataType::TYPE_BF16, 1);
+    auto stream          = createMtpCacheStream(config, 4, 4);
+    ASSERT_TRUE(stream->stream_cache_resource_->prepareLinearReplayResources().ok());
+    const auto round = stream->prepareLinearReplayRound();
+    ASSERT_TRUE(round.ok());
+    ASSERT_NE(round->initial_state_hold, nullptr);
+    const auto anchor  = cacheTable(stream);
+    // Synchronous admission may already own proposal slots. Cross the actual
+    // snapshot extent to exercise an asynchronous extension rather than a hit.
+    const int  next_bound = static_cast<int>((anchor.size(2) + 1) * config.seq_size_per_block);
+    auto       pending    = pendingMtpCacheSnapshot(stream, next_bound);
+    const auto epoch   = stream->getMtpAsyncDeviceState().epoch;
+
+    ASSERT_TRUE(stream->prepareMtpCacheForNextStep());
+    EXPECT_TRUE(stream->hasPendingAsyncBookkeeping());
+    const auto next = stream->getMtpAsyncDeviceState();
+    EXPECT_EQ(next.epoch, epoch);
+    EXPECT_GT(next.next_kv_cache_block_id_gpu.size(2), anchor.size(2));
+    EXPECT_TRUE(torch::equal(next.next_kv_cache_block_id_gpu.cpu(), cacheTable(stream)));
+    EXPECT_TRUE(torch::equal(next.next_kv_cache_kernel_block_id_gpu.cpu(), cacheTable(stream, true)));
+    EXPECT_EQ(stream->stream_cache_resource_->linearReplayLease(), round->lease);
+    EXPECT_EQ(cacheTable(stream)[0][0][0].item<int32_t>(), anchor[0][0][0].item<int32_t>());
+}
+
+TEST_F(GenerateStreamTest, ReplayPdTailPreparationMatchesCapacityCheck) {
+    constexpr int block_tokens = 64;
+    constexpr int host_length  = 180;
+    constexpr int next_bound   = 188;  // MTP gamma=3: host + 2 * (gamma + 1), still in the same state page.
+    for (const int reserve_step : {0, 4}) {
+        SCOPED_TRACE(reserve_step);
+        auto config          = test::makeSimpleLinearCacheConfig(1, 32, block_tokens, DataType::TYPE_BF16, 1, 2);
+        config.linear_replay = LinearReplayPlan::create({0}, 1, 4, {1, 2}, {1, 2}, false, DataType::TYPE_BF16, 1);
+        auto       stream    = createMtpCacheStream(config, host_length, reserve_step, 1, /*prepare_decode=*/false);
+        auto&      resource  = stream->streamCacheResource();
+        auto&      blocks    = stream->kvCacheMutable();
+        const auto tag       = config.groupTags().front();
+        const auto manager   = resource.resourceContext().cache_manager;
+        const auto pool      = manager->coordinator_manager_->groupBlockPools().front();
+        ASSERT_TRUE(stream->isContextStream());
+        ASSERT_EQ(blocks.blocks(0, tag).size(), 3u);
+        // PD transfers only the LINEAR group's last state page. Preserve that
+        // canonical state and remove the earlier request refs as the handoff does.
+        const auto anchor = blocks.blocks(0, tag)[2];
+        for (size_t position = 0; position < 2; ++position) {
+            const auto block = blocks.blocks(0, tag)[position];
+            if (!isNullBlockIdx(block)) {
+                pool->decRef(block);
+                blocks.mutableBlockIds(0, tag).remove({position});
+            }
+        }
+        ASSERT_TRUE(isNullBlockIdx(blocks.blocks(0, tag)[1]));
+        ASSERT_TRUE(resource.prepareLinearReplayResources().ok());
+        ASSERT_EQ(resource.linearReplayLease(), nullptr) << "context preparation must still take its early return";
+        stream->setIsContextStream(false);
+        ASSERT_TRUE(resource.incrKVBlock().ok());
+        const size_t expected_slots = 3 + (reserve_step == 0 ? 0 : reserve_step - 1);
+        EXPECT_EQ(blocks.blocks(0, tag).size(), expected_slots) << "ordinary proposal capacity must be retained";
+        EXPECT_EQ(blocks.blocks(0, tag)[2], anchor);
+        EXPECT_EQ(resource.singleBatchNeedBlocks(next_bound, reserve_step), 0);
+
+        auto pending = pendingMtpCacheSnapshot(stream, next_bound);
+        for (int iteration = 0; iteration < 3; ++iteration) {
+            SCOPED_TRACE(iteration);
+            const auto before = stream->getMtpAsyncDeviceState();
+            ASSERT_TRUE(stream->prepareMtpCacheForNextStep());
+            EXPECT_EQ(resource.singleBatchNeedBlocks(next_bound, reserve_step), 0)
+                << "a successful reserve must satisfy the following capacity check";
+            stream->generate_status_->handleRunning();
+            const auto after = stream->getMtpAsyncDeviceState();
+            EXPECT_TRUE(GenerateStream::hasMtpCacheSnapshot(after));
+            if (!GenerateStream::hasMtpCacheSnapshot(after)) {
+                break;
+            }
+            EXPECT_EQ(after.epoch, before.epoch);
+            EXPECT_EQ(after.next_kv_cache_block_id_gpu.data_ptr(), before.next_kv_cache_block_id_gpu.data_ptr());
+            EXPECT_TRUE(stream->hasPendingAsyncBookkeeping());
+        }
+    }
+}
+
+TEST_F(GenerateStreamTest, MtpCacheReservationJoinsBeforePublishingBackfilledLegacySlots) {
+    auto       config   = test::makeSimpleLinearCacheConfig(1, 32, 4, DataType::TYPE_BF16, 1, 2);
+    auto       stream   = createMtpCacheStream(config, 5, 4);
+    auto&      resource = stream->kvCacheMutable();
+    const auto tag      = config.groupTags().front();
+    const auto pool     = stream->stream_cache_resource_->resourceContext()
+                          .cache_manager->coordinator_manager_->groupBlockPools()
+                          .front();
+    // Make an old sparse slot that the larger accepted-length bound requires.
+    // Its device location differs because an accepted-slot swap is pending.
+    pool->decRef(resource.blocks(0, tag)[2]);
+    resource.mutableBlockIds(0, tag).remove({2});
+    resource.swapBlocks(0, tag, 1, 2);
+    auto pending = pendingMtpCacheSnapshot(stream, 9);
+    resource.swapBlocks(0, tag, 1, 2);
+    const auto original = stream->getMtpAsyncDeviceState();
+
+    EXPECT_FALSE(stream->prepareMtpCacheForNextStep());
+    EXPECT_TRUE(stream->hasPendingAsyncBookkeeping());
+    EXPECT_GT(resource.blocks(0, tag)[2], 0);
+    const auto unchanged = stream->getMtpAsyncDeviceState();
+    EXPECT_EQ(unchanged.epoch, original.epoch);
+    EXPECT_EQ(unchanged.next_kv_cache_block_id_gpu.data_ptr(), original.next_kv_cache_block_id_gpu.data_ptr());
+    EXPECT_EQ(unchanged.next_kv_cache_kernel_block_id_gpu.data_ptr(),
+              original.next_kv_cache_kernel_block_id_gpu.data_ptr());
+
+    // The existing joined path invalidates both snapshots and regathers the
+    // authoritative host table, rather than applying a second GPU permutation.
+    resource.swapBlocks(0, tag, 1, 2);
+    pending.reset();
+    EXPECT_EQ(stream->moveToNext(), StreamState::RUNNING);
+    EXPECT_FALSE(stream->hasMtpCacheSnapshot());
+}
+
+TEST_F(GenerateStreamTest, MtpCacheReservationDoesNotJoinNormalDecodeButRequiresCompleteMtpSnapshot) {
+    GenerateStreamBuilder builder;
+    auto                  stream = builder.createDecoderStream({1, 2, 3}, {4});
+    markRunning(stream);
+    stream->incPendingAsyncBookkeeping();
+    auto pending =
+        std::shared_ptr<void>(nullptr, [stream](void*) { stream->decPendingAsyncBookkeepingAndMaybeRelease(); });
+    GenerateStream::NormalAsyncDeviceState normal;
+    normal.next_real_seq_len = stream->seqLength() + 1;
+    stream->setNormalAsyncDeviceState(std::move(normal));
+    EXPECT_TRUE(stream->prepareMtpCacheForNextStep());
+    stream->setMtpAsyncDeviceState({});
+    EXPECT_FALSE(stream->prepareMtpCacheForNextStep());
+    EXPECT_TRUE(stream->hasPendingAsyncBookkeeping());
+    pending.reset();
+    EXPECT_TRUE(stream->prepareMtpCacheForNextStep());
+}
+
 TEST_F(GenerateStreamTest, testMtpAsyncDeviceStatePublishesCoherentConcurrentSnapshots) {
     auto builder = GenerateStreamBuilder();
     auto stream  = builder.createContextStream({1, 2, 3, 4, 5, 6});
@@ -2053,10 +2318,8 @@ TEST_F(GenerateStreamTest, timeInfoFirstTokenRtStaysFrozenAcrossBeginReset) {
     // Before the later reset, the frozen latency equals the naive subtraction.
     EXPECT_EQ(committed.first_token_rt_us, committed.first_token_time_us - committed.begin_time_us);
 
-    // Decode stamps a new (later) begin AFTER the first token has committed
-    // (DecodeRpcServer::update precedes resetBeginTime). A read-time recompute
-    // would go negative; clamping it to 0 would hide the real latency. The
-    // frozen firstTokenLatencyUs() must survive the reset unchanged.
+    // A scheduler can reset the begin time after the first token commits.
+    // The reported latency must retain the value captured at commit.
     const auto later_begin_us = committed.first_token_time_us + 100000;
     stream->resetBeginTime(later_begin_us);
 

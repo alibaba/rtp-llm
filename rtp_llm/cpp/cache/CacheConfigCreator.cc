@@ -58,6 +58,7 @@ void addBudgetBytes(size_t& total, size_t bytes, size_t count = 1) {
 KVCacheBlockBudget blockBudgetForConfig(const CacheConfig& config) {
     KVCacheBlockBudget budget;
     budget.max_baseline_block_num = config.maxBaselineBlockNum();
+    addBudgetBytes(budget.explicit_pool_reserve_bytes, config.linear_replay.reserve_bytes);
     for (size_t gid = 0; gid < config.topology().groups().size(); ++gid) {
         const auto& group          = config.topology().groups()[gid];
         size_t      group_bytes    = 0;
@@ -329,6 +330,15 @@ CacheConfig createConfigFromDescs(const ModelConfig&       model_config,
     config.cache_min_replay_tokens = std::max(1, model_config.cache_min_replay_tokens);
     config.cache_key_hash_seed     = model_config.cache_key_hash_seed;
 
+    const auto& cp = parallelism_config.prefill_cp_config;
+    config.local_kv_cache_sharded =
+        parallelism_config.tp_size > 1
+        && (model_config.use_page_rr_kv_cache
+            || (cp.kv_cache_sharded && (cp.is_enabled() || cp.is_prefill_enabled())
+                && parallelism_config.role_type != RoleType::DECODE));
+    RTP_LLM_CHECK_WITH_INFO(!config.local_kv_cache_sharded || cp.kv_cache_sharded,
+                            "local PageRR allocation requires kv_cache_sharded transport metadata");
+
     config.seq_size_per_block = seq_size;
     config.use_mla            = model_config.attn_config.use_mla;
     config.is_sparse          = model_config.attn_config.is_sparse;
@@ -489,6 +499,66 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
     }
     resolvePoolBlockWeights(config, kv_cache_config.kv_cache_pool_block_weights, parallelism_config.pp_size);
     return config;
+}
+
+void CacheConfigCreator::configureLinearReplay(CacheConfig&                                     config,
+                                               const ModelConfig&                               model_config,
+                                               const ParallelismConfig&                         parallelism_config,
+                                               const RuntimeConfig&                             runtime_config,
+                                               const std::optional<SpeculativeExecutionConfig>& sp_config,
+                                               bool                                             is_mtp) {
+    if (!runtime_config.enable_linear_replay || !is_mtp || parallelism_config.pp_size > 1
+        || parallelism_config.role_type == RoleType::PREFILL || !sp_config || sp_config->gen_num_per_cycle <= 0
+        || (sp_config->type != SP_TYPE_MTP && sp_config->type != SP_TYPE_EAGLE && sp_config->type != SP_TYPE_EAGLE3)) {
+        return;
+    }
+    std::vector<int> group_ids;
+    size_t           layer_count = 0;
+    for (size_t group_id = 0; group_id < config.groups().size(); ++group_id) {
+        const auto& group = config.groups()[group_id];
+        if (group.policy.group_type != CacheGroupType::LINEAR
+            || group.policy.memory_placement != CacheMemoryPlacement::DEVICE) {
+            continue;
+        }
+        const auto layers        = config.layerIdsForGroup(group.tag);
+        const auto target_layers = std::count_if(layers.begin(), layers.end(), [&](int layer) {
+            return layer >= 0 && static_cast<uint32_t>(layer) < config.layer_num;
+        });
+        if (target_layers > 0) {
+            group_ids.push_back(static_cast<int>(group_id));
+            layer_count += static_cast<size_t>(target_layers);
+        }
+    }
+    if (group_ids.empty()) {
+        return;
+    }
+#if !USING_CUDA || USE_PPU
+    // Replay kernels are CUDA-only; retain the normal LINEAR cache path elsewhere.
+    return;
+#endif
+    const int64_t slot_count =
+        runtime_config.use_batch_decode_scheduler ?
+            std::max(runtime_config.max_generate_batch_size,
+                     runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size) :
+            runtime_config.max_generate_batch_size;
+    RTP_LLM_CHECK_WITH_INFO(slot_count > 0 && slot_count <= std::numeric_limits<int>::max(),
+                            "LINEAR replay requires a positive slot count fitting int");
+    RTP_LLM_CHECK_WITH_INFO(sp_config->gen_num_per_cycle < std::numeric_limits<int>::max(),
+                            "LINEAR replay verify width overflows int");
+    const auto& linear = model_config.linear_attention_config;
+    const auto  tp     = std::max<int64_t>(1, parallelism_config.get_attn_tp_size());
+    RTP_LLM_CHECK_WITH_INFO(linear.linear_num_key_heads > 0 && linear.linear_num_value_heads > 0
+                                && linear.linear_num_key_heads % tp == 0 && linear.linear_num_value_heads % tp == 0,
+                            "LINEAR replay requires head counts divisible by attention TP");
+    RTP_LLM_CHECK_WITH_INFO(linear.linear_conv_kernel_dim > 1, "LINEAR replay requires convolution history");
+    config.linear_replay = LinearReplayPlan::create(std::move(group_ids),
+                                                    slot_count,
+                                                    sp_config->gen_num_per_cycle + 1,
+                                                    {linear.linear_num_key_heads / tp, linear.linear_key_head_dim},
+                                                    {linear.linear_num_value_heads / tp, linear.linear_value_head_dim},
+                                                    linear.replay_vector_gate,
+                                                    linear.conv_state_dtype,
+                                                    layer_count);
 }
 
 uint32_t CacheConfigCreator::computeLocalBlockNum(const CacheConfig&                               config,

@@ -3,6 +3,7 @@
 #include "torch/all.h"
 #include <algorithm>
 #include <cstdlib>
+#include <future>
 #include <limits>
 
 #define private public
@@ -40,6 +41,49 @@ namespace rtp_llm {
 class NormalEngineTest: public DeviceTestBase {
 public:
 };
+
+TEST_F(NormalEngineTest, StopRetainsScheduledResourcesUntilForwardFinishes) {
+    autil::EnvGuard async("RTP_LLM_STREAM_ASYNC", "0");
+    ModelConfig     model_config;
+    RuntimeConfig   runtime_config;
+    KVCacheConfig   kv_cache_config;
+    auto            params = createEngineInitParams(CustomConfig{}, model_config, runtime_config, kv_cache_config);
+    params.runtime_config.warm_up = false;
+    std::promise<void> entered, resume;
+    auto               entered_future  = entered.get_future();
+    auto               resume_future   = resume.get_future();
+    NormalExecutor::test_model_factory = [&](const GptModelInitParams&) {
+        return std::make_unique<MockModel>(model_config.vocab_size, [&](const GptModelInputs&) {
+            entered.set_value();
+            EXPECT_EQ(resume_future.wait_for(std::chrono::seconds(10)), std::future_status::ready);
+        });
+    };
+    struct FactoryResetGuard {
+        ~FactoryResetGuard() {
+            NormalExecutor::test_model_factory = nullptr;
+        }
+    } factory_reset;
+    auto engine                            = std::make_shared<NormalEngine>(params, nullptr);
+    auto input                             = std::make_shared<GenerateInput>();
+    input->input_ids                       = torch::tensor({1, 2}, torch::kInt32);
+    input->generate_config                 = std::make_shared<GenerateConfig>();
+    input->generate_config->max_new_tokens = 4;
+    auto stream                            = engine->enqueue(input);
+    ASSERT_EQ(entered_future.wait_for(std::chrono::seconds(10)), std::future_status::ready);
+    auto  stopped             = std::async(std::launch::async, [&] { return engine->stop(); });
+    auto* scheduler           = static_cast<FIFOScheduler*>(engine->scheduler_.get());
+    bool  released_in_forward = false;
+    {
+        std::unique_lock<std::mutex> lock(scheduler->lock_);
+        EXPECT_TRUE(scheduler->cond_.wait_for(lock, std::chrono::seconds(5), [&] { return scheduler->stop_.load(); }));
+        released_in_forward = stream->streamCacheResource().isResourceReleased();
+    }
+    resume.set_value();
+    ASSERT_EQ(stopped.wait_for(std::chrono::seconds(10)), std::future_status::ready);
+    EXPECT_TRUE(stopped.get().ok());
+    EXPECT_FALSE(released_in_forward);
+    EXPECT_TRUE(stream->streamCacheResource().isResourceReleased());
+}
 
 namespace {
 
@@ -414,15 +458,16 @@ TEST_F(NormalEngineTest, testPpStepRejectsBeforeFakePaddingAndDefersRetirementTo
 
             engine->sp_config.type              = type;
             engine->sp_config.gen_num_per_cycle = 3;
-            engine->scheduler_                  = std::make_unique<PPScheduler>(engine->runtime_config,
-                                                               engine->model_config_,
-                                                               engine->pd_sep_config,
-                                                               engine->parallelism_config,
-                                                               engine->sp_config,
-                                                               engine->resource_context_.cache_manager);
-            auto  executor                      = std::make_unique<RecordingExecutor>();
-            auto* recorded                      = executor.get();
-            engine->executor_                   = std::move(executor);
+            engine->scheduler_ = std::make_unique<PPScheduler>(
+                engine->runtime_config,
+                engine->model_config_,
+                engine->pd_sep_config,
+                engine->parallelism_config,
+                engine->sp_config,
+                engine->resource_context_.cache_manager);
+            auto  executor = std::make_unique<RecordingExecutor>();
+            auto* recorded = executor.get();
+            engine->executor_ = std::move(executor);
 
             auto query                             = std::make_shared<GenerateInput>();
             query->request_id                      = 101;
@@ -461,12 +506,12 @@ TEST_F(NormalEngineTest, testPpStepRejectsBeforeFakePaddingAndDefersRetirementTo
             EXPECT_TRUE(rejected->streamCacheResource().isResourceReleased());
             EXPECT_TRUE(engine->scheduler_->empty());
 
-            auto healthy_query                             = std::make_shared<GenerateInput>();
+            auto healthy_query                            = std::make_shared<GenerateInput>();
             healthy_query->request_id                      = 202;
             healthy_query->input_ids                       = torch::tensor({3, 4}, torch::kInt32);
             healthy_query->generate_config                 = std::make_shared<GenerateConfig>();
             healthy_query->generate_config->max_new_tokens = 2;
-            auto healthy                                   = engine->makeStream(healthy_query);
+            auto healthy                                  = engine->makeStream(healthy_query);
             ASSERT_TRUE(engine->scheduler_->enqueue(healthy).ok());
             ASSERT_TRUE(engine->pp_step().ok());
             ASSERT_EQ(recorded->calls.size(), 3u);
@@ -893,20 +938,16 @@ TEST_F(NormalEngineTest, testPpChunkedPrefillWarmupUsesStageCacheAndChunkShapes)
         RoleType                  role;
         std::vector<ForwardShape> shapes;
     };
+    // Row-heavy shapes share the global chunk budget across all three rows.
     const WarmupCase cases[] = {
-        {4,
-         SP_TYPE_NONE,
-         RoleType::PDFUSION,
-         {{4, 0, 1}, {4, 4, 1}, {4, 8, 1}, {4, 12, 1}, {3, 16, 1}, {12, 14, 3}, {7, 0, 1}}},
-        {5,
-         SP_TYPE_MTP,
-         RoleType::PDFUSION,
-         {{4, 0, 1}, {4, 4, 1}, {4, 8, 1}, {4, 12, 1}, {3, 16, 1}, {15, 14, 3}, {7, 0, 1}}},
-        {5,
-         SP_TYPE_MTP,
-         RoleType::PREFILL,
-         {{4, 0, 1}, {4, 4, 1}, {4, 8, 1}, {4, 12, 1}, {3, 16, 1}, {15, 14, 3}, {7, 0, 1}}},
-        {std::numeric_limits<int>::max(), SP_TYPE_NONE, RoleType::PREFILL, {{19, 0, 1}, {57, 0, 3}, {7, 0, 1}}},
+        {4, SP_TYPE_NONE, RoleType::PDFUSION,
+         {{4, 0, 1}, {4, 4, 1}, {4, 8, 1}, {4, 12, 1}, {3, 16, 1}, {3, 18, 3}, {7, 0, 1}}},
+        {5, SP_TYPE_MTP, RoleType::PDFUSION,
+         {{4, 0, 1}, {4, 4, 1}, {4, 8, 1}, {4, 12, 1}, {3, 16, 1}, {3, 18, 3}, {7, 0, 1}}},
+        {5, SP_TYPE_MTP, RoleType::PREFILL,
+         {{4, 0, 1}, {4, 4, 1}, {4, 8, 1}, {4, 12, 1}, {3, 16, 1}, {3, 18, 3}, {7, 0, 1}}},
+        {std::numeric_limits<int>::max(), SP_TYPE_NONE, RoleType::PREFILL,
+         {{19, 0, 1}, {57, 0, 3}, {7, 0, 1}}},
     };
     const std::vector<std::string> expected_tags{"first", "last"};
     for (const auto& test_case : cases) {
@@ -919,21 +960,21 @@ TEST_F(NormalEngineTest, testPpChunkedPrefillWarmupUsesStageCacheAndChunkShapes)
         ModelConfig   model_config;
         RuntimeConfig runtime_config;
         KVCacheConfig kv_cache_config;
-        auto          params = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
+        auto params = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
         params.parallelism_config.pp_size               = 2;
         params.parallelism_config.world_size            = 2;
         params.parallelism_config.pp_stage_layer_counts = {1, 1};
         params.parallelism_config.role_type             = test_case.role;
         params.sp_config.type                           = test_case.type;
         params.sp_config.gen_num_per_cycle              = 3;
-        params.model_config_.max_seq_len                = 19 + std::max(1, NormalEngine::calculateReserveStep(params));
-        params.model_config_.kv_cache_spec_descs        = {
+        params.model_config_.max_seq_len = 19 + std::max(1, NormalEngine::calculateReserveStep(params));
+        params.model_config_.kv_cache_spec_descs = {
             {{"first", KVCacheSpecType::MultiHeadAttention}},
             {{"last", KVCacheSpecType::MultiHeadAttention}},
         };
         for (int stage : {0, 1}) {
             SCOPED_TRACE(::testing::Message() << "budget=" << test_case.budget << ", type=" << test_case.type
-                                              << ", role=" << test_case.role << ", stage=" << stage);
+                                            << ", role=" << test_case.role << ", stage=" << stage);
             params.parallelism_config.pp_rank    = stage;
             params.parallelism_config.world_rank = stage;
             auto proposal = stage == 1 && test_case.type != SP_TYPE_NONE ? makeLocalProposalParams(params) : nullptr;
@@ -1231,6 +1272,62 @@ TEST_F(NormalEngineTest, testDecodeRoleRejectsPrefillOnlyBeforeScheduling) {
     ASSERT_NE(positive_stream, nullptr);
     EXPECT_FALSE(positive_stream->hasError());
     EXPECT_EQ(positive_stream->curBlocksNum(), 0);
+}
+
+TEST_F(NormalEngineTest, testSpeculativeAdmissionRejectsMultiSequenceEvenWhenDraftIsDisabled) {
+    auto engine = createMockEngine(CustomConfig{});
+    ASSERT_TRUE(engine->stop().ok());
+
+    auto make_query = [](int mode, bool disabled) {
+        auto query                                   = make_shared<GenerateInput>();
+        query->input_ids                             = torch::tensor({1, 2, 3, 4}, torch::kInt32);
+        query->generate_config                       = make_shared<GenerateConfig>();
+        query->generate_config->max_new_tokens       = 1;
+        query->generate_config->force_disable_sp_run = disabled;
+        query->generate_config->return_all_probs     = ReturnAllProbsMode::ORIGINAL;
+        query->generate_config->num_return_sequences = mode == 0 ? 2 : 1;
+        query->generate_config->num_beams            = mode == 1 ? 2 : 1;
+        query->generate_config->variable_num_beams   = mode == 2 ? std::vector<int>{1, 2} : std::vector<int>{};
+        return query;
+    };
+    for (auto type : {SP_TYPE_MTP, SP_TYPE_EAGLE, SP_TYPE_DSPARK}) {
+        engine->sp_config.type = type;
+        for (int mode = 0; mode < 3; ++mode) {
+            for (bool disabled : {false, true}) {
+                SCOPED_TRACE(::testing::Message() << "type=" << type << ", mode=" << mode << ", disabled=" << disabled);
+                auto query  = make_query(mode, disabled);
+                auto stream = engine->makeStream(query);
+                EXPECT_TRUE(stream->hasError());
+                EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+                EXPECT_EQ(stream->curBlocksNum(), 0);
+
+                auto [accepted, streams] = engine->enqueueMultiple({query});
+                EXPECT_EQ(accepted, std::vector<bool>{false});
+                ASSERT_EQ(streams.size(), 1);
+                EXPECT_EQ(streams[0]->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+                EXPECT_EQ(engine->getScheduler().onflightStreams(), 0);
+                EXPECT_EQ(query->generate_config->force_disable_sp_run, disabled);
+                EXPECT_EQ(query->generate_config->return_all_probs, ReturnAllProbsMode::ORIGINAL);
+            }
+        }
+    }
+    auto fake        = make_query(0, true);
+    fake->fake_query = true;
+    EXPECT_FALSE(engine->makeStream(fake)->hasError());
+
+    auto single                                   = make_query(0, true);
+    single->generate_config->num_return_sequences = 1;
+    EXPECT_FALSE(engine->makeStream(single)->hasError());
+
+    engine->parallelism_config.pp_size          = 2;
+    engine->sp_config.type                      = SP_TYPE_EAGLE;
+    auto pp_query                               = make_query(0, true);
+    pp_query->generate_config->return_all_probs = ReturnAllProbsMode::NONE;
+    EXPECT_FALSE(engine->makeStream(pp_query)->hasError());
+
+    engine->parallelism_config.pp_size = 1;
+    engine->sp_config.type             = SP_TYPE_NONE;
+    EXPECT_FALSE(engine->makeStream(make_query(1, true))->hasError());
 }
 
 TEST_F(NormalEngineTest, testDirectEngineEntriesConvertPrefillValidationErrorsToStreamErrors) {
@@ -1665,11 +1762,18 @@ TEST_F(NormalEngineTest, testChunkedPrefillWarmupStartup) {
     auto engine                     = createMockEngine(config);
 
     // Token-heavy: one row walks the 19-token prompt in budget-4 chunks. Row-heavy: four rows
-    // each execute four tokens after a block-aligned 14-token synthetic prefix. The 7-token
-    // whole-segment shape runs once during warmup and once while constructing the system prompt.
+    // share the budget, each executing one token after a block-aligned 18-token synthetic prefix.
+    // The 7-token whole-segment shape runs once during warmup and once for the system prompt.
     ASSERT_EQ(*config.forward_shapes,
               (std::vector<ForwardShape>{
-                  {4, 0, 1}, {4, 4, 1}, {4, 8, 1}, {4, 12, 1}, {3, 16, 1}, {16, 14, 4}, {7, 0, 1}, {7, 0, 1}}));
+                  {4, 0, 1},
+                  {4, 4, 1},
+                  {4, 8, 1},
+                  {4, 12, 1},
+                  {3, 16, 1},
+                  {4, 18, 4},
+                  {7, 0, 1},
+                  {7, 0, 1}}));
     const auto& cache_config = engine->resourceContext().cache_manager->cacheConfig();
     ASSERT_EQ(cache_config.groups().size(), 1u);
     ASSERT_EQ(cache_config.groups().front().block_num, 100u);
@@ -1698,7 +1802,7 @@ TEST_F(NormalEngineTest, testChunkedPrefillWarmupAlignsPrefixWithOddBudget) {
     config.forward_shapes     = std::make_shared<std::vector<ForwardShape>>();
     (void)createMockEngine(config);
 
-    // Middle chunks align to two-token blocks; the five-token row-heavy query keeps prefix 14.
+    // Middle chunks align to two-token blocks; five row-heavy rows share the budget after prefix 18.
     ASSERT_EQ(*config.forward_shapes,
               (std::vector<ForwardShape>{
                   {4, 0, 1},
@@ -1706,7 +1810,7 @@ TEST_F(NormalEngineTest, testChunkedPrefillWarmupAlignsPrefixWithOddBudget) {
                   {4, 8, 1},
                   {4, 12, 1},
                   {3, 16, 1},
-                  {25, 14, 5},
+                  {5, 18, 5},
               }));
 }
 
@@ -1743,7 +1847,7 @@ TEST_F(NormalEngineTest, testChunkedPrefillGenerationGraphWarmupUsesChunkShapes)
                   {4, 8, 1},
                   {4, 12, 1},
                   {3, 16, 1},
-                  {16, 14, 4},
+                  {4, 18, 4},
               }));
 }
 

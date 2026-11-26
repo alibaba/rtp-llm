@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/engine_base/stream/ResourceContext.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
+#include "rtp_llm/cpp/cache/LinearReplayPool.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 
 namespace rtp_llm {
@@ -20,7 +21,32 @@ class LoadAsyncContext;
 class GenerateStream;
 struct MallocResult;
 
+struct LinearReplayWindow {
+    int32_t                                produced_steps = 0;
+    int32_t                                produced_log_bank = 0;
+    torch::Tensor                          accept_len_gpu;
+    torch::Tensor                          anchor_block_ids_gpu;
+    torch::Tensor                          anchor_processed_len_gpu;
+    std::shared_ptr<LinearReplayLease>     lease;
+    std::shared_ptr<LinearReplayBlockHold> state_block_hold;
+    std::shared_ptr<torch::Event>          device_ready;
+};
+
+struct LinearReplayRound {
+    std::shared_ptr<LinearReplayLease>        lease;
+    std::shared_ptr<const LinearReplayWindow> previous_window;
+    std::shared_ptr<LinearReplayBlockHold>    state_block_hold;
+    std::vector<int32_t>                      initial_block_ids;
+    std::shared_ptr<LinearReplayBlockHold>    initial_state_hold;
+
+    int32_t historyLogBank() const {
+        return previous_window ? previous_window->produced_log_bank : 0;
+    }
+};
+
 class StreamCacheResource {
+    friend class GenerateStream;
+
 public:
     StreamCacheResource(GenerateStream*        stream,
                         const ResourceContext& resource_context,
@@ -40,7 +66,16 @@ public:
     absl::Status         waitForAllocatorLoad();
     // Empty while pending; a terminal status preserves retryable materialization failures.
     std::optional<absl::Status> pollAllocatorLoad();
-    absl::Status                incrKVBlock(int seq_len_override = -1);
+    absl::Status                           incrKVBlock(int seq_len_override = -1, bool preserve_inflight = false);
+    void                                   publishPrefillCache(int processed_length);
+    std::shared_ptr<LinearReplayLease>     linearReplayLease() const {
+        return linear_replay_.lease;
+    }
+    // Reserve decode capacity at admission, before Prefill or asynchronous loads.
+    bool reserveLinearReplaySlot(bool* newly_reserved = nullptr);
+    // Roll back only a new admission reservation that made no KV/load progress.
+    void                                   releaseUnusedLinearReplaySlot();
+    std::shared_ptr<LinearReplayBlockHold> holdLinearReplayBlocks();
     // Called under the owning stream's mutex after token/cache-layout commit.
     // Record only; the scheduler drains this watermark before admission or allocation so an
     // async output worker never mutates the host block table during gather.
@@ -168,6 +203,7 @@ private:
     size_t       treeCoveredBlockNum() const;
     bool         deferAllocatorLoadRelease();
     void         publishAllocatorReuse(const LoadAsyncContext& context, bool local_only);
+    absl::Status prepareLinearReplayResources(bool prepare_tails = true);
 
     GenerateStream*                stream_;
     BatchKVCacheResourcePtr        batch_kv_cache_resource_;
@@ -194,6 +230,18 @@ private:
     bool                             p2p_cancel_requested_{false};
 
     // Physical block pins held for PD separation.
+    // Window access remains protected by the owning stream's async-state mutex.
+    struct LinearReplayState {
+        std::shared_ptr<LinearReplayLease>        lease;
+        std::shared_ptr<LinearReplayBlockHold>    initial_state_hold;
+        std::vector<int32_t>                      initial_block_ids;
+        std::shared_ptr<const LinearReplayWindow> window;
+
+        void clearInitialState() {
+            initial_block_ids.clear();
+            initial_state_hold.reset();
+        }
+    } linear_replay_;
 };
 
 }  // namespace rtp_llm

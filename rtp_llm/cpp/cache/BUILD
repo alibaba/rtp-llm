@@ -56,6 +56,12 @@ cc_library(
 )
 
 cc_library(
+    name = "kv_cache_spec_type",
+    hdrs = ["KVCacheSpecType.h"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "kv_cache_specs",
     srcs = [
         "KVCacheSpecDesc.cc",
@@ -73,6 +79,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":block_info",
+        ":kv_cache_spec_type",
         ":tp_cache_transfer_layout",
         ":cache_group_type",
         "//rtp_llm/cpp/config:config_modules",
@@ -103,6 +110,7 @@ cc_library(
     hdrs = [
         "CacheConfig.h",
         "CacheTopology.h",
+        "LinearReplayPlan.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
@@ -221,6 +229,7 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
+        ":kv_cache_spec_type",
         ":cache_types",
     ] + select({
         "@//:using_ppu": [
@@ -407,6 +416,7 @@ cc_library(
     ],
     hdrs = [
         "KVCacheManager.h",
+        "LinearReplayPool.h",
     ],
     copts = copts() + select({
         "//:using_remote_kv_cache": ["-DRTP_LLM_USE_REMOTE_KV_CACHE=1"],
@@ -430,6 +440,8 @@ cc_library(
         "//rtp_llm/cpp/cache/connector/p2p/plan:transfer_plan_glue",
         ":pp_topology_validator",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
+        "//rtp_llm/models_py/bindings/core:type_convert",
+        "//rtp_llm/models_py/bindings:op_defs",
         "//rtp_llm/cpp/utils:profiling_scope",
     ] + torch_deps() + select({
         "//:using_remote_kv_cache": [

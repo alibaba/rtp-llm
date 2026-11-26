@@ -58,6 +58,10 @@ P2PWorkerPrefillRead::P2PWorkerPrefillRead(P2PConnectorWorkerConfig             
     computed_buffers_(std::make_shared<ComputedLayerCacheBufferStore>()) {}
 
 P2PWorkerPrefillRead::~P2PWorkerPrefillRead() {
+    stop();
+}
+
+void P2PWorkerPrefillRead::stop() {
     store_wait_stopping_.store(true);
     computed_buffers_->notification()->notify();
     if (store_wait_check_thread_.joinable()) {
@@ -66,6 +70,9 @@ P2PWorkerPrefillRead::~P2PWorkerPrefillRead() {
     if (async_sender_pool_) {
         async_sender_pool_->stop();
         async_sender_pool_.reset();
+    }
+    if (sender_) {
+        sender_->stop();
     }
 }
 
@@ -365,23 +372,6 @@ int P2PWorkerPrefillRead::dispatchPendingLayerTransfers(
             }
             const auto count = sendLayerToPartitions(
                 buffer, worker_plan, unique_key, return_deadline_ms, cancel_flag, transfer_result);
-            const auto expected_count = worker_plan.routeCountForLayer(buffer->getLayerId(), buffer->cacheTag());
-            if (count != expected_count) {
-                std::lock_guard<std::mutex> lock(transfer_result->result_mutex);
-                if (transfer_result->all_success.exchange(false)) {
-                    if (cancel_flag->load()) {
-                        transfer_result->error_code = ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_CANCELLED;
-                    } else if (currentTimeMs() >= return_deadline_ms) {
-                        transfer_result->error_code = ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TIMEOUT;
-                    } else {
-                        transfer_result->error_code = ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TRANSFER_FAILED;
-                    }
-                    transfer_result->error_msg =
-                        "sendKVCache: incomplete buffer dispatch, unique_key=" + unique_key + " buffer=" + buffer_key
-                        + " chunk_id=" + std::to_string(buffer->chunkId()) + " sent=" + std::to_string(count)
-                        + " expected=" + std::to_string(expected_count);
-                }
-            }
             if (count > 0) {
                 const auto ready_us = currentTimeUs();
                 if (transfer_result->first_buffer_ready_us < 0) {
@@ -466,26 +456,44 @@ int P2PWorkerPrefillRead::sendLayerToPartitions(const std::shared_ptr<LayerCache
         if (!route.sendsLayer(layer_id, layer_cache_buffer->cacheTag())) {
             continue;
         }
+        auto route_buffer = layer_cache_buffer;
+        if (!route.prefill_cache_keys.empty()) {
+            route_buffer = std::make_shared<LayerCacheBuffer>(layer_id, route.cache_tag, chunk_id);
+            for (const auto& [key, block_id] : layer_cache_buffer->blockIdMap()) {
+                if (route.prefill_cache_keys.count(key) != 0) {
+                    route_buffer->addBlockId(key, block_id);
+                }
+            }
+            // Another chunk may supply this route's requested pages.
+            if (route_buffer->blockIdMap().empty()) {
+                continue;
+            }
+        }
+        const auto*  spec = config_.topology ? config_.topology->group(route.cache_tag).spec.get() : nullptr;
         const size_t payload_bytes =
-            route.slice_payload_bytes != 0 ?
-                route.slice_payload_bytes :
-                (config_.topology ? config_.topology->group(route.cache_tag).spec->k_block_payload_bytes() : 0);
+            route.slice_payload_bytes != 0 ? route.slice_payload_bytes : (spec ? spec->k_block_payload_bytes() : 0);
 
         // partition / slice 均来自 route（本侧那一半）。§2.3 的修正就在这里生效：
         // NP1D 下 planner 给源端的是 {1,0}（整块），不再对本地 block 二次切分。
-        auto key_block_infos = LayerCacheBufferUtil::buildKeyBlockInfosSliced(layer_block_converter_,
-                                                                              layer_cache_buffer,
-                                                                              route.partition.count,
-                                                                              route.partition.id,
-                                                                              route.slice,
-                                                                              payload_bytes);
+        auto key_block_infos = route.linear_qkv_segments ?
+                                   LayerCacheBufferUtil::buildKeyBlockInfosLinearQkv(
+                                       layer_block_converter_,
+                                       route_buffer,
+                                       route.partition,
+                                       config_.linearSpecForLayer(layer_id, route.cache_tag)) :
+                                   LayerCacheBufferUtil::buildKeyBlockInfosSliced(layer_block_converter_,
+                                                                                  route_buffer,
+                                                                                  route.partition.count,
+                                                                                  route.partition.id,
+                                                                                  route.slice,
+                                                                                  payload_bytes);
         if (!key_block_infos.ok() || key_block_infos.value().empty()
-            || key_block_infos.value().size() != layer_cache_buffer->blockIdMap().size()) {
+            || key_block_infos.value().size() != route_buffer->blockIdMap().size()) {
             const std::string conversion_message =
                 !key_block_infos.ok() ?
                     key_block_infos.status().ToString() :
                     "converted key count=" + std::to_string(key_block_infos.value().size())
-                        + " differs from source key count=" + std::to_string(layer_cache_buffer->blockIdMap().size());
+                        + " differs from route key count=" + std::to_string(route_buffer->blockIdMap().size());
             mark_dispatch_failure(!key_block_infos.ok() ? key_block_infos.status().code() :
                                       ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED,
                                   "sendKVCache: route=" + std::to_string(route.route_id) + " layer="

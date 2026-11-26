@@ -1237,8 +1237,9 @@ grpc::Status LocalRpcServer::UpdateSchedulerInfo(grpc::ServerContext*           
                                                  const UpdateSchedulerInfoRequestPB* request,
                                                  EmptyPB*                            response) {
     const std::string scheduler_info = request->scheduler_info();
-    engine_->getScheduler().updateSchedulerInfo(scheduler_info);
-    return grpc::Status::OK;
+    const auto        status         = engine_->getScheduler().updateSchedulerInfo(scheduler_info);
+    return status.ok() ? grpc::Status::OK :
+                         grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, std::string(status.message()));
 }
 
 grpc::Status

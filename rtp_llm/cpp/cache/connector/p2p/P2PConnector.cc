@@ -17,6 +17,15 @@ P2PConnector::P2PConnector(P2PConnectorConfig                          config,
 
 P2PConnector::~P2PConnector() = default;
 
+void P2PConnector::stop() {
+    if (prefill_) {
+        prefill_->stop();
+    }
+    if (decode_) {
+        decode_->stopMetricsReporter();
+    }
+}
+
 bool P2PConnector::init() {
     const auto& scheduler = config_.scheduler_config;
     if (scheduler.load_cache_timeout_ms <= 0

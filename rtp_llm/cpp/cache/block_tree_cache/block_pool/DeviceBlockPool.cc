@@ -258,11 +258,12 @@ bool DeviceBlockPool::tryReplaceRequestReferences(const std::vector<RequestRefer
     return true;
 }
 
-bool DeviceBlockPool::isExclusiveRequestBlock(BlockIdxType block) const {
+bool DeviceBlockPool::isExclusiveRequestBlock(BlockIdxType block, uint32_t owned_references) const {
     std::lock_guard<std::mutex> lock(mutex_);
     checkInitializedNoLock();
     checkAllocatedNoLock(block);
-    return refcounts_[block] == 1 && hasRequestRefNoLock(block);
+    const auto request_references = refcounts_by_type_[static_cast<size_t>(DeviceBlockRefType::REQUEST)][block];
+    return owned_references > 0 && refcounts_[block] == owned_references && request_references == owned_references;
 }
 
 bool DeviceBlockPool::hasRequestRef(BlockIdxType block) const {

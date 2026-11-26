@@ -45,6 +45,14 @@ def init_engine_group_args(parser, runtime_config):
         default=True,
         help="在服务启动时是否开启模型侧预热",
     )
+    engine_group.add_argument(
+        "--enable_linear_replay",
+        env_name="ENABLE_LINEAR_REPLAY",
+        bind_to=(runtime_config, "enable_linear_replay"),
+        type=str2bool,
+        default=True,
+        help="启用 MTP LINEAR 状态回放，默认开启；LINEAR 状态池容量由 LINEAR_POOL_BLOCKS 或自动预算独立确定",
+    )
 
     engine_group.add_argument(
         "--output_dispatcher_worker_count",

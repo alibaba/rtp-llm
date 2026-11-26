@@ -33,6 +33,7 @@ public:
                      const std::string&             tree_decode_config,
                      kmonitor::MetricsReporterPtr   metrics_reporter = nullptr);
 
+    // Call after streams stop, before shutting down the metrics factory.
     static void shutdown();
 
     static ErrorResult<std::vector<BaseLogitsProcessorPtr>>
