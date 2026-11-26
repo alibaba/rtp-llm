@@ -28,6 +28,7 @@ from rtp_llm.models_py.modules.dsv41.ppu.graph_metadata import (
 from rtp_llm.models_py.modules.dsv41.ppu.graph_packed_attention import (
     GRAPH_VISIBLE_INDEXER_ENV,
     VERIFY_PACKED_ATTENTION_ENV,
+    VERIFY_REQUEST_SLOTS_ENV,
     GraphPackedAttention,
 )
 from rtp_llm.models_py.modules.dsv41.ppu.packed_attention import DEPENDENCY_ENV, enabled
@@ -35,6 +36,7 @@ from rtp_llm.models_py.speculative.dspark_proposer_mixin import map_context_rows
 
 
 _REFERENCE_REPLAYS = []
+_VERIFY_SINGLE_PAGE_ROWS = 128
 _VERIFY_FUSED_PUBLICATION_ENV = "RTP_V41_PPU_VERIFY_FUSED_PUBLICATION"
 _VERIFY_BATCHED_PUBLICATION_ENV = "RTP_V41_PPU_VERIFY_BATCHED_PUBLICATION"
 _PRIVATE_DRAFT_KV_ENV = "RTP_V41_PPU_DSPARK_PRIVATE_DRAFT_KV"
@@ -115,14 +117,27 @@ class SharedDSparkGraphImpl:
         self._private_draft_replay = 0
         if mode in ("dense", "packed"):
             self.cache = VerifyGraphJournal(self.native_cache, rows)
+            verify_width = self.width if mode == "dense" else None
+            request_slots = (
+                mode == "dense"
+                and rows > _VERIFY_SINGLE_PAGE_ROWS
+                and enabled(VERIFY_REQUEST_SLOTS_ENV, default=True)
+                and self.cache._batched_publication is not None
+                and GraphPackedAttention.supports_verify_request_slots(
+                    self.native_cache, model.shared_weight_views.geometry.window, self.width,
+                )
+            )
             if (
                 runtime is not None and runtime.grouped is None
                 and enabled(VERIFY_PACKED_ATTENTION_ENV, default=True)
                 and os.environ.get(DEPENDENCY_ENV)
-                and GraphPackedAttention.supports_verify(self.native_cache, rows)
+                and (request_slots or GraphPackedAttention.supports_verify(
+                    self.native_cache, rows, verify_width=verify_width,
+                ))
             ):
                 self.packed_attention = GraphPackedAttention(
                     self.native_cache, model.shared_weight_views.geometry, journal=self.cache,
+                    verify_width=verify_width, request_slots=request_slots,
                 )
             self.consumed_prefixes = torch.empty_like(self.prefixes)
             self.consumed_lengths = torch.empty_like(self.lengths)
@@ -310,6 +325,7 @@ class VerifyGraphJournal:
             for key in self.generations
         }
         self.completions = torch.zeros((), dtype=torch.int64, device=native.device)
+        self.request_slot_conflict = None
         self.consumed_tables = {tag: torch.empty_like(table) for tag, table in native.tables.items()}
         self._batched_publication = None
         if enabled(_VERIFY_BATCHED_PUBLICATION_ENV, default=True):
@@ -405,7 +421,12 @@ class VerifyGraphJournal:
         )
         return torch.where(live[..., None], self.payloads[key][index], native)
 
+    def _validate_request_slots(self):
+        if self.request_slot_conflict is not None and self.request_slot_conflict.item():
+            raise RuntimeError("request-slot Verify found a shared or unmapped candidate page")
+
     def binding_checks(self, cache):
+        self._validate_request_slots()
         checked = set()
         for key in self.generations:
             table_tag = self.native_cache._table_tag(*key)
@@ -534,6 +555,7 @@ class VerifyGraphJournal:
         """Materialize this replay's live journal for the N7 transaction."""
         from rtp_llm.models_py.modules.dsv41.ppu.verify_transaction import SharedCacheVersion
 
+        self._validate_request_slots()
         for key, positions in self.generations.items():
             table = self.consumed_tables[self.native_cache._table_tag(*key)]
             pool = cache.pools[key]

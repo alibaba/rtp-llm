@@ -676,6 +676,197 @@ class VerifyTableGeometryDeviceTest(unittest.TestCase):
 class GraphCacheDeviceTest(unittest.TestCase):
     @torch.inference_mode()
     def test_packed_verify_replay_restores_reserved_pages(self):
+        self._assert_packed_verify_replay(8)
+
+    @torch.inference_mode()
+    def test_tiled_packed_verify_replay_restores_reserved_pages(self):
+        for fused_copies in ("1", "0"):
+            with patch.dict(os.environ, {"RTP_V41_PPU_DECODE_LAUNCH_REUSE": fused_copies}):
+                for rows in (128, 132, 256):
+                    with self.subTest(rows=rows, fused_copies=fused_copies):
+                        self._assert_packed_verify_replay(rows, verify_width=4)
+
+    @torch.inference_mode()
+    def test_dense_verify_request_slots_publish_only_accepted_rows(self):
+        for ratio in (1, 2):
+            with self.subTest(ratio=ratio):
+                self._assert_dense_verify_request_slots(ratio)
+
+    def _assert_dense_verify_request_slots(self, ratio):
+        from rtp_llm.models_py.modules.dsv41.ppu import dspark_graph, graph_packed_attention
+        from rtp_llm.models_py.modules.dsv41.ppu.kv_codec import encode_kv
+        from rtp_llm.models_py.modules.dsv41.ppu.packed_attention import DEPENDENCY_ENV
+        from rtp_llm.models_py.modules.dsv41.ppu.verify_transaction import SharedVerifyTransaction, VerifyLayout
+
+        if not os.environ.get(DEPENDENCY_ENV):
+            self.skipTest("requires the pinned packed FlashMLA provider")
+        device = torch.device("cuda", torch.cuda.current_device())
+        torch.manual_seed(2291)
+        batch, width = 64, 4
+        rows = batch * width
+        swa, compressed = (0, "swa_kv"), (0, f"global_kv_{ratio}")
+        keys = swa, compressed
+        geometry = SimpleNamespace(
+            pool_keys=lambda: keys, ratio=lambda owner: ratio, window=128, head_dim=512,
+            n_heads=64, sm_scale=lambda: 512**-0.5, engram_enabled=lambda: False,
+        )
+        cache = NativeGraphCache.__new__(NativeGraphCache)
+        cache.device, cache.max_seq_len, cache.native, cache.geometry = device, 768, None, geometry
+        cache.entries = {swa[1]: 132, compressed[1]: 256 // ratio}
+        cache.spans = {key[1]: 256 for key in keys}
+        cache._framework_tags = {key: key[1] for key in keys}
+        blocks = 2 + batch * 3
+        private = torch.arange(2, blocks, device=device, dtype=torch.int32).view(batch, 3)
+        cache.tables = {
+            swa[1]: private,
+            compressed[1]: torch.cat((torch.ones_like(private[:, :1]), private[:, 1:]), dim=1),
+        }
+
+        def encoded(count, tag):
+            return encode_kv(torch.randn(count, 512, device=device, dtype=torch.bfloat16) / 4, pool_tag=tag)
+
+        cache._pools = {
+            key: encoded(blocks * cache.entries[key[1]], key[1]).reshape(blocks, -1)
+            for key in keys
+        }
+        before = {key: cache.pool(*key).clone() for key in keys}
+        payloads = {key: encoded(rows, key[1]) for key in keys}
+        bases = torch.full((batch,), 256, dtype=torch.long, device=device)
+        lengths = torch.full_like(bases, width)
+        attention_inputs = SimpleNamespace(
+            input_lengths=lengths, input_lengths_device=lengths, prefix_lengths_device=bases,
+            is_target_verify=True, is_packed_target_verify=False,
+        )
+        inputs = SimpleNamespace(
+            attention_inputs=attention_inputs, input_ids=torch.empty(rows, dtype=torch.long, device=device),
+            engram_token_windows=torch.empty((rows, 1), dtype=torch.long, device=device),
+        )
+        model = unittest.mock.Mock(
+            _is_decode_role=True, kv_cache=object(), _max_generate_batch_size=batch,
+            _v4_args=SimpleNamespace(max_seq_len=cache.max_seq_len),
+            shared_weight_views=SimpleNamespace(config={}, geometry=geometry),
+            shared_runtime=SimpleNamespace(device=device, policy=SimpleNamespace(max_rollback_tokens=width)),
+        )
+        with (
+            patch.object(dspark_graph, "NativeGraphCache", return_value=cache),
+            patch.object(dspark_graph, "primary_attention_inputs", return_value=attention_inputs),
+            patch.object(dspark_graph, "require_device_tables"),
+            patch.dict(os.environ),
+        ):
+            os.environ.pop(graph_packed_attention.VERIFY_REQUEST_SLOTS_ENV, None)
+            impl = dspark_graph.SharedDSparkGraphImpl(model, inputs, "dense", runtime=SimpleNamespace(grouped=None))
+        journal = impl.cache
+        direct = impl.packed_attention
+        self.assertTrue(direct.request_slots)
+        tiled = graph_packed_attention.GraphPackedAttention(
+            cache, geometry, journal=journal, verify_width=width,
+        )
+        tile_rows = 128 if ratio == 2 else 132
+        self.assertEqual(tiled.verify_tile_rows, tile_rows)
+        layer = SimpleNamespace(
+            layer_id=0, kv_source_layer_id=0, index_source_layer_id=0, compress_ratio=ratio,
+            geometry=geometry, attn_sink=torch.zeros(64, device=device),
+        )
+        row_ids = torch.arange(rows, device=device)
+        requests = row_ids // width
+        positions = bases[requests] + row_ids % width
+        valid = torch.ones(rows, dtype=torch.bool, device=device)
+        selected = torch.arange(512, dtype=torch.int32, device=device).expand(rows, -1).contiguous()
+        q = torch.randn(rows, 64, 512, device=device, dtype=torch.bfloat16)
+
+        def candidate_positions(key, positions, valid):
+            if key == swa or ratio == 1:
+                return torch.where(valid, positions, -1)
+            return torch.where(valid & ((positions & 1) == 1), positions - 1, -1)
+
+        def step():
+            impl.prepare_in_graph(attention_inputs)
+            metadata = impl.metadata
+            for key in keys:
+                raw = candidate_positions(key, metadata.positions, metadata.valid_mask)
+                journal.write_rows(*key, journal.slots(*key, raw), payloads[key])
+            with direct.verify_tail_transaction():
+                first = direct.forward(layer, q, selected, metadata, {})
+            with tiled.verify_tail_transaction():
+                reference = tiled.forward(layer, q, selected, metadata, {})
+            return first, reference
+
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream(device))
+        with torch.cuda.stream(stream):
+            step()
+        stream.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with patch.object(graph_packed_attention, "packed_decode", wraps=graph_packed_attention.packed_decode) as provider:
+            with torch.cuda.graph(graph, stream=stream):
+                actual, reference = step()
+            self.assertEqual([call.args[0].shape[0] for call in provider.call_args_list], [rows, tile_rows, rows - tile_rows])
+
+        pools = {
+            key: SimpleNamespace(
+                tensor=cache.pool(*key), table=cache.tables[key[1]],
+                entries=cache.entries[key[1]], span=cache.spans[key[1]],
+            )
+            for key in keys
+        }
+        transaction_cache = SimpleNamespace(pools=pools, geometry=geometry, journal=[])
+        ids, tokens = torch.arange(batch), torch.arange(rows)
+        counts = torch.arange(batch) % (width + 1)
+        for call, base_values in enumerate(((256, 263, 386, 511), (263, 512, 393, 513)), start=1):
+            bases.copy_(torch.tensor(base_values, device=device).repeat(batch // len(base_values)))
+            positions.copy_(bases[requests] + row_ids % width)
+            graph.replay()
+            self.assertFalse(bool(journal.request_slot_conflict.item()))
+            torch.testing.assert_close(actual, reference, rtol=0.02, atol=0.005)
+            for key in keys:
+                self.assertTrue(torch.equal(cache.pool(*key), before[key]))
+            layout = VerifyLayout.from_lengths_and_prefixes((width,) * batch, tuple(bases.tolist()), rows)
+            tx = SharedVerifyTransaction(
+                transaction_cache, ids, layout, None, tokens, call_id=call, max_backtracking=width,
+                graph_journal=journal,
+            )
+            if call == 1:
+                tx.abort()
+                for key in keys:
+                    self.assertTrue(torch.equal(cache.pool(*key), before[key]))
+                continue
+            accepted = tx.finish(ids, bases, counts)
+            self.assertEqual(accepted["accepted_input_rows"], tuple(counts.tolist()))
+            limit = (bases + counts.to(device))[requests]
+            for key in keys:
+                raw = candidate_positions(key, positions, valid)
+                keep = (raw >= 0) & (positions < limit)
+                tag = key[1]
+                page = cache.tables[tag][requests[keep], raw[keep] // 256].long()
+                offset = raw[keep] % 132 if key == swa else (raw[keep] % 256) // ratio
+                expected = before[key].clone().reshape(blocks, cache.entries[tag], payloads[key].shape[1])
+                expected[page, offset] = payloads[key][keep]
+                self.assertTrue(torch.equal(cache.pool(*key), expected.reshape_as(before[key])))
+                cache.pool(*key).copy_(before[key])
+
+        # Candidate blocks must be writable, even if another request only maps
+        # that block as part of its committed prefix.
+        table = cache.tables[compressed[1]]
+        for invalid_page in (0, int(table[0, 1])):
+            saved = int(table[1, 2])
+            table[1, 2] = invalid_page
+            graph.replay()
+            with self.assertRaisesRegex(RuntimeError, "shared or unmapped candidate page"):
+                list(journal.binding_checks(transaction_cache))
+            for key in keys:
+                self.assertTrue(torch.equal(cache.pool(*key), before[key]))
+            table[1, 2] = saved
+
+        impl.cuda_graph_valid_request_count_device.fill_(batch - 1)
+        saved = int(table[-1, 1])
+        table[-1, 1] = table[0, 1]  # Padding does not make a live request's page shared.
+        graph.replay()
+        self.assertFalse(bool(journal.request_slot_conflict.item()))
+        torch.testing.assert_close(actual, reference, rtol=0.02, atol=0.005)
+        self.assertFalse(bool(actual[-width:].any()))
+        table[-1, 1] = saved
+
+    def _assert_packed_verify_replay(self, rows, *, verify_width=None):
         from rtp_llm.models_py.modules.dsv41.ppu.dspark_graph import VerifyGraphJournal
         from rtp_llm.models_py.modules.dsv41.ppu.graph_attention_layer import _shared_decode_attention
         from rtp_llm.models_py.modules.dsv41.ppu.graph_packed_attention import GraphPackedAttention
@@ -690,13 +881,16 @@ class GraphCacheDeviceTest(unittest.TestCase):
         cache = NativeGraphCache.__new__(NativeGraphCache)
         cache.device, cache.max_seq_len, cache.native = device, 512, None
         cache.geometry = SimpleNamespace(pool_keys=lambda: keys, ratio=lambda owner: 2)
-        cache.entries = {"swa_kv": 128, "global_kv_2": 64}
-        cache.spans = dict.fromkeys(cache.entries, 128)
+        csa_entries = 64 if verify_width is None else 128
+        cache.entries = {"swa_kv": 128, "global_kv_2": csa_entries}
+        cache.spans = {"swa_kv": 128, "global_kv_2": 2 * csa_entries}
         cache._framework_tags = {key: key[1] for key in keys}
+        batch = rows // 4
         cache.tables = {
             "swa_kv": torch.tensor([[1, 2, 3, 4], [5, 6, 7, 8]], device=device, dtype=torch.int32),
             "global_kv_2": torch.tensor([[2, 3, 4, 1], [6, 7, 8, 5]], device=device, dtype=torch.int32),
         }
+        cache.tables = {tag: table.repeat((batch + 1) // 2, 1)[:batch] for tag, table in cache.tables.items()}
 
         def encoded(count, tag):
             kv = torch.randn(count, 512, device=device, dtype=torch.bfloat16) * 0.25
@@ -707,10 +901,10 @@ class GraphCacheDeviceTest(unittest.TestCase):
             for owner, tag in keys
         }
         before = {key: cache.pool(*key).clone() for key in keys}
-        rows = 8
         journal = VerifyGraphJournal(cache, rows)
         geometry = SimpleNamespace(window=128, head_dim=512, n_heads=64, sm_scale=lambda: 512**-0.5)
-        packed = GraphPackedAttention(cache, geometry, journal=journal)
+        packed = GraphPackedAttention(cache, geometry, journal=journal, verify_width=verify_width)
+        self.assertEqual(packed.verify_tile_rows, min(rows, csa_entries))
         sink = torch.zeros(64, device=device)
         layer = SimpleNamespace(
             layer_id=0, kv_source_layer_id=0, index_source_layer_id=0, compress_ratio=2,
@@ -718,8 +912,8 @@ class GraphCacheDeviceTest(unittest.TestCase):
         )
         positions = torch.zeros(rows, device=device, dtype=torch.int64)
         valid = torch.ones(rows, device=device, dtype=torch.bool)
-        prefixes = torch.zeros(2, device=device, dtype=torch.int64)
-        starts = torch.tensor([0, 4], device=device)
+        prefixes = torch.zeros(batch, device=device, dtype=torch.int64)
+        starts = torch.arange(batch, device=device) * 4
         requests = torch.arange(rows, device=device) // 4
         metadata = SimpleNamespace(positions=positions, valid_mask=valid)
         selected = torch.arange(512, device=device, dtype=torch.int32).repeat(rows, 1)
@@ -755,8 +949,8 @@ class GraphCacheDeviceTest(unittest.TestCase):
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph, stream=stream):
             output, reference, swa, global_slots = step()
-        for bases, count in (((127, 129), 7), ((132, 5), 4), ((255, 253), 8)):
-            prefixes.copy_(torch.tensor(bases, device=device))
+        for bases, count in (((127, 129), rows - 1), ((132, 5), rows // 2), ((255, 253), rows)):
+            prefixes.copy_(torch.tensor(bases, device=device).repeat((batch + 1) // 2)[:batch])
             positions.copy_(prefixes[requests] + torch.arange(rows, device=device) % 4)
             valid.copy_(torch.arange(rows, device=device) < count)
             graph.replay()
@@ -769,7 +963,11 @@ class GraphCacheDeviceTest(unittest.TestCase):
                 self.assertEqual(swa[1, 0, -2:].tolist(), [0, 1])
                 self.assertEqual(int(global_slots[0, 0, 63]), 0)
                 self.assertEqual(int(global_slots[4, 0, 64]), 4)
-                self.assertTrue(bool((swa[7] == -1).all() and (global_slots[7] == -1).all()))
+                self.assertTrue(bool((swa[-1] == -1).all() and (global_slots[-1] == -1).all()))
+                if packed.tiled_verify:
+                    first_row_of_next_tile = packed.verify_tile_rows
+                    self.assertEqual(int(swa[first_row_of_next_tile, 0, -1]), 0)
+                    self.assertEqual(int(global_slots[first_row_of_next_tile, 0, 63]), 0)
 
     @torch.inference_mode()
     def test_packed_scheduler_replay_shares_only_equal_prefixes(self):

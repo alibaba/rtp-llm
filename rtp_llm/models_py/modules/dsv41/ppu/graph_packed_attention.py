@@ -20,6 +20,7 @@ VERIFY_PACKED_ATTENTION_ENV = "RTP_V41_PPU_VERIFY_PACKED_ATTENTION"
 GRAPH_VISIBLE_INDEXER_ENV = "RTP_V41_PPU_GRAPH_VISIBLE_INDEXER"
 GRAPH_SHARED_MLA_METADATA_ENV = "RTP_V41_PPU_GRAPH_SHARED_MLA_METADATA"
 VERIFY_DIRECT_JOURNAL_ENV = "RTP_V41_PPU_VERIFY_DIRECT_JOURNAL"
+VERIFY_REQUEST_SLOTS_ENV = "RTP_V41_PPU_VERIFY_REQUEST_SLOTS"
 _PACKED_WIDTHS = {"swa_kv": 528, "global_kv_1": 288, "global_kv_2": 288}
 
 
@@ -146,7 +147,7 @@ def _packed_metadata_kernel():
         TABLE_COLS: tl.constexpr, POOL_BLOCKS: tl.constexpr,
         SPAN: tl.constexpr, ENTRIES: tl.constexpr, WIDTH: tl.constexpr,
         RATIO: tl.constexpr, GLOBAL: tl.constexpr, ROWS: tl.constexpr,
-        VERIFY_LAG: tl.constexpr, BLOCK: tl.constexpr,
+        VERIFY_LAG: tl.constexpr, VERIFY_TILE_ROWS: tl.constexpr, BLOCK: tl.constexpr,
         STAGE_PAGE0=None, STAGE_PAYLOAD0=None, STAGE_PAGE1=None, STAGE_PAYLOAD1=None,
         STAGE_WIDTH0: tl.constexpr = 0, STAGE_WIDTH1: tl.constexpr = 0,
     ):
@@ -190,7 +191,10 @@ def _packed_metadata_kernel():
                 & (tl.load(verify_requests + candidate) == request)
                 & (tl.load(verify_generations + candidate) == raw)
             )
-            # Candidate rows occupy offsets [0, ROWS) of reserved block 0.
+            # Dense Verify stages whole requests from one tile into block 0.
+            if VERIFY_TILE_ROWS:
+                tentative = tentative & (candidate // VERIFY_TILE_ROWS == row // VERIFY_TILE_ROWS)
+                candidate = candidate % VERIFY_TILE_ROWS
             slot = tl.where(tentative, candidate, slot)
         tl.store(
             slots + row * WIDTH + column,
@@ -228,31 +232,63 @@ def _packed_metadata_kernel():
 class GraphPackedAttention:
     """Bind the provider and zero-copy pool views before bucket capture."""
 
+    tiled_verify = False
+
     @staticmethod
-    def supports_verify(cache, rows):
-        return all(
-            rows <= cache.entries[cache._table_tag(owner, tag)]
-            for owner, tag in cache.geometry.pool_keys() if tag in _PACKED_WIDTHS
+    def _verify_tile_rows(cache, rows, verify_width):
+        capacity = min(
+            (cache.entries[cache._table_tag(owner, tag)]
+             for owner, tag in cache.geometry.pool_keys() if tag in _PACKED_WIDTHS),
+            default=0,
+        )
+        if 0 < rows <= capacity:
+            return rows
+        if rows > 0 and verify_width and rows % verify_width == 0:
+            return capacity // verify_width * verify_width
+        return 0
+
+    @staticmethod
+    def supports_verify(cache, rows, *, verify_width=None):
+        return GraphPackedAttention._verify_tile_rows(cache, rows, verify_width) > 0
+
+    @staticmethod
+    def supports_verify_request_slots(cache, window, verify_width):
+        return bool(verify_width) and all(
+            cache.entries[cache._table_tag(owner, tag)] >= window + verify_width - 1
+            for owner, tag in cache.geometry.pool_keys() if tag == "swa_kv"
         )
 
-    def __init__(self, cache, geometry, *, journal=None):
+    def __init__(self, cache, geometry, *, journal=None, verify_width=None, request_slots=False):
         backend, _ = load_packed_backend()
         self.native = backend.flash_mla_with_kvcache
         self.metadata_factory = backend.get_mla_metadata
         self.share_mla_metadata = enabled(GRAPH_SHARED_MLA_METADATA_ENV, default=True)
         self.cache = cache
         self.journal = journal
+        self.request_slots = request_slots
         g = geometry
         if g.window != 128 or g.head_dim != 512 or not 0 < g.n_heads <= 128:
             raise ValueError("unsupported PPU packed Decode Graph geometry")
-        if journal is not None and not self.supports_verify(cache, journal.rows):
-            raise ValueError("packed Verify Graph exceeds the reserved page capacity")
+        self.verify_tile_rows = 0
+        if request_slots:
+            if (
+                journal is None or journal._batched_publication is None
+                or not self.supports_verify_request_slots(cache, g.window, verify_width)
+            ):
+                raise ValueError("request-slot Verify requires disjoint pools and SWA rollback capacity")
+            journal.request_slot_conflict = torch.zeros((), dtype=torch.bool, device=cache.device)
+        elif journal is not None:
+            self.verify_tile_rows = self._verify_tile_rows(cache, journal.rows, verify_width)
+            if not self.verify_tile_rows:
+                raise ValueError("packed Verify Graph exceeds the reserved page capacity")
+            self.tiled_verify = self.verify_tile_rows < journal.rows
         self.offsets = torch.arange(g.window, dtype=torch.int64, device=cache.device)
         self.views = {}
         self.swa_domains = {}
         self._tail_transaction_active = False
         self._tail_transaction = None
         self._direct_journal = None
+        self._request_slot_transaction = None
         for owner, tag in cache.geometry.pool_keys():
             if tag not in _PACKED_WIDTHS:
                 continue
@@ -264,7 +300,7 @@ class GraphPackedAttention:
             )
             if tag == "swa_kv":
                 self.swa_domains[owner] = (domain, tensor.shape[0])
-        if (journal is not None
+        if (journal is not None and not request_slots and not self.tiled_verify
             and optimization_env_value("RTP_V41_PPU_DECODE_LAUNCH_REUSE", "0") == "1"
             and optimization_env_value("RTP_V41_PPU_VERIFY_BATCHED_JOURNAL", "0") == "1"):
             pages = [view[0, :journal.rows, 0] for view in self.views.values()]
@@ -303,7 +339,28 @@ class GraphPackedAttention:
 
     @contextmanager
     def verify_tail_transaction(self):
-        """Borrow block 0 for one serialized Verify, restoring even on failure."""
+        """Stage candidates for this Verify and restore the native cache before Commit."""
+        if self.request_slots:
+            if self._request_slot_transaction is not None:
+                raise RuntimeError("request-slot Verify transaction is already active")
+            journal = self.journal
+            journal.request_slot_conflict.zero_()
+            row = torch.arange(journal.rows, device=journal.requests.device)
+            positions = journal.prefixes[journal.requests] + row - journal.starts[journal.requests]
+            active = torch.zeros_like(journal.prefixes, dtype=torch.int32).scatter_add_(
+                0, journal.requests, journal.valid.int(),
+            ) > 0
+            staged, references = {}, {}
+            self._request_slot_transaction = staged, references, positions, active
+            try:
+                yield
+            finally:
+                try:
+                    for key, (slots, backup) in reversed(staged.items()):
+                        self.cache.write_rows(*key, slots, backup)
+                finally:
+                    self._request_slot_transaction = None
+            return
         transaction = getattr(self, "_tail_transaction", None)
         if transaction is None:
             yield
@@ -364,6 +421,10 @@ class GraphPackedAttention:
         domain = cache._table_tag(owner, tag)
         journal = self.journal
         table = cache.tables[domain] if journal is None else journal.row_tables[domain]
+        if self.request_slots:
+            # Query rows still use the Verify row-to-request mapping. Candidates
+            # visible to this row now reside at the same physical addresses.
+            journal = None
         if (
             table.device != positions.device
             or table.dtype not in (torch.int32, torch.int64)
@@ -408,7 +469,7 @@ class GraphPackedAttention:
             table.stride(0), table.stride(1), table.shape[1],
             cache.pool(owner, tag).shape[0], cache.spans[domain], cache.entries[domain],
             width, ratio, selected is not None, rows, int(selected is not None and ratio == 2),
-            block, num_warps=4, **options,
+            self.verify_tile_rows if self.tiled_verify else 0, block, num_warps=4, **options,
         )
         return slots, lengths
 
@@ -470,8 +531,14 @@ class GraphPackedAttention:
         return shared[key]
 
     @contextmanager
-    def _stage_verify_tail(self, keys, *, already_staged=False):
+    def _stage_verify_tail(self, keys, *, already_staged=False, start=0, stop=None):
         if self.journal is None:
+            yield
+            return
+        if self.request_slots:
+            if self._request_slot_transaction is None:
+                raise RuntimeError("request-slot attention requires an active Verify transaction")
+            self._stage_request_slots(keys)
             yield
             return
         if getattr(self, "_direct_journal", None) is not None and self._tail_transaction_active:
@@ -480,8 +547,9 @@ class GraphPackedAttention:
         # The framework never allocates block 0 to a live request. The
         # synchronous Verify stream borrows it only across this MLA call,
         # then restores its previous bytes for other Graph modes.
-        pages = [self.views[key][0, :self.journal.rows, 0] for key in keys]
-        payloads = [self.journal.payloads[key] for key in keys]
+        stop = self.journal.rows if stop is None else stop
+        pages = [self.views[key][0, :stop - start, 0] for key in keys]
+        payloads = [self.journal.payloads[key][start:stop] for key in keys]
         if getattr(self, "_tail_transaction_active", False):
             if not _can_fuse_tail_copies(pages, payloads):
                 raise RuntimeError("packed Verify journal storage changed inside transaction")
@@ -503,12 +571,77 @@ class GraphPackedAttention:
             return
         backups = [page.clone() for page in pages]
         try:
-            for key, page in zip(keys, pages):
-                page.copy_(self.journal.payloads[key])
+            for page, payload in zip(pages, payloads):
+                page.copy_(payload)
             yield
         finally:
             for page, backup in zip(pages, backups):
                 page.copy_(backup)
+
+    def _stage_request_slots(self, keys):
+        staged, references, positions, active = self._request_slot_transaction
+        cache, journal = self.cache, self.journal
+        for key in keys:
+            if key in staged:
+                continue
+            domain = cache._table_tag(*key)
+            blocks = cache.pool(*key).shape[0]
+            ref_key = domain, blocks
+            if ref_key not in references:
+                table = journal.consumed_tables[domain]
+                indices = table.long().reshape(-1).clamp(0, blocks - 1)
+                mapped = (table > 0) & (table < blocks) & active[:, None]
+                references[ref_key] = torch.zeros(
+                    blocks, dtype=torch.int32, device=table.device,
+                ).scatter_add_(0, indices, mapped.reshape(-1).int())
+            pair = int(key[1] == "global_kv_2")
+            live = journal.valid & ((positions & pair) == pair)
+            raw = torch.where(live, positions - pair, -1)
+            slots = journal._native_slots(*key, raw)
+            block_ids = (slots.clamp_min(0) // cache.entries[domain]).long()
+            private = (
+                (slots >= 0) & (references[ref_key][block_ids] == 1)
+                & (journal.generations[key] == raw)
+            )
+            journal.request_slot_conflict.logical_or_((live & ~private).any())
+            slots = torch.where(live & private, slots, -1)
+            staged[key] = slots, cache.read_rows(*key, slots)
+            cache.write_rows(*key, slots, journal.payloads[key])
+
+    def _forward_verify_tiles(self, attn, q, positions, plan, keys, *, mega, mask_output):
+        tiles = []
+        for start in range(0, q.shape[0], self.verify_tile_rows):
+            stop = min(start + self.verify_tile_rows, q.shape[0])
+            rows = slice(start, stop)
+            tile = SimpleNamespace(
+                native=plan.native,
+                metadata_factory=plan.metadata_factory,
+                swa_cache=plan.swa_cache,
+                swa_indices=plan.swa_indices[rows],
+                swa_lengths=plan.swa_lengths[rows],
+                global_cache=plan.global_cache,
+                global_indices=None if plan.global_indices is None else plan.global_indices[rows],
+                global_lengths=None if plan.global_lengths is None else plan.global_lengths[rows],
+                valid_mask=plan.valid_mask[rows],
+            )
+            if mega is not None and mega.decode_reason(q[rows], tile, positions[rows], phase="verify"):
+                return None
+            tiles.append((rows, tile))
+
+        outputs = []
+        for rows, tile in tiles:
+            with self._stage_verify_tail(keys, start=rows.start, stop=rows.stop):
+                if mega is not None:
+                    output = mega.decode(
+                        q[rows], tile, positions[rows], packed_q=True, mask_output=mask_output, phase="verify",
+                    )
+                else:
+                    output = packed_decode(
+                        q[rows], tile, softmax_scale=attn.geometry.sm_scale(),
+                        attn_sink=attn.attn_sink, mask_output=mask_output,
+                    )
+                outputs.append(output)
+        return torch.cat(outputs, dim=0)
 
     def forward(self, attn, q, selected, metadata, shared, *, mask_output=True, share_scheduler=False,
                 mega=None, mega_phase="decode", verify_slots=None):
@@ -566,6 +699,10 @@ class GraphPackedAttention:
             global_lengths=global_lengths,
             valid_mask=valid,
         )
+        if self.tiled_verify:
+            return self._forward_verify_tiles(
+                attn, q, positions, plan, keys, mega=mega, mask_output=mask_output,
+            )
         if mega is not None:
             if mega.decode_reason(q, plan, positions, phase=mega_phase) is not None:
                 return None
