@@ -202,6 +202,7 @@ torch::Tensor           makeModelInputShapeHintsTensor(const GptModelInputs& inp
 std::array<int64_t, 2>  decodeMtpHiddenStatesShape(int64_t total_numel, int64_t rows);
 std::vector<int64_t> decodeKvBlockTableShape(int64_t rank, int64_t group_num, int64_t batch_size, int64_t max_blocks);
 
+bool hasRealPdPrefillRequest(const GptModelInputs& inputs);
 void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallelism_config);
 
 class ModelBase {

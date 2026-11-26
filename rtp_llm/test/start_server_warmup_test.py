@@ -1,3 +1,4 @@
+import asyncio
 import multiprocessing
 import unittest
 from contextlib import ExitStack
@@ -5,6 +6,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, call, patch
 
 from rtp_llm import start_backend_server, start_server
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.ops import RoleType, SpeculativeType
 from rtp_llm.utils.backend_restart import RestartOutcome
 from rtp_llm.utils.drain_flag import DrainFlag
@@ -343,6 +346,8 @@ class StartupRealWarmupTest(unittest.TestCase):
                     self.assertFalse(
                         start_server._should_run_startup_real_warmup(config)
                     )
+                    config.model_args.model_type = "glm_5"
+                    self.assertTrue(start_server._should_run_startup_real_warmup(config))
 
     def test_warmup_entry_rank_preserves_pp_and_tp_boundaries(self):
         for pp_size, world_rank, expected in (
@@ -411,6 +416,62 @@ class StartupRealWarmupTest(unittest.TestCase):
                 9,
             )
 
+    def test_glm_warmup_uses_the_workers_input_limit(self):
+        config = PyEnvConfigs()
+        config.model_args.model_type = "glm_5"
+        worker = AsyncMock()
+        for address, limit, expected in (("dp0", 11, [2, 4, 8, 11]), ("dp1", 1, [1])):
+            worker.get_worker_status.return_value = SimpleNamespace(max_warmup_input_tokens=limit)
+            lengths = asyncio.run(start_server._get_startup_real_warmup_input_lens(worker, address, 60))
+            self.assertEqual(lengths, expected)
+            worker.get_worker_status.assert_awaited_with(address, 60, include_warmup_input_limit=True)
+
+        worker.get_worker_status.return_value = SimpleNamespace(max_warmup_input_tokens=0)
+        with self.assertRaises(ValueError):
+            asyncio.run(start_server._get_startup_real_warmup_input_lens(worker, "dp1", 60))
+
+    def test_glm_warmup_skips_size_errors_only_if_worker_can_serve(self):
+        config = PyEnvConfigs()
+        config.model_args.model_type = "glm_5"
+        too_long = ExceptionType.LONG_PROMPT_ERROR
+        kv_limit = ExceptionType.EXCEEDS_KV_CACHE_MAX_LEN
+        execution_error = ExceptionType.EXECUTION_EXCEPTION
+        for failures, partial, expected_error in (
+            ({4: too_long, 8: kv_limit}, False, None),
+            ({2: too_long, 4: too_long, 8: kv_limit}, False, kv_limit),
+            ({4: execution_error}, False, execution_error),
+            ({4: too_long}, True, too_long),
+        ):
+            with self.subTest(failures=failures, partial=partial), patch.object(
+                start_server, "_get_startup_real_warmup_grpc_addresses",
+                return_value=["dp0"],
+            ), patch("rtp_llm.cpp.model_rpc.model_rpc_client.ModelRpcClient") as clients:
+                worker = clients.return_value
+                worker.get_worker_status = AsyncMock(
+                    return_value=SimpleNamespace(max_warmup_input_tokens=8)
+                )
+                worker.close = AsyncMock()
+                attempted = []
+
+                async def enqueue(request):
+                    size = request.token_ids.numel()
+                    attempted.append(size)
+                    if size in failures:
+                        if partial:
+                            yield SimpleNamespace(generate_outputs=[])
+                        raise FtRuntimeException(failures[size], "warmup request failed")
+                    yield SimpleNamespace(generate_outputs=[])
+
+                worker.enqueue = enqueue
+                warmup = start_server._run_startup_real_warmup_grpc(config)
+                if expected_error is None:
+                    asyncio.run(warmup)
+                    self.assertEqual(attempted, [2, 4, 8])
+                else:
+                    with self.assertRaises(FtRuntimeException) as raised:
+                        asyncio.run(warmup)
+                    self.assertEqual(raised.exception.exception_type, expected_error)
+                worker.close.assert_awaited_once()
 
 if __name__ == "__main__":
     unittest.main()

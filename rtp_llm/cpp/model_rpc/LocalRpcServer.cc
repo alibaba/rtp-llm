@@ -2,6 +2,7 @@
 #include <chrono>
 #include <cmath>
 #include <exception>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <unistd.h>
@@ -1141,6 +1142,14 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
     response->set_total_kv_cache(kv_info.total_kv_cache);
     auto       group_mode    = KV_CACHE_GROUP_MODE_UNSPECIFIED;
     const auto cache_manager = engine_->getCacheManager();
+    if (request->include_warmup_input_limit() && cache_manager) {
+        const int     reserve_step = NormalEngine::calculateReserveStep(maga_init_params_);
+        const int64_t model_limit  = std::min<int64_t>(response->max_seq_len(), std::numeric_limits<int>::max());
+        if (model_limit > std::max(1, reserve_step)) {
+            const int max_prompt = static_cast<int>(warmUpInputLength(model_limit, reserve_step));
+            response->set_max_warmup_input_tokens(cache_manager->maxWarmupInputTokens(max_prompt, reserve_step));
+        }
+    }
     if (cache_manager && cache_manager->cacheConfig().groupNums() > 0) {
         for (const auto& group : cache_manager->cacheConfig().topology().groups()) {
             // Match the HBM publisher's eligibility, including its exact tag exclusions.

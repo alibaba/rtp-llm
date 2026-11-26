@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/models/prefill_progress/PrefillProgress.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpCompute.h"
 #include "rtp_llm/cpp/observability/ExecutionRecorder.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
@@ -1177,6 +1178,8 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         executor_collector.tp_sync_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
+    PrefillProgressScope prefill_progress(role_type_ == RoleType::PREFILL && !warm_up_
+                                          && PrefillProgressScope::enabled() && hasRealPdPrefillRequest(model_input));
     beginProfiledWork();
     metrics_collector.not_skip = true;
 
@@ -1243,7 +1246,9 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
 
     if (target_only && !is_block_draft_ && canEarlyReturnTargetOnlyPrefill(parallelism_config_.dp_size)) {
         collect_prefill_metrics();
+        PrefillProgressScope::mark(PrefillPhase::GPU_WAIT);
         cudaSyncAndCheck();
+        PrefillProgressScope::mark(PrefillPhase::GPU_DONE);
         releaseAllModelBuffers();
         if (auto deferred_capture_error = model_->takeDeferredHiddenStateCaptureError();
             deferred_capture_error.has_value()) {
@@ -1354,7 +1359,9 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     const bool dspark_cache_store_ok = finishDSparkPrefillCachePublication(model_input, streams);
     cache_store_drain_guard.disarm();
     if (!dspark_cache_store_ok) {
+        PrefillProgressScope::mark(PrefillPhase::GPU_WAIT);
         cudaSyncAndCheck();
+        PrefillProgressScope::mark(PrefillPhase::GPU_DONE);
         releaseAllModelBuffers();
         return absl::OkStatus();
     }
@@ -1367,7 +1374,9 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         if (metrics_reporter_) {
             collectPrefillMetrics(stream_groups, metrics_collector, schedule_time_us, model_forward_us);
         }
+        PrefillProgressScope::mark(PrefillPhase::GPU_WAIT);
         cudaSyncAndCheck();
+        PrefillProgressScope::mark(PrefillPhase::GPU_DONE);
         releaseAllModelBuffers();
         for (const auto& stream : streams) {
             if (!stream->hasError()) {
@@ -1388,7 +1397,9 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
 
     if (target_only) {
         collect_prefill_metrics();
+        PrefillProgressScope::mark(PrefillPhase::GPU_WAIT);
         cudaSyncAndCheck();
+        PrefillProgressScope::mark(PrefillPhase::GPU_DONE);
         releaseAllModelBuffers();
         if (isTpRank0() && batch_record) {
             batch_record->setStepDurationUs(autil::TimeUtility::currentTimeInMicroSeconds() - step_start_us);
@@ -1397,7 +1408,9 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     }
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
+        PrefillProgressScope::mark(PrefillPhase::GPU_WAIT);
         cudaSyncAndCheck();
+        PrefillProgressScope::mark(PrefillPhase::GPU_DONE);
         releaseAllModelBuffers();
         return absl::OkStatus();
     }

@@ -723,6 +723,7 @@ class DashScRequestControls:
 
     return_input_ids: bool = False
     force_sp_accept: bool = False
+    can_use_pd_separation: bool = True
     enable_thinking: bool | None = None
     max_new_think_tokens: int | None = None
     timeout_ms: int | None = None
@@ -808,6 +809,9 @@ class SamplingParams:
             max_thinking_tokens = request_max_think
         return GenerateConfig(
             max_new_tokens=backend_max_new_tokens,
+            can_use_pd_separation=(
+                request_controls.can_use_pd_separation if request_controls is not None else True
+            ),
             num_return_sequences=self.num_return_sequences,
             top_k=self.top_k,
             top_p=self.top_p,
@@ -1055,6 +1059,10 @@ def parse_request_controls(
             _lookup_ds_request_control(ds_attrs, "enable_thinking")
         )
 
+    can_use_pd_separation = _parse_optional_parameter_bool(
+        request, "can_use_pd_separation"
+    )
+
     max_new_think_tokens = _parse_optional_scalar_int(request, "max_new_think_tokens")
     if max_new_think_tokens is None:
         max_new_think_tokens = _parse_optional_parameter_int(
@@ -1125,6 +1133,9 @@ def parse_request_controls(
     return DashScRequestControls(
         return_input_ids=return_input_ids,
         force_sp_accept=force_sp_accept,
+        can_use_pd_separation=(
+            can_use_pd_separation if can_use_pd_separation is not None else True
+        ),
         enable_thinking=enable_thinking,
         max_new_think_tokens=max_new_think_tokens,
         timeout_ms=timeout_ms,

@@ -53,6 +53,67 @@ class TestMasterService(unittest.TestCase):
 
     @patch("rtp_llm.server.host_service.kmonitor.report")
     @patch("requests.post")
+    def test_heartbeat_readiness_withdraws_and_restores_master(
+        self, mock_post: MagicMock, _mock_kmonitor: MagicMock
+    ):
+        addr = "10.0.0.1:8000"
+        vip = MagicMock(domain="master.vip")
+        vip.get_hosts.return_value = [Host("10.0.0.1", "8000")]
+        svc, health = self._make_service(vip)
+
+        def heartbeat(**fields):
+            mock_post.return_value = _json_response({"real_master_host": addr, **fields})
+            self._refresh(svc, health)
+
+        for value in (False, None, 0, 1, "false", "true", [], {}):
+            with self.subTest(ready=value):
+                heartbeat(ready=value)
+                self.assertIsNone(svc.get_master_addr())
+                self.assertIsNone(svc.get_slave_addr())
+                self.assertEqual(svc.get_host_health_status()[addr]["health"], "unhealthy")
+
+        heartbeat(ready=True, queue_length=7)
+        self.assertEqual(svc.get_master_addr(), addr)
+        self.assertEqual(svc.get_queue_length(), 7)
+        self.assertEqual(svc.get_host_health_status()[addr]["consecutive_failures"], 0)
+        heartbeat(ready=False)
+        self.assertIsNone(svc.get_master_addr())
+        self.assertEqual(svc.get_queue_length(), 0)
+        self.assertEqual(svc.get_host_health_status()[addr]["consecutive_failures"], 1)
+        heartbeat()  # Older peers omit the ready field.
+        self.assertEqual(svc.get_master_addr(), addr)
+
+    @patch("rtp_llm.server.host_service.kmonitor.report")
+    @patch("requests.post")
+    def test_standalone_backup_takes_over_on_first_draining_heartbeat(
+        self, mock_post: MagicMock, _mock_kmonitor: MagicMock
+    ):
+        primary = Host("10.0.0.1", "8000")
+        backup = Host("10.0.0.2", "8000")
+        vip = MagicMock(domain="master.vip")
+        vip.get_hosts.return_value = [primary]
+        svc, host_health_map = self._make_service(vip)
+        mock_post.return_value = _json_response({"ready": True})
+        self._refresh(svc, host_health_map)
+        self.assertEqual(svc.get_master_addr(), "10.0.0.1:8000")
+
+        vip.get_hosts.return_value = [primary, backup]
+        mock_post.side_effect = lambda url, **_: _json_response(
+            {"ready": "10.0.0.2:8000" in url}
+        )
+        self._refresh(svc, host_health_map)
+        self.assertEqual(svc.get_master_addr(), "10.0.0.2:8000")
+        self.assertIsNone(svc.get_slave_addr())
+
+        # After the backup drains there is no eligible fallback.
+        mock_post.side_effect = None
+        mock_post.return_value = _json_response({"ready": False})
+        self._refresh(svc, host_health_map)
+        self.assertIsNone(svc.get_master_addr())
+        self.assertIsNone(svc.get_slave_addr())
+
+    @patch("rtp_llm.server.host_service.kmonitor.report")
+    @patch("requests.post")
     def test_refresh_two_hosts_prefers_server_marked_master(
         self, mock_post: MagicMock, _mock_kmonitor: MagicMock
     ):

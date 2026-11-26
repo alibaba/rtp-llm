@@ -155,7 +155,7 @@ cc_test(
         "@com_google_googletest//:gtest_main",
         "@havenask//aios/autil:net",
     ],
-    env = {},
+    env = {"GPU_COUNT": "0"},
 )
 
 cc_test(

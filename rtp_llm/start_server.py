@@ -699,7 +699,7 @@ def _should_run_startup_real_warmup(py_env_configs: PyEnvConfigs) -> bool:
         )
         return False
 
-    return getattr(py_env_configs.model_args, "model_type", "") == "deepseek_v4"
+    return py_env_configs.model_args.model_type in ("deepseek_v4", "glm_5")
 
 
 def _setup_startup_warmup_health_gate(py_env_configs: PyEnvConfigs, force=False):
@@ -1062,6 +1062,23 @@ def _get_startup_real_warmup_token_lens(prompt_limit: int) -> list[int]:
     return token_lens
 
 
+async def _get_startup_real_warmup_input_lens(
+    client, address: str, timeout_s: float
+) -> list[int]:
+    status = await client.get_worker_status(
+        address, timeout_s, include_warmup_input_limit=True
+    )
+    # The worker has already reserved space for generation and speculation.
+    limit = status.max_warmup_input_tokens
+    if limit <= 0:
+        raise ValueError(
+            f"GLM5 warmup worker {address} reported no positive input limit "
+            f"(max_warmup_input_tokens={limit})"
+        )
+    return _get_startup_real_warmup_token_lens(limit)
+
+
+
 def _get_startup_real_warmup_grpc_addresses(py_env_configs: PyEnvConfigs):
     from rtp_llm.distribute.distributed_server import get_dp_rpc_addresses
 
@@ -1165,28 +1182,30 @@ def _run_startup_real_warmup_async(coroutine):
     return loop.run_until_complete(coroutine)
 
 
-async def _run_startup_real_warmup_grpc(py_env_configs: PyEnvConfigs, max_len: int):
+async def _run_startup_real_warmup_grpc(py_env_configs: PyEnvConfigs, max_len: int | None = None):
     import torch
 
+    from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
     from rtp_llm.config.generate_config import GenerateConfig
     from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient
     from rtp_llm.utils.base_model_datatypes import GenerateInput
     from rtp_llm.utils.grpc_client_wrapper import GrpcClientWrapper
 
-    if max_len < STARTUP_REAL_WARMUP_MIN_TOKEN_LEN:
-        raise ValueError(
-            "model max_seq_len should be at least "
-            f"{STARTUP_REAL_WARMUP_MIN_TOKEN_LEN}, got {max_len}"
-        )
     reserve_step = _get_startup_real_warmup_speculative_reserve_step(py_env_configs)
     max_new_tokens = STARTUP_REAL_WARMUP_MAX_NEW_TOKENS
-    model_prompt_limit = max_len - reserve_step - max_new_tokens
-    if model_prompt_limit < 1:
-        raise ValueError(
-            "model max_seq_len cannot hold one startup warmup input and its reserved "
-            f"tokens, got max_seq_len={max_len}, reserve_step={reserve_step}, "
-            f"max_new_tokens={max_new_tokens}"
-        )
+    if max_len is not None:
+        if max_len < STARTUP_REAL_WARMUP_MIN_TOKEN_LEN:
+            raise ValueError(
+                "model max_seq_len should be at least "
+                f"{STARTUP_REAL_WARMUP_MIN_TOKEN_LEN}, got {max_len}"
+            )
+        model_prompt_limit = max_len - reserve_step - max_new_tokens
+        if model_prompt_limit < 1:
+            raise ValueError(
+                "model max_seq_len cannot hold one startup warmup input and its reserved "
+                f"tokens, got max_seq_len={max_len}, reserve_step={reserve_step}, "
+                f"max_new_tokens={max_new_tokens}"
+            )
     addresses = _get_startup_real_warmup_grpc_addresses(py_env_configs)
     timeout_s = _get_startup_real_warmup_timeout_s()
     timeout_ms = int(timeout_s * 1000)
@@ -1196,62 +1215,56 @@ async def _run_startup_real_warmup_grpc(py_env_configs: PyEnvConfigs, max_len: i
         if py_env_configs.grpc_config is not None
         else {}
     )
-    cache_client = GrpcClientWrapper(
-        py_env_configs.server_config.rpc_server_port,
-        dp_addresses=addresses,
-        client_config=client_config,
-    )
-    try:
-        cache_status = await cache_client.get_cache_status({"need_cache_keys": False})
-    finally:
-        await cache_client.close()
-    kv_config = py_env_configs.kv_cache_config
-    kv_prompt_limits = {
-        result["address"]: _get_startup_real_warmup_kv_prompt_limit(
-            int(result["total_kv_cache"]),
-            int(result["block_size"]),
-            kv_config.seq_size_per_block,
-            kv_config.reserve_block_ratio,
-            reserve_step,
+    if max_len is not None:
+        cache_client = GrpcClientWrapper(
+            py_env_configs.server_config.rpc_server_port,
+            dp_addresses=addresses,
+            client_config=client_config,
         )
-        for result in cache_status.get("results", [])
-    }
-    if set(kv_prompt_limits) != set(addresses):
-        raise RuntimeError(
-            "startup real warmup could not read every backend's KV capacity"
+        try:
+            cache_status = await cache_client.get_cache_status({"need_cache_keys": False})
+        finally:
+            await cache_client.close()
+        kv_config = py_env_configs.kv_cache_config
+        kv_prompt_limits = {
+            result["address"]: _get_startup_real_warmup_kv_prompt_limit(
+                int(result["total_kv_cache"]),
+                int(result["block_size"]),
+                kv_config.seq_size_per_block,
+                kv_config.reserve_block_ratio,
+                reserve_step,
+            )
+            for result in cache_status.get("results", [])
+        }
+        if set(kv_prompt_limits) != set(addresses):
+            raise RuntimeError(
+                "startup real warmup could not read every backend's KV capacity"
+            )
+        kv_prompt_limit = min(kv_prompt_limits.values())
+        if kv_prompt_limit < 1:
+            raise ValueError(
+                "backend KV capacity cannot hold one startup warmup input and its reserved tokens"
+            )
+        token_lens = _get_startup_real_warmup_token_lens(
+            min(model_prompt_limit, kv_prompt_limit)
         )
-    kv_prompt_limit = min(kv_prompt_limits.values())
-    if kv_prompt_limit < 1:
-        raise ValueError(
-            "backend KV capacity cannot hold one startup warmup input and its reserved tokens"
-        )
-    token_lens = _get_startup_real_warmup_token_lens(
-        min(model_prompt_limit, kv_prompt_limit)
-    )
-    logging.info(
-        "running startup real warmup via backend grpc, addrs=%s, "
-        "token_lens=%s, token_id=%d, max_new_tokens=%d, reserve_step=%d, timeout=%.1fs",
-        addresses,
-        token_lens,
-        STARTUP_REAL_WARMUP_TOKEN_ID,
-        max_new_tokens,
-        reserve_step,
-        timeout_s,
-    )
 
     begin_all = time.time()
     total_requests = 0
-    for addr_idx, addr in enumerate(addresses):
+    for addr in addresses:
         client = ModelRpcClient(
             addresses=[addr],
             client_config=client_config,
             max_rpc_timeout_ms=timeout_ms,
         )
         try:
-            for len_idx, request_token_len in enumerate(token_lens):
+            if max_len is None:
+                token_lens = await _get_startup_real_warmup_input_lens(client, addr, timeout_s)
+            worker_warmed_up = False
+            for request_token_len in token_lens:
                 total_requests += 1
                 request_id = _new_startup_real_warmup_request_id(
-                    addr_idx * len(token_lens) + len_idx
+                    total_requests - 1
                 )
                 generate_config = GenerateConfig(
                     max_new_tokens=max_new_tokens,
@@ -1292,10 +1305,30 @@ async def _run_startup_real_warmup_grpc(py_env_configs: PyEnvConfigs, max_len: i
                     max_new_tokens,
                     reserve_step,
                 )
-                async for outputs in client.enqueue(generate_input):
-                    chunk_count += 1
-                    if outputs.generate_outputs:
-                        last_aux = outputs.generate_outputs[0].aux_info
+                try:
+                    async for outputs in client.enqueue(generate_input):
+                        chunk_count += 1
+                        if outputs.generate_outputs:
+                            last_aux = outputs.generate_outputs[0].aux_info
+                except FtRuntimeException as exc:
+                    if (
+                        max_len is not None
+                        or chunk_count
+                        or exc.exception_type not in (
+                            ExceptionType.EXCEEDS_KV_CACHE_MAX_LEN,
+                            ExceptionType.LONG_PROMPT_ERROR,
+                        )
+                    ):
+                        raise
+                    # A worker must complete at least one real request to become ready.
+                    if not worker_warmed_up and request_token_len == token_lens[-1]:
+                        raise
+                    logging.warning(
+                        "Skipping GLM5 warmup length %d on %s: %s",
+                        request_token_len, addr, exc,
+                    )
+                    continue
+                worker_warmed_up = True
                 if last_aux is not None:
                     logging.info(
                         "startup grpc warmup request finished, addr=%s, request_id=%d, "
@@ -1335,10 +1368,9 @@ async def _run_startup_real_warmup_grpc(py_env_configs: PyEnvConfigs, max_len: i
                 )
 
     logging.info(
-        "startup grpc warmup finished, requests=%d, addrs=%d, token_lens=%d, cost=%.2fs",
+        "startup grpc warmup finished, requests=%d, addrs=%d, cost=%.2fs",
         total_requests,
         len(addresses),
-        len(token_lens),
         time.time() - begin_all,
     )
 
@@ -1349,7 +1381,10 @@ def _maybe_run_startup_real_warmup(py_env_configs: PyEnvConfigs, max_seq_len) ->
 
     try:
         _run_startup_real_warmup_async(
-            _run_startup_real_warmup_grpc(py_env_configs, int(max_seq_len))
+            _run_startup_real_warmup_grpc(
+                py_env_configs,
+                None if py_env_configs.model_args.model_type == "glm_5" else int(max_seq_len),
+            )
         )
         return True
     except StartupRealWarmupAddressResolutionError:

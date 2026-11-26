@@ -289,6 +289,8 @@ EngineInitParams RtpLLMOp::initModel(py::object model, py::object engine_config,
         params.grammar_config   = grammar_config;
         params.nccl_comm_config = engine_config.attr("nccl_comm_config").cast<NcclCommConfig>();
         params.server_config    = engine_config.attr("server_config");
+        configureRpcKeepalive({params.server_config.attr("grpc_keepalive_time_ms").cast<int>(),
+                               params.server_config.attr("grpc_keepalive_timeout_ms").cast<int>()});
         params.grammar_config   = engine_config.attr("grammar_config").cast<GrammarConfig>();
         model_id_++;
         if (parallelism_config.tp_rank == 0) {

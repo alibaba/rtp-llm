@@ -189,8 +189,11 @@ class Glm5FmhaDispatchTest(unittest.TestCase):
         fmha = {"default": object(), "indexer_kv": object()}
         first_output = None
         for step, token_ids in enumerate(([0, 1], [2])):
+            progress = []
             inputs = SimpleNamespace(
-                input_ids=torch.tensor(token_ids), capture_hidden_states=True
+                input_ids=torch.tensor(token_ids),
+                capture_hidden_states=True,
+                prefill_layer_progress=progress.append,
             )
             embedded = model.embed_tokens(inputs.input_ids)
             final = (embedded + 6) / 2
@@ -199,6 +202,7 @@ class Glm5FmhaDispatchTest(unittest.TestCase):
                 return_value=False,
             ):
                 output = model(inputs, fmha).hidden_states
+            self.assertEqual(progress, [-1, 0, 1])
             expected = torch.cat([embedded + 6, embedded + 2, final], dim=-1)
             torch.testing.assert_close(output, expected)
             self.assertEqual(model.norm.calls, step + 1)
@@ -215,7 +219,9 @@ class Glm5FmhaDispatchTest(unittest.TestCase):
             with self.subTest(layer_ids=layer_ids, requested=requested):
                 model = self.make_capture_model(layer_ids)
                 inputs = SimpleNamespace(
-                    input_ids=torch.tensor([0, 1]), capture_hidden_states=requested
+                    input_ids=torch.tensor([0, 1]),
+                    capture_hidden_states=requested,
+                    prefill_layer_progress=None,
                 )
                 with patch(
                     "rtp_llm.models_py.model_desc.glm5.should_enable_glm5_cmp",

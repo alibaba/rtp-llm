@@ -360,6 +360,29 @@ class TestProcessManager(unittest.TestCase):
         proc.join(timeout=1)
         self.assertFalse(proc.is_alive())
 
+    def test_prefill_watchdog_stops_during_parent_drain(self):
+        watchdog = Mock()
+        self.manager._prefill_watchdog = watchdog
+        self.manager._poll_prefill_watchdog()
+        watchdog.poll.assert_called_once()
+
+        self.manager.service_draining = Mock()
+        self.manager.service_draining.is_set.return_value = True
+        self.manager._poll_prefill_watchdog()
+        watchdog.poll.assert_called_once()
+        watchdog.close.assert_called_once()
+
+    def test_prefill_watchdog_failure_leaves_engine_monitor_running(self):
+        watchdog = Mock()
+        watchdog.poll.side_effect = RuntimeError("cannot read Prefill progress")
+        self.manager._prefill_watchdog = watchdog
+        with self.assertLogs(level="ERROR"):
+            self.manager._poll_prefill_watchdog()
+        watchdog.close.assert_called_once()
+        self.assertIsNone(self.manager._prefill_watchdog)
+        self.assertFalse(self.manager.shutdown_requested)
+        self.assertFalse(self.manager.failure_detected)
+
     def test_monitor_empty_processes(self):
         """Test monitoring with no processes"""
         with patch("logging.info") as mock_info:

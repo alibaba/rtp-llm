@@ -978,6 +978,16 @@ class BackendRPCServerVisitor:
                     )
                     final_roles.add(RoleType.PREFILL)
             if not final_roles:
+                if (
+                    not master_addr
+                    and not role_addrs_specified
+                    and not input_token_batched
+                    and self.host_service.master_vip.domain
+                ):
+                    raise FtRuntimeException(
+                        ExceptionType.MASTER_NO_AVAILABLE_WORKER,
+                        f"request_id={input.request_id} no ready master or fallback backend",
+                    )
                 route_error = FtRuntimeException(
                     ExceptionType.ROUTE_ERROR,
                     "request_id=%s no backend role addresses found after routing"

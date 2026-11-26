@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/models/prefill_progress/PrefillProgress.h"
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/cuda_graph/prepared_attention_inputs_guard.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
@@ -986,6 +987,7 @@ void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& inputs) {
 }
 
 GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
+    PrefillProgressScope::mark(PrefillPhase::PREPARE);
     RTP_LLM_PROFILE_SCOPE("py_model.forward");
 
     // Establish the cleanup guard before touching inputs: both the performance
@@ -1118,7 +1120,9 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                 py_model_inputs.attention_inputs.is_prefill,
                 graph_state.current_real_graph_bs);
             py_model_inputs.attention_inputs.is_s_padded = true;
-            py_model_outputs                             = graph_runner->forward(py_model_inputs, graph_state);
+            PrefillProgressScope::mark(PrefillPhase::GRAPH);
+            py_model_outputs = graph_runner->forward(py_model_inputs, graph_state);
+            PrefillProgressScope::mark(PrefillPhase::TAIL);
             if (is_generation_prefill_runner) {
                 generation_prefill_cuda_graph_status = GenerationPrefillCudaGraphStatus::REPLAYED;
             }
@@ -1130,7 +1134,11 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                               py_model_inputs.attention_inputs.is_target_verify,
                               py_model_inputs.attention_inputs.is_prefill);
             held_attn_pyobj_ = py_model_.attr("prepare_fmha_impl")(py_model_inputs, false);
-            auto outputs     = py_forward_method_(py_model_inputs, held_attn_pyobj_);
+            if (PrefillProgressScope::active()) {
+                py_model_inputs.prefill_layer_progress = &PrefillProgressScope::markLayer;
+            }
+            auto outputs = py_forward_method_(py_model_inputs, held_attn_pyobj_);
+            PrefillProgressScope::mark(PrefillPhase::TAIL);
             py_model_outputs = outputs.cast<PyModelOutputs>();
         }
 

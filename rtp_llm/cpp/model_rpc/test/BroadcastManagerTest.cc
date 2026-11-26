@@ -13,6 +13,14 @@
 
 namespace rtp_llm::test {
 
+TEST(BroadcastDiagnosticsTest, SanitizesAndBoundsPeerErrorTextForLogs) {
+    using Result = BroadcastResult<FunctionRequestPB, FunctionResponsePB>;
+    EXPECT_EQ(Result::errorForLog("OSS_ACCESS_ID=id&OSS_ACCESS_KEY=key Bearer token\nsk-secret"),
+              "OSS_ACCESS_ID=<redacted>&OSS_ACCESS_KEY=<redacted> Bearer <redacted> sk-<redacted>");
+    const std::string limit(4096, 'x');
+    EXPECT_EQ(Result::errorForLog(limit + "tail"), limit);
+}
+
 TEST(BroadcastDiagnosticsTest, ProgressCompletionDoesNotCopyRegisteredCallable) {
     using Result = BroadcastResult<int, int>;
     struct Callback {

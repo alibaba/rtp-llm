@@ -8,14 +8,13 @@
 
 **Introduced in:** [PR #1112](https://github.com/alibaba/rtp-llm/pull/1112) (JIT remote cache).
 
-**Summary:** Managed JIT toolchains now write their compilation caches under one
-fixed local root, `/tmp/rtp-llm/.jit_cache/v1/<scope_id>/<component>/`, where
-`<scope_id>` digests the build environment (GPU architecture, CUDA/ROCm toolkit,
-C++ runtime, torch ABI, compile flags, and managed package versions) — for
-example `/tmp/rtp-llm/.jit_cache/v1/3d8e437f489bb70e/torch_extensions/`. Setting
-`REMOTE_JIT_DIR` additionally restores and publishes
-`<REMOTE_JIT_DIR>/v1/<scope_id>/<time_ns>-<host>.jit_snapshot.tar.zst` snapshots;
-it governs remote access only, so local redirection stays on when it is empty.
+**Summary:** Managed JIT toolchains write their compilation caches under
+`<LOCAL_JIT_DIR>/v2/<scope_id>/<component>/`. The local root defaults to
+`/tmp/rtp-llm/.jit_cache`. The scope ID includes this path, GPU architecture,
+CUDA/ROCm toolkit, C++ runtime, torch ABI, compile flags, and managed package
+versions. Set `REMOTE_JIT_DIR` to restore and publish snapshots under
+`<REMOTE_JIT_DIR>/v2/<scope_id>/<time_ns>-<host>.jit_snapshot.tar.zst`.
+Local redirection stays on when this setting is empty.
 
 **Impact and migration:** Component cache variables you do not set explicitly are
 redirected: `FLASHINFER_WORKSPACE_BASE`, `DG_JIT_CACHE_DIR`,
@@ -35,9 +34,12 @@ snapshot restore only: build-scope probing runs before it and can add tens of
 seconds on a cold host. `JIT_CACHE_RESTORED`, `JIT_CACHE_FAIL_OPEN`, and a
 `JIT shared root ... mode ...` line report status.
 
-The local root is fixed, not configurable: ninja depfiles and compiled artifacts
-embed absolute paths, so a snapshot restored under a different root cannot be
-reused. Opt out of the feature rather than relocating it.
+Use `--local_jit_dir` or `LOCAL_JIT_DIR` to select a writable absolute directory
+on a mount that permits loading shared libraries. With cache management enabled,
+a failed directory check stops backend startup. A failed build-environment probe
+or unavailable ACL tools let the backend cold-start with the component caches.
+Preset component paths remain in effect. Changing the root selects a new scope
+because compiled artifacts embed absolute paths.
 
 **Rollback:** Unset `REMOTE_JIT_DIR` to stop remote restore and publication.
 `--manage_jit_cache=0` (`MANAGE_JIT_CACHE=0`) disables the feature outright: no

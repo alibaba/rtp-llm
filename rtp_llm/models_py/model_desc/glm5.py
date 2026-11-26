@@ -712,6 +712,7 @@ class Glm5ModelBase(CpMtpHiddenHandoff, GenericMoeModel):
         force_reuse_topk_indices: bool = False,
         capture: Optional[CaptureContext] = None,
         residual: Optional[torch.Tensor] = None,
+        layer_progress=None,
     ) -> DecodeLayerOutput:
         default_fmha = (
             fmha_impl["default"] if isinstance(fmha_impl, Mapping) else fmha_impl
@@ -745,6 +746,8 @@ class Glm5ModelBase(CpMtpHiddenHandoff, GenericMoeModel):
             )
             if residual is None or residual.shape != hidden_states.shape or residual.dtype != hidden_states.dtype or residual.device != hidden_states.device:
                 residual = torch.zeros_like(hidden_states)
+            if layer_progress is not None:
+                layer_progress(-1)
             for idx, layer in enumerate(self.layers[: self.layer_num]):
                 caches = None
                 if self.kv_cache is not None:
@@ -766,6 +769,8 @@ class Glm5ModelBase(CpMtpHiddenHandoff, GenericMoeModel):
                 )
                 hidden_states, residual = result.hidden_states, result.residual
                 prev_topk_indices = result.topk_indices
+                if layer_progress is not None:
+                    layer_progress(idx)
                 if capture is not None:
                     capture.capture_layer(idx, hidden_states, residual)
             return DecodeLayerOutput(hidden_states, residual, prev_topk_indices)
@@ -819,7 +824,12 @@ class Glm5MoeModel(Glm5ModelBase):
         }:
             raise RuntimeError("GLM5 requires default and indexer_kv attention routes")
         capture = self.capture_context(inputs.capture_hidden_states)
-        result = self._forward_decoder_layers(hidden_states, fmha_impl, capture=capture)
+        result = self._forward_decoder_layers(
+            hidden_states,
+            fmha_impl,
+            capture=capture,
+            layer_progress=inputs.prefill_layer_progress,
+        )
         return capture.finalize(result.hidden_states, result.residual)
 
 

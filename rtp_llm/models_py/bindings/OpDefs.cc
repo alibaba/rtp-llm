@@ -314,6 +314,12 @@ void registerPyOpDefs(pybind11::module& m) {
             "A PyAttentionInputs value or a tag-to-PyAttentionInputs mapping")
         .def_readwrite(
             "bert_embedding_inputs", &PyModelInputs::bert_embedding_inputs, "BERT embedding inputs structure")
+        .def_property_readonly("prefill_layer_progress", [](const PyModelInputs& inputs) -> pybind11::object {
+            if (inputs.prefill_layer_progress) {
+                return pybind11::cpp_function(inputs.prefill_layer_progress);
+            }
+            return pybind11::none();
+        })
         .def_readwrite("capture_hidden_states",
                        &PyModelInputs::capture_hidden_states,
                        "Capture configured hidden states for this homogeneous target-prefill batch")

@@ -335,6 +335,8 @@ class PyModelInitResources:
     def max_context_batch_size(self) -> int: ...
 
 class PyModelInputs:
+    @property
+    def prefill_layer_progress(self) -> typing.Callable[[int], None] | None: ...
     need_all_hidden_states: bool
     need_all_logits: bool
     engram_token_windows: torch.Tensor
