@@ -206,6 +206,8 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     encode_flag(inputs.shutdown, GptModelInputControlFlag::kControlShutdown);
     encode_flag(inputs.is_fake_stream, GptModelInputControlFlag::kControlFakeStream);
     encode_flag(inputs.is_middle_chunk_only, GptModelInputControlFlag::kControlMiddleChunkOnly);
+    encode_flag(inputs.uniform_verify_lengths && inputs.is_target_verify,
+                GptModelInputControlFlag::kControlUniformVerify);
     encode_flag(inputs.is_target_verify, GptModelInputControlFlag::kControlTargetVerify);
     encode_flag(inputs.is_draft_extend, GptModelInputControlFlag::kControlDraftExtend);
     encode_flag(inputs.pd_separation, GptModelInputControlFlag::kControlPdSeparation);
@@ -371,6 +373,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     inputs.shutdown                  = has_flag(GptModelInputControlFlag::kControlShutdown);
     inputs.is_fake_stream            = has_flag(GptModelInputControlFlag::kControlFakeStream);
     inputs.is_middle_chunk_only      = has_flag(GptModelInputControlFlag::kControlMiddleChunkOnly);
+    inputs.uniform_verify_lengths    = has_flag(GptModelInputControlFlag::kControlUniformVerify);
     inputs.is_target_verify          = has_flag(GptModelInputControlFlag::kControlTargetVerify);
     inputs.is_draft_extend           = has_flag(GptModelInputControlFlag::kControlDraftExtend);
     inputs.pd_separation             = has_flag(GptModelInputControlFlag::kControlPdSeparation);

@@ -548,6 +548,9 @@ class Glm5MoeDecoderLayer(nn.Module):
 class Glm5ModelBase(CpMtpHiddenHandoff, GenericMoeModel):
     """Share main's FMHA contract while constructing GLM decoder layers."""
 
+    def cuda_graph_uses_glm5_buckets(self) -> bool:
+        return self.config.model_type in ("glm_5", "glm_5_mtp")
+
     def __init__(
         self,
         model_config: ModelConfig,
@@ -618,6 +621,7 @@ class Glm5ModelBase(CpMtpHiddenHandoff, GenericMoeModel):
         *,
         force_reuse_topk_indices: bool = False,
         capture: Optional[CaptureContext] = None,
+        residual: Optional[torch.Tensor] = None,
     ) -> DecodeLayerOutput:
         default_fmha = (
             fmha_impl["default"] if isinstance(fmha_impl, Mapping) else fmha_impl
@@ -649,7 +653,8 @@ class Glm5ModelBase(CpMtpHiddenHandoff, GenericMoeModel):
                 self.kv_cache,
                 force_reuse_topk_indices=force_reuse_topk_indices,
             )
-            residual = torch.zeros_like(hidden_states)
+            if residual is None or residual.shape != hidden_states.shape or residual.dtype != hidden_states.dtype or residual.device != hidden_states.device:
+                residual = torch.zeros_like(hidden_states)
             for idx, layer in enumerate(self.layers[: self.layer_num]):
                 caches = None
                 if self.kv_cache is not None:

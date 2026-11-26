@@ -9,6 +9,11 @@
 
 namespace rtp_llm {
 
+struct MtpDecodeDispatchSnapshot {
+    torch::Tensor all_probs;
+    torch::Tensor last_hidden;
+};
+
 class MtpBatchStreamProcessor: public NormalBatchStreamProcessor {
 public:
     static torch::Tensor
@@ -53,7 +58,8 @@ public:
     absl::Status dispatchDecode(const StreamGroups&                          stream_groups,
                                 const speculative::SpeculativeSamplerOutput& spec_decode_output,
                                 const MergedOutput&                          draft_prefill_output,
-                                MtpTargetLogprobs                            target_logprobs) const;
+                                MtpTargetLogprobs                            target_logprobs,
+                                const MtpDecodeDispatchSnapshot*             snapshot = nullptr) const;
 
     void finalizeDecodeTargetLogprobs(const StreamGroups&                          stream_groups,
                                       const speculative::SpeculativeSamplerOutput& spec_decode_output,
@@ -184,7 +190,8 @@ protected:
                                      const speculative::SpeculativeSamplerOutput& spec_decode_output,
                                      const MergedOutput&                          draft_prefill_output,
                                      MtpTargetLogprobs&                           target_logprobs,
-                                     std::vector<StreamSpecUpdateInfo>&           spec_update_infos) const;
+                                     std::vector<StreamSpecUpdateInfo>&           spec_update_infos,
+                                     const MtpDecodeDispatchSnapshot*             snapshot) const;
 
     void gatherHiddenStates(const StreamGroups& stream_groups, GptModelInputs& model_input) const;
 

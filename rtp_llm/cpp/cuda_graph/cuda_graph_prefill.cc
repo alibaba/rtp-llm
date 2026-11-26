@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
+#include <numeric>
 #include <optional>
 
 namespace rtp_llm {
@@ -18,7 +19,9 @@ void CudaGraphRunner::capturePrefill() {
         // we will transfer a `batch size tensor(int)` for `copy kernel`.
         // Prepare common inputs using shared function
         const int capture_batch_size =
-            usesFixedCapacityMtpDraftPrefillCudaGraph() ? seq_len / num_tokens_per_bs_ : static_cast<int>(max_bs_);
+            (usesFixedCapacityMtpDraftPrefillCudaGraph() || (isMtpDraftPrefillCudaGraph() && uses_glm5_buckets_)) ?
+                seq_len / num_tokens_per_bs_ :
+                static_cast<int>(max_bs_);
         prepareCaptureInputs(inputs, capture_batch_size, seq_len);
         // Generation prefill uses Bmax real slots plus one fixed sentinel slot.
         // Capture the conservative layout [0, ..., 0, Tg] so FMHA/RoPE fix
@@ -153,17 +156,18 @@ void CudaGraphRunner::capturePrefill() {
 std::vector<int> CudaGraphRunner::getPrefillSequenceLengthsToCapture() {
     // MTP draft prefill: capture at multiples of num_tokens_per_bs_
     if (isMtpDraftPrefillCudaGraph()) {
-        std::vector<int> result;
-        for (int i = 1; i <= max_bs_; ++i) {
-            result.push_back(i * num_tokens_per_bs_);
+        std::vector<int> buckets;
+        if (decode_capture_batch_sizes_.empty() && !uses_glm5_buckets_) {
+            // Draft prefill historically captures every request count unless a deployment selects buckets.
+            buckets.resize(max_bs_);
+            std::iota(buckets.begin(), buckets.end(), 1);
+        } else {
+            buckets = getDecodeBatchSizesToCapture();
         }
-        RTP_LLM_LOG_INFO(
-            "Draft model prefill: capture seq_lens at %d intervals, %zu total (max_bs=%d, num_tokens_per_bs=%d)",
-            num_tokens_per_bs_,
-            result.size(),
-            max_bs_,
-            num_tokens_per_bs_);
-        return result;
+        for (int& batch : buckets) {
+            batch *= num_tokens_per_bs_;
+        }
+        return buckets;
     }
 
     // Embedding model prefill: use Python-provided capture seq_lens

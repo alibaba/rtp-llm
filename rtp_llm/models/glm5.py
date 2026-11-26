@@ -239,6 +239,52 @@ class Glm5MtpWeight(Glm5Weight):
 class Glm5Mtp(Glm5):
 
     @classmethod
+    def speculative_weight_alias_names(cls, target_model, draft_model_config):
+        target = target_model.model_config
+        draft = draft_model_config
+        if (
+            target.model_type != "glm_5"
+            or draft.model_type != "glm_5_mtp"
+            or draft.mtp_layer_offset <= 0
+            or not target.ckpt_path
+            or not draft.ckpt_path
+            or os.path.realpath(target.ckpt_path) != os.path.realpath(draft.ckpt_path)
+        ):
+            return ()
+
+        loader = target_model.model_weights_loader
+        merged_lora = (
+            loader.get_load_config().merge_lora
+            if loader is not None
+            else target_model.merge_lora
+        )
+        if (
+            merged_lora
+            or target.enable_output_vocab_pruning
+            or draft.enable_output_vocab_pruning
+            or target.output_vocab_ids != draft.output_vocab_ids
+            or draft.normalize_lm_head_weight
+            or draft.logit_scale != 1.0
+        ):
+            return ()
+
+        def weight_layout(config):
+            return (
+                config.vocab_size,
+                config.hidden_size,
+                config.data_type,
+                config.tie_word_embeddings,
+                config.enable_fp32_lm_head,
+                config.normalize_lm_head_weight,
+                config.logit_scale,
+            )
+
+        layout = weight_layout(target)
+        if None in layout or layout != weight_layout(draft):
+            return ()
+        return (W.embedding, W.lm_head)
+
+    @classmethod
     def _create_config(cls, ckpt_path: str):
         config = super()._create_config(ckpt_path)
         num_main_layers = config.num_layers

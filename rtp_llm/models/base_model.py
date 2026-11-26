@@ -114,6 +114,7 @@ class BaseModel(object):
             max_generate_batch_size: Maximum batch size for generation
             merge_lora: Whether to merge LoRA weights
         """
+        self.model_weights_loader: Optional[ModelLoader] = None
         self.model_config = model_config
         self.parallelism_config = parallelism_config
         self.hw_kernel_config = hw_kernel_config

@@ -310,6 +310,7 @@ struct PyContextParallelParams {
 struct PyAttentionInputs {
     bool          is_prefill{false};
     bool          is_target_verify{false};
+    bool          uniform_verify_lengths{false};
     bool          is_draft_extend{false};
     std::optional<rtp_llm::LinearReplayInputs> linear_replay;
     torch::Tensor prefix_lengths;

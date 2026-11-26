@@ -339,6 +339,7 @@ py_library(
     }),
     data = [
         "//rtp_llm/libs:marlin_nvfp4",
+        "kernels/cuda/mtp_frontend.cu",
         "kernels/cuda/marlin_nvfp4/marlin_kernels/LICENSE",
     ] + glob(["kernels/cuda/qsa/*.cu", "kernels/cuda/qsa/*.cuh"]),
     deps = [

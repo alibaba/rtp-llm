@@ -685,6 +685,7 @@ void setVerifyPairInputs(GptModelInputs& model_input,
     model_input.sequence_lengths   = emptyInt32OnCuda({0});
     model_input.last_hidden_states = torch::Tensor();
     model_input.prefix_lengths     = toCudaInt32(model_input.prefix_lengths, host_holder).contiguous();
+    model_input.uniform_verify_lengths = true;
     model_input.input_lengths      = fullInt32OnCuda({static_cast<int64_t>(batch_size)}, score_len);
     model_input.lm_output_indexes  = makeCudaInt32Range(static_cast<int64_t>(batch_size * score_len));
 }
@@ -880,13 +881,14 @@ absl::Status MtpBatchStreamProcessor::dispatchDecode(const StreamGroups&        
 absl::Status MtpBatchStreamProcessor::dispatchDecode(const StreamGroups&                          stream_groups,
                                                      const speculative::SpeculativeSamplerOutput& spec_decode_output,
                                                      const MergedOutput&                          draft_prefill_output,
-                                                     MtpTargetLogprobs target_logprobs) const {
+                                                     MtpTargetLogprobs                            target_logprobs,
+                                                     const MtpDecodeDispatchSnapshot*             snapshot) const {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
 
     std::vector<StreamSpecUpdateInfo> spec_update_infos;
 
     prepareDecodeSpecUpdateInfo(
-        stream_groups, spec_decode_output, draft_prefill_output, target_logprobs, spec_update_infos);
+        stream_groups, spec_decode_output, draft_prefill_output, target_logprobs, spec_update_infos, snapshot);
 
     if (target_logprobs.defined()) {
         stageMtpLogprobsToCpu(spec_update_infos);
@@ -1080,6 +1082,23 @@ void MtpBatchStreamProcessor::overlayMtpCacheSnapshots(const StreamGroups& strea
 
     if (buckets.empty()) {
         return;
+    }
+    if (buckets.size() == 1) {
+        const auto& bucket = buckets.begin()->second;
+        // A bucket is filled in batch order. If it covers every row there are
+        // no fresh host rows to upload and no scatter indices to materialize.
+        if (model_input.kv_cache_block_id.defined() && model_input.kv_cache_kernel_block_id.defined()
+            && model_input.kv_cache_block_id.dim() == 3 && model_input.kv_cache_kernel_block_id.dim() == 3
+            && static_cast<int64_t>(bucket.rows.size()) == model_input.kv_cache_block_id.size(1)
+            && model_input.kv_cache_block_id.size(1) == model_input.kv_cache_kernel_block_id.size(1)
+            && bucket.physical_tables.front().size(0) == model_input.kv_cache_block_id.size(0)
+            && bucket.kernel_tables.front().size(0) == model_input.kv_cache_kernel_block_id.size(0)
+            && bucket.physical_tables.front().size(2) == model_input.kv_cache_block_id.size(2)
+            && bucket.kernel_tables.front().size(2) == model_input.kv_cache_kernel_block_id.size(2)) {
+            model_input.kv_cache_block_id        = torch::cat(bucket.physical_tables, 1);
+            model_input.kv_cache_kernel_block_id = torch::cat(bucket.kernel_tables, 1);
+            return;
+        }
     }
     // Generic gathering produces pinned host tables. Move the complete mixed
     // batch once, preserving freshly admitted host rows, then replace only the
@@ -1901,7 +1920,8 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
     const speculative::SpeculativeSamplerOutput& spec_decode_output,
     const MergedOutput&                          draft_prefill_output,
     MtpTargetLogprobs&                           target_logprobs,
-    std::vector<StreamSpecUpdateInfo>&           spec_update_infos) const {
+    std::vector<StreamSpecUpdateInfo>&           spec_update_infos,
+    const MtpDecodeDispatchSnapshot*             snapshot) const {
     finalizeDecodeTargetLogprobs(stream_groups, spec_decode_output, target_logprobs);
     const auto  accepted      = mtp::getHostAcceptedTokens(spec_decode_output);
     const auto& accept_len    = accepted.lengths;
@@ -1921,7 +1941,9 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
 
         // speculative decoding info
         torch::Tensor propose_all_probs;
-        if (draft_sampler_output.all_probs.defined()) {
+        if (snapshot && snapshot->all_probs.defined()) {
+            propose_all_probs = snapshot->all_probs.narrow(0, batch_idx_out, next_batch_size);
+        } else if (draft_sampler_output.all_probs.defined()) {
             propose_all_probs =
                 draft_sampler_output.all_probs.narrow(0, batch_idx_out, next_batch_size).to(torch::kCUDA).clone();
         }
@@ -1934,7 +1956,8 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
         torch::Tensor last_hidden_states;
         if (propose_step_ > 1 && !is_block_draft_) {
             last_hidden_states =
-                cloneHiddenSlice(draft_model_output.all_hidden_states, token_offset + cur_accept_len - 1, 1);
+                snapshot ? snapshot->last_hidden.narrow(0, batch_idx_out, 1) :
+                           cloneHiddenSlice(draft_model_output.all_hidden_states, token_offset + cur_accept_len - 1, 1);
         }
 
         torch::Tensor accept_tokens_tensor =

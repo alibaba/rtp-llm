@@ -91,6 +91,7 @@ public:
 #endif
     at::cuda::CUDAGraph graph_;
     CaptureMemoryHold   mem_hold_;
+    bool                requires_uniform_verify_lengths = false;
 };
 
 class CudaGraphStreamLife {

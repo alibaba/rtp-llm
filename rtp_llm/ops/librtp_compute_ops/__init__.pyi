@@ -262,6 +262,7 @@ class PyAttentionInputs:
     is_prefill: bool
     is_s_padded: bool
     is_target_verify: bool
+    uniform_verify_lengths: bool
     is_draft_extend: bool
     mtp_indexer_seed_rows: torch.Tensor
     linear_replay: LinearReplayInputs | None
