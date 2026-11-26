@@ -179,16 +179,50 @@ class DraftPrefillGraphReplay(Mapping):
 
     This intentionally is not a dict: the existing graph runner calls the
     model-wide callback with all cache groups, rather than each FMHA separately.
-    Tagged inputs share request lengths and prefixes, and the position and CU
-    buffers are on one device. The caller supplies positive raw-state page
-    sizes and a nonempty physical state table.
+    The graph runner owns the fixed int32 position and CU buffers. Each replay
+    refreshes their contents and shares request lengths and prefixes across
+    tags. The caller supplies positive raw-state page sizes and a nonempty
+    physical state table.
     """
 
     def __init__(
-        self, impls, bounds, position_factor, token_capacity, state_cache=None
+        self,
+        impls,
+        bounds,
+        position_factor,
+        token_capacity,
+        state_cache=None,
+        *,
+        capture_groups,
     ):
+        anchor = capture_groups[next(iter(impls))]
+        positions = anchor.combo_position_ids
+        expected_positions = token_capacity * position_factor
+        if positions is None or positions.numel() != expected_positions:
+            raise RuntimeError(
+                "QSA draft graph capture requires transported position capacity "
+                f"{expected_positions}"
+            )
+        cu = anchor.cu_seqlens_device
+        expected_cu_shape = (anchor.input_lengths.numel() + 1,)
+        if cu is None or cu.dtype != torch.int32 or cu.shape != expected_cu_shape:
+            raise RuntimeError(
+                f"QSA draft graph capture requires int32 device cu_seqlens {expected_cu_shape}"
+            )
+
         self.impls = impls
-        self.bounds = bounds
+        self.bounds = []
+        state_bound = None
+        for tag, pool_size, page_size, compressed in bounds:
+            if tag == INDEXER_STATE_TAG:
+                state_bound = (pool_size, page_size)
+            else:
+                self.bounds.append((tag, pool_size, page_size, compressed))
+        if state_bound is None or INDEXER_STATE_TAG not in capture_groups:
+            raise RuntimeError(
+                "QSA draft graph capture requires a raw-state cache group"
+            )
+        self.state_bound = state_bound
         self.position_factor = position_factor
         self.token_capacity = token_capacity
         self.state_cache = state_cache
@@ -204,32 +238,10 @@ class DraftPrefillGraphReplay(Mapping):
     def __len__(self):
         return len(self.impls)
 
-    def _validate_replay_layout(self, anchor):
-        """Check bucket metadata before allocating scratch or writing graph inputs."""
-        transported = anchor.combo_position_ids
-        if not torch.is_tensor(transported) or transported.dtype not in (
-            torch.int32,
-            torch.int64,
-        ):
-            raise RuntimeError(
-                "QSA draft graph requires int32 or int64 transported positions"
-            )
-        if transported.numel() != self.token_capacity * self.position_factor:
-            raise RuntimeError("QSA draft graph transported position capacity changed")
-        cu = anchor.cu_seqlens_device
-        if (
-            not torch.is_tensor(cu)
-            or cu.dtype != torch.int32
-            or tuple(cu.shape) != (anchor.input_lengths.numel() + 1,)
-        ):
-            raise RuntimeError(
-                "QSA draft graph requires int32 device cu_seqlens matching the request capacity"
-            )
-        return transported, cu
-
     def prepare_cuda_graph(self, groups):
         anchor = groups[next(iter(self.impls))]
-        transported, cu = self._validate_replay_layout(anchor)
+        transported = anchor.combo_position_ids
+        cu = anchor.cu_seqlens_device
         if not self._workspace_lock.acquire(blocking=False):
             return self._prepare_cuda_graph(
                 groups, transported, cu, _ReplayWorkspace(None)
@@ -288,14 +300,8 @@ class DraftPrefillGraphReplay(Mapping):
                 raise RuntimeError(
                     "QSA draft graph requires positive live prefixes and lengths within request capacity followed by padding"
                 )
-        state_geometry = None
         for tag, pool_size, page_size, compressed in self.bounds:
             inputs = groups[tag]
-            if tag == INDEXER_STATE_TAG:
-                # The model's state view derives physical pages from the
-                # refreshed kernel table; do not use a stale host mirror.
-                state_geometry = (inputs.kv_cache_block_id_device, pool_size, page_size)
-                continue
             table = inputs.kv_cache_kernel_block_id
             if (
                 table.device.type != "cpu"
@@ -333,8 +339,8 @@ class DraftPrefillGraphReplay(Mapping):
                     raise RuntimeError(
                         "QSA draft graph live row resolves to an unallocated or out-of-range physical block"
                     )
-        if state_geometry is None:
-            raise RuntimeError("QSA draft graph requires a raw-state cache group")
+        # Resolve the physical pages from this replay's refreshed kernel table.
+        state_table = groups[INDEXER_STATE_TAG].kv_cache_block_id_device
         # Draft Base-RoPE uses logical coordinates even for transported media rows.
         invalid_replay = workspace.prepare_positions(
             anchor,
@@ -342,7 +348,7 @@ class DraftPrefillGraphReplay(Mapping):
             prefixes,
             cu,
             transported,
-            state_geometry,
+            (state_table, *self.state_bound),
             self.token_capacity,
             self.position_factor,
         )

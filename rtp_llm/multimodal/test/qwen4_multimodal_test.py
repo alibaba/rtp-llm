@@ -618,6 +618,7 @@ class Qwen4MultimodalTest(unittest.TestCase):
             ],
             3,
             4,
+            capture_groups=groups,
         )
         replay.prepare_cuda_graph(groups)
         for value in groups.values():

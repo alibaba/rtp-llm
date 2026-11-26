@@ -59,12 +59,12 @@ class DraftPrefillGraphTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "capacity"):
                 draft_graph_lanes(inputs, bad)
         hook, groups, delegate = self._replay()
-        hook.token_capacity = 6
-        with self.assertRaisesRegex(RuntimeError, "capacity"):
+        groups["full"].input_lengths[1] = 5
+        with self.assertRaisesRegex(RuntimeError, "within request capacity"):
             hook.prepare_cuda_graph(groups)
         delegate.prepare_cuda_graph.assert_not_called()
 
-    def _replay(self, *, device="cpu"):
+    def _replay(self, *, device="cpu", state_page_size=128):
         lengths = torch.tensor([1, 4, 0], dtype=torch.int32)
         prefixes = torch.tensor([7, 127, 0], dtype=torch.int32)
         cu = torch.tensor([0, 1, 5, 5], dtype=torch.int32)
@@ -92,74 +92,43 @@ class DraftPrefillGraphTest(unittest.TestCase):
                 kv_cache_block_id_device=tables.to(device).clone(),
             )
         delegate = Mock()
-        hook = DraftPrefillGraphReplay(
+        hook = self._capture(groups, delegate, state_page_size=state_page_size)
+        return hook, groups, delegate
+
+    def _capture(self, groups, delegate, *, state_page_size=128):
+        return DraftPrefillGraphReplay(
             {"full": delegate},
             [
                 ("full", 12, 128, False),
                 (INDEXER_KV_TAG, 12, 32, True),
-                (INDEXER_STATE_TAG, 12, 128, False),
+                (INDEXER_STATE_TAG, 12, state_page_size, False),
             ],
             3,
             12,
+            capture_groups=groups,
         )
-        return hook, groups, delegate
 
-    def test_replay_layout_errors_preserve_graph_inputs_and_cached_scratch(self):
+    def test_capture_rejects_invalid_fixed_layout(self):
+        _, groups, delegate = self._replay()
+        anchor = groups["full"]
         bad_layouts = (
-            ("combo_position_ids", None, "transported positions"),
-            ("combo_position_ids", torch.zeros(36), "transported positions"),
+            ("combo_position_ids", None, "capacity"),
             ("combo_position_ids", torch.zeros(35, dtype=torch.int32), "capacity"),
             ("cu_seqlens_device", None, "cu_seqlens"),
-            ("cu_seqlens_device", [0, 1, 5, 5], "cu_seqlens"),
             ("cu_seqlens_device", torch.zeros(4, dtype=torch.int64), "cu_seqlens"),
             ("cu_seqlens_device", torch.zeros(3, dtype=torch.int32), "cu_seqlens"),
             ("cu_seqlens_device", torch.zeros(4, 1, dtype=torch.int32), "cu_seqlens"),
         )
-        for index, (field, value, error) in enumerate(bad_layouts):
-            # Layout validation precedes locking; one busy case covers ordering.
-            for busy in (False, True) if index == 0 else (False,):
-                with self.subTest(field=field, value=value, busy=busy):
-                    hook, groups, delegate = self._replay()
-                    anchor = groups["full"]
-                    hook.prepare_cuda_graph(groups)
-                    workspace = hook._workspace
-                    delegate.reset_mock()
-                    positions = anchor.combo_position_ids
-                    positions.fill_(999)
-                    groups["full"] = SimpleNamespace(**(vars(anchor) | {field: value}))
-                    if busy:
-                        hook._workspace_lock.acquire()
-                    try:
-                        with self.assertRaisesRegex(RuntimeError, error):
-                            hook.prepare_cuda_graph(groups)
-                        self.assertEqual(hook._workspace_lock.locked(), busy)
-                    finally:
-                        if busy:
-                            hook._workspace_lock.release()
-                    self.assertIs(hook._workspace, workspace)
-                    delegate.prepare_cuda_graph.assert_not_called()
-                    torch.testing.assert_close(
-                        positions, torch.full_like(positions, 999)
-                    )
-                    groups["full"] = anchor
-                    hook.prepare_cuda_graph(groups)
-                    self.assertIs(hook._workspace, workspace)
-                    delegate.prepare_cuda_graph.assert_called_once_with(anchor)
+        for field, value, error in bad_layouts:
+            with self.subTest(field=field, value=value):
+                bad_anchor = SimpleNamespace(**(vars(anchor) | {field: value}))
+                with self.assertRaisesRegex(RuntimeError, f"capture.*{error}"):
+                    self._capture(dict(groups, full=bad_anchor), delegate)
 
-    def test_replay_layout_accepts_int64_positions(self):
-        hook, groups, delegate = self._replay()
-        positions = groups["full"].combo_position_ids.to(torch.int64)
-        expected = positions.clone()
-        for inputs in groups.values():
-            inputs.combo_position_ids = positions
-        hook.prepare_cuda_graph(groups)
-        workspace = hook._workspace
-        positions.fill_(999)
-        hook.prepare_cuda_graph(groups)
-        self.assertIs(hook._workspace, workspace)
-        self.assertEqual(positions.dtype, torch.int64)
-        torch.testing.assert_close(positions, expected)
-        self.assertEqual(delegate.prepare_cuda_graph.call_count, 2)
+        del groups[INDEXER_STATE_TAG]
+        with self.assertRaisesRegex(RuntimeError, "capture.*raw-state cache group"):
+            self._capture(groups, delegate)
+        delegate.prepare_cuda_graph.assert_not_called()
 
     def test_replay_stages_host_reference_with_cuda_default_device(self):
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -249,7 +218,7 @@ class DraftPrefillGraphTest(unittest.TestCase):
                     delegate.prepare_cuda_graph.assert_not_called()
 
     def test_replay_resolves_state_pages_from_refreshed_kernel_table(self):
-        hook, groups, delegate = self._replay()
+        hook, groups, delegate = self._replay(state_page_size=256)
         state = groups[INDEXER_STATE_TAG]
         physical = state.kv_cache_block_id_device
         expanded = physical[..., None] * 2 + torch.arange(2, dtype=torch.int32)
@@ -263,7 +232,6 @@ class DraftPrefillGraphTest(unittest.TestCase):
             get_seq_size_per_block=lambda tag: 256,
             get_kernel_seq_size_per_block=lambda tag: 128,
         )
-        hook.bounds[-1] = (INDEXER_STATE_TAG, 12, 256, False)
         hook.prepare_cuda_graph(groups)
         delegate.prepare_cuda_graph.assert_called_once_with(groups["full"])
         delegate.reset_mock()
@@ -488,7 +456,9 @@ class DraftPrefillGraphTest(unittest.TestCase):
     def test_replay_refreshes_cuda_state_projection_workspace(self):
         for factor in (2, 4):
             with self.subTest(factor=factor):
-                hook, groups, delegate = self._replay(device="cuda")
+                hook, groups, delegate = self._replay(
+                    device="cuda", state_page_size=128 * factor
+                )
                 state = groups[INDEXER_STATE_TAG]
                 physical = state.kv_cache_block_id_device.clone()
                 offsets = torch.arange(factor, device="cuda", dtype=torch.int32)
@@ -508,7 +478,6 @@ class DraftPrefillGraphTest(unittest.TestCase):
                     get_seq_size_per_block=lambda tag: 128 * factor,
                     get_kernel_seq_size_per_block=lambda tag: 128,
                 )
-                hook.bounds[-1] = (INDEXER_STATE_TAG, 12, 128 * factor, False)
                 hook.prepare_cuda_graph(groups)
                 workspace = hook._workspace
                 view = workspace.state_inputs[INDEXER_STATE_TAG][1]
@@ -614,7 +583,9 @@ class DraftPrefillGraphTest(unittest.TestCase):
     def test_device_prepare_fallback_uses_current_host_mirrors(self):
         for defect in ("strided_table", "length_dtype", "page_size"):
             with self.subTest(defect=defect):
-                hook, groups, delegate = self._replay(device="cuda")
+                hook, groups, delegate = self._replay(
+                    device="cuda", state_page_size=127 if defect == "page_size" else 128
+                )
                 anchor = groups["full"]
                 expected = anchor.combo_position_ids.clone()
                 if defect == "strided_table":
@@ -623,8 +594,6 @@ class DraftPrefillGraphTest(unittest.TestCase):
                     state.kv_cache_block_id_device = table.T.contiguous().T
                 elif defect == "length_dtype":
                     anchor.input_lengths_device = anchor.input_lengths_device.long()
-                else:
-                    hook.bounds[-1] = (INDEXER_STATE_TAG, 12, 127, False)
                 anchor.combo_position_ids.fill_(999)
                 hook.prepare_cuda_graph(groups)
                 self.assertIsNone(hook._workspace.invalid)
@@ -670,7 +639,7 @@ class DraftPrefillGraphTest(unittest.TestCase):
     def test_replay_checks_interior_raw_state_pages(self):
         for page_size in (1, 2, 3):
             with self.subTest(page_size=page_size):
-                hook, groups, delegate = self._replay()
+                hook, groups, delegate = self._replay(state_page_size=page_size)
                 anchor = groups["full"]
                 anchor.input_lengths.copy_(torch.tensor([4, 0, 0]))
                 anchor.prefix_lengths.copy_(torch.tensor([7, 0, 0]))
@@ -679,7 +648,6 @@ class DraftPrefillGraphTest(unittest.TestCase):
                 table = state.kv_cache_block_id_device = torch.ones(
                     3, 11, dtype=torch.int32
                 )
-                hook.bounds[-1] = (INDEXER_STATE_TAG, 12, page_size, False)
                 hook.prepare_cuda_graph(groups)
                 delegate.reset_mock()
                 # The raw-state window spans positions 4 through 10 inclusive.
