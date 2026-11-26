@@ -427,7 +427,47 @@ class DefaultFstRouteTest(_CheckpointCase):
             )
 
 
+def _shared_fst_dispatch_failure(rank, root, store):
+    dist.init_process_group("gloo", init_method=store, rank=rank, world_size=2,
+                            timeout=timedelta(seconds=12))
+    try:
+        loader = _loader(root, device="cpu", load_method=Method.FASTSAFETENSORS,
+                         tp_size=2, tp_rank=rank)
+        loader.model_config["model_type"] = "_test_overlay_local_stage"
+        case = unittest.TestCase()
+        reads = []
+        original = _OverlayStage.load_weights
+
+        def consume(owner, weights):
+            def checked():
+                for name, value in weights:
+                    reads.append(name)
+                    if rank == 1:
+                        raise ValueError("rejected first shared weight")
+                    yield name, value
+            return original(owner, checked())
+
+        with patch.object(_OverlayStage, "load_weights", consume), case.assertRaisesRegex(
+            RuntimeError, "rank 1: ValueError: rejected first shared weight"
+        ):
+            loader.load()
+        case.assertEqual(len(reads), 1 if rank == 1 else 2)
+        case.assertIsNone(loader.loaded_method)
+        # A timeout or process-group abort is not successful error propagation.
+        dist.barrier()
+    finally:
+        dist.destroy_process_group()
+
+
 class DefaultFstNativeReaderTest(_CheckpointCase):
+    def test_shared_fst_dispatch_failure_preserves_peer_collectives(self):
+        save_file({"bias": self.expected}, str(self.root / "other.safetensors"))
+        torch.multiprocessing.spawn(
+            _shared_fst_dispatch_failure,
+            args=(str(self.root), (self.root / "dispatch-store").as_uri()),
+            nprocs=2,
+        )
+
     def test_explicit_fst_with_whole_stage_in_overlay(self):
         save_file({"other_stage.weight": self.expected}, str(self.root / "model.safetensors"))
         overlay = self.root / "overlay"

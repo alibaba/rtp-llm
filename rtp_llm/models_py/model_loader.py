@@ -5,6 +5,7 @@ import os
 import platform
 import re
 import time
+from collections import deque
 from contextlib import contextmanager, nullcontext
 from itertools import chain
 from dataclasses import dataclass, field, replace
@@ -47,6 +48,26 @@ from rtp_llm.models_py.registry import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def _complete_shared_fst(reader):
+    """Finish the group's native reads before voting on a local dispatch error."""
+    try:
+        yield
+    except Exception as owner_error:
+        try:
+            # A peer may already be inside the next broadcast. Discard data,
+            # not collectives; do not dispatch more parameters on this rank.
+            deque(reader, maxlen=0)
+        except Exception as read_error:
+            raise owner_error from read_error
+        raise
+    else:
+        # Usually exhausted. An owner that stops early must still participate.
+        deque(reader, maxlen=0)
+
+
 _CUSTOM_WEIGHT_PREFIX = "__custom__."
 
 _EXPERT_ID_RE = re.compile(r"(?:^|\.)experts\.(\d+)(?:\.|$)")
@@ -2851,6 +2872,7 @@ class NewModelLoader:
             method == NewLoaderLoadMethod.FASTSAFETENSORS
             and not self.load_config.force_cpu_load_weights
         )
+        shared_completion = nullcontext()
         streamed_scratch = self._arm_streamed_scratch(
             model, method
         ) or self._ppu_streamed_scratch(model, method)
@@ -2896,13 +2918,16 @@ class NewModelLoader:
             if independent:
                 logger.info("NewLoader FST: %d collective files; %d use independent native CPU range reads",
                             len(shared),len(independent))
+            shared_reader = (
+                self._fastsafetensors_weights_iterator(
+                    shared, self.load_config.device, base_filter, base_expander, base_resolver
+                ) if shared else None
+            )
+            if shared_reader is not None and process_group.size() > 1:
+                shared_completion = _complete_shared_fst(shared_reader)
             def iter_planned_weights():
-                # yield from forwards close() to the active native reader on
-                # dispatch failure. Unstarted readers never acquire resources.
-                if shared:
-                    yield from self._fastsafetensors_weights_iterator(
-                        shared, self.load_config.device, base_filter, base_expander, base_resolver
-                    )
+                if shared_reader is not None:
+                    yield from shared_reader
                 if independent:
                     yield from iter_fst_range_tensors(
                         independent, catalog=self._checkpoint_catalog(), name_filter=base_filter,
@@ -2971,7 +2996,8 @@ class NewModelLoader:
 
         with self._checkpoint_preflight(model, requested_method), dispatch_context:
             try:
-                model.load_weights(checked_weights())
+                with shared_completion:
+                    model.load_weights(checked_weights())
                 if staged_coordinator is not None:
                     staged_coordinator.finish()
             finally:
