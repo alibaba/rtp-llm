@@ -335,19 +335,44 @@ py_test(
     deps = [":new_loader_core", "//rtp_llm:fastsafetensors"],
 )
 
+py_library(
+    name = "parallel_checkpoint_test_support",
+    testonly = True,
+    srcs = ["parallel_checkpoint_test_support.py"],
+    deps = [":new_loader_core"],
+)
+
+_GLOO_CPU_ENV = {
+    "CUDA_VISIBLE_DEVICES": "",
+    "HIP_VISIBLE_DEVICES": "",
+    "ROCR_VISIBLE_DEVICES": "",
+    "OMP_NUM_THREADS": "1",
+    "MKL_NUM_THREADS": "1",
+}
+
 py_test(
     name = "main_parallel_runtime_test",
     srcs = ["main_parallel_runtime_test.py", "layers/embedding.py"],
-    env = {
-        "CUDA_VISIBLE_DEVICES": "",
-        "HIP_VISIBLE_DEVICES": "",
-        "ROCR_VISIBLE_DEVICES": "",
-        "OMP_NUM_THREADS": "1",
-        "MKL_NUM_THREADS": "1",
-    },
+    env = _GLOO_CPU_ENV,
     deps = [
         ":new_loader_core",
+        ":parallel_checkpoint_test_support",
         "//rtp_llm:fastsafetensors",
+    ],
+)
+
+# Only this integration test needs the BaseModel service descriptor.
+py_test(
+    name = "resident_draft_parallel_runtime_test",
+    srcs = ["resident_draft_parallel_runtime_test.py"],
+    data = ["//rtp_llm/libs:libth_transformer_config_so"],
+    env = _GLOO_CPU_ENV,
+    deps = [
+        ":new_loader_core",
+        ":parallel_checkpoint_test_support",
+        "//rtp_llm:fastsafetensors",
+        "//rtp_llm:model_descriptors",
+        "//rtp_llm/resident_weights",
     ],
 )
 

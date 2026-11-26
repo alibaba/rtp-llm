@@ -5,7 +5,6 @@ import tempfile
 import unittest
 from datetime import timedelta
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
 
 import torch
 import torch.distributed as dist
@@ -18,146 +17,11 @@ from rtp_llm.models_py.model_loader import (
     NewModelLoader,
     _ExpertRangeFilter,
 )
-from rtp_llm.models_py.module_base import RtpModule
-from rtp_llm.models_py.read_spec import make_sharded_read_spec
-from rtp_llm.models_py.registry import register_model
-
-
-class _Runtime(SimpleNamespace):
-    def get_attn_tp_size(self):
-        return 1 if self.cp else self.tp_size
-
-    def get_attn_tp_rank(self):
-        return 0 if self.cp else self.tp_rank
-
-    def get_ffn_tp_size(self):
-        return 1 if self.ffn_replicated or self.cp else self.tp_size
-
-    def get_ffn_tp_rank(self):
-        return 0 if self.ffn_replicated or self.cp else self.tp_rank
-
-
-def _config(rank, pp=2, tp=2, dp=1, ep=None, cp=False, ffn_replicated=False):
-    world = pp * tp * dp
-    layout = RankLayout(world, pp, dp, tp)
-    coord = layout.coord_of(rank)
-    ep = tp * dp if ep is None else ep
-    return _Runtime(
-        world_size=world,
-        world_rank=rank,
-        local_world_size=world,
-        pp_size=pp,
-        tp_size=tp,
-        dp_size=dp,
-        ep_size=ep,
-        tp_rank=coord.tp,
-        pp_rank=coord.pp,
-        dp_rank=coord.dp,
-        ep_rank=layout.ep_rank_of(rank, ep),
-        cp=cp,
-        ffn_replicated=ffn_replicated,
-    )
-
-
-class _Partition(RtpModule):
-    def __init__(self, size, rank):
-        super().__init__()
-        self.size, self.rank = size, rank
-        self.weight = torch.nn.Parameter(torch.empty(8 // size, 2))
-
-    def checkpoint_read_spec(self, name, shape):
-        return make_sharded_read_spec(name, shape, 0, self.size, self.rank)
-
-
-@register_model("_p0_main_parallel_runtime")
-class _Owner(RtpModule):
-    def __init__(self, config, load):
-        super().__init__()
-        for name in ("attn", "ffn", "lm_head"):
-            setattr(
-                self,
-                name,
-                _Partition(
-                    getattr(load, name + "_tp_size"), getattr(load, name + "_tp_rank")
-                ),
-            )
-        if config.expert_num:
-            self.experts = torch.nn.ModuleDict({str(load.ep_rank): _Partition(1, 0)})
-
-
-class _GlooLoader(NewModelLoader):
-    """Bind the actual Gloo groups allocated by this CPU launcher.
-
-    The production launcher exposes its groups through collective_torch; no
-    native config or CUDA process-group registry is synthesized in this test.
-    """
-
-    def _runtime_checkpoint_group(self, group):
-        return self.groups[group]
-
-
-def _resident_draft_worker(rank, root):
-    from rtp_llm.models.base_model import BaseModel
-    from rtp_llm.resident_weights import ResidentWeights
-
-    dist.init_process_group("gloo", init_method=f"file://{root}/rdzv", rank=rank, world_size=4,
-                            timeout=timedelta(seconds=40))
-    try:
-        tail = dist.new_group([2, 3], backend="gloo", timeout=timedelta(seconds=30))
-        for scenario in ("all_hit", "mixed", "no_store", "restore_error"):
-            if rank >= 2:
-                pc = _config(rank, ep=1)
-                config = SimpleNamespace(model_type="_p0_main_parallel_runtime", is_mtp=True, expert_num=0)
-                load_cfg = NewLoaderConfig.from_runtime(pc, device="cpu", compute_dtype=torch.float32,
-                                                        load_method="fastsafetensors")
-                loader = _GlooLoader(config, load_cfg, model_path=root)
-                loader.groups = {Group.TP: tail, Group.STAGE: tail}
-                manager = ResidentWeights.__new__(ResidentWeights)
-                manager.slot_key, manager.verify = f"gpu{rank}/draft", False
-                manager.discard_attach, manager.release_attach = Mock(), Mock()
-
-                def attach():
-                    if rank == 3 and scenario == "restore_error":
-                        manager._restore_error = "simulated host restore failure"
-                    return None if rank == 3 and scenario in ("mixed", "restore_error") else []
-
-                manager.attach = Mock(side_effect=attach)
-                local = None if rank == 3 and scenario == "no_store" else manager
-                service = BaseModel.__new__(BaseModel)
-                service.resident_weights_config = SimpleNamespace(enable=True, role="draft")
-                service.parallelism_config = pc
-                observed = []
-
-                def load(**kwargs):
-                    warm = kwargs.get("restored") is not None
-                    observed.append(warm)
-                    if not warm:
-                        # Real FST collective, real checkpoint bytes. Only the local
-                        # store/VMM outcome is supplied by the fixture.
-                        owner = loader.load()
-                        expected = torch.arange(16, dtype=torch.float32).view(8, 2)
-                        torch.testing.assert_close(owner.attn.weight, expected.chunk(2)[pc.tp_rank])
-                        assert loader.loaded_method.value == "fastsafetensors"
-                    return warm
-
-                with patch.object(service, "_create_resident_weights", return_value=local):
-                    if scenario == "restore_error":
-                        with unittest.TestCase().assertRaisesRegex(RuntimeError, "restore"):
-                            service._load_with_residency("cpu", load, group=loader.checkpoint_group())
-                        manager.release_attach.assert_called_once()
-                        assert not observed
-                    else:
-                        result = service._load_with_residency("cpu", load, group=loader.checkpoint_group())
-                        assert observed == [scenario == "all_hit"] and result == observed[0]
-                        assert manager.discard_attach.called == (
-                            scenario == "mixed" or (scenario == "no_store" and rank == 2)
-                        )
-                        assert manager.attach.called == (scenario != "no_store")
-            # Non-draft ranks never participate in the availability vote, the
-            # attach-state vote, the actual FST read, or the completion barrier.
-            dist.barrier()
-    finally:
-        dist.destroy_process_group()
+from rtp_llm.models_py.parallel_checkpoint_test_support import (
+    GlooCheckpointLoader,
+    ParallelCheckpointOwner,
+    runtime_config,
+)
 
 
 def _worker(rank, temp):
@@ -184,7 +48,7 @@ def _worker(rank, temp):
         # tail. Its two other WORLD peers wait at a WORLD barrier, not in FST.
         for draft, experts in ((False, 0), (False, 2), (True, 2)):
             if not draft or rank >= 2:
-                pc = _config(rank, cp=draft, ffn_replicated=True)
+                pc = runtime_config(rank, cp=draft, ffn_replicated=True)
                 directory = os.path.join(temp, f"{pc.pp_rank}-{experts}")
                 for method in ("scratch", "fastsafetensors"):
                     load = NewLoaderConfig.from_runtime(
@@ -193,7 +57,7 @@ def _worker(rank, temp):
                         compute_dtype=torch.float32,
                         load_method=method,
                     )
-                    loader = _GlooLoader(
+                    loader = GlooCheckpointLoader(
                         SimpleNamespace(
                             model_type="_p0_main_parallel_runtime",
                             is_mtp=draft,
@@ -221,7 +85,7 @@ def _worker(rank, temp):
                         try:
                             loader._select_load_method(
                                 load.load_method,
-                                _Owner(loader.model_config, load),
+                                ParallelCheckpointOwner(loader.model_config, load),
                                 paths,
                             )
                         except RuntimeError as exc:
@@ -321,12 +185,6 @@ def _vocab_and_stacked_worker(rank, temp):
 
 
 class MainParallelRuntimeTest(unittest.TestCase):
-    def test_resident_draft_mixed_hit_uses_real_tail_stage_fst(self):
-        with tempfile.TemporaryDirectory() as root:
-            save_file({name + ".weight": torch.arange(16, dtype=torch.float32).view(8, 2)
-                       for name in ("attn", "ffn", "lm_head")}, os.path.join(root, "model.safetensors"))
-            torch.multiprocessing.start_processes(_resident_draft_worker, (root,), nprocs=4, start_method="fork")
-
     def test_pruned_tied_vocab_and_stacked_row_order_native_fst(self):
         with tempfile.TemporaryDirectory() as temp:
             experts = torch.arange(12).reshape(4, 3)
@@ -346,7 +204,7 @@ class MainParallelRuntimeTest(unittest.TestCase):
     def test_runtime_role_coordinates(self):
         for rank in range(8):
             for cp, replicated in ((False, False), (True, False), (False, True)):
-                pc = _config(rank, dp=2, cp=cp, ffn_replicated=replicated)
+                pc = runtime_config(rank, dp=2, cp=cp, ffn_replicated=replicated)
                 c = NewLoaderConfig.from_runtime(pc, device="cpu")
                 self.assertIs(c.parallelism_config, pc)
                 self.assertEqual(c.ep_rank, rank % 4)
@@ -360,7 +218,7 @@ class MainParallelRuntimeTest(unittest.TestCase):
                 )
 
     def test_reject_stale_or_overridden_rank(self):
-        pc = _config(3)
+        pc = runtime_config(3)
         for field in ("tp_rank", "dp_rank", "pp_rank", "ep_rank"):
             saved = getattr(pc, field)
             setattr(pc, field, 1 - saved)
