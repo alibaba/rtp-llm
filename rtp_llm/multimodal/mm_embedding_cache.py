@@ -28,7 +28,7 @@ from rtp_llm.multimodal.vit_metrics import (
 )
 from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
 
-_PROFILE_LOCAL_HITS = os.environ.get("MM_EMB_LOCAL_HIT_PROFILE") == "1"
+_PROFILE_LOCAL_HITS = os.environ.get("MM_EMB_LOCAL_HIT_PROFILE", "1") == "1"
 
 
 # Terminal entries share a permanently signaled event. A pending entry only
