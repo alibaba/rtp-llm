@@ -1,5 +1,11 @@
 load("//rtp_llm/models_py:checkpoint_test_platforms.bzl", "checkpoint_reader_test_env")
 
+py_test(
+    name = "newloader_linear_replay_test",
+    srcs = ["newloader_linear_replay_test.py"],
+    deps = ["//rtp_llm/models_py:new_weight_loader", "//rtp_llm:models"],
+)
+
 py_library(
     name = "hybrid_ft_fixture",
     srcs = ["test_kimi_owner.py"],

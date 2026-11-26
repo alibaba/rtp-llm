@@ -389,6 +389,7 @@ class _OwnedKdaRuntime:
         self.local_num_k_heads = self.local_num_v_heads = owner.local_num_heads
         self.ssm_state_dtype = owner.ssm_state_dtype
         self.linear_cache_converter = owner.cache_converter
+        self._linear_replay = None
 
     @property
     def conv_weights(self):
@@ -418,6 +419,13 @@ class KimiLinearKDA(KimiKDAParameters):
         super().__init__(cfg, prefix)
         self.prefill_kda = _OwnedPrefill(self)
         self.decode_kda = _OwnedDecode(self)
+
+    def _apply(self, fn, recurse=True):
+        result = super()._apply(fn, recurse)
+        # Replay captures views of the owner's weights, including the direct
+        # gate parameters that can move even when recurse=False.
+        self.decode_kda._linear_replay = None
+        return result
 
     def validate_runtime_device(self, device: torch.device) -> None:
         # CPU is a valid checkpoint destination, including for inspection and

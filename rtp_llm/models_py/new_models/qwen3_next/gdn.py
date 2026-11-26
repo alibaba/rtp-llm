@@ -25,10 +25,30 @@ class Qwen3NextGatedDeltaNet(Qwen3NextGdnExecution, Qwen3NextGdnParameters):
 
     def process_weights_after_loading(self):
         self._prepare_input_projection()
-        # Scratch may stage on CPU; take kernel views only after migration.
-        state = Qwen3NextGdnStateParameters(
+        self._bind_runtime_state()
+
+    def _apply(self, fn, recurse=True):
+        result = super()._apply(fn, recurse)
+        if hasattr(self, "decode_gdn"):
+            # The owner parameters move even with recurse=False; the execution
+            # modules' detached views do not. Keep the executors and their hooks.
+            state = self._runtime_state()
+            for executor in (self.prefill_gdn, self.decode_gdn):
+                executor.weights = state
+                executor.conv_weights = state.conv
+                executor.dt_bias = state.dt_bias
+                executor.alog = state.a_log
+                executor._linear_replay = None
+            self.norm.weight = self.norm_w.detach()
+        return result
+
+    def _runtime_state(self):
+        return Qwen3NextGdnStateParameters(
             self.conv1d_w.detach(), self.dt_bias.detach(), self.a_log.detach()
         )
+
+    def _bind_runtime_state(self):
+        state = self._runtime_state()
         self.prefill_gdn = Qwen3NextGatedDeltaNetPrefill(
             self.linear_attn_config, self.parallelism_config, state
         )
