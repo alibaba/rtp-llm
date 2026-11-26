@@ -2,7 +2,7 @@
 
 load("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository")
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
-load("@rtp_blackwell_config//:pins.bzl", "CUDA_EXTENSION", "DEEP_GEMM_WHEEL", "MHC_SOURCE")
+load("@internal_impls//:impls.bzl", "CUDA_EXTENSION", "DEEP_GEMM_WHEEL", "MHC_SOURCE")
 
 BLACKWELL_SOURCES = {
     "cutlass_mhc": struct(

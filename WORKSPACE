@@ -45,11 +45,6 @@ local_repository(
 )
 
 local_repository(
-    name = "rtp_blackwell_config",
-    path = "3rdparty/blackwell/config",
-)
-
-local_repository(
     name = "arch_config",
     path = "arch_config",
 )

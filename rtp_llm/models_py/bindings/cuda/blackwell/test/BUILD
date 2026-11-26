@@ -1,4 +1,4 @@
-load("@rtp_blackwell_config//:pins.bzl", "CUDA_EXTENSION")
+load("@internal_impls//:impls.bzl", "CUDA_EXTENSION")
 load("@rules_python//python:defs.bzl", "py_test")
 
 py_test(

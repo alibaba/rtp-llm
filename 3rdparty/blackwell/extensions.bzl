@@ -1,6 +1,6 @@
 """Build the native operators and their JIT inputs in the installed wheel layout."""
 
-load("@rtp_blackwell_config//:pins.bzl", "CUDA_EXTENSION")
+load("@internal_impls//:impls.bzl", "CUDA_EXTENSION")
 load(":repositories.bzl", "BLACKWELL_SOURCES", "ELFUTILS")
 
 _BINDINGS = "//rtp_llm/models_py/bindings/cuda/blackwell:"
