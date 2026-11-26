@@ -76,9 +76,11 @@ try:
     import flashinfer as _flashinfer
 
     _HAS_FLASHINFER = hasattr(_flashinfer, "BatchPrefillWithPagedKVCacheWrapper")
+    _HAS_FLASHINFER_TOP_K = hasattr(_flashinfer, "top_k") and hasattr(_flashinfer, "TopKTieBreak")
 except Exception:
     _flashinfer = None  # type: ignore[assignment]
     _HAS_FLASHINFER = False
+    _HAS_FLASHINFER_TOP_K = False
 
 _DEFAULT_DFLASH2_FI_WS_BYTES = 256 * 1024 * 1024
 _MAX_DFLASH2_FI_WS_BYTES = 1024 * 1024 * 1024
@@ -108,9 +110,14 @@ def _build_sm100_fp8_for_weight(
     in_features: int,
     out_features: int,
     eff_mode: str,
+    *,
+    allow_decode_scaled_mm: bool = False,
 ):
     from rtp_llm.models_py.modules.qwen4_5.fp8_linear import SM100FP8Linear
 
+    extra_kw: Dict[str, Any] = {}
+    if "allow_decode_scaled_mm" in inspect.signature(SM100FP8Linear.__init__).parameters:
+        extra_kw["allow_decode_scaled_mm"] = bool(allow_decode_scaled_mm)
     inst = SM100FP8Linear(
         in_features=int(in_features),
         out_features=int(out_features),
@@ -122,6 +129,7 @@ def _build_sm100_fp8_for_weight(
         prepare_w4a8=(eff_mode == "w4a8"),
         dtype=weight.dtype,
         device=weight.device,
+        **extra_kw,
     )
     inst.weight = (
         weight
@@ -406,15 +414,22 @@ if _HAS_TRITON:
     def _dflash2_apply_output_gate_kernel(
         out_ptr,
         gate_ptr,
-        num_elems,
-        BLOCK: tl.constexpr,
+        o_stride_tok: tl.int64,
+        o_stride_h: tl.int64,
+        g_stride_tok: tl.int64,
+        g_stride_h: tl.int64,
+        head_dim: tl.int32,
+        BLOCK_D: tl.constexpr,
     ):
-        pid = tl.program_id(0).to(tl.int64)
-        offs = pid * BLOCK + tl.arange(0, BLOCK)
-        mask = offs < num_elems
-        o = tl.load(out_ptr + offs, mask=mask, other=0.0).to(tl.float32)
-        g = tl.load(gate_ptr + offs, mask=mask, other=0.0).to(tl.float32)
-        tl.store(out_ptr + offs, (o * tl.sigmoid(g)).to(out_ptr.dtype.element_ty), mask=mask)
+        tok = tl.program_id(0).to(tl.int64)
+        h = tl.program_id(1).to(tl.int64)
+        offs_d = tl.arange(0, BLOCK_D)
+        mask_d = offs_d < head_dim
+        o_ptrs = out_ptr + tok * o_stride_tok + h * o_stride_h + offs_d
+        g_ptrs = gate_ptr + tok * g_stride_tok + h * g_stride_h + offs_d
+        o = tl.load(o_ptrs, mask=mask_d, other=0.0).to(tl.float32)
+        g = tl.load(g_ptrs, mask=mask_d, other=0.0).to(tl.float32)
+        tl.store(o_ptrs, (o * tl.sigmoid(g)).to(out_ptr.dtype.element_ty), mask=mask_d)
 
     @triton.jit(do_not_specialize=["batch_size", "max_blocks", "num_blocks", "window_left"])
     def _dflash2_paged_noncausal_mha_stage1_body_triton(
@@ -1241,6 +1256,8 @@ if _HAS_TRITON:
         base_stride_tap,
         out_stride_row,
         num_rows,
+        clip_value: tl.float32,
+        HAS_CLIP: tl.constexpr,
         NUM_CHANNELS: tl.constexpr,
         BLOCK_SIZE: tl.constexpr,
         GROUP_SIZE: tl.constexpr,
@@ -1280,7 +1297,77 @@ if _HAS_TRITON:
             ).to(tl.float32)
             acc += (base_val + delta_val) * x_val
 
+        if HAS_CLIP:
+            acc = tl.minimum(tl.maximum(acc, -clip_value), clip_value)
         tl.store(out_ptr + row * out_stride_row + offs, acc, mask=mask)
+
+    @triton.jit
+    def _dflash2_score_edges_fused_kernel(
+        hidden_proj_ptr,
+        unary_ptr,
+        cand_ptr,
+        anchor_ptr,
+        pred_cb_ptr,
+        succ_cb_ptr,
+        out_ptr,
+        num_steps: tl.int32,
+        stride_hb: tl.int64,
+        stride_hl: tl.int64,
+        stride_ub: tl.int64,
+        stride_ul: tl.int64,
+        stride_cb: tl.int64,
+        stride_cl: tl.int64,
+        stride_a: tl.int64,
+        stride_pb: tl.int64,
+        stride_sb: tl.int64,
+        stride_ob: tl.int64,
+        stride_ol: tl.int64,
+        stride_op: tl.int64,
+        TOP_K: tl.constexpr,
+        BLOCK_K: tl.constexpr,
+        RANK: tl.constexpr,
+        BLOCK_R: tl.constexpr,
+    ):
+        pid = tl.program_id(0)
+        b = pid // num_steps
+        l = pid - b * num_steps
+        offs_k = tl.arange(0, BLOCK_K)
+        mask_k = offs_k < TOP_K
+
+        succ_ids = tl.load(cand_ptr + b * stride_cb + l * stride_cl + offs_k, mask=mask_k, other=0).to(tl.int64)
+        if l == 0:
+            anc = tl.load(anchor_ptr + b * stride_a).to(tl.int64)
+            pred_ids = tl.full((BLOCK_K,), anc, dtype=tl.int64)
+        else:
+            pred_ids = tl.load(
+                cand_ptr + b * stride_cb + (l - 1) * stride_cl + offs_k, mask=mask_k, other=0
+            ).to(tl.int64)
+
+        unary = tl.load(unary_ptr + b * stride_ub + l * stride_ul + offs_k, mask=mask_k, other=0.0).to(tl.float32)
+        acc = tl.zeros((BLOCK_K, BLOCK_K), dtype=tl.float32)
+        for r0 in tl.static_range(0, RANK, BLOCK_R):
+            offs_r = r0 + tl.arange(0, BLOCK_R)
+            mask_r = offs_r < RANK
+            h = tl.load(
+                hidden_proj_ptr + b * stride_hb + l * stride_hl + offs_r, mask=mask_r, other=0.0
+            ).to(tl.float32)
+            p_mat = tl.load(
+                pred_cb_ptr + pred_ids[:, None] * stride_pb + offs_r[None, :],
+                mask=mask_k[:, None] & mask_r[None, :],
+                other=0.0,
+            ).to(tl.float32)
+            s_mat = tl.load(
+                succ_cb_ptr + succ_ids[:, None] * stride_sb + offs_r[None, :],
+                mask=mask_k[:, None] & mask_r[None, :],
+                other=0.0,
+            ).to(tl.float32)
+            acc = tl.dot(p_mat * h[None, :], tl.trans(s_mat), acc=acc, input_precision="ieee")
+
+        acc = acc + unary[None, :]
+        out_ptrs = (
+            out_ptr + b * stride_ob + l * stride_ol + offs_k[:, None] * stride_op + offs_k[None, :]
+        )
+        tl.store(out_ptrs, acc, mask=mask_k[:, None] & mask_k[None, :])
 
     @triton.jit
     def _selector_greedy_walk_kernel(
@@ -1426,6 +1513,8 @@ def grouped_conv_ref(
     num_groups: int,
     group_size: int,
     taps: int,
+    *,
+    clip_value: Optional[float] = None,
 ) -> torch.Tensor:
     """Exact PyTorch reference for request-local dynamic grouped conv."""
     if hidden_states.size(0) == 0:
@@ -1449,7 +1538,10 @@ def grouped_conv_ref(
         shifted = F.pad(blocks[:-tap], (0, 0, 0, 0, tap, 0))
         within_request = (position >= tap).view(-1, 1, 1)
         output = output + coefficients[:, tap] * shifted * within_request
-    return output.flatten(-2).to(hidden_states.dtype)
+    out = output.flatten(-2).to(hidden_states.dtype)
+    if clip_value is not None and clip_value > 0:
+        out = out.clamp(-float(clip_value), float(clip_value))
+    return out
 
 
 def grouped_conv_forward(
@@ -1460,6 +1552,8 @@ def grouped_conv_forward(
     num_groups: int,
     group_size: int,
     taps: int,
+    *,
+    clip_value: Optional[float] = None,
 ) -> torch.Tensor:
     num_rows, num_channels = hidden_states.shape
     if num_rows == 0:
@@ -1483,6 +1577,8 @@ def grouped_conv_forward(
         out = torch.empty_like(x_c)
         element_block = 512 if num_channels % 512 == 0 else 256
         grid = (num_rows * triton.cdiv(num_channels, element_block),)
+        has_clip = bool(clip_value is not None and clip_value > 0)
+        eff_clip = float(clip_value) if has_clip else 0.0
         _dflash2_grouped_conv_kernel[grid](
             x_c,
             delta_c,
@@ -1494,6 +1590,8 @@ def grouped_conv_forward(
             base_c.stride(0),
             out.stride(0),
             num_rows,
+            eff_clip,
+            HAS_CLIP=has_clip,
             NUM_CHANNELS=num_channels,
             BLOCK_SIZE=block_size,
             GROUP_SIZE=group_size,
@@ -1503,7 +1601,14 @@ def grouped_conv_forward(
         )
         return out
     return grouped_conv_ref(
-        hidden_states, delta, base, block_size, num_groups, group_size, taps
+        hidden_states,
+        delta,
+        base,
+        block_size,
+        num_groups,
+        group_size,
+        taps,
+        clip_value=clip_value,
     )
 
 
@@ -1548,7 +1653,12 @@ class DFlashGroupedConv(nn.Module):
         )
 
     def _convolve(
-        self, hidden_states: torch.Tensor, delta: torch.Tensor, side: int
+        self,
+        hidden_states: torch.Tensor,
+        delta: torch.Tensor,
+        side: int,
+        *,
+        clip_value: Optional[float] = None,
     ) -> torch.Tensor:
         return grouped_conv_forward(
             hidden_states,
@@ -1558,6 +1668,7 @@ class DFlashGroupedConv(nn.Module):
             self.num_groups,
             self.group_size,
             self.taps,
+            clip_value=clip_value,
         )
 
     def prepare(self, hidden_states: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -1567,9 +1678,13 @@ class DFlashGroupedConv(nn.Module):
         return self._convolve(hidden_states, coefficients[:, 0], 0), coefficients[:, 1]
 
     def finish(
-        self, hidden_states: torch.Tensor, coefficients: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        coefficients: torch.Tensor,
+        *,
+        clip_value: Optional[float] = None,
     ) -> torch.Tensor:
-        return self._convolve(hidden_states, coefficients, 1)
+        return self._convolve(hidden_states, coefficients, 1, clip_value=clip_value)
 
 
 def greedy_select_path_ref(
@@ -1674,6 +1789,72 @@ class CandidateSelector(nn.Module):
     ) -> torch.Tensor:
         """Compute ``[B, L, K, K]`` transition scores from hidden + codebooks."""
         hidden = self.hidden_projection(hidden_states)
+        if (
+            _HAS_TRITON
+            and hidden.is_cuda
+            and candidate_ids.is_cuda
+            and unary_logits.is_cuda
+            and anchor_token_ids.is_cuda
+            and self.predecessor_codebook.is_cuda
+            and self.successor_codebook.is_cuda
+            and candidate_ids.ndim == 3
+            and hidden.ndim == 3
+            and unary_logits.ndim == 3
+            and self.top_k <= 64
+            and self.rank >= 16
+        ):
+            batch_size, num_steps, k_dim = candidate_ids.shape
+            if batch_size > 0 and num_steps > 0 and k_dim == self.top_k:
+                hp = hidden if hidden.stride(-1) == 1 else hidden.contiguous()
+                unary_c = unary_logits if unary_logits.stride(-1) == 1 else unary_logits.contiguous()
+                cand_c = candidate_ids if candidate_ids.stride(-1) == 1 else candidate_ids.contiguous()
+                anc_1d = anchor_token_ids.reshape(-1)
+                pred_cb = (
+                    self.predecessor_codebook
+                    if self.predecessor_codebook.stride(-1) == 1
+                    else self.predecessor_codebook.contiguous()
+                )
+                succ_cb = (
+                    self.successor_codebook
+                    if self.successor_codebook.stride(-1) == 1
+                    else self.successor_codebook.contiguous()
+                )
+                out = torch.empty(
+                    (batch_size, num_steps, self.top_k, self.top_k),
+                    dtype=torch.float32,
+                    device=hidden.device,
+                )
+                block_k = max(16, int(triton.next_power_of_2(self.top_k)))
+                block_r = max(16, min(64, int(triton.next_power_of_2(self.rank))))
+                _dflash2_score_edges_fused_kernel[(batch_size * num_steps,)](
+                    hp,
+                    unary_c,
+                    cand_c,
+                    anc_1d,
+                    pred_cb,
+                    succ_cb,
+                    out,
+                    int(num_steps),
+                    int(hp.stride(0)),
+                    int(hp.stride(1)),
+                    int(unary_c.stride(0)),
+                    int(unary_c.stride(1)),
+                    int(cand_c.stride(0)),
+                    int(cand_c.stride(1)),
+                    int(anc_1d.stride(0)),
+                    int(pred_cb.stride(0)),
+                    int(succ_cb.stride(0)),
+                    int(out.stride(0)),
+                    int(out.stride(1)),
+                    int(out.stride(2)),
+                    TOP_K=self.top_k,
+                    BLOCK_K=block_k,
+                    RANK=self.rank,
+                    BLOCK_R=block_r,
+                    num_warps=4,
+                )
+                return out
+
         cand_l = candidate_ids.long()
         successors = self.successor_codebook[cand_l]
         predecessor_ids = torch.cat(
@@ -1898,9 +2079,8 @@ def _choose_dflash2_tile_and_splits(
     is_fp8_kv: bool = False,
 ) -> Tuple[int, int, int, int]:
     """Select (BLOCK_Q, BLOCK_G, BLOCK_M, num_splits) tuned for L20D/SM100 saturation."""
-    block_g = min(8, max(1, int(triton.next_power_of_2(max(1, gqa_groups)))))
-    if q_len <= 1:
-        block_g = min(16, max(1, int(triton.next_power_of_2(max(1, gqa_groups)))))
+    max_g = 16 if (q_len <= 1 or (q_len >= 4 and gqa_groups >= 16)) else 8
+    block_g = min(max_g, max(1, int(triton.next_power_of_2(max(1, gqa_groups)))))
     target_m = 64 if q_len >= 4 else 16
     max_q_fit = max(1, target_m // block_g)
     block_q = min(max_q_fit, max(1, int(triton.next_power_of_2(max(1, q_len)))))
@@ -1914,8 +2094,10 @@ def _choose_dflash2_tile_and_splits(
         num_splits = 1
     else:
         base_ctas = max(1, batch_size * num_kv_heads * num_q_tiles * num_g_tiles)
-        if base_ctas >= 128:
-            target_splits = 4
+        if base_ctas >= 256:
+            target_splits = 1
+        elif base_ctas >= 128:
+            target_splits = 2 if has_swa else 4
         elif base_ctas >= 64:
             target_splits = 4 if is_fp8_kv else 8
         elif base_ctas >= 32:
@@ -2378,11 +2560,17 @@ class _DFlash2PagedFMHADispatcher(FMHAImplBase):
                     if w is not None:
                         out = w.run(q, (kv_hnd[:, 0], kv_hnd[:, 1]))
                         if output_gate is not None:
-                            n_el = int(out.numel())
-                            gate_f = output_gate.contiguous().reshape(-1)
-                            out_f = out.reshape(-1)
-                            _dflash2_apply_output_gate_kernel[(triton.cdiv(n_el, 512),)](
-                                out_f, gate_f, n_el, BLOCK=512, num_warps=4
+                            gate_v = output_gate.view(total_tokens, head_num, head_dim)
+                            _dflash2_apply_output_gate_kernel[(total_tokens, head_num)](
+                                out,
+                                gate_v,
+                                int(out.stride(0)),
+                                int(out.stride(1)),
+                                int(gate_v.stride(0)),
+                                int(gate_v.stride(1)),
+                                head_dim,
+                                BLOCK_D=block_d,
+                                num_warps=2,
                             )
                         return out
 
@@ -2416,9 +2604,10 @@ class _DFlash2PagedFMHADispatcher(FMHAImplBase):
                 out = torch.empty_like(q)
                 base_ctas = max(1, batch_size * kv_head_num * num_q_tiles * num_g_tiles)
                 if use_fp8_dot:
-                    body_warps, body_stages = 8, 2
+                    body_warps = 4 if base_ctas >= 64 else 8
+                    body_stages = 2
                 elif base_ctas >= 64 or base_ctas < 32:
-                    body_warps, body_stages = 4, 3 if block_n >= 32 else 3
+                    body_warps, body_stages = 4, 3
                 else:
                     body_warps, body_stages = 8, 2
 
@@ -2625,7 +2814,7 @@ class _DFlash2PagedFMHADispatcher(FMHAImplBase):
                     HAS_GATE=has_gate,
                     SPLIT_BLOCK=split_block,
                     BLOCK_D=block_d,
-                    num_warps=4,
+                    num_warps=2 if split_block <= 16 else 4,
                 )
                 return out
 
@@ -3345,9 +3534,9 @@ class Qwen4_5DFlash2DecoderLayer(nn.Module):
             if enable_tbo
             else self.mlp(mixed, use_triton_mxfp4=use_cuda)
         )
-        output = self.mlp_conv.finish(mlp_out, mlp_coeff)
-        if self.clip_mlp_output:
-            output = output.clamp(-self.clip_mlp_output, self.clip_mlp_output)
+        output = self.mlp_conv.finish(
+            mlp_out, mlp_coeff, clip_value=self.clip_mlp_output or None
+        )
         return (output, residual, inject), latent
 
 
@@ -3704,6 +3893,7 @@ class Qwen4_5DSparkModel(DSparkProposerMixin, GptModelBase):
                 int(self.lm_head_weight.shape[1]),
                 int(self.lm_head_weight.shape[0]),
                 eff_mode,
+                allow_decode_scaled_mm=True,
             )
             self._lm_head_version = _tensor_version(self.lm_head_weight)
         else:
@@ -3950,13 +4140,14 @@ class Qwen4_5DSparkModel(DSparkProposerMixin, GptModelBase):
             eff_tbo = self.enable_tbo if enable_tbo is None else bool(enable_tbo)
             eff_eq = self.tbo_equal_tokens if tbo_equal_tokens is None else tbo_equal_tokens
 
+        safe_pos = flat_pos.clamp(min=0)
         deferred = None
         latent = None
         for layer_idx, layer in enumerate(self.layers):
             layer_kv = self._get_layer_full_kv(layer_idx)
             deferred, latent = layer(
                 hidden,
-                flat_pos.clamp(min=0),
+                safe_pos,
                 active_fmha,
                 layer_kv,
                 deferred,
@@ -3984,7 +4175,7 @@ class Qwen4_5DSparkModel(DSparkProposerMixin, GptModelBase):
             + out
         )
 
-    def _linear_lm_head_local(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def _linear_lm_head_local_raw(self, hidden_states: torch.Tensor) -> torch.Tensor:
         x_in = hidden_states.to(self.lm_head_weight.dtype)
         if self._fp8_lm_head is not None:
             if (
@@ -3992,8 +4183,11 @@ class Qwen4_5DSparkModel(DSparkProposerMixin, GptModelBase):
                 and _tensor_version(self.lm_head_weight) != self._lm_head_version
             ):
                 self.prepare_weights()
-            return self._fp8_lm_head(x_in).float()
-        return F.linear(x_in, self.lm_head_weight).float()
+            return self._fp8_lm_head(x_in)
+        return F.linear(x_in, self.lm_head_weight)
+
+    def _linear_lm_head_local(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return self._linear_lm_head_local_raw(hidden_states).float()
 
     def _tp_all_gather_lastdim(self, x: torch.Tensor) -> torch.Tensor:
         if self.fast_all_reduce is not None and self.fast_all_reduce.group is self.tp_group:
@@ -4021,16 +4215,53 @@ class Qwen4_5DSparkModel(DSparkProposerMixin, GptModelBase):
     def vocab_parallel_topk(
         self, hidden_states: torch.Tensor, k: Optional[int] = None
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Vocab-parallel distributed Top-K gathering packed [val, id] in 1 collective."""
+        """Vocab-parallel Top-K in native logits dtype via FlashInfer + packed TP gather."""
         top_k = int(k if k is not None else self.candidate_selector.top_k)
-        logits_local = self._linear_lm_head_local(hidden_states)
-        valid_len = max(0, min(int(logits_local.shape[-1]), self.lm_head_vocab_end - self.lm_head_vocab_start))
+        logits_local = self._linear_lm_head_local_raw(hidden_states)
+        valid_len = max(
+            0, min(int(logits_local.shape[-1]), self.lm_head_vocab_end - self.lm_head_vocab_start)
+        )
         if valid_len < int(logits_local.shape[-1]):
-            logits_local = logits_local.clone()
-            logits_local[..., valid_len:] = float("-inf")
+            if valid_len >= top_k:
+                logits_local = logits_local[..., :valid_len]
+            else:
+                logits_local = logits_local.clone()
+                logits_local[..., valid_len:] = float("-inf")
 
-        local_k = min(top_k, int(logits_local.shape[-1]))
-        local_vals, local_idx = torch.topk(logits_local, local_k, dim=-1)
+        v_local = int(logits_local.shape[-1])
+        local_k = min(top_k, v_local)
+        if (
+            _HAS_FLASHINFER_TOP_K
+            and logits_local.is_cuda
+            and v_local >= 4096
+            and local_k > 0
+            and logits_local.dtype in (torch.float32, torch.bfloat16, torch.float16)
+        ):
+            lead_shape = logits_local.shape[:-1]
+            logits_2d = (
+                logits_local
+                if (logits_local.ndim == 2 and logits_local.is_contiguous())
+                else logits_local.contiguous().reshape(-1, v_local)
+            )
+            if int(logits_2d.shape[0]) == 0:
+                local_vals = torch.empty(
+                    (*lead_shape, local_k), dtype=logits_local.dtype, device=logits_local.device
+                )
+                local_idx = torch.empty(
+                    (*lead_shape, local_k), dtype=torch.int64, device=logits_local.device
+                )
+            else:
+                local_vals_2d, local_idx_2d = _flashinfer.top_k(
+                    logits_2d,
+                    local_k,
+                    sorted=True,
+                    deterministic=True,
+                    tie_break=_flashinfer.TopKTieBreak.SMALL,
+                )
+                local_vals = local_vals_2d.reshape(*lead_shape, local_k)
+                local_idx = local_idx_2d.reshape(*lead_shape, local_k)
+        else:
+            local_vals, local_idx = torch.topk(logits_local, local_k, dim=-1)
         local_ids = local_idx + int(self.lm_head_vocab_start)
 
         if (
@@ -4059,13 +4290,13 @@ class Qwen4_5DSparkModel(DSparkProposerMixin, GptModelBase):
                 )
                 top_vals, top_pos = torch.topk(all_vals, top_k, dim=-1)
                 top_ids = torch.gather(gathered[1], -1, top_pos).to(local_ids.dtype)
-                return top_vals, top_ids
+                return top_vals.float(), top_ids
             all_vals = self._tp_all_gather_lastdim(local_vals)
             all_ids = self._tp_all_gather_lastdim(local_ids)
             top_vals, top_pos = torch.topk(all_vals, top_k, dim=-1)
             top_ids = torch.gather(all_ids, -1, top_pos)
-            return top_vals, top_ids
-        return local_vals, local_ids
+            return top_vals.float(), top_ids
+        return local_vals.float(), local_ids
 
     def propose_with_candidate_selector(
         self,

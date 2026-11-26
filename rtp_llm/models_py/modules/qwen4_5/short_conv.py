@@ -42,6 +42,8 @@ def _causal_dwconv1d_prefill_kernel(
     USE_SILU: tl.constexpr,
     BLOCK_T: tl.constexpr,
     BLOCK_C: tl.constexpr,
+    HAS_CLAMP: tl.constexpr = False,
+    CLAMP_VAL: tl.constexpr = 0.0,
 ):
     batch = tl.program_id(0).to(tl.int64)
     t_start = tl.program_id(1).to(tl.int64) * BLOCK_T
@@ -91,6 +93,9 @@ def _causal_dwconv1d_prefill_kernel(
         acc = acc * tl.sigmoid(acc)
     if RESIDUAL:
         acc = x_cur + acc
+    if HAS_CLAMP:
+        acc = acc.to(OUT_PTR.dtype.element_ty).to(tl.float32)
+        acc = tl.minimum(tl.maximum(acc, -CLAMP_VAL), CLAMP_VAL)
 
     tl.store(
         OUT_PTR + x_batch_base + t_offs[:, None] * C + c_offs[None, :],
@@ -188,6 +193,8 @@ def _causal_dwconv1d_verify_k4_kernel(
     INIT_STATE_PTR,
     STAGE_STATE_PTR,
     OUT_PTR,
+    BT_PTR,
+    SEQ_BEFORE_PTR,
     stride_xb: tl.int64,
     stride_xv: tl.int64,
     stride_xc: tl.int64,
@@ -201,6 +208,12 @@ def _causal_dwconv1d_verify_k4_kernel(
     stride_stv: tl.int64,
     stride_stc: tl.int64,
     stride_stk: tl.int64,
+    stride_bt_b: tl.int64,
+    stride_bt_p: tl.int64,
+    TPB,
+    MAX_BLOCKS,
+    NUM_BLOCKS,
+    POOL_COL_OFF: tl.int64,
     C: tl.constexpr,
     V: tl.constexpr,
     RESIDUAL: tl.constexpr,
@@ -211,16 +224,32 @@ def _causal_dwconv1d_verify_k4_kernel(
     HAS_CLAMP: tl.constexpr,
     CLAMP_VAL: tl.constexpr,
     BLOCK_C: tl.constexpr,
+    IS_OPAQUE_INIT: tl.constexpr = False,
 ):
     """Single-launch K=4 causal dwconv1d across V speculative verify steps in registers."""
     batch = tl.program_id(0).to(tl.int64)
     c_offs = tl.program_id(1).to(tl.int64) * BLOCK_C + tl.arange(0, BLOCK_C).to(tl.int64)
     c_mask = c_offs < C
 
-    s_base = INIT_STATE_PTR + batch * stride_sb + c_offs * stride_sc
-    s0_raw = tl.load(s_base + 0 * stride_sk, mask=c_mask, other=0.0)
-    s1_raw = tl.load(s_base + 1 * stride_sk, mask=c_mask, other=0.0)
-    s2_raw = tl.load(s_base + 2 * stride_sk, mask=c_mask, other=0.0)
+    if IS_OPAQUE_INIT:
+        seq_b = tl.load(SEQ_BEFORE_PTR + batch)
+        has_pfx = seq_b > 0
+        blk_idx = tl.where(has_pfx, (seq_b - 1) // TPB, 0)
+        in_bt = has_pfx & (blk_idx < MAX_BLOCKS)
+        phys = tl.load(
+            BT_PTR + batch * stride_bt_b + tl.minimum(blk_idx, MAX_BLOCKS - 1) * stride_bt_p,
+            mask=in_bt,
+            other=0,
+        ).to(tl.int64)
+        ok_init = in_bt & (phys > 0) & (phys < NUM_BLOCKS)
+        s_base = INIT_STATE_PTR + phys * stride_sb + POOL_COL_OFF + c_offs * stride_sc
+        m_s = ok_init & c_mask
+    else:
+        s_base = INIT_STATE_PTR + batch * stride_sb + c_offs * stride_sc
+        m_s = c_mask
+    s0_raw = tl.load(s_base + 0 * stride_sk, mask=m_s, other=0.0)
+    s1_raw = tl.load(s_base + 1 * stride_sk, mask=m_s, other=0.0)
+    s2_raw = tl.load(s_base + 2 * stride_sk, mask=m_s, other=0.0)
 
     w_base = c_offs * 4
     w0 = tl.load(W_PTR + w_base + 0, mask=c_mask, other=0.0).to(tl.float32)
@@ -556,6 +585,7 @@ def causal_dwconv1d_ref(
     *,
     residual: bool = False,
     use_activation: bool = False,
+    clamp_val: Optional[float] = None,
 ) -> torch.Tensor:
     """Exact pure-PyTorch FP32 reference for causal depthwise conv1d + state update."""
     if x.ndim != 3:
@@ -583,7 +613,10 @@ def causal_dwconv1d_ref(
         y = F.silu(y)
     if residual:
         y = x_t.float() + y
-    return y.transpose(1, 2).contiguous().to(x.dtype)
+    out = y.transpose(1, 2).contiguous().to(x.dtype)
+    if clamp_val is not None:
+        out = out.clamp(-clamp_val, clamp_val)
+    return out
 
 
 def causal_dwconv1d_prefill_triton(
@@ -593,6 +626,7 @@ def causal_dwconv1d_prefill_triton(
     *,
     residual: bool = False,
     use_activation: bool = False,
+    clamp_val: Optional[float] = None,
 ) -> torch.Tensor:
     """Fused Triton causal depthwise conv1d for Prefill / multi-step input [B, T, C].
 
@@ -601,7 +635,12 @@ def causal_dwconv1d_prefill_triton(
     """
     if not x.is_cuda:
         return causal_dwconv1d_ref(
-            x, weight, conv_state, residual=residual, use_activation=use_activation
+            x,
+            weight,
+            conv_state,
+            residual=residual,
+            use_activation=use_activation,
+            clamp_val=clamp_val,
         )
     if x.ndim != 3:
         raise ValueError(f"Expected x of shape [B, T, C], got {tuple(x.shape)}")
@@ -643,6 +682,8 @@ def causal_dwconv1d_prefill_triton(
         USE_SILU=use_activation,
         BLOCK_T=block_t,
         BLOCK_C=block_c,
+        HAS_CLAMP=clamp_val is not None,
+        CLAMP_VAL=float(clamp_val) if clamp_val is not None else 0.0,
         num_warps=num_warps,
     )
 
@@ -686,10 +727,14 @@ def causal_dwconv1d_decode_triton(
     B, T, C = x.shape
     kernel_size = int(weight.shape[-1])
     if T != 1 or kernel_size != 4:
-        out = causal_dwconv1d_prefill_triton(
-            x, weight, conv_state, residual=residual, use_activation=use_activation
+        return causal_dwconv1d_prefill_triton(
+            x,
+            weight,
+            conv_state,
+            residual=residual,
+            use_activation=use_activation,
+            clamp_val=clamp_val,
         )
-        return out.clamp(-clamp_val, clamp_val) if clamp_val is not None else out
 
     if tuple(conv_state.shape) != (B, C, 3):
         raise ValueError(
@@ -776,29 +821,78 @@ def causal_dwconv1d_verify_triton(
     if B == 0:
         return out
 
-    has_stage = stage_states is not None
-    st_ptr = stage_states if has_stage else out
-    block_c = 256 if C <= 512 else 512
-    num_warps = 4 if block_c <= 256 else 8
-    _causal_dwconv1d_verify_k4_kernel[(B, triton.cdiv(C, block_c))](
+    return _launch_verify_k4_kernel(
         x,
         w_c,
         init_state,
+        stage_states,
+        out,
+        stride_sb=int(init_state.stride(0)),
+        stride_sc=int(init_state.stride(1)),
+        stride_sk=int(init_state.stride(2)),
+        residual=residual,
+        use_activation=use_activation,
+        round_pre_act=round_pre_act,
+        clamp_val=clamp_val,
+        update_init_inplace=update_init_inplace,
+        is_opaque_init=False,
+    )
+
+
+def _launch_verify_k4_kernel(
+    x: torch.Tensor,
+    w_c: torch.Tensor,
+    init_or_pool: torch.Tensor,
+    stage_states: Optional[torch.Tensor],
+    out: torch.Tensor,
+    *,
+    stride_sb: int,
+    stride_sc: int,
+    stride_sk: int,
+    residual: bool,
+    use_activation: bool,
+    round_pre_act: bool,
+    clamp_val: Optional[float],
+    update_init_inplace: bool,
+    is_opaque_init: bool,
+    block_table: Optional[torch.Tensor] = None,
+    seq_before: Optional[torch.Tensor] = None,
+    page_size: int = 1,
+    pool_col_offset: int = 0,
+) -> torch.Tensor:
+    B, V, C = int(x.shape[0]), int(x.shape[1]), int(x.shape[2])
+    has_stage = stage_states is not None
+    st_ptr = stage_states if has_stage else out
+    bt_ptr = block_table if block_table is not None else x
+    seq_ptr = seq_before if seq_before is not None else x
+    block_c = 128 if C > 512 else 256
+    _causal_dwconv1d_verify_k4_kernel[(B, triton.cdiv(C, block_c))](
+        x,
+        w_c,
+        init_or_pool,
         st_ptr,
         out,
+        bt_ptr,
+        seq_ptr,
         int(x.stride(0)),
         int(x.stride(1)),
         int(x.stride(2)),
         int(out.stride(0)),
         int(out.stride(1)),
         int(out.stride(2)),
-        int(init_state.stride(0)),
-        int(init_state.stride(1)),
-        int(init_state.stride(2)),
-        int(stage_states.stride(0)) if has_stage else 0,
-        int(stage_states.stride(1)) if has_stage else 0,
-        int(stage_states.stride(2)) if has_stage else 0,
-        int(stage_states.stride(3)) if has_stage else 0,
+        stride_sb,
+        stride_sc,
+        stride_sk,
+        int(stage_states.stride(0)) if has_stage and stage_states is not None else 0,
+        int(stage_states.stride(1)) if has_stage and stage_states is not None else 0,
+        int(stage_states.stride(2)) if has_stage and stage_states is not None else 0,
+        int(stage_states.stride(3)) if has_stage and stage_states is not None else 0,
+        int(block_table.stride(0)) if block_table is not None else 0,
+        int(block_table.stride(1)) if block_table is not None else 0,
+        int(page_size),
+        int(block_table.shape[1]) if block_table is not None and block_table.ndim >= 2 else 0,
+        int(init_or_pool.shape[0]) if is_opaque_init else 0,
+        int(pool_col_offset),
         C=C,
         V=V,
         RESIDUAL=residual,
@@ -809,9 +903,68 @@ def causal_dwconv1d_verify_triton(
         HAS_CLAMP=clamp_val is not None,
         CLAMP_VAL=float(clamp_val) if clamp_val is not None else 0.0,
         BLOCK_C=block_c,
-        num_warps=num_warps,
+        IS_OPAQUE_INIT=is_opaque_init,
+        num_warps=4,
     )
     return out
+
+
+def causal_dwconv1d_verify_opaque_triton(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    pool_2d: torch.Tensor,
+    block_table: torch.Tensor,
+    seq_before: torch.Tensor,
+    stage_states: Optional[torch.Tensor] = None,
+    *,
+    page_size: int,
+    pool_col_offset: int = 0,
+    residual: bool = False,
+    use_activation: bool = False,
+    round_pre_act: bool = False,
+    clamp_val: Optional[float] = None,
+) -> torch.Tensor:
+    """Single-launch K=4 verify conv1d reading init_state directly from opaque pool."""
+    if x.ndim != 3:
+        raise ValueError(f"Expected x of shape [B, V, C], got {tuple(x.shape)}")
+    B, V, C = int(x.shape[0]), int(x.shape[1]), int(x.shape[2])
+    if (
+        not x.is_cuda
+        or int(weight.shape[-1]) != 4
+        or V <= 0
+        or V > 16
+        or x.stride(-1) != 1
+        or pool_2d.ndim != 2
+        or pool_2d.dtype != x.dtype
+        or pool_2d.stride(1) != 1
+        or page_size <= 0
+    ):
+        raise ValueError("Unsupported configuration for direct-opaque ShortConv verify kernel")
+
+    out = torch.empty((B, V, C), dtype=x.dtype, device=x.device)
+    if B == 0:
+        return out
+
+    return _launch_verify_k4_kernel(
+        x,
+        weight.contiguous(),
+        pool_2d,
+        stage_states,
+        out,
+        stride_sb=int(pool_2d.stride(0)),
+        stride_sc=3,
+        stride_sk=1,
+        residual=residual,
+        use_activation=use_activation,
+        round_pre_act=round_pre_act,
+        clamp_val=clamp_val,
+        update_init_inplace=False,
+        is_opaque_init=True,
+        block_table=block_table,
+        seq_before=seq_before,
+        page_size=page_size,
+        pool_col_offset=pool_col_offset,
+    )
 
 
 def causal_dwconv1d_ragged_prefill_with_snapshots_triton(
@@ -1194,6 +1347,8 @@ class Qwen4_5ShortConv(nn.Module):
         self,
         x: torch.Tensor,
         state: Optional[ConvStateLike] = None,
+        *,
+        clip_value: Optional[float] = None,
     ) -> torch.Tensor:
         squeeze_batch = False
         if x.ndim == 2:
@@ -1213,6 +1368,7 @@ class Qwen4_5ShortConv(nn.Module):
                     conv_state,
                     residual=self.residual,
                     use_activation=self.use_activation,
+                    clamp_val=clip_value,
                 )
             else:
                 y = causal_dwconv1d_prefill_triton(
@@ -1221,6 +1377,7 @@ class Qwen4_5ShortConv(nn.Module):
                     conv_state,
                     residual=self.residual,
                     use_activation=self.use_activation,
+                    clamp_val=clip_value,
                 )
         else:
             y = causal_dwconv1d_ref(
@@ -1229,6 +1386,7 @@ class Qwen4_5ShortConv(nn.Module):
                 conv_state,
                 residual=self.residual,
                 use_activation=self.use_activation,
+                clamp_val=clip_value,
             )
 
         return y.squeeze(0) if squeeze_batch else y
@@ -1237,6 +1395,8 @@ class Qwen4_5ShortConv(nn.Module):
         self,
         x: torch.Tensor,
         state: Optional[ConvStateLike] = None,
+        *,
+        clip_value: Optional[float] = None,
     ) -> torch.Tensor:
         """Pure-PyTorch FP32 reference forward (updates state in-place if provided)."""
         squeeze_batch = False
@@ -1252,5 +1412,6 @@ class Qwen4_5ShortConv(nn.Module):
             conv_state,
             residual=self.residual,
             use_activation=self.use_activation,
+            clamp_val=clip_value,
         )
         return y.squeeze(0) if squeeze_batch else y

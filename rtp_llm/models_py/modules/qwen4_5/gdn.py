@@ -102,6 +102,9 @@ def compute_gdn_gating(
     dt_bias: torch.Tensor,
     num_k_heads: int,
     num_v_heads: int,
+    *,
+    out_g: Optional[torch.Tensor] = None,
+    out_beta: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Unpack interleaved ``in_proj_ba`` output and compute ``(g, beta)`` in FP32.
 
@@ -110,6 +113,8 @@ def compute_gdn_gating(
             ``H_k`` groups of ``[b (group_v), a (group_v)]``.
         a_log: Parameter ``A_log`` of shape ``[H_v]``.
         dt_bias: Parameter ``dt_bias`` of shape ``[H_v]``.
+        out_g: Optional preallocated output buffer for ``g`` ``[B, T, H_v]`` fp32.
+        out_beta: Optional preallocated output buffer for ``beta`` ``[B, T, H_v]`` fp32.
 
     Returns:
         ``(g, beta)``, each FP32 of shape ``[B, T, H_v]``.
@@ -126,8 +131,16 @@ def compute_gdn_gating(
         and a_log.is_contiguous()
         and dt_bias.is_contiguous()
     ):
-        g = torch.empty((bsz, seq_len, num_v_heads), dtype=torch.float32, device=ba_interleaved.device)
-        beta = torch.empty((bsz, seq_len, num_v_heads), dtype=torch.float32, device=ba_interleaved.device)
+        g = (
+            out_g
+            if (out_g is not None and tuple(out_g.shape) == (bsz, seq_len, num_v_heads) and out_g.dtype == torch.float32)
+            else torch.empty((bsz, seq_len, num_v_heads), dtype=torch.float32, device=ba_interleaved.device)
+        )
+        beta = (
+            out_beta
+            if (out_beta is not None and tuple(out_beta.shape) == (bsz, seq_len, num_v_heads) and out_beta.dtype == torch.float32)
+            else torch.empty((bsz, seq_len, num_v_heads), dtype=torch.float32, device=ba_interleaved.device)
+        )
         _gdn_gating_ba_interleaved_kernel[(bsz * seq_len,)](
             ba_interleaved,
             a_log,
@@ -155,6 +168,12 @@ def compute_gdn_gating(
     a = a_g.reshape(bsz, seq_len, num_v_heads).float()
     g = -torch.exp(a_log.float()) * F.softplus(a + dt_bias.float())
     beta = torch.sigmoid(b)
+    if out_g is not None:
+        out_g.copy_(g)
+        g = out_g
+    if out_beta is not None:
+        out_beta.copy_(beta)
+        beta = out_beta
     return g, beta
 
 
@@ -187,40 +206,82 @@ def _rms_norm_gated_kernel(
     GQA_RATIO: tl.constexpr,
     D: tl.constexpr,
     USE_SIGMOID: tl.constexpr,
+    H_V: tl.constexpr = 1,
+    BLOCK_H: tl.constexpr = 1,
 ):
     """Per-head RMSNorm (standard weight, NOT 1+w) followed by sigmoid/silu gating."""
     bt = tl.program_id(0).to(tl.int64)
-    h = tl.program_id(1).to(tl.int64)
+    hb = tl.program_id(1).to(tl.int64)
     b = bt // T
     t = bt % T
 
     offs = tl.arange(0, D)
-    x = tl.load(X_ptr + b * stride_xb + t * stride_xt + h * stride_xh + offs * stride_xd).to(tl.float32)
-    if GQA_RATIO > 1:
-        h_k = h // GQA_RATIO
-        h_sub = h % GQA_RATIO
-        z = tl.load(
-            Z_ptr
-            + b * stride_zb
-            + t * stride_zt
-            + h_k * stride_zhk
-            + h_sub * stride_zsub
-            + offs * stride_zd
-        ).to(tl.float32)
-    else:
-        z = tl.load(
-            Z_ptr + b * stride_zb + t * stride_zt + h * stride_zhk + offs * stride_zd
-        ).to(tl.float32)
-    w = tl.load(W_ptr + offs).to(tl.float32)
+    if BLOCK_H == 1:
+        h = hb
+        x = tl.load(X_ptr + b * stride_xb + t * stride_xt + h * stride_xh + offs * stride_xd).to(tl.float32)
+        if GQA_RATIO > 1:
+            h_k = h // GQA_RATIO
+            h_sub = h % GQA_RATIO
+            z = tl.load(
+                Z_ptr
+                + b * stride_zb
+                + t * stride_zt
+                + h_k * stride_zhk
+                + h_sub * stride_zsub
+                + offs * stride_zd
+            ).to(tl.float32)
+        else:
+            z = tl.load(
+                Z_ptr + b * stride_zb + t * stride_zt + h * stride_zhk + offs * stride_zd
+            ).to(tl.float32)
+        w = tl.load(W_ptr + offs).to(tl.float32)
 
-    rstd = tl.rsqrt(tl.sum(x * x, axis=0) * (1.0 / D) + eps)
-    y = (x * rstd) * w
-    gate = tl.sigmoid(z) if USE_SIGMOID else (z * tl.sigmoid(z))
-    y = y * gate
-    tl.store(
-        Y_ptr + b * stride_yb + t * stride_yt + h * stride_yh + offs * stride_yd,
-        y.to(Y_ptr.dtype.element_ty),
-    )
+        rstd = tl.rsqrt(tl.sum(x * x, axis=0) * (1.0 / D) + eps)
+        y = (x * rstd) * w
+        gate = tl.sigmoid(z) if USE_SIGMOID else (z * tl.sigmoid(z))
+        y = y * gate
+        tl.store(
+            Y_ptr + b * stride_yb + t * stride_yt + h * stride_yh + offs * stride_yd,
+            y.to(Y_ptr.dtype.element_ty),
+        )
+    else:
+        hs = hb * BLOCK_H + tl.arange(0, BLOCK_H)
+        h_mask = hs < H_V
+        x = tl.load(
+            X_ptr + b * stride_xb + t * stride_xt + hs[:, None] * stride_xh + offs[None, :] * stride_xd,
+            mask=h_mask[:, None],
+            other=0.0,
+        ).to(tl.float32)
+        if GQA_RATIO > 1:
+            h_k = hs // GQA_RATIO
+            h_sub = hs % GQA_RATIO
+            z = tl.load(
+                Z_ptr
+                + b * stride_zb
+                + t * stride_zt
+                + h_k[:, None] * stride_zhk
+                + h_sub[:, None] * stride_zsub
+                + offs[None, :] * stride_zd,
+                mask=h_mask[:, None],
+                other=0.0,
+            ).to(tl.float32)
+        else:
+            z = tl.load(
+                Z_ptr + b * stride_zb + t * stride_zt + hs[:, None] * stride_zhk + offs[None, :] * stride_zd,
+                mask=h_mask[:, None],
+                other=0.0,
+            ).to(tl.float32)
+        w = tl.load(W_ptr + offs).to(tl.float32)
+
+        rstd = tl.rsqrt(tl.sum(x * x, axis=1) * (1.0 / D) + eps)[:, None]
+        y = (x * rstd) * w[None, :]
+        gate = tl.sigmoid(z) if USE_SIGMOID else (z * tl.sigmoid(z))
+        y = y * gate
+        tl.store(
+            Y_ptr + b * stride_yb + t * stride_yt + hs[:, None] * stride_yh + offs[None, :] * stride_yd,
+            y.to(Y_ptr.dtype.element_ty),
+            mask=h_mask[:, None],
+        )
 
 
 class RMSNormGated(nn.Module):
@@ -285,7 +346,8 @@ class RMSNormGated(nn.Module):
                     0,
                     gate.stride(3),
                 )
-            _rms_norm_gated_kernel[(bsz * seq_len, num_heads)](
+            block_h = 4 if (num_heads % 4 == 0 and dim <= 128) else 1
+            _rms_norm_gated_kernel[(bsz * seq_len, triton.cdiv(num_heads, block_h))](
                 x,
                 gate,
                 self.weight,
@@ -308,7 +370,9 @@ class RMSNormGated(nn.Module):
                 GQA_RATIO=gqa_ratio,
                 D=dim,
                 USE_SIGMOID=(self.activation == "sigmoid"),
-                num_warps=2 if dim <= 64 else 4,
+                H_V=num_heads,
+                BLOCK_H=block_h,
+                num_warps=2 if (block_h > 1 or dim <= 64) else 4,
             )
             return out
 
@@ -1752,16 +1816,18 @@ def _yoco_gdn_verify_readout_kernel(
     GQA_RATIO: tl.constexpr,
     D_K: tl.constexpr,
     D_V: tl.constexpr,
+    BLOCK_DV: tl.constexpr = 64,
 ):
     """Fused batched V-step YoCo GDN verify readout against source per-step SSM states."""
     bv = tl.program_id(0).to(tl.int64)
     h_v = tl.program_id(1).to(tl.int64)
+    dv = tl.program_id(2).to(tl.int64)
     b = bv // V_STEPS
     t = bv % V_STEPS
     h_k = h_v // GQA_RATIO
 
     offs_k = tl.arange(0, D_K)
-    offs_v = tl.arange(0, D_V)
+    offs_v = dv * BLOCK_DV + tl.arange(0, BLOCK_DV)
 
     q = tl.load(
         Q_ptr + b * stride_qb + t * stride_qv + h_k * stride_qhk + offs_k * stride_qd
@@ -1774,7 +1840,8 @@ def _yoco_gdn_verify_readout_kernel(
         + t * stride_sv
         + h_v * stride_shv
         + offs_k[:, None] * stride_sk
-        + offs_v[None, :] * stride_svv
+        + offs_v[None, :] * stride_svv,
+        eviction_policy="evict_first",
     ).to(tl.float32)
 
     out = tl.sum(s * q_scaled[:, None], axis=0)
@@ -2410,7 +2477,7 @@ def gdn_chunk_prefill_ragged_with_snapshots_triton(
         GQA_RATIO=gqa_ratio,
         D_K=64,
         D_V=64,
-        num_warps=2 if (bsz >= 4 and num_chunks >= 128) else 4,
+        num_warps=2 if num_chunks >= 32 else 4,
         num_stages=1 if (bsz >= 4 and num_chunks >= 128) else 2,
     )
 
@@ -2439,7 +2506,7 @@ def gdn_chunk_prefill_ragged_with_snapshots_triton(
             raise ValueError(f"ssm_dst_pool dtype {ssm_dst_pool.dtype} must be >= 4 bytes")
         dst_stride_blk = int(ssm_dst_pool.stride(0)) * elem_scale
 
-    block_dv_s2 = 16 if (bsz * num_v_heads <= 128 and num_chunks >= 128) else 64
+    block_dv_s2 = 32 if (bsz * num_v_heads <= 128 and num_chunks >= 128) else 64
     _gdn_chunk_state_recurrence_ragged_kernel[(bsz, num_v_heads, 64 // block_dv_s2)](
         k,
         g_cum,
@@ -2498,7 +2565,7 @@ def gdn_chunk_prefill_ragged_with_snapshots_triton(
         SKIP_INVALID_PHYS=skip_invalid_phys,
         BLOCK_DV=block_dv_s2,
         num_warps=2 if (block_dv_s2 < 64 or bsz >= 4) else 4,
-        num_stages=1 if (bsz >= 4 and num_chunks >= 128) else 2,
+        num_stages=2,
     )
 
     _gdn_chunk_output_ragged_kernel[(num_v_heads, num_chunks)](
@@ -2536,7 +2603,7 @@ def gdn_chunk_prefill_ragged_with_snapshots_triton(
         GQA_RATIO=gqa_ratio,
         D_K=64,
         D_V=64,
-        num_warps=4,
+        num_warps=8 if num_chunks >= 64 else 4,
         num_stages=1 if (bsz >= 4 and num_chunks >= 128) else 2,
     )
 
@@ -3410,7 +3477,14 @@ class Qwen4_5GatedDeltaNet(nn.Module):
                     device=device,
                 )
                 s_st = shared.ssm_state
-                _yoco_gdn_verify_readout_kernel[(bsz * verify_w, self.num_v_heads)](
+                block_dv_ro = (
+                    32
+                    if (bsz * verify_w * self.num_v_heads >= 512 and self.head_v_dim % 32 == 0)
+                    else self.head_v_dim
+                )
+                _yoco_gdn_verify_readout_kernel[
+                    (bsz * verify_w, self.num_v_heads, self.head_v_dim // block_dv_ro)
+                ](
                     q,
                     s_st,
                     core_out,
@@ -3433,7 +3507,8 @@ class Qwen4_5GatedDeltaNet(nn.Module):
                     GQA_RATIO=self.gqa_ratio,
                     D_K=self.head_k_dim,
                     D_V=self.head_v_dim,
-                    num_warps=1 if bsz >= 2 else 2,
+                    BLOCK_DV=block_dv_ro,
+                    num_warps=1 if (block_dv_ro < 64 or bsz >= 2) else 2,
                 )
             else:
                 core_out = self._launch_gdn_verify_scan(
@@ -3463,6 +3538,8 @@ class Qwen4_5GatedDeltaNet(nn.Module):
             self.dt_bias,
             num_k_heads=self.num_k_heads,
             num_v_heads=self.num_v_heads,
+            out_g=lazy_kvgb_buffers[2][:bsz] if lazy_kvgb_buffers is not None else None,
+            out_beta=lazy_kvgb_buffers[3][:bsz] if lazy_kvgb_buffers is not None else None,
         )
 
         if self._can_use_fused_unpack_conv(qkvz):
@@ -3470,8 +3547,6 @@ class Qwen4_5GatedDeltaNet(nn.Module):
             if lazy_kvgb_buffers is not None:
                 k = lazy_kvgb_buffers[0][:bsz]
                 v = lazy_kvgb_buffers[1][:bsz]
-                lazy_kvgb_buffers[2][:bsz].copy_(g)
-                lazy_kvgb_buffers[3][:bsz].copy_(beta)
             else:
                 k = torch.empty((bsz, verify_w, self.num_k_heads, self.head_k_dim), dtype=dtype, device=device)
                 v = torch.empty((bsz, verify_w, self.num_v_heads, self.head_v_dim), dtype=dtype, device=device)
@@ -3538,8 +3613,6 @@ class Qwen4_5GatedDeltaNet(nn.Module):
             if lazy_kvgb_buffers is not None:
                 lazy_kvgb_buffers[0][:bsz].copy_(k)
                 lazy_kvgb_buffers[1][:bsz].copy_(v)
-                lazy_kvgb_buffers[2][:bsz].copy_(g)
-                lazy_kvgb_buffers[3][:bsz].copy_(beta)
 
         core_out = self._launch_gdn_verify_scan(
             q,

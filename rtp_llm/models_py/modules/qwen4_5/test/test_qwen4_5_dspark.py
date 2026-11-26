@@ -2335,6 +2335,10 @@ class TestDFlash2Phase2MHAAndTP4(unittest.TestCase):
 
         self.assertIsNotNone(m1_auto._fp8_fc)
         self.assertIsNotNone(m1_auto._fp8_lm_head)
+        self.assertTrue(m1_auto._fp8_lm_head._allow_decode_scaled_mm)
+        self.assertFalse(m1_auto._fp8_fc._allow_decode_scaled_mm)
+        self.assertFalse(m1_auto.layers[0].self_attn._fp8_qkvg._allow_decode_scaled_mm)
+        self.assertFalse(m1_auto.layers[0].self_attn._fp8_o_proj._allow_decode_scaled_mm)
         self.assertEqual(m1_auto._fp8_fc.weight.data_ptr(), m1_auto.fc.weight.data_ptr())
         self.assertEqual(m1_auto._fp8_lm_head.weight.data_ptr(), m1_auto.lm_head_weight.data_ptr())
         self.assertIsNotNone(m1_auto.layers[0].self_attn._fp8_qkvg)
@@ -2674,6 +2678,165 @@ class TestDFlash2Phase2MHAAndTP4(unittest.TestCase):
         cos_5_fp8_sim = F.cosine_similarity(h_fp8_s.float().reshape(-1), h_sim_s.float().reshape(-1), dim=0).item()
         self.assertGreaterEqual(cos_5_fp8_fi, 0.95, f"5L Triton FP8-KV vs FI: {cos_5_fp8_fi}")
         self.assertGreaterEqual(cos_5_fp8_sim, 0.99, f"5L Triton FP8-KV vs FP8-sim: {cos_5_fp8_sim}")
+
+    @torch.no_grad()
+    def test_dflash2_r4_flashinfer_topk_fused_selector_conv_clip_and_strided_gate_gpu(self) -> None:
+        """Verify R4 FlashInfer BF16 Top-K (M=0 guard, V=62080/padding, CG determinism), fused CandidateSelector, Conv+clip, and strided gate."""
+        import rtp_llm.models_py.model_desc.qwen4_5_dspark_model as dm
+        import torch.nn.functional as F
+
+        device = torch.device("cuda:0")
+        _cpu_rng = torch.random.get_rng_state()
+        _cuda_rng = torch.cuda.get_rng_state(device)
+        self.addCleanup(torch.cuda.set_rng_state, _cuda_rng, device)
+        self.addCleanup(torch.random.set_rng_state, _cpu_rng)
+        torch.manual_seed(4242)
+
+        # 1) Native BF16 vocab_parallel_topk (padded local vocab, M=0 guard, CG determinism)
+        class _TopKStub:
+            def __init__(self, v_size: int, w_rows: int) -> None:
+                self.vocab_size = v_size
+                self.lm_head_vocab_start = 0
+                self.lm_head_vocab_end = v_size
+                self.tp_size = 1
+                self.tp_rank = 0
+                self.tp_group = None
+                self._fp8_lm_head = None
+                self.lm_head_weight = torch.randn((w_rows, 256), dtype=torch.bfloat16, device=device) * 0.2
+                self.spec = type("_S", (), {"vocab_size": v_size})()
+
+            def _linear_lm_head_local_raw(self, hidden):
+                return dm.Qwen4_5DSparkModel._linear_lm_head_local_raw(self, hidden)
+
+        stub = _TopKStub(62080, 62088)
+        x_tk = torch.randn((32, 8, 256), dtype=torch.bfloat16, device=device)
+        vals_new, idx_new = dm.Qwen4_5DSparkModel.vocab_parallel_topk(stub, x_tk, 16)
+        logits_ref = F.linear(x_tk, stub.lm_head_weight[:62080]).float()
+        vals_ref, idx_ref = torch.topk(logits_ref, k=16, dim=-1, largest=True, sorted=True)
+        self.assertEqual(tuple(vals_new.shape), (32, 8, 16))
+        self.assertEqual(tuple(idx_new.shape), (32, 8, 16))
+        self.assertEqual(float((vals_new - vals_ref).abs().max().item()), 0.0)
+        strict_mask = torch.ones_like(vals_ref, dtype=torch.bool)
+        strict_mask[..., :-1] &= vals_ref[..., :-1] > vals_ref[..., 1:]
+        strict_mask[..., 1:] &= vals_ref[..., 1:] < vals_ref[..., :-1]
+        if bool(strict_mask.any()):
+            self.assertTrue(torch.equal(idx_new[strict_mask], idx_ref[strict_mask]))
+
+        # Empty M=0 DP rank guard must not call flashinfer.top_k(M=0) and raise
+        x_empty = torch.empty((0, 256), dtype=torch.bfloat16, device=device)
+        ve, ie = dm.Qwen4_5DSparkModel.vocab_parallel_topk(stub, x_empty, 16)
+        self.assertEqual((tuple(ve.shape), tuple(ie.shape)), ((0, 16), (0, 16)))
+
+        # CUDA Graph capture + replay determinism (TopKTieBreak.SMALL)
+        static_x = x_tk[:4].clone()
+        _ = dm.Qwen4_5DSparkModel.vocab_parallel_topk(stub, static_x, 16)
+        g_tk = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g_tk):
+            cg_vals, cg_idx = dm.Qwen4_5DSparkModel.vocab_parallel_topk(stub, static_x, 16)
+        g_tk.replay()
+        torch.cuda.synchronize()
+        self.assertTrue(torch.equal(cg_vals, vals_new[:4]))
+        self.assertTrue(torch.equal(cg_idx, idx_new[:4]))
+        del stub, x_tk, logits_ref, g_tk
+        torch.cuda.empty_cache()
+
+        # 2) Fused Triton CandidateSelector.score_edges vs PyTorch ref + CG replay
+        cs = dm.CandidateSelector(
+            hidden_size=512, vocab_size=1024, rank=256, top_k=16, dtype=torch.bfloat16, device=device
+        )
+        with torch.no_grad():
+            cs.hidden_projection.weight.normal_(0.0, 0.05)
+            cs.predecessor_codebook.normal_(0.0, 0.1)
+            cs.successor_codebook.normal_(0.0, 0.1)
+        cands = torch.randint(0, 1024, (16, 8, 16), dtype=torch.long, device=device)
+        unary = torch.randn((16, 8, 16), dtype=torch.float32, device=device)
+        hid_cs = torch.randn((16, 8, 512), dtype=torch.bfloat16, device=device)
+        anchors = torch.randint(0, 1024, (16,), dtype=torch.long, device=device)
+
+        edge_tri = cs.score_edges(cands, unary, hid_cs, anchors)
+        prev_flag = dm._HAS_TRITON
+        dm._HAS_TRITON = False
+        try:
+            edge_pt = cs.score_edges(cands, unary, hid_cs, anchors)
+        finally:
+            dm._HAS_TRITON = prev_flag
+        self.assertGreaterEqual(
+            F.cosine_similarity(edge_tri.reshape(-1), edge_pt.reshape(-1), dim=0).item(),
+            0.99999,
+        )
+        self.assertTrue(
+            torch.equal(
+                greedy_select_path_ref(cands, edge_tri),
+                greedy_select_path_ref(cands, edge_pt),
+            )
+        )
+        g_cs = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g_cs):
+            cg_edge = cs.score_edges(cands, unary, hid_cs, anchors)
+        g_cs.replay()
+        torch.cuda.synchronize()
+        self.assertTrue(torch.equal(cg_edge, edge_tri))
+        del cs, g_cs
+
+        # 3) Fused DFlashGroupedConv.finish(..., clip_value=...) parity + CG replay
+        gc_mod = dm.DFlashGroupedConv(hidden_size=512, dtype=torch.bfloat16, device=device)
+        h_gc = torch.randn((64, 512), dtype=torch.bfloat16, device=device) * 2.5
+        c_gc = torch.randn((64, gc_mod.taps * gc_mod.num_groups), dtype=torch.bfloat16, device=device) * 0.25
+        y_fused = gc_mod.finish(h_gc, c_gc, clip_value=1.5)
+        y_ref = gc_mod.finish(h_gc, c_gc, clip_value=None).clamp(-1.5, 1.5)
+        self.assertEqual(float((y_fused - y_ref).abs().max().item()), 0.0)
+        g_gc = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g_gc):
+            cg_gc = gc_mod.finish(h_gc, c_gc, clip_value=1.5)
+        g_gc.replay()
+        torch.cuda.synchronize()
+        self.assertTrue(torch.equal(cg_gc, y_fused))
+        del gc_mod, g_gc
+
+        # 4) FlashInfer strided non-contiguous output_gate (fused qkvg slice) parity
+        from rtp_llm.models_py.model_desc.qwen4_5_dspark_model import _DFlash2SplitKVWorkspace
+        from rtp_llm.ops import AttentionConfigs
+
+        page_size = 16
+        kv_buf = torch.randn((4, 2, 1, page_size, 256), dtype=torch.bfloat16, device=device) * 0.05
+        kv_snap = kv_buf.clone()
+        kv_obj = type("_KV", (), {"kv_cache_base": kv_buf})()
+        bt = torch.tensor([[0, 1], [2, 3]], dtype=torch.int32, device=device)
+        pref = torch.tensor([12, 9], dtype=torch.int32, device=device)
+        act = torch.ones((2,), dtype=torch.bool, device=device)
+        pos = (pref[:, None] + torch.arange(8, dtype=torch.int32, device=device)[None, :]).reshape(-1)
+
+        ai = type("_AI", (), {})()
+        ai.kv_cache_kernel_block_id_device = bt
+        ai.prefix_lengths = pref
+        ai.input_lengths = torch.full((2,), 8, dtype=torch.int32, device=device)
+
+        attn_cfg = AttentionConfigs()
+        attn_cfg.head_num = 8
+        attn_cfg.kv_head_num = 1
+        attn_cfg.size_per_head = 256
+        attn_cfg.kernel_tokens_per_block = page_size
+        attn_cfg.is_causal = False
+        attn_cfg.dtype = torch.bfloat16
+
+        ws = _DFlash2SplitKVWorkspace(2, 8, 8, 64, 256, device=device)
+        fi_disp = dm._DFlash2PagedFMHADispatcher(
+            attn_cfg, ai, use_triton_paged=True, use_flashinfer=True, is_cuda_graph=True,
+            window_lefts=(2048, -1), fi_workspace_holder=[],
+            query_positions=pos, prefix_lengths=pref, active_requests=act, query_width=8, split_kv_workspace=ws,
+        )
+        fi_disp.prepare_cuda_graph(ai)
+
+        qkvg = torch.randn((16, 8 * 256 + 2 * 256 + 8 * 256), dtype=torch.bfloat16, device=device) * 0.1
+        q_s = qkvg[:, : 8 * 256].view(16, 8, 256)
+        k_s = qkvg[:, 8 * 256 : 9 * 256].view(16, 1, 256)
+        v_s = qkvg[:, 9 * 256 : 10 * 256].view(16, 1, 256)
+        g_strided = qkvg[:, 10 * 256 :].view(16, 8, 256)
+        self.assertFalse(g_strided.is_contiguous())
+        out_strided = fi_disp.append_and_attend(q_s, k_s, v_s, kv_obj, output_gate=g_strided)
+        kv_buf.copy_(kv_snap)
+        out_contig = fi_disp.append_and_attend(q_s, k_s, v_s, kv_obj, output_gate=g_strided.contiguous())
+        self.assertEqual(float((out_strided - out_contig).abs().max().item()), 0.0)
 
 @torch.no_grad()
 def _dflash2_gloo_tp4_worker(rank: int, world_size: int, port: int, err_q) -> None:

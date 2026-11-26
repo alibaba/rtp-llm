@@ -21,6 +21,7 @@ FP8/MXFP8 modes and 4x weight compression in opt-in ``w4a8`` mode:
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import os
 from typing import Any, Dict, Optional, Tuple
@@ -43,6 +44,16 @@ _QUANT_EPS = 1.0e-12
 _TRTLLM_PERM_CACHE: Dict[torch.Size, torch.Tensor] = {}
 _MXFP8_PROBE_CACHE: Dict[int, bool] = {}
 _TRTLLM_LL_PROBE_CACHE: Dict[int, bool] = {}
+
+
+def _cuda_device_ctx(device: torch.device):
+    if (
+        device.type == "cuda"
+        and device.index is not None
+        and device.index != torch.cuda.current_device()
+    ):
+        return torch.cuda.device(device)
+    return contextlib.nullcontext()
 
 
 def has_flashinfer_mxfp8(device_index: int = 0) -> bool:
@@ -243,9 +254,10 @@ def quantize_fp8_rowwise_triton(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Te
     if M == 0 or K == 0:
         return q, sc
     BK = min(4096, triton.next_power_of_2(K))
-    _quant_fp8_rowwise_kernel[(M,)](
-        x_2d, q, sc, M, K, x_2d.stride(0), q.stride(0), BLOCK_K=BK, num_warps=8
-    )
+    with _cuda_device_ctx(x_2d.device):
+        _quant_fp8_rowwise_kernel[(M,)](
+            x_2d, q, sc, M, K, x_2d.stride(0), q.stride(0), BLOCK_K=BK, num_warps=8
+        )
     return q, sc
 
 
@@ -263,24 +275,25 @@ def quantize_fp8_tensorwise_triton(
         alpha = (sc.view(1) * float(weight_scale)).contiguous()
         return q, alpha
     BK = min(4096, triton.next_power_of_2(K))
-    amax_i32 = torch.zeros((1,), dtype=torch.int32, device=x_2d.device)
-    alpha = torch.empty((1,), dtype=torch.float32, device=x_2d.device)
-    _reduce_amax_rows_i32_kernel[(M,)](
-        x_2d, amax_i32, M, K, x_2d.stride(0), BLOCK_K=BK, num_warps=8
-    )
-    _apply_tensorwise_fp8_kernel[(M,)](
-        x_2d,
-        q,
-        amax_i32,
-        alpha,
-        float(weight_scale),
-        M,
-        K,
-        x_2d.stride(0),
-        q.stride(0),
-        BLOCK_K=BK,
-        num_warps=8,
-    )
+    with _cuda_device_ctx(x_2d.device):
+        amax_i32 = torch.zeros((1,), dtype=torch.int32, device=x_2d.device)
+        alpha = torch.empty((1,), dtype=torch.float32, device=x_2d.device)
+        _reduce_amax_rows_i32_kernel[(M,)](
+            x_2d, amax_i32, M, K, x_2d.stride(0), BLOCK_K=BK, num_warps=8
+        )
+        _apply_tensorwise_fp8_kernel[(M,)](
+            x_2d,
+            q,
+            amax_i32,
+            alpha,
+            float(weight_scale),
+            M,
+            K,
+            x_2d.stride(0),
+            q.stride(0),
+            BLOCK_K=BK,
+            num_warps=8,
+        )
     return q, alpha
 
 
@@ -332,6 +345,7 @@ class SM100FP8Linear(nn.Module):
         prepare_mxfp8: bool = True,
         prepare_deepgemm_fp8: bool = False,
         prepare_w4a8: bool = False,
+        allow_decode_scaled_mm: bool = False,
         dtype: torch.dtype = torch.bfloat16,
         device: Optional[torch.device] = None,
     ) -> None:
@@ -371,6 +385,9 @@ class SM100FP8Linear(nn.Module):
         self._prepare_mxfp8_flag = bool(prepare_mxfp8)
         self._prepare_dg_fp8_flag = bool(prepare_deepgemm_fp8)
         self._prepare_w4a8_flag = bool(prepare_w4a8 or mode == "w4a8")
+        self._allow_decode_scaled_mm = bool(allow_decode_scaled_mm)
+        self._k_mul_n = self.in_features * self.out_features
+        self._is_wide = self.out_features >= 16384
 
     @classmethod
     @torch.no_grad()
@@ -384,6 +401,7 @@ class SM100FP8Linear(nn.Module):
         prepare_mxfp8: bool = True,
         prepare_deepgemm_fp8: bool = False,
         prepare_w4a8: bool = False,
+        allow_decode_scaled_mm: bool = False,
     ) -> "SM100FP8Linear":
         """Wrap and quantize an existing ``nn.Linear`` module."""
         w = linear.weight.data
@@ -397,6 +415,7 @@ class SM100FP8Linear(nn.Module):
             prepare_mxfp8=prepare_mxfp8,
             prepare_deepgemm_fp8=prepare_deepgemm_fp8,
             prepare_w4a8=prepare_w4a8,
+            allow_decode_scaled_mm=allow_decode_scaled_mm,
             dtype=w.dtype,
             device=w.device,
         )
@@ -421,6 +440,13 @@ class SM100FP8Linear(nn.Module):
         if not w_d.is_cuda or self.mode == "bf16":
             return
 
+        with _cuda_device_ctx(dev):
+            self._prepare_weights_cuda(w_d, N, K, dev_idx)
+
+    @torch.no_grad()
+    def _prepare_weights_cuda(
+        self, w_d: torch.Tensor, N: int, K: int, dev_idx: int
+    ) -> None:
         auto_like = ("auto", "fp8")
         if K % 16 == 0 and N % 16 == 0 and (self.mode in auto_like or self.mode == "scaled_mm"):
             wq, wsc = quantize_weight_fp8_rowwise(w_d)
@@ -512,28 +538,31 @@ class SM100FP8Linear(nn.Module):
             return "w4a8" if self.w_fp4_i8 is not None else "bf16"
 
         # Empirical SM100/SM103 Pareto frontier (cos >= 0.999):
-        #   - Decode (M <= 512): keep all N < 16384 layers (GDN, QSA, MoE, DFlash fc)
-        #     in BF16 so zero 1-ULP router flips occur and single-kernel BF16 wins
-        #     over 2-kernel rowwise quant+FP8. Wide outputs (N >= 16384, lm_head_tp4)
-        #     run scaled_mm (1.35x-1.6x faster than BF16, cos>=0.9993) or opt-in trtllm_ll.
-        #   - Prefill (M > 512): use block-32 mxfp8 when available; otherwise keep
-        #     N < 16384 in BF16 (avoids rowwise scaled_mm cos drop and latency regression).
-        is_wide = N >= 16384
+        #   - Decode / low-FLOP (M*K*N < 1e11): keep non-lm_head layers (including
+        #     wide DenseMLP N=25600, GDN qkvz N=40960, DFlash qkvg N=16896) in BF16
+        #     unless allow_decode_scaled_mm=True (lm_head opt-in) is enabled.
+        #   - Prefill (M*K*N >= 1e11 with min(K, N) >= 1280): use block-32 mxfp8.
+        is_wide = self._is_wide
         if M <= 512:
-            if not is_wide and self.weight is not None:
+            if not (self._allow_decode_scaled_mm and is_wide) and self.weight is not None:
                 return "bf16"
-            prefer_ll = os.environ.get("QWEN4_5_FP8_PREFER_TRTLLM_LL", "0") == "1"
-            if M <= 16 and prefer_ll and self.w_trtllm_ll is not None and (is_wide or self.weight is None):
-                return "trtllm_ll"
-            if self.w_fp8_row is not None:
-                return "scaled_mm"
-            if M <= 16 and self.w_trtllm_ll is not None:
-                return "trtllm_ll"
+            if self._allow_decode_scaled_mm:
+                prefer_ll = os.environ.get("QWEN4_5_FP8_PREFER_TRTLLM_LL", "0") == "1"
+                if M <= 16 and prefer_ll and self.w_trtllm_ll is not None and (is_wide or self.weight is None):
+                    return "trtllm_ll"
+                if self.w_fp8_row is not None:
+                    return "scaled_mm"
+                if M <= 16 and self.w_trtllm_ll is not None:
+                    return "trtllm_ll"
             if self.weight is not None:
                 return "bf16"
-        if (M >= 4096 or (M >= 1024 and is_wide)) and self.w_mxfp8 is not None:
+        if (
+            M * self._k_mul_n >= 100_000_000_000
+            and min(K, N) >= 1280
+            and self.w_mxfp8 is not None
+        ):
             return "mxfp8"
-        if is_wide and self.w_fp8_row is not None:
+        if self._allow_decode_scaled_mm and is_wide and self.w_fp8_row is not None:
             return "scaled_mm"
         if self.weight is not None:
             return "bf16"
@@ -546,6 +575,27 @@ class SM100FP8Linear(nn.Module):
         if self.w_mxfp8 is not None:
             return "mxfp8"
         raise RuntimeError("SM100FP8Linear has no prepared weights for active backend.")
+
+    def forward_prequant_mxfp8(
+        self, x_q: torch.Tensor, x_sc: torch.Tensor, *, orig_shape: Tuple[int, ...]
+    ) -> torch.Tensor:
+        """Execute ``flashinfer.mm_mxfp8`` reusing pre-quantized MXFP8 activation."""
+        if self.w_mxfp8 is None or self.w_mxfp8_sc is None:
+            raise RuntimeError("w_mxfp8 is not prepared on SM100FP8Linear")
+        import flashinfer  # type: ignore
+
+        with _cuda_device_ctx(x_q.device):
+            out = flashinfer.mm_mxfp8(
+                x_q,
+                self.w_mxfp8.t(),
+                x_sc,
+                self.w_mxfp8_sc,
+                out_dtype=self.dtype,
+                backend="cutlass",
+            )
+        if self.bias is not None:
+            out = out + self.bias
+        return out.reshape(*orig_shape, self.out_features)
 
     def forward_prequant_rowwise(
         self, x_q: torch.Tensor, x_sc: torch.Tensor, *, orig_shape: Tuple[int, ...]
@@ -565,6 +615,27 @@ class SM100FP8Linear(nn.Module):
         return out.reshape(*orig_shape, self.out_features)
 
     def forward(self, x: torch.Tensor, *, mode: Optional[str] = None) -> torch.Tensor:
+        if (
+            self.weight is not None
+            and x.device.type == "cuda"
+            and not os.environ.get("QWEN4_5_DENSE_LINEAR_MODE", "")
+        ):
+            req = self.mode if mode is None else str(mode)
+            if req == "bf16":
+                return F.linear(x, self.weight, self.bias)
+            if req in ("auto", "fp8") and not self._allow_decode_scaled_mm:
+                m_est = x.numel() // self.in_features
+                if m_est == 0:
+                    return torch.empty(
+                        (*x.shape[:-1], self.out_features), dtype=self.dtype, device=x.device
+                    )
+                if (
+                    self.w_mxfp8 is None
+                    or m_est * self._k_mul_n < 100_000_000_000
+                    or min(self.in_features, self.out_features) < 1280
+                ):
+                    return F.linear(x, self.weight, self.bias)
+
         orig_prefix = x.shape[:-1]
         x_2d = x.reshape(-1, self.in_features)
         if not x_2d.is_contiguous():
@@ -581,6 +652,17 @@ class SM100FP8Linear(nn.Module):
         if chosen == "bf16" and self.weight is not None:
             return F.linear(x, self.weight, self.bias)
 
+        with _cuda_device_ctx(x_2d.device):
+            return self._forward_low_prec(x, x_2d, orig_prefix, M, chosen)
+
+    def _forward_low_prec(
+        self,
+        x: torch.Tensor,
+        x_2d: torch.Tensor,
+        orig_prefix: Tuple[int, ...],
+        M: int,
+        chosen: str,
+    ) -> torch.Tensor:
         if chosen == "trtllm_ll" and self.w_trtllm_ll is not None:
             import flashinfer  # type: ignore
 

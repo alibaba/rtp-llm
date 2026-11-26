@@ -76,6 +76,7 @@ from rtp_llm.models_py.modules.qwen4_5.qsa_bridge import (
 from rtp_llm.models_py.modules.qwen4_5.short_conv import (
     causal_dwconv1d_decode_triton,
     causal_dwconv1d_ragged_prefill_with_snapshots_triton,
+    causal_dwconv1d_verify_opaque_triton,
     causal_dwconv1d_verify_triton,
 )
 from rtp_llm.models_py.modules.qwen4_5.contracts import (
@@ -941,6 +942,35 @@ if _HAS_TRITON:
         offs = tl.program_id(1) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
         mask = offs < n_elems
         val = tl.load(src_ptr + row.to(tl.int64) * src_row_stride + offs, mask=mask)
+        tl.store(dst_ptr + phys.to(tl.int64) * dst_row_stride + offs, val, mask=mask)
+
+    @triton.jit
+    def _write_opaque_rows_paged_triton(
+        dst_ptr,
+        src_ptr,
+        block_table_ptr,
+        seq_before_ptr,
+        dst_row_stride: tl.int64,
+        src_row_stride: tl.int64,
+        bt_s0: tl.int64,
+        bt_s1: tl.int64,
+        tpb: tl.int32,
+        max_blocks: tl.int32,
+        num_blocks: tl.int32,
+        n_elems,
+        BLOCK_SIZE: tl.constexpr,
+    ):
+        b = tl.program_id(0).to(tl.int64)
+        pos = tl.load(seq_before_ptr + b).to(tl.int32)
+        if pos < 0:
+            return
+        page = tl.minimum(pos // tpb, max_blocks - 1)
+        phys = tl.load(block_table_ptr + b * bt_s0 + page.to(tl.int64) * bt_s1).to(tl.int32)
+        if phys <= 0 or phys >= num_blocks:
+            return
+        offs = tl.program_id(1).to(tl.int64) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        mask = offs < n_elems
+        val = tl.load(src_ptr + b * src_row_stride + offs, mask=mask)
         tl.store(dst_ptr + phys.to(tl.int64) * dst_row_stride + offs, val, mask=mask)
 
     @triton.jit
@@ -2407,6 +2437,23 @@ class Qwen4_5PagedStateBridge:
                 phys = _check_phys_block(raw_phys, int(base.shape[0]), tag, layer_idx)
                 _view_opaque_row(base, phys, target_shape, target_dtype).copy_(tensor[b])
 
+    @staticmethod
+    def _opaque_2d_aligned_view(
+        tensor: torch.Tensor,
+        rows: int,
+        need_bytes: int,
+        elem_dtype: torch.dtype,
+    ) -> Optional[torch.Tensor]:
+        """Return [rows, row_elems] view in ``elem_dtype`` if stride and ptr satisfy alignment."""
+        elem_sz = torch.empty((), dtype=elem_dtype).element_size()
+        if need_bytes % elem_sz != 0:
+            return None
+        t_u8 = tensor.reshape(rows, -1).view(torch.uint8)
+        if int(t_u8.stride(0)) % elem_sz != 0 or t_u8.data_ptr() % elem_sz != 0 or int(t_u8.shape[1]) % elem_sz != 0:
+            return None
+        viewed, _ = _view_opaque_pool_2d(tensor, elem_dtype)
+        return viewed if viewed.stride(1) == 1 else None
+
     def _read_opaque_batch_gpu(
         self,
         cache: Any,
@@ -2431,29 +2478,16 @@ class Qwen4_5PagedStateBridge:
                 (bsz, *target_shape), fill_value, dtype=resolved_dtype, device=base.device
             )
 
-        pos = seq_before_dev.to(torch.int64)
-        read_page = ((pos - 1).clamp(min=0) // tpb).clamp(max=max_blocks - 1)
-        read_phys = block_table.gather(1, read_page.unsqueeze(1)).squeeze(1).to(torch.int64)
-        valid = (pos > 0) & (read_phys > 0) & (read_phys < num_blocks)
-        safe_phys = read_phys.clamp(min=0, max=num_blocks - 1)
-
-        elem_size = torch.empty((), dtype=resolved_dtype).element_size()
-        need_bytes = math.prod(target_shape) * elem_size
-        base_u8 = base.reshape(num_blocks, -1).view(torch.uint8)
-        if int(base_u8.shape[1]) < need_bytes:
-            raise RuntimeError(
-                f"Opaque pool row too small: {base_u8.shape[1]} bytes < {need_bytes} bytes "
-                f"for tag={tag} layer={layer_idx} shape={target_shape} dtype={resolved_dtype}"
-            )
-        gathered = (
-            base_u8[:, :need_bytes]
-            .index_select(0, safe_phys)
-            .view(resolved_dtype)
-            .reshape(bsz, *target_shape)
-            .contiguous()
+        out = torch.empty((bsz, *target_shape), dtype=resolved_dtype, device=base.device)
+        return self._read_opaque_batch_static_gpu(
+            cache,
+            block_table,
+            seq_before_dev,
+            out,
+            tag,
+            layer_idx,
+            fill_value=fill_value,
         )
-        valid_bc = valid.view(bsz, *([1] * len(target_shape)))
-        return gathered.masked_fill_(~valid_bc, fill_value)
 
     def _read_opaque_batch_static_gpu(
         self,
@@ -2475,18 +2509,6 @@ class Qwen4_5PagedStateBridge:
         if bsz == 0 or max_blocks == 0 or num_blocks == 0:
             dst_buf.fill_(fill_value)
             return dst_buf
-        if not (_HAS_TRITON and base.is_cuda and dst_buf.is_cuda):
-            res = self._read_opaque_batch_gpu(
-                cache,
-                block_table,
-                seq_before_dev,
-                tag,
-                layer_idx,
-                fill_value=fill_value,
-                target_dtype=dst_buf.dtype,
-            )
-            dst_buf.copy_(res)
-            return dst_buf
 
         dst_u8 = dst_buf.reshape(bsz, -1).view(torch.uint8)
         need_bytes = int(dst_u8.shape[1])
@@ -2496,54 +2518,159 @@ class Qwen4_5PagedStateBridge:
                 f"Opaque pool row too small: {base_u8.shape[1]} bytes < {need_bytes} bytes "
                 f"for tag={tag} layer={layer_idx}"
             )
-        if dst_buf.dtype == torch.int64 and int(base_u8.stride(0)) % 8 == 0 and base_u8.data_ptr() % 8 == 0:
-            dst_view, _ = _view_opaque_pool_2d(dst_buf, torch.int64)
-            src_view, _ = _view_opaque_pool_2d(base, torch.int64)
-            n_elems = need_bytes // 8
-            fv = int(fill_value)
-        elif (
-            fill_value == 0
-            and need_bytes % 4 == 0
-            and int(base_u8.stride(0)) % 4 == 0
-            and int(dst_u8.stride(0)) % 4 == 0
-            and base_u8.data_ptr() % 4 == 0
-            and dst_u8.data_ptr() % 4 == 0
-        ):
-            dst_view = dst_u8.view(torch.int32)
-            src_view, _ = _view_opaque_pool_2d(base, torch.int32)
-            n_elems = need_bytes // 4
-            fv = 0
-        else:
-            res = self._read_opaque_batch_gpu(
-                cache,
-                block_table,
-                seq_before_dev,
-                tag,
-                layer_idx,
-                fill_value=fill_value,
-                target_dtype=dst_buf.dtype,
-            )
-            dst_buf.copy_(res)
-            return dst_buf
 
-        block_sz = 1024
-        _read_opaque_rows_triton[(bsz, int(triton.cdiv(n_elems, block_sz)))](
-            dst_view,
-            src_view,
-            block_table,
-            seq_before_dev,
-            int(dst_view.stride(0)),
-            int(src_view.stride(0)),
-            int(block_table.stride(0)),
-            int(block_table.stride(1)),
-            tpb,
-            max_blocks,
-            num_blocks,
-            n_elems,
-            fv,
-            BLOCK_SIZE=block_sz,
+        if _HAS_TRITON and base.is_cuda and dst_buf.is_cuda:
+            dst_view = None
+            src_view = None
+            n_elems = 0
+            fv = 0
+            if (dst_buf.dtype == torch.int64 or fill_value == 0) and need_bytes % 8 == 0:
+                d8 = self._opaque_2d_aligned_view(dst_buf, bsz, need_bytes, torch.int64)
+                s8 = self._opaque_2d_aligned_view(base, num_blocks, need_bytes, torch.int64)
+                if d8 is not None and s8 is not None:
+                    dst_view, src_view = d8, s8
+                    n_elems = need_bytes // 8
+                    fv = int(fill_value)
+            if dst_view is None and fill_value == 0 and need_bytes % 4 == 0:
+                d4 = self._opaque_2d_aligned_view(dst_buf, bsz, need_bytes, torch.int32)
+                s4 = self._opaque_2d_aligned_view(base, num_blocks, need_bytes, torch.int32)
+                if d4 is not None and s4 is not None:
+                    dst_view, src_view = d4, s4
+                    n_elems = need_bytes // 4
+                    fv = 0
+            if dst_view is None and fill_value == 0:
+                dst_view = dst_u8 if dst_u8.stride(1) == 1 else dst_u8.contiguous()
+                src_view = base_u8 if base_u8.stride(1) == 1 else torch.as_strided(base_u8, size=base_u8.shape, stride=(int(base_u8.stride(0)), 1))
+                n_elems = need_bytes
+                fv = 0
+            if dst_view is not None and src_view is not None and dst_view.data_ptr() == dst_u8.data_ptr():
+                block_sz = 1024
+                _read_opaque_rows_triton[(bsz, int(triton.cdiv(n_elems, block_sz)))](
+                    dst_view,
+                    src_view,
+                    block_table,
+                    seq_before_dev,
+                    int(dst_view.stride(0)),
+                    int(src_view.stride(0)),
+                    int(block_table.stride(0)),
+                    int(block_table.stride(1)),
+                    tpb,
+                    max_blocks,
+                    num_blocks,
+                    n_elems,
+                    fv,
+                    BLOCK_SIZE=block_sz,
+                )
+                return dst_buf
+
+        # Pure PyTorch fallback for non-CUDA or unaligned non-zero fill_value
+        pos = seq_before_dev.to(torch.int64)
+        read_page = ((pos - 1).clamp(min=0) // tpb).clamp(max=max_blocks - 1)
+        read_phys = block_table.gather(1, read_page.unsqueeze(1)).squeeze(1).to(torch.int64)
+        valid = (pos > 0) & (read_phys > 0) & (read_phys < num_blocks)
+        safe_phys = read_phys.clamp(min=0, max=num_blocks - 1)
+        target_shape = tuple(int(d) for d in dst_buf.shape[1:])
+        gathered = (
+            base_u8[:, :need_bytes]
+            .index_select(0, safe_phys)
+            .view(dst_buf.dtype)
+            .reshape(bsz, *target_shape)
         )
+        valid_bc = valid.view(bsz, *([1] * len(target_shape)))
+        dst_buf.copy_(gathered)
+        dst_buf.masked_fill_(~valid_bc, fill_value)
         return dst_buf
+
+    @staticmethod
+    def _try_view_sconv_opaque_pool_2d(
+        cache: Any,
+        bt: torch.Tensor,
+        verify_w: int,
+        kernel_size: int,
+        need_elems: int,
+        dtype: torch.dtype,
+        x_ref: torch.Tensor,
+    ) -> Optional[torch.Tensor]:
+        """Return zero-copy 2D opaque pool view if direct verify read is valid."""
+        base = cache.kv_cache_base
+        tpb = int(cache.seq_size_per_block)
+        max_blocks = int(bt.shape[1]) if bt.ndim >= 2 else 0
+        if not (
+            _HAS_TRITON
+            and x_ref.is_cuda
+            and base.is_cuda
+            and int(kernel_size) == 4
+            and 0 < verify_w <= 16
+            and x_ref.stride(-1) == 1
+            and tpb > 0
+            and max_blocks > 0
+            and int(base.shape[0]) > 0
+        ):
+            return None
+        base_u8 = base.reshape(int(base.shape[0]), -1).view(torch.uint8)
+        elem_sz = x_ref.element_size()
+        if (
+            int(base_u8.shape[1]) < need_elems * elem_sz
+            or int(base_u8.shape[1]) % elem_sz != 0
+            or int(base_u8.stride(0)) % elem_sz != 0
+            or base_u8.data_ptr() % elem_sz != 0
+        ):
+            return None
+        pool_2d, _ = _view_opaque_pool_2d(base, dtype)
+        return pool_2d if pool_2d.stride(1) == 1 else None
+
+    def _run_verify_sconv_opaque_or_static(
+        self,
+        x: torch.Tensor,
+        sconv: Any,
+        cache: Any,
+        bt: torch.Tensor,
+        seq_before_dev: torch.Tensor,
+        tx_stage: _PinnedTargetVerifyTxStager,
+        tag: str,
+        lid: int,
+        state_shape: Tuple[int, ...],
+        stage_states: torch.Tensor,
+        *,
+        clamp_val: Optional[float] = None,
+    ) -> torch.Tensor:
+        """Run K=4 verify conv directly from opaque pool (or fall back to static gather)."""
+        verify_w = int(x.shape[1])
+        dtype = x.dtype
+        pool_2d = self._try_view_sconv_opaque_pool_2d(
+            cache, bt, verify_w, sconv.kernel_size, math.prod(state_shape), dtype, x
+        )
+        if pool_2d is not None:
+            return causal_dwconv1d_verify_opaque_triton(
+                x,
+                sconv.weight,
+                pool_2d,
+                bt,
+                seq_before_dev,
+                stage_states,
+                page_size=int(cache.seq_size_per_block),
+                pool_col_offset=0,
+                residual=sconv.residual,
+                use_activation=sconv.use_activation,
+                clamp_val=clamp_val,
+            )
+        init_buf = self._read_opaque_batch_static_gpu(
+            cache,
+            bt,
+            seq_before_dev,
+            tx_stage.scratch_tensor(("init", tag, lid), (int(x.shape[0]), *state_shape), dtype, x.device),
+            tag,
+            lid,
+        )
+        return causal_dwconv1d_verify_triton(
+            x,
+            sconv.weight,
+            init_buf,
+            stage_states,
+            residual=sconv.residual,
+            use_activation=sconv.use_activation,
+            clamp_val=clamp_val,
+        )
 
     def _build_ragged_prefill_plan(
         self,
@@ -2689,12 +2816,8 @@ class Qwen4_5PagedStateBridge:
         if bsz == 0 or max_blocks == 0 or num_blocks == 0:
             return
 
-        new_last = seq_before_dev.to(torch.int64).clamp(min=0)
-        write_page = (new_last // tpb).clamp(max=max_blocks - 1)
-        write_phys = block_table.gather(1, write_page.unsqueeze(1)).squeeze(1).to(torch.int32)
-        write_phys = torch.where(seq_before_dev >= 0, write_phys, 0)
-
-        src_u8 = tensor.contiguous().reshape(bsz, -1).view(torch.uint8)
+        src_c = tensor.contiguous().reshape(bsz, -1)
+        src_u8 = src_c.view(torch.uint8)
         need_bytes = int(src_u8.shape[1])
         base_u8 = base.reshape(num_blocks, -1).view(torch.uint8)
         if int(base_u8.shape[1]) < need_bytes:
@@ -2702,32 +2825,36 @@ class Qwen4_5PagedStateBridge:
                 f"Opaque pool row too small for write: {base_u8.shape[1]} bytes < {need_bytes} bytes "
                 f"for tag={tag} layer={layer_idx}"
             )
-        if (
-            need_bytes % 4 == 0
-            and int(base_u8.shape[1]) % 4 == 0
-            and int(base_u8.stride(0)) % 4 == 0
-            and int(src_u8.stride(0)) % 4 == 0
-            and base_u8.data_ptr() % 4 == 0
-            and src_u8.data_ptr() % 4 == 0
-        ):
-            dst_view = base_u8.view(torch.int32)
-            src_view = src_u8.view(torch.int32)
-            n_elems = need_bytes // 4
+
+        dst_view = self._opaque_2d_aligned_view(base, num_blocks, need_bytes, torch.int64)
+        src_view = self._opaque_2d_aligned_view(src_c, bsz, need_bytes, torch.int64) if dst_view is not None else None
+        if dst_view is not None and src_view is not None:
+            n_elems = need_bytes // 8
         else:
-            dst_view = base_u8
-            src_view = src_u8
-            n_elems = need_bytes
+            dst_view = self._opaque_2d_aligned_view(base, num_blocks, need_bytes, torch.int32)
+            src_view = self._opaque_2d_aligned_view(src_c, bsz, need_bytes, torch.int32) if dst_view is not None else None
+            if dst_view is not None and src_view is not None:
+                n_elems = need_bytes // 4
+            else:
+                dst_view = base_u8
+                src_view = src_u8
+                n_elems = need_bytes
 
         block_sz = 1024
         grid = (bsz, int(triton.cdiv(n_elems, block_sz)))
-        _write_opaque_rows_triton[grid](
+        _write_opaque_rows_paged_triton[grid](
             dst_view,
             src_view,
-            write_phys,
+            block_table,
+            seq_before_dev,
             int(dst_view.stride(0)),
             int(src_view.stride(0)),
-            n_elems,
+            int(block_table.stride(0)),
+            int(block_table.stride(1)),
+            tpb,
+            max_blocks,
             num_blocks,
+            n_elems,
             BLOCK_SIZE=block_sz,
         )
 
@@ -5619,35 +5746,68 @@ class Qwen4_5PagedStateBridge:
                                 self.cfg.num_key_value_heads * self.cfg.head_dim,
                                 sa.kv_sconv_kernel_size - 1,
                             )
-                            kv_sc_buf = self._read_opaque_batch_static_gpu(
-                                sc_c,
-                                bt_sc,
-                                seq_lens_before_dev,
-                                tx_stage.scratch_tensor(("init", FULL_ATTN_KV_SCONV_TAG, lid), (bsz, *sc_shape), dtype, device),
-                                FULL_ATTN_KV_SCONV_TAG,
-                                lid,
-                            )
                             stage_kv_sc = tx_stage.stage_tensor(
                                 FULL_ATTN_KV_SCONV_TAG, lid, sc_c, bt_sc, sc_shape, dtype
                             )[:bsz]
-                            k_raw = causal_dwconv1d_verify_triton(
-                                k_raw,
-                                sa.k_sconv.weight,
-                                kv_sc_buf[:, 0],
-                                stage_kv_sc[:, :, 0],
-                                residual=sa.kv_sconv_residual,
-                                use_activation=sa.kv_sconv_use_activation,
-                                round_pre_act=True,
+                            kv_dim_sc = self.cfg.num_key_value_heads * self.cfg.head_dim
+                            kv_pool_2d = self._try_view_sconv_opaque_pool_2d(
+                                sc_c, bt_sc, verify_w, sa.kv_sconv_kernel_size, kv_dim_sc * 2 * (sa.kv_sconv_kernel_size - 1), dtype, k_raw
                             )
-                            v_raw = causal_dwconv1d_verify_triton(
-                                v_raw,
-                                sa.v_sconv.weight,
-                                kv_sc_buf[:, 1],
-                                stage_kv_sc[:, :, 1],
-                                residual=sa.kv_sconv_residual,
-                                use_activation=sa.kv_sconv_use_activation,
-                                round_pre_act=True,
-                            )
+                            if kv_pool_2d is not None:
+                                tpb_sc = int(sc_c.seq_size_per_block)
+                                k_raw = causal_dwconv1d_verify_opaque_triton(
+                                    k_raw,
+                                    sa.k_sconv.weight,
+                                    kv_pool_2d,
+                                    bt_sc,
+                                    seq_lens_before_dev,
+                                    stage_kv_sc[:, :, 0],
+                                    page_size=tpb_sc,
+                                    pool_col_offset=0,
+                                    residual=sa.kv_sconv_residual,
+                                    use_activation=sa.kv_sconv_use_activation,
+                                    round_pre_act=True,
+                                )
+                                v_raw = causal_dwconv1d_verify_opaque_triton(
+                                    v_raw,
+                                    sa.v_sconv.weight,
+                                    kv_pool_2d,
+                                    bt_sc,
+                                    seq_lens_before_dev,
+                                    stage_kv_sc[:, :, 1],
+                                    page_size=tpb_sc,
+                                    pool_col_offset=kv_dim_sc * (sa.kv_sconv_kernel_size - 1),
+                                    residual=sa.kv_sconv_residual,
+                                    use_activation=sa.kv_sconv_use_activation,
+                                    round_pre_act=True,
+                                )
+                            else:
+                                kv_sc_buf = self._read_opaque_batch_static_gpu(
+                                    sc_c,
+                                    bt_sc,
+                                    seq_lens_before_dev,
+                                    tx_stage.scratch_tensor(("init", FULL_ATTN_KV_SCONV_TAG, lid), (bsz, *sc_shape), dtype, device),
+                                    FULL_ATTN_KV_SCONV_TAG,
+                                    lid,
+                                )
+                                k_raw = causal_dwconv1d_verify_triton(
+                                    k_raw,
+                                    sa.k_sconv.weight,
+                                    kv_sc_buf[:, 0],
+                                    stage_kv_sc[:, :, 0],
+                                    residual=sa.kv_sconv_residual,
+                                    use_activation=sa.kv_sconv_use_activation,
+                                    round_pre_act=True,
+                                )
+                                v_raw = causal_dwconv1d_verify_triton(
+                                    v_raw,
+                                    sa.v_sconv.weight,
+                                    kv_sc_buf[:, 1],
+                                    stage_kv_sc[:, :, 1],
+                                    residual=sa.kv_sconv_residual,
+                                    use_activation=sa.kv_sconv_use_activation,
+                                    round_pre_act=True,
+                                )
 
                         k_all = gemma_rmsnorm_and_partial_rope(
                             k_raw.unflatten(-1, (sa.num_kv_heads, sa.head_dim)),
@@ -5855,24 +6015,20 @@ class Qwen4_5PagedStateBridge:
                     self.cfg.hidden_size,
                     layer.attn_output_sconv.kernel_size - 1,
                 )
-                init_ao = self._read_opaque_batch_static_gpu(
-                    c_ao,
-                    bt_ao,
-                    seq_lens_before_dev,
-                    tx_stage.scratch_tensor(("init", tag_out, lid), (bsz, *ao_shape), dtype, device),
-                    tag_out,
-                    lid,
-                )
                 stage_ao = tx_stage.stage_tensor(
                     tag_out, lid, c_ao, bt_ao, ao_shape, dtype
                 )[:bsz]
-                attn_out = causal_dwconv1d_verify_triton(
+                attn_out = self._run_verify_sconv_opaque_or_static(
                     attn_out,
-                    layer.attn_output_sconv.weight,
-                    init_ao,
+                    layer.attn_output_sconv,
+                    c_ao,
+                    bt_ao,
+                    seq_lens_before_dev,
+                    tx_stage,
+                    tag_out,
+                    lid,
+                    ao_shape,
                     stage_ao,
-                    residual=layer.attn_output_sconv.residual,
-                    use_activation=layer.attn_output_sconv.use_activation,
                     clamp_val=self.cfg.clip_attn_output,
                 )
             elif self.cfg.clip_attn_output is not None:
@@ -5895,24 +6051,20 @@ class Qwen4_5PagedStateBridge:
                     self.cfg.hidden_size,
                     layer.ffn_output_sconv.kernel_size - 1,
                 )
-                init_fo = self._read_opaque_batch_static_gpu(
-                    c_fo,
-                    bt_fo,
-                    seq_lens_before_dev,
-                    tx_stage.scratch_tensor(("init", FFN_OUTPUT_SCONV_TAG, lid), (bsz, *fo_shape), dtype, device),
-                    FFN_OUTPUT_SCONV_TAG,
-                    lid,
-                )
                 stage_fo = tx_stage.stage_tensor(
                     FFN_OUTPUT_SCONV_TAG, lid, c_fo, bt_fo, fo_shape, dtype
                 )[:bsz]
-                mlp_out = causal_dwconv1d_verify_triton(
+                mlp_out = self._run_verify_sconv_opaque_or_static(
                     mlp_out,
-                    layer.ffn_output_sconv.weight,
-                    init_fo,
+                    layer.ffn_output_sconv,
+                    c_fo,
+                    bt_fo,
+                    seq_lens_before_dev,
+                    tx_stage,
+                    FFN_OUTPUT_SCONV_TAG,
+                    lid,
+                    fo_shape,
                     stage_fo,
-                    residual=layer.ffn_output_sconv.residual,
-                    use_activation=layer.ffn_output_sconv.use_activation,
                     clamp_val=self.cfg.clip_mlp_output,
                 )
             elif self.cfg.clip_mlp_output is not None:

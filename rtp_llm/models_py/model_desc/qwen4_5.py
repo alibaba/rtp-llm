@@ -447,17 +447,32 @@ def _resolve_dense_linear_mode(override: Optional[str], stored: Optional[str]) -
     return os.environ.get("QWEN4_5_DENSE_LINEAR_MODE", "bf16").strip().lower()
 
 
-def _wrap_linear_with_sm100_fp8(mod: nn.Module, eff_mode: str) -> nn.Module:
+def _wrap_linear_with_sm100_fp8(
+    mod: nn.Module,
+    eff_mode: str,
+    *,
+    allow_decode_scaled_mm: Optional[bool] = None,
+) -> nn.Module:
     from rtp_llm.models_py.modules.qwen4_5.fp8_linear import SM100FP8Linear
 
     if isinstance(mod, SM100FP8Linear):
         mod.mode = eff_mode
         mod._prepare_w4a8_flag = bool(eff_mode == "w4a8")
+        if allow_decode_scaled_mm is not None and hasattr(mod, "_allow_decode_scaled_mm"):
+            mod._allow_decode_scaled_mm = bool(allow_decode_scaled_mm)
         if eff_mode != "bf16" and mod.weight is not None and mod.weight.is_cuda:
             mod.prepare_weights()
         return mod
     if eff_mode == "bf16" or not isinstance(mod, nn.Linear) or not mod.weight.is_cuda:
         return mod
+    extra_kw = _filter_init_kwargs(
+        SM100FP8Linear.__init__,
+        {
+            "allow_decode_scaled_mm": (
+                bool(allow_decode_scaled_mm) if allow_decode_scaled_mm is not None else False
+            )
+        },
+    )
     inst = SM100FP8Linear(
         in_features=mod.in_features,
         out_features=mod.out_features,
@@ -469,6 +484,7 @@ def _wrap_linear_with_sm100_fp8(mod: nn.Module, eff_mode: str) -> nn.Module:
         prepare_w4a8=(eff_mode == "w4a8"),
         dtype=mod.weight.dtype,
         device=mod.weight.device,
+        **extra_kw,
     )
     inst.weight = mod.weight
     if mod.bias is not None:
@@ -803,6 +819,47 @@ class Qwen4_5DecoderLayer(nn.Module):
             )
         else:
             self.ffn_output_sconv = None
+        self._attn_sconv_has_clip = (
+            self.attn_output_sconv is not None
+            and "clip_value" in inspect.signature(self.attn_output_sconv.forward).parameters
+            and "clip_value" in inspect.signature(self.attn_output_sconv.forward_ref).parameters
+        )
+        self._ffn_sconv_has_clip = (
+            self.ffn_output_sconv is not None
+            and "clip_value" in inspect.signature(self.ffn_output_sconv.forward).parameters
+            and "clip_value" in inspect.signature(self.ffn_output_sconv.forward_ref).parameters
+        )
+
+    @staticmethod
+    def _run_sconv_with_clip(
+        sconv: Optional[Qwen4_5ShortConv],
+        x: torch.Tensor,
+        sc_state: Optional[Any],
+        clip_val: Optional[float],
+        has_clip: bool,
+        *,
+        use_reference: bool,
+        profiler: Optional[Qwen4_5ProfileRecorder],
+    ) -> torch.Tensor:
+        """Run output ShortConv and fuse symmetric clamping when supported."""
+        if sconv is not None:
+            if clip_val is not None and has_clip:
+                if profiler is not None:
+                    with profiler.record("short_conv"):
+                        return sconv(x, state=sc_state, clip_value=clip_val)
+                if use_reference:
+                    return sconv.forward_ref(x, state=sc_state, clip_value=clip_val)
+                return sconv(x, state=sc_state, clip_value=clip_val)
+            if profiler is not None:
+                with profiler.record("short_conv"):
+                    x = sconv(x, state=sc_state)
+            elif use_reference:
+                x = sconv.forward_ref(x, state=sc_state)
+            else:
+                x = sconv(x, state=sc_state)
+        if clip_val is not None:
+            x = x.clamp(-clip_val, clip_val)
+        return x
 
     @torch.no_grad()
     def prepare_weights(
@@ -1038,18 +1095,21 @@ class Qwen4_5DecoderLayer(nn.Module):
                     **qsa_kwargs,
                 )
 
-        # Step D: Attention output ShortConv (+ optional clip)
-        if self.attn_output_sconv is not None:
-            sc_state = state.attn_output_sconv.get(lid) if state is not None else None
-            if profiler is not None:
-                with profiler.record("short_conv"):
-                    attn_out = self.attn_output_sconv(attn_out, state=sc_state)
-            elif use_reference:
-                attn_out = self.attn_output_sconv.forward_ref(attn_out, state=sc_state)
-            else:
-                attn_out = self.attn_output_sconv(attn_out, state=sc_state)
-        if cfg.clip_attn_output is not None:
-            attn_out = attn_out.clamp(-cfg.clip_attn_output, cfg.clip_attn_output)
+        # Step D: Attention output ShortConv (+ optional fused clip)
+        attn_sc_state = (
+            state.attn_output_sconv.get(lid)
+            if (state is not None and self.attn_output_sconv is not None)
+            else None
+        )
+        attn_out = self._run_sconv_with_clip(
+            self.attn_output_sconv,
+            attn_out,
+            attn_sc_state,
+            cfg.clip_attn_output,
+            self._attn_sconv_has_clip,
+            use_reference=use_reference,
+            profiler=profiler,
+        )
 
         # Step E: MLP Hyper-Connection (fused combine of attn_out + norm + mix)
         if profiler is not None:
@@ -1140,17 +1200,20 @@ class Qwen4_5DecoderLayer(nn.Module):
         """Run FFN output ShortConv + clamping and emit deferred branch tuple."""
         cfg = self.config
         lid = self.layer_idx
-        if self.ffn_output_sconv is not None:
-            sc_state = state.ffn_output_sconv.get(lid) if state is not None else None
-            if profiler is not None:
-                with profiler.record("short_conv"):
-                    mlp_out = self.ffn_output_sconv(mlp_out, state=sc_state)
-            elif use_reference:
-                mlp_out = self.ffn_output_sconv.forward_ref(mlp_out, state=sc_state)
-            else:
-                mlp_out = self.ffn_output_sconv(mlp_out, state=sc_state)
-        if cfg.clip_mlp_output is not None:
-            mlp_out = mlp_out.clamp(-cfg.clip_mlp_output, cfg.clip_mlp_output)
+        ffn_sc_state = (
+            state.ffn_output_sconv.get(lid)
+            if (state is not None and self.ffn_output_sconv is not None)
+            else None
+        )
+        mlp_out = self._run_sconv_with_clip(
+            self.ffn_output_sconv,
+            mlp_out,
+            ffn_sc_state,
+            cfg.clip_mlp_output,
+            self._ffn_sconv_has_clip,
+            use_reference=use_reference,
+            profiler=profiler,
+        )
         return hyper_hidden, prev_latent, (mlp_out, mlp_inj)
 
     def forward(
@@ -2146,6 +2209,10 @@ class Qwen4_5ForCausalLM(nn.Module):
 
         self.local_vocab_size = config.vocab_size // self.tp_size
         init_lm_mode = _resolve_dense_linear_mode(dense_linear_mode, None)
+        lm_extra_kw = _filter_init_kwargs(
+            SM100FP8Linear.__init__,
+            {"allow_decode_scaled_mm": True},
+        )
         self.lm_head: nn.Module = SM100FP8Linear(
             in_features=config.hidden_size,
             out_features=self.local_vocab_size,
@@ -2157,6 +2224,7 @@ class Qwen4_5ForCausalLM(nn.Module):
             prepare_w4a8=(init_lm_mode == "w4a8"),
             dtype=dtype,
             device=device,
+            **lm_extra_kw,
         )
         self.requires_grad_(False)
 
@@ -2174,7 +2242,9 @@ class Qwen4_5ForCausalLM(nn.Module):
             transpose_mxfp4=transpose_mxfp4,
             dense_linear_mode=dense_linear_mode,
         )
-        self.lm_head = _wrap_linear_with_sm100_fp8(self.lm_head, eff_mode)
+        self.lm_head = _wrap_linear_with_sm100_fp8(
+            self.lm_head, eff_mode, allow_decode_scaled_mm=True
+        )
 
     def create_runtime_state(
         self,

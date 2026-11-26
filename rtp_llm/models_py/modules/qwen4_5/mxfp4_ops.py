@@ -39,6 +39,7 @@ import triton.language as tl
 from triton.language.extra import libdevice
 
 from rtp_llm.models_py.modules.qwen4_5.activation import (
+    _cuda_device_ctx,
     per_token_group_quant_fp8_ue8m0,
     per_token_group_quant_fp8_ue8m0_ref,
     situ_and_mul_ref,
@@ -1035,6 +1036,79 @@ def _get_m1_static_tensors(
     return cached
 
 
+@triton.jit(do_not_specialize=["m_total", "ep_start"])
+def _ep_local_and_bincount_kernel(
+    ids_ptr,
+    flat_local_ptr,
+    counts_ptr,
+    m_total,
+    ep_start,
+    num_experts,
+    BLOCK: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < m_total
+    gid = tl.load(ids_ptr + offs, mask=mask, other=0).to(tl.int32)
+    local_e = gid - ep_start
+    valid = (local_e >= 0) & (local_e < num_experts)
+    mapped = tl.where(valid, local_e, num_experts)
+    tl.store(flat_local_ptr + offs, mapped, mask=mask)
+    tl.atomic_add(counts_ptr + mapped, 1, mask=mask & valid)
+
+
+@triton.jit(do_not_specialize=["m_total", "ep_start"])
+def _compact_perm_unpack_kernel(
+    perm_ptr,
+    flat_ids_ptr,
+    flat_weights_ptr,
+    sorted_tok_ids_ptr,
+    sorted_weights_ptr,
+    inv_slots_ptr,
+    m_total,
+    ep_start,
+    num_experts,
+    TOP_K: tl.constexpr,
+    HAS_EP: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < m_total
+    p = tl.load(perm_ptr + offs, mask=mask, other=0).to(tl.int64)
+    tok_id = (p // TOP_K).to(tl.int32)
+    w = tl.load(flat_weights_ptr + p, mask=mask, other=0.0).to(tl.float32)
+    tl.store(sorted_tok_ids_ptr + offs, tok_id, mask=mask)
+    tl.store(sorted_weights_ptr + offs, w, mask=mask)
+    if HAS_EP:
+        gid = tl.load(flat_ids_ptr + p, mask=mask, other=0).to(tl.int32)
+        local_e = gid - ep_start
+        valid = (local_e >= 0) & (local_e < num_experts)
+        slot_val = tl.where(valid, offs.to(tl.int32), -1)
+    else:
+        slot_val = offs.to(tl.int32)
+    tl.store(inv_slots_ptr + p, slot_val, mask=mask)
+
+
+@triton.jit
+def _compact_prefix_scan_kernel(
+    counts_ptr,
+    m_starts_ptr,
+    tile_starts_ptr,
+    num_experts,
+    BM: tl.constexpr,
+    E_PAD: tl.constexpr,
+):
+    offs = tl.arange(0, E_PAD)
+    mask = offs < num_experts
+    c = tl.load(counts_ptr + offs, mask=mask, other=0).to(tl.int32)
+    nt = tl.where(mask, (c + BM - 1) // BM, 0)
+    m_starts = tl.cumsum(c, axis=0) - c
+    tile_starts = tl.cumsum(nt, axis=0) - nt
+    tl.store(m_starts_ptr + offs, m_starts, mask=mask)
+    tl.store(tile_starts_ptr + offs, tile_starts, mask=mask)
+
+
 @triton.jit
 def _moe_expert_bincount_kernel(
     ids_ptr,
@@ -1062,14 +1136,15 @@ def _gpu_expert_bincount(flat_local: torch.Tensor, num_experts: int) -> torch.Te
         return counts
     flat_c = flat_local.to(torch.int32).contiguous()
     BLOCK = 256
-    _moe_expert_bincount_kernel[(triton.cdiv(m_total, BLOCK),)](
-        flat_c,
-        counts,
-        m_total,
-        num_experts,
-        BLOCK=BLOCK,
-        num_warps=4,
-    )
+    with _cuda_device_ctx(flat_local.device):
+        _moe_expert_bincount_kernel[(triton.cdiv(m_total, BLOCK),)](
+            flat_c,
+            counts,
+            m_total,
+            num_experts,
+            BLOCK=BLOCK,
+            num_warps=4,
+        )
     return counts
 
 
@@ -1158,16 +1233,28 @@ def build_moe_tile_schedule(
     tile_m_start = torch.empty((max_num_tiles,), dtype=torch.int32, device=device)
     tile_m_count = torch.empty((max_num_tiles,), dtype=torch.int32, device=device)
 
-    _scatter_moe_tile_schedule_kernel[(num_experts,)](
-        counts,
-        m_starts,
-        tile_starts,
-        tile_expert_id,
-        tile_m_start,
-        tile_m_count,
-        BM=block_m,
-        num_warps=1,
-    )
+    if topk_ids.is_cuda:
+        with _cuda_device_ctx(device):
+            _scatter_moe_tile_schedule_kernel[(num_experts,)](
+                counts,
+                m_starts,
+                tile_starts,
+                tile_expert_id,
+                tile_m_start,
+                tile_m_count,
+                BM=block_m,
+                num_warps=1,
+            )
+    else:
+        for e in range(num_experts):
+            c = int(counts[e].item())
+            m0 = int(m_starts[e].item())
+            t0 = int(tile_starts[e].item())
+            nt = (c + block_m - 1) // block_m
+            for i in range(nt):
+                tile_expert_id[t0 + i] = e
+                tile_m_start[t0 + i] = m0 + i * block_m
+                tile_m_count[t0 + i] = min(block_m, c - i * block_m)
 
     return MoETileSchedule(
         perm=perm,
@@ -1196,7 +1283,26 @@ def _build_compact_decode_schedule(
     m_total = num_tokens * top_k
     device = topk_ids.device
 
-    if num_tokens == 1 and top_k <= 32:
+    if m_total == 0:
+        empty_i32 = torch.empty((0,), dtype=torch.int32, device=device)
+        empty_f32 = torch.empty((0,), dtype=torch.float32, device=device)
+        return CompactMoETileSchedule(
+            sorted_tok_ids=empty_i32,
+            sorted_weights=empty_f32,
+            inv_slots=torch.empty((num_tokens, top_k), dtype=torch.int32, device=device),
+            tile_expert_id=empty_i32,
+            tile_m_start=empty_i32,
+            tile_m_count=empty_i32,
+            num_active_tiles_buf=torch.zeros((1,), dtype=torch.int32, device=device),
+            num_active_slots_buf=torch.zeros((1,), dtype=torch.int32, device=device),
+            max_num_tiles=0,
+            max_slots=0,
+            top_k=top_k,
+            num_tokens=num_tokens,
+            block_m=block_m,
+        )
+
+    if topk_ids.is_cuda and num_tokens == 1 and top_k <= 32:
         sorted_tok_ids = torch.empty((top_k,), dtype=torch.int32, device=device)
         sorted_weights = torch.empty((top_k,), dtype=torch.float32, device=device)
         inv_slots = torch.empty((1, top_k), dtype=torch.int32, device=device)
@@ -1205,22 +1311,25 @@ def _build_compact_decode_schedule(
         tile_m_count = torch.empty((top_k,), dtype=torch.int32, device=device)
         num_active_tiles_buf = torch.empty((1,), dtype=torch.int32, device=device)
         num_active_slots_buf = torch.empty((1,), dtype=torch.int32, device=device)
-        _build_m1_compact_schedule_kernel[(1,)](
-            topk_ids[0].contiguous(),
-            topk_weights[0].float().contiguous(),
-            sorted_tok_ids,
-            sorted_weights,
-            inv_slots.view(-1),
-            tile_expert_id,
-            tile_m_start,
-            tile_m_count,
-            num_active_tiles_buf,
-            num_active_slots_buf,
-            int(ep_start) if ep_size > 1 else 0,
-            num_experts,
-            TOP_K=top_k,
-            num_warps=1,
-        )
+        ids_0 = topk_ids[0] if topk_ids[0].is_contiguous() else topk_ids[0].contiguous()
+        w_0 = topk_weights[0] if topk_weights[0].is_contiguous() else topk_weights[0].contiguous()
+        with _cuda_device_ctx(device):
+            _build_m1_compact_schedule_kernel[(1,)](
+                ids_0,
+                w_0,
+                sorted_tok_ids,
+                sorted_weights,
+                inv_slots.view(-1),
+                tile_expert_id,
+                tile_m_start,
+                tile_m_count,
+                num_active_tiles_buf,
+                num_active_slots_buf,
+                int(ep_start) if ep_size > 1 else 0,
+                num_experts,
+                TOP_K=top_k,
+                num_warps=1,
+            )
         return CompactMoETileSchedule(
             sorted_tok_ids=sorted_tok_ids,
             sorted_weights=sorted_weights,
@@ -1238,60 +1347,142 @@ def _build_compact_decode_schedule(
         )
 
     flat_ids = topk_ids.reshape(-1)
-    flat_weights = topk_weights.float().reshape(-1)
-    slot_idx = torch.arange(m_total, dtype=torch.int32, device=device)
-    if ep_size > 1:
-        ep_end = int(ep_start) + num_experts
-        in_range = (flat_ids >= ep_start) & (flat_ids < ep_end)
-        flat_local = torch.where(
-            in_range,
-            flat_ids - int(ep_start),
-            torch.full_like(flat_ids, num_experts),
-        )
-        _, perm_i64 = torch.sort(flat_local, stable=True)
-        sorted_tok_ids = (perm_i64 // top_k).to(torch.int32)
-        sorted_weights = flat_weights.index_select(0, perm_i64)
-        slot_vals = torch.where(
-            in_range.index_select(0, perm_i64),
-            slot_idx,
-            torch.full_like(slot_idx, -1),
-        )
-        counts = _gpu_expert_bincount(flat_local, num_experts)
-    else:
-        _, perm_i64 = torch.sort(flat_ids, stable=True)
-        sorted_tok_ids = (perm_i64 // top_k).to(torch.int32)
-        sorted_weights = flat_weights.index_select(0, perm_i64)
-        slot_vals = slot_idx
-        counts = _gpu_expert_bincount(flat_ids, num_experts)
-    inv_slots_flat = torch.empty((m_total,), dtype=torch.int32, device=device)
-    inv_slots_flat.index_copy_(0, perm_i64, slot_vals)
-    inv_slots = inv_slots_flat.reshape(num_tokens, top_k)
-
-    m_starts = torch.cumsum(counts, dim=0) - counts
-    num_tiles_per_e = (counts + block_m - 1) // block_m
-    tile_starts = torch.cumsum(num_tiles_per_e, dim=0) - num_tiles_per_e
-
+    if not flat_ids.is_contiguous():
+        flat_ids = flat_ids.contiguous()
+    flat_weights = topk_weights.reshape(-1)
+    if not flat_weights.is_contiguous():
+        flat_weights = flat_weights.contiguous()
     a_max = min(num_experts, m_total)
     max_num_tiles = max(1, a_max + (m_total - a_max) // block_m)
-    tile_expert_id = torch.empty((max_num_tiles,), dtype=torch.int32, device=device)
-    tile_m_start = torch.empty((max_num_tiles,), dtype=torch.int32, device=device)
-    tile_m_count = torch.empty((max_num_tiles,), dtype=torch.int32, device=device)
-    num_active_tiles_buf = torch.empty((1,), dtype=torch.int32, device=device)
-    num_active_slots_buf = torch.empty((1,), dtype=torch.int32, device=device)
 
-    _scatter_compact_tile_schedule_kernel[(num_experts,)](
-        counts,
-        m_starts,
-        tile_starts,
-        tile_expert_id,
-        tile_m_start,
-        tile_m_count,
-        num_active_tiles_buf,
-        num_active_slots_buf,
-        num_experts,
-        BM=block_m,
-        num_warps=1,
-    )
+    if flat_ids.is_cuda:
+        with _cuda_device_ctx(device):
+            BLOCK = 256
+            grid_m = (triton.cdiv(m_total, BLOCK),)
+            if ep_size > 1:
+                flat_local = torch.empty((m_total,), dtype=torch.int32, device=device)
+                counts = torch.zeros((num_experts,), dtype=torch.int32, device=device)
+                _ep_local_and_bincount_kernel[grid_m](
+                    flat_ids,
+                    flat_local,
+                    counts,
+                    m_total,
+                    int(ep_start),
+                    num_experts,
+                    BLOCK=BLOCK,
+                    num_warps=4,
+                )
+                _, perm_i64 = torch.sort(flat_local, stable=True)
+            else:
+                counts = _gpu_expert_bincount(flat_ids, num_experts)
+                _, perm_i64 = torch.sort(flat_ids, stable=True)
+
+            sorted_tok_ids = torch.empty((m_total,), dtype=torch.int32, device=device)
+            sorted_weights = torch.empty((m_total,), dtype=torch.float32, device=device)
+            inv_slots_flat = torch.empty((m_total,), dtype=torch.int32, device=device)
+            _compact_perm_unpack_kernel[grid_m](
+                perm_i64,
+                flat_ids,
+                flat_weights,
+                sorted_tok_ids,
+                sorted_weights,
+                inv_slots_flat,
+                m_total,
+                int(ep_start) if ep_size > 1 else 0,
+                num_experts,
+                TOP_K=top_k,
+                HAS_EP=(ep_size > 1),
+                BLOCK=BLOCK,
+                num_warps=4,
+            )
+            inv_slots = inv_slots_flat.reshape(num_tokens, top_k)
+
+            if num_experts <= 2048:
+                m_starts = torch.empty((num_experts,), dtype=torch.int32, device=device)
+                tile_starts = torch.empty((num_experts,), dtype=torch.int32, device=device)
+                e_pad = max(16, triton.next_power_of_2(num_experts))
+                _compact_prefix_scan_kernel[(1,)](
+                    counts,
+                    m_starts,
+                    tile_starts,
+                    num_experts,
+                    BM=block_m,
+                    E_PAD=e_pad,
+                    num_warps=4,
+                )
+            else:
+                m_starts = torch.cumsum(counts, dim=0) - counts
+                num_tiles_per_e = (counts + block_m - 1) // block_m
+                tile_starts = torch.cumsum(num_tiles_per_e, dim=0) - num_tiles_per_e
+
+            tile_expert_id = torch.empty((max_num_tiles,), dtype=torch.int32, device=device)
+            tile_m_start = torch.empty((max_num_tiles,), dtype=torch.int32, device=device)
+            tile_m_count = torch.empty((max_num_tiles,), dtype=torch.int32, device=device)
+            num_active_tiles_buf = torch.empty((1,), dtype=torch.int32, device=device)
+            num_active_slots_buf = torch.empty((1,), dtype=torch.int32, device=device)
+            _scatter_compact_tile_schedule_kernel[(num_experts,)](
+                counts,
+                m_starts,
+                tile_starts,
+                tile_expert_id,
+                tile_m_start,
+                tile_m_count,
+                num_active_tiles_buf,
+                num_active_slots_buf,
+                num_experts,
+                BM=block_m,
+                num_warps=1,
+            )
+    else:
+        flat_weights_f32 = flat_weights.float()
+        slot_idx = torch.arange(m_total, dtype=torch.int32, device=device)
+        if ep_size > 1:
+            ep_end = int(ep_start) + num_experts
+            in_range = (flat_ids >= ep_start) & (flat_ids < ep_end)
+            flat_local = torch.where(
+                in_range,
+                flat_ids - int(ep_start),
+                torch.full_like(flat_ids, num_experts),
+            )
+            _, perm_i64 = torch.sort(flat_local, stable=True)
+            sorted_tok_ids = (perm_i64 // top_k).to(torch.int32)
+            sorted_weights = flat_weights_f32.index_select(0, perm_i64)
+            slot_vals = torch.where(
+                in_range.index_select(0, perm_i64),
+                slot_idx,
+                torch.full_like(slot_idx, -1),
+            )
+            counts = _gpu_expert_bincount(flat_local, num_experts).to(torch.int32)
+        else:
+            _, perm_i64 = torch.sort(flat_ids, stable=True)
+            sorted_tok_ids = (perm_i64 // top_k).to(torch.int32)
+            sorted_weights = flat_weights_f32.index_select(0, perm_i64)
+            slot_vals = slot_idx
+            counts = _gpu_expert_bincount(flat_ids, num_experts).to(torch.int32)
+        inv_slots_flat = torch.empty((m_total,), dtype=torch.int32, device=device)
+        inv_slots_flat.index_copy_(0, perm_i64, slot_vals)
+        inv_slots = inv_slots_flat.reshape(num_tokens, top_k)
+
+        m_starts = torch.cumsum(counts, dim=0) - counts
+        num_tiles_per_e = (counts + block_m - 1) // block_m
+        tile_starts = torch.cumsum(num_tiles_per_e, dim=0) - num_tiles_per_e
+        tile_expert_id = torch.empty((max_num_tiles,), dtype=torch.int32, device=device)
+        tile_m_start = torch.empty((max_num_tiles,), dtype=torch.int32, device=device)
+        tile_m_count = torch.empty((max_num_tiles,), dtype=torch.int32, device=device)
+        num_active_tiles = 0
+        for e in range(num_experts):
+            c = int(counts[e].item())
+            m0 = int(m_starts[e].item())
+            nt = (c + block_m - 1) // block_m
+            for i in range(nt):
+                tile_expert_id[num_active_tiles] = e
+                tile_m_start[num_active_tiles] = m0 + i * block_m
+                tile_m_count[num_active_tiles] = min(block_m, c - i * block_m)
+                num_active_tiles += 1
+        num_active_tiles_buf = torch.tensor([num_active_tiles], dtype=torch.int32, device=device)
+        num_active_slots_buf = torch.tensor(
+            [int((m_starts[-1] + counts[-1]).item())], dtype=torch.int32, device=device
+        )
 
     return CompactMoETileSchedule(
         sorted_tok_ids=sorted_tok_ids,
@@ -3322,6 +3513,42 @@ def mxfp4_moe_forward(
         M, L, dev, weights, backend, use_triton, compute_mode=compute_mode
     )
 
+    with _cuda_device_ctx(dev):
+        return _dispatch_mxfp4_moe_forward(
+            chosen,
+            x,
+            topk_ids,
+            topk_weights,
+            weights,
+            gate_beta=gate_beta,
+            up_beta=up_beta,
+            ep_start=ep_start,
+            ep_size=ep_size,
+            prequant_fp8=prequant_fp8,
+            res_dtype=res_dtype,
+            M=M,
+            L=L,
+            compute_mode=compute_mode,
+        )
+
+
+def _dispatch_mxfp4_moe_forward(
+    chosen: str,
+    x: Optional[torch.Tensor],
+    topk_ids: torch.Tensor,
+    topk_weights: torch.Tensor,
+    weights: MXFP4MoEWeights,
+    *,
+    gate_beta: float,
+    up_beta: float,
+    ep_start: int,
+    ep_size: int,
+    prequant_fp8: Optional[Tuple[torch.Tensor, torch.Tensor]],
+    res_dtype: torch.dtype,
+    M: int,
+    L: int,
+    compute_mode: str,
+) -> torch.Tensor:
     if chosen == "deepgemm_contiguous":
         return mxfp4_moe_deepgemm_contiguous(
             x,

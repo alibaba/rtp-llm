@@ -28,6 +28,7 @@ from rtp_llm.models_py.modules.qwen4_5.short_conv import (
     Qwen4_5ShortConv,
     causal_dwconv1d_prefill_with_snapshots_triton,
     causal_dwconv1d_ragged_prefill_with_snapshots_triton,
+    causal_dwconv1d_verify_opaque_triton,
     causal_dwconv1d_verify_triton,
 )
 
@@ -936,6 +937,91 @@ def test_r2_hc_aligned_projections_and_ple_p2p() -> None:
         assert ple._ensure_pointer_table(device).numel() == 4
     print("  [PASS] R2 HC H=5120 LR=32 zero cutlass_80, CG parity=0.0, & PLE P2P shard check")
 
+def test_r4_shortconv_opaque_verify_and_clip_value() -> None:
+    print("\n=== [3e] R4 ShortConv Direct-Opaque Verify & Fused clip_value Check ===")
+    device = torch.device("cuda")
+    dtype = torch.bfloat16
+    torch.manual_seed(202640)
+
+    B, V, ps, num_blocks = 8, 8, 64, 48
+    for C, pool_slots, offset_idx in [(5120, 1, 0), (256, 2, 1)]:
+        pool_3d = torch.randn((num_blocks, pool_slots, C, 3), device=device, dtype=dtype) * 0.5
+        pool_2d = pool_3d.reshape(num_blocks, pool_slots * C * 3)
+        bt = torch.tensor(
+            [[1 + b * 2, 2 + b * 2, 0] for b in range(B)],
+            device=device,
+            dtype=torch.int32,
+        )
+        # Exercise seq=0 (no prefix), seq=64 (page 0), seq=128 (page 1), and phys=0 unallocated sentinel (page 2)
+        seq_before = torch.tensor([0, 64, 65, 128, 130, 1, 64, 150], device=device, dtype=torch.int32)
+        w = torch.randn((C, 1, 4), device=device, dtype=dtype) * 0.2
+        x = torch.randn((B, V, C), device=device, dtype=dtype) * 2.0
+
+        init_ref = torch.zeros((B, C, 3), device=device, dtype=dtype)
+        for b in range(B):
+            sb = int(seq_before[b].item())
+            if sb > 0:
+                phys = int(bt[b, (sb - 1) // ps].item())
+                if 0 < phys < num_blocks:
+                    init_ref[b].copy_(pool_3d[phys, offset_idx])
+
+        st_ref = torch.empty((B, V, C, 3), device=device, dtype=dtype)
+        st_opq = torch.empty((B, V, C, 3), device=device, dtype=dtype)
+        y_ref = causal_dwconv1d_verify_triton(
+            x, w, init_ref, st_ref, residual=True, use_activation=(C == 256), round_pre_act=(C == 256), clamp_val=1.5
+        )
+        y_opq = causal_dwconv1d_verify_opaque_triton(
+            x,
+            w,
+            pool_2d,
+            bt,
+            seq_before,
+            st_opq,
+            page_size=ps,
+            pool_col_offset=offset_idx * C * 3,
+            residual=True,
+            use_activation=(C == 256),
+            round_pre_act=(C == 256),
+            clamp_val=1.5,
+        )
+        assert float((y_opq - y_ref).abs().max().item()) == 0.0
+        assert float((st_opq - st_ref).abs().max().item()) == 0.0
+
+    # Verify CUDA Graph capture/replay on C=5120 direct-opaque verify
+    C_cg = 5120
+    pool_cg = torch.randn((num_blocks, C_cg * 3), device=device, dtype=dtype) * 0.5
+    bt_cg = torch.arange(1, 1 + B * 2, device=device, dtype=torch.int32).view(B, 2)
+    sb_cg = torch.full((B,), 64, device=device, dtype=torch.int32)
+    x_cg = torch.randn((B, V, C_cg), device=device, dtype=dtype)
+    w_cg = torch.randn((C_cg, 1, 4), device=device, dtype=dtype) * 0.2
+    st_cg = torch.empty((B, V, C_cg, 3), device=device, dtype=dtype)
+    _ = causal_dwconv1d_verify_opaque_triton(x_cg, w_cg, pool_cg, bt_cg, sb_cg, st_cg, page_size=ps, residual=True, clamp_val=2.0)
+    cg = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(cg):
+        out_cg = causal_dwconv1d_verify_opaque_triton(x_cg, w_cg, pool_cg, bt_cg, sb_cg, st_cg, page_size=ps, residual=True, clamp_val=2.0)
+    x_cg.copy_(torch.randn_like(x_cg) * 4.0)
+    cg.replay()
+    st_eag = torch.empty_like(st_cg)
+    out_eag = causal_dwconv1d_verify_opaque_triton(x_cg, w_cg, pool_cg, bt_cg, sb_cg, st_eag, page_size=ps, residual=True, clamp_val=2.0)
+    assert float((out_cg - out_eag).abs().max().item()) == 0.0
+    assert float((st_cg - st_eag).abs().max().item()) == 0.0
+
+    # Verify clip_value on Qwen4_5ShortConv.forward (Prefill & Decode)
+    sconv = Qwen4_5ShortConv(512, kernel_size=4, residual=True, use_activation=False, dtype=dtype, device=device).eval()
+    xp = torch.randn((2, 17, 512), device=device, dtype=dtype) * 3.0
+    stp_a = sconv.alloc_state(2, device=device, dtype=dtype)
+    stp_b = sconv.alloc_state(2, device=device, dtype=dtype)
+    yp_clip = sconv(xp, state=stp_a, clip_value=2.5)
+    yp_ref = sconv.forward_ref(xp, state=stp_b, clip_value=2.5)
+    assert float((yp_clip.float() - yp_ref.float()).abs().max().item()) < 2e-2
+    xd = torch.randn((2, 1, 512), device=device, dtype=dtype) * 3.0
+    yd_clip = sconv(xd, state=stp_a, clip_value=2.5)
+    yd_ref = sconv.forward_ref(xd, state=stp_b, clip_value=2.5)
+    assert float((yd_clip.float() - yd_ref.float()).abs().max().item()) < 2e-2
+    assert float(yd_clip.abs().max().item()) <= 2.5
+    print("  [PASS] R4 ShortConv direct-opaque verify + clip_value parity & CG!")
+
+
 def run_benchmarks() -> None:
     print("\n=== [4] B300 (SM103) CUDA-Graph Pure-GPU Micro-Benchmarks at REAL Qwen 4.5-Flash Shapes ===")
     device = torch.device("cuda")
@@ -1057,6 +1143,7 @@ def main() -> int:
     test_short_conv_verify_and_packed_prefill()
     test_ple_packed_prefill_verify_and_tp_hooks()
     test_r2_hc_aligned_projections_and_ple_p2p()
+    test_r4_shortconv_opaque_verify_and_clip_value()
     run_benchmarks()
     print(f"\nALL TESTS & BENCHMARKS PASSED in {time.perf_counter() - t0:.2f}s!")
     return 0

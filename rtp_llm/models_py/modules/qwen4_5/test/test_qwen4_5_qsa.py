@@ -2025,6 +2025,164 @@ class Qwen4_5QSATest(unittest.TestCase):
                 else:
                     os.environ["QWEN4_5_RUNTIME_MOE_TBO"] = prev_env
 
+    def test_r4_qsa_bsearch_prefill_blkk128_and_decode_kt128(self) -> None:
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA required")
+        from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_selection import select_qsa_paged_tokens
+
+        dev = torch.device("cuda")
+        dt = torch.bfloat16
+        torch.manual_seed(202642)
+
+        with torch.no_grad():
+            # 1. _select_top_tokens bsearch fast path for rows > 1024 and cols <= 2048
+            rows_b, cols_b = 2048, 1024
+            vis_b = torch.randint(128, cols_b * 4 + 1, (rows_b,), device=dev, dtype=torch.int32)
+            scores_b = torch.randn((rows_b, cols_b), device=dev, dtype=torch.float32)
+            c_idx = torch.arange(cols_b, device=dev, dtype=torch.int32).unsqueeze(0)
+            scores_b = torch.where(c_idx < (vis_b // 4).unsqueeze(1), scores_b, torch.full_like(scores_b, float("-inf")))
+            sel_fast = _select_top_tokens(scores_b, vis_b, compress_ratio=4, token_budget=2048, scores_are_masked=True)
+            sel_ref = select_qsa_paged_tokens(scores_b, vis_b, compress_ratio=4, token_budget=2048, validate_lengths=False, scores_are_masked=True)
+            for ri in (0, 77, 1025, rows_b - 1):
+                self.assertEqual(set(sel_fast[ri].tolist()), set(sel_ref[ri].tolist()))
+
+            # 1b. 2-Stage Tiled Parallel Top-K (8192 < cols <= 32768) exact parity + ties + vis edge + CG
+            for rows_t, cols_t in [(8, 12288), (64, 16384), (16, 28672), (8, 32768)]:
+                vis_t = torch.randint(0, cols_t * 4 + 1, (rows_t,), device=dev, dtype=torch.int32)
+                vis_t[0] = 0
+                vis_t[1] = 17
+                scores_t = torch.randn((rows_t, cols_t), device=dev, dtype=torch.float32)
+                scores_t[2, : min(cols_t, 6000)] = 3.25  # heavy exact ties across tiles
+                c_t = torch.arange(cols_t, device=dev, dtype=torch.int32).unsqueeze(0)
+                scores_t = torch.where(c_t < (vis_t // 4).unsqueeze(1), scores_t, torch.full_like(scores_t, float("-inf")))
+                sel_tiled = _select_top_tokens(scores_t, vis_t, compress_ratio=4, token_budget=2048, scores_are_masked=True)
+                sel_tref = select_qsa_paged_tokens(scores_t, vis_t, compress_ratio=4, token_budget=2048, validate_lengths=False, scores_are_masked=True)
+                for ri in range(rows_t):
+                    self.assertEqual(set(sel_tiled[ri].tolist()), set(sel_tref[ri].tolist()))
+                if cols_t == 32768:
+                    cg_t = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(cg_t):
+                        sel_cg = _select_top_tokens(scores_t, vis_t, compress_ratio=4, token_budget=2048, scores_are_masked=True)
+                    new_sc = torch.where(c_t < (vis_t // 4).unsqueeze(1), torch.randn_like(scores_t), torch.full_like(scores_t, float("-inf")))
+                    scores_t.copy_(new_sc)
+                    # Re-check capture replay consistency
+                    cg_t.replay()
+                    sel_eag_t = _select_top_tokens(scores_t, vis_t, compress_ratio=4, token_budget=2048, scores_are_masked=True)
+                    self.assertEqual(set(sel_cg[2].tolist()), set(sel_eag_t[2].tolist()))
+
+            # 1c. Verify 8L Decode _read/_write_opaque_batch_gpu uses Triton (0 opaque indexSelectSmallIndex<unsigned char>) + parity
+            arch_dec = _make_mini_arch(indexer_n_heads=8, indexer_budget=32, max_position_embeddings=512)
+            plan_dec = build_qwen4_5_kv_cache_plan(arch_dec)
+            pools_dec = {t: 40 for t in [INDEXER_KV_TAG, INDEXER_STATE_TAG, FULL_ATTN_KV_TAG, "linear", "gdn_consumer_q_conv", "full_attn_kv_sconv", "full_attn_output_sconv", "linear_attn_output_sconv", "ffn_output_sconv", "ple_conv_state", "ple_ngram_ctx"]}
+            lm_dec = Qwen4_5ForCausalLM(arch_dec, use_triton_mxfp4=True, compute_mode="bf16", dtype=dt, device=dev)
+            lm_dec.init_synthetic_weights(seed=202643, ple_mode="gpu_full", ple_fp8=False)
+            lm_dec.prepare_weights()
+            c_dec = LocalKVCache(plan_dec, tokens_per_block=64, num_blocks_per_tag=pools_dec, device=dev, dtype=dt)
+            rt_dec = Qwen4_5RTPModel.from_causal_lm(lm_dec, kv_cache=c_dec)
+            tb_dec = build_block_tables_for_requests(c_dec, [96, 96])
+            rt_dec.forward(LocalPyModelInputs(input_ids=torch.randint(4, 240, (128,), device=dev, dtype=torch.int64), attention_inputs=make_tagged_attention_inputs(tb_dec, is_prefill=True, input_lengths=[64, 64], sequence_lengths=[64, 64], prefix_lengths=[0, 0], device=dev)))
+            d_attn = make_tagged_attention_inputs(tb_dec, is_prefill=False, input_lengths=[1, 1], sequence_lengths=[64, 64], prefix_lengths=[0, 0], device=dev)
+            seq_p1 = torch.tensor([65, 65], dtype=torch.int32, device=dev)
+            for grp in d_attn.values():
+                grp.sequence_lengths_plus_1_device = seq_p1
+            d_in = LocalPyModelInputs(input_ids=torch.randint(4, 240, (2,), device=dev, dtype=torch.int64), attention_inputs=d_attn)
+            dec_handle = rt_dec.prepare_fmha_impl(d_in, is_cuda_graph=False)
+            _ = rt_dec.forward(d_in, fmha_impl=dec_handle)
+            torch.cuda.synchronize()
+            with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as prof_dec:
+                _ = rt_dec.forward(d_in, fmha_impl=dec_handle)
+            torch.cuda.synchronize()
+            u8_idx_cnt = sum(e.count for e in prof_dec.key_averages() if "indexSelectSmallIndex" in e.key and "unsigned char" in e.key)
+            self.assertEqual(u8_idx_cnt, 0, f"Expected 0 unsigned char opaque indexSelectSmallIndex, got {u8_idx_cnt}")
+            rd_triton_cnt = sum(e.count for e in prof_dec.key_averages() if "_read_opaque_rows_triton" in e.key)
+            wr_triton_cnt = sum(e.count for e in prof_dec.key_averages() if "_write_opaque_rows_paged_triton" in e.key)
+            self.assertGreaterEqual(rd_triton_cnt, 20)
+            self.assertGreaterEqual(wr_triton_cnt, 20)
+
+            # 2. QSA Prefill BLK_K=128 parity (dense + paged FP8/BF16, Hq=32 & Hq=16)
+            ps, D, K_p, T_p = 64, 256, 320, 640
+            for hq in (32, 16):
+                B_p, S_p = 2, 16
+                qp = torch.randn((B_p, hq, S_p, D), device=dev, dtype=dt)
+                kp = torch.randn((B_p, 1, T_p, D), device=dev, dtype=dt)
+                vp = torch.randn((B_p, 1, T_p, D), device=dev, dtype=dt)
+                sel_p = torch.stack([
+                    torch.stack([torch.randperm(T_p, device=dev, dtype=torch.int32)[:K_p] for _ in range(S_p)])
+                    for _ in range(B_p)
+                ])
+                got_dense = qsa_sparse_prefill_attention(qp, kp, vp, sel_p)
+                ref_dense = qsa_sparse_prefill_attention(qp.cpu(), kp.cpu(), vp.cpu(), sel_p.cpu()).to(dev)
+                self.assertGreaterEqual(_cosine(got_dense, ref_dense), 0.9999)
+
+                n_lp = T_p // ps
+                kv_raw = torch.randn((B_p * n_lp + 4, 2, 1, ps, D), device=dev, dtype=dt) * 0.5
+                sc_p = 0.3 + torch.rand((B_p * n_lp + 4, 2, 1, ps), device=dev, dtype=torch.float32) * 1.4
+                kv_fp8 = (kv_raw.float() / sc_p.unsqueeze(-1)).to(torch.float8_e4m3fn)
+                bt_p = torch.arange(1, 1 + B_p * n_lp, device=dev, dtype=torch.int32).view(B_p, n_lp)
+                got_p = qsa_sparse_paged_prefill_attention(
+                    qp, kv_fp8, bt_p, sel_p, page_size=ps, kv_heads=1, head_dim=D, max_ctx_len=T_p, kv_scale=sc_p
+                )
+                # Reference via K=K_p per query on FP8 values
+                kv_f = (kv_fp8.float() * sc_p.unsqueeze(-1)).to(dt)
+                ref_p = torch.zeros_like(qp, dtype=torch.float32)
+                for b in range(B_p):
+                    for s in range(S_p):
+                        ids = sel_p[b, s].long()
+                        pp, sl = bt_p[b, ids // ps].long(), ids % ps
+                        kk = kv_f[pp, 0, 0, sl].float().unsqueeze(0).expand(hq, -1, -1)
+                        vv = kv_f[pp, 1, 0, sl].float().unsqueeze(0).expand(hq, -1, -1)
+                        pr = torch.softmax(torch.einsum("hd,hkd->hk", qp[b, :, s].float(), kk) * (D ** -0.5), dim=-1)
+                        ref_p[b, :, s] = torch.einsum("hk,hkd->hd", pr, vv)
+                self.assertGreaterEqual(_cosine(got_p, ref_p.to(dt)), 0.9998)
+
+            # 3. QSA Decode KT=128 (FP8 Hq=32/16, m_ctas >= 16..512) & BF16 KT=64 nw=2 (Hq=16) + CUDA Graph
+            for fp8, hq, B_d, S_d, K_d in [
+                (True, 32, 64, 8, 640),   # m_ctas=512 -> sp=1, kt=128
+                (True, 32, 16, 8, 640),   # m_ctas=128 -> sp=2, kt=128
+                (True, 16, 8, 8, 640),    # m_ctas=64  -> sp=4, kt=128
+                (False, 16, 16, 8, 512),  # m_ctas=128 -> sp=4, kt=64, nw=2
+                (False, 32, 16, 1, 512),  # m_ctas=16  -> sp=16, kt=64
+            ]:
+                T_d = 1024
+                n_lp = T_d // ps
+                num_p = B_d * n_lp + 4
+                qd = torch.randn((B_d, hq, S_d, D), device=dev, dtype=dt)
+                gd = torch.randn((B_d, S_d, hq, D), device=dev, dtype=dt)
+                kv_raw = torch.randn((num_p, 2, 1, ps, D), device=dev, dtype=dt) * 0.4
+                sc_d = (0.3 + torch.rand((num_p, 2, 1, ps), device=dev, dtype=torch.float32) * 1.4) if fp8 else None
+                kv_d = (kv_raw.float() / sc_d.unsqueeze(-1)).to(torch.float8_e4m3fn) if fp8 else kv_raw
+                bt_d = torch.arange(1, 1 + B_d * n_lp, device=dev, dtype=torch.int32).view(B_d, n_lp)
+                kl_d = torch.full((B_d, S_d), T_d, device=dev, dtype=torch.int32)
+                sel_d = torch.randint(0, T_d, (B_d, S_d, K_d), device=dev, dtype=torch.int32)
+                got_d = qsa_sparse_paged_decode_attention(
+                    qd, kv_d, bt_d, kl_d, sel_d, page_size=ps, kv_heads=1, head_dim=D, kv_scale=sc_d, output_gate=gd, is_cuda_graph=True
+                )
+                kv_df = (kv_d.float() * sc_d.unsqueeze(-1)) if fp8 else kv_d.float()
+                ref_d = torch.zeros_like(qd, dtype=torch.float32)
+                for b in range(B_d):
+                    for s in range(S_d):
+                        ids = sel_d[b, s].long()
+                        pp, sl = bt_d[b, ids // ps].long(), ids % ps
+                        kk = kv_df[pp, 0, 0, sl].unsqueeze(0).expand(hq, -1, -1)
+                        vv = kv_df[pp, 1, 0, sl].unsqueeze(0).expand(hq, -1, -1)
+                        pr = torch.softmax(torch.einsum("hd,hkd->hk", qd[b, :, s].float(), kk) * (D ** -0.5), dim=-1)
+                        res = torch.einsum("hk,hkd->hd", pr, vv).to(dt).float()
+                        ref_d[b, :, s] = res * torch.sigmoid(gd[b, s].float()).to(dt).float()
+                self.assertGreaterEqual(_cosine(got_d, ref_d.to(dt)), 0.9995 if fp8 else 0.9999)
+
+                if fp8 and hq == 32 and B_d == 64:
+                    cg = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(cg):
+                        out_cg = qsa_sparse_paged_decode_attention(
+                            qd, kv_d, bt_d, kl_d, sel_d, page_size=ps, kv_heads=1, head_dim=D, kv_scale=sc_d, output_gate=gd, is_cuda_graph=True
+                        )
+                    qd.copy_(torch.randn_like(qd))
+                    cg.replay()
+                    out_eag = qsa_sparse_paged_decode_attention(
+                        qd, kv_d, bt_d, kl_d, sel_d, page_size=ps, kv_heads=1, head_dim=D, kv_scale=sc_d, output_gate=gd, is_cuda_graph=True
+                    )
+                    self.assertGreaterEqual(_cosine(out_cg, out_eag), 0.99999)
+
 
 if __name__ == "__main__":
     unittest.main()

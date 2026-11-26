@@ -16,7 +16,7 @@ FP8 E4M3 quantization kernels:
 
 from __future__ import annotations
 
-from functools import lru_cache
+import contextlib
 from typing import Optional, Tuple
 
 import torch
@@ -31,7 +31,12 @@ _MASKED_PERSIST_MAX_E = 1024
 _MASKED_CHUNK_M = 16
 
 
-@lru_cache(maxsize=8)
+def _cuda_device_ctx(device: torch.device):
+    if device.type == "cuda" and device.index is not None and device.index != torch.cuda.current_device():
+        return torch.cuda.device(device)
+    return contextlib.nullcontext()
+
+
 def _get_sm_count(device_index: int) -> int:
     return int(torch.cuda.get_device_properties(device_index).multi_processor_count)
 
@@ -72,12 +77,13 @@ def situ_and_mul_ref(
 def _situ_and_mul_cat_kernel(
     x_ptr,
     out_ptr,
-    num_rows,
-    D,
+    D: tl.constexpr,
     stride_x_row: tl.int64,
     stride_out_row: tl.int64,
     gate_beta: tl.constexpr,
     up_beta: tl.constexpr,
+    inv_gate_beta: tl.constexpr,
+    inv_up_beta: tl.constexpr,
     BLOCK_D: tl.constexpr,
 ):
     pid_row = tl.program_id(0).to(tl.int64)
@@ -90,8 +96,8 @@ def _situ_and_mul_cat_kernel(
     up = tl.load(x_row_ptr + D + offs, mask=mask, other=0.0).to(tl.float32)
 
     sig_gate = tl.div_rn(1.0, 1.0 + libdevice.exp(-gate))
-    g = gate_beta * libdevice.tanh(tl.div_rn(gate, gate_beta)) * sig_gate
-    u = up_beta * libdevice.tanh(tl.div_rn(up, up_beta))
+    g = gate_beta * libdevice.tanh(gate * inv_gate_beta) * sig_gate
+    u = up_beta * libdevice.tanh(up * inv_up_beta)
     out = g * u
 
     out_row_ptr = out_ptr + pid_row * stride_out_row
@@ -103,13 +109,14 @@ def _situ_and_mul_split_kernel(
     gate_ptr,
     up_ptr,
     out_ptr,
-    num_rows,
-    D,
+    D: tl.constexpr,
     stride_g_row: tl.int64,
     stride_u_row: tl.int64,
     stride_out_row: tl.int64,
     gate_beta: tl.constexpr,
     up_beta: tl.constexpr,
+    inv_gate_beta: tl.constexpr,
+    inv_up_beta: tl.constexpr,
     BLOCK_D: tl.constexpr,
 ):
     pid_row = tl.program_id(0).to(tl.int64)
@@ -125,8 +132,8 @@ def _situ_and_mul_split_kernel(
     )
 
     sig_gate = tl.div_rn(1.0, 1.0 + libdevice.exp(-gate))
-    g = gate_beta * libdevice.tanh(tl.div_rn(gate, gate_beta)) * sig_gate
-    u = up_beta * libdevice.tanh(tl.div_rn(up, up_beta))
+    g = gate_beta * libdevice.tanh(gate * inv_gate_beta) * sig_gate
+    u = up_beta * libdevice.tanh(up * inv_up_beta)
     out = g * u
 
     tl.store(
@@ -152,6 +159,8 @@ def situ_and_mul_triton(
 
     gate_beta_f = float(gate_beta)
     up_beta_f = float(up_beta)
+    inv_gate_beta_f = 1.0 / gate_beta_f
+    inv_up_beta_f = 1.0 / up_beta_f
 
     if up is None:
         if x.shape[-1] % 2 != 0:
@@ -168,21 +177,23 @@ def situ_and_mul_triton(
         num_rows = x_2d.shape[0]
         out = torch.empty((num_rows, D), dtype=x.dtype, device=x.device)
 
-        BLOCK_D = 1024 if D >= 1024 else triton.next_power_of_2(max(D, 64))
-        num_warps = 8 if BLOCK_D >= 1024 else 4
+        # BLOCK_D=512 with 4 warps maximizes SM100/SM103 occupancy across D=320..12800.
+        BLOCK_D = min(512, triton.next_power_of_2(max(D, 64)))
         grid = (num_rows, triton.cdiv(D, BLOCK_D))
-        _situ_and_mul_cat_kernel[grid](
-            x_2d,
-            out,
-            num_rows,
-            D,
-            x_2d.stride(0),
-            out.stride(0),
-            gate_beta=gate_beta_f,
-            up_beta=up_beta_f,
-            BLOCK_D=BLOCK_D,
-            num_warps=num_warps,
-        )
+        with _cuda_device_ctx(x_2d.device):
+            _situ_and_mul_cat_kernel[grid](
+                x_2d,
+                out,
+                D,
+                x_2d.stride(0),
+                out.stride(0),
+                gate_beta=gate_beta_f,
+                up_beta=up_beta_f,
+                inv_gate_beta=inv_gate_beta_f,
+                inv_up_beta=inv_up_beta_f,
+                BLOCK_D=BLOCK_D,
+                num_warps=4,
+            )
         return out.reshape(*orig_shape, D)
 
     if x.shape != up.shape:
@@ -200,23 +211,24 @@ def situ_and_mul_triton(
     num_rows = g_2d.shape[0]
     out = torch.empty((num_rows, D), dtype=x.dtype, device=x.device)
 
-    BLOCK_D = 1024 if D >= 1024 else triton.next_power_of_2(max(D, 64))
-    num_warps = 8 if BLOCK_D >= 1024 else 4
+    BLOCK_D = min(512, triton.next_power_of_2(max(D, 64)))
     grid = (num_rows, triton.cdiv(D, BLOCK_D))
-    _situ_and_mul_split_kernel[grid](
-        g_2d,
-        u_2d,
-        out,
-        num_rows,
-        D,
-        g_2d.stride(0),
-        u_2d.stride(0),
-        out.stride(0),
-        gate_beta=gate_beta_f,
-        up_beta=up_beta_f,
-        BLOCK_D=BLOCK_D,
-        num_warps=num_warps,
-    )
+    with _cuda_device_ctx(g_2d.device):
+        _situ_and_mul_split_kernel[grid](
+            g_2d,
+            u_2d,
+            out,
+            D,
+            g_2d.stride(0),
+            u_2d.stride(0),
+            out.stride(0),
+            gate_beta=gate_beta_f,
+            up_beta=up_beta_f,
+            inv_gate_beta=inv_gate_beta_f,
+            inv_up_beta=inv_up_beta_f,
+            BLOCK_D=BLOCK_D,
+            num_warps=4,
+        )
     return out.reshape(*orig_shape, D)
 
 
@@ -235,9 +247,14 @@ class SituAndMul(nn.Module):
         self.use_triton = bool(use_triton)
 
     def forward(
-        self, x: torch.Tensor, up: Optional[torch.Tensor] = None
+        self,
+        x: torch.Tensor,
+        up: Optional[torch.Tensor] = None,
+        *,
+        use_triton: Optional[bool] = None,
     ) -> torch.Tensor:
-        if self.use_triton and x.is_cuda and (up is None or up.is_cuda):
+        eff_triton = self.use_triton if use_triton is None else bool(use_triton)
+        if eff_triton and x.is_cuda and (up is None or up.is_cuda):
             return situ_and_mul_triton(
                 x, up, gate_beta=self.gate_beta, up_beta=self.up_beta
             )

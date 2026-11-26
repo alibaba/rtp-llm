@@ -620,6 +620,32 @@ class TestQwen4_5E2E(unittest.TestCase):
             a_d = m_auto(tokens[:, t : t + 1], state=st_auto, enable_yoco_decode=True)
             self.assertGreater(_cos_sim(a_d, r_d), 0.999)
 
+        self.assertTrue(m_auto.model.layers[0]._attn_sconv_has_clip)
+        self.assertTrue(m_auto.model.layers[0]._ffn_sconv_has_clip)
+        # R4: Only lm_head opts into allow_decode_scaled_mm=True; wide non-lm_head stay BF16 at M<=512
+        self.assertTrue(m_auto.lm_head._allow_decode_scaled_mm)
+        self.assertFalse(m_auto.model.layers[1].linear_attn.in_proj_qkvz._allow_decode_scaled_mm)
+        self.assertFalse(m_auto.model.layers[1].linear_attn.out_proj._allow_decode_scaled_mm)
+        self.assertFalse(m_auto.model.layers[3].self_attn.q_proj._allow_decode_scaled_mm)
+        self.assertFalse(m_auto.model.layers[3].self_attn.o_proj._allow_decode_scaled_mm)
+        self.assertFalse(m_auto.model.layers[0].mlp._fp8_gate_up._allow_decode_scaled_mm)
+
+        from rtp_llm.models_py.model_desc.qwen4_5 import _wrap_linear_with_sm100_fp8
+        w_wide = _wrap_linear_with_sm100_fp8(
+            torch.nn.Linear(256, 25600, bias=False, dtype=torch.bfloat16, device=device), "auto"
+        )
+        w_lm = _wrap_linear_with_sm100_fp8(
+            torch.nn.Linear(256, 25600, bias=False, dtype=torch.bfloat16, device=device),
+            "auto",
+            allow_decode_scaled_mm=True,
+        )
+        self.assertFalse(w_wide._allow_decode_scaled_mm)
+        self.assertTrue(w_lm._allow_decode_scaled_mm)
+        self.assertEqual(w_wide._resolve_backend(128, device), "bf16")
+        self.assertEqual(w_wide._resolve_backend(512, device), "bf16")
+        self.assertEqual(w_lm._resolve_backend(128, device), "scaled_mm")
+        self.assertEqual(w_lm._resolve_backend(512, device), "scaled_mm")
+
     @torch.no_grad()
     def test_09_dp4_ep4_shared_host_ple_pss_cleanup_and_parity(self) -> None:
         """Verify 4-rank DP4+EP4 shared host PLE occupies 1 physical copy (Pss), cleans up, captures CG, and matches bitwise."""
@@ -678,10 +704,12 @@ class TestQwen4_5E2E(unittest.TestCase):
                     f"Shared_Dirty={max_shared_mb:.1f}MiB, post_cleanup_Pss={cleanup_pss_mb:.1f}MiB, "
                     f"cos={[round(s[5], 6) for s in stats]}"
                 )
+                cleanup_shared_mb = max(s[6] for s in stats) / 1024.0
                 self.assertGreater(total_pss_mb, 100.0)
                 self.assertLess(total_pss_mb, 200.0)
                 self.assertGreater(max_shared_mb, 110.0)
                 self.assertLess(cleanup_pss_mb, 32.0)
+                self.assertLess(cleanup_shared_mb, 1.0)
                 leftover = glob.glob("/tmp/qwen45_ple_*") + glob.glob("/dev/shm/qwen45_ple_*")
                 self.assertEqual(leftover, [], f"Leaked shared PLE files: {leftover}")
 
@@ -1181,6 +1209,15 @@ def _gloo_shared_ple_worker(
         device = torch.device("cuda:0")
         dist.init_process_group(backend="gloo", rank=rank, world_size=world_size)
         try:
+            # Warm 1-page CUDA context & cudaHostRegister pool once so smaps isolates the 128 MiB PLE test buffer.
+            _ = torch.empty(1, device=device)
+            _warm_sbuf = alloc_shared_host_ple_shards([(torch.uint8, (4096,))], group=dist.group.WORLD, device=device)
+            assert finalize_shared_host_ple_shards(_warm_sbuf)
+            dist.barrier()
+            del _warm_sbuf
+            gc.collect()
+            dist.barrier()
+
             specs = [(torch.float8_e4m3fn, (65536, 256)) for _ in range(8)]
             base_m = _read_smaps_kb()
             sbuf = alloc_shared_host_ple_shards(specs, group=dist.group.WORLD, device=device)
@@ -1268,6 +1305,7 @@ def _gloo_shared_ple_worker(
                     after_m["Shared_Dirty"] - base_m["Shared_Dirty"],
                     clean_m["Pss"] - base_m["Pss"],
                     cos_e2e,
+                    clean_m["Shared_Dirty"] - base_m["Shared_Dirty"],
                 )
             )
             dist.barrier()

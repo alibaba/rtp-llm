@@ -762,6 +762,115 @@ def test_r3_gdn_stage2_sub_dv_and_verify_nw1() -> None:
 
 
 @torch.no_grad()
+def test_r4_rmsnorm_gated_packed_yoco_subdv_and_prefill_tuning() -> None:
+    print("[R4 Test] RMSNormGated BLOCK_H=4 + YoCo Readout BLOCK_DV=32 + Gating Prealloc + Prefill R4 Tuning...")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    dtype = torch.bfloat16
+    if device.type != "cuda":
+        print("  SKIP (CUDA required)")
+        return
+    torch.manual_seed(202641)
+
+    # 1. RMSNormGated packed BLOCK_H=4 (4D, 5D GQA gate, sigmoid/silu) and fallback H=6 / D=256
+    for hv, gqa, dim, act, b, t in [
+        (128, 1, 64, "sigmoid", 2, 128),
+        (128, 8, 64, "silu", 8, 8),
+        (6, 1, 64, "sigmoid", 2, 16),
+        (8, 1, 256, "sigmoid", 2, 8),
+    ]:
+        rmsn = RMSNormGated(dim, eps=1e-6, activation=act, norm_before_gate=True).to(device=device, dtype=dtype).eval()
+        torch.nn.init.normal_(rmsn.weight, mean=1.0, std=0.2)
+        x = torch.randn((b, t, hv, dim), device=device, dtype=dtype) * 0.5
+        if gqa > 1:
+            z = torch.randn((b, t, hv // gqa, gqa, dim), device=device, dtype=dtype) * 0.5
+        else:
+            z = torch.randn((b, t, hv, dim), device=device, dtype=dtype) * 0.5
+        y_tri = rmsn(x, z)
+        g_f = z.reshape(x.shape).float()
+        g_val = torch.sigmoid(g_f) if act == "sigmoid" else F.silu(g_f)
+        y_ref = (x.float() * torch.rsqrt(x.float().square().mean(-1, keepdim=True) + 1e-6) * rmsn.weight.float() * g_val).to(dtype)
+        cos = F.cosine_similarity(y_tri.float().flatten(), y_ref.float().flatten(), dim=0).item()
+        max_abs = float((y_tri.float() - y_ref.float()).abs().max().item())
+        assert cos > 0.99999 and max_abs < 2e-2, f"RMSNormGated hv={hv} gqa={gqa} dim={dim}: cos={cos}, max_abs={max_abs}"
+
+    # 2. YoCo GDN Verify Readout BLOCK_DV=32 (B*V*H_v >= 512) + CUDA Graph capture/replay
+    cfg = make_config(5120)
+    gdn_cons = Qwen4_5GatedDeltaNet.from_config(cfg, layer_idx=22).to(device=device, dtype=dtype).eval()
+    B_ro, V_ro = 8, 8  # B*V*Hv = 8*8*128 = 8192 >= 512 -> BLOCK_DV=32
+    hv_in = torch.randn((B_ro, V_ro, 5120), device=device, dtype=dtype) * 0.2
+    st_c = gdn_cons.create_state(B_ro, device, dtype)
+    sc_out = torch.empty((B_ro, V_ro, gdn_cons.conv_dim, 3), device=device, dtype=dtype)
+    sh_in = SharedGDNInputs(
+        key=torch.randn((B_ro, V_ro, gdn_cons.num_k_heads, 64), device=device, dtype=dtype) * 0.2,
+        value=torch.randn((B_ro, V_ro, gdn_cons.num_v_heads, 64), device=device, dtype=dtype) * 0.2,
+        g=-torch.rand((B_ro, V_ro, gdn_cons.num_v_heads), device=device, dtype=torch.float32) * 0.2,
+        beta=torch.sigmoid(torch.randn((B_ro, V_ro, gdn_cons.num_v_heads), device=device, dtype=torch.float32)),
+        ssm_state=torch.randn((B_ro, V_ro, gdn_cons.num_v_heads, 64, 64), device=device, dtype=torch.float32) * 0.1,
+    )
+    out_ro, _ = gdn_cons.forward_verify(
+        hv_in, init_conv_state=st_c.conv_state, stage_conv_state=sc_out, shared=sh_in, enable_yoco_decode=True
+    )
+    # Compare against step-by-step reference readout
+    qz_ref = gdn_cons.in_proj_qkvz(hv_in)
+    q_raw, z_ref = gdn_cons._unpack_qz_consumer(qz_ref)
+    conv_st_ref = st_c.conv_state.clone()
+    from rtp_llm.models_py.modules.qwen4_5.short_conv import causal_dwconv1d_ref
+    q_conv = causal_dwconv1d_ref(q_raw, gdn_cons.conv1d.weight, conv_st_ref, residual=gdn_cons.gdn_conv_residual, use_activation=True)
+    q_4d = q_conv.view(B_ro, V_ro, gdn_cons.num_k_heads, 64).repeat_interleave(gdn_cons.gqa_ratio, dim=2).float()
+    q_4d = q_4d * torch.rsqrt(q_4d.square().sum(dim=-1, keepdim=True) + 1e-6) * (64 ** -0.5)
+    core_ref = torch.einsum("bshk,bshkv->bshv", q_4d, sh_in.ssm_state).to(dtype)
+    out_ref = gdn_cons.out_proj(gdn_cons.norm(core_ref, z_ref).reshape(B_ro, V_ro, gdn_cons.value_dim))
+    assert F.cosine_similarity(out_ro.float().flatten(), out_ref.float().flatten(), dim=0).item() > 0.9999
+
+    cg_ro = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(cg_ro):
+        out_cg, _ = gdn_cons.forward_verify(
+            hv_in, init_conv_state=st_c.conv_state, stage_conv_state=sc_out, shared=sh_in, enable_yoco_decode=True
+        )
+    hv_in.copy_(torch.randn_like(hv_in) * 0.2)
+    cg_ro.replay()
+    out_eag, _ = gdn_cons.forward_verify(
+        hv_in, init_conv_state=st_c.conv_state, stage_conv_state=torch.empty_like(sc_out), shared=sh_in, enable_yoco_decode=True
+    )
+    assert F.cosine_similarity(out_cg.float().flatten(), out_eag.float().flatten(), dim=0).item() > 0.99999
+
+    # 3. compute_gdn_gating direct preallocated output parity
+    ba = torch.randn((4, 8, 2 * 128), device=device, dtype=dtype)
+    alog = torch.randn((128,), device=device, dtype=torch.float32)
+    dt_b = torch.randn((128,), device=device, dtype=torch.float32)
+    g1, b1 = compute_gdn_gating(ba, alog, dt_b, 16, 128)
+    og = torch.empty_like(g1)
+    ob = torch.empty_like(b1)
+    g2, b2 = compute_gdn_gating(ba, alog, dt_b, 16, 128, out_g=og, out_beta=ob)
+    assert g2 is og and b2 is ob
+    assert float((g1 - og).abs().max().item()) == 0.0 and float((b1 - ob).abs().max().item()) == 0.0
+
+    # 4. Ragged prefill Stage 1/2/3 R4 tuning on small & multi-request batches
+    cu_list, cu, _, _, c_req, c_t0, rcs, _, _, rss, sle, sp_phys, _, pool_sz = _build_ragged_meta_for_test([192, 128], device=device)
+    Nt, Hk, Hv = int(cu[-1].item()), 16, 128
+    qr = torch.randn((Nt, Hk, 64), device=device, dtype=dtype) * 0.2
+    kr = torch.randn((Nt, Hk, 64), device=device, dtype=dtype) * 0.2
+    vr = torch.randn((Nt, Hv, 64), device=device, dtype=dtype) * 0.2
+    gr = -torch.rand((Nt, Hv), device=device, dtype=torch.float32) * 0.2
+    br = torch.sigmoid(torch.randn((Nt, Hv), device=device, dtype=torch.float32))
+    out_r, fs_r = gdn_chunk_prefill_ragged_with_snapshots_triton(
+        qr, kr, vr, gr, br, cu, c_req, c_t0, rcs,
+        req_snap_start=rss, snap_local_end=sle, snap_phys=sp_phys,
+        ssm_dst_pool=torch.zeros((pool_sz, Hv, 64, 64), device=device, dtype=torch.float32),
+        output_final_states=True,
+    )
+    for req_i, ln in enumerate([192, 128]):
+        s_i, e_i = cu_list[req_i], cu_list[req_i + 1]
+        o_ref_i, f_ref_i = gdn_recurrent_ref(
+            qr[s_i:e_i].unsqueeze(0), kr[s_i:e_i].unsqueeze(0), vr[s_i:e_i].unsqueeze(0),
+            gr[s_i:e_i].unsqueeze(0), br[s_i:e_i].unsqueeze(0), output_final_state=True,
+        )
+        assert F.cosine_similarity(out_r[s_i:e_i].float().flatten(), o_ref_i.squeeze(0).float().flatten(), dim=0).item() > 0.9999
+        assert F.cosine_similarity(fs_r[req_i].flatten(), f_ref_i[0].flatten(), dim=0).item() > 0.9999
+    print("  PASS: R4 GDN RMSNormGated + YoCo BLOCK_DV=32 + Gating prealloc + Prefill tuning verified.")
+
+
+@torch.no_grad()
 def bench_cuda(fn, warmup: int = 10, iters: int = 50) -> tuple[float, float]:
     """Return (median_ms, mean_ms) using CUDA events."""
     for _ in range(warmup):
@@ -942,6 +1051,7 @@ def main() -> None:
     test_yoco_shared_gdn_source_and_consumer()
     test_gdn_fused_unpack_verify_ragged_and_tp()
     test_r3_gdn_stage2_sub_dv_and_verify_nw1()
+    test_r4_rmsnorm_gated_packed_yoco_subdv_and_prefill_tuning()
     run_b300_benchmarks()
     print(f"\nALL TESTS & BENCHMARKS PASSED in {time.time() - t0:.2f}s")
 

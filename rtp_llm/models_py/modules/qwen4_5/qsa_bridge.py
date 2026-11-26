@@ -599,6 +599,155 @@ if _HAS_TRITON:
         for r in tl.static_range(RATIO - 1):
             tl.store(out_row + BUDGET + r, complete * RATIO + r if r < tail_cnt else -1)
 
+    @triton.jit
+    def _qsa_tiled_topk_stage1_kernel(
+        scores_ptr,
+        len_ptr,
+        cand_val_ptr,
+        cand_col_ptr,
+        stride_s: tl.int64,
+        stride_l: tl.int64,
+        stride_cv: tl.int64,
+        N: tl.constexpr,
+        TILE_N: tl.constexpr,
+        K_BLKS: tl.constexpr,
+        RATIO: tl.constexpr,
+    ):
+        """Stage 1 of CG-safe 2-stage tiled exact Top-K: select <= K_BLKS per tile in one HBM read."""
+        row = tl.program_id(0).to(tl.int64)
+        tile = tl.program_id(1).to(tl.int64)
+        vis = tl.load(len_ptr + row * stride_l)
+        complete = tl.maximum(vis // RATIO, 0)
+        cols = tile * TILE_N + tl.arange(0, TILE_N)
+        in_c = (cols < complete) & (cols < N)
+        vals = tl.load(
+            scores_ptr + row * stride_s + cols, mask=in_c, other=float("-inf")
+        ).to(tl.float32)
+        is_fin = in_c & (vals > float("-inf")) & (vals < float("inf"))
+        bits = vals.to(tl.uint32, bitcast=True)
+        ord_u = tl.where((bits & 0x80000000) != 0, ~bits, bits ^ 0x80000000)
+        ord_u = tl.where(is_fin, ord_u, 0)
+
+        valid_cnt = tl.sum(is_fin.to(tl.int32), 0)
+        out_base = row * stride_cv + tile * K_BLKS
+        if valid_cnt == 0:
+            sk = tl.arange(0, K_BLKS)
+            tl.store(cand_val_ptr + out_base + sk, float("-inf"))
+            tl.store(cand_col_ptr + out_base + sk, -1)
+            return
+
+        if valid_cnt <= K_BLKS:
+            sel_pos = tl.cumsum(is_fin.to(tl.int32), 0) - 1
+            sk = tl.arange(0, K_BLKS)
+            tl.store(cand_val_ptr + out_base + sk, float("-inf"))
+            tl.store(cand_col_ptr + out_base + sk, -1)
+            tl.store(
+                cand_val_ptr + out_base + sel_pos,
+                vals,
+                mask=is_fin & (sel_pos < K_BLKS),
+            )
+            tl.store(
+                cand_col_ptr + out_base + sel_pos,
+                cols.to(tl.int32),
+                mask=is_fin & (sel_pos < K_BLKS),
+            )
+            return
+
+        lo = tl.zeros((), dtype=tl.uint32)
+        hi = tl.full((), 0xFFFFFFFF, tl.uint32)
+        for _bit in tl.static_range(32):
+            mid = lo + ((hi - lo) >> 1) + 1
+            cnt = tl.sum((is_fin & (ord_u >= mid)).to(tl.int32), 0)
+            lo = tl.where(cnt >= K_BLKS, mid, lo)
+            hi = tl.where(cnt < K_BLKS, mid - 1, hi)
+
+        gt_m = is_fin & (ord_u > lo)
+        gt_cnt = tl.sum(gt_m.to(tl.int32), 0)
+        eq_m = is_fin & (ord_u == lo)
+        eq_rank = tl.cumsum(eq_m.to(tl.int32), 0) - 1
+        sel_m = gt_m | (eq_m & (gt_cnt + eq_rank < K_BLKS))
+        sel_pos = tl.cumsum(sel_m.to(tl.int32), 0) - 1
+        tl.store(
+            cand_val_ptr + out_base + sel_pos,
+            vals,
+            mask=sel_m & (sel_pos < K_BLKS),
+        )
+        tl.store(
+            cand_col_ptr + out_base + sel_pos,
+            cols.to(tl.int32),
+            mask=sel_m & (sel_pos < K_BLKS),
+        )
+
+    @triton.jit
+    def _qsa_tiled_topk_stage2_kernel(
+        cand_val_ptr,
+        cand_col_ptr,
+        len_ptr,
+        out_ptr,
+        stride_cv: tl.int64,
+        stride_l: tl.int64,
+        stride_o: tl.int64,
+        VALID_CANDS: tl.constexpr,
+        N_CANDS: tl.constexpr,
+        K_BLKS: tl.constexpr,
+        RATIO: tl.constexpr,
+        BUDGET: tl.constexpr,
+    ):
+        """Stage 2 of CG-safe 2-stage tiled exact Top-K: merge candidates and expand tokens."""
+        row = tl.program_id(0).to(tl.int64)
+        vis = tl.load(len_ptr + row * stride_l)
+        complete = tl.maximum(vis // RATIO, 0)
+        offs = tl.arange(0, N_CANDS)
+        in_v = offs < VALID_CANDS
+        vals = tl.load(
+            cand_val_ptr + row * stride_cv + offs, mask=in_v, other=float("-inf")
+        ).to(tl.float32)
+        orig_cols = tl.load(
+            cand_col_ptr + row * stride_cv + offs, mask=in_v, other=-1
+        )
+        is_fin = (
+            in_v
+            & (orig_cols >= 0)
+            & (vals > float("-inf"))
+            & (vals < float("inf"))
+        )
+        bits = vals.to(tl.uint32, bitcast=True)
+        ord_u = tl.where((bits & 0x80000000) != 0, ~bits, bits ^ 0x80000000)
+        ord_u = tl.where(is_fin, ord_u, 0)
+
+        valid_cnt = tl.sum(is_fin.to(tl.int32), 0)
+        k_rem = tl.minimum(K_BLKS, valid_cnt)
+        lo = tl.zeros((), dtype=tl.uint32)
+        hi = tl.full((), 0xFFFFFFFF, tl.uint32)
+        for _bit in tl.static_range(32):
+            mid = lo + ((hi - lo) >> 1) + 1
+            cnt = tl.sum((is_fin & (ord_u >= mid)).to(tl.int32), 0)
+            lo = tl.where(cnt >= k_rem, mid, lo)
+            hi = tl.where(cnt < k_rem, mid - 1, hi)
+
+        gt_m = is_fin & (ord_u > lo)
+        gt_cnt = tl.sum(gt_m.to(tl.int32), 0)
+        eq_m = is_fin & (ord_u == lo)
+        eq_rank = tl.cumsum(eq_m.to(tl.int32), 0) - 1
+        sel_m = gt_m | (eq_m & (gt_cnt + eq_rank < k_rem))
+        sel_pos = tl.cumsum(sel_m.to(tl.int32), 0) - 1
+
+        out_row = out_ptr + row * stride_o
+        for r in tl.static_range(RATIO):
+            tl.store(
+                out_row + sel_pos * RATIO + r,
+                orig_cols * RATIO + r,
+                mask=sel_m & (sel_pos < K_BLKS),
+            )
+        if k_rem < K_BLKS:
+            tail_s = tl.arange(0, K_BLKS)
+            for r in tl.static_range(RATIO):
+                tl.store(out_row + tail_s * RATIO + r, -1, mask=(tail_s >= k_rem))
+
+        tail_cnt = tl.maximum(vis, 0) % RATIO
+        for r in tl.static_range(RATIO - 1):
+            tl.store(out_row + BUDGET + r, complete * RATIO + r if r < tail_cnt else -1)
+
 
 def qsa_prefill_score(
     q_rot: torch.Tensor,
@@ -827,8 +976,8 @@ def _select_top_tokens(
         and compress_ratio == 4
         and token_budget > 0
         and token_budget % compress_ratio == 0
-        and 1 <= rows <= 1024
         and 1 <= cols <= 32768
+        and (rows <= 1024 or (cols <= 2048 and rows <= 16384))
         and torch.cuda.get_device_capability(block_scores.device)[0] >= 8
     ):
         k_blks = token_budget // compress_ratio
@@ -840,7 +989,7 @@ def _select_top_tokens(
                     device=block_scores.device,
                     dtype=torch.int32,
                 )
-                nw = 8 if bn >= 4096 else 4
+                nw = 4 if (rows > 1024 and bn <= 2048) else (8 if bn >= 4096 else 4)
                 _qsa_bsearch_topk_expand_kernel[(rows,)](
                     block_scores,
                     vis_1d,
@@ -856,29 +1005,77 @@ def _select_top_tokens(
                     num_warps=nw,
                 )
                 return out
-            elif rows <= 128:
+            elif rows <= 128 or (cols > 16384 and rows <= 1024):
                 out = torch.empty(
                     (rows, token_budget + compress_ratio - 1),
                     device=block_scores.device,
                     dtype=torch.int32,
                 )
-                n_chunks = triton.cdiv(cols, 8192)
-                _qsa_radix2_chunked_topk_expand_kernel[(rows,)](
-                    block_scores,
-                    vis_1d,
-                    out,
-                    int(block_scores.stride(0)),
-                    int(vis_1d.stride(0)),
-                    int(out.stride(0)),
-                    N=cols,
-                    CHUNK=8192,
-                    N_CHUNKS=n_chunks,
-                    K_BLKS=k_blks,
-                    RATIO=compress_ratio,
-                    BUDGET=token_budget,
-                    num_warps=8,
-                )
-                return out
+                tile_n = 4096 if (cols <= 16384 and rows <= 64 and k_blks <= 512) else (4096 if k_blks == 1024 else 2048)
+                n_tiles = triton.cdiv(cols, tile_n)
+                valid_cands = n_tiles * k_blks
+                n_cands = max(64, triton.next_power_of_2(valid_cands))
+                if n_cands <= 8192:
+                    cand_val = torch.empty(
+                        (rows, valid_cands),
+                        device=block_scores.device,
+                        dtype=torch.float32,
+                    )
+                    cand_col = torch.empty(
+                        (rows, valid_cands),
+                        device=block_scores.device,
+                        dtype=torch.int32,
+                    )
+                    nw1 = 8 if (tile_n == 4096 or rows <= 16) else 4
+                    nw2 = 8 if n_cands >= 4096 else 4
+                    _qsa_tiled_topk_stage1_kernel[(rows, n_tiles)](
+                        block_scores,
+                        vis_1d,
+                        cand_val,
+                        cand_col,
+                        int(block_scores.stride(0)),
+                        int(vis_1d.stride(0)),
+                        int(cand_val.stride(0)),
+                        N=cols,
+                        TILE_N=tile_n,
+                        K_BLKS=k_blks,
+                        RATIO=compress_ratio,
+                        num_warps=nw1,
+                    )
+                    _qsa_tiled_topk_stage2_kernel[(rows,)](
+                        cand_val,
+                        cand_col,
+                        vis_1d,
+                        out,
+                        int(cand_val.stride(0)),
+                        int(vis_1d.stride(0)),
+                        int(out.stride(0)),
+                        VALID_CANDS=valid_cands,
+                        N_CANDS=n_cands,
+                        K_BLKS=k_blks,
+                        RATIO=compress_ratio,
+                        BUDGET=token_budget,
+                        num_warps=nw2,
+                    )
+                    return out
+                if rows <= 128:
+                    n_chunks = triton.cdiv(cols, 8192)
+                    _qsa_radix2_chunked_topk_expand_kernel[(rows,)](
+                        block_scores,
+                        vis_1d,
+                        out,
+                        int(block_scores.stride(0)),
+                        int(vis_1d.stride(0)),
+                        int(out.stride(0)),
+                        N=cols,
+                        CHUNK=8192,
+                        N_CHUNKS=n_chunks,
+                        K_BLKS=k_blks,
+                        RATIO=compress_ratio,
+                        BUDGET=token_budget,
+                        num_warps=8,
+                    )
+                    return out
 
     return select_qsa_paged_tokens(
         block_scores,
@@ -2432,7 +2629,11 @@ def qsa_sparse_prefill_attention(
             if S >= 16 and K >= 32 and q_per_kv >= 3:
                 blk_h = 32 if (16 < q_per_kv <= 32) else 16
                 sub_g = triton.cdiv(q_per_kv, blk_h)
-                blk_k = 64 if (blk_h == 32 or D < 256) else 32
+                blk_k = (
+                    128
+                    if (K >= 128 and D == 256 and blk_h >= 16)
+                    else (64 if (blk_h == 32 or D < 256) else 32)
+                )
                 out = torch.empty_like(q_c)
                 _qsa_sparse_prefill_grouped_fast_kernel[(S, B, H_kv * sub_g)](
                     q_c,
@@ -2587,7 +2788,11 @@ def qsa_sparse_paged_prefill_attention(
 
         blk_h = 32 if (16 < q_per_kv <= 32) else 16
         sub_g = triton.cdiv(q_per_kv, blk_h)
-        blk_k = 64 if (blk_h == 32 or D < 256) else 32
+        blk_k = (
+            128
+            if (K >= 128 and D == 256 and blk_h >= 16)
+            else (64 if (blk_h == 32 or D < 256) else 32)
+        )
         out = torch.empty_like(q_c)
         is_fp8 = kv_hnd.dtype == torch.float8_e4m3fn
         has_scale = is_fp8 and sc_hnd is not None
@@ -2735,14 +2940,46 @@ def qsa_sparse_paged_decode_attention(
         sub_g = triton.cdiv(q_per_kv, m_rows)
         m_ctas = B * S * kv_heads * sub_g
         if not is_fp8:
-            if m_ctas <= 16:
+            if K >= 256 and D == 256:
+                if m_rows == 32:
+                    if m_ctas <= 16:
+                        target_sp, kt, nw, stg = 16, 64, 4, 1
+                    elif m_ctas <= 128:
+                        target_sp, kt, nw, stg = (4 if S == 1 else 2), 64, 4, 1
+                    else:
+                        target_sp, kt, nw, stg = 4, 32, 4, 2
+                else:
+                    kt, nw, stg = 64, 2, 1
+                    if m_ctas <= 16:
+                        target_sp = 16
+                    elif m_ctas <= 64:
+                        target_sp = 8
+                    elif m_ctas <= 128:
+                        target_sp = 4
+                    elif m_ctas <= 512:
+                        target_sp = 1
+                    else:
+                        target_sp = 4
+            elif m_ctas <= 16:
                 target_sp, kt, nw, stg = 32, 32, 4, 2
             elif m_ctas <= 128:
                 target_sp, kt, nw, stg = 4, (64 if K >= 256 else 32), 4, 2
             else:
                 target_sp, kt, nw, stg = 4, 32, 4, 2
         else:
-            if m_ctas <= 16:
+            if K >= 512 and D == 256:
+                kt, nw = 128, 4
+                if m_ctas <= 16:
+                    target_sp, stg = 16, 1
+                elif m_ctas <= 64:
+                    target_sp, stg = 4, 1
+                elif m_ctas <= 128:
+                    target_sp, stg = 2, 1
+                elif m_ctas <= 512:
+                    target_sp, stg = (1 if m_rows == 32 else 4), 1
+                else:
+                    target_sp, stg = 2, 2
+            elif m_ctas <= 16:
                 target_sp, kt, nw, stg = 16, 32, 4, 2
             elif m_ctas <= 128:
                 if S > 1:

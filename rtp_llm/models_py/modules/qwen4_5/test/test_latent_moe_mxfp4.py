@@ -109,7 +109,7 @@ def test_situ_and_mul(device: torch.device) -> None:
     torch.manual_seed(101)
     act = SituAndMul(gate_beta=4.0, up_beta=25.0, use_triton=True)
 
-    for shape in [(1, 2560), (7, 1280), (16, 12800), (2, 5, 2560), (13, 96)]:
+    for shape in [(64, 320), (7, 1280), (1, 2560), (32, 3200), (16, 12800), (2, 5, 2560), (13, 96)]:
         for dtype in (torch.bfloat16, torch.float32):
             # Standard scale: strict max_abs < 1e-3
             gate_up = torch.randn((*shape[:-1], shape[-1] * 2), dtype=dtype, device=device)
@@ -1681,7 +1681,7 @@ def test_sm100_fp8_linear(device: torch.device) -> None:
         assert cos_cg >= 0.999, f"SM100FP8Linear CG cos={cos_cg}"
         del g
 
-    # Verify SM100/SM103 Pareto frontier dispatch on keep_bf16=True (N >= 16384 threshold)
+    # Verify SM100/SM103 Pareto frontier dispatch on keep_bf16=True (M*K*N >= 1e11 + allow_decode_scaled_mm)
     assert isinstance(has_flashinfer_mxfp8(dev_idx), bool)
     assert isinstance(has_flashinfer_trtllm_ll(dev_idx), bool)
     narrow_lin = SM100FP8Linear(5120, 2560, mode="auto", keep_bf16=True, device=device)
@@ -1690,9 +1690,42 @@ def test_sm100_fp8_linear(device: torch.device) -> None:
     assert narrow_lin._resolve_backend(8, device) == "bf16"
     assert narrow_lin._resolve_backend(512, device) == "bf16"
     assert narrow_lin._resolve_backend(2048, device) == "bf16"
-    assert narrow_lin._resolve_backend(4096, device) == (
+    assert narrow_lin._resolve_backend(4096, device) == "bf16"
+    assert narrow_lin._resolve_backend(8192, device) == (
         "mxfp8" if has_flashinfer_mxfp8(dev_idx) else "bf16"
     )
+    if has_flashinfer_mxfp8(dev_idx):
+        import flashinfer  # type: ignore
+
+        xp = torch.randn((64, 5120), dtype=torch.bfloat16, device=device) * 0.5
+        ax, asc = flashinfer.mxfp8_quantize(xp, is_sf_swizzled_layout=True, alignment=32)
+        yp_pq = narrow_lin.forward_prequant_mxfp8(ax, asc, orig_shape=(64,))
+        assert _diff_stats(yp_pq, F.linear(xp, narrow_lin.weight))[2] >= 0.999
+
+    sh_dn_lin = SM100FP8Linear(1280, 5120, mode="auto", keep_bf16=True, device=device)
+    torch.nn.init.normal_(sh_dn_lin.weight, 0.0, 0.02)
+    sh_dn_lin.prepare_weights()
+    assert sh_dn_lin._resolve_backend(8192, device) == "bf16"
+    assert sh_dn_lin._resolve_backend(20480, device) == (
+        "mxfp8" if has_flashinfer_mxfp8(dev_idx) else "bf16"
+    )
+
+    tp4_sh_dn = SM100FP8Linear(320, 5120, mode="auto", keep_bf16=True, device=device)
+    torch.nn.init.normal_(tp4_sh_dn.weight, 0.0, 0.02)
+    tp4_sh_dn.prepare_weights()
+    assert tp4_sh_dn._resolve_backend(20480, device) == "bf16"
+
+    # Non-lm_head wide layers (DenseMLP.gate_up=25600, GDN.qkvz=40960) stay BF16 during Decode.
+    for wide_out in (25600, 40960):
+        non_lm_wide = SM100FP8Linear(
+            5120, wide_out, mode="auto", keep_bf16=True, allow_decode_scaled_mm=False, device=device
+        )
+        torch.nn.init.normal_(non_lm_wide.weight, 0.0, 0.02)
+        non_lm_wide.prepare_weights()
+        for m_w in (1, 8, 64, 512):
+            assert non_lm_wide._resolve_backend(m_w, device) == "bf16"
+        del non_lm_wide
+
     dflash_fc_lin = SM100FP8Linear(
         25600, 5120, mode="auto", keep_bf16=True, prepare_trtllm_ll=False, prepare_mxfp8=False, device=device
     )
@@ -1701,7 +1734,14 @@ def test_sm100_fp8_linear(device: torch.device) -> None:
     for m_df in (1, 8, 64, 512):
         assert dflash_fc_lin._resolve_backend(m_df, device) == "bf16"
     wide_lin = SM100FP8Linear(
-        5120, 62080, mode="auto", keep_bf16=True, prepare_trtllm_ll=True, prepare_mxfp8=True, device=device
+        5120,
+        62080,
+        mode="auto",
+        keep_bf16=True,
+        prepare_trtllm_ll=True,
+        prepare_mxfp8=True,
+        allow_decode_scaled_mm=True,
+        device=device,
     )
     torch.nn.init.normal_(wide_lin.weight, 0.0, 0.02)
     wide_lin.prepare_weights()
@@ -1725,27 +1765,33 @@ def test_sm100_fp8_linear(device: torch.device) -> None:
             os.environ.pop("QWEN4_5_FP8_PREFER_TRTLLM_LL", None)
         else:
             os.environ["QWEN4_5_FP8_PREFER_TRTLLM_LL"] = prev_pref_ll
-    del narrow_lin, dflash_fc_lin, wide_lin
+    del narrow_lin, sh_dn_lin, tp4_sh_dn, dflash_fc_lin, wide_lin
 
-    # DenseMLP & LatentMoE dense_linear_mode="auto" parity
+    # DenseMLP TP=1 (N=25600) & TP=4 dense_linear_mode="auto" parity (must keep cos >= 0.9999)
     cfg = Qwen4_5ArchConfig()
-    mlp_bf16 = Qwen4_5DenseMLP.from_config(cfg, dtype=torch.bfloat16, device=device)
-    with torch.no_grad():
-        for p in mlp_bf16.parameters():
-            p.normal_(0.0, 0.02)
-    mlp_fp8 = Qwen4_5DenseMLP.from_config(
-        cfg, dense_linear_mode="auto", dtype=torch.bfloat16, device=device
-    )
-    mlp_fp8.load_state_dict(mlp_bf16.state_dict())
-    mlp_bf16.prepare_weights(fuse_gate_up=True)
-    mlp_fp8.prepare_weights(fuse_gate_up=True)
-    for m in (8, 64):
-        xm = torch.randn((m, 5120), dtype=torch.bfloat16, device=device) * 0.5
-        ym_ref = mlp_bf16(xm)
-        ym_fp8 = mlp_fp8(xm)
-        _, _, cos_mlp = _diff_stats(ym_fp8, ym_ref)
-        assert cos_mlp >= 0.997, f"Qwen4_5DenseMLP FP8 auto M={m} cos={cos_mlp}"
+    for tp_sz in (1, 4):
+        mlp_bf16 = Qwen4_5DenseMLP.from_config(cfg, tp_size=tp_sz, dtype=torch.bfloat16, device=device)
+        with torch.no_grad():
+            for p in mlp_bf16.parameters():
+                p.normal_(0.0, 0.02)
+        mlp_fp8 = Qwen4_5DenseMLP.from_config(
+            cfg, tp_size=tp_sz, dense_linear_mode="auto", dtype=torch.bfloat16, device=device
+        )
+        mlp_fp8.load_state_dict(mlp_bf16.state_dict())
+        mlp_bf16.prepare_weights(fuse_gate_up=True)
+        mlp_fp8.prepare_weights(fuse_gate_up=True)
+        assert mlp_fp8._fp8_gate_up is not None
+        assert mlp_fp8._fp8_gate_up._resolve_backend(64, device) == "bf16"
+        assert mlp_fp8._fp8_gate_up._resolve_backend(4096, device) == "bf16"
+        for m in (8, 64, 512):
+            xm = torch.randn((m, 5120), dtype=torch.bfloat16, device=device) * 0.5
+            ym_ref = mlp_bf16(xm)
+            ym_fp8 = mlp_fp8(xm)
+            _, _, cos_mlp = _diff_stats(ym_fp8, ym_ref)
+            assert cos_mlp >= 0.9999, f"Qwen4_5DenseMLP TP={tp_sz} auto M={m} cos={cos_mlp}"
+        del mlp_bf16, mlp_fp8
 
+    # LatentMoE fused W_3x + [2, H] epilogue + 2-pass norm (Decode, Prefill M=4096, TBO, CG, L=5120)
     moe_bf16 = Qwen4_5LatentMoE(
         hidden_size=5120,
         routed_expert_hidden_size=2560,
@@ -1775,15 +1821,201 @@ def test_sm100_fp8_linear(device: torch.device) -> None:
     )
     moe_fp8.load_state_dict(moe_bf16.state_dict(), strict=True)
     moe_fp8.prepare_weights()
+    assert moe_fp8._latent_down_gate_shared_gu_weight is not None
+    assert moe_fp8._latent_shared_gates_weight is not None
     # Amplify router weight margin so tiny FP8 noise does not flip random top-k ties.
     with torch.no_grad():
         moe_bf16.gate.weight.mul_(4.0)
         moe_fp8.gate.weight.mul_(4.0)
     torch.manual_seed(8081)
-    xm_moe = torch.randn((8, 5120), dtype=torch.bfloat16, device=device) * 0.4
-    _, _, cos_moe_fp8 = _diff_stats(moe_fp8(xm_moe), moe_bf16(xm_moe))
-    assert cos_moe_fp8 >= 0.997, f"Qwen4_5LatentMoE FP8 auto cos={cos_moe_fp8}"
-    print(f"  PASS SM100FP8Linear & FP8 Dense/LatentMoE wiring (DenseMLP cos={cos_mlp:.6f}, LatentMoE cos={cos_moe_fp8:.6f})")
+    for m_chk, min_cos in ((8, 0.9999), (64, 0.9999), (4096, 0.9999), (8192, 0.999)):
+        xm_moe = torch.randn((m_chk, 5120), dtype=torch.bfloat16, device=device) * 0.4
+        ym_auto = moe_fp8(xm_moe)
+        ym_bf = moe_bf16(xm_moe)
+        _, _, cos_moe_fp8 = _diff_stats(ym_auto, ym_bf)
+        assert cos_moe_fp8 >= min_cos, f"Qwen4_5LatentMoE FP8 auto M={m_chk} cos={cos_moe_fp8}"
+    # Verify CUDA Graph capture/replay on LatentMoE R4 path
+    xm_cg = torch.randn((64, 5120), dtype=torch.bfloat16, device=device) * 0.4
+    ym_cg_ref = moe_bf16(xm_cg)
+    for _ in range(2):
+        moe_fp8(xm_cg)
+    torch.cuda.synchronize(device)
+    g_moe = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(g_moe):
+        ym_cg_out = moe_fp8(xm_cg)
+    g_moe.replay()
+    torch.cuda.synchronize(device)
+    assert _diff_stats(ym_cg_out, ym_cg_ref)[2] >= 0.9999
+    del g_moe
+    # Verify TBO 3-stage path matches standard forward
+    ctx_tbo = moe_fp8.forward_route_and_dispatch(xm_cg)
+    ctx_tbo = moe_fp8.forward_routed_compute_and_combine(ctx_tbo)
+    ym_tbo = moe_fp8.forward_finish_combine(ctx_tbo)
+    assert _diff_stats(ym_tbo, moe_fp8(xm_cg))[2] >= 0.9999
+
+    # Verify 2-pass norm works with L > 4096 (5120) and shared_expert_gate=False
+    moe_big_l = Qwen4_5LatentMoE(
+        hidden_size=512,
+        routed_expert_hidden_size=5120,
+        moe_intermediate_size=128,
+        shared_expert_intermediate_size=128,
+        shared_expert_gate=False,
+        num_experts=8,
+        num_experts_per_tok=2,
+        dtype=torch.bfloat16,
+        device=device,
+        enable_shared_overlap=False,
+        backend="triton_splitk",
+    )
+    _init_latent_moe_weights(moe_big_l, seed=8082)
+    moe_big_l.prepare_weights()
+    xb = torch.randn((16, 512), dtype=torch.bfloat16, device=device) * 0.4
+    yb_tri = moe_big_l(xb, use_triton_mxfp4=True)
+    yb_ref = moe_big_l(xb, use_triton_mxfp4=False)
+    assert _diff_stats(yb_tri, yb_ref)[2] >= 0.9999
+    del moe_bf16, moe_fp8, moe_big_l
+    print(f"  PASS SM100FP8Linear & FP8 Dense/LatentMoE wiring (LatentMoE M=8192 cos={cos_moe_fp8:.6f})")
+
+
+def test_r4_combine_bitwise_schedule_and_multigpu(device: torch.device) -> None:
+    print("[10d] Testing R4 combine bitwise parity, fused Decode schedule & multi-GPU device ctx...")
+    from rtp_llm.models_py.modules.qwen4_5.mxfp4_ops import (
+        _build_compact_decode_schedule,
+        _gpu_expert_bincount,
+    )
+
+    torch.manual_seed(20261126)
+    # 1. Bitwise BF16 parity on _combine_latent_and_shared (avoids fma.rn.bf16 contraction)
+    for has_sg in (True, False):
+        for H in (512, 5120):
+            moe = Qwen4_5LatentMoE(
+                hidden_size=H,
+                routed_expert_hidden_size=min(H, 1280),
+                moe_intermediate_size=128,
+                shared_expert_intermediate_size=128,
+                shared_expert_gate=has_sg,
+                num_experts=8,
+                num_experts_per_tok=2,
+                dtype=torch.bfloat16,
+                device=device,
+                enable_shared_overlap=False,
+            )
+            _init_latent_moe_weights(moe, seed=9001 + H + int(has_sg))
+            moe.prepare_weights()
+            for M in (1, 7, 64, 512):
+                x = torch.randn((M, H), dtype=torch.bfloat16, device=device)
+                r = torch.randn((M, H), dtype=torch.bfloat16, device=device)
+                s = torch.randn((M, H), dtype=torch.bfloat16, device=device)
+                y_tri = moe._combine_latent_and_shared(x, r, s, run_triton=True)
+                y_ref = moe._combine_latent_and_shared(x, r, s, run_triton=False)
+                assert torch.equal(y_tri, y_ref), (
+                    f"_combine_latent_and_shared bitwise diff has_sg={has_sg} H={H} M={M} "
+                    f"n_diffs={(y_tri != y_ref).sum().item()}"
+                )
+            del moe
+
+    # 2. Fused _build_compact_decode_schedule parity (CPU + GPU, ep_size=1 & 4) + CG replay
+    for dev in (torch.device("cpu"), device):
+        for num_experts, ep_size, ep_start in ((8, 1, 0), (256, 1, 0), (64, 4, 64)):
+            for M in (1, 2, 7, 64):
+                for w_dtype in (torch.bfloat16, torch.float32):
+                    for id_dtype in (torch.int32, torch.int64):
+                        total_e = num_experts * ep_size
+                        ids = torch.stack(
+                            [torch.randperm(total_e, device=dev)[:8] for _ in range(M)]
+                        ).to(id_dtype)
+                        w = torch.randn((M, 8), device=dev, dtype=w_dtype)
+                        sched = _build_compact_decode_schedule(
+                            ids, w, num_experts, 16, ep_start=ep_start, ep_size=ep_size
+                        )
+                        flat_ids = ids.reshape(-1)
+                        flat_w = w.float().reshape(-1)
+                        slot_idx = torch.arange(M * 8, dtype=torch.int32, device=dev)
+                        if ep_size > 1:
+                            in_range = (flat_ids >= ep_start) & (flat_ids < ep_start + num_experts)
+                            flat_local = torch.where(
+                                in_range,
+                                flat_ids - ep_start,
+                                torch.full_like(flat_ids, num_experts),
+                            )
+                            _, perm_i64 = torch.sort(flat_local, stable=True)
+                            slot_vals = torch.where(
+                                in_range.index_select(0, perm_i64),
+                                slot_idx,
+                                torch.full_like(slot_idx, -1),
+                            )
+                            counts = _gpu_expert_bincount(flat_local, num_experts)
+                        else:
+                            _, perm_i64 = torch.sort(flat_ids, stable=True)
+                            slot_vals = slot_idx
+                            counts = _gpu_expert_bincount(flat_ids, num_experts)
+                        ref_tok = (perm_i64 // 8).to(torch.int32)
+                        ref_w = flat_w.index_select(0, perm_i64)
+                        ref_inv = torch.empty((M * 8,), dtype=torch.int32, device=dev)
+                        ref_inv.index_copy_(0, perm_i64, slot_vals)
+                        ref_inv = ref_inv.reshape(M, 8)
+                        n_act = int(sched.num_active_slots_buf.item())
+                        n_tiles = int(sched.num_active_tiles_buf.item())
+                        assert n_act == int(counts.sum().item())
+                        assert int(sched.tile_m_count[:n_tiles].sum().item()) == n_act
+                        if M > 1 or dev.type == "cpu":
+                            assert torch.equal(sched.inv_slots, ref_inv)
+                            assert torch.equal(sched.sorted_tok_ids, ref_tok)
+                            assert torch.equal(sched.sorted_weights, ref_w)
+
+    cg_ids = torch.stack([torch.randperm(256, device=device)[:8] for _ in range(64)]).to(torch.int32)
+    cg_w = torch.randn((64, 8), device=device, dtype=torch.bfloat16)
+    _build_compact_decode_schedule(cg_ids, cg_w, 256, 16)
+    torch.cuda.synchronize(device)
+    g = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(g):
+        cg_out = _build_compact_decode_schedule(cg_ids, cg_w, 256, 16)
+    new_ids = torch.stack([torch.randperm(256, device=device)[:8] for _ in range(64)]).to(torch.int32)
+    new_w = torch.randn((64, 8), device=device, dtype=torch.bfloat16)
+    cg_ids.copy_(new_ids)
+    cg_w.copy_(new_w)
+    g.replay()
+    ref_cg = _build_compact_decode_schedule(new_ids, new_w, 256, 16)
+    assert torch.equal(cg_out.inv_slots, ref_cg.inv_slots)
+    assert torch.equal(cg_out.sorted_weights, ref_cg.sorted_weights)
+    del g, cg_out, ref_cg
+
+    # 3. Single-process multi-GPU guard: execute on cuda:1 while current_device() == 0
+    if torch.cuda.device_count() >= 2:
+        torch.cuda.set_device(0)
+        dev1 = torch.device("cuda:1")
+        lin = SM100FP8Linear(
+            256,
+            256,
+            mode="scaled_mm",
+            keep_bf16=True,
+            allow_decode_scaled_mm=True,
+            device=dev1,
+        )
+        torch.nn.init.normal_(lin.weight, 0.0, 0.02)
+        lin.prepare_weights()
+        x1 = torch.randn((16, 256), dtype=torch.bfloat16, device=dev1)
+        y1 = lin(x1)
+        assert y1.device == dev1
+        act_y = SituAndMul()(torch.randn((16, 512), dtype=torch.bfloat16, device=dev1))
+        assert act_y.device == dev1
+        moe1 = Qwen4_5LatentMoE(
+            hidden_size=256,
+            routed_expert_hidden_size=128,
+            moe_intermediate_size=128,
+            shared_expert_intermediate_size=128,
+            num_experts=8,
+            num_experts_per_tok=2,
+            dtype=torch.bfloat16,
+            device=dev1,
+            enable_shared_overlap=False,
+        )
+        _init_latent_moe_weights(moe1, seed=9901)
+        moe1.prepare_weights()
+        m1_out = moe1(torch.randn((8, 256), dtype=torch.bfloat16, device=dev1), use_triton_mxfp4=True)
+        assert m1_out.device == dev1
+        del lin, x1, y1, act_y, moe1, m1_out
+    print("  PASS R4 combine bitwise parity, fused Decode schedule & multi-GPU device ctx")
 
 
 def main() -> int:
@@ -1846,6 +2078,7 @@ def main() -> int:
         test_sm100_mxfp4_backends_and_cuda_graph(device)
         test_dense_mlp_tp_simulated(device)
         test_sm100_fp8_linear(device)
+        test_r4_combine_bitwise_schedule_and_multigpu(device)
 
     if args.distributed:
         test_distributed_fast_comm_tp_ep(world_size=args.world_size)
