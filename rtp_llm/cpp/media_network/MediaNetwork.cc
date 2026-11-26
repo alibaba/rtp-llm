@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/media_network/ContentDecoder.h"
+#include "rtp_llm/cpp/media_network/MediaAddressPolicy.h"
 
 #include <arpa/inet.h>
 #include <ares.h>
@@ -45,22 +46,11 @@ struct Failure: std::runtime_error {
     using std::runtime_error::runtime_error;
 };
 struct Policy {
-    std::unordered_set<std::string>            denied;
-    Headers                                    group_hosts;
-    std::vector<std::pair<uint32_t, uint32_t>> blocked_networks;
-    void                                       set_networks(const std::vector<std::string>& cidrs) {
-        blocked_networks.clear();
-        for (const auto& cidr : cidrs) {
-            auto slash = cidr.find('/');
-            if (slash == std::string::npos)
-                throw std::invalid_argument("invalid download CIDR");
-            auto    prefix = std::stoi(cidr.substr(slash + 1));
-            in_addr address{};
-            if (prefix < 0 || prefix > 32 || !inet_aton(cidr.substr(0, slash).c_str(), &address))
-                throw std::invalid_argument("invalid download CIDR");
-            auto mask = prefix == 0 ? 0u : UINT32_MAX << (32 - prefix);
-            blocked_networks.emplace_back(ntohl(address.s_addr) & mask, mask);
-        }
+    std::unordered_set<std::string>         denied;
+    Headers                                 group_hosts;
+    rtp_llm::media_network::BlockedNetworks blocked_networks;
+    void                                    set_networks(const std::vector<std::string>& cidrs) {
+        blocked_networks.set(cidrs);
     }
     std::unordered_set<std::string> regions;
     bool                            region_list = false;
@@ -99,12 +89,8 @@ Endpoint endpoint(const std::string& url, const Policy& policy, bool media) {
     if (media && policy.denied.count(host))
         throw Failure("blocked");
     in_addr ip{};
-    if (media && policy.internal && inet_aton(host.c_str(), &ip)) {
-        const uint32_t value = ntohl(ip.s_addr);
-        for (auto [network, mask] : policy.blocked_networks)
-            if ((value & mask) == network)
-                throw Failure("blocked");
-    }
+    if (media && policy.internal && inet_aton(host.c_str(), &ip) && policy.blocked_networks.contains(AF_INET, &ip))
+        throw Failure("blocked");
     return {lower(url.substr(0, start) + authority), host, start, spelling.size()};
 }
 bool ends(const std::string& s, const std::string& suffix) {
@@ -275,29 +261,36 @@ bool safe_on_redirect(const std::string& name) {
     auto n = lower(name);
     return n == "user-agent" || n == "accept" || n == "accept-encoding" || n == "accept-language";
 }
-// A forward proxy resolves the origin itself. Preserve the internal policy's
-// local hostname check, accepting the first successful A or AAAA answer.
-void validate_proxied_media_host(const Endpoint& dest, Job& job) {
-    in_addr literal{};
-    if (dest.host.front() == '[' || inet_aton(dest.host.c_str(), &literal))
-        return;
+// c-ares owns the result until the caller takes it. Keep the callback state
+// alive while channel destruction delivers any outstanding cancellation.
+struct Lookup {
+    bool                                                         done = false;
+    std::unique_ptr<ares_addrinfo, decltype(&ares_freeaddrinfo)> result{nullptr, ares_freeaddrinfo};
+};
+std::vector<std::string> resolve_media_addresses(const std::string& host, const Policy& policy, Job& job) {
+    Lookup       lookup;
     ares_channel raw;
     if (ares_init(&raw) != ARES_SUCCESS)
         throw Failure("dns");
-    struct Lookup {
-        int  pending = 2;
-        bool found   = false;
-    } lookup;
-    // Destroy the channel before lookup. Destruction completes pending callbacks.
     std::unique_ptr<ares_channeldata, decltype(&ares_destroy)> channel(raw, ares_destroy);
-    auto completed = [](void* data, int status, int, struct hostent*) {
-        auto& lookup = *static_cast<Lookup*>(data);
-        lookup.found |= status == ARES_SUCCESS;
-        --lookup.pending;
-    };
-    ares_gethostbyname(raw, dest.host.c_str(), AF_INET6, completed, &lookup);
-    ares_gethostbyname(raw, dest.host.c_str(), AF_INET, completed, &lookup);
-    while (!lookup.found && lookup.pending) {
+    ares_addrinfo_hints                                        hints{};
+    hints.ai_family   = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_flags    = ARES_AI_NOSORT;
+    ares_getaddrinfo(
+        raw,
+        host.c_str(),
+        nullptr,
+        &hints,
+        [](void* data, int status, int, ares_addrinfo* result) {
+            auto& lookup = *static_cast<Lookup*>(data);
+            lookup.result.reset(result);
+            if (status != ARES_SUCCESS)
+                lookup.result.reset();
+            lookup.done = true;
+        },
+        &lookup);
+    while (!lookup.done) {
         if (job.canceled.load())
             throw Failure("cancelled");
         auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(job.deadline - Clock::now()).count();
@@ -323,7 +316,7 @@ void validate_proxied_media_host(const Endpoint& dest, Job& job) {
             throw Failure("dns");
         if (!ready)
             ares_process_fd(raw, ARES_SOCKET_BAD, ARES_SOCKET_BAD);
-        for (int i = 0; i < count && !lookup.found && lookup.pending; ++i) {
+        for (int i = 0; i < count && !lookup.done; ++i) {
             const auto& fd = descriptors[i];
             if (fd.revents)
                 ares_process_fd(raw,
@@ -331,8 +324,122 @@ void validate_proxied_media_host(const Endpoint& dest, Job& job) {
                                 fd.revents & POLLOUT ? fd.fd : ARES_SOCKET_BAD);
         }
     }
-    if (!lookup.found)
+    std::vector<std::string> addresses;
+    for (auto* node = lookup.result ? lookup.result->nodes : nullptr; node; node = node->ai_next) {
+        const void* address;
+        if (node->ai_family == AF_INET)
+            address = &reinterpret_cast<const sockaddr_in*>(node->ai_addr)->sin_addr;
+        else if (node->ai_family == AF_INET6)
+            address = &reinterpret_cast<const sockaddr_in6*>(node->ai_addr)->sin6_addr;
+        else
+            throw Failure("dns");
+        if (policy.blocked_networks.contains(node->ai_family, address))
+            throw Failure("blocked");
+        char text[INET6_ADDRSTRLEN];
+        if (!inet_ntop(node->ai_family, address, text, sizeof(text)))
+            throw Failure("dns");
+        addresses.emplace_back(node->ai_family == AF_INET6 ? "[" + std::string(text) + "]" : text);
+    }
+    if (addresses.empty())
         throw Failure("dns");
+    return addresses;
+}
+
+bool trusted_oss_endpoint(const std::string& host, const Policy& policy) {
+    auto under = [&host](const std::string& domain) { return host == domain || ends(host, "." + domain); };
+    if (!policy.rewrite_oss)
+        return false;
+    if (policy.region_list) {
+        for (const auto& region : policy.regions)
+            if (under("oss-" + region + "-internal.aliyuncs.com") || under(region + ".oss.aliyuncs.com"))
+                return true;
+    } else {
+        for (const auto& entry : policy.group_hosts)
+            if (under(entry.second))
+                return true;
+    }
+    return false;
+}
+
+struct DirectPeerCheck {
+    const Policy& policy;
+    bool          blocked = false;
+};
+
+int check_connected_peer(void* user, char* ip, char*, int, int) noexcept {
+    auto&    check = *static_cast<DirectPeerCheck*>(user);
+    in_addr  v4{};
+    in6_addr v6{};
+    if (ip && inet_pton(AF_INET, ip, &v4) == 1)
+        check.blocked = check.policy.blocked_networks.contains(AF_INET, &v4);
+    else if (ip && inet_pton(AF_INET6, ip, &v6) == 1)
+        check.blocked = check.policy.blocked_networks.contains(AF_INET6, &v6);
+    else
+        check.blocked = true;
+    return check.blocked ? CURL_PREREQFUNC_ABORT : CURL_PREREQFUNC_OK;
+}
+
+// Use libcurl's exact host and effective port for the DNS cache key. Keep the
+// original URL for Host, TLS verification and signed OSS requests.
+std::string url_part(CURLU* url, CURLUPart part) {
+    char* value = nullptr;
+    if (curl_url_get(url, part, &value, CURLU_DEFAULT_PORT) != CURLUE_OK)
+        throw Failure("invalid_url");
+    std::unique_ptr<char, decltype(&curl_free)> owned(value, curl_free);
+    return owned.get();
+}
+
+void pin_media_origin(CURL*              curl,
+                      const std::string& url,
+                      const Endpoint&    dest,
+                      const Policy&      policy,
+                      Job&               job,
+                      bool               proxied,
+                      HeaderList&        pins,
+                      DirectPeerCheck&   peer) {
+    std::unique_ptr<CURLU, decltype(&curl_url_cleanup)> parsed(curl_url(), curl_url_cleanup);
+    if (!parsed || curl_url_set(parsed.get(), CURLUPART_URL, url.c_str(), 0) != CURLUE_OK)
+        throw Failure("invalid_url");
+    const auto host       = url_part(parsed.get(), CURLUPART_HOST);
+    const auto port       = url_part(parsed.get(), CURLUPART_PORT);
+    auto       normalized = lower(host);
+    while (!normalized.empty() && normalized.back() == '.')
+        normalized.pop_back();
+    // Only operator-selected OSS endpoints on their standard port may use
+    // private addresses. Authorize the actual curl host again on every hop.
+    const auto standard_port = url_part(parsed.get(), CURLUPART_SCHEME) == "https" ? "443" : "80";
+    if (normalized == dest.host && port == standard_port && trusted_oss_endpoint(normalized, policy))
+        return;
+    // The multi handle also caches connections made for service requests.
+    // Check the peer even when curl reuses an already-open direct connection.
+    if (!proxied
+        && (curl_easy_setopt(curl, CURLOPT_PREREQFUNCTION, check_connected_peer) != CURLE_OK
+            || curl_easy_setopt(curl, CURLOPT_PREREQDATA, &peer) != CURLE_OK))
+        throw Failure("transport");
+    in_addr literal{};
+    if (inet_aton(host.c_str(), &literal)) {
+        if (policy.blocked_networks.contains(AF_INET, &literal))
+            throw Failure("blocked");
+        return;
+    }
+    const auto addresses = resolve_media_addresses(host, policy, job);
+    if (proxied) {
+        // RESOLVE cannot constrain a forward proxy's DNS. CONNECT to the
+        // approved numeric origin while preserving the original HTTP/TLS host.
+        auto address = std::find_if(addresses.begin(), addresses.end(), [](const auto& s) { return s.front() != '['; });
+        pins.append("::" + (address == addresses.end() ? addresses.front() : *address) + ":");
+        if (curl_easy_setopt(curl, CURLOPT_CONNECT_TO, pins.head) != CURLE_OK
+            || curl_easy_setopt(curl, CURLOPT_SUPPRESS_CONNECT_HEADERS, 1L) != CURLE_OK)
+            throw Failure("transport");
+    } else {
+        std::string entry = "+" + host + ":" + port + ":";
+        for (const auto& address : addresses)
+            entry += address + ",";
+        entry.pop_back();
+        pins.append(entry);
+        if (curl_easy_setopt(curl, CURLOPT_RESOLVE, pins.head) != CURLE_OK)
+            throw Failure("transport");
+    }
 }
 // Only the I/O thread drives the multi handle. Workers lend it their configured
 // easy handles for one transfer; the multi handle retains connections between transfers.
@@ -429,14 +536,16 @@ void exchange(CurlConnectionPool& connections, CURL* curl, Job& job, const Polic
     for (int hop = 0; hop <= 30; ++hop) {
         auto dest = endpoint(url, policy, req.media);
         strip     = strip || dest.origin != first.origin;
-        if (req.media && policy.internal && !proxy.empty())
-            validate_proxied_media_host(dest, job);
+        curl_easy_reset(curl);
+        HeaderList      pins;
+        DirectPeerCheck peer{policy};
+        if (req.media && policy.internal)
+            pin_media_origin(curl, url, dest, policy, job, !proxy.empty(), pins, peer);
         auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(job.deadline - Clock::now()).count();
         if (job.canceled.load())
             throw Failure("cancelled");
         if (ms <= 0)
             throw Failure("timeout");
-        curl_easy_reset(curl);
         Transfer   transfer{job};
         HeaderList headers;
         for (const auto& [name, value] : (proxy.empty() ? req.headers : req.proxy_headers)) {
@@ -481,6 +590,8 @@ void exchange(CurlConnectionPool& connections, CURL* curl, Job& job, const Polic
             curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, req.method.c_str());
         }
         auto rc = connections.perform(curl);
+        if (peer.blocked)
+            throw Failure("blocked");
         if (job.canceled.load())
             throw Failure("cancelled");
         if (transfer.large)

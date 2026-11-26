@@ -16,6 +16,23 @@ from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.mm_download_domains import blocked_download_domains
 from rtp_llm.multimodal.mm_error_messages import MMErr
 
+# Media URLs can come from clients. Service RPCs have separate, configured destinations.
+_PRIVATE_MEDIA_NETWORKS = (
+    "0.0.0.0/8",
+    "10.0.0.0/8",
+    "100.64.0.0/10",
+    "127.0.0.0/8",
+    "169.254.0.0/16",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    "224.0.0.0/4",
+    "240.0.0.0/4",
+    "::/96",
+    "fc00::/7",
+    "fe80::/10",
+    "ff00::/8",
+)
+
 current_network = contextvars.ContextVar("vit_media_network", default=None)
 
 
@@ -62,6 +79,7 @@ class MediaNetwork:
 
         self.native = native
         policy = native.Policy()
+        networks = set(_PRIVATE_MEDIA_NETWORKS)
         policy.denied = blocked_download_domains()
         policy.ca = (
             os.getenv("REQUESTS_CA_BUNDLE")
@@ -80,8 +98,7 @@ class MediaNetwork:
         else:
             from rtp_llm.config.oss_download import get_oss_internal_region_allowlist
 
-            policy.internal = True
-            policy.set_networks(ssrf_check.INTRANET_CIDRS)
+            networks.update(ssrf_check.INTRANET_CIDRS)
             policy.rewrite_oss = os.getenv("ENABLE_OSS_INTERNAL_REWRITE") != "0"
             policy.group_hosts = ssrf_check.OSS_PUBLIC_TO_GROUP_INTERNAL
             regions = get_oss_internal_region_allowlist()
@@ -91,6 +108,8 @@ class MediaNetwork:
             self.proxy_for = download_proxy.resolve_download_proxy
             self.proxy_headers = download_proxy.DOWNLOAD_HEADERS
             self.report_proxy = download_proxy._report_proxy_metric
+        policy.internal = True
+        policy.set_networks(sorted(networks))
         self.config = config
         workers = (
             config.vit_source_download_concurrency

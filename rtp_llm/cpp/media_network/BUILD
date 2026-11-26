@@ -11,7 +11,7 @@ binding_headers(
 
 cc_binary(
     name = "_media_network.so",
-    srcs = ["ContentDecoder.cc", "ContentDecoder.h", "MediaNetwork.cc"],
+    srcs = ["ContentDecoder.cc", "ContentDecoder.h", "MediaAddressPolicy.h", "MediaNetwork.cc"],
     additional_linker_inputs = [":exports.map"],
     copts = ["-std=c++17"],
     # Keep private curl, c-ares and TLS symbols local when loaded alongside gRPC.

@@ -181,6 +181,16 @@ class MediaPipelineTraceTest(unittest.TestCase):
             engine = self.engine()
         self.assertIsNone(engine._media_network)
 
+    def test_native_media_rejects_loopback_by_default(self):
+        from rtp_llm.multimodal.media_network import MediaNetwork
+
+        network = MediaNetwork(VitConfig())
+        self.addCleanup(network.close)
+        result = network.image(
+            "http://localhost/", "", 1024, time.monotonic() + 3, None
+        ).result(timeout=5)
+        self.assertEqual(result[1], "blocked")
+
     def test_native_download_span_belongs_to_original_media_by_default(self):
         from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -197,7 +207,10 @@ class MediaPipelineTraceTest(unittest.TestCase):
         self.addCleanup(server.server_close)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self.addCleanup(server.shutdown)
-        with patch.dict(os.environ):
+        # This tracing fixture intentionally downloads from its loopback server.
+        with patch.dict(os.environ), patch(
+            "rtp_llm.multimodal.media_network._PRIVATE_MEDIA_NETWORKS", ()
+        ):
             os.environ.pop("MM_NATIVE_MEDIA_NETWORK", None)
             engine = self.engine()
         self.assertIsNotNone(engine._media_network)

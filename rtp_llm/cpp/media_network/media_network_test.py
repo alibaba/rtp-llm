@@ -27,6 +27,12 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def do_CONNECT(self):
+        self.server.tunnels.append(self.path)
+        self.send_response(200)
+        self.end_headers()
+        self.close_connection = False
+
     def do_GET(self):
         self.server.visits.append(self.path)
         if self.path in getattr(self.server, "encoded", {}):
@@ -50,6 +56,10 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
         elif self.path == "/redirect-v6":
             self.reply(302, b"", "http://[::1]/image")
+        elif self.path == "/redirect-host":
+            self.reply(302, b"", "http://localhost/image")
+        elif self.path == "/echo-host":
+            self.reply(200, self.headers["Host"].encode())
         elif self.path == "/policy":
             self.reply(302, b"", "http://denied.invalid/image")
         elif self.path == "/retry" and self.server.visits.count("/retry") == 1:
@@ -67,6 +77,7 @@ class MediaNetworkTest(unittest.TestCase):
     def setUp(self):
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.server.visits = []
+        self.server.tunnels = []
         self.server.gates = {
             path: (threading.Event(), threading.Event()) for path in ("/slow", "/hold")
         }
@@ -80,7 +91,8 @@ class MediaNetworkTest(unittest.TestCase):
         self.net = native.Network(2, 1, policy)
         self.addCleanup(self.net.close)
 
-    def fetch(self, path, **options):
+    def fetch(self, path, network=None, **options):
+        network = self.net if network is None else network
         req = native.Request()
         req.url = "http://127.0.0.1:%d%s" % (self.server.server_port, path)
         for name, value in options.items():
@@ -88,8 +100,8 @@ class MediaNetworkTest(unittest.TestCase):
                 req.set_body(value)
             else:
                 setattr(req, name, value)
-        job = self.net.submit(req)
-        self.assertIs(self.net.next(), job)
+        job = network.submit(req)
+        self.assertIs(network.next(), job)
         return job.result()
 
     def test_redirect_cache_limit_eviction(self):
@@ -120,6 +132,55 @@ class MediaNetworkTest(unittest.TestCase):
         self.assertEqual(self.fetch("/binary", limit=1)[1], "too_large")
         self.assertEqual(self.fetch("/retry", attempts=2)[4], 1)
         self.assertEqual(self.server.visits.count("/retry"), 2)
+
+    def test_resolved_addresses_checked_for_each_hop_and_proxy(self):
+        policy = native.Policy()
+        policy.internal = True
+        # localhost supplies both families; reject the whole answer even if
+        # the other address and the initial redirect origin are permitted.
+        policy.set_networks(["::1/128"])
+        network = native.Network(1, 0, policy)
+        self.addCleanup(network.close)
+        proxy = f"http://127.0.0.1:{self.server.server_port}"
+        for via in ("", proxy):
+            with self.subTest(proxy=bool(via)):
+                self.assertEqual(
+                    self.fetch("/", network, url="http://localhost/image", proxy=via)[
+                        1
+                    ],
+                    "blocked",
+                )
+        self.assertEqual(self.fetch("/redirect-host", network)[1], "blocked")
+        self.assertEqual(self.server.visits, ["/redirect-host"])
+        self.assertEqual(self.server.tunnels, [])
+
+    def test_proxy_uses_checked_address_and_preserves_origin_host(self):
+        proxy = f"http://127.0.0.1:{self.server.server_port}"
+        result = self.fetch("/", url="http://localhost:8731/echo-host", proxy=proxy)
+        self.assertEqual(result[:3], (200, "", b"localhost:8731"))
+        self.assertEqual(self.server.tunnels, ["127.0.0.1:8731"])
+
+    def test_oss_exception_is_scoped_to_configured_endpoint_and_port(self):
+        policy = native.Policy()
+        policy.internal = policy.rewrite_oss = True
+        policy.group_hosts = {"media.example.test": "localhost"}
+        policy.set_networks(["127.0.0.0/8", "::1/128"])
+        network = native.Network(1, 0, policy)
+        self.addCleanup(network.close)
+        proxy = f"http://127.0.0.1:{self.server.server_port}"
+        self.assertEqual(
+            self.fetch(
+                "/", network, url="http://media.example.test/image", proxy=proxy
+            )[0],
+            200,
+        )
+        self.assertEqual(self.server.visits, ["http://localhost/image"])
+        self.assertEqual(
+            self.fetch(
+                "/", network, url="http://media.example.test:81/image", proxy=proxy
+            )[1],
+            "blocked",
+        )
 
     def test_slow_job_allows_other_transfers_and_python_threads_to_progress(self):
         slow = native.Request()
