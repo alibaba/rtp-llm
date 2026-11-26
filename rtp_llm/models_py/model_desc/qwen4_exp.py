@@ -734,7 +734,14 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
             hidden_states, hyper_states, inject_weights = self.mlp_hyper_connection(
                 hyper_states
             )
-        hidden_states = self.mlp(hidden_states)
+        if isinstance(self.mlp, Qwen4MoeLayer):
+            hidden_states = self.mlp(
+                hidden_states,
+                attention_inputs=attention_inputs,
+                is_cuda_graph=attn_meta.is_cuda_graph,
+            )
+        else:
+            hidden_states = self.mlp(hidden_states)
         return hyper_states, hidden_states, inject_weights
 
 
@@ -772,6 +779,12 @@ class Qwen4ExpModel(Qwen35Model):
         py_hw_kernel_config=None,
     ):
         config = model_config
+        if config.n_shared_experts > 0 and torch.version.hip is None:
+            from rtp_llm.models_py.modules.qwen4_exp.moe.shared_gemm import (
+                prepare_bf16_shared_weights,
+            )
+
+            prepare_bf16_shared_weights(weights.weights, config, parallelism_config)
         compute_weights = (
             prepare_compute_weights(weights)
             if getattr(config, "_qwen4_full_fp8_nvfp4", False)
@@ -828,6 +841,12 @@ class Qwen4ExpModel(Qwen35Model):
         if dispatch is not None:
             for layer in self.layers:
                 install_target_graph_all_reduce(layer.self_attn, layer.mlp, dispatch)
+
+        from rtp_llm.models_py.modules.qwen4_exp.moe.reduce_gate import (
+            prepare_model_reduce,
+        )
+
+        self._moe_reduce_gate = prepare_model_reduce(self, config, parallelism_config)
 
     def _ple_coordinator(self) -> PLETransactionCoordinator:
         coordinator = self.__dict__.get("_ple_transaction_coordinator")
@@ -913,6 +932,9 @@ class Qwen4ExpModel(Qwen35Model):
         target_reduce = self.__dict__.get("_target_reduce")
         if target_reduce is not None:
             target_reduce.close()
+        moe_reduce_gate = self.__dict__.get("_moe_reduce_gate")
+        if moe_reduce_gate is not None:
+            moe_reduce_gate.close()
         self._closed = True
 
     def initialize(self, init_resource) -> bool:

@@ -340,7 +340,7 @@ py_library(
     data = [
         "//rtp_llm/libs:marlin_nvfp4",
         "kernels/cuda/marlin_nvfp4/marlin_kernels/LICENSE",
-    ] + glob(["kernels/cuda/qsa/*.cu", "kernels/cuda/qsa/*.cuh"]),
+    ] + glob(["kernels/cuda/qsa/*.cu", "kernels/cuda/qsa/*.cuh", "kernels/cuda/qwen4_moe/*.cu"]),
     deps = [
         ":utils",
         "//rtp_llm/resident_weights",

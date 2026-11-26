@@ -868,6 +868,33 @@ class ModelOptFp4Config(QuantizationConfig):
             "activation_amax", 32.0 if qwen4_recipe else None
         )
         self.online_cache_dir = kwargs.get("online_cache_dir", None)
+        self.decode_b12x_max_rows = kwargs.get(
+            "decode_b12x_max_rows", 2 if qwen4_recipe else 0
+        )
+        if (
+            type(self.decode_b12x_max_rows) is not int
+            or not 0 <= self.decode_b12x_max_rows <= 16
+        ):
+            raise ValueError("decode_b12x_max_rows must be an integer from 0 through 16")
+        self.decode_lsa_enabled = kwargs.get("decode_lsa_enabled", True)
+        if type(self.decode_lsa_enabled) is not bool:
+            raise ValueError("decode_lsa_enabled must be a boolean")
+        self.decode_lsa_startup_timeout_s = kwargs.get("decode_lsa_startup_timeout_s")
+        if self.decode_lsa_startup_timeout_s is not None and (
+            type(self.decode_lsa_startup_timeout_s) is not int
+            or not 1 <= self.decode_lsa_startup_timeout_s <= 2**31 - 1
+        ):
+            raise ValueError(
+                "decode_lsa_startup_timeout_s must be null or an integer from 1 through 2147483647"
+            )
+        self.decode_lsa_timeout_ms = kwargs.get("decode_lsa_timeout_ms", 0)
+        if (
+            type(self.decode_lsa_timeout_ms) is not int
+            or not 0 <= self.decode_lsa_timeout_ms <= 2**31 - 1
+        ):
+            raise ValueError(
+                "decode_lsa_timeout_ms must be an integer from 0 through 2147483647"
+            )
         self.prefill_library = kwargs.get("prefill_library", None)
         self.prefill_library_sha256 = kwargs.get("prefill_library_sha256", None)
         self.source_fp8_block_size = kwargs.get(

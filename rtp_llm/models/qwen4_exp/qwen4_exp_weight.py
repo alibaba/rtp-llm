@@ -243,6 +243,24 @@ class Qwen4ExpWeight(Qwen35MoeWeight):
         if self._contains(weight_keys, "layers.0.mlp.experts.gate_up_proj"):
             self._has_stacked_ckpt = True
 
+    def _create_ffn_weight(self):
+        weights = super()._create_ffn_weight()
+        if getattr(self.model_config, "_qwen4_dense_storage", None) != "source_bf16":
+            return weights
+        from rtp_llm.model_loader.ffn_weight import FfnWeight
+        from rtp_llm.models.qwen4_exp.shared_expert_weight import Qwen4SharedFfnWeight
+
+        return [
+            (
+                Qwen4SharedFfnWeight(
+                    list(weight.sub_weights.values()), config=weight.config
+                )
+                if type(weight) is FfnWeight
+                else weight
+            )
+            for weight in weights
+        ]
+
     def _create_mqa_weight(self) -> List[WeightModule]:
         """Reuse the Qwen3.5 attention mappings, minus the q/k norm ``plus_one``.
 

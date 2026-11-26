@@ -238,7 +238,9 @@ class GenericMoeLayer(nn.Module):
         experts_output = self._forward_routed(hidden_states)
         return self._add_shared_expert(hidden_states, experts_output, x_fp8, x_scale)
 
-    def _forward_routed(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def _forward_routed(
+        self, hidden_states: torch.Tensor, *, skip_tp_allreduce: bool = False
+    ) -> torch.Tensor:
         topk_ids, topk_weights = self._route(hidden_states)
         # In pure-TP mode both the routed experts and the shared expert produce
         # TP-partial outputs.  Reduce their sum once instead of reducing each
@@ -250,7 +252,7 @@ class GenericMoeLayer(nn.Module):
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             activation="SiGLU",
-            skip_tp_allreduce=self.use_unified_tp_allreduce,
+            skip_tp_allreduce=self.use_unified_tp_allreduce or skip_tp_allreduce,
         )
         return experts_output
 
