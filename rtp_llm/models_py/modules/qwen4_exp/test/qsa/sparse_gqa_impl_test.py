@@ -832,6 +832,30 @@ class SparseGqaImplForwardTest(unittest.TestCase):
         selected[:, 0] = 0
         return impl, qkv, cache, selected
 
+    def test_side_preflight_reuses_receipt_token_count(self):
+        from rtp_llm.models_py.model_desc.qwen4_exp_runtime.prefill_preflight import (
+            main_geometry_preflight,
+        )
+
+        impl, hidden, cache, _ = self._incremental_plan_case()
+        inputs = impl.attn_inputs
+        runtime = SimpleNamespace(
+            main_cache=cache,
+            main_inputs=inputs,
+            validate_before_projection=lambda **kwargs: None,
+        )
+        entry = (impl, cache.kv_cache_base, inputs.prefix_lengths, inputs.input_lengths)
+        with (
+            main_geometry_preflight([entry]),
+            patch.object(
+                torch.Tensor, "sum", side_effect=AssertionError("reduced lengths again")
+            ),
+        ):
+            impl.validate_qsa_before_side_write(runtime, None, hidden)
+            with self.assertRaisesRegex(RuntimeError, "token count does not match"):
+                impl.validate_qsa_before_side_write(runtime, None, hidden[:-1])
+        self.assertFalse(impl.qsa_main_cache_mutation_started())
+
     def test_fallback_geometry_has_one_read_and_preserves_wide_lengths(self):
         from rtp_llm.models_py.modules.qwen4_exp.qsa import fmha_validation
 

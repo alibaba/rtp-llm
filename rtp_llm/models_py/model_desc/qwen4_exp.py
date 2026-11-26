@@ -1227,12 +1227,15 @@ class Qwen4ExpModel(Qwen35Model):
                 tags.append(tag)
         return tags
 
-    def _layer_fmha_impl(self, decoder_layer, fmha_impl, layer_idx: int):
+    def _layer_fmha_impl(
+        self, decoder_layer, fmha_impl, layer_idx: int, tag: Optional[str] = None
+    ):
         if decoder_layer.layer_type == HybridAttentionType.LINEAR:
             return None
         if not isinstance(fmha_impl, Mapping):
             return fmha_impl
-        tag = self._attention_tag(layer_idx)
+        if tag is None:
+            tag = self._attention_tag(layer_idx)
         try:
             return fmha_impl[tag]
         except KeyError as error:
@@ -1470,6 +1473,7 @@ class Qwen4ExpModel(Qwen35Model):
                     **({"prefetch": ple_prefetch[i]} if i in ple_prefetch else {}),
                 )
             if self.kv_cache is None:
+                tag = None
                 layer_kv_cache = None
                 layer_attention_inputs = attention_inputs
             else:
@@ -1478,7 +1482,7 @@ class Qwen4ExpModel(Qwen35Model):
                 layer_attention_inputs = select_attention_inputs_for_tag(
                     attention_inputs, tag
                 )
-            layer_fmha_impl = self._layer_fmha_impl(decoder_layer, fmha_impl, i)
+            layer_fmha_impl = self._layer_fmha_impl(decoder_layer, fmha_impl, i, tag)
             # The engine rebuilds equivalent attention-input objects per batch,
             # so bind this layer to the exact object its sparse-GQA impl was
             # constructed with. The QSA runtime context, the impl and the

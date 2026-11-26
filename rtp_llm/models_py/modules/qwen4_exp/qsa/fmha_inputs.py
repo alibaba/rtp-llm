@@ -220,13 +220,19 @@ def _prepare_incremental_prefill_inputs(
     qkv: torch.Tensor,
     kv_cache: Optional[LayerKVCache],
     selected_indices: torch.Tensor,
+    *,
+    prefix_reuse_confirmed: bool = False,
 ) -> IncrementalPrefillInputs:
     """Build ragged per-request paged plans before the production writer."""
     prefixes = self.attn_inputs.prefix_lengths
     if (
         not self.is_prefill
         or self.is_target_verify
-        or (prefixes.device.type == "cpu" and not self._is_prefix_reuse_prefill())
+        or (
+            not prefix_reuse_confirmed
+            and prefixes.device.type == "cpu"
+            and not self._is_prefix_reuse_prefill()
+        )
     ):
         raise RuntimeError("qwen4_exp incremental prefill requires an explicit prefix")
     if qkv.dim() != 2:

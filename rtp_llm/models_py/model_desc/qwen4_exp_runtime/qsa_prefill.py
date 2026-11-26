@@ -598,7 +598,6 @@ def _incremental_prefill_selection(
         position_state.stage()
     triton_draft_window = (
         draft
-        and max(plan.lengths) <= 4
         and int(plan.ratio) == 4
         and int(plan.head_dim) == 128
         and int(plan.kv_tokens_per_block) == 128
