@@ -29,3 +29,50 @@ def _is_sm120_index(index: int) -> bool:
 def is_sm120_device(device: torch.device) -> bool:
     index = cuda_device_index(device)
     return index is not None and _is_sm120_index(index)
+
+
+def require_sm120_providers(device: torch.device) -> None:
+    """Require the registered SM120 operations on the selected device."""
+    index = cuda_device_index(device)
+    if index is not None and _is_sm120_index(index):
+        _require_sm120_providers(index)
+
+
+@cache
+def _require_sm120_providers(index: int) -> None:
+    # Imported here: provider modules load only on SM120 workers.
+    from rtp_llm.models_py.modules.dsv4.fp8.sm120_sparse_mla import sparse_mla_available
+
+    del index
+    try:
+        import deep_gemm
+    except (ImportError, AttributeError, OSError, RuntimeError):
+        deep_gemm = None
+
+    missing = [
+        name
+        for name, available in (
+            (
+                "the SM120 DeepGEMM operations",
+                deep_gemm is not None
+                and all(
+                    callable(getattr(deep_gemm, sym, None))
+                    for sym in (
+                        "fp8_gemm_nt",
+                        "fp8_einsum",
+                        "tf32_hc_prenorm_gemm",
+                        "fp8_fp4_mqa_logits",
+                        "fp8_fp4_paged_mqa_logits",
+                        "get_paged_mqa_logits_metadata",
+                    )
+                ),
+            ),
+            ("the SM120 sparse MLA operation", sparse_mla_available()),
+        )
+        if not available
+    ]
+    if missing:
+        raise RuntimeError(
+            "DeepSeek-V4 on SM120 requires the x86 CUDA 13 RTP-LLM build; "
+            "this environment lacks " + ", ".join(missing)
+        )

@@ -40,6 +40,7 @@ from rtp_llm.models_py.modules.dsv4.fp8._swa_ops_triton import (
     compute_swa_slot_mapping,
     compute_swa_slot_mapping_from_positions,
 )
+from rtp_llm.models_py.modules.dsv4.fp8.attention import _swa_paged_slots_fully_covered
 
 
 def _ref_compute_swa_slot_mapping(
@@ -925,6 +926,28 @@ class SwaSlotMappingTest(unittest.TestCase):
         )
         self.assertEqual(int(rank2[64].item()), 12 * local_entries)
         self.assertEqual(int(rank2[159].item()), -1)
+
+
+class SwaSlotMappingTestSm120(unittest.TestCase):
+    """SM120 paged-prefill write-slot fallback checks."""
+
+    def setUp(self):
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA required")
+        self.device = torch.device("cuda", torch.cuda.current_device())
+
+    def test_paged_prefill_falls_back_when_write_slots_contain_negative(self):
+        """Any -1 write slot must abandon the direct-paged prefill route."""
+        dense = torch.tensor([0, 5, 129, 511], dtype=torch.long, device=self.device)
+        sparse = torch.tensor([0, -1, 129, -1], dtype=torch.long, device=self.device)
+        self.assertTrue(_swa_paged_slots_fully_covered(dense))
+        self.assertFalse(_swa_paged_slots_fully_covered(sparse))
+        self.assertTrue(
+            _swa_paged_slots_fully_covered(
+                torch.empty(0, dtype=torch.long, device=self.device)
+            )
+        )
+        self.assertTrue(_swa_paged_slots_fully_covered(None))
 
 
 if __name__ == "__main__":

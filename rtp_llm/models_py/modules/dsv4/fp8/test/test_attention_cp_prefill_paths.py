@@ -138,6 +138,27 @@ class AttentionCPPrefillDispatchTest(unittest.TestCase):
         self.assertEqual(tuple(out.shape), (3, 8))
         return seq
 
+    def test_dispatch_forwards_shared_input_quant_without_repacking(self) -> None:
+        shared = (torch.zeros(3, 4, dtype=torch.uint8), torch.ones(3, 1))
+        common = _make_common(cp_on=True, device=torch.device("cuda"))
+        for ratio in (0, 4, 128):
+            with self.subTest(compress_ratio=ratio):
+                seq: list = []
+                layer = _make_dispatch_layer(ratio, seq)
+                layer._prefill_common_setup.side_effect = (  # type: ignore[attr-defined]
+                    lambda x, p: seq.append("common") or common
+                )
+                out = layer._forward_prefill(
+                    self.x, self.positions, shared_input_quant=shared
+                )
+                layer._prefill_compute_qkv.assert_called_once()  # type: ignore[attr-defined]
+                call = layer._prefill_compute_qkv.call_args  # type: ignore[attr-defined]
+                self.assertIs(call.args[0], self.x)
+                self.assertIs(call.args[1], common)
+                self.assertEqual(set(call.kwargs), {"shared_input_quant"})
+                self.assertIs(call.kwargs["shared_input_quant"], shared)
+                self.assertEqual(tuple(out.shape), (3, 8))
+
     def test_swa_only_stays_on_swa_path(self) -> None:
         common = _make_common(cp_on=True, device=torch.device("cuda"))
 

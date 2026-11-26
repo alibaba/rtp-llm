@@ -51,7 +51,7 @@ from rtp_llm.models_py.modules.dsv4.fp8._indexer_quant_triton import (
 )
 from rtp_llm.models_py.modules.dsv4.fp8._indexer_score import (
     fp8_mqa_indexer_score,
-    supports_mqa_logits,
+    supports_dsv4_mqa_logits,
 )
 from rtp_llm.models_py.triton_kernels import (
     legacy_fp8_indexer_score as _legacy_fallback_mod,
@@ -71,6 +71,10 @@ class _CountingDeepGemm:
     def fp8_mqa_logits(self, *args, **kwargs):
         self.mqa += 1
         return self._inner.fp8_mqa_logits(*args, **kwargs)
+
+    def fp8_fp4_mqa_logits(self, *args, **kwargs):
+        self.mqa += 1
+        return self._inner.fp8_fp4_mqa_logits(*args, **kwargs)
 
 
 @contextlib.contextmanager
@@ -106,7 +110,7 @@ def _assert_mqa_path(counted, fallback, expected_calls: int) -> None:
     entry point was called ``expected_calls`` times; predicate false → they ran
     on the Triton fallback instead.
     """
-    expects_deepgemm = supports_mqa_logits(torch.device("cuda"))
+    expects_deepgemm = supports_dsv4_mqa_logits(torch.device("cuda"), num_heads=64)
     expected_deepgemm = expected_calls if expects_deepgemm else 0
     expected_fallback = 0 if expects_deepgemm else expected_calls
     assert counted.mqa == expected_deepgemm, (
@@ -255,7 +259,7 @@ def _compare(label, ref, cand, k_topk, q_pos_kernel=None, ratio=1):
 def test_prefill_fresh():
     # DeepGEMM or the Triton fallback — both must match the reference; an
     # unconditional assert would red the ARM SM100 lane.
-    if not supports_mqa_logits(torch.device("cuda")):
+    if not supports_dsv4_mqa_logits(torch.device("cuda"), num_heads=64):
         logging.info("prefill MQA logits not served by DeepGEMM here; using fallback")
     torch.manual_seed(0)
     B, S, H, D = 1, 128, 64, INDEXER_HEAD_DIM
@@ -286,7 +290,7 @@ def test_prefill_fresh():
 def test_prefill_continuation():
     # DeepGEMM or the Triton fallback — both must match the reference; an
     # unconditional assert would red the ARM SM100 lane.
-    if not supports_mqa_logits(torch.device("cuda")):
+    if not supports_dsv4_mqa_logits(torch.device("cuda"), num_heads=64):
         logging.info("prefill MQA logits not served by DeepGEMM here; using fallback")
     torch.manual_seed(1)
     B, S, H, D = 1, 8, 64, INDEXER_HEAD_DIM
@@ -317,7 +321,7 @@ def test_prefill_continuation():
 def test_prefill_long_S():
     # DeepGEMM or the Triton fallback — both must match the reference; an
     # unconditional assert would red the ARM SM100 lane.
-    if not supports_mqa_logits(torch.device("cuda")):
+    if not supports_dsv4_mqa_logits(torch.device("cuda"), num_heads=64):
         logging.info("prefill MQA logits not served by DeepGEMM here; using fallback")
     torch.manual_seed(2)
     B, S, H, D = 1, 4096, 64, INDEXER_HEAD_DIM
@@ -350,7 +354,7 @@ def test_prefill_chunked():
     compare vs single-shot fp8 (and bf16 reference)."""
     # DeepGEMM or the Triton fallback — both must match the reference; an
     # unconditional assert would red the ARM SM100 lane.
-    if not supports_mqa_logits(torch.device("cuda")):
+    if not supports_dsv4_mqa_logits(torch.device("cuda"), num_heads=64):
         logging.info("prefill MQA logits not served by DeepGEMM here; using fallback")
     torch.manual_seed(3)
     B, S, H, D = 1, 256, 64, INDEXER_HEAD_DIM

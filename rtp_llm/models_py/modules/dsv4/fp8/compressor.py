@@ -56,10 +56,13 @@ def _linear_bf16_bf16_fp32(x: torch.Tensor, weight: torch.Tensor) -> torch.Tenso
     assert (
         _CUBLAS_GEMM_BF16_BF16_FP32 is not None
     ), "cublas_gemm_bf16_bf16_fp32 op is not built"
-    leading_shape = x.shape[:-1]
-    x_2d = x.reshape(-1, x.shape[-1])
-    out_2d = _CUBLAS_GEMM_BF16_BF16_FP32(x_2d, weight)
-    return out_2d.reshape(*leading_shape, weight.shape[0])
+    from rtp_llm.models_py.modules.dsv4.fp8.attention_backend import (
+        get_sparse_attention_backend,
+    )
+
+    return get_sparse_attention_backend(x.device).compressor_linear(
+        x, weight, _CUBLAS_GEMM_BF16_BF16_FP32
+    )
 
 
 from rtp_llm.models_py.modules.dsv4.cp import (
@@ -947,6 +950,18 @@ class CompressorFP8(PoolBackedModule):
     #     (e.g. CSA: nested indexer + main) is required for FIFO ordering
     #     of NCCL collectives within the ProcessGroup.
     # ----------------------------------------------------------------------
+    def _project_prefill(self, x: torch.Tensor) -> torch.Tensor:
+        from rtp_llm.models_py.modules.dsv4.fp8.attention_backend import (
+            get_sparse_attention_backend,
+        )
+
+        return get_sparse_attention_backend(x.device).compressor_prefill(
+            x,
+            self._wkv_wgate_fused,
+            _linear_bf16_bf16_fp32,
+            getattr(getattr(self, "_cp_ctx", None), "chunk_lengths_per_req", None),
+        )
+
     def start_prefill(
         self,
         x: torch.Tensor,
@@ -996,7 +1011,7 @@ class CompressorFP8(PoolBackedModule):
 
         out_dim = (1 + self.overlap) * self.head_dim
         with record_function_range("dsv4.fp8.compressor.prefill.fused_linear"):
-            fused_out = _linear_bf16_bf16_fp32(x, self._wkv_wgate_fused)
+            fused_out = self._project_prefill(x)
             N = bsz * seqlen
             fused_flat = fused_out.reshape(N, -1)
 
@@ -1159,7 +1174,7 @@ class CompressorFP8(PoolBackedModule):
         device = x.device
         out_dim = (1 + self.overlap) * self.head_dim
         with record_function_range("dsv4.fp8.compressor.prefill.fused_linear"):
-            fused_out = _linear_bf16_bf16_fp32(x, self._wkv_wgate_fused)
+            fused_out = self._project_prefill(x)
             N = bsz * seqlen
             fused_flat = fused_out.reshape(N, -1)
 

@@ -16,6 +16,7 @@ from rtp_llm.models_py.modules.dsv4.fp8._swa_dequant_triton import (
     ENTRY_BYTES,
     HEAD_DIM,
     dequantize_and_gather_k_cache,
+    gather_k_cache_slots_packed,
 )
 
 CORE_DUMP_BATCH_SIZE = 28
@@ -99,6 +100,28 @@ class SwaDequantLargeStrideTest(unittest.TestCase):
                         f"Got min={recovered.min().item()} max={recovered.max().item()}."
                     ),
                 )
+
+
+class SwaSlotGatherPackedTest(unittest.TestCase):
+    """Folded packed SWA slot-gather regression cases."""
+
+    def setUp(self):
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA required")
+        self.device = torch.device("cuda", torch.cuda.current_device())
+
+    def test_slot_gather_zeros_negative_and_out_of_range_indices(self) -> None:
+        k_cache = torch.full(
+            (1, 2, ENTRY_BYTES), 7, dtype=torch.uint8, device=self.device
+        )
+        slots = torch.tensor([-1, 0, 2], dtype=torch.int64, device=self.device)
+
+        gathered = gather_k_cache_slots_packed(k_cache, slots)
+        torch.cuda.synchronize()
+
+        self.assertTrue(torch.equal(gathered[0], torch.zeros_like(gathered[0])))
+        self.assertTrue(torch.equal(gathered[1], torch.full_like(gathered[1], 7)))
+        self.assertTrue(torch.equal(gathered[2], torch.zeros_like(gathered[2])))
 
 
 if __name__ == "__main__":

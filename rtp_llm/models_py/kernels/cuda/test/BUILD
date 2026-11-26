@@ -149,3 +149,13 @@ models_py_test(
     src = "qwen4_mtp_norm_test.py",
     gpu = "RTX_5000_PRO_CU13",
 )
+
+dsv4_sm120_py_test(
+    name = "test_sparse_binding",
+    src = "test_sparse_binding.py",
+    deps = py_test_deps + select({
+        "@//:using_cuda13_x86": ["//rtp_llm:flashinfer-python"],
+        "//conditions:default": [],
+    }),
+    timeout = "long",
+)

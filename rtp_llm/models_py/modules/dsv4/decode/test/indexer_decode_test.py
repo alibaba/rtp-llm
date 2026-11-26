@@ -650,7 +650,7 @@ class TestIndexerDecodeFastPathAbi(unittest.TestCase):
                 with (
                     patch.object(mod, "_deep_gemm", fake_dg),
                     patch.object(dsv4_score, "_deep_gemm", fake_dg),
-                    patch.object(dsv4_score, "_HAS_DEEP_GEMM_PAGED", True),
+                    patch.object(dsv4_score, "_HAS_DEEP_GEMM", True),
                     patch("torch.cuda.is_available", return_value=True),
                     patch("torch.cuda.get_device_capability", return_value=(9, 0)),
                 ):
@@ -839,6 +839,126 @@ class TestIndexerDecodeFastPathAbi(unittest.TestCase):
             patch.object(torch.Tensor, "to", fake_to),
         ):
             out_mqa = dsv41_score.fp8_mqa_indexer_score(
+                fake_q4, wf, kq, ks_f, ks, ke, clean_logits=True, max_seqlen_k=4
+            )
+        self.assertEqual(seen_clean, [(False, 4)])
+        self.assertEqual(tuple(out_mqa.shape), (4, 4))
+        self.assertTrue(torch.isfinite(out_mqa[0, :2]).all())
+        self.assertTrue(torch.isneginf(out_mqa[0, 2:]).all())
+        self.assertTrue(torch.isfinite(out_mqa[1, :2]).all())
+        self.assertTrue(torch.isneginf(out_mqa[1, 2:]).all())
+        self.assertTrue(torch.isneginf(out_mqa[2]).all())
+        self.assertTrue(torch.isfinite(out_mqa[3, :2]).all())
+        self.assertTrue(torch.isneginf(out_mqa[3, 2:]).all())
+
+    def test_paged_context_lens_contract_and_sm100_relative_dsv4(self):
+        from contextlib import nullcontext
+
+        from rtp_llm.models_py.modules.dsv4.fp8 import _indexer_score as dsv4_score
+
+        cuda_dev = torch.device("cuda", 0)
+        orig_to = torch.Tensor.to
+
+        def fake_to(self, *args, **kwargs):
+            if "device" in kwargs:
+                kwargs = dict(kwargs)
+                kwargs["device"] = self.device
+            elif args and isinstance(args[0], (torch.device, str)):
+                args = (self.device, *args[1:])
+            return orig_to(self, *args, **kwargs)
+
+        q_paged = torch.zeros((2, 3, 64, 128), dtype=torch.float8_e4m3fn)
+        w_paged = torch.ones((6, 64), dtype=torch.float32)
+        kv_pool = torch.zeros((64, 132), dtype=torch.uint8)
+        bt = torch.tensor([[0], [0]], dtype=torch.int32)
+        fake_q_paged = types.SimpleNamespace(
+            is_cuda=True,
+            device=cuda_dev,
+            dtype=q_paged.dtype,
+            shape=q_paged.shape,
+            dim=q_paged.dim,
+            contiguous=lambda: q_paged,
+        )
+        fake_paged_dg = types.SimpleNamespace(
+            __version__="2.1.1+ee8d9c7.cu129",
+            fp8_paged_mqa_logits=lambda *a, **kw: torch.zeros(
+                (a[0].shape[0] * a[0].shape[1], a[6])
+            ),
+            get_paged_mqa_logits_metadata=lambda *a: torch.empty(0, dtype=torch.int32),
+            get_num_sms=lambda: 132,
+        )
+        with (
+            patch.object(dsv4_score, "_deep_gemm", fake_paged_dg),
+            patch.object(dsv4_score, "_HAS_DEEP_GEMM", True),
+            patch.object(dsv4_score, "_DEEP_GEMM_SM100_LEGACY_OK", True),
+            patch.object(dsv4_score, "is_sm120", return_value=False),
+            patch("torch.cuda.is_available", return_value=True),
+            patch("torch.cuda.get_device_capability", return_value=(10, 0)),
+            patch("torch.cuda.device", lambda *_: nullcontext()),
+            patch.object(torch.Tensor, "to", fake_to),
+        ):
+            for valid_len in (
+                torch.tensor([12, 20], dtype=torch.int32),
+                torch.tensor([10, 11, 12, 20, 21, 22], dtype=torch.int32),
+            ):
+                out_p = dsv4_score.fp8_paged_indexer_score(
+                    fake_q_paged,
+                    w_paged,
+                    kv_pool,
+                    bt,
+                    valid_len,
+                    block_size=64,
+                    max_ctx_len=32,
+                )
+                self.assertEqual(tuple(out_p.shape), (6, 32))
+            with self.assertRaisesRegex(ValueError, "expected 2 or 6"):
+                dsv4_score.fp8_paged_indexer_score(
+                    fake_q_paged,
+                    w_paged,
+                    kv_pool,
+                    bt,
+                    torch.tensor([10, 20, 30], dtype=torch.int32),
+                    block_size=64,
+                    max_ctx_len=32,
+                )
+
+        seen_clean = []
+
+        def fake_282_mqa(q_in, k_pair, w_in, ks_t, ke_t, clean, max_k):
+            seen_clean.append((clean, max_k))
+            self.assertFalse(clean)
+            return torch.arange(16, dtype=torch.float32).view(4, 4)
+
+        fake_dg_282 = types.SimpleNamespace(
+            __version__="2.8.2+a5165ad.cu132",
+            fp8_mqa_logits=fake_282_mqa,
+            get_legacy_paged_mqa_logits_metadata=lambda *a: None,
+        )
+        q4 = torch.zeros((4, 64, 128), dtype=torch.float8_e4m3fn)
+        kq = torch.zeros((8, 128), dtype=torch.float8_e4m3fn)
+        ks_f = torch.ones((8,), dtype=torch.float32)
+        wf = torch.ones((4, 64), dtype=torch.float32)
+        ks = torch.tensor([2, 1, 3, 6], dtype=torch.int32)
+        ke = torch.tensor([4, 3, 3, 10], dtype=torch.int32)
+        fake_q4 = types.SimpleNamespace(
+            is_cuda=True,
+            device=cuda_dev,
+            dtype=q4.dtype,
+            shape=q4.shape,
+            dim=q4.dim,
+            contiguous=lambda: q4,
+        )
+        with (
+            patch.object(dsv4_score, "_deep_gemm", fake_dg_282),
+            patch.object(dsv4_score, "_HAS_DEEP_GEMM_MQA", True),
+            patch.object(dsv4_score, "_DEEP_GEMM_SM100_LEGACY_OK", True),
+            patch.object(dsv4_score, "is_sm120", return_value=False),
+            patch("torch.cuda.is_available", return_value=True),
+            patch("torch.cuda.get_device_capability", return_value=(10, 0)),
+            patch("torch.cuda.device", lambda *_: nullcontext()),
+            patch.object(torch.Tensor, "to", fake_to),
+        ):
+            out_mqa = dsv4_score.fp8_mqa_indexer_score(
                 fake_q4, wf, kq, ks_f, ks, ke, clean_logits=True, max_seqlen_k=4
             )
         self.assertEqual(seen_clean, [(False, 4)])

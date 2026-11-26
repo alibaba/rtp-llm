@@ -232,6 +232,74 @@ def test_lengths_2d_accepted():
     _assert_equiv(out, logits, lengths_1d, k=512, tag="lengths 2D ok via view")
 
 
+def test_workspace_device_and_contiguity_checks():
+    """Persistent branch rejects non-contiguous and misaligned workspaces."""
+    logits, lengths = _make(4, 2048, seed=10, lengths_mode="full")
+    out = torch.full((4, 512), -1, dtype=torch.int32, device="cuda")
+
+    strided_ws = torch.empty(WORKSPACE_BYTES * 2, dtype=torch.uint8, device="cuda")[::2]
+    assert not strided_ws.is_contiguous()
+    try:
+        rtp_llm_ops.dsv4_persistent_topk(logits, lengths, out, strided_ws, 512, 2048)
+    except RuntimeError as exc:
+        assert "contiguous" in str(exc), f"unexpected error: {exc}"
+    else:
+        raise AssertionError("expected non-contiguous workspace to be rejected")
+
+    unaligned_ws = torch.empty(WORKSPACE_BYTES + 16, dtype=torch.uint8, device="cuda")[
+        1 : WORKSPACE_BYTES + 1
+    ]
+    assert unaligned_ws.is_contiguous()
+    try:
+        rtp_llm_ops.dsv4_persistent_topk(logits, lengths, out, unaligned_ws, 512, 2048)
+    except RuntimeError as exc:
+        assert "aligned" in str(exc), f"unexpected error: {exc}"
+    else:
+        raise AssertionError("expected misaligned workspace to be rejected")
+
+
+def test_workspace_cross_device_rejected():
+    """Persistent branch rejects workspace located on a different CUDA device."""
+    assert torch.cuda.device_count() >= 2, "requires >= 2 CUDA devices"
+    logits, lengths = _make(4, 2048, seed=10, lengths_mode="full")
+    out = torch.full((4, 512), -1, dtype=torch.int32, device="cuda")
+    ws_other = torch.empty(WORKSPACE_BYTES, dtype=torch.uint8, device="cuda:1")
+    try:
+        rtp_llm_ops.dsv4_persistent_topk(logits, lengths, out, ws_other, 512, 2048)
+    except RuntimeError as exc:
+        assert "same CUDA device" in str(exc), f"unexpected error: {exc}"
+    else:
+        raise AssertionError("expected cross-device workspace to be rejected")
+
+
+def test_noncontiguous_output_rejected():
+    """Output tensor must be contiguous so kernel row*top_k writes never corrupt slices."""
+    logits, lengths = _make(4, 2048, seed=11, lengths_mode="full")
+    storage = torch.full((4, 1024), -7, dtype=torch.int32, device="cuda")
+    out = storage[:, ::2]
+    assert not out.is_contiguous()
+    ws = torch.empty(WORKSPACE_BYTES, dtype=torch.uint8, device="cuda")
+    try:
+        rtp_llm_ops.dsv4_persistent_topk(logits, lengths, out, ws, 512, 2048)
+    except RuntimeError as exc:
+        assert "contiguous" in str(exc), f"unexpected error: {exc}"
+    else:
+        raise AssertionError("expected non-contiguous output to be rejected")
+    assert torch.all(storage == -7), "rejected call must not touch output storage"
+
+
+def test_unaligned_logits_radix_path():
+    """Scalar fallback must handle 4-element-strided logits with unaligned base pointer."""
+    backing = torch.randn(2 * 40000 + 1, dtype=torch.float32, device="cuda")
+    logits = backing[1:].view(2, 40000)
+    assert logits.stride(0) % 4 == 0
+    assert logits.data_ptr() % 16 != 0
+    lengths = torch.tensor([40000, 35000], dtype=torch.int32, device="cuda")
+    out = _run(logits, lengths, k=512, max_seq_len=40000)
+    torch.cuda.synchronize()
+    _assert_equiv(out, logits, lengths, k=512, tag="radix unaligned logits")
+
+
 # ---------------------------------------------------------------------------
 # Bench — compare against torch.topk (current production path).
 # ---------------------------------------------------------------------------
@@ -308,6 +376,11 @@ if __name__ == "__main__":
     test_long_seq_radix_path()
     test_zero_length_row()
     test_lengths_2d_accepted()
+    test_workspace_device_and_contiguity_checks()
+    test_noncontiguous_output_rejected()
+    test_unaligned_logits_radix_path()
+    if torch.cuda.device_count() >= 2:
+        test_workspace_cross_device_rejected()
     print("\n== Benchmark ==")
     bench_decode_sweep()
     print("\nOK")

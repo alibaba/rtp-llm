@@ -26,6 +26,7 @@ Caller is responsible for FP8 quantizing Q via
 from __future__ import annotations
 
 import re as _re
+from contextlib import nullcontext
 from typing import Optional
 
 import torch
@@ -34,6 +35,7 @@ from rtp_llm.models_py.modules.dsv4.fp8._indexer_quant_triton import (
     INDEXER_ENTRY_BYTES,
     INDEXER_HEAD_DIM,
 )
+from rtp_llm.models_py.utils.arch import is_sm120
 
 
 def get_fp8_paged_mqa_logits_metadata(backend, *args, **kwargs):
@@ -168,6 +170,10 @@ try:
         _deep_gemm, "get_paged_mqa_logits_metadata"
     )
     _HAS_DEEP_GEMM_MQA = hasattr(_deep_gemm, "fp8_mqa_logits")
+    _HAS_DEEP_GEMM_SM120_PAGED_MQA = callable(
+        getattr(_deep_gemm, "fp8_fp4_paged_mqa_logits", None)
+    ) and callable(getattr(_deep_gemm, "get_paged_mqa_logits_metadata", None))
+    _HAS_DEEP_GEMM_SM120_MQA = callable(getattr(_deep_gemm, "fp8_fp4_mqa_logits", None))
     # Newer wheels restore the group-128 FP32-weight/output APIs alongside
     # the MX APIs, with an explicit legacy metadata entry point. Older
     # 2.8.0 wheels use the shared metadata name; 2.8.1 rejects these calls
@@ -180,7 +186,12 @@ except ImportError:
     _deep_gemm = None
     _HAS_DEEP_GEMM = False
     _HAS_DEEP_GEMM_MQA = False
+    _HAS_DEEP_GEMM_SM120_PAGED_MQA = False
+    _HAS_DEEP_GEMM_SM120_MQA = False
     _DEEP_GEMM_SM100_LEGACY_OK = False
+
+_SM120_MQA_SUPPORTED_HEADS = (16, 32, 64)
+_SM120_MQA_SUPPORTED_BLOCKS = (32, 64, 128, 256)
 
 
 def _is_cuda_runtime_device(device) -> bool:
@@ -203,9 +214,7 @@ def _legacy_mqa_abi_ok(backend=None) -> bool:
 def _sm100_needs_triton_fallback(device, backend=None) -> bool:
     """Whether this wheel rejects the group-128 legacy logits calls on SM100."""
     return torch.cuda.get_device_capability(device)[0] == 10 and not (
-        _DEEP_GEMM_SM100_LEGACY_OK
-        if backend is None
-        else _legacy_mqa_abi_ok(backend)
+        _DEEP_GEMM_SM100_LEGACY_OK if backend is None else _legacy_mqa_abi_ok(backend)
     )
 
 
@@ -259,14 +268,40 @@ def supports_mqa_logits(device, *, backend=None) -> bool:
     if torch.cuda.get_device_capability(device)[0] not in (9, 10):
         return False
     has_mqa = (
-        _HAS_DEEP_GEMM_MQA
-        if backend is None
-        else hasattr(backend, "fp8_mqa_logits")
+        _HAS_DEEP_GEMM_MQA if backend is None else hasattr(backend, "fp8_mqa_logits")
     )
     return has_mqa and not _sm100_needs_triton_fallback(device, backend=backend)
 
 
-def has_fp8_paged_mqa_logits() -> bool:
+def supports_dsv4_paged_mqa_logits(
+    device, block_kv: Optional[int] = None, *, num_heads: Optional[int] = None
+) -> bool:
+    """Whether :func:`fp8_paged_indexer_score` takes a DeepGEMM fast path."""
+    if not _is_cuda_runtime_device(device):
+        return False
+    if is_sm120(device):
+        if not _HAS_DEEP_GEMM_SM120_PAGED_MQA:
+            return False
+        if num_heads is not None and int(num_heads) not in _SM120_MQA_SUPPORTED_HEADS:
+            return False
+        return block_kv is None or block_kv in _SM120_MQA_SUPPORTED_BLOCKS
+    return supports_paged_mqa_logits(device, block_kv)
+
+
+def supports_dsv4_mqa_logits(device, *, num_heads: Optional[int] = None) -> bool:
+    """Whether :func:`fp8_mqa_indexer_score` takes a DeepGEMM fast path."""
+    if not _is_cuda_runtime_device(device):
+        return False
+    if is_sm120(device):
+        if not _HAS_DEEP_GEMM_SM120_MQA:
+            return False
+        return num_heads is None or int(num_heads) in _SM120_MQA_SUPPORTED_HEADS
+    return supports_mqa_logits(device)
+
+
+def has_fp8_paged_mqa_logits(
+    device: Optional[torch.device | str | int] = None,
+) -> bool:
     """Kernel availability — not a device/path decision (always usable).
 
     The group-128 paged kernel is always servable: DeepGEMM when the wheel
@@ -276,7 +311,9 @@ def has_fp8_paged_mqa_logits() -> bool:
     return True
 
 
-def has_fp8_mqa_logits() -> bool:
+def has_fp8_mqa_logits(
+    device: Optional[torch.device | str | int] = None,
+) -> bool:
     """Kernel availability — not a device/path decision; see above."""
     return True
 
@@ -312,82 +349,192 @@ def fp8_paged_indexer_score(
     block_size: int,  # tokens per cache block
     max_ctx_len: int,  # output T dim
 ) -> torch.Tensor:
-    """One-shot FP8 paged indexer logits via DeepGEMM.
+    """One-shot FP8 paged indexer logits via DeepGEMM or checked fallback."""
+    if q_fp8.dim() != 4:
+        raise ValueError(f"q_fp8 must be 4D [B, N, H, D], got {q_fp8.shape}")
+    if q_fp8.dtype != torch.float8_e4m3fn:
+        raise ValueError(f"q_fp8 dtype must be float8_e4m3fn, got {q_fp8.dtype}")
+    B, next_n, H, D = q_fp8.shape
+    rows = B * next_n
+    if D != INDEXER_HEAD_DIM:
+        raise ValueError(f"q_fp8 head dim must be {INDEXER_HEAD_DIM}, got {D}")
+    if w_fold.dim() != 2 or tuple(w_fold.shape) != (rows, H):
+        raise ValueError(
+            f"w_fold shape must be {(rows, H)} for q_fp8, got {tuple(w_fold.shape)}"
+        )
+    if w_fold.dtype != torch.float32:
+        raise ValueError(f"w_fold dtype must be float32, got {w_fold.dtype}")
+    if (
+        kv_pool_uint8.dtype != torch.uint8
+        or kv_pool_uint8.dim() != 2
+        or kv_pool_uint8.shape[-1] != INDEXER_ENTRY_BYTES
+    ):
+        raise ValueError(
+            "kv_pool_uint8 must have shape [slots, 132] and dtype uint8, "
+            f"got shape={tuple(kv_pool_uint8.shape)}, dtype={kv_pool_uint8.dtype}"
+        )
+    if block_table.dim() != 2:
+        raise ValueError(
+            f"block_table must be 2D [B, max_blocks], got {block_table.shape}"
+        )
+    if block_table.dtype != torch.int32:
+        raise ValueError(f"block_table dtype must be int32, got {block_table.dtype}")
+    if block_size <= 0:
+        raise ValueError(f"block_size must be positive, got {block_size}")
+    if max_ctx_len < 0:
+        raise ValueError(f"max_ctx_len must be non-negative, got {max_ctx_len}")
 
-    Returns ``[B*next_n, max_ctx_len] fp32`` — feed straight to topk.
-    Padded columns past per-row ``context_lens[b, n]`` are left as
-    whatever DeepGEMM writes (use ``clean_logits=True`` if the
-    downstream topk needs ``-inf`` there; default False to save the
-    extra mask).
-    """
-    assert q_fp8.dtype == torch.float8_e4m3fn, f"q_fp8 dtype={q_fp8.dtype}"
-    assert q_fp8.dim() == 4 and q_fp8.shape[-1] == INDEXER_HEAD_DIM
-    assert w_fold.dtype == torch.float32 and w_fold.dim() == 2
-    assert kv_pool_uint8.dtype == torch.uint8
-    assert kv_pool_uint8.shape[-1] == INDEXER_ENTRY_BYTES
-    assert block_table.dtype == torch.int32 and block_table.dim() == 2
-    assert context_lens.dtype == torch.int32 and context_lens.dim() == 2
-    # DeepGEMM kv_cache shape: [num_blocks, block_size, 1, D+4] uint8.
-    # Our pool is a flat [total_slots, 132] view; reshape into the 4D
-    # layout (no copy — just a metadata change).
+    device = q_fp8.device
+    if rows == 0 or max_ctx_len == 0:
+        return torch.empty((rows, max_ctx_len), dtype=torch.float32, device=device)
+
+    lengths = context_lens.to(dtype=torch.int32).reshape(-1)
+    if lengths.numel() == B and B != rows:
+        lengths = lengths.repeat_interleave(next_n)
+    elif lengths.numel() != rows:
+        raise ValueError(
+            f"context_lens has {lengths.numel()} entries; expected {B} or {rows}"
+        )
+    lengths = lengths.clamp(min=0, max=max_ctx_len)
+
     total_slots = kv_pool_uint8.shape[0]
-    assert (
-        total_slots % block_size == 0
-    ), f"total_slots={total_slots} not divisible by block_size={block_size}"
+    if total_slots % block_size != 0:
+        raise ValueError(
+            f"total_slots={total_slots} not divisible by block_size={block_size}"
+        )
     num_blocks = total_slots // block_size
+    if num_blocks == 0:
+        raise ValueError("kv_pool_uint8 has no physical blocks for a non-empty context")
+    if max_ctx_len > block_table.shape[1] * block_size:
+        raise ValueError(
+            f"max_ctx_len={max_ctx_len} exceeds block-table capacity "
+            f"{block_table.shape[1] * block_size}"
+        )
+    if block_table.shape[0] not in (B, rows):
+        raise ValueError(
+            f"block_table has {block_table.shape[0]} rows; expected {B} or {rows}"
+        )
+
     kv_4d = kv_pool_uint8.view(num_blocks, block_size, 1, INDEXER_ENTRY_BYTES)
+    w_in = w_fold.contiguous()
+    if next_n > 1 and block_table.shape[0] == rows:
+        q_in = q_fp8.contiguous().reshape(rows, 1, H, D)
+        ctx_in = lengths.reshape(rows, 1).contiguous()
+        bt_in = block_table.to(dtype=torch.int32).contiguous()
+        bt_rows = bt_in
+    else:
+        q_in = q_fp8.contiguous()
+        ctx_in = lengths.reshape(B, next_n).contiguous()
+        bt_in = block_table.to(dtype=torch.int32).contiguous()
+        bt_rows = bt_in.repeat_interleave(next_n, dim=0) if next_n > 1 else bt_in
 
-    if not supports_paged_mqa_logits(q_fp8.device, block_size):
-        from rtp_llm.models_py.triton_kernels.legacy_fp8_indexer_score import (
-            legacy_fp8_paged_mqa_logits,
+    if (
+        q_fp8.is_cuda
+        and is_sm120(device)
+        and supports_dsv4_paged_mqa_logits(device, block_size, num_heads=H)
+    ):
+        ctx_dev = ctx_in.to(device=device, dtype=torch.int32).contiguous()
+        bt_dev = bt_in.to(device=device, dtype=torch.int32).contiguous()
+        bt_rows_dev = (
+            bt_dev
+            if bt_rows.shape == bt_dev.shape
+            else bt_rows.to(device=device, dtype=torch.int32).contiguous()
         )
-
-        return legacy_fp8_paged_mqa_logits(
-            q_fp8, kv_4d, w_fold, context_lens, block_table, max_ctx_len
-        )
-    with torch.cuda.device(q_fp8.device):
-        num_sms = _get_num_sms(q_fp8.device)
-        q_in, ctx_in, bt_in = prepare_fp8_paged_mqa_inputs(
-            q_fp8, context_lens, block_table, device=q_fp8.device, backend=_deep_gemm
-        )
-        # Legacy SM90/SM100 schedulers size work from the row's final length;
-        # monotonic cummax avoids under-scheduling decreasing MTP rows while
-        # passing the original ctx_in to logits preserves masking.
+        lengths_dev = lengths.to(device=device, dtype=torch.int32)
+        bt_safe = bt_dev.clamp(0, num_blocks - 1)
         ctx_sched = (
-            ctx_in.cummax(dim=1).values.contiguous()
-            if (ctx_in.dim() == 2 and ctx_in.shape[1] > 1)
-            else ctx_in
+            ctx_dev.cummax(dim=-1).values.contiguous()
+            if ctx_dev.shape[1] > 1
+            else ctx_dev
         )
-        schedule = get_fp8_paged_mqa_logits_metadata(
-            _deep_gemm, ctx_sched, block_size, num_sms
-        )
-        return _deep_gemm.fp8_paged_mqa_logits(
+        with torch.cuda.device(device):
+            num_sms = _get_num_sms(device)
+            schedule = _deep_gemm.get_paged_mqa_logits_metadata(
+                ctx_sched, block_size, num_sms
+            )
+            out = _deep_gemm.fp8_fp4_paged_mqa_logits(
+                (q_in, None),
+                kv_4d,
+                w_in,
+                ctx_sched,
+                bt_safe,
+                schedule,
+                max_ctx_len,
+                None,
+                False,
+                torch.float32,
+            )
+            num_pages = (max_ctx_len + block_size - 1) // block_size
+            used_pages = bt_rows_dev[:, :num_pages]
+            invalid_pages = (used_pages < 0) | (used_pages >= num_blocks)
+            full_pages = max_ctx_len // block_size
+            if full_pages > 0:
+                out_blocks = out[:, : full_pages * block_size].view(
+                    rows, full_pages, block_size
+                )
+                out_blocks.masked_fill_(
+                    invalid_pages[:, :full_pages, None], float("-inf")
+                )
+            rem = max_ctx_len - full_pages * block_size
+            if rem > 0:
+                out[:, full_pages * block_size :].masked_fill_(
+                    invalid_pages[:, full_pages : full_pages + 1], float("-inf")
+                )
+            cols = torch.arange(max_ctx_len, device=device, dtype=torch.int32)
+            out.masked_fill_(
+                cols.unsqueeze(0) >= lengths_dev.unsqueeze(1), float("-inf")
+            )
+            return out
+
+    if (
+        q_fp8.is_cuda
+        and not is_sm120(device)
+        and supports_paged_mqa_logits(device, block_size)
+    ):
+        ctx_dev = ctx_in.to(device=device, dtype=torch.int32).contiguous()
+        bt_dev = bt_in.to(device=device, dtype=torch.int32).contiguous()
+        with torch.cuda.device(device):
+            num_sms = _get_num_sms(device)
+            q_leg, ctx_leg, bt_leg = prepare_fp8_paged_mqa_inputs(
+                q_in, ctx_dev, bt_dev, device=device, backend=_deep_gemm
+            )
+            # Legacy SM90/SM100 schedulers size work from the row's final length;
+            # monotonic cummax avoids under-scheduling decreasing MTP rows while
+            # passing the original ctx_leg to logits preserves masking.
+            ctx_sched = (
+                ctx_leg.cummax(dim=1).values.contiguous()
+                if (ctx_leg.dim() == 2 and ctx_leg.shape[1] > 1)
+                else ctx_leg
+            )
+            schedule = get_fp8_paged_mqa_logits_metadata(
+                _deep_gemm, ctx_sched, block_size, num_sms
+            )
+            return _deep_gemm.fp8_paged_mqa_logits(
+                q_leg,
+                kv_4d,
+                w_in,
+                ctx_leg,
+                bt_leg,
+                schedule,
+                max_ctx_len,
+            )
+
+    from rtp_llm.models_py.triton_kernels.legacy_fp8_indexer_score import (
+        legacy_fp8_paged_mqa_logits,
+    )
+
+    ctx_fb = ctx_in.to(device=device, dtype=torch.int32).contiguous()
+    bt_fb = bt_in.to(device=device, dtype=torch.int32).contiguous()
+    with torch.cuda.device(device) if q_fp8.is_cuda else nullcontext():
+        return legacy_fp8_paged_mqa_logits(
             q_in,
             kv_4d,
-            w_fold.contiguous(),
-            ctx_in,
-            bt_in,
-            schedule,
+            w_in,
+            ctx_fb,
+            bt_fb,
             max_ctx_len,
+            clean_logits=True,
         )
-
-
-# ---------------------------------------------------------------------------
-# Prefill (non-paged) wrapper around ``deep_gemm.fp8_mqa_logits``.
-#
-# Shape contract:
-#   q_fp8        [M, H, D]    float8_e4m3fn  (M = total query tokens)
-#   w_fold       [M, H]       fp32           (per-(token, head) Q scale folded in)
-#   k_quant      [N, D]       float8_e4m3fn  (N = total key tokens — gathered
-#                                              contiguous from the FP8 cache)
-#   k_scale      [N]          float32
-#   cu_seqlen_ks [M]          int32          (K start, inclusive)
-#   cu_seqlen_ke [M]          int32          (K end,   exclusive)
-#
-# Returns ``[M, N] fp32`` logits — same semantics as ``v4_indexer_score``
-# but laid out flat over total query tokens (the indexer prefill caller
-# reshapes back to ``[B, S, T]``).
-# ---------------------------------------------------------------------------
 
 
 def _mask_relative_mqa_logits(
@@ -405,10 +552,7 @@ def _mask_relative_mqa_logits(
     rel = torch.arange(max_seqlen_k, device=out.device, dtype=torch.int64).unsqueeze(0)
     abs_pos = starts + rel
     valid = (
-        (abs_pos >= starts)
-        & (abs_pos < ends)
-        & (abs_pos >= 0)
-        & (abs_pos < num_keys)
+        (abs_pos >= starts) & (abs_pos < ends) & (abs_pos >= 0) & (abs_pos < num_keys)
     )
     out.masked_fill_(~valid, float("-inf"))
     return out
@@ -459,19 +603,13 @@ def fp8_mqa_indexer_score(
     clean_logits: bool = False,
     max_seqlen_k: int = 0,
 ) -> torch.Tensor:
-    """One-shot non-paged FP8 indexer logits via DeepGEMM.
-
-    Returns ``[M, N] fp32`` (M = total Q tokens this chunk; N = total K
-    tokens in the gathered workspace). Caller reshapes back to ``[B, S, T]``.
-
-    ``clean_logits=False`` matches what we want — entries past
-    ``cu_seqlen_ke[m]`` are left untouched; the topk-with-causal-mask path
-    in :class:`Indexer.forward` re-applies its own ``q_pos`` causal cap.
-    """
+    """One-shot non-paged FP8 indexer logits via DeepGEMM or checked fallback."""
+    if max_seqlen_k < 0:
+        raise ValueError(f"max_seqlen_k must be non-negative, got {max_seqlen_k}")
     assert q_fp8.dtype == torch.float8_e4m3fn and q_fp8.dim() == 3
     assert q_fp8.shape[-1] == INDEXER_HEAD_DIM
     assert w_fold.dtype == torch.float32 and w_fold.dim() == 2
-    assert w_fold.shape[0] == q_fp8.shape[0]
+    assert w_fold.shape[:2] == q_fp8.shape[:2]
     assert k_quant.dtype == torch.float8_e4m3fn and k_quant.dim() == 2
     assert k_quant.shape[-1] == INDEXER_HEAD_DIM
     assert k_scale.dtype == torch.float32 and k_scale.dim() == 1
@@ -481,44 +619,120 @@ def fp8_mqa_indexer_score(
     assert cu_seqlen_ks.shape[0] == q_fp8.shape[0]
     assert cu_seqlen_ke.shape[0] == q_fp8.shape[0]
 
-    if not supports_mqa_logits(q_fp8.device):
-        from rtp_llm.models_py.triton_kernels.legacy_fp8_indexer_score import (
-            legacy_fp8_mqa_logits,
-        )
+    M, H, _ = q_fp8.shape
+    N = k_quant.shape[0]
+    device = q_fp8.device
+    if M == 0 or N == 0:
+        cols = max_seqlen_k if max_seqlen_k > 0 else N
+        if max_seqlen_k > 0:
+            return torch.full(
+                (M, cols), float("-inf"), dtype=torch.float32, device=device
+            )
+        return torch.empty((M, cols), dtype=torch.float32, device=device)
 
-        return legacy_fp8_mqa_logits(
-            q_fp8,
-            (k_quant, k_scale),
-            w_fold,
-            cu_seqlen_ks,
-            cu_seqlen_ke,
-            clean_logits=clean_logits,
-            max_seqlen_k=max_seqlen_k,
+    if (
+        q_fp8.is_cuda
+        and is_sm120(device)
+        and supports_dsv4_mqa_logits(device, num_heads=H)
+    ):
+        q_in = q_fp8.contiguous()
+        k_in = k_quant.contiguous()
+        ks_in = k_scale.contiguous()
+        w_in = w_fold.contiguous()
+        ks_native = (
+            cu_seqlen_ks.to(device=device, dtype=torch.int32).clamp(0, N).contiguous()
         )
+        ke_native = torch.maximum(
+            cu_seqlen_ke.to(device=device, dtype=torch.int32).clamp(0, N),
+            ks_native,
+        ).contiguous()
+        with torch.cuda.device(device):
+            if max_seqlen_k == 0:
+                return _deep_gemm.fp8_fp4_mqa_logits(
+                    (q_in, None),
+                    (k_in, ks_in),
+                    w_in,
+                    ks_native,
+                    ke_native,
+                    0,
+                    None,
+                    bool(clean_logits),
+                    torch.float32,
+                )
+            raw = _deep_gemm.fp8_fp4_mqa_logits(
+                (q_in, None),
+                (k_in, ks_in),
+                w_in,
+                ks_native,
+                ke_native,
+                0,
+                None,
+                False,
+                torch.float32,
+            )
+            return _slice_relative_mqa_logits(
+                raw,
+                cu_seqlen_ks,
+                cu_seqlen_ke,
+                clean_logits=clean_logits,
+                max_seqlen_k=max_seqlen_k,
+            )
 
-    with torch.cuda.device(q_fp8.device):
-        if fp8_paged_mqa_uses_2d_context_lens(_deep_gemm):
-            return _deep_gemm.fp8_mqa_logits(
+    if q_fp8.is_cuda and not is_sm120(device) and supports_mqa_logits(device):
+        ks_dev = cu_seqlen_ks.to(device=device, dtype=torch.int32).contiguous()
+        ke_dev = cu_seqlen_ke.to(device=device, dtype=torch.int32).contiguous()
+        with torch.cuda.device(device):
+            if fp8_paged_mqa_uses_2d_context_lens(_deep_gemm):
+                out = _deep_gemm.fp8_mqa_logits(
+                    q_fp8.contiguous(),
+                    (k_quant.contiguous(), k_scale.contiguous()),
+                    w_fold.contiguous(),
+                    ks_dev,
+                    ke_dev,
+                    bool(clean_logits) if max_seqlen_k == 0 else False,
+                    max_seqlen_k,
+                )
+                if max_seqlen_k > 0 and clean_logits:
+                    return _mask_relative_mqa_logits(out, ks_dev, ke_dev, N)
+                return out
+            raw = _deep_gemm.fp8_mqa_logits(
                 q_fp8.contiguous(),
                 (k_quant.contiguous(), k_scale.contiguous()),
                 w_fold.contiguous(),
-                cu_seqlen_ks.contiguous(),
-                cu_seqlen_ke.contiguous(),
-                clean_logits,
-                max_seqlen_k,
+                ks_dev,
+                ke_dev,
+                bool(clean_logits) if max_seqlen_k == 0 else False,
             )
-        raw = _deep_gemm.fp8_mqa_logits(
-            q_fp8.contiguous(),
-            (k_quant.contiguous(), k_scale.contiguous()),
-            w_fold.contiguous(),
-            cu_seqlen_ks.contiguous(),
-            cu_seqlen_ke.contiguous(),
-            bool(clean_logits) if max_seqlen_k == 0 else False,
-        )
-        return _slice_relative_mqa_logits(
-            raw,
-            cu_seqlen_ks,
-            cu_seqlen_ke,
+            return _slice_relative_mqa_logits(
+                raw,
+                cu_seqlen_ks,
+                cu_seqlen_ke,
+                clean_logits=clean_logits,
+                max_seqlen_k=max_seqlen_k,
+            )
+
+    from rtp_llm.models_py.triton_kernels.legacy_fp8_indexer_score import (
+        legacy_fp8_mqa_logits,
+    )
+
+    ks_fb = cu_seqlen_ks.to(device=device, dtype=torch.int32).contiguous()
+    ke_fb = cu_seqlen_ke.to(device=device, dtype=torch.int32).contiguous()
+    with torch.cuda.device(device) if q_fp8.is_cuda else nullcontext():
+        out = legacy_fp8_mqa_logits(
+            q_fp8,
+            (k_quant, k_scale),
+            w_fold,
+            ks_fb,
+            ke_fb,
             clean_logits=clean_logits,
-            max_seqlen_k=max_seqlen_k,
+            max_seqlen_k=0,
         )
+    if max_seqlen_k == 0 and not clean_logits:
+        return out
+    return _slice_relative_mqa_logits(
+        out,
+        cu_seqlen_ks,
+        cu_seqlen_ke,
+        clean_logits=clean_logits,
+        max_seqlen_k=max_seqlen_k,
+    )

@@ -19,6 +19,9 @@ from typing import Optional
 
 import torch
 
+from rtp_llm.models_py.modules.dsv4.fp8.attention_backend import (
+    get_sparse_attention_backend,
+)
 from rtp_llm.utils.warmup import model_warm_up_enabled
 
 _log = _logging.getLogger(__name__)
@@ -72,6 +75,7 @@ def _ensure_libz3_loadable() -> None:
 
     try:
         import z3
+
         lib_dir = os.path.join(os.path.dirname(z3.__file__), "lib")
     except Exception:
         return
@@ -263,6 +267,8 @@ def prewarm(
     module-level _SPARSE_ATTN_KERNEL_CACHE and skip compilation.
     """
     if not model_warm_up_enabled() or not _TILELANG_AVAILABLE:
+        return
+    if not get_sparse_attention_backend(torch.device(device)).uses_tilelang_sparse:
         return
     h_padded = max(n_heads, 16)
     _log.info(

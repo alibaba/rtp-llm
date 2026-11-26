@@ -80,5 +80,55 @@ class LegacyFP8IndexerScoreTest(unittest.TestCase):
             )
 
 
+@unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+class LegacyFP8IndexerScoreCleanLogitsTest(unittest.TestCase):
+    def setUp(self):
+        torch.manual_seed(4021)
+        torch.backends.cuda.matmul.allow_tf32 = False
+
+    def reference(self, q, k, scale, weight):
+        return (
+            torch.einsum("mhd,nd->mhn", q.float(), k.float()).relu()
+            * weight.unsqueeze(-1)
+        ).sum(1) * scale
+
+    def test_paged_clean_logits_masks_out_of_range_with_neg_inf(self):
+        batch, next_n, heads, page, pages = 3, 2, 64, 16, 12
+        q = torch.randn(batch, next_n, heads, 128, device="cuda").to(
+            torch.float8_e4m3fn
+        )
+        keys = torch.randn(pages, page, 128, device="cuda").to(torch.float8_e4m3fn)
+        scales = torch.rand(pages, page, device="cuda") * 0.00457 + 0.000019
+        packed = torch.empty(pages, page * 132, dtype=torch.uint8, device="cuda")
+        packed[:, : page * 128] = keys.view(torch.uint8).reshape(pages, page * 128)
+        packed[:, page * 128 :] = scales.view(torch.uint8).reshape(pages, page * 4)
+        packed = packed.view(pages, page, 1, 132)
+        table = torch.randperm(pages, device="cuda").to(torch.int32).reshape(batch, 4)
+        lens = torch.tensor(
+            [[0, 3], [31, 42], [63, 64]], device="cuda", dtype=torch.int32
+        )
+        weights = torch.randn(batch * next_n, heads, device="cuda")
+        actual = legacy_fp8_paged_mqa_logits(
+            q, packed, weights, lens, table, 64, clean_logits=True
+        )
+        for b in range(batch):
+            physical = table[b].long()
+            k = keys[physical].reshape(-1, 128)
+            scale = scales[physical].reshape(-1)
+            expected = self.reference(
+                q[b], k, scale, weights[b * next_n : (b + 1) * next_n]
+            )
+            expected.masked_fill_(
+                torch.arange(64, device="cuda") >= lens[b, :, None],
+                -float("inf"),
+            )
+            torch.testing.assert_close(
+                actual[b * next_n : (b + 1) * next_n],
+                expected,
+                rtol=2e-5,
+                atol=2e-5,
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

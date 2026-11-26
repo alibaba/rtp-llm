@@ -12,7 +12,10 @@ from typing import Any, Callable, Optional, Sequence, TypeVar
 import torch
 import torch.nn.functional as F
 
-from rtp_llm.models_py.modules.dsv4.fp8.backend_selection import cuda_device_index
+from rtp_llm.models_py.modules.dsv4.fp8.backend_selection import (
+    _is_sm120_index,
+    cuda_device_index,
+)
 from rtp_llm.models_py.utils.arch import is_sm90
 
 T = TypeVar("T")
@@ -364,5 +367,10 @@ def get_sparse_attention_backend(device: torch.device) -> SparseAttentionBackend
 
 @cache
 def _backend_for_cuda(index: int) -> SparseAttentionBackend:
-    del index
+    if _is_sm120_index(index):
+        from rtp_llm.models_py.modules.dsv4.fp8.sm120_attention_backend import (
+            SM120_ATTENTION,
+        )
+
+        return SM120_ATTENTION
     return _DEFAULT

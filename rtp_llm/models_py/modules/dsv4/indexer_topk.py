@@ -14,8 +14,15 @@ from typing import Optional
 
 import torch
 
+from rtp_llm.models_py.utils.arch import is_sm120
+
 _FAST_TOPK_VALUES = (2048,)
 _PERSISTENT_TOPK_VALUES = (512, 1024, 2048)
+
+
+def supports_fast_topk(device: torch.device) -> bool:
+    """Whether the fast TopK kernels fit the device's shared-memory budget."""
+    return device.type != "cuda" or not is_sm120(device)
 
 
 def _flatten_score(score: torch.Tensor) -> tuple[torch.Tensor, tuple[int, ...]]:
@@ -161,6 +168,11 @@ class FastIndexerTopKBackend(IndexerTopKBackend):
                 "topk=2048; "
                 f"got device={score.device}, dtype={score.dtype}, topk={int(topk)}"
             )
+        if not supports_fast_topk(score.device):
+            raise RuntimeError(
+                "DSV4 fast indexer TopK exceeds SM120 shared memory; "
+                "use auto or persistent"
+            )
         flat, shape = _flatten_score(score)
         lengths_i32 = _normalize_lengths(score, topk, lengths)
 
@@ -203,11 +215,30 @@ class PersistentIndexerTopKBackend(IndexerTopKBackend):
 
         from rtp_llm.ops.compute_ops import rtp_llm_ops
 
-        persistent_topk = getattr(rtp_llm_ops, "persistent_topk")
+        persistent_topk = getattr(
+            rtp_llm_ops,
+            "dsv4_persistent_topk" if is_sm120(score.device) else "persistent_topk",
+        )
         out = torch.empty(
             (flat.shape[0], int(topk)), dtype=torch.int32, device=flat.device
         )
-        workspace = torch.empty((1 << 20,), dtype=torch.uint8, device=flat.device)
+        workspaces = getattr(self, "_workspaces", None)
+        if workspaces is None:
+            workspaces = {}
+            self._workspaces = workspaces
+        dev = torch.device(flat.device)
+        dev_idx = torch.cuda.current_device() if dev.index is None else dev.index
+        with torch.cuda.device(dev_idx):
+            stream_key = (
+                None
+                if torch.cuda.is_current_stream_capturing()
+                else torch.cuda.current_stream(dev_idx).cuda_stream
+            )
+            ws_key = (dev_idx, stream_key)
+            workspace = workspaces.get(ws_key)
+            if workspace is None:
+                workspace = torch.empty((1 << 20,), dtype=torch.uint8, device=flat.device)
+                workspaces[ws_key] = workspace
         persistent_topk(
             flat, lengths_i32, out, workspace, int(topk), int(flat.shape[1])
         )
@@ -235,7 +266,26 @@ class AutoIndexerTopKBackend(IndexerTopKBackend):
     ) -> torch.Tensor:
         if int(topk) <= 0 or score.shape[-1] == 0:
             return self._torch.select(score, topk, lengths=lengths, offset=offset)
-        # The fused TopK kernels are only used for full-row selection. Decode
+        if (
+            score.is_cuda
+            and score.dtype == torch.float32
+            and is_sm120(score.device)
+            and int(topk) in _PERSISTENT_TOPK_VALUES
+        ):
+            try:
+                return self._persistent.select(
+                    score, topk, lengths=lengths, offset=offset
+                )
+            except (ImportError, AttributeError) as err:
+                # dsv4_persistent_topk is registered unconditionally in every
+                # CUDA ops build, so a missing symbol means a broken or stale
+                # ops build. Fail loudly instead of silently degrading to the
+                # torch path.
+                raise RuntimeError(
+                    "dsv4_persistent_topk missing from rtp_llm_ops on SM120 "
+                    f"(topk={int(topk)}): broken or stale ops build"
+                ) from err
+        # Outside SM120, fused TopK is only used for full-row selection. Decode
         # can request topk=512 while only a short compressed prefix is valid;
         # keep that masked case on the exact torch path.
         if lengths is not None:
@@ -244,6 +294,7 @@ class AutoIndexerTopKBackend(IndexerTopKBackend):
             score.is_cuda
             and score.dtype == torch.float32
             and int(topk) in _FAST_TOPK_VALUES
+            and supports_fast_topk(score.device)
         ):
             try:
                 return self._fast.select(score, topk, lengths=lengths, offset=offset)

@@ -32,7 +32,7 @@ mode reads tensors from `mw.global_weights[W.*]` and
 import logging
 import os
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Optional, Tuple
 
 import torch
 
@@ -54,6 +54,10 @@ from rtp_llm.models_py.modules.dsv4.decode.forward import (
     build_paged_pool_specs,
     forward_decode,
 )
+from rtp_llm.models_py.modules.dsv4.fp8.attention_backend import (
+    get_sparse_attention_backend,
+)
+from rtp_llm.models_py.modules.dsv4.fp8.backend_selection import require_sm120_providers
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import primary_attention_inputs
 from rtp_llm.models_py.modules.dsv4.prefill.forward import forward_prefill
 from rtp_llm.models_py.modules.dsv4.transformer import V4Args, V4Transformer
@@ -238,6 +242,13 @@ def _resolve_dsv4_moe_strategy(moe_config) -> str:
     return requested or "auto"
 
 
+def _is_prefill_only_role(parallelism_config) -> bool:
+    role_type = getattr(parallelism_config, "role_type", None)
+    return role_type == RoleType.PREFILL or (
+        str(role_type).upper().rsplit(".", 1)[-1] == "PREFILL"
+    )
+
+
 def _apply_parallelism_to_v4_args(args: V4Args, parallelism_config) -> None:
     """Apply runtime parallelism fields (incl. CP attention TP=1) onto V4Args."""
     if parallelism_config is None:
@@ -398,6 +409,13 @@ class DeepSeekV4Model(GptModelBase):
             max_generate_batch_size,
             moe_config=moe_config,
         )
+        if torch.cuda.is_available():
+            device = torch.device("cuda", torch.cuda.current_device())
+            require_sm120_providers(device)
+            if args.fp8_kv_cache and not _is_prefill_only_role(parallelism_config):
+                get_sparse_attention_backend(device).validate_decode_window(
+                    args.window_size
+                )
         self._max_generate_batch_size = int(max_generate_batch_size)
         assert self._max_generate_batch_size > 0, (
             "max_generate_batch_size must be positive, "
@@ -860,50 +878,58 @@ class DeepSeekV4Model(GptModelBase):
                 )
 
             try:
-                from rtp_llm.models_py.utils.flash_mla_legacy import (
-                    flash_mla_sparse_fwd as _flash_mla_sparse_fwd,
-                )
-
                 _swa_attn = self.v4.layers[0].attn
-                _H_swa = int(_swa_attn.n_heads)
-                _D_swa = int(_swa_attn.head_dim)
-                _W_swa = int(_swa_attn.window_size)
-                _q_swa = _torch.zeros(
-                    (2, _H_swa, _D_swa), dtype=_torch.bfloat16, device=device_str
-                )
-                _kv_swa = _torch.zeros(
-                    (5, 1, _D_swa), dtype=_torch.bfloat16, device=device_str
-                )
-                _idx_swa = _torch.full(
-                    (2, 1, _W_swa), -1, dtype=_torch.int32, device=device_str
-                )
-                _cp_rank_swa = 0
-                try:
-                    import torch.distributed as _dist
+                if not get_sparse_attention_backend(
+                    _torch.device(device_str)
+                ).uses_flash_mla_prefill(_swa_attn.n_heads):
+                    logging.info(
+                        "[DeepSeekV4Model] selected attention backend skips FlashMLA prewarm"
+                    )
+                else:
+                    # Import FlashMLA lazily so backends that do not use it do not require it.
+                    from rtp_llm.models_py.utils.flash_mla_legacy import (
+                        flash_mla_sparse_fwd as _flash_mla_sparse_fwd,
+                    )
 
-                    if _dist.is_available() and _dist.is_initialized():
-                        _cp_rank_swa = int(_dist.get_rank())
-                except Exception:
+                    _H_swa = int(_swa_attn.n_heads)
+                    _D_swa = int(_swa_attn.head_dim)
+                    _W_swa = int(_swa_attn.window_size)
+                    _q_swa = _torch.zeros(
+                        (2, _H_swa, _D_swa), dtype=_torch.bfloat16, device=device_str
+                    )
+                    _kv_swa = _torch.zeros(
+                        (5, 1, _D_swa), dtype=_torch.bfloat16, device=device_str
+                    )
+                    _idx_swa = _torch.full(
+                        (2, 1, _W_swa), -1, dtype=_torch.int32, device=device_str
+                    )
                     _cp_rank_swa = 0
-                _first_topk_len_swa = min(_cp_rank_swa + 1, 5, _W_swa)
-                _idx_swa[0, 0, :_first_topk_len_swa] = _torch.arange(
-                    _first_topk_len_swa, dtype=_torch.int32, device=device_str
-                )
-                _idx_swa[1, 0, :5] = _torch.arange(
-                    5, dtype=_torch.int32, device=device_str
-                )
-                _topk_len_swa = _torch.tensor(
-                    [_first_topk_len_swa, 5], dtype=_torch.int32, device=device_str
-                )
-                _flash_mla_sparse_fwd(
-                    q=_q_swa,
-                    kv=_kv_swa,
-                    indices=_idx_swa,
-                    sm_scale=float(_swa_attn.softmax_scale),
-                    attn_sink=_swa_attn.attn_sink,
-                    topk_length=_topk_len_swa,
-                )
-                logging.info("[DeepSeekV4Model] flash_mla SWA kv_full prewarm done")
+                    try:
+                        import torch.distributed as _dist
+
+                        if _dist.is_available() and _dist.is_initialized():
+                            _cp_rank_swa = int(_dist.get_rank())
+                    except Exception:
+                        _cp_rank_swa = 0
+                    _first_topk_len_swa = min(_cp_rank_swa + 1, 5, _W_swa)
+                    _idx_swa[0, 0, :_first_topk_len_swa] = _torch.arange(
+                        _first_topk_len_swa, dtype=_torch.int32, device=device_str
+                    )
+                    _idx_swa[1, 0, :5] = _torch.arange(
+                        5, dtype=_torch.int32, device=device_str
+                    )
+                    _topk_len_swa = _torch.tensor(
+                        [_first_topk_len_swa, 5], dtype=_torch.int32, device=device_str
+                    )
+                    _flash_mla_sparse_fwd(
+                        q=_q_swa,
+                        kv=_kv_swa,
+                        indices=_idx_swa,
+                        sm_scale=float(_swa_attn.softmax_scale),
+                        attn_sink=_swa_attn.attn_sink,
+                        topk_length=_topk_len_swa,
+                    )
+                    logging.info("[DeepSeekV4Model] flash_mla SWA kv_full prewarm done")
             except Exception:
                 logging.exception(
                     "[DeepSeekV4Model] flash_mla SWA kv_full prewarm failed"
