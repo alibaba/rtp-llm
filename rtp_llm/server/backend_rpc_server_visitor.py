@@ -2,6 +2,7 @@ import asyncio
 import inspect
 import logging
 import os
+import random
 import time
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, List, Optional, Set
@@ -99,6 +100,7 @@ class BackendRPCServerVisitor:
         source_role: str = "frontend",
         mm_model_config=None,
         model_config=None,
+        model_type: str = "",
     ) -> None:
         """Initialize BackendRPCServerVisitor.
 
@@ -156,6 +158,13 @@ class BackendRPCServerVisitor:
             self.pd_sep_config, host_args, vit_separation
         )
         self.host_service = HostService(host_args)
+        self._balance_atom_decode = (
+            bool(torch.version.hip)
+            and pd_sep_config.role_type == RoleType.PREFILL
+            and (model_type or getattr(model_config, "model_type", "")) == "atom_qwen4_exp"
+        )
+        if self._balance_atom_decode:
+            route_logger.info("Enabled load-aware ATOM decode domain fallback")
         self.master_config = master_config
         self._page_rr_route_cache_keys = False
         self._page_rr_cp_size = 1
@@ -737,6 +746,36 @@ class BackendRPCServerVisitor:
         role_addrs: List[RoleAddr] = self.host_service.get_backend_role_addrs(
             missing_roles
         )
+        if self._balance_atom_decode:
+            for addr in role_addrs:
+                if addr.role != RoleType.DECODE:
+                    continue
+                vip = self.host_service.role_vip_map[RoleType.DECODE]
+                peers = [
+                    h
+                    for h in vip.get_hosts()
+                    if (h.ip, int(h.port)) != (addr.ip, addr.http_port)
+                ]
+                if not peers:
+                    continue
+                peer = random.choice(peers)
+                peer_port = int(peer.port)
+                current_load, peer_load = await asyncio.gather(
+                    self.model_rpc_client.decode_route_load(
+                        f"{addr.ip}:{addr.grpc_port}"
+                    ),
+                    self.model_rpc_client.decode_route_load(
+                        f"{peer.ip}:{peer_port + 1}"
+                    ),
+                )
+                if (
+                    current_load is not None
+                    and peer_load is not None
+                    and peer_load < current_load
+                ):
+                    addr.ip = peer.ip
+                    addr.http_port = peer_port
+                    addr.grpc_port = peer_port + 1
         if role_addrs:
             input.generate_config.role_addrs.extend(role_addrs)
             route_logger.warning(

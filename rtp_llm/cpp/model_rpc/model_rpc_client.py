@@ -26,6 +26,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     MultimodalInputPB,
     MultimodalInputsPB,
     RoleAddrPB,
+    StatusVersionPB,
 )
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
     MultimodalRpcServiceStub,
@@ -1281,6 +1282,19 @@ class ModelRpcClient(object):
 
     async def close(self) -> None:
         await self._channel_pool.close()
+
+    async def decode_route_load(self, address: str) -> Optional[int]:
+        # Finished tasks do not contribute to current load. Omit their history.
+        try:
+            channel = await self._channel_pool.get(address)
+            status = await RpcServiceStub(channel).GetWorkerStatus(
+                StatusVersionPB(latest_finished_version=(1 << 63) - 1), timeout=0.025
+            )
+        except grpc.RpcError:
+            return None
+        if not status.alive or status.role != "RoleType.DECODE":
+            return None
+        return len(status.running_task_info)
 
     def _compute_grpc_timeout(self, timeout_ms) -> float:
         rpc_timeout_ms = (

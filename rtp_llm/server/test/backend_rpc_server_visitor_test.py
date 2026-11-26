@@ -260,6 +260,32 @@ class BackendRPCServerVisitorFrontendCacheMetricTest(unittest.TestCase):
 
 
 class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
+    async def test_decode_domain_load_selection(self):
+        visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor._balance_atom_decode = True
+        visitor.backend_role_list = [RoleType.DECODE]
+        visitor.host_service = MagicMock()
+        vip = visitor.host_service.role_vip_map[RoleType.DECODE]
+        vip.get_hosts.return_value = [SimpleNamespace(ip="peer", port=9000)]
+        for loads, expected in (
+            ([4, 0], "peer"), ([1, 1], "current"), ([4, None], "current")
+        ):
+            with self.subTest(loads=loads):
+                visitor.host_service.get_backend_role_addrs.return_value = [
+                    RoleAddr(
+                        role=RoleType.DECODE, ip="current", http_port=8000, grpc_port=8001
+                    )
+                ]
+                visitor.model_rpc_client = SimpleNamespace(
+                    decode_route_load=AsyncMock(side_effect=loads)
+                )
+                request = _FakeInput()
+                with patch("rtp_llm.server.backend_rpc_server_visitor.kmonitor"):
+                    await visitor.get_domain_route_addrs(request)
+                addr = request.generate_config.role_addrs[0]
+                self.assertEqual(addr.ip, expected)
+                self.assertEqual(addr.grpc_port, 9001 if expected == "peer" else 8001)
+
     async def test_early_vit_failure_and_exception_are_reported_once(self):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
         request = _FakeRouteInput()
