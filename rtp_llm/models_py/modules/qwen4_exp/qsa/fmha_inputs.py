@@ -416,23 +416,32 @@ def _try_prepare_host_incremental_prefill(
         and batch <= 256
     ):
         return None
-    lens = lengths.tolist()
-    prefix_host = prefixes.tolist()
-    if any(x <= 0 for x in lens):
-        raise ValueError("qwen4_exp incremental prefill input lengths must be positive")
-    if any(x < 0 for x in prefix_host):
-        raise ValueError("qwen4_exp incremental prefill prefixes must be non-negative")
-    if sum(lens) != tokens:
-        raise ValueError(
-            "qwen4_exp incremental prefill cu_seqlens do not partition qkv"
-        )
-    # Keep int32 visible positions and device lengths inside their supported range.
-    if any(p + s >= 2**31 for p, s in zip(prefix_host, lens)):
-        raise ValueError("qwen4_exp incremental prefill visible KV exceeds int32 range")
     table = self.attn_inputs.kv_cache_kernel_block_id_device
     receipt = matching_model_prefill_geometry(
         self, cache.kv_cache_base, table, prefixes, lengths, qkv.device
     )
+    if receipt is None or receipt.host_geometry is None:
+        lens = lengths.tolist()
+        prefix_host = prefixes.tolist()
+        if any(x <= 0 for x in lens):
+            raise ValueError(
+                "qwen4_exp incremental prefill input lengths must be positive"
+            )
+        if any(x < 0 for x in prefix_host):
+            raise ValueError(
+                "qwen4_exp incremental prefill prefixes must be non-negative"
+            )
+        token_count = sum(lens)
+        max_end = max((p + s for p, s in zip(prefix_host, lens)), default=0)
+    else:
+        lens, prefix_host, token_count, max_end = receipt.host_geometry
+    if token_count != tokens:
+        raise ValueError(
+            "qwen4_exp incremental prefill cu_seqlens do not partition qkv"
+        )
+    # Keep int32 visible positions and device lengths inside their supported range.
+    if max_end >= 2**31:
+        raise ValueError("qwen4_exp incremental prefill visible KV exceeds int32 range")
     if receipt is None:
         page_size, cache_blocks = _validate_main_cache_layout(
             self, cache.kv_cache_base, table, batch, qkv.device
@@ -441,7 +450,7 @@ def _try_prepare_host_incremental_prefill(
         pd = prefixes.to(device=qkv.device, dtype=torch.int32, non_blocking=True)
     else:
         page_size, cache_blocks = receipt.page_size, int(cache.kv_cache_base.shape[0])
-        ld, pd = (tensor.to(torch.int32) for tensor in receipt.device_lengths)
+        ld, pd = receipt.device_lengths
     visible = validate_prefill_inputs(
         selected,
         cu,

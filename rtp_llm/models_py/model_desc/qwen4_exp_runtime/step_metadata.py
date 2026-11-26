@@ -11,6 +11,8 @@ from typing import NamedTuple
 
 import torch
 
+from rtp_llm.models_py.modules.qwen4_exp.qsa.validation import DeviceChecks
+
 
 def tensor_signature(tensor):
     return (
@@ -215,6 +217,14 @@ def rope_config_signature(config):
     )
 
 
+@dataclass
+class _PrefillRopeEntry:
+    positions: torch.Tensor
+    rope: tuple[torch.Tensor, torch.Tensor]
+    checks: DeviceChecks
+    verified_by: DeviceChecks | None = None
+
+
 def prefill_current_rope(
     context,
     positions,
@@ -243,13 +253,11 @@ def prefill_current_rope(
     if not share:
         return build(checks)
 
-    from rtp_llm.models_py.modules.qwen4_exp.qsa.validation import DeviceChecks
-
     def materialize():
         position_checks = DeviceChecks()
-        return positions, build(position_checks), position_checks
+        return _PrefillRopeEntry(positions, build(position_checks), position_checks)
 
-    _, rope, position_checks = cached_step_value(
+    entry = cached_step_value(
         context,
         (
             "prefill_current_rope",
@@ -263,9 +271,13 @@ def prefill_current_rope(
         ),
         materialize,
     )
-    # Include the position flags in every layer's pre-write verification.
-    checks.extend(position_checks)
-    return rope
+    # Shared RoPE values still need a successful position verdict before writes.
+    if not checks.prefill_metadata_readonly:
+        checks.extend(entry.checks)
+    elif entry.verified_by is None or not entry.verified_by.verified:
+        checks.extend(entry.checks)
+        entry.verified_by = checks
+    return entry.rope
 
 
 def prefill_group_rope(

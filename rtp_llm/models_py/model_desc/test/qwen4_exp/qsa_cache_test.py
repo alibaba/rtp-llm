@@ -609,6 +609,8 @@ class Qwen4ExpQSACacheTest(QSARuntimeFixture, TestCase):
         )
         torch.testing.assert_close(actual.visible_lengths, expected.visible_lengths)
         torch.testing.assert_close(actual.cu_seqlens, expected.cu_seqlens)
+        _, reused = plan(other)
+        self.assertFalse(reused._checks)
         other.main_inputs.combo_position_ids.add_(1)
         with self.assertRaisesRegex(ValueError, "logical cache positions"):
             plan(other)

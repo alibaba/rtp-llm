@@ -18,6 +18,58 @@ from rtp_llm.ops.compute_ops import PyAttentionInputs, PyModelInputs
 
 
 class PrefillGeometryScopeTest(unittest.TestCase):
+    def test_receipts_reuse_packed_host_geometry(self):
+        cache = torch.zeros(5, 2, 1, 4, 16, dtype=torch.bfloat16)
+        second_pool = cache.clone()
+        bases = torch.tensor([4, 0], dtype=torch.int64)
+        lengths = torch.tensor([2, 3], dtype=torch.int64)
+        table = torch.tensor([[1, 2], [3, 0]], dtype=torch.int32)
+        impl = SimpleNamespace(
+            attn_inputs=SimpleNamespace(
+                is_s_padded=False,
+                kv_cache_kernel_block_id_device=table,
+                cu_seqlens_device=torch.tensor([0, 2, 5], dtype=torch.int32),
+            ),
+            attn_configs=SimpleNamespace(kernel_tokens_per_block=4),
+            head_dim=16,
+            kv_head_num=1,
+            _model_prefill_geometry=None,
+        )
+        entries = [(impl, pool, bases, lengths) for pool in (cache, second_pool)]
+
+        def prepare(pool, rows=5):
+            return fmha_inputs._try_prepare_host_incremental_prefill(
+                impl,
+                torch.empty(rows, 1),
+                SimpleNamespace(kv_cache_base=pool),
+                torch.zeros(rows, 1, dtype=torch.int32),
+                lengths,
+                bases,
+            )
+
+        with patch.object(
+            paged_validation,
+            "geometry_flags",
+            return_value=torch.zeros((), dtype=torch.int32),
+        ) as geometry, patch.object(
+            prefill_validation,
+            "validate_prefill_inputs",
+            return_value=torch.tensor([5, 6, 1, 2, 3], dtype=torch.int32),
+        ) as packed:
+            with main_geometry_preflight(entries):
+                self.assertIs(
+                    prepare(cache).prefixes_device, prepare(second_pool).prefixes_device
+                )
+                with self.assertRaisesRegex(ValueError, "partition qkv"):
+                    prepare(cache, rows=6)
+            geometry.assert_called_once()
+            self.assertEqual(geometry.call_args.args[0].dtype, torch.int64)
+            self.assertEqual(packed.call_count, 2)
+            first, second = packed.call_args_list
+            self.assertIs(first.args[2], second.args[2])
+            self.assertEqual(first.args[2].dtype, torch.int32)
+            self.assertFalse(first.kwargs["check_pages"])
+
     def test_hook_checks_only_apply_to_eager_qsa(self):
         model = torch.nn.Sequential(torch.nn.Identity())
         model.kv_cache = object()

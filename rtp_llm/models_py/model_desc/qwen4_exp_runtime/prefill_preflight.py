@@ -7,6 +7,7 @@ keep their existing mutation boundaries. No receipt survives a call.
 """
 
 from contextlib import contextmanager, nullcontext
+from typing import NamedTuple
 
 import torch
 
@@ -32,9 +33,32 @@ def _signature(tensor, *, version=False):
     )
 
 
+def _host_values(tensor, values):
+    key = _signature(tensor, version=True)
+    if key not in values:
+        host = tensor.tolist()
+        values[key] = (host, any(host))
+    return values[key]
+
+
+class PrefillHostGeometry(NamedTuple):
+    lengths: list[int]
+    prefixes: list[int]
+    token_count: int
+    max_end: int
+
+
 class MainGeometryReceipt:
     def __init__(
-        self, impl, cache, table, bases, lengths, page_size, device_lengths=None
+        self,
+        impl,
+        cache,
+        table,
+        bases,
+        lengths,
+        page_size,
+        device_lengths=None,
+        host_geometry=None,
     ):
         self.owners = (cache, table, bases, lengths)
         self.inputs = impl.attn_inputs
@@ -46,6 +70,7 @@ class MainGeometryReceipt:
         self.page_size = page_size
         self.head_geometry = (impl.kv_head_num, impl.head_dim)
         self.device_lengths = device_lengths
+        self.host_geometry = host_geometry
 
     def matches(self, impl, cache, table, bases, lengths):
         if (
@@ -65,7 +90,7 @@ class MainGeometryReceipt:
 
 
 @contextmanager
-def main_geometry_preflight(entries):
+def main_geometry_preflight(entries, host_values=None):
     """Check all entries before publishing any receipt, and clear on exceptions."""
     from rtp_llm.models_py.kernels.cuda.qsa.paged_validation import (
         geometry_flags,
@@ -78,6 +103,8 @@ def main_geometry_preflight(entries):
     # Stage the current host values once per input and device. The FMHA layer
     # can reuse these copies while its receipt matches the current inputs.
     staged = {}
+    host_values = {} if host_values is None else host_values
+    request_geometry = {}
 
     def stage(source, device):
         key = (_signature(source, version=True), device)
@@ -96,8 +123,28 @@ def main_geometry_preflight(entries):
             impl, cache, table, bases.numel(), cache.device
         )
         ld, pd = stage(lengths, cache.device), stage(bases, cache.device)
+        host_geometry = None
+        if lengths.device.type == bases.device.type == "cpu":
+            key = (_signature(lengths, version=True), _signature(bases, version=True))
+            if key not in request_geometry:
+                lens, _ = _host_values(lengths, host_values)
+                prefixes, _ = _host_values(bases, host_values)
+                request_geometry[key] = PrefillHostGeometry(
+                    lens,
+                    prefixes,
+                    sum(lens),
+                    max((p + n for p, n in zip(prefixes, lens)), default=0),
+                )
+            host_geometry = request_geometry[key]
         receipt = MainGeometryReceipt(
-            impl, cache, table, bases, lengths, page_size, device_lengths=(ld, pd)
+            impl,
+            cache,
+            table,
+            bases,
+            lengths,
+            page_size,
+            device_lengths=(ld, pd),
+            host_geometry=host_geometry,
         )
         # Physical IDs depend on pool capacity, not on the address of the pool.
         # Each cache layout has already been checked and gets its own receipt.
@@ -110,8 +157,21 @@ def main_geometry_preflight(entries):
         # Accept every device's verdicts before publishing any receipt.
         for verdict in torch.stack(tuple(flags.values())).cpu().tolist():
             raise_geometry_error(verdict)
+    packed_lengths = {}
     try:
         for impl, receipt in pending:
+            if (
+                receipt.host_geometry is not None
+                and receipt.host_geometry.max_end < 2**31
+            ):
+                ld, pd = receipt.device_lengths
+                key = (id(ld), id(pd))
+                if key not in packed_lengths:
+                    packed_lengths[key] = (
+                        ld.to(torch.int32).contiguous(),
+                        pd.to(torch.int32).contiguous(),
+                    )
+                receipt.device_lengths = packed_lengths[key]
             receipts = impl._model_prefill_geometry
             if receipts is None:
                 impl._model_prefill_geometry = receipts = {}
@@ -166,6 +226,7 @@ def prefill_geometry_scope(model, inputs, fmha_impl):
         return nullcontext(True)
 
     entries = []
+    host_values = {}
     for index, layer in enumerate(model.layers):
         impl = model._layer_fmha_impl(layer, fmha_impl, index)
         if type(impl) is not SparseGqaFmhaImpl:
@@ -187,8 +248,8 @@ def prefill_geometry_scope(model, inputs, fmha_impl):
             or lengths.dtype not in (torch.int32, torch.int64)
         ):
             return nullcontext(True)
-        if not any(bases.tolist()):
+        if not _host_values(bases, host_values)[1]:
             continue
         cache = model.kv_cache.get_layer_cache(index, model._attention_tag(index))
         entries.append((impl, cache.kv_cache_base, bases, lengths))
-    return main_geometry_preflight(entries)
+    return main_geometry_preflight(entries, host_values)
