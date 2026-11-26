@@ -98,47 +98,52 @@ def _quantize_and_insert_k_kernel(
     token_fp8_ptr = token_data_ptr
     token_bf16_ptr = token_data_ptr + fp8_dim
 
-    # NoPE: 7 quantization tiles of 64 elements each (UE8M0 power-of-2 scale).
-    for qblock_idx in tl.static_range(n_quant_blocks):
-        qblock_start = qblock_idx * quant_block
-        if qblock_start < fp8_dim:
-            offsets = qblock_start + tl.arange(0, quant_block)
-            mask = offsets < fp8_dim
+    # Vectorized whole-row quantization: load the full [512] row once, view it
+    # as [8, 64] quant groups (groups 0-6 = NoPE 448, group 7 = RoPE bytes,
+    # computed but masked out of every store), and reduce each group's absmax
+    # in a single tl.max(axis=1) instead of 7 serial cross-warp block
+    # reductions + 7 dependent scalar scale stores. Math, dtypes, and output
+    # bytes are identical to the former per-tile loop (max is exact and
+    # order-independent; the UE8M0 ceil-log2 scale math is element-wise).
+    row_offsets = tl.arange(0, input_dim)
+    x_full = tl.load(input_row_ptr + row_offsets)
+    x_groups = tl.reshape(x_full, (n_quant_blocks, quant_block))
 
-            x = tl.load(input_row_ptr + offsets, mask=mask, other=0.0)
+    abs_x = tl.abs(x_groups)
+    block_max = tl.max(abs_x, axis=1)
+    block_max = tl.maximum(block_max, 1e-4)  # match CUDA fmaxf(amax, 1e-4)
 
-            abs_x = tl.abs(x)
-            block_max = tl.max(abs_x, axis=0)
-            block_max = tl.maximum(block_max, 1e-4)  # match CUDA fmaxf(amax, 1e-4)
+    # UE8M0: scale = 2^ceil(log2(block_max / fp8_max)) per 64-element group.
+    raw_scale = block_max / fp8_max
+    log_scale = tl.log2(raw_scale)
+    exponent = tl.ceil(log_scale)
+    scale = tl.exp2(exponent)
 
-            # UE8M0: scale = 2^ceil(log2(block_max / fp8_max))
-            raw_scale = block_max / fp8_max
-            log_scale = tl.log2(raw_scale)
-            exponent = tl.ceil(log_scale)
-            scale = tl.exp2(exponent)
+    x_scaled = x_groups / scale[:, None]
+    x_clamped = tl.clamp(x_scaled, -fp8_max, fp8_max)
+    x_fp8 = x_clamped.to(tl.float8e4nv)
+    x_uint8 = tl.reshape(x_fp8.to(tl.uint8, bitcast=True), (input_dim,))
 
-            x_scaled = x / scale
-            x_clamped = tl.clamp(x_scaled, -fp8_max, fp8_max)
-            x_fp8 = x_clamped.to(tl.float8e4nv)
-            x_uint8 = x_fp8.to(tl.uint8, bitcast=True)
+    # NoPE fp8 bytes: one 512-wide masked store (lanes >= 448 masked out).
+    tl.store(token_fp8_ptr + row_offsets, x_uint8, mask=row_offsets < fp8_dim)
 
-            tl.store(token_fp8_ptr + offsets, x_uint8, mask=mask)
+    # UE8M0 scale bytes = exponent + 127 (clamp [0, 255]); one 8-byte store
+    # where the real groups (fp8_dim / quant_block = 7) carry their encoded
+    # scales and the padding lane carries 0.
+    scale_offsets = tl.arange(0, scale_dim)
+    encoded_scale = exponent + 127.0
+    encoded_scale = tl.maximum(tl.minimum(encoded_scale, 255.0), 0.0)
+    encoded_scale = tl.where(
+        scale_offsets < fp8_dim // quant_block, encoded_scale, 0.0
+    )
+    tl.store(token_scale_ptr + scale_offsets, encoded_scale.to(tl.uint8))
 
-            # UE8M0 scale byte = exponent + 127 (clamp [0, 255]).
-            encoded_scale = exponent + 127.0
-            encoded_scale = tl.maximum(tl.minimum(encoded_scale, 255.0), 0.0)
-            tl.store(token_scale_ptr + qblock_idx, encoded_scale.to(tl.uint8))
-
-    # Padding scale at index 7 (8 - 1).
-    tl.store(token_scale_ptr + 7, tl.zeros((), dtype=tl.uint8))
-
-    # RoPE: bf16 passthrough, 64 elements = 128 bytes.
+    # RoPE: bf16 passthrough, 64 elements = 128 bytes in one load/store.
     bf16_input_offset = fp8_dim
     bf16_out_ptr = token_bf16_ptr.to(tl.pointer_type(tl.bfloat16))
-    for i in tl.static_range(bf16_dim // 16):
-        chunk_offsets = i * 16 + tl.arange(0, 16)
-        bf16_vals = tl.load(input_row_ptr + bf16_input_offset + chunk_offsets)
-        tl.store(bf16_out_ptr + chunk_offsets, bf16_vals)
+    rope_offsets = tl.arange(0, bf16_dim)
+    bf16_vals = tl.load(input_row_ptr + bf16_input_offset + rope_offsets)
+    tl.store(bf16_out_ptr + rope_offsets, bf16_vals)
 
 
 # Layout constants (mirror decode/fp8_kv_quant_decode_op.py).
