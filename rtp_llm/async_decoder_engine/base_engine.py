@@ -1,5 +1,5 @@
 from abc import abstractmethod
-from typing import Callable, Dict, Optional
+from typing import Dict
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models.base_model import BaseModel
@@ -19,19 +19,12 @@ class BaseEngine:
     def _start(self) -> None:
         raise NotImplementedError()
 
-    def stop(
-        self, before_rpc_shutdown: Optional[Callable[[int], None]] = None
-    ) -> None:
+    def stop(self) -> None:
         self.started = False
-        if before_rpc_shutdown is None:
-            self._stop()
-        else:
-            self._stop(before_rpc_shutdown)
+        self._stop()
 
     @abstractmethod
-    def _stop(
-        self, before_rpc_shutdown: Optional[Callable[[int], None]] = None
-    ) -> None:
+    def _stop(self) -> None:
         raise NotImplementedError()
 
     def set_serving(self, serving: bool) -> None:

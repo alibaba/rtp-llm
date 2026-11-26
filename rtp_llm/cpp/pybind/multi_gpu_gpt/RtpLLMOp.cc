@@ -2,9 +2,8 @@
 #include <memory>
 #include <tuple>
 #include <vector>
+#include <algorithm>
 #include <chrono>
-#include <thread>
-#include <pybind11/functional.h>
 #include "autil/EnvUtil.h"
 #include "autil/Log.h"
 #include "c10/util/intrusive_ptr.h"
@@ -457,7 +456,7 @@ void RtpLLMOp::setServing(bool serving) {
     setKmonServiceServing(serving);
 }
 
-void RtpLLMOp::stop(const std::function<void(int64_t)>& before_rpc_shutdown) {
+void RtpLLMOp::stop() {
     setKmonServiceServing(false);
     const int64_t stop_timeout_ms = getGrpcStopTimeoutMs();
     if (!is_server_shutdown_) {
@@ -490,19 +489,6 @@ void RtpLLMOp::stop(const std::function<void(int64_t)>& before_rpc_shutdown) {
                 std::chrono::duration_cast<std::chrono::milliseconds>(deadline.time_since_epoch()).count());
         }
         cache_manager.reset();
-        if (before_rpc_shutdown) {
-            const auto remaining_ms = std::max<int64_t>(
-                0, std::chrono::duration_cast<std::chrono::milliseconds>(deadline - ShutdownClock::now()).count());
-            try {
-                before_rpc_shutdown(remaining_ms);
-            } catch (const std::exception& e) {
-                if (writeback_enabled) {
-                    RTP_LLM_LOG_ERROR("writeback rank rendezvous failed; proceeding with shutdown: %s", e.what());
-                } else {
-                    throw;
-                }
-            }
-        }
         if (grpc_server_) {
             RTP_LLM_LOG_INFO("Shutting down gRPC server");
             {
@@ -545,7 +531,7 @@ void registerRtpLLMOp(const py::module& m) {
              py::arg("mm_process_engine"),
              py::arg("trace_config") = py::none())
         .def("set_serving", &RtpLLMOp::setServing)
-        .def("stop", &RtpLLMOp::stop, py::arg("before_rpc_shutdown") = py::none());
+        .def("stop", &RtpLLMOp::stop);
 }
 
 }  // namespace rtp_llm

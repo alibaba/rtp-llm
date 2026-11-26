@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from typing import Callable, Optional
+from typing import Optional
 
 from typing_extensions import override
 
@@ -35,12 +35,7 @@ class EmbeddingCppEngine(BaseEngine):
         self.cpp_engine.set_serving(serving)
 
     @override
-    def _stop(
-        self, before_rpc_shutdown: Optional[Callable[[int], None]] = None
-    ) -> None:
-        # EmbeddingCppEngine has no P2P writeback or worker RPC drain barrier;
-        # accept before_rpc_shutdown only for BaseEngine interface compatibility.
-        del before_rpc_shutdown
+    def _stop(self) -> None:
         # Stop the C++ engine first so it issues no more embedding calls, then
         # close the local MMProcessEngine (which stops its MMScheduler thread and
         # preprocessing executor).

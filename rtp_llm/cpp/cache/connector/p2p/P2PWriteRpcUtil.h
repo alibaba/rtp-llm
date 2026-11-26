@@ -1,17 +1,21 @@
 #pragma once
 
-#include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PNotification.h"
+#include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
+#include "rtp_llm/cpp/model_rpc/RPCPool.h"
+#include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/utils/RpcCompletionQueue.h"
+#include "rtp_llm/cpp/utils/TimeUtil.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <exception>
-#include <map>
+#include <functional>
 #include <limits>
 #include <memory>
-#include <mutex>
+#include <optional>
 #include <string>
-#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -26,9 +30,6 @@ inline int64_t writebackSteadyDeadline(int64_t wall_deadline_ms) {
 inline int64_t writebackLocalDeadline(int64_t timeout_ms) {
     return timeout_ms > 0 && timeout_ms <= std::numeric_limits<int32_t>::max() ? currentTimeMs() + timeout_ms : 0;
 }
-
-// Idle retention window measured monotonically after all handles and in-flight RPCs finish.
-constexpr int64_t kPeerClientIdleTtlMs = 10 * 60 * 1000;
 
 // Returns call()'s pointer result; on an exception or a null result returns null and describes why in `failure`.
 template<typename Call>
@@ -47,82 +48,120 @@ auto callForResult(Call&& call, std::string& failure) -> decltype(call()) {
     return nullptr;
 }
 
-namespace detail {
-
-template<typename Client, typename = void>
-struct ClientActivityTraits {
-    static bool hasInflightRpcs(const Client&) {
-        return false;
+// Dispatches async unary RPCs to dynamic peer addresses using a shared RPCPool
+// and RpcCompletionQueue::instance() (zero per-peer threads, matching DecodeLoadHelper).
+// Returns nullptr if no rank ever started a call (e.g. connection failure, CQ stopping,
+// or prepare_rpc returning nullptr on rank 0).
+template<typename RequestPB, typename ResponsePB, typename PrepareRpc>
+std::shared_ptr<BroadcastResult<RequestPB, ResponsePB>>
+dispatchRpcToPeers(const std::shared_ptr<RPCPool>&                rpc_pool,
+                   const std::vector<std::string>&                addresses,
+                   std::vector<RequestPB>                         requests,
+                   int                                            timeout_ms,
+                   std::chrono::system_clock::time_point          deadline,
+                   PrepareRpc&&                                   prepare_rpc,
+                   const std::function<grpc::Status(RequestPB&)>& before_dispatch = {},
+                   std::optional<int64_t>                         request_id      = std::nullopt,
+                   std::string                                    direction       = "unknown") {
+    if (!rpc_pool || addresses.empty() || requests.size() != addresses.size() || timeout_ms <= 0) {
+        return nullptr;
     }
-    static int64_t lastActivityMs(const Client&) {
-        return 0;
-    }
-};
 
-template<typename Client>
-struct ClientActivityTraits<Client,
-                            std::void_t<decltype(std::declval<const Client&>().hasInflightRpcs()),
-                                        decltype(std::declval<const Client&>().lastActivityMs())>> {
-    static bool hasInflightRpcs(const Client& client) {
-        return client.hasInflightRpcs();
-    }
-    static int64_t lastActivityMs(const Client& client) {
-        return client.lastActivityMs();
-    }
-};
+    using ResultT = BroadcastResult<RequestPB, ResponsePB>;
+    using CtxT    = typename ResultT::WorkerRpcContext;
 
-}  // namespace detail
-
-// One client per peer; evicted only when no caller holds it, no async RPCs remain in flight,
-// and monotonic idle time since last activity reaches the TTL.
-template<typename Key, typename Client>
-class PeerClientCache {
-public:
-    explicit PeerClientCache(int64_t idle_ttl_ms = kPeerClientIdleTtlMs): idle_ttl_ms_(idle_ttl_ms) {}
-
-    template<typename Create>
-    std::shared_ptr<Client> get(const Key& key, Create&& create) {
-        // Declared before the lock so evicted clients are destroyed unlocked: destruction joins their threads.
-        std::vector<std::shared_ptr<Client>> evicted;
-        std::lock_guard<std::mutex>          lock(mutex_);
-        const auto                           now_ms = P2PNotification::nowMs();
-        for (auto it = entries_.begin(); it != entries_.end();) {
-            const bool busy = it->second.client.use_count() > 1
-                              || detail::ClientActivityTraits<Client>::hasInflightRpcs(*it->second.client);
-            const int64_t last_active_ms =
-                std::max(it->second.last_used_ms,
-                         detail::ClientActivityTraits<Client>::lastActivityMs(*it->second.client));
-            if (!busy && now_ms - last_active_ms >= idle_ttl_ms_) {
-                evicted.push_back(std::move(it->second.client));
-                it = entries_.erase(it);
-            } else {
-                if (busy) {
-                    it->second.last_used_ms = now_ms;
-                }
-                ++it;
-            }
+    const size_t                       worker_size = addresses.size();
+    std::vector<std::shared_ptr<CtxT>> contexts(worker_size);
+    for (size_t rank = 0; rank < worker_size; ++rank) {
+        auto conn = rpc_pool->getConnection(addresses[rank]);
+        if (!conn.ok() || !conn.value().stub) {
+            RTP_LLM_LOG_WARNING("writeback peer connection failed, rank=%zu addr=%s err=%s",
+                                rank,
+                                addresses[rank].c_str(),
+                                conn.ok() ? "null stub" : conn.status().ToString().c_str());
+            return nullptr;
         }
-        auto it = entries_.find(key);
-        if (it == entries_.end()) {
-            auto client = create();
-            if (!client) {
+        auto ctx            = std::make_shared<CtxT>();
+        ctx->stub           = conn.value().stub;
+        ctx->client_context = std::make_shared<grpc::ClientContext>();
+        ctx->client_context->set_deadline(deadline);
+        ctx->request        = std::move(requests[rank]);
+        ctx->server_addr    = addresses[rank];
+        ctx->timeout_ms     = timeout_ms;
+        contexts[rank]      = std::move(ctx);
+    }
+
+    auto result      = std::make_shared<ResultT>(contexts, request_id, std::move(direction));
+    bool any_started = false;
+    for (size_t rank = 0; rank < worker_size; ++rank) {
+        auto& ctx = contexts[rank];
+        if (result->firstError().error.hasError()) {
+            result->finishDispatchFailure(rank, "earlier rank failed");
+            continue;
+        }
+        try {
+            result->markDispatchStarted(rank);
+            auto reader_holder = std::make_shared<std::unique_ptr<grpc::ClientAsyncResponseReader<ResponsePB>>>();
+            grpc::Status before_status = grpc::Status::OK;
+            const bool   submitted     = RpcCompletionQueue::instance().submit(
+                ctx->client_context,
+                [&](grpc::CompletionQueue* cq, void* tag) {
+                    if (before_dispatch) {
+                        before_status = before_dispatch(ctx->request);
+                        if (!before_status.ok()) {
+                            return false;
+                        }
+                    }
+                    *reader_holder = prepare_rpc(ctx->stub, ctx->client_context, ctx->request, cq);
+                    if (!*reader_holder) {
+                        return false;
+                    }
+                    any_started = true;
+                    (*reader_holder)->StartCall();
+                    (*reader_holder)->Finish(&ctx->response, &ctx->status, tag);
+                    return true;
+                },
+                [result, rank, reader_holder](bool ok) mutable {
+                    result->finishRank(rank, ok);
+                    reader_holder->reset();
+                });
+            if (submitted) {
+                result->markSubmitted(rank);
+                continue;
+            }
+            if (!before_status.ok()) {
+                ctx->status = std::move(before_status);
+                result->finishRank(rank, true);
+                continue;
+            }
+            if (!any_started) {
                 return nullptr;
             }
-            it = entries_.emplace(key, Entry{std::move(client), now_ms}).first;
+            result->finishDispatchFailure(rank, "RpcCompletionQueue submit failed");
+        } catch (const std::exception& error) {
+            if (!any_started) {
+                RTP_LLM_LOG_WARNING("writeback peer dispatch threw before StartCall, rank=%zu addr=%s err=%s",
+                                    rank,
+                                    ctx->server_addr.c_str(),
+                                    error.what());
+                return nullptr;
+            }
+            result->finishDispatchFailure(rank, error.what());
+        } catch (...) {
+            if (!any_started) {
+                RTP_LLM_LOG_WARNING("writeback peer dispatch threw unknown error before StartCall, rank=%zu addr=%s",
+                                    rank,
+                                    ctx->server_addr.c_str());
+                return nullptr;
+            }
+            result->finishDispatchFailure(rank, "unknown dispatch error");
         }
-        it->second.last_used_ms = now_ms;
-        return it->second.client;
+        for (size_t rest = rank + 1; rest < worker_size; ++rest) {
+            result->finishDispatchFailure(rest, "not submitted after an earlier dispatch failure");
+        }
+        break;
     }
-
-private:
-    struct Entry {
-        std::shared_ptr<Client> client;
-        int64_t                 last_used_ms = 0;
-    };
-
-    const int64_t        idle_ttl_ms_;
-    std::mutex           mutex_;
-    std::map<Key, Entry> entries_;
-};
+    return result;
+}
 
 }  // namespace rtp_llm::p2p_internal

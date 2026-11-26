@@ -129,7 +129,6 @@ private:
                                               const std::string& decode_layout = {},
                                               int                workers       = 0,
                                               const std::string& unique_key    = {});
-    std::shared_ptr<P2PBroadcastClient> sourceClient(const std::vector<std::string>& addresses);
     ErrorInfo                           buildPrefillRankRoutes(const TransferPlan&             plan,
                                                                KVCacheResource&                resource,
                                                                size_t                          start_block,
@@ -146,7 +145,8 @@ private:
     std::shared_ptr<P2PBroadcastClient>                                         client_;
     kmonitor::MetricsReporterPtr                                                metrics_reporter_;
     std::vector<std::string>                                                    transfer_addrs_;
-    p2p_internal::PeerClientCache<std::vector<std::string>, P2PBroadcastClient> source_clients_;
+    std::shared_ptr<RPCPool>                                                    source_rpc_pool_ =
+        std::make_shared<RPCPool>();
     std::shared_ptr<autil::ThreadPool>                                          control_pool_;
     mutable std::mutex                                                          requests_mutex_;
     std::condition_variable                                                     requests_cv_;

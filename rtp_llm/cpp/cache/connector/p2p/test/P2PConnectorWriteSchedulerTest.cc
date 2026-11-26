@@ -3359,72 +3359,84 @@ TEST(P2PWriteRpcUtilTest, CallForResultKeepsFailureCause) {
     EXPECT_EQ(failure, "connection refused");
 }
 
-TEST(P2PWriteRpcUtilTest, PeerClientCacheEvictsOnlyIdleUnheldClients) {
-    p2p_internal::PeerClientCache<std::string, int> cache(/*idle_ttl_ms=*/1);
-    int                                             created = 0;
-    const auto                                      create  = [&] { return std::make_shared<int>(++created); };
-    const auto idle = [] { std::this_thread::sleep_for(std::chrono::milliseconds(5)); };
-
-    auto held = cache.get("held", create);
-    EXPECT_EQ(cache.get("held", create), held);
-    cache.get("dropped", create);
-    EXPECT_EQ(created, 2);
-
-    idle();
-    EXPECT_EQ(cache.get("held", create), held);
-    EXPECT_EQ(*cache.get("dropped", create), 3);
-
-    held.reset();
-    idle();
-    EXPECT_EQ(*cache.get("held", create), 4);
-
-    EXPECT_EQ(cache.get("failed", [] { return std::shared_ptr<int>{}; }), nullptr);
-    EXPECT_EQ(*cache.get("failed", create), 5);
+TEST_F(P2PConnectorWriteSchedulerTest, DispatchRpcToPeersReturnsNullWhenUnicastNeverSubmits) {
+    auto                           pool = std::make_shared<RPCPool>();
+    std::vector<FunctionRequestPB> requests(1);
+    requests[0].mutable_p2p_request()->set_type(WRITE);
+    requests[0].mutable_p2p_request()->set_unique_key("unicast-never-submits");
+    auto result = p2p_internal::dispatchRpcToPeers<FunctionRequestPB, FunctionResponsePB>(
+        pool,
+        {decode_addrs_[0]},
+        std::move(requests),
+        1000,
+        std::chrono::system_clock::now() + std::chrono::milliseconds(1000),
+        [](std::shared_ptr<RpcService::Stub>&,
+           std::shared_ptr<grpc::ClientContext>&,
+           FunctionRequestPB&,
+           grpc::CompletionQueue*) {
+            return std::unique_ptr<grpc::ClientAsyncResponseReader<FunctionResponsePB>>{};
+        });
+    EXPECT_EQ(result, nullptr);
+    EXPECT_EQ(decode_workers_[0].starts, 0);
 }
 
-TEST_F(P2PConnectorWriteSchedulerTest, PeerClientCacheRetainsClientWhileAsyncRpcIsInFlight) {
-    p2p_internal::PeerClientCache<std::string, BroadcastManager> cache(/*idle_ttl_ms=*/20);
-    const auto make_peer = [&](const std::string& addr) {
-        auto peer = std::make_shared<BroadcastManager>(std::vector<std::string>{addr});
-        EXPECT_TRUE(peer->init());
-        return peer;
-    };
-    FunctionRequestPB req;
-    req.mutable_p2p_request()->set_type(WRITE);
-    req.mutable_p2p_request()->set_unique_key("inflight-cache-retention");
-    req.mutable_p2p_request()->set_deadline_ms(currentTimeMs() + 5000);
-
-    std::weak_ptr<BroadcastManager>                  weak_peer;
-    std::shared_ptr<BroadcastResult<FunctionRequestPB, FunctionResponsePB>> inflight;
-    {
-        auto peer = cache.get("peer", [&] { return make_peer(decode_addrs_[0]); });
-        ASSERT_NE(peer, nullptr);
-        weak_peer = peer;
-        inflight  = peer->broadcast<FunctionRequestPB, FunctionResponsePB>(
-            {req}, 5000, [](auto& stub, auto& context, const auto& request, auto* queue) {
-                return stub->AsyncExecuteFunction(context.get(), request, queue);
-            });
-        ASSERT_NE(inflight, nullptr);
+TEST_F(P2PConnectorWriteSchedulerTest, DispatchRpcToPeersPreservesPartialSubmissionOnLaterRankException) {
+    auto                           pool = std::make_shared<RPCPool>();
+    std::vector<FunctionRequestPB> requests(2);
+    for (auto& req : requests) {
+        req.mutable_p2p_request()->set_type(WRITE);
+        req.mutable_p2p_request()->set_unique_key("partial-submit-later-throw");
+        req.mutable_p2p_request()->set_deadline_ms(currentTimeMs() + 5000);
     }
-    // Caller dropped its handle (use_count == 1), but the async RPC is still blocked on the server.
+    int calls = 0;
+    auto result = p2p_internal::dispatchRpcToPeers<FunctionRequestPB, FunctionResponsePB>(
+        pool,
+        {decode_addrs_[0], decode_addrs_[1]},
+        std::move(requests),
+        5000,
+        std::chrono::system_clock::now() + std::chrono::milliseconds(5000),
+        [](std::shared_ptr<RpcService::Stub>&    stub,
+           std::shared_ptr<grpc::ClientContext>& ctx,
+           FunctionRequestPB&                    req,
+           grpc::CompletionQueue*                cq) {
+            return stub->PrepareAsyncExecuteFunction(ctx.get(), req, cq);
+        },
+        [&](FunctionRequestPB&) -> grpc::Status {
+            if (++calls == 2) {
+                throw std::runtime_error("rank 1 local before_dispatch failure");
+            }
+            return grpc::Status::OK;
+        });
+    ASSERT_NE(result, nullptr);
     ASSERT_TRUE(await([&] { return decode_workers_[0].starts == 1; }));
-    std::this_thread::sleep_for(std::chrono::milliseconds(40));
-    const auto start_ms = P2PNotification::nowMs();
-    auto       other    = cache.get("other", [&] { return make_peer(decode_addrs_[1]); });
-    ASSERT_NE(other, nullptr);
-    EXPECT_LT(P2PNotification::nowMs() - start_ms, 500);
-    EXPECT_FALSE(weak_peer.expired());
-    EXPECT_EQ(cache.get("peer", [&] { return make_peer(decode_addrs_[0]); }), weak_peer.lock());
-
+    EXPECT_EQ(decode_workers_[1].starts, 0);
+    EXPECT_FALSE(result->done());
     completeAll();
-    ASSERT_TRUE(inflight->waitDone(2000, false));
-    ASSERT_TRUE(await([&] {
-        auto locked = weak_peer.lock();
-        return !locked || !locked->hasInflightRpcs();
-    }));
-    std::this_thread::sleep_for(std::chrono::milliseconds(30));
-    cache.get("other", [&] { return make_peer(decode_addrs_[1]); });
-    EXPECT_TRUE(weak_peer.expired());
+    ASSERT_TRUE(result->waitDone(2000, false));
+    EXPECT_FALSE(result->success());
+    EXPECT_EQ(result->rankSnapshots()[0].dispatch_state, BroadcastDispatchState::SUBMITTED);
+    EXPECT_EQ(result->rankSnapshots()[1].dispatch_error, "rank 1 local before_dispatch failure");
+}
+
+TEST_F(P2PConnectorWriteSchedulerTest, DispatchRpcToPeersReturnsNullWhenFirstRankThrowsBeforeStartCall) {
+    auto                           pool = std::make_shared<RPCPool>();
+    std::vector<FunctionRequestPB> requests(1);
+    requests[0].mutable_p2p_request()->set_type(WRITE);
+    requests[0].mutable_p2p_request()->set_unique_key("first-rank-throws-before-start");
+    auto result = p2p_internal::dispatchRpcToPeers<FunctionRequestPB, FunctionResponsePB>(
+        pool,
+        {decode_addrs_[0]},
+        std::move(requests),
+        1000,
+        std::chrono::system_clock::now() + std::chrono::milliseconds(1000),
+        [](std::shared_ptr<RpcService::Stub>&,
+           std::shared_ptr<grpc::ClientContext>&,
+           FunctionRequestPB&,
+           grpc::CompletionQueue*) -> std::unique_ptr<grpc::ClientAsyncResponseReader<FunctionResponsePB>> {
+            throw std::runtime_error("prepare failed before StartCall");
+        });
+    EXPECT_EQ(result, nullptr);
+    EXPECT_EQ(decode_workers_[0].starts, 0);
 }
 
 TEST_F(P2PConnectorWriteSchedulerTest, ProgressSeqPreventsLostWakeupBetweenCheckAndWait) {

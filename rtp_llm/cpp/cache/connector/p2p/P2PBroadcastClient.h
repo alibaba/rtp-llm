@@ -185,13 +185,9 @@ public:
     queryLeaseStatusAsync(const std::string& unique_key, P2PConnectorBroadcastType operation, int64_t poll_timeout_ms);
     static LeaseStatusResult leaseStatus(const std::shared_ptr<TpBroadcastResult>& result);
 
-    bool hasInflightRpcs() const {
-        return tp_broadcast_manager_ && tp_broadcast_manager_->hasInflightRpcs();
-    }
-
-    int64_t lastActivityMs() const {
-        return tp_broadcast_manager_ ? tp_broadcast_manager_->lastActivityMs() : 0;
-    }
+    static std::shared_ptr<Result> broadcastToAddresses(const std::shared_ptr<RPCPool>& rpc_pool,
+                                                        const std::vector<std::string>& addresses,
+                                                        BroadcastParams                 params);
 
 private:
     std::shared_ptr<TpBroadcastResult> broadcastRpc(const std::vector<FunctionRequestPB>& requests, int64_t timeout_ms);
@@ -201,9 +197,9 @@ private:
                                               int64_t                        deadline_ms,
                                               const std::function<bool()>&   is_cancelled);
 
-    void genBroadcastRequest(FunctionRequestPB&                  request,
-                             const BroadcastParams&              params,
-                             std::vector<TransferRoutePB>*       routes_of_worker);
+    static void genBroadcastRequest(FunctionRequestPB&            request,
+                                    const BroadcastParams&        params,
+                                    std::vector<TransferRoutePB>* routes_of_worker);
 
 private:
     std::vector<std::string>                worker_addrs_;

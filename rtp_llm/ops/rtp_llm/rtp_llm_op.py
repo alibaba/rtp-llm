@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Callable, Optional
+from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from rtp_llm.config.engine_config import EngineConfig
@@ -58,8 +58,5 @@ class RtpLLMOp:
     def set_serving(self, serving: bool) -> None:
         self.ft_op.set_serving(serving)
 
-    def stop(self, before_rpc_shutdown: Optional[Callable[[int], None]] = None):
-        if before_rpc_shutdown is None:
-            self.ft_op.stop()  # type: ignore
-        else:
-            self.ft_op.stop(before_rpc_shutdown)  # type: ignore
+    def stop(self):
+        self.ft_op.stop()  # type: ignore

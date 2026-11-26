@@ -1,7 +1,7 @@
 #pragma once
 
-#include "rtp_llm/cpp/cache/connector/p2p/P2PWriteRpcUtil.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
+#include "rtp_llm/cpp/model_rpc/RPCPool.h"
 #include <memory>
 #include <string>
 
@@ -23,8 +23,7 @@ public:
     cancel(const std::string& prefill_addr, const std::string& unique_key, int64_t deadline_ms, int64_t timeout_ms);
 
 private:
-    std::shared_ptr<BroadcastManager>                            server(const std::string& address);
-    p2p_internal::PeerClientCache<std::string, BroadcastManager> servers_;
+    std::shared_ptr<RPCPool> rpc_pool_ = std::make_shared<RPCPool>();
 };
 
 }  // namespace rtp_llm

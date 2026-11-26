@@ -118,13 +118,6 @@ bool P2PSchedulerPrefillWrite::init() {
     return initialized_;
 }
 
-std::shared_ptr<P2PBroadcastClient> P2PSchedulerPrefillWrite::sourceClient(const std::vector<std::string>& addresses) {
-    return source_clients_.get(addresses, [&]() -> std::shared_ptr<P2PBroadcastClient> {
-        auto client = std::make_shared<P2PBroadcastClient>(addresses, config_.p2p_cancel_broadcast_timeout_ms);
-        return client->init() ? client : nullptr;
-    });
-}
-
 std::shared_ptr<const PlanResult>
 P2PSchedulerPrefillWrite::planFor(int tp, const std::string& layout, int workers, const std::string& unique_key) {
     return planner_.planFor(tp, 1, layout, workers, unique_key);
@@ -827,8 +820,7 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteBackReque
             transfer.send_submission = submitWriteRpc(
                 control_pool_,
                 [this, addresses = source_addrs, send = std::move(send)]() mutable {
-                    const auto client = sourceClient(addresses);
-                    return client ? client->broadcast(std::move(send)) : nullptr;
+                    return P2PBroadcastClient::broadcastToAddresses(source_rpc_pool_, addresses, std::move(send));
                 },
                 notify);
             if (!transfer.send_submission.valid())
