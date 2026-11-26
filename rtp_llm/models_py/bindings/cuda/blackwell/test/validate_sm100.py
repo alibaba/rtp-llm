@@ -242,6 +242,30 @@ def mhc():
         torch.cuda.synchronize()
         for a, b in zip(actual, target):
             torch.testing.assert_close(a, b, rtol=0.01, atol=0.005)
+        if rows == 48:
+            from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.shared_fp8_scale import (
+                shared_fp8_scale_row_indices,
+            )
+
+            block_m = 64
+            scale_shape = (rows, x.size(1) // 128)
+            packed = {
+                "x_fp8": torch.empty_like(x, dtype=torch.float8_e4m3fn),
+                "routed_sf": torch.empty(
+                    scale_shape, dtype=torch.int32, device=x.device
+                ),
+                "shared_sf": torch.empty(
+                    (scale_shape[1], 128), dtype=torch.int32, device=x.device
+                ).t(),
+                "block_m": block_m,
+            }
+            m.fused_post_pre_rms(
+                x, residual, post, comb, unit, norm, mega_inputs=packed
+            )
+            shared_rows = shared_fp8_scale_row_indices(rows, block_m, x.device)
+            torch.testing.assert_close(
+                packed["shared_sf"][shared_rows], packed["routed_sf"]
+            )
         # Run the eager kernel on the execution stream, as the graph runner does.
         stream = torch.cuda.Stream()
         stream.wait_stream(torch.cuda.current_stream())

@@ -73,7 +73,8 @@ public:
                     torch::Tensor t_input_lengths,
                     torch::Tensor t_kv_cache_block_id_host,
                     int           seq_size_per_block,
-                    bool          forbid_realloc = false);
+                    bool          forbid_realloc    = false,
+                    int64_t       min_page_capacity = 0);
 
     void fillDecodeCudaGraphParams(torch::Tensor sequence_lengths_plus_1_d,
                                    torch::Tensor kv_cache_block_id_device,

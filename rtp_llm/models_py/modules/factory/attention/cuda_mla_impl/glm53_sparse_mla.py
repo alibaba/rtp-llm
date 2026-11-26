@@ -936,20 +936,36 @@ class SparseMlaImpl(MlaImplBase):
     def prepare_cuda_graph(self, group_inputs: AttentionInputs) -> None:
         self.glm53_group_inputs = group_inputs
         attn_inputs = select_attention_inputs_for_tag(group_inputs, "full")
-        if (
-            not getattr(attn_inputs, "is_prefill", True)
-            and isinstance(self.fmha_impl, SparseMlaOp)
+        sparse = isinstance(self.fmha_impl, SparseMlaOp)
+        multi_token = (
+            sparse
+            and _is_multi_token_decode(attn_inputs)
+            and self.fmha_params.multi_token_decode_total_tokens > 0
+        )
+        single_token = (
+            sparse
+            and not getattr(attn_inputs, "is_prefill", True)
             and attn_inputs.sequence_lengths_plus_1_device is not None
             and attn_inputs.kv_cache_kernel_block_id_device is not None
-        ):
+        )
+        if multi_token or single_token:
             block_table = getattr(attn_inputs, "kv_cache_kernel_block_id_device", None)
             if not isinstance(block_table, torch.Tensor) or block_table.numel() == 0:
                 block_table = attn_inputs.kv_cache_block_id_device
-            self.fmha_params.fill_sparse_mla_decode_cuda_graph_params(
-                attn_inputs.sequence_lengths_plus_1_device,
-                block_table,
-                self.seq_size_per_block,
-            )
+            if multi_token:
+                # Live draft lengths may be smaller than the captured query extent.
+                self.fmha_params.fill_multi_token_decode_cuda_graph_params(
+                    attn_inputs.input_lengths_device,
+                    attn_inputs.prefix_lengths_device,
+                    block_table,
+                    self.seq_size_per_block,
+                )
+            else:
+                self.fmha_params.fill_sparse_mla_decode_cuda_graph_params(
+                    attn_inputs.sequence_lengths_plus_1_device,
+                    block_table,
+                    self.seq_size_per_block,
+                )
             self._refresh_paged_mqa_schedule_metadata(attn_inputs, forbid_realloc=True)
             self.fmha_impl.plan(self.fmha_params, block_table, attn_inputs=attn_inputs)
         else:

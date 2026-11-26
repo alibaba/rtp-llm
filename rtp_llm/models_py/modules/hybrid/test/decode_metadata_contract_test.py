@@ -115,6 +115,42 @@ class DecodeMetadataContractTest(unittest.TestCase):
                         pointers,
                     )
 
+    def test_glm53_replay_keeps_the_captured_query_extent(self):
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl import (
+            glm53_sparse_mla,
+        )
+
+        impl = glm53_sparse_mla.SparseMlaImpl.__new__(glm53_sparse_mla.SparseMlaImpl)
+        impl.fmha_impl = glm53_sparse_mla.SparseMlaFp8Op.__new__(
+            glm53_sparse_mla.SparseMlaFp8Op
+        )
+        impl.fmha_impl.plan = Mock()
+        impl.seq_size_per_block = 64
+        impl._cuda_dag_indexer_metadata = None
+        impl._refresh_paged_mqa_schedule_metadata = Mock()
+        impl.fmha_params = rtp_llm_ops.SparseMlaParams()
+
+        inputs = PyAttentionInputs()
+        inputs.is_prefill = True
+        inputs.is_draft_extend = True
+        inputs.input_lengths = torch.tensor([5], dtype=torch.int32)
+        inputs.prefix_lengths = torch.tensor([63], dtype=torch.int32)
+        inputs.sequence_lengths = torch.empty(0, dtype=torch.int32)
+        inputs.kv_cache_kernel_block_id = torch.tensor([[1, 2, 3]], dtype=torch.int32)
+        impl.fmha_params.fill_params(inputs, 64)
+        captured_ptr = impl.fmha_params.positions_d.data_ptr()
+
+        inputs.input_lengths = torch.tensor([2], dtype=torch.int32)
+        inputs.input_lengths_device = inputs.input_lengths.cuda()
+        inputs.prefix_lengths_device = inputs.prefix_lengths.cuda()
+        inputs.kv_cache_kernel_block_id_device = inputs.kv_cache_kernel_block_id.cuda()
+        impl.prepare_cuda_graph({"full": inputs})
+
+        self.assertEqual(impl.fmha_params.positions_d.data_ptr(), captured_ptr)
+        self.assertEqual(impl.fmha_params.positions_d.tolist(), [63, 64, 0, 0, 0])
+        self.assertEqual(impl.fmha_params.expanded_seq_lens.tolist(), [64, 65, 0, 0, 0])
+        impl.fmha_impl.plan.assert_called_once()
+
     def test_graph_prepare_passes_device_lengths_for_each_multi_token_phase(self):
         for phase in ("verify", "draft_extend", "prefill"):
             with self.subTest(phase=phase):

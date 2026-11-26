@@ -118,10 +118,13 @@ def fused_post_pre_rms(x, residual, post, comb, unit, norm, mega_inputs=None):
     y = torch.empty_like(x)
     extra = {}
     if mega_inputs is not None:
+        # MegaMHC expects logical token rows. The view keeps the padded
+        # backing and column stride used for the shared expert's scale tiles.
+        shared_sf = mega_inputs["shared_sf"].narrow(0, 0, x.size(0))
         extra = {
             "y_fp8": mega_inputs["x_fp8"],
             "y_routed_sf": mega_inputs["routed_sf"],
-            "y_shared_sf": mega_inputs["shared_sf"],
+            "y_shared_sf": shared_sf,
             "shared_sf_block_m": mega_inputs["block_m"],
         }
     library.mega_mhc(

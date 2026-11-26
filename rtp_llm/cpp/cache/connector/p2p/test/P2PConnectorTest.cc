@@ -17,6 +17,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PSchedulerDecodeRead.h"
 #include "rtp_llm/cpp/cache/connector/p2p/plan/PipelineLayoutCodec.h"
 #include "rtp_llm/cpp/cache/connector/p2p/plan/ShardLayoutFactory.h"
+#include "rtp_llm/cpp/cache/DeviceBlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorResourceStore.h"
 #include "rtp_llm/cpp/cache/connector/p2p/test/MockGenerateStream.h"
@@ -230,6 +231,30 @@ TEST(P2PConnectorRegistrationTest, RegistersLayerStorageWithPhysicalBlockAlignme
         EXPECT_EQ(alignment, group.kvBlockStrideBytes());
         EXPECT_EQ(buffer.size_bytes, alignment * group.block_num);
         EXPECT_LT(alignment, buffer.size_bytes);
+    }
+}
+
+TEST(P2PConnectorRegistrationTest, RegistersSharedBackingOnceAtLayerBlockBoundaries) {
+    auto config = test::makeSimpleMhaCacheConfig(2, 8, 16, DataType::TYPE_FP16, 1, 64);
+    DeviceBlockPoolConfigHelper::finalizeSharedConfig(config, (1u << 20) + 256, RuntimeConfig{});
+    auto coordinator = std::make_shared<CoordinatorCacheManager>(config, AllocationType::HOST);
+    ASSERT_TRUE(coordinator->init());
+
+    LayerBlockConverterImpl converter(coordinator);
+    const auto              buffers = converter.getAllBuffers();
+    ASSERT_EQ(buffers.size(), 1u);
+    const auto& [buffer, alignment] = buffers.front();
+    const auto& group               = config.topology().groups().front();
+    EXPECT_EQ(buffer.addr, coordinator->groupBlockPools().front()->getBaseAddress());
+    EXPECT_EQ(alignment, group.kvBlockStrideBytes());
+    EXPECT_EQ(buffer.size_bytes, 2 * alignment * group.block_num);
+
+    for (int layer : {0, 1}) {
+        auto blocks = converter.convertIndexToBuffer(layer, group.tag, group.block_num - 1, 1, 0);
+        ASSERT_EQ(blocks.size(), 1u);
+        const auto offset = reinterpret_cast<uintptr_t>(blocks.front().addr) - reinterpret_cast<uintptr_t>(buffer.addr);
+        EXPECT_EQ(offset % alignment, 0u);
+        EXPECT_LE(offset + blocks.front().size_bytes, buffer.size_bytes);
     }
 }
 
