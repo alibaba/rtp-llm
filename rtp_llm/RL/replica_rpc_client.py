@@ -57,6 +57,7 @@ class ReplicaRpcClient:
                 "kv_cache_ready",
                 "kv_cache_bytes",
                 "quiescent",
+                "weights_ready",
             )
         }
 
@@ -91,9 +92,18 @@ class ReplicaRpcClient:
                 raise ReplicaControlError(
                     "world KV capacity changed outside cache release/restore"
                 )
+        if operation == pb.RlControlRequestPB.SLEEP:
+            if state["weights_ready"] or state["kv_cache_ready"] or not state["quiescent"]:
+                raise ReplicaControlError("sleep did not release both weight and KV tags")
+        elif operation == pb.RlControlRequestPB.WAKE_UP:
+            if state["weights_ready"] != before["weights_ready"]:
+                raise ReplicaControlError("mapping cannot publish refitted weights")
+            if state["kv_cache_ready"] != (before["kv_cache_ready"] or "kv_cache" in kwargs["memory_tags"]):
+                raise ReplicaControlError("wake acknowledged incorrect KV residency")
         if operation == pb.RlControlRequestPB.COMMIT_UPDATE:
             if (
-                before["phase"] != "updating"
+                not state["weights_ready"]
+                or before["phase"] != "updating"
                 or not before["update_id"]
                 or state["model_version"] != before["update_id"]
                 or state["model_version"] == before["model_version"]
@@ -154,6 +164,7 @@ class ReplicaRpcClient:
     ):
         if self._failed:
             raise ReplicaControlError("replica control has failed; restart all ranks")
+        all_unimplemented = False
         try:
             if self._channels is None:
                 self._channels = [
@@ -216,6 +227,12 @@ class ReplicaRpcClient:
                 ),
                 return_exceptions=True,
             )
+            # A mixed response may have already unmapped or written a peer's storage.
+            all_unimplemented = all(
+                isinstance(reply, grpc.RpcError)
+                and reply.code() == grpc.StatusCode.UNIMPLEMENTED
+                for reply in replies
+            )
             for rank, reply in enumerate(replies):
                 if isinstance(reply, BaseException):
                     raise ReplicaControlError(
@@ -267,6 +284,8 @@ class ReplicaRpcClient:
                     raise ReplicaControlError(
                         f"rank {rank} returned inconsistent KV capacity"
                     )
+                if reply.phase == "running" and not (reply.weights_ready and reply.kv_cache_ready):
+                    raise ReplicaControlError(f"rank {rank} admitted generation with missing weights or KV")
                 if reply.phase == "failed" or (
                     phase == "updating" and not reply.update_id
                 ):
@@ -282,6 +301,7 @@ class ReplicaRpcClient:
                 "applied_weights",
                 "kv_cache_ready",
                 "kv_cache_bytes",
+                "weights_ready",
             ):
                 if len({getattr(reply, field) for reply in replies}) != 1:
                     raise ReplicaControlError(f"ranks disagree on {field}")
@@ -305,13 +325,8 @@ class ReplicaRpcClient:
             self.version = replies[0].model_version
             self.update_id = replies[0].update_id
             return replies
-        except BaseException as exc:
-            # Side-effect-free UNIMPLEMENTED stub calls should not poison a healthy client.
-            cause = exc.__cause__
-            if not (
-                isinstance(cause, grpc.RpcError)
-                and cause.code() == grpc.StatusCode.UNIMPLEMENTED
-            ):
+        except BaseException:
+            if not all_unimplemented:
                 self._failed = True
             raise
 
@@ -334,13 +349,13 @@ class ReplicaRpcClient:
     async def sleep(self, *, level: int = 2):
         async with self._lock:
             return await self._call_all(
-                pb.RlControlRequestPB.SLEEP, sleep_level=int(level)
+                pb.RlControlRequestPB.SLEEP, phase="paused", cache_ready=False, sleep_level=int(level)
             )
 
     async def wake_up(self, *, tags=("weights", "kv_cache")):
         async with self._lock:
             return await self._call_all(
-                pb.RlControlRequestPB.WAKE_UP, memory_tags=list(tags)
+                pb.RlControlRequestPB.WAKE_UP, phase="paused", memory_tags=list(tags)
             )
 
     async def write_bucket(self, write_bucket_pb):

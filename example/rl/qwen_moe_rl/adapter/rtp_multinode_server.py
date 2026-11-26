@@ -91,7 +91,7 @@ def gpu_inventory():
 class NativeNodeOwner(RTPServer):
     """One local process tree, holding a contiguous subset of native TP ranks."""
 
-    def __init__(self, replica_rank, model_path, topology, node_index, enable_return_routed_experts=False):
+    def __init__(self, replica_rank, model_path, topology, node_index, enable_return_routed_experts=False, vmm_sleep_level=0):
         self.topology = ReplicaTopology.from_dict(topology)
         self.node_index = int(node_index)
         self.node = self.topology.node_groups[self.node_index]
@@ -104,6 +104,7 @@ class NativeNodeOwner(RTPServer):
             self.topology.tp_size,
         )
         self.enable_return_routed_experts = enable_return_routed_experts
+        self.vmm_sleep_level = vmm_sleep_level
         self.owner_identity = dict(
             pid=os.getpid(),
             create_time=psutil.Process().create_time(),
@@ -160,6 +161,8 @@ class NativeNodeOwner(RTPServer):
         command = ["/bin/bash", os.environ["RTP_SERVER_LAUNCHER"]]
         if self.enable_return_routed_experts:
             command += ["--enable_return_routed_experts", "1"]
+        if self.vmm_sleep_level:
+            command += ["--enable_rl_vmm_sleep", "1"]
         self.process = subprocess.Popen(
             command,
             env=environment,
@@ -345,7 +348,7 @@ class NativeNodeOwner(RTPServer):
 class MultiNodeRTPServer(RTPServer):
     """Stable RPC/gateway actor; native process ownership lives on each host."""
 
-    def __init__(self, replica_rank, model_path, topology, owners, enable_return_routed_experts=False):
+    def __init__(self, replica_rank, model_path, topology, owners, enable_return_routed_experts=False, vmm_sleep_level=0):
         self.topology = ReplicaTopology.from_dict(topology)
         self.owners = owners
         self.boot = -1
@@ -359,6 +362,7 @@ class MultiNodeRTPServer(RTPServer):
         self._owner_identities = []
         super().__init__(replica_rank, model_path, "", self.topology.tp_size)
         self.enable_return_routed_experts = enable_return_routed_experts
+        self.vmm_sleep_level = vmm_sleep_level
         self.controller_identity = dict(
             pid=os.getpid(),
             create_time=psutil.Process().create_time(),
@@ -517,17 +521,44 @@ class MultiNodeRTPServer(RTPServer):
         self._generation_ready = True
         return result
 
+    async def resume_for_rollout(self, tags, expected_step, expected_version):
+        async with self._lifecycle_lock:
+            control = await _new_control(self.replica_rank)
+            try:
+                statuses = await control.status()
+                if self.vmm_sleep_level and statuses[0].phase == "paused":
+                    statuses = await control.wake_up(tags=tags)
+                if "kv_cache" not in tags:
+                    return
+                for status in statuses:
+                    if (
+                        not status.weights_ready
+                        or not status.kv_cache_ready
+                        or (expected_version is not None and status.model_version != expected_version)
+                        or (expected_step is not None and status.global_step != expected_step)
+                    ):
+                        raise RuntimeError("RTP did not acknowledge the refitted rollout policy")
+                if statuses[0].phase == "paused":
+                    statuses = await control.resume()
+                if any(status.phase != "running" for status in statuses):
+                    raise RuntimeError("RTP did not resume generation")
+                self._committed_version = statuses[0].model_version
+                self._generation_ready = True
+            finally:
+                await control.close()
+
     async def pause_for_training(self):
         async with self._lifecycle_lock:
             if not self._started:
                 raise RuntimeError("Native world must be live before a training pause")
             self._generation_ready = False
-            from rtp_native_server import _sleep
-
-            await _sleep(self.replica_rank)
             control = await _new_control(self.replica_rank)
             try:
                 statuses = await control.status()
+                if self.vmm_sleep_level:
+                    statuses = await control.sleep(level=self.vmm_sleep_level)
+                elif statuses[0].phase == "running":
+                    statuses = await control.pause()
             finally:
                 await control.close()
             if len(statuses) != self.tp_size or any(
@@ -542,7 +573,8 @@ class MultiNodeRTPServer(RTPServer):
                 native_boot=self.boot,
                 native_incarnation=self.incarnation,
                 previous_committed_version=self._committed_version,
-                kv_pool_retained=True,
+                kv_pool_retained=statuses[0].kv_cache_ready,
+                released_vmm_bytes_by_rank=[s.released_vmm_bytes for s in statuses],
                 statuses=[
                     dict(
                         tp_rank=value.tp_rank,
@@ -592,6 +624,9 @@ class MultiNodeRTPServer(RTPServer):
             self._last_suspend = result
             return result
 
+    async def wake_up(self, **kwargs):
+        await self.resume_for_rollout(kwargs.get("tags", ["kv_cache"]), None, None)
+
     async def sleep(self):
         return await self.pause_for_training()
 
@@ -604,8 +639,10 @@ class MultiNodeRTPServer(RTPServer):
         return result
 
 
-def launch_multinode_server(model_path, topology, node_ids, *, enable_return_routed_experts=False):
+def launch_multinode_server(model_path, topology, node_ids, *, enable_return_routed_experts=False, vmm_sleep_level=0):
     """Create the stable controller and local owners on an existing Ray cluster."""
+    if vmm_sleep_level not in (0, 2):
+        raise ValueError("RTP supports resident pause (0) and VMM sleep (2)")
     topology = ReplicaTopology.from_dict(topology)
     if not ray.is_initialized() or len(node_ids) != len(topology.node_groups):
         raise ValueError("A live Ray placement for every native owner is required")
@@ -625,7 +662,7 @@ def launch_multinode_server(model_path, topology, node_ids, *, enable_return_rou
                     node_id, soft=False
                 ),
                 runtime_env=runtime,
-            ).remote(topology.replica_rank, model_path, topology.to_dict(), index, enable_return_routed_experts)
+            ).remote(topology.replica_rank, model_path, topology.to_dict(), index, enable_return_routed_experts, vmm_sleep_level)
         )
     controller_class = ray.remote(num_cpus=1, num_gpus=0)(MultiNodeRTPServer)
     controller = controller_class.options(
@@ -633,5 +670,5 @@ def launch_multinode_server(model_path, topology, node_ids, *, enable_return_rou
         max_concurrency=128,
         scheduling_strategy=NodeAffinitySchedulingStrategy(node_ids[0], soft=False),
         runtime_env=runtime,
-    ).remote(topology.replica_rank, model_path, topology.to_dict(), owners, enable_return_routed_experts)
+    ).remote(topology.replica_rank, model_path, topology.to_dict(), owners, enable_return_routed_experts, vmm_sleep_level)
     return controller, owners

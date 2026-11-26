@@ -104,5 +104,5 @@ py_test(
     name = "test_rl_weight_update",
     srcs = ["test_rl_weight_update.py"],
     env = {"CUDA_VISIBLE_DEVICES": ""},
-    deps = py_test_deps + ["//rtp_llm/model_loader:loader"],
+    deps = py_test_deps + ["//rtp_llm/model_loader:loader", "//rtp_llm:models"],
 )

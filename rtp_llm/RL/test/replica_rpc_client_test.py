@@ -25,19 +25,29 @@ class _FakeRlService(rpc.RpcServiceServicer):
         self.received_weights = 0
         self.applied_weights = 0
         self.fail_next = False
+        self.vmm_enabled = False
+        self.kv_ready = True
+        self.weights_ready = True
 
     async def RlControl(self, request, context):
         self.requests.append(request)
-        if request.operation in (
+        if (not self.vmm_enabled and request.operation in (
             pb.RlControlRequestPB.SLEEP,
             pb.RlControlRequestPB.WAKE_UP,
-            pb.RlControlRequestPB.WRITE_BUCKET,
-        ):
+        )) or request.operation == pb.RlControlRequestPB.WRITE_BUCKET:
             await context.abort(grpc.StatusCode.UNIMPLEMENTED, "reserved stub")
         if self.fail_next:
             self.fail_next = False
             await context.abort(grpc.StatusCode.INTERNAL, "injected error")
-        if request.operation == pb.RlControlRequestPB.BEGIN_UPDATE:
+        if request.operation == pb.RlControlRequestPB.SLEEP:
+            self.phase = "paused"
+            self.kv_ready = self.weights_ready = False
+        elif request.operation == pb.RlControlRequestPB.WAKE_UP:
+            if "kv_cache" in request.memory_tags:
+                self.kv_ready = True
+        elif request.operation == pb.RlControlRequestPB.RESUME:
+            self.phase = "running"
+        elif request.operation == pb.RlControlRequestPB.BEGIN_UPDATE:
             self.phase = "updating"
             self.update_id = "run:1"
             self.received_weights = 0
@@ -50,6 +60,7 @@ class _FakeRlService(rpc.RpcServiceServicer):
             self.update_id = ""
             self.global_step = 1
             self.applied_weights = self.received_weights
+            self.weights_ready = True
         return pb.RlControlResponsePB(
             protocol_version=3,
             phase=self.phase,
@@ -66,10 +77,10 @@ class _FakeRlService(rpc.RpcServiceServicer):
             ep_size=self.ep_size,
             received_weights=self.received_weights,
             applied_weights=self.applied_weights,
-            quiescent=True,
-            kv_cache_ready=True,
-            kv_cache_bytes=1024,
-            weights_ready=True,
+            quiescent=self.phase != "running",
+            kv_cache_ready=self.kv_ready,
+            kv_cache_bytes=1024 if self.kv_ready else 0,
+            weights_ready=self.weights_ready and self.phase != "updating",
         )
 
 
@@ -146,6 +157,30 @@ class ReplicaRpcClientTest(unittest.IsolatedAsyncioTestCase):
         committed = await self.client.commit_update()
         self.assertEqual(committed[0].model_version, "run:1")
         self.assertEqual(committed[0].received_weights, 1)
+
+    async def test_two_stage_wake_requires_refit_to_restore_weights(self):
+        for service in self.services:
+            service.vmm_enabled = True
+        await self.client.status()
+        slept = await self.client.sleep()
+        self.assertTrue(all(not reply.weights_ready and reply.kv_cache_bytes == 0 for reply in slept))
+        mapped = await self.client.wake_up(tags=["weights"])
+        self.assertTrue(all(not reply.weights_ready and not reply.kv_cache_ready for reply in mapped))
+        await self.client.begin_update(global_step=1, max_buffer_bytes=1024)
+        await self.client.push_weight("model.embed_tokens.weight", [b"ipc"] * 4)
+        committed = await self.client.commit_update()
+        self.assertTrue(all(reply.weights_ready and not reply.kv_cache_ready for reply in committed))
+        await self.client.wake_up(tags=["kv_cache"])
+        running = await self.client.resume()
+        self.assertTrue(all(reply.phase == "running" for reply in running))
+
+    async def test_partially_implemented_sleep_poisons_client(self):
+        self.services[-1].vmm_enabled = True
+        await self.client.status()
+        with self.assertRaises(ReplicaControlError):
+            await self.client.sleep()
+        with self.assertRaisesRegex(ReplicaControlError, "restart all ranks"):
+            await self.client.status()
 
     async def test_internal_error_poisons_client(self):
         await self.client.status()

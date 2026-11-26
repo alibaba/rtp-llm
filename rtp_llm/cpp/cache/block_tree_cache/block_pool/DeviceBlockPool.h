@@ -18,6 +18,7 @@ namespace rtp_llm {
 
 class CacheStore;
 class MemoryUtil;
+class CudaVmmPoolBacking;
 
 // Config for the device (GPU) block pool. Derives BlockPoolConfigBase for the IBlockPool
 // lifecycle; physical_block_count is reconciled against memory_layouts[*].block_num by
@@ -27,6 +28,7 @@ struct DeviceBlockPoolConfig: public BlockPoolConfigBase {
     std::vector<MemoryLayoutConfig> memory_layouts;
     bool                            use_pinned_cpu_backing{false};
     bool                            use_device_malloc_backing{false};
+    bool                            use_rl_vmm_backing{false};
 };
 
 class DeviceBlockPool;
@@ -70,6 +72,9 @@ public:
 
     // Stable CUDA device index of the backing buffer. Returns -1 for non-CUDA builds.
     int deviceIndex() const;
+    bool canSleepBacking() const;
+    size_t unmapPhysical();
+    void remapPhysical();
 
     MemoryType                 where() const;
     std::vector<torch::Tensor> allLayerCacheBase() const;
@@ -146,6 +151,7 @@ private:
     std::vector<uint32_t> refcounts_;
     size_t                request_referenced_blocks_num_{0};
 
+    std::shared_ptr<CudaVmmPoolBacking> vmm_backing_;
     torch::Tensor cache_aligned_buffer_;
     void*         cache_base_ptr_{nullptr};
 

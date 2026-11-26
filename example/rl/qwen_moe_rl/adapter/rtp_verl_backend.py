@@ -18,9 +18,7 @@ from rtp_native_server import (
     _audit_root,
     _base_port,
     _new_control,
-    _sleep,
     _source,
-    _wake,
     _write_json,
 )
 from rtp_topology import (
@@ -87,6 +85,7 @@ class RTPReplica(RolloutReplica):
         self._server_handle, self._native_owners = launch_multinode_server(
             self.model_config.path, topology.to_dict(), node_ids,
             enable_return_routed_experts=self.config.enable_rollout_routing_replay,
+            vmm_sleep_level=int(self.config.engine_kwargs.get("rtp", {}).get("sleep_level", 0)),
         )
         self.servers = [self._server_handle]
         try:
@@ -213,22 +212,6 @@ class RTPServerAdapter(BaseRollout):
             )
         self._unacknowledged_ipc = []
 
-    async def _group_lifecycle(self, action):
-        outcome = None
-        if self.is_leader:
-            try:
-                await (
-                    _wake(self.replica_rank)
-                    if action == "wake"
-                    else _sleep(self.replica_rank)
-                )
-                outcome = {"ok": True}
-            except BaseException as exc:
-                outcome = {"ok": False, "error": repr(exc)}
-        outcome = self._broadcast(outcome)
-        if not outcome["ok"]:
-            raise RuntimeError("RTP group lifecycle failed: " + outcome["error"])
-
     async def release(self):
         outcome = None
         if self.is_leader:
@@ -249,13 +232,13 @@ class RTPServerAdapter(BaseRollout):
             )
 
     async def resume(self, tags):
-        if "kv_cache" not in tags:
-            return
         error = None
         probe = None
         try:
-            await self._group_lifecycle("wake")
-            if self.is_leader and os.environ.get("RLLM_RTP_POST_SYNC_PROBE", "0") == "1":
+            if self.is_leader:
+                server = ray.get_actor(f"rtp_server_{self.replica_rank}_0")
+                await server.resume_for_rollout.remote(tags, self._last_sync_step, self._last_sync_version)
+            if self.is_leader and "kv_cache" in tags and os.environ.get("RLLM_RTP_POST_SYNC_PROBE", "0") == "1":
                 server = ray.get_actor(f"rtp_server_{self.replica_rank}_0")
                 probe = await server.probe_synced_policy.remote(
                     self._last_sync_step, self._last_sync_version
@@ -338,6 +321,8 @@ class RTPServerAdapter(BaseRollout):
         _source()
         from rtp_llm.utils.cuda_ipc import CudaIpcV2
 
+        refit_start = time.perf_counter()
+        push_rpc_seconds = 0.0
         full_sha = os.environ.get("RLLM_RTP_FULL_SHA256", "0") == "1"
         control = None
         failure = None
@@ -391,7 +376,11 @@ class RTPServerAdapter(BaseRollout):
                     ),
                     expected_source_names=sorted(self.hf_sources),
                 )
-                setup = {"error": None, "before_version": before.model_version}
+                setup = {
+                    "error": None,
+                    "before_version": before.model_version,
+                    "kv_cache_ready": before.kv_cache_ready,
+                }
             except BaseException as exc:
                 setup = {"error": repr(exc)}
         setup = self._broadcast(setup)
@@ -478,9 +467,11 @@ class RTPServerAdapter(BaseRollout):
                             raise RuntimeError(
                                 "TP source tensor metadata differs across training ranks"
                             )
+                    rpc_start = time.perf_counter()
                     await control.push_weight(
                         name, [x["metadata"] for x in rank_items]
                     )
+                    push_rpc_seconds += time.perf_counter() - rpc_start
                     outcome = {"error": None}
                 except BaseException as exc:
                     outcome = {"error": repr(exc)}
@@ -574,7 +565,9 @@ class RTPServerAdapter(BaseRollout):
             rank_status=finish["rank_status"],
             ipc_bindings=[item["binding"] for item in manifest_checks],
             transport="native_rl_cuda_ipc_v2_per_tp_rank",
-            kv_pool_retained_while_paused=True,
+            kv_pool_retained_while_paused=setup["kv_cache_ready"],
+            refit_wall_seconds=time.perf_counter() - refit_start,
+            push_weight_rpc_seconds=push_rpc_seconds,
             finished_unix=time.time(),
         )
         if self.is_leader:

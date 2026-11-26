@@ -1125,6 +1125,15 @@ class Qwen4ExpModel(Qwen35Model):
         self._capture_mtp_target_hidden = bool(
             init_resource.is_speculative or getattr(self.config, "is_mtp", False)
         )
+        manager = getattr(self, "_rl_vmm_weight_manager", None)
+        if initialized and manager is not None:
+            recorder = getattr(self, "_rl_vmm_record_startup", None)
+            if not callable(recorder):
+                raise RuntimeError("RL VMM startup manifest recorder was not attached")
+            inventory = manager.finish_after_initialize(self.weight, self)
+            recorder(inventory)
+            del self._rl_vmm_weight_manager
+            del self._rl_vmm_record_startup
         return initialized
 
     def get_mtp_target_hidden_states(self, num_tokens: int) -> Optional[torch.Tensor]:

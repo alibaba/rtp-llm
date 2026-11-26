@@ -923,6 +923,11 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                                                   nullptr;
     auto               config               = CacheConfigCreator::createConfig(
         model_config_, parallelism_config, kv_cache_config, sp_config, draft_model_config, isMTPEagle(), isEagle());
+    config.enable_rl_vmm_sleep = kv_cache_config.enable_rl_vmm_sleep;
+    RTP_LLM_CHECK_WITH_INFO(!config.enable_rl_vmm_sleep
+                                || (rl_enabled_ && model_config_.model_type == "qwen4_exp"
+                                    && pd_sep_config.role_type == RoleType::PDFUSION && !use_device_malloc_block_pool),
+                            "RL VMM sleep requires a local BF16 Qwen4 rollout without RDMA registration");
     auto block_tree_layout = planBlockTreeCacheLayout(config, kv_cache_config);
     RTP_LLM_CHECK_WITH_INFO(block_tree_layout != nullptr, "failed to plan BlockTreeCache layout");
     const auto local_block_num = CacheConfigCreator::computeLocalBlockNum(
@@ -1535,6 +1540,47 @@ std::string NormalEngine::rlModelVersion() const {
     return rl_model_version_;
 }
 
+bool NormalEngine::rlWeightsMapped() const {
+    std::lock_guard<std::mutex> lock(rl_mutex_);
+    return rl_weights_mapped_;
+}
+
+bool NormalEngine::rlWeightsReady() const {
+    std::lock_guard<std::mutex> lock(rl_mutex_);
+    return rl_weights_mapped_ && rl_weights_initialized_ && !rl_failed_;
+}
+
+void NormalEngine::rlSetWeightsMapped(bool mapped) {
+    std::lock_guard<std::mutex> lock(rl_mutex_);
+    RTP_LLM_CHECK(rl_enabled_ && rl_paused_ && !rl_failed_);
+    if (mapped != rl_weights_mapped_) {
+        rl_weights_mapped_ = mapped;
+        // Remapping restores addresses, but only a complete refit restores the policy.
+        rl_weights_initialized_ = false;
+    }
+}
+
+size_t NormalEngine::rlSetKVMapping(bool mapped) {
+    std::lock_guard<std::mutex> lock(rl_mutex_);
+    RTP_LLM_CHECK(rl_enabled_ && rl_paused_ && !rl_failed_ && resource_context_.cache_manager);
+    if (rl_kv_ready_ == mapped) {
+        return 0;
+    }
+    try {
+        const auto released = resource_context_.cache_manager->setPhysicalResidency(mapped);
+#if USING_CUDA
+        if (mapped) {
+            RTP_LLM_CHECK(cudaDeviceSynchronize() == cudaSuccess);
+        }
+#endif
+        rl_kv_ready_ = mapped;
+        return released;
+    } catch (...) {
+        rl_failed_ = true;
+        throw;
+    }
+}
+
 bool NormalEngine::rlKVCacheReady() const {
     std::lock_guard<std::mutex> lock(rl_mutex_);
     return rl_kv_ready_ && !rl_failed_;
@@ -1590,6 +1636,15 @@ absl::Status NormalEngine::rlClearCache() {
     if (!resource_context_.cache_manager) {
         return absl::OkStatus();
     }
+    if (!rl_kv_ready_) {
+        // SLEEP cleared the tree before unmap; admission remains fenced through the refit.
+        auto tree = resource_context_.cache_manager->blockTreeCache();
+        if (tree && tree->getStats().tree_node_count != 0) {
+            rl_failed_ = true;
+            return absl::InternalError("KV metadata was repopulated while its backing was unmapped");
+        }
+        return absl::OkStatus();
+    }
     const auto status = resource_context_.cache_manager->clearAllCachedBlocks();
     if (!status.ok()) {
         rl_failed_ = true;
@@ -1600,7 +1655,7 @@ absl::Status NormalEngine::rlClearCache() {
 
 absl::Status NormalEngine::rlSetModelVersion(const std::string& version, int64_t global_step) {
     std::lock_guard<std::mutex> lock(rl_mutex_);
-    if (!rl_enabled_ || !rl_paused_ || rl_failed_ || version.empty() || global_step < rl_global_step_) {
+    if (!rl_enabled_ || !rl_paused_ || rl_failed_ || !rl_weights_mapped_ || version.empty() || global_step < rl_global_step_) {
         return absl::FailedPreconditionError("model version may only advance while safely paused");
     }
     rl_model_version_       = version;

@@ -104,6 +104,7 @@ class WeightManager:
         weight: ModelWeights,
         model_weights_loader: ModelLoader,
         non_owned_global_weights: Sequence[str] = (),
+        rl_vmm_weight_manager=None,
     ) -> None:
         """
         Initializes the WeightManager with a model's weights, device information, and weight loader.
@@ -121,6 +122,9 @@ class WeightManager:
         self._weights_loader: ModelLoader = model_weights_loader
         self._weight_module = self._weights_loader._model_weights_info
         self._non_owned_global_weights = frozenset(non_owned_global_weights)
+        self._rl_vmm_weight_manager = rl_vmm_weight_manager
+        self._rl_vmm_startup_inventory = None
+        self._rl_vmm_last_remap = None
         self._working_stream: torch.cuda.Stream = torch.cuda.Stream(
             device=self._device,
         )
@@ -217,12 +221,54 @@ class WeightManager:
                 "\n".join(self._rl_required_names).encode()
             ).hexdigest(),
         }
+        if self._rl_vmm_weight_manager is not None:
+            record["rl_vmm"] = {
+                "initial_allocations": self._rl_vmm_weight_manager.inventory_summary(),
+                "startup_verification": self._rl_vmm_startup_inventory,
+                "last_remap_verification": self._rl_vmm_last_remap,
+            }
         folder = Path(directory)
         folder.mkdir(parents=True, exist_ok=True)
         output = folder / f"rank-{world_rank:05d}.json"
         temporary = output.with_name(output.name + f".writing-{os.getpid()}")
         temporary.write_text(json.dumps(record, indent=2) + "\n")
         temporary.replace(output)
+
+    def record_rl_vmm_startup(self, inventory: dict) -> None:
+        """Store the pre-graph stable-VA inventory in the existing RL weight manifest."""
+        if self._rl_vmm_weight_manager is None:
+            raise RuntimeError("RL VMM startup verification was reported without a VMM manager")
+        self._rl_vmm_startup_inventory = inventory
+        self._write_rl_manifest_if_configured()
+
+    def rl_unmap_weights(self) -> int:
+        """Release sleepable weight backing while retaining each target virtual address."""
+        if self._rl_vmm_weight_manager is None:
+            raise RuntimeError("RL VMM weight sleep was not enabled for this model")
+        if self._rl_update is not None:
+            raise RuntimeError("cannot sleep RL weights during an active refit transaction")
+        with self._lock:
+            released_bytes = self._rl_vmm_weight_manager.unmap_sleepable()
+            logging.info("RL VMM weights unmapped: released_bytes=%d", released_bytes)
+            self._write_rl_manifest_if_configured()
+            return released_bytes
+
+    def rl_remap_weights(self) -> None:
+        """Restore sleepable weight backing and verify the original live target addresses."""
+        if self._rl_vmm_weight_manager is None:
+            raise RuntimeError("RL VMM weight wake was not enabled for this model")
+        if self._rl_update is not None:
+            raise RuntimeError("cannot remap RL weights during an active refit transaction")
+        with self._lock:
+            self._rl_vmm_weight_manager.remap_sleepable()
+            self._rl_vmm_last_remap = self._rl_vmm_weight_manager.verify_remapped_weights(
+                self._weights
+            )
+            logging.info(
+                "RL VMM weights remapped and live tensor addresses verified: inventory_sha256=%s",
+                self._rl_vmm_last_remap["inventory_sha256"],
+            )
+            self._write_rl_manifest_if_configured()
 
     def _load_rl_source_manifest(self) -> tuple[dict[str, tuple[int, ...]], dict[str, torch.dtype]]:
         from safetensors import safe_open
@@ -279,27 +325,45 @@ class WeightManager:
             self._rl_source_shapes, self._rl_source_dtypes = (
                 self._load_rl_source_manifest()
             )
+        frozen_qsa_source_names = frozenset()
         if expected_source_names is not None:
-            expected_set = set(expected_source_names)
             required_set = set(self._rl_source_shapes)
-            if expected_set != required_set:
-                missing = sorted(required_set - expected_set)
-                extra = sorted(expected_set - required_set)
+            expected_set = set(expected_source_names)
+            frozen_qsa_source_names = (
+                self._weights_loader.validate_rl_frozen_qsa_source_names(
+                    required_set, expected_source_names
+                )
+            )
+            active_set = required_set - set(frozen_qsa_source_names)
+            if expected_set != active_set:
+                missing = sorted(active_set - expected_set)
+                extra = sorted(expected_set - active_set)
                 raise ValueError(
                     f"BEGIN_UPDATE expected_source_names does not match native mutable manifest: "
                     f"missing={len(missing)} ({missing[:5]}), extra={len(extra)} ({extra[:5]})"
                 )
+        source_shapes = {
+            name: shape
+            for name, shape in self._rl_source_shapes.items()
+            if name not in frozen_qsa_source_names
+        }
+        source_dtypes = {
+            name: dtype
+            for name, dtype in self._rl_source_dtypes.items()
+            if name not in frozen_qsa_source_names
+        }
         self._rl_update = RlWeightUpdate(
             self._weights_loader,
             self._weights,
             self._device,
-            self._rl_source_shapes,
+            source_shapes,
             max_buffer_bytes,
             borrow_singleton_sources=os.environ.get(
                 "RTP_RL_BORROW_SINGLETON_HF_SOURCES", "1"
             )
             != "0",
-            source_dtypes=self._rl_source_dtypes,
+            source_dtypes=source_dtypes,
+            frozen_qsa_source_names=frozen_qsa_source_names,
         )
 
     def rl_push(self, name: str, metadata: bytes, timeout: float) -> None:

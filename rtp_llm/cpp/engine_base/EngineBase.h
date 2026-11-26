@@ -76,6 +76,10 @@ public:
     virtual absl::Status rlClearCache() {
         return absl::UnimplementedError("RL cache invalidation is not enabled");
     }
+    virtual bool rlWeightsMapped() const { return true; }
+    virtual bool rlWeightsReady() const { return true; }
+    virtual void rlSetWeightsMapped(bool) { }
+    virtual size_t rlSetKVMapping(bool) { return 0; }
     virtual bool rlKVCacheReady() const {
         return false;
     }

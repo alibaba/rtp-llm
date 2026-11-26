@@ -2,7 +2,7 @@ import gc
 import logging
 import os
 from collections import OrderedDict
-from typing import Dict, Iterable, Iterator, List, Mapping, NamedTuple, Optional, Tuple
+from typing import Collection, Dict, Iterable, Iterator, List, Mapping, NamedTuple, Optional, Tuple
 
 import safetensors
 import torch
@@ -26,6 +26,15 @@ from rtp_llm.utils.model_weight import W, WeightStyle, identity
 from rtp_llm.utils.module_util import has_module
 from rtp_llm.utils.time_util import timer_wrapper
 from rtp_llm.utils.util import check_with_info
+
+
+_QWEN4_QSA_INDEXER_TARGET_NAMES = frozenset(
+    {
+        W.qwen4_indexer_qk_proj_w,
+        W.qwen4_indexer_q_ln_gamma,
+        W.qwen4_indexer_k_ln_gamma,
+    }
+)
 
 
 class ModelLoader:
@@ -705,6 +714,107 @@ class ModelLoader:
                 frozen_meta_keys.add((layer_id, wname))
         return frozen_table_keys, frozen_meta_keys
 
+    def get_rl_qsa_source_groups(self) -> Dict[int, Tuple[frozenset[str], frozenset[str]]]:
+        """Return the closed three-source HF group and target names for each local QSA layer."""
+        if self.model_config.model_type != "qwen4_exp":
+            return {}
+        groups: Dict[int, Dict[str, set[str]]] = {}
+        for layer_id in self._load_config.layer_range:
+            layer_weights = self._model_weights_info.layer_weights[layer_id]
+            modules = layer_weights if isinstance(layer_weights, list) else [layer_weights]
+            for module in modules:
+                for weight in module.get_components():
+                    if weight.name not in _QWEN4_QSA_INDEXER_TARGET_NAMES:
+                        continue
+                    source_names = set(weight.get_tensor_names(layer_id, self._load_config))
+                    if len(source_names) != 1:
+                        raise ValueError(
+                            f"Qwen4 QSA target {weight.name!r} must have exactly one HF source, "
+                            f"got {sorted(source_names)}"
+                        )
+                    layer_group = groups.setdefault(layer_id, {})
+                    if weight.name in layer_group:
+                        raise ValueError(f"duplicate Qwen4 QSA target {weight.name!r} in layer {layer_id}")
+                    layer_group[weight.name] = source_names
+
+        result = {}
+        for layer_id, targets in groups.items():
+            if set(targets) != _QWEN4_QSA_INDEXER_TARGET_NAMES:
+                raise ValueError(
+                    f"Qwen4 QSA layer {layer_id} must contain the closed indexer triplet; "
+                    f"got {sorted(targets)}"
+                )
+            source_names = frozenset().union(*targets.values())
+            target_keys = frozenset((layer_id, name) for name in targets)
+            if len(source_names) != 3:
+                raise ValueError(
+                    f"Qwen4 QSA layer {layer_id} must map three distinct HF sources, "
+                    f"got {sorted(source_names)}"
+                )
+            result[layer_id] = (source_names, target_keys)
+        return result
+
+    def get_rl_qsa_target_keys(self) -> set[Tuple[int, str]]:
+        return {
+            target
+            for _, target_keys in self.get_rl_qsa_source_groups().values()
+            for target in target_keys
+        }
+
+    def validate_rl_frozen_qsa_source_names(
+        self,
+        required_source_names: Collection[str],
+        expected_source_names: Collection[str],
+    ) -> frozenset[str]:
+        """Permit only complete omitted QSA triplets in a producer's exact source set."""
+        required = set(required_source_names)
+        expected_list = list(expected_source_names)
+        expected = set(expected_list)
+        if len(expected_list) != len(expected):
+            raise ValueError("BEGIN_UPDATE expected_source_names contains duplicates")
+        extra = expected - required
+        if extra:
+            raise ValueError(f"BEGIN_UPDATE expected_source_names has unknown sources: {sorted(extra)[:8]}")
+        missing = required - expected
+        frozen = set()
+        for source_names, _ in self.get_rl_qsa_source_groups().values():
+            overlap = set(source_names) & missing
+            if overlap and overlap != set(source_names):
+                raise ValueError(
+                    "Qwen4 QSA indexer freeze must omit a complete per-layer source triplet; "
+                    f"partial omission={sorted(overlap)}"
+                )
+            if overlap:
+                frozen.update(source_names)
+        unsupported = missing - frozen
+        if unsupported:
+            raise ValueError(
+                "BEGIN_UPDATE may omit only complete frozen QSA indexer triplets; "
+                f"unsupported missing sources={sorted(unsupported)[:8]}"
+            )
+        return frozenset(frozen)
+
+    def get_rl_frozen_qsa_target_keys(
+        self, frozen_source_names: Collection[str]
+    ) -> set[Tuple[int, str]]:
+        frozen = set(frozen_source_names)
+        selected = set()
+        covered = set()
+        for source_names, target_keys in self.get_rl_qsa_source_groups().values():
+            source_names = set(source_names)
+            overlap = source_names & frozen
+            if overlap and overlap != source_names:
+                raise ValueError(
+                    "Qwen4 QSA frozen target lookup requires complete layer triplets; "
+                    f"partial={sorted(overlap)}"
+                )
+            if overlap:
+                selected.update(target_keys)
+                covered.update(source_names)
+        if covered != frozen:
+            raise ValueError(f"unknown frozen QSA source names: {sorted(frozen - covered)[:8]}")
+        return selected
+
     def prepare_weights_from_tensors(
         self,
         named_tensors: Iterable[Tuple[str, torch.Tensor]],
@@ -713,14 +823,30 @@ class ModelLoader:
         max_buffer_bytes: int,
         borrow_singleton_sources: bool = True,
         stacked_experts: Optional[dict[str, range]] = None,
+        frozen_qsa_source_names: Collection[str] = (),
     ) -> Iterator[Tuple[Optional[int], str, torch.Tensor]]:
         """Stream mutable HF inputs through the normal loader, skipping static PLE descriptors."""
         if max_buffer_bytes <= 0:
             raise ValueError("max_buffer_bytes must be positive")
         if self._load_config.is_ft_style_weight or self._load_config.merge_lora:
             raise NotImplementedError("tensor streaming requires unmerged HF weights")
-        groups, _ = self._rl_mutable_groups()
-        group_names = [self._get_rl_group_source_names(group) for group in groups]
+        all_groups, _ = self._rl_mutable_groups()
+        all_group_names = [self._get_rl_group_source_names(group) for group in all_groups]
+        frozen_qsa = set(frozen_qsa_source_names)
+        if frozen_qsa:
+            self.get_rl_frozen_qsa_target_keys(frozen_qsa)
+        groups, group_names = [], []
+        for group, names in zip(all_groups, all_group_names, strict=True):
+            overlap = names & frozen_qsa
+            if overlap and overlap != names:
+                raise ValueError(
+                    f"a loader weight group cannot be partially frozen: group={sorted(names)}, "
+                    f"frozen={sorted(overlap)}"
+                )
+            if overlap:
+                continue
+            groups.append(group)
+            group_names.append(names)
         groups = [
             group._replace(
                 collector=TensorCollector(

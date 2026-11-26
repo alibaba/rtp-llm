@@ -1082,6 +1082,11 @@ class Qwen3NextGatedDeltaNet(nn.Module):
                 )
                 fused_w[:, : self._qkvz_size].copy_(qkvz_w)
                 fused_w[:, self._qkvz_size :].copy_(ba_w)
+            # Refit writes the qkvz/ba dictionary views below. The captured
+            # projection must read the same sleepable storage after those writes.
+            from rtp_llm.model_loader.rl_vmm import pack_if_rl_vmm
+
+            fused_w, _ = pack_if_rl_vmm(fused_w, qkvz_w)
             weights[W.linear_attn_qkvz_w] = fused_w[:, : self._qkvz_size]
             weights[W.linear_attn_ba_w] = fused_w[:, self._qkvz_size :]
             del qkvz_w, ba_w

@@ -1654,6 +1654,7 @@ bool CoordinatorCacheManager::doInit() {
                               group_id);
             return false;
         }
+        pool_config.use_rl_vmm_backing = config_.enable_rl_vmm_sleep && !pool_config.use_pinned_cpu_backing;
         const auto tag        = group.tag;
         const auto group_type = group.policy.group_type;
         appendPoolSummary(pool_summary, has_pool, group_id, tag, group_type, pool_config);

@@ -146,6 +146,20 @@ class GatedResidual(nn.Module):
             self.merged_down_inject = torch.cat(
                 (mix_down, inject, mix_down.new_zeros((padding, hc_hidden))), dim=0
             ).contiguous()
+            # In RL VMM mode the captured GEMM reads this final merged storage.
+            # Move it before the Qwen4 model installs its views/consumers; the
+            # ordinary path remains the same allocation and performs no copy.
+            from rtp_llm.model_loader.rl_vmm import pack_if_rl_vmm
+
+            self.merged_down_inject, vmm_manager = pack_if_rl_vmm(
+                self.merged_down_inject, mix_down
+            )
+            if vmm_manager is not None:
+                tail_start = int(mix_down.shape[0]) + int(hc_mult)
+                if tail_start < self.merged_down_inject.shape[0]:
+                    vmm_manager.register_zero_on_remap(
+                        self.merged_down_inject[tail_start:]
+                    )
 
     def _norm(self, hyper_input: torch.Tensor) -> torch.Tensor:
         return grouped_rms_norm(

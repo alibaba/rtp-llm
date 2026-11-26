@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include <unordered_set>
 #include "rtp_llm/cpp/cache/events/KVCMPublisher.h"
 
 #include <algorithm>
@@ -677,6 +678,26 @@ size_t KVCacheManager::backingBytes() const {
         total_bytes += snapshot.total_blocks * snapshot.block_size_bytes;
     }
     return total_bytes;
+}
+
+size_t KVCacheManager::setPhysicalResidency(bool mapped) {
+    RTP_LLM_CHECK(coordinator_manager_ && kv_cache_config_.enable_rl_vmm_sleep);
+    const auto& pools = coordinator_manager_->groupBlockPools();
+    std::unordered_set<DeviceBlockPool*> unique;
+    for (const auto& pool : pools) {
+        RTP_LLM_CHECK_WITH_INFO(pool && pool->canSleepBacking(),
+                                "KV pool has an external registration or is not on VMM");
+        unique.insert(pool.get());
+    }
+    size_t released = 0;
+    for (auto* pool : unique) {
+        if (mapped) {
+            pool->remapPhysical();
+        } else {
+            released += pool->unmapPhysical();
+        }
+    }
+    return released;
 }
 
 absl::Status KVCacheManager::clearAllCachedBlocks() {

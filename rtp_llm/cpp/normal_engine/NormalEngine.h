@@ -57,6 +57,10 @@ public:
     absl::Status rlSetModelVersion(const std::string& version, int64_t global_step) override;
     std::string  rlModelVersion() const override;
     absl::Status rlClearCache() override;
+    bool         rlWeightsMapped() const override;
+    bool         rlWeightsReady() const override;
+    void         rlSetWeightsMapped(bool mapped) override;
+    size_t       rlSetKVMapping(bool mapped) override;
     bool         rlKVCacheReady() const override;
     size_t       rlKVCacheBytes() const override;
 
@@ -134,6 +138,7 @@ private:
     bool                    rl_paused_              = false;
     bool                    rl_failed_              = false;
     bool                    rl_kv_ready_            = true;
+    bool                    rl_weights_mapped_      = true;
     bool                    rl_weights_initialized_ = true;
     bool                    rl_uses_cuda_graph_     = false;
     std::string             rl_model_version_;

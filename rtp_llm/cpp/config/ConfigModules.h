@@ -154,6 +154,7 @@ constexpr double kDefaultDiskLowWatermarkRatio    = 0.92;
 constexpr double kDefaultDiskHighWatermarkRatio   = 0.97;
 
 struct KVCacheConfig {
+    bool enable_rl_vmm_sleep = false;
     bool                                    reuse_cache           = false;
     std::string                             multi_task_prompt     = "";
     std::string                             multi_task_prompt_str = "";

@@ -690,6 +690,7 @@ class HybridAttentionType:
         ...
 class KVCacheConfig:
     enable_crc: bool
+    enable_rl_vmm_sleep: bool
     enable_device_cache: bool
     enable_memory_cache: bool
     enable_disk_cache: bool

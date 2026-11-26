@@ -34,6 +34,7 @@ inline void checkGroupResidencyBudget(const CacheGroupPolicy& policy, const std:
 }
 
 struct CacheConfig {
+    bool enable_rl_vmm_sleep = false;
 private:
     std::shared_ptr<const CacheTopology> cache_topology;
 

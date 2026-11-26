@@ -19,12 +19,96 @@
 
 #if USING_CUDA
 #include <cuda_runtime.h>
+#include <c10/cuda/driver_api.h>
 #elif USING_ROCM
 #include <hip/hip_runtime.h>
 #include <torch/cuda.h>
 #endif
 
 namespace rtp_llm {
+
+#if USING_CUDA
+// A tensor view can outlive its pool. The tensor's deleter shares this VA reservation,
+// while SLEEP only gives the physical allocation back to the device.
+class CudaVmmPoolBacking {
+public:
+    explicit CudaVmmPoolBacking(size_t bytes) {
+        RTP_LLM_CHECK(cudaGetDevice(&device_) == cudaSuccess);
+        prop_.type = CU_MEM_ALLOCATION_TYPE_PINNED;
+        prop_.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+        prop_.location.id = device_;
+        size_t granularity = 0;
+        C10_CUDA_DRIVER_CHECK(api_->cuMemGetAllocationGranularity_(
+            &granularity, &prop_, CU_MEM_ALLOC_GRANULARITY_RECOMMENDED));
+        RTP_LLM_CHECK(bytes > 0 && granularity && bytes <= std::numeric_limits<size_t>::max() - granularity + 1);
+        size_ = ((bytes + granularity - 1) / granularity) * granularity;
+        C10_CUDA_DRIVER_CHECK(api_->cuMemAddressReserve_(&address_, size_, 0, 0, 0));
+        try {
+            remap();
+        } catch (...) {
+            api_->cuMemAddressFree_(address_, size_);
+            throw;
+        }
+    }
+
+    ~CudaVmmPoolBacking() {
+        if (mapped_) {
+            api_->cuMemUnmap_(address_, size_);
+        }
+        if (handle_) {
+            api_->cuMemRelease_(handle_);
+        }
+        api_->cuMemAddressFree_(address_, size_);
+    }
+
+    void* data() const { return reinterpret_cast<void*>(address_); }
+    int device() const { return device_; }
+
+    size_t unmap() {
+        if (!mapped_) {
+            return 0;
+        }
+        C10_CUDA_DRIVER_CHECK(api_->cuMemUnmap_(address_, size_));
+        mapped_ = false;
+        C10_CUDA_DRIVER_CHECK(api_->cuMemRelease_(handle_));
+        handle_ = 0;
+        return size_;
+    }
+
+    bool remap() {
+        if (mapped_) {
+            return false;
+        }
+        C10_CUDA_DRIVER_CHECK(api_->cuMemCreate_(&handle_, size_, &prop_, 0));
+        try {
+            C10_CUDA_DRIVER_CHECK(api_->cuMemMap_(address_, size_, 0, handle_, 0));
+            mapped_ = true;
+            CUmemAccessDesc access{};
+            access.location = prop_.location;
+            access.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+            C10_CUDA_DRIVER_CHECK(api_->cuMemSetAccess_(address_, size_, &access, 1));
+        } catch (...) {
+            if (mapped_) {
+                api_->cuMemUnmap_(address_, size_);
+                mapped_ = false;
+            }
+            api_->cuMemRelease_(handle_);
+            handle_ = 0;
+            throw;
+        }
+        return true;
+    }
+
+private:
+    c10::cuda::DriverAPI* api_ = c10::cuda::DriverAPI::get();
+    CUmemAllocationProp prop_{};
+    CUmemGenericAllocationHandle handle_{};
+    CUdeviceptr address_{};
+    size_t size_{0};
+    int device_{-1};
+    bool mapped_{false};
+};
+#endif
 
 namespace {
 
@@ -300,7 +384,18 @@ void DeviceBlockPool::initializeCacheBuffer() {
                             "device block pool [%s] cannot use pinned CPU and cudaMalloc backing together",
                             cfg.pool_name.c_str());
 
-    if (cfg.use_pinned_cpu_backing) {
+    if (cfg.use_rl_vmm_backing) {
+#if USING_CUDA
+        RTP_LLM_CHECK(!cfg.use_pinned_cpu_backing && !cfg.use_device_malloc_backing);
+        vmm_backing_ = std::make_shared<CudaVmmPoolBacking>(cfg.total_size_bytes);
+        cache_aligned_buffer_ = torch::from_blob(vmm_backing_->data(), {static_cast<int64_t>(cfg.total_size_bytes)},
+            [owner = vmm_backing_](void*) { (void)owner; },
+            torch::TensorOptions().device(torch::Device(torch::kCUDA, vmm_backing_->device())).dtype(torch::kUInt8));
+        cache_aligned_buffer_.zero_();
+#else
+        RTP_LLM_FAIL("RL VMM backing requires CUDA");
+#endif
+    } else if (cfg.use_pinned_cpu_backing) {
         initializePinnedCpuBuffer();
     } else if (cfg.use_device_malloc_backing) {
         initializeDeviceMallocBuffer();
@@ -336,6 +431,37 @@ void DeviceBlockPool::initializeCacheBuffer() {
                      cfg.total_size_bytes,
                      static_cast<double>(cfg.total_size_bytes) / kBytesPerMB,
                      cfg.memory_layouts.size());
+}
+
+bool DeviceBlockPool::canSleepBacking() const {
+    return !kvcache_reg_mr_ && (vmm_backing_ || config().use_pinned_cpu_backing);
+}
+
+size_t DeviceBlockPool::unmapPhysical() {
+    RTP_LLM_CHECK(canSleepBacking());
+#if USING_CUDA
+    if (!vmm_backing_) {
+        return 0;
+    }
+    const auto released = vmm_backing_->unmap();
+    RTP_LLM_LOG_INFO("RL KV backing unmap device=%d pool=%s va=%p released=%zu",
+                     vmm_backing_->device(), config().pool_name.c_str(), vmm_backing_->data(), released);
+    return released;
+#else
+    return 0;
+#endif
+}
+
+void DeviceBlockPool::remapPhysical() {
+    RTP_LLM_CHECK(canSleepBacking());
+#if USING_CUDA
+    if (vmm_backing_ && vmm_backing_->remap()) {
+        RTP_LLM_CHECK(cache_aligned_buffer_.data_ptr() == vmm_backing_->data());
+        cache_aligned_buffer_.zero_();
+        RTP_LLM_LOG_INFO("RL KV backing remap device=%d pool=%s va=%p",
+                         vmm_backing_->device(), config().pool_name.c_str(), cache_aligned_buffer_.data_ptr());
+    }
+#endif
 }
 
 void DeviceBlockPool::initializePinnedCpuBuffer() {
@@ -574,6 +700,7 @@ bool DeviceBlockPool::init() {
 }
 
 void DeviceBlockPool::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store) {
+    RTP_LLM_CHECK_WITH_INFO(!vmm_backing_, "RDMA memory registration is incompatible with RL VMM sleep");
     if (cache_store) {
         cache_store_ = std::move(cache_store);
     }

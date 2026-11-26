@@ -32,6 +32,7 @@ class RlWeightUpdate:
         *,
         borrow_singleton_sources=True,
         source_dtypes=None,
+        frozen_qsa_source_names=(),
     ):
         self.loader = loader
         self.weights = weights
@@ -48,12 +49,18 @@ class RlWeightUpdate:
             raise ValueError("HF source dtype contract must cover every source exactly")
         self.max_buffer_bytes = max_buffer_bytes
         self.borrow_singleton_sources = bool(borrow_singleton_sources)
+        self.frozen_qsa_source_names = frozenset(frozen_qsa_source_names)
 
         all_targets = self._live_targets()
         frozen_table_keys, frozen_meta_keys = loader.get_rl_static_target_keys(weights)
+        self.frozen_qsa_target_keys = loader.get_rl_frozen_qsa_target_keys(
+            self.frozen_qsa_source_names
+        )
         self.static_table_keys = set(frozen_table_keys)
         self.static_meta_keys = set(frozen_meta_keys)
-        self.static_keys = self.static_table_keys | self.static_meta_keys
+        self.static_keys = (
+            self.static_table_keys | self.static_meta_keys | self.frozen_qsa_target_keys
+        )
         self.targets = {
             key: value for key, value in all_targets.items() if key not in self.static_keys
         }
@@ -95,7 +102,13 @@ class RlWeightUpdate:
         self._static_meta_snapshots = {
             key: all_targets[key].detach().clone() for key in self.static_meta_keys
         }
-        if self.device.type == "cuda" and self._static_meta_snapshots:
+        self._frozen_qsa_snapshots = {
+            key: all_targets[key].detach().clone()
+            for key in self.frozen_qsa_target_keys
+        }
+        if self.device.type == "cuda" and (
+            self._static_meta_snapshots or self._frozen_qsa_snapshots
+        ):
             torch.cuda.current_stream(self.device).synchronize()
 
         self.received = set()
@@ -185,6 +198,7 @@ class RlWeightUpdate:
                     str(self.device),
                     max_buffer_bytes=self.max_buffer_bytes,
                     borrow_singleton_sources=self.borrow_singleton_sources,
+                    frozen_qsa_source_names=self.frozen_qsa_source_names,
                 ):
                     key = (layer, name)
                     if key in self.applied or key not in self.targets:
@@ -257,16 +271,23 @@ class RlWeightUpdate:
                     for key, before in self._static_meta_snapshots.items()
                 ):
                     raise RuntimeError("weight update modified immutable PLE hash metadata")
+                if any(
+                    not torch.equal(live_targets[key], before)
+                    for key, before in self._frozen_qsa_snapshots.items()
+                ):
+                    raise RuntimeError("weight update modified a producer-declared frozen QSA indexer")
 
                 result = {
                     "hf_sources": len(self.received),
                     "internal_tensors": len(self.applied),
                     "static_table_tensors": len(self.static_table_keys),
                     "static_meta_tensors": len(self.static_meta_keys),
+                    "static_qsa_tensors": len(self.frozen_qsa_target_keys),
                 }
                 if is_cuda:
                     torch.cuda.current_stream(self.device).synchronize()
                     self._static_meta_snapshots.clear()
+                    self._frozen_qsa_snapshots.clear()
                     before_trim = self._allocator_memory()
                     started = time.monotonic_ns()
                     gc.collect()

@@ -115,6 +115,7 @@ class BaseModel(object):
         self.moe_pure_tp_preshard = moe_pure_tp_preshard
         self.weight = None
         self.weight_manager = None
+        self._rl_vmm_weight_manager = None
         # Keep the owner alive for the complete lifetime of any non-owning
         # tensor aliases. The alias names are immutable construction metadata;
         # a draft must never silently become an owner during reload/update.
@@ -197,13 +198,29 @@ class BaseModel(object):
             self.weight,
             self.model_weights_loader,
             non_owned_global_weights=self._weight_alias_names,
+            rl_vmm_weight_manager=self._rl_vmm_weight_manager,
         )
         if skip_python_model:
+            if self._rl_vmm_weight_manager is not None:
+                raise ValueError(
+                    "RL VMM sleep requires the Qwen4 Python model and its post-construction owner check"
+                )
             return
         logging.info(
             f"Creating python model for {self.model_config.ckpt_path} on {device_str}"
         )
         self._create_python_model()
+        if self._rl_vmm_weight_manager is not None:
+            if self.py_model is None or not callable(
+                getattr(self.py_model, "initialize", None)
+            ):
+                raise RuntimeError(
+                    "RL VMM sleep requires a constructed Qwen4 Python model with initialize()"
+                )
+            self.py_model._rl_vmm_weight_manager = self._rl_vmm_weight_manager
+            self.py_model._rl_vmm_record_startup = (
+                self.weight_manager.record_rl_vmm_startup
+            )
 
     def _create_python_model(self):
         pass
@@ -219,9 +236,35 @@ class BaseModel(object):
         # record device string for later use (e.g., WeightManager, python model init)
         self.device = device
         aliases = self._resolve_global_weight_aliases()
+        vmm_sleep_enabled = bool(
+            getattr(self.kv_cache_config, "enable_rl_vmm_sleep", False)
+        )
+        if vmm_sleep_enabled:
+            if self.model_config.model_type != "qwen4_exp":
+                raise ValueError("RL VMM sleep is currently supported only for qwen4_exp")
+            if getattr(self.model_config, "is_mtp", False):
+                raise ValueError("RL VMM sleep does not support MTP draft models")
+            if os.environ.get("RTP_LLM_RL_MODE") != "1":
+                raise ValueError("RL VMM sleep requires the existing RTP_LLM_RL_MODE=1 startup mode")
+            if self.model_config.quant_algo.isQuant() or getattr(
+                self.model_config, "online_mxfp8", False
+            ):
+                raise ValueError("RL VMM sleep currently requires unquantized BF16 weights")
+            load_config = self.model_weights_loader.get_load_config()
+            if load_config.compute_dtype != torch.bfloat16:
+                raise ValueError(
+                    f"RL VMM sleep requires BF16 weights, got {load_config.compute_dtype}"
+                )
+            from rtp_llm.model_loader.rl_vmm import RlVmmWeightManager
+
+            self._rl_vmm_weight_manager = RlVmmWeightManager(device)
         self.weight: ModelWeights = self.model_weights_loader.load_weights(
             device=device, global_weight_aliases=aliases
         )
+        if self._rl_vmm_weight_manager is not None:
+            self._rl_vmm_weight_manager.pack_model_weights(
+                self.weight, self.model_weights_loader
+            )
         self._load_custom_module()
 
         # 清理checkpoint加载过程中使用的临时资源，释放host内存

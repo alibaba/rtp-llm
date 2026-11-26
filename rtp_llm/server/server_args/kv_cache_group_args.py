@@ -51,6 +51,13 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help="控制是否激活KV Cache的重用机制, 默认开启显存重用, 其他cache重用需手动开启。设置为 True 启用 , False 关闭",
     )
     kv_cache_group.add_argument(
+        "--enable_rl_vmm_sleep",
+        type=str2bool,
+        default=False,
+        bind_to=(kv_cache_config, "enable_rl_vmm_sleep"),
+        help="Allocate local Qwen4 RL weights and KV on remappable CUDA virtual addresses.",
+    )
+    kv_cache_group.add_argument(
         "--enable_device_cache",
         env_name="ENABLE_DEVICE_CACHE",
         bind_to=(kv_cache_config, "enable_device_cache"),

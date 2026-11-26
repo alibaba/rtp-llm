@@ -9,6 +9,7 @@
 
 #if USING_CUDA
 #include <c10/cuda/CUDACachingAllocator.h>
+#include <cuda_runtime.h>
 #endif
 
 namespace rtp_llm {
@@ -24,7 +25,8 @@ grpc::Status LocalRpcServer::RlControl(grpc::ServerContext*      context,
 
     const auto op = request->operation();
     // Explicitly unsupported contract stubs are side-effect free and never fail the replica.
-    if (op == RlControlRequestPB::SLEEP || op == RlControlRequestPB::WAKE_UP
+    const bool sleep_control = op == RlControlRequestPB::SLEEP || op == RlControlRequestPB::WAKE_UP;
+    if ((sleep_control && !maga_init_params_.kv_cache_config.enable_rl_vmm_sleep)
         || op == RlControlRequestPB::WRITE_BUCKET || op == RlControlRequestPB::RELEASE_KV_CACHE
         || op == RlControlRequestPB::RESTORE_KV_CACHE) {
         return {grpc::StatusCode::UNIMPLEMENTED,
@@ -68,6 +70,32 @@ grpc::Status LocalRpcServer::RlControl(grpc::ServerContext*      context,
         return {grpc::StatusCode::FAILED_PRECONDITION, "cannot pause an active weight transaction"};
     }
 
+    bool wake_weights = false;
+    bool wake_kv = false;
+    if (sleep_control && rl_phase_ != "running" && rl_phase_ != "paused") {
+        return {grpc::StatusCode::FAILED_PRECONDITION, "cannot change memory residency during a refit"};
+    }
+    if (op == RlControlRequestPB::SLEEP && (request->sleep_level() != 2 || request->memory_tags_size() != 0)) {
+        return {grpc::StatusCode::INVALID_ARGUMENT, "sleep requires level 2 and no memory tags"};
+    }
+    if (op == RlControlRequestPB::WAKE_UP) {
+        if (rl_phase_ != "paused" || request->memory_tags_size() == 0) {
+            return {grpc::StatusCode::FAILED_PRECONDITION, "wake requires a paused replica and at least one tag"};
+        }
+        for (const auto& tag : request->memory_tags()) {
+            if (tag == "weights" && !wake_weights) wake_weights = true;
+            else if (tag == "kv_cache" && !wake_kv) wake_kv = true;
+            else return {grpc::StatusCode::INVALID_ARGUMENT, "unknown or repeated wake tag: " + tag};
+        }
+    }
+    if ((op == RlControlRequestPB::BEGIN_UPDATE || op == RlControlRequestPB::WRITE_WEIGHT
+         || op == RlControlRequestPB::COMMIT_UPDATE) && !engine_->rlWeightsMapped()) {
+        return {grpc::StatusCode::FAILED_PRECONDITION, "weights must be mapped before refit"};
+    }
+    if (op == RlControlRequestPB::RESUME && (!engine_->rlWeightsReady() || !engine_->rlKVCacheReady())) {
+        return {grpc::StatusCode::FAILED_PRECONDITION, "resume requires refitted weights and mapped KV"};
+    }
+    uint64_t released_bytes = 0;
     int64_t timeout_ms = request->timeout_ms();
     if (op != RlControlRequestPB::STATUS) {
         const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -102,6 +130,32 @@ grpc::Status LocalRpcServer::RlControl(grpc::ServerContext*      context,
                 require_ok(engine_->rlResume(timeout_ms));
                 rl_phase_ = "running";
                 break;
+            case RlControlRequestPB::SLEEP: {
+                if (rl_phase_ == "running") {
+                    require_ok(engine_->rlPause(timeout_ms));
+                    rl_phase_ = "paused";
+                }
+                require_ok(engine_->rlClearCache());
+#if USING_CUDA
+                RTP_LLM_CHECK(cudaDeviceSynchronize() == cudaSuccess);
+#endif
+                released_bytes = engine_->rlSetKVMapping(false);
+                if (engine_->rlWeightsMapped()) {
+                    py::gil_scoped_acquire gil;
+                    released_bytes += weight_manager_.attr("rl_unmap_weights")().cast<uint64_t>();
+                    engine_->rlSetWeightsMapped(false);
+                }
+                break;
+            }
+            case RlControlRequestPB::WAKE_UP: {
+                if (wake_weights && !engine_->rlWeightsMapped()) {
+                    py::gil_scoped_acquire gil;
+                    weight_manager_.attr("rl_remap_weights")();
+                    engine_->rlSetWeightsMapped(true);
+                }
+                if (wake_kv) engine_->rlSetKVMapping(true);
+                break;
+            }
             case RlControlRequestPB::BEGIN_UPDATE: {
                 if (!engine_->rlPaused()) {
                     throw std::runtime_error("native engine has not acknowledged quiescence");
@@ -189,7 +243,8 @@ grpc::Status LocalRpcServer::RlControl(grpc::ServerContext*      context,
     response->set_quiescent(engine_->rlPaused());
     response->set_kv_cache_ready(engine_->rlKVCacheReady());
     response->set_kv_cache_bytes(engine_->rlKVCacheBytes());
-    response->set_weights_ready(rl_phase_ != "failed");
+    response->set_weights_ready(rl_phase_ != "failed" && rl_phase_ != "updating" && engine_->rlWeightsReady());
+    response->set_released_vmm_bytes(released_bytes);
 #if USING_CUDA
     const auto stats = c10::cuda::CUDACachingAllocator::getDeviceStats(parallel.local_rank);
     response->set_torch_allocated_bytes(stats.allocated_bytes[0].current);

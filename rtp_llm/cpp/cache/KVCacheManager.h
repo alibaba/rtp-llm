@@ -126,6 +126,7 @@ public:
     size_t      maxAvailableTokensNum() const;
     size_t      backingBytes() const;
     absl::Status clearAllCachedBlocks();
+    size_t setPhysicalResidency(bool mapped);
     KVCacheInfo getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const;
     std::vector<KVCachePoolMetricsSnapshot> devicePoolMetricsSnapshots() const;
 
