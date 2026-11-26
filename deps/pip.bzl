@@ -72,14 +72,6 @@ CUDA13_ANNOTATIONS["nvidia-cutlass-dsl-libs-base"] = package_annotation(
         }),
     },
 )
-CUDA13_ANNOTATIONS["flash-attn-4"] = package_annotation(
-    whl_patches = {
-        "@rtp_llm//patches/flash_attn4:0001-quack-packed-sub.patch": json.encode({
-            "whls": ["flash_attn_4-4.0.0b21-py3-none-any.whl"],
-            "patch_strip": 1,
-        }),
-    },
-)
 
 def pip_deps():
     pip_parse(

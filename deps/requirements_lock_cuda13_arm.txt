@@ -690,8 +690,8 @@ filelock==3.32.0 \
     #   blobfile
     #   huggingface-hub
     #   torch
-flash-attn-4 @ https://files.pythonhosted.org/packages/44/1c/7ee1a5949e9b275eb62017d6fcc70e385db161b5341b686a29beb94ea181/flash_attn_4-4.0.0b21-py3-none-any.whl#sha256=8ad0cdd22b279ef2ca8b4e43a4fb33b7dc78936d36c41788bad9d67372056949 \
-    --hash=sha256:8ad0cdd22b279ef2ca8b4e43a4fb33b7dc78936d36c41788bad9d67372056949
+flash-attn-4 @ https://files.pythonhosted.org/packages/73/b3/85de5e9e393f5fc8a83c27258ba21c683c396c5ad79f15713283a801407b/flash_attn_4-4.0.0b27-py3-none-any.whl#sha256=c84fedab172419f87bd1daf019ecd268595f512a5967ff90b74a0a601f578e07 \
+    --hash=sha256:c84fedab172419f87bd1daf019ecd268595f512a5967ff90b74a0a601f578e07
     # via -r deps/requirements_cuda13_arm.txt
 flash-mla==1.0.0+2e5429f \
     --hash=sha256:4e729f23823e02ef95e5c94a1d41b9031e8e4b00682f0c44392f480fed15899e
@@ -2254,7 +2254,6 @@ nvidia-cusparselt-cu13==0.8.0 \
 nvidia-cutlass-dsl==4.7.1 \
     --hash=sha256:765850c74868a0b5a02fefbfc1b380842b64e5f7a1c8b1655e322a3b14c01726
     # via
-    #   --override deps/requirements_cuda13_overrides.txt
     #   -r deps/requirements_cuda13_arm.txt
     #   flash-attn-4
     #   flashinfer-python

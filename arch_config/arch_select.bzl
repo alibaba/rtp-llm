@@ -140,7 +140,7 @@ def subscribe_deps():
 
 def whl_deps():
     # Upgrade CUDA 13 FA4, QuACK and CUTLASS DSL together across both architectures,
-    # including the Bazel patch and the wheels installed in the release images.
+    # using the same wheel in Bazel and release images.
     return extension_wheel_requirements() + select({
         "@rtp_llm//:using_ppu": [
             "deep-gemm-mega@https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/ppu/deep_gemm_mega-2.1.0%2Bppu2.2.0.torch2.11.cu130.r1-cp312-cp312-linux_x86_64.whl#sha256=48039c6fbac4832b8990fdc1ace9ce1b5bfc3a7c4d7fa02a9b5172e01f78c392",
@@ -186,7 +186,7 @@ def whl_deps():
             "apache-tvm-ffi==0.1.12",
             # FlashAttention 3 remains deferred on CUDA13.
             "quack-kernels @ https://github.com/Dao-AILab/quack/archive/77a750c0d9548d4a6e23c0f64062d61b3ea420ff.tar.gz#sha256=ebc940da966e88a05be318c3dc3f650a7359a281642f8f2f77c28ba4e9affa05",
-            "flash-attn-4 @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/rtp_kernel_260612/flash_attn_4-4.0.0b21-py3-none-any.whl#sha256=8ad0cdd22b279ef2ca8b4e43a4fb33b7dc78936d36c41788bad9d67372056949",
+            "flash-attn-4 @ https://files.pythonhosted.org/packages/73/b3/85de5e9e393f5fc8a83c27258ba21c683c396c5ad79f15713283a801407b/flash_attn_4-4.0.0b27-py3-none-any.whl#sha256=c84fedab172419f87bd1daf019ecd268595f512a5967ff90b74a0a601f578e07",
             "nvidia-cutlass-dsl==4.7.1",
             "nvidia-cutlass-dsl-libs-base==4.7.1",
             "torch-c-dlpack-ext==0.1.5",
@@ -206,10 +206,9 @@ def whl_deps():
             "fastsafetensors==0.3.4.dev20260908+ali.fuseshm.gfb2c381b.aone70048596",
             "tilelang==0.1.15+cuda.gita35f8ddf",
             "apache-tvm-ffi==0.1.12",
-            # FlashAttention wheels remain deferred on CUDA13 ARM.
             "fast-hadamard-transform@https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/fast_hadamard_transform-1.0.4.post1-cp310-cp310-linux_aarch64.whl",
             "quack-kernels @ https://github.com/Dao-AILab/quack/archive/77a750c0d9548d4a6e23c0f64062d61b3ea420ff.tar.gz#sha256=ebc940da966e88a05be318c3dc3f650a7359a281642f8f2f77c28ba4e9affa05",
-            "flash-attn-4 @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/rtp_kernel_260612/flash_attn_4-4.0.0b21-py3-none-any.whl#sha256=8ad0cdd22b279ef2ca8b4e43a4fb33b7dc78936d36c41788bad9d67372056949",
+            "flash-attn-4 @ https://files.pythonhosted.org/packages/73/b3/85de5e9e393f5fc8a83c27258ba21c683c396c5ad79f15713283a801407b/flash_attn_4-4.0.0b27-py3-none-any.whl#sha256=c84fedab172419f87bd1daf019ecd268595f512a5967ff90b74a0a601f578e07",
             "nvidia-cutlass-dsl==4.7.1",
             "nvidia-cutlass-dsl-libs-base==4.7.1",
             "torch-c-dlpack-ext==0.1.5",
