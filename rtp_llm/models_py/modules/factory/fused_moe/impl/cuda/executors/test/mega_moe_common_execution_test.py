@@ -400,7 +400,7 @@ class CommonMegaMoeExecutionTest(unittest.TestCase):
                 PACKAGE + ".mega_moe.prepare_fp4_weight_scale_for_deepgemm",
                 side_effect=lambda t, *args: t,
             ), patch(
-                "deep_gemm.transform_weights_for_mega_moe", side_effect=transform
+                "deep_gemm.transform_weights_for_mega_moe", new=transform
             ), patch(
                 "deep_gemm.mega._transpose_sf_for_utccp", side_effect=lambda t: t
             ), patch.object(
