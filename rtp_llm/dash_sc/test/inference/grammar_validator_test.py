@@ -6,6 +6,7 @@ import json
 import multiprocessing
 import os
 import queue
+import runpy
 import signal
 import tempfile
 import threading
@@ -13,6 +14,7 @@ import unittest
 from collections import OrderedDict
 from unittest.mock import MagicMock, patch
 
+from rtp_llm.config import grammar_constraint
 from rtp_llm.dash_sc.inference import grammar_validator as grammar_validator_module
 from rtp_llm.dash_sc.inference.core_dump_control import (
     _XGRAMMAR_SANDBOX_CORE_DUMP_ENV,
@@ -220,13 +222,15 @@ class GrammarValidatorTest(unittest.TestCase):
         self.validator._live = 1
         self.validator._last_spawn_error = ""
 
+    @patch("rtp_llm.config.grammar_constraint.STRIP_STRING_PATTERNS", True)
     def test_json_object_allows_object_or_array(self) -> None:
-        self.assertTrue(
-            self.validator.validate_response_format({"type": "json_object"})
+        self._use_real_grammar_check()
+        self.assertEqual(
+            self.validator.validate_and_norm_response_format({"type": "json_object"}),
+            (True, None),
         )
-        self.validator._check_grammar.assert_called_once_with(
-            "json",
-            {"anyOf": [{"type": "object"}, {"type": "array"}]},
+        self.validator._compile_in_worker.assert_called_once_with(
+            "json", json.dumps({"anyOf": [{"type": "object"}, {"type": "array"}]})
         )
 
     def test_json_schema_preserves_request_schema(self) -> None:
@@ -247,6 +251,146 @@ class GrammarValidatorTest(unittest.TestCase):
         self.validator._inflight_lock = threading.Lock()
         self.validator._inflight = {}
         self.validator._compile_in_worker = MagicMock(return_value=True)
+
+    def test_string_pattern_policy_reads_environment_at_import(self) -> None:
+        key = "DS_LLM_GRAMMAR_STRIP_STRING_PATTERNS"
+        schema = {"type": "string", "pattern": "^[A-Z]{6}$"}
+        for env, expected in (
+            ({}, schema),
+            ({key: "0"}, schema),
+            ({key: "1"}, {"type": "string"}),
+        ):
+            with self.subTest(env=env), patch.dict(os.environ, env, clear=True):
+                normalize = runpy.run_path(grammar_constraint.__file__)[
+                    "without_string_patterns"
+                ]
+                self.assertEqual(normalize("json_schema", schema.copy()), expected)
+
+    def test_pattern_switch_applies_to_nested_string_schemas(self) -> None:
+        self._use_real_grammar_check()
+        item = {"type": "string", "pattern": "^[A-Z]{6}$"}
+        schema = {
+            "$defs": {"code": item},
+            "properties": {
+                "pattern": {"$ref": "#/$defs/code"},
+                "codes": {"type": "array", "items": item},
+                "nullable": {"type": ["string", "null"], "pattern": "(?=ab)"},
+                "implicit": {"pattern": "(?!cd)"},
+            },
+            "patternProperties": {"^key[0-9]$": item},
+            "required": ["pattern"],
+            "enum": [item],
+        }
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {"name": "record", "schema": schema, "strict": True},
+        }
+        with patch("rtp_llm.config.grammar_constraint.STRIP_STRING_PATTERNS", False):
+            self.assertEqual(
+                GrammarValidator.normalize_response_format_for_xgrammar(
+                    response_format
+                ),
+                (None, None),
+            )
+            self.assertEqual(
+                GrammarValidator.normalize_json_for_xgrammar(
+                    {**item, "minLength": 3, "maxLength": 8}
+                ),
+                (json.dumps(item), None),
+            )
+        with patch("rtp_llm.config.grammar_constraint.STRIP_STRING_PATTERNS", True):
+            ok, normalized = self.validator.validate_and_norm_response_format(
+                response_format
+            )
+            self.assertEqual(
+                GrammarValidator.normalize_response_format_for_xgrammar(
+                    response_format
+                ),
+                (normalized, None),
+            )
+        self.assertTrue(ok)
+        expected = copy.deepcopy(response_format)
+        expected_schema = expected["json_schema"]["schema"]
+        expected_schema["$defs"]["code"] = {"type": "string"}
+        expected_schema["properties"]["codes"]["items"] = {"type": "string"}
+        expected_schema["patternProperties"]["^key[0-9]$"] = {"type": "string"}
+        self.assertEqual(json.loads(normalized), expected)
+        self.validator._compile_in_worker.assert_called_once_with(
+            "json", json.dumps(expected_schema)
+        )
+        self.assertEqual(item["pattern"], "^[A-Z]{6}$")
+
+    @patch("rtp_llm.config.grammar_constraint.STRIP_STRING_PATTERNS", False)
+    def test_only_unescaped_lookaheads_outside_character_classes_are_removed(
+        self,
+    ) -> None:
+        for pattern, remove in (
+            (r"^(?=.{6}$)[A-Z]+$", True),
+            (r"^(?!BAD)[A-Z]{6}$", True),
+            (r"^\\(?=A)A$", True),
+            (r"^[(?=)](?=A)A$", True),
+            (r"^[A-Z]{6}$", False),
+            (r"^\(?=A\)$", False),
+            (r"^[\](?=)(?!)]$", False),
+            (r"(?<=A)B(?<!C)$", False),
+        ):
+            with self.subTest(pattern=pattern):
+                schema = {"type": "string", "pattern": pattern}
+                self.assertEqual(
+                    GrammarValidator.normalize_json_for_xgrammar(schema),
+                    (json.dumps({"type": "string"}) if remove else None, None),
+                )
+
+    def test_tag_schemas_strip_patterns_and_regex_keeps_its_pattern(self) -> None:
+        self._use_real_grammar_check()
+        for strip_patterns, pattern in (
+            (False, "^(?!BAD)[A-Z]{6}$"),
+            (True, "^[A-Z]{6}$"),
+        ):
+            with self.subTest(strip_patterns=strip_patterns), patch(
+                "rtp_llm.config.grammar_constraint.STRIP_STRING_PATTERNS",
+                strip_patterns,
+            ):
+                regex = {"type": "regex", "pattern": pattern}
+                self.assertEqual(
+                    self.validator.validate_and_norm_response_format(regex),
+                    (True, None),
+                )
+                self.validator._compile_in_worker.assert_called_with("regex", pattern)
+
+                schema = {"type": "string", "pattern": pattern}
+                legacy = {
+                    "structures": [{"begin": "<x>", "end": "</x>", "schema": schema}],
+                    "triggers": ["<x>"],
+                }
+                modern = {
+                    "type": "structural_tag",
+                    "format": {
+                        "type": "sequence",
+                        "elements": [
+                            regex,
+                            {"type": "json_schema", "json_schema": schema},
+                        ],
+                    },
+                }
+                for tag in (legacy, modern):
+                    with self.subTest(tag=tag):
+                        ok, normalized = (
+                            self.validator.validate_and_norm_structural_tag(tag)
+                        )
+                        self.assertTrue(ok)
+                        self.assertIsNotNone(normalized)
+                        expected = copy.deepcopy(tag)
+                        if tag is legacy:
+                            expected["structures"][0]["schema"] = {"type": "string"}
+                        else:
+                            expected["format"]["elements"][1]["json_schema"] = {
+                                "type": "string"
+                            }
+                        self.assertEqual(json.loads(normalized), expected)
+                        self.validator._compile_in_worker.assert_called_with(
+                            "structural_tag", normalized
+                        )
 
     def test_normalization_preserves_schema_literal_values(self) -> None:
         literal = {"type": "string", "minLength": 1, "maxLength": 2}

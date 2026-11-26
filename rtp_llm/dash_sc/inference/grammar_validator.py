@@ -37,6 +37,11 @@ from typing import Any, BinaryIO, NamedTuple
 
 from jsonschema import Draft7Validator
 
+from rtp_llm.config.grammar_constraint import (
+    SCHEMA_MAP_KEYWORDS,
+    SCHEMA_VALUE_KEYWORDS,
+    without_string_patterns,
+)
 from rtp_llm.config.py_config_modules import GrammarAdmissionConfig
 from rtp_llm.dash_sc.inference.core_dump_control import (
     _configure_xgrammar_sandbox_core_dump_for_current_process,
@@ -243,14 +248,7 @@ def _strip_xgrammar_string_length_bounds(node: Any, *, in_json_schema: bool) -> 
                     normalized = True
 
         for key, value in node.items():
-            if key in (
-                "properties",
-                "patternProperties",
-                "definitions",
-                "$defs",
-                "dependencies",
-                "dependentSchemas",
-            ):
+            if key in SCHEMA_MAP_KEYWORDS:
                 if isinstance(value, dict):
                     for schema in value.values():
                         normalized = (
@@ -259,23 +257,7 @@ def _strip_xgrammar_string_length_bounds(node: Any, *, in_json_schema: bool) -> 
                             )
                             or normalized
                         )
-            elif key in (
-                "items",
-                "additionalItems",
-                "contains",
-                "additionalProperties",
-                "propertyNames",
-                "not",
-                "if",
-                "then",
-                "else",
-                "allOf",
-                "anyOf",
-                "oneOf",
-                "prefixItems",
-                "unevaluatedProperties",
-                "unevaluatedItems",
-            ):
+            elif key in SCHEMA_VALUE_KEYWORDS:
                 normalized = (
                     _strip_xgrammar_string_length_bounds(value, in_json_schema=True)
                     or normalized
@@ -485,9 +467,12 @@ class GrammarValidator:
             normalized = _strip_xgrammar_string_length_bounds(
                 payload, in_json_schema=True
             )
+            schema = without_string_patterns("json_schema", payload)
         except Exception:
             return None, "invalid Draft 7 JSON schema"
-        return (json.dumps(payload) if normalized else None), None
+        return (
+            json.dumps(schema) if normalized or schema is not payload else None
+        ), None
 
     @staticmethod
     def normalize_structural_tag_for_xgrammar(
@@ -502,9 +487,10 @@ class GrammarValidator:
             normalized = _strip_xgrammar_string_length_bounds(
                 payload, in_json_schema=False
             )
+            tag = without_string_patterns("structural_tag", payload)
         except Exception:
             return None, "invalid Draft 7 JSON schema"
-        return (json.dumps(payload) if normalized else None), None
+        return (json.dumps(tag) if normalized or tag is not payload else None), None
 
     @staticmethod
     def normalize_response_format_for_xgrammar(

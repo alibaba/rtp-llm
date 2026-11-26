@@ -1525,6 +1525,47 @@ class ResponseFormatProjectionTest(TestCase):
                 self._validate(cfg)
                 self.assertEqual(cfg.json_schema, {"type": "object"})
 
+    def test_string_pattern_policy_for_json_constraints(self):
+        for pattern, strip_patterns, expected_item in (
+            ("^A", False, {"type": "string", "pattern": "^A"}),
+            ("^(?=A)A", False, {"type": "string"}),
+            ("^A", True, {"type": "string"}),
+        ):
+            schema = {"type": "array", "items": {"type": "string", "pattern": pattern}}
+            original = copy.deepcopy(schema)
+            expected = {"type": "array", "items": expected_item}
+            with self.subTest(pattern=pattern, strip_patterns=strip_patterns), patch(
+                "rtp_llm.config.grammar_constraint.STRIP_STRING_PATTERNS",
+                strip_patterns,
+            ):
+                json_object = GenerateConfig(response_format={"type": "json_object"})
+                self._validate(json_object)
+                self.assertEqual(
+                    json_object.json_schema,
+                    {"anyOf": [{"type": "object"}, {"type": "array"}]},
+                )
+
+                direct = GenerateConfig(json_schema=schema)
+                self._validate(direct)
+                self.assertEqual(direct.json_schema, expected)
+
+                thinking = GenerateConfig(
+                    response_format={
+                        "type": "json_schema",
+                        "json_schema": {"schema": schema},
+                    },
+                    max_thinking_tokens=64,
+                )
+                final = thinking.finalize_response_format(
+                    reasoning_format=self._enable_thinking(thinking)
+                )
+                content = thinking.structural_tag["format"]["elements"][1]
+                self.assertEqual(content["json_schema"], expected)
+                thinking.in_think_mode = False
+                restore_final_constraint(thinking, final)
+                self.assertEqual(thinking.json_schema, expected)
+                self.assertEqual(schema, original)
+
     def test_reasoning_json_schema_wrapped_as_structural_tag(self):
         cfg = GenerateConfig(
             response_format={

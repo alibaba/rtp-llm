@@ -3,7 +3,11 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
-from rtp_llm.config.grammar_constraint import GRAMMAR_FIELD_NAMES, GrammarConstraint
+from rtp_llm.config.grammar_constraint import (
+    GRAMMAR_FIELD_NAMES,
+    GrammarConstraint,
+    without_string_patterns,
+)
 from rtp_llm.config.response_format import ResponseFormat, normalize_think_tag
 
 if TYPE_CHECKING:
@@ -78,6 +82,12 @@ class ResponseFormatPlan:
         from rtp_llm.config.generate_config import ThinkingMode
 
         final_constraint = _resolve_final_constraint(config)
+        if final_constraint is not None:
+            value = without_string_patterns(
+                final_constraint.name, final_constraint.value
+            )
+            if value is not final_constraint.value:
+                final_constraint = GrammarConstraint(final_constraint.name, value)
         thinking_mode = _resolved_thinking_mode(config)
 
         if _uses_reasoning_envelope(config):
