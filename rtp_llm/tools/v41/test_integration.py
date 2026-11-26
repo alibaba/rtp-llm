@@ -20,6 +20,7 @@ from rtp_llm.config.v41_runtime import (
     DSPARK_CROSS_ROUND_OVERLAP_ENV,
     DSPARK_OVERLAP_ENV,
     DSPARK_OVERLAP_FLAGS,
+    DSPARK_SIMULATED_ACCEPT_ENV,
     MEGAMOE_DSPARK_ASYNC_FLAGS,
     V41RuntimeConfig,
     ZERO_OVERHEAD_ENV,
@@ -69,8 +70,8 @@ class IntegrationTest(unittest.TestCase):
         for overrides in ({"dspark_gamma": 0}, {"dspark_gamma": 1}, {"shared_decode_graph": False}):
             with self.assertRaisesRegex(ValueError, ZERO_OVERHEAD_ENV):
                 preset_env("decode", "/weights", parent=env, **{**options, **overrides})
-        with self.assertRaisesRegex(ValueError, "real DSpARK acceptance"):
-            preset_env("decode", "/weights", parent={**env, "RTP_V41_PPU_DSPARK_SIMULATED_ACCEPT_LEN": "3.25"}, **options)
+        with self.assertRaisesRegex(ValueError, "simulated acceptance 3.25"):
+            preset_env("decode", "/weights", parent={**env, DSPARK_SIMULATED_ACCEPT_ENV: "3"}, **options)
         with self.assertRaisesRegex(ValueError, "boolean"):
             preset_env("decode", "/weights", parent={ZERO_OVERHEAD_ENV: "maybe"})
 
@@ -313,10 +314,22 @@ class IntegrationTest(unittest.TestCase):
         self.assertEqual(disabled[DSPARK_OVERLAP_ENV], "1")
         self.assertNotIn(ZERO_OVERHEAD_ENV, disabled)
 
-        flags[DSPARK_CROSS_ROUND_OVERLAP_ENV] = "1"
-        flags["RTP_V41_PPU_DSPARK_SIMULATED_ACCEPT_LEN"] = "3.25"
-        simulated = preset_env("decode", "/weights", **options)
-        self.assertNotIn(ZERO_OVERHEAD_ENV, simulated)
+    def test_zero_overhead_scheduler_simulated_acceptance(self):
+        parent = {
+            "RTP_V41_PPU_MOE_BACKEND": "megamoe",
+            DSPARK_SIMULATED_ACCEPT_ENV: "3.25",
+        }
+        options = dict(shared_decode_graph=True, dspark_gamma=3)
+        for switch in (None, "0", "1"):
+            with self.subTest(switch=switch):
+                env = dict(parent)
+                if switch is not None:
+                    env[ZERO_OVERHEAD_ENV] = switch
+                decode = preset_env("decode", "/weights", parent=env, **options)
+                self.assertEqual(decode[ZERO_OVERHEAD_ENV], switch or "1")
+                self.assertEqual(decode[DSPARK_SIMULATED_ACCEPT_ENV], "3.25")
+                self.assertEqual(decode[DSPARK_OVERLAP_ENV], "1")
+                self.assertEqual(decode[DSPARK_CROSS_ROUND_OVERLAP_ENV], "1")
 
     def test_dspark_cross_round_overlap_honors_explicit_flags(self):
         for role in ("prefill", "decode"):

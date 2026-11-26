@@ -106,10 +106,10 @@ def zero_overhead_flags(env, *, role, speculative, graph, single_host, gamma, ve
         if not explicit:
             return {}
         raise ValueError(f"{ZERO_OVERHEAD_ENV} requires MegaMoE Decode Graph with dense DSpARK gamma=3 and confidence off")
-    if env.get(DSPARK_SIMULATED_ACCEPT_ENV, "0") != "0":
+    if env.get(DSPARK_SIMULATED_ACCEPT_ENV, "0") not in ("0", "3.25"):
         if not explicit:
             return {}
-        raise ValueError(f"{ZERO_OVERHEAD_ENV} requires real DSpARK acceptance")
+        raise ValueError(f"{ZERO_OVERHEAD_ENV} requires real DSpARK acceptance or simulated acceptance 3.25")
     if not explicit and any(
         not env_bool(env, key, default=True)
         for key in (DSPARK_OVERLAP_ENV, DSPARK_CROSS_ROUND_OVERLAP_ENV)

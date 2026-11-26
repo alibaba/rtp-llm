@@ -3251,7 +3251,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             static const bool overlap_verify_epilogue = readEnvFlagOnce(
                 "RTP_V41_PPU_DSPARK_OVERLAP_VERIFY_EPILOGUE", "ppu-dspark-commit", "overlap_verify_epilogue");
             const bool overlap_epilogue = private_draft_commit.staged && use_joint_kv_publish && overlap_verify_epilogue;
-            const bool can_publish_device_acceptance = use_device_acceptance && !simulated_count && overlap_epilogue
+            // The simulated sampler also produces the device acceptance packet consumed by lookahead.
+            const bool can_publish_device_acceptance = use_device_acceptance && overlap_epilogue
+                                                       && (!simulated_count || guard_this_role)
                                                        && speculative_sampler_output.processor_errors.empty();
             if (zero_overhead && can_publish_device_acceptance && dp_ep_span_world && !is_linear_attention_model_
                 && model_input.kv_cache_block_id.defined() && model_input.kv_cache_block_id.is_cuda()
@@ -3316,7 +3318,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                 applyCacheStrideToModelInput(inputs, cache_manager_->getMTPModuleCacheConfig(0));
                 next_proposal.model->prepareAttentionInputs(inputs, true, nullptr, true);
             }
-            if (!simulated_count) {
+            if (!simulated_count || can_publish_device_acceptance) {
                 prepare(model_.get(), private_draft_commit, model_input.prefix_lengths);
             }
             bool proposal_vote_queued = false;
@@ -3546,7 +3548,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             if (direct_draft_commit && !private_draft_commit.staged && !model_input.is_fake_stream) {
                 direct_draft_accepted_rows = accepted;
             }
-            if ((!direct_draft_commit && simulated_count) || defer_commit) {
+            if (!device_kv_ready && ((!direct_draft_commit && simulated_count) || defer_commit)) {
                 RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(defer_verify_publication)");
                 auto draft = std::make_shared<PrivateDraftCommitGuard>();
                 draft->model = std::exchange(private_draft_commit.model, nullptr);
