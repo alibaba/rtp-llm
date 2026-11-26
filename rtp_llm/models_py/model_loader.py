@@ -2688,12 +2688,13 @@ class NewModelLoader:
                 model.to(self.load_config.device)
                 self._validate_loaded_weights(model)
                 validate_borrowed_parameters(model)
+                if hasattr(model, "prepare_resident_weights"):
+                    # Rebind local linear executors to their restored storage.
+                    self._bind_resident_runtime(model)
         if warm_replay:
             # No peer may enter a collective executor constructor while another
             # is still rejecting a rank-local resident tensor or resolving a loan.
             with self._checkpoint_preflight(owner, requested_method, isolated=isolated):
-                if hasattr(model, "prepare_resident_weights"):
-                    self._bind_resident_runtime(model)
                 if not getattr(model, "resident_after_post_load", False):
                     self._run_post_load_hooks(model)
                 validate_borrowed_parameters(model)

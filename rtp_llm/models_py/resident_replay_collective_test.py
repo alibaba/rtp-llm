@@ -25,6 +25,13 @@ class _Owner(RtpModule):
         if config.reject_constructor:
             raise ValueError("incompatible resident constructor")
 
+    def prepare_resident_weights(self):
+        raise AssertionError("replay must not rerun cold preparation")
+
+    def bind_resident_runtime(self):
+        if self.config.reject_binding:
+            raise ValueError("incompatible local runtime binding")
+
     def process_weights_after_loading(self):
         # The NVFP4 DeepEP executor joins such a barrier at construction.
         self.config.hooks.append("entered")
@@ -61,6 +68,7 @@ def _check_replay(rank, stage, parallel, method, owner, fault, expected):
         stage=stage,
         hooks=[],
         reject_constructor=rank == 3 and fault == "constructor",
+        reject_binding=rank == 3 and fault == "binding",
     )
     loader = NewModelLoader(
         config,
@@ -113,6 +121,7 @@ def _worker(rank, rendezvous):
                 for fault, expected in (
                     ("shape", "Resident shape or dtype mismatch"),
                     ("constructor", "incompatible resident constructor"),
+                    ("binding", "incompatible local runtime binding"),
                     ("loan", "missing warm loan"),
                     (None, None),
                 ):
