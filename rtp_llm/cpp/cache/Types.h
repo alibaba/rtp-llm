@@ -75,6 +75,7 @@ struct MallocInfo {
     // Lets the state machine feed the publish-time value instead of racing with the async worker.
     int incr_seq_len_override = -1;
     bool enable_storage_backend = true;
+    std::optional<CacheKeyType> pd_handoff_source;
 
     int incrSeqLen() const;
 };
@@ -135,12 +136,19 @@ struct FreeInfo {
     int64_t request_id = 0;
 };
 
+struct PdHandoffPrefix {
+    CacheKeyType source;
+    size_t       full_blocks;
+};
+
 struct InsertInfo {
     BatchKVCacheResourcePtr batch_kv_cache_resource;
     CompleteTokenIdsPtr     complete_token_ids;
     bool                    is_resident;
     Tier                    target_tier{Tier::DEVICE};
     std::optional<int64_t>  request_id{std::nullopt};
+    // Publish only this many committed FULL pages in the local P/D namespace.
+    std::optional<PdHandoffPrefix> pd_handoff_prefix{std::nullopt};
 };
 
 }  // namespace rtp_llm

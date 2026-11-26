@@ -529,8 +529,14 @@ bool KVCacheManager::captureCompletedDecode(const BatchKVCacheResource& resource
 void KVCacheManager::insertIntoCache(const InsertInfo& insert_info, size_t& resident_prefix_length) {
     RTP_LLM_PROFILE_FUNCTION();
     const int64_t begin_time_us = metrics_reporter_ == nullptr ? 0 : currentTimeUs();
-    dropLastPartialBlock(insert_info.batch_kv_cache_resource);
+    if (!insert_info.pd_handoff_prefix) {
+        dropLastPartialBlock(insert_info.batch_kv_cache_resource);
+    }
     coordinator_manager_->insertIntoCache(insert_info, resident_prefix_length);
+    if (insert_info.pd_handoff_prefix && insert_info.pd_handoff_prefix->full_blocks > 0) {
+        // A waiter can now fit using shared pages even if no request has freed pages yet.
+        notifyAllocationChangeState(allocation_wait_state_);
+    }
     reportCacheOperation(metrics_reporter_, RtpLLMCacheOperationMetricsCollector::OpType::INSERT, begin_time_us);
 }
 

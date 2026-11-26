@@ -34,6 +34,14 @@ inline CacheKeysType cpCanonicalCacheKeys(const std::shared_ptr<CPSlotMapper>& m
     return (mapper && mapper->isSharded()) ? mapper->canonicalCacheKeys(full) : full;
 }
 
+void enterPdHandoffNamespace(CacheKeysType& keys, CacheKeyType source) {
+    // The first key selects the tree branch. Keep transport keys and the
+    // ordinary prefix tree path intact, including entries for other requests.
+    if (!keys.empty()) {
+        keys.front() ^= 0x50445f46554c4c31LL ^ source;
+    }
+}
+
 inline bool
 cpBlockRoundRobinGroup(const std::shared_ptr<CPSlotMapper>& mapper, const CacheConfig& config, std::string_view tag) {
     return mapper && mapper->isSharded() && mapper->blockRoundRobinGroup(config, tag);
@@ -181,9 +189,12 @@ size_t CoordinatorCacheManager::heldRequestBlocks(const MallocInfo& malloc_info,
 }
 
 CoordinatorCacheManager::InitBlockDemand
-CoordinatorCacheManager::initBlockDemand(const MallocInfo& malloc_info, size_t planned_blocks, std::string_view tag) {
+CoordinatorCacheManager::initBlockDemand(const MallocInfo& malloc_info,
+                                         size_t            planned_blocks,
+                                         std::string_view  tag,
+                                         bool              reuse_enabled) {
     const size_t held_blocks = heldRequestBlocks(malloc_info, tag);
-    if (malloc_info.reuse_cache) {
+    if (reuse_enabled) {
         return {held_blocks, planned_blocks};
     }
     // No-reuse planners already describe the full request. Account only for
@@ -497,13 +508,14 @@ CoordinatorCacheManager::prepareKVCache(const CacheKeysType&                 cac
                                         PreparedKVCache&                     prepared,
                                         const std::function<bool(size_t)>&   valid_prefix,
                                         bool                                 enable_storage_backend,
-                                        std::optional<int64_t>               request_id) {
+                                        std::optional<int64_t>               request_id,
+                                        bool                                 device_full_only) {
     if (!block_tree_cache_ || cache_keys.empty()) {
         return nullptr;
     }
     const int            cp_scale = (cp_mapper && cp_mapper->isSharded()) ? cp_mapper->cpSize() : 1;
     BlockTreeMatchResult match_result =
-        block_tree_cache_->match(cache_keys, valid_prefix, enable_storage_backend, request_id);
+        block_tree_cache_->match(cache_keys, valid_prefix, enable_storage_backend, request_id, device_full_only);
     std::shared_ptr<LoadAsyncContext> load_context = std::move(match_result.async_context);
     prepared.decode_sources                        = std::move(match_result.matched_device_decode_sources);
     prepared.matched_device_blocks                 = match_result.matched_device_blocks;
@@ -512,6 +524,9 @@ CoordinatorCacheManager::prepareKVCache(const CacheKeysType&                 cac
     const auto& group_sets = block_tree_cache_->groupSets();
     if (prepared.total_logical_blocks > 0) {
         for (const auto& group_set : group_sets) {
+            if (device_full_only && group_set->groupType() != CacheGroupType::FULL) {
+                continue;
+            }
             for (const auto& tag : group_set->groupTags()) {
                 const size_t reuse_size =
                     loadTargetPosition(prepared.total_logical_blocks - 1, tag, cp_mapper, cp_scale) + 1;
@@ -580,6 +595,9 @@ MallocResult CoordinatorCacheManager::initMallocForCommonLen(const MallocInfo& m
                    static_cast<int>(match_keys.size()) * reuse_unit_tokens, config_.cache_min_replay_tokens)) {
             match_keys.pop_back();
         }
+        if (malloc_info.pd_handoff_source) {
+            enterPdHandoffNamespace(match_keys, *malloc_info.pd_handoff_source);
+        }
         const int64_t begin_us = currentTimeUs();
         load_context           = prepareKVCache(
             match_keys,
@@ -590,7 +608,8 @@ MallocResult CoordinatorCacheManager::initMallocForCommonLen(const MallocInfo& m
                 return tokens->isValidReuseLength(static_cast<int>(count) * reuse_unit_tokens);
             },
             malloc_info.enable_storage_backend,
-            malloc_info.request_id);
+            malloc_info.request_id,
+            malloc_info.pd_handoff_source.has_value());
         match_end_time_us  = currentTimeUs();
         match_cost_time_us = match_end_time_us - begin_us;
         load_attempted     = load_context != nullptr;
@@ -657,6 +676,9 @@ bool CoordinatorCacheManager::materializeInitialBlocks(const MallocInfo& malloc_
 
     if (matched_blocks > 0) {
         for (const GroupSetPtr& group_set : block_tree_cache_->groupSets()) {
+            if (malloc_info.pd_handoff_source && group_set->groupType() != CacheGroupType::FULL) {
+                continue;
+            }
             for (const auto& tag : group_set->groupTags()) {
                 kv_resource.mutableBlockIds(0, tag).resize(
                     loadTargetPosition(matched_blocks - 1, tag, cp_mapper, cp_scale) + 1);
@@ -960,6 +982,11 @@ void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info, siz
             continue;
         }
         CacheKeysType insert_keys = cp_active ? cpCanonicalCacheKeys(cp_mapper, full_keys) : full_keys;
+        if (insert_info.pd_handoff_prefix) {
+            const auto& handoff = *insert_info.pd_handoff_prefix;
+            insert_keys.resize(std::min(insert_keys.size(), handoff.full_blocks));
+            enterPdHandoffNamespace(insert_keys, handoff.source);
+        }
         if (insert_keys.empty()) {
             continue;
         }
@@ -973,6 +1000,9 @@ void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info, siz
                 || group_set->groupTags().size() != group_set->devicePools().size()) {
                 mapping_valid = false;
                 break;
+            }
+            if (insert_info.pd_handoff_prefix && group_set->groupType() != CacheGroupType::FULL) {
+                continue;
             }
             for (auto& per_key_resources : resources) {
                 per_key_resources[group_set_id].device_blocks.assign(group_set->devicePools().size(), NULL_BLOCK_IDX);
@@ -2085,7 +2115,6 @@ CoordinatorCacheManager::evaluateInitCapacityImpl(const MallocInfo&             
     const int   raw_common_seq_len = std::min(malloc_info.complete_token_ids->commonSeqLength(), total_seq_len);
     const int   raw_seq_len        = malloc_info.complete_token_ids->seqLength();
     const int   reserve_step       = malloc_info.complete_token_ids->getReserveStep();
-    const bool  reuse_enabled      = malloc_info.reuse_cache;
 
     size_t total_reservable_blocks = 0;
     {
@@ -2105,6 +2134,9 @@ CoordinatorCacheManager::evaluateInitCapacityImpl(const MallocInfo&             
     for (int group_id = 0; group_id < static_cast<int>(kv_cache_groups_.size()); ++group_id) {
         const size_t group_index            = static_cast<size_t>(group_id);
         const auto&  tag                    = topology_groups[group_index].tag;
+        const bool   reuse_enabled = malloc_info.reuse_cache
+                                   || (malloc_info.pd_handoff_source
+                                       && topology_groups[group_index].policy.group_type == CacheGroupType::FULL);
         const int    group_common_seq       = cpEffectiveSeqLenForReserve(cp_mapper, config_, tag, raw_common_seq_len);
         const int    group_seq_len          = cpEffectiveSeqLenForReserve(cp_mapper, config_, tag, raw_seq_len);
         const int    group_reuse_blocks_len = malloc_info.batch_kv_cache_resource->blocksNum(0, tag);
@@ -2121,7 +2153,7 @@ CoordinatorCacheManager::evaluateInitCapacityImpl(const MallocInfo&             
 
         const auto&  pool         = group_block_pools_[group_index];
         const size_t total_blocks = pool->totalBlocksNum();
-        const auto   demand       = initBlockDemand(malloc_info, planned_blocks, tag);
+        const auto   demand       = initBlockDemand(malloc_info, planned_blocks, tag, reuse_enabled);
         const size_t group_reserve_blocks =
             (!kv_cache_groups_[group_index]->isReservable()
              || topology_groups[group_index].policy.explicit_block_num > 0 || total_reservable_blocks == 0) ?

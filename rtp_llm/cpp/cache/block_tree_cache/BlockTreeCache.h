@@ -144,7 +144,8 @@ public:
     BlockTreeMatchResult match(const CacheKeysType&               cache_keys,
                                const std::function<bool(size_t)>& valid_prefix           = {},
                                bool                               enable_storage_backend = true,
-                               std::optional<int64_t>             request_id             = {});
+                               std::optional<int64_t>             request_id             = {},
+                               bool                               device_full_only       = false);
     void                 insert(const CacheKeysType&                              cache_keys,
                                 const std::vector<std::vector<GroupSetResource>>& resources,
                                 Tier                                              target_tier);

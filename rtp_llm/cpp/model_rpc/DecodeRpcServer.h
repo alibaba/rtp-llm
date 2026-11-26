@@ -86,6 +86,9 @@ public:
 
         grpc::ServerContext* server_context;
         int32_t              prefill_cp_size;
+        // Carries the destination allocation through asynchronous RDMA callbacks.
+        // It also identifies the rank-local FULL-prefix handoff path.
+        std::shared_ptr<KVCacheResource> destination_ref;
 
     private:
         GroupBlockIds group_block_ids_;
@@ -98,6 +101,7 @@ private:
     struct LoadCacheResult {
         ErrorInfo error_info;
         size_t    loaded_cache_block_count = 0;
+        size_t    transferred_bytes       = 0;
 
         bool ok() const {
             return error_info.ok();
@@ -112,6 +116,7 @@ private:
 
     void initThreadPool();
     void prepareGenerateContext(DecodeGenerateContext& decode_context);
+    std::optional<CacheKeyType> handoffPrefixSource(DecodeGenerateContext& decode_context) const;
     void allocateResource(DecodeGenerateContext& decode_context);
     void loadCacheFromPrefill(DecodeGenerateContext& decode_context);
     void localGenerate(DecodeGenerateContext& decode_context);
@@ -149,7 +154,8 @@ private:
                                                                size_t                  reuse_block_size,
                                                                bool                    use_hybrid,
                                                                size_t                  group_seq_size_per_block,
-                                                               size_t                  base_seq_size_per_block);
+                                                               size_t                  base_seq_size_per_block,
+                                                               bool                    share_full_prefix = false);
     static size_t    cacheKeysPerPhysicalBlock(size_t group_seq_size_per_block, size_t base_seq_size_per_block);
     static size_t    keyBlocksPerLogicalBlock(const CacheGroupPolicy& policy,
                                               size_t                  group_seq_size_per_block,

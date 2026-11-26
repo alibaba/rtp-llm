@@ -119,7 +119,7 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
 
     if (total_blocks > 0) {
         if (reuseCache() && !stream_->hasErrorWithoutLock() && stream_->getStatus() == StreamState::FINISHED) {
-            const Tier target_tier = storeTarget();
+            const Tier target_tier = pd_handoff_full_prefix_ ? Tier::NONE : storeTarget();
             RTP_LLM_LOG_DEBUG("tryReleaseKVBlock: stream=%ld, storing cache, curBlocksNum=%d, target_tier=%s",
                               stream_->streamId(),
                               total_blocks,
@@ -182,10 +182,8 @@ void StreamCacheResource::publishReuseLengths(int total, int host, int disk, int
 }
 
 // TODO(xinfei.sxf) 保证这个函数的原子性
-absl::Status StreamCacheResource::initKVBlock() {
+absl::Status StreamCacheResource::initKVBlock(std::optional<CacheKeyType> pd_handoff_source) {
     RTP_LLM_PROFILE_FUNCTION();
-    // Decode side: first malloc should NOT use device cache, regardless of runtime config.
-    // Follow-up allocations (incrKVBlock) use enableCacheLookup().
     if (fake_inited_) {
         return absl::InternalError("fake inited not allow to incr block");
     }
@@ -202,14 +200,17 @@ absl::Status StreamCacheResource::initKVBlock() {
     const bool is_first_malloc = (batch_kv_cache_resource_->curBlocksNum() == 0);
 
     if (disable_first_malloc_reuse && is_decode_role && is_first_malloc) {
-        malloc_info.reuse_cache         = false;
-        malloc_info.enable_cache_lookup = false;
+        malloc_info.reuse_cache = false;
+        if (reuseCache() && enableDeviceCache()) {
+            malloc_info.pd_handoff_source = pd_handoff_source;
+        }
+        malloc_info.enable_cache_lookup = malloc_info.pd_handoff_source.has_value();
     } else {
         malloc_info.reuse_cache         = reuseCache();
         malloc_info.enable_cache_lookup = enableCacheLookup();
     }
     malloc_info.enable_remove_skipped_blocks = false;
-    malloc_info.enable_storage_backend       = !skip_remote_cache_;
+    malloc_info.enable_storage_backend       = !skip_remote_cache_ && !malloc_info.pd_handoff_source;
 
     // The allocator performs lookup and page preparation before backend.read.
     // Keep an attempt-local steady timestamp; report only after a real remote
@@ -242,6 +243,7 @@ absl::Status StreamCacheResource::initKVBlock() {
     }
 
     // HOST/DISK reuse is published after the asynchronous load completes.
+    pd_handoff_full_prefix_ = malloc_info.pd_handoff_source.has_value();
     publishReuseLengths(result.reuse_len, 0, 0, 0);
     adoptDecodeReuse(std::move(result.decode_sources), result.reuse_len);
     allocator_load_context_ = std::move(result.async_context);

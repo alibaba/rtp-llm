@@ -52,7 +52,8 @@ public:
     BlockTreeMatchResult matchLocked(const CacheKeysType&               cache_keys,
                                      const std::function<bool(size_t)>& valid_prefix           = {},
                                      bool                               enable_storage_backend = true,
-                                     std::optional<int64_t>             request_id             = {});
+                                     std::optional<int64_t>             request_id             = {},
+                                     bool                               device_full_only       = false);
     BlockIndicesType     matchedBlocksForGroup(std::string_view                      group_tag,
                                                const std::vector<MultiNodeResource>& matched_resources) const;
     bool                 abortPendingLoad(const std::shared_ptr<AsyncContext>& context);
@@ -62,7 +63,8 @@ private:
     DecodeReuseSourcesPtr snapshotDecodeSources(const std::vector<TreeNode*>& path, size_t prefix) const;
     bool                 validMatch(std::vector<TreeNode*>&            path,
                                     std::vector<bool>&                 candidate_valid,
-                                    const std::function<bool(size_t)>& valid_prefix) const;
+                                    const std::function<bool(size_t)>& valid_prefix,
+                                    bool                               device_full_only) const;
     void                 collectReuseTimeSnapshots(TreeNode*                                            node,
                                                    size_t                                               group_set_id,
                                                    uint64_t                                             access_seq,
@@ -72,7 +74,8 @@ private:
                                            const CacheKeysType&               cache_keys,
                                            const std::function<bool(size_t)>& valid_prefix,
                                            bool                               enable_storage_backend,
-                                           std::optional<int64_t>             request_id);
+                                           std::optional<int64_t>             request_id,
+                                           bool                               device_full_only);
     StorageRequest       makeStorageRequest(const CacheKeysType& cache_keys, size_t local_matched_blocks_num) const;
     bool                 commitLoad(const std::shared_ptr<LoadAsyncContext>& context);
     void                 abortLoadLocked(const std::vector<TransferDescriptor>& load_descs,

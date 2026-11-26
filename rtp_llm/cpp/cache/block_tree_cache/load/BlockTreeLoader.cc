@@ -107,14 +107,16 @@ DecodeReuseSourcesPtr BlockTreeLoader::snapshotDecodeSources(const std::vector<T
 BlockTreeMatchResult BlockTreeLoader::matchLocked(const CacheKeysType&               cache_keys,
                                                   const std::function<bool(size_t)>& valid_prefix,
                                                   bool                               enable_storage_backend,
-                                                  std::optional<int64_t>             request_id) {
+                                                  std::optional<int64_t>             request_id,
+                                                  bool                               device_full_only) {
     if (cache_keys.empty()) {
         RTP_LLM_LOG_DEBUG("empty cache_keys, returning empty result");
         return {};
     }
 
     std::vector<TreeNode*> path = tree_->findNode(cache_keys);
-    BlockTreeMatchResult result = createMatchResult(path, cache_keys, valid_prefix, enable_storage_backend, request_id);
+    BlockTreeMatchResult result =
+        createMatchResult(path, cache_keys, valid_prefix, enable_storage_backend, request_id, device_full_only);
     RTP_LLM_LOG_DEBUG("matched %zu device blocks, cache_keys=%zu, tree_nodes=%zu",
                       result.matched_device_blocks,
                       cache_keys.size(),
@@ -124,19 +126,23 @@ BlockTreeMatchResult BlockTreeLoader::matchLocked(const CacheKeysType&          
 
 bool BlockTreeLoader::validMatch(std::vector<TreeNode*>&            path,
                                  std::vector<bool>&                 candidate_valid,
-                                 const std::function<bool(size_t)>& valid_prefix) const {
+                                 const std::function<bool(size_t)>& valid_prefix,
+                                 bool                               device_full_only) const {
     size_t valid_block_count = 0;
     candidate_valid.reserve(path.size());
     std::vector<std::unique_ptr<MatchValidator>> match_validators;
     match_validators.reserve(tree_->groupSets().size());
     for (const GroupSetPtr& group_set : tree_->groupSets()) {
-        match_validators.push_back(group_set->createMatchValidator());
+        match_validators.push_back(device_full_only && group_set->groupType() != CacheGroupType::FULL ?
+                                       nullptr :
+                                       group_set->createMatchValidator());
     }
     for (size_t i = 0; i < path.size(); ++i) {
         TreeNode* node             = path[i];
         bool      all_groups_valid = true;
         for (size_t group_set_id = 0; group_set_id < tree_->groupSets().size(); ++group_set_id) {
-            if (!match_validators[group_set_id]->validate(node->group_set_resources[group_set_id])) {
+            if (match_validators[group_set_id]
+                && !match_validators[group_set_id]->validate(node->group_set_resources[group_set_id])) {
                 all_groups_valid = false;
             }
         }
@@ -205,10 +211,11 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
                                                         const CacheKeysType&               cache_keys,
                                                         const std::function<bool(size_t)>& valid_prefix,
                                                         bool                               enable_storage_backend,
-                                                        std::optional<int64_t>             request_id) {
+                                                        std::optional<int64_t>             request_id,
+                                                        bool                               device_full_only) {
     BlockTreeMatchResult result;
     std::vector<bool>    candidate_valid;
-    if (!path.empty() && !validMatch(path, candidate_valid, valid_prefix) && !storage_backend_) {
+    if (!path.empty() && !validMatch(path, candidate_valid, valid_prefix, device_full_only) && !storage_backend_) {
         return result;
     }
     const int64_t  access_time_us = currentTimeUs();
@@ -222,6 +229,9 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
         bool all_groups_ready = true;
         for (size_t group_set_id = 0; group_set_id < tree_->groupSets().size(); ++group_set_id) {
             const GroupSetPtr& group_set = tree_->groupSets()[group_set_id];
+            if (device_full_only && group_set->groupType() != CacheGroupType::FULL) {
+                continue;
+            }
             const size_t reuse_count = std::min(group_set->computeReuseBlockCount(candidate_count), candidate_count);
             for (size_t i = candidate_count - reuse_count; i < candidate_count; ++i) {
                 if (!path[i]->group_set_resources[group_set_id].hasCompleteDeviceValue()) {
@@ -243,6 +253,9 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
     std::vector<bool>               joined_loads;
     for (size_t group_set_id = 0; group_set_id < tree_->groupSets().size(); ++group_set_id) {
         const GroupSetPtr& group_set = tree_->groupSets()[group_set_id];
+        if (device_full_only && group_set->groupType() != CacheGroupType::FULL) {
+            continue;
+        }
         const size_t       ready_reuse_count =
             std::min(group_set->computeReuseBlockCount(result.matched_device_blocks), result.matched_device_blocks);
         MultiNodeResource matched_device_resource{group_set_id, Tier::DEVICE};
@@ -255,6 +268,10 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
         if (!matched_device_resource.node_blocks.empty()) {
             group_set->referenceBlocks(matched_device_resource);
             result.matched_device_resources.push_back(std::move(matched_device_resource));
+        }
+
+        if (device_full_only) {
+            continue;
         }
 
         const size_t logical_reuse_count = std::min(group_set->computeReuseBlockCount(path.size()), path.size());
@@ -284,7 +301,7 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
     }
 
     StorageRequest storage_request;
-    if (enable_storage_backend && storage_backend_ && path.size() < cache_keys.size()) {
+    if (!device_full_only && enable_storage_backend && storage_backend_ && path.size() < cache_keys.size()) {
         storage_request = makeStorageRequest(cache_keys, path.size());
     }
     const bool use_storage     = !storage_request.empty();

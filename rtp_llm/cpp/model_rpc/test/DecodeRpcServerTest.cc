@@ -1167,6 +1167,19 @@ TEST(DecodeRpcServerTest, CompactStateGroupLoadsGlobalTailKeysIntoCanonicalSlots
     EXPECT_EQ(keyOffsetPairs(plan), (KeyOffsetPairs{{9, 4}, {10, 5}}));
 }
 
+TEST(DecodeRpcServerTest, PdHandoffSkipsSharedFullPagesAndLoadsPrivateGroups) {
+    const auto full = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    const auto swa = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    const auto state = makeCompactStatePolicy(/*active_tail_blocks=*/2);
+    EXPECT_EQ(keyOffsetPairs(DecodeRpcServer::buildGroupLoadPlan(full, 8, 8, 6, true, 256, 256, true)),
+              (KeyOffsetPairs{{6, 6}, {7, 7}}));
+    EXPECT_EQ(DecodeRpcServer::buildGroupLoadPlan(full, 8, 8, 6, true, 256, 256).size(), 8u);
+    EXPECT_EQ(keyOffsetPairs(DecodeRpcServer::buildGroupLoadPlan(swa, 8, 8, 7, true, 256, 256, true)),
+              (KeyOffsetPairs{{6, 6}, {7, 7}}));
+    EXPECT_EQ(keyOffsetPairs(DecodeRpcServer::buildGroupLoadPlan(state, 4, 8, 7, true, 512, 256, true)),
+              (KeyOffsetPairs{{5, 2}, {7, 3}}));
+}
+
 TEST(DecodeRpcServerTest, CompactStateGroupLoadPlanMatchesProducerStorePlan) {
     // The consumer must project exactly like the producer: same (key, offset)
     // pairs, or the decode reads a key the prefill never registered.

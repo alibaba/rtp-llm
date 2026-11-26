@@ -38,7 +38,7 @@ public:
     void                 init(int batch_size);
     bool                 hasCacheKeys() const;
     const CacheKeysType& cacheKeys(int32_t batch_id) const;
-    absl::Status         initKVBlock();
+    absl::Status         initKVBlock(std::optional<CacheKeyType> pd_handoff_source = std::nullopt);
     absl::Status         waitForAllocatorLoad();
     // Empty while pending; a terminal status preserves retryable materialization failures.
     std::optional<absl::Status> pollAllocatorLoad();
@@ -163,6 +163,7 @@ private:
     bool                             fake_inited_           = false;
     bool                             resource_released_     = false;
     bool                             skip_remote_cache_     = false;
+    bool                             pd_handoff_full_prefix_ = false;
     std::shared_ptr<AsyncContext>    allocator_load_context_;
     RtpLLMCacheReuseMetricsCollector cache_reuse_metrics_;
     int64_t                          malloc_begin_time_us_    = 0;

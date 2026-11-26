@@ -198,7 +198,10 @@ protected:
     static size_t heldRequestBlocks(const MallocInfo& malloc_info, std::string_view tag);
     // Reuse-aware interpretation of planner output: reuse planners report
     // additional demand; no-reuse planners report the full footprint.
-    static InitBlockDemand initBlockDemand(const MallocInfo& malloc_info, size_t planned_blocks, std::string_view tag);
+    static InitBlockDemand initBlockDemand(const MallocInfo& malloc_info,
+                                           size_t            planned_blocks,
+                                           std::string_view  tag,
+                                           bool              reuse_enabled);
     // Estimate peak additional blocks for one sequence resource.
     virtual int   estimatePeakNeedBlocks(const KVCacheResource& kv_cache_resource,
                                          int                    seq_len,
@@ -256,7 +259,8 @@ protected:
                                                      PreparedKVCache&                     prepared,
                                                      const std::function<bool(size_t)>&   valid_prefix           = {},
                                                      bool                                 enable_storage_backend = true,
-                                                     std::optional<int64_t>               request_id             = {});
+                                                     std::optional<int64_t>               request_id             = {},
+                                                     bool                                 device_full_only       = false);
     bool                              materializeInitialBlocks(const MallocInfo& malloc_info,
                                                                PreparedKVCache&  prepared,
                                                                LoadAsyncContext* context,

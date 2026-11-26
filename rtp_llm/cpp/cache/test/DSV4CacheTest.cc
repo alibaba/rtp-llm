@@ -3060,6 +3060,81 @@ TEST_F(DSV4AllocatorTest, InsertIntoCacheAllGroups) {
 // Prefix cache: Flash config insertIntoCache skips HCA_STATE.
 // ============================================================
 
+TEST_F(DSV4AllocatorTest, PdHandoffSharesOnlyPublishedFullPages) {
+    const auto config = makeDSV4AllocatorConfig(/*use_flash=*/true);
+    auto allocator = std::make_shared<TestDSV4HybridTypeAllocator>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+    const int span = config.seq_size_per_block;
+    const auto allocate = [&](const CacheKeysType& keys, CacheKeyType source) {
+        auto resource = std::make_shared<BatchKVCacheResource>();
+        resource->resetBatchSize(1);
+        initDsv4BatchGroups(*resource, config);
+        resource->setBatchCacheKeys(0, keys);
+        auto tokens = std::make_shared<CompleteTokenIds>(1, 1, 4096, span);
+        auto input = std::make_shared<GenerateInput>();
+        input->input_ids = torch::arange(3 * span, torch::kInt32);
+        input->generate_config = std::make_shared<GenerateConfig>();
+        tokens->init(input);
+        MallocInfo info;
+        info.batch_kv_cache_resource = resource;
+        info.complete_token_ids = tokens;
+        info.reuse_cache = false;
+        info.enable_cache_lookup = true;
+        info.enable_storage_backend = false;
+        info.pd_handoff_source = source;
+        return std::make_tuple(resource, tokens, allocator->malloc(info));
+    };
+
+    auto [first, first_tokens, first_result] = allocate({101, 102, 103}, 1);
+    ASSERT_TRUE(first_result.success);
+    EXPECT_EQ(first_result.reuse_len, 0);
+    auto [uncommitted, uncommitted_tokens, uncommitted_result] = allocate({101, 102, 104}, 1);
+    ASSERT_TRUE(uncommitted_result.success);
+    EXPECT_EQ(uncommitted_result.reuse_len, 0);
+    size_t resident_prefix = 0;
+    allocator->insertIntoCache({first, first_tokens, false, Tier::DEVICE, 1, PdHandoffPrefix{1, 2}}, resident_prefix);
+    allocator->insertIntoCache(
+        {uncommitted, uncommitted_tokens, false, Tier::DEVICE, 2, PdHandoffPrefix{1, 2}}, resident_prefix);
+    allocator->free({uncommitted, uncommitted_tokens});
+    auto [incompatible, incompatible_tokens, incompatible_result] = allocate({101, 102, 104}, 2);
+    ASSERT_TRUE(incompatible_result.success);
+    EXPECT_EQ(incompatible_result.reuse_len, 0);
+    allocator->free({incompatible, incompatible_tokens});
+
+    auto [second, second_tokens, second_result] = allocate({101, 102, 104}, 1);
+    ASSERT_TRUE(second_result.success);
+    EXPECT_FALSE(second_result.async_context);
+    EXPECT_EQ(second_result.reuse_len, 2 * span);
+    EXPECT_EQ(allocator->blockTreeCacheOwner()->match({101, 102}).matched_device_blocks, 0u);
+
+    const auto pools = allocator->groupBlockPools();
+    for (size_t gid = 0; gid < config.groupTags().size(); ++gid) {
+        const auto& tag = config.groupTags()[gid];
+        const auto& a = first->blocks(0, tag);
+        const auto& b = second->blocks(0, tag);
+        ASSERT_EQ(a.size(), b.size()) << tag;
+        for (size_t i = 0; i < a.size(); ++i) {
+            if (config.group(tag).policy.group_type == CacheGroupType::FULL && i < 2) {
+                EXPECT_EQ(a[i], b[i]) << tag;
+                EXPECT_EQ(pools[gid]->refCount(a[i]), 3u) << tag;
+            } else if (!isNullBlockIdx(a[i])) {
+                EXPECT_NE(a[i], b[i]) << tag;
+            }
+        }
+    }
+    allocator->free({first, first_tokens});
+    for (size_t gid = 0; gid < config.groupTags().size(); ++gid) {
+        const auto& tag = config.groupTags()[gid];
+        if (config.group(tag).policy.group_type == CacheGroupType::FULL) {
+            EXPECT_EQ(pools[gid]->refCount(second->blocks(0, tag).front()), 2u);
+        }
+    }
+    allocator->free({second, second_tokens});
+    for (const auto& pool : pools) {
+        EXPECT_EQ(pool->referencedBlocksNum(), 0u);
+    }
+}
+
 TEST_F(DSV4AllocatorTest, FlashInsertIntoCacheAllGroups) {
     auto config    = makeDSV4AllocatorConfig(/*use_flash=*/true);
     auto allocator = std::make_shared<TestDSV4HybridTypeAllocator>(config, AllocationType::DEVICE);
