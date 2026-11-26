@@ -3,12 +3,15 @@
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 from safetensors.torch import save_file
 
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers
 from rtp_llm.models.kimi_k25.kimi_k25 import KimiK25
 from rtp_llm.models.kimi_linear.kimi_linear import KimiLinear
 from rtp_llm.models.qwen3_next.qwen3_next import Qwen3Next, Qwen35Dense, Qwen35Moe
@@ -44,13 +47,13 @@ from rtp_llm.tools.convert.ft_export_job import create_ft_export_job
 from rtp_llm.tools.convert.ft_export_metadata import generate_ft_index
 
 
-class HybridFTRoundTrip(unittest.TestCase):
-    def _check(self, source, ft, config, wrapper, weights, *, stage_only=False):
-        config.ckpt_path = str(source)
-        config.data_type = "fp32"
-        config.lora_infos = {}
-        save_file(weights, str(source / "model.safetensors"))
+def _export_ft(source, output, config, wrapper, tp=1):
+    config.ckpt_path = str(source)
+    config.lora_infos = {}
+    for rank in range(tp):
         pc = ParallelismConfig()
+        pc.tp_size = pc.ffn_tp_size = pc.world_size = pc.local_world_size = tp
+        pc.tp_rank = pc.ffn_tp_rank = pc.world_rank = pc.local_rank = rank
         pc.ep_size = 1
         descriptor = SimpleNamespace(
             model_config=config,
@@ -65,8 +68,73 @@ class HybridFTRoundTrip(unittest.TestCase):
             loader_recycle_handles=False,
             _init_custom_module=lambda: None,
         )
-        create_ft_export_job(descriptor).dump_weight_as_ft_style("cpu", str(ft))
-        generate_ft_index(str(ft), {})
+        with patch("sys.argv", ["weights_convert"]):
+            create_ft_export_job(descriptor).dump_weight_as_ft_style("cpu", str(output))
+    generate_ft_index(str(output), {"TP_SIZE": tp, "EP_SIZE": 1, "DP_SIZE": 1})
+
+
+class HybridFTRoundTrip(unittest.TestCase):
+    def test_qwen35_gated_q_peft_hf_and_ft(self):
+        # The reference merges PEFT into the original HF tensor. No
+        # expected tensor is constructed using the loader's split helper.
+        cfg = _config(tie=False)
+        cfg.model_type = "qwen35_dense"
+        cfg.expert_num = cfg.moe_k = cfg.moe_inter_size = cfg.moe_style = 0
+        weights = {
+            key.replace("model.", "model.language_model.", 1): value
+            for key, value in _dense_weights(True).items()
+        }
+        q = "model.language_model.layers.0.self_attn.q_proj"
+        a = torch.tensor([[1., 2., 3., 4.], [4., -2., 1., 0.]])
+        b = torch.arange(16, dtype=torch.float32).view(8, 2) - 7
+        with tempfile.TemporaryDirectory() as tmp:
+            src, ref, adapter = (Path(tmp) / name for name in ("hf", "ref", "adapter"))
+            for path in (src, ref, adapter):
+                path.mkdir()
+            save_file(weights, str(src / "model.safetensors"))
+            save_file(
+                {**weights, q + ".weight": weights[q + ".weight"] + (b @ a) * 1.5},
+                str(ref / "model.safetensors"),
+            )
+            (adapter / "adapter_config.json").write_text(json.dumps({"r": 2, "lora_alpha": 3}))
+
+            def save_adapter(output_factor):
+                save_file({
+                    f"base_model.model.{q}.lora_A.weight": a,
+                    f"base_model.model.{q}.lora_B.weight": output_factor,
+                }, str(adapter / "adapter_model.safetensors"))
+
+            save_adapter(b)
+            for tp in (1, 2):
+                ft = Path(tmp) / f"ft{tp}"
+                _export_ft(src, ft, cfg, Qwen35Dense, tp=tp)
+                for rank in range(tp):
+                    config = _load_config(tp_size=tp, tp_rank=rank)
+                    reference = NewModelLoader(cfg, config, str(ref)).load().state_dict()
+                    for folder in (src, ft):
+                        for backend in checkpoint_readers("scratch", "fastsafetensors"):
+                            load = replace(config, load_method=backend, force_cpu_load_weights=True)
+                            with self.subTest(tp=tp, rank=rank, path=folder.name, backend=backend):
+                                owner = NewModelLoader(cfg, load, str(folder)).load(
+                                    startup_lora=("gated", str(adapter))
+                                )
+                                actual = owner.state_dict()
+                                self.assertEqual(actual.keys(), reference.keys())
+                                for key in actual:
+                                    torch.testing.assert_close(actual[key], reference[key], rtol=0, atol=0)
+
+            # A Q-only factor is not a valid PEFT factor for this HF
+            # checkpoint. Never publish half of what the adapter requested.
+            save_adapter(b[:4])
+            with self.assertRaisesRegex(ValueError, "must have 8 rows"):
+                NewModelLoader(cfg, _load_config(), str(src)).load(
+                    startup_lora=("truncated", str(adapter))
+                )
+
+    def _check(self, source, ft, config, wrapper, weights, *, stage_only=False):
+        config.data_type = "fp32"
+        save_file(weights, str(source / "model.safetensors"))
+        _export_ft(source, ft, config, wrapper)
         if stage_only:
             # GDN explicitly has no CPU execution backend. Exercise the two real
             # parameter importers and completeness checks, not a fake CPU service.

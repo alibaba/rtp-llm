@@ -952,6 +952,14 @@ class Qwen3NextForCausalLM(ResidentDecoderOwner, DecoderHandlerOwner, Qwen3NextM
     def owns_lora_checkpoint_target(self, mapped_name):
         return self._owns_mapped_layer(mapped_name)
 
+    def split_lora_checkpoint_outputs(self, name, b):
+        # W and the output factor B share the HF [head, Q/gate, dim, :]
+        # row order. Split B before TP; both local projections use the same A.
+        if name.endswith(".self_attn.q_proj.weight"):
+            yield from self._split_q_gate_yield(name, b, self._cfg)
+        else:
+            yield name, b
+
     def resolve_checkpoint_load_plan(self, name, shape):
         if name in getattr(getattr(self, "handler_heads", None), "sources", ()):
             return None, None

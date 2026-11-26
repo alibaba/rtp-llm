@@ -33,18 +33,29 @@ def validate_attention_lora_checkpoint_target(name: str, model_name: str) -> Non
         )
 
 
-def model_lora_checkpoint_updates(model, loader, path: str, *, calibrated_ft=False) -> list[LoRAUpdate]:
-    """Resolve PEFT factors through the model's existing TP/fusion owners."""
-    module_names = {module: name for name, module in model.named_modules()}
+def _local_lora_projections(model, loader, path):
+    """Resolve the source projection before any leaf performs TP sharding."""
     validate_target = getattr(model, "validate_lora_checkpoint_target", None)
     owns_target = getattr(model, "owns_lora_checkpoint_target", None)
-    grouped = {}
+    split_outputs = getattr(model, "split_lora_checkpoint_outputs", None)
     for update in read_lora_checkpoint(path):
         mapped = loader._mapped_checkpoint_name(model, update.target)
         if callable(validate_target):
             validate_target(mapped)
         if callable(owns_target) and not owns_target(mapped):
             continue
+        if split_outputs is None:
+            yield mapped, update
+        else:
+            for projection, b in split_outputs(mapped, update.b):
+                yield projection, LoRAUpdate(update.target, update.a, b, update.scale)
+
+
+def model_lora_checkpoint_updates(model, loader, path: str, *, calibrated_ft=False) -> list[LoRAUpdate]:
+    """Resolve PEFT factors through the model's existing TP/fusion owners."""
+    module_names = {module: name for name, module in model.named_modules()}
+    grouped = {}
+    for mapped, update in _local_lora_projections(model, loader, path):
         if calibrated_ft:
             target = model.resolve_lora_projection(mapped)
         else:
