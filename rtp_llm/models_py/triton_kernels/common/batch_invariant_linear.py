@@ -69,12 +69,24 @@ _TILES = (
     (16, 64, 4, 3),
 )
 
-_tile_cache: dict[int, tuple[int, int, int, int]] = {}
+_tile_cache: dict[
+    tuple[int, int, tuple[tuple[int, int, int, int], ...]], tuple[int, int, int, int]
+] = {}
 
 
-def _select_tile(device: torch.device) -> tuple[int, int, int, int]:
+def select_fitting_tile(
+    tiles: tuple[tuple[int, int, int, int], ...], bk: int, device: torch.device
+) -> tuple[int, int, int, int]:
+    """Pick the first (BM, BN, warps, stages) whose staged tiles fit shared memory.
+
+    Each pipeline stage holds a BM x BK and a BK x BN BF16 tile. Triton may
+    shorten the pipeline for small tiles, so this bound is conservative. The
+    choice depends only on the device, never on M, so it cannot break batch
+    invariance; callers are responsible for every rung being numerically equal.
+    """
     index = device.index if device.index is not None else torch.cuda.current_device()
-    tile = _tile_cache.get(index)
+    key = (index, bk, tiles)
+    tile = _tile_cache.get(key)
     if tile is None:
         properties = torch.cuda.get_device_properties(index)
         budget = getattr(
@@ -82,14 +94,12 @@ def _select_tile(device: torch.device) -> tuple[int, int, int, int]:
             "shared_memory_per_block_optin",
             properties.shared_memory_per_block,
         )
-        # (BM x BK) + (BK x BN) BF16 elements per pipeline stage. Triton may
-        # shorten the pipeline for small tiles, so this is an upper bound.
         tile = next(
             candidate
-            for candidate in _TILES
-            if (candidate[0] * _BK + _BK * candidate[1]) * 2 * candidate[3] <= budget
+            for candidate in tiles
+            if (candidate[0] * bk + bk * candidate[1]) * 2 * candidate[3] <= budget
         )
-        _tile_cache[index] = tile
+        _tile_cache[key] = tile
     return tile
 
 
@@ -116,7 +126,7 @@ def batch_invariant_linear(
     rows = x.reshape(-1, k).contiguous()
     bias = bias.contiguous() if bias is not None else None
     m = rows.size(0)
-    bm, bn, warps, stages = _select_tile(x.device)
+    bm, bn, warps, stages = select_fitting_tile(_TILES, _BK, x.device)
     bn = min(bn, 16) if n <= 16 else bn
     _linear[(triton.cdiv(m, bm), triton.cdiv(n, bn))](
         rows,

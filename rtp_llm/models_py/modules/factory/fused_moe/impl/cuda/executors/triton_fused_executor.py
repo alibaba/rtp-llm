@@ -31,14 +31,43 @@ from .decode_capabilities import decode_capabilities
 
 # Fixed BF16 tile for both Qwen3.6 expert GEMMs on SM103. As in vLLM's
 # batch-invariant MoE selection, each CTA reduces K once in the same order.
-_BATCH_INVARIANT_CONFIG = {
-    "BLOCK_SIZE_M": 16,
-    "BLOCK_SIZE_N": 128,
-    "BLOCK_SIZE_K": 64,
-    "GROUP_SIZE_M": 1,
-    "num_warps": 8,
-    "num_stages": 4,
-}
+# Only BLOCK_SIZE_K is load-bearing for invariance: BLOCK_SIZE_M, BLOCK_SIZE_N
+# and GROUP_SIZE_M decide which CTA owns an output row, not the order in which
+# that row's products accumulate. Measured on an idle B300 over the
+# Qwen3.8-Flash-Next EP8 shard (64 local experts, top-10, w1 [64, 1280, 2560],
+# w2 [64, 2560, 640]), every rung below is bit-identical to the last one, the
+# historical 16x128 tile, while the first rung runs 1.33x faster at M=512 and
+# 3.58x at M=4096. The rung is chosen from the device's opt-in shared memory so
+# a pre-Hopper GPU still compiles; the choice never depends on M.
+_BATCH_INVARIANT_BLOCK_K = 64
+_BATCH_INVARIANT_TILES = (
+    (128, 256, 8, 4),
+    (128, 256, 8, 3),
+    (128, 128, 8, 4),
+    (128, 128, 8, 3),
+    (64, 128, 8, 3),
+    (32, 128, 4, 3),
+    (16, 128, 8, 4),
+    (16, 64, 4, 3),
+)
+
+
+def _batch_invariant_config(device) -> Dict[str, Any]:
+    from rtp_llm.models_py.triton_kernels.common.batch_invariant_linear import (
+        select_fitting_tile,
+    )
+
+    block_m, block_n, warps, stages = select_fitting_tile(
+        _BATCH_INVARIANT_TILES, _BATCH_INVARIANT_BLOCK_K, device
+    )
+    return {
+        "BLOCK_SIZE_M": block_m,
+        "BLOCK_SIZE_N": block_n,
+        "BLOCK_SIZE_K": _BATCH_INVARIANT_BLOCK_K,
+        "GROUP_SIZE_M": 1,
+        "num_warps": warps,
+        "num_stages": stages,
+    }
 
 
 class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
@@ -138,7 +167,7 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
 
         # Config selection for both GEMMs
         if self._batch_invariant:
-            config1 = config2 = _BATCH_INVARIANT_CONFIG
+            config1 = config2 = _batch_invariant_config(hidden_states.device)
         else:
             config1 = get_default_config(M, self.E, self.N, K, top_k)
             config2 = get_default_config(M, self.E, K, self.inter_size, top_k)
