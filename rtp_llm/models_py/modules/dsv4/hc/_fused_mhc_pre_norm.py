@@ -25,6 +25,18 @@ _MHC_POST_MULT = 2.0
 _MAX_FUSED_HIDDEN = 8192
 _UE8M0_GROUP_SIZE = 128
 
+# The fused kernel launches one CTA per token row and processes the whole
+# BLOCK_H=4096 row (4 mHC lanes + RMSNorm + optional UE8M0 quant) inside that
+# single CTA. Below this token count the kernel is latency/occupancy bound
+# (decode M_local=3..4 uses 3-4 CTAs out of 148 SMs) and is measurably slower
+# than the unfused TileLang pre + RMSNorm pair (~18.3us vs ~10us per call on
+# the Cluster 2 SM103 decode trace, 46 calls per decode step => ~0.4ms/step
+# regression). Above it the single-pass-over-residual fusion wins on HBM
+# traffic (~25-28% less row traffic than the 3-kernel unfused chain), so
+# daytime chunked prefill (M >= 10K) keeps the fused path. 1024 sits at the
+# measured/measured-modelled crossover with a 16x decode margin.
+_FUSE_MIN_TOKENS = 1024
+
 
 @functools.cache
 def _is_sm100_device_index(device_idx: int) -> bool:
@@ -310,8 +322,16 @@ def can_use_fused_mhc_pre_norm(
     norm: Any,
     *,
     quant_ue8m0: bool = False,
+    min_tokens: int = _FUSE_MIN_TOKENS,
 ) -> bool:
-    """Return True when mHC pre + RMSNorm (+ optional UE8M0 quant) can fuse."""
+    """Return True when mHC pre + RMSNorm (+ optional UE8M0 quant) can fuse.
+
+    ``min_tokens`` dispatches the fused kernel away from small batches: the
+    per-row CTA design only pays off once enough rows exist to cover the SM
+    array, so decode-scale inputs fall back to the unfused TileLang pre +
+    RMSNorm chain (see ``_FUSE_MIN_TOKENS``). Tests may pass
+    ``min_tokens=0`` to exercise the fused kernel on tiny inputs.
+    """
     if triton is None or torch.is_grad_enabled():
         return False
     if not isinstance(x, torch.Tensor) or not x.is_cuda:
@@ -329,6 +349,8 @@ def can_use_fused_mhc_pre_norm(
         return False
     dim = int(hc_unit.dim)
     if int(x.shape[-2]) != _MHC_MULT or int(x.shape[-1]) != dim:
+        return False
+    if min_tokens > 0 and x.numel() // (_MHC_MULT * dim) < min_tokens:
         return False
     if (_MHC_MULT * dim) % 256 != 0 or dim > _MAX_FUSED_HIDDEN:
         return False

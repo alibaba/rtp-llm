@@ -278,6 +278,49 @@ class TestHCImpl(unittest.TestCase):
         self.assertFalse(can_use_fused_mhc_pre_norm(x, unit, norm))
 
     @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+    def test_fused_mhc_pre_norm_gate_dispatches_small_batches_to_unfused(self) -> None:
+        """Decode-scale batches must fall back to the unfused chain.
+
+        The fused kernel is one CTA per token row; at decode M_local=3..4 it
+        runs 18.3us/call vs ~10us unfused on SM103 (46 calls/step), so the
+        default gate rejects small batches and only prefill-scale token
+        counts keep the fused path.
+        """
+        from rtp_llm.models_py.modules.base.cuda.norm import RMSNorm
+        from rtp_llm.models_py.modules.dsv4.hc import can_use_fused_mhc_pre_norm
+
+        major, _ = torch.cuda.get_device_capability()
+        if major != 10:
+            self.skipTest("requires SM100/SM103 for tf32_hc_prenorm_gemm")
+
+        dim = 4096
+        fn, base, scale = _weights(4, dim, device="cuda")
+        unit = TileLangHCUnit(
+            fn,
+            base,
+            scale,
+            dim=dim,
+            hc_mult=4,
+            hc_sinkhorn_iters=3,
+            norm_eps=1e-6,
+            hc_eps=1e-6,
+        )
+        norm = RMSNorm(torch.ones(dim, device="cuda", dtype=torch.bfloat16), eps=1e-6)
+        with torch.inference_mode():
+            x_small = torch.randn(4, 4, dim, device="cuda", dtype=torch.bfloat16)
+            self.assertFalse(can_use_fused_mhc_pre_norm(x_small, unit, norm))
+            self.assertFalse(
+                can_use_fused_mhc_pre_norm(x_small, unit, norm, quant_ue8m0=True)
+            )
+            # min_tokens=0 restores the raw capability gate for tiny inputs.
+            if can_use_fused_mhc_pre_norm(x_small, unit, norm, min_tokens=0):
+                x_large = torch.randn(1024, 4, dim, device="cuda", dtype=torch.bfloat16)
+                self.assertTrue(can_use_fused_mhc_pre_norm(x_large, unit, norm))
+                # A 4D [B, S, hc, dim] tensor counts B*S rows, not B.
+                x_4d = torch.randn(2, 600, 4, dim, device="cuda", dtype=torch.bfloat16)
+                self.assertTrue(can_use_fused_mhc_pre_norm(x_4d, unit, norm))
+
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
     def test_fused_mhc_pre_norm_matches_separate_tilelang_and_rmsnorm(self) -> None:
         from rtp_llm.models_py.modules.base.cuda.norm import RMSNorm
         from rtp_llm.models_py.modules.dsv4._fused_rmsnorm_fp8_quant_triton import (
@@ -311,7 +354,7 @@ class TestHCImpl(unittest.TestCase):
                 norm = RMSNorm(w, eps=1e-6)
                 x = torch.randn(*shape, device="cuda", dtype=torch.bfloat16)
                 with torch.inference_mode():
-                    if not can_use_fused_mhc_pre_norm(x, unit, norm):
+                    if not can_use_fused_mhc_pre_norm(x, unit, norm, min_tokens=0):
                         self.skipTest("tf32_hc_prenorm_gemm unavailable in DeepGEMM")
                     x_pre_ref, post_ref, comb_ref = unit.pre(x)
                     if x_pre_ref.dim() > 2:
