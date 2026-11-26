@@ -45,6 +45,9 @@ from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.dsv4 import _profiler
 from rtp_llm.models_py.modules.dsv4._fused_rmsnorm_rope_triton import fused_rmsnorm_rope
 from rtp_llm.models_py.modules.dsv4.cp import build_cp_context_for_forward
+from rtp_llm.models_py.modules.dsv4.fp8._dspark_meta_triton import (
+    try_compute_dspark_decode_meta,
+)
 from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import (
     require_pool_tokens_per_block,
 )
@@ -666,6 +669,9 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         block_table: Optional[torch.Tensor],
         tokens_per_block: int,
         graph_metadata: Any,
+        precomputed_meta: Optional[
+            tuple[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor]]
+        ] = None,
     ) -> torch.Tensor:
         batch_size, gamma, _ = x.shape
         if batch_size == 0:
@@ -681,16 +687,45 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             # Project and insert all query KVs before attention so each query
             # can read every other query position, including future noise.
             qkv = decode_compute_qkv(attn, x, query_positions.reshape(-1))
-            query_req_ids = torch.arange(
-                batch_size, device=x.device, dtype=torch.long
-            ).repeat_interleave(gamma)
-            query_slots = self._global_pool_slots(
-                block_table,
-                query_req_ids,
-                query_positions.reshape(-1),
-                entries_per_block,
-                tokens_per_block,
-            )
+            fused_meta = None
+            if (
+                precomputed_meta is not None
+                and precomputed_meta[0] == entries_per_block
+            ):
+                fused_meta = precomputed_meta[1]
+            elif gamma == int(self._gen_num_per_cycle):
+                # Fallback when layers diverge in entries_per_block or direct
+                # unit-test calls bypass _forward_layers.
+                fused_meta = try_compute_dspark_decode_meta(
+                    block_table,
+                    query_positions,
+                    prefix_lengths,
+                    active_requests,
+                    gamma=gamma,
+                    window=int(self._v4_args.window_size),
+                    entries_per_block=entries_per_block,
+                    tokens_per_block=tokens_per_block,
+                )
+            if fused_meta is not None:
+                query_slots, global_indices, topk_length = fused_meta
+            else:
+                query_req_ids = torch.arange(
+                    batch_size, device=x.device, dtype=torch.long
+                ).repeat_interleave(gamma)
+                query_slots = self._global_pool_slots(
+                    block_table,
+                    query_req_ids,
+                    query_positions.reshape(-1),
+                    entries_per_block,
+                    tokens_per_block,
+                )
+                global_indices, topk_length = self._build_noncausal_indices(
+                    prefix_lengths,
+                    active_requests,
+                    block_table,
+                    entries_per_block,
+                    tokens_per_block,
+                )
             decode_write_swa_fp8(
                 kv=qkv.kv,
                 slot_mapping=query_slots,
@@ -700,13 +735,6 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                 head_dim=int(attn.head_dim),
             )
 
-            global_indices, topk_length = self._build_noncausal_indices(
-                prefix_lengths,
-                active_requests,
-                block_table,
-                entries_per_block,
-                tokens_per_block,
-            )
             topk = int(global_indices.shape[-1])
             global_indices = global_indices.view(batch_size, gamma, topk).contiguous()
 
@@ -741,6 +769,35 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         hidden = self.v4.embed(query_ids)
         hidden = hidden.unsqueeze(2).repeat(1, 1, self.v4.hc_mult, 1)
 
+        # Hoist DSpARK SWA decode metadata computation once per draft step
+        # rather than launching once per draft layer (all layers share SWA_KV
+        # pool geometry and inputs).
+        precomputed_meta = None
+        batch_size, gamma = int(query_positions.shape[0]), int(query_positions.shape[1])
+        if (
+            batch_size > 0
+            and block_table is not None
+            and gamma == int(self._gen_num_per_cycle)
+            and self.v4.layers
+        ):
+            with self._swa_cache_bound(0, block_table) as (
+                _attn0,
+                epb0,
+                _pool0,
+            ):
+                maybe_meta = try_compute_dspark_decode_meta(
+                    block_table,
+                    query_positions,
+                    prefix_lengths,
+                    active_requests,
+                    gamma=gamma,
+                    window=int(self._v4_args.window_size),
+                    entries_per_block=epb0,
+                    tokens_per_block=tokens_per_block,
+                )
+                if maybe_meta is not None:
+                    precomputed_meta = (epb0, maybe_meta)
+
         # The hyper-connection choreography lives in Block.forward_decode;
         # only the attention call is substituted with the non-causal
         # fixed-block variant.
@@ -760,6 +817,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                         block_table,
                         tokens_per_block,
                         graph_metadata,
+                        precomputed_meta=precomputed_meta,
                     ),
                 )
 
