@@ -49,6 +49,50 @@ def _linear(
     )
 
 
+_BK = 64
+
+# BM and BN only decide which CTA owns an output element; they never change the
+# order in which that element's products are summed. Only BK and the ascending
+# K traversal have to stay fixed for batch invariance, so the tile can be sized
+# for the machine. Every entry below is measured bit-identical to the last one,
+# the historical (16, 64) tile, on SM103 across M, both weight strides, FP32 and
+# BF16 output, and K/N that do not divide the tile. Descending order; the first
+# tile whose staged A and B buffers fit the device's opt-in shared memory wins,
+# so a pre-Hopper GPU keeps a small tile instead of failing to compile.
+_TILES = (
+    (128, 256, 8, 4),
+    (128, 256, 8, 3),
+    (128, 128, 8, 4),
+    (128, 128, 8, 3),
+    (64, 128, 8, 3),
+    (32, 128, 4, 3),
+    (16, 64, 4, 3),
+)
+
+_tile_cache: dict[int, tuple[int, int, int, int]] = {}
+
+
+def _select_tile(device: torch.device) -> tuple[int, int, int, int]:
+    index = device.index if device.index is not None else torch.cuda.current_device()
+    tile = _tile_cache.get(index)
+    if tile is None:
+        properties = torch.cuda.get_device_properties(index)
+        budget = getattr(
+            properties,
+            "shared_memory_per_block_optin",
+            properties.shared_memory_per_block,
+        )
+        # (BM x BK) + (BK x BN) BF16 elements per pipeline stage. Triton may
+        # shorten the pipeline for small tiles, so this is an upper bound.
+        tile = next(
+            candidate
+            for candidate in _TILES
+            if (candidate[0] * _BK + _BK * candidate[1]) * 2 * candidate[3] <= budget
+        )
+        _tile_cache[index] = tile
+    return tile
+
+
 def batch_invariant_linear(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -72,7 +116,8 @@ def batch_invariant_linear(
     rows = x.reshape(-1, k).contiguous()
     bias = bias.contiguous() if bias is not None else None
     m = rows.size(0)
-    bm, bn, bk = 16, 16 if n <= 16 else 64, 64
+    bm, bn, warps, stages = _select_tile(x.device)
+    bn = min(bn, 16) if n <= 16 else bn
     _linear[(triton.cdiv(m, bm), triton.cdiv(n, bn))](
         rows,
         weight,
@@ -84,9 +129,9 @@ def batch_invariant_linear(
         *weight.stride(),
         bm,
         bn,
-        bk,
+        _BK,
         bias is not None,
-        num_warps=4,
-        num_stages=3,
+        num_warps=warps,
+        num_stages=stages,
     )
     return output
