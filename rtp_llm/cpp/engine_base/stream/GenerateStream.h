@@ -54,6 +54,7 @@ struct StreamUpdateInfo {
         GenerationPrefillCudaGraphStatus::NOT_REQUESTED};
     // Appended to preserve existing aggregate initializers. CPU context rows.
     const torch::Tensor custom_output{};
+    torch::Tensor       raw_logprobs{};
 };
 
 struct StreamSpecUpdateInfo {

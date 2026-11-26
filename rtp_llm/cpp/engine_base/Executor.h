@@ -25,6 +25,11 @@ public:
         return absl::OkStatus();
     }
 
+    /** Drain async dispatch and synchronize device work at an RL pause boundary. */
+    virtual absl::Status quiesce() {
+        return absl::UnimplementedError("executor does not support RL quiescence");
+    }
+
     // Batch-recording helpers shared by executors. They cannot live in
     // rtp_llm/cpp/observability: engine_base/stream already depends on that
     // library (RecordedBatch in StreamGroups, identity publishing in

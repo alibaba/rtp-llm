@@ -116,6 +116,7 @@ bool NormalGenerateStream::canDeferTerminalOutput(const StreamUpdateInfo& update
            && !config.return_prompt_logits && !config.return_hidden_states && !config.return_all_hidden_states
            && !config.return_softmax_probs && config.return_all_probs == ReturnAllProbsMode::NONE
            && config.calculate_loss == 0 && !loss_.defined() && !custom_output_.defined()
+           && !sampling_state_.raw_logprobs.defined()
            && !update_info.prompt_logits.has_value()
            && (!update_info.cum_log_probs.defined()
                || (cumLogProbs().device().is_cpu() && cumLogProbs().scalar_type() == torch::kFloat32
@@ -198,6 +199,7 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
     const auto&     cum_log_probs_ = sampling_state_.cum_log_probs;
     const auto&     all_probs_     = sampling_state_.all_probs;
     const auto&     softmax_probs_ = sampling_state_.softmax_probs;
+    const auto&     raw_logprobs_  = sampling_state_.raw_logprobs;
     generate_results.request_id    = request_id_;
 
     // CompleteTokenIds has already applied this step, so currentBatchSize is the output row count.
@@ -276,6 +278,10 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
                 generate_output.aux_info.softmax_probs =
                     softmax_probs_[i].narrow(0, last_output_pos_, output_len).clone();
             }
+            if (calculateSoftmaxProbs() && raw_logprobs_.defined()) {
+                generate_output.aux_info.raw_logprobs =
+                    raw_logprobs_[i].narrow(0, last_output_pos_, output_len).clone();
+            }
             if (update_info.cum_log_probs.defined()) {
                 generate_output.aux_info.cum_log_probs = cum_log_probs_.narrow(0, i, 1).cpu().clone();
             }
@@ -352,6 +358,21 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
         RTP_LLM_CHECK(update_info.softmax_probs.size(1) == update_info.num_new_tokens);
         setSoftmaxProbs(
             update_info.softmax_probs, seqLength() - update_info.num_new_tokens, update_info.src_batch_indices);
+    }
+    if (calculateSoftmaxProbs() && update_info.raw_logprobs.defined()) {
+        auto& raw_logprobs_ = sampling_state_.raw_logprobs;
+        auto  raw_cpu       = update_info.raw_logprobs.to(torch::kCPU, torch::kFloat32).contiguous();
+        RTP_LLM_CHECK(raw_cpu.dim() == 2);
+        RTP_LLM_CHECK(raw_cpu.size(0) == static_cast<int64_t>(currentBatchSize()));
+        RTP_LLM_CHECK(raw_cpu.size(1) == update_info.num_new_tokens);
+        if (!raw_logprobs_.defined()) {
+            raw_logprobs_ = torch::zeros({(int64_t)maxBatchSize(), (int64_t)maxTokenNum()}, torch::kFloat32);
+        }
+        const int start_pos = seqLength() - update_info.num_new_tokens;
+        RTP_LLM_CHECK(start_pos >= 0 && start_pos + update_info.num_new_tokens <= raw_logprobs_.size(1));
+        raw_logprobs_.narrow(0, 0, currentBatchSize())
+            .narrow(1, start_pos, update_info.num_new_tokens)
+            .copy_(raw_cpu);
     }
 
     finished_ = needFinish();

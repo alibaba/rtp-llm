@@ -1,8 +1,11 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <functional>
 #include <memory>
+#include <mutex>
+#include <string>
 #include "absl/status/status.h"
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/engine_base/TorchProfiler.h"
@@ -47,6 +50,16 @@ public:
     bool updateEplbConfig(const EPLBConfig& config) override;
     void startTimelineProfiling(const std::string& trace_name, int start_step, int num_steps) override;
 
+    bool         rlEnabled() const override;
+    bool         rlPaused() const override;
+    absl::Status rlPause(int64_t timeout_ms) override;
+    absl::Status rlResume(int64_t timeout_ms) override;
+    absl::Status rlSetModelVersion(const std::string& version, int64_t global_step) override;
+    std::string  rlModelVersion() const override;
+    absl::Status rlClearCache() override;
+    bool         rlKVCacheReady() const override;
+    size_t       rlKVCacheBytes() const override;
+
 private:
     static int calculateReserveStep(const EngineInitParams& params);
 
@@ -83,6 +96,9 @@ private:
 
     void initExecutor(const EngineInitParams& params);
 
+    absl::Status rlCheckpoint();
+    bool         rlAdmitStreamLocked(const GenerateStreamPtr& stream);
+
     bool isMTPEagle() override;
     bool isEagle() override;
     bool isDSpark() override;
@@ -109,6 +125,19 @@ private:
     int64_t                                       trace_control_epoch_ = 0;
     int64_t                                       trace_model_step_id_ = 0;
     bool                                          mtp_profile_prefill_started_ = false;
+
+    mutable std::mutex      rl_mutex_;
+    std::condition_variable rl_cv_;
+    bool                    rl_enabled_             = false;
+    bool                    rl_world_vote_          = false;
+    bool                    rl_pause_requested_     = false;
+    bool                    rl_paused_              = false;
+    bool                    rl_failed_              = false;
+    bool                    rl_kv_ready_            = true;
+    bool                    rl_weights_initialized_ = true;
+    bool                    rl_uses_cuda_graph_     = false;
+    std::string             rl_model_version_;
+    int64_t                 rl_global_step_         = 0;
 };
 
 }  // namespace rtp_llm

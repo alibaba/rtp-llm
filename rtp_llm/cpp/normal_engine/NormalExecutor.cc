@@ -996,4 +996,17 @@ absl::Status NormalExecutor::dispatchOutputAsync(const StreamGroups&            
     return absl::OkStatus();
 }
 
+absl::Status NormalExecutor::quiesce() {
+    dispatch_runner_.sync(cuda_graph::graphGetCurrentStream());
+    cuda_graph::graphDeviceSynchronize();
+    // Drop staging references after the last asynchronous dispatcher has joined.
+    buffer_holder_.release();
+    buffer_holder_.release();
+    if (model_) {
+        model_->releaseBuffers();
+        model_->releaseBuffers();
+    }
+    return absl::OkStatus();
+}
+
 }  // namespace rtp_llm

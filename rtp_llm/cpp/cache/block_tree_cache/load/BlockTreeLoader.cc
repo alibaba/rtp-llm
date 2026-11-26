@@ -281,6 +281,14 @@ bool BlockTreeLoader::abortPendingLoad(const std::shared_ptr<AsyncContext>& cont
     return load_context->abortPending();
 }
 
+void BlockTreeLoader::suspendAndDrain() {
+    load_context_coordinator_->suspendAndDrain();
+}
+
+void BlockTreeLoader::resumeAdmission() {
+    load_context_coordinator_->resumeAdmission();
+}
+
 void BlockTreeLoader::shutdown() {
     load_context_coordinator_->shutdown();
 }

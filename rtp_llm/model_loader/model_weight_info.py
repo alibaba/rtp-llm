@@ -854,7 +854,14 @@ class ModelWeights:
         )
         del entries[name]
 
-    def update_layer_weight(self, layer_id: int, name: str, data: torch.Tensor):
+    def update_layer_weight(
+        self,
+        layer_id: int,
+        name: str,
+        data: torch.Tensor,
+        *,
+        allow_paused_inplace: bool = False,
+    ):
         if not isinstance(layer_id, int):
             raise TypeError(
                 f"Invalid 'layer_id' type. Expected an integer, but received {type(layer_id).__name__}.\n"
@@ -881,7 +888,10 @@ class ModelWeights:
                 "Please check the provided weight 'name'."
             )
         ori_tensor = layer_weight_dict[name]
-        if getattr(ori_tensor, "_rtp_requires_restart_for_update", False):
+        if getattr(ori_tensor, "_rtp_requires_restart_for_update", False) and not (
+            allow_paused_inplace
+            and getattr(ori_tensor, "_rtp_allow_paused_inplace_update", False)
+        ):
             raise PermissionError(
                 f"shared projection {name!r} requires a service restart to update"
             )
@@ -900,7 +910,13 @@ class ModelWeights:
     def get_global_weight(self, name: str) -> torch.Tensor:
         return self.global_weights[name]
 
-    def update_global_weight(self, name: str, data: torch.Tensor):
+    def update_global_weight(
+        self,
+        name: str,
+        data: torch.Tensor,
+        *,
+        allow_paused_inplace: bool = False,
+    ):
         if not isinstance(name, str):
             raise TypeError(
                 f"Invalid 'name' type. Expected a string, but received {type(name).__name__}.\n"
@@ -920,6 +936,17 @@ class ModelWeights:
                 "If 'data' is a dictionary, its values must be PyTorch tensors."
             )
         original_global_tensor = self.global_weights[name]
+        if getattr(
+            original_global_tensor, "_rtp_requires_restart_for_update", False
+        ) and not (
+            allow_paused_inplace
+            and getattr(
+                original_global_tensor, "_rtp_allow_paused_inplace_update", False
+            )
+        ):
+            raise PermissionError(
+                f"global weight {name!r} requires a service restart to update"
+            )
         # Use the check_data method to validate shape, device, and dtype
         self.check_data(original_global_tensor, data)
         with torch.inference_mode():

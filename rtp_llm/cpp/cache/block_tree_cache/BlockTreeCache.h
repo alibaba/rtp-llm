@@ -134,6 +134,9 @@ public:
     // Directly reclaim up to num_blocks device blocks belonging to one group set
     // (target_tier = NONE, content dropped). Returns the number actually freed.
     int evictForGroup(std::string_view group_tag, size_t num_blocks);
+    // Drain in-flight cache work behind a reversible fence and invalidate every
+    // cached prefix block across all tiers/pools while keeping backing memory.
+    bool clearAll(std::string* error_message = nullptr);
 
     CacheStats                                getStats() const;
     std::vector<BlockTreePoolMetricsSnapshot> poolMetricsSnapshots() const;
@@ -194,6 +197,7 @@ private:
     mutable std::mutex                             mutex_;
     BlockTreeEvictor                               evictor_;
     bool                                           initialized_{false};
+    bool                                           commit_fenced_{false};
     BlockTreeLoader                             loader_;
     BlockTreeStorer                             storer_;
     std::unique_ptr<FullPrefixInvariantScanner> full_prefix_scanner_;

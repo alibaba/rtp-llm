@@ -52,6 +52,8 @@ public:
     BlockIndicesType     matchedBlocksForGroup(std::string_view                      group_tag,
                                                const std::vector<MultiNodeResource>& matched_resources) const;
     bool                 abortPendingLoad(const std::shared_ptr<AsyncContext>& context);
+    void                 suspendAndDrain();
+    void                 resumeAdmission();
     void                 shutdown();
 
 private:

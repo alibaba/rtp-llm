@@ -41,6 +41,7 @@ public:
                                  bool                                              is_resident,
                                  size_t&                                           resident_prefix_length);
     void             stopAdmissionLocked();
+    void             resumeAdmissionLocked();
 
 private:
     using StoreTask    = StoreTaskRunner::Task;

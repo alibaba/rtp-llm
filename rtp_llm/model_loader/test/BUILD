@@ -99,3 +99,10 @@ py_test(
     visibility = ["//rtp_llm/test/qwen4_exp:__pkg__"],
     deps = ["//rtp_llm:testlib"],
 )
+
+py_test(
+    name = "test_rl_weight_update",
+    srcs = ["test_rl_weight_update.py"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+    deps = py_test_deps + ["//rtp_llm/model_loader:loader"],
+)

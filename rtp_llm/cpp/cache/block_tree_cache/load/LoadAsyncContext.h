@@ -155,6 +155,8 @@ public:
     bool                              registerContext(const std::shared_ptr<LoadAsyncContext>& context);
     bool                              commit(uint64_t context_id);
     bool                              abort(LoadAsyncContext& context) noexcept;
+    void                              suspendAndDrain();
+    void                              resumeAdmission();
     void                              shutdown();
 
 private:

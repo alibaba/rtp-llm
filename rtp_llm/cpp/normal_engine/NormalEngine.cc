@@ -199,6 +199,40 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     step_profiler_(params.profiling_debug_logging_config.torch_cuda_profiler_dir,
                    params.parallelism_config.world_rank) {
     RTP_LLM_LOG_INFO(__PRETTY_FUNCTION__);
+    const char* rl_mode = std::getenv("RTP_LLM_RL_MODE");
+    rl_enabled_         = rl_mode != nullptr && std::strcmp(rl_mode, "1") == 0;
+    if (rl_enabled_) {
+        const char* run_id = std::getenv("RTP_LLM_RL_RUN_ID");
+        RTP_LLM_CHECK_WITH_INFO(run_id != nullptr && std::strlen(run_id) > 0,
+                                "RL mode requires non-empty RTP_LLM_RL_RUN_ID");
+        const bool rl_model_supported =
+            (model_config_.model_type == "qwen_3" && !model_config_.moe_style)
+            || model_config_.model_type == "qwen4_exp"
+            || model_config_.model_type == "qwen3_next"
+            || model_config_.model_type == "qwen35_moe_text"
+            || model_config_.model_type == "qwen36_moe_text"
+            || model_config_.model_type == "qwen38_moe_text";
+        RTP_LLM_CHECK_WITH_INFO(rl_model_supported && model_config_.data_type == DataType::TYPE_BF16
+                                    && !model_config_.quant_algo.isQuant(),
+                                "RL mode requires an unquantized BF16 supported model (got model_type=%s)",
+                                model_config_.model_type.c_str());
+        RTP_LLM_CHECK_WITH_INFO(parallelism_config.pp_size == 1
+                                    && parallelism_config.world_size
+                                           == parallelism_config.tp_size * parallelism_config.dp_size
+                                    && parallelism_config.ep_size >= 1
+                                    && parallelism_config.world_size % parallelism_config.ep_size == 0,
+                                "RL mode requires single-PP topology with world_size=tp*dp and ep dividing world_size");
+        rl_world_vote_ = parallelism_config.dp_size > 1 || parallelism_config.ep_size > parallelism_config.tp_size;
+        RTP_LLM_CHECK_WITH_INFO(!propose_params_ && sp_config.type == SP_TYPE_NONE,
+                                "RL mode does not support speculative execution");
+        RTP_LLM_CHECK_WITH_INFO(kv_cache_config.multi_task_prompt_tokens.empty()
+                                    && !kv_cache_config.enable_remote_cache,
+                                "RL mode currently requires resident system prompts and remote cache to be disabled");
+        rl_uses_cuda_graph_ = params.hw_kernel_config.enable_cuda_graph;
+        rl_model_version_   = std::string(run_id) + ":0";
+        rl_global_step_     = 0;
+        rl_kv_ready_        = true;
+    }
     // As in PyWrappedModel, failed construction must release Python references under the GIL.
     auto cleanup_on_failure = [](NormalEngine* engine) noexcept {
         if (engine->custom_output_selector_) {
@@ -932,6 +966,13 @@ absl::Status NormalEngine::initSystemPrompt() {
 }
 
 KVCacheInfo NormalEngine::getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) {
+    std::unique_lock<std::mutex> lock(rl_mutex_, std::defer_lock);
+    if (rl_enabled_) {
+        lock.lock();
+        if (!rl_kv_ready_ || rl_failed_) {
+            return KVCacheInfo{};
+        }
+    }
     return resource_context_.cache_manager->getKVCacheInfo(latest_version, need_cache_keys);
 }
 
@@ -954,6 +995,10 @@ absl::Status NormalEngine::stop() {
     }
     RTP_LLM_LOG_INFO("stop normal engine");
     running_ = false;
+    if (rl_enabled_) {
+        std::lock_guard<std::mutex> lock(rl_mutex_);
+        rl_cv_.notify_all();
+    }
     const auto scheduler_status = scheduler_->stop();
     // Ask rank 0 to stop at a step boundary. Receivers must finish all model
     // collectives for inputs that rank 0 has already published before exiting.
@@ -1063,9 +1108,32 @@ std::shared_ptr<GenerateStream> NormalEngine::makeStream(const std::shared_ptr<G
     return stream;
 }
 
+bool NormalEngine::rlAdmitStreamLocked(const GenerateStreamPtr& stream) {
+    if (rl_pause_requested_ || rl_paused_ || rl_failed_ || !rl_kv_ready_ || !rl_weights_initialized_) {
+        stream->reportError(ErrorCode::EXECUTION_EXCEPTION, "RL engine admission is closed");
+        return false;
+    }
+    const auto& config = stream->generateConfig();
+    if (config && config->enable_remote_cache) {
+        stream->reportError(ErrorCode::INVALID_PARAMS, "RL mode does not allow remote cache reuse yet");
+        return false;
+    }
+    stream->generateInput()->rl_model_version = rl_model_version_;
+    stream->generateInput()->rl_global_step   = rl_global_step_;
+    return true;
+}
+
 void NormalEngine::enqueue(std::shared_ptr<GenerateStream>& stream) {
     stream->setReserveStep(reserveStepForStream(stream->generateConfig()->isPrefillOnly()));
     if (!validateStreamForScheduling(stream)) {
+        return;
+    }
+    if (rl_enabled_) {
+        std::lock_guard<std::mutex> lock(rl_mutex_);
+        if (!rlAdmitStreamLocked(stream)) {
+            return;
+        }
+        (void)scheduler_->enqueue(stream);
         return;
     }
     (void)scheduler_->enqueue(stream);
@@ -1115,6 +1183,26 @@ NormalEngine::enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>&
         }
     }
 
+    if (rl_enabled_) {
+        std::lock_guard<std::mutex>    lock(rl_mutex_);
+        std::vector<GenerateStreamPtr> admitted_streams;
+        std::vector<size_t>            admitted_indexes;
+        admitted_streams.reserve(schedulable_streams.size());
+        admitted_indexes.reserve(schedulable_indexes.size());
+        for (size_t i = 0; i < schedulable_streams.size(); ++i) {
+            if (rlAdmitStreamLocked(schedulable_streams[i])) {
+                admitted_indexes.push_back(schedulable_indexes[i]);
+                admitted_streams.push_back(schedulable_streams[i]);
+            }
+        }
+        auto              admitted_result = scheduler_->enqueueGroup(admitted_streams);
+        std::vector<bool> enqueue_successes(streams.size(), false);
+        for (size_t i = 0; i < admitted_indexes.size(); ++i) {
+            enqueue_successes[admitted_indexes[i]] = admitted_result.first[i];
+        }
+        return {std::move(enqueue_successes), std::move(streams)};
+    }
+
     auto              schedulable_result = scheduler_->enqueueGroup(schedulable_streams);
     std::vector<bool> enqueue_successes(streams.size(), false);
     for (size_t i = 0; i < schedulable_indexes.size(); ++i) {
@@ -1125,6 +1213,12 @@ NormalEngine::enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>&
 
 absl::Status NormalEngine::step() try {
     RTP_LLM_PROFILE_SCOPE("engine.normal.step_work");
+    if (rl_enabled_) {
+        RETURN_IF_STATUS_ERROR(rlCheckpoint());
+        if (!running_) {
+            return absl::OkStatus();
+        }
+    }
     while (pause_) {
         // wait 50ms if system paused.
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -1408,6 +1502,122 @@ bool NormalEngine::updateEplbConfig(const EPLBConfig& config) {
 
 void NormalEngine::startTimelineProfiling(const std::string& trace_name, int start_step, int num_steps) {
     step_profiler_.configure(true, trace_name, start_step, num_steps);
+}
+
+bool NormalEngine::rlEnabled() const {
+    return rl_enabled_;
+}
+
+bool NormalEngine::rlPaused() const {
+    std::lock_guard<std::mutex> lock(rl_mutex_);
+    return rl_paused_ && !rl_failed_;
+}
+
+std::string NormalEngine::rlModelVersion() const {
+    std::lock_guard<std::mutex> lock(rl_mutex_);
+    return rl_model_version_;
+}
+
+bool NormalEngine::rlKVCacheReady() const {
+    std::lock_guard<std::mutex> lock(rl_mutex_);
+    return rl_kv_ready_ && !rl_failed_;
+}
+
+size_t NormalEngine::rlKVCacheBytes() const {
+    std::lock_guard<std::mutex> lock(rl_mutex_);
+    return (rl_kv_ready_ && resource_context_.cache_manager) ? resource_context_.cache_manager->backingBytes() : 0;
+}
+
+absl::Status NormalEngine::rlPause(int64_t timeout_ms) {
+    if (!rl_enabled_ || timeout_ms <= 0) {
+        return absl::FailedPreconditionError("RL mode and a positive timeout are required");
+    }
+    std::unique_lock<std::mutex> lock(rl_mutex_);
+    if (rl_failed_) {
+        return absl::FailedPreconditionError("RL engine failed; restart the entire replica");
+    }
+    rl_pause_requested_ = true;
+    auto* fifo          = dynamic_cast<FIFOSchedulerBase*>(scheduler_.get());
+    RTP_LLM_CHECK_WITH_INFO(fifo != nullptr, "RL mode requires a FIFO-family scheduler");
+    fifo->wakeForControl();
+    if (!rl_cv_.wait_for(lock, std::chrono::milliseconds(timeout_ms), [this] { return rl_paused_ || !running_; })
+        || !rl_paused_) {
+        rl_failed_ = true;
+        return absl::DeadlineExceededError("RL drain timed out; restart the entire replica");
+    }
+    return absl::OkStatus();
+}
+
+absl::Status NormalEngine::rlResume(int64_t timeout_ms) {
+    std::unique_lock<std::mutex> lock(rl_mutex_);
+    if (!rl_enabled_ || !rl_paused_ || rl_failed_ || !rl_kv_ready_ || !rl_weights_initialized_) {
+        return absl::FailedPreconditionError(
+            "RL engine requires a safely paused initialized policy with resident KV cache");
+    }
+    rl_pause_requested_ = false;
+    rl_cv_.notify_all();
+    if (!rl_cv_.wait_for(lock, std::chrono::milliseconds(timeout_ms), [this] { return !rl_paused_ || !running_; })
+        || !running_) {
+        rl_failed_          = true;
+        rl_pause_requested_ = true;
+        return absl::DeadlineExceededError("RL resume timed out; restart the entire replica");
+    }
+    return absl::OkStatus();
+}
+
+absl::Status NormalEngine::rlClearCache() {
+    std::lock_guard<std::mutex> lock(rl_mutex_);
+    if (!rl_enabled_ || !rl_paused_ || rl_failed_) {
+        return absl::FailedPreconditionError("RL cache invalidation requires a safely paused engine");
+    }
+    if (!resource_context_.cache_manager) {
+        return absl::OkStatus();
+    }
+    const auto status = resource_context_.cache_manager->clearAllCachedBlocks();
+    if (!status.ok()) {
+        rl_failed_ = true;
+        return status;
+    }
+    return absl::OkStatus();
+}
+
+absl::Status NormalEngine::rlSetModelVersion(const std::string& version, int64_t global_step) {
+    std::lock_guard<std::mutex> lock(rl_mutex_);
+    if (!rl_enabled_ || !rl_paused_ || rl_failed_ || version.empty() || global_step < rl_global_step_) {
+        return absl::FailedPreconditionError("model version may only advance while safely paused");
+    }
+    rl_model_version_       = version;
+    rl_global_step_         = global_step;
+    rl_weights_initialized_ = true;
+    return absl::OkStatus();
+}
+
+absl::Status NormalEngine::rlCheckpoint() {
+    auto decision = torch::zeros({1}, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU));
+    if (parallelism_config.tp_rank == 0) {
+        std::lock_guard<std::mutex> lock(rl_mutex_);
+        decision.data_ptr<int64_t>()[0] = rl_pause_requested_ && scheduler_->empty();
+    }
+    if (parallelism_config.tp_size > 1) {
+        execBroadcastCpu({{decision}, 0});
+    }
+    if (rl_world_vote_) {
+        auto vote = decision.to(torch::Device(torch::kCUDA, parallelism_config.local_rank));
+        vote      = execAllReduce({vote, ReduceOp::Min, ParallelMode::WORLD}).buffer;
+        decision  = vote.to(torch::kCPU);
+    }
+    if (!decision.item<int64_t>()) {
+        return absl::OkStatus();
+    }
+    RETURN_IF_STATUS_ERROR(executor_->quiesce());
+    std::unique_lock<std::mutex> lock(rl_mutex_);
+    rl_pause_requested_ = true;
+    rl_paused_          = true;
+    rl_cv_.notify_all();
+    rl_cv_.wait(lock, [this] { return (!rl_pause_requested_ && !rl_failed_) || !running_; });
+    rl_paused_ = false;
+    rl_cv_.notify_all();
+    return absl::OkStatus();
 }
 
 bool NormalEngine::isMTPEagle() {

@@ -53,6 +53,7 @@ public:
                 std::function<void()>            on_timeout = {});
     bool submitCompletion(std::function<void()> task);
     void stopAdmission();
+    void resumeAdmission();
     // Wait only for queued/running task bodies, including submitted completions.
     // External asynchronous transfers must be drained by their owner.
     void waitForIdle();

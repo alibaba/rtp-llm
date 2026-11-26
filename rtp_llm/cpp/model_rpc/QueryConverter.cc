@@ -226,6 +226,9 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->enable_memory_cache = config_proto->enable_memory_cache();
     generate_config->enable_remote_cache = config_proto->enable_remote_cache();
     generate_config->enable_disk_cache   = config_proto->enable_disk_cache();
+    if (config_proto->return_routed_experts()) {
+        throw std::invalid_argument("return_routed_experts is not yet implemented on this build");
+    }
     TRANS_OPTIONAL(trace_id);
     TRANS_OPTIONAL(group_timeout);
 
@@ -563,6 +566,9 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
             }
             if (response.aux_info.softmax_probs.has_value()) {
                 transTensorPB(aux_info->mutable_softmax_probs(), response.aux_info.softmax_probs.value());
+            }
+            if (response.aux_info.raw_logprobs.has_value()) {
+                transTensorPB(aux_info->mutable_raw_logprobs(), response.aux_info.raw_logprobs.value());
             }
         }
     }

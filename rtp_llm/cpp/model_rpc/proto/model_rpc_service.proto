@@ -167,6 +167,8 @@ message GenerateConfigPB {
     // Explicit target-prefill assertion. true requires max_new_tokens == 0 and cannot be combined with
     // return_prompt_logits. false/omitted does not change the legacy bare-zero behavior above.
     bool prefill_only = 76;
+    // Reserved for RL R3 routed-expert export contract (default false; unsupported until implemented).
+    bool return_routed_experts = 77;
 }
 
 message MMPreprocessConfigPB {
@@ -357,6 +359,8 @@ message AuxInfoPB {
     int32 disk_reuse_len = 31;
     int32 prefill_disk_reuse_len = 32;
     int32 decode_disk_reuse_len = 33;
+    // Native FP32 selected-token log-probabilities computed directly from raw model logits.
+    TensorPB raw_logprobs = 34;
 }
 
 message PromptLogitsOutputPB {
@@ -393,6 +397,94 @@ message GenerateOutputsPB {
     RpcErrorPB error_info = 9;
     // Advertised only by the Decode ALLOCATE response.
     bool supports_prefill_completion = 10;
+    // Actual version and training step captured by the engine at admission in RL mode.
+    string model_version = 11;
+    int64 global_step = 12;
+}
+
+message BucketEntryPB {
+    string name = 1;
+    uint64 byte_offset = 2;
+    uint64 byte_length = 3;
+    repeated int64 shape = 4;
+    string dtype = 5;
+    string layout = 6;
+    int32 shard_dim = 7;
+    int64 shard_offset = 8;
+    int64 shard_size = 9;
+    repeated int32 expert_ids = 10;
+}
+
+message WriteBucketRequestPB {
+    uint64 bucket_id = 1;
+    uint32 slot_id = 2;
+    uint64 slot_generation = 3;
+    bytes cuda_ipc_metadata = 4;
+    repeated BucketEntryPB entries = 5;
+}
+
+message RlControlRequestPB {
+    enum Operation {
+        STATUS = 0;
+        PAUSE = 1;
+        RESUME = 2;
+        BEGIN_UPDATE = 3;
+        WRITE_WEIGHT = 4;
+        COMMIT_UPDATE = 5;
+        RELEASE_KV_CACHE = 6;
+        RESTORE_KV_CACHE = 7;
+        SLEEP = 8;
+        WAKE_UP = 9;
+        WRITE_BUCKET = 10;
+    }
+    Operation operation = 1;
+    int64 timeout_ms = 2;
+    string expected_version = 3;
+    string update_id = 4;
+    string weight_name = 5;
+    bytes cuda_ipc_metadata = 6;
+    uint64 max_buffer_bytes = 7;
+    int64 global_step = 8;
+    // Protocol 3 binds every control ACK to one complete world; protocol 2 covers single-replica TP.
+    uint32 protocol_version = 9;
+    int32 expected_world_rank = 10;
+    int32 expected_world_size = 11;
+    int32 expected_tp_size = 12;
+    int32 expected_dp_size = 13;
+    int32 expected_ep_size = 14;
+    // Upfront cross-team RL contract fields (SLEEP / WAKE_UP / WRITE_BUCKET / frozen subset).
+    int32 sleep_level = 15;
+    repeated string memory_tags = 16;
+    WriteBucketRequestPB write_bucket = 17;
+    repeated string expected_source_names = 18;
+}
+
+message RlControlResponsePB {
+    uint32 protocol_version = 1;
+    string phase = 2;
+    string model_version = 3;
+    string update_id = 4;
+    int64 global_step = 5;
+    int32 tp_rank = 6;
+    int32 tp_size = 7;
+    uint64 received_weights = 8;
+    uint64 applied_weights = 9;
+    bool quiescent = 10;
+    bool kv_cache_ready = 11;
+    uint64 kv_cache_bytes = 12;
+    uint64 torch_allocated_bytes = 13;
+    uint64 torch_reserved_bytes = 14;
+    int32 world_rank = 15;
+    int32 world_size = 16;
+    int32 dp_rank = 17;
+    int32 dp_size = 18;
+    int32 ep_rank = 19;
+    int32 ep_size = 20;
+    bool weights_ready = 21;
+    uint64 released_vmm_bytes = 22;
+    uint64 bucket_id = 23;
+    uint32 slot_id = 24;
+    uint64 slot_generation = 25;
 }
 
 // return to python client
@@ -1084,6 +1176,7 @@ service RpcService {
     rpc CheckHealth(EmptyPB) returns (CheckHealthResponsePB);
     rpc UpdateEplbConfig(UpdateEplbConfigRequestPB) returns (EmptyPB);
     rpc SetPause(EmptyPB) returns (EmptyPB);
+    rpc RlControl(RlControlRequestPB) returns (RlControlResponsePB);
     rpc SetRestart(EmptyPB) returns (EmptyPB);
     rpc SetLogLevel(SetLogLevelRequestPB) returns (EmptyPB);
     rpc StartProfile(StartProfileRequestPB) returns (EmptyPB);

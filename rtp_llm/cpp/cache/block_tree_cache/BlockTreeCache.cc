@@ -1,6 +1,8 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 
 #include <algorithm>
+#include <sstream>
+#include <unordered_set>
 #include <utility>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
@@ -147,6 +149,9 @@ BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType&               ca
     BlockTreeMatchResult result;
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        if (commit_fenced_) {
+            return result;
+        }
         result = loader_.matchLocked(cache_keys, valid_prefix);
     }
     metrics_reporter_->reportCacheReuseTimeMetrics(result.reuse_time_metrics_snapshots);
@@ -167,12 +172,201 @@ size_t BlockTreeCache::insert(const CacheKeysType&                              
     StorageWriteTask storage_write;
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        if (commit_fenced_) {
+            return 0;
+        }
         storage_write = storer_.storeLocked(cache_keys, resources, target_tier, is_resident, resident_prefix_length);
     }
     if (storage_write) {
         storage_backend_->write(std::move(storage_write));
     }
     return resident_prefix_length;
+}
+
+bool BlockTreeCache::clearAll(std::string* error_message) {
+    auto fail = [&](const std::string& msg) {
+        RTP_LLM_LOG_ERROR("BlockTreeCache::clearAll failed: %s", msg.c_str());
+        if (error_message != nullptr) {
+            *error_message = msg;
+        }
+        return false;
+    };
+    if (!initialized_) {
+        return fail("BlockTreeCache is not initialized");
+    }
+    if (storage_backend_) {
+        return fail("external StorageBackend invalidation is not supported in live RL commit");
+    }
+
+    // 1. Install a reversible commit fence so no new match/insert/watermark work enters.
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        commit_fenced_ = true;
+        storer_.stopAdmissionLocked();
+    }
+
+    // 2. Abort any pending loads and drain business tasks + async transfers to stable idleness.
+    loader_.suspendAndDrain();
+    task_pool_->stopAdmission();
+    transfer_dispatcher_->cancelPendingStagingTransfers();
+
+    bool drained = false;
+    for (int round = 0; round < 8; ++round) {
+        task_pool_->waitForIdle();
+        transfer_dispatcher_->drainTransfers();
+        task_pool_->waitForIdle();
+        const auto biz_q  = task_pool_->queueSizes();
+        const auto xfer_q = transfer_dispatcher_->queueSizes();
+        if (biz_q.load == 0 && biz_q.background == 0 && biz_q.completion == 0 && xfer_q.load == 0
+            && xfer_q.background == 0 && xfer_q.completion == 0) {
+            drained = true;
+            break;
+        }
+    }
+    if (!drained) {
+        return fail("cache task/transfer queues did not reach stable idle state");
+    }
+
+    // 3. Under mutex_, validate pools, walk populated nodes child-first, release CACHE refs,
+    //    remove nodes via publication-aware BlockTree::removeNode, and assert empty baselines.
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (tree_->pendingNodeCount() != 0) {
+            return fail("BlockTree still has pending detached nodes after drain: "
+                        + std::to_string(tree_->pendingNodeCount()));
+        }
+
+        std::unordered_set<IBlockPool*>       all_pools;
+        std::unordered_set<DeviceBlockPool*>  device_pools;
+        for (const GroupSetPtr& group_set : tree_->groupSets()) {
+            for (const auto& device_pool : group_set->devicePools()) {
+                if (device_pool != nullptr) {
+                    all_pools.insert(device_pool.get());
+                    device_pools.insert(device_pool.get());
+                }
+            }
+            if (group_set->hostPool() != nullptr) {
+                all_pools.insert(group_set->hostPool().get());
+            }
+            if (group_set->diskPool() != nullptr) {
+                all_pools.insert(group_set->diskPool().get());
+            }
+        }
+
+        // Pre-clear safety: zero active requests, zero in-flight LOAD/EVICTION/STORE, zero FROZEN.
+        for (DeviceBlockPool* pool : device_pools) {
+            if (pool->referencedBlocksNum() != 0) {
+                return fail("device pool " + pool->poolName() + " still has active request refs="
+                            + std::to_string(pool->referencedBlocksNum()));
+            }
+        }
+        for (IBlockPool* pool : all_pools) {
+            for (BlockTreeRefType ref_type :
+                 {BlockTreeRefType::LOAD, BlockTreeRefType::EVICTION, BlockTreeRefType::STORE, BlockTreeRefType::FROZEN}) {
+                const size_t count = pool->referencedBlocksNum(ref_type);
+                if (count != 0) {
+                    return fail("pool " + pool->poolName() + " has non-zero ref type "
+                                + std::to_string(static_cast<int>(ref_type)) + " count=" + std::to_string(count));
+                }
+            }
+        }
+
+        // Collect all non-root nodes in post-order (children before parents).
+        std::vector<TreeNode*> post_order;
+        post_order.reserve(tree_->size());
+        std::vector<std::pair<TreeNode*, bool>> stack;
+        for (const auto& [_, child] : tree_->root()->children) {
+            stack.emplace_back(child, false);
+        }
+        while (!stack.empty()) {
+            auto [node, visited] = stack.back();
+            stack.pop_back();
+            if (visited) {
+                post_order.push_back(node);
+            } else {
+                stack.emplace_back(node, true);
+                for (const auto& [_, child] : node->children) {
+                    stack.emplace_back(child, false);
+                }
+            }
+        }
+
+        if (post_order.size() != tree_->size()) {
+            return fail("BlockTree reachable node count (" + std::to_string(post_order.size())
+                        + ") != node_pool size (" + std::to_string(tree_->size()) + ")");
+        }
+
+        for (TreeNode* node : post_order) {
+            if (node->is_resident) {
+                return fail("cannot invalidate resident system-prompt node key=" + std::to_string(node->cache_key));
+            }
+            for (const GroupSetResource& resource : node->group_set_resources) {
+                if (resource.transfer_state != GroupSetTransferState::IDLE || resource.transfer_detached) {
+                    return fail("BlockTree node key=" + std::to_string(node->cache_key)
+                                + " is not IDLE after drain");
+                }
+            }
+        }
+
+        for (TreeNode* node : post_order) {
+            evictor_.eraseNodeFromAllHeaps(node);
+            tree_->releaseNode(node);
+            if (!tree_->isRemovable(node)) {
+                return fail("BlockTree node key=" + std::to_string(node->cache_key)
+                            + " remained non-removable after releasing CACHE refs");
+            }
+            tree_->removeNode(node);
+        }
+
+        // Postconditions: tree empty, heaps empty, publication snapshot empty, every pool at empty baseline.
+        if (tree_->size() != 0 || tree_->pendingNodeCount() != 0 || !tree_->root()->children.empty()) {
+            return fail("BlockTree not empty after clearAll: size=" + std::to_string(tree_->size())
+                        + " pending=" + std::to_string(tree_->pendingNodeCount())
+                        + " root_children=" + std::to_string(tree_->root()->children.size()));
+        }
+        const KVCacheSnapshot snapshot = tree_->logicalCacheSnapshot();
+        if (!snapshot.block_keys.empty()) {
+            return fail("published logicalCacheSnapshot is non-empty after clearAll: "
+                        + std::to_string(snapshot.block_keys.size()));
+        }
+        const CandidateStats candidates = evictor_.candidateStats();
+        if (candidates.device_candidates != 0 || candidates.host_candidates != 0 || candidates.disk_candidates != 0) {
+            return fail("evictor heaps non-empty after clearAll");
+        }
+        for (IBlockPool* pool : all_pools) {
+            if (pool->freeBlocksNum() != pool->totalBlocksNum() || pool->activeBlocksNum() != 0
+                || pool->referencedBlocksNum(BlockTreeRefType::CACHE) != 0
+                || pool->referencedBlocksNum(BlockTreeRefType::LOAD) != 0
+                || pool->referencedBlocksNum(BlockTreeRefType::EVICTION) != 0
+                || pool->referencedBlocksNum(BlockTreeRefType::STORE) != 0
+                || pool->referencedBlocksNum(BlockTreeRefType::FROZEN) != 0) {
+                std::ostringstream oss;
+                oss << "pool " << pool->poolName() << " did not return to empty baseline after clearAll: free="
+                    << pool->freeBlocksNum() << " total=" << pool->totalBlocksNum()
+                    << " active=" << pool->activeBlocksNum()
+                    << " cache_refs=" << pool->referencedBlocksNum(BlockTreeRefType::CACHE);
+                return fail(oss.str());
+            }
+        }
+        for (DeviceBlockPool* pool : device_pools) {
+            if (pool->referencedBlocksNum() != 0) {
+                return fail("device pool " + pool->poolName() + " has non-zero request refs after clearAll");
+            }
+        }
+
+        RTP_LLM_LOG_INFO("BlockTreeCache::clearAll cleared %zu nodes across %zu distinct pools; key_version=%ld",
+                         post_order.size(),
+                         all_pools.size(),
+                         tree_->keyVersion());
+
+        // 4. All postconditions verified: reopen the reversible fence.
+        storer_.resumeAdmissionLocked();
+        commit_fenced_ = false;
+    }
+
+    loader_.resumeAdmission();
+    task_pool_->resumeAdmission();
+    return true;
 }
 
 int BlockTreeCache::evictForGroup(std::string_view group_tag, size_t num_blocks) {
@@ -273,6 +467,9 @@ bool BlockTreeCache::abortPendingLoad(const std::shared_ptr<AsyncContext>& conte
 }
 
 void BlockTreeCache::onWorkflowSettledLocked(bool check_watermark) {
+    if (commit_fenced_) {
+        return;
+    }
     if (check_watermark) {
         checkWatermark();
     }

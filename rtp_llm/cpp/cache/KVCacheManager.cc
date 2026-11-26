@@ -668,6 +668,28 @@ size_t KVCacheManager::maxAvailableTokensNum() const {
     return coordinator_manager_->maxAvailableTokensNum();
 }
 
+size_t KVCacheManager::backingBytes() const {
+    if (!coordinator_manager_) {
+        return 0;
+    }
+    size_t total_bytes = 0;
+    for (const auto& snapshot : coordinator_manager_->poolMetricsSnapshots()) {
+        total_bytes += snapshot.total_blocks * snapshot.block_size_bytes;
+    }
+    return total_bytes;
+}
+
+absl::Status KVCacheManager::clearAllCachedBlocks() {
+    if (!block_tree_cache_) {
+        return absl::OkStatus();
+    }
+    std::string error_message;
+    if (!block_tree_cache_->clearAll(&error_message)) {
+        return absl::InternalError(error_message.empty() ? "BlockTreeCache::clearAll failed" : error_message);
+    }
+    return absl::OkStatus();
+}
+
 KVCacheInfo KVCacheManager::getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const {
     KVCacheInfo info;
     info.version = latest_version;

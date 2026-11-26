@@ -9,6 +9,7 @@
 #include <thread>
 #include <vector>
 
+#include "absl/status/status.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/BufferTypes.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
@@ -123,6 +124,8 @@ public:
     size_t      availableTokensNum() const;
     size_t      totalBlocksNum() const;
     size_t      maxAvailableTokensNum() const;
+    size_t      backingBytes() const;
+    absl::Status clearAllCachedBlocks();
     KVCacheInfo getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const;
     std::vector<KVCachePoolMetricsSnapshot> devicePoolMetricsSnapshots() const;
 

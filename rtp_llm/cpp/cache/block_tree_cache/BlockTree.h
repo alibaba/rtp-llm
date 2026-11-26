@@ -75,6 +75,9 @@ public:
     size_t size() const {
         return node_pool_.size();
     }
+    size_t pendingNodeCount() const {
+        return pending_node_pool_.size();
+    }
     CacheKeysType cacheKeys() const;
     int64_t keyVersion() const {
         return key_version_;
@@ -100,6 +103,7 @@ private:
     std::unordered_set<CacheKeyType>   published_keys_;
     int64_t                            publication_version_{-1};
 
+    friend class BlockTreeCache;
     friend class BlockTreeEvictor;
 
     BlockTreeInsertResult insertNodeImpl(const CacheKeysType&                              cache_keys,

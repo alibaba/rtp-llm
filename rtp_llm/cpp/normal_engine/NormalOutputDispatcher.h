@@ -48,6 +48,8 @@ private:
                               const torch::Tensor& new_tokens_all,
                               const torch::Tensor& token_ids_cpu,
                               const torch::Tensor& success_cpu,
+                              const torch::Tensor& selected_probs_cpu,
+                              const torch::Tensor& selected_logprobs_cpu,
                               const torch::Tensor& custom_output_cpu,
                               int                  custom_output_batch_idx) const;
 

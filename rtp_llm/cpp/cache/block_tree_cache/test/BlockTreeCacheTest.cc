@@ -3571,5 +3571,86 @@ TEST_F(BlockTreeCacheTest, EventPublicationExcludesHostAndCancelledLoad) {
     EXPECT_TRUE(publisher->events.empty());
 }
 
+TEST_F(BlockTreeCacheTest, ClearAllEvictsTreeRestoresPoolsAndAllowsReuse) {
+    const std::vector<DeviceBlockPoolPtr> pools = makeStructuralDevicePools(1, "clear_all_pool");
+    ASSERT_EQ(pools.size(), 1u);
+    auto full = std::make_shared<FullGroupSet>(pools, nullptr, nullptr);
+    initializeTestGroupSet(full, pools);
+    auto cache = makeBlockTreeCacheForTest({full});
+    ASSERT_NE(cache, nullptr);
+
+    auto publisher = std::make_shared<RecordingCachePublisher>();
+    cache->setEventPublisher(publisher, {full->groupTags().front()});
+    const auto& pool = pools[0];
+    ASSERT_EQ(pool->freeBlocksNum(), pool->totalBlocksNum());
+
+    const BlockIdxType b0 = pool->malloc().value();
+    const BlockIdxType b1 = pool->malloc().value();
+    pool->incRef(b0);
+    pool->incRef(b1);
+
+    std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(1));
+    resources[0][0].device_blocks = {b0};
+    resources[1][0].device_blocks = {b1};
+    cache->insert({100, 101}, resources, Tier::DEVICE);
+    pool->decRef(b0);
+    pool->decRef(b1);
+
+    EXPECT_EQ(cache->logicalCacheSnapshot().block_keys, (std::vector<int64_t>{100, 101}));
+    const size_t free_before_clear = pool->freeBlocksNum();
+    EXPECT_EQ(free_before_clear, pool->totalBlocksNum() - 2);
+
+    std::string error;
+    ASSERT_TRUE(cache->clearAll(&error)) << error;
+    EXPECT_TRUE(error.empty());
+    EXPECT_EQ(cache->tree()->size(), 0u);
+    EXPECT_EQ(cache->tree()->pendingNodeCount(), 0u);
+    EXPECT_TRUE(cache->logicalCacheSnapshot().block_keys.empty());
+    EXPECT_EQ(pool->freeBlocksNum(), pool->totalBlocksNum());
+    EXPECT_GT(pool->freeBlocksNum(), free_before_clear);
+    EXPECT_EQ(pool->activeBlocksNum(), 0u);
+    EXPECT_EQ(pool->referencedBlocksNum(), 0u);
+
+    size_t delete_events = 0;
+    for (const auto& ev : publisher->events) {
+        if (ev.type == KVCacheEventType::BLOCK_DELETE) {
+            ++delete_events;
+        }
+    }
+    EXPECT_GE(delete_events, 2u);
+
+    // Subsequent match misses, and subsequent allocate + insert + match succeeds cleanly.
+    auto miss = cache->match({100, 101});
+    EXPECT_EQ(miss.matched_device_blocks, 0u);
+
+    const BlockIdxType b2 = pool->malloc().value();
+    pool->incRef(b2);
+    std::vector<std::vector<GroupSetResource>> fresh(1, std::vector<GroupSetResource>(1));
+    fresh[0][0].device_blocks = {b2};
+    cache->insert({200}, fresh, Tier::DEVICE);
+    pool->decRef(b2);
+    auto hit = cache->match({200});
+    EXPECT_EQ(hit.matched_device_blocks, 1u);
+    releaseRequestRefsForTest(*cache, hit.matched_device_resources);
+}
+
+TEST_F(BlockTreeCacheTest, ClearAllFailsClosedWhenBlockIsReferenced) {
+    std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
+    resources[0][0].device_blocks = {42};
+    cache_->insert({100}, resources, Tier::DEVICE);
+    auto hit = cache_->match({100});
+    ASSERT_EQ(hit.matched_device_blocks, 1u);
+
+    std::string error;
+    EXPECT_FALSE(cache_->clearAll(&error));
+    EXPECT_FALSE(error.empty());
+
+    // Fence remains closed after failure (fail-closed).
+    auto blocked_match = cache_->match({100});
+    EXPECT_EQ(blocked_match.matched_device_blocks, 0u);
+
+    releaseRequestRefsForTest(*cache_, hit.matched_device_resources);
+}
+
 }  // namespace
 }  // namespace rtp_llm

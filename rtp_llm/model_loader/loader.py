@@ -2,7 +2,7 @@ import gc
 import logging
 import os
 from collections import OrderedDict
-from typing import Dict, Iterable, List, Mapping, NamedTuple, Optional, Tuple
+from typing import Dict, Iterable, Iterator, List, Mapping, NamedTuple, Optional, Tuple
 
 import safetensors
 import torch
@@ -626,6 +626,201 @@ class ModelLoader:
             )
             for name, tensor in weights.items():
                 yield (None, name, tensor)
+
+    @staticmethod
+    def _is_rl_static_component(weight: WeightModule) -> bool:
+        """Frozen host PLE lookup shards and INT64 hash metadata are never refit in-place."""
+        name = getattr(weight, "name", None)
+        if name in (
+            W.qwen4_ple_ngram_shards,
+            W.qwen4_ple_multipliers,
+            W.qwen4_ple_ngram_offsets,
+            W.qwen4_ple_ngram_vocab_sizes,
+        ):
+            return True
+        if getattr(weight, "resident_device", None) == "cpu":
+            return True
+        return False
+
+    def _get_rl_group_source_names(self, group) -> set[str]:
+        """Expose physical HF inputs rather than fast-loader per-expert aliases."""
+        names = set(group.weight.get_tensor_names(group.layer_id, self._load_config))
+        for weight in iter_stacked_moe_weights(group.weight):
+            names.difference_update(
+                weight.get_tensor_names(group.layer_id, self._load_config)
+            )
+            names.update(info.tensor_name(group.layer_id) for info in weight.weights)
+        return names
+
+    def _rl_mutable_groups(self):
+        _, all_groups = self._generate_weight_info()
+        mutable = []
+        static = []
+        for group in all_groups:
+            if self._is_rl_static_component(group.weight):
+                group.collector.clear()
+                static.append(group)
+            else:
+                mutable.append(group)
+        return mutable, static
+
+    def get_rl_hf_source_names(self) -> Tuple[str, ...]:
+        """Return mutable checkpoint-loader HF inputs, excluding frozen CPU PLE shards/metadata."""
+        mutable_groups, _ = self._rl_mutable_groups()
+        try:
+            return tuple(
+                sorted(
+                    {
+                        name
+                        for group in mutable_groups
+                        for name in self._get_rl_group_source_names(group)
+                    }
+                )
+            )
+        finally:
+            for group in mutable_groups:
+                group.collector.clear()
+
+    def get_rl_static_target_keys(
+        self, model_weights: ModelWeights
+    ) -> Tuple[set[Tuple[Optional[int], str]], set[Tuple[Optional[int], str]]]:
+        """Return (frozen_table_keys, frozen_metadata_keys) owned by static components."""
+        _, static_groups = self._rl_mutable_groups()
+        frozen_table_keys: set[Tuple[Optional[int], str]] = set()
+        frozen_meta_keys: set[Tuple[Optional[int], str]] = set()
+        ple_shard_prefix = f"{W.qwen4_ple_ngram_shards}."
+        for group in static_groups:
+            layer_id = group.layer_id
+            wname = getattr(group.weight, "name", "")
+            entries = (
+                model_weights.global_weights
+                if layer_id is None
+                else model_weights.weights[layer_id]
+            )
+            if wname == W.qwen4_ple_ngram_shards:
+                for key in entries:
+                    if key.startswith(ple_shard_prefix) or key == W.qwen4_ple_ngram_scale:
+                        frozen_table_keys.add((layer_id, key))
+            elif wname in entries:
+                frozen_meta_keys.add((layer_id, wname))
+        return frozen_table_keys, frozen_meta_keys
+
+    def prepare_weights_from_tensors(
+        self,
+        named_tensors: Iterable[Tuple[str, torch.Tensor]],
+        device: str,
+        *,
+        max_buffer_bytes: int,
+        borrow_singleton_sources: bool = True,
+        stacked_experts: Optional[dict[str, range]] = None,
+    ) -> Iterator[Tuple[Optional[int], str, torch.Tensor]]:
+        """Stream mutable HF inputs through the normal loader, skipping static PLE descriptors."""
+        if max_buffer_bytes <= 0:
+            raise ValueError("max_buffer_bytes must be positive")
+        if self._load_config.is_ft_style_weight or self._load_config.merge_lora:
+            raise NotImplementedError("tensor streaming requires unmerged HF weights")
+        groups, _ = self._rl_mutable_groups()
+        group_names = [self._get_rl_group_source_names(group) for group in groups]
+        groups = [
+            group._replace(
+                collector=TensorCollector(
+                    names, self._load_config.database, stacked_experts=stacked_experts
+                )
+            )
+            for group, names in zip(groups, group_names)
+        ]
+        consumers: Dict[str, List[int]] = {}
+        for index, names in enumerate(group_names):
+            for name in names:
+                consumers.setdefault(name, []).append(index)
+        expected = set(consumers)
+        seen: set[str] = set()
+        emitted: set[int] = set()
+        remaining = {name: len(indices) for name, indices in consumers.items()}
+        pending_bytes = 0
+        sizes: Dict[str, int] = {}
+        try:
+            for name, tensor in named_tensors:
+                if name not in expected:
+                    raise KeyError(f"unexpected HF tensor: {name}")
+                if name in seen:
+                    raise ValueError(f"duplicate HF tensor: {name}")
+                if not isinstance(tensor, torch.Tensor):
+                    raise TypeError(f"HF tensor {name!r} is not a torch.Tensor")
+                selected = (stacked_experts or {}).get(name)
+                if selected is not None and (
+                    tensor.ndim != 3
+                    or tensor.shape[0] != len(selected)
+                    or tensor.dtype != torch.bfloat16
+                    or not tensor.is_contiguous()
+                ):
+                    raise ValueError(
+                        f"Invalid rank-local BF16 packed expert tensor for {name}"
+                    )
+                size = tensor.numel() * tensor.element_size()
+                if pending_bytes + size > max_buffer_bytes:
+                    raise ValueError(
+                        f"HF tensor buffer exceeds {max_buffer_bytes} bytes at {name}; "
+                        "send complete weight groups together or increase the limit"
+                    )
+                # Borrow only single-source, single-consumer BF16 packed experts so
+                # multi-input/shared groups still receive owned clones.
+                singleton = (
+                    borrow_singleton_sources
+                    and name.endswith(
+                        (".mlp.experts.gate_up_proj", ".mlp.experts.down_proj")
+                    )
+                    and len(consumers[name]) == 1
+                    and group_names[consumers[name][0]] == {name}
+                )
+                if singleton and tensor.dtype != torch.bfloat16:
+                    raise ValueError("Borrowed packed expert inputs must be BF16")
+                owned_tensor = tensor.detach() if singleton else tensor.detach().clone()
+                ready = []
+                for index in consumers[name]:
+                    if groups[index].collector.store_tensor(name, owned_tensor):
+                        ready.append(index)
+                del owned_tensor
+                seen.add(name)
+                sizes[name] = size
+                pending_bytes += size
+                for index in ready:
+                    if index in emitted:
+                        raise RuntimeError("repeated completed weight group")
+                    group = groups[index]
+                    converted = group.weight.load(
+                        group.collector, group.layer_id, device, self._load_config
+                    )
+                    for key in group_names[index]:
+                        remaining[key] -= 1
+                        if remaining[key] == 0:
+                            pending_bytes -= sizes.pop(key)
+                    group.collector.clear()
+                    emitted.add(index)
+                    for key, value in converted.items():
+                        yield group.layer_id, key, value
+                    del converted
+                    value = None
+                del tensor
+            missing = expected - seen
+            if missing:
+                raise ValueError(f"missing HF tensors: {sorted(missing)}")
+            for index, names in enumerate(group_names):
+                if names:
+                    continue
+                group = groups[index]
+                converted = group.weight.load(
+                    group.collector, group.layer_id, device, self._load_config
+                )
+                emitted.add(index)
+                for key, value in converted.items():
+                    yield group.layer_id, key, value
+                del converted
+            if len(emitted) != len(groups) or pending_bytes or sizes:
+                raise RuntimeError("incomplete or unbalanced HF weight conversion")
+        finally:
+            for group in groups:
+                group.collector.clear()
 
     def _generate_weight_info(self) -> Tuple[Dict[str, WeightInfo], List[WeightInfo]]:
         # WeightInfo = namedtuple("WeightInfo", ["weight", "layer_id", "collector"])

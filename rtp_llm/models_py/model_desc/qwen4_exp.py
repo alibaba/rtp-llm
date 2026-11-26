@@ -770,10 +770,23 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
             unit.mix_down = merged[:rank]
             unit.inject = merged[rank : rank + unit.hc_mult]
             # Views are also used by captured merged GEMMs. Updating them
-            # in place requires restarting, before either execution path
-            # can observe a partially changed projection.
+            # in place while serving requires restarting, before either execution
+            # path can observe a partially changed projection. Pure BF16 slices
+            # (with no quantized compute projection) may be updated in place ONLY
+            # inside a paused RL weight transaction that verifies storage identity
+            # and zero-padded trailing rows.
             unit.mix_down._rtp_requires_restart_for_update = True
             unit.inject._rtp_requires_restart_for_update = True
+            if (
+                merged.dtype == torch.bfloat16
+                and unit.down_projection is None
+                and unit.inject_projection is None
+            ):
+                tail_start = rank + unit.hc_mult
+                for view in (unit.mix_down, unit.inject):
+                    view._rtp_allow_paused_inplace_update = True
+                    view._rtp_merged_parent = merged
+                    view._rtp_merged_tail_start = tail_start
             weights[down_name] = unit.mix_down
             weights[inject_name] = unit.inject
 

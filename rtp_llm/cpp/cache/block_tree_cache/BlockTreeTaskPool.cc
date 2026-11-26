@@ -99,6 +99,13 @@ void BlockTreeTaskPool::stopAdmission() {
     admission_stopped_ = true;
 }
 
+void BlockTreeTaskPool::resumeAdmission() {
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    if (!shutdown_) {
+        admission_stopped_ = false;
+    }
+}
+
 size_t BlockTreeTaskPool::backgroundLimit() const {
     return queue_size_ > kLoadReservedSlots ? queue_size_ - kLoadReservedSlots : queue_size_;
 }

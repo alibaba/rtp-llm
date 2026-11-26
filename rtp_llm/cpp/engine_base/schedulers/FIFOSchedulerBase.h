@@ -43,6 +43,13 @@ public:
     int64_t      lastScheduleTime() override;
     int64_t      onflightStreams() override;
 
+    // Wake an idle loop so it can reach the collective RL pause boundary.
+    void wakeForControl() {
+        std::lock_guard<std::mutex> lock(lock_);
+        schedule_trigger_ = true;
+        cond_.notify_all();
+    }
+
     std::vector<EngineScheduleInfo::TaskInfo> waitingTaskList() override;
     std::vector<EngineScheduleInfo::TaskInfo> runningTaskList() override;
 

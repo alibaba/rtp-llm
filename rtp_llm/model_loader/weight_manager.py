@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+import os
+from pathlib import Path
 import re
 import threading
 from typing import Any, Mapping, Sequence
@@ -124,6 +128,195 @@ class WeightManager:
         # serialized via the server's request handling, a per-update lock might
         # be redundant or require finer-grained locking within _weights.update_...
         self._lock = threading.Lock()
+        self._rl_update = None
+        self._rl_source_shapes = None
+        self._rl_source_dtypes = None
+        if os.environ.get("RTP_LLM_RL_MODE") == "1":
+            self._validate_rl_model_contract()
+            self._rl_required_names = self._weights_loader.get_rl_hf_source_names()
+            self._write_rl_manifest_if_configured()
+
+    @staticmethod
+    def _supported_rl_model_types() -> frozenset[str]:
+        return frozenset(
+            {
+                "qwen_3",
+                "qwen3_next",
+                "qwen35_moe_text",
+                "qwen36_moe_text",
+                "qwen38_moe_text",
+                "qwen4_exp",
+            }
+        )
+
+    def _validate_rl_model_contract(self) -> None:
+        config = self._weights_loader.model_config
+        if config.model_type not in self._supported_rl_model_types():
+            raise ValueError(
+                f"RL mode does not support model_type={config.model_type!r}"
+            )
+        if config.enable_fp32_lm_head:
+            raise ValueError("RL mode requires a BF16 LM head (enable_fp32_lm_head=False)")
+        if (
+            config.quant_algo.isQuant()
+            or getattr(config, "online_mxfp8", False)
+            or getattr(config, "_qwen4_full_fp8_nvfp4", False)
+            or getattr(config, "_qwen4_nvfp4_source", False)
+            or getattr(config, "_qwen4_mxfp4_source", False)
+            or getattr(config, "_qwen4_fp8_source", False)
+        ):
+            raise ValueError(
+                "RL in-place BF16 update rejects quantized / FP8 / MXFP8 / NVFP4 runtime weights"
+            )
+        if (
+            self._non_owned_global_weights
+            or self._weights_loader.get_load_config().compute_dtype != torch.bfloat16
+        ):
+            raise ValueError("RL updates require owned BF16 weights")
+        lm_head = self._weights.get_global_weight_or_none("lm_head")
+        if lm_head is not None and lm_head.dtype != torch.bfloat16:
+            raise ValueError(
+                f"RL mode requires live BF16 lm_head, got {lm_head.dtype}"
+            )
+
+    def _write_rl_manifest_if_configured(self) -> None:
+        directory = os.environ.get("RTP_WEIGHT_MANIFEST_DIR")
+        if not directory:
+            return
+        config = self._weights_loader.model_config
+        load = self._weights_loader.get_load_config()
+        tp_rank = int(load.tp_rank)
+        tp_size = int(load.tp_size)
+        dp_rank = int(getattr(load, "dp_rank", 0))
+        dp_size = int(getattr(load, "dp_size", 1))
+        world_rank = dp_rank * tp_size + tp_rank
+        world_size = tp_size * dp_size
+        record = {
+            "schema": "rtp-required-hf-v2",
+            "model_type": config.model_type,
+            "pid": os.getpid(),
+            "device": str(self._device),
+            "gpu_uuid": str(
+                getattr(torch.cuda.get_device_properties(self._device), "uuid", "")
+            ),
+            "world_rank": world_rank,
+            "world_size": world_size,
+            "tp_rank": tp_rank,
+            "tp_size": tp_size,
+            "dp_rank": dp_rank,
+            "dp_size": dp_size,
+            "ep_rank": int(getattr(load, "ep_rank", 0)),
+            "ep_size": int(getattr(load, "ep_size", 1)),
+            "pp_size": 1,
+            "num_nodes": int(load.num_nodes),
+            "local_world_size": world_size // max(1, int(load.num_nodes)),
+            "incarnation_id": os.environ.get("RTP_LLM_RL_RUN_ID", ""),
+            "ffn_tp_size": int(getattr(load, "ffn_tp_size", tp_size)),
+            "names": list(self._rl_required_names),
+            "names_sha256": hashlib.sha256(
+                "\n".join(self._rl_required_names).encode()
+            ).hexdigest(),
+        }
+        folder = Path(directory)
+        folder.mkdir(parents=True, exist_ok=True)
+        output = folder / f"rank-{world_rank:05d}.json"
+        temporary = output.with_name(output.name + f".writing-{os.getpid()}")
+        temporary.write_text(json.dumps(record, indent=2) + "\n")
+        temporary.replace(output)
+
+    def _load_rl_source_manifest(self) -> tuple[dict[str, tuple[int, ...]], dict[str, torch.dtype]]:
+        from safetensors import safe_open
+
+        config = self._weights_loader.model_config
+        checkpoint = Path(config.ckpt_path)
+        index = json.loads(
+            (checkpoint / "model.safetensors.index.json").read_text()
+        )["weight_map"]
+        required = set(self._weights_loader.get_rl_hf_source_names())
+        missing_sources = required - set(index)
+        if missing_sources:
+            raise ValueError(
+                f"RL source keys missing from checkpoint index: {sorted(missing_sources)}"
+            )
+        dtype_map = {
+            "BF16": torch.bfloat16,
+            "F32": torch.float32,
+        }
+        shapes: dict[str, tuple[int, ...]] = {}
+        dtypes: dict[str, torch.dtype] = {}
+        for filename in sorted({index[name] for name in required}):
+            with safe_open(checkpoint / filename, framework="pt", device="cpu") as handle:
+                for name in handle.keys():
+                    if name in required and index.get(name) == filename:
+                        sl = handle.get_slice(name)
+                        shapes[name] = tuple(sl.get_shape())
+                        dt = sl.get_dtype()
+                        if dt not in dtype_map:
+                            raise ValueError(
+                                f"Unsupported RL checkpoint dtype {dt!r} for {name}"
+                            )
+                        dtypes[name] = dtype_map[dt]
+        if set(shapes) != required:
+            raise ValueError(
+                "checkpoint HF shape manifest is incomplete for required mutable weights"
+            )
+        return shapes, dtypes
+
+    def rl_begin(
+        self,
+        max_buffer_bytes: int,
+        expected_source_names: Sequence[str] | None = None,
+    ) -> None:
+        """Called only by the native RL control RPC after engine quiescence."""
+        from rtp_llm.model_loader.rl_weight_update import RlWeightUpdate
+
+        if self._rl_update is not None:
+            raise RuntimeError("another RL weight transaction is active")
+        self._validate_rl_model_contract()
+        if max_buffer_bytes <= 0:
+            raise ValueError("max_buffer_bytes must be positive")
+        if self._rl_source_shapes is None or self._rl_source_dtypes is None:
+            self._rl_source_shapes, self._rl_source_dtypes = (
+                self._load_rl_source_manifest()
+            )
+        if expected_source_names is not None:
+            expected_set = set(expected_source_names)
+            required_set = set(self._rl_source_shapes)
+            if expected_set != required_set:
+                missing = sorted(required_set - expected_set)
+                extra = sorted(expected_set - required_set)
+                raise ValueError(
+                    f"BEGIN_UPDATE expected_source_names does not match native mutable manifest: "
+                    f"missing={len(missing)} ({missing[:5]}), extra={len(extra)} ({extra[:5]})"
+                )
+        self._rl_update = RlWeightUpdate(
+            self._weights_loader,
+            self._weights,
+            self._device,
+            self._rl_source_shapes,
+            max_buffer_bytes,
+            borrow_singleton_sources=os.environ.get(
+                "RTP_RL_BORROW_SINGLETON_HF_SOURCES", "1"
+            )
+            != "0",
+            source_dtypes=self._rl_source_dtypes,
+        )
+
+    def rl_push(self, name: str, metadata: bytes, timeout: float) -> None:
+        from rtp_llm.utils.cuda_ipc import CudaIpcV2
+
+        if self._rl_update is None:
+            raise RuntimeError("no active RL weight transaction")
+        tensor = CudaIpcV2.import_tensor(metadata)
+        self._rl_update.push(name, tensor, timeout=timeout)
+
+    def rl_finish(self, timeout: float) -> dict:
+        if self._rl_update is None:
+            raise RuntimeError("no active RL weight transaction")
+        try:
+            return self._rl_update.finish(timeout=timeout)
+        finally:
+            self._rl_update = None
 
     def extract_layer_number(self, s: str) -> int | None:
         """

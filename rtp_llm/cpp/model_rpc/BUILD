@@ -141,9 +141,10 @@ cc_library(
         "//rtp_llm/cpp/normal_engine",
         "//rtp_llm/cpp/telemetry",
         "//rtp_llm/cpp/utils:atomic_util",
+        "//rtp_llm/cpp/utils:device_pin",
         "//rtp_llm/cpp/utils:profiling_scope",
         "@havenask//aios/autil:scope",
-    ],
+    ] + torch_deps(),
 )
 
 py_library(

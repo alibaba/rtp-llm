@@ -518,7 +518,7 @@ void LoadContextCoordinator::retireActiveCallback() {
     }
 }
 
-void LoadContextCoordinator::shutdown() {
+void LoadContextCoordinator::suspendAndDrain() {
     std::vector<std::shared_ptr<LoadAsyncContext>> contexts;
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -535,6 +535,16 @@ void LoadContextCoordinator::shutdown() {
 
     std::unique_lock<std::mutex> lock(mutex_);
     cv_.wait(lock, [this] { return pending_contexts_.empty() && active_callbacks_ == 0; });
+}
+
+void LoadContextCoordinator::resumeAdmission() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    accepting_ = true;
+}
+
+void LoadContextCoordinator::shutdown() {
+    suspendAndDrain();
+    std::lock_guard<std::mutex> lock(mutex_);
     commit_callback_ = {};
     abort_callback_  = {};
 }

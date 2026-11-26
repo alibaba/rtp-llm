@@ -97,6 +97,8 @@ public:
     void onLoaded(TreeNode* node, size_t group_set_id);
 
 private:
+    friend class BlockTreeCache;
+
     struct BatchEvictResult {
         bool   direct_progress{false};
         bool   async_submitted{false};

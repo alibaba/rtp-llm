@@ -194,19 +194,7 @@ class WeightModule(ABC):
         split_tensors = self._split(merged_tensors, load_config)
 
         processed_tensors = self._postprocess(split_tensors, device, load_config)
-        flat_res = {}
-
-        def __extract_tensor(tensors):
-            for k, v in tensors.items():
-                if isinstance(v, dict):
-                    __extract_tensor(v)
-                else:
-                    tensor = v.to(self.resident_output_devices.get(k, device))
-                    flat_res.update({k: tensor})
-
-        __extract_tensor(processed_tensors)
-        shape_info = {k: (v.shape, v.dtype) for k, v in flat_res.items()}
-        return flat_res
+        return dict(self._flatten_outputs(processed_tensors, device))
 
     @torch.inference_mode()
     def update(
@@ -215,20 +203,14 @@ class WeightModule(ABC):
         device = self.resident_device or device
         split_tensors = self._split(tensor, load_config)
         processed_tensors = self._postprocess(split_tensors, device, load_config)
-        flat_res = {}
+        return dict(self._flatten_outputs(processed_tensors, device))
 
-        def __extract_tensor(tensors):
-            for k, v in tensors.items():
-                if isinstance(v, dict):
-                    __extract_tensor(v)
-                else:
-                    flat_res.update(
-                        {k: v.to(self.resident_output_devices.get(k, device))}
-                    )
-
-        __extract_tensor(processed_tensors)
-        shape_info = {k: (v.shape, v.dtype) for k, v in flat_res.items()}
-        return flat_res
+    def _flatten_outputs(self, tensors, device):
+        for name, value in tensors.items():
+            if isinstance(value, dict):
+                yield from self._flatten_outputs(value, device)
+            else:
+                yield name, value.to(self.resident_output_devices.get(name, device))
 
     @torch.inference_mode()
     def load_lora(

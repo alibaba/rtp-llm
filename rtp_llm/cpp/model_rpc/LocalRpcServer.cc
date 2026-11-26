@@ -365,6 +365,10 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
                                       stream->generateConfig()->aux_info,
                                       maga_init_params_.misc_config.aux_string,
                                       stream->specialTokens().eos_token_id);
+        if (engine_ && engine_->rlEnabled()) {
+            outputs_pb.set_model_version(stream->generateInput()->rl_model_version);
+            outputs_pb.set_global_step(stream->generateInput()->rl_global_step);
+        }
         // Packaging runs without the stream lock and can overlap cancellation.
         // Recheck before handing a completed terminal response to the transport.
         if (isCancelled(context)) {
@@ -1467,12 +1471,18 @@ void LocalRpcServer::reportCacheStatusTime(int64_t request_begin_time_us) {
 }
 
 grpc::Status LocalRpcServer::SetPause(grpc::ServerContext* context, const EmptyPB* request, EmptyPB* response) {
+    if (engine_ && engine_->rlEnabled()) {
+        return {grpc::StatusCode::FAILED_PRECONDITION, "use RlControl in RL mode"};
+    }
     RTP_LLM_LOG_DEBUG("receive cacheStatus rpc request from client: %s", context->peer().c_str());
     engine_->pause();
     return grpc::Status::OK;
 }
 
 grpc::Status LocalRpcServer::SetRestart(grpc::ServerContext* context, const EmptyPB* request, EmptyPB* response) {
+    if (engine_ && engine_->rlEnabled()) {
+        return {grpc::StatusCode::FAILED_PRECONDITION, "use RlControl in RL mode"};
+    }
     RTP_LLM_LOG_DEBUG("receive cacheStatus rpc request from client: %s,", context->peer().c_str());
     engine_->restart();
     return grpc::Status::OK;
@@ -1480,6 +1490,9 @@ grpc::Status LocalRpcServer::SetRestart(grpc::ServerContext* context, const Empt
 
 grpc::Status
 LocalRpcServer::UpdateWeights(grpc::ServerContext* context, const UpdateWeightsRequestPB* request, EmptyPB* response) {
+    if (engine_ && engine_->rlEnabled()) {
+        return {grpc::StatusCode::FAILED_PRECONDITION, "use RlControl in RL mode"};
+    }
     RTP_LLM_LOG_DEBUG("Receive update weights request from: %s", context->peer().c_str());
     try {
         if (request->name().empty() || request->desc().empty() || request->method().empty()) {

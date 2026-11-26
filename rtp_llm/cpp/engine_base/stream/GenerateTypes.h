@@ -134,6 +134,10 @@ public:
     int     group_size = 1;
     int64_t group_id   = -1;
 
+    // Policy version/step stamped by NormalEngine at admission in RL mode.
+    std::string rl_model_version;
+    int64_t     rl_global_step = 0;
+
     bool isGroup() const {
         return group_id != -1;
     }
@@ -171,6 +175,7 @@ struct AuxInfo {
     std::optional<torch::Tensor> cum_log_probs;
     std::optional<torch::Tensor> all_probs;
     std::optional<torch::Tensor> softmax_probs;
+    std::optional<torch::Tensor> raw_logprobs;
     std::map<int, int>           multimodal_lengths = {};
 };
 

@@ -21,6 +21,7 @@ struct SamplingState {
     torch::Tensor cum_log_probs;
     torch::Tensor all_probs;
     torch::Tensor softmax_probs;
+    torch::Tensor raw_logprobs;
 
     ReturnAllProbsMode return_all_probs = ReturnAllProbsMode::NONE;
 };

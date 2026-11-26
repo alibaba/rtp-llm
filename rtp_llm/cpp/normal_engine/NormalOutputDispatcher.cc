@@ -222,6 +222,25 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
     const torch::Tensor success_cpu   = copyToPinnedCpuAsync(sampler_output.success, need_d2h_sync);
     const torch::Tensor custom_output_cpu =
         copyToPinnedCpuAsync(merge_outputs.model_output.custom_output, need_d2h_sync);
+    bool any_softmax_probs = false;
+    bool direct_rows       = stream_groups.totalSamplerBatchSizeIn() == total_batch_size_out;
+    for (const auto& stream : stream_groups.allStreams()) {
+        any_softmax_probs |= stream->calculateSoftmaxProbs();
+        direct_rows &=
+            !stream->usesBeamSearchTokenLayoutForCurrentStep() && stream->currentBatchSize() == stream->nextBatchSize();
+    }
+    torch::Tensor selected_probs_cpu;
+    torch::Tensor selected_logprobs_cpu;
+    if (any_softmax_probs && direct_rows) {
+        const auto& logits = merge_outputs.model_output.logits;
+        RTP_LLM_CHECK(logits.defined() && logits.dim() == 2
+                      && logits.size(0) >= static_cast<int64_t>(total_batch_size_out) && logits.size(1) > 0);
+        auto raw_logits   = logits.narrow(0, 0, total_batch_size_out).to(torch::kFloat32);
+        auto selected_ids = token_ids_for_copy.to(raw_logits.device(), torch::kLong).clamp(0, raw_logits.size(1) - 1);
+        auto selected     = raw_logits.gather(1, selected_ids) - raw_logits.logsumexp(-1, /*keepdim=*/true);
+        selected_logprobs_cpu = copyToPinnedCpuAsync(selected, need_d2h_sync);
+        selected_probs_cpu    = copyToPinnedCpuAsync(selected.exp(), need_d2h_sync);
+    }
     syncPinnedCpuCopies(need_d2h_sync);
     RTP_LLM_LOG_DEBUG("new_all_token_ids = [%s]", tensorDebugStringWithData<int32_t>(token_ids_cpu).c_str());
     int  batch_idx_in     = 0;
@@ -278,6 +297,8 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
                                  new_tokens_all,
                                  token_ids_cpu,
                                  success_cpu,
+                                 selected_probs_cpu,
+                                 selected_logprobs_cpu,
                                  custom_output_cpu,
                                  custom_output_batch_idx);
         };
@@ -318,6 +339,8 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
                                                   const torch::Tensor& new_tokens_all,
                                                   const torch::Tensor& token_ids_cpu,
                                                   const torch::Tensor& success_cpu,
+                                                  const torch::Tensor& selected_probs_cpu,
+                                                  const torch::Tensor& selected_logprobs_cpu,
                                                   const torch::Tensor& custom_output_cpu,
                                                   int                  custom_output_batch_idx) const {
 
@@ -481,17 +504,22 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
 
     torch::Tensor current_softmax_result;
     if (stream->calculateSoftmaxProbs()) {
+        if (selected_probs_cpu.defined()) {
+            current_softmax_result = selected_probs_cpu.narrow(0, batch_idx_out, next_batch_size);
+        } else {
 #if USING_CUDA
-        // The in-place kernel must not overwrite model logits or the views returned to streams.
-        auto batch_softmax_input = raw_logits.to(torch::kFloat32, /*non_blocking=*/false, /*copy=*/true).contiguous();
-        cudaSoftmaxInplace(batch_softmax_input, at::cuda::getCurrentCUDAStream().stream());
+            // The in-place kernel must not overwrite model logits or the views returned to streams.
+            auto batch_softmax_input =
+                raw_logits.to(torch::kFloat32, /*non_blocking=*/false, /*copy=*/true).contiguous();
+            cudaSoftmaxInplace(batch_softmax_input, at::cuda::getCurrentCUDAStream().stream());
 #else
-        auto batch_softmax_input = torch::softmax(raw_logits.to(torch::kFloat32).contiguous(), -1);
+            auto batch_softmax_input = torch::softmax(raw_logits.to(torch::kFloat32).contiguous(), -1);
 #endif
-        auto batch_softmax_tensor = batch_softmax_input.cpu();
-        current_softmax_result    = torch::empty({(int64_t)next_batch_size, 1}, torch::kFloat32);
-        for (int i = 0; i < next_batch_size; ++i) {
-            current_softmax_result[i][0] = batch_softmax_tensor[get_src_idx(i)][new_tokens.data_ptr<int32_t>()[i]];
+            auto batch_softmax_tensor = batch_softmax_input.cpu();
+            current_softmax_result    = torch::empty({(int64_t)next_batch_size, 1}, torch::kFloat32);
+            for (int i = 0; i < next_batch_size; ++i) {
+                current_softmax_result[i][0] = batch_softmax_tensor[get_src_idx(i)][new_tokens.data_ptr<int32_t>()[i]];
+            }
         }
     }
 
@@ -545,6 +573,9 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
                                  stream->isContextStream() ? model_output.generation_prefill_cuda_graph_status :
                                                              GenerationPrefillCudaGraphStatus::NOT_REQUESTED,
                                  batch_custom_output};
+    if (stream->calculateSoftmaxProbs() && selected_logprobs_cpu.defined()) {
+        update_info.raw_logprobs = selected_logprobs_cpu.narrow(0, batch_idx_out, next_batch_size);
+    }
     stream->update(update_info, true, recorded_timings, cur_batch_size);
 }
 
