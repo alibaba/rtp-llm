@@ -4,6 +4,7 @@ from typing import Dict, Optional, Type
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
@@ -34,6 +35,16 @@ _ACTIVATION_FUNC_MAP: Dict[ActivationType, Type[nn.Module]] = {
 _GATED_ACTIVATION_TYPE_LIST = [ActivationType.Swiglu]
 
 
+class ClampedSiluAndMul(nn.Module):
+    def __init__(self, limit: float):
+        super().__init__()
+        self.limit = limit
+
+    def forward(self, gate_up: torch.Tensor) -> torch.Tensor:
+        gate, up = gate_up.chunk(2, dim=-1)
+        return F.silu(gate.clamp(max=self.limit)) * up.clamp(-self.limit, self.limit)
+
+
 class DenseMLP(nn.Module):
     """
     Unified DenseMLP implementation supporting both SiGLU and GELU activations.
@@ -50,6 +61,8 @@ class DenseMLP(nn.Module):
         quant_config: object,
         hw_kernel_config: Optional["HWKernelConfig"] = None,
         linear_factory=None,
+        *,
+        swiglu_limit: float = 0.0,
     ):
         super().__init__()
         self.linear_factory = linear_factory or LinearFactory
@@ -58,8 +71,13 @@ class DenseMLP(nn.Module):
         self.parallelism_config = parallelism_config
         if self.activation_type not in _ACTIVATION_FUNC_MAP:
             raise ValueError(f"Unsupported activation type: {activation_type}")
-        self.act_fn = _ACTIVATION_FUNC_MAP[activation_type]()
         self.is_gated = activation_type in _GATED_ACTIVATION_TYPE_LIST
+        self.clamp_swiglu = self.is_gated and swiglu_limit > 0
+        self.act_fn = (
+            ClampedSiluAndMul(swiglu_limit)
+            if self.clamp_swiglu
+            else _ACTIVATION_FUNC_MAP[activation_type]()
+        )
 
         if self.is_gated:
             if W.ffn_w13 not in weights:
@@ -114,6 +132,7 @@ class DenseMLP(nn.Module):
         self._fuse_silu_quant = (
             fuse_kernels_enabled(hw_kernel_config)
             and self.is_gated
+            and not self.clamp_swiglu
             and CudaFp8GEMMLinear is not None
             and isinstance(self.down_proj, CudaFp8GEMMLinear)
             and (self.down_proj.K % 128 == 0)
@@ -123,8 +142,12 @@ class DenseMLP(nn.Module):
 
     @property
     def accepts_fp8_input(self) -> bool:
-        return CudaFp8GEMMLinear is not None and isinstance(
-            self.up_proj, CudaFp8GEMMLinear
+        return self.is_gated and (
+            callable(getattr(self.up_proj, "forward_quantized", None))
+            or (
+                CudaFp8GEMMLinear is not None
+                and isinstance(self.up_proj, CudaFp8GEMMLinear)
+            )
         )
 
     def forward(
@@ -142,12 +165,17 @@ class DenseMLP(nn.Module):
                 output = all_reduce(output, group=Group.TP)
             return output
         if x_fp8 is not None and x_scale is not None and self.accepts_fp8_input:
-            up = self.up_proj(x_fp8, input_scales=x_scale)
+            if callable(getattr(self.up_proj, "forward_quantized", None)):
+                up = self.up_proj.forward_quantized(x_fp8, x_scale)
+            else:
+                up = self.up_proj(x_fp8, input_scales=x_scale)
         else:
             up = self.up_proj(x)
         output = None
-        if self.is_gated and getattr(
-            self.down_proj, "supports_fused_silu_quant", False
+        if (
+            self.is_gated
+            and not self.clamp_swiglu
+            and getattr(self.down_proj, "supports_fused_silu_quant", False)
         ):
             output = self.down_proj.forward_silu_and_mul_quantized(up)
         if output is not None:

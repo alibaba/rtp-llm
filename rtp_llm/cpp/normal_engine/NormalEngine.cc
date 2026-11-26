@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerUtils.h"
 #include "rtp_llm/cpp/telemetry/TelemetryRuntime.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
+#include "rtp_llm/cpp/cache/DeviceBlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/PPTopologyValidator.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
@@ -627,10 +628,9 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
     RTP_LLM_FAIL("prefillWarmUp is not supported on non-CUDA platforms");
     return {};
 #else
-    const int64_t token_budget = runtime_config.fifo_scheduler_config.prefill_chunk_size;
-    const bool    use_global_budget_warmup =
-        token_budget > 0 && !runtime_config.warm_up_with_loss;
-    const int64_t token_heavy_seq_len = std::max<int64_t>(1, static_cast<int64_t>(getWarmUpInputLength()));
+    const int64_t token_budget             = runtime_config.fifo_scheduler_config.prefill_chunk_size;
+    const bool    use_global_budget_warmup = token_budget > 0 && !runtime_config.warm_up_with_loss;
+    const int64_t token_heavy_seq_len      = std::max<int64_t>(1, static_cast<int64_t>(getWarmUpInputLength()));
 
     auto fake_input = makeFakeInput(static_cast<size_t>(token_heavy_seq_len));
     fake_input->generate_config->num_return_sequences =
@@ -865,16 +865,16 @@ void NormalEngine::initializeAndPublishCacheManager(ResourceContext&            
 }
 
 #if USING_CUDA
-std::vector<AccuracyScenario> NormalEngine::accuracyScenariosForStartup(const ModelConfig& model_config,
-                                                                      const RuntimeConfig& runtime_config,
-                                                                      const KVCacheConfig& cache_config,
-                                                                      size_t block_size,
-                                                                      size_t temporary_block_num) {
+std::vector<AccuracyScenario> NormalEngine::accuracyScenariosForStartup(const ModelConfig&   model_config,
+                                                                        const RuntimeConfig& runtime_config,
+                                                                        const KVCacheConfig& cache_config,
+                                                                        size_t               block_size,
+                                                                        size_t               temporary_block_num) {
     const auto executable = [&](const AccuracyScenario& scenario) {
         size_t max_plain = 0, max_seq = 0;
         for (const auto& seq : scenario.seqs) {
             max_plain = std::max(max_plain, seq.prefix_len + seq.chunk_len);
-            max_seq = std::max(max_seq, seq.prefix_len + seq.chunk_len + seq.decode_steps);
+            max_seq   = std::max(max_seq, seq.prefix_len + seq.chunk_len + seq.decode_steps);
         }
         // Match runCheck(), including its strict token-budget comparison.
         const auto token_budget = runtime_config.fifo_scheduler_config.max_batch_tokens_size;
@@ -882,21 +882,22 @@ std::vector<AccuracyScenario> NormalEngine::accuracyScenariosForStartup(const Mo
                && scenario.seqs.size() <= static_cast<size_t>(runtime_config.max_generate_batch_size)
                && (token_budget == 0 || max_plain * scenario.seqs.size() < static_cast<size_t>(token_budget))
                && max_seq <= static_cast<size_t>(model_config.max_seq_len) && max_seq <= 65536
-               && AccuracyChecker::computeTemporaryBlockNum(block_size, cache_config, {scenario}) <= temporary_block_num;
+               && AccuracyChecker::computeTemporaryBlockNum(block_size, cache_config, {scenario})
+                      <= temporary_block_num;
     };
     std::vector<AccuracyScenario> scenarios;
-    bool has_decode = false;
+    bool                          has_decode = false;
     for (const auto& scenario : AccuracyChecker::defaultScenarios()) {
         if (executable(scenario)) {
             scenarios.push_back(scenario);
-            has_decode |= std::any_of(scenario.seqs.begin(), scenario.seqs.end(),
-                                      [](const auto& seq) { return seq.decode_steps > 0; });
+            has_decode |= std::any_of(
+                scenario.seqs.begin(), scenario.seqs.end(), [](const auto& seq) { return seq.decode_steps > 0; });
         }
     }
     if (!has_decode) {
         AccuracyScenario minimal{{{0, 1, 1}}};
         RTP_LLM_CHECK_WITH_INFO(executable(minimal),
-                               "accuracy check requires capacity for batch 1, one prompt token and one decode step");
+                                "accuracy check requires capacity for batch 1, one prompt token and one decode step");
         scenarios.push_back(std::move(minimal));
     }
     return scenarios;
@@ -944,14 +945,19 @@ absl::StatusOr<bool> NormalEngine::runAttentionAccuracyCheck(const EngineInitPar
                             "attention accuracy check requires one FULL KV cache group");
         return false;
     }
-    auto accuracy_scenarios = accuracyScenariosForStartup(
-        model_config_, runtime_config, check_config, cache_config.seq_size_per_block, std::numeric_limits<size_t>::max());
+    auto accuracy_scenarios = accuracyScenariosForStartup(model_config_,
+                                                          runtime_config,
+                                                          check_config,
+                                                          cache_config.seq_size_per_block,
+                                                          std::numeric_limits<size_t>::max());
     cache_config.finalizeBlockNums(
         AccuracyChecker::computeTemporaryBlockNum(cache_config.seq_size_per_block, check_config, accuracy_scenarios),
         runtime_config);
-    accuracy_scenarios = accuracyScenariosForStartup(
-        model_config_, runtime_config, check_config, cache_config.seq_size_per_block,
-        cache_config.topology().groups().front().block_num);
+    accuracy_scenarios = accuracyScenariosForStartup(model_config_,
+                                                     runtime_config,
+                                                     check_config,
+                                                     cache_config.seq_size_per_block,
+                                                     cache_config.topology().groups().front().block_num);
     ResourceContext check_context;
     check_context.initCacheConfig(check_config);
     check_context.role_type  = pd_sep_config.role_type;
@@ -1043,33 +1049,50 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
     normalizeSystemPromptCacheConfig();
     const bool use_device_malloc_block_pool =
         shouldUseDeviceMallocKVCacheBacking(pd_sep_config, cache_store_config, kv_cache_config);
-    const ModelConfig* draft_model_config   = propose_params_ && propose_params_->draftModel() ?
-                                                  &propose_params_->getEngineInitParams().model_config_ :
-                                                  nullptr;
-    auto               config               = CacheConfigCreator::createConfig(
+    const ModelConfig* draft_model_config = propose_params_ && propose_params_->draftModel() ?
+                                                &propose_params_->getEngineInitParams().model_config_ :
+                                                nullptr;
+    auto               config             = CacheConfigCreator::createConfig(
         model_config_, parallelism_config, kv_cache_config, sp_config, draft_model_config, isMTPEagle(), isEagle());
     CacheConfigCreator::configureLinearReplay(
         config, model_config_, parallelism_config, runtime_config, sp_config, isMTPEagle());
     auto block_tree_layout = planBlockTreeCacheLayout(config, kv_cache_config);
     RTP_LLM_CHECK_WITH_INFO(block_tree_layout != nullptr, "failed to plan BlockTreeCache layout");
-    const auto local_block_num     = CacheConfigCreator::computeLocalBlockNum(config,
-                                                                          model_config_,
-                                                                          runtime_config,
-                                                                          kv_cache_config,
-                                                                          parallelism_config,
-                                                                          warm_up_result,
-                                                                          sp_config,
-                                                                          &block_tree_layout->crc_workspaces);
-    const auto confirmed_block_num = CacheConfigCreator::synchronizeBlockNum(local_block_num, parallelism_config, config);
-    if (parallelism_config.pp_size > 1) {
-        PPCacheCapacityNegotiator negotiator(parallelism_config.pp_size);
-        const auto                capacity =
-            negotiator.negotiate(config, confirmed_block_num, block_tree_layout->sizing, runtime_config);
-        config.finalizeBlockNums(capacity.paged_block_num, runtime_config, &capacity.block_num_overrides);
-        block_tree_layout->block_nums = capacity.block_tree;
-        block_tree_layout->disk_eviction_block_bytes = capacity.disk_eviction_block_bytes;
+    if (CacheConfigCreator::useSharedBlockPool(config, model_config_, parallelism_config, kv_cache_config)) {
+        const auto local_bytes  = CacheConfigCreator::computeLocalCacheBytes(config,
+                                                                            model_config_,
+                                                                            runtime_config,
+                                                                            kv_cache_config,
+                                                                            parallelism_config,
+                                                                            warm_up_result,
+                                                                            sp_config,
+                                                                            &block_tree_layout->crc_workspaces);
+        const auto agreed_bytes = CacheConfigCreator::synchronizeCacheBytes(local_bytes, parallelism_config);
+        DeviceBlockPoolConfigHelper::finalizeSharedConfig(config, agreed_bytes, runtime_config);
+        RTP_LLM_LOG_INFO("shared hybrid cache initialized from rank-agreed budget: local_bytes=%lu agreed_bytes=%lu",
+                         local_bytes,
+                         config.shared_cache_bytes);
     } else {
-        config.finalizeBlockNums(confirmed_block_num, runtime_config);
+        const auto local_block_num = CacheConfigCreator::computeLocalBlockNum(config,
+                                                                              model_config_,
+                                                                              runtime_config,
+                                                                              kv_cache_config,
+                                                                              parallelism_config,
+                                                                              warm_up_result,
+                                                                              sp_config,
+                                                                              &block_tree_layout->crc_workspaces);
+        const auto confirmed_block_num =
+            CacheConfigCreator::synchronizeBlockNum(local_block_num, parallelism_config, config);
+        if (parallelism_config.pp_size > 1) {
+            PPCacheCapacityNegotiator negotiator(parallelism_config.pp_size);
+            const auto                capacity =
+                negotiator.negotiate(config, confirmed_block_num, block_tree_layout->sizing, runtime_config);
+            config.finalizeBlockNums(capacity.paged_block_num, runtime_config, &capacity.block_num_overrides);
+            block_tree_layout->block_nums                = capacity.block_tree;
+            block_tree_layout->disk_eviction_block_bytes = capacity.disk_eviction_block_bytes;
+        } else {
+            config.finalizeBlockNums(confirmed_block_num, runtime_config);
+        }
     }
     auto cache_manager = make_shared<KVCacheManager>(config,
                                                      false,

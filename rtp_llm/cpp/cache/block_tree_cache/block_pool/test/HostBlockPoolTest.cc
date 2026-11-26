@@ -192,4 +192,69 @@ TEST(HostBlockPoolTest, LastTreeRefReleasesBlock) {
     EXPECT_FALSE(pool.isAllocated(*block));
 }
 
+TEST(HostBlockPoolTest, SharedHostBudgetBorrowsOnlyAfterStoreAndCacheHoldsDrain) {
+    auto arena                       = std::make_shared<SharedBlockArena>(32768, std::vector<size_t>{4096, 8192});
+    auto small_config                = makeConfig(arena->slotCount(0), 1024, arena->stride(0));
+    small_config->shared_arena       = arena;
+    small_config->shared_arena_group = 0;
+    HostBlockPool small(small_config);
+    ASSERT_TRUE(small.init());
+    auto ids = small.malloc(6);
+    ASSERT_TRUE(ids.has_value());
+    small.incTreeRef(*ids, BlockTreeRefType::CACHE);
+    for (size_t i = 0; i < ids->size(); ++i) {
+        const auto buffer = small.blockBuffer((*ids)[i]);
+        std::memset(buffer.addr, 0x31 + i, buffer.payload_bytes);
+    }
+    auto large_config                = makeConfig(arena->slotCount(1), 6000, arena->stride(1));
+    large_config->shared_arena       = arena;
+    large_config->shared_arena_group = 1;
+    large_config->shared_backing     = small.sharedBacking();
+    HostBlockPool large(large_config);
+    ASSERT_TRUE(large.init());
+    EXPECT_EQ(large.sharedBacking(), small.sharedBacking());
+    EXPECT_EQ(arena->freeBytes(), 0u);
+    EXPECT_FALSE(large.malloc().has_value());
+    small.incTreeRef((*ids)[0], BlockTreeRefType::EVICT);
+    small.decTreeRef(BlockIdList{(*ids)[0], (*ids)[1]}, BlockTreeRefType::CACHE);
+    EXPECT_EQ(arena->freeBytes(), 4096u);
+    EXPECT_FALSE(large.malloc().has_value());
+    small.decTreeRef((*ids)[0], BlockTreeRefType::EVICT);
+    const auto borrowed = large.malloc();
+    ASSERT_TRUE(borrowed.has_value());
+    large.incTreeRef(*borrowed, BlockTreeRefType::EVICT);
+    const auto output = large.blockBuffer(*borrowed);
+    std::memset(output.addr, 0xAB, output.payload_bytes);
+    const auto first = small.blockBuffer((*ids)[0]);
+    EXPECT_EQ(static_cast<uint8_t*>(first.addr) - (*ids)[0] * arena->stride(0),
+              static_cast<uint8_t*>(output.addr) - *borrowed * arena->stride(1));
+    for (size_t i = 2; i < ids->size(); ++i) {
+        const auto  input = small.blockBuffer((*ids)[i]);
+        const auto* bytes = static_cast<const uint8_t*>(input.addr);
+        for (size_t byte = 0; byte < input.payload_bytes; ++byte) {
+            ASSERT_EQ(bytes[byte], 0x31 + i);
+        }
+    }
+    small.decTreeRef(BlockIdList(ids->begin() + 2, ids->end()), BlockTreeRefType::CACHE);
+    large.decTreeRef(*borrowed, BlockTreeRefType::EVICT);
+    EXPECT_EQ(arena->freeBytes(), arena->usableBytes());
+    EXPECT_EQ(arena->availableBytes(), arena->usableBytes());
+}
+
+TEST(HostBlockPoolTest, SharedHostRejectsIndependentAllocatorAndWrongNamespace) {
+    auto arena           = std::make_shared<SharedBlockArena>(32768, std::vector<size_t>{4096});
+    auto config          = makeConfig(arena->slotCount(0));
+    config->shared_arena = arena;
+    HostBlockPool first(config);
+    ASSERT_TRUE(first.init());
+    auto wrong            = std::make_shared<HostBlockPoolConfig>(*config);
+    wrong->shared_backing = first.sharedBacking();
+    wrong->shared_arena   = std::make_shared<SharedBlockArena>(32768, std::vector<size_t>{4096});
+    HostBlockPool independent(wrong);
+    EXPECT_ANY_THROW(independent.init());
+    auto wrong_count = std::make_shared<HostBlockPoolConfig>(*config);
+    --wrong_count->physical_block_count;
+    EXPECT_ANY_THROW(static_cast<void>(HostBlockPool(wrong_count)));
+}
+
 }  // namespace rtp_llm

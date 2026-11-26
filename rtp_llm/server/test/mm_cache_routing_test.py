@@ -341,6 +341,19 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(self.request.mm_token_expansion, expansion)
         self.visitor.master_client.get_vit_cache_metadata.assert_not_awaited()
 
+    async def test_domain_pd_preserves_original_tokens_when_decode_fetches_vit_layout(
+        self,
+    ):
+        self.visitor._mm_layout_from_vit = True
+        decode = self.prefill.model_copy(update={"role": RoleType.DECODE})
+        self.request.generate_config.role_addrs = [self.vit, self.prefill, decode]
+        await self.visitor._expand_pd_multimodal_tokens(self.request)
+        self.visitor.master_client.get_vit_cache_metadata.assert_not_awaited()
+        wire = trans_input(self.request)
+        self.assertTrue(wire.generate_config.can_use_pd_separation)
+        self.assertFalse(wire.HasField("multimodal_token_layout"))
+        self.assertEqual(list(wire.token_ids), [1, 99, 2])
+
     async def test_domain_pd_uses_prefill_fallback_if_hash_rpc_is_unavailable(self):
         decode = self.prefill.model_copy(update={"role": RoleType.DECODE})
         self.request.generate_config.role_addrs = [self.vit, self.prefill, decode]
@@ -359,7 +372,9 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.request.generate_config.role_addrs = [self.vit, self.prefill, decode]
         self.request.enqueued_by_master = True
         self.visitor.master_client.get_vit_cache_metadata.return_value = None
-        with self.assertRaisesRegex(FtRuntimeException, "routing hashes are unavailable"):
+        with self.assertRaisesRegex(
+            FtRuntimeException, "routing hashes are unavailable"
+        ):
             await self.visitor._expand_pd_multimodal_tokens(self.request)
         self.assertIsNone(self.request.mm_token_expansion)
 

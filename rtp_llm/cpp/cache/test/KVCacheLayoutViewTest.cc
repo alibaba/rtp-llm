@@ -139,6 +139,48 @@ TEST(KVCacheLayoutViewTest, MlaReshapesKvAndScaleWithoutChangingStorage) {
     EXPECT_EQ(layer.kv_scale_base.data_ptr(), scale.data_ptr());
 }
 
+TEST(KVCacheLayoutViewTest, SharedMlaViewsRetainOuterPitchAndBackingLifetime) {
+    auto backing = torch::zeros({1024}, torch::kUInt8);
+    auto base    = backing.view(torch::kBFloat16).as_strided({3, 8, 6}, {128, 6, 1}, 16);
+    auto scale   = backing.as_strided({3, 8, 3}, {256, 3, 1}, 128);
+    auto group   = makeGroup("mla", KVCacheSpecType::MultiHeadLatentAttention, CacheGroupType::FULL, 8, 8, 32, 16);
+    torch_ext::KVCache cache(makeLayout({std::move(group)}, {"mla"}, {{base, scale}}));
+    const auto         layer = cache.getLayerCache(0);
+    EXPECT_EQ(layer.kv_cache_base.data_ptr(), base.data_ptr());
+    EXPECT_EQ(layer.kv_cache_base.stride(0), 128);
+    EXPECT_EQ(layer.kv_scale_base.stride(0), 256);
+    layer.kv_cache_base[2][3][4].fill_(7);
+    EXPECT_EQ(base[2][3][4].item<float>(), 7);
+    layer.kv_scale_base[1][0][0].fill_(31);
+    EXPECT_EQ(backing[384].item<int>(), 31);
+    backing = torch::Tensor();
+    base    = torch::Tensor();
+    scale   = torch::Tensor();
+    EXPECT_EQ(layer.kv_cache_base[2][3][4].item<float>(), 7);
+}
+
+TEST(KVCacheLayoutViewTest, SharedMhaAndOpaqueViewsAliasTheirPhysicalSlots) {
+    for (const auto type : {KVCacheSpecType::MultiHeadAttention, KVCacheSpecType::OpaqueKV}) {
+        auto               backing = torch::zeros({3, 160}, torch::kFloat16);
+        auto               base    = backing.as_strided({3, 64}, {160, 1}, 8);
+        auto               group   = makeGroup("full", type, CacheGroupType::FULL, 8, 8, 32, 32);
+        torch_ext::KVCache cache(makeLayout({group}, {"full"}, {{base, {}}}));
+        auto               view = cache.getLayerCache(0).kv_cache_base;
+        EXPECT_EQ(view.data_ptr(), base.data_ptr());
+        EXPECT_EQ(view.stride(0), 160);
+        view[1].fill_(9);
+        EXPECT_EQ(backing[1][8].item<float>(), 9);
+        EXPECT_EQ(backing[1][7].item<float>(), 0);
+        EXPECT_EQ(backing[1][72].item<float>(), 0);
+
+        // The unrepresentable multi-page case must fail, rather than creating
+        // a contiguous copy whose writes miss the shared arena.
+        auto               multi_group = makeGroup("full", type, CacheGroupType::FULL, 8, 2, 32, 32);
+        torch_ext::KVCache multi_page(makeLayout({std::move(multi_group)}, {"full"}, {{base, {}}}));
+        EXPECT_THROW(multi_page.getLayerCache(0), std::exception);
+    }
+}
+
 TEST(KVCacheLayoutViewTest, FullOpaqueExpandsButLinearSwaAndStateStayPhysical) {
     const auto opaque       = torch::arange(3 * 64, torch::TensorOptions().dtype(torch::kUInt8)).reshape({3, 64});
     auto       opaque_group = makeGroup("opaque", KVCacheSpecType::OpaqueKV, CacheGroupType::FULL, 512, 128, 64, 0);

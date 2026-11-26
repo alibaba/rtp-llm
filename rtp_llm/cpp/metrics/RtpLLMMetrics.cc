@@ -641,8 +641,8 @@ bool RtpLLMCacheEventDropMetrics::init(kmonitor::MetricsGroupManager* manager) {
     return true;
 }
 
-void RtpLLMCacheEventDropMetrics::report(const kmonitor::MetricsTags* tags,
-                                        RtpLLMCacheEventDropMetricsCollector* collector) {
+void RtpLLMCacheEventDropMetrics::report(const kmonitor::MetricsTags*          tags,
+                                         RtpLLMCacheEventDropMetricsCollector* collector) {
     kmonitor::MetricsTags queue_tags = tags ? *tags : kmonitor::MetricsTags{};
     queue_tags.AddTag("reason", "queue_full");
     reportKmonMetric(drop_qps_metric, &queue_tags, collector->queue_full_count);
@@ -679,6 +679,9 @@ void RtpLLMCacheOperationMetrics::report(const kmonitor::MetricsTags*          t
 }
 
 bool RtpLLMCachePoolMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_GAUGE_MUTABLE_METRIC(shared_arena_total_bytes_metric, "rtp_llm_kv_cache_shared_arena_total_bytes");
+    REGISTER_GAUGE_MUTABLE_METRIC(shared_arena_free_bytes_metric, "rtp_llm_kv_cache_shared_arena_free_bytes");
+    REGISTER_GAUGE_MUTABLE_METRIC(shared_arena_available_bytes_metric, "rtp_llm_kv_cache_shared_arena_available_bytes");
     REGISTER_GAUGE_MUTABLE_METRIC(block_size_bytes_metric, "rtp_llm_kv_cache_block_size_bytes");
     REGISTER_GAUGE_MUTABLE_METRIC(free_blocks_metric, "rtp_llm_kv_cache_free_blocks");
     REGISTER_GAUGE_MUTABLE_METRIC(used_blocks_metric, "rtp_llm_kv_cache_used_blocks");
@@ -709,6 +712,15 @@ void RtpLLMCachePoolMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCac
 }
 
 void RtpLLMCachePoolMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCachePoolMetricsCollector* collector) {
+    if (collector->shared_arena_total_bytes) {
+        RTP_REPORT_MUTABLE_METRIC(shared_arena_total_bytes_metric, *collector->shared_arena_total_bytes);
+    }
+    if (collector->shared_arena_free_bytes) {
+        RTP_REPORT_MUTABLE_METRIC(shared_arena_free_bytes_metric, *collector->shared_arena_free_bytes);
+    }
+    if (collector->shared_arena_available_bytes) {
+        RTP_REPORT_MUTABLE_METRIC(shared_arena_available_bytes_metric, *collector->shared_arena_available_bytes);
+    }
     RTP_REPORT_MUTABLE_METRIC(block_size_bytes_metric, collector->block_size_bytes);
     RTP_REPORT_MUTABLE_METRIC(free_blocks_metric, collector->free_blocks);
     RTP_REPORT_MUTABLE_METRIC(used_blocks_metric, collector->used_blocks);
@@ -901,9 +913,9 @@ void RtpLLMCacheEvictionMetrics::report(const kmonitor::MetricsTags*            
         return;
     }
     if (collector->calls > 0) {
-        reportKmonMetric(
-            evictable_candidate_count_metric, &selection_tags,
-            static_cast<double>(collector->candidates_sum) / collector->calls);
+        reportKmonMetric(evictable_candidate_count_metric,
+                         &selection_tags,
+                         static_cast<double>(collector->candidates_sum) / collector->calls);
     }
     reportKmonMetric(choose_victim_latency_sum_us_metric, &selection_tags, collector->latency_sum_us);
     reportKmonMetric(choose_victim_scanned_candidates_qps_metric, &selection_tags, collector->scanned_candidates);
@@ -1331,7 +1343,7 @@ bool RtpLLMRemoteCacheControlMetrics::init(kmonitor::MetricsGroupManager* manage
     return true;
 }
 
-void RtpLLMRemoteCacheControlMetrics::report(const kmonitor::MetricsTags* tags,
+void RtpLLMRemoteCacheControlMetrics::report(const kmonitor::MetricsTags*              tags,
                                              RtpLLMRemoteCacheControlMetricsCollector* collector) {
     RTP_REPORT_MUTABLE_METRIC(enabled_metric, collector->enabled ? 1 : 0);
 }

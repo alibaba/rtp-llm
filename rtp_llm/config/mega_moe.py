@@ -10,6 +10,9 @@ class MegaMoeExecutionPolicy:
     w1_layout: str = "up_gate"
     activation_clamp: float | None = None
     fast_math: bool = False
+    prefill_chunk_tokens: int | None = None
+    preserve_fp32_scales: bool = False
+    replicate_shared_weights: bool = False
 
 
 FP4_MEGA_MOE_STRATEGIES = frozenset({"mega_moe", "mega_moe_se", "mega_moe_fused"})

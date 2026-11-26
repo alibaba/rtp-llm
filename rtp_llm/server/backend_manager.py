@@ -133,6 +133,9 @@ class BackendManager(object):
             and engine_config.parallelism_config.world_size > 1
             and not engine_config.moe_config.use_all_gather
         ):
+            model_config.prepare_moe_backend(
+                engine_config.parallelism_config, engine_config.moe_config
+            )
             deepep_init_success = False
             moriep_init_success = False
 

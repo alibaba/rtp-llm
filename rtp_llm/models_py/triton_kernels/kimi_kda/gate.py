@@ -16,6 +16,7 @@ from rtp_llm.models_py.triton_kernels.autotune_cache import (
     autotune_cache_kwargs,
     cuda_cached_autotune,
 )
+from rtp_llm.models_py.triton_kernels.common.kda_gate import KDAGateFunction
 from rtp_llm.models_py.triton_kernels.fla.index import prepare_chunk_indices
 from rtp_llm.models_py.triton_kernels.fla.op import exp, softplus
 from rtp_llm.models_py.triton_kernels.fla.utils import is_amd as IS_AMD
@@ -100,57 +101,6 @@ def kda_gate_fwd_kernel(
         tl.store(p_yb, b_yb.to(p_yb.dtype.element_ty), mask=p_yb_m0)
 
 
-def kda_gate_fwd(
-    g: torch.Tensor,
-    A_log: torch.Tensor,
-    dt_bias: torch.Tensor | None = None,
-    lower_bound: float | None = None,
-    output_dtype: torch.dtype = torch.float32,
-) -> torch.Tensor:
-    H, K = g.shape[-2:]
-    T = g.numel() // (H * K)
-
-    yg = torch.empty_like(g, dtype=output_dtype)
-
-    def grid(meta):
-        return (triton.cdiv(T, meta["BT"]), H)
-
-    kda_gate_fwd_kernel[grid](
-        g=g,
-        A_log=A_log,
-        dt_bias=dt_bias,
-        beta=None,
-        yg=yg,
-        yb=None,
-        T=T,
-        H=H,
-        D=K,
-        BD=triton.next_power_of_2(K),
-        lower_bound=lower_bound,
-    )
-    return yg
-
-
-class KDAGateFunction(torch.autograd.Function):
-    @staticmethod
-    def forward(
-        ctx,
-        g: torch.Tensor,
-        A_log: torch.Tensor,
-        dt_bias: torch.Tensor | None = None,
-        lower_bound: float | None = None,
-        output_dtype: torch.dtype = torch.float32,
-    ) -> torch.Tensor:
-        yg = kda_gate_fwd(
-            g=g,
-            A_log=A_log,
-            dt_bias=dt_bias,
-            lower_bound=lower_bound,
-            output_dtype=output_dtype,
-        )
-        return yg
-
-
 @torch.compiler.disable
 def fused_kda_gate(
     g: torch.Tensor,
@@ -159,7 +109,9 @@ def fused_kda_gate(
     lower_bound: float | None = None,
     output_dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-    return KDAGateFunction.apply(g, A_log, dt_bias, lower_bound, output_dtype)
+    return KDAGateFunction.apply(
+        kda_gate_fwd_kernel, g, A_log, dt_bias, lower_bound, output_dtype
+    )
 
 
 @triton.heuristics(

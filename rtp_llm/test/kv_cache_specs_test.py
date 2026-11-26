@@ -13,6 +13,7 @@ from rtp_llm.models.qwen3_next.qwen3_next_mtp import Qwen3NextMTP
 from rtp_llm.models.qwen3_vl import QWen3_VL
 from rtp_llm.models.qwen_v2 import QwenV2MTP
 from rtp_llm.ops import (
+    CacheCapacityPolicyDesc,
     CacheReusePolicyDesc,
     DataType,
     HybridAttentionType,
@@ -476,6 +477,18 @@ class HybridKVCacheSpecTest(TestCase):
 
             self.assertEqual(restored.enable_prefix_reuse, enable_prefix_reuse)
             self.assertFalse(hasattr(restored, "evict_policy"))
+
+    def test_cache_capacity_policy_desc_pickle_keeps_projection_and_legacy_state(self):
+        policy = CacheCapacityPolicyDesc()
+        self.assertEqual(policy.__getstate__(), (None, None, None))
+        policy.match_decode_token_capacity = True
+        restored = pickle.loads(pickle.dumps(policy))
+        self.assertTrue(restored.match_decode_token_capacity)
+
+        legacy = CacheCapacityPolicyDesc.__new__(CacheCapacityPolicyDesc)
+        legacy.__setstate__((True, 32, True))
+        self.assertEqual(legacy.explicit_block_num, 32)
+        self.assertFalse(legacy.match_decode_token_capacity)
 
     def test_kv_cache_spec_desc_nested_reuse_pickle_round_trip(self):
         reuse = CacheReusePolicyDesc()

@@ -1,6 +1,8 @@
 import base64
 import io
 import logging
+import pickle
+import socket
 import tempfile
 import time
 import unittest
@@ -8,11 +10,15 @@ from unittest.mock import Mock, patch
 
 import requests
 from PIL import Image
-from urllib3.exceptions import ReadTimeoutError
+from urllib3.exceptions import MaxRetryError, NewConnectionError, ReadTimeoutError
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import MMPreprocessConfigPB
-from rtp_llm.multimodal.mm_error_messages import MMErr, format_mm_rpc_error
+from rtp_llm.multimodal.mm_error_messages import (
+    MediaDownloadError,
+    MMErr,
+    format_mm_rpc_error,
+)
 from rtp_llm.multimodal.multimodal_util import (
     collect_download_timing,
     get_bytes_io_from_url,
@@ -45,6 +51,78 @@ class _FakeResponse:
 
 
 class TestMultiModalUtil(unittest.TestCase):
+    def test_dns_failure_preserves_input_error_and_safe_diagnostics(self):
+        url = "https://user:pass@kb-prod.dsbj.com/media?signature=secret"
+        dns_error = socket.gaierror(socket.EAI_NONAME, "secret resolver details")
+        connection_error = NewConnectionError(None, "secret connection details")
+        connection_error.__cause__ = dns_error
+        wrapped_error = requests.ConnectionError(
+            MaxRetryError(None, url, reason=connection_error)
+        )
+        for failure in (dns_error, wrapped_error):
+            with self.subTest(failure=type(failure).__name__):
+                with patch(
+                    "rtp_llm.multimodal.multimodal_util.REQUEST_GET",
+                    side_effect=failure,
+                ) as request_impl:
+                    with self.assertRaises(MediaDownloadError) as captured:
+                        get_bytes_io_from_url(url)
+                request_impl.assert_called_once()
+                serialized = pickle.dumps(captured.exception)
+                for secret in (b"secret", b"/media", b"user:pass"):
+                    self.assertNotIn(secret, serialized)
+                error = pickle.loads(serialized)
+                self.assertEqual(
+                    error.exception_type, ExceptionType.MM_WRONG_FORMAT_ERROR
+                )
+                self.assertEqual(error.message, MMErr.DNS_FAILED)
+                self.assertEqual(error.domain, "kb-prod.dsbj.com")
+                self.assertEqual(error.retry_count, 0)
+                self.assertEqual(
+                    error.metric_tags(),
+                    {"failure_type": "dns_error", "http_status": "none"},
+                )
+
+    def test_temporary_dns_failure_is_not_an_invalid_parameter(self):
+        with patch(
+            "rtp_llm.multimodal.multimodal_util.REQUEST_GET",
+            side_effect=socket.gaierror(socket.EAI_AGAIN, "Temporary failure"),
+        ):
+            with self.assertRaises(MediaDownloadError) as captured:
+                get_bytes_io_from_url("https://example.com/image")
+        self.assertEqual(
+            captured.exception.exception_type, ExceptionType.MM_DOWNLOAD_FAILED
+        )
+        self.assertEqual(captured.exception.failure_type, "dns_error")
+
+    def test_internal_ssrf_dns_failure_keeps_the_download_error_code(self):
+        try:
+            from internal_source.rtp_llm.utils.ssrf_check import safe_request_get
+        except ImportError:
+            self.skipTest("internal SSRF implementation is not installed")
+        with patch(
+            "socket.gethostbyname",
+            side_effect=socket.gaierror(socket.EAI_NONAME, "lookup failed"),
+        ):
+            with patch(
+                "rtp_llm.multimodal.multimodal_util.REQUEST_GET", safe_request_get
+            ):
+                self.assert_mm_error(
+                    ExceptionType.MM_WRONG_FORMAT_ERROR,
+                    MMErr.DNS_FAILED,
+                    lambda: get_bytes_io_from_url("https://kb-prod.dsbj.com/image"),
+                )
+
+    def test_proxy_dns_failure_is_not_an_invalid_media_url(self):
+        error = requests.exceptions.ProxyError("proxy lookup failed")
+        error.__cause__ = socket.gaierror(socket.EAI_NONAME, "proxy not found")
+        with patch("rtp_llm.multimodal.multimodal_util.REQUEST_GET", side_effect=error):
+            self.assert_mm_error(
+                ExceptionType.MM_DOWNLOAD_FAILED,
+                MMErr.DNS_FAILED,
+                lambda: get_bytes_io_from_url("https://example.com/image"),
+            )
+
     def assert_mm_error(self, exception_type, message, callable_):
         with self.assertRaises(FtRuntimeException) as context:
             callable_()
@@ -322,6 +400,57 @@ class TestMultiModalUtil(unittest.TestCase):
             with collect_download_timing() as cache_timing:
                 get_bytes_io_from_url("https://example.com/cached")
         self.assertEqual(cache_timing.elapsed_ms, 0.0)
+
+    def test_http_failure_diagnostics_survive_the_worker_boundary(self):
+        request_impl = Mock(
+            side_effect=[
+                requests.exceptions.ConnectTimeout(
+                    "https://example.com/?signature=secret"
+                ),
+                _FakeResponse(status_code=403),
+            ]
+        )
+        with patch("rtp_llm.multimodal.multimodal_util.REQUEST_GET", request_impl):
+            with self.assertRaises(MediaDownloadError) as captured:
+                get_bytes_io_from_url(
+                    "https://user:pass@example.com/media?signature=secret"
+                )
+
+        serialized = pickle.dumps(captured.exception)
+        self.assertNotIn(b"secret", serialized)
+        self.assertNotIn(b"/media", serialized)
+        self.assertNotIn(b"user:pass", serialized)
+        error = pickle.loads(serialized)
+        self.assertEqual(error.exception_type, ExceptionType.MM_DOWNLOAD_FAILED)
+        self.assertEqual(error.domain, "example.com")
+        self.assertEqual(error.retry_count, 1)
+        self.assertGreaterEqual(error.elapsed_ms, 0)
+        self.assertEqual(
+            error.metric_tags(), {"failure_type": "http_status", "http_status": "403"}
+        )
+
+    def test_http_failure_diagnostics_distinguish_network_failures(self):
+        for exception, failure_type, retry_count in (
+            (requests.exceptions.ConnectTimeout(), "connect_timeout", 2),
+            (requests.exceptions.ReadTimeout(), "read_timeout", 0),
+            (requests.exceptions.ConnectionError(), "connection_error", 0),
+            (requests.exceptions.InvalidURL(), "invalid_url", 0),
+        ):
+            with self.subTest(failure_type=failure_type):
+                with patch(
+                    "rtp_llm.multimodal.multimodal_util.REQUEST_GET",
+                    side_effect=exception,
+                ):
+                    with self.assertRaises(MediaDownloadError) as captured:
+                        get_bytes_io_from_url("https://example.com/network-failure")
+
+                error = captured.exception
+                self.assertIsNone(error.http_status)
+                self.assertEqual(error.retry_count, retry_count)
+                self.assertEqual(
+                    error.metric_tags(),
+                    {"failure_type": failure_type, "http_status": "none"},
+                )
 
 
 if __name__ == "__main__":

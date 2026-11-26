@@ -1031,9 +1031,9 @@ PrefillRpcServer::Cancel(grpc::ServerContext*, const CancelRequestPB* request, C
         return grpcStatusFromErrorInfo(
             ErrorInfo(ErrorCode::INVALID_PARAMS, "GetPeerInfo invalid tp_size=" + std::to_string(pc.tp_size)));
     }
+    const bool local_page_rr = maga_init_params_.model_config_.use_page_rr_kv_cache;
     response->set_tp_size(static_cast<int32_t>(pc.tp_size));
-    const auto& cp = pc.prefill_cp_config;
-    response->set_cp_size(static_cast<int32_t>(cp.is_enabled() && cp.kv_cache_sharded ? pc.tp_size : 1));
+    response->set_cp_size(static_cast<int32_t>(pc.kvCacheCpSize(local_page_rr)));
     // Advertise actual cache geometry for single-stage peers as well as pipelines.
     if (engine_ && engine_->getCacheManager()) {
         response->set_pipeline_layout(engine_->getCacheManager()->p2pPipelineLayout());

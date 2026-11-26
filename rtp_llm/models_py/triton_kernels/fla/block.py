@@ -1,9 +1,14 @@
+from typing import TYPE_CHECKING
+
 import torch
 import triton
 import triton.language as tl
 
 from rtp_llm.models_py.triton_kernels.common.offset import linear_offset_64
 from rtp_llm.models_py.triton_kernels.fla.index import prepare_chunk_indices
+
+if TYPE_CHECKING:
+    from rtp_llm.ops.compute_ops import PyAttentionInputs
 
 
 @triton.jit(do_not_specialize=["block_map_stride_b"])
@@ -24,9 +29,10 @@ def load_initial_state_from_block_map_kernel(
     SSM_PER_HEAD = K * V
     SSM_PER_BATCH = HEAD_NUM * SSM_PER_HEAD
 
-    i_b, i_h, i_v = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_b = tl.program_id(0).to(tl.int64)
+    i_h, i_v = tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
 
-    prefix = tl.load(prefix_lengths + i_b)
+    prefix = tl.load(prefix_lengths + i_b).to(tl.int64)
 
     v_offset = i_v * BLOCK_V
 
@@ -226,6 +232,30 @@ def store_ssm_state_to_block_map_kernel(
             BLOCK_V,
             CONV_STRIDE_TOKEN,
         )
+
+
+def store_kda_chunk_states(
+    intermediate: torch.Tensor | None,
+    final: torch.Tensor | None,
+    cache: torch.Tensor | None,
+    inputs: "PyAttentionInputs",
+    page_size: int,
+    chunk_size: int,
+) -> None:
+    if cache is None or final is None:
+        return
+    if intermediate is None:
+        intermediate = final.unsqueeze(0).unsqueeze(0)
+    store_ssm_state_to_block_map(
+        intermediate.float(),
+        final.float(),
+        inputs.prefix_lengths_device,
+        inputs.cu_seqlens_device,
+        inputs.kv_cache_kernel_block_id_device,
+        cache,
+        page_size,
+        chunk_size=chunk_size,
+    )
 
 
 def store_ssm_state_to_block_map(

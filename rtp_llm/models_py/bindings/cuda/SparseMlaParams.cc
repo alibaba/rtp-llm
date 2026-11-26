@@ -437,12 +437,18 @@ void SparseMlaParams::fillParams(torch_ext::PyAttentionInputs attn_inputs,
         attn_inputs.kv_cache_kernel_block_id.defined() && attn_inputs.kv_cache_kernel_block_id.numel() > 0 ?
             attn_inputs.kv_cache_kernel_block_id :
             attn_inputs.kv_cache_block_id;
+    // Replay uses the entire block table as an upper bound for page storage.
+    const int64_t page_capacity = attn_inputs.is_prefill && block_table_host.defined() ? block_table_host.numel() : 0;
     FlashInferMlaAttnParams::fillParams(prefix_lengths_host,
                                         sequence_lengths_host,
                                         input_lengths_host,
                                         block_table_host,
                                         seq_size_per_block,
-                                        forbid_realloc);
+                                        forbid_realloc,
+                                        page_capacity);
+    if (!forbid_realloc) {
+        captured_page_capacity_ = page_capacity;
+    }
 
     // Step 2: Fill IndexerParams-specific parameters
     bool is_prefill = attn_inputs.is_prefill;
@@ -549,10 +555,30 @@ void SparseMlaParams::fillMultiTokenDecodeCudaGraphParams(torch::Tensor input_le
     if (kv_cache_block_id_device.scalar_type() != torch::kInt32)
         kv_cache_block_id_device = kv_cache_block_id_device.to(torch::kInt32);
 
+    RTP_LLM_CHECK_WITH_INFO(
+        input_lengths_device.dim() == 1 && prefix_lengths_device.dim() == 1 && kv_cache_block_id_device.dim() == 2
+            && input_lengths_device.numel() > 0 && prefix_lengths_device.numel() == input_lengths_device.numel()
+            && kv_cache_block_id_device.size(0) == input_lengths_device.numel() && seq_size_per_block > 0
+            && input_lengths_device.device() == prefix_lengths_device.device()
+            && input_lengths_device.device() == kv_cache_block_id_device.device()
+            && input_lengths_device.is_contiguous() && prefix_lengths_device.is_contiguous()
+            && kv_cache_block_id_device.is_contiguous(),
+        "multi-token decode metadata shapes/devices are inconsistent");
+
     const int batch_size           = static_cast<int>(input_lengths_device.size(0));
     const int max_blocks_per_batch = static_cast<int>(kv_cache_block_id_device.size(1));
     const int cap_batch            = kvlen_d.defined() ? static_cast<int>(kvlen_d.size(0)) : batch_size;
     const int cap_tokens           = batch_indice_d.defined() ? static_cast<int>(batch_indice_d.size(0)) : batch_size;
+
+    int total_tokens = multi_token_decode_total_tokens_;
+    if (total_tokens <= 0 && prefill_tokens_per_batch_ > 0) {
+        total_tokens = batch_size * prefill_tokens_per_batch_;
+    }
+    const int64_t page_capacity = kv_cache_block_id_device.numel();
+    RTP_LLM_CHECK_WITH_INFO(kvlen_d.defined() && batch_indice_d.defined() && page_indice_d.defined()
+                                && batch_size <= cap_batch && total_tokens > 0 && total_tokens <= cap_tokens
+                                && page_capacity <= captured_page_capacity_,
+                            "multi-token decode metadata exceeds captured capacity");
 
     cudaStream_t stream = GET_CURRENT_STREAM();
 
@@ -578,15 +604,6 @@ void SparseMlaParams::fillMultiTokenDecodeCudaGraphParams(torch::Tensor input_le
                                              cap_batch,
                                              cap_tokens,
                                              stream);
-
-    int total_tokens = multi_token_decode_total_tokens_;
-    if (total_tokens <= 0 && prefill_tokens_per_batch_ > 0) {
-        total_tokens = batch_size * prefill_tokens_per_batch_;
-    }
-    RTP_LLM_CHECK_WITH_INFO(
-        total_tokens > 0,
-        "total_tokens must be derivable from multi_token_decode_total_tokens_ or prefill_tokens_per_batch_");
-    const int page_capacity = batch_size * max_blocks_per_batch;
 
     auto set_shape = [](torch::Tensor& t, std::vector<int64_t> s) {
         if (t.defined())

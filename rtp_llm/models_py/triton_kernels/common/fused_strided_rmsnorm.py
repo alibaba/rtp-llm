@@ -41,6 +41,8 @@ from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
     create_per_token_group_quant_fp8_output_scale,
 )
 
+from rtp_llm.models_py.triton_kernels.common.host_math import next_power_of_2
+
 MAX_INREG_H = 8192
 
 
@@ -203,6 +205,27 @@ def _baseline_strided_rmsnorm(
     return flashinfer.norm.rmsnorm(x.contiguous(), weight, eps=eps)
 
 
+def _baseline_strided_rmsnorm_fp8_quant(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+    group_size: int,
+    scale_ue8m0: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    import flashinfer.norm
+    from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
+
+    normed = flashinfer.norm.rmsnorm(x.contiguous(), weight, eps=eps)
+    return sgl_per_token_group_quant_fp8(
+        normed,
+        group_size=group_size,
+        eps=1e-4,
+        column_major_scales=True,
+        scale_tma_aligned=True,
+        scale_ue8m0=scale_ue8m0,
+    )
+
+
 def _baseline_strided_rmsnorm_fp8_quant_with_bf16_output(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -257,7 +280,7 @@ def fused_strided_rmsnorm(
     if T == 0:
         return torch.empty((T, H), dtype=x.dtype, device=x.device)
 
-    block_n = triton.next_power_of_2(H)
+    block_n = next_power_of_2(H)
     if x.dtype != torch.bfloat16 or block_n > MAX_INREG_H or x.stride(-1) != 1:
         return _baseline_strided_rmsnorm(x, weight, eps)
 
@@ -293,6 +316,77 @@ def fused_strided_rmsnorm(
     return bf16_out
 
 
+def fused_strided_rmsnorm_per_token_fp8_quant(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float = 1e-6,
+    group_size: int = 128,
+    scale_ue8m0: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """RMSNorm + per-token-group fp8 quant on a strided input.
+
+    Use when the only consumer of the normed output is an fp8 GEMM (or when
+    multiple fp8 GEMMs share the same scale_ue8m0). Returns ``(fp8, scale)``
+    in DeepGEMM's expected layout.
+
+    Falls back to ``.contiguous() + rmsnorm + sgl_per_token_group_quant_fp8``
+    for ``H > 8192`` or when ``x.stride(-1) != 1`` or shape constraints.
+    """
+    assert x.dim() == 2
+    assert weight.dim() == 1 and weight.shape[0] == x.shape[1]
+    T, H = x.shape
+    assert H % group_size == 0
+    if scale_ue8m0:
+        assert (H // group_size) % 4 == 0, "UE8M0 requires num_groups divisible by 4"
+
+    block_n = next_power_of_2(H)
+    if block_n > MAX_INREG_H or x.stride(-1) != 1:
+        return _baseline_strided_rmsnorm_fp8_quant(
+            x, weight, eps, group_size, scale_ue8m0
+        )
+
+    fp8_out = torch.empty((T, H), dtype=torch.float8_e4m3fn, device=x.device)
+    scale_out = create_per_token_group_quant_fp8_output_scale(
+        x_shape=(T, H),
+        device=x.device,
+        group_size=group_size,
+        column_major_scales=True,
+        scale_tma_aligned=True,
+        scale_ue8m0=scale_ue8m0,
+    )
+    if T == 0:
+        return fp8_out, scale_out
+
+    finfo = torch.finfo(torch.float8_e4m3fn)
+    fp8_max = finfo.max
+    fp8_min = -fp8_max
+    grid = (T,)
+
+    _fused_strided_rmsnorm_singlepass_kernel[grid](
+        x,
+        weight,
+        fp8_out,  # bf16_out_ptr unused
+        fp8_out,
+        scale_out,
+        H,
+        eps,
+        fp8_max,
+        fp8_min,
+        x.stride(0),
+        fp8_out.stride(0),  # stride_b_t unused
+        fp8_out.stride(0),
+        scale_out.stride(0),
+        scale_out.stride(1),
+        BLOCK_N=block_n,
+        GROUP_SIZE=group_size,
+        HAS_BF16_OUT=False,
+        HAS_FP8_OUT=True,
+        SCALE_UE8M0=scale_ue8m0,
+        num_warps=_select_num_warps(H),
+    )
+    return fp8_out, scale_out
+
+
 def fused_strided_rmsnorm_per_token_fp8_quant_with_bf16_output(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -313,7 +407,7 @@ def fused_strided_rmsnorm_per_token_fp8_quant_with_bf16_output(
     if scale_ue8m0:
         assert (H // group_size) % 4 == 0, "UE8M0 requires num_groups divisible by 4"
 
-    block_n = triton.next_power_of_2(H)
+    block_n = next_power_of_2(H)
     if T > 0 and (block_n > MAX_INREG_H or x.stride(-1) != 1):
         return _baseline_strided_rmsnorm_fp8_quant_with_bf16_output(
             x, weight, eps, group_size, scale_ue8m0

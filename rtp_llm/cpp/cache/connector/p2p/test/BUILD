@@ -89,6 +89,7 @@ cc_test(
         "//rtp_llm/cpp/cache/connector/p2p:connector",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
         "//rtp_llm/cpp/cache/test:cache_config_test_utils",
+        "//rtp_llm/cpp/cache:device_block_pool_config_helper",
         "//rtp_llm/cpp/engine_base/stream",
         "//rtp_llm/cpp/testing:device_test_utils",
         "@com_google_googletest//:gtest",

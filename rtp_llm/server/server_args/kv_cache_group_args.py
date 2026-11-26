@@ -108,6 +108,16 @@ def init_kv_cache_group_args(parser, kv_cache_config):
     ##############################################################################################################
     kv_cache_group = parser.add_argument_group("KVCache")
     kv_cache_group.add_argument(
+        "--shared_hybrid_cache",
+        cli_only=True,
+        bind_to=(kv_cache_config, "shared_hybrid_cache"),
+        type=int,
+        choices=[-1, 0, 1],
+        default=-1,
+        help="GLM53 共享 GPU/主存字节池：-1 使用模型策略，0 关闭，1 要求开启；"
+        "共享模式仅支持单 PP、无 CP、无 DISK cache、每物理块一页的布局，不兼容显式独立池容量。",
+    )
+    kv_cache_group.add_argument(
         "--enable_crc",
         env_name="ENABLE_CRC",
         bind_to=(kv_cache_config, "enable_crc"),
@@ -272,7 +282,7 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         default="",
         help=(
             "按 cache group tag 设置 pool block 数量权重的 JSON 对象，权重为正整数；"
-            "例如 {\"full\":8,\"linear\":1}。权重表示 block 数量比例而非显存比例，"
+            '例如 {"full":8,"linear":1}。权重表示 block 数量比例而非显存比例，'
             "PP>1 时各 stage 只需包含本 stage 拥有的 tag，其余 tag 自动忽略；"
             "空字符串保持默认分配策略。"
         ),

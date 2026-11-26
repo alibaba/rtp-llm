@@ -219,9 +219,9 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DecodeTpReplicatesFullPagesWhilePrefillCp
             par.prefill_cp_config.kv_cache_sharded = true;
             par.prefill_cp_config.prefill_cp_size  = 2;
             PDSepConfig pd;
-            pd.role_type = role;
+            pd.role_type             = role;
             pd.cache_store_rdma_mode = false;
-            auto config  = finalizeCacheConfig(CacheConfigCreator::createConfig(model, par, {}), 20);
+            auto config              = finalizeCacheConfig(CacheConfigCreator::createConfig(model, par, {}), 20);
             EXPECT_EQ(config.group(full.tag).seqSizePerBlock(), 256u);
             EXPECT_EQ(config.group(swa.tag).seqSizePerBlock(), 512u);
             RuntimeConfig runtime;
@@ -290,23 +290,25 @@ TEST_F(KVCacheManagerCPSlotMapperTest, CPShardingEnabled_ReturnsValidMapper) {
 
     ParallelismConfig par;
     par.role_type                          = RoleType::PREFILL;
-    par.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
     par.tp_rank                            = 1;
     par.tp_size                            = 2;
     par.prefill_cp_config.kv_cache_sharded = true;
 
-    // The fixture has complete capacities; manager construction does not run
-    // collectives. cp_slot_mapper_ is constructed in both warmup and normal modes.
-    auto mgr = std::make_shared<KVCacheManager>(config, /*warmup=*/true, nullptr, KVCacheConfig{}, par);
-    ASSERT_TRUE(mgr->init());
+    // Model-managed prefill leaves the shared CP forward path disabled.
+    for (const auto method : {CPRotateMethod::ALL_GATHER, CPRotateMethod::DISABLED}) {
+        SCOPED_TRACE(static_cast<int>(method));
+        par.prefill_cp_config.method = method;
+        auto mgr = std::make_shared<KVCacheManager>(config, /*warmup=*/true, nullptr, KVCacheConfig{}, par);
+        ASSERT_TRUE(mgr->init());
 
-    auto mapper = mgr->cpSlotMapper();
-    ASSERT_NE(mapper, nullptr);
-    EXPECT_TRUE(mapper->isSharded());
-    EXPECT_EQ(mapper->cpRank(), 1);
-    EXPECT_EQ(mapper->cpSize(), 2);
-    EXPECT_EQ(mapper->blockSize(), seq_size_per_block);
-    EXPECT_EQ(mapper->virtualBlockSize(), seq_size_per_block * 2);
+        auto mapper = mgr->cpSlotMapper();
+        ASSERT_NE(mapper, nullptr);
+        EXPECT_TRUE(mapper->isSharded());
+        EXPECT_EQ(mapper->cpRank(), 1);
+        EXPECT_EQ(mapper->cpSize(), 2);
+        EXPECT_EQ(mapper->blockSize(), seq_size_per_block);
+        EXPECT_EQ(mapper->virtualBlockSize(), seq_size_per_block * 2);
+    }
 }
 
 TEST_F(KVCacheManagerCPSlotMapperTest, PrefillCPShardingEnabled_ReturnsValidMapper) {

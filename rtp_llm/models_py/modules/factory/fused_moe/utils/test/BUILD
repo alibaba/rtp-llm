@@ -7,6 +7,61 @@ _CUDA13_ONLY = select({
 })
 
 py_test(
+    name = "glm_mega_moe_contract_test",
+    srcs = ["glm_mega_moe_contract_test.py"],
+    tags = ["glm53_contract"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+    target_compatible_with = _CUDA13_ONLY,
+)
+
+py_test(
+    name = "glm_indexer_cache_contract_test",
+    srcs = ["glm_indexer_cache_contract_test.py"],
+    args = ["GlmIndexerCacheContractTest"],
+    tags = ["glm53_contract"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+    target_compatible_with = _CUDA13_ONLY,
+)
+
+py_test(
+    name = "glm_sparse_cold_start_contract_test",
+    srcs = ["glm_sparse_cold_start_contract_test.py"],
+    tags = ["glm53_contract"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+    target_compatible_with = _CUDA13_ONLY,
+)
+
+py_test(
+    name = "glm_decode_cache_policy_test",
+    srcs = ["glm_decode_cache_policy_test.py"],
+    tags = ["glm53_contract"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+    target_compatible_with = _CUDA13_ONLY,
+)
+
+dsv4_sm100_py_test(
+    name = "glm_indexer_cache_gpu_test",
+    src = "glm_indexer_cache_contract_test.py",
+    args = ["-k", "GlmIndexerCacheGpuTest"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+)
+
+py_test(
     name = "timeline_test",
     srcs = ["timeline_test.py"],
     deps = [

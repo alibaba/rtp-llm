@@ -12,6 +12,34 @@ _MODEL_TEST_DEPS = [
     "//rtp_llm:testlib",
 ]
 
+# Keep GLM53's offline FP32 producer separate from generic BF16 requantization.
+dsv4_sm100_py_test(
+    name = "test_glm53_fp8_requant",
+    deps = _MODEL_TEST_DEPS + ["//rtp_llm/models_py:kernels"],
+)
+
+dsv4_sm100_py_test(
+    name = "test_glm53_norm",
+    deps = _MODEL_TEST_DEPS,
+    env = {"FLASHINFER_USE_CUDA_NORM": "0"},
+)
+
+# Source GLM53 mHC initial-pre contract: keep one-token reductions across
+# decode/verify padding and prefill token shards without changing other models.
+dsv4_sm100_py_test(
+    name = "test_glm53_mhc_pre_batch_invariance",
+    tags = ["manual"],
+    deps = _MODEL_TEST_DEPS + ["//rtp_llm/models_py:tile_kernels_mhc"],
+)
+
+# Preserve the source deferred GLM53 post/pre transition separately from
+# initial-pre coverage, including owned inputs and changed-input graph replay.
+dsv4_sm100_py_test(
+    name = "test_glm53_mhc_fused_batch_invariance",
+    tags = ["manual"],
+    deps = _MODEL_TEST_DEPS + ["//rtp_llm/models_py:tile_kernels_mhc"],
+)
+
 # CPU math and mocked transport tests still need the CUDA13 Python import
 # closure. Run them alongside GPU tests, with one isolated process per file.
 _CP_HELPER_TESTS = [
@@ -169,6 +197,8 @@ _MOVED_CONTRACT_TESTS = [
 ]
 
 _PAIRED_GPU_TESTS = [
+    ":test_glm53_fp8_requant",
+    ":test_glm53_norm",
     ":test_prefill_fast_path_cuda",
     "//rtp_llm/models_py/modules/factory/fused_moe/utils/test:test_shared_expert_executor",
     "//rtp_llm/models_py/modules/factory/fused_moe/utils/test:test_mega_moe_input_packer",

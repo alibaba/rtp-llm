@@ -259,6 +259,25 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
             return int(deep_gemm.get_block_m_for_mega_moe_fp8(*args))
         return int(deep_gemm.get_block_m_for_mega_moe(*args, _MMA_TYPE))
 
+    def shared_input_views(self, tokens: int):
+        """Writable views for a producer that packs both routed and shared scales."""
+        if tokens > min(self._mega_buf.num_max_tokens_per_rank, self._mega_y.size(0)):
+            return None
+        x, scales, ids, weights = self.prepacked_input_views(tokens)
+        return {
+            "x_fp8": x,
+            "routed_sf": scales,
+            "ids": ids,
+            "weights": weights,
+            "shared_sf": self._mega_buf.shared_l1_acts_sf,
+            "block_m": self._block_m(tokens),
+        }
+
+    def forward_prepacked_shared(self, x: torch.Tensor) -> torch.Tensor:
+        return self._forward_impl(
+            x, None, None, inputs_prepacked=True, shared_scales_prepacked=True
+        )
+
     def _stage_kernel_inputs(self, tokens, *, inputs_prepacked):
         stage_shared_fp8_input_scales(
             self._mega_buf.x_sf,

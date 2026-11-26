@@ -4,6 +4,8 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
 
 #include <algorithm>
+#include <limits>
+#include <numeric>
 #include <string>
 #include <utility>
 
@@ -11,6 +13,100 @@ namespace rtp_llm {
 
 class DeviceBlockPoolConfigHelper {
 public:
+    static std::shared_ptr<SharedBlockArena> createSharedArena(const CacheConfig& cache_config, size_t bytes) {
+        std::vector<size_t> strides;
+        for (const auto& group : cache_config.groups()) {
+            RTP_LLM_CHECK_WITH_INFO(group.policy.explicit_block_num == 0
+                                        && group.policy.memory_placement == CacheMemoryPlacement::DEVICE,
+                                    "shared cache cannot replace an explicitly sized or pinned group");
+            strides.push_back(sharedSlotStride(createConfigForGroup(cache_config, group)));
+        }
+        return std::make_shared<SharedBlockArena>(bytes, strides);
+    }
+
+    static void finalizeSharedConfig(CacheConfig& cache_config, uint64_t bytes, const RuntimeConfig& runtime_config) {
+        // Tensor dtype views require aligned storage bytes, not just aligned
+        // slot starts. Never round upward through the agreed memory budget.
+        bytes -= bytes % 256;
+        RTP_LLM_CHECK_WITH_INFO(bytes > 0 && bytes <= std::numeric_limits<size_t>::max(),
+                                "shared cache byte budget cannot be represented locally");
+        cache_config.finalizeBlockNums(2, runtime_config);
+        const auto          arena = createSharedArena(cache_config, static_cast<size_t>(bytes));
+        PPBlockNumOverrides counts;
+        for (size_t group = 0; group < cache_config.groups().size(); ++group) {
+            const auto count = arena->slotCount(group);
+            RTP_LLM_CHECK_WITH_INFO(count >= 2 && count <= static_cast<size_t>(std::numeric_limits<int32_t>::max()),
+                                    "shared cache typed namespace must include null and usable slots");
+            counts.emplace(cache_config.groups()[group].tag, static_cast<uint32_t>(count));
+        }
+        cache_config.finalizeBlockNums(1, runtime_config, &counts);
+        cache_config.use_shared_block_pool = true;
+        cache_config.shared_cache_bytes    = bytes;
+        for (auto& child : cache_config.mtp_sub_configs) {
+            child->use_shared_block_pool = true;
+            child->shared_cache_bytes    = bytes;
+        }
+    }
+
+    static size_t sharedSlotStride(const DeviceBlockPoolConfig& config) {
+        size_t bytes     = 0;
+        size_t alignment = 256;
+        for (const auto& layout : config.memory_layouts) {
+            RTP_LLM_CHECK_WITH_INFO(layout.kernel_blocks_per_kv_block == 1,
+                                    "shared cache backing requires one kernel page per physical slot");
+            RTP_LLM_CHECK_WITH_INFO(layout.kv_block_stride_bytes
+                                        <= std::numeric_limits<size_t>::max() - layout.kv_scale_stride_bytes,
+                                    "shared cache per-layer payload overflows");
+            const size_t payload = layout.kv_block_stride_bytes + layout.kv_scale_stride_bytes;
+            RTP_LLM_CHECK_WITH_INFO(payload > 0
+                                        && layout.layer_num <= (std::numeric_limits<size_t>::max() - bytes) / payload,
+                                    "shared cache payload overflows byte addressing");
+            bytes += layout.layer_num * payload;
+            if (layout.cache_type == KVCacheSpecType::MultiHeadLatentAttention) {
+                RTP_LLM_CHECK_WITH_INFO(layout.seq_size_per_block > 0
+                                            && layout.kv_block_stride_bytes % layout.seq_size_per_block == 0,
+                                        "shared MLA cache requires packed token rows");
+                const size_t row_bytes = layout.kv_block_stride_bytes / layout.seq_size_per_block;
+                const size_t factor    = row_bytes / std::gcd(alignment, row_bytes);
+                RTP_LLM_CHECK_WITH_INFO(factor > 0 && alignment <= std::numeric_limits<size_t>::max() / factor,
+                                        "shared MLA row alignment overflows");
+                alignment *= factor;
+            }
+        }
+        RTP_LLM_CHECK_WITH_INFO(bytes > 0 && bytes <= std::numeric_limits<size_t>::max() - (alignment - 1),
+                                "shared cache slot size overflows");
+        return (bytes + alignment - 1) / alignment * alignment;
+    }
+
+    static void bindSharedArena(DeviceBlockPoolConfig&                    config,
+                                const std::shared_ptr<SharedBlockArena>&  arena,
+                                size_t                                    group,
+                                std::shared_ptr<SharedDeviceBlockBacking> backing = nullptr) {
+        RTP_LLM_CHECK_WITH_INFO(arena && arena->stride(group) == sharedSlotStride(config),
+                                "shared cache allocation stride differs from layout payload");
+        const size_t blocks = arena->slotCount(group);
+        RTP_LLM_CHECK_WITH_INFO(blocks > 1 && blocks <= std::numeric_limits<uint32_t>::max(),
+                                "shared cache namespace exceeds physical block addressing");
+        size_t offset = 0;
+        for (auto& layout : config.memory_layouts) {
+            layout.block_num                = static_cast<uint32_t>(blocks);
+            layout.block_slot_stride_bytes  = arena->stride(group);
+            layout.kv_cache_offset_bytes    = offset;
+            layout.kv_block_pool_size_bytes = blocks * layout.layer_num * layout.kv_block_stride_bytes;
+            offset += layout.layer_num * layout.kv_block_stride_bytes;
+            layout.kv_scale_offset_bytes    = offset;
+            layout.kv_scale_pool_size_bytes = blocks * layout.layer_num * layout.kv_scale_stride_bytes;
+            offset += layout.layer_num * layout.kv_scale_stride_bytes;
+            layout.total_size_bytes = layout.kv_block_pool_size_bytes + layout.kv_scale_pool_size_bytes;
+        }
+        RTP_LLM_CHECK_WITH_INFO(offset <= arena->stride(group), "shared cache layouts overlap the next slot");
+        config.physical_block_count = blocks;
+        config.total_size_bytes     = arena->bytes();
+        config.shared_arena         = arena;
+        config.shared_arena_group   = group;
+        config.shared_backing       = std::move(backing);
+    }
+
     /**
      * Create the per-group block pool config from a merged CacheConfig.
      * Memory layout is [layout0_kv][layout0_scale][layout1_kv][layout1_scale]...[layoutN_kv][layoutN_scale]

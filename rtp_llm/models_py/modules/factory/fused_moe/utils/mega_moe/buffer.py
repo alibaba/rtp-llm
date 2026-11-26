@@ -169,7 +169,11 @@ def _get_or_create_mega_output(
 
 
 def _mega_moe_unavailable_reason(
-    *, kernel_name="fp8_fp4_mega_moe", allocator_name=None, allow_single_rank=False
+    *,
+    kernel_name="fp8_fp4_mega_moe",
+    allocator_name=None,
+    allow_single_rank=False,
+    device_capabilities=None,
 ) -> str | None:
     """Return ``None`` when Mega MoE can run, otherwise a human-readable reason."""
     try:
@@ -193,6 +197,10 @@ def _mega_moe_unavailable_reason(
     if not torch.cuda.is_available():
         return "CUDA is not available"
     cap = torch.cuda.get_device_capability()
+    if device_capabilities is not None and (
+        torch.version.hip is not None or cap not in device_capabilities
+    ):
+        return f"DeepGEMM {kernel_name} does not support this device ({cap})"
     if cap[0] < 10:
         return f"CUDA device capability sm{cap[0]}{cap[1]} is below SM100"
     return None

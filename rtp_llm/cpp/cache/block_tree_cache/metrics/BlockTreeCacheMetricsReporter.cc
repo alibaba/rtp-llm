@@ -39,18 +39,18 @@ int metricGroupTypeIndex(CacheGroupType group_type) {
 
 CachePoolMetrics makePoolMetrics(Tier tier, const IBlockPool& pool) {
     CachePoolMetrics metrics_data;
-    metrics_data.tier                       = tier;
-    metrics_data.pool_name                  = pool.poolName();
-    metrics_data.block_size_bytes           = pool.blockSizeBytes();
-    metrics_data.total_blocks               = pool.totalBlocksNum();
-    metrics_data.free_blocks                = pool.freeBlocksNum();
-    metrics_data.used_blocks                = metrics_data.total_blocks - metrics_data.free_blocks;
-    metrics_data.active_blocks              = pool.activeBlocksNum();
-    metrics_data.available_blocks           = pool.availableBlocksNum();
-    metrics_data.block_cache_ref_blocks     = pool.referencedBlocksNum(BlockTreeRefType::CACHE);
-    metrics_data.load_ref_blocks            = pool.referencedBlocksNum(BlockTreeRefType::LOAD);
-    metrics_data.eviction_ref_blocks        = pool.referencedBlocksNum(BlockTreeRefType::EVICT);
-    metrics_data.frozen_ref_blocks          = pool.referencedBlocksNum(BlockTreeRefType::FROZEN);
+    metrics_data.tier                   = tier;
+    metrics_data.pool_name              = pool.poolName();
+    metrics_data.block_size_bytes       = pool.blockSizeBytes();
+    metrics_data.total_blocks           = pool.totalBlocksNum();
+    metrics_data.free_blocks            = pool.freeBlocksNum();
+    metrics_data.used_blocks            = metrics_data.total_blocks - metrics_data.free_blocks;
+    metrics_data.active_blocks          = pool.activeBlocksNum();
+    metrics_data.available_blocks       = pool.availableBlocksNum();
+    metrics_data.block_cache_ref_blocks = pool.referencedBlocksNum(BlockTreeRefType::CACHE);
+    metrics_data.load_ref_blocks        = pool.referencedBlocksNum(BlockTreeRefType::LOAD);
+    metrics_data.eviction_ref_blocks    = pool.referencedBlocksNum(BlockTreeRefType::EVICT);
+    metrics_data.frozen_ref_blocks      = pool.referencedBlocksNum(BlockTreeRefType::FROZEN);
     return metrics_data;
 }
 
@@ -133,8 +133,21 @@ void BlockTreeCacheMetricsReporter::flushStageMetrics() const {
 std::vector<CachePoolMetrics>
 BlockTreeCacheMetricsReporter::collectPoolMetrics(const std::vector<GroupSetPtr>&       group_sets,
                                                   std::chrono::steady_clock::time_point now) {
-    std::unordered_set<const IBlockPool*> reported_device_pools;
-    std::vector<CachePoolMetrics>         metrics_list;
+    std::unordered_set<const IBlockPool*>       reported_device_pools;
+    std::unordered_set<const SharedBlockArena*> reported_arenas;
+    const auto report_shared_memory = [&](const IBlockPool& pool, CachePoolMetrics& metrics_data) {
+        if (const auto& arena = pool.sharedArena()) {
+            metrics_data.shared_namespace = true;
+            if (reported_arenas.insert(arena.get()).second) {
+                const auto memory = arena->metrics();
+                metrics_data.shared_arena_memory =
+                    CachePoolMetrics::SharedArenaMemory{static_cast<int64_t>(memory.total_bytes),
+                                                        static_cast<int64_t>(memory.free_bytes),
+                                                        static_cast<int64_t>(memory.available_bytes)};
+            }
+        }
+    };
+    std::vector<CachePoolMetrics> metrics_list;
     for (const GroupSetPtr& group_set : group_sets) {
         const std::vector<DeviceBlockPoolPtr>& device_pools = group_set->devicePools();
         for (const DeviceBlockPoolPtr& pool : device_pools) {
@@ -146,12 +159,16 @@ BlockTreeCacheMetricsReporter::collectPoolMetrics(const std::vector<GroupSetPtr>
             if (!insert_result.second) {
                 continue;
             }
-            metrics_list.push_back(makeDevicePoolMetrics(*pool));
+            auto metrics = makeDevicePoolMetrics(*pool);
+            report_shared_memory(*pool, metrics);
+            metrics_list.push_back(std::move(metrics));
         }
 
         const std::shared_ptr<HostBlockPool> host_pool = group_set->hostPool();
         if (host_pool != nullptr) {
-            metrics_list.push_back(makePoolMetrics(Tier::HOST, *host_pool));
+            auto metrics = makePoolMetrics(Tier::HOST, *host_pool);
+            report_shared_memory(*host_pool, metrics);
+            metrics_list.push_back(std::move(metrics));
         }
 
         const std::shared_ptr<DiskBlockPool> disk_pool = group_set->diskPool();
@@ -345,9 +362,9 @@ void BlockTreeCacheMetricsReporter::reportEvictionFinished(const EvictionTransfe
         return;
     }
     RtpLLMCacheEvictionMetricsCollector collector;
-    collector.eviction_success                    = success;
-    collector.eviction_cancelled_blocks           = cancelled_blocks;
-    collector.eviction_blocks                     = cancelled_blocks;
+    collector.eviction_success          = success;
+    collector.eviction_cancelled_blocks = cancelled_blocks;
+    collector.eviction_blocks           = cancelled_blocks;
     std::vector<std::pair<int64_t, int64_t>> block_times_ms;
     if (success) {
         block_times_ms.reserve(task.descriptors().size());
@@ -543,9 +560,8 @@ void BlockTreeCacheMetricsReporter::maybeReportCopyError(Tier                  s
     metrics_reporter_->report<RtpLLMCacheTransferMetrics, RtpLLMCacheCopyErrorMetricsCollector>(nullptr, &collector);
 }
 
-int64_t BlockTreeCacheMetricsReporter::reportTransferStarted(TransferOperation      operation,
-                                                             Tier                   source_tier,
-                                                             Tier                   target_tier) {
+int64_t
+BlockTreeCacheMetricsReporter::reportTransferStarted(TransferOperation operation, Tier source_tier, Tier target_tier) {
     if (metrics_reporter_ == nullptr) {
         return 0;
     }

@@ -112,6 +112,6 @@ cc_test(
         "L20_CU13",
         "exclusive-if-local",
     ],
-    deps = pool_test_deps,
+    deps = pool_test_deps + ["//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface"],
     env = {},
 )

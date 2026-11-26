@@ -20,11 +20,69 @@ bool MemoryLayoutStrategy::init(const MemoryLayoutConfig& config,
     RTP_LLM_CHECK_WITH_INFO(data_type_ != rtp_llm::TYPE_INVALID, "dtype must be set");
     RTP_LLM_CHECK_WITH_INFO(kv_cache_tensor.numel() > 0, "kv cache tensor is empty, cannot split by layers");
 
+    if (config_.block_slot_stride_bytes != 0) {
+        initializeSharedViews(kv_cache_tensor);
+        return true;
+    }
+
     processKVTensor(kv_cache_tensor);
     processScaleTensor(kv_scale_tensor);
 
     RTP_LLM_LOG_INFO("MemoryLayoutStrategy initialized successfully");
     return true;
+}
+
+void MemoryLayoutStrategy::initializeSharedViews(const torch::Tensor& backing) {
+    RTP_LLM_CHECK_WITH_INFO(backing.dim() == 1 && backing.scalar_type() == torch::kUInt8 && backing.is_contiguous(),
+                            "shared cache backing must be contiguous one-dimensional bytes");
+    RTP_LLM_CHECK_WITH_INFO(config_.kernel_blocks_per_kv_block == 1 && config_.block_num > 1 && config_.layer_num > 0,
+                            "shared cache views require one kernel page per physical slot");
+    const auto stride = config_.block_slot_stride_bytes;
+    const auto bytes  = static_cast<size_t>(backing.numel());
+    RTP_LLM_CHECK_WITH_INFO(stride > 0 && config_.block_num <= bytes / stride,
+                            "shared cache slot namespace exceeds backing");
+
+    const auto make_views = [&](size_t offset, size_t payload, torch::ScalarType dtype, bool token_rows) {
+        const size_t element_bytes = c10::elementSize(dtype);
+        RTP_LLM_CHECK_WITH_INFO(payload > 0 && offset <= stride && config_.layer_num <= (stride - offset) / payload,
+                                "shared cache layout does not fit inside one slot");
+        RTP_LLM_CHECK_WITH_INFO(offset % element_bytes == 0 && stride % element_bytes == 0
+                                    && payload % element_bytes == 0 && bytes % element_bytes == 0,
+                                "shared cache layout has misaligned typed offsets");
+        // view(dtype) and as_strided retain the owning Storage. from_blob would
+        // leave these model-facing tensors dangling after the pool is released.
+        const auto                 typed = backing.view(dtype);
+        std::vector<torch::Tensor> views;
+        views.reserve(config_.layer_num);
+        const auto elements = static_cast<int64_t>(payload / element_bytes);
+        const auto pitch    = static_cast<int64_t>(stride / element_bytes);
+        for (size_t layer = 0; layer < config_.layer_num; ++layer) {
+            const auto start = static_cast<int64_t>((offset + layer * payload) / element_bytes);
+            if (token_rows) {
+                const auto tokens = static_cast<int64_t>(config_.seq_size_per_block);
+                RTP_LLM_CHECK_WITH_INFO(tokens > 0 && elements % tokens == 0,
+                                        "shared cache payload must contain packed token rows");
+                views.push_back(typed.as_strided(
+                    {config_.block_num, tokens, elements / tokens}, {pitch, elements / tokens, 1}, start));
+            } else {
+                views.push_back(typed.as_strided({config_.block_num, elements}, {pitch, 1}, start));
+            }
+        }
+        return views;
+    };
+    const bool token_major_kv = config_.cache_type == KVCacheSpecType::MultiHeadLatentAttention;
+    layer_kv_tensors_         = make_views(
+        config_.kv_cache_offset_bytes, config_.kv_block_stride_bytes, dataTypeToTorchType(data_type_), token_major_kv);
+    layer_kv_scale_tensors_.clear();
+    if (config_.hasScale()) {
+        const bool packed_scales = config_.cache_type != KVCacheSpecType::MultiHeadAttention;
+        layer_kv_scale_tensors_  = make_views(config_.kv_scale_offset_bytes,
+                                             config_.kv_scale_stride_bytes,
+                                             packed_scales ? torch::kUInt8 : torch::kFloat32,
+                                             packed_scales);
+    }
+    // The common owner initializes backing once, before allocation begins.
+    // Clearing each overlapping group view here would corrupt its neighbours.
 }
 
 // Clear tensor function

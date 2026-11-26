@@ -489,7 +489,12 @@ class ModelDeployWeightInfo:
                 weight_info
             )
 
-        is_glm = self.model_config.model_type in {"glm_5", "glm_5_mtp"}
+        is_glm = self.model_config.model_type in {
+            "glm_5",
+            "glm_5_mtp",
+            "glm5_3_flash",
+            "glm5_3_flash_mtp",
+        }
         # For an online source, select the MoE destination format before the
         # generic FP8 pass. QuantWeight leaves these prepared descriptors alone,
         # avoiding a lossy BF16 -> FP8 -> FP4 round trip without a skip_moe flag.

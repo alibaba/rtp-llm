@@ -127,11 +127,20 @@ class GraphLifecycleModel(TaggedBlockTableModel):
         self.events = []
         self.pending_stage = False
         self.captured = set()
+        self.prepared_stream = None
+
+    def prepare_cuda_graph_stream(self):
+        if torch.cuda.is_current_stream_capturing():
+            raise RuntimeError("stream preparation ran inside graph capture")
+        self.prepared_stream = torch.cuda.current_stream()
 
     def prepare_cuda_graph_model_inputs(self, inputs):
         raise RuntimeError("obsolete input preparation hook was called")
 
     def forward(self, inputs, fmha_impl=None):
+        if torch.cuda.is_current_stream_capturing():
+            if torch.cuda.current_stream() != self.prepared_stream:
+                raise RuntimeError("graph capture started on an unprepared stream")
         if self.pending_stage:
             raise RuntimeError("warmup state leaked into another forward")
         self.pending_stage = True

@@ -1,0 +1,1258 @@
+"""DeepSeek-V4 lightning Indexer — FP8 KV pool path.
+
+Uses the packaged native MQA backend when present and the shared FP8
+group-128 score implementation in builds without the native extension.
+
+Nested compressor is ``CompressorFP8(head_dim=128)`` which writes the
+132B grouped UE8M0 layout that DeepGEMM consumes directly.
+
+What this class does NOT do — by design:
+
+  * NO ``_bind_kv_cache_for_indexer`` materialization. DeepGEMM reads
+    the FP8 pool directly via ``fp8_paged_mqa_logits`` /
+    ``fp8_mqa_logits``. No bf16 dequant intermediate.
+  * NO bf16 / FP8 runtime branching. Pick the right indexer class at
+    attention construction time.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Callable, Dict, NamedTuple, Optional
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
+from rtp_llm.models_py.modules.dsv4.cp import (
+    _CP_ROLE_INDEXER,
+    CPContext,
+    build_cp_full_prefill_positions,
+)
+from rtp_llm.models_py.modules.dsv4.forward_metadata import (
+    cached_indexer_host_lengths,
+    cached_indexer_prefill,
+    indexer_varlen_bounds,
+    metadata_cache,
+    score_workspace_budget,
+    score_workspace_fits,
+)
+from rtp_llm.models_py.modules.dsv4.fp8._glm53_indexer_q_quant_triton import (
+    indexer_q_fp8_quant_fold,
+)
+from rtp_llm.models_py.modules.dsv4.fp8._indexer_quant_triton import INDEXER_HEAD_DIM
+from rtp_llm.models_py.modules.dsv4.fp8.compressor import (
+    CompressorMeta,
+    _CompressorPending,
+)
+from rtp_llm.models_py.modules.dsv4.fp8.glm53_compressor import CompressorFP8
+from rtp_llm.models_py.modules.dsv4.fp8.glm53_indexer_score import (
+    fp8_mqa_indexer_score,
+    fp8_paged_indexer_score,
+)
+from rtp_llm.models_py.modules.dsv4.fp8.indexer import (
+    FP8IndexerBase,
+    _as_bf16_contig,
+    _flat_1d,
+    _fp8_prefill_score_chunk_rows,
+)
+from rtp_llm.models_py.modules.dsv4.glm53_prefill_workspace import PrefillWorkspace
+from rtp_llm.models_py.modules.dsv4.indexer_topk import select_stable_window_topk
+from rtp_llm.models_py.modules.indexer_grouping import completed_group_lengths_i32
+from rtp_llm.ops import RoleType
+from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+
+def canonicalize_topk_output(out: torch.Tensor) -> None:
+    """Sort valid token indices in-place while preserving ``-1`` padding."""
+    if (
+        out.is_cuda
+        and metadata_cache() is None
+        and out.dtype == torch.int32
+        and out.ndim == 2
+        and (
+            out.shape[0] <= 1024
+            or (out.shape[1] in (512, 1024, 2048) and out.shape[0] <= 32768)
+        )
+        and out.shape[1] <= 2048
+    ):
+        # Tuned int32 widths win through the tested 32K-row range.
+        # Retain the small-row limit for other widths and native fallback beyond it.
+        from rtp_llm.models_py.triton_kernels.common.canonicalize_topk import (
+            canonicalize_topk_,
+        )
+
+        if canonicalize_topk_(out):
+            return
+    sentinel = torch.iinfo(out.dtype).max
+    sortable = torch.where(out >= 0, out, torch.full_like(out, sentinel))
+    sorted_indices = torch.sort(sortable, dim=-1).values
+    out.copy_(
+        torch.where(
+            sorted_indices == sentinel,
+            torch.full_like(sorted_indices, -1),
+            sorted_indices,
+        )
+    )
+
+
+def _select_topk(logits, starts, ends, out, *, canonicalize=False):
+    select_stable_window_topk(
+        logits, starts, ends, out, getattr(rtp_llm_ops, "topk_v3_tie_break", None)
+    )
+    if canonicalize:
+        canonicalize_topk_output(out)
+
+
+class _IndexerFP8PrefillMeta(NamedTuple):
+    """Per-call FP8 prefill metadata for :class:`IndexerFP8`.
+
+    Built once by :meth:`IndexerFP8.prepare` from the caller's
+    per-step state (``bsz``, ``seqlen``, ``sp_int``, ``device``) and the
+    bound INDEXER_KV pool. Replaces the old in-forward slot construction and
+    masking chain so :meth:`IndexerFP8.forward` is kernel-only.
+
+    All ``torch.Tensor`` fields are device-side, contiguous, and
+    immediately consumable by the gather / score / topk kernels.
+
+    Coordinate system:
+      * **single-request**: ``ks=0``, ``ke = clamp((positions_d+1)//ratio,
+        max=T)`` — request-local indices directly into the single-request
+        flat K. Returned topk is request-local.
+      * **varlen**: K is request-concatenated on the flat axis
+        (``cu_kv_seqlens``). ``ks/ke`` are GLOBAL flat-K coords with the
+        per-token request offset baked in (``ks[t] = cu_kv_seqlens[req_t]``,
+        ``ke[t] = ks[t] + min((pos_t+1)//ratio, T_b)``). The TopK kernel
+        processes columns ``[ks, ke)`` but returns indices relative to ``ks``
+        — already in request-local ``[0, N_b)`` workspace column space,
+        same contract as the B==1 path.
+    """
+
+    # ── geometry (Python scalars; cheap) ──
+    bsz: int
+    seqlen: int
+    M: int  # = bsz * seqlen  (= T_total for flat 2D)
+    sp_int: int  # legacy compat: prefix_lengths[0] under varlen, sp_int otherwise
+    end_pos: int  # legacy compat: sp_per_req[0] + S_0 under varlen
+    is_fresh_prefill: bool  # legacy compat: any-cont negation under varlen
+    T: int  # compressed K count: total across batch (sum T_b) under varlen
+
+    # ── Q-side ──
+    freqs_cis_slice: torch.Tensor  # self.freqs_cis[sp:sp+seqlen]; pre-sliced view
+    positions_d: torch.Tensor  # [M] int32 — per-token global absolute positions
+
+    # ── per-row visible-K window for fp8_mqa_logits ──
+    # See class docstring for the legacy vs varlen coord contract.
+    ks: torch.Tensor  # [M] int32
+    ke: torch.Tensor  # [M] int32
+
+    # ── K-side (paged) ──
+    block_table_i32: torch.Tensor  # [B, max_blocks] int32 contig
+    cu_kv_seqlens: torch.Tensor  # [B+1] int32 (compressed)
+    # Per-token global K offset (= ``cu_kv_seqlens[req_id_per_token]``).
+    # ``None`` on the legacy B==1 path (no offset needed); populated under
+    # varlen so ``forward()`` can convert global TopK indices back to
+    # request-local in one ``torch.where(idx >= 0, idx - off, idx)`` launch.
+    cu_kv_per_token: Optional[torch.Tensor]
+
+    # ── Nested CompressorFP8 metadata, hoisted out of the per-call hot
+    # path. Without this, ``CompressorFP8.forward(meta=None)`` rebuilds
+    # ~30 small kernels (state/kv slot mapping) per layer between the
+    # F.linear SGEMM and ``run_save_partial_states``. ``None`` during
+    # warmup (pool not bound); forward then falls back to in-band rebuild.
+    compressor_meta: Optional[CompressorMeta]
+    # CP-sharded INDEXER_KV gather metadata. Hoisted out of the per-layer
+    # gather hot path so the rank-local length / restore plan is built once
+    # with the rest of prefill metadata.
+    indexer_cp_plan: Optional[Any]
+    indexer_cp_local_cu: Optional[torch.Tensor]
+    # GLM sequence-CP lays out each request's local Q contiguously. Slice the
+    # corresponding K interval before allocating logits; top-k stays relative
+    # to that request, with its original causal bound and canonical ordering.
+    score_segments: Optional[tuple[tuple[int, int, int, int], ...]] = None
+    score_relative_ks: Optional[torch.Tensor] = None
+    score_relative_ke: Optional[torch.Tensor] = None
+    # Compressed logits are request-local even when K is batch-concatenated.
+    # Host geometry supplies this bound without another device scalar read.
+    max_request_keys: Optional[int] = None
+
+
+class IndexerFP8(FP8IndexerBase):
+    """FP8 lightning indexer. DeepGEMM-only score; nested
+    ``CompressorFP8(head_dim=128)`` writes the 132B pool."""
+
+    def __init__(
+        self,
+        dim: int,
+        q_lora_rank: int,
+        index_n_heads: int,
+        index_head_dim: int,
+        rope_head_dim: int,
+        index_topk: int,
+        compress_ratio: int,
+        max_batch_size: int,
+        max_seq_len: int,
+        norm_eps: float = 1e-6,
+        layer_weights: Optional[Dict[str, torch.Tensor]] = None,
+        q_projection: Optional[nn.Module] = None,
+        weights_projection: Optional[torch.Tensor] = None,
+        compressor_weights: Optional[Dict[str, torch.Tensor]] = None,
+        compressor_kpool_mode: bool = False,
+        compressor_pre_norm_weight: Optional[torch.Tensor] = None,
+        compressor_pre_norm_bias: Optional[torch.Tensor] = None,
+        rotate_q: bool = False,
+        role_type: Optional[RoleType] = None,
+    ):
+        """``layer_weights`` is the framework's per-layer dict
+        (``ModelWeights.weights[layer_id]``), keyed by ``W.v4_*`` enum.
+        Indexer reads ``W.v4_indexer_wq_b_{w,s}``, ``W.v4_indexer_weights_proj_w``,
+        and the four ``W.v4_indexer_compressor_*`` keys for its nested
+        ``CompressorFP8``."""
+        super().__init__()
+        assert index_head_dim == INDEXER_HEAD_DIM, (
+            f"IndexerFP8 locked to index_head_dim={INDEXER_HEAD_DIM} "
+            f"(matches CompressorFP8 132B layout); got {index_head_dim}"
+        )
+        assert layer_weights is not None or (
+            q_projection is not None
+            and weights_projection is not None
+            and compressor_weights is not None
+        ), "IndexerFP8 requires DSV4 layer_weights or explicit GLM projections"
+        self.dim = dim
+        self.n_heads = index_n_heads
+        self.head_dim = index_head_dim
+        self.rope_head_dim = rope_head_dim
+        self.index_topk = index_topk
+        self.q_lora_rank = q_lora_rank
+        self.softmax_scale = self.head_dim**-0.5
+        self.compress_ratio = compress_ratio
+        self.rotate_q = bool(rotate_q)
+        self.role_type = role_type
+        from rtp_llm.models_py.modules.dsv4.fp8.attention import _v4_fp8_linear
+        from rtp_llm.utils.model_weight import W
+
+        if q_projection is not None:
+            self.wq_b = q_projection
+        else:
+            assert layer_weights is not None
+            self.wq_b = _v4_fp8_linear(
+                layer_weights[W.v4_indexer_wq_b_w],
+                layer_weights[W.v4_indexer_wq_b_s],
+            )
+        # Pre-fold the runtime ``softmax_scale *
+        # n_heads^-0.5`` into the weight at load time so prefill / decode can
+        # do a single ``F.linear`` without a trailing elementwise mul. Preserve
+        # the checkpoint loader dtype (GLM uses FP32; DSV4 uses BF16). New
+        # tensor — never mutate ``layer_weights`` in place.
+        _wp_scale = self.softmax_scale * self.n_heads**-0.5
+        if weights_projection is None:
+            assert layer_weights is not None
+            weights_projection = layer_weights[W.v4_indexer_weights_proj_w]
+        self.weights_proj = (weights_projection * _wp_scale).contiguous()
+
+        # Nested compressor: 132B layout (head_dim=128).
+        if compressor_weights is None:
+            assert layer_weights is not None
+            inner_cmp_weights = {
+                "ape": layer_weights[W.v4_indexer_compressor_ape],
+                "wkv": layer_weights[W.v4_indexer_compressor_wkv],
+                "wgate": layer_weights[W.v4_indexer_compressor_wgate],
+                "norm": layer_weights[W.v4_indexer_compressor_norm],
+            }
+        else:
+            inner_cmp_weights = compressor_weights
+        self.compressor = CompressorFP8(
+            dim=dim,
+            head_dim=index_head_dim,
+            rope_head_dim=rope_head_dim,
+            compress_ratio=compress_ratio,
+            max_batch_size=max_batch_size,
+            cp_role=_CP_ROLE_INDEXER,
+            norm_eps=norm_eps,
+            rotate=True,
+            compressor_weights=inner_cmp_weights,
+            overlap=False if compressor_kpool_mode else None,
+            kpool_mode=compressor_kpool_mode,
+            pre_norm_weight=compressor_pre_norm_weight,
+            pre_norm_bias=compressor_pre_norm_bias,
+        )
+        self.max_batch_size = max_batch_size
+        self._kv_cache_t = max_seq_len // compress_ratio
+        self._kv_cache_d = index_head_dim
+        self.freqs_cis: Optional[torch.Tensor] = None
+        # Context-Parallel context bound by ``V4Transformer._propagate_cp_ctx``
+        # before each prefill forward (Phase F). Decode runs with this
+        # cleared. Under cp_size > 1, ``prepare()`` swaps in
+        # ``cp_ctx.input_lengths_global`` for the per-request length math
+        # so T (compressed-K count) reflects the gather'd global view, and
+        # the nested compressor rebuilds its slot mappings post-gather
+        # (CompressorFP8.forward handles that internally).
+        self._cp_ctx: Optional[CPContext] = None
+
+    def _compute_weights(self, x: torch.Tensor) -> torch.Tensor:
+        """Project per-head gates in the checkpoint weight's native dtype."""
+        weight = self.weights_proj
+        return F.linear(x if x.dtype == weight.dtype else x.to(weight.dtype), weight)
+
+    def _fuse_glm_q_quant(self) -> bool:
+        return self.compressor.kpool_mode and self.rotate_q
+
+    def _quantize_q(self, q: torch.Tensor, weights: torch.Tensor):
+        # GLM53 projects head gates in FP32 to distinguish near-tie scores.
+        # Both quantizers accept FP32 gates; preserve them until scale folding.
+        # GLM53 Q follows the KPool UE8M0 scale contract in both paths.
+        round_scale = self.compressor.kpool_mode
+        if self._fuse_glm_q_quant():
+            from rtp_llm.models_py.modules.dsv4.fp8._indexer_hadamard_quant_triton import (
+                indexer_hadamard_quant_fold,
+            )
+
+            return indexer_hadamard_quant_fold(q, weights, round_scale=round_scale)
+        return indexer_q_fp8_quant_fold(q, weights, round_scale=round_scale)
+
+    def _prefill_score_topk(self, q, weights, key, key_scale, meta):
+        out = torch.empty((meta.M, self.index_topk), dtype=torch.int32, device=q.device)
+        if meta.M == 0:
+            return out
+        if self.compressor.kpool_mode and metadata_cache() is not None:
+            # DeepGEMM's compressed-logits mode retains absolute ks/ke for
+            # loading K, but writes each row starting at its request-local zero.
+            # This batches requests without a dense cross-request output axis.
+            segments = getattr(meta, "score_segments", None)
+            max_keys = (
+                max((e - b for _, _, b, e in segments), default=0)
+                if segments is not None
+                else meta.T
+            )
+            request_bound = getattr(meta, "max_request_keys", None)
+            if segments is None and request_bound is not None:
+                max_keys = request_bound
+            if max_keys == 0:
+                out.fill_(-1)
+                return out
+            starts = getattr(meta, "score_relative_ks", None)
+            ends = getattr(meta, "score_relative_ke", None)
+            if starts is None:
+                starts = torch.zeros_like(meta.ks)
+                ends = meta.ke - meta.ks
+            # DeepGEMM pads the logits row stride; include TopK/normalization
+            # scratch in the per-row bound instead of budgeting logits alone.
+            row_bytes = (((max_keys + 255) // 256 + 1) * 256 + 8 * self.index_topk) * 4
+            required_bytes = ((meta.M + 127) // 128 * 128) * row_bytes
+            if score_workspace_fits(q.device, required_bytes):
+                rows = meta.M
+            else:
+                budget = score_workspace_budget(q.device)
+                rows = budget // row_bytes
+                if rows < 1:
+                    raise RuntimeError(
+                        "Indexer score workspace cannot fit one query row"
+                    )
+                rows = min(meta.M, max(1, rows // 128 * 128))
+            for begin in range(0, meta.M, rows):
+                end = min(begin + rows, meta.M)
+                with record_function_range("dsv4.fp8.indexer.prefill.score"):
+                    logits = fp8_mqa_indexer_score(
+                        q[begin:end],
+                        weights[begin:end],
+                        key,
+                        key_scale,
+                        meta.ks[begin:end],
+                        meta.ke[begin:end],
+                        clean_logits=False,
+                        max_seqlen_k=max_keys,
+                    )
+                with record_function_range("dsv4.fp8.indexer.prefill.topk"):
+                    _select_topk(
+                        logits,
+                        starts[begin:end],
+                        ends[begin:end],
+                        out[begin:end],
+                        canonicalize=self.role_type == RoleType.PREFILL,
+                    )
+                del logits
+            return out
+        chunk = _fp8_prefill_score_chunk_rows() or meta.M
+        segments = getattr(meta, "score_segments", None)
+        starts, ends = meta.ks, meta.ke
+        if segments is not None:
+            starts, ends = meta.score_relative_ks, meta.score_relative_ke
+        else:
+            segments = ((0, meta.M, 0, meta.T),)
+        for q_begin, q_end, k_begin, k_end in segments:
+            if k_begin == k_end:
+                out[q_begin:q_end].fill_(-1)
+                continue
+            segment_scale = key_scale[k_begin:k_end]
+            # TMA requires a 16-byte base; contiguous() preserves sliced offsets.
+            if segment_scale.data_ptr() % 16:
+                segment_scale = segment_scale.clone()
+            for begin in range(q_begin, q_end, chunk):
+                end = min(begin + chunk, q_end)
+                with record_function_range("dsv4.fp8.indexer.prefill.score"):
+                    logits = fp8_mqa_indexer_score(
+                        q[begin:end],
+                        weights[begin:end],
+                        key[k_begin:k_end],
+                        segment_scale,
+                        starts[begin:end],
+                        ends[begin:end],
+                        clean_logits=False,
+                    )
+                with record_function_range("dsv4.fp8.indexer.prefill.topk"):
+                    _select_topk(
+                        logits,
+                        starts[begin:end],
+                        ends[begin:end],
+                        out[begin:end],
+                        canonicalize=self.role_type == RoleType.PREFILL,
+                    )
+                del logits
+        return out
+
+    # --------------------------------------------------------------
+    # Gather paged indexer keys for prefill
+    # --------------------------------------------------------------
+    def _gather_prefill_k_cache(
+        self,
+        attention_inputs: _IndexerFP8PrefillMeta,
+        k_quant_flat: torch.Tensor,
+        k_scale_buf: torch.Tensor,
+    ) -> None:
+        """Fill prefill indexer-K buffers from the FP8 pool.
+
+        Shared by ``forward`` and ``forward_with_pending_nested`` so the overlap
+        path keeps the same CP-sharded assembler behavior as the baseline path.
+        """
+        cp_ctx = getattr(self, "_cp_ctx", None)
+        kv_cache_sharded = bool(
+            cp_ctx is not None
+            and getattr(cp_ctx, "kv_cache_sharded", False)
+            and cp_ctx.cp_size > 1
+        )
+        if not kv_cache_sharded:
+            rtp_llm_ops.cp_gather_indexer_k_quant_cache(
+                self._kv_pool_view,
+                k_quant_flat,
+                k_scale_buf,
+                attention_inputs.block_table_i32,
+                attention_inputs.cu_kv_seqlens,
+            )
+            return
+
+        from rtp_llm.models_py.modules.dsv4.fp8 import (
+            _glm53_indexer_cp_assembler as asm,
+        )
+
+        plan = attention_inputs.indexer_cp_plan
+        actual_cu = attention_inputs.indexer_cp_local_cu
+        assert plan is not None, "CP-sharded indexer gather requires prebuilt plan"
+        assert actual_cu is not None, "CP-sharded indexer gather requires local cu"
+        local_q = torch.zeros(
+            (plan.total_local_T, k_quant_flat.shape[-1]),
+            dtype=k_quant_flat.dtype,
+            device=k_quant_flat.device,
+        )
+        local_s = torch.zeros(
+            (plan.total_local_T, k_scale_buf.shape[-1]),
+            dtype=k_scale_buf.dtype,
+            device=k_scale_buf.device,
+        )
+        if plan.total_actual_local_T > 0:
+            actual_q = torch.empty(
+                (plan.total_actual_local_T, k_quant_flat.shape[-1]),
+                dtype=k_quant_flat.dtype,
+                device=k_quant_flat.device,
+            )
+            actual_s = torch.empty(
+                (plan.total_actual_local_T, k_scale_buf.shape[-1]),
+                dtype=k_scale_buf.dtype,
+                device=k_scale_buf.device,
+            )
+            rtp_llm_ops.cp_gather_indexer_k_quant_cache(
+                self._kv_pool_view,
+                actual_q,
+                actual_s,
+                attention_inputs.block_table_i32,
+                actual_cu,
+            )
+            asm.copy_actual_indexer_k_to_padded(
+                plan=plan,
+                actual_k_quant=actual_q,
+                actual_k_scale=actual_s,
+                padded_k_quant=local_q,
+                padded_k_scale=local_s,
+            )
+        asm.assemble_indexer_k(
+            plan=plan,
+            local_k_quant=local_q,
+            local_k_scale=local_s,
+            out_k_quant=k_quant_flat,
+            out_k_scale=k_scale_buf,
+        )
+
+    # --------------------------------------------------------------
+    # Q-projection + RoPE helper (shared between prefill & decode)
+    # --------------------------------------------------------------
+    def _compute_indexer_q(
+        self,
+        qr: torch.Tensor,
+        freqs_cis: torch.Tensor,
+        batched_rope: bool = False,
+        apply_rope: bool = True,
+    ) -> torch.Tensor:
+        q = super()._compute_indexer_q(qr, freqs_cis, batched_rope, apply_rope)
+        if self.rotate_q and (apply_rope or not self._fuse_glm_q_quant()):
+            from rtp_llm.models_py.modules.base.cuda.indexer_op import (
+                _rotate_activation,
+            )
+
+            q = _rotate_activation(q)
+        return q
+
+    # --------------------------------------------------------------
+    # Decode (vectorized over B)
+    # --------------------------------------------------------------
+    def forward_decode_vectorized(
+        self,
+        x: torch.Tensor,
+        qr: torch.Tensor,
+        start_pos: torch.Tensor,
+        out_topk_buffer: torch.Tensor,
+        position_ids: Optional[torch.Tensor] = None,
+        compressor_meta: Optional[CompressorMeta] = None,
+    ) -> torch.Tensor:
+        bsz, q_len = int(x.size(0)), int(x.size(1))
+        if position_ids is None:
+            assert q_len == 1, "decode q_len > 1 requires flat position_ids"
+        ratio = self.compress_ratio
+        K = self.index_topk
+
+        self._propagate_pool_to_nested()
+        try:
+            # Nested compressor writes its compressed token to the 132B pool.
+            self.compressor.forward_decode_vectorized(
+                x,
+                start_pos,
+                meta=compressor_meta,
+                position_ids=position_ids,
+            )
+
+            if position_ids is None:
+                freqs = (
+                    self.freqs_cis[start_pos.long()]
+                    if self.freqs_cis is not None
+                    else x.new_empty((bsz, 0), dtype=torch.complex64)
+                )
+                q = self._compute_indexer_q(
+                    qr,
+                    freqs,
+                    batched_rope=True,
+                    apply_rope=not self.compressor.kpool_mode,
+                )
+                compressed_len = completed_group_lengths_i32(start_pos, ratio).view(
+                    bsz, 1, 1
+                )
+            else:
+                assert compressor_meta is not None
+                pos_flat = compressor_meta.positions.reshape(-1)
+                freqs = (
+                    self.freqs_cis.index_select(0, pos_flat).contiguous()
+                    if self.freqs_cis is not None
+                    else x.new_empty((pos_flat.numel(), 0), dtype=torch.complex64)
+                )
+                q = self._compute_indexer_q(
+                    qr,
+                    freqs,
+                    batched_rope=False,
+                    apply_rope=not self.compressor.kpool_mode,
+                )
+                assert compressor_meta.compressed_lens_per_token is not None
+                compressed_len = compressor_meta.compressed_lens_per_token.view(
+                    bsz, q_len, 1
+                ).to(dtype=torch.int32)
+            # ``softmax_scale * n_heads^-0.5`` is pre-folded into weights_proj at __init__.
+            fuse_gate_quant = (
+                self._fuse_glm_q_quant()
+                and x.is_contiguous()
+                and x.dtype == torch.bfloat16
+                and self.head_dim == 128
+                and self.weights_proj.dtype == torch.float32
+                and self.weights_proj.is_contiguous()
+                and self.weights_proj.shape == (self.n_heads, 4096)
+                and self.n_heads in (32, 64)
+            )
+            if not fuse_gate_quant:
+                weights = self._compute_weights(x)
+
+            # Always use DeepGEMM (FP8 path). Decode uses a static score
+            # width from the cache/block-table upper bound; replay updates
+            # block tables and per-row lengths in-place before captured
+            # kernels run. Do not derive this from live positions via a GPU
+            # scalar read: that would synchronize the device and is
+            # illegal during CUDA graph capture.
+            T_cache = self._kv_block_table.shape[1] * self._kv_eb
+            # Cloned EAGLE draft metadata can be smaller than the engine graph.
+            # The block table is the only capture-stable bound for all replays.
+            T_max = max(32, T_cache)
+
+            if fuse_gate_quant:
+                from rtp_llm.models_py.triton_kernels.glm53_indexer_gate_quant import (
+                    gate_quant,
+                )
+
+                q_fp8, w_fold = gate_quant(
+                    x.reshape(-1, 4096),
+                    self.weights_proj,
+                    _as_bf16_contig(q).reshape(-1, self.n_heads, 128),
+                    head_tile=2 if bsz * q_len <= 64 else 8,
+                )
+                q_fp8 = q_fp8.view(q.shape)
+                w_fold = w_fold.view(q.shape[:-1])
+            else:
+                q_fp8, w_fold = self._quantize_q(
+                    _as_bf16_contig(q), weights.contiguous()
+                )
+            ctx_lens_2d = compressed_len.view(bsz, q_len)
+            bt_i32 = self._kv_block_table[:bsz].to(torch.int32).contiguous()
+            # Shared arenas leave gaps between blocks. Pass the block view
+            # through to the scorer so it preserves that pitch without copying.
+            logits = fp8_paged_indexer_score(
+                q_fp8,
+                w_fold.view(bsz * q_len, self.n_heads),
+                self._kv_pool_view,
+                bt_i32,
+                ctx_lens_2d,
+                block_size=self._kv_eb,
+                max_ctx_len=T_max,
+            )  # [B*q_len, T_max] fp32
+            score = logits.view(bsz, q_len, T_max)
+
+            lengths = compressed_len.view(bsz * q_len)
+            _select_topk(
+                score.view(bsz * q_len, T_max),
+                torch.zeros_like(lengths),
+                lengths,
+                out_topk_buffer.view(bsz * q_len, K),
+            )
+            return out_topk_buffer
+        finally:
+            self._clear_nested_pool()
+
+    # --------------------------------------------------------------
+    # Prefill prepare — caller invokes once per layer-call, before forward
+    # --------------------------------------------------------------
+    @cached_indexer_prefill
+    def prepare(
+        self,
+        bsz: int,
+        seqlen: int,
+        sp_int: int,
+        device: torch.device,
+        kv_block_table: Optional[torch.Tensor] = None,
+        kv_eb: int = 0,
+        *,
+        use_varlen: bool,
+        batch_size: int = 1,
+        cu_seqlens: Optional[torch.Tensor] = None,
+        input_lengths: Optional[torch.Tensor] = None,
+        prefix_lengths: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
+        req_id_per_token: Optional[torch.Tensor] = None,
+        max_seqlen_q: int = 0,
+        has_prefix: bool,
+    ) -> _IndexerFP8PrefillMeta:
+        """Build per-call FP8 prefill metadata.
+
+        Caller (``Attention._build_shared_prefill_meta``) invokes this once
+        per layer-call. The returned bundle carries every device-side
+        tensor and Python scalar :meth:`forward` needs, so the hot path
+        has zero ``arange`` / ``where`` / ``zeros`` / ``contiguous``
+        launches.
+
+        ``kv_block_table`` and ``kv_eb`` describe the INDEXER_KV pool layout
+        for this forward; pass them explicitly so this method does not
+        rely on a stale ``set_pool_context`` snapshot. Warmup callers can
+        pass ``kv_block_table=None`` / ``kv_eb=0`` and the per-row
+        ``block_table_i32`` is emitted empty (matches the warmup short-
+        circuit in :meth:`forward`).
+
+        Today's caller still hands us a single-request layout (``bsz==1``
+        with the full request flattened into ``seqlen``), so the
+        ``cu_kv_seqlens`` we emit is ``[0, T]``. This method is otherwise
+        layout-agnostic — once the caller starts feeding per-request
+        ``cu_seqlens`` we'll fan that out here.
+        """
+        assert (
+            self.compressor.kpool_mode or self.freqs_cis is not None
+        ), "IndexerFP8.prepare needs freqs_cis unless GLM KPool NoPE is active"
+        ratio = self.compress_ratio
+        max_request_keys = None
+        # ``use_varlen`` is required — set by
+        # ``Attention._build_csa_prefill_meta`` which receives it from
+        # ``Attention._build_shared_prefill_meta`` (the single env-read
+        # point + contract guard for the whole prefill stack). UT helpers
+        # must pass it explicitly.
+        # Phase F: under CP the framework's ``input_lengths`` is rank-local
+        # (chunk_length per req). The nested ``CompressorFP8.forward``
+        # all-gathers KV/score to the full ``seq_len_full`` per req, so the
+        # compressed-K count ``T_b = (prefix + S_b) // ratio`` must use the
+        # GLOBAL per-req length to size the score axis (ks/ke/cu_kv_seqlens
+        # all index into a per-rank pool that holds compressed entries for
+        # the entire global sequence). ``prefix_lengths`` is rank-invariant
+        # so it doesn't need swapping. Q stays rank-local — ``positions_d``
+        # uses ``position_ids`` which already carries GLOBAL absolute
+        # positions on each rank-local token.
+        cp_ctx = getattr(self, "_cp_ctx", None)
+        cp_active = cp_ctx is not None and cp_ctx.cp_size > 1
+        eff_input_lengths = input_lengths
+        if cp_active and cp_ctx.input_lengths_global is not None:
+            eff_input_lengths = cp_ctx.input_lengths_global
+        if use_varlen:
+            assert cu_seqlens is not None
+            assert eff_input_lengths is not None
+            assert prefix_lengths is not None
+            assert position_ids is not None
+            assert req_id_per_token is not None
+            cu_seqlens = _flat_1d(cu_seqlens)
+            eff_input_lengths = _flat_1d(eff_input_lengths)
+            prefix_lengths = _flat_1d(prefix_lengths)
+            position_ids = _flat_1d(position_ids)
+            req_id_per_token = _flat_1d(req_id_per_token)
+            assert position_ids.numel() == req_id_per_token.numel(), (
+                "position_ids / req_id_per_token must have matching token counts: "
+                f"{position_ids.numel()} vs {req_id_per_token.numel()}"
+            )
+            assert (
+                cu_seqlens.numel() == batch_size + 1
+            ), f"cu_seqlens must be [B+1={batch_size + 1}], got {cu_seqlens.shape}"
+            assert (
+                eff_input_lengths.numel() == batch_size
+            ), f"input_lengths must be [B={batch_size}], got {eff_input_lengths.shape}"
+            assert (
+                prefix_lengths.numel() == batch_size
+            ), f"prefix_lengths must be [B={batch_size}], got {prefix_lengths.shape}"
+            # Per-request compressed-K count: T_b = (sp_b + S_b) // ratio.
+            with record_function_range("dsv4.fp8.indexer.prepare.varlen_lengths"):
+                host_geometry = (
+                    cached_indexer_host_lengths(
+                        cu_seqlens, prefix_lengths, eff_input_lengths, ratio, device
+                    )
+                    if self.compressor.kpool_mode
+                    and (
+                        not cp_active or not getattr(cp_ctx, "sequence_parallel", True)
+                    )
+                    else None
+                )
+                if host_geometry is not None:
+                    T_per_req, cu_kv_seqlens, T, end_pos, host_counts, _ = host_geometry
+                    max_request_keys = max(host_counts.tolist(), default=0)
+                else:
+                    seq_total_per_req = prefix_lengths.to(
+                        device=device, dtype=torch.int64
+                    ) + eff_input_lengths.to(
+                        device=device, dtype=torch.int64
+                    )  # [B]
+                    T_per_req = (seq_total_per_req // ratio).to(torch.int32)  # [B]
+                    cu_kv_seqlens = torch.zeros(
+                        batch_size + 1, dtype=torch.int32, device=device
+                    )
+                    cu_kv_seqlens[1:] = torch.cumsum(
+                        T_per_req.to(torch.int64), dim=0
+                    ).to(torch.int32)
+                    T = int(cu_kv_seqlens[-1].item())  # total compressed K across batch
+                M = int(position_ids.numel())  # T_total
+
+            # Under varlen, ``fp8_mqa_indexer_score`` consumes a single
+            # request-concatenated K axis ``k_quant_flat[0..T)`` whose
+            # per-request offset is ``cu_kv_seqlens[b]``. ``ks/ke`` MUST
+            # be in this GLOBAL flat-K coord (kernel docstring:
+            # "K start, inclusive / K end, exclusive" — same 1D K axis
+            # across rows). Per-token visible window for token t in
+            # request b at absolute position pos_t:
+            #     ks[t] = cu_kv_seqlens[b]
+            #     ke[t] = cu_kv_seqlens[b] + min((pos_t+1)//ratio, T_b)
+            # The TopK kernel processes [ks, ke) but returns indices
+            # relative to ks — already request-local [0, N_b).
+            with record_function_range("dsv4.fp8.indexer.prepare.varlen_bounds"):
+                positions_d, ks, ke, cu_kv_per_token = indexer_varlen_bounds(
+                    req_id_per_token,
+                    position_ids,
+                    T_per_req,
+                    cu_kv_seqlens,
+                    ratio,
+                    device,
+                )
+
+            # ``freqs_cis_slice`` per-token gather — RoPE angles for ``q``
+            # in ``_compute_indexer_q``. Equivalent to ``self.freqs_cis[
+            # sp:sp+S]`` for B == 1 contiguous range; per-token gather is
+            # required when requests interleave on the flat axis.
+            with record_function_range("dsv4.fp8.indexer.prepare.freqs"):
+                freqs_cis_slice = (
+                    self.freqs_cis.index_select(0, positions_d.to(torch.long))
+                    if self.freqs_cis is not None
+                    else torch.empty((M, 0), dtype=torch.complex64, device=device)
+                )
+
+            if kv_block_table is not None and kv_eb > 0:
+                with record_function_range("dsv4.fp8.indexer.prepare.block_table"):
+                    block_table_i32 = (
+                        kv_block_table[:batch_size]
+                        .to(device=device, dtype=torch.int32)
+                        .contiguous()
+                    )
+            else:
+                block_table_i32 = torch.empty(
+                    (batch_size, 0), dtype=torch.int32, device=device
+                )
+
+            # Legacy compat scalar fields. Under varlen ``forward()`` does
+            # not consume ``end_pos`` / ``is_fresh_prefill`` (the kernel-
+            # native path drives off the per-request tensors); ``sp_int``
+            # is still passed to ``self.compressor(x, sp, meta=...)`` but
+            # is ignored there because ``meta.is_batched=True``. Keep the
+            # request-0 values for diagnostics / B==1 collapse equivalence.
+            if host_geometry is None:
+                end_pos = int(seq_total_per_req[0].item())
+            is_fresh_prefill = sp_int == 0
+        else:
+            # Legacy B == 1 scalar path — unchanged, bit-equal to pre-Phase-3a.
+            with record_function_range("dsv4.fp8.indexer.prepare.legacy"):
+                end_pos = sp_int + seqlen
+                is_fresh_prefill = sp_int == 0
+                T = end_pos // ratio
+                M = bsz * seqlen
+
+                freqs_cis_slice = (
+                    self.freqs_cis[sp_int : sp_int + seqlen]
+                    if self.freqs_cis is not None
+                    else torch.empty((seqlen, 0), dtype=torch.complex64, device=device)
+                )
+
+                # Global Q positions for this chunk: sp..sp+S-1 (B==1 → flat [M]).
+                positions_d = torch.arange(
+                    sp_int, sp_int + seqlen, device=device, dtype=torch.int32
+                )
+
+                # Per-row visible-K window (causal): row r → [0, (pos+1)//ratio),
+                # clamped to T (compressed K count).
+                ke = ((positions_d + 1) // ratio).clamp_max(T).to(torch.int32)
+                ks = torch.zeros(M, dtype=torch.int32, device=device)
+
+            # K-side block_table — None during warmup (no pool bound).
+            if kv_block_table is not None and kv_eb > 0:
+                block_table_i32 = (
+                    kv_block_table[:bsz]
+                    .to(device=device, dtype=torch.int32)
+                    .contiguous()
+                )
+            else:
+                block_table_i32 = torch.empty(
+                    (bsz, 0), dtype=torch.int32, device=device
+                )
+            cu_kv_seqlens = torch.tensor([0, T], dtype=torch.int32, device=device)
+            # B==1 → request-0 offset is 0 → request-local ≡ global; the
+            # subtract in ``forward()`` becomes a no-op so we leave this
+            # field as ``None`` to skip the launch entirely on the legacy path.
+            cu_kv_per_token = None
+
+        score_segments = None
+        score_relative_ks = score_relative_ke = None
+        if (
+            cp_active
+            and use_varlen
+            and self.compressor.kpool_mode
+            and getattr(cp_ctx, "sequence_parallel", False)
+            and cp_ctx.chunk_lengths_per_req is not None
+        ):
+            # CPContext guarantees [request0 front/back, request1 front/back,
+            # ...], including each request's padding. Only B+1 offsets cross
+            # to the host in prepare; forward never reads a CUDA scalar.
+            k_offsets = cu_kv_seqlens.tolist()
+            segments, cursor = [], 0
+            for request, length in enumerate(cp_ctx.chunk_lengths_per_req):
+                segments.append(
+                    (
+                        cursor,
+                        cursor + length,
+                        k_offsets[request],
+                        k_offsets[request + 1],
+                    )
+                )
+                cursor += length
+            if cursor != M or len(k_offsets) != len(segments) + 1:
+                raise ValueError("GLM Indexer CP request chunks do not cover local Q/K")
+            score_segments = tuple(segments)
+            score_relative_ks = torch.zeros_like(ks)
+            score_relative_ke = ke - ks
+
+        indexer_cp_plan: Optional[Any] = None
+        indexer_cp_local_cu: Optional[torch.Tensor] = None
+        if (
+            cp_active
+            and bool(getattr(cp_ctx, "kv_cache_sharded", False))
+            and kv_block_table is not None
+            and kv_eb > 0
+            and T > 0
+        ):
+            from rtp_llm.models_py.modules.dsv4.fp8 import (
+                _glm53_indexer_cp_assembler as asm,
+            )
+
+            with record_function_range("dsv4.fp8.indexer.prepare.cp_gather_plan"):
+                cu = cu_kv_seqlens.to(torch.int64)
+                per_req_T = (cu[1:] - cu[:-1]).contiguous()
+                owner_block_size = kv_eb
+                if (
+                    self.compress_ratio > 0
+                    and self._kv_owner_tokens_per_block > 0
+                    and self._kv_owner_tokens_per_block % self.compress_ratio == 0
+                ):
+                    owner_block_size = (
+                        self._kv_owner_tokens_per_block // self.compress_ratio
+                    )
+                indexer_cp_plan = asm.build_indexer_cp_chunk_plan(
+                    cp_ctx=cp_ctx,
+                    per_req_total_kv_lens=per_req_T,
+                    block_size=kv_eb,
+                    device=device,
+                    owner_block_size=owner_block_size,
+                    geometry_key=(self.compress_ratio, T),
+                )
+                indexer_cp_local_cu = asm.build_actual_local_cu_kv_seqlens(
+                    indexer_cp_plan
+                )
+
+        # Hoist the nested CompressorFP8's slot-mapping metadata. The
+        # IndexerFP8's pool context is bound by Attention's
+        # ``_set_compressor_pool_context`` BEFORE ``_build_csa_prefill_meta``
+        # runs, so ``_propagate_pool_to_nested`` is safe here. Without
+        # this, ``CompressorFP8.forward(meta=None)`` rebuilds the slot
+        # mappings each call (~30 small kernels per layer between the
+        # F.linear SGEMM and ``run_save_partial_states``). ``getattr``
+        # defaults keep the stub-based UTs (which expose only the four
+        # attrs ``prepare`` historically read) working — they fall through
+        # to ``compressor_meta=None`` and the in-band rebuild path.
+        compressor_meta: Optional[CompressorMeta] = None
+        state_bt = getattr(self, "_state_block_table", None)
+        state_eb = getattr(self, "_state_eb", 0)
+        compressor = getattr(self, "compressor", None)
+        if (
+            self._kv_block_table is not None
+            and self._kv_eb > 0
+            and state_bt is not None
+            and state_eb > 0
+            and compressor is not None
+        ):
+            from rtp_llm.models_py.modules.dsv4.fp8.compressor import (
+                build_prepare_metadata_args,
+            )
+
+            self._propagate_pool_to_nested()
+            try:
+                if cp_active:
+                    # Phase F: under CP the nested compressor all-gathers
+                    # KV/score to the full sequence. Build matching
+                    # full-sequence slot metadata here, where Attention's
+                    # prefill_meta broadcast path calls ``prepare`` once per
+                    # CSA ratio bucket, instead of rebuilding in every layer's
+                    # nested compressor hot path.
+                    assert cp_ctx is not None
+                    if cp_ctx.input_lengths_global is not None:
+                        with record_function_range(
+                            "dsv4.fp8.indexer.prepare.cp_nested_compressor_meta"
+                        ):
+                            (
+                                cp_positions,
+                                cp_b_idx,
+                                cp_seq_start_per_req,
+                                cp_cu_seq_per_req,
+                            ) = build_cp_full_prefill_positions(cp_ctx, device)
+                            compressor_meta = compressor.prepare_metadata(
+                                cp_positions,
+                                cp_b_idx,
+                                has_prefix=has_prefix,
+                                is_batched=True,
+                                seq_start_per_req=cp_seq_start_per_req,
+                                cu_seq_per_req=cp_cu_seq_per_req,
+                            )
+                    else:
+                        compressor_meta = None
+                else:
+                    with record_function_range(
+                        "dsv4.fp8.indexer.prepare.nested_compressor_meta"
+                    ):
+                        cmp_args = build_prepare_metadata_args(
+                            use_varlen=use_varlen,
+                            has_prefix=has_prefix,
+                            device=device,
+                            sp_int=sp_int,
+                            seqlen=seqlen,
+                            position_ids=position_ids,
+                            req_id_per_token=req_id_per_token,
+                            seq_start_per_req=prefix_lengths,
+                            cu_seqlens=cu_seqlens,
+                        )
+                        compressor_meta = compressor.prepare_metadata(**cmp_args)
+            finally:
+                self._clear_nested_pool()
+
+        return _IndexerFP8PrefillMeta(
+            bsz=bsz,
+            seqlen=seqlen,
+            M=M,
+            sp_int=sp_int,
+            end_pos=end_pos,
+            is_fresh_prefill=is_fresh_prefill,
+            T=T,
+            freqs_cis_slice=freqs_cis_slice,
+            positions_d=positions_d,
+            ks=ks,
+            ke=ke,
+            block_table_i32=block_table_i32,
+            cu_kv_seqlens=cu_kv_seqlens,
+            cu_kv_per_token=cu_kv_per_token,
+            compressor_meta=compressor_meta,
+            indexer_cp_plan=indexer_cp_plan,
+            indexer_cp_local_cu=indexer_cp_local_cu,
+            score_segments=score_segments,
+            score_relative_ks=score_relative_ks,
+            score_relative_ke=score_relative_ke,
+            max_request_keys=max_request_keys,
+        )
+
+    # --------------------------------------------------------------
+    # Prefill — kernel-only hot path; metadata pre-built in ``prepare``.
+    # ``x`` may be either flat ``[T_total, dim]`` (vLLM-native) or
+    # legacy ``[B, S, dim]`` — output shape mirrors the input layout
+    # (``[..., index_topk]``).
+    # Returned indices are **raw** compressed-pool offsets in int32 with
+    # ``-1`` past the per-row valid count. The caller is responsible for
+    # any downstream coordinate transform / dtype cast — the topk
+    # consumer (``flash_mla_sparse_fwd``) accepts ``-1`` directly so no
+    # sentinel-aware post-process is needed here.
+    # --------------------------------------------------------------
+    def forward(
+        self,
+        x: torch.Tensor,
+        qr: torch.Tensor,
+        attention_inputs: _IndexerFP8PrefillMeta,
+        *,
+        # REQUIRED, never Optional — by design. Threaded straight to the nested
+        # ``CompressorFP8`` (which dereferences it only on the CP gather branch).
+        # Always passed (unused on non-CP) so there is one buffer-lifecycle
+        # contract and no hidden ``None``/fallback-allocate. Do NOT make Optional.
+        workspace: "PrefillWorkspace",
+    ) -> torch.Tensor:
+        M = attention_inputs.M
+        T = attention_inputs.T
+        sp = attention_inputs.sp_int
+        K = self.index_topk
+
+        # Output shape mirrors ``x`` layout: ``[T_total, K]`` for flat 2D,
+        # ``[B, S, K]`` for 3D. Empty ``K=0`` for warmup / cold-start.
+        out_shape = (*x.shape[:-1], K)
+        empty_shape = (*x.shape[:-1], 0)
+
+        # Warmup forward (no pool bound by framework): emit empty topk
+        # (matches BF16 Indexer's warmup fallback shape). Caller in
+        # ``Attention._forward_prefill_fp8_csa_hca`` concats with the SWA
+        # topk; an empty trailing dim is a no-op there.
+        if (
+            self._kv_block_table is None
+            or self._kv_pool_view is None
+            or self._kv_eb <= 0
+        ):
+            return torch.full(empty_shape, -1, dtype=torch.int32, device=x.device)
+
+        if not self.compressor.kpool_mode and self.compressor.freqs_cis is None:
+            self.compressor.freqs_cis = self.freqs_cis
+
+        self._propagate_pool_to_nested()
+        try:
+            with record_function_range("dsv4.fp8.indexer.prefill.compute_q"):
+                q = self._compute_indexer_q(
+                    qr,
+                    attention_inputs.freqs_cis_slice,
+                    apply_rope=not self.compressor.kpool_mode,
+                )
+            with record_function_range("dsv4.fp8.indexer.prefill.nested_compressor"):
+                self.compressor(
+                    x, sp, meta=attention_inputs.compressor_meta, workspace=workspace
+                )
+            # ``softmax_scale * n_heads^-0.5`` is pre-folded into weights_proj at __init__.
+            with record_function_range("dsv4.fp8.indexer.prefill.weights_proj"):
+                weights = self._compute_weights(x)
+
+            assert self._kv_pool_view.dim() == 3, (
+                "IndexerFP8 expects 3D ``_kv_pool_view`` "
+                "[num_blocks, eb, 132]; got dim="
+                f"{self._kv_pool_view.dim()}"
+            )
+
+            if T == 0:
+                # Cold-start prefill before any compressed tokens — no K
+                # to score against; emit empty topk buffer behavior.
+                return torch.full(empty_shape, -1, dtype=torch.int32, device=x.device)
+
+            # Vendored CUDA gather: reads paged FP8 K + scale directly
+            # via (block_table, cu_kv_seqlens). No host-side slot mapping.
+            with record_function_range("dsv4.fp8.indexer.prefill.gather_k_cache"):
+                k_quant_flat = torch.empty(
+                    (T, INDEXER_HEAD_DIM),
+                    dtype=torch.float8_e4m3fn,
+                    device=x.device,
+                )
+                # quant_block_size = head_dim*4/dst_scale.size(1) = 128*4/4 = 128.
+                k_scale_buf = torch.empty((T, 4), dtype=torch.uint8, device=x.device)
+                self._gather_prefill_k_cache(
+                    attention_inputs,
+                    k_quant_flat,
+                    k_scale_buf,
+                )
+                # ``deep_gemm.fp8_mqa_logits`` expects k_scale as 1D fp32
+                # contig — view uint8 [T, 4] → fp32 [T, 1] → squeeze [T].
+                k_scale_flat = k_scale_buf.view(torch.float32).squeeze(-1)
+
+            # Phase-3a part 3 fix: when ``_compute_indexer_q`` was given a
+            # flat 2D qr it returns 3D ``[T, H, D]``; ``indexer_q_fp8_quant_fold``
+            # requires 4D ``[B, S, H, D]`` (asserts ``q_bf16.dim() == 4``).
+            # Wrap with a fake B=1 — downstream consumers immediately reshape
+            # to flat ``[M, H, D]`` so the wrap is a free view.
+            q_for_quant = q if q.dim() == 4 else q.unsqueeze(0)
+            w_for_quant = weights if weights.dim() == 3 else weights.unsqueeze(0)
+            with record_function_range("dsv4.fp8.indexer.prefill.quant_q"):
+                q_fp8, w_fold = self._quantize_q(
+                    _as_bf16_contig(q_for_quant), w_for_quant.contiguous()
+                )
+
+            q_score = q_fp8.view(M, self.n_heads, INDEXER_HEAD_DIM)
+            w_score = w_fold.view(M, self.n_heads)
+            out_buf = self._prefill_score_topk(
+                q_score, w_score, k_quant_flat, k_scale_flat, attention_inputs
+            )
+
+            return out_buf.view(out_shape)
+        finally:
+            self._clear_nested_pool()
+
+    # --------------------------------------------------------------
+    # Overlap orchestration entry points
+    #
+    # Companion pair to :meth:`forward` for the attention overlap path:
+    # ``start_prefill_nested_compressor`` queues the nested compressor's
+    # CP all-gather on ``cp_gather_stream`` without waiting, and the
+    # returned ``_CompressorPending`` is drained inside
+    # :meth:`forward_with_pending_nested` in place of the synchronous
+    # ``self.compressor(x, sp, meta=...)`` call that ``forward`` issues.
+    #
+    # Non-overlap callers must keep using :meth:`forward` unchanged.
+    # --------------------------------------------------------------
+    def forward_with_pending_nested(
+        self,
+        x: torch.Tensor,
+        qr: torch.Tensor,
+        attention_inputs: _IndexerFP8PrefillMeta,
+        nested_pending: Optional[_CompressorPending],
+        before_gather_k: Optional[Callable[[], None]] = None,
+    ) -> torch.Tensor:
+        """Overlap-variant of :meth:`forward`.
+
+        Identical to :meth:`forward` byte-for-byte except the nested
+        compressor is drained via ``self.compressor.finish_prefill``
+        on the supplied ``nested_pending`` (produced by
+        :meth:`start_prefill_nested_compressor`) instead of a fresh
+        synchronous call. Same warmup early-return, same try/finally
+        pool clear, same gather_k → quant_q → score → topk path.
+
+        ``before_gather_k`` is an optional orchestrator fence. CSA overlap uses
+        it to wait the main compressor's CP gather after nested write +
+        compute_q/weights projection, but before this method reads the nested
+        INDEXER_KV pool and runs the numerically sensitive score/topk chain.
+
+        ``nested_pending`` is ``None`` on the warmup path; the call to
+        ``finish_prefill(None)`` is a no-op so the pairing is safe to
+        chain unconditionally.
+        """
+        M = attention_inputs.M
+        T = attention_inputs.T
+        K = self.index_topk
+
+        out_shape = (*x.shape[:-1], K)
+        empty_shape = (*x.shape[:-1], 0)
+
+        if (
+            self._kv_block_table is None
+            or self._kv_pool_view is None
+            or self._kv_eb <= 0
+        ):
+            # Warmup mirror of ``forward``: emit empty topk. The pending
+            # here is always ``None`` (start_prefill_nested_compressor
+            # also short-circuits on warmup); the explicit no-op drain
+            # keeps the orchestrator's symmetric pairing contract clear.
+            self.compressor.finish_prefill(nested_pending)
+            return torch.full(empty_shape, -1, dtype=torch.int32, device=x.device)
+
+        if not self.compressor.kpool_mode and self.compressor.freqs_cis is None:
+            self.compressor.freqs_cis = self.freqs_cis
+        # ``set_pool_context`` is idempotent — re-propagating is safe and
+        # mirrors ``forward``'s unconditional propagate so callers that
+        # entered through this path without start_prefill_nested_compressor
+        # (e.g. tests) still work.
+        self._propagate_pool_to_nested()
+        try:
+            with record_function_range("dsv4.fp8.indexer.prefill.compute_q"):
+                q = self._compute_indexer_q(
+                    qr,
+                    attention_inputs.freqs_cis_slice,
+                    apply_rope=not self.compressor.kpool_mode,
+                )
+            with record_function_range("dsv4.fp8.indexer.prefill.nested_compressor"):
+                self.compressor.finish_prefill(nested_pending)
+            with record_function_range("dsv4.fp8.indexer.prefill.weights_proj"):
+                weights = self._compute_weights(x)
+
+            assert self._kv_pool_view.dim() == 3, (
+                "IndexerFP8 expects 3D ``_kv_pool_view`` "
+                "[num_blocks, eb, 132]; got dim="
+                f"{self._kv_pool_view.dim()}"
+            )
+
+            if T == 0:
+                return torch.full(empty_shape, -1, dtype=torch.int32, device=x.device)
+
+            if before_gather_k is not None:
+                with record_function_range("dsv4.fp8.indexer.prefill.before_gather_k"):
+                    before_gather_k()
+
+            with record_function_range("dsv4.fp8.indexer.prefill.gather_k_cache"):
+                k_quant_flat = torch.empty(
+                    (T, INDEXER_HEAD_DIM),
+                    dtype=torch.float8_e4m3fn,
+                    device=x.device,
+                )
+                k_scale_buf = torch.empty((T, 4), dtype=torch.uint8, device=x.device)
+                self._gather_prefill_k_cache(
+                    attention_inputs,
+                    k_quant_flat,
+                    k_scale_buf,
+                )
+                k_scale_flat = k_scale_buf.view(torch.float32).squeeze(-1)
+
+            q_for_quant = q if q.dim() == 4 else q.unsqueeze(0)
+            w_for_quant = weights if weights.dim() == 3 else weights.unsqueeze(0)
+            with record_function_range("dsv4.fp8.indexer.prefill.quant_q"):
+                q_fp8, w_fold = self._quantize_q(
+                    _as_bf16_contig(q_for_quant), w_for_quant.contiguous()
+                )
+
+            q_score = q_fp8.view(M, self.n_heads, INDEXER_HEAD_DIM)
+            w_score = w_fold.view(M, self.n_heads)
+            out_buf = self._prefill_score_topk(
+                q_score, w_score, k_quant_flat, k_scale_flat, attention_inputs
+            )
+
+            return out_buf.view(out_shape)
+        finally:
+            self._clear_nested_pool()

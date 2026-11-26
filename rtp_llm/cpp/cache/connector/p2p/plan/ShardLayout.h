@@ -45,8 +45,8 @@ struct ShardLayout {
         size_t linear_history_rows = 0;
     };
 
-    ParallelismConfig            pc;
-    size_t                             cache_key_tokens_per_block = 1;
+    ParallelismConfig                  pc;
+    size_t                             cache_key_tokens_per_block      = 1;
     bool                               use_group_cache_transfer_policy = false;
     bool                               use_mla                         = false;
     bool                               local_full_page_rr              = false;
@@ -55,14 +55,7 @@ struct ShardLayout {
     // ---- rank 坐标：CP 轴与 head 轴相互独立，不做除法分解（设计文档 §3.3）----
 
     int cpSize() const {
-        if (local_full_page_rr) {
-            return static_cast<int>(pc.tp_size);
-        }
-        // Ordinary Decode's flag describes its Prefill peer.
-        return pc.role_type != RoleType::DECODE && pc.prefill_cp_config.is_enabled()
-                       && pc.prefill_cp_config.kv_cache_sharded ?
-                   static_cast<int>(pc.tp_size) :
-                   1;
+        return static_cast<int>(pc.kvCacheCpSize(local_full_page_rr));
     }
 
     // Compact state pages retain Prefill's token geometry on Decode, without
@@ -147,7 +140,7 @@ struct ShardLayout {
 
     /// @brief 还原出「不分片时」的全局 block 字节数，用于两侧一致性校验。
     size_t effectiveGlobalBlockBytes(const std::string& tag) const {
-        const auto& g = group(tag);
+        const auto& g     = group(tag);
         size_t      bytes = g.kv_block_stride_bytes * static_cast<size_t>(headShardCount(tag));
         if (g.pre_sliced) {
             bytes *= static_cast<size_t>(cpSize());

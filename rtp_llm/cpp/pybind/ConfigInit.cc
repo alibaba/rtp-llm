@@ -476,6 +476,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     py::class_<KVCacheConfig>(m, "KVCacheConfig")
         .def(py::init<>())
         .def_readwrite("reuse_cache", &KVCacheConfig::reuse_cache)
+        .def_readwrite("shared_hybrid_cache", &KVCacheConfig::shared_hybrid_cache)
         .def_readwrite("enable_remote_cache", &KVCacheConfig::enable_remote_cache)
         .def_readwrite("enable_device_cache", &KVCacheConfig::enable_device_cache)
         .def_readwrite("enable_crc", &KVCacheConfig::enable_crc)
@@ -589,7 +590,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      25,
+                                      26,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -671,9 +672,27 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       // the per-pool block weights at the tail so indices 0-78
                                       // stay identical to main's v23.
                                       self.enable_linear_cache_reclaim,
-                                      self.kv_cache_pool_block_weights);
+                                      self.kv_cache_pool_block_weights,
+                                      self.shared_hybrid_cache);
             },
             [](py::tuple t) {
+                int shared_hybrid_cache = 0;
+                if (t.size() > 1 && py::isinstance<py::int_>(t[1])) {
+                    const int wire_version = t[1].cast<int>();
+                    // GLM-5.3's original v10 appends the shared policy to v9.
+                    // Main's older 73-slot v10 stores a boolean reclaim flag at index 70.
+                    const bool glm_port_state = wire_version == 10 && t.size() == 73 && py::isinstance<py::int_>(t[70])
+                                                && !py::isinstance<py::bool_>(t[70]);
+                    const bool current_state = wire_version == 26 && t.size() == 82;
+                    if (glm_port_state || current_state) {
+                        shared_hybrid_cache = t[t.size() - 1].cast<int>();
+                        if (shared_hybrid_cache < -1 || shared_hybrid_cache > 1) {
+                            throw std::runtime_error("invalid shared hybrid cache policy");
+                        }
+                        t    = t[py::slice(0, t.size() - 1, 1)].cast<py::tuple>();
+                        t[1] = py::int_(glm_port_state ? 9 : 25);
+                    }
+                }
                 // Pickle version ladder after merging main #1643 (dsv41 btc):
                 // v9  = ours enable_linear_cache_reclaim (size 71);
                 // v10 = ours reclaim + pool weights (size 72) or reclaim +
@@ -929,6 +948,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                         throw std::runtime_error("invalid KVCacheConfig tail or pool blocks");
                     }
                 }
+                c.shared_hybrid_cache = shared_hybrid_cache;
                 return c;
             }));
 
@@ -1319,19 +1339,19 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 if (t.size() == 18) {
                     CacheStoreConfig c;
                     try {
-                        c.cache_store_rdma_mode                        = t[0].cast<bool>();
-                        c.thread_count                                 = t[1].cast<int>();
-                        c.rdma_connect_timeout_ms                      = t[2].cast<int>();
-                        c.rdma_qp_count_per_connection                 = t[3].cast<int>();
-                        c.rdma_io_thread_count                         = t[4].cast<int>();
-                        c.rdma_worker_thread_count                     = t[5].cast<int>();
-                        c.messager_io_thread_count                     = t[6].cast<int>();
-                        c.messager_worker_thread_count                 = t[7].cast<int>();
-                        c.rdma_max_block_pairs_per_connection          = t[9].cast<int>();
-                        c.p2p_transfer_not_done_resource_hold_ms       = t[12].cast<int64_t>();
-                        c.p2p_cancel_broadcast_timeout_ms              = t[15].cast<int64_t>();
-                        c.cache_store_tcp_anet_rpc_thread_num          = t[16].cast<int>();
-                        c.cache_store_tcp_anet_rpc_queue_num           = t[17].cast<int>();
+                        c.cache_store_rdma_mode                  = t[0].cast<bool>();
+                        c.thread_count                           = t[1].cast<int>();
+                        c.rdma_connect_timeout_ms                = t[2].cast<int>();
+                        c.rdma_qp_count_per_connection           = t[3].cast<int>();
+                        c.rdma_io_thread_count                   = t[4].cast<int>();
+                        c.rdma_worker_thread_count               = t[5].cast<int>();
+                        c.messager_io_thread_count               = t[6].cast<int>();
+                        c.messager_worker_thread_count           = t[7].cast<int>();
+                        c.rdma_max_block_pairs_per_connection    = t[9].cast<int>();
+                        c.p2p_transfer_not_done_resource_hold_ms = t[12].cast<int64_t>();
+                        c.p2p_cancel_broadcast_timeout_ms        = t[15].cast<int64_t>();
+                        c.cache_store_tcp_anet_rpc_thread_num    = t[16].cast<int>();
+                        c.cache_store_tcp_anet_rpc_queue_num     = t[17].cast<int>();
                     } catch (const std::exception& e) {
                         throw std::runtime_error(std::string("CacheStoreConfig unpickle error: ") + e.what());
                     }
@@ -1342,28 +1362,28 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     throw std::runtime_error("Invalid CacheStoreConfig state");
                 }
                 CacheStoreConfig c;
-                c.cache_store_rdma_mode = t[0].cast<bool>();
-                c.thread_count = t[1].cast<int>();
-                c.rdma_connect_timeout_ms = t[2].cast<int>();
-                c.rdma_qp_count_per_connection = t[3].cast<int>();
-                c.rdma_io_thread_count = t[4].cast<int>();
-                c.rdma_worker_thread_count = t[5].cast<int>();
-                c.messager_io_thread_count = t[6].cast<int>();
-                c.messager_worker_thread_count = t[7].cast<int>();
-                c.rdma_max_block_pairs_per_connection = t[8].cast<int>();
+                c.cache_store_rdma_mode                  = t[0].cast<bool>();
+                c.thread_count                           = t[1].cast<int>();
+                c.rdma_connect_timeout_ms                = t[2].cast<int>();
+                c.rdma_qp_count_per_connection           = t[3].cast<int>();
+                c.rdma_io_thread_count                   = t[4].cast<int>();
+                c.rdma_worker_thread_count               = t[5].cast<int>();
+                c.messager_io_thread_count               = t[6].cast<int>();
+                c.messager_worker_thread_count           = t[7].cast<int>();
+                c.rdma_max_block_pairs_per_connection    = t[8].cast<int>();
                 c.p2p_transfer_not_done_resource_hold_ms = t[9].cast<int64_t>();
-                c.p2p_lease_query_timeout_ms = t[10].cast<int64_t>();
-                c.p2p_cancel_broadcast_timeout_ms = t[11].cast<int64_t>();
-                c.p2p_cancelled_keys_ttl_ms = t[12].cast<int64_t>();
-                c.cache_store_tcp_anet_rpc_thread_num = t[13].cast<int>();
-                c.cache_store_tcp_anet_rpc_queue_num = t[14].cast<int>();
-                c.cache_store_tcp_worker_queue_size = t[15].cast<int>();
-                c.rdma_transfer_worker_thread_count = t[16].cast<int>();
-                c.rdma_transfer_worker_queue_size = t[17].cast<int>();
-                c.p2p_rdma_enable_h2d_copy = t[18].cast<bool>();
-                c.p2p_rdma_staging_total_bytes = t[19].cast<int64_t>();
-                c.p2p_prefill_sender_thread_count = t[20].cast<int>();
-                c.p2p_prefill_sender_queue_size = t[21].cast<int>();
+                c.p2p_lease_query_timeout_ms             = t[10].cast<int64_t>();
+                c.p2p_cancel_broadcast_timeout_ms        = t[11].cast<int64_t>();
+                c.p2p_cancelled_keys_ttl_ms              = t[12].cast<int64_t>();
+                c.cache_store_tcp_anet_rpc_thread_num    = t[13].cast<int>();
+                c.cache_store_tcp_anet_rpc_queue_num     = t[14].cast<int>();
+                c.cache_store_tcp_worker_queue_size      = t[15].cast<int>();
+                c.rdma_transfer_worker_thread_count      = t[16].cast<int>();
+                c.rdma_transfer_worker_queue_size        = t[17].cast<int>();
+                c.p2p_rdma_enable_h2d_copy               = t[18].cast<bool>();
+                c.p2p_rdma_staging_total_bytes           = t[19].cast<int64_t>();
+                c.p2p_prefill_sender_thread_count        = t[20].cast<int>();
+                c.p2p_prefill_sender_queue_size          = t[21].cast<int>();
                 return c;
             }));
 
@@ -1613,8 +1633,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
             [](py::tuple t) {
                 // Main's nine-slot state ends in force_single_prefill (bool);
                 // older KV-budget states end in max_batch_kv_len (int).
-                if (t.size() != 2 && t.size() != 4 && t.size() != 6 && t.size() != 7 && t.size() != 8
-                    && t.size() != 9 && t.size() != 10)
+                if (t.size() != 2 && t.size() != 4 && t.size() != 6 && t.size() != 7 && t.size() != 8 && t.size() != 9
+                    && t.size() != 10)
                     throw std::runtime_error("Invalid state!");
                 FIFOSchedulerConfig c;
                 try {
@@ -1979,6 +1999,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("indexer_head_dim", &AttentionConfigs::indexer_head_dim)
         .def_readwrite("indexer_head_num", &AttentionConfigs::indexer_head_num)
         .def_readwrite("indexer_topk", &AttentionConfigs::indexer_topk)
+        .def_readwrite("indexer_compress_ratio", &AttentionConfigs::indexer_compress_ratio)
+        .def_readwrite("indexer_compressor_overlap", &AttentionConfigs::indexer_compressor_overlap)
+        .def_readwrite("sparse_attention_topk", &AttentionConfigs::sparse_attention_topk)
+        .def_readwrite("indexer_layer_ids", &AttentionConfigs::indexer_layer_ids)
         .def_readwrite("dtype", &AttentionConfigs::dtype)
         .def_readwrite("max_seq_len", &AttentionConfigs::max_seq_len)
         .def_readwrite("gen_num_per_cycle", &AttentionConfigs::gen_num_per_cycle)
@@ -2057,7 +2081,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("is_multimodal", &MMModelConfig::is_multimodal)
         .def_readwrite("mm_sep_tokens", &MMModelConfig::mm_sep_tokens)
         .def_readwrite("include_sep_tokens", &MMModelConfig::include_sep_tokens)
-        .def_readwrite("mm_position_ids_style", &MMModelConfig::mm_position_ids_style);
+        .def_readwrite("mm_position_ids_style", &MMModelConfig::mm_position_ids_style)
+        .def_readwrite("token_layout_from_vit", &MMModelConfig::token_layout_from_vit);
 
     py::class_<CacheReusePolicyDesc>(m, "CacheReusePolicyDesc")
         .def(py::init<>())
@@ -2076,17 +2101,24 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("reservable", &CacheCapacityPolicyDesc::reservable)
         .def_readwrite("explicit_block_num", &CacheCapacityPolicyDesc::explicit_block_num)
         .def_readwrite("charge_to_paged_budget", &CacheCapacityPolicyDesc::charge_to_paged_budget)
+        .def_readwrite("match_decode_token_capacity", &CacheCapacityPolicyDesc::match_decode_token_capacity)
         .def(py::pickle(
-            [](const CacheCapacityPolicyDesc& self) {
+            [](const CacheCapacityPolicyDesc& self) -> py::tuple {
+                if (self.match_decode_token_capacity) {
+                    return py::make_tuple(self.reservable, self.explicit_block_num, self.charge_to_paged_budget, true);
+                }
                 return py::make_tuple(self.reservable, self.explicit_block_num, self.charge_to_paged_budget);
             },
             [](py::tuple t) {
                 CacheCapacityPolicyDesc c;
-                if (t.size() != 3)
+                if (t.size() != 3 && t.size() != 4)
                     throw std::runtime_error("Invalid CacheCapacityPolicyDesc state!");
                 c.reservable             = t[0].cast<std::optional<bool>>();
                 c.explicit_block_num     = t[1].cast<std::optional<uint32_t>>();
                 c.charge_to_paged_budget = t[2].cast<std::optional<bool>>();
+                if (t.size() == 4) {
+                    c.match_decode_token_capacity = t[3].cast<bool>();
+                }
                 return c;
             }));
 
@@ -2392,18 +2424,18 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     const auto  timeout_index = t.size() >= 19 ? 13 : 9;
                     PDSepConfig c;
                     try {
-                        c.role_type                           = t[0].cast<RoleType>();
-                        c.cache_store_rdma_mode               = t[1].cast<bool>();
-                        c.cache_store_listen_port             = t[2].cast<int64_t>();
-                        c.cache_store_connect_port            = t[3].cast<int64_t>();
-                        c.cache_store_rdma_listen_port        = t[4].cast<int64_t>();
-                        c.cache_store_rdma_connect_port       = t[5].cast<int64_t>();
-                        c.remote_rpc_server_port              = t[6].cast<int64_t>();
-                        c.prefill_retry_times                 = t[7].cast<int64_t>();
-                        c.prefill_retry_timeout_ms            = t[8].cast<int64_t>();
-                        c.load_cache_timeout_ms               = t[timeout_index].cast<int64_t>();
-                        c.max_rpc_timeout_ms                  = t[timeout_index + 1].cast<int64_t>();
-                        c.worker_port_offset                  = t[timeout_index + 2].cast<int64_t>();
+                        c.role_type                     = t[0].cast<RoleType>();
+                        c.cache_store_rdma_mode         = t[1].cast<bool>();
+                        c.cache_store_listen_port       = t[2].cast<int64_t>();
+                        c.cache_store_connect_port      = t[3].cast<int64_t>();
+                        c.cache_store_rdma_listen_port  = t[4].cast<int64_t>();
+                        c.cache_store_rdma_connect_port = t[5].cast<int64_t>();
+                        c.remote_rpc_server_port        = t[6].cast<int64_t>();
+                        c.prefill_retry_times           = t[7].cast<int64_t>();
+                        c.prefill_retry_timeout_ms      = t[8].cast<int64_t>();
+                        c.load_cache_timeout_ms         = t[timeout_index].cast<int64_t>();
+                        c.max_rpc_timeout_ms            = t[timeout_index + 1].cast<int64_t>();
+                        c.worker_port_offset            = t[timeout_index + 2].cast<int64_t>();
                         if (t.size() == 13 || t.size() == 20)
                             c.decode_linear_tail_only = t[t.size() == 13 ? 12 : 19].cast<bool>();
                     } catch (const std::exception& e) {

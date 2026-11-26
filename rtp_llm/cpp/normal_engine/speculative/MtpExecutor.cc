@@ -636,10 +636,10 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     propose_step_          = propose_params->gen_num_per_circle;
     RTP_LLM_CHECK_WITH_INFO(
         propose_step_ > 0, "speculative proposal width/gen_num_per_cycle must be positive, got %zu", propose_step_);
-    vocab_size_                 = params.model_config_.vocab_size;
-    draft_vocab_size_           = propose_params->getEngineInitParams().model_config_.vocab_size;
-    is_block_draft_             = isBlockDraftType(propose_params->sp_type);
-    is_dflash_                  = propose_params->sp_type == SP_TYPE_DFLASH;
+    vocab_size_                = params.model_config_.vocab_size;
+    draft_vocab_size_          = propose_params->getEngineInitParams().model_config_.vocab_size;
+    is_block_draft_            = isBlockDraftType(propose_params->sp_type);
+    is_dflash_                 = propose_params->sp_type == SP_TYPE_DFLASH;
     const auto& draft_config   = propose_params->getEngineInitParams().model_config_;
     const auto& draft_parallel = propose_params->getEngineInitParams().parallelism_config;
     // Block drafts (DSpark/DFlash) run their own propose/commit blocks and do
@@ -666,10 +666,11 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     }
     if (is_block_draft_) {
         RTP_LLM_CHECK_WITH_INFO(propose_step_ > 0, "block draft fixed proposal width must be positive");
-        RTP_LLM_CHECK_WITH_INFO(params.parallelism_config.role_type == role_type_,
-                                "block draft role mismatch between parallelism config (%d) and PD separation config (%d)",
-                                static_cast<int>(params.parallelism_config.role_type),
-                                static_cast<int>(role_type_));
+        RTP_LLM_CHECK_WITH_INFO(
+            params.parallelism_config.role_type == role_type_,
+            "block draft role mismatch between parallelism config (%d) and PD separation config (%d)",
+            static_cast<int>(params.parallelism_config.role_type),
+            static_cast<int>(role_type_));
         // DSpARK commit handles both replicated and byte-sharded prefill-CP
         // cache layouts after gathering the rank-local target features.
         // (A fixed-gamma block draft cannot layer-micro-batch; main retired
@@ -928,8 +929,15 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                        /*enable_cache_store=*/true,
                                        mtp_indexer_share_enabled_ ? MtpIndexerRole::REUSE : MtpIndexerRole::NORMAL));
             }
-            /** MTP separates prefill/decode graph shapes; DSpARK/DFlash block drafts separate fixed PROPOSE/COMMIT entry points. */
-            if (enable_cuda_graph || is_block_draft_) {
+            /** MTP separates prefill/decode graph shapes; DSpARK/DFlash block drafts separate fixed PROPOSE/COMMIT
+             * entry points. */
+            const bool glm53_draft = draft_config.model_type == "glm5_3_flash_mtp";
+            const bool capture_draft_prefill =
+                enable_cuda_graph
+                && (!glm53_draft
+                    || (role_type_ == RoleType::DECODE && !params.parallelism_config.prefill_cp_config.is_enabled()
+                        && !draft_parallel.prefill_cp_config.is_enabled()));
+            if (capture_draft_prefill || is_block_draft_) {
                 RTP_LLM_LOG_INFO("[speculative decoding] creating draft prefill model");
                 // Ordinary MTP captures a prefill graph. DSpARK keeps the same
                 // runtime slot but constructs a gamma+1 decode-graph commit wrapper.
@@ -1098,10 +1106,10 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
                                       MtpMetricsCollector&                metrics_collector,
                                       int64_t                             schedule_time_us) {
     MtpTargetLogprobs target_logprobs;
-    const int64_t step_start_us        = autil::TimeUtility::currentTimeInMicroSeconds();
-    size_t        total_prefix_length  = 0;
-    size_t        total_execute_length = 0;
-    size_t        total_length         = 0;
+    const int64_t     step_start_us        = autil::TimeUtility::currentTimeInMicroSeconds();
+    size_t            total_prefix_length  = 0;
+    size_t            total_execute_length = 0;
+    size_t            total_length         = 0;
     if (at::hasCallbacks()) {
         for (const auto& stream : streams) {
             total_prefix_length += static_cast<size_t>(stream->prefixLength());
@@ -1197,8 +1205,10 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         return result;
     };
 
-    mtp::DSparkCacheStoreDrainGuard cache_store_drain_guard{
-        is_block_draft_ && !model_input.warmup && model_input.pd_separation, model_.get(), sp_prefill_draft_model_.get()};
+    mtp::DSparkCacheStoreDrainGuard cache_store_drain_guard{is_block_draft_ && !model_input.warmup
+                                                                && model_input.pd_separation,
+                                                            model_.get(),
+                                                            sp_prefill_draft_model_.get()};
 
     // release model input before forward
     releaseAllModelBuffers();
@@ -1227,7 +1237,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
                 }
             }
         }
-        model_output          = std::move(forwardModel(model_.get(), model_input, ModelInputsModelRole::TARGET));
+        model_output = std::move(forwardModel(model_.get(), model_input, ModelInputsModelRole::TARGET));
         mtp::maybeOverrideLastHiddenWithMtpBuffer(
             model_output, *model_, cp_enabled ? -1 : model_input.combo_tokens.numel());
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
@@ -1660,6 +1670,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         {
             RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(prepare_decode_input_and_tp_sync)");
             model_input.is_target_verify = false;
+            model_input.is_draft_extend  = false;
             if (isTpRank0()) {
                 if (propose_step_ == 1) {
                     batch_stream_processor_->prepareOneStepSpecDecodeModelInput(
@@ -1762,13 +1773,14 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         launch_spec_logits_phase();
     }
 
-    // Launch draft-prefill prepare BEFORE target verify forward so it overlaps
-    // with target verify GPU work instead of running serially after it. Sync
-    // on this prepare happens just before draft_model_forward below.
-    // DSpARK commit reuses the verify token/length geometry verbatim. Only its
-    // rank-local feature tensor is bound after target forward, so attention
-    // preparation can overlap target verification just like ordinary MTP.
-    launchDraftPrefillPrepareAsync(model_input);
+    // Device-state MTP and DSpARK keep the dense verify geometry through
+    // rejection, so their prepare can overlap target verification. The host
+    // path compacts tokens and lengths to accept_len; prepare its final layout
+    // only after rejection instead of reusing metadata for the dense rows.
+    const bool draft_prefill_geometry_is_fixed = is_block_draft_ || useStreamAsync() || useAsyncDeviceState();
+    if (draft_prefill_geometry_is_fixed) {
+        launchDraftPrefillPrepareAsync(model_input);
+    }
 
     SpeculativeTargetCommitGuard target_commit_guard(model_.get());
 
@@ -2021,9 +2033,13 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     // The prepare reads only lengths/tables/metadata, all final at this point;
     // the tensors the broadcast overwrites in place on non-root ranks are
     // consumed inside the forward, after the join.
+    model_input.is_draft_extend = !is_block_draft_;
     launchDraftPrefillPrepareAsync(model_input, /*post_rejection=*/true);
     broadcastPostRejectionInputs(model_input);
 
+    if (!draft_prefill_geometry_is_fixed) {
+        launchDraftPrefillPrepareAsync(model_input);
+    }
     draft_prefill_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());
 
     {
@@ -2254,6 +2270,7 @@ void MtpExecutor::launchTargetVerifyPrepareAsync(const GptModelInputs& model_inp
     model_input_copy.sequence_lengths =
         torch::empty({0}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
     model_input_copy.is_target_verify = true;
+    model_input_copy.is_draft_extend  = false;
     ensureModelInputsOnCuda(model_input_copy, "decode.target_prepare");
 
     // Device-first inputs are produced on the main stream; the async prepare
@@ -3640,9 +3657,10 @@ void MtpExecutor::publishSyncMtpDeviceState(const StreamGroups&                 
         draft_probs_all = draft_all_probs_full.clone();
     }
     auto next_position_ids_all =
-        is_block_draft_ ? advanceDSparkPositionIds(
-                              verify_position_ids, accept_len_all, batch_size, static_cast<int64_t>(propose_step_ + 1)) :
-                          torch::Tensor();
+        is_block_draft_ ?
+            advanceDSparkPositionIds(
+                verify_position_ids, accept_len_all, batch_size, static_cast<int64_t>(propose_step_ + 1)) :
+            torch::Tensor();
 
     // Assign per-stream views
     int64_t probs_batch_off = 0;

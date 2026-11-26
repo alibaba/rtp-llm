@@ -140,14 +140,24 @@ def transform_fp8_mega_weights(
             )
         from rtp_llm.models_py.kernels.cuda.fp8_kernel import requant_weight_ue8m0
 
+        requant_options = (
+            {"dequant_dtype": torch.float32}
+            if getattr(
+                getattr(cfg, "mega_moe_policy", None), "preserve_fp32_scales", False
+            )
+            else {}
+        )
+
         logger.info(
             "[GLM5 MegaMoE FP8] requantizing FP8 weights to UE8M0 scales: " "layer=%d",
             cfg.layer_id,
         )
-        w13_fp8, s13_int = requant_weight_ue8m0(w13_fp8, s13)
+        w13_fp8, s13_int = requant_weight_ue8m0(w13_fp8, s13, **requant_options)
         del s13
         torch.cuda.empty_cache()
-        w2_fp8, s2_int = requant_weight_ue8m0(w2_fp8.contiguous(), w2_scale)
+        w2_fp8, s2_int = requant_weight_ue8m0(
+            w2_fp8.contiguous(), w2_scale, **requant_options
+        )
         del w2_scale
         torch.cuda.empty_cache()
     else:

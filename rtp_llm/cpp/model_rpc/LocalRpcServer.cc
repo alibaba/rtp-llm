@@ -278,14 +278,16 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
         }
     }
 
-    const auto mm_decision = resolveAndLogMMProcessorKind(maga_init_params.model_config_.mm_model_config.is_multimodal,
+    const auto& mm_model_config = maga_init_params.model_config_.mm_model_config;
+    const auto  mm_decision     = resolveAndLogMMProcessorKind(mm_model_config.is_multimodal,
                                                           maga_init_params.vit_config.vit_separation,
                                                           !mm_process_engine.is_none(),
                                                           maga_init_params.pd_sep_config.role_type,
                                                           maga_init_params.parallelism_config.tp_rank,
                                                           maga_init_params.parallelism_config.pp_rank,
                                                           maga_init_params.model_config_.model_type,
-                                                          "LocalRpcServer");
+                                                          "LocalRpcServer",
+                                                          mm_model_config.token_layout_from_vit);
     const auto mm_kind     = mm_decision.kind;
     if (!mm_decision.ok()) {
         RTP_LLM_LOG_ERROR("%s", mm_decision.error.c_str());
@@ -299,11 +301,10 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
         engine_.reset(new NormalEngine(maga_init_params, std::move(propose_params)));
     }
     if (mm_kind == MMProcessorKind::LOCAL) {
-        mm_processor_.reset(new LocalMultimodalProcessor(mm_process_engine,
-                                                         maga_init_params.model_config_.mm_model_config,
-                                                         maga_init_params.model_config_.max_seq_len));
+        mm_processor_.reset(new LocalMultimodalProcessor(
+            mm_process_engine, mm_model_config, maga_init_params.model_config_.max_seq_len));
     } else if (mm_kind == MMProcessorKind::REMOTE) {
-        mm_processor_.reset(new RemoteMultimodalProcessor(maga_init_params.model_config_.mm_model_config,
+        mm_processor_.reset(new RemoteMultimodalProcessor(mm_model_config,
                                                           maga_init_params.model_config_.max_seq_len,
                                                           maga_init_params.vit_config.output_transport,
                                                           metrics_reporter_,

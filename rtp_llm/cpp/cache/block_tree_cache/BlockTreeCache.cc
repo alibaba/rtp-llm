@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 
 #include <algorithm>
+#include <limits>
 #include <utility>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/metrics/CacheLockGuard.h"
@@ -234,6 +235,38 @@ int BlockTreeCache::evictForGroup(std::string_view group_tag, size_t num_blocks)
     if (location == nullptr) {
         return 0;
     }
+    const GroupSetPtr& group_set   = tree_->groupSets()[location->group_set_id];
+    const auto&        device_pool = group_set->devicePools()[location->member_group_id];
+
+    if (const auto& arena = device_pool->config().shared_arena) {
+        const size_t initial_free = device_pool->freeBlocksNum();
+        size_t       reclaimed    = 0;
+        bool         progress     = true;
+        // Prefer this group's existing eviction policy, then reclaim cache-only
+        // cells in other GroupSets sharing the same physical byte budget.
+        while (reclaimed < num_blocks && progress) {
+            progress = false;
+            for (size_t offset = 0; offset < tree_->groupSets().size(); ++offset) {
+                const size_t id        = (location->group_set_id + offset) % tree_->groupSets().size();
+                const auto&  candidate = tree_->groupSets()[id];
+                const auto&  pools     = candidate->devicePools();
+                const auto   member    = std::find_if(pools.begin(), pools.end(), [&](const DeviceBlockPoolPtr& pool) {
+                    return pool && pool->config().shared_arena == arena;
+                });
+                if (member != pools.end()
+                    && evictor_.reclaimDeviceBlocksLocked(id, static_cast<size_t>(member - pools.begin()), 1) > 0) {
+                    progress             = true;
+                    const size_t current = device_pool->freeBlocksNum();
+                    reclaimed            = current > initial_free ? current - initial_free : 0;
+                    if (reclaimed >= num_blocks) {
+                        break;
+                    }
+                }
+            }
+        }
+        return static_cast<int>(std::min(reclaimed, static_cast<size_t>(std::numeric_limits<int>::max())));
+    }
+
     const size_t reclaimed =
         evictor_.reclaimDeviceBlocksLocked(location->group_set_id, location->member_group_id, num_blocks);
     RTP_LLM_LOG_DEBUG("tag=%.*s group_set[%zu] reclaimed %zu/%zu device blocks",
@@ -243,6 +276,39 @@ int BlockTreeCache::evictForGroup(std::string_view group_tag, size_t num_blocks)
                       reclaimed,
                       num_blocks);
     return static_cast<int>(reclaimed);
+}
+
+bool BlockTreeCache::ensureSharedDeviceSlots(const std::shared_ptr<SharedBlockArena>& arena,
+                                             const std::vector<size_t>&               demand) {
+    RTP_LLM_CHECK_WITH_INFO(arena != nullptr, "shared cache pressure requires an arena");
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto                  ready = [&] { return arena->canAllocate(demand, SharedBlockArena::Capacity::FREE); };
+    if (ready()) {
+        return true;
+    }
+    if (!config_.isTierEnabled(Tier::DEVICE) || !arena->canAllocate(demand, SharedBlockArena::Capacity::AVAILABLE)) {
+        return false;
+    }
+    bool progress = true;
+    while (!ready() && progress) {
+        progress = false;
+        for (size_t id = 0; id < tree_->groupSets().size(); ++id) {
+            const auto& pools  = tree_->groupSets()[id]->devicePools();
+            const auto  member = std::find_if(pools.begin(), pools.end(), [&arena](const DeviceBlockPoolPtr& pool) {
+                return pool && pool->config().shared_arena == arena;
+            });
+            if (member == pools.end()) {
+                continue;
+            }
+            const size_t reclaimed =
+                evictor_.reclaimDeviceBlocksLocked(id, static_cast<size_t>(member - pools.begin()), 1);
+            if (ready()) {
+                return true;
+            }
+            progress |= reclaimed > 0;
+        }
+    }
+    return ready();
 }
 
 BlockIndicesType BlockTreeCache::matchedBlocksForGroup(std::string_view                      group_tag,

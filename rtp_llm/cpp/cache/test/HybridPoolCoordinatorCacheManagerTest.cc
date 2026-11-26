@@ -54,9 +54,9 @@ static CacheConfig makeTinyMultiPoolHybridConfig(uint32_t       linear_block_num
                                                  const std::string& linear_tag   = "linear",
                                                  const std::string& second_tag   = "") {
     CacheConfig config;
-    config.dtype              = rtp_llm::DataType::TYPE_FP16;
-    config.layer_num          = 4;
-    config.seq_size_per_block = 4;
+    config.dtype                   = rtp_llm::DataType::TYPE_FP16;
+    config.layer_num               = 4;
+    config.seq_size_per_block      = 4;
     config.reuse_cache_tail_blocks = 2;
 
     const auto resolved_second_tag = second_tag.empty() ? (second_type == CacheGroupType::SWA ? "swa" : "full") :
@@ -94,9 +94,9 @@ static CacheConfig makeTinySwaMultiPoolHybridConfig(uint32_t linear_block_num = 
 
 static CacheConfig makeTinyFullSwaMultiPoolHybridConfig(uint32_t full_block_num = 12, uint32_t swa_block_num = 12) {
     CacheConfig config;
-    config.dtype              = DataType::TYPE_FP16;
-    config.layer_num          = 4;
-    config.seq_size_per_block = 4;
+    config.dtype                   = DataType::TYPE_FP16;
+    config.layer_num               = 4;
+    config.seq_size_per_block      = 4;
     config.reuse_cache_tail_blocks = 2;
 
     auto full_spec                 = makeResolvedMhaSpec(config.dtype, 1, 1, 4, "full");
@@ -194,6 +194,10 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         return read_group_tags_;
     }
+    std::vector<std::vector<StorageBlockHandle>> readHandles() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return read_handles_;
+    }
 
 protected:
     bool initImpl() override {
@@ -240,6 +244,7 @@ protected:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             read_group_tags_ = std::move(group_tags);
+            read_handles_    = request.handles;
         }
     }
 
@@ -263,11 +268,12 @@ protected:
     }
 
 private:
-    std::shared_ptr<MemoryStorageState>   state_;
-    mutable std::mutex                    mutex_;
-    size_t                                matched_keys_{0};
-    std::vector<std::vector<std::string>> write_group_tags_;
-    std::vector<std::vector<std::string>> read_group_tags_;
+    std::shared_ptr<MemoryStorageState>          state_;
+    mutable std::mutex                           mutex_;
+    size_t                                       matched_keys_{0};
+    std::vector<std::vector<std::string>>        write_group_tags_;
+    std::vector<std::vector<std::string>>        read_group_tags_;
+    std::vector<std::vector<StorageBlockHandle>> read_handles_;
 };
 
 static ModelConfig makeTinyDSV4ModelConfig() {
@@ -326,7 +332,7 @@ static CacheConfig makeDSV4HybridPoolConfig(uint32_t block_num = 200, int cp_siz
     pc.role_type                          = RoleType::PREFILL;
     pc.tp_size                            = cp_size;
     pc.prefill_cp_config.kv_cache_sharded = cp_size > 1;
-    auto              config = CacheConfigCreator::createWarmupConfig(mc, pc, 0);
+    auto config                           = CacheConfigCreator::createWarmupConfig(mc, pc, 0);
     config.finalizeBlockNums(block_num, RuntimeConfig{});
     return config;
 }
@@ -662,9 +668,9 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, RecomputePreservesCompactCpReadyPr
             const auto  desc = makeDsv4Desc(tag, "state", 4, DataType::TYPE_FP32);
             const auto  spec = SpecBuilder::build(desc, context);
             CacheConfig config;
-            config.dtype     = context.dtype;
-            config.layer_num = 1;
-            config.seq_size_per_block               = context.seq_size_per_block;
+            config.dtype              = context.dtype;
+            config.layer_num          = 1;
+            config.seq_size_per_block = context.seq_size_per_block;
             config.fromGroupedSpecs({spec}, {{0}}, {CacheGroupType::SWA}, {tag}, {SpecBuilder::groupPolicy(desc)});
             config.setGroupBlockLayout({tag}, {8}, {spec->block_size_bytes()}, {0});
             ASSERT_EQ(config.group(tag).seqSizePerBlock(), device_ready_reuse_length);
@@ -1464,20 +1470,20 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, AllPrefixReuseDisabledPoolMetricsF
 static CachePoolMetrics makeMergeAllocatorInput(
     const std::string& pool_name, size_t seed, size_t total_blocks, size_t free_blocks, size_t available_blocks) {
     CachePoolMetrics metrics_data;
-    metrics_data.pool_index                 = seed;
-    metrics_data.pool_name                  = pool_name;
-    metrics_data.block_size_bytes           = 1000 + seed;
-    metrics_data.total_blocks               = total_blocks;
-    metrics_data.free_blocks                = free_blocks;
-    metrics_data.used_blocks                = total_blocks - free_blocks;
-    metrics_data.active_blocks              = 7 + seed;
-    metrics_data.available_blocks           = available_blocks;
-    metrics_data.reserve_blocks             = 5 + seed;
-    metrics_data.request_ref_blocks         = 11 + seed;
-    metrics_data.block_cache_ref_blocks     = 13 + seed;
-    metrics_data.load_ref_blocks            = 14 + seed;
-    metrics_data.eviction_ref_blocks = 15 + seed;
-    metrics_data.frozen_ref_blocks          = 17 + seed;
+    metrics_data.pool_index             = seed;
+    metrics_data.pool_name              = pool_name;
+    metrics_data.block_size_bytes       = 1000 + seed;
+    metrics_data.total_blocks           = total_blocks;
+    metrics_data.free_blocks            = free_blocks;
+    metrics_data.used_blocks            = total_blocks - free_blocks;
+    metrics_data.active_blocks          = 7 + seed;
+    metrics_data.available_blocks       = available_blocks;
+    metrics_data.reserve_blocks         = 5 + seed;
+    metrics_data.request_ref_blocks     = 11 + seed;
+    metrics_data.block_cache_ref_blocks = 13 + seed;
+    metrics_data.load_ref_blocks        = 14 + seed;
+    metrics_data.eviction_ref_blocks    = 15 + seed;
+    metrics_data.frozen_ref_blocks      = 17 + seed;
     metrics_data.used_ratio = static_cast<float>(100.0 * (metrics_data.total_blocks - metrics_data.available_blocks)
                                                  / static_cast<double>(metrics_data.total_blocks));
     return metrics_data;
@@ -1490,19 +1496,19 @@ static CachePoolMetrics makeMergeTreeInput(Tier               tier,
                                            size_t             free_blocks,
                                            size_t             available_blocks) {
     CachePoolMetrics metrics_data;
-    metrics_data.tier                       = tier;
-    metrics_data.pool_name                  = pool_name;
-    metrics_data.block_size_bytes           = 2000 + seed;
-    metrics_data.total_blocks               = total_blocks;
-    metrics_data.free_blocks                = free_blocks;
-    metrics_data.used_blocks                = total_blocks - free_blocks;
-    metrics_data.available_blocks           = available_blocks;
-    metrics_data.active_blocks              = total_blocks - available_blocks;
-    metrics_data.request_ref_blocks         = 31 + seed;
-    metrics_data.block_cache_ref_blocks     = 33 + seed;
-    metrics_data.load_ref_blocks            = 34 + seed;
-    metrics_data.eviction_ref_blocks = 35 + seed;
-    metrics_data.frozen_ref_blocks          = 37 + seed;
+    metrics_data.tier                   = tier;
+    metrics_data.pool_name              = pool_name;
+    metrics_data.block_size_bytes       = 2000 + seed;
+    metrics_data.total_blocks           = total_blocks;
+    metrics_data.free_blocks            = free_blocks;
+    metrics_data.used_blocks            = total_blocks - free_blocks;
+    metrics_data.available_blocks       = available_blocks;
+    metrics_data.active_blocks          = total_blocks - available_blocks;
+    metrics_data.request_ref_blocks     = 31 + seed;
+    metrics_data.block_cache_ref_blocks = 33 + seed;
+    metrics_data.load_ref_blocks        = 34 + seed;
+    metrics_data.eviction_ref_blocks    = 35 + seed;
+    metrics_data.frozen_ref_blocks      = 37 + seed;
     if (tier == Tier::DISK) {
         metrics_data.read_bytes                    = (int64_t{1} << 40) + seed;
         metrics_data.write_bytes                   = (int64_t{1} << 41) + seed;
@@ -1570,10 +1576,10 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, MergeCachePoolMetricsPreservesRepo
         float  used_ratio;
     };
     struct MergeCase {
-        std::string                               name;
-        std::vector<CachePoolMetrics>             allocator_metrics_list;
-        std::vector<CachePoolMetrics>             tree_metrics_list;
-        std::vector<ExpectedRow>                  expected_rows;
+        std::string                   name;
+        std::vector<CachePoolMetrics> allocator_metrics_list;
+        std::vector<CachePoolMetrics> tree_metrics_list;
+        std::vector<ExpectedRow>      expected_rows;
     };
 
     const std::vector<MergeCase> cases = {
@@ -2013,6 +2019,110 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, DeferredBackendMatchReportsSWAPool
     allocator->free(FreeInfo{resource, token_ids});
 }
 
+TEST_F(HybridPoolCoordinatorCacheManagerTest, DeferredLinearCheckpointShortfallRejectsReadThenMaterializesMatchedTail) {
+    auto          config    = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/4, /*full_block_num=*/12);
+    auto          state     = std::make_shared<MemoryStorageState>();
+    auto          executor  = std::make_shared<ManualStorageBackendExecutor>();
+    auto          backend   = std::make_shared<PolicyMemoryStorageBackend>(state, executor);
+    auto          allocator = makeAllocator(config);
+    KVCacheConfig remote_config;
+    remote_config.enable_remote_cache = true;
+    allocator->setBlockTreeCacheConfigForTest(remote_config);
+    allocator->setStorageBackendForTest(backend);
+    ASSERT_TRUE(allocator->init());
+    allocator->setReserveBlocksNum(0);
+
+    const auto tags         = config.groupTags();
+    const auto pool_for_tag = [&](const std::string& tag) {
+        return allocator->groupBlockPools().at(std::distance(tags.begin(), std::find(tags.begin(), tags.end(), tag)));
+    };
+    auto linear_pool = pool_for_tag("linear");
+    auto full_pool   = pool_for_tag("full");
+    ASSERT_EQ(linear_pool->totalBlocksNum(), 3u);
+    auto holds = linear_pool->malloc(linear_pool->freeBlocksNum());
+    ASSERT_TRUE(holds.has_value());
+    linear_pool->incRef(*holds);
+    ASSERT_EQ(linear_pool->freeBlocksNum(), 0u);
+    ASSERT_GT(full_pool->freeBlocksNum(), 0u);
+    const auto held_counters = snapshotPoolCounters(allocator);
+
+    auto resource = makeBatchResource(/*batch_size=*/1, config);
+    resource->setBatchCacheKeys(0, {100, 101, 102, 103, 104, 105});
+    auto       token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/21, /*seq_size_per_block=*/4);
+    MallocInfo malloc_info{resource, token_ids};
+    malloc_info.enable_cache_lookup          = true;
+    malloc_info.reuse_cache                  = true;
+    malloc_info.enable_remove_skipped_blocks = false;
+    malloc_info.verbose                      = false;
+    auto result                              = allocator->malloc(malloc_info);
+    ASSERT_TRUE(result.success);
+    EXPECT_EQ(result.reuse_len, 0);
+    auto context = std::dynamic_pointer_cast<LoadAsyncContext>(result.async_context);
+    ASSERT_NE(context, nullptr);
+    ASSERT_TRUE(context->needBackendMatch());
+    ASSERT_EQ(executor->pendingCount(), 1u);
+
+    // The checkpoint becomes visible after the local snapshot. Matching four
+    // blocks needs Linear slot 3, outside the ordinary prefill tail at 4/5.
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        for (const auto key : {100, 101, 102}) {
+            state->groups_by_key[key] = {"full"};
+        }
+        state->groups_by_key[103] = {"linear", "full"};
+    }
+    ASSERT_TRUE(executor->runOne());
+    EXPECT_EQ(backend->matchedKeys(), 4u);
+    ASSERT_TRUE(context->done());
+    EXPECT_FALSE(context->success());
+    EXPECT_EQ(context->mallocStatus(), MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED);
+    EXPECT_EQ(context->matchedBlocks(), 0u);
+    EXPECT_EQ(resource->blocksNum(0, "linear"), 0u);
+    EXPECT_EQ(resource->blocksNum(0, "full"), 0u);
+    EXPECT_TRUE(backend->readHandles().empty());
+    EXPECT_EQ(executor->pendingCount(), 0u);
+    expectPoolCountersEq(allocator, held_counters);
+
+    linear_pool->decRef(*holds);
+    context.reset();
+    result.async_context.reset();
+    auto retry = allocator->malloc(malloc_info);
+    ASSERT_TRUE(retry.success);
+    auto retry_context = std::dynamic_pointer_cast<LoadAsyncContext>(retry.async_context);
+    ASSERT_NE(retry_context, nullptr);
+    ASSERT_EQ(executor->pendingCount(), 1u);
+    ASSERT_TRUE(executor->runOne());  // Match and materialize; read is still queued.
+    ASSERT_EQ(executor->pendingCount(), 1u);
+    EXPECT_FALSE(retry_context->done());
+    EXPECT_EQ(retry_context->matchedBlocks(), 0u);
+    const auto& linear_blocks = resource->blocks(0, "linear");
+    ASSERT_EQ(linear_blocks.size(), 6u);
+    for (const auto position : {3u, 4u, 5u}) {
+        ASSERT_FALSE(isNullBlockIdx(linear_blocks[position]));
+        EXPECT_TRUE(linear_pool->isAllocated(linear_blocks[position]));
+        EXPECT_GT(linear_pool->refCount(linear_blocks[position]), 0u);
+    }
+    ASSERT_TRUE(executor->runOne());  // Read only into the actual allocated destinations.
+    retry_context->waitDone();
+    ASSERT_TRUE(retry_context->success());
+    EXPECT_EQ(retry_context->matchedBlocks(), 4u);
+    auto read_groups = backend->readGroupTags();
+    for (auto& groups : read_groups) {
+        std::sort(groups.begin(), groups.end());
+    }
+    EXPECT_EQ(read_groups, (std::vector<std::vector<std::string>>{{"full"}, {"full"}, {"full"}, {"full", "linear"}}));
+    const auto handles = backend->readHandles();
+    ASSERT_EQ(handles.size(), 4u);
+    for (size_t position = 0; position < handles.size(); ++position) {
+        for (const auto& handle : handles[position]) {
+            ASSERT_FALSE(isNullBlockIdx(handle.block));
+            EXPECT_EQ(handle.block, resource->blocks(0, handle.tag)[position]);
+            EXPECT_TRUE(pool_for_tag(handle.tag)->isAllocated(handle.block));
+        }
+    }
+    allocator->free(FreeInfo{resource, token_ids});
+}
+
 TEST_F(HybridPoolCoordinatorCacheManagerTest, ReserveCheckIsBypassedWhenMallocInfoLacksContext) {
     // hasAvailableBlocksForReserve returns true when info has no resource/tokens.
     auto config    = makeTinyMultiPoolHybridConfig();
@@ -2319,9 +2429,9 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, DSV4FixedTagPoolsUsePinnedHostBack
 }
 
 TEST_F(HybridPoolCoordinatorCacheManagerTest, DSV4HCAStateReuseEnabledAllocatesTailOnly) {
-    auto config        = makeDSV4HybridPoolConfig(/*block_num=*/200);
+    auto config                    = makeDSV4HybridPoolConfig(/*block_num=*/200);
     config.reuse_cache_tail_blocks = 4;
-    auto allocator     = makeAllocator(config);
+    auto allocator                 = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
 
     ASSERT_NE(poolForTag(*allocator, "hca_state"), nullptr);
@@ -2494,7 +2604,7 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, DSV4StateSwaPoolsWithoutExplicitBl
     mc.hybrid_attention_config.enable_hybrid_attention = true;
     ParallelismConfig pc;
     setDsv4ExplicitPoolBlocks(mc, "hca_state", 0);
-    auto config        = CacheConfigCreator::createWarmupConfig(mc, pc, 0);
+    auto config                    = CacheConfigCreator::createWarmupConfig(mc, pc, 0);
     config.reuse_cache_tail_blocks = 4;
 
     RuntimeConfig rt;
@@ -2508,7 +2618,7 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, DSV4StateSwaPoolsWithoutExplicitBl
 }
 
 TEST_F(HybridPoolCoordinatorCacheManagerTest, FinalizeNonExplicitSwaBlocksFollowsBaseline) {
-    auto config        = makeTinySwaMultiPoolHybridConfig();
+    auto config                    = makeTinySwaMultiPoolHybridConfig();
     config.reuse_cache_tail_blocks = 4;
     RuntimeConfig rt;
 

@@ -4,14 +4,14 @@ import json
 import logging
 import math
 import time
+from collections.abc import Sequence
 from dataclasses import replace
 from typing import Any, AsyncGenerator, Dict, Optional, Union
 
 import grpc
 import torch
-from google.protobuf.wrappers_pb2 import StringValue
-from collections.abc import Sequence
 from google.protobuf.message import DecodeError
+from google.protobuf.wrappers_pb2 import StringValue
 from grpc import StatusCode
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
@@ -37,6 +37,7 @@ from rtp_llm.server.request_headers import (
     dashscope_greennet_metadata,
     extract_correlation_request_id,
     extract_trace_id,
+    vit_source_request_metadata,
 )
 from rtp_llm.telemetry import CURRENT_TRACE_STATE
 from rtp_llm.telemetry import attributes as trace_attrs
@@ -548,7 +549,11 @@ def _format_host_port(host: str, port: int) -> str:
 def _split_host_port(address: str) -> tuple[str, int]:
     if address.startswith("["):
         close_pos = address.find("]")
-        if close_pos == -1 or close_pos + 1 >= len(address) or address[close_pos + 1] != ":":
+        if (
+            close_pos == -1
+            or close_pos + 1 >= len(address)
+            or address[close_pos + 1] != ":"
+        ):
             raise ValueError(f"invalid grpc address: {address}")
         host = address[1:close_pos]
         port_text = address[close_pos + 2 :]
@@ -707,9 +712,7 @@ def _trans_jsonable_options(
 def trans_input(input_py: GenerateInput):
     input_pb = GenerateInputPB()
     input_pb.request_id = input_py.request_id
-    input_pb.enqueued_by_master = bool(
-        getattr(input_py, "enqueued_by_master", False)
-    )
+    input_pb.enqueued_by_master = bool(getattr(input_py, "enqueued_by_master", False))
     expansion = input_py.mm_token_expansion
     if expansion is not None:
         input_pb.token_ids.extend(expansion.token_ids)
@@ -1438,9 +1441,12 @@ class ModelRpcClient(object):
         self._addresses = addresses
         self._max_rpc_timeout_ms = max_rpc_timeout_ms
         self._role_type = role_type
-        self._options = []
-        for key, value in client_config.items():
-            self._options.append((key, value))
+        # A backend can return on the same address after several minutes of
+        # downtime. Bound the retained channel's reconnect backoff so it can
+        # discover the listener promptly, even for calls without a deadline.
+        self._options = list(
+            {"grpc.max_reconnect_backoff_ms": 2000, **client_config}.items()
+        )
         logging.info(f"client options: {self._options}")
 
         # Initialize the channel pool
@@ -1613,7 +1619,10 @@ class ModelRpcClient(object):
                 message = f"backend_error_code={code}: {message}"
         logging.error(
             "backend failure: backend_error_code=%d frontend_error_code=%d error_name=%s message=%s",
-            code, error_type.value, error_type.name, message,
+            code,
+            error_type.value,
+            error_type.name,
+            message,
         )
         raise FtRuntimeException(
             error_type, ModelRpcClient._client_backend_message(error_type, message)
@@ -1636,12 +1645,17 @@ class ModelRpcClient(object):
             ).value
         logging.error(
             "%s backend error frame: wire_code=%d backend_error_code=%d message=%s",
-            request_desc, error.error_code, code, error.error_message,
+            request_desc,
+            error.error_code,
+            code,
+            error.error_message,
         )
         message = error.error_message or _rpc_error_code_name(error.error_code)
         ModelRpcClient._raise_backend_error(code, f"{request_desc}: {message}")
 
-    def _handle_grpc_error(self, e: grpc.RpcError, request_desc: str, target_address: str = "") -> None:
+    def _handle_grpc_error(
+        self, e: grpc.RpcError, request_desc: str, target_address: str = ""
+    ) -> None:
         # request_desc reaches the client; keep backend addresses in the log-only argument.
         details = ErrorDetailsPB()
         try:
@@ -1654,19 +1668,35 @@ class ModelRpcClient(object):
         if details.error_code:
             logging.error(
                 "%s RPC to [%s] failed: grpc_code=%s backend_error_code=%d message=%s",
-                request_desc, target_address, e.code(), details.error_code,
+                request_desc,
+                target_address,
+                e.code(),
+                details.error_code,
                 details.error_message or e.details(),
             )
             self._raise_backend_error(
-                details.error_code, f"{request_desc}: {details.error_message or e.details()}"
+                details.error_code,
+                f"{request_desc}: {details.error_message or e.details()}",
             )
-        logging.error("%s RPC to [%s] failed: %s %s", request_desc, target_address, e.code(), e.details())
+        logging.error(
+            "%s RPC to [%s] failed: %s %s",
+            request_desc,
+            target_address,
+            e.code(),
+            e.details(),
+        )
         if e.code() == StatusCode.UNAVAILABLE:
             message = e.details() or ""
             lower = message.lower()
-            error_type = (ExceptionType.CONNECTION_RESET_BY_PEER if "socket closed" in lower or "connection reset" in lower
-                          else ExceptionType.CONNECT_TIMEOUT if "timed out" in lower or "timeout" in lower
-                          else ExceptionType.CONNECT_FAILED)
+            error_type = (
+                ExceptionType.CONNECTION_RESET_BY_PEER
+                if "socket closed" in lower or "connection reset" in lower
+                else (
+                    ExceptionType.CONNECT_TIMEOUT
+                    if "timed out" in lower or "timeout" in lower
+                    else ExceptionType.CONNECT_FAILED
+                )
+            )
             self._raise_backend_error(error_type.value, f"{request_desc}: {message}")
         codes = {
             StatusCode.DEADLINE_EXCEEDED: ExceptionType.GENERATE_TIMEOUT,
@@ -1764,6 +1794,10 @@ class ModelRpcClient(object):
             if effective_ms > 0:
                 grpc_kwargs["timeout"] = effective_ms / 1000.0
             identity_metadata = dashscope_greennet_metadata(input_py.headers)
+            if input_pb.multimodal_inputs or input_pb.HasField("v41_inputs"):
+                identity_metadata += vit_source_request_metadata(
+                    input_pb.request_info.request_id
+                )
             trace_metadata = tuple(trace_metadata or ()) + tuple(identity_metadata)
             if trace_metadata:
                 # W3C traceparent
@@ -1786,8 +1820,15 @@ class ModelRpcClient(object):
                 if response is None:
                     break
                 if response.error_info.error_code or response.error_info.error_message:
-                    self._raise_pb_error(response.error_info, f"request={input_pb.request_id}")
-                output_py = trans_output(input_py, response, stream_state, response_role_addrs=response_role_addrs)
+                    self._raise_pb_error(
+                        response.error_info, f"request={input_pb.request_id}"
+                    )
+                output_py = trans_output(
+                    input_py,
+                    response,
+                    stream_state,
+                    response_role_addrs=response_role_addrs,
+                )
                 if not output_py.frontend_metric_only:
                     last_output = output_py
                 if _is_finished_response(response):
@@ -1997,7 +2038,9 @@ class ModelRpcClient(object):
         if not inputs:
             return []
         selected_targets = [self._get_explicit_target(inp) for inp in inputs]
-        selected_roles = [target.role if target is not None else None for target in selected_targets]
+        selected_roles = [
+            target.role if target is not None else None for target in selected_targets
+        ]
         if any(
             (role is None and self._requires_explicit_target(inp))
             or (role == RoleType.PDFUSION and getattr(inp, "enqueued_by_master", False))
@@ -2145,10 +2188,16 @@ class ModelRpcClient(object):
                     )
                     if error.error_code or error.error_message:
                         exception_type = _trans_rpc_error_code(error.error_code)
-                        error_message = error.error_message or _rpc_error_code_name(error.error_code)
+                        error_message = error.error_message or _rpc_error_code_name(
+                            error.error_code
+                        )
                         logging.error(
                             "batch item %d request=%s wire_code=%d frontend_error_code=%d: %s",
-                            i, inputs[i].request_id, error.error_code, exception_type.value, error_message,
+                            i,
+                            inputs[i].request_id,
+                            error.error_code,
+                            exception_type.value,
+                            error_message,
                         )
                         item_error = FtRuntimeException(
                             exception_type,
@@ -2161,7 +2210,9 @@ class ModelRpcClient(object):
                     conversion_index = i
                     stream_state = StreamState()
                     output = trans_output(
-                        batch_inputs[i], result_pb.final_output, stream_state,
+                        batch_inputs[i],
+                        result_pb.final_output,
+                        stream_state,
                         response_role_addrs=response_role_addrs_list[i],
                     )
                     _validate_prefill_only_completed(batch_inputs[i], stream_state)
@@ -2173,7 +2224,9 @@ class ModelRpcClient(object):
                 rpc_status = e.code()
                 transport_failure = e
                 self._handle_grpc_error(
-                    e, f"batch_size={len(inputs)} request_ids={[inp.request_id for inp in inputs]}", target_address,
+                    e,
+                    f"batch_size={len(inputs)} request_ids={[inp.request_id for inp in inputs]}",
+                    target_address,
                 )
             except FtRuntimeException:
                 raise
@@ -2261,13 +2314,16 @@ class ModelRpcClient(object):
                 await stub.WaitGreenNetVerdict(
                     mm_inputs_pb,
                     timeout=VitConfig.DEFAULT_MM_TIMEOUT_MS / 1000.0,
-                    metadata=dashscope_greennet_metadata(input_py.headers),
+                    metadata=dashscope_greennet_metadata(input_py.headers)
+                    + vit_source_request_metadata(input_pb.request_info.request_id),
                 )
             except grpc.RpcError as e:
                 error_details = ErrorDetailsPB()
                 try:
                     encoded = _grpc_status_details(e.trailing_metadata())
-                    has_details = bool(encoded) and bool(error_details.ParseFromString(encoded))
+                    has_details = bool(encoded) and bool(
+                        error_details.ParseFromString(encoded)
+                    )
                 except (DecodeError, TypeError, ValueError) as error:
                     logging.warning("Malformed greennet gRPC error details: %s", error)
                     has_details = False

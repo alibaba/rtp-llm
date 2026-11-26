@@ -39,7 +39,8 @@ public:
     std::vector<std::vector<int64_t>> mm_sep_tokens         = {};
     bool                              include_sep_tokens    = false;
     int64_t                           mm_padding_size       = 0;
-    int64_t                           mm_position_ids_style = 0;  // 0 for default; 1 for chatglm4v; 2 for qwen2 vl
+    int64_t                           mm_position_ids_style = 0;      // 0 for default; 1 for chatglm4v; 2 for qwen2 vl
+    bool                              token_layout_from_vit = false;  // ViT supplies text tokens between feature spans.
 };
 
 class ModelConfig {
@@ -106,6 +107,7 @@ public:
 
     // Hyper-connection residual multiplier. Default 1 (no expansion).
     int64_t hc_mult = 1;
+    // Checkpoint capability; runtime MTP indexer sharing also requires explicit opt-in.
     // DeepSeek-V4 specific.
     int64_t hc_sinkhorn_iters = 0;
     double  hc_eps            = 1e-6;

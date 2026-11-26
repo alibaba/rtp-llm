@@ -131,6 +131,9 @@ class BackendRPCServerVisitor:
         self.sp_config = sp_config
         self.source_role = source_role
         self.mm_model_config = mm_model_config
+        self._mm_layout_from_vit = getattr(
+            mm_model_config, "token_layout_from_vit", False
+        )
         self._mm_cache_routing = (
             vit_separation == VitSeparation.VIT_SEPARATION_REMOTE
             and getattr(pd_sep_config, "role_type", None)
@@ -156,7 +159,9 @@ class BackendRPCServerVisitor:
         )
 
         host_args = HostServiceArgs.create_from_env()
-        self._prefill_has_decode_routing = bool(host_args.decode_domain or host_args.master_domain)
+        self._prefill_has_decode_routing = bool(
+            host_args.decode_domain or host_args.master_domain
+        )
         self.backend_role_list = self.get_backend_role_list(
             self.pd_sep_config, host_args, vit_separation
         )
@@ -349,7 +354,14 @@ class BackendRPCServerVisitor:
         ):
             keys = multimodal_cache_keys(input)
             metadata = None
-            if keys and len(keys) <= 256 and all(len(key) <= 4096 for key in keys):
+            # GLM video has one feature span per frame, with timestamp tokens
+            # supplied by ViT. Hash-only metadata cannot expand that layout.
+            if (
+                not getattr(self, "_mm_layout_from_vit", False)
+                and keys
+                and len(keys) <= 256
+                and all(len(key) <= 4096 for key in keys)
+            ):
                 vit_result = await self.master_client.get_backend_role_addrs(
                     block_cache_keys=[],
                     cache_key_block_size=self._cache_key_block_size(),
@@ -769,8 +781,7 @@ class BackendRPCServerVisitor:
             )
 
     async def _expand_pd_multimodal_tokens(self, input: GenerateInput):
-        # Domain and explicitly supplied routes bypass Master preselection, but
-        # Decode still consumes exactly the frontend-expanded token layout.
+        # Domain and supplied routes bypass Master's frontend expansion.
         if (
             not self._mm_cache_routing
             or not input.mm_inputs
@@ -786,7 +797,8 @@ class BackendRPCServerVisitor:
                     if addr.ip and addr.role in (RoleType.DECODE, RoleType.PDFUSION)
                 ),
                 None,
-            ) != RoleType.DECODE
+            )
+            != RoleType.DECODE
         ):
             return
         vit_addrs = [
@@ -797,6 +809,9 @@ class BackendRPCServerVisitor:
                 ExceptionType.ROUTE_ERROR,
                 "PD multimodal expansion requires one selected ViT",
             )
+        if getattr(self, "_mm_layout_from_vit", False):
+            # Decode fetches the full layout from the selected ViT.
+            return
         keys = multimodal_cache_keys(input)
         metadata = None
         if (
@@ -1282,7 +1297,9 @@ class BackendRPCServerVisitor:
         return stream_with_aux_info()
 
     @torch.inference_mode()
-    async def batch_enqueue(self, inputs: list[GenerateInput]) -> list[GenerateOutputs | FtRuntimeException]:
+    async def batch_enqueue(
+        self, inputs: list[GenerateInput]
+    ) -> list[GenerateOutputs | FtRuntimeException]:
         if not inputs:
             return []
         for input in inputs:

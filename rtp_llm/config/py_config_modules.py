@@ -447,6 +447,7 @@ class VitConfig:
     DEFAULT_MM_TIMEOUT_MS: int = DEFAULT_MM_TIMEOUT_MS
     DEFAULT_MM_IMAGE_MAX_FILE_SIZE_KB: int = 100 * 1024
     DEFAULT_MM_VIDEO_MAX_FILE_SIZE_KB: int = 2 * 1024 * 1024
+    DEFAULT_MM_VIDEO_MAX_FRAMES: int = 64
     # Per-process byte budgets. Hashes live on CPU, independently of the
     # tensor-bearing embedding cache. Zero disables the respective cache.
     DEFAULT_MM_CACHE_GPU_MAX_BYTES: int = 2 * 1024 * 1024 * 1024
@@ -466,6 +467,7 @@ class VitConfig:
         self.mm_video_max_file_size_kb: int = (
             VitConfig.DEFAULT_MM_VIDEO_MAX_FILE_SIZE_KB
         )
+        self.mm_video_max_frames: int = VitConfig.DEFAULT_MM_VIDEO_MAX_FRAMES
         self.mm_cache_item_num: int = 10
         self.mm_cache_gpu_max_bytes: int = VitConfig.DEFAULT_MM_CACHE_GPU_MAX_BYTES
         self.mm_cache_cpu_max_bytes: int = VitConfig.DEFAULT_MM_CACHE_CPU_MAX_BYTES
@@ -557,6 +559,7 @@ class VitConfig:
             f"{self.enable_oss_internal_endpoint_rewrite}\n"
             f"mm_image_max_file_size_kb: {self.mm_image_max_file_size_kb}\n"
             f"mm_video_max_file_size_kb: {self.mm_video_max_file_size_kb}\n"
+            f"mm_video_max_frames: {self.mm_video_max_frames}\n"
             f"mm_cache_item_num: {self.mm_cache_item_num}\n"
             f"mm_cache_gpu_max_bytes: {self.mm_cache_gpu_max_bytes}\n"
             f"mm_cache_cpu_max_bytes: {self.mm_cache_cpu_max_bytes}\n"
@@ -963,7 +966,9 @@ class PyEnvConfigs:
             + "[hot_hook_config]\n"
             + self.hot_hook_config.to_string()
             + "\n\n"
-            + "[kernel_tuning_config]\n" + self.kernel_tuning_config.to_string() + "\n\n"
+            + "[kernel_tuning_config]\n"
+            + self.kernel_tuning_config.to_string()
+            + "\n\n"
             "[py_hw_kernel_config]\n" + self.py_hw_kernel_config.to_string() + "\n\n"
             "[sp_config]\n" + self.sp_config.to_string() + "\n\n"
             "[sampler_config]\n" + self.sampler_config.to_string() + "\n\n"

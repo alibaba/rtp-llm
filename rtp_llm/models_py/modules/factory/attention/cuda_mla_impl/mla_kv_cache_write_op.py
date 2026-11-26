@@ -18,9 +18,13 @@ class MlaKVCacheWriteOp:
     def __init__(
         self,
         kv_cache_dtype: KvCacheDataType,
+        *,
+        fp8_nope: bool = False,
     ) -> None:
         self.kv_cache_type = (
-            "fp8_ds_mla" if kv_cache_dtype == KvCacheDataType.FP8 else "auto"
+            ("fp8_glm53_mla" if fp8_nope else "fp8_ds_mla")
+            if kv_cache_dtype == KvCacheDataType.FP8
+            else "auto"
         )
         # Scale tensor is required for concat_and_cache_mla even in non-FP8 mode
         self.scale = torch.tensor(1.0, dtype=torch.float32, device="cuda")

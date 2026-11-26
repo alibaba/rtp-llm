@@ -1736,6 +1736,8 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info,
     // Prefill publishes the first token's probabilities from this update to Decode.
     updateOutput({.new_tokens             = new_tokens,
                   .num_new_tokens         = num_new_tokens,
+                  .hidden_states          = update_info.target_hidden_states,
+                  .logits                 = update_info.target_logits,
                   .update_remote_generate = update_info.update_remote_generate,
                   .force_update_info      = update_info.force_update_info,
                   .token_logprobs         = update_info.token_logprobs,

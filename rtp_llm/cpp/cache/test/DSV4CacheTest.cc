@@ -456,6 +456,22 @@ TEST(CacheConfigCreatorTest, LinearReplayCanBeExplicitlyDisabled) {
     EXPECT_EQ(config.linear_replay.reserve_bytes, 0u);
 }
 
+TEST(CacheConfigCreatorTest, Glm53UsesItsOrdinaryLinearStateForMtp) {
+    auto              model = makeHybridAttentionModelConfig();
+    ParallelismConfig parallelism;
+    parallelism.role_type = RoleType::DECODE;
+    RuntimeConfig runtime;
+    runtime.max_generate_batch_size = 5;
+    SpeculativeExecutionConfig speculative;
+    speculative.type              = SP_TYPE_MTP;
+    speculative.gen_num_per_cycle = 3;
+
+    model.model_type = "glm5_3_flash";
+    auto config      = CacheConfigCreator::createConfig(model, parallelism, KVCacheConfig{});
+    CacheConfigCreator::configureLinearReplay(config, model, parallelism, runtime, speculative, true);
+    EXPECT_FALSE(config.linear_replay.enabled());
+}
+
 TEST(CacheConfigCreatorTest, LinearReplayReservesLogBytesIndependentlyOfLinearPoolSizing) {
     auto model = makeHybridAttentionModelConfig();
     model.linear_attention_config.conv_state_dtype = DataType::TYPE_BF16;
@@ -1190,7 +1206,7 @@ TEST(CacheConfigCreatorTest, HybridAttentionIndependentPoolBackingFitsBudgetExac
     ParallelismConfig pc;
     RuntimeConfig     runtime_config;
     KVCacheConfig     kv_cache_config;
-    kv_cache_config.kv_cache_mem_mb = 1;
+    kv_cache_config.kv_cache_mem_mb         = 1;
     kv_cache_config.reuse_cache_tail_blocks = 4;
 
     auto           created_config = CacheConfigCreator::createConfig(mc, pc, kv_cache_config);
@@ -2228,6 +2244,57 @@ TEST(CacheConfigTest, ExactBlockBudgetHandlesIndependentPools) {
     EXPECT_EQ(maxKVCacheBlockNumForBudget(9, KVCacheBlockBudget{10, 0, 0}), 0u);
 }
 
+TEST(CacheConfigTest, ExactBlockBudgetAccountsForProjectedStatePageBoundaries) {
+    KVCacheBlockBudget budget{10, 3, 5};
+    budget.projected_pools = {{16, 8}};
+    EXPECT_EQ(maxKVCacheBlockNumForBudget(33, budget), 0u);
+    EXPECT_EQ(maxKVCacheBlockNumForBudget(34, budget), 1u);
+    EXPECT_EQ(maxKVCacheBlockNumForBudget(113, budget), 8u);
+    EXPECT_EQ(maxKVCacheBlockNumForBudget(114, budget), 9u);
+    EXPECT_EQ(maxKVCacheBlockNumForBudget(137, budget), 9u);
+    EXPECT_EQ(maxKVCacheBlockNumForBudget(138, budget), 10u);
+}
+
+TEST(CacheConfigCreatorTest, DecodeProjectsOptInStatePoolAcrossTargetAndDraft) {
+    auto model                         = makeHybridAttentionModelConfig();
+    model.attn_config.tokens_per_block = 128;
+    setHybridAttentionKvCacheSpecs(model);
+    auto state = makeDsv4Desc("indexer_state", "fixed_state", 256, DataType::TYPE_FP32);
+    state.capacity.emplace();
+    state.capacity->match_decode_token_capacity = true;
+    model.kv_cache_spec_descs[1].push_back(state);
+    model.kv_cache_spec_descs[3].push_back(state);
+
+    auto draft                                           = model;
+    draft.num_layers                                     = 1;
+    draft.hybrid_attention_config.hybrid_attention_types = {HybridAttentionType::NONE};
+    draft.kv_cache_spec_descs                            = {model.kv_cache_spec_descs[1]};
+
+    SpeculativeExecutionConfig speculative;
+    speculative.gen_num_per_cycle = 4;
+    ParallelismConfig parallelism;
+    parallelism.role_type                          = RoleType::DECODE;
+    parallelism.prefill_cp_config.method           = CPRotateMethod::PREFILL_CP;
+    parallelism.prefill_cp_config.kv_cache_sharded = true;
+    parallelism.prefill_cp_config.prefill_cp_size  = 8;
+    KVCacheConfig options;
+    options.linear_pool_blocks = 7;
+    auto decode                = CacheConfigCreator::createConfig(model, parallelism, options, speculative, &draft);
+    decode.finalizeBlockNums(18, RuntimeConfig{});
+    EXPECT_EQ(decode.group("indexer_state").seqSizePerBlock(), 1024u);
+    EXPECT_EQ(decode.group("indexer_state").block_num, 4u);
+    EXPECT_EQ(decode.group("linear").block_num, 7u);
+    ASSERT_EQ(decode.mtp_sub_configs.size(), 1u);
+    EXPECT_EQ(decode.mtp_sub_configs[0]->group("indexer_state").block_num, 4u);
+
+    parallelism.role_type = RoleType::PREFILL;
+    parallelism.tp_size   = 2;
+    auto prefill          = CacheConfigCreator::createConfig(model, parallelism, options, speculative, &draft);
+    prefill.finalizeBlockNums(18, RuntimeConfig{});
+    EXPECT_EQ(prefill.group("indexer_state").seqSizePerBlock(), 256u);
+    EXPECT_EQ(prefill.group("indexer_state").block_num, 18u);
+}
+
 TEST(CacheConfigTest, FinalizeBlockNumsUpdatesHybridPerGroupBlockNums) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                      = 8;
@@ -2320,7 +2387,7 @@ TEST(CacheConfigTest, DSV4ExplicitHcaStatePoolBlocksIgnoreTailRetention) {
     runtime_config.fifo_scheduler_config.max_context_batch_size = 2;
 
     ParallelismConfig pc;
-    auto              config = CacheConfigCreator::createWarmupConfig(makeProModelConfig(), pc, 0);
+    auto              config       = CacheConfigCreator::createWarmupConfig(makeProModelConfig(), pc, 0);
     config.reuse_cache_tail_blocks = 4;
     config.finalizeBlockNums(100, runtime_config);
 
@@ -2340,9 +2407,9 @@ TEST(CacheConfigTest, DSV4StateSwaPoolsWithoutExplicitBlocksFollowBaseline) {
 
     ParallelismConfig pc;
     KVCacheConfig     kv_cache_config;
-    kv_cache_config.test_block_num = 100;
+    kv_cache_config.test_block_num          = 100;
     kv_cache_config.reuse_cache_tail_blocks = 4;
-    auto mc                        = makeProModelConfig();
+    auto mc                                 = makeProModelConfig();
     setDsv4ExplicitPoolBlocks(mc, "hca_state", 0);
 
     auto           created_config = CacheConfigCreator::createConfig(mc, pc, kv_cache_config);
@@ -2506,8 +2573,6 @@ TEST(CacheConfigTest, DSV4MtpJointBudgetIncludesScoreAndProposeSwaBacking) {
         EXPECT_EQ(sub_config->group("swa_kv").block_num, block_num);
     }
 }
-
-
 
 TEST(CacheConfigCreatorTest, MtpGenNum2RingEntriesMatch) {
     // gen_num_per_cycle=2 -> CSA/INDEXER R=10, HCA R=130, SWA R=130.
@@ -2764,7 +2829,7 @@ TEST_F(DSV4AllocatorTest, ReportedTokenCapacityIgnoresFixedTailPools) {
     for (const auto& tag : dsv4StateSwaTags()) {
         setDsv4ExplicitPoolBlocks(mc, tag, 11);
     }
-    auto config = CacheConfigCreator::createWarmupConfig(mc, pc, 0);
+    auto                  config = CacheConfigCreator::createWarmupConfig(mc, pc, 0);
     std::vector<uint32_t> block_nums;
     for (const auto& tag : config.groupTags()) {
         if (tag == "csa_kv") {
@@ -2838,14 +2903,14 @@ TEST_F(DSV4AllocatorTest, ChunkMallocSharesCommonSparseBanksAndKeepsPrivateTail)
         size_t         first_required_position;
     };
     for (const auto& test_case : {TestCase{CacheGroupType::LINEAR, 1, 20, 8, false, 3, 8, 2},
-                                 TestCase{CacheGroupType::SWA, 1, 20, 8, false, 4, 9, 1},
-                                 TestCase{CacheGroupType::LINEAR, 2, 20, 8, false, 3, 8, 2},
-                                 TestCase{CacheGroupType::LINEAR, 2, 18, 8, false, 4, 10, 2},
-                                 TestCase{CacheGroupType::SWA, 2, 20, 12, true, 5, 10, 0},
-                                 TestCase{CacheGroupType::SWA, 2, 20, 8, true, 4, 9, 1}}) {
-        const auto type = test_case.type;
-        auto config = makeSimpleHybridMhaCacheConfig(4, 10, 4, DataType::TYPE_FP16);
-        auto groups = config.topology().groups();
+                                  TestCase{CacheGroupType::SWA, 1, 20, 8, false, 4, 9, 1},
+                                  TestCase{CacheGroupType::LINEAR, 2, 20, 8, false, 3, 8, 2},
+                                  TestCase{CacheGroupType::LINEAR, 2, 18, 8, false, 4, 10, 2},
+                                  TestCase{CacheGroupType::SWA, 2, 20, 12, true, 5, 10, 0},
+                                  TestCase{CacheGroupType::SWA, 2, 20, 8, true, 4, 9, 1}}) {
+        const auto type   = test_case.type;
+        auto       config = makeSimpleHybridMhaCacheConfig(4, 10, 4, DataType::TYPE_FP16);
+        auto       groups = config.topology().groups();
         for (auto& group : groups) {
             if (group.policy.group_type == CacheGroupType::LINEAR && type == CacheGroupType::SWA) {
                 group.spec                       = makeMhaSpec(group.tag, 4, DataType::TYPE_FP16, 1, 1);
@@ -4281,8 +4346,8 @@ TEST(CacheConfigCreatorTest, PoolBlockWeightsSolverMatchesDiscreteBudgetOracleAn
     auto model                                 = makeCreationModel();
     model.kv_cache_spec_descs[0][0].group_type = CacheGroupType::SWA;
     KVCacheConfig options;
-    auto config    = CacheConfigCreator::createConfig(model, {}, options);
-    const auto bound = static_cast<uint32_t>(std::numeric_limits<int32_t>::max());
+    auto          config = CacheConfigCreator::createConfig(model, {}, options);
+    const auto    bound  = static_cast<uint32_t>(std::numeric_limits<int32_t>::max());
     EXPECT_EQ(config.maxBaselineBlockNum(), bound);
     config.finalizeBlockNums(bound, {});
     EXPECT_EQ(config.group("full").block_num, bound);
@@ -4292,9 +4357,9 @@ TEST(CacheConfigCreatorTest, WarmupUsesMinimalCapacityAndPreservesExplicitPoolPo
     auto model = makeCreationModel();
     addCreationFixedPool(model, true);
     KVCacheConfig options;
-    options.test_block_num = 99;
+    options.test_block_num          = 99;
     options.reuse_cache_tail_blocks = 4;
-    auto config            = CacheConfigCreator::createWarmupConfig(model, {}, options);
+    auto config                     = CacheConfigCreator::createWarmupConfig(model, {}, options);
     EXPECT_EQ(config.group("full").block_num, 2u);
     EXPECT_EQ(config.group("state").block_num, 2u);
     EXPECT_EQ(config.group("state").policy.explicit_block_num, 7u);
@@ -4316,7 +4381,7 @@ TEST(CacheConfigCreatorTest, MergedBudgetUsesEachPhysicalSegmentOnce) {
             }
             addCreationFixedPool(target, host);
             KVCacheConfig options;
-            options.kv_cache_mem_mb = 1;
+            options.kv_cache_mem_mb         = 1;
             options.reuse_cache_tail_blocks = 3;
             SpeculativeExecutionConfig sp;
             sp.type              = SP_TYPE_MTP;
@@ -4464,7 +4529,7 @@ TEST(CacheConfigCreatorTest, RejectsInvalidMtpBudgetSegmentsBeforeIndexing) {
     layout.mtp_sub_configs.push_back(nullptr);
     EXPECT_ANY_THROW(CacheConfigCreator::computeLocalBlockNum(layout, model, {}, options, {}));
 
-    auto sub = std::make_shared<CacheConfig>();
+    auto sub       = std::make_shared<CacheConfig>();
     sub->layer_num = 1;
     sub->setTopology({layout.group("full")}, {{0, {"full"}}});
     layout.mtp_sub_configs.back() = sub;

@@ -20,6 +20,30 @@ namespace rtp_llm {
 class CacheStore;
 class MemoryUtil;
 
+// Shared by every typed pool using the same byte arena. Storage and its MR
+// registration have one owner; registration is retained once per active pool.
+class SharedDeviceBlockBacking {
+public:
+    SharedDeviceBlockBacking(torch::Tensor buffer, std::shared_ptr<SharedBlockArena> arena);
+    ~SharedDeviceBlockBacking();
+
+    const torch::Tensor& buffer() const {
+        return buffer_;
+    }
+    const std::shared_ptr<SharedBlockArena>& arena() const {
+        return arena_;
+    }
+    void retainMemoryRegistration(const std::shared_ptr<MemoryUtil>& memory_util);
+    void releaseMemoryRegistration();
+
+private:
+    torch::Tensor                     buffer_;
+    std::shared_ptr<SharedBlockArena> arena_;
+    std::mutex                        mutex_;
+    std::shared_ptr<MemoryUtil>       memory_util_;
+    size_t                            registration_users_{0};
+};
+
 // Config for the device (GPU) block pool. Derives BlockPoolConfigBase for the IBlockPool
 // lifecycle; physical_block_count is reconciled against memory_layouts[*].block_num by
 // normalizeConfig() - see DeviceBlockPool.cc.
@@ -28,6 +52,8 @@ struct DeviceBlockPoolConfig: public BlockPoolConfigBase {
     std::vector<MemoryLayoutConfig> memory_layouts;
     bool                            use_pinned_cpu_backing{false};
     bool                            use_device_malloc_backing{false};
+    // The first typed pool allocates this owner; subsequent pools adopt it.
+    std::shared_ptr<SharedDeviceBlockBacking> shared_backing;
 };
 
 class DeviceBlockPool;
@@ -114,6 +140,9 @@ public:
     void* getBaseAddress() const {
         return cache_base_ptr_;
     }
+    const std::shared_ptr<SharedDeviceBlockBacking>& sharedBacking() const {
+        return shared_backing_;
+    }
     bool usesDedicatedDeviceAllocation() const {
         return uses_dedicated_device_allocation_;
     }
@@ -175,14 +204,15 @@ private:
 
 private:
     static constexpr size_t                          kRefTypeCount = static_cast<size_t>(DeviceBlockRefType::COUNT);
-    std::vector<uint32_t> refcounts_;
+    std::vector<uint32_t>                            refcounts_;
     std::array<std::vector<uint32_t>, kRefTypeCount> refcounts_by_type_;
     std::array<size_t, kRefTypeCount>                referenced_block_counts_{};
 
-    torch::Tensor cache_aligned_buffer_;
-    void*         cache_base_ptr_{nullptr};
-    size_t        allocation_size_bytes_{0};
-    bool          uses_dedicated_device_allocation_{false};
+    torch::Tensor                             cache_aligned_buffer_;
+    std::shared_ptr<SharedDeviceBlockBacking> shared_backing_;
+    void*                                     cache_base_ptr_{nullptr};
+    size_t                                    allocation_size_bytes_{0};
+    bool                                      uses_dedicated_device_allocation_{false};
 
     bool                        kvcache_reg_mr_  = false;
     int64_t                     mr_cost_time_ms_ = 0;

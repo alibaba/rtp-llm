@@ -38,8 +38,8 @@ def _layer_norm_fwd_1pass_kernel(
     ACTIVATION: tl.constexpr,
 ):
     # Map the program id to the row of X and Y it should compute.
-    row = tl.program_id(0)
-    group = tl.program_id(1)
+    row = tl.program_id(0).to(tl.int64)
+    group = tl.program_id(1).to(tl.int64)
     X += row * stride_x_row + group * N
     Y += row * stride_y_row + group * N
     if HAS_Z:
@@ -52,7 +52,7 @@ def _layer_norm_fwd_1pass_kernel(
         if HAS_BIAS:
             B += group * N
     # Compute mean and variance
-    cols = tl.arange(0, BLOCK_N)
+    cols = tl.arange(0, BLOCK_N).to(tl.int64)
     x = tl.load(X + cols, mask=cols < N, other=0.0).to(tl.float32)
     if HAS_Z and not NORM_BEFORE_GATE:
         z = tl.load(Z + cols, mask=cols < N).to(tl.float32)

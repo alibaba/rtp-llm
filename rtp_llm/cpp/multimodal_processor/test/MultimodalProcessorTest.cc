@@ -26,6 +26,26 @@ TEST_F(MultimodalProcessorTest, SemanticIdsFollowFeatureSlicesAndValidateBounds)
 }
 
 namespace {
+class InterleavedVideoProcessor: public FakeMultimodalProcessor {
+public:
+    InterleavedVideoProcessor(): FakeMultimodalProcessor(py::none(), {{20, 21}}, false, 32) {}
+    bool starts_media = true;
+
+private:
+    ErrorResult<MultimodalOutput>
+    MultimodalEmbedding(std::vector<MultimodalInput>, std::string, int64_t, grpc::ServerContext*) override {
+        MultimodalOutput result;
+        result.mm_features    = {torch::ones({2, 4}), torch::zeros({1, 4})};
+        result.mm_extra_input = std::vector<torch::Tensor>{
+            torch::tensor({-53530053, int(starts_media), 1, 2, 30, 31, 40}, torch::kInt32),
+            torch::tensor({-53530053, 0, 1, 2, 30, 31, 41}, torch::kInt32),
+        };
+        result.mm_feature_hashes =
+            std::vector<torch::Tensor>{torch::tensor({101, 102}, torch::kInt32), torch::tensor({103}, torch::kInt32)};
+        return result;
+    }
+};
+
 class PreparedV41Processor: public FakeMultimodalProcessor {
 public:
     PreparedV41Processor(): FakeMultimodalProcessor(py::none(), {}, false, 32) {}
@@ -65,6 +85,25 @@ std::shared_ptr<GenerateInput> preparedV41Input() {
     return input;
 }
 }  // namespace
+
+TEST_F(MultimodalProcessorTest, InterleavedVideoExpandsTimestampsWithoutDeepstack) {
+    InterleavedVideoProcessor processor;
+    auto                      input = std::make_shared<GenerateInput>();
+    input->input_ids                = torch::tensor({0, 20, 99, 21, 6}, torch::kInt32);
+    input->multimodal_inputs        = std::vector<MultimodalInput>{MultimodalInput("video", 2)};
+    ASSERT_TRUE(processor.updateMultimodalFeatures(input).ok());
+    EXPECT_TRUE(torch::equal(input->input_ids,
+                             torch::tensor({0, 20, 30, 101, 102, 31, 40, 30, 103, 31, 41, 21, 6}, torch::kInt32)));
+    EXPECT_TRUE(torch::equal(input->mm_locs.value(), torch::tensor({3, 8}, torch::kInt32)));
+    EXPECT_TRUE(!input->mm_extra_input || input->mm_extra_input->empty());
+    EXPECT_TRUE(torch::equal(input->text_tokens_mask.value(),
+                             torch::tensor({1, 1, 1, 0, 0, 1, 1, 1, 0, 1, 1, 1, 1}, torch::kInt32)));
+    EXPECT_EQ(input->multimodalLengths(), (std::map<int, int>{{2, 3}}));
+
+    processor.starts_media = false;
+    input->input_ids       = torch::tensor({0, 20, 99, 21, 6}, torch::kInt32);
+    EXPECT_EQ(processor.updateMultimodalFeatures(input).code(), ErrorCode::MM_WRONG_FORMAT_ERROR);
+}
 
 TEST_F(MultimodalProcessorTest, V41PreparedMetadataPreservesImagesAndTextOnlyRequests) {
     PreparedV41Processor processor;
@@ -472,11 +511,11 @@ TEST_F(MultimodalProcessorTest, testExpandedLayoutDoesNotScanHashValuesAsTags) {
     EXPECT_TRUE(torch::equal(input.input_ids, torch::tensor({1, 99, -2, 3, 99, 4}, torch::kInt32)));
     EXPECT_TRUE(torch::equal(refreshed.value().locs, result.value().locs));
     EXPECT_TRUE(torch::equal(refreshed.value().text_tokens_mask, result.value().text_tokens_mask));
-    input.generate_config = std::make_shared<GenerateConfig>();
+    input.generate_config                = std::make_shared<GenerateConfig>();
     input.generate_config->pd_separation = true;
     EXPECT_EQ(processor.useExpandedTokenLayout(input, features, hashes).status().code(), ErrorCode::MM_PROCESS_ERROR);
     input.generate_config->pd_separation = false;
-    hashes[0] = torch::tensor({42}, torch::kInt32);
+    hashes[0]                            = torch::tensor({42}, torch::kInt32);
     EXPECT_FALSE(processor.useExpandedTokenLayout(input, features, hashes).ok());
 }
 

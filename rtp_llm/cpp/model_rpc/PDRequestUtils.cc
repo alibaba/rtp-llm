@@ -93,8 +93,6 @@ ErrorInfo preprocessForPD(std::shared_ptr<GenerateInput>& input,
     input->generate_config->pd_separation        = true;
     input->generate_config->force_disable_sp_run = !is_mtp_eagle;
     if (role == RoleType::DECODE) {
-        // Remote ViT uses the frontend layout. With LOCAL ViT, both engines
-        // expand the original request independently before using its KV keys.
         if (input->multimodal_token_layout) {
             const auto& ids   = input->input_ids;
             const auto& spans = input->multimodal_token_layout->spans;

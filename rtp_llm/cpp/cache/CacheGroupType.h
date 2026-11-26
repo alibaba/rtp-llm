@@ -66,6 +66,8 @@ struct CacheGroupPolicy {
     int sliding_window_size = 0;
     // Share one state bank across logical blocks during chunked prefill.
     bool shared_chunk_state = false;
+    // A Decode state page may cover multiple base KV pages.
+    bool match_base_token_capacity = false;
 
     std::string policyFingerprint() const {
         std::ostringstream oss;
@@ -73,7 +75,7 @@ struct CacheGroupPolicy {
             << ':' << explicit_block_num << ':' << (charge_to_paged_budget ? 1 : 0) << ':'
             << static_cast<int>(memory_placement) << ':' << active_tail_blocks << ':' << (validate_tail_blocks ? 1 : 0)
             << ':' << static_cast<int>(cp_mapping) << ':' << static_cast<int>(cp_slice) << ':' << sliding_window_size
-            << ':' << (shared_chunk_state ? 1 : 0);
+            << ':' << (shared_chunk_state ? 1 : 0) << ':' << (match_base_token_capacity ? 1 : 0);
         return oss.str();
     }
 };
@@ -96,7 +98,7 @@ inline std::vector<CacheStoreBlockPair> buildCacheStorePlan(const CacheGroupPoli
                                                             int                     cp_size,
                                                             size_t                  key_blocks_per_logical_block = 1,
                                                             size_t                  cache_key_count              = 0,
-                                                            size_t                  publish_start_block           = 0) {
+                                                            size_t                  publish_start_block          = 0) {
     std::vector<CacheStoreBlockPair> plan;
     if (total_logical_blocks == 0) {
         return plan;

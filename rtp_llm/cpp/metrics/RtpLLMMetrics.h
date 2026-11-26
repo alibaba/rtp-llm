@@ -1104,27 +1104,30 @@ private:
 // Reported once per BlockPool so each pool's capacity and utilization are visible.
 class RtpLLMCachePoolMetricsCollector final {
 public:
-    int64_t block_size_bytes                  = 0;
-    int64_t free_blocks                       = 0;
-    int64_t used_blocks                       = 0;
-    int64_t available_blocks                  = 0;
-    int64_t active_blocks                     = 0;
-    int64_t total_blocks                      = 0;
-    int64_t reserve_blocks                    = 0;
-    int64_t request_ref_blocks                = 0;
-    int64_t remote_connector_ref_blocks       = 0;
-    int64_t pd_connector_ref_blocks           = 0;
-    int64_t block_cache_ref_blocks            = 0;
-    int64_t load_ref_blocks                   = 0;
-    int64_t eviction_ref_blocks               = 0;
-    int64_t frozen_ref_blocks                 = 0;
-    float   used_ratio                        = 0;
-    bool    report_frozen_ref_blocks          = false;
+    int64_t block_size_bytes            = 0;
+    int64_t free_blocks                 = 0;
+    int64_t used_blocks                 = 0;
+    int64_t available_blocks            = 0;
+    int64_t active_blocks               = 0;
+    int64_t total_blocks                = 0;
+    int64_t reserve_blocks              = 0;
+    int64_t request_ref_blocks          = 0;
+    int64_t remote_connector_ref_blocks = 0;
+    int64_t pd_connector_ref_blocks     = 0;
+    int64_t block_cache_ref_blocks      = 0;
+    int64_t load_ref_blocks             = 0;
+    int64_t eviction_ref_blocks         = 0;
+    int64_t frozen_ref_blocks           = 0;
+    float   used_ratio                  = 0;
+    bool    report_frozen_ref_blocks    = false;
 
     std::optional<int64_t> read_bytes;
     std::optional<int64_t> write_bytes;
     std::optional<double>  read_bandwidth_bytes_per_sec;
     std::optional<double>  write_bandwidth_bytes_per_sec;
+    std::optional<int64_t> shared_arena_total_bytes;
+    std::optional<int64_t> shared_arena_free_bytes;
+    std::optional<int64_t> shared_arena_available_bytes;
 };
 
 class RtpLLMCacheUnfreezeMetricsCollector final {
@@ -1139,27 +1142,30 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMCacheUnfreezeMetricsCollector* collector);
 
 public:
-    kmonitor::MutableMetric* block_size_bytes_metric           = nullptr;
-    kmonitor::MutableMetric* free_blocks_metric                = nullptr;
-    kmonitor::MutableMetric* used_blocks_metric                = nullptr;
-    kmonitor::MutableMetric* available_blocks_metric           = nullptr;
-    kmonitor::MutableMetric* active_blocks_metric              = nullptr;
-    kmonitor::MutableMetric* total_blocks_metric               = nullptr;
-    kmonitor::MutableMetric* reserve_blocks_metric             = nullptr;
-    kmonitor::MutableMetric* request_ref_blocks_metric         = nullptr;
+    kmonitor::MutableMetric* block_size_bytes_metric            = nullptr;
+    kmonitor::MutableMetric* free_blocks_metric                 = nullptr;
+    kmonitor::MutableMetric* used_blocks_metric                 = nullptr;
+    kmonitor::MutableMetric* available_blocks_metric            = nullptr;
+    kmonitor::MutableMetric* active_blocks_metric               = nullptr;
+    kmonitor::MutableMetric* total_blocks_metric                = nullptr;
+    kmonitor::MutableMetric* reserve_blocks_metric              = nullptr;
+    kmonitor::MutableMetric* request_ref_blocks_metric          = nullptr;
     kmonitor::MutableMetric* remote_connector_ref_blocks_metric = nullptr;
     kmonitor::MutableMetric* pd_connector_ref_blocks_metric     = nullptr;
     kmonitor::MutableMetric* block_cache_ref_blocks_metric      = nullptr;
     kmonitor::MutableMetric* load_ref_blocks_metric             = nullptr;
     kmonitor::MutableMetric* eviction_ref_blocks_metric         = nullptr;
-    kmonitor::MutableMetric* frozen_ref_blocks_metric          = nullptr;
+    kmonitor::MutableMetric* frozen_ref_blocks_metric           = nullptr;
     kmonitor::MutableMetric* unfreeze_blocks_qps_metric         = nullptr;
-    kmonitor::MutableMetric* used_ratio_metric                 = nullptr;
+    kmonitor::MutableMetric* used_ratio_metric                  = nullptr;
 
     kmonitor::MutableMetric* read_bytes_metric                    = nullptr;
     kmonitor::MutableMetric* write_bytes_metric                   = nullptr;
     kmonitor::MutableMetric* read_bandwidth_bytes_per_sec_metric  = nullptr;
     kmonitor::MutableMetric* write_bandwidth_bytes_per_sec_metric = nullptr;
+    kmonitor::MutableMetric* shared_arena_total_bytes_metric      = nullptr;
+    kmonitor::MutableMetric* shared_arena_free_bytes_metric       = nullptr;
+    kmonitor::MutableMetric* shared_arena_available_bytes_metric  = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
@@ -1178,16 +1184,16 @@ public:
     std::string                     source_tier;
     std::string                     target_tier;
     std::vector<TransferBytesEntry> transfer_bytes;
-    int64_t                         descriptors_per_transfer  = 0;
-    int64_t                         latency_us                = 0;
-    int64_t                         in_flight                 = 0;
-    int64_t                         load_queue_backlog        = 0;
-    int64_t                         background_queue_backlog  = 0;
-    int64_t                         completion_queue_backlog  = 0;
-    bool                            success                   = true;
-    bool                            transfer_completed        = true;
-    bool                            report_transfer           = true;
-    bool                            report_queue_backlog      = false;
+    int64_t                         descriptors_per_transfer = 0;
+    int64_t                         latency_us               = 0;
+    int64_t                         in_flight                = 0;
+    int64_t                         load_queue_backlog       = 0;
+    int64_t                         background_queue_backlog = 0;
+    int64_t                         completion_queue_backlog = 0;
+    bool                            success                  = true;
+    bool                            transfer_completed       = true;
+    bool                            report_transfer          = true;
+    bool                            report_queue_backlog     = false;
     std::string                     pool_type;
 };
 
@@ -1198,9 +1204,9 @@ public:
     std::string target_tier{"DEVICE"};
     std::string stage;
     std::string scope;
-    int64_t     rank       = -1;
+    int64_t     rank           = -1;
     double      latency_us     = 0;
-    bool        success    = true;
+    bool        success        = true;
     uint64_t    sample_count   = 1;
     uint64_t    latency_sum_us = 0;
     uint64_t    dropped_count  = 0;
@@ -1221,20 +1227,20 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMCacheTransferStageMetricsCollector* collector);
 
 private:
-    kmonitor::MutableMetric* transfer_qps_metric                = nullptr;
-    kmonitor::MutableMetric* transfer_failed_qps_metric         = nullptr;
-    kmonitor::MutableMetric* host_cache_copy_error_qps_metric   = nullptr;
-    kmonitor::MutableMetric* descriptors_per_transfer_metric    = nullptr;
+    kmonitor::MutableMetric* transfer_qps_metric              = nullptr;
+    kmonitor::MutableMetric* transfer_failed_qps_metric       = nullptr;
+    kmonitor::MutableMetric* host_cache_copy_error_qps_metric = nullptr;
+    kmonitor::MutableMetric* descriptors_per_transfer_metric  = nullptr;
     // Compatibility alias retained while dashboards migrate to the clarified name.
-    kmonitor::MutableMetric* transfer_descriptor_count_compat_metric    = nullptr;
-    kmonitor::MutableMetric* transfer_latency_us_metric                 = nullptr;
-    kmonitor::MutableMetric* task_queue_backlog_metric                  = nullptr;
-    kmonitor::MutableMetric* transfer_in_flight_metric                  = nullptr;
-    kmonitor::MutableMetric* transfer_bytes_metric                      = nullptr;
-    kmonitor::MutableMetric* transfer_stage_latency_us_metric           = nullptr;
-    kmonitor::MutableMetric* transfer_stage_qps_metric                  = nullptr;
-    kmonitor::MutableMetric* transfer_stage_latency_sum_us_metric       = nullptr;
-    kmonitor::MutableMetric* transfer_stage_dropped_qps_metric          = nullptr;
+    kmonitor::MutableMetric* transfer_descriptor_count_compat_metric = nullptr;
+    kmonitor::MutableMetric* transfer_latency_us_metric              = nullptr;
+    kmonitor::MutableMetric* task_queue_backlog_metric               = nullptr;
+    kmonitor::MutableMetric* transfer_in_flight_metric               = nullptr;
+    kmonitor::MutableMetric* transfer_bytes_metric                   = nullptr;
+    kmonitor::MutableMetric* transfer_stage_latency_us_metric        = nullptr;
+    kmonitor::MutableMetric* transfer_stage_qps_metric               = nullptr;
+    kmonitor::MutableMetric* transfer_stage_latency_sum_us_metric    = nullptr;
+    kmonitor::MutableMetric* transfer_stage_dropped_qps_metric       = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
@@ -1377,7 +1383,7 @@ public:
 class RtpLLMRemoteCacheSDKMetricsCollector final {
 public:
     bool    remote_sdk_fail_qps     = true;
-    bool    report_details         = true;
+    bool    report_details          = true;
     int64_t remote_sdk_block_num    = 0;
     int64_t remote_sdk_cost_time_us = 0;
 };

@@ -932,19 +932,31 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             )
             # kernel_weight, scale_weight = load_config.exported_device.convert_fp8_weight_params(kernel_weight, scale_weight)
 
-            skip_moe_scale_repack = self.kernel.name in (
-                W.moe_w1,
-                W.moe_w2,
-            ) and load_config.moe_strategy in ("mega_moe_fp8", "mega_moe_fp8_se")
-            if is_deep_gemm_e8m0_used() and not skip_moe_scale_repack:
-                if (
-                    native_e8m0_dtype is not None
-                    and scale_weight.dtype == native_e8m0_dtype
+            # Online SM100/SM120 loading can already produce the final packed
+            # UE8M0 representation directly from source weights.  Legacy/pre-quantized
+            # inputs still arrive with floating-point block scales and require
+            # the old dequantize/requantize conversion here.
+            defer_moe_requant = self.kernel.name in (W.moe_w1, W.moe_w2) and (
+                load_config.moe_strategy in ("mega_moe_fp8", "mega_moe_fp8_se")
+                or (getattr(load_config, "fp8_defer_moe_requant", False) and self.quant_config.is_quanted())
+            )
+            if (
+                is_deep_gemm_e8m0_used()
+                and not defer_moe_requant
+                and scale_weight.dtype != torch.int32
+            ):
+                if native_e8m0_dtype is not None and scale_weight.dtype == native_e8m0_dtype:
+                    scale_weight = _transform_scale_ue8m0(scale_weight, mn=kernel_weight.shape[-2])
+                elif (
+                    getattr(load_config, "fp8_requant_preserve_fp32", False)
+                    and self.quant_config.is_quanted()
+                    and kernel_weight.dtype == torch.float8_e4m3fn
+                    and scale_weight.dtype == torch.float32
                 ):
-                    scale_weight = _transform_scale_ue8m0(
-                        scale_weight, mn=kernel_weight.shape[-2]
+                    kernel_weight, scale_weight = requant_weight_ue8m0(
+                        kernel_weight, scale_weight, dequant_dtype=torch.float32
                     )
-                elif scale_weight.dtype != torch.int32:
+                else:
                     kernel_weight, scale_weight = requant_weight_ue8m0(
                         kernel_weight, scale_weight
                     )

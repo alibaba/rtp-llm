@@ -109,6 +109,16 @@ models_py_test(
 )
 
 py_test(
+    name = "kda_checkpoint_test",
+    srcs = ["kda_checkpoint_test.py"],
+    tags = ["glm53_contract"],
+    deps = [
+        "//rtp_llm:torch",
+        "//rtp_llm/models_py/triton_kernels:common",
+    ],
+)
+
+py_test(
     name = "aiter_verify_attention_test",
     srcs = ["test_aiter_verify_attention.py"],
     main = "test_aiter_verify_attention.py",

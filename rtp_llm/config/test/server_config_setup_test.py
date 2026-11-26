@@ -24,7 +24,13 @@ from rtp_llm.config.server_config_setup import (
     set_parallelism_config,
     setup_and_configure_server,
 )
-from rtp_llm.ops import CPAllGatherImpl, CPRotateMethod, KvCacheDataType, NcclCommConfig, RoleType
+from rtp_llm.ops import (
+    CPAllGatherImpl,
+    CPRotateMethod,
+    KvCacheDataType,
+    NcclCommConfig,
+    RoleType,
+)
 from rtp_llm.server.server_args.server_args import setup_args
 from rtp_llm.start_backend_server import start_backend_server
 
@@ -716,12 +722,13 @@ class GenerateConfigTest(TestCase):
         config.block_tree_disk_evict_high_watermark_ratio = 0.83
 
         state = config.__getstate__()
-        self.assertEqual(len(state), 81)
-        self.assertEqual(state[:2], ("KVCacheConfig", 25))
+        self.assertEqual(len(state), 82)
+        self.assertEqual(state[:2], ("KVCacheConfig", 26))
 
         restored = pickle.loads(pickle.dumps(config))
         self.assertEqual(restored.disk_cache_staging_block_count, 8)
         self.assertFalse(restored.enable_disk_cache)
+        self.assertEqual(restored.shared_hybrid_cache, config.shared_hybrid_cache)
         self.assertEqual(restored.device_eviction_policy, "fifo")
         self.assertEqual(restored.memory_eviction_policy, "lfu")
         self.assertEqual(restored.disk_eviction_policy, "lru")
@@ -754,13 +761,11 @@ class GenerateConfigTest(TestCase):
         # Legacy payloads share the load deadline for eviction and omit later fields.
         legacy_defaults = KVCacheConfig()
         legacy_defaults.disk_cache_evict_timeout_ms = -1
-        # The v25 tail flags (linear reclaim, pool weights) also fall back to
-        # their defaults after a legacy v6 state round-trips.
+        legacy_defaults.shared_hybrid_cache = 0
+        # Legacy state carries none of the current tail fields.
         event_state = (
             *state[:63],
-            *legacy_defaults.__getstate__()[:79][63:],
-            legacy_defaults.__getstate__()[79],
-            legacy_defaults.__getstate__()[80],
+            *legacy_defaults.__getstate__()[63:],
         )
         # Version 6 carried the retired host-placement flag at index 53.
         state = (state[0], 6, *state[2:53], True, *state[53:63])

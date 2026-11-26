@@ -37,10 +37,13 @@ inline const char* vitSeparationName(VitSeparation separation) {
 
 /** Later PP stages receive activations and do not create a local multimodal engine.
  *  Keep ingress ownership aligned with LanguageCppEngine in rpc_engine.py so those stages can initialize. */
-inline bool ownsMultimodalIngress(RoleType role_type, int64_t tp_rank, int64_t pp_rank, VitSeparation vit_separation) {
+inline bool ownsMultimodalIngress(
+    RoleType role_type, int64_t tp_rank, int64_t pp_rank, VitSeparation vit_separation, bool token_layout_from_vit) {
     return pp_rank == 0 && tp_rank == 0
            && (role_type == RoleType::PDFUSION || role_type == RoleType::PREFILL
-               || (role_type == RoleType::DECODE && vit_separation == VIT_SEPARATION_LOCAL));
+               || (role_type == RoleType::DECODE
+                   && (vit_separation == VIT_SEPARATION_LOCAL
+                       || (vit_separation == VIT_SEPARATION_REMOTE && token_layout_from_vit))));
 }
 
 inline MMProcessorKind resolveMMProcessorKind(bool          is_multimodal,
@@ -48,8 +51,10 @@ inline MMProcessorKind resolveMMProcessorKind(bool          is_multimodal,
                                               bool          has_local_engine,
                                               RoleType      role_type,
                                               int64_t       tp_rank,
-                                              int64_t       pp_rank) {
-    const bool owns_ingress = is_multimodal && ownsMultimodalIngress(role_type, tp_rank, pp_rank, vit_separation);
+                                              int64_t       pp_rank,
+                                              bool          token_layout_from_vit = false) {
+    const bool owns_ingress =
+        is_multimodal && ownsMultimodalIngress(role_type, tp_rank, pp_rank, vit_separation, token_layout_from_vit);
     if (has_local_engine && !owns_ingress) {
         return MMProcessorKind::INVALID;
     }
@@ -95,10 +100,11 @@ inline MMProcessorDecision resolveAndLogMMProcessorKind(bool               is_mu
                                                         int64_t            tp_rank,
                                                         int64_t            pp_rank,
                                                         const std::string& model_type,
-                                                        const std::string& entry) {
+                                                        const std::string& entry,
+                                                        bool               token_layout_from_vit = false) {
     MMProcessorDecision decision;
-    decision.kind =
-        resolveMMProcessorKind(is_multimodal, vit_separation, has_local_engine, role_type, tp_rank, pp_rank);
+    decision.kind = resolveMMProcessorKind(
+        is_multimodal, vit_separation, has_local_engine, role_type, tp_rank, pp_rank, token_layout_from_vit);
 
     const std::string described = "entry=" + entry + ", vit_separation=" + vitSeparationName(vit_separation)
                                   + ", role_type=" + roleTypeToString(role_type)

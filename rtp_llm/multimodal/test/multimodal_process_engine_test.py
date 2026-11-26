@@ -41,7 +41,7 @@ from rtp_llm.multimodal.greennet_hook import (
     GreenNetProvider,
     GreenNetVerdict,
 )
-from rtp_llm.multimodal.mm_error_messages import MMErr
+from rtp_llm.multimodal.mm_error_messages import MediaDownloadError, MMErr
 from rtp_llm.multimodal.mm_process_engine import (
     MMEmbeddingAsyncCache,
     MMEmbeddingCacheEntry,
@@ -49,6 +49,10 @@ from rtp_llm.multimodal.mm_process_engine import (
     MMProcessEngine,
     MMWorkItem,
     _feature_hashes_from_result,
+)
+from rtp_llm.multimodal.mm_request_context import (
+    MEDIA_REQUEST_CONTEXT,
+    MediaRequestContext,
 )
 from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
     MultiModalEmbeddingInterface,
@@ -1125,6 +1129,43 @@ class MMEmbeddingAsyncCacheTest(TestCase):
 
 
 class VitErrorReportingTest(TestCase):
+    @patch("rtp_llm.multimodal.mm_process_engine.logging.warning")
+    @patch("rtp_llm.multimodal.mm_process_engine.kmonitor.report")
+    def test_download_failure_deduplicates_safe_diagnostics(self, report, warning):
+        engine = object.__new__(MMProcessEngine)
+        error = MediaDownloadError(
+            ExceptionType.MM_DOWNLOAD_FAILED,
+            "download failed",
+            "http",
+            403,
+            "media.example",
+            12.5,
+            2,
+        )
+        token = MEDIA_REQUEST_CONTEXT.set(
+            MediaRequestContext(71, "external-id#attempt3")
+        )
+        try:
+            engine.report_vit_error(error)
+            engine.report_vit_error(error)
+        finally:
+            MEDIA_REQUEST_CONTEXT.reset(token)
+        self.assertEqual(report.call_count, 2)
+        self.assertEqual(
+            report.call_args.args,
+            (
+                AccMetrics.VIT_MEDIA_DOWNLOAD_FAILURE_QPS_METRIC,
+                1,
+                {"failure_type": "http", "http_status": "403"},
+            ),
+        )
+        warning.assert_called_once()
+        fields = json.loads(warning.call_args.args[1])
+        self.assertEqual(fields["request_id"], 71)
+        self.assertEqual(fields["source_request_id"], "external-id")
+        self.assertEqual(fields["source_retry_count"], 3)
+        self.assertEqual(fields["media_domain"], "media.example")
+
     @patch("rtp_llm.multimodal.mm_process_engine.kmonitor.report")
     def test_proxy_worker_reports_each_error_once(self, report):
         engine = object.__new__(MMProcessEngine)
@@ -1589,6 +1630,126 @@ class AsyncSubmitGetEmbeddingTest(TestCase):
         finally:
             release.set()
             engine.stop()
+
+    def test_request_larger_than_queue_uses_bounded_windows(self):
+        engine = self._make_engine(vit_concurrency=2, vit_max_queue_size=78)
+        release = threading.Event()
+        first_window = threading.Event()
+        submitted = 0
+        result, errors, admitted_counts = [], [], []
+        inputs = [self._make_input(f"fake://large-{i}") for i in range(82)]
+        # A duplicate must retain its result position without another producer.
+        inputs.append(inputs[0])
+        original_submit = engine._async_compute_executor.submit
+
+        def observe_submit(*args, **kwargs):
+            nonlocal submitted
+            future = original_submit(*args, **kwargs)
+            submitted += 1
+            if submitted == 80:
+                first_window.set()
+            return future
+
+        def compute(mm_inputs, cache_key, entry, request_id=0, **kwargs):
+            release.wait(timeout=5)
+            with engine._async_admission_lock:
+                admitted_counts.append(engine._async_admitted)
+            index = int(mm_inputs[0].url.rsplit("-", 1)[1])
+            entry.complete((torch.tensor([index]), None))
+
+        def request():
+            try:
+                result.extend(engine.get_embedding_result(inputs, timeout_ms=5000))
+            except Exception as error:
+                errors.append(error)
+
+        engine._async_compute = compute
+        thread = threading.Thread(target=request)
+        try:
+            with patch.object(engine._async_compute_executor, "submit", observe_submit):
+                thread.start()
+                self.assertTrue(first_window.wait(timeout=2))
+                with engine._async_admission_lock:
+                    self.assertEqual(engine._async_admitted, 80)
+                self.assertEqual(submitted, 80)
+                release.set()
+                thread.join(timeout=5)
+                self.assertFalse(thread.is_alive())
+            self.assertEqual(errors, [])
+            self.assertEqual(submitted, 82)
+            self.assertLessEqual(max(admitted_counts), 80)
+            self.assertEqual(
+                [item.embeddings[0].item() for item in result],
+                list(range(82)) + [0],
+            )
+            with engine._async_admission_changed:
+                self.assertTrue(
+                    engine._async_admission_changed.wait_for(
+                        lambda: engine._async_admitted == 0, timeout=1
+                    )
+                )
+        finally:
+            release.set()
+            thread.join(timeout=5)
+            engine.stop()
+
+    def test_windowed_submission_observes_deadline_and_cancellation(self):
+        for cancelled in (False, True):
+            with self.subTest(cancelled=cancelled):
+                engine = self._make_engine(vit_concurrency=1, vit_max_queue_size=1)
+                release, started, cancellation = (
+                    threading.Event(),
+                    threading.Event(),
+                    threading.Event(),
+                )
+                inputs = [self._make_input(f"fake://window-stop-{i}") for i in range(3)]
+                errors, started_urls = [], []
+
+                def compute(mm_inputs, cache_key, entry, request_id=0, **kwargs):
+                    started_urls.append(mm_inputs[0].url)
+                    started.set()
+                    release.wait(timeout=5)
+                    entry.complete((torch.tensor([0]), None))
+
+                def request():
+                    try:
+                        engine.get_embedding_result(
+                            inputs,
+                            timeout_ms=5000 if cancelled else 100,
+                            request_id=901,
+                            cancellation_event=cancellation,
+                        )
+                    except Exception as error:
+                        errors.append(error)
+
+                engine._async_compute = compute
+                thread = threading.Thread(target=request)
+                try:
+                    thread.start()
+                    self.assertTrue(started.wait(timeout=2))
+                    if cancelled:
+                        cancellation.set()
+                    thread.join(timeout=2)
+                    self.assertFalse(thread.is_alive())
+                    self.assertEqual(len(errors), 1)
+                    self.assertIsInstance(errors[0], FtRuntimeException)
+                    self.assertEqual(
+                        errors[0].exception_type,
+                        (
+                            ExceptionType.CANCELLED_ERROR
+                            if cancelled
+                            else ExceptionType.GENERATE_TIMEOUT
+                        ),
+                    )
+                    self.assertIsNone(
+                        engine._embedding_cache.peek(inputs[2].cache_key())
+                    )
+                    self.assertEqual(started_urls, [inputs[0].url])
+                finally:
+                    release.set()
+                    thread.join(timeout=5)
+                    engine.stop()
+                self.assertEqual(engine._async_admitted, 0)
 
     def test_cancel_request_removes_only_queued_work(self):
         engine = self._make_engine(vit_concurrency=1, vit_max_queue_size=1)
@@ -2342,13 +2503,13 @@ class MMAccessLoggerRequestIdTest(TestCase):
         access_logger = MMAccessLogger.__new__(MMAccessLogger)
         access_logger.query_logger = MagicMock()
         mm_input = MagicMock()
-        mm_input.to_string.return_value = "image://test"
+        mm_input.url = "https://user:secret@media.example/image.jpg?signature=private"
 
         access_logger.log_query_access([mm_input], request_id=123456)
 
         payload = json.loads(access_logger.query_logger.info.call_args.args[0])
         self.assertEqual(payload["id"], 123456)
-        self.assertEqual(payload["query"], ["image://test"])
+        self.assertEqual(payload["query"], ["media.example"])
 
 
 if __name__ == "__main__":

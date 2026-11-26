@@ -40,7 +40,7 @@ from rtp_llm.models_py.triton_kernels.causal_conv1d import (
 from rtp_llm.models_py.triton_kernels.common.layernorm_gated import RmsNormGated
 from rtp_llm.models_py.triton_kernels.fla.block import (
     load_initial_state_from_block_map,
-    store_ssm_state_to_block_map,
+    store_kda_chunk_states,
 )
 from rtp_llm.models_py.triton_kernels.kimi_kda import (
     chunk_kda,
@@ -260,9 +260,8 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
             1, value.shape[0], self.local_num_v_heads, self.head_v_dim
         ).contiguous()
 
-        q_len = query.shape[1]
         # Prefill: use chunk_kda with fused gate (use_gate_in_kernel=True)
-        attn_out, final_state, h = chunk_kda(
+        attn_out, final_state, h_from_chunk = chunk_kda(
             query,
             key,
             value,
@@ -277,32 +276,15 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
             A_log=self.alog,
             dt_bias=self.dt_bias,
         )
-        h_from_chunk = h
 
-        if ssm_states is not None and final_state is not None:
-            _target_dtype = ssm_states.dtype
-            h_for_store = (
-                h_from_chunk
-                if h_from_chunk is not None
-                else final_state.unsqueeze(0).unsqueeze(0)
-            )
-            # store_ssm_state_to_block_map requires h and final_state in float32
-            if h_for_store.dtype != torch.float32:
-                h_for_store = h_for_store.float()
-            if final_state.dtype != torch.float32:
-                final_state = final_state.float()
-
-            store_ssm_state_to_block_map(
-                h_for_store,
-                final_state,
-                attn_inputs.prefix_lengths_device,
-                cu_seqlens_without_padding,
-                attn_inputs.kv_cache_kernel_block_id_device,
-                ssm_states,
-                seq_size_per_block,
-                chunk_size=64,
-            )
-
+        store_kda_chunk_states(
+            h_from_chunk,
+            final_state,
+            ssm_states,
+            attn_inputs,
+            seq_size_per_block,
+            chunk_size=64,
+        )
         return attn_out.squeeze_(0)
 
     def forward(

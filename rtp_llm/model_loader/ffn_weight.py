@@ -5,7 +5,6 @@ from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple, Union
 
 import torch
 from pydantic import BaseModel
-
 from rtp_llm.config.quant_config import QuantizationConfig
 from rtp_llm.model_loader.load_config import LoadConfig
 from rtp_llm.model_loader.tensor_source import (
@@ -31,6 +30,7 @@ class FfnConfig(BaseModel):
     is_moe: bool = False
     need_post_ln: bool = False
     need_ffn_act_scale: bool = False
+    replicate_for_prefill_tokens: bool = False
 
 
 class FfnAtomicWeight(AtomicWeight):
@@ -46,6 +46,12 @@ class FfnAtomicWeight(AtomicWeight):
     ):
         self.config = config
         super().__init__(name, weights, process_fun, data_type, *args, **kwargs)
+
+    def _split(self, tensor, load_config: LoadConfig):
+        if self.config is not None and self.config.replicate_for_prefill_tokens:
+            raw = tensor if isinstance(tensor, torch.Tensor) else tensor[self.name]
+            return {self.name: raw.clone(memory_format=torch.contiguous_format)}
+        return super()._split(tensor, load_config)
 
     @property
     def need_padding(self) -> bool:

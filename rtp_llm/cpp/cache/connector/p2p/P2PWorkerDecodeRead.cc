@@ -36,16 +36,16 @@ public:
     }
 
 private:
-    std::mutex mutex_;
+    std::mutex        mutex_;
     std::set<int64_t> pending_;
 };
 
 }  // namespace
 
 P2PWorkerDecodeRead::P2PWorkerDecodeRead(P2PConnectorWorkerConfig                    config,
-                                                   const std::shared_ptr<LayerBlockConverter>& layer_block_converter,
-                                                   const kmonitor::MetricsReporterPtr&         metrics_reporter,
-                                                   const transfer::IKVCacheReceiverPtr&        receiver):
+                                         const std::shared_ptr<LayerBlockConverter>& layer_block_converter,
+                                         const kmonitor::MetricsReporterPtr&         metrics_reporter,
+                                         const transfer::IKVCacheReceiverPtr&        receiver):
     config_(std::move(config)),
     layer_block_converter_(layer_block_converter),
     metrics_reporter_(metrics_reporter),
@@ -72,15 +72,17 @@ P2PWorkerDecodeRead::~P2PWorkerDecodeRead() {
 }
 
 ErrorInfo P2PWorkerDecodeRead::buildRecvTasks(const P2PWorkerRoutePlan&             worker_plan,
-                                                   const std::string&                    unique_key,
-                                                   int64_t                               deadline_ms,
-                                                   const std::shared_ptr<ReadTaskGroup>& task_group,
-                                                   int&                                  total_block_count) {
+                                              const std::string&                    unique_key,
+                                              int64_t                               deadline_ms,
+                                              const std::shared_ptr<ReadTaskGroup>& task_group,
+                                              int&                                  total_block_count) {
     auto fail_registration = [&](const std::string& message,
                                  ErrorCode error_code = ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED) {
         RTP_LLM_LOG_WARNING("P2P recv registration failed, unique_key=%s error_code=%d error_name=%s error=%s",
-                            unique_key.c_str(), static_cast<int>(error_code),
-                            ErrorCodeToString(error_code).c_str(), message.c_str());
+                            unique_key.c_str(),
+                            static_cast<int>(error_code),
+                            ErrorCodeToString(error_code).c_str(),
+                            message.c_str());
         return ErrorInfo(error_code, message);
     };
     struct PreparedReceive {
@@ -135,11 +137,11 @@ ErrorInfo P2PWorkerDecodeRead::buildRecvTasks(const P2PWorkerRoutePlan&         
                                                 + " differs from source key count="
                                                 + std::to_string(layer_cache_buffer->blockIdMap().size());
                 return fail_registration("read: route=" + std::to_string(route.route_id) + " layer="
-                                         + std::to_string(layer_id) + " tag=" + layer_cache_buffer->cacheTag()
-                                         + " task registration failed, unique_key=" + unique_key + ": "
-                                         + conversion_message,
+                                             + std::to_string(layer_id) + " tag=" + layer_cache_buffer->cacheTag()
+                                             + " task registration failed, unique_key=" + unique_key + ": "
+                                             + conversion_message,
                                          !key_block_infos.ok() ? key_block_infos.status().code() :
-                                             ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED);
+                                                                 ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED);
             }
 
             // key 由编排层签发的 route_id + plan digest 命名 —— 两侧不做任何独立推导。
@@ -150,10 +152,10 @@ ErrorInfo P2PWorkerDecodeRead::buildRecvTasks(const P2PWorkerRoutePlan&         
                                                                               worker_plan.plan_digest);
 
             transfer::RecvRequest recv_req;
-            recv_req.unique_key  = route_layer_key;
-            recv_req.block_info  = std::move(key_block_infos.value());
-            recv_req.deadline_ms = deadline_ms;
-            auto window = std::make_shared<ReceiveWindow>(recv_req.block_info);
+            recv_req.unique_key      = route_layer_key;
+            recv_req.block_info      = std::move(key_block_infos.value());
+            recv_req.deadline_ms     = deadline_ms;
+            auto window              = std::make_shared<ReceiveWindow>(recv_req.block_info);
             recv_req.on_batch_copied = [window](const std::vector<int64_t>& keys) {
                 return window->onBatchCopied(keys);
             };
@@ -175,7 +177,7 @@ ErrorInfo P2PWorkerDecodeRead::buildRecvTasks(const P2PWorkerRoutePlan&         
     for (const auto& receive : prepared) {
         task_group->partition_keys.push_back(receive.request.unique_key);
         const int64_t recv_start_us = currentTimeUs();
-        auto task = receiver_->recv(receive.request);
+        auto          task          = receiver_->recv(receive.request);
         if (!task) {
             return fail_registration(receive.context + ": create recv task failed");
         }
@@ -189,7 +191,7 @@ ErrorInfo P2PWorkerDecodeRead::buildRecvTasks(const P2PWorkerRoutePlan&         
 }
 
 void P2PWorkerDecodeRead::cleanupRecvTaskStore(const std::shared_ptr<ReadTaskGroup>& task_group,
-                                                    bool                                   cancel_pending_tasks) const {
+                                               bool                                  cancel_pending_tasks) const {
     if (!task_group) {
         return;
     }
@@ -205,9 +207,9 @@ void P2PWorkerDecodeRead::cleanupRecvTaskStore(const std::shared_ptr<ReadTaskGro
 
 P2PWorkerDecodeRead::ReadWaitOutcome
 P2PWorkerDecodeRead::waitRecvTasksWithReadDeadlinePolicy(const std::shared_ptr<ReadTaskGroup>& task_group,
-                                                              int64_t                               deadline_ms,
-                                                              int64_t                               request_id,
-                                                              const std::string&                    unique_key) const {
+                                                         int64_t                               deadline_ms,
+                                                         int64_t                               request_id,
+                                                         const std::string&                    unique_key) const {
     const auto all_done = [&]() {
         return std::all_of(
             task_group->tasks.begin(), task_group->tasks.end(), [](const auto& task) { return task->done(); });
@@ -251,9 +253,9 @@ P2PWorkerDecodeRead::waitRecvTasksWithReadDeadlinePolicy(const std::shared_ptr<R
 }
 
 void P2PWorkerDecodeRead::reportReadMetrics(P2PConnectorMetricsCollector&         collector,
-                                                 bool                                  success,
-                                                 int64_t                               read_start_time_us,
-                                                 const std::shared_ptr<ReadTaskGroup>& task_group) const {
+                                            bool                                  success,
+                                            int64_t                               read_start_time_us,
+                                            const std::shared_ptr<ReadTaskGroup>& task_group) const {
     if (!metrics_reporter_) {
         return;
     }
@@ -267,10 +269,10 @@ void P2PWorkerDecodeRead::reportReadMetrics(P2PConnectorMetricsCollector&       
 }
 
 ErrorInfo P2PWorkerDecodeRead::read(int64_t                   request_id,
-                                         const std::string&        unique_key,
-                                         int64_t                   deadline_ms,
-                                         const P2PWorkerRoutePlan& worker_plan,
-                                         int64_t* physical_completion_time_us) {
+                                    const std::string&        unique_key,
+                                    int64_t                   deadline_ms,
+                                    const P2PWorkerRoutePlan& worker_plan,
+                                    int64_t*                  physical_completion_time_us) {
     RTP_LLM_LOG_DEBUG("read start, request_id: %ld, unique_key: %s, deadline_ms: %ld, routes: %zu, plan_digest: %llu",
                       request_id,
                       unique_key.c_str(),
@@ -288,8 +290,8 @@ ErrorInfo P2PWorkerDecodeRead::read(int64_t                   request_id,
     task_group->lease                              = std::make_shared<DecodeTargetWriteLease>();
     int                          total_block_count = 0;
     P2PConnectorMetricsCollector collector;
-    bool registration_pending = false;
-    const auto rollback_registration = [&] {
+    bool                         registration_pending  = false;
+    const auto                   rollback_registration = [&] {
         if (!registration_pending) {
             return;
         }
@@ -351,7 +353,7 @@ ErrorInfo P2PWorkerDecodeRead::read(int64_t                   request_id,
     {
         std::lock_guard<std::mutex> lock(read_tasks_mutex_);
         read_tasks_.emplace(unique_key, task_group);
-        pending_cancel = pending_cancel_keys_.count(unique_key) > 0;
+        pending_cancel       = pending_cancel_keys_.count(unique_key) > 0;
         registration_pending = false;
     }
 
@@ -481,7 +483,7 @@ bool P2PWorkerDecodeRead::cancelRead(const std::string& unique_key, int64_t requ
         expiry       = std::max(
             expiry, has_finite_request_deadline ? std::max(request_deadline_ms, fallback_deadline) : fallback_deadline);
         schedulePendingCancelExpiryLocked();
-        auto                        it = read_tasks_.find(unique_key);
+        auto it = read_tasks_.find(unique_key);
         if (it == read_tasks_.end()) {
             RTP_LLM_LOG_INFO("cancelRead: queued pending cancel, unique_key: %s", unique_key.c_str());
             return true;
@@ -503,11 +505,10 @@ bool P2PWorkerDecodeRead::cancelRead(const std::string& unique_key, int64_t requ
     return true;
 }
 
-void P2PWorkerDecodeRead::registerTaskCompletionCallback(
-    const transfer::IKVCacheRecvTaskPtr& task,
-    const std::string&                    unique_key,
-    const std::shared_ptr<ReadTaskGroup>& task_group) {
-    const auto callback_state = completion_callback_state_;
+void P2PWorkerDecodeRead::registerTaskCompletionCallback(const transfer::IKVCacheRecvTaskPtr&  task,
+                                                         const std::string&                    unique_key,
+                                                         const std::shared_ptr<ReadTaskGroup>& task_group) {
+    const auto                         callback_state  = completion_callback_state_;
     const std::weak_ptr<ReadTaskGroup> weak_task_group = task_group;
     const std::string task_key = task_group->partition_keys.empty() ? unique_key : task_group->partition_keys.back();
     std::weak_ptr<transfer::IKVCacheRecvTask> weak_task = task;
@@ -562,8 +563,8 @@ void P2PWorkerDecodeRead::registerTaskCompletionCallback(
     });
 }
 
-void P2PWorkerDecodeRead::onRecvTaskDone(const std::string& unique_key,
-                                               const std::weak_ptr<ReadTaskGroup>& weak_task_group) {
+void P2PWorkerDecodeRead::onRecvTaskDone(const std::string&                  unique_key,
+                                         const std::weak_ptr<ReadTaskGroup>& weak_task_group) {
     const auto task_group = weak_task_group.lock();
     if (!task_group) {
         return;

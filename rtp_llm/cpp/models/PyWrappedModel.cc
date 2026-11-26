@@ -646,7 +646,13 @@ PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_
 
     // The model topology, including placeholders, determines the input shape;
     // extra rows in a shared target payload do not make a single-group model tagged.
-    py_attn_inputs = by_tag.at(model_groups.front().tag);
+    // MLA builds its slot map before per-layer table selection. Bind the singular
+    // tables to the model's FULL group so an Eagle draft with independent pools
+    // cannot index its arena with the target model's block IDs.
+    const auto& initial_group = description_.attention_conf.use_mla ?
+                                    kv_cache_layer_layout_->topology().initialMlaBlockTableGroup() :
+                                    model_groups.front();
+    py_attn_inputs            = by_tag.at(initial_group.tag);
     if (model_groups.size() == 1) {
         return {};
     }
@@ -1097,11 +1103,15 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             && generation_prefill_graph_runner_ != nullptr && !is_generation_prefill_runner) {
             generation_prefill_cuda_graph_status = GenerationPrefillCudaGraphStatus::MIXED_PREFILL_DECODE_NOT_SUPPORTED;
         }
-        const bool can_run_graph = moe_forward_allows_graph_ && !capture_hidden_states && enable_cuda_graph_
-                                   && graph_runner != nullptr && graph_runner->canRun(py_model_inputs, graph_state);
-        // The eager Python instance retains this wrapper's SEED/REUSE role and
-        // shares its request-local TopK buffer with the graph clones. Batches
-        // outside the captured buckets must use that same role eagerly.
+        bool can_run_graph = moe_forward_allows_graph_ && !capture_hidden_states && enable_cuda_graph_
+                             && graph_runner != nullptr && graph_runner->canRun(py_model_inputs, graph_state);
+        if (synchronize_cuda_graph_choice_) {
+            // The eager forward plans MegaMoE chunks on WORLD. Every rank
+            // must enter that collective before any rank launches MegaMoE.
+            auto graph_ok = torch::full({1}, can_run_graph ? 1 : 0, token_ids.options().dtype(torch::kInt32));
+            can_run_graph =
+                execAllReduce({graph_ok, ReduceOp::Min, ParallelMode::WORLD, {}}).buffer.item<int32_t>() != 0;
+        }
         if (!capture_hidden_states && is_generation_prefill_runner && !can_run_graph) {
             generation_prefill_cuda_graph_status =
                 graph_state.generation_prefill_status == GenerationPrefillCudaGraphStatus::NOT_REQUESTED ?

@@ -13,6 +13,20 @@ size_t GroupBase::seqSizePerBlock() const {
     return spec->seq_size_per_block;
 }
 
+uint32_t GroupBase::blockCountDivisor(size_t base_tokens_per_block) const {
+    if (!policy.match_base_token_capacity) {
+        return 1;
+    }
+    const auto group_tokens = seqSizePerBlock();
+    RTP_LLM_CHECK_WITH_INFO(policy.group_type == CacheGroupType::SWA && base_tokens_per_block > 0
+                                && group_tokens >= base_tokens_per_block && group_tokens % base_tokens_per_block == 0,
+                            "cache tag=%s requires an integral Decode state page span (state=%zu base=%zu)",
+                            tag.c_str(),
+                            group_tokens,
+                            base_tokens_per_block);
+    return static_cast<uint32_t>(group_tokens / base_tokens_per_block);
+}
+
 size_t GroupBase::kernelSeqSizePerBlock() const {
     RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "CacheTopology tag=%s has null spec", tag.c_str());
     return spec->kernel_seq_size_per_block;
@@ -88,10 +102,10 @@ GroupBase::chunkCacheBlockCount(int prompt_tokens, int chunk_tokens, bool reuse_
 }
 
 size_t CacheTopology::blockSizeBytesForGroup(std::string_view group_tag) const {
-    const auto& cache_group            = group(group_tag);
-    const auto  kv_block_stride_bytes  = cache_group.kvBlockStrideBytes();
-    const auto  kv_scale_stride_bytes  = cache_group.kvScaleStrideBytes();
-    const auto  layer_count            = layerIdsForGroup(group_tag).size();
+    const auto& cache_group           = group(group_tag);
+    const auto  kv_block_stride_bytes = cache_group.kvBlockStrideBytes();
+    const auto  kv_scale_stride_bytes = cache_group.kvScaleStrideBytes();
+    const auto  layer_count           = layerIdsForGroup(group_tag).size();
     RTP_LLM_CHECK_WITH_INFO(kv_scale_stride_bytes <= std::numeric_limits<size_t>::max() - kv_block_stride_bytes,
                             "CacheTopology tag=%s stride overflow",
                             cache_group.tag.c_str());
@@ -171,6 +185,24 @@ size_t CacheTopology::groupIdForTag(std::string_view tag) const {
     const auto        it = tag_to_group_id_.find(value);
     RTP_LLM_CHECK_WITH_INFO(it != tag_to_group_id_.end(), "CacheTopology missing tag=%s", value.c_str());
     return it->second;
+}
+
+const GroupBase& CacheTopology::initialMlaBlockTableGroup() const {
+    const GroupBase* full_group = nullptr;
+    for (const auto& layer : layers_) {
+        for (const auto& tag : layer.group_tags) {
+            const auto& cache_group = group(tag);
+            if (cache_group.policy.group_type == CacheGroupType::FULL) {
+                if (cache_group.spec->type == KVCacheSpecType::MultiHeadLatentAttention) {
+                    return cache_group;
+                }
+                if (full_group == nullptr) {
+                    full_group = &cache_group;
+                }
+            }
+        }
+    }
+    return full_group != nullptr ? *full_group : groups_.front();
 }
 
 const GroupBase& CacheTopology::group(std::string_view tag) const {

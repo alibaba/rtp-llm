@@ -15,9 +15,41 @@
 // remote_kv_cache_manager dependency that does not link in the CUDA-12 toolchain).
 #include "rtp_llm/cpp/cache/DeviceBlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/MemoryUtil.h"
 
 namespace rtp_llm {
 namespace {
+
+class CountingMemoryUtil: public MemoryUtil {
+public:
+    bool regUserMr(void* address, uint64_t bytes, bool gpu, uint64_t alignment) override {
+        ++registrations;
+        last_address   = address;
+        last_bytes     = bytes;
+        last_gpu       = gpu;
+        last_alignment = alignment;
+        return register_ok;
+    }
+    bool deregUserMr(void* address, bool gpu) override {
+        ++deregistrations;
+        EXPECT_EQ(address, last_address);
+        EXPECT_EQ(gpu, last_gpu);
+        return true;
+    }
+    bool isMemoryMr(void*, uint64_t, bool, bool) override {
+        return false;
+    }
+    bool findMemoryMr(void*, void*, uint64_t, bool, bool) override {
+        return false;
+    }
+    bool isRdmaMode() override {
+        return false;
+    }
+    size_t   registrations{0}, deregistrations{0};
+    void*    last_address{nullptr};
+    uint64_t last_bytes{0}, last_alignment{0};
+    bool     last_gpu{false}, register_ok{true};
+};
 
 static_assert(std::is_same_v<decltype(DeviceBlockPoolConfigHelper::createConfigForGroup(
                                  std::declval<const CacheConfig&>(), std::declval<const GroupBase&>())),
@@ -592,6 +624,102 @@ TEST(DeviceBlockPoolTest, MallocAllocatesLowestBlockFirst) {
     EXPECT_EQ(*b1, 1);
     EXPECT_EQ(*b2, 2);
     EXPECT_EQ(*b3, 3);
+}
+
+TEST(DeviceBlockPoolTest, SharedBackingPreservesMainMtpAndScaleViewsAcrossPoolInitialization) {
+    auto mtp   = makeMtpCacheConfig();
+    auto first = std::make_shared<DeviceBlockPoolConfig>(
+        DeviceBlockPoolConfigHelper::createConfigForGroup(mtp, mtp.topology().groups().front()));
+    auto                      second  = makeMixedScaleConfig();
+    const std::vector<size_t> strides = {DeviceBlockPoolConfigHelper::sharedSlotStride(*first),
+                                         DeviceBlockPoolConfigHelper::sharedSlotStride(*second)};
+    auto arena = std::make_shared<SharedBlockArena>(16 * std::max(strides[0], strides[1]), strides);
+    DeviceBlockPoolConfigHelper::bindSharedArena(*first, arena, 0);
+    auto first_pool = std::make_unique<DeviceBlockPool>(first);
+    ASSERT_TRUE(first_pool->init());
+    auto block = first_pool->malloc();
+    ASSERT_TRUE(block.has_value());
+    first_pool->incRef(*block);
+    const auto first_views = first_pool->allLayerCacheBase();
+    ASSERT_EQ(first_views.size(), 4u);  // main two layers plus two MTP modules.
+    for (size_t layer = 0; layer < first_views.size(); ++layer) {
+        first_views[layer][*block].fill_(10 + layer);
+    }
+    DeviceBlockPoolConfigHelper::bindSharedArena(*second, arena, 1, first_pool->sharedBacking());
+    auto second_pool = std::make_unique<DeviceBlockPool>(second);
+    ASSERT_TRUE(second_pool->init());
+    EXPECT_EQ(first_pool->getBaseAddress(), second_pool->getBaseAddress());
+    EXPECT_EQ(first_pool->sharedBacking(), second_pool->sharedBacking());
+    EXPECT_EQ(first_pool->getTotalSizeBytes(), arena->bytes());
+    EXPECT_EQ(second_pool->getTotalSizeBytes(), arena->bytes());
+    for (size_t layer = 0; layer < first_views.size(); ++layer) {
+        EXPECT_TRUE(first_views[layer][*block].eq(10 + layer).all().item<bool>());
+    }
+    auto other = second_pool->malloc();
+    ASSERT_TRUE(other.has_value());
+    second_pool->incRef(*other);
+    const size_t begin0 = *block * strides[0], begin1 = *other * strides[1];
+    EXPECT_TRUE(begin0 + strides[0] <= begin1 || begin1 + strides[1] <= begin0);
+    const auto second_views  = second_pool->allLayerCacheBase();
+    const auto second_scales = second_pool->allLayerScaleCacheBase();
+    second_views[0][*other].fill_(19);
+    second_scales[0][*other].fill_(23);
+    EXPECT_TRUE(second_views[0][*other].eq(19).all().item<bool>());
+    EXPECT_TRUE(second_scales[0][*other].eq(23).all().item<bool>());
+    for (size_t layer = 0; layer < first_views.size(); ++layer) {
+        EXPECT_TRUE(first_views[layer][*block].eq(10 + layer).all().item<bool>());
+        const auto buffer = first_pool->convertIndexToBuffer(static_cast<int>(layer), *block).front();
+        EXPECT_EQ(buffer.addr, first_views[layer][*block].data_ptr());
+    }
+    first_pool->decRef(*block);
+    second_pool->decRef(*other);
+    EXPECT_EQ(arena->freeBytes(), arena->usableBytes());
+    first_pool.reset();
+    // The second pool and model views retain the common Storage.
+    EXPECT_TRUE(second_views[0][*other].eq(19).all().item<bool>());
+}
+
+TEST(DeviceBlockPoolTest, SharedBackingRegistersWholeBudgetOnceAndRollsBackRegistrationFailure) {
+    auto arena          = std::make_shared<SharedBlockArena>(4096, std::vector<size_t>{512, 1024});
+    auto bytes          = torch::zeros({4096}, torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+    auto backing        = std::make_shared<SharedDeviceBlockBacking>(bytes, arena);
+    auto memory         = std::make_shared<CountingMemoryUtil>();
+    memory->register_ok = false;
+    EXPECT_ANY_THROW(backing->retainMemoryRegistration(memory));
+    memory->register_ok = true;
+    backing->retainMemoryRegistration(memory);
+    backing->retainMemoryRegistration(memory);
+    EXPECT_EQ(memory->registrations, 2u);  // one failed attempt, one actual registration.
+    EXPECT_EQ(memory->last_address, bytes.data_ptr());
+    EXPECT_EQ(memory->last_bytes, 4096u);
+    EXPECT_TRUE(memory->last_gpu);
+    EXPECT_EQ(memory->last_alignment, 0u);
+    auto different_provider = std::make_shared<CountingMemoryUtil>();
+    EXPECT_ANY_THROW(backing->retainMemoryRegistration(different_provider));
+    backing->releaseMemoryRegistration();
+    EXPECT_EQ(memory->deregistrations, 0u);
+    backing->releaseMemoryRegistration();
+    EXPECT_EQ(memory->deregistrations, 1u);
+    EXPECT_ANY_THROW(backing->releaseMemoryRegistration());
+    backing->retainMemoryRegistration(memory);
+    backing.reset();  // exception cleanup still releases the one registration.
+    EXPECT_EQ(memory->deregistrations, 2u);
+}
+
+TEST(DeviceBlockPoolTest, SharedBackingRejectsIndependentAllocatorAndWrongPitch) {
+    auto       first  = makeConfig();
+    const auto stride = DeviceBlockPoolConfigHelper::sharedSlotStride(*first);
+    auto       arena  = std::make_shared<SharedBlockArena>(16 * stride, std::vector<size_t>{stride});
+    DeviceBlockPoolConfigHelper::bindSharedArena(*first, arena, 0);
+    DeviceBlockPool pool(first);
+    ASSERT_TRUE(pool.init());
+    auto second      = makeConfig();
+    auto independent = std::make_shared<SharedBlockArena>(16 * stride, std::vector<size_t>{stride});
+    DeviceBlockPoolConfigHelper::bindSharedArena(*second, independent, 0, pool.sharedBacking());
+    DeviceBlockPool unsafe(second);
+    EXPECT_ANY_THROW(unsafe.init());
+    first->memory_layouts.front().block_slot_stride_bytes += 256;
+    EXPECT_ANY_THROW(static_cast<void>(DeviceBlockPool(first)));
 }
 
 }  // namespace rtp_llm
