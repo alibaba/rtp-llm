@@ -162,6 +162,8 @@ class ModelConfig(CppModelConfig):
         "moe_inter_size",
         "moe_w1_layout",
         "moe_prefill_max_tokens_per_rank",
+        "mega_moe_prefill_chunk_tokens",
+        "mega_moe_decode_tokens_per_rank",
         "n_shared_experts",
         "dsv4_fixed_pool_use_memory",
         "generate_env_config",
@@ -785,6 +787,8 @@ class ModelConfig(CppModelConfig):
         self.dsv4_fixed_pool_use_memory: Optional[bool] = None
         # None uses max_seq_len until ModelFactory finalizes the scheduler bound.
         self.moe_prefill_max_tokens_per_rank: Optional[int] = None
+        self.mega_moe_prefill_chunk_tokens: int = 0
+        self.mega_moe_decode_tokens_per_rank: int = 0
 
         # Renderer configuration fields
         self.generate_env_config: Optional[Any] = (

@@ -293,6 +293,9 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("capture_hidden_states",
                        &PyModelInputs::capture_hidden_states,
                        "Capture configured hidden states for this homogeneous target-prefill batch")
+        .def_readwrite("is_mtp_decode_commit",
+                       &PyModelInputs::is_mtp_decode_commit,
+                       "MTP decode draft commit with prefill-shaped attention inputs")
         .def_readwrite("pp_intermediates",
                        &PyModelInputs::pp_intermediates,
                        "PP stage-boundary tensors from the upstream stage (empty under pp_size=1)");

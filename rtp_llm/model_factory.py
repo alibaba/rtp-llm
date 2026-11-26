@@ -26,6 +26,7 @@ from rtp_llm.device.device_type import is_hip
 from rtp_llm.model_factory_register import _model_factory, ensure_model_registered
 from rtp_llm.ops import (
     ProfilingDebugLoggingConfig,
+    RoleType,
     SpeculativeType,
     TaskType,
     VitSeparation,
@@ -470,9 +471,73 @@ class ModelFactory:
             * int(model_config.max_seq_len),
             int(scheduler_config.max_batch_tokens_size),
         )
+        ModelFactory._configure_qwen4_mega_moe_prefill(engine_config, model_config)
 
         # Set model_name to engine_config.runtime_config.model_name (for backward compatibility)
         engine_config.runtime_config.model_name = model_config.model_name
+
+    @staticmethod
+    def _configure_qwen4_mega_moe_prefill(
+        engine: EngineConfig, model: ModelConfig
+    ) -> None:
+        if not (
+            model.model_type == "qwen4_exp"
+            and getattr(model, "_qwen4_mxfp4_source", False)
+            and engine.moe_config.moe_strategy in ("mega_moe", "mega_moe_se")
+        ):
+            return
+
+        from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.chunking import (
+            MAX_MEGA_MOE_RANKS,
+        )
+
+        model.mega_moe_prefill_chunk_tokens = 0
+        model.mega_moe_decode_tokens_per_rank = 0
+        parallel = engine.parallelism_config
+        if not (
+            2 <= parallel.ep_size <= MAX_MEGA_MOE_RANKS
+            and parallel.ep_size == parallel.dp_size == parallel.world_size
+            and parallel.tp_size == parallel.pp_size == 1
+            and parallel.get_ffn_tp_size() == 1
+            and not parallel.prefill_cp_config.is_enabled()
+        ):
+            return
+
+        role = engine.pd_sep_config.role_type
+        runtime = engine.runtime_config
+        fifo = runtime.fifo_scheduler_config
+        # Idle ranks must join the same eager prefill as busy ranks.
+        # PREFILL workers already do this. PDFUSION needs its phase coordinator.
+        if role != RoleType.PREFILL and not (
+            role == RoleType.PDFUSION
+            and (
+                fifo.pdfusion_coord_mode == "cadence"
+                or int(os.environ.get("PDFUSION_CADENCE_ADAPTIVE", "0")) == 1
+            )
+        ):
+            return
+
+        hw = engine.hw_kernel_config
+        if hw.enable_cuda_graph and hw.generation_prefill_capture_token_buckets:
+            return
+
+        chunk_tokens = int(os.environ.get("RTP_MEGAMOE_CHUNK_TOKENS", "8192"))
+        if chunk_tokens < 0:
+            raise ValueError("RTP_MEGAMOE_CHUNK_TOKENS must be non-negative")
+        if not chunk_tokens:
+            return
+
+        decode_batch_size = int(runtime.max_generate_batch_size)
+        if hw.enable_cuda_graph:
+            decode_batch_size = max(
+                decode_batch_size, max(hw.decode_capture_batch_sizes, default=0)
+            )
+        sp = engine.sp_config
+        tokens_per_request = (
+            1 if sp.type == SpeculativeType.NONE else 1 + int(sp.gen_num_per_cycle)
+        )
+        model.mega_moe_prefill_chunk_tokens = chunk_tokens
+        model.mega_moe_decode_tokens_per_rank = decode_batch_size * tokens_per_request
 
     @staticmethod
     def create_propose_model_config(
@@ -549,6 +614,23 @@ class ModelFactory:
             propose_model_config, engine_config.kv_cache_config
         )
         propose_model_cls._post_build_model_config(propose_model_config)
+
+        if (
+            propose_model_config.model_type == "qwen4_exp_mtp"
+            and getattr(propose_model_config, "_qwen4_mxfp4_source", False)
+            and model_config.mega_moe_prefill_chunk_tokens
+        ):
+            # Prompt prefill uses the target scheduler's budget. MTP
+            # decode/commit forwards share its unchunked verification bound.
+            propose_model_config.moe_prefill_max_tokens_per_rank = (
+                model_config.moe_prefill_max_tokens_per_rank
+            )
+            propose_model_config.mega_moe_prefill_chunk_tokens = (
+                model_config.mega_moe_prefill_chunk_tokens
+            )
+            propose_model_config.mega_moe_decode_tokens_per_rank = (
+                model_config.mega_moe_decode_tokens_per_rank
+            )
 
         if sp_config.type == SpeculativeType.DSPARK:
             ModelFactory._setup_dspark_configs(

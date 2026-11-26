@@ -986,6 +986,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                                               bert_embedding_inputs});
 
         py_model_inputs.capture_hidden_states  = capture_hidden_states;
+        py_model_inputs.is_mtp_decode_commit   = inputs.is_mtp_decode_commit;
         py_model_inputs.need_all_logits        = inputs.need_all_logits;
         py_model_inputs.need_all_hidden_states = inputs.need_all_hidden_states;
         if (inputs.engram_token_windows.defined()) {

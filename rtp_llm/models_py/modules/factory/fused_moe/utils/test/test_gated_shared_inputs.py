@@ -21,7 +21,7 @@ class GatedSharedInputsTest(unittest.TestCase):
         logits = torch.linspace(
             -10, 10, 129, device="cuda", dtype=torch.bfloat16
         ).unsqueeze(-1)
-        ensure_shared_gate_capacity(logits.device, 129)
+        capacity = ensure_shared_gate_capacity(logits.device, 129).numel()
         stream = torch.cuda.Stream()
         stream.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(stream):
@@ -31,6 +31,20 @@ class GatedSharedInputsTest(unittest.TestCase):
         with torch.cuda.graph(graph):
             output = shared_expert_sigmoid(logits)
         address = output.data_ptr()
+        prefill_logits = torch.randn(
+            capacity + 128, 1, device=logits.device, dtype=logits.dtype
+        )
+        prefill_gates = shared_expert_sigmoid(prefill_logits, use_static_buffer=False)
+        self.assertNotEqual(prefill_gates.data_ptr(), address)
+        self.assertEqual(
+            ensure_shared_gate_capacity(logits.device, 129).data_ptr(), address
+        )
+        torch.testing.assert_close(
+            prefill_gates,
+            torch.sigmoid(prefill_logits[:, 0].float()),
+            rtol=1e-6,
+            atol=1e-7,
+        )
         for value in (-3.0, 0.0, 2.0):
             logits.copy_(torch.randn_like(logits) + value)
             graph.replay()

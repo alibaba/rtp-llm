@@ -167,9 +167,11 @@ class GenericMoeLayer(nn.Module):
         hidden_states: torch.Tensor,
         experts_output: torch.Tensor,
         shared_expert_output: torch.Tensor,
+        gate_output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if self.shared_expert_gate is not None:
-            gate_output = self.shared_expert_gate(hidden_states)  # [T, 1]
+            if gate_output is None:
+                gate_output = self.shared_expert_gate(hidden_states)  # [T, 1]
             self.sigmoid_gate_scale_add(
                 gate_output, shared_expert_output, experts_output
             )
@@ -180,62 +182,69 @@ class GenericMoeLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         shared_expert_output: torch.Tensor,
+        gate_output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if self.shared_expert_gate is not None:
-            gate_output = self.shared_expert_gate(hidden_states)  # [T, 1]
+            if gate_output is None:
+                gate_output = self.shared_expert_gate(hidden_states)  # [T, 1]
             return torch.sigmoid(gate_output) * shared_expert_output
         return shared_expert_output
 
-    def _forward_routed(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        num_tokens, _ = hidden_states.shape
-        router_logits = self.gate(hidden_states)
-        expert_args = None
-        if self._uses_shared_expert_gates:
-            from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.shared_inputs import (
-                shared_expert_sigmoid,
-            )
+    def _routed_shared_gates(
+        self, hidden_states: torch.Tensor, *, use_static_buffer: bool = True
+    ) -> torch.Tensor:
+        from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.shared_inputs import (
+            shared_expert_sigmoid,
+        )
 
-            if self.shared_expert_gate is None or self.ffn_tp_size != 1:
-                raise ValueError(
-                    "Gated MegaMoE requires a complete gated shared expert"
-                )
-            # Preserve the original linear output dtype/rounding before FP32 sigmoid.
-            gates = shared_expert_sigmoid(self.shared_expert_gate(hidden_states))
-            expert_args = {"shared_expert_gates": gates}
-            if (
-                self.fused_moe.supports_gate_pack
-                and self.config.scoring_func == 0
-                and self.config.has_moe_norm
-                and float(self.config.routed_scaling_factor or 1.0) == 1.0
-                and self.correction_bias is None
-                and self.fake_balance_expert is None
-            ):
-                return self.fused_moe.forward_gate_pack(
-                    hidden_states=hidden_states,
-                    gate_payload=ExpertGatePayload(
-                        scores=router_logits,
-                        topk=self.top_k,
-                        score_func="softmax",
-                        route_scale=1.0,
-                        norm_eps=0.0,
-                    ),
-                    activation="SiGLU",
-                    extra_expert_args=expert_args,
-                )
+        if self.shared_expert_gate is None or self.ffn_tp_size != 1:
+            raise ValueError("Gated MegaMoE requires a complete gated shared expert")
+        # Preserve the original linear output dtype/rounding before FP32 sigmoid.
+        return shared_expert_sigmoid(
+            self.shared_expert_gate(hidden_states), use_static_buffer=use_static_buffer
+        )
 
+    def _uses_fused_gate_pack(self) -> bool:
+        return (
+            self._uses_shared_expert_gates
+            and self.fused_moe.supports_gate_pack
+            and self.config.scoring_func == 0
+            and self.config.has_moe_norm
+            and float(self.config.routed_scaling_factor or 1.0) == 1.0
+            and self.correction_bias is None
+            and self.fake_balance_expert is None
+        )
+
+    def _forward_gate_pack(self, hidden_states, router_logits, expert_args):
+        return self.fused_moe.forward_gate_pack(
+            hidden_states=hidden_states,
+            gate_payload=ExpertGatePayload(
+                scores=router_logits,
+                topk=self.top_k,
+                score_func="softmax",
+                route_scale=1.0,
+                norm_eps=0.0,
+            ),
+            activation="SiGLU",
+            extra_expert_args=expert_args,
+        )
+
+    def _select_routing(self, router_logits: torch.Tensor):
+        num_tokens = router_logits.size(0)
         topk_weights = torch.empty(
             (num_tokens, self.top_k),
             dtype=torch.float32,
-            device=hidden_states.device,
+            device=router_logits.device,
         )
         # different executor may need different topk_ids dtype
         topk_ids_dtype = self.fused_moe.topk_ids_dtype
         topk_ids = torch.empty(
             (num_tokens, self.top_k),
             dtype=topk_ids_dtype,
-            device=hidden_states.device,
+            device=router_logits.device,
         )
-
+        if num_tokens == 0:
+            return topk_weights, topk_ids
         if self.correction_bias is not None:
             self.group_topk = GroupTopK()
             self.renormalize = self.config.has_moe_norm
@@ -260,13 +269,15 @@ class GenericMoeLayer(nn.Module):
 
         if self.fake_balance_expert is not None:
             self.fake_balance_expert(topk_ids, topk_weights)
+        return topk_weights, topk_ids
 
+    def _forward_with_routing(self, hidden_states, topk_weights, topk_ids, expert_args):
         # In pure-TP mode both the routed experts and the shared expert produce
         # TP-partial outputs.  Reduce their sum once instead of reducing each
         # path separately.  This is especially important for decode, where the
         # hidden dimension is small enough that collective launch latency
         # dominates the payload transfer.
-        experts_output = self.fused_moe(
+        return self.fused_moe(
             hidden_states=hidden_states,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
@@ -274,10 +285,24 @@ class GenericMoeLayer(nn.Module):
             skip_tp_allreduce=self.use_unified_tp_allreduce,
             extra_expert_args=expert_args,
         )
-        return experts_output
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        experts_output = self._forward_routed(hidden_states)
+    def _forward_routed(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        router_logits = self.gate(hidden_states)
+        expert_args = None
+        if self._uses_shared_expert_gates:
+            expert_args = {
+                "shared_expert_gates": self._routed_shared_gates(hidden_states)
+            }
+            if self._uses_fused_gate_pack():
+                return self._forward_gate_pack(
+                    hidden_states, router_logits, expert_args
+                )
+        topk_weights, topk_ids = self._select_routing(router_logits)
+        return self._forward_with_routing(
+            hidden_states, topk_weights, topk_ids, expert_args
+        )
+
+    def _finish_forward(self, hidden_states, experts_output, shared_gate_logits=None):
         if self.shared_expert is not None:
             shared_expert_output = self.shared_expert(
                 hidden_states,
@@ -291,7 +316,10 @@ class GenericMoeLayer(nn.Module):
                 # TP ranks, so it is safe to apply it before the single
                 # all-reduce.
                 experts_output = self._merge_shared_expert_output(
-                    hidden_states, experts_output, shared_expert_output
+                    hidden_states,
+                    experts_output,
+                    shared_expert_output,
+                    shared_gate_logits,
                 )
                 experts_output = getattr(self, "tp_all_reduce", all_reduce)(
                     experts_output, group=Group.TP
@@ -301,7 +329,7 @@ class GenericMoeLayer(nn.Module):
                 # (EP combine via all_to_all / all_gather aggregated across ranks).
                 # Only the shared expert output is TP-partial and needs all_reduce.
                 shared_expert_output = self._gate_shared_expert_output(
-                    hidden_states, shared_expert_output
+                    hidden_states, shared_expert_output, shared_gate_logits
                 )
                 shared_expert_output = getattr(self, "tp_all_reduce", all_reduce)(
                     shared_expert_output, group=Group.TP
@@ -312,10 +340,16 @@ class GenericMoeLayer(nn.Module):
                 # This includes ffn_tp_size == 1 and routers that retain their
                 # own finalize reduction, so only local merging remains.
                 experts_output = self._merge_shared_expert_output(
-                    hidden_states, experts_output, shared_expert_output
+                    hidden_states,
+                    experts_output,
+                    shared_expert_output,
+                    shared_gate_logits,
                 )
 
         return experts_output
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return self._finish_forward(hidden_states, self._forward_routed(hidden_states))
 
 
 class DecodeLayerOutput:

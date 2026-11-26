@@ -68,6 +68,16 @@ py_test(
 )
 
 py_test(
+    name = "test_mega_moe_prefill_chunking",
+    srcs = ["test_mega_moe_prefill_chunking.py"],
+    env = {"GPU_COUNT": "0"},
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+)
+
+py_test(
     name = "mega_moe_static_buf_test",
     srcs = ["mega_moe_static_buf_test.py"],
     deps = ["//rtp_llm:testlib"],

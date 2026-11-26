@@ -98,14 +98,17 @@ class MoEConfigAdapter:
         self.prefill_max_tokens_per_rank = int(
             model_config.max_seq_len if prefill_capacity is None else prefill_capacity
         )
+        self.mega_moe_prefill_chunk_tokens = model_config.mega_moe_prefill_chunk_tokens
+        prefill_capacity = self.prefill_max_tokens_per_rank
+        if self.mega_moe_prefill_chunk_tokens:
+            prefill_capacity = min(prefill_capacity, self.mega_moe_prefill_chunk_tokens)
         self.max_tokens_per_rank = max(
             self.decode_max_tokens_per_rank,
-            self.prefill_max_tokens_per_rank,
+            prefill_capacity,
+            model_config.mega_moe_decode_tokens_per_rank,
             1,
         )
-        # Generic execution is not chunked, so JIT warmup only needs the
-        # request-visible bucket representatives rather than the capacity cap.
-        self.warmup_include_capacity = False
+        self.warmup_include_capacity = bool(self.mega_moe_prefill_chunk_tokens)
         effective_quant_config = (
             quant_config if quant_config is not None else model_config.quant_config
         )

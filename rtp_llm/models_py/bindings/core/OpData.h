@@ -123,6 +123,8 @@ struct GptModelInputs {
     // So, the model has different inference logic for target verify and normal inference.
     // To select correct inference mode, we need to set this flag manually.
     bool is_target_verify = false;
+    // Decode's draft commit uses prefill-shaped attention inputs.
+    bool is_mtp_decode_commit = false;
 
     /** Upstream stage activations; excluded from TP input synchronization. */
     std::map<std::string, torch::Tensor> pp_intermediates;

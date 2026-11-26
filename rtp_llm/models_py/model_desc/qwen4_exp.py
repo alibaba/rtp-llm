@@ -1,6 +1,7 @@
 import os
 import weakref
 from collections.abc import Mapping
+from contextlib import nullcontext
 from typing import Any, Dict, Optional
 
 import torch
@@ -934,6 +935,14 @@ class Qwen4ExpModel(Qwen35Model):
             fmha_config,
             py_hw_kernel_config,
         )
+        self._mega_moe_prefill_chunker = next(
+            (
+                layer.mlp.prefill_chunker
+                for layer in self.layers
+                if getattr(layer.mlp, "prefill_chunker", None) is not None
+            ),
+            None,
+        )
         fp8_embedding = (
             getattr(self.config, "_qwen4_full_fp8_nvfp4", False)
             and self.embed_tokens.weight.dtype == torch.float8_e4m3fn
@@ -1482,6 +1491,21 @@ class Qwen4ExpModel(Qwen35Model):
     def _ple_input_ids(self, inputs: PyModelInputs) -> torch.Tensor:
         return ple_input_ids(inputs, ple_eos_token_id(getattr(self, "config", None)))
 
+    def _mega_moe_prefill_scope(self, inputs: PyModelInputs, fmha_impl: Any):
+        chunker = getattr(self, "_mega_moe_prefill_chunker", None)
+        if chunker is None:
+            return nullcontext()
+        if self.config.is_mtp and inputs.is_mtp_decode_commit:
+            return nullcontext()
+        primary = get_primary_attention_inputs(inputs)
+        if not primary.is_prefill or primary.is_target_verify:
+            return nullcontext()
+        if _is_cuda_graph_forward(inputs, fmha_impl) or (
+            inputs.input_ids.is_cuda and torch.cuda.is_current_stream_capturing()
+        ):
+            return nullcontext()
+        return chunker.plan(inputs.input_ids.numel(), inputs.input_ids.device)
+
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         if self.__dict__.get("_closed", False):
             raise RuntimeError("Qwen4 model is closed")
@@ -1495,7 +1519,10 @@ class Qwen4ExpModel(Qwen35Model):
         try:
             from .qwen4_exp_runtime.prefill_preflight import prefill_geometry_scope
 
-            with prefill_geometry_scope(self, inputs, fmha_impl):
+            with (
+                prefill_geometry_scope(self, inputs, fmha_impl),
+                self._mega_moe_prefill_scope(inputs, fmha_impl),
+            ):
                 outputs = self._forward_with_ple_prefetch(inputs, fmha_impl)
             return outputs
         finally:

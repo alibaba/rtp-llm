@@ -2592,7 +2592,8 @@ void MtpExecutor::runDSparkProposal(GptModelInputs&              proposal_input,
 GptModelOutputs MtpExecutor::runDraftPrefillForward(GptModelInputs& model_input) {
     RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(draft_model_forward)");
     maybePrintModelInput(model_input, "decode post draft model");
-    model_input.is_target_verify = is_dspark_;
+    model_input.is_target_verify     = is_dspark_;
+    model_input.is_mtp_decode_commit = !is_dspark_;
     ensureModelInputsOnCuda(model_input, "decode.draft_prefill_forward");
     // Use sp_prefill_draft_model_ if CUDA graph is enabled, otherwise use draft_model_.
     auto* draft_prefill_model = sp_prefill_draft_model_ ? sp_prefill_draft_model_.get() : draft_model_.get();

@@ -11,6 +11,9 @@ from functools import lru_cache
 import torch
 
 from rtp_llm.models_py.model_desc.generic_moe import GenericMoeLayer
+from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.chunking import (
+    MegaMoePrefillChunker,
+)
 from rtp_llm.models_py.modules.qwen4_exp.dense_mlp import Qwen4DenseMLP
 
 
@@ -25,9 +28,15 @@ class Qwen4MoeLayer(GenericMoeLayer):
 
     _shared_stream = None
     _reused_shared_stream = None
+    prefill_chunker = None
 
     def __init__(self, config, parallelism_config, weights, *args, **kwargs):
         super().__init__(config, parallelism_config, weights, *args, **kwargs)
+        if config.mega_moe_prefill_chunk_tokens:
+            self.prefill_chunker = MegaMoePrefillChunker(
+                config.mega_moe_prefill_chunk_tokens,
+                self.fused_moe.fused_experts._mega_group,
+            )
         if os.getenv("RTP_QWEN4_BF16_SHARED_TP2", "0") == "1":
             from rtp_llm.models_py.modules.qwen4_exp.moe.shared_tp2 import (
                 maybe_prepare_bf16_shared_tp2,
@@ -85,7 +94,78 @@ class Qwen4MoeLayer(GenericMoeLayer):
         self._shared_input_ready = torch.cuda.Event()
         self._shared_output_ready = torch.cuda.Event()
 
+    def _prepare_prefill_chunks(self, hidden_states: torch.Tensor):
+        tokens = hidden_states.size(0)
+        router_logits = (
+            self.gate(hidden_states)
+            if tokens
+            else hidden_states.new_empty((0, self.num_experts))
+        )
+        gates = None
+        if self._uses_shared_expert_gates:
+            # The full prefill can exceed the staging capacity of a decode
+            # graph. Keep its gates separate from the graph's captured buffer.
+            gates = (
+                self._routed_shared_gates(hidden_states, use_static_buffer=False)
+                if tokens
+                else hidden_states.new_empty((0,), dtype=torch.float32)
+            )
+        shared_gate_logits = None
+        if (
+            tokens
+            and self.shared_expert is not None
+            and self.shared_expert_gate is not None
+        ):
+            shared_gate_logits = self.shared_expert_gate(hidden_states)
+
+        # Keep the fused softmax/pack route for SE. The ordinary router instead
+        # computes top-k on the original rows once and releases the logits.
+        routing = None
+        if not self._uses_fused_gate_pack():
+            routing = self._select_routing(router_logits)
+            router_logits = None
+
+        def forward_chunk(begin: int, end: int) -> torch.Tensor:
+            hidden = hidden_states[begin:end]
+            expert_args = (
+                {"shared_expert_gates": gates[begin:end]} if gates is not None else None
+            )
+            if routing is None:
+                assert router_logits is not None
+                experts = self._forward_gate_pack(
+                    hidden, router_logits[begin:end], expert_args
+                )
+            else:
+                weights, ids = routing
+                experts = self._forward_with_routing(
+                    hidden, weights[begin:end], ids[begin:end], expert_args
+                )
+            if begin == end:
+                # The expert collective ran. A separate local shared expert
+                # has no rows in this rank for this round.
+                return experts
+            return self._finish_forward(
+                hidden,
+                experts,
+                (
+                    shared_gate_logits[begin:end]
+                    if shared_gate_logits is not None
+                    else None
+                ),
+            )
+
+        return forward_chunk
+
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if self.prefill_chunker is not None:
+            return self.prefill_chunker.forward(
+                hidden_states,
+                self._forward_with_shared_overlap,
+                self._prepare_prefill_chunks,
+            )
+        return self._forward_with_shared_overlap(hidden_states)
+
+    def _forward_with_shared_overlap(self, hidden_states: torch.Tensor) -> torch.Tensor:
         stream = self._shared_stream
         # Larger shapes did not improve in the complete TP2 consumer. Keep
         # their established schedule and each layer's distinct event pair.

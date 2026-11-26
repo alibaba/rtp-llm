@@ -32,19 +32,23 @@ def ensure_shared_gate_capacity(device, capacity: int) -> torch.Tensor:
     return cached
 
 
-def shared_expert_sigmoid(logits):
+def shared_expert_sigmoid(logits, *, use_static_buffer: bool = True):
+    """Compute FP32 gates, optionally in storage owned by decode graphs."""
     if logits.ndim != 2 or logits.shape[1] != 1 or not logits.is_cuda:
         raise ValueError("Expected CUDA gate logits [tokens, 1]")
     tokens = logits.shape[0]
-    cached = _SHARED_GATE_CACHE.get(str(logits.device))
-    if cached is None or cached.numel() < max(tokens, 1):
-        if torch.cuda.is_current_stream_capturing():
-            raise RuntimeError(
-                "shared_expert_sigmoid has no static gate buffer large enough "
-                f"for tokens={tokens} during CUDA graph capture"
-            )
-        cached = ensure_shared_gate_capacity(logits.device, max(tokens, 1))
-    gates = cached[:tokens]
+    if use_static_buffer:
+        cached = _SHARED_GATE_CACHE.get(str(logits.device))
+        if cached is None or cached.numel() < max(tokens, 1):
+            if torch.cuda.is_current_stream_capturing():
+                raise RuntimeError(
+                    "shared_expert_sigmoid has no static gate buffer large enough "
+                    f"for tokens={tokens} during CUDA graph capture"
+                )
+            cached = ensure_shared_gate_capacity(logits.device, max(tokens, 1))
+        gates = cached[:tokens]
+    else:
+        gates = torch.empty((tokens,), device=logits.device, dtype=torch.float32)
     if tokens:
         _shared_expert_sigmoid[(triton.cdiv(tokens, 256),)](
             logits, gates, tokens, logits.stride(0), 256

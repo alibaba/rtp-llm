@@ -14,6 +14,9 @@ import torch.nn as nn
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.layer import (
     Fp8Fp4MoeLayer,
 )
+from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.chunking import (
+    max_ep_tokens,
+)
 
 DEFAULT_MOE_CHUNK_TOKENS = 16384
 Observer = Callable[[str, torch.Tensor], None]
@@ -131,9 +134,9 @@ def synchronized_moe_chunk_plan(
         yield
         return
 
-    token_count = torch.tensor(int(tokens), dtype=torch.int64, device=device)
-    dist.all_reduce(token_count, op=dist.ReduceOp.MAX, group=dist.group.WORLD)
-    token = _SYNCHRONIZED_CHUNK_TOKENS.set(int(token_count.item()))
+    token = _SYNCHRONIZED_CHUNK_TOKENS.set(
+        max_ep_tokens(int(tokens), device, dist.group.WORLD)
+    )
     try:
         yield
     finally:
@@ -262,9 +265,7 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
             return planned_tokens
         if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
             return tokens
-        token_count = torch.tensor(tokens, dtype=torch.int64, device=device)
-        dist.all_reduce(token_count, op=dist.ReduceOp.MAX, group=dist.group.WORLD)
-        return int(token_count.item())
+        return max_ep_tokens(tokens, device, dist.group.WORLD)
 
     def _observer(self, positions: Optional[torch.Tensor]):
         return self._observer_factory(positions) if self._observer_factory else None
