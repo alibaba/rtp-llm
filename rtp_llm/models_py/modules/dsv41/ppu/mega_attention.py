@@ -34,6 +34,7 @@ from rtp_llm.models_py.modules.dsv41.ppu.optimization_config import env_value as
 
 ENV = "RTP_V41_PPU_MEGA_ATTENTION"
 LAUNCH_REUSE_ENV = "RTP_V41_PPU_DECODE_LAUNCH_REUSE"
+DIRECT_DECODE_ENV = "RTP_V41_PPU_MLA_PACKED_VERIFY"
 HEAD_DIM = 512
 ROPE_DIM = 64
 GROUP_WIDTH = 4096
@@ -465,6 +466,62 @@ class PPUMegaAttention:
         )
         return self._project_output(data, scale, q.shape[0], valid_mask)
 
+    def _direct_decode_eligible(self, q, plan, phase):
+        if not (
+            os.environ.get(DIRECT_DECODE_ENV, "0") == "1" and phase == "verify"
+            and q.shape[0] == 32 and self.heads == 64 and self.groups == 8
+            and plan.global_cache is not None and readonly_decode_positions(self)
+        ):
+            return False
+        swa, extra = plan.swa_cache, plan.global_cache
+        # These are the exact pinned native packed-kernel dispatch conditions.
+        # Other physical layouts retain the existing split-KV implementation.
+        return (
+            swa.shape[1:] == (128, 1, 528) and swa.stride(0) == 128 * 528
+            and extra.shape[1:] == (64, 1, 288) and extra.stride(0) == 64 * 288
+            and swa.data_ptr() % 16 == extra.data_ptr() % 16 == 0
+            and plan.swa_indices.shape[-1] == 128 and plan.global_indices.shape[-1] == 512
+            and torch.cuda.get_device_properties(self.device).multi_processor_count == 39
+        )
+
+    def _direct_decode(self, common, plan, shared):
+        sources = (plan.swa_indices, plan.swa_lengths, plan.global_indices,
+                   plan.global_lengths, common["token_positions"])
+        key = ("mega_packed_verify_metadata", *(id(tensor) for tensor in sources))
+        cached = None if shared is None else shared.get(key)
+        if cached is None:
+            triton, kernel = _direct_metadata_kernel()
+            indices = torch.empty((40, 128), dtype=torch.int32, device=self.device)
+            extra_indices = torch.empty((40, 512), dtype=torch.int32, device=self.device)
+            lengths = torch.empty(40, dtype=torch.int32, device=self.device)
+            extra_lengths = torch.empty_like(lengths)
+            positions = torch.empty_like(lengths)
+            kernel[(40,)](
+                sources[0], sources[1], sources[2], sources[3], sources[4],
+                indices, lengths, extra_indices, extra_lengths, positions, 512, num_warps=4,
+            )
+            cached = sources, (indices, lengths, extra_indices, extra_lengths, positions)
+            if shared is not None:
+                shared[key] = cached
+        original, padded = cached
+        if any(left is not right for left, right in zip(original, sources)):
+            raise RuntimeError("MegaAttention direct metadata belongs to another forward")
+        indices, lengths, extra_indices, extra_lengths, positions = padded
+        q = common["q"]
+        # Private padding selects the provider's existing complete-query
+        # kernel. It never becomes a real token, KV writer or MoE route.
+        native_q = torch.empty((40, self.heads, HEAD_DIM), dtype=q.dtype, device=q.device)
+        native_q[:32].copy_(q)
+        native_q[32:].zero_()
+        arguments = {**common, "q": native_q, "token_positions": positions}
+        data, scale, lse = self.backend.decode(
+            **arguments, k_cache=plan.swa_cache, indices_in_kvcache=indices,
+            topk_length=lengths, extra_k_cache=plan.global_cache,
+            extra_indices_in_kvcache=extra_indices, extra_topk_length=extra_lengths,
+            **self.backend.decode_kwargs,
+        )
+        return data[:32], scale[:32], lse[:32]
+
     def decode(self, q, plan, positions, *, packed_q=False, mask_output=True, phase="decode", shared=None):
         """Consume the same interleaved-pool plan as ordinary packed_decode.
 
@@ -491,6 +548,9 @@ class PPUMegaAttention:
             common = self._common(self._query(q, packed_q), converted, None)
         else:
             common = self._common(self._query(q, packed_q), positions, plan.valid_mask)
+        if self._direct_decode_eligible(q, plan, phase):
+            data, scale, _ = self._direct_decode(common, plan, shared)
+            return self._project_output(data, scale, q.shape[0], plan.valid_mask if mask_output else None)
         extra = plan.global_indices
         decode_options = self.backend.decode_kwargs
         schedule_max_rows = getattr(self.backend, "verify_schedule_max_rows", None)
@@ -542,6 +602,32 @@ _READONLY_PREFILL_NORMAL = _normal
 
 
 @lru_cache(maxsize=1)
+def _direct_metadata_kernel():
+    import triton
+    import triton.language as tl
+
+    @triton.jit
+    def pad_direct_metadata(swa, swa_length, extra, extra_length, position,
+                            out_swa, out_length, out_extra, out_extra_length, out_position,
+                            BLOCK: tl.constexpr):
+        row = tl.program_id(0)
+        column = tl.arange(0, BLOCK)
+        live = row < 32
+        value = tl.load(swa + row * 128 + column, live & (column < 128), other=-1)
+        tl.store(out_swa + row * 128 + column, value, column < 128)
+        value = tl.load(extra + row * 512 + column, live, other=-1)
+        tl.store(out_extra + row * 512 + column, value)
+        length = tl.load(swa_length + row, live, other=0)
+        extra_len = tl.load(extra_length + row, live, other=0)
+        pos = tl.load(position + row, live, other=0)
+        tl.store(out_length + row, length)
+        tl.store(out_extra_length + row, extra_len)
+        tl.store(out_position + row, pos)
+
+    return triton, pad_direct_metadata
+
+
+@lru_cache(maxsize=1)
 def _owned_output_mask_kernel():
     import triton
     import triton.language as tl
@@ -566,7 +652,7 @@ def _mask_owned_output(output, valid):
 _READONLY_DECODE_METHODS = tuple(
     (name, vars(PPUMegaAttention)[name])
     for name in ("decode", "decode_reason", "query_reason", "_common", "_query",
-                 "_current", "_indices_ok", "_cache_ok")
+                 "_current", "_indices_ok", "_cache_ok", "_direct_decode_eligible", "_direct_decode")
 )
 
 
