@@ -223,7 +223,6 @@ def _load_kv_score_tile(
     STATE_WIDTH: tl.constexpr,
     COMPRESS_RATIO: tl.constexpr,
     WINDOW_SIZE: tl.constexpr,
-    TILE_ROWS: tl.constexpr,
     TRAP_INVALID_KV_ACCESS: tl.constexpr,
     STATE_RING_ENTRIES: tl.constexpr,
     MAY_USE_CACHE: tl.constexpr,
@@ -239,70 +238,82 @@ def _load_kv_score_tile(
     flat_idx_safe = tl.where(use_raw, flat_idx, 0)
 
     if MAY_USE_CACHE:
-        # On decode (n_raw == 0) or pure-prefix tiles, skip raw global loads entirely.
-        has_raw = tl.max(use_raw.to(tl.int32), axis=0) != 0
-        kv_from_raw = tl.zeros((TILE_ROWS, TRITON_BLOCK_SIZE), dtype=tl.float32)
-        score_from_raw = tl.zeros((TILE_ROWS, TRITON_BLOCK_SIZE), dtype=tl.float32)
-        if has_raw:
-            kv_from_raw, score_from_raw = _load_raw_tile(
-                kv_raw_ptr,
-                kv_raw_stride,
-                score_raw_ptr,
-                score_raw_stride,
-                ape_ptr,
-                ape_stride,
-                unpad_restore_ptr,
-                pos,
-                use_raw,
-                flat_idx_safe,
-                head_offset,
-                block,
-                mask,
-                COMPRESS_RATIO=COMPRESS_RATIO,
-                USE_UNPAD_RESTORE=USE_UNPAD_RESTORE,
-            )
+        # Unified raw/cache load: pick the source per row on 1-D row-base
+        # pointers, then issue ONE load per tensor. The previous dual-load +
+        # where-merge kept four live [TILE_ROWS, TRITON_BLOCK_SIZE] fp32 tiles
+        # (raw + cache, kv + score) alive across the ``has_raw``/``has_cache``
+        # regions, which capped resident CTAs/SM on chunked-prefill steps 2+.
+        # Rows that are neither raw nor a valid cache block stay masked and
+        # load ``other=0.0`` — the same zeros the old zeros-init + merge
+        # produced. Predicated loads issue no memory traffic for fully
+        # masked rows, so decode (n_raw == 0) and pure-prefix tiles still
+        # skip the raw global loads they never performed.
+        if USE_UNPAD_RESTORE:
+            raw_row_idx = tl.load(
+                unpad_restore_ptr + flat_idx_safe, mask=use_raw, other=0
+            ).to(tl.int64)
+        else:
+            raw_row_idx = flat_idx_safe
 
         # State-cache path: prefix-cache hit region.
         use_cache = mask_pos & ~use_raw
-        has_cache = tl.max(use_cache.to(tl.int32), axis=0) != 0
-        kv_from_cache = tl.zeros((TILE_ROWS, TRITON_BLOCK_SIZE), dtype=tl.float32)
-        score_from_cache = tl.zeros((TILE_ROWS, TRITON_BLOCK_SIZE), dtype=tl.float32)
-        valid_block = tl.full((TILE_ROWS,), False, dtype=tl.int1)
-        if has_cache:
-            block_indices = (pos // block_size) % block_table_stride
-            block_indices_safe = tl.where(use_cache, block_indices, 0)
-            block_numbers = tl.load(
-                block_table_ptr + req_idx * block_table_stride + block_indices_safe,
-                mask=use_cache,
-                other=0,
-            )
-            invalid_state_block = use_cache & (block_numbers >= NUM_STATE_BLOCKS)
-            if tl.max(invalid_state_block.to(tl.int32), axis=0) != 0:
-                _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
-            valid_block = use_cache & (block_numbers > 0)
-            block_numbers_i64 = tl.where(valid_block, block_numbers, 0).to(tl.int64)
-            ring_mod = STATE_RING_ENTRIES
-            block_offsets_raw = pos % ring_mod
-            block_offsets = tl.where(mask_pos, block_offsets_raw, 0)
+        block_indices = (pos // block_size) % tl.maximum(block_table_stride, 1)
+        block_indices_safe = tl.where(use_cache, block_indices, 0)
+        block_numbers = tl.load(
+            block_table_ptr + req_idx * block_table_stride + block_indices_safe,
+            mask=use_cache,
+            other=0,
+        )
+        invalid_state_block = use_cache & (block_numbers >= NUM_STATE_BLOCKS)
+        if tl.max(invalid_state_block.to(tl.int32), axis=0) != 0:
+            _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
+        valid_block = use_cache & (block_numbers > 0)
+        block_numbers_i64 = tl.where(valid_block, block_numbers, 0).to(tl.int64)
+        block_offsets = tl.where(mask_pos, pos % STATE_RING_ENTRIES, 0)
 
-            row_base = (
-                state_cache_ptr
-                + block_numbers_i64 * state_cache_stride0.to(tl.int64)
-                + block_offsets.to(tl.int64) * state_cache_stride1.to(tl.int64)
-                + head_offset
-            )
-            cache_mask = valid_block[:, None] & mask[None, :]
-            kv_from_cache = tl.load(
-                row_base[:, None] + block[None, :], mask=cache_mask, other=0.0
-            ).to(tl.float32)
-            score_from_cache = tl.load(
-                row_base[:, None] + STATE_WIDTH + block[None, :],
-                mask=cache_mask,
-                other=0.0,
-            ).to(tl.float32)
+        cache_row_base = (
+            state_cache_ptr
+            + block_numbers_i64 * state_cache_stride0.to(tl.int64)
+            + block_offsets.to(tl.int64) * state_cache_stride1.to(tl.int64)
+            + head_offset
+        )
 
-        kv = tl.where(use_raw[:, None], kv_from_raw, kv_from_cache)
-        score = tl.where(use_raw[:, None], score_from_raw, score_from_cache)
+        # Per-row source select. Both pointer sets must share the fp32
+        # pointee type (kv_raw/score_raw are fp32 everywhere today); use_raw
+        # and valid_block are disjoint, so every row is loaded from exactly
+        # the source the old where-merge would have picked.
+        load_mask = (use_raw | valid_block)[:, None] & mask[None, :]
+        kv_row_base = tl.where(
+            use_raw,
+            kv_raw_ptr + raw_row_idx * kv_raw_stride + head_offset,
+            cache_row_base,
+        )
+        kv = tl.load(
+            kv_row_base[:, None] + block[None, :], mask=load_mask, other=0.0
+        ).to(tl.float32)
+
+        score_row_base = tl.where(
+            use_raw,
+            score_raw_ptr + raw_row_idx * score_raw_stride + head_offset,
+            cache_row_base + STATE_WIDTH,
+        )
+        score = tl.load(
+            score_row_base[:, None] + block[None, :], mask=load_mask, other=0.0
+        ).to(tl.float32)
+
+        # state_cache stores score+ape pre-summed; raw path adds ape here.
+        # ape_vals is 0.0 on non-raw rows, so cache rows keep their value.
+        ape_rows_safe = tl.where(use_raw, pos % COMPRESS_RATIO, 0)
+        ape_vals = tl.load(
+            ape_ptr
+            + ape_rows_safe[:, None] * ape_stride
+            + head_offset[:, None]
+            + block[None, :],
+            mask=use_raw[:, None] & mask[None, :],
+            other=0.0,
+        ).to(tl.float32)
+        score = score + ape_vals
+
         final_valid = use_raw | (use_cache & valid_block)
     else:
         kv, score = _load_raw_tile(
@@ -408,7 +419,6 @@ def _compress_and_rmsnorm(
             STATE_WIDTH=STATE_WIDTH,
             COMPRESS_RATIO=COMPRESS_RATIO,
             WINDOW_SIZE=WINDOW_SIZE,
-            TILE_ROWS=WINDOW_SIZE,
             TRAP_INVALID_KV_ACCESS=TRAP_INVALID_KV_ACCESS,
             STATE_RING_ENTRIES=STATE_RING_ENTRIES,
             MAY_USE_CACHE=MAY_USE_CACHE,
@@ -455,7 +465,6 @@ def _compress_and_rmsnorm(
                 STATE_WIDTH=STATE_WIDTH,
                 COMPRESS_RATIO=COMPRESS_RATIO,
                 WINDOW_SIZE=WINDOW_SIZE,
-                TILE_ROWS=TILE_T,
                 TRAP_INVALID_KV_ACCESS=TRAP_INVALID_KV_ACCESS,
                 STATE_RING_ENTRIES=STATE_RING_ENTRIES,
                 MAY_USE_CACHE=MAY_USE_CACHE,
@@ -1025,8 +1034,25 @@ def run_fused_compress_kv_write(
     if cfg is None:
         raise ValueError(f"Unsupported head_dim {head_dim} for fused compressor write")
 
+    if kv_raw.dtype != torch.float32 or score_raw.dtype != torch.float32:
+        raise TypeError(
+            "run_fused_compress_kv_write requires float32 kv_raw and score_raw, "
+            f"got kv_raw={kv_raw.dtype}, score_raw={score_raw.dtype}"
+        )
+
     effective_may_use_cache = bool(may_use_cache)
-    if state_cache is None or block_table is None:
+    if (
+        effective_may_use_cache
+        and block_table is not None
+        and (
+            block_table.dim() != 2
+            or int(block_table.shape[1]) <= 0
+            or int(block_table.stride(0)) <= 0
+        )
+    ):
+        effective_may_use_cache = False
+
+    if not effective_may_use_cache or state_cache is None or block_table is None:
         if effective_may_use_cache:
             raise ValueError(
                 "state_cache and block_table are required when may_use_cache=True"
@@ -1040,6 +1066,11 @@ def run_fused_compress_kv_write(
         block_table_arg = positions
         block_table_stride = 1
     else:
+        if state_cache.dtype != kv_raw.dtype or state_cache.dtype != score_raw.dtype:
+            raise TypeError(
+                "state_cache, kv_raw, and score_raw must share dtype "
+                f"(got state_cache={state_cache.dtype}, kv_raw={kv_raw.dtype}, score_raw={score_raw.dtype})"
+            )
         state_cache_arg = state_cache
         state_stride0 = int(state_cache.stride(0))
         state_stride1 = int(state_cache.stride(1))

@@ -257,6 +257,86 @@ class CompressorVarlenRawPathTest(unittest.TestCase):
             "KV pool diverged between BATCHED kernel and per-request scalar path",
         )
 
+    def test_empty_block_table_and_raw_dtype_guards(self) -> None:
+        from rtp_llm.models_py.modules.dsv4.fp8._compressor_vllm_triton import (
+            build_cos_sin_cache,
+            run_fused_compress_kv_write,
+        )
+
+        # Empty [B, 0] state block_table must fall back to non-cached raw path
+        # instead of computing `% 0` on block_table_stride.
+        cmp = _build_compressor(
+            dim=256, head_dim=512, rope_head_dim=64, compress_ratio=4
+        )
+        n_tok = 8
+        head_dim = 512
+        coff = 2
+        kv_raw = torch.randn(n_tok, coff * head_dim, dtype=torch.float32, device=DEVICE)
+        score_raw = torch.randn_like(kv_raw)
+        kv_pool = torch.zeros(2, 4, KV_ENTRY_BYTES, dtype=torch.uint8, device=DEVICE)
+        state_cache = torch.zeros(
+            2, 16, 2 * coff * head_dim, dtype=torch.float32, device=DEVICE
+        )
+        empty_bt = torch.empty((1, 0), dtype=torch.int32, device=DEVICE)
+        positions = torch.arange(n_tok, dtype=torch.int64, device=DEVICE)
+        slot_mapping = torch.arange(n_tok, dtype=torch.int64, device=DEVICE)
+        kv_slot_mapping = torch.tensor(
+            [-1, -1, -1, 0, -1, -1, -1, 1], dtype=torch.int64, device=DEVICE
+        )
+        token_to_req = torch.zeros(n_tok, dtype=torch.int32, device=DEVICE)
+        cos_sin_cache, _ = build_cos_sin_cache(
+            torch.ones(64, 32, dtype=torch.complex64, device=DEVICE)
+        )
+
+        run_fused_compress_kv_write(
+            state_cache=state_cache,
+            token_to_req_indices=token_to_req,
+            positions=positions,
+            slot_mapping=slot_mapping,
+            block_table=empty_bt,
+            rms_norm_weight=cmp.norm.weight,
+            rms_norm_eps=cmp.norm_eps,
+            cos_sin_cache=cos_sin_cache,
+            kv_cache=kv_pool,
+            kv_slot_mapping=kv_slot_mapping,
+            kv_raw=kv_raw,
+            score_raw=score_raw,
+            ape=cmp.ape,
+            seq_start=0,
+            head_dim=head_dim,
+            rope_head_dim=64,
+            compress_ratio=4,
+            overlap=True,
+            state_tokens_per_block=16,
+            may_use_cache=True,
+        )
+        torch.cuda.synchronize()
+        self.assertGreater(int(kv_pool[0, :2].abs().sum().item()), 0)
+
+        with self.assertRaisesRegex(TypeError, "requires float32"):
+            run_fused_compress_kv_write(
+                state_cache=state_cache,
+                token_to_req_indices=token_to_req,
+                positions=positions,
+                slot_mapping=slot_mapping,
+                block_table=torch.ones((1, 1), dtype=torch.int32, device=DEVICE),
+                rms_norm_weight=cmp.norm.weight,
+                rms_norm_eps=cmp.norm_eps,
+                cos_sin_cache=cos_sin_cache,
+                kv_cache=kv_pool,
+                kv_slot_mapping=kv_slot_mapping,
+                kv_raw=kv_raw.to(torch.bfloat16),
+                score_raw=score_raw,
+                ape=cmp.ape,
+                seq_start=0,
+                head_dim=head_dim,
+                rope_head_dim=64,
+                compress_ratio=4,
+                overlap=True,
+                state_tokens_per_block=16,
+                may_use_cache=False,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
