@@ -215,6 +215,211 @@ def fused_moe_kernel(
     tl.store(c_ptrs, accumulator, mask=c_mask)
 
 
+@triton.jit
+def fixed_shape_moe_kernel(
+    # Pointers to matrices
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    a_scale_ptr,
+    b_scale_ptr,
+    topk_weights_ptr,
+    sorted_token_ids_ptr,
+    expert_ids_ptr,
+    num_tokens_post_padded_ptr,
+    # Matrix dimensions
+    N: tl.constexpr,
+    K: tl.constexpr,
+    EM: tl.constexpr,
+    num_valid_tokens: tl.constexpr,
+    # Strides
+    stride_am: tl.constexpr,
+    stride_ak: tl.constexpr,
+    stride_be: tl.constexpr,
+    stride_bk: tl.constexpr,
+    stride_bn: tl.constexpr,
+    stride_cm: tl.constexpr,
+    stride_cn: tl.constexpr,
+    stride_asm: tl.constexpr,
+    stride_ask: tl.constexpr,
+    stride_bse: tl.constexpr,
+    stride_bsk: tl.constexpr,
+    stride_bsn: tl.constexpr,
+    # Block size for block-wise quantization
+    group_n: tl.constexpr,
+    group_k: tl.constexpr,
+    # Meta-parameters
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+    GROUP_SIZE_M: tl.constexpr,
+    MUL_ROUTED_WEIGHT: tl.constexpr,
+    top_k: tl.constexpr,
+    compute_type: tl.constexpr,
+    use_fp8_w8a8: tl.constexpr,
+    scale_ue8m0: tl.constexpr,
+    even_Ks: tl.constexpr,
+    NARROW: tl.constexpr,
+    UNROLL: tl.constexpr,
+    REMOTE_EXPERT: tl.constexpr = None,
+    SWAP_AB: tl.constexpr = False,
+    PDL: tl.constexpr = False,
+    PRE_READY_ROUTING: tl.constexpr = False,
+):
+    """
+    Fused MoE GEMM kernel.
+
+    A: input tokens [M, K] (indexed via sorted_token_ids)
+    B: expert weights [E, N, K] (read as [K, N] tiles per expert)
+    C: output [num_valid_tokens, N] (scattered via sorted_token_ids)
+
+    sorted_token_ids, expert_ids, num_tokens_post_padded are produced by
+    moe_align_block_size_torch().
+    """
+    # Map program id to the block of C it should compute (grouped for L2 reuse)
+    pid = tl.program_id(axis=0)
+    num_pid_m = tl.cdiv(EM, BLOCK_SIZE_M)
+    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+    num_pid_in_group = GROUP_SIZE_M * num_pid_n
+    group_id = pid // num_pid_in_group
+    first_pid_m = group_id * GROUP_SIZE_M
+    group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+    pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
+    pid_n = (pid % num_pid_in_group) // group_size_m
+
+    if PDL and not PRE_READY_ROUTING:
+        tl.extra.cuda.gdc_wait()
+
+    # Early exit for padding blocks
+    num_tokens_post_padded = tl.load(num_tokens_post_padded_ptr)
+    if pid_m * BLOCK_SIZE_M >= num_tokens_post_padded:
+        if PDL and PRE_READY_ROUTING:
+            tl.extra.cuda.gdc_wait()
+        if PDL:
+            tl.extra.cuda.gdc_launch_dependents()
+        return
+
+    # Load sorted token ids and expert id for this block
+    offs_token_id = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M).to(tl.int32 if NARROW else tl.int64)
+    offs_token = tl.load(sorted_token_ids_ptr + offs_token_id)
+    offs_token = offs_token.to(tl.int32 if NARROW else tl.int64)
+    token_mask = offs_token < num_valid_tokens
+
+    off_experts = tl.load(expert_ids_ptr + pid_m).to(tl.int32 if NARROW else tl.int64)
+    offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    c_ptrs = c_ptr + stride_cm * offs_token[:, None] + stride_cn * offs_cn[None, :]
+    c_mask = token_mask[:, None] & (offs_cn[None, :] < N)
+    # EP reserves one alignment bin for routes owned by another rank.
+    if REMOTE_EXPERT is not None and off_experts == REMOTE_EXPERT:
+        if PDL and PRE_READY_ROUTING:
+            tl.extra.cuda.gdc_wait()
+        if PDL:
+            tl.extra.cuda.gdc_launch_dependents()
+        tl.store(c_ptrs, 0, mask=c_mask)
+        return
+
+    if PDL and PRE_READY_ROUTING:
+        tl.extra.cuda.gdc_wait()
+
+    # Pointers for A and B
+    offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N).to(tl.int32 if NARROW else tl.int64)) % N
+    offs_k = tl.arange(0, BLOCK_SIZE_K)
+    a_ptrs = a_ptr + (
+        offs_token[:, None] // top_k * stride_am + offs_k[None, :] * stride_ak
+    )
+    b_ptrs = (
+        b_ptr
+        + off_experts * stride_be
+        + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
+    )
+
+    if use_fp8_w8a8:
+        a_scale_ptrs = a_scale_ptr + (offs_token // top_k) * stride_asm
+        if scale_ue8m0:
+            # DeepGEMM expands each N-group scale over its 128 output rows
+            # before packing. Select a representative expanded row for a
+            # single-group tile, or each row when a tile spans groups.
+            if BLOCK_SIZE_N > group_n:
+                offs_bsn = offs_bn
+            else:
+                offs_bsn = pid_n * BLOCK_SIZE_N
+        elif BLOCK_SIZE_N > group_n:
+            offs_bsn = offs_bn // group_n
+        else:
+            offs_bsn = pid_n * BLOCK_SIZE_N // group_n
+        b_scale_ptrs = b_scale_ptr + off_experts * stride_bse + offs_bsn * stride_bsn
+
+    # Accumulate in fp32
+    if SWAP_AB:
+        accumulator = tl.zeros((BLOCK_SIZE_N, BLOCK_SIZE_M), dtype=tl.float32)
+    else:
+        accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+
+    for k_start in tl.range(0, K, BLOCK_SIZE_K, loop_unroll_factor=UNROLL):
+        if even_Ks:
+            a = tl.load(a_ptrs, mask=token_mask[:, None], other=0.0)
+        else:
+            a = tl.load(
+                a_ptrs,
+                mask=token_mask[:, None] & (offs_k[None, :] < K - k_start),
+                other=0.0,
+            )
+
+        if even_Ks:
+            b = tl.load(b_ptrs)
+        else:
+            b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k_start, other=0.0)
+
+        if use_fp8_w8a8:
+            offs_ks = k_start // group_k
+            if scale_ue8m0:
+                scale_pack_idx = offs_ks // 4
+                scale_shift = (offs_ks % 4) * 8
+                a_scale_pack = tl.load(
+                    a_scale_ptrs + scale_pack_idx * stride_ask,
+                    mask=token_mask,
+                    other=0,
+                )
+                b_scale_pack = tl.load(b_scale_ptrs + scale_pack_idx * stride_bsk)
+                a_scale_bits = ((a_scale_pack >> scale_shift) & 0xFF) << 23
+                b_scale_bits = ((b_scale_pack >> scale_shift) & 0xFF) << 23
+                a_scale = a_scale_bits.to(tl.float32, bitcast=True)
+                b_scale = b_scale_bits.to(tl.float32, bitcast=True)
+            else:
+                a_scale = tl.load(
+                    a_scale_ptrs + offs_ks * stride_ask,
+                    mask=token_mask,
+                    other=0.0,
+                )
+                b_scale = tl.load(b_scale_ptrs + offs_ks * stride_bsk)
+            if SWAP_AB:
+                partial = tl.dot(tl.trans(b), tl.trans(a))
+                accumulator += partial * (b_scale * a_scale[None, :])
+            elif BLOCK_SIZE_N > group_n:
+                accumulator += tl.dot(a, b) * a_scale[:, None] * b_scale[None, :]
+            else:
+                accumulator += tl.dot(a, b) * (a_scale[:, None] * b_scale)
+        else:
+            accumulator += tl.dot(a, b)
+
+        a_ptrs += BLOCK_SIZE_K * stride_ak
+        b_ptrs += BLOCK_SIZE_K * stride_bk
+
+    if SWAP_AB:
+        accumulator = tl.trans(accumulator)
+
+    # Apply router weights if requested
+    if MUL_ROUTED_WEIGHT:
+        moe_weight = tl.load(topk_weights_ptr + offs_token, mask=token_mask, other=0)
+        accumulator *= moe_weight[:, None]
+
+    accumulator = accumulator.to(compute_type)
+    if PDL:
+        tl.extra.cuda.gdc_launch_dependents()
+
+    tl.store(c_ptrs, accumulator, mask=c_mask)
+
+
 def invoke_fused_moe_kernel(
     A: torch.Tensor,  # [M, K] input hidden states
     B: torch.Tensor,  # [E, N, K] expert weights
@@ -282,7 +487,17 @@ def invoke_fused_moe_kernel(
         block_n, block_k = 0, 0
 
     pdl = sm90_pdl_enabled(A.device)
-    fused_moe_kernel[grid](
+    mode = config.get("FIXED_MODE", 0)
+    if mode:
+        assert swap_ab and B.shape in ((256, 1280, 2560), (256, 2560, 640))
+        assert all(t.is_contiguous() for t in (A, B, C, A_scale, B_scale))
+        config = {k: v for k, v in config.items() if k != "FIXED_MODE"}
+        launch = fixed_shape_moe_kernel
+        options = {"NARROW": mode == 2, "UNROLL": 1}
+    else:
+        launch = fused_moe_kernel
+        options = {}
+    launch[grid](
         A,
         B,
         C,
@@ -321,6 +536,7 @@ def invoke_fused_moe_kernel(
         PDL=pdl,
         PRE_READY_ROUTING=pre_ready_routing,
         launch_pdl=pdl,
+        **options,
         **config,
     )
 

@@ -111,6 +111,30 @@ def _silu_mul_quantize_tiles(
     tl.store(scales + row * GROUPS + group, scale, live)
 
 
+def _expert_gemm_configs(x, x_scale, weights_up, weights_down, top_k):
+    tokens, hidden = x.shape
+    experts, _, intermediate = weights_down[0].shape
+    if (
+        tokens not in (32, 64)
+        or os.environ.get("RTP_QWEN4_EXPERT_GEMM_TUNING", "1") != "1"
+        or (experts, hidden, intermediate, top_k) != (256, 2560, 640, 10)
+        or weights_up[0].shape != (256, 1280, 2560)
+        or weights_down[0].shape != (256, 2560, 640)
+        or torch.cuda.get_device_capability(x.device) != (9, 0)
+        or _device_num_sms(x.device) != 132
+        or not all(
+            tensor.is_contiguous()
+            for tensor in (x, x_scale, weights_up[0], weights_up[1], weights_down[0], weights_down[1])
+        )
+    ):
+        return _GEMM_CONFIG, _GEMM_CONFIG
+    # Mode 2 uses 32-bit offsets. Every qualified contiguous tensor fits in 2 Gi elements.
+    mode = 2 if tokens == 32 else 1
+    up = dict(_GEMM_CONFIG, FIXED_MODE=mode)
+    down = dict(up, BLOCK_SIZE_N=128)
+    return up, down
+
+
 def _project(
     x,
     x_scale,
@@ -218,7 +242,11 @@ def compact_fp8_decode(
             global_start=global_start,
             allow_unordered=routes > 640,
         )
-        plans = ((_GEMM_CONFIG, True, layout),)
+        up_config, down_config = _expert_gemm_configs(
+            x, x_scale, up_weights, down_weights, top_k
+        )
+        plans = ((up_config, True, layout),)
+        down_plans = ((down_config, True, layout),)
     flat_ids = ids.view(-1)
     flat_weights = route_weights.reshape(-1)
 
@@ -269,7 +297,7 @@ def compact_fp8_decode(
         flat_ids,
         flat_weights,
         1,
-        plans,
+        plans if large else down_plans,
         pre_ready_routing=True,
     )
     del down_input, down_scale, plans
