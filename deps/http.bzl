@@ -1,4 +1,5 @@
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive", "http_file")
+load("@bazel_tools//tools/build_defs/repo:utils.bzl", "maybe")
 
 # accl/solar/tnet/ali-rdma-core RPMs stay closed-only: deps/impls.bzl declares
 # them and no open target may depend on accl.
@@ -173,6 +174,13 @@ def http_deps():
         name = "hf3fs_rpm",
         urls = ["https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/package/3fs/hf3fs-1.3.0-1.alios7.x86_64.rpm"],
         sha256 = "dd375f794557a1135934b40b23a7435569644922c5c7116cb69dd36f699ad5a4",
+    )
+
+    maybe(
+        http_file,
+        name = "hf3fs_rpm_aarch64",
+        urls = ["https://github.com/alibaba/tair-kvcache/releases/download/__binary-dependency-0.0.2/libhf3fs_api_shared-1.2.1-1.aarch64.rpm"],
+        sha256 = "94c10e4aa3916600b6e2fcb531f137a53ecc38bf7e19662ce09b6bec16ee7462",
     )
 
     http_file(
