@@ -333,6 +333,20 @@ def batch_invariant_reduce_scatter(tensor, group, out):
 
 
 def _sum_rank_order(contributions, out):
+    # One kernel instead of world_size-1 elementwise adds plus a cast. The BI
+    # all-reduce runs twice per layer, so at TP8 the eager chain cost nine
+    # launches of trivial work per reduce and the launches, not the bytes,
+    # dominated. Bit-identical to the eager chain below by construction:
+    # same ascending rank order, same single FP32 accumulator per element.
+    if contributions.shape[0] > 1:
+        from rtp_llm.models_py.triton_kernels.common.rank_order_sum import (
+            rank_order_sum,
+            supports,
+        )
+
+        flat = contributions.reshape(contributions.shape[0], -1)
+        if supports(flat, out):
+            return rank_order_sum(flat, out)
     first, *rest = contributions.unbind()
     acc = first if first.dtype == torch.float64 else first.float()
     for partial in rest:
