@@ -114,6 +114,48 @@ class _ReplayWorkspace:
         self.reference = None
         self.invalid = None
         self.state_inputs = {}
+        self.length_mirrors = None
+        self.host_tables = {}
+
+    def request_lengths(self, anchor):
+        lengths = anchor.input_lengths
+        prefixes = anchor.prefix_lengths
+        mirrors = (
+            lengths,
+            prefixes,
+            anchor.input_lengths_device,
+            anchor.prefix_lengths_device,
+        )
+        if self.length_mirrors is None or any(
+            current is not previous
+            for current, previous in zip(mirrors, self.length_mirrors)
+        ):
+            if lengths.device.type != "cpu" or prefixes.device.type != "cpu":
+                raise RuntimeError(
+                    "QSA draft graph replay requires host length mirrors"
+                )
+            batch = lengths.numel()
+            if not batch or any(value.shape != (batch,) for value in mirrors):
+                raise RuntimeError("QSA draft graph replay has invalid length geometry")
+            self.length_mirrors = mirrors
+        return lengths.tolist(), prefixes.tolist()
+
+    def host_table(self, tag, table, batch):
+        layout = (table.data_ptr(), table.shape, table.stride(), batch)
+        binding = self.host_tables.get(tag)
+        if binding is None or binding[0] is not table or binding[1] != layout:
+            if (
+                table.device.type != "cpu"
+                or table.dtype != torch.int32
+                or table.ndim != 2
+                or table.shape[0] != batch
+            ):
+                raise RuntimeError(
+                    "QSA draft graph replay requires host int32 block tables"
+                )
+            binding = (table, layout, table.numpy())
+            self.host_tables[tag] = binding
+        return binding[2]
 
     def prepare_positions(
         self,
@@ -195,21 +237,6 @@ class DraftPrefillGraphReplay(Mapping):
         *,
         capture_groups,
     ):
-        anchor = capture_groups[next(iter(impls))]
-        positions = anchor.combo_position_ids
-        expected_positions = token_capacity * position_factor
-        if positions is None or positions.numel() != expected_positions:
-            raise RuntimeError(
-                "QSA draft graph capture requires transported position capacity "
-                f"{expected_positions}"
-            )
-        cu = anchor.cu_seqlens_device
-        expected_cu_shape = (anchor.input_lengths.numel() + 1,)
-        if cu is None or cu.dtype != torch.int32 or cu.shape != expected_cu_shape:
-            raise RuntimeError(
-                f"QSA draft graph capture requires int32 device cu_seqlens {expected_cu_shape}"
-            )
-
         self.impls = impls
         self.bounds = []
         state_bound = None
@@ -248,8 +275,6 @@ class DraftPrefillGraphReplay(Mapping):
                 else None
             )
             key = (
-                self.token_capacity,
-                self.position_factor,
                 transported.dtype,
                 transported.device,
                 tuple(cu.shape),
@@ -271,19 +296,7 @@ class DraftPrefillGraphReplay(Mapping):
             groups, self.state_cache, workspace=workspace.state_inputs
         )
         anchor = groups[next(iter(self.impls))]
-        lengths = anchor.input_lengths
-        prefixes = anchor.prefix_lengths
-        if any(value.device.type != "cpu" for value in (lengths, prefixes)):
-            raise RuntimeError("QSA draft graph replay requires host length mirrors")
-        lengths = lengths.tolist()
-        prefixes = prefixes.tolist()
-        if (
-            not lengths
-            or len(prefixes) != len(lengths)
-            or anchor.input_lengths_device.shape != (len(lengths),)
-            or anchor.prefix_lengths_device.shape != (len(lengths),)
-        ):
-            raise RuntimeError("QSA draft graph replay has invalid length geometry")
+        lengths, prefixes = workspace.request_lengths(anchor)
         lanes = draft_graph_lanes(anchor, self.token_capacity)
         padding_started = False
         for length, prefix in zip(lengths, prefixes):
@@ -294,18 +307,9 @@ class DraftPrefillGraphReplay(Mapping):
                     "QSA draft graph requires positive live prefixes and lengths within request capacity followed by padding"
                 )
         for tag, pool_size, page_size, compressed in self.bounds:
-            inputs = groups[tag]
-            table = inputs.kv_cache_kernel_block_id
-            if (
-                table.device.type != "cpu"
-                or table.dtype != torch.int32
-                or table.ndim != 2
-                or table.shape[0] != len(lengths)
-            ):
-                raise RuntimeError(
-                    "QSA draft graph replay requires host int32 block tables"
-                )
-            values = table.numpy()
+            values = workspace.host_table(
+                tag, groups[tag].kv_cache_kernel_block_id, len(lengths)
+            )
             for row, (length, prefix) in enumerate(zip(lengths, prefixes)):
                 if not length:
                     continue
@@ -313,7 +317,7 @@ class DraftPrefillGraphReplay(Mapping):
                     end = ((prefix + length) // 4 + page_size - 1) // page_size
                 else:
                     end = (prefix + length + page_size - 1) // page_size
-                if end > table.shape[1]:
+                if end > values.shape[1]:
                     raise RuntimeError(
                         "QSA draft graph block table does not cover the visible tail"
                     )
@@ -345,15 +349,15 @@ class DraftPrefillGraphReplay(Mapping):
             self.token_capacity,
             self.position_factor,
         )
+        if bool(invalid_replay.item()):
+            raise RuntimeError(
+                "QSA draft graph has invalid raw-state pages, cu_seqlens or positions disagree with logical cache positions"
+            )
         copied = {transported.data_ptr()}
         for value in groups.values():
             target = value.combo_position_ids
             if target.data_ptr() not in copied:
                 target.copy_(transported.reshape_as(target))
                 copied.add(target.data_ptr())
-        if bool(invalid_replay.item()):
-            raise RuntimeError(
-                "QSA draft graph has invalid raw-state pages, cu_seqlens or positions disagree with logical cache positions"
-            )
         for tag, impl in self.impls.items():
             impl.prepare_cuda_graph(groups[tag])

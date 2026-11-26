@@ -74,13 +74,18 @@ def prepare_state_cache_inputs(groups, kv_cache, *, workspace=None) -> Any:
     for tag, inputs in groups.items():
         if tag not in _STATE_TAGS or not inputs.is_cuda_graph:
             continue
-        physical = int(kv_cache.get_seq_size_per_block(tag))
-        kernel = int(kv_cache.get_kernel_seq_size_per_block(tag))
-        if kernel <= 0 or physical <= 0 or physical % kernel:
-            raise RuntimeError(f"Qwen state cache {tag!r} has invalid block geometry")
-        source = inputs.kv_cache_kernel_block_id_device
-        factor = physical // kernel
         binding = None if workspace is None else workspace.get(tag)
+        if binding is not None and binding[2] is kv_cache:
+            factor = binding[0][-1]
+        else:
+            physical = int(kv_cache.get_seq_size_per_block(tag))
+            kernel = int(kv_cache.get_kernel_seq_size_per_block(tag))
+            if kernel <= 0 or physical <= 0 or physical % kernel:
+                raise RuntimeError(
+                    f"Qwen state cache {tag!r} has invalid block geometry"
+                )
+            factor = physical // kernel
+        source = inputs.kv_cache_kernel_block_id_device
         layout = None
         if workspace is not None and torch.is_tensor(source):
             layout = (
@@ -90,7 +95,7 @@ def prepare_state_cache_inputs(groups, kv_cache, *, workspace=None) -> Any:
                 source.device,
                 factor,
             )
-        if binding is not None and binding[0] == layout:
+        if binding is not None and binding[0] == layout and binding[2] is kv_cache:
             view = binding[1]
             table = state_page_table(
                 source,
@@ -103,7 +108,7 @@ def prepare_state_cache_inputs(groups, kv_cache, *, workspace=None) -> Any:
             table = state_page_table(source, factor)
             view = _GraphStateInputs(inputs, table)
             if workspace is not None:
-                workspace[tag] = (layout, view)
+                workspace[tag] = (layout, view, kv_cache)
         if result is None:
             result = dict(groups)
         result[tag] = view

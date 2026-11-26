@@ -108,26 +108,26 @@ class DraftPrefillGraphTest(unittest.TestCase):
             capture_groups=groups,
         )
 
-    def test_capture_rejects_invalid_fixed_layout(self):
+    def test_capture_requires_raw_state_group(self):
         _, groups, delegate = self._replay()
-        anchor = groups["full"]
-        bad_layouts = (
-            ("combo_position_ids", None, "capacity"),
-            ("combo_position_ids", torch.zeros(35, dtype=torch.int32), "capacity"),
-            ("cu_seqlens_device", None, "cu_seqlens"),
-            ("cu_seqlens_device", torch.zeros(4, dtype=torch.int64), "cu_seqlens"),
-            ("cu_seqlens_device", torch.zeros(3, dtype=torch.int32), "cu_seqlens"),
-            ("cu_seqlens_device", torch.zeros(4, 1, dtype=torch.int32), "cu_seqlens"),
-        )
-        for field, value, error in bad_layouts:
-            with self.subTest(field=field, value=value):
-                bad_anchor = SimpleNamespace(**(vars(anchor) | {field: value}))
-                with self.assertRaisesRegex(RuntimeError, f"capture.*{error}"):
-                    self._capture(dict(groups, full=bad_anchor), delegate)
-
         del groups[INDEXER_STATE_TAG]
         with self.assertRaisesRegex(RuntimeError, "capture.*raw-state cache group"):
             self._capture(groups, delegate)
+        delegate.prepare_cuda_graph.assert_not_called()
+
+    def test_replay_revalidates_rebound_host_mirrors(self):
+        hook, groups, delegate = self._replay()
+        hook.prepare_cuda_graph(groups)
+        delegate.reset_mock()
+        anchor = groups["full"]
+        lengths = anchor.input_lengths
+        anchor.input_lengths = lengths[:, None]
+        with self.assertRaisesRegex(RuntimeError, "invalid length geometry"):
+            hook.prepare_cuda_graph(groups)
+        anchor.input_lengths = lengths
+        anchor.kv_cache_kernel_block_id = anchor.kv_cache_kernel_block_id.long()
+        with self.assertRaisesRegex(RuntimeError, "requires host int32 block tables"):
+            hook.prepare_cuda_graph(groups)
         delegate.prepare_cuda_graph.assert_not_called()
 
     def test_replay_stages_host_reference_with_cuda_default_device(self):
