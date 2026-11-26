@@ -1,7 +1,6 @@
 """Fixed-capacity MTP draft metadata and validation before graph replay."""
 
 from collections.abc import Mapping
-from threading import Lock
 
 import torch
 
@@ -182,7 +181,8 @@ class DraftPrefillGraphReplay(Mapping):
     The graph runner owns the fixed int32 position and CU buffers. Each replay
     refreshes their contents and shares request lengths and prefixes across
     tags. The caller supplies positive raw-state page sizes and a nonempty
-    physical state table.
+    physical state table. The caller also serializes prepares for each
+    captured bucket before reusing its graph buffers and workspace.
     """
 
     def __init__(
@@ -227,7 +227,6 @@ class DraftPrefillGraphReplay(Mapping):
         self.token_capacity = token_capacity
         self.state_cache = state_cache
         self._workspace = None
-        self._workspace_lock = Lock()
 
     def __getitem__(self, key):
         return self.impls[key]
@@ -242,10 +241,6 @@ class DraftPrefillGraphReplay(Mapping):
         anchor = groups[next(iter(self.impls))]
         transported = anchor.combo_position_ids
         cu = anchor.cu_seqlens_device
-        if not self._workspace_lock.acquire(blocking=False):
-            return self._prepare_cuda_graph(
-                groups, transported, cu, _ReplayWorkspace(None)
-            )
         try:
             stream = (
                 torch.cuda.current_stream(transported.device)
@@ -270,8 +265,6 @@ class DraftPrefillGraphReplay(Mapping):
             # reference; PyTorch's allocators retain in-flight storage safely.
             self._workspace = None
             raise
-        finally:
-            self._workspace_lock.release()
 
     def _prepare_cuda_graph(self, groups, transported, cu, workspace):
         groups = prepare_state_cache_inputs(

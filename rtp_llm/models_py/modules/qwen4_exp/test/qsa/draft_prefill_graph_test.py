@@ -318,25 +318,7 @@ class DraftPrefillGraphTest(unittest.TestCase):
         self.assertIsNot(other._workspace, workspace)
         self.assertNotEqual(other._workspace.reference.data_ptr(), pointers[-1])
 
-    def test_replay_busy_workspace_uses_independent_scratch(self):
-        hook, groups, _ = self._replay()
-        hook.prepare_cuda_graph(groups)
-        workspace = hook._workspace
-        before = workspace.reference.clone()
-        groups["full"].prefix_lengths[0] = 11
-        hook._workspace_lock.acquire()
-        try:
-            hook.prepare_cuda_graph(groups)
-        finally:
-            hook._workspace_lock.release()
-        torch.testing.assert_close(workspace.reference, before)
-        self.assertIs(hook._workspace, workspace)
-        self.assertEqual(int(groups["full"].combo_position_ids[0]), 11)
-        hook.prepare_cuda_graph(groups)
-        self.assertIs(hook._workspace, workspace)
-        self.assertEqual(int(workspace.reference[1, 0]), 11)
-
-    def test_replay_discards_workspace_and_releases_lock_after_failure(self):
+    def test_replay_discards_workspace_and_recovers_after_failure(self):
         for defect in ("host", "verdict", "delegate"):
             with self.subTest(defect=defect):
                 hook, groups, delegate = self._replay()
@@ -353,7 +335,6 @@ class DraftPrefillGraphTest(unittest.TestCase):
                 with self.assertRaises(error):
                     hook.prepare_cuda_graph(groups)
                 self.assertIsNone(hook._workspace)
-                self.assertFalse(hook._workspace_lock.locked())
                 if defect != "delegate":
                     delegate.prepare_cuda_graph.assert_not_called()
                 groups["full"].kv_cache_kernel_block_id[0, 0] = 1
@@ -416,7 +397,6 @@ class DraftPrefillGraphTest(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "injected failure"):
                     hook.prepare_cuda_graph(groups)
             self.assertIsNone(hook._workspace)
-            self.assertFalse(hook._workspace_lock.locked())
             delegate.prepare_cuda_graph.assert_not_called()
             poisoned = torch.empty((2, 3), dtype=torch.int64, pin_memory=True)
             if not pending.query():
