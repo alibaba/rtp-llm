@@ -1,5 +1,6 @@
 import gc
 import logging
+import math
 import threading
 import time
 from typing import TYPE_CHECKING, Optional
@@ -22,6 +23,11 @@ if TYPE_CHECKING:
     from rtp_llm.async_decoder_engine.base_engine import BaseEngine
 
 USAGE_HEADER = "USAGE"
+
+# Serve-loop full GC cadence (seconds), aligned to wall-clock multiples so EP
+# ranks collect in the same window instead of skewing collective barriers.
+# Constant by policy: no env vars or config knobs.
+_FULL_GC_INTERVAL_S = 300.0
 
 
 class BackendManager(object):
@@ -238,12 +244,37 @@ class BackendManager(object):
 
     def serve_forever(self):
         """Enter service loop to keep the process alive until shutdown is requested"""
-        # freeze all current tracked objects to reduce gc cost
+        # GC hardening, motivated by decode rank skew: freeze startup/warmup
+        # heap objects into the permanent generation, then disable automatic
+        # cyclic GC (which otherwise freezes individual ranks on the GIL and
+        # skews EP NVLink collectives). Run full collections on a coarse
+        # wall-clock boundary (_FULL_GC_INTERVAL_S) instead of unaligned ticks.
+        gc_was_enabled = gc.isenabled()
         gc.collect()
         gc.freeze()
+        gc.disable()
+        logging.info(
+            "gc hardening active: automatic cyclic gc disabled after freeze; "
+            "wall-clock-aligned full gc every %.0fs in the serve loop",
+            _FULL_GC_INTERVAL_S,
+        )
         logging.info("BackendManager entering serve_forever loop")
-        while not self._shutdown_requested.is_set():
-            time.sleep(0.1)  # Check shutdown flag more frequently
+        next_gc_wall_s = (
+            math.floor(time.time() / _FULL_GC_INTERVAL_S) + 1.0
+        ) * _FULL_GC_INTERVAL_S
+        try:
+            while not self._shutdown_requested.is_set():
+                time.sleep(0.1)  # Check shutdown flag more frequently
+                now = time.time()
+                if now >= next_gc_wall_s:
+                    gc.collect()
+                    next_gc_wall_s = (
+                        math.floor(now / _FULL_GC_INTERVAL_S) + 1.0
+                    ) * _FULL_GC_INTERVAL_S
+                    logging.debug("full gc collection completed in the serve loop")
+        finally:
+            if gc_was_enabled:
+                gc.enable()
         logging.info("Shutdown requested, stopping BackendManager...")
         self.stop()
         logging.info("BackendManager stopped successfully")

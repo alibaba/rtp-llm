@@ -249,5 +249,55 @@ class BackendManagerDeepEPTest(unittest.TestCase):
                 factory.from_model_configs.assert_called_once()
 
 
+class BackendManagerGcHardeningTest(unittest.TestCase):
+    def test_serve_forever_aligns_full_gc_and_restores_gc_on_exit(self):
+        manager = BackendManager.__new__(BackendManager)
+        manager._shutdown_requested = MagicMock()
+        manager._shutdown_requested.is_set.side_effect = [False, False, True]
+        manager.stop = Mock()
+
+        # Wall times: initial setup=10.0 (next boundary=300.0), tick1=100.0, tick2=305.0 (>=300 -> collect, next=600).
+        wall_times = iter([10.0, 100.0, 305.0])
+        with (
+            patch("rtp_llm.server.backend_manager.time.sleep"),
+            patch(
+                "rtp_llm.server.backend_manager.time.time",
+                side_effect=lambda: next(wall_times),
+            ),
+            patch("rtp_llm.server.backend_manager.gc.isenabled", return_value=True),
+            patch("rtp_llm.server.backend_manager.gc.collect") as mock_collect,
+            patch("rtp_llm.server.backend_manager.gc.freeze") as mock_freeze,
+            patch("rtp_llm.server.backend_manager.gc.disable") as mock_disable,
+            patch("rtp_llm.server.backend_manager.gc.enable") as mock_enable,
+        ):
+            manager.serve_forever()
+
+        mock_freeze.assert_called_once()
+        mock_disable.assert_called_once()
+        mock_enable.assert_called_once()
+        # Only startup full collect() + one 300s boundary full collect(), never collect(0).
+        self.assertEqual(mock_collect.call_args_list, [(), ()])
+        manager.stop.assert_called_once()
+
+    def test_serve_forever_restores_gc_when_loop_raises(self):
+        manager = BackendManager.__new__(BackendManager)
+        manager._shutdown_requested = MagicMock()
+        manager._shutdown_requested.is_set.side_effect = RuntimeError("poll boom")
+        manager.stop = Mock()
+
+        with (
+            patch("rtp_llm.server.backend_manager.time.time", return_value=10.0),
+            patch("rtp_llm.server.backend_manager.gc.isenabled", return_value=True),
+            patch("rtp_llm.server.backend_manager.gc.collect"),
+            patch("rtp_llm.server.backend_manager.gc.freeze"),
+            patch("rtp_llm.server.backend_manager.gc.disable"),
+            patch("rtp_llm.server.backend_manager.gc.enable") as mock_enable,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "poll boom"):
+                manager.serve_forever()
+
+        mock_enable.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()
