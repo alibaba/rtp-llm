@@ -410,12 +410,17 @@ struct BatchDecodeSchedulerConfig {
 };
 
 struct FIFOSchedulerConfig {
-    int64_t     max_context_batch_size         = 1;
-    int64_t     max_batch_tokens_size          = 0;
-    int64_t     max_batch_tokens_without_cache = 0;
-    int64_t     max_batch_kv_len               = 0;
-    bool        cp_force_single_prefill        = true;
-    int64_t     max_inited_kv_cache_streams    = 0;
+    int64_t     max_context_batch_size                = 1;
+    int64_t     max_batch_tokens_size                 = 0;
+    int64_t     max_batch_tokens_without_cache        = 0;
+    int64_t     max_batch_kv_len                      = 0;
+    bool        cp_force_single_prefill               = true;
+    int64_t     max_inited_kv_cache_streams           = 0;
+    std::string pdfusion_coord_mode                   = "off";
+    std::string decode_prefill_ratio                  = "1";
+    bool        pdfusion_cadence_adaptive             = false;
+    int64_t     pdfusion_cadence_min_decode_share_pct = 25;
+    bool        pdfusion_schedule_trace               = false;
     std::string to_string() const;
 };
 

@@ -174,11 +174,22 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
     // need to check client has buffer at first
     if (mm_processor_ != nullptr && input->multimodal_inputs) {
         RTP_LLM_PROFILE_SCOPE("rpc.mm_update_features");
+        const bool fused_cadence =
+            maga_init_params_.pd_sep_config.role_type == RoleType::PDFUSION
+            && maga_init_params_.runtime_config.fifo_scheduler_config.pdfusion_coord_mode == "cadence";
+        if (fused_cadence && context && context->IsCancelled()) {
+            return grpc::Status(grpc::StatusCode::CANCELLED, "request cancelled before multimodal preparation");
+        }
         auto mm_res = mm_processor_->updateMultimodalFeatures(input, context);
         if (!mm_res.ok()) {
             generate_context.error_info = mm_res;
             generate_context.error_status =
                 serializeErrorMsg(generate_context.request_key, generate_context.request_info, mm_res);
+        }
+        // GLM53 obtains exact image/video positions from the local ViT result.
+        // Keep the request out of KV admission until that result is complete.
+        if (fused_cadence && mm_res.ok() && context && context->IsCancelled()) {
+            return grpc::Status(grpc::StatusCode::CANCELLED, "request cancelled during multimodal preparation");
         }
     }
     CHECK_ERROR_STATUS(generate_context);

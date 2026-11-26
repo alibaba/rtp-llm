@@ -2,15 +2,18 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/models/context_parallel/ZigzagTokenLayout.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -47,6 +50,20 @@ bool fifoBatchTraceEnabled() {
     return env != nullptr && std::strcmp(env, "1") == 0;
 }
 
+std::optional<PDFusionCadence> makeCadence(const FIFOSchedulerConfig& config, RoleType role) {
+    if (role != RoleType::PDFUSION || config.pdfusion_coord_mode != "cadence") {
+        return std::nullopt;
+    }
+    int64_t ratio = 1;
+    if (!config.pdfusion_cadence_adaptive) {
+        const auto& text        = config.decode_prefill_ratio;
+        const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), ratio);
+        RTP_LLM_CHECK_WITH_INFO(error == std::errc() && end == text.data() + text.size(),
+                                "PDFUSION cadence requires an integer DECODE_PREFILL_RATIO");
+    }
+    return PDFusionCadence(ratio, config.pdfusion_cadence_adaptive, config.pdfusion_cadence_min_decode_share_pct);
+}
+
 }  // namespace
 
 FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_config,
@@ -76,6 +93,7 @@ FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_conf
     cp_force_single_prefill_(parallelism_config.prefill_cp_config.is_enabled()
                              && runtime_config.fifo_scheduler_config.cp_force_single_prefill),
     worker_status_snapshot_enabled_(workerStatusSnapshotEnabled()),
+    cadence_(makeCadence(runtime_config.fifo_scheduler_config, pd_sep_config.role_type)),
     metrics_reporter_(metrics_reporter) {
     RTP_LLM_LOG_INFO("max_generate_batch_size is [%zu], max_batch_tokens_size is [%zu], "
                      "max_batch_tokens_without_cache is [%zu], max_batch_kv_len is [%zu], prefill_cp_size is [%zu], "
@@ -89,7 +107,10 @@ FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_conf
                      cp_force_single_prefill_,
                      max_inited_kv_cache_streams_,
                      worker_status_snapshot_enabled_);
-    if (asyncCachePrepareEnabled(glm53_) && pd_sep_config_.role_type != RoleType::DECODE && parallelism_config.tp_rank == 0) {
+    // Cadence owns Prefill admission. Eager background KV reservations would
+    // consume Decode capacity even while the cadence selects Decode.
+    if (!cadence_ && asyncCachePrepareEnabled(glm53_) && pd_sep_config_.role_type != RoleType::DECODE
+        && parallelism_config.tp_rank == 0) {
         try {
             async_cache_prepare_enabled_ = true;
             cache_prepare_thread_        = std::thread([this]() { cachePrepareLoop(); });
@@ -261,7 +282,8 @@ FIFOScheduler::enqueueGroup(const vector<GenerateStreamPtr>& streams) {
 }
 
 bool FIFOScheduler::evaluateRunningBatch(const ScheduleRuntime&   schedule_runtime,
-                                         const GenerateStreamPtr& new_stream) const {
+                                         const GenerateStreamPtr& new_stream,
+                                         bool                     allow_prefill_with_decode) const {
     RTP_LLM_PROFILE_FUNCTION();
     const auto admitted_running_stream_count = schedule_runtime.admitted_running_stream_count;
     if (pd_sep_config_.role_type == RoleType::DECODE) {
@@ -272,8 +294,8 @@ bool FIFOScheduler::evaluateRunningBatch(const ScheduleRuntime&   schedule_runti
             return true;
         }
     }
-    // prefill and decode not mixed together
-    if (!running_streams_.empty()) {
+    // Cadence can hold Decode streams while executing a separate Prefill round.
+    if (!running_streams_.empty() && !allow_prefill_with_decode) {
         return false;
     }
     if (cp_force_single_prefill_ && admitted_running_stream_count > 0) {
@@ -371,7 +393,8 @@ bool FIFOScheduler::fitsPrefillTokenLimits(size_t                   admitted_str
         return max_seq_len == 0 || sequence_count <= (available_tokens - 1) / max_seq_len;
     };
 
-    if (max_batch_kv_len_ > 0) {
+    const bool adaptive_cadence = cadence_ && cadence_->adaptive();
+    if (max_batch_kv_len_ > 0 || adaptive_cadence) {
         const auto candidate_tokens               = prefillTokenCostWithCache(candidate);
         const auto candidate_tokens_without_cache = prefillTokenCostWithoutCache(candidate);
         const auto fits_strict_sum = [running_token_reserve](size_t admitted, size_t candidate, size_t limit) {
@@ -380,7 +403,8 @@ bool FIFOScheduler::fitsPrefillTokenLimits(size_t                   admitted_str
             }
             return candidate < limit - running_token_reserve - admitted;
         };
-        const bool fits_kv = fits_strict_sum(admitted_tokens, candidate_tokens, max_batch_kv_len_);
+        const bool fits_kv =
+            max_batch_kv_len_ == 0 || fits_strict_sum(admitted_tokens, candidate_tokens, max_batch_kv_len_);
         const bool fits_q =
             fits_strict_sum(admitted_tokens_without_cache, candidate_tokens_without_cache, max_batch_tokens_size_);
         const size_t min_streams = prefillSumQuotaMinStreams(glm53_);
@@ -390,7 +414,7 @@ bool FIFOScheduler::fitsPrefillTokenLimits(size_t                   admitted_str
                                        + std::max(admitted_stream_count, new_streams_.size())
                                        + groupQueueStreamsSize(waiting_group_queue_)
                                        + groupQueueStreamsSize(loading_cache_group_queue_);
-        const bool use_sum_quota = min_streams == 0 || pending_streams >= min_streams;
+        const bool use_sum_quota = adaptive_cadence || min_streams == 0 || pending_streams >= min_streams;
         // The independent KV cap remains mandatory in either policy.
         const bool admitted = fits_kv && (use_sum_quota ? fits_q : fits_legacy());
         if (fifoBatchTraceEnabled()) {
@@ -612,7 +636,8 @@ bool FIFOScheduler::evaluateAndUpdateStreams(list<GenerateStreamPtr>& streams) {
 }
 
 void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>&       waiting_streams,
-                                           const list<GenerateStreamPtr>& already_admitted_streams) {
+                                           const list<GenerateStreamPtr>& already_admitted_streams,
+                                           bool                           allow_prefill_with_decode) {
     RTP_LLM_PROFILE_FUNCTION();
     const size_t inited_kv_streams = max_inited_kv_cache_streams_ > 0 ? countInitedKVCacheStreams() : 0;
 
@@ -674,7 +699,7 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>&       waitin
             continue;
         }
 
-        if (!evaluateRunningBatch(schedule_runtime, stream)) {
+        if (!evaluateRunningBatch(schedule_runtime, stream, allow_prefill_with_decode)) {
             continue;
         }
 
@@ -914,6 +939,9 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     last_admitted_context_batch_size_    = 0;
     last_admitted_context_token_size_    = 0;
     last_waiting_oldest_age_us_          = 0;
+    if (cadence_) {
+        return scheduleCadence();
+    }
     const size_t running_streams_before  = running_streams_.size();
     bool         running_streams_changed = evaluateAndUpdateStreams(running_streams_);
     if (async_cache_prepare && cache_prepare_blocked_stream_) {
@@ -923,6 +951,12 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
         }
     }
 
+    admitStreams(false);
+    finishSchedule(running_streams_changed);
+    return running_streams_;
+}
+
+void FIFOScheduler::admitStreams(bool allow_prefill_with_decode) {
     if (running_streams_.empty()) {
         active_admission_lane_ = AdmissionLane::NONE;
     }
@@ -947,7 +981,7 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
             // barrier for new waiting streams, not for already-owned work.
             evaluateAndUpdateStreams(loading_cache_streams_);
             if (!group_barrier) {
-                evaluateWaitingStreams(waiting_streams_, new_streams_);
+                evaluateWaitingStreams(waiting_streams_, new_streams_, allow_prefill_with_decode);
             } else {
                 // Do not admit another waiting stream after a group arrives.
                 // The current normal lane (including completed cache loads)
@@ -1013,6 +1047,9 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
             }
         }
     }
+}
+
+void FIFOScheduler::finishSchedule(bool running_streams_changed) {
     running_streams_changed = running_streams_changed || !new_streams_.empty();
     running_streams_.insert(running_streams_.end(), new_streams_.begin(), new_streams_.end());
     new_streams_.clear();
@@ -1021,7 +1058,74 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     if (running_streams_changed) {
         publishWorkerStatusSnapshotLocked();
     }
-    return running_streams_;
+}
+
+std::list<GenerateStreamPtr> FIFOScheduler::scheduleCadence() {
+    if (stop_) {
+        return {};
+    }
+
+    bool   changed       = false;
+    size_t ready_prefill = 0;
+    size_t ready_decode  = 0;
+    for (auto it = running_streams_.begin(); it != running_streams_.end();) {
+        const auto& stream = *it;
+        stream->checkTimeout();
+        if (!stream->isActive() || stream->hasEvent(StreamEvents::GenerateDone)) {
+            stream->moveToNext();
+            it      = running_streams_.erase(it);
+            changed = true;
+        } else {
+            if (stream->isContextStream()) {
+                ++ready_prefill;
+            } else {
+                ++ready_decode;
+            }
+            ++it;
+        }
+    }
+
+    const bool prefill_pending = ready_prefill > 0 || !waiting_streams_.empty() || !loading_cache_streams_.empty()
+                                 || !waiting_group_queue_.empty() || !loading_cache_group_queue_.empty();
+    auto phase = cadence_->choose(prefill_pending, ready_decode > 0);
+    if (phase == PDFusionPhase::PREFILL && ready_prefill == 0) {
+        admitStreams(true);
+        if (new_streams_.empty()) {
+            // KV pressure, an unfinished cache load or an explicit group can
+            // block Prefill. Let active Decode release capacity in this round.
+            phase = ready_decode > 0 ? PDFusionPhase::DECODE : PDFusionPhase::IDLE;
+        }
+    }
+
+    std::list<GenerateStreamPtr> batch;
+    if (phase != PDFusionPhase::IDLE) {
+        const bool prefill = phase == PDFusionPhase::PREFILL;
+        for (auto it = running_streams_.begin(); it != running_streams_.end();) {
+            const auto& stream = *it;
+            if (stream->isContextStream() != prefill) {
+                ++it;
+                continue;
+            }
+            if (!prefill && stream->moveToNext() != StreamState::RUNNING) {
+                it      = running_streams_.erase(it);
+                changed = true;
+                continue;
+            }
+            batch.push_back(stream);
+            ++it;
+        }
+        if (prefill) {
+            std::copy_if(new_streams_.begin(), new_streams_.end(), std::back_inserter(batch), [](const auto& stream) {
+                return stream->isContextStream();
+            });
+        }
+    }
+    finishSchedule(changed);
+    return batch;
+}
+
+void FIFOScheduler::recordCadenceStep(PDFusionPhase phase, int64_t elapsed_us) {
+    cadence_->recordExecution(phase, elapsed_us);
 }
 
 int64_t FIFOScheduler::waitingStreamsSize() {

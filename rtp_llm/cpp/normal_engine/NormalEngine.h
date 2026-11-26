@@ -19,6 +19,8 @@
 
 namespace rtp_llm {
 
+class FIFOScheduler;
+
 class NormalEngine: public EngineBase {
 public:
     NormalEngine(const EngineInitParams& params, std::unique_ptr<ProposeModelEngineInitParams> propose_params);
@@ -100,6 +102,7 @@ private:
     std::unique_ptr<ProposeModelEngineInitParams> propose_params_;
     StepWindowProfiler                            step_profiler_;
     int                                           reserve_step_ = 0;
+    FIFOScheduler*                                cadence_scheduler_ = nullptr;
 };
 
 }  // namespace rtp_llm

@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <list>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -10,6 +11,7 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/engine_base/schedulers/EngineScheduleInfo.h"
+#include "rtp_llm/cpp/engine_base/schedulers/PDFusionCadence.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerBase.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 
@@ -36,6 +38,7 @@ public:
     bool                                         empty() override;
 
     void reportMetrics();
+    void recordCadenceStep(PDFusionPhase phase, int64_t elapsed_us);
 
 public:
     // for test
@@ -72,7 +75,9 @@ private:
                                    size_t                   admitted_max_seq_len,
                                    size_t                   admitted_sequence_count,
                                    const GenerateStreamPtr& candidate) const;
-    bool    evaluateRunningBatch(const ScheduleRuntime& schedule_runtime, const GenerateStreamPtr& new_stream) const;
+    bool    evaluateRunningBatch(const ScheduleRuntime&   schedule_runtime,
+                                 const GenerateStreamPtr& new_stream,
+                                 bool                     allow_prefill_with_decode) const;
     bool   evaluateRunningBatch(const std::list<GenerateStreamPtr>& streams, const GenerateStreamPtr& new_stream) const;
     size_t prefillTokenCostWithoutCache(const GenerateStreamPtr& stream) const;
     size_t prefillSeqLenWithCache(const GenerateStreamPtr& stream) const;
@@ -84,8 +89,12 @@ private:
     void   cachePrepareLoop();
     void   addStreamToNewState(const GenerateStreamPtr& stream, StreamState new_state);
     bool   checkInputLength(const GenerateStreamPtr& stream);
-    void   evaluateWaitingStreams(std::list<GenerateStreamPtr>&       streams,
-                                  const std::list<GenerateStreamPtr>& already_admitted_streams);
+    void    evaluateWaitingStreams(std::list<GenerateStreamPtr>&       streams,
+                                   const std::list<GenerateStreamPtr>& already_admitted_streams,
+                                   bool                                allow_prefill_with_decode = false);
+    void    admitStreams(bool allow_prefill_with_decode);
+    void    finishSchedule(bool running_streams_changed);
+    std::list<GenerateStreamPtr> scheduleCadence();
     void   evaluateWaitingGroupQueue();
     void   evaluateLoadingCacheGroupQueue();
     bool   loadingGroupReady() const;
@@ -122,6 +131,7 @@ protected:
     const size_t                    prefill_cp_size_                = 1;
     const bool                      cp_force_single_prefill_        = false;
     const bool                      worker_status_snapshot_enabled_ = false;
+    std::optional<PDFusionCadence>  cadence_;
     std::atomic<bool>               stop_                           = false;
     bool                            schedule_trigger_               = false;
     bool                            async_cache_prepare_enabled_    = false;

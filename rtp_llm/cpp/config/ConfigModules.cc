@@ -385,7 +385,12 @@ std::string FIFOSchedulerConfig::to_string() const {
         << "max_batch_tokens_without_cache: " << max_batch_tokens_without_cache << "\n"
         << "max_batch_kv_len: " << max_batch_kv_len << "\n"
         << "cp_force_single_prefill: " << cp_force_single_prefill << "\n"
-        << "max_inited_kv_cache_streams: " << max_inited_kv_cache_streams;
+        << "max_inited_kv_cache_streams: " << max_inited_kv_cache_streams << "\n"
+        << "pdfusion_coord_mode: " << pdfusion_coord_mode << "\n"
+        << "decode_prefill_ratio: " << decode_prefill_ratio << "\n"
+        << "pdfusion_cadence_adaptive: " << pdfusion_cadence_adaptive << "\n"
+        << "pdfusion_cadence_min_decode_share_pct: " << pdfusion_cadence_min_decode_share_pct << "\n"
+        << "pdfusion_schedule_trace: " << pdfusion_schedule_trace;
     return oss.str();
 }
 

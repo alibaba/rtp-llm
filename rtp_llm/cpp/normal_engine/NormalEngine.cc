@@ -259,6 +259,16 @@ void NormalEngine::initExecutor(const EngineInitParams&                        p
 }
 
 void NormalEngine::initScheduler() {
+    const auto& fifo    = runtime_config.fifo_scheduler_config;
+    const bool  cadence = pd_sep_config.role_type == RoleType::PDFUSION && fifo.pdfusion_coord_mode == "cadence";
+    if (cadence) {
+        RTP_LLM_CHECK_WITH_INFO(
+            parallelism_config.dp_size == 1 && parallelism_config.pp_size == 1
+                && !parallelism_config.prefill_cp_config.is_enabled()
+                && !ffn_disaggregate_config.enable_ffn_disaggregate && !runtime_config.use_batch_decode_scheduler
+                && !runtime_config.use_gather_batch_scheduler && !autil::EnvUtil::getEnv("RTP_LLM_STREAM_ASYNC", false),
+            "PDFUSION cadence requires synchronous FIFO execution with DP1/PP1, without prefill CP or FFN disaggregation");
+    }
     if (runtime_config.use_batch_decode_scheduler) {
         scheduler_.reset(new BatchDecodeScheduler(
             runtime_config, resource_context_.cache_manager, metrics_reporter_, parallelism_config.dp_rank));
@@ -273,13 +283,20 @@ void NormalEngine::initScheduler() {
                                                   metrics_reporter_));
         RTP_LLM_LOG_INFO("create gather batch scheduler done");
     } else {
-        scheduler_.reset(new FIFOScheduler(runtime_config,
-                                           model_config_,
-                                           pd_sep_config,
-                                           parallelism_config,
-                                           model_specific_config,
-                                           resource_context_.cache_manager,
-                                           metrics_reporter_));
+        auto scheduler = std::make_unique<FIFOScheduler>(runtime_config,
+                                                         model_config_,
+                                                         pd_sep_config,
+                                                         parallelism_config,
+                                                         model_specific_config,
+                                                         resource_context_.cache_manager,
+                                                         metrics_reporter_);
+        if (cadence && parallelism_config.tp_rank == 0) {
+            cadence_scheduler_ = scheduler.get();
+            RTP_LLM_LOG_INFO("create PDFUSION cadence scheduler adaptive=%d tp_size=%ld",
+                             fifo.pdfusion_cadence_adaptive,
+                             parallelism_config.tp_size);
+        }
+        scheduler_ = std::move(scheduler);
         RTP_LLM_LOG_INFO("create fifo scheduler done");
     }
 }
@@ -917,6 +934,12 @@ absl::Status NormalEngine::step() {
     }
 
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
+    auto cadence_phase = PDFusionPhase::IDLE;
+    if (cadence_scheduler_ && !streams.empty()) {
+        cadence_phase = streams.front()->isContextStream() ? PDFusionPhase::PREFILL : PDFusionPhase::DECODE;
+    }
+    const auto   cadence_start      = cadence_phase != PDFusionPhase::IDLE ? std::chrono::steady_clock::now() :
+                                                                             std::chrono::steady_clock::time_point{};
     int64_t      step_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     absl::Status status             = absl::OkStatus();
     if (propose_params_) {
@@ -925,6 +948,18 @@ absl::Status NormalEngine::step() {
     {
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.execute(stream_size=%zu)", streams.size());
         status = executor_->process(streams, tps_schedule_time_us);
+        if (cadence_phase != PDFusionPhase::IDLE && status.ok()) {
+            const auto elapsed_us =
+                std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - cadence_start)
+                    .count();
+            cadence_scheduler_->recordCadenceStep(cadence_phase, elapsed_us);
+            if (runtime_config.fifo_scheduler_config.pdfusion_schedule_trace) {
+                RTP_LLM_LOG_INFO("PDFUSION_CADENCE phase=%s batch_size=%zu elapsed_us=%ld",
+                                 cadence_phase == PDFusionPhase::PREFILL ? "prefill" : "decode",
+                                 streams.size(),
+                                 elapsed_us);
+            }
+        }
         if (propose_params_) {
             ++completed_steps_;
             if ((completed_steps_ & 63U) == 0) {

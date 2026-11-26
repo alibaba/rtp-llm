@@ -60,6 +60,77 @@ public:
     FIFOSchedulerTest() {}
 };
 
+TEST_F(FIFOSchedulerTest, fusedCadenceAlternatesPhasesWithoutDroppingActiveDecode) {
+    auto cache_manager = std::make_shared<KVCacheManager>(makeMhaCacheConfig(1, 16, 1, 4, 8, DataType::TYPE_FP16));
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+
+    ModelConfig model_config;
+    model_config.max_seq_len = 128;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                         = 8;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size     = 128;
+    runtime_config.fifo_scheduler_config.pdfusion_coord_mode       = "cadence";
+    runtime_config.fifo_scheduler_config.pdfusion_cadence_adaptive = true;
+    PDSepConfig pd_sep_config;
+    pd_sep_config.role_type = RoleType::PDFUSION;
+    FIFOScheduler scheduler(
+        runtime_config, model_config, pd_sep_config, ParallelismConfig{}, ModelSpecificConfig{}, cache_manager);
+
+    const auto make_stream = [&]() {
+        auto input             = std::make_shared<GenerateInput>();
+        input->input_ids       = torch::tensor({1, 2}, torch::kInt32);
+        input->generate_config = std::make_shared<GenerateConfig>();
+        return std::make_shared<NormalGenerateStream>(input, model_config, runtime_config, resource_context, nullptr);
+    };
+    auto first  = make_stream();
+    auto second = make_stream();
+    ASSERT_TRUE(scheduler.enqueue(first).ok());
+    auto batch = scheduler.schedule();
+    ASSERT_TRUE(batch.ok());
+    EXPECT_EQ(*batch, (std::list<GenerateStreamPtr>{first}));
+    first->setIsContextStream(false);
+    scheduler.recordCadenceStep(PDFusionPhase::PREFILL, 300);
+
+    ASSERT_TRUE(scheduler.enqueue(second).ok());
+    batch = scheduler.schedule();
+    ASSERT_TRUE(batch.ok());
+    EXPECT_EQ(*batch, (std::list<GenerateStreamPtr>{first}));
+    EXPECT_EQ(scheduler.waitingStreamsSize(), 1);
+    scheduler.recordCadenceStep(PDFusionPhase::DECODE, 100);
+
+    batch = scheduler.schedule();
+    ASSERT_TRUE(batch.ok());
+    EXPECT_EQ(*batch, (std::list<GenerateStreamPtr>{second}));
+    EXPECT_EQ(scheduler.runningStreamsSize(), 2);
+    EXPECT_FALSE(first->isContextStream());
+    EXPECT_TRUE(second->isContextStream());
+
+    first->reportEvent(StreamEvents::GenerateDone);
+    second->setIsContextStream(false);
+    batch = scheduler.schedule();
+    ASSERT_TRUE(batch.ok());
+    EXPECT_EQ(*batch, (std::list<GenerateStreamPtr>{second}));
+    EXPECT_EQ(scheduler.runningStreamsSize(), 1);
+}
+
+TEST_F(FIFOSchedulerTest, cadenceOptionsAreIgnoredBySeparatedRoles) {
+    RuntimeConfig runtime_config;
+    runtime_config.fifo_scheduler_config.pdfusion_coord_mode  = "cadence";
+    runtime_config.fifo_scheduler_config.decode_prefill_ratio = "invalid for cadence";
+    auto cache_manager = std::make_shared<KVCacheManager>(makeMhaCacheConfig(1, 16, 1, 4, 8, DataType::TYPE_FP16));
+    ASSERT_TRUE(cache_manager->init());
+
+    for (auto role : {RoleType::PREFILL, RoleType::DECODE}) {
+        PDSepConfig pd_sep_config;
+        pd_sep_config.role_type = role;
+        FIFOScheduler scheduler(
+            runtime_config, ModelConfig{}, pd_sep_config, ParallelismConfig{}, ModelSpecificConfig{}, cache_manager);
+        EXPECT_FALSE(scheduler.cadence_.has_value());
+    }
+}
+
 TEST_F(FIFOSchedulerTest, testWorkerStatusSnapshotDisabledByDefault) {
     ScopedEnvVar snapshot_env("RTP_LLM_WORKER_STATUS_SNAPSHOT", "0");
 
