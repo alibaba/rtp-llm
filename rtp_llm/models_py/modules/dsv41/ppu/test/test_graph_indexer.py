@@ -1282,10 +1282,20 @@ class PagedGraphIndexerTest(unittest.TestCase):
         stream.synchronize()
 
     @unittest.skipUnless(torch.cuda.is_available(), "PPU required")
+    @torch.no_grad()
     def test_sparse_candidates_replay_matches_full_scoring(self):
-        if "ZW-" not in torch.cuda.get_device_name():
-            self.skipTest("PPU required")
+        if (
+            "ZW-" not in torch.cuda.get_device_name()
+            or torch.cuda.get_device_capability() != (8, 9)
+        ):
+            self.skipTest("SM89 PPU required for Sail sparse TopK")
+        for rows in (1, 8):
+            with self.subTest(rows=rows):
+                self._assert_sparse_candidates_replay_matches_full_scoring(rows)
+
+    def _assert_sparse_candidates_replay_matches_full_scoring(self, rows):
         from rtp_llm.models_py.modules.dsv41.fp8.attention_v41 import mask_candidate_logits
+        from rtp_llm.models_py.modules.dsv41.ppu import local_prefill_sg_topk
 
         device = torch.device("cuda", torch.cuda.current_device())
         _quant.prepare_e2m1_codebooks(device)
@@ -1314,60 +1324,82 @@ class PagedGraphIndexerTest(unittest.TestCase):
         candidates[:, :5] = torch.tensor([1055, 1055, 16, 15, -1], dtype=torch.int32, device=device)
         candidates[4, 2:] = -1
         candidates[6, :] = -1
+        batch_rows = slice(4, 5) if rows == 1 else slice(None)
+        batch_query, batch_weights = query[batch_rows], weights[batch_rows]
+        batch_positions, batch_valid = positions[batch_rows], valid[batch_rows]
+        batch_candidates, batch_active = candidates[batch_rows], active[batch_rows]
+        batch_table = table[batch_rows]
         cache = SimpleNamespace(
             max_seq_len=capacity * ratio,
-            tables={tag: table, "global_kv_2": torch.zeros_like(table)},
+            tables={tag: batch_table, "global_kv_2": torch.zeros_like(batch_table)},
             entries={tag: page},
             spans={tag: page},
             pool=lambda _layer, _tag: pool,
         )
-        args = dict(cache=cache, ratio=ratio, positions=positions, valid_mask=valid)
+        args = dict(cache=cache, ratio=ratio, positions=batch_positions, valid_mask=batch_valid)
 
         def forward():
-            live = (positions + 1) // ratio
+            live = (batch_positions + 1) // ratio
             plans = {}
             sparse_args = dict(
-                **args, topk=topk, candidate_block_size=tile, candidates=candidates,
-                candidate_active=active, visible=live, candidate_flags_cache=plans,
+                **args, topk=topk, candidate_block_size=tile, candidates=batch_candidates,
+                candidate_active=batch_active, visible=live, candidate_flags_cache=plans,
                 candidate_inactive_limit=count * tile,
             )
-            selected, published = select_visible_indices(query, weights, source_layer=0, **sparse_args)
+            selected, published = select_visible_indices(
+                batch_query, batch_weights, source_layer=0, **sparse_args,
+            )
             self.assertIsNone(published)
             key, = plans
             self.assertEqual(key[0], "indexer_sparse_schedule")
             plan = plans[key]
-            reused, _ = select_visible_indices(query, weights, source_layer=1, **sparse_args)
+            reused, _ = select_visible_indices(
+                batch_query, batch_weights, source_layer=1, **sparse_args,
+            )
             self.assertEqual(len(plans), 1)
             self.assertIs(plans[key], plan)
             return selected, reused
 
         def check(outputs):
-            live = (positions + 1) // ratio
-            dense = indexer_scores(query, weights, source_layer=0, **args)
-            masked = mask_candidate_logits(dense.clone(), candidates, tile)
-            logits = torch.where(active[:, None], masked, dense)
-            ranked = logits.argsort(dim=1, descending=True, stable=True)[:, :topk]
-            scored = torch.where(logits.gather(1, ranked).isfinite(), ranked, -1)
+            live = (batch_positions + 1) // ratio
+            long_rows = batch_valid & (live > topk)
+            dense = indexer_scores(batch_query, batch_weights, source_layer=0, **args)
+            masked = mask_candidate_logits(dense.clone(), batch_candidates, tile)
+            logits = torch.where(batch_active[:, None], masked, dense)
+            expected_scores = logits[long_rows].topk(topk, dim=1).values
             ordinal = torch.arange(topk, device=device)[None, :]
-            short = torch.where(ordinal < live[:, None], ordinal, -1)
-            expected = torch.where((live <= topk)[:, None], short, scored)
-            expected = torch.where(valid[:, None], expected, -1).int()
+            short_ids = torch.where(batch_valid[:, None] & (ordinal < live[:, None]), ordinal, -1)
             for selected in outputs:
-                torch.testing.assert_close(selected, expected, rtol=0, atol=0)
-            newest = (live[4] - 1) // tile * tile
-            ids = outputs[0][4]
+                torch.testing.assert_close(selected[~long_rows], short_ids[~long_rows].int())
+                # Sail permits arbitrary output order and tied membership.
+                ids = selected[long_rows].sort(dim=1).values
+                self.assertFalse(((ids[:, 1:] >= 0) & (ids[:, 1:] == ids[:, :-1])).any().item())
+                self.assertFalse((ids >= live[long_rows, None]).any().item())
+                scores = logits[long_rows].gather(1, ids.clamp_min(0).long())
+                scores = scores.masked_fill(ids < 0, -torch.inf)
+                torch.testing.assert_close(scores.sort(dim=1, descending=True).values, expected_scores)
+            newest_row = 0 if rows == 1 else 4
+            newest = (live[newest_row] - 1) // tile * tile
+            ids = outputs[0][newest_row]
             self.assertTrue((ids == newest).any().item())
-            self.assertFalse((ids >= live[4]).any().item())
 
         stream = torch.cuda.Stream()
         stream.wait_stream(torch.cuda.current_stream())
-        with patch.dict("os.environ", {"RTP_V41_PPU_GRAPH_SPARSE_INDEXER": "1"}):
+        with (
+            patch.dict("os.environ", {"RTP_V41_PPU_GRAPH_SPARSE_INDEXER": "1"}),
+            patch.object(
+                local_prefill_sg_topk, "select_decode_sparse",
+                wraps=local_prefill_sg_topk.select_decode_sparse,
+            ) as native_topk,
+        ):
             with torch.cuda.stream(stream):
                 check(forward())
             stream.synchronize()
             graph = torch.cuda.CUDAGraph()
+            native_topk.reset_mock()
             with torch.cuda.graph(graph, stream=stream):
                 captured = forward()
+            self.assertEqual(native_topk.call_count, 2)
             with torch.cuda.stream(stream):
                 graph.replay()
                 check(captured)

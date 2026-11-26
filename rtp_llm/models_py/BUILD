@@ -143,7 +143,6 @@ _DSV41_PPU_SHARED_MODULES = [
     "modules/dsv41/fp8/_v41_fp4_triton.py",
     "modules/dsv41/moe/_silu_mul_bf16_triton.py",
     "modules/dsv41/ppu/graph_indexer.py",
-    "modules/dsv41/ppu/sparse_selection.py",
     "modules/dsv41/ppu/graph_packed_attention.py",
     "modules/dsv41/ppu/graph_metadata.py",
     "modules/dsv41/ppu/graph_moe.py",

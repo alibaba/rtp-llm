@@ -23,6 +23,7 @@ from rtp_llm.models_py.modules.dsv41.ppu.topk import (
 
 _INDEXER_POOL = "indexer_kv"
 _MAX_SPARSE_BLOCKS = 4096
+_SAIL_SPARSE_MAX_WIDTH = 16384
 _TOPK_TILE = 65536
 # Enter the native cooperative radix path. Its medium-row implementation can
 # truncate a coarse bin at 4,096 values, which is unsafe for tied block scores.
@@ -543,10 +544,12 @@ def _compact_kernels():
     @triton.jit
     def prepare_sparse_candidates(
         table, candidates, candidate_active, visible, valid, logical_ids, provider_ids, lengths, rows,
+        decode_lengths,
         visible_stride: tl.constexpr, valid_stride: tl.constexpr, active_stride: tl.constexpr,
         page_count: tl.constexpr, pool_blocks: tl.constexpr, capacity: tl.constexpr,
         logical_per_page: tl.constexpr, physical_per_page: tl.constexpr, tile: tl.constexpr,
         count: tl.constexpr, blocks: tl.constexpr, BLOCK: tl.constexpr,
+        DECODE_TOPK: tl.constexpr,
     ):
         row = tl.program_id(0)
         lane = tl.arange(0, BLOCK)
@@ -567,13 +570,28 @@ def _compact_kernels():
         previous = tl.gather(ordered, tl.maximum(lane - 1, 0), axis=0)
         keep = (ordered != missing) & ((lane == 0) | (ordered != previous))
         slot = tl.cumsum(keep.to(tl.int32), axis=0) - 1
-        tl.store(logical_ids + row * blocks + slot, ordered, keep)
+        compact_length = tl.sum(keep.to(tl.int32), axis=0) * tile
+        if DECODE_TOPK:
+            # Only the last retained logical block can be partially visible.
+            # Preserve the provider's full-block length and trim selection separately.
+            end = tl.where(live, tl.maximum(tl.minimum(length, capacity), 0), 0)
+            last_block = tl.max(tl.where(keep, ordered, -1), axis=0)
+            padding = tl.maximum((last_block + 1) * tile - end, 0)
+            short = end <= 512
+            tl.store(decode_lengths + row, tl.where(short, end, compact_length - padding))
+            # Native TopK also maps short rows. Identity pages preserve RTP's
+            # ordinal output even when candidate or cache pages are missing.
+            tl.store(logical_ids + row * blocks + lane, lane, short & (lane * tile < end))
+            keep_logical = keep & ~short
+        else:
+            keep_logical = keep
+        tl.store(logical_ids + row * blocks + slot, ordered, keep_logical)
         # Provider addresses use physical page width. Keep the original
         # compressed logical ID alongside each scheduled block for TopK.
         block = tl.where(keep, ordered, 0)
         provider = (block // logical_per_page) * physical_per_page + block % logical_per_page
         tl.store(provider_ids + row * blocks + slot, provider, keep)
-        tl.store(lengths + row, tl.sum(keep.to(tl.int32), axis=0) * tile)
+        tl.store(lengths + row, compact_length)
         tl.store(rows + row, row)
 
     @triton.jit
@@ -1136,7 +1154,7 @@ def _select_verify_topk(score_tiles, visible, valid_mask, topk, *, bf16_tail_pro
 def _sparse_candidate_scores(
     query, head_weights, cache, source_layer, ratio, visible, valid_mask,
     topk, tile, candidates, candidate_active, inactive_limit, shared, quantized_query=None,
-    max_compact_width=32768,
+    max_compact_width=32768, *, decode_topk=False,
 ):
     batch = query.shape[0]
     if (
@@ -1162,6 +1180,7 @@ def _sparse_candidate_scores(
         or not 0 <= inactive_limit <= count * tile
     ):
         return None
+    decode_topk = decode_topk and width <= _SAIL_SPARSE_MAX_WIDTH
     table = cache.tables[_INDEXER_POOL][:batch]
     physical_page = cache.entries[_INDEXER_POOL]
     raw_page = cache.spans[_INDEXER_POOL]
@@ -1189,7 +1208,7 @@ def _sparse_candidate_scores(
     key = (
         "indexer_sparse_schedule", id(candidates), id(candidate_active), id(visible),
         id(valid_mask), table.data_ptr(), table.shape, physical_page, logical_page,
-        pool.shape[0], capacity, tile,
+        pool.shape[0], capacity, tile, decode_topk,
     )
     schedule = None if shared is None else shared.get(key)
     if schedule is None:
@@ -1197,21 +1216,26 @@ def _sparse_candidate_scores(
         provider_ids = torch.empty_like(logical_ids)
         lengths = torch.empty(batch, dtype=torch.int32, device=device)
         rows = torch.empty_like(lengths)
+        decode_lengths = torch.empty_like(lengths) if decode_topk else None
         kernels.prepare_sparse_candidates[(batch,)](
             table, candidates, candidate_active, visible, valid_mask,
-            logical_ids, provider_ids, lengths, rows,
+            logical_ids, provider_ids, lengths, rows, decode_lengths,
             visible.stride(0), valid_mask.stride(0), candidate_active.stride(0),
             table.shape[1], pool.shape[0], capacity, logical_page // tile,
             physical_page // tile, tile, count, blocks, kernels.triton.next_power_of_2(count),
+            decode_topk,
             num_warps=8,
         )
         metadata = make_metadata(
             lengths, table, rows, physical_page, provider_ids, torch.int8, tile,
         )
-        schedule = metadata, logical_ids, lengths, candidates, candidate_active, visible, valid_mask
+        schedule = (
+            metadata, logical_ids, lengths, decode_lengths,
+            candidates, candidate_active, visible, valid_mask,
+        )
         if shared is not None:
             shared[key] = schedule
-    metadata, logical_ids, lengths, *_ = schedule
+    metadata, logical_ids, lengths, decode_lengths, *_ = schedule
     packed_query, packed_pool, weights = _score_inputs(
         query, head_weights, pool, physical_page, True, quantized_query,
     )
@@ -1220,6 +1244,7 @@ def _sparse_candidate_scores(
     )
     return SimpleNamespace(
         scores=scores, logical_ids=logical_ids, lengths=lengths,
+        decode_lengths=decode_lengths,
         blocks=blocks, tile=tile, capacity=capacity, kernels=kernels,
     )
 
@@ -1248,8 +1273,6 @@ def _select_verify_compact_topk(
     *, bf16_tail_provenance=False, sail_topk=False,
 ):
     """Select plain scores, then map compact positions to logical KV IDs."""
-    from rtp_llm.models_py.modules.dsv41.ppu.sparse_selection import try_select_sparse
-
     if (
         sail_topk and bf16_tail_provenance and scored.scores.dtype == torch.bfloat16
         and scored.tile == 8 and 64 <= scored.blocks <= 2048 and tentative.shape[1] <= 8
@@ -1270,13 +1293,6 @@ def _select_verify_compact_topk(
         )
         return select_decode_sparse(packed, lengths, pages, topk)
 
-    fused = try_select_sparse(
-        scored, visible, valid_mask, topk, first=first, tentative=tentative,
-        allowed=allowed, candidate_active=candidate_active,
-        bf16_tail_provenance=bf16_tail_provenance,
-    )
-    if fused is not None:
-        return fused
     native_topk, cooperative_bf16 = _verify_topk_op(
         visible.numel(), visible.device, topk,
         bf16_provenance=bf16_tail_provenance and scored.scores.dtype == torch.bfloat16,
@@ -1417,22 +1433,35 @@ def _select_sparse_candidates(
     query, head_weights, cache, source_layer, ratio, visible, valid_mask,
     topk, tile, candidates, candidate_active, inactive_limit, shared,
 ):
+    batch = query.shape[0]
+    sail_topk = (
+        topk == 512 and tile == 8 and _quant.is_ppu()
+        and torch.cuda.get_device_capability(query.device) == (8, 9)
+    )
+    if batch == 1 and not sail_topk:
+        return None
     scored = _sparse_candidate_scores(
         query, head_weights, cache, source_layer, ratio, visible, valid_mask,
         topk, tile, candidates, candidate_active, inactive_limit, shared,
+        max_compact_width=_SAIL_SPARSE_MAX_WIDTH if batch == 1 else 32768,
+        decode_topk=sail_topk,
     )
     if scored is None:
         return None
-    from rtp_llm.models_py.modules.dsv41.ppu.sparse_selection import try_select_sparse
-
-    fused = try_select_sparse(scored, visible, valid_mask, topk)
-    if fused is not None:
-        return fused
-    from rtp_llm.ops.compute_ops import rtp_llm_ops
-
     scores, logical_ids, lengths = scored.scores, scored.logical_ids, scored.lengths
     blocks, capacity, kernels = scored.blocks, scored.capacity, scored.kernels
-    batch, device = query.shape[0], query.device
+    if scored.decode_lengths is not None and scores.dtype == torch.bfloat16:
+        from .local_prefill_sg_topk import select_decode_sparse
+
+        # DeepGEMM can pad the score row stride beyond the compact block count.
+        return select_decode_sparse(
+            scores[:, : blocks * tile], scored.decode_lengths, logical_ids, topk,
+        )
+    if batch == 1:
+        return None
+    from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+    device = query.device
     padded = _CANDIDATE_RADIX_WIDTH
     ranks = torch.empty((batch, padded), dtype=torch.float32, device=device)
     rank_lengths = torch.empty_like(lengths)
@@ -1526,7 +1555,8 @@ def select_visible_indices(
     # Keep its original native TopK launch geometry.
     compact = query.is_cuda and query.shape[0] > 1 and topk in (512, 1024, 2048)
     if (
-        compact and candidates is not None and candidate_topk_blocks == 0
+        (compact or (query.is_cuda and query.shape[0] == 1 and topk == 512))
+        and candidates is not None and candidate_topk_blocks == 0
         and candidate_inactive_limit is not None
         and os.environ.get(_SPARSE_INDEXER_ENV, "1") != "0"
     ):
