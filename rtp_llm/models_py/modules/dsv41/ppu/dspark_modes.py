@@ -25,8 +25,8 @@ class SharedDSparkMode:
     sample_from_anchor: bool = True
 
     def validate(self):
-        if type(self.gamma) is not int or self.gamma not in (1, 3, 5):
-            raise ValueError("shared PPU DSpark supports gamma1/3/5")
+        if type(self.gamma) is not int or self.gamma not in (1, 3, 4, 5):
+            raise ValueError("shared PPU DSpark supports gamma1/3/4/5")
         if self.confidence not in ("off", "observe", "bounded"):
             raise ValueError("invalid shared confidence mode")
         if self.verify not in ("dense", "packed") or self.budget_mode not in ("fixed", "adaptive"):

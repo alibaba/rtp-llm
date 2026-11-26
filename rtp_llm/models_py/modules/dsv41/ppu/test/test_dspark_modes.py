@@ -35,9 +35,9 @@ MODE = MODES.SharedDSparkMode
 
 
 class SharedDSparkModeContracts(unittest.TestCase):
-    def test_all_25_modes_and_capacity(self):
+    def test_all_supported_modes_and_capacity(self):
         count = 0
-        for gamma in (1, 3, 5):
+        for gamma in (1, 3, 4, 5):
             choices = [MODE(gamma, c) for c in ("off", "observe")]
             for budget in sorted({0, gamma // 2 if gamma > 1 else 0, gamma}):
                 choices += [MODE(gamma, "bounded", verify, budget) for verify in ("dense", "packed")]
@@ -51,7 +51,7 @@ class SharedDSparkModeContracts(unittest.TestCase):
                     self.assertGreaterEqual(policy.keep_tokens, policy.window + mode.max_verified_rows)
                     self.assertEqual(MODE.from_config(mode.freeze({}), env={}), mode)
                 count += 1
-        self.assertEqual(count, 25)
+        self.assertEqual(count, 34)
 
     def test_actual_launch_both_roles_and_protocol_identity(self):
         # Only execute the real import-light launcher functions, with the real
@@ -60,13 +60,16 @@ class SharedDSparkModeContracts(unittest.TestCase):
         load_light(precision_name, PPU / "moe_precision.py")
         runtime = load_light("n7_runtime_config", ROOT / "config/v41_runtime.py")
         tree = ast.parse((ROOT / "tools/v41/launch.py").read_text())
+        helpers = {"preset_env", "bounded_prefill_wait_timeout_ms", "positive_integer", "decode_capture_batches"}
         selected = ast.Module(body=[x for x in tree.body if isinstance(x, ast.FunctionDef)
-                                   and x.name in {"preset_env", "bounded_prefill_wait_timeout_ms"}], type_ignores=[])
+                                   and x.name in helpers], type_ignores=[])
         ns = {"os": os, "json": json, "DEFAULT_PREFILL_WAIT_TIMEOUT_MS": 1800000,
               "MAX_PREFILL_WAIT_TIMEOUT_MS": 86400000, "env_bool": runtime.env_bool,
+              "DSPARK_CROSS_ROUND_OVERLAP_ENV": runtime.DSPARK_CROSS_ROUND_OVERLAP_ENV,
+              "zero_overhead_flags": runtime.zero_overhead_flags,
               "PPU_STRATEGY": runtime.PPU_STRATEGY, "V41RuntimeConfig": runtime.V41RuntimeConfig}
         exec(compile(selected, "launch.py", "exec"), ns)
-        for mode in (MODE(1), MODE(3, "bounded", "dense", 0), MODE(5, "bounded", "packed", 2, "adaptive"),
+        for mode in (MODE(1), MODE(3, "bounded", "dense", 0), MODE(4), MODE(5, "bounded", "packed", 2, "adaptive"),
                      MODE(3, sample_from_anchor=False)):
             configs = []
             for role in ("prefill", "decode"):
@@ -191,19 +194,22 @@ def device_suite():
             windows = torch.tensor(windows, device=device, dtype=torch.int32)
             request_ids = torch.tensor([101, 202])
             original = {key: handles[key[0], framework[key[1]]].kv_cache_base.clone() for key in keys}
+            max_backtracking = MODE(4).validate().max_verified_rows
+            self.assertEqual(max_backtracking, 5)
+            runtime = NS(model=NS(v4=NS(layers=())), policy=NS(mode="compact"))
             observed = []
             for counts in ((0, 0), (1, 2), (2, 5)):
                 for key, value in original.items():
                     handles[key[0], framework[key[1]]].kv_cache_base.copy_(value)
                 cache = SharedVerifyCache({}, geometry, native, tagged, (129, 134), device=device)
-                state = SharedForwardState.__new__(SharedForwardState)
-                state.prefill, state.inputs = False, NS(input_ids=ids)
-                state.query_prefixes, state.lengths = layout.prefixes, layout.lengths
+                state = SharedForwardState(runtime, NS(input_ids=ids), None, cache, prefill=False, idle=False,
+                                           prefixes=layout.prefixes, lengths=layout.lengths)
                 pos, requests, cu, valid = state.rows()
                 self.assertEqual(pos.tolist(), [127, 128, 129, 130, 131, 132, 133])
                 self.assertEqual(requests.tolist(), [0, 0, 1, 1, 1, 1, 1])
                 self.assertEqual(cu.tolist(), [0, 2, 7])
-                tx = SharedVerifyTransaction(cache, request_ids, layout, windows, ids, call_id=1, max_backtracking=6)
+                tx = SharedVerifyTransaction(cache, request_ids, layout, windows, ids, call_id=1,
+                                             max_backtracking=max_backtracking)
                 expected = {key: value.clone() for key, value in original.items()}
                 for key in keys:
                     width, tag = widths[key[1]], key[1]
@@ -278,7 +284,7 @@ def device_suite():
                 journal.validate_bindings(cache, layout)
                 graph_tx = SharedVerifyTransaction(
                     cache, request_ids, layout, windows, ids, call_id=2,
-                    max_backtracking=6, graph_journal=journal,
+                    max_backtracking=max_backtracking, graph_journal=journal,
                 )
                 self.assertFalse(cache.journal)
                 if counts == (1, 2):
@@ -306,7 +312,8 @@ def device_suite():
                     self.assertTrue(torch.equal(pool.tensor, expected[key]), ("graph", counts, key))
                 observed.append({"counts": counts, "published_rows": evidence["native_rows_published"], "whole_native_bytes": "EXACT"})
             print(json.dumps({"schema": "n7-device-transaction-v1", "ragged_lengths": [2, 5],
-                              "loop_view": MODES.target_loop_geometry((2, 5), True), "cases": observed}))
+                              "loop_view": MODES.target_loop_geometry((2, 5), True),
+                              "max_backtracking": max_backtracking, "cases": observed}))
     return unittest.defaultTestLoader.loadTestsFromTestCase(TransactionDevice)
 
 
