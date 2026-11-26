@@ -10,6 +10,7 @@
 #include "rtp_llm/models_py/bindings/core/OpData.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
+#include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/SingleTypeCacheManager.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
@@ -628,13 +629,21 @@ CoordinatorCacheManager::prepareKVCache(const CacheKeysType&                 cac
                                         const std::function<bool(size_t)>&   valid_prefix,
                                         bool                                 enable_storage_backend,
                                         std::optional<int64_t>               request_id,
-                                        bool                                 skip_linear) {
-    if (!block_tree_cache_ || cache_keys.empty()) {
+                                        bool                                 skip_linear,
+                                        const ContentMatchContext*           partial_tail) {
+    if (!block_tree_cache_) {
+        return nullptr;
+    }
+    if (cache_keys.empty()) {
+        if (partial_tail != nullptr) {
+            block_tree_cache_->match(
+                cache_keys, valid_prefix, enable_storage_backend, request_id, skip_linear, partial_tail);
+        }
         return nullptr;
     }
     const int            cp_scale = (cp_mapper && cp_mapper->isSharded()) ? cp_mapper->cpSize() : 1;
-    BlockTreeMatchResult match_result =
-        block_tree_cache_->match(cache_keys, valid_prefix, enable_storage_backend, request_id, skip_linear);
+    BlockTreeMatchResult match_result = block_tree_cache_->match(
+        cache_keys, valid_prefix, enable_storage_backend, request_id, skip_linear, partial_tail);
     std::shared_ptr<LoadAsyncContext> load_context = std::move(match_result.async_context);
     prepared.matched_device_blocks                 = match_result.matched_device_blocks;
     prepared.total_logical_blocks =
@@ -710,6 +719,27 @@ MallocResult CoordinatorCacheManager::initMallocForCommonLen(const MallocInfo& m
                    static_cast<int>(match_keys.size()) * reuse_unit_tokens, config_.cache_min_replay_tokens)) {
             match_keys.pop_back();
         }
+        std::vector<int>    request_tokens;
+        ContentMatchContext partial_tail;
+        if (malloc_info.probe_partial_prefix) {
+            const auto ids            = malloc_info.complete_token_ids;
+            const int  base           = static_cast<int>(seqSizePerBlock());
+            const auto seed           = config_.cache_key_hash_seed;
+            request_tokens            = ids->completeTokenIdsVec(0);
+            partial_tail.tokens       = &request_tokens;
+            partial_tail.endpoint_key = [ids, base, seed, &cache_keys](size_t end) {
+                return cacheKeyAtTokenEnd(*ids, 0, base, static_cast<int>(end), cache_keys, seed);
+            };
+            partial_tail.source_identity = [ids, base, seed, &cache_keys](
+                                               size_t begin, const std::vector<int>& source, CacheKeyType key) {
+                if (base <= 0 || begin % static_cast<size_t>(base) != 0
+                    || begin / static_cast<size_t>(base) > cache_keys.size()
+                    || source.size() > static_cast<size_t>(std::numeric_limits<int>::max()) - begin) {
+                    return false;
+                }
+                return cacheKeyForSourceSegment(*ids, source, static_cast<int>(begin), base, cache_keys, seed) == key;
+            };
+        }
         const int64_t begin_us = currentTimeUs();
         load_context           = prepareKVCache(
             match_keys,
@@ -721,7 +751,8 @@ MallocResult CoordinatorCacheManager::initMallocForCommonLen(const MallocInfo& m
             },
             malloc_info.enable_storage_backend,
             malloc_info.request_id,
-            malloc_info.pd_decode_linear_tail_only);
+            malloc_info.pd_decode_linear_tail_only,
+            partial_tail.tokens ? &partial_tail : nullptr);
         match_end_time_us  = currentTimeUs();
         match_cost_time_us = match_end_time_us - begin_us;
         load_attempted     = load_context != nullptr;
@@ -1353,9 +1384,25 @@ void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info, siz
             remote_reuse_begin =
                 std::min(resource.reuseBlockNum() - resource.storageBackendReuseBlockNum(), remote_reuse_end);
         }
-        resident_prefix_length += block_tree_cache_->insert(
-            insert_keys, resources, insert_info.target_tier, insert_info.is_resident, insert_info.request_id,
-            remote_reuse_begin, remote_reuse_end);
+        std::vector<std::vector<int>> token_segments;
+        if (insert_info.complete_token_ids) {
+            const auto& tokens = insert_info.complete_token_ids->completeTokenIdsVec(batch_id);
+            const auto unit = static_cast<size_t>(cp_mapper ? cp_mapper->reuseBlockTokens(config_) : seqSizePerBlock());
+            if (unit > 0 && publish_prefix <= tokens.size() / unit) {
+                token_segments.reserve(publish_prefix);
+                for (size_t i = 0; i < publish_prefix; ++i) {
+                    token_segments.emplace_back(tokens.begin() + i * unit, tokens.begin() + (i + 1) * unit);
+                }
+            }
+        }
+        resident_prefix_length += block_tree_cache_->insert(insert_keys,
+                                                            resources,
+                                                            insert_info.target_tier,
+                                                            insert_info.is_resident,
+                                                            insert_info.request_id,
+                                                            remote_reuse_begin,
+                                                            remote_reuse_end,
+                                                            token_segments.empty() ? nullptr : &token_segments);
     }
 }
 

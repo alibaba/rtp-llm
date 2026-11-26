@@ -553,6 +553,8 @@ absl::Status StreamCacheResource::initKVBlock() {
     malloc_info.max_chunk_tokens =
         stream_->chunkedPrefillEnabled() && stream_->isContextStream() ? stream_->maxChunkSize() : 0;
 
+    malloc_info.probe_partial_prefix = resource_context_.enable_prefill_partial_tail_reuse
+                                       && resource_context_.role_type == RoleType::PREFILL && isContextStream();
     MallocResult result = resource_context_.cache_manager->malloc(malloc_info);
     recordCacheReuseMallocResult(result);
     if (!result.success) {

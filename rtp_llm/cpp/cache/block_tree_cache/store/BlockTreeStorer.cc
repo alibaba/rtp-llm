@@ -24,10 +24,11 @@ StorageWriteTask BlockTreeStorer::storeLocked(const CacheKeysType&              
                                               size_t&                                           resident_prefix_length,
                                               std::optional<int64_t>                            request_id,
                                               size_t                                            remote_reuse_begin,
-                                              size_t                                            remote_reuse_end) {
+                                              size_t                                            remote_reuse_end,
+                                              const std::vector<std::vector<int>>*              token_segments) {
     resident_prefix_length = 0;
     RTP_LLM_CHECK_WITH_INFO(target_tier == Tier::DEVICE, "unsupported store target tier: %s", tierName(target_tier));
-    publishDeviceLocked(cache_keys, resources, is_resident, resident_prefix_length);
+    publishDeviceLocked(cache_keys, resources, is_resident, resident_prefix_length, token_segments);
     return storage_backend_ ? storage_backend_->prepareWrite(makeStorageRequest(
                                   cache_keys, resources, request_id, remote_reuse_begin, remote_reuse_end)) :
                               StorageWriteTask{};
@@ -36,8 +37,10 @@ StorageWriteTask BlockTreeStorer::storeLocked(const CacheKeysType&              
 void BlockTreeStorer::publishDeviceLocked(const CacheKeysType&                              cache_keys,
                                           const std::vector<std::vector<GroupSetResource>>& resources,
                                           bool                                              is_resident,
-                                          size_t&                                           resident_prefix_length) {
-    const BlockTreeInsertResult insert_result = tree_->insertNode(cache_keys, resources, false, is_resident);
+                                          size_t&                                           resident_prefix_length,
+                                          const std::vector<std::vector<int>>*              token_segments) {
+    const BlockTreeInsertResult insert_result =
+        tree_->insertNode(cache_keys, resources, false, is_resident, token_segments);
     if (insert_result.hard_stop) {
         metrics_reporter_.reportInsertHardStop();
     }

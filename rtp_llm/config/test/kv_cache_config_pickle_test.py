@@ -70,6 +70,54 @@ class LinearAttentionConfigBindingsTest(TestCase):
 
 
 class KVCacheConfigPickleTest(TestCase):
+    def test_prefill_partial_tail_reuse_round_trip_uses_v26_tail(self):
+        config = KVCacheConfig()
+        config.enable_prefill_partial_tail_reuse = True
+        state = config.__getstate__()
+        self.assertEqual(state[:2], ("KVCacheConfig", 26))
+        self.assertEqual(len(state), 82)
+        self.assertEqual(state[81], True)
+
+        restored = pickle.loads(pickle.dumps(config))
+        self.assertTrue(restored.enable_prefill_partial_tail_reuse)
+        self.assertEqual(restored.__getstate__(), state)
+
+    def test_old_v10_partial_tail_shape_is_read_without_reinterpreting_v9(self):
+        config = KVCacheConfig()
+        state = _version_twenty_two_state(config)
+        # Historical feature v10 appended a bool after the v8 tuple. This shape
+        # is unambiguous; the old feature v9 shape aliases upstream v9 and stays
+        # decoded as upstream CRC/reclaim state.
+        legacy_v10 = (state[0], 10, *state[2:70], True)
+        restored_v10 = KVCacheConfig.__new__(KVCacheConfig)
+        restored_v10.__setstate__(legacy_v10)
+        self.assertTrue(restored_v10.enable_prefill_partial_tail_reuse)
+
+        legacy_v9 = (state[0], 9, *state[2:70], True)
+        restored_v9 = KVCacheConfig.__new__(KVCacheConfig)
+        restored_v9.__setstate__(legacy_v9)
+        self.assertTrue(restored_v9.enable_crc)
+        self.assertTrue(restored_v9.enable_linear_cache_reclaim)
+        self.assertFalse(restored_v9.enable_prefill_partial_tail_reuse)
+
+        # The old feature v10/size-73 shape is byte-for-byte/type-for-type
+        # identical to upstream's v10 reclaim + pool-budget shape. Upstream
+        # compatibility is canonical for this ambiguous state.
+        legacy_v10_with_pools = (
+            state[0],
+            10,
+            *state[2:70],
+            True,
+            31,
+            17,
+        )
+        restored_v10_with_pools = KVCacheConfig.__new__(KVCacheConfig)
+        restored_v10_with_pools.__setstate__(legacy_v10_with_pools)
+        self.assertTrue(restored_v10_with_pools.enable_linear_cache_reclaim)
+        self.assertEqual(restored_v10_with_pools.linear_pool_blocks, 31)
+        self.assertEqual(restored_v10_with_pools.swa_pool_blocks, 17)
+        self.assertFalse(restored_v10_with_pools.enable_prefill_partial_tail_reuse)
+
     def test_pool_block_weights_binding_defaults_empty_and_preserves_raw_json(self):
         config = KVCacheConfig()
         self.assertEqual(config.kv_cache_pool_block_weights, "")
@@ -85,8 +133,8 @@ class KVCacheConfigPickleTest(TestCase):
         config.reserve_block_ratio = 9
         config.kv_cache_event_instance_group = "weighted-pools"
         state = config.__getstate__()
-        self.assertEqual(state[:2], ("KVCacheConfig", 25))
-        self.assertEqual(len(state), 81)
+        self.assertEqual(state[:2], ("KVCacheConfig", 26))
+        self.assertEqual(len(state), 82)
         self.assertEqual(state[80], config.kv_cache_pool_block_weights)
         self.assertTrue(state[79])
 
@@ -149,8 +197,8 @@ class KVCacheConfigPickleTest(TestCase):
                 config.kv_cache_pool_block_weights = '{"full":7,"linear":2}'
                 state = config.__getstate__()
                 v22_state = _version_twenty_two_state(config)
-                self.assertEqual(len(state), 81)
-                self.assertEqual(state[:2], ("KVCacheConfig", 25))
+                self.assertEqual(len(state), 82)
+                self.assertEqual(state[:2], ("KVCacheConfig", 26))
                 self.assertEqual(state[63:68], tuple(BASE_EVENT_FIELD_VALUES.values()))
                 self.assertIs(state[68], enable_crc)
                 self.assertEqual(state[77], 6)
@@ -421,7 +469,7 @@ class KVCacheConfigPickleTest(TestCase):
             ):
                 state = KVCacheConfig().__getstate__()
                 restored = KVCacheConfig.__new__(KVCacheConfig)
-                restored.__setstate__((*state[:78], timeout, state[79], state[80]))
+                restored.__setstate__((*state[:78], timeout, *state[79:]))
 
     def test_previous_versions_use_default_frozen_force_release_timeout(self):
         source = KVCacheConfig()

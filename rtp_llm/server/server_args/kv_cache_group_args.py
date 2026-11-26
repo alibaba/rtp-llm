@@ -124,6 +124,14 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help="控制是否激活KV Cache的重用机制, 默认开启显存重用, 其他cache重用需手动开启。设置为 True 启用 , False 关闭",
     )
     kv_cache_group.add_argument(
+        "--enable_prefill_partial_tail_reuse",
+        env_name="ENABLE_PREFILL_PARTIAL_TAIL_REUSE",
+        bind_to=(kv_cache_config, "enable_prefill_partial_tail_reuse"),
+        type=str2bool,
+        default=False,
+        help="启用 P/D 分离 PREFILL 的不完整前缀探测，继续按完整复用单元恢复。",
+    )
+    kv_cache_group.add_argument(
         "--enable_device_cache",
         env_name="ENABLE_DEVICE_CACHE",
         bind_to=(kv_cache_config, "enable_device_cache"),

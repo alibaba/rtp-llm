@@ -57,26 +57,40 @@ BlockTreeMatchResult BlockTreeLoader::matchLocked(const CacheKeysType&          
                                                   const std::function<bool(size_t)>& valid_prefix,
                                                   bool                               enable_storage_backend,
                                                   std::optional<int64_t>             request_id,
-                                                  bool                               skip_linear) {
+                                                  bool                               skip_linear,
+                                                  const ContentMatchContext*         partial_tail) {
+    std::optional<PrefixCachePlanPoint> farthest_fork;
+    if (partial_tail && partial_tail->tokens && partial_tail->endpoint_key) {
+        // Match content independently of the canonical load decision.
+        tree_->contentMatchRanges(
+            *partial_tail->tokens, partial_tail->endpoint_key, partial_tail->source_identity, &farthest_fork);
+    }
     if (cache_keys.empty()) {
         RTP_LLM_LOG_DEBUG("empty cache_keys, returning empty result");
-        return {};
+        BlockTreeMatchResult result;
+        result.farthest_fork = farthest_fork;
+        return result;
     }
 
-    std::vector<TreeNode*> path = tree_->findNode(cache_keys);
+    std::vector<TreeNode*> path     = tree_->findNode(cache_keys);
     const bool             has_considered_group_set =
         std::any_of(tree_->groupSets().begin(), tree_->groupSets().end(), [skip_linear](const GroupSetPtr& group_set) {
             return !skip_linear || group_set->groupType() != CacheGroupType::LINEAR;
         });
     if (!has_considered_group_set) {
-        return {};
+        BlockTreeMatchResult result;
+        result.farthest_fork = farthest_fork;
+        return result;
     }
     std::vector<bool> candidate_valid;
     if (!path.empty() && !validMatch(path, candidate_valid, valid_prefix, skip_linear) && !storage_backend_) {
-        return {};
+        BlockTreeMatchResult result;
+        result.farthest_fork = farthest_fork;
+        return result;
     }
     BlockTreeMatchResult result = createMatchResult(
         path, candidate_valid, cache_keys, valid_prefix, enable_storage_backend, request_id, skip_linear);
+    result.farthest_fork = farthest_fork;
     RTP_LLM_LOG_DEBUG("matched %zu device blocks, cache_keys=%zu, tree_nodes=%zu",
                       result.matched_device_blocks,
                       cache_keys.size(),

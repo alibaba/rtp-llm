@@ -476,6 +476,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     py::class_<KVCacheConfig>(m, "KVCacheConfig")
         .def(py::init<>())
         .def_readwrite("reuse_cache", &KVCacheConfig::reuse_cache)
+        .def_readwrite("enable_prefill_partial_tail_reuse", &KVCacheConfig::enable_prefill_partial_tail_reuse)
         .def_readwrite("enable_remote_cache", &KVCacheConfig::enable_remote_cache)
         .def_readwrite("enable_device_cache", &KVCacheConfig::enable_device_cache)
         .def_readwrite("enable_crc", &KVCacheConfig::enable_crc)
@@ -589,7 +590,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      25,
+                                      26,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -671,9 +672,31 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       // the per-pool block weights at the tail so indices 0-78
                                       // stay identical to main's v23.
                                       self.enable_linear_cache_reclaim,
-                                      self.kv_cache_pool_block_weights);
+                                      self.kv_cache_pool_block_weights,
+                                      self.enable_prefill_partial_tail_reuse);
             },
             [](py::tuple t) {
+                const py::tuple legacy_partial_tail_state = t;
+                // The old feature branch's v10/size-71 shape is distinct from
+                // upstream's v10 layout. The old v9/size-71 shape is not: it
+                // aliases upstream's CRC/reclaim fields, so retain upstream's
+                // interpretation for that tuple.
+                const bool has_legacy_partial_tail_field = t.size() == 71 && py::isinstance<py::int_>(t[1])
+                                                           && t[1].cast<int>() == 10
+                                                           && py::isinstance<py::bool_>(t[70]);
+                if (has_legacy_partial_tail_field) {
+                    t    = t[py::slice(0, 70, 1)].cast<py::tuple>();
+                    t[1] = py::int_(8);
+                }
+                // v26 appends Prefill partial-tail reuse after the official v25
+                // state. Preserve official indices 0-80 and unwind to v25.
+                const py::tuple partial_tail_v26_state = t;
+                const bool      has_v26_partial_tail_field =
+                    t.size() == 82 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 26;
+                if (has_v26_partial_tail_field) {
+                    t    = t[py::slice(0, 81, 1)].cast<py::tuple>();
+                    t[1] = py::int_(25);
+                }
                 // Pickle version ladder after merging main #1643 (dsv41 btc):
                 // v9  = ours enable_linear_cache_reclaim (size 71);
                 // v10 = ours reclaim + pool weights (size 72) or reclaim +
@@ -896,6 +919,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 if (has_v25_pool_weights_field) {
                     // v25 appended the per-pool weights at index 80 after v24.
                     c.kv_cache_pool_block_weights = pool_weights_v25_state[80].cast<std::string>();
+                }
+                if (has_v26_partial_tail_field) {
+                    c.enable_prefill_partial_tail_reuse = partial_tail_v26_state[81].cast<bool>();
+                }
+                if (has_legacy_partial_tail_field) {
+                    c.enable_prefill_partial_tail_reuse = legacy_partial_tail_state[70].cast<bool>();
                 }
                 if (has_pool_weights_field) {
                     c.kv_cache_pool_block_weights = pool_weights_state[71].cast<std::string>();

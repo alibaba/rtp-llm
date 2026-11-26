@@ -12,7 +12,43 @@
 
 namespace rtp_llm {
 
-BlockTree::BlockTree(std::vector<GroupSetPtr> group_sets): group_sets_(std::move(group_sets)) {
+namespace {
+
+size_t matchingTokenPrefix(const int* source, const int* request, size_t count) {
+    size_t matched = 0;
+    // Most unrelated children differ immediately. Keep that path cheap before
+    // comparing large CP/block segments in batches.
+    for (; matched < count && matched < 4; ++matched) {
+        if (source[matched] != request[matched]) {
+            return matched;
+        }
+    }
+    if (count - matched >= 32) {
+        if (!std::equal(source + matched, source + matched + 32, request + matched)) {
+            while (matched < count && source[matched] == request[matched]) {
+                ++matched;
+            }
+            return matched;
+        }
+        matched += 32;
+    }
+    while (count - matched >= 64 && std::equal(source + matched, source + matched + 64, request + matched)) {
+        matched += 64;
+    }
+    // A failed batch comparison only narrows the search. Locate the first
+    // unequal token exactly; callers still authenticate the source identity.
+    while (matched < count && source[matched] == request[matched]) {
+        ++matched;
+    }
+    return matched;
+}
+
+}  // namespace
+
+BlockTree::BlockTree(std::vector<GroupSetPtr> group_sets, size_t reuse_unit_tokens):
+    group_sets_(std::move(group_sets)), reuse_unit_tokens_(reuse_unit_tokens) {
+    RTP_LLM_CHECK_WITH_INFO(reuse_unit_tokens_ > 0, "BlockTree reuse unit must be positive");
+
     for (size_t group_set_id = 0; group_set_id < group_sets_.size(); ++group_set_id) {
         const auto& group_tags = group_sets_[group_set_id]->groupTags();
         for (size_t member_group_id = 0; member_group_id < group_tags.size(); ++member_group_id) {
@@ -96,6 +132,7 @@ TreeNode* BlockTree::createNode(CacheKeyType key, TreeNode* parent, const std::v
     auto node       = std::make_unique<TreeNode>();
     node->cache_key = key;
     node->parent    = parent;
+    node->token_end = parent->token_end + reuse_unit_tokens_;
     node->index     = node_pool_.size();
     node->group_set_resources.resize(group_sets_.size());
     for (size_t group_set_id = 0; group_set_id < group_sets_.size(); ++group_set_id) {
@@ -109,6 +146,98 @@ TreeNode* BlockTree::createNode(CacheKeyType key, TreeNode* parent, const std::v
     cache_keys_.push_back(key);
     ++key_version_;
     return raw;
+}
+
+std::vector<TreeNode*>
+BlockTree::contentMatchCandidates(const std::vector<int>&                    request_tokens,
+                                  const std::function<CacheKeyType(size_t)>& endpoint_key) const {
+    std::vector<TreeNode*> candidates;
+    if (request_tokens.empty() || !endpoint_key) {
+        return candidates;
+    }
+    std::vector<const TreeNode*> pending{root_.get()};
+    while (!pending.empty()) {
+        const TreeNode* parent = pending.back();
+        pending.pop_back();
+        for (const auto& [_, child] : parent->children) {
+            if (child->token_ids.empty() || child->token_end > request_tokens.size()
+                || child->token_ids.size() != child->token_end - parent->token_end
+                || !std::equal(
+                    child->token_ids.begin(), child->token_ids.end(), request_tokens.begin() + parent->token_end)
+                || child->cache_key != endpoint_key(child->token_end)) {
+                continue;
+            }
+            candidates.push_back(child);
+            if (!isShortLeaf(child)) {
+                pending.push_back(child);
+            }
+        }
+    }
+    std::sort(candidates.begin(), candidates.end(), [](const TreeNode* lhs, const TreeNode* rhs) {
+        return lhs->token_end < rhs->token_end;
+    });
+    return candidates;
+}
+
+std::vector<BlockTreeContentRange>
+BlockTree::contentMatchRanges(const std::vector<int>&                                                   request_tokens,
+                              const std::function<CacheKeyType(size_t)>&                                endpoint_key,
+                              const std::function<bool(size_t, const std::vector<int>&, CacheKeyType)>& source_identity,
+                              std::optional<PrefixCachePlanPoint>* farthest_fork) const {
+    std::vector<BlockTreeContentRange> ranges;
+    if (farthest_fork != nullptr) {
+        farthest_fork->reset();
+    }
+    if (request_tokens.empty() || !endpoint_key) {
+        return ranges;
+    }
+    std::vector<const TreeNode*> pending{root_.get()};
+    while (!pending.empty()) {
+        const TreeNode* parent = pending.back();
+        pending.pop_back();
+        for (const auto& [_, child] : parent->children) {
+            if (child->token_ids.empty() || child->token_end <= parent->token_end
+                || child->token_ids.size() != child->token_end - parent->token_end
+                || parent->token_end >= request_tokens.size()) {
+                continue;
+            }
+            const size_t limit = std::min(child->token_ids.size(), request_tokens.size() - parent->token_end);
+            const size_t matched =
+                matchingTokenPrefix(child->token_ids.data(), request_tokens.data() + parent->token_end, limit);
+            if (matched == 0 && (farthest_fork == nullptr || parent->token_end == 0)) {
+                continue;
+            }
+            const bool whole = matched == child->token_ids.size();
+            // Token equality alone is insufficient: the key also carries the
+            // original hash seed and image identity. Never accept an interior
+            // range unless the caller can authenticate its complete source.
+            if (whole ? child->cache_key != endpoint_key(child->token_end) :
+                        (!source_identity || !source_identity(parent->token_end, child->token_ids, child->cache_key))) {
+                continue;
+            }
+            // A strict fork has a next token on both sides. The source segment
+            // is authenticated above, including a mismatch at child offset 0
+            // after an authenticated canonical parent.
+            if (farthest_fork != nullptr && matched < limit) {
+                const size_t fork_pos = parent->token_end + matched;
+                if (fork_pos > 0 && (!*farthest_fork || fork_pos > (*farthest_fork)->pos)) {
+                    *farthest_fork =
+                        PrefixCachePlanPoint{(fork_pos - 1) / reuse_unit_tokens_, endpoint_key(fork_pos), fork_pos};
+                }
+            }
+            if (matched == 0) {
+                continue;
+            }
+            ranges.push_back({child, parent->token_end + matched});
+            if (whole && !isShortLeaf(child)) {
+                pending.push_back(child);
+            }
+        }
+    }
+    std::sort(ranges.begin(), ranges.end(), [](const auto& lhs, const auto& rhs) {
+        return lhs.matched_end > rhs.matched_end;
+    });
+    return ranges;
 }
 
 std::vector<TreeNode*> BlockTree::findNode(const CacheKeysType& cache_keys) const {
@@ -139,6 +268,10 @@ CacheKeysType BlockTree::cacheKeys() const {
     return cache_keys_;
 }
 
+bool BlockTree::isShortLeaf(const TreeNode* node) const {
+    return node != nullptr && node->parent != nullptr && node->token_end - node->parent->token_end < reuse_unit_tokens_;
+}
+
 bool BlockTree::isLeafAtTier(const TreeNode* node, size_t group_set_id, Tier tier) const {
     for (const auto& [_, child] : node->children) {
         if (child->group_set_resources[group_set_id].hasTier(tier)) {
@@ -151,7 +284,8 @@ bool BlockTree::isLeafAtTier(const TreeNode* node, size_t group_set_id, Tier tie
 BlockTreeInsertResult BlockTree::insertNode(const CacheKeysType&                              cache_keys,
                                             const std::vector<std::vector<GroupSetResource>>& resources,
                                             bool                                              collect_path,
-                                            bool                                              is_resident) {
+                                            bool                                              is_resident,
+                                            const std::vector<std::vector<int>>*              token_segments) {
     BlockTreeInsertResult result;
     if (resources.size() != cache_keys.size()) {
         RTP_LLM_LOG_WARNING("key/resource size mismatch, keys=%zu resources=%zu", cache_keys.size(), resources.size());
@@ -178,13 +312,17 @@ BlockTreeInsertResult BlockTree::insertNode(const CacheKeysType&                
         }
     }
 
-    return insertNodeImpl(cache_keys, resources, collect_path, is_resident);
+    if (token_segments && token_segments->size() != cache_keys.size()) {
+        token_segments = nullptr;
+    }
+    return insertNodeImpl(cache_keys, resources, collect_path, is_resident, token_segments);
 }
 
 BlockTreeInsertResult BlockTree::insertNodeImpl(const CacheKeysType&                              cache_keys,
                                                 const std::vector<std::vector<GroupSetResource>>& resources,
                                                 bool                                              collect_path,
-                                                bool                                              is_resident) {
+                                                bool                                              is_resident,
+                                                const std::vector<std::vector<int>>*              token_segments) {
     BlockTreeInsertResult result;
     if (collect_path) {
         result.path.reserve(cache_keys.size());
@@ -322,6 +460,9 @@ BlockTreeInsertResult BlockTree::insertNodeImpl(const CacheKeysType&            
                 ++result.accepted_resource_count;
             }
             result.inserted_nodes.push_back(current);
+        }
+        if (token_segments && current->token_ids.empty()) {
+            current->token_ids = (*token_segments)[i];
         }
         if (is_resident && !current->is_resident) {
             assert(current->parent == root_.get() || current->parent->is_resident);

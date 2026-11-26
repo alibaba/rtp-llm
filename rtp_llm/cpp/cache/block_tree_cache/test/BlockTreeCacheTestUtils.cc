@@ -492,7 +492,8 @@ std::unique_ptr<BlockTreeCache> makeBlockTreeCacheForTest(std::vector<GroupSetPt
                                                           std::shared_ptr<StorageBackend>            storage_backend,
                                                           std::shared_ptr<BroadcastManager>          broadcast_manager,
                                                           std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter,
-                                                          RecoveryTestOptions                        recovery) {
+                                                          RecoveryTestOptions                        recovery,
+                                                          size_t reuse_unit_tokens) {
     group_sets = workLoopTestGroups(std::move(group_sets));
     if (config.disk_cache_evict_max_pending_bytes == 0) {
         config.disk_cache_evict_max_pending_bytes = KVCacheConfig{}.disk_cache_evict_max_pending_bytes;
@@ -550,7 +551,7 @@ std::unique_ptr<BlockTreeCache> makeBlockTreeCacheForTest(std::vector<GroupSetPt
         std::make_unique<BlockTransferDispatcher>(std::move(per_rank_engine), reclaimer, std::move(multi_rank_engine));
     auto task_pool = std::make_unique<BlockTreeTaskPool>(
         static_cast<size_t>(config.task_pool_size), config.business_queue_max_size, "BlockTreeCacheTaskPool");
-    auto tree  = std::make_unique<BlockTree>(std::move(group_sets));
+    auto tree  = std::make_unique<BlockTree>(std::move(group_sets), reuse_unit_tokens);
     auto cache = std::make_unique<BlockTreeCache>(std::move(tree),
                                                   std::move(config),
                                                   std::move(storage_backend),

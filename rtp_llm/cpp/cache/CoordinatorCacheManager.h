@@ -28,6 +28,7 @@ namespace rtp_llm {
 class CPSlotMapper;
 class LoadAsyncContext;
 class BlockTreeCache;
+struct ContentMatchContext;
 using BlockTreeCachePtr = std::shared_ptr<BlockTreeCache>;
 class SingleTypeCacheManager;
 using SingleTypeCacheManagerPtr = std::shared_ptr<SingleTypeCacheManager>;
@@ -257,7 +258,8 @@ protected:
                                                      const std::function<bool(size_t)>&   valid_prefix           = {},
                                                      bool                                 enable_storage_backend = true,
                                                      std::optional<int64_t>               request_id             = {},
-                                                     bool                                 skip_linear            = false);
+                                                     bool                                 skip_linear  = false,
+                                                     const ContentMatchContext*           partial_tail = nullptr);
     bool                              materializeInitialBlocks(const MallocInfo& malloc_info,
                                                                PreparedKVCache&  prepared,
                                                                LoadAsyncContext* context,

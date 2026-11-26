@@ -143,7 +143,8 @@ public:
                                const std::function<bool(size_t)>& valid_prefix           = {},
                                bool                               enable_storage_backend = true,
                                std::optional<int64_t>             request_id             = {},
-                               bool                               skip_linear            = false);
+                               bool                               skip_linear            = false,
+                               const ContentMatchContext*         partial_tail           = nullptr);
     void                 insert(const CacheKeysType&                              cache_keys,
                                 const std::vector<std::vector<GroupSetResource>>& resources,
                                 Tier                                              target_tier);
@@ -154,7 +155,8 @@ public:
                   bool                                              is_resident,
                   std::optional<int64_t>                            request_id         = {},
                   size_t                                            remote_reuse_begin = 0,
-                  size_t                                            remote_reuse_end   = 0);
+                  size_t                                            remote_reuse_end   = 0,
+                  const std::vector<std::vector<int>>*              token_segments     = nullptr);
     // Directly reclaim up to num_blocks device blocks belonging to one group set
     // (target_tier = NONE, content dropped). Returns the number actually freed.
     // Skips plans containing device blocks that would remain referenced after dropping.

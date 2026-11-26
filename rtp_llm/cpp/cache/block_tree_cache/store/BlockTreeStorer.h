@@ -32,13 +32,15 @@ public:
                                  size_t&                                           resident_prefix_length,
                                  std::optional<int64_t>                            request_id         = {},
                                  size_t                                            remote_reuse_begin = 0,
-                                 size_t                                            remote_reuse_end   = 0);
+                                 size_t                                            remote_reuse_end   = 0,
+                                 const std::vector<std::vector<int>>*              token_segments     = nullptr);
 
 private:
     void           publishDeviceLocked(const CacheKeysType&                              cache_keys,
                                        const std::vector<std::vector<GroupSetResource>>& resources,
                                        bool                                              is_resident,
-                                       size_t&                                           resident_prefix_length);
+                                       size_t&                                           resident_prefix_length,
+                                       const std::vector<std::vector<int>>*              token_segments);
     StorageRequest makeStorageRequest(const CacheKeysType&                              cache_keys,
                                       const std::vector<std::vector<GroupSetResource>>& resources,
                                       const std::optional<int64_t>&                     request_id,

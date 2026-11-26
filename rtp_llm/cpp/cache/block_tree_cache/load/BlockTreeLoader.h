@@ -21,11 +21,23 @@ class BlockTreeTaskPool;
 struct CacheStageContext;
 
 struct BlockTreeMatchResult {
+    std::optional<PrefixCachePlanPoint>                 farthest_fork;
     size_t                                              matched_device_blocks{0};
     size_t                                              matched_device_host_blocks{0};
     std::vector<MultiNodeResource>                      matched_device_resources;
     std::shared_ptr<LoadAsyncContext>                   async_context;
     std::vector<BlockTreeCacheReuseTimeMetrics>         reuse_time_metrics;
+};
+
+// Content-match authentication capability for the partial-prefix matching path.
+// Scenario-agnostic: the same struct backs tail reuse and common-prefix recovery;
+// the scenario only changes how the caller assembles these callbacks.
+struct ContentMatchContext {
+    const std::vector<int>*             tokens{nullptr};
+    std::function<CacheKeyType(size_t)> endpoint_key;
+    // Verify the complete source segment with the request's original hash/image
+    // identity even when only a prefix of that segment matches request tokens.
+    std::function<bool(size_t, const std::vector<int>&, CacheKeyType)> source_identity;
 };
 
 // Owns matching and the complete lower-tier-to-device load workflow.
@@ -52,7 +64,8 @@ public:
                                      const std::function<bool(size_t)>& valid_prefix           = {},
                                      bool                               enable_storage_backend = true,
                                      std::optional<int64_t>             request_id             = {},
-                                     bool                               skip_linear            = false);
+                                     bool                               skip_linear            = false,
+                                     const ContentMatchContext*         partial_tail           = nullptr);
     BlockIndicesType     matchedBlocksForGroup(std::string_view                      group_tag,
                                                const std::vector<MultiNodeResource>& matched_resources) const;
     bool                 abortPendingLoad(const std::shared_ptr<AsyncContext>& context);

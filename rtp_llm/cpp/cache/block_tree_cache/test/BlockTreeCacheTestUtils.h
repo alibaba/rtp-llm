@@ -150,7 +150,8 @@ makeBlockTreeCacheForTest(std::vector<GroupSetPtr>                   group_sets,
                           std::shared_ptr<StorageBackend>            storage_backend   = nullptr,
                           std::shared_ptr<BroadcastManager>          broadcast_manager = nullptr,
                           std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter  = nullptr,
-                          RecoveryTestOptions                        recovery          = {});
+                          RecoveryTestOptions                        recovery          = {},
+                          size_t                                     reuse_unit_tokens = 1);
 
 bool insertGroupSetResources(BlockTreeCache&                                   cache,
                              const CacheKeysType&                              cache_keys,

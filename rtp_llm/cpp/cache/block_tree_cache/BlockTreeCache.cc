@@ -256,11 +256,13 @@ BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType&               ca
                                            const std::function<bool(size_t)>& valid_prefix,
                                            bool                               enable_storage_backend,
                                            std::optional<int64_t>             request_id,
-                                           bool                               skip_linear) {
+                                           bool                               skip_linear,
+                                           const ContentMatchContext*         partial_tail) {
     BlockTreeMatchResult result;
     {
         CacheLockGuard lock(mutex_, *metrics_reporter_, "match");
-        result = loader_.matchLocked(cache_keys, valid_prefix, enable_storage_backend, request_id, skip_linear);
+        result = loader_.matchLocked(
+            cache_keys, valid_prefix, enable_storage_backend, request_id, skip_linear, partial_tail);
     }
     metrics_reporter_->reportCacheReuseTimeMetrics(result.reuse_time_metrics);
     return result;
@@ -278,7 +280,8 @@ size_t BlockTreeCache::insert(const CacheKeysType&                              
                               bool                                              is_resident,
                               std::optional<int64_t>                            request_id,
                               size_t                                            remote_reuse_begin,
-                              size_t                                            remote_reuse_end) {
+                              size_t                                            remote_reuse_end,
+                              const std::vector<std::vector<int>>*              token_segments) {
     size_t           resident_prefix_length = 0;
     StorageWriteTask storage_write;
     {
@@ -290,7 +293,8 @@ size_t BlockTreeCache::insert(const CacheKeysType&                              
                                             resident_prefix_length,
                                             request_id,
                                             remote_reuse_begin,
-                                            remote_reuse_end);
+                                            remote_reuse_end,
+                                            token_segments);
     }
     if (storage_write) {
         storage_backend_->write(std::move(storage_write));

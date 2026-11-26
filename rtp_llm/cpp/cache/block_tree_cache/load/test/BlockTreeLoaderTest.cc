@@ -64,7 +64,52 @@ protected:
     void writeImpl(const StorageRequest&) override {}
 };
 
-TEST(BlockTreeLoaderTest, LocalHostLoadSettlesDespiteBackendFailure) {
+TEST(BlockTreeLoaderTest, ContentProbeKeepsCanonicalReuseWithoutExtraRegistration) {
+    constexpr size_t     reuse_unit = 64;
+    auto                 pool       = makeStructuralDevicePool(0);
+    auto                 full = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{pool}, nullptr, nullptr);
+    BlockTreeCacheConfig config;
+    config.enable_device_cache = true;
+    auto cache =
+        block_tree_cache_test::makeBlockTreeCacheForTest({full}, config, nullptr, nullptr, nullptr, {}, reuse_unit);
+    ASSERT_NE(cache, nullptr);
+
+    std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(1));
+    resources[0][0].device_blocks = {42};
+    resources[1][0].device_blocks = {43};
+    pool->incRef(BlockIndicesType{42, 43});
+    const std::vector<std::vector<int>> segments{std::vector<int>(reuse_unit, 1), std::vector<int>(reuse_unit, 2)};
+    cache->insert({64, 128}, resources, Tier::DEVICE, false, {}, 0, 0, &segments);
+    pool->decRef(BlockIndicesType{42, 43});
+
+    std::vector<int> tokens(129, 3);
+    std::fill_n(tokens.begin(), reuse_unit, 1);
+    std::fill_n(tokens.begin() + reuse_unit, 36, 2);
+    ContentMatchContext probe;
+    probe.tokens          = &tokens;
+    probe.endpoint_key    = [](size_t pos) { return static_cast<CacheKeyType>(pos); };
+    probe.source_identity = [&](size_t begin, const std::vector<int>& source, CacheKeyType key) {
+        return begin == reuse_unit && source == segments.back() && key == 128;
+    };
+    for (bool enabled : {false, true}) {
+        auto result = cache->match({64, 999}, {}, false, {}, false, enabled ? &probe : nullptr);
+        ASSERT_EQ(result.farthest_fork.has_value(), enabled);
+        if (enabled) {
+            EXPECT_EQ(result.farthest_fork->pos, 100u);
+        }
+        EXPECT_EQ(result.matched_device_blocks, 1u);
+        EXPECT_EQ(result.async_context, nullptr);
+        ASSERT_EQ(result.matched_device_resources.size(), 1u);
+        ASSERT_EQ(result.matched_device_resources.front().node_blocks.size(), 1u);
+        EXPECT_EQ(result.matched_device_resources.front().node_blocks.front().second, (BlockIndicesType{42}));
+        block_tree_cache_test::releaseRequestRefsForTest(*cache, result.matched_device_resources);
+    }
+    EXPECT_EQ(cache->getKeySnapshot().keys, (CacheKeysType{64, 128}));
+}
+
+class BlockTreeLoaderHostFallbackTest: public ::testing::TestWithParam<bool> {};
+
+TEST_P(BlockTreeLoaderHostFallbackTest, LocalHostLoadSettlesDespiteBackendFailure) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
@@ -98,7 +143,13 @@ TEST(BlockTreeLoaderTest, LocalHostLoadSettlesDespiteBackendFailure) {
     environment->cache->loader_.storage_backend_ = backend;
     CacheKeysType keys                           = environment->keys;
     keys.push_back(keys.back() + 1);
-    auto result  = environment->cache->match(keys);
+    // Compare local tier settlement with the content probe both disabled and active.
+    const std::vector<int> tokens{1, 3, 4};
+    ContentMatchContext probe;
+    probe.tokens = &tokens;
+    probe.endpoint_key = [&](size_t end) { return keys.at(end - 1); };
+    const auto* match_probe = GetParam() ? &probe : nullptr;
+    auto result = environment->cache->match(keys, {}, true, {}, false, match_probe);
     auto context = result.async_context;
     ASSERT_NE(context, nullptr);
     ASSERT_TRUE(context->needBackendMatch());
@@ -184,6 +235,8 @@ TEST(BlockTreeLoaderTest, LocalHostLoadSettlesDespiteBackendFailure) {
     environment->reclaimAll();
     environment->expectFullyReclaimed();
 }
+
+INSTANTIATE_TEST_SUITE_P(ContentProbe, BlockTreeLoaderHostFallbackTest, ::testing::Bool());
 
 TEST(BlockTreeLoaderTest, HostLoadInstallsAllocatorBoundDeviceTargets) {
     if (!cudaAvailable()) {

@@ -315,11 +315,26 @@ cc_library(
         ":cp_slot_mapper",
         ":device_block_pool_config_helper",
         ":coordinator_cache_manager_hdr",
+        ":kv_cache_hash_util",
         ":single_type_cache_manager",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
         "//rtp_llm/cpp/cache/block_tree_cache",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/models_py/bindings/core:gpu_block_copy",
+    ],
+)
+
+cc_library(
+    name = "kv_cache_hash_util",
+    srcs = ["KVCacheHashUtil.cc"],
+    hdrs = ["KVCacheHashUtil.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        ":batch_kv_cache_resource",
+        "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/utils:hash_util",
     ],
 )
 
@@ -343,12 +358,10 @@ cc_library(
     name = "cache_core",
     srcs = [
         "CacheConfigCreator.cc",
-        "KVCacheHashUtil.cc",
         "MemoryEvaluationHelper.cc",
     ],
     hdrs = [
         "CacheConfigCreator.h",
-        "KVCacheHashUtil.h",
         "MemoryEvaluationHelper.h",
     ],
     copts = copts(),
@@ -356,6 +369,7 @@ cc_library(
     deps = [
         "//rtp_llm/cpp/cache/block_tree_cache:block_tree_cache_layout",
         ":batch_kv_cache_resource",
+        ":kv_cache_hash_util",
         ":cache_types",
         ":coordinator_cache_manager",
         ":prefill_cache_hit_metrics_reporter",

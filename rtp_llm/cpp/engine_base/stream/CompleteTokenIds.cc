@@ -116,6 +116,32 @@ bool CompleteTokenIds::isValidReuseLength(int reuse_length, int min_fresh_tokens
     return true;
 }
 
+int CompleteTokenIds::maxValidReuseLength(int upper, int min_fresh_tokens) const {
+    int candidate = std::max(0, std::min(upper, seqLength() - std::max(0, min_fresh_tokens)));
+    if (!v41_inputs_) {
+        return candidate;
+    }
+    // Jump to image boundaries rather than probing every token. Repeat for
+    // overlapping image regions whose input order need not be sorted.
+    bool changed;
+    do {
+        changed = false;
+        for (const auto& image : v41_inputs_->images) {
+            const int64_t start = image.start - canonical_offset_;
+            const int64_t end   = start + image.types.numel();
+            if (candidate > start
+                && (candidate < end || image.content_sha256.empty() || image.processor_identity.empty())) {
+                const int next = static_cast<int>(std::max<int64_t>(0, start));
+                if (next < candidate) {
+                    candidate = next;
+                    changed   = true;
+                }
+            }
+        }
+    } while (changed);
+    return candidate;
+}
+
 int CompleteTokenIds::maxBatchSize() {
     return max_batch_size_;
 }

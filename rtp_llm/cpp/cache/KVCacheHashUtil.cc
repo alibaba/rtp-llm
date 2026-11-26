@@ -6,6 +6,96 @@
 
 namespace rtp_llm {
 
+namespace {
+int64_t basePrefixSeed(const CacheKeysType& base_keys, int segment_begin, int base, int64_t initial_hash) {
+    RTP_LLM_CHECK_WITH_INFO(base > 0 && segment_begin >= 0 && segment_begin % base == 0,
+                            "cached segment must begin at a base-block boundary");
+    const size_t completed_blocks = static_cast<size_t>(segment_begin / base);
+    RTP_LLM_CHECK(completed_blocks <= base_keys.size());
+    return completed_blocks == 0 ? initial_hash : base_keys[completed_blocks - 1];
+}
+
+int64_t appendCacheKeySegment(int64_t hash, const CompleteTokenIds& ids, const int32_t* tokens, int pos, int len) {
+    hash                = hashInt64Array(hash, tokens, tokens + len);
+    const auto identity = ids.imageCacheIdentity(pos, len);
+    if (!identity.empty()) {
+        hash = hashInt64Array(hash, identity.data(), identity.data() + identity.size());
+    }
+    return hash;
+}
+}  // namespace
+
+int64_t cacheKeyForSourceSegment(const CompleteTokenIds& complete_token_ids,
+                                 const std::vector<int>& source_tokens,
+                                 int                     segment_begin,
+                                 int                     seq_size_per_block,
+                                 int64_t                 initial_hash) {
+    RTP_LLM_CHECK_WITH_INFO(seq_size_per_block > 0 && segment_begin >= 0 && segment_begin % seq_size_per_block == 0,
+                            "cached segment must begin at a base-block boundary");
+    int64_t hash = initial_hash;
+    for (size_t offset = 0; offset < source_tokens.size(); offset += seq_size_per_block) {
+        const size_t count = std::min(static_cast<size_t>(seq_size_per_block), source_tokens.size() - offset);
+        hash               = appendCacheKeySegment(hash,
+                                     complete_token_ids,
+                                     source_tokens.data() + offset,
+                                     segment_begin + static_cast<int>(offset),
+                                     static_cast<int>(count));
+    }
+    return hash;
+}
+
+int64_t cacheKeyAtTokenEnd(
+    CompleteTokenIds& complete_token_ids, int batch_id, int seq_size_per_block, int token_end, int64_t initial_hash) {
+    RTP_LLM_CHECK_WITH_INFO(seq_size_per_block > 0 && token_end >= 0 && token_end <= complete_token_ids.seqLength(),
+                            "invalid cache endpoint=%d block_size=%d seq_length=%d",
+                            token_end,
+                            seq_size_per_block,
+                            complete_token_ids.seqLength());
+    RTP_LLM_CHECK_WITH_INFO(
+        batch_id >= 0 && batch_id < complete_token_ids.batchSize(), "invalid cache batch id=%d", batch_id);
+    const int32_t* tokens = complete_token_ids.data(batch_id);
+    int64_t        hash   = initial_hash;
+    for (int pos = 0; pos < token_end; pos += seq_size_per_block) {
+        hash = appendCacheKeySegment(
+            hash, complete_token_ids, tokens + pos, pos, std::min(seq_size_per_block, token_end - pos));
+    }
+    return hash;
+}
+
+int64_t cacheKeyForSourceSegment(const CompleteTokenIds& complete_token_ids,
+                                 const std::vector<int>& source_tokens,
+                                 int                     segment_begin,
+                                 int                     seq_size_per_block,
+                                 const CacheKeysType&    base_keys,
+                                 int64_t                 initial_hash) {
+    return cacheKeyForSourceSegment(complete_token_ids,
+                                    source_tokens,
+                                    segment_begin,
+                                    seq_size_per_block,
+                                    basePrefixSeed(base_keys, segment_begin, seq_size_per_block, initial_hash));
+}
+
+int64_t cacheKeyAtTokenEnd(CompleteTokenIds&    complete_token_ids,
+                           int                  batch_id,
+                           int                  seq_size_per_block,
+                           int                  token_end,
+                           const CacheKeysType& base_keys,
+                           int64_t              initial_hash) {
+    RTP_LLM_CHECK_WITH_INFO(seq_size_per_block > 0 && token_end >= 0 && token_end <= complete_token_ids.seqLength(),
+                            "invalid cache endpoint=%d block_size=%d seq_length=%d",
+                            token_end,
+                            seq_size_per_block,
+                            complete_token_ids.seqLength());
+    RTP_LLM_CHECK_WITH_INFO(
+        batch_id >= 0 && batch_id < complete_token_ids.batchSize(), "invalid cache batch id=%d", batch_id);
+    const int     begin = token_end / seq_size_per_block * seq_size_per_block;
+    const int64_t seed  = basePrefixSeed(base_keys, begin, seq_size_per_block, initial_hash);
+    return begin == token_end ?
+               seed :
+               appendCacheKeySegment(
+                   seed, complete_token_ids, complete_token_ids.data(batch_id) + begin, begin, token_end - begin);
+}
+
 void initCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource,
                    CompleteTokenIdsPtr     complete_token_ids,
                    int                     seq_size_per_block,

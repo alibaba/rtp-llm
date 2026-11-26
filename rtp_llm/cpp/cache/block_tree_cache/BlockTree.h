@@ -3,6 +3,7 @@
 #include <deque>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -11,6 +12,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
+#include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/events/KVCacheEventPublisher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/TreeNode.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
@@ -55,19 +57,39 @@ struct BlockTreeNodeRangeResult {
     bool   cycle_complete{false};
 };
 
+// A content-matched interval backed by a real tree node. The source endpoint
+// can exceed matched_end; dense groups may reuse the shared part of that node.
+struct BlockTreeContentRange {
+    TreeNode* node{nullptr};
+    size_t    matched_end{0};
+};
+
 class BlockTree {
 public:
-    explicit BlockTree(std::vector<GroupSetPtr> group_sets);
+    explicit BlockTree(std::vector<GroupSetPtr> group_sets, size_t reuse_unit_tokens = 1);
     ~BlockTree();
 
     std::vector<TreeNode*> findNode(const CacheKeysType& cache_keys) const;
+
+    // Returns all content- and identity-matched endpoints, including terminal short leaves.
+    // The caller supplies keys computed with the request's original hash seed and base-block layout.
+    std::vector<TreeNode*> contentMatchCandidates(const std::vector<int>&                    request_tokens,
+                                                  const std::function<CacheKeyType(size_t)>& endpoint_key) const;
+
+    std::vector<BlockTreeContentRange>
+         contentMatchRanges(const std::vector<int>&                                                   request_tokens,
+                            const std::function<CacheKeyType(size_t)>&                                endpoint_key,
+                            const std::function<bool(size_t, const std::vector<int>&, CacheKeyType)>& source_identity,
+                            std::optional<PrefixCachePlanPoint>* farthest_fork = nullptr) const;
+    bool isShortLeaf(const TreeNode* node) const;
 
     bool isLeafAtTier(const TreeNode* node, size_t group_set_id, Tier tier) const;
 
     BlockTreeInsertResult insertNode(const CacheKeysType&                              cache_keys,
                                      const std::vector<std::vector<GroupSetResource>>& resources,
                                      bool                                              collect_path,
-                                     bool                                              is_resident);
+                                     bool                                              is_resident,
+                                     const std::vector<std::vector<int>>*              token_segments = nullptr);
 
     void      referenceNodeForNonOwnerTransfer(TreeNode* node);
     bool      isRemovable(TreeNode* node) const;
@@ -117,7 +139,8 @@ private:
     BlockTreeInsertResult insertNodeImpl(const CacheKeysType&                              cache_keys,
                                          const std::vector<std::vector<GroupSetResource>>& resources,
                                          bool                                              collect_path,
-                                         bool                                              is_resident);
+                                         bool                                              is_resident,
+                                         const std::vector<std::vector<int>>*              token_segments);
 
     bool      canReleaseNode(TreeNode* node) const;
     void      removeNode(TreeNode* node);
@@ -129,6 +152,7 @@ private:
     std::unique_ptr<TreeNode>             root_;
     std::deque<std::unique_ptr<TreeNode>> node_pool_;
     std::unordered_map<CacheKeyType, std::unique_ptr<TreeNode>> pending_node_pool_;
+    size_t                                                      reuse_unit_tokens_;
     // Indexed together with node_pool_ for contiguous snapshot copies.
     CacheKeysType cache_keys_;
     int64_t       key_version_{-1};

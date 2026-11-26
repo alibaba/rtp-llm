@@ -712,7 +712,10 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
     auto         task_pool           = std::make_unique<BlockTreeTaskPool>(
         static_cast<size_t>(config.task_pool_size), business_queue_size, "btc_task");
 
-    auto tree = std::make_unique<BlockTree>(std::move(group_sets));
+    const auto& mapper = coordinator_manager->cpSlotMapper();
+    const auto  reuse_unit =
+        mapper ? static_cast<size_t>(mapper->reuseBlockTokens(cache_config)) : cache_config.seq_size_per_block;
+    auto tree = std::make_unique<BlockTree>(std::move(group_sets), reuse_unit);
 
     auto result = std::make_shared<BlockTreeCache>(std::move(tree),
                                                    std::move(config),

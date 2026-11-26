@@ -75,6 +75,12 @@ inline bool reuseCacheForGroup(bool reuse_cache, CacheGroupType group_type, Line
            && !(group_type == CacheGroupType::LINEAR && linear_cache_policy == LinearCachePolicy::TAIL_ONLY);
 }
 
+struct PrefixCachePlanPoint {
+    size_t       index{0};
+    CacheKeyType key{0};
+    size_t       pos{0};
+};
+
 struct MallocInfo {
     BatchKVCacheResourcePtr batch_kv_cache_resource;
     CompleteTokenIdsPtr     complete_token_ids;
@@ -109,6 +115,8 @@ struct MallocInfo {
     // Reserve every intervening destination up to the length bound without
     // pruning pages that an unfinished decode round may still use.
     bool preserve_inflight = false;
+
+    bool probe_partial_prefix = false;
 
     int incrSeqLen() const;
 };
