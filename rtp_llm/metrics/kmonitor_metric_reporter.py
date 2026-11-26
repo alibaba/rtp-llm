@@ -101,6 +101,8 @@ class AccMetrics(Enum):
     OUTPUT_REPETITION_QPS_METRIC = "py_rtp_output_repetition_qps"
     SAME_TOKEN_RUN_QPS_METRIC = "py_rtp_same_token_run_qps"
 
+    VIT_HASH_KEY_CACHE_HIT_QPS_METRIC = "py_rtp_vit_hash_key_cache_hit_qps"
+    VIT_HASH_KEY_CACHE_MISS_QPS_METRIC = "py_rtp_vit_hash_key_cache_miss_qps"
     VIT_EMBEDDING_CACHE_HIT_QPS_METRIC = "py_rtp_vit_embedding_cache_hit_qps"
     VIT_EMBEDDING_CACHE_MISS_QPS_METRIC = "py_rtp_vit_embedding_cache_miss_qps"
     VIT_PREFILL_EMBEDDING_CACHE_MISS_QPS_METRIC = (

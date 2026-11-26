@@ -8,7 +8,9 @@ from typing import Optional, Sequence
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.mm_download_domains import check_download_urls
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import MultimodalHashResponsePB
+from rtp_llm.metrics import AccMetrics
 from rtp_llm.multimodal.greennet_hook import inspection_fields
+from rtp_llm.multimodal.vit_metrics import report_vit_phase
 from rtp_llm.telemetry import vit_media
 
 MAX_METADATA_KEYS = 256
@@ -124,6 +126,17 @@ def get_mm_cache_metadata(
         )
     except ValueError as error:
         raise OverflowError(str(error)) from error
+    # Only the key-only probe measures residency. A fill rechecks the same keys,
+    # and inspection can require a new verdict even when hashes are resident.
+    if inputs is None:
+        key_hits = {entry["key"]: entry["hash_hit"] for entry in metadata["entries"]}
+        hits = sum(key_hits.values())
+        misses = len(key_hits) - hits
+        if hits:
+            report_vit_phase(AccMetrics.VIT_HASH_KEY_CACHE_HIT_QPS_METRIC, hits, {})
+        if misses:
+            report_vit_phase(AccMetrics.VIT_HASH_KEY_CACHE_MISS_QPS_METRIC, misses, {})
+
     greennet_enabled = (
         engine._greennet_enabled() if hasattr(engine, "_greennet_enabled") else False
     )
