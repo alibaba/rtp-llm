@@ -367,8 +367,8 @@ private:
 class RtpLLMEngineMetricsCollector final {
 public:
     int64_t step_latency_us = 0;
-    // Start-to-start interval between non-empty executor calls; zero skips the first sample.
-    int64_t step_interval_us = 0;
+    // Engine time outside process() between non-empty batches. The first batch has no preceding interval.
+    int64_t step_interval_us = -1;
 };
 
 class RtpLLMEngineMetrics: public kmonitor::MetricsGroup {

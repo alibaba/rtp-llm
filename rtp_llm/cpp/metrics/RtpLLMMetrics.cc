@@ -374,7 +374,7 @@ bool RtpLLMEngineMetrics::init(kmonitor::MetricsGroupManager* manager) {
 
 void RtpLLMEngineMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMEngineMetricsCollector* collector) {
     REPORT_GAUGE(step_latency_us);
-    if (collector->step_interval_us) {
+    if (collector->step_interval_us >= 0) {
         REPORT_MUTABLE_METRIC(step_interval_us_metric, collector->step_interval_us);
     }
 }

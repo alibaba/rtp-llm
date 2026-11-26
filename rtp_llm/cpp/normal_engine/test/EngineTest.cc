@@ -109,6 +109,15 @@ TEST_F(NormalEngineTest, testPreparedPrefillTpsStartsAtConsumption) {
     EXPECT_GE(observed->observed_schedule_time_us, consumer_start_us);
 }
 
+TEST_F(NormalEngineTest, testStepIdleTime) {
+    auto engine = createMockEngine(CustomConfig{}, false);
+    EXPECT_EQ(engine->recordExecutorTime(1, 10, /*empty_batch=*/true), -1);
+    EXPECT_EQ(engine->recordExecutorTime(20, 100, false), -1);
+    EXPECT_EQ(engine->recordExecutorTime(105, 205, true), -1);
+    EXPECT_EQ(engine->recordExecutorTime(212, 300, false), 12);  // Gaps of 5 and 7 us.
+    EXPECT_EQ(engine->recordExecutorTime(300, 400, false), 0);
+}
+
 namespace {
 
 class EmptyThenReadyPrefillScheduler final: public SchedulerBase {

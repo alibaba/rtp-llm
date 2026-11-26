@@ -32,6 +32,7 @@
 #include <list>
 #include <memory>
 #include <thread>
+#include <utility>
 #include <random>
 #include <stdexcept>
 
@@ -955,6 +956,14 @@ NormalEngine::PreparedPrefillBatch NormalEngine::prepareNextPrefillBatch() {
     return prepared;
 }
 
+int64_t NormalEngine::recordExecutorTime(int64_t begin_us, int64_t end_us, bool empty_batch) {
+    if (pending_idle_us_ >= 0) {
+        pending_idle_us_ += begin_us - previous_executor_end_us_;
+    }
+    previous_executor_end_us_ = end_us;
+    return empty_batch ? -1 : std::exchange(pending_idle_us_, 0);
+}
+
 absl::Status NormalEngine::step() try {
     RTP_LLM_PROFILE_SCOPE("engine.normal.step_work");
     while (pause_ && running_) {
@@ -1020,9 +1029,9 @@ absl::Status NormalEngine::step() try {
     }
 
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
-    int64_t      step_begin_time_us      = autil::TimeUtility::currentTimeInMicroSeconds();
-    int64_t      execution_begin_time_us = 0;
-    absl::Status status                  = absl::OkStatus();
+    const auto   step_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+    int64_t      step_idle_us       = -1;
+    absl::Status status             = absl::OkStatus();
 
     // Per-request timeline: if any stream requested gen_timeline and no session is
     // active yet, configure the profiler so the executor-driven step window
@@ -1047,8 +1056,11 @@ absl::Status NormalEngine::step() try {
         ++execute_step_;
         RTP_LLM_PROFILE_SCOPE_DYNAMIC(
             "engine.normal.execute(step=%" PRId64 ",stream_size=%zu)", execute_step_, streams.size());
-        execution_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        status                  = executor_->process(streams, tps_schedule_time_us);
+        const auto begin_us = autil::TimeUtility::monotonicTimeUs();
+        status              = executor_->process(streams, tps_schedule_time_us);
+        if (parallelism_config.tp_rank == 0) {
+            step_idle_us = recordExecutorTime(begin_us, autil::TimeUtility::monotonicTimeUs(), streams.empty());
+        }
         if (propose_params_) {
             step_profiler_.finishStep();
         }
@@ -1062,16 +1074,10 @@ absl::Status NormalEngine::step() try {
         previous_execution_release_us_ = autil::TimeUtility::currentTimeInMicroSeconds();
     }
 
-    // report step metrics
-    // loop() is a no-sleep tight loop and with TP>1 every iteration enters
-    // process() to drive the collective tpSync even with empty streams —
-    // without this gate the gauge gets diluted to ~0 by idle iterations.
     if (parallelism_config.tp_rank == 0 && !streams.empty()) {
         RTP_LLM_PROFILE_SCOPE("engine.normal.report_metrics_work");
-        auto step_latency  = autil::TimeUtility::currentTimeInMicroSeconds() - step_begin_time_us;
-        auto step_interval = previous_execution_begin_us_ ? execution_begin_time_us - previous_execution_begin_us_ : 0;
-        previous_execution_begin_us_ = execution_begin_time_us;
-        reportMetrics({step_latency, step_interval});
+        const auto step_latency = autil::TimeUtility::currentTimeInMicroSeconds() - step_begin_time_us;
+        reportMetrics({step_latency, step_idle_us});
     }
 
     return status;

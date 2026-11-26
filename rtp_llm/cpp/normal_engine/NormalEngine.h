@@ -68,6 +68,7 @@ private:
     void                            initLoadBalance();
     absl::Status                    trySaveStepError() const;
     void                            loop();
+    int64_t                         recordExecutorTime(int64_t begin_us, int64_t end_us, bool empty_batch);
     void                            normalizeSystemPromptCacheConfig();
     void                            initCacheManager(std::optional<WarmUpResult> warm_up_result);
     static void                     initializeAndPublishCacheManager(ResourceContext&                            resource_context,
@@ -94,7 +95,8 @@ private:
     std::unique_ptr<autil::LockFreeThreadPool>                         prefill_prepare_pool_;
     std::optional<autil::ThreadPoolBase::Future<PreparedPrefillBatch>> prepared_prefill_batch_;
     int64_t                                                            previous_execution_release_us_ = 0;
-    int64_t                                                            previous_execution_begin_us_   = 0;
+    int64_t                                                            previous_executor_end_us_      = 0;
+    int64_t                                                            pending_idle_us_               = -1;
     autil::ThreadPtr                                                   loop_thread_;
     std::atomic<bool>                                                  running_{false};
     bool                                                               cpu_tp_shutdown_ = false;
