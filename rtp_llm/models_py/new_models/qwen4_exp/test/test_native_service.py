@@ -8,12 +8,14 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
 
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.models.qwen4_exp.qwen4_exp import Qwen4Exp
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers
 from rtp_llm.models_py.new_models.qwen4_exp.language import Qwen4ForCausalLM
 from rtp_llm.models_py.new_models.qwen4_exp.test.test_target_weights import _checkpoint
 from rtp_llm.models_py.registry import get_model_class
@@ -80,7 +82,7 @@ class NativeQwen4ServiceTest(unittest.TestCase):
     def test_bf16_actual_service_scratch_and_fst(self):
         from rtp_llm.models_py.new_models.qwen4_exp.test.test_precision_profiles import source_checkpoint
 
-        for method in ("scratch", "fastsafetensors"):
+        for method in checkpoint_readers("scratch", "fastsafetensors"):
             with self.subTest(method=method), tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"LOAD_METHOD": ""}):
                 config, values = source_checkpoint(directory, "bf16")
                 parallel = ParallelismConfig()
@@ -121,7 +123,7 @@ class NativeQwen4ServiceTest(unittest.TestCase):
                 )
 
     def test_actual_service_publishes_complete_target_owner(self):
-        for method in ("scratch","fastsafetensors"):
+        for method in checkpoint_readers("scratch", "fastsafetensors"):
             with self.subTest(method=method):
                 self._check_service(method)
 
@@ -168,6 +170,7 @@ class NativeQwen4ServiceTest(unittest.TestCase):
             torch.testing.assert_close(full_runtime.qkv_proj(x),torch.nn.functional.linear(x,full_owner.qkv_proj.weight),rtol=0,atol=0)
             torch.testing.assert_close(full_runtime.gate(x),torch.nn.functional.linear(x,full_owner.gate.weight),rtol=0,atol=0)
             gdn_owner = model.py_model.layers[0].linear_attn
+            self._check_target_verify(runtime.layers[0].self_attn.decode_gdn, gdn_owner)
             qkvz, ba = runtime.layers[0].self_attn._input_project(x)
             torch.testing.assert_close(qkvz,torch.nn.functional.linear(x,gdn_owner.in_proj_qkvz.weight),rtol=0,atol=0)
             torch.testing.assert_close(ba,x @ gdn_owner.in_proj_ba_w,rtol=0,atol=0)
@@ -181,6 +184,42 @@ class NativeQwen4ServiceTest(unittest.TestCase):
             before = {name:(id(value),value.data_ptr()) for name,value in model.py_model.named_parameters()}
             model.py_model.process_weights_after_loading()
             self.assertEqual(before,{name:(id(value),value.data_ptr()) for name,value in model.py_model.named_parameters()})
+
+    def _check_target_verify(self, decode, owner):
+        # Exercise the inherited target-verify forward with a real loaded
+        # owner. Only the final device kernel is replaced in this CPU test.
+        h, hv = owner.local_num_k_heads, owner.local_num_v_heads
+        k, v = owner.head_k_dim, owner.head_v_dim
+        channels = owner.qkv_size
+        cache = SimpleNamespace(
+            kv_cache_base=torch.empty(
+                2, decode.linear_cache_converter.block_size_bytes // 4, dtype=torch.float32
+            ),
+            group_id=0,
+            linear_replay=SimpleNamespace(
+                k=torch.empty(2, 2, h, k),
+                u=torch.empty(2, 2, hv, v),
+                g=torch.empty(2, 2, hv, 1),
+                conv_inputs=torch.empty(2, 2, channels, dtype=decode.conv_state_dtype),
+            ),
+        )
+        inputs = SimpleNamespace(prefix_lengths=torch.ones(1), linear_replay=object())
+        metadata = SimpleNamespace(is_target_verify=True)
+        qkv = torch.zeros(2, channels)
+        b, a = torch.zeros(2, hv), torch.zeros(2, hv)
+        with patch("rtp_llm.models_py.triton_kernels.linear_replay._linear_serial_replay") as launch:
+            self.assertIs(decode(qkv, b, a, inputs, cache, metadata), launch.return_value)
+            first = decode._linear_replay
+            self.assertIs(launch.call_args.kwargs["conv_weights"], owner.conv1d_w)
+            self.assertIs(launch.call_args.kwargs["dt_bias"], owner.dt_bias)
+            self.assertIs(launch.call_args.kwargs["a_log"], owner.a_log)
+            self.assertIs(launch.call_args.kwargs["replay_inputs"], inputs.linear_replay)
+            decode(qkv, b, a, inputs, cache, metadata)
+            self.assertIs(decode._linear_replay, first)
+            cache.kv_cache_base = cache.kv_cache_base.clone()
+            decode(qkv, b, a, inputs, cache, metadata)
+            self.assertIsNot(decode._linear_replay, first)
+            self.assertIs(decode._linear_replay.base, cache.kv_cache_base)
 
     def test_manifest_failure_does_not_publish_service_weights(self):
         with tempfile.TemporaryDirectory() as directory:

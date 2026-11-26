@@ -20,6 +20,7 @@ from transformers import (
 from rtp_llm.config.py_config_modules import GenerateEnvConfig, RenderConfig
 from rtp_llm.model_factory_register import _model_factory, ensure_model_registered
 from rtp_llm.models.megatron_bert import MegatronBert
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.new_models.megatron_bert.language import MegatronBertForEmbedding
 from rtp_llm.models_py.new_models.megatron_bert.test_checkpoint import PackedSdpa
@@ -80,7 +81,7 @@ class _MegatronServiceFixture(unittest.TestCase):
             cfg.task_type = TaskType.SEQ_CLASSIFICATION
             cfg.render_config = RenderConfig()
             cfg.generate_env_config = GenerateEnvConfig()
-            for method in ("scratch", "fastsafetensors"):
+            for method in checkpoint_readers("scratch", "fastsafetensors"):
                 service = CpuService.from_config(
                     model_config=cfg,
                     parallelism_config=ParallelismConfig(),
@@ -167,7 +168,7 @@ class NativeMegatronTest(_MegatronServiceFixture):
             save_file(ref.state_dict(), os.path.join(tmp, "model.safetensors"))
             cfg = MegatronBert._create_config(tmp)
             cfg.model_type = "megatron_bert"
-            for method in ("scratch", "fastsafetensors"):
+            for method in checkpoint_readers("scratch", "fastsafetensors"):
                 loader = NewModelLoader(
                     cfg,
                     NewLoaderConfig(

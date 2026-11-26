@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import torch
 from safetensors.torch import save_file
 
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.new_models.qwen3.language import Qwen3ForCausalLM
 from rtp_llm.models_py.new_weight_manager import NewLoaderWeightManager
@@ -183,7 +184,7 @@ class MainPPCheckpointTest(unittest.TestCase):
             dp_size=1,
             dp_rank=0,
         )
-        for method in ("scratch", "fastsafetensors"):
+        for method in checkpoint_readers("scratch", "fastsafetensors"):
             for explicit_head, needs_head in (
                 (False, False),
                 (True, False),

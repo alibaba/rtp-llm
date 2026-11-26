@@ -13,6 +13,7 @@ import torch.multiprocessing as mp
 from safetensors.torch import save_file
 
 from rtp_llm.models.direct_checkpoint import load_owned_model
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers, requires_native_fst
 from rtp_llm.models_py.model_loader import NewLoaderLoadMethod
 from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.new_models.qwen3_moe.parameters import (
@@ -232,6 +233,7 @@ def _serving_eplb_rank(rank, directory, rendezvous):
 
 
 class Qwen3MoeCpuTest(unittest.TestCase):
+    @requires_native_fst
     def test_stacked_fst_serving_eplb_ep2_commit_and_rollback(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory)
@@ -242,7 +244,7 @@ class Qwen3MoeCpuTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory)
             write_stacked_checkpoint(path)
-            for method in ("scratch", "fastsafetensors"):
+            for method in checkpoint_readers("scratch", "fastsafetensors"):
                 model = service(directory, method, "_qwen3_moe_cpu_parameters")
                 configure(model)
                 model.parallelism_config.local_world_size = 1
@@ -264,7 +266,7 @@ class Qwen3MoeCpuTest(unittest.TestCase):
                     )
 
     def test_service_publication_scratch_and_fst(self):
-        for method in ("scratch", "fastsafetensors"):
+        for method in checkpoint_readers("scratch", "fastsafetensors"):
             with (
                 self.subTest(method=method),
                 tempfile.TemporaryDirectory() as directory,

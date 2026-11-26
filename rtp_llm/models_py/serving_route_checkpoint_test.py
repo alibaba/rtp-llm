@@ -13,6 +13,7 @@ import torch
 from safetensors.torch import save_file
 
 from rtp_llm.models.direct_checkpoint import load_owned_model
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers, requires_native_fst
 from rtp_llm.models_py.downstream_heads import (
     ReplicatedHandlerHeads,
     handler_weight_mappings,
@@ -154,6 +155,7 @@ class DirectServingBoundaryTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, f"{tag}.*no direct checkpoint owner"):
             load_owned_model(service)
 
+    @requires_native_fst
     def test_two_gloo_ranks_combine_collective_and_indexed_range_reads(self):
         from pathlib import Path
 
@@ -169,8 +171,9 @@ class DirectServingBoundaryTest(unittest.TestCase):
     def test_hf_index_owns_physical_shard_subset(self):
         # A shortened score checkpoint keeps a physical shard from a larger
         # model. Its unrelated experts must never reach the strict dispatcher.
-        for ext, method in (("bin", "scratch"), ("safetensors", "scratch"),
-                            ("safetensors", "fastsafetensors")):
+        formats = [("bin", "scratch")]
+        formats.extend(("safetensors", method) for method in checkpoint_readers("scratch", "fastsafetensors"))
+        for ext, method in formats:
             with self.subTest(ext=ext, method=method), tempfile.TemporaryDirectory() as root:
                 folder = os.path.join(root, "shards")
                 os.mkdir(folder)
@@ -192,7 +195,7 @@ class DirectServingBoundaryTest(unittest.TestCase):
     def test_hf_index_rejects_missing_and_misplaced_tensors(self):
         from rtp_llm.models_py.weight_mapper import checkpoint_catalog
 
-        for method in ("scratch", "fastsafetensors"):
+        for method in checkpoint_readers("scratch", "fastsafetensors"):
             with self.subTest(method=method), tempfile.TemporaryDirectory() as root:
                 first, second = "a.safetensors", "b.safetensors"
                 index = os.path.join(root, "model.safetensors.index.json")
@@ -279,7 +282,7 @@ sys.exit(0 if result.wasSuccessful() else 1)
         weight = torch.tensor([[1.0, 2.0], [-3.0, 4.0]])
         # Explicit fp32 bias must not be rounded through the bf16 model dtype.
         bias = torch.tensor([1.001, 2.003])
-        for method in ("scratch", "fastsafetensors"):
+        for method in checkpoint_readers("scratch", "fastsafetensors"):
             with self.subTest(method=method), tempfile.TemporaryDirectory() as root:
                 path = os.path.join(root, "model.safetensors")
 
@@ -328,7 +331,7 @@ sys.exit(0 if result.wasSuccessful() else 1)
                 self.assertIsNone(invalid.py_model)
 
     def test_offline_conversion_keeps_owner_without_publishing_runtime(self):
-        for method in ("scratch", "fastsafetensors"):
+        for method in checkpoint_readers("scratch", "fastsafetensors"):
             with self.subTest(method=method), tempfile.TemporaryDirectory() as root:
                 tensor = torch.tensor([[3.0, 4.0], [-2.0, 1.0]])
                 save_file(
@@ -347,6 +350,7 @@ sys.exit(0 if result.wasSuccessful() else 1)
                 )
                 torch.testing.assert_close(model.checkpoint_owner.weight_param, tensor)
 
+    @requires_native_fst
     def test_forced_cpu_stages_with_native_fst_and_never_retries(self):
         with tempfile.TemporaryDirectory() as root:
             path = os.path.join(root, "model.safetensors")
@@ -378,6 +382,7 @@ sys.exit(0 if result.wasSuccessful() else 1)
                         load_owned_model(failed)
                 self.assertIsNone(failed.py_model)
 
+    @requires_native_fst
     def test_native_cpu_staging_reads_pruned_vocab_rows_including_empty_rank(self):
         with tempfile.TemporaryDirectory() as root:
             path = os.path.join(root, "model.safetensors")
@@ -405,7 +410,7 @@ sys.exit(0 if result.wasSuccessful() else 1)
             "classifier.bias": torch.tensor([3.0, 1.0, -1.0]),
         }
         mappings = handler_weight_mappings(tuple(values))
-        for method in ("scratch", "fastsafetensors"):
+        for method in checkpoint_readers("scratch", "fastsafetensors"):
             with self.subTest(method=method), tempfile.TemporaryDirectory() as root:
                 cfg = service(root, method, "_service_direct_handler").model_config
                 path = os.path.join(root, "model.safetensors")
@@ -431,7 +436,7 @@ sys.exit(0 if result.wasSuccessful() else 1)
                     NewModelLoader(cfg, load, model_path=root).load()
 
     def test_exact_backend_and_publication_preserve_identity(self):
-        for method in ("scratch", "fastsafetensors"):
+        for method in checkpoint_readers("scratch", "fastsafetensors"):
             with self.subTest(method=method), tempfile.TemporaryDirectory() as root:
                 values = torch.tensor([[2.0, 5.0], [-3.0, 7.0]])
                 file = os.path.join(root, "model.safetensors")

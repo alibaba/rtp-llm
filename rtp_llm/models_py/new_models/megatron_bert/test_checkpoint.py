@@ -10,6 +10,7 @@ from safetensors.torch import save_file
 from torch.nn import functional as F
 from transformers import MegatronBertConfig, MegatronBertForSequenceClassification
 
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers, requires_native_fst
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.new_models.megatron_bert.backbone import MegatronParameters
@@ -183,13 +184,14 @@ class TestMegatron(unittest.TestCase):
         key = "bert.embeddings.position_embeddings.weight"
         table = values[key]
         values[key] = torch.cat((table, table[:3]))
-        for method in ("scratch", "fastsafetensors"):
+        for method in checkpoint_readers("scratch", "fastsafetensors"):
             with self.subTest(method=method):
                 model = self.load_case(method, values)
                 torch.testing.assert_close(
                     model.embeddings.position_embeddings.weight, table
                 )
 
+    @requires_native_fst
     def test_fst_packed_encoder_and_task_head(self):
         self.assert_outputs("fastsafetensors")
 
@@ -198,7 +200,7 @@ class TestMegatron(unittest.TestCase):
         key = "bert.embeddings.token_type_embeddings.weight"
         values = dict(self.ref.state_dict())
         table = values.pop(key)
-        for method in ("scratch", "fastsafetensors"):
+        for method in checkpoint_readers("scratch", "fastsafetensors"):
             with self.subTest(method=method):
                 owner = self.load_case(method, values, config=config)
                 self.assertIsNone(owner.embeddings.token_type_embeddings)
@@ -250,6 +252,7 @@ class TestMegatron(unittest.TestCase):
             ):
                 self.load_case("scratch", sd)
 
+    @requires_native_fst
     def test_tp2_native_fst_gloo(self):
         with tempfile.TemporaryDirectory() as tmp:
             save_file(self.ref.state_dict(), os.path.join(tmp, "model.safetensors"))

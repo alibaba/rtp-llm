@@ -16,6 +16,7 @@ from rtp_llm.config.quant_config import (
     GPTQConfig,
     WeightOnlyInt8PerChannelQuantConfig,
 )
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers, requires_native_fst
 from rtp_llm.models_py.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
@@ -155,7 +156,106 @@ def decode(layer):
     )
 
 
+def check_ffn_rank(rank, checkpoint_dir, config, backend):
+    """Load the production decoder with this rank's actual FFN TP config."""
+    from rtp_llm.ops import ParallelismConfig
+
+    torch.distributed.init_process_group(
+        "gloo", init_method=f"file://{checkpoint_dir}/rdzv", rank=rank, world_size=2,
+        timeout=timedelta(seconds=45),
+    )
+    try:
+        pc = ParallelismConfig()
+        pc.world_size = pc.local_world_size = pc.tp_size = pc.ffn_tp_size = 2
+        pc.world_rank = pc.local_rank = pc.tp_rank = pc.ffn_tp_rank = rank
+        pc.dp_size = pc.ep_size = pc.pp_size = 1
+        pc.dp_rank = pc.ep_rank = pc.pp_rank = 0
+        load = NewLoaderConfig(
+            device="cpu", compute_dtype=torch.float16, load_method=backend,
+            tp_size=2, tp_rank=rank, parallelism_config=pc,
+            quant_config=QuantizationConfig(config.quant_config.get_method(), config.quant_config),
+        )
+        loader = NewModelLoader(config, load, model_path=checkpoint_dir)
+        mlp = loader.load().layers[0].mlp
+        assert loader.loaded_method.value == backend
+        gate, up = decode(mlp.gate_up_proj).chunk(2, 1)
+        torch.save((gate, up, decode(mlp.down_proj)), f"{checkpoint_dir}/ffn-{rank}.pt")
+    finally:
+        torch.distributed.destroy_process_group()
+
+
 class GroupwiseOwnerTest(unittest.TestCase):
+    def test_group_odd_ffn_width_matches_global_qwen_checkpoint(self):
+        # 3 groups of 16 split over TP2: rank 0 owns channels 0:32,
+        # rank 1 owns 32:48 plus one neutral group. Both gate/up and down
+        # must describe that same interval; halving the raw width is wrong.
+        for method, bits, inter in (
+            ("awq", 4, 48), ("gptq", 4, 48),
+            ("awq", 8, 40), ("gptq", 8, 40),
+        ):
+            config = SimpleNamespace(
+                model_type="qwen_2", num_layers=1, is_mtp=False, vocab_size=64,
+                quant_config=source_config(method, bits), activation_type="SiGLU",
+                hidden_size=64, inter_size=inter,
+                attn_config=SimpleNamespace(head_num=4, kv_head_num=1, size_per_head=16),
+                layernorm_eps=1e-6, enable_fp32_lm_head=False, tie_word_embeddings=True,
+                capture_aux_hidden_layer_ids=[], hidden_state_capture_layer_ids=[],
+            )
+            values = {"model.embed_tokens.weight": torch.ones(64, 64).half(),
+                      "model.norm.weight": torch.ones(64).half()}
+            p = "model.layers.0."
+            for name in ("input_layernorm", "post_attention_layernorm"):
+                values[p + name + ".weight"] = torch.ones(64).half()
+            expected = {}
+            for i, (name, k, n) in enumerate((
+                ("self_attn.q_proj", 64, 64), ("self_attn.k_proj", 64, 16),
+                ("self_attn.v_proj", 64, 16), ("self_attn.o_proj", 64, 64),
+                ("mlp.gate_proj", 64, inter), ("mlp.up_proj", 64, inter), ("mlp.down_proj", inter, 64),
+            )):
+                # Form a real short final input group by trimming weight rows,
+                # not its per-group scales/zeros. These nonzero zero points
+                # also exercise the case where zero isn't the zero-weight code.
+                padded_k = (k + 15) // 16 * 16
+                pieces, dense = material(method, bits, padded_k, n, i)
+                packed_k = k // (32 // bits) if method == "gptq" else k
+                pieces["qweight"] = pieces["qweight"][:packed_k].contiguous()
+                if method == "gptq":
+                    pieces["g_idx"] = torch.arange(k, dtype=torch.int32) // 16
+                expected[name] = dense[:k]
+                values.update({p + name + "." + key: t for key, t in pieces.items()})
+                if i < 3:
+                    values[p + name + ".bias"] = torch.zeros(n).half()
+            for backend in checkpoint_readers("scratch", "fastsafetensors"):
+                with self.subTest(method=method, backend=backend, bits=bits, inter=inter), tempfile.TemporaryDirectory() as root:
+                    save_file(values, str(Path(root) / "model.safetensors"))
+                    torch.multiprocessing.start_processes(
+                        check_ffn_rank, args=(root, config, backend), nprocs=2, join=True,
+                        start_method="fork",
+                    )
+                    x = torch.linspace(-0.01, 0.01, 64, dtype=torch.float64)
+                    def project(gate, up, down):
+                        return (torch.nn.functional.silu(x @ gate.double()) * (x @ up.double())) @ down.double()
+                    outputs = []
+                    for rank in (0, 1):
+                        gate, up, down = torch.load(f"{root}/ffn-{rank}.pt", weights_only=True)
+                        outputs.append(project(gate, up, down))
+                        for part, actual, axis in (
+                            ("gate_proj", gate, 1), ("up_proj", up, 1), ("down_proj", down, 0),
+                        ):
+                            raw = expected["mlp." + part]
+                            zeros = torch.zeros_like(raw.narrow(axis, 0, 64 - inter))
+                            wanted = torch.cat((raw, zeros), axis).chunk(2, axis)[rank]
+                            if part == "down_proj" and inter % 16 and rank == 1:
+                                # Padded lanes inside the final real group use
+                                # that group's scale/zero point. Gate and up
+                                # are exactly zero there; only real rows enter
+                                # the dot product.
+                                actual = actual[:inter - 32]
+                                wanted = wanted[:inter - 32]
+                            torch.testing.assert_close(actual, wanted, rtol=0, atol=0)
+                    reference = project(*(expected["mlp." + key] for key in ("gate_proj", "up_proj", "down_proj")))
+                    torch.testing.assert_close(sum(outputs), reference, rtol=1e-10, atol=1e-8)
+
     def test_gptq_zero_encoding_from_checkpoint_to_dense_and_expert_owners(self):
         from rtp_llm.config.quant_config import QuantizationConfig as SourceConfig
         from rtp_llm.models_py.quant_methods.groupwise_runtime import prepare_groupwise_state
@@ -180,7 +280,7 @@ class GroupwiseOwnerTest(unittest.TestCase):
                     (root / "config.json").write_text(json.dumps({"quantization_config": config}))
                     source = SourceConfig.load_from_ckpt(folder)
                     quant = QuantizationConfig("gptq", source)
-                    for backend in ("scratch", "fastsafetensors"):
+                    for backend in checkpoint_readers("scratch", "fastsafetensors"):
                         with self.subTest(bits=bits, flag=flag, backend=backend):
                             cfg = SimpleNamespace(
                                 model_type="_groupwise_dense_cpu_owner", bias=False,
@@ -352,7 +452,7 @@ class GroupwiseOwnerTest(unittest.TestCase):
                 if index < 3:
                     biases.append(bias)
             expected_biases[layer] = torch.cat(biases)
-        for backend in ("scratch", "fastsafetensors"):
+        for backend in checkpoint_readers("scratch", "fastsafetensors"):
             # Scratch checks each real PP ownership interval; the separate
             # leaf regression below exercises real FST TP groups with Gloo.
             for stage in (0, 1) if backend == "scratch" else (0,):
@@ -408,7 +508,7 @@ class GroupwiseOwnerTest(unittest.TestCase):
                         NewModelLoader(config, load, model_path=root).load()
 
     def test_gptq_zero_bias_buffers_for_biasless_modules(self):
-        for backend in ("scratch", "fastsafetensors"):
+        for backend in checkpoint_readers("scratch", "fastsafetensors"):
             for kind in ("column", "row", "merged"):
                 parts = ("gate_proj", "up_proj") if kind == "merged" else ("",)
                 values, dense_parts = {}, []
@@ -452,7 +552,7 @@ class GroupwiseOwnerTest(unittest.TestCase):
         config = SimpleNamespace(
             model_type="_groupwise_dense_cpu_owner", kind="row", bias=False
         )
-        for backend in ("scratch", "fastsafetensors"):
+        for backend in checkpoint_readers("scratch", "fastsafetensors"):
             for dtype in (torch.float16, torch.bfloat16, torch.float32):
                 with self.subTest(backend=backend, dtype=dtype):
                     owner = self.load(
@@ -497,6 +597,7 @@ class GroupwiseOwnerTest(unittest.TestCase):
                             backend,
                         )
 
+    @requires_native_fst
     def test_staged_fst_late_dense_metadata(self):
         cfg = SimpleNamespace(
             model_type="_groupwise_dense_cpu_owner", kind="merged", bias=False
@@ -537,6 +638,7 @@ class GroupwiseOwnerTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "after staged postprocessing"):
                 load_late({"proj.scales": torch.cat([packed["scales"]] * 2, dim=1)})
 
+    @requires_native_fst
     def test_staged_fst_late_expert_g_idx(self):
         cfg = SimpleNamespace(model_type="_groupwise_moe_cpu_owner")
         packed, _ = material("gptq", 4, 64, 64)
@@ -570,7 +672,7 @@ class GroupwiseOwnerTest(unittest.TestCase):
             "shape": torch.zeros(63, dtype=torch.float16),
             "dtype": torch.zeros(64, dtype=torch.int32),
         }
-        for backend in ("scratch", "fastsafetensors"):
+        for backend in checkpoint_readers("scratch", "fastsafetensors"):
             for case, bias in bad_values.items():
                 with self.subTest(backend=backend, case=case):
                     with self.assertRaises((ValueError, TypeError)):
@@ -622,7 +724,7 @@ class GroupwiseOwnerTest(unittest.TestCase):
     def test_dense_real_scratch_and_fst_all_formats_tp_and_gqa(self):
         for method in ("awq", "gptq"):
             for bits in (4, 8):
-                for backend in ("scratch", "fastsafetensors"):
+                for backend in checkpoint_readers("scratch", "fastsafetensors"):
                     for kind in ("column", "row", "merged", "qkv"):
                         tp = 4 if kind == "qkv" else 2
                         parts = (
@@ -708,7 +810,7 @@ class GroupwiseOwnerTest(unittest.TestCase):
                     "proj." + key: torch.cat([p[key] for p in packs], dim=1)
                     for key in packs[0]
                 }
-                for backend in ("scratch", "fastsafetensors"):
+                for backend in checkpoint_readers("scratch", "fastsafetensors"):
                     owner = self.load(
                         values,
                         SimpleNamespace(
@@ -762,7 +864,7 @@ class GroupwiseOwnerTest(unittest.TestCase):
                             }
                         )
                         full[expert, projection] = dense
-                for backend in ("scratch", "fastsafetensors"):
+                for backend in checkpoint_readers("scratch", "fastsafetensors"):
                     for tp, ep in ((1, 1), (2, 1), (2, 2)):
                         for rank in range(tp):
                             with self.subTest(
@@ -844,7 +946,7 @@ class GroupwiseOwnerTest(unittest.TestCase):
         cfg = SimpleNamespace(
             model_type="_groupwise_dense_cpu_owner", kind="column", bias=False
         )
-        for backend in ("scratch", "fastsafetensors"):
+        for backend in checkpoint_readers("scratch", "fastsafetensors"):
             missing = {
                 "proj." + key: value for key, value in packed.items() if key != "qzeros"
             }
@@ -860,7 +962,7 @@ class GroupwiseOwnerTest(unittest.TestCase):
     def test_gptq_max_stored_zero_remains_effective_sixteen(self):
         packed, _ = material("gptq", 4, 64, 64)
         packed["qzeros"].fill_(-1)
-        for backend in ("scratch", "fastsafetensors"):
+        for backend in checkpoint_readers("scratch", "fastsafetensors"):
             owner = self.load(
                 {"proj." + key: value for key, value in packed.items()},
                 SimpleNamespace(
@@ -881,7 +983,7 @@ class GroupwiseOwnerTest(unittest.TestCase):
         cfg = SimpleNamespace(
             model_type="_groupwise_dense_cpu_owner", kind="column", bias=False
         )
-        for backend in ("scratch", "fastsafetensors"):
+        for backend in checkpoint_readers("scratch", "fastsafetensors"):
             for parameter in ("qweight", "qzeros", "scales"):
                 values = {"proj." + key: value for key, value in packed.items()}
                 values["proj." + parameter] = packed[parameter].to(torch.int64)

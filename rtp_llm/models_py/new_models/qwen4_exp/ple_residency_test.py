@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import torch
 from safetensors.torch import save_file
 
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers, requires_native_fst
 from rtp_llm.models_py.model_loader import (
     NewModelLoader,
     NewLoaderConfig,
@@ -205,6 +206,7 @@ def _verify(test, root, method, rank, preserve, values, aux, scale):
 
 
 class PLEStorageTest(unittest.TestCase):
+    @requires_native_fst
     def test_varying_collective_key_and_file_schedules(self):
         for invalid in (False, True):
             with self.subTest(invalid=invalid), tempfile.TemporaryDirectory() as d:
@@ -230,7 +232,7 @@ class PLEStorageTest(unittest.TestCase):
                 )
 
     def test_host_checkpoint_formats(self):
-        for method in ("scratch", "fastsafetensors"):
+        for method in checkpoint_readers("scratch", "fastsafetensors"):
             for exported, preserve in ((False, True), (True, True), (True, False)):
                 with self.subTest(method=method, exported=exported, preserve=preserve):
                     check_local_ple(self, method, exported=exported, preserve=preserve)

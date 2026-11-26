@@ -14,6 +14,7 @@ from rtp_llm.models_py.borrowed_parameters import (
     BorrowedParameter,
     validate_borrowed_parameters,
 )
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers, requires_native_fst
 from rtp_llm.models_py.model_desc.qwen3_dspark_runtime import (
     _apply_non_interleaved_rope,
     _write_rocm_paged_kv_cache,
@@ -187,7 +188,7 @@ class DSparkLoadTest(unittest.TestCase):
             torch.multiprocessing.start_processes(worker, nprocs=2, start_method="fork")
 
     def _check_tail_methods(self, root, weights, cfg, loader_cls):
-        for method in ("scratch", "fastsafetensors"):
+        for method in checkpoint_readers("scratch", "fastsafetensors"):
             load = replace(load_config(), load_method=method)
             pc = load.parallelism_config
             pc.pp_size, pc.pp_rank = 2, 1
@@ -263,6 +264,7 @@ class DSparkLoadTest(unittest.TestCase):
                     weights["markov_head.markov_w1.weight"],
                 )
 
+    @requires_native_fst
     def test_explicit_fst_after_close_matches_scratch(self):
         weights = checkpoint()
         expected = self.load(weights)

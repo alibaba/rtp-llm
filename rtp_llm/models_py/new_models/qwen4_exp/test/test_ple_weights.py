@@ -10,6 +10,7 @@ import torch
 from safetensors.torch import save_file
 
 from rtp_llm.models_py import weight_mapper
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers
 from rtp_llm.models_py.model_loader import (
     NewLoaderConfig,
     NewLoaderLoadMethod,
@@ -210,7 +211,7 @@ class PLECheckpointTest(unittest.TestCase):
         key = "ple_embedding.ngram_embedding.weight_scale"
         weights[key] = torch.tensor([0.00019931793212890625], dtype=torch.bfloat16)
         self.write(weights)
-        for method in (
+        for method in checkpoint_readers(
             NewLoaderLoadMethod.SCRATCH,
             NewLoaderLoadMethod.FASTSAFETENSORS,
         ):

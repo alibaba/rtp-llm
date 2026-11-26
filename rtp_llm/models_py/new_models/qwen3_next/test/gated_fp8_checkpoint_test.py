@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import torch
 from safetensors.torch import save_file
 
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers
 from rtp_llm.models_py.model_loader import NewModelLoader
 from rtp_llm.models_py.new_models.qwen3_next.test.main_checkpoint_test import (
     _config,
@@ -96,7 +97,7 @@ def _check_rank(rank, directory):
                     grids["self_attn.v_proj"][kv],
                 )
             )
-            for method in ("scratch", "fastsafetensors"):
+            for method in checkpoint_readers("scratch", "fastsafetensors"):
                 opts = _load_config(
                     tp_size=2,
                     tp_rank=rank,

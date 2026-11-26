@@ -17,7 +17,11 @@ from rtp_llm.models_py.quant_methods.base import (
     QuantizeMethodBase,
     register_quant_method,
 )
-from rtp_llm.models_py.quant_methods.startup_lora import FloatingStartupLoRA, merge_calibrated_projection
+from rtp_llm.models_py.quant_methods.startup_lora import (
+    FloatingStartupLoRA,
+    merge_block_fp8_projection,
+    merge_calibrated_projection,
+)
 
 
 def _convert_e4m3fn_to_fnuz(
@@ -609,7 +613,9 @@ class Fp8LinearMethod(QuantizeMethodBase):
     checkpoint_suffix_family = "fp8_per_tensor"
 
     def merge_ft_lora(self, layer, update):
-        merge_calibrated_projection(layer, update, per_row=False)
+        merge_calibrated_projection(
+            layer, update, per_row=False, dtype=torch.float8_e4m3fn
+        )
 
     @property
     def required_checkpoint_parameters(self) -> Tuple[str, ...]:
@@ -993,6 +999,11 @@ class Fp8PerChannelLinearMethod(_RocmPtpcEpilogueMixin, QuantizeMethodBase):
 
     required_checkpoint_parameters = ("weight", "weight_scale")
 
+    def merge_ft_lora(self, layer, update):
+        merge_calibrated_projection(
+            layer, update, per_row=True, dtype=torch.float8_e4m3fn
+        )
+
     def create_weights(
         self,
         layer,
@@ -1359,6 +1370,9 @@ class Fp8BlockLinearMethod(Fp8BlockOnlineLinearMethod):
 
     requires_staged_device_postprocess = False
     required_checkpoint_parameters = ("weight", "weight_scale_inv")
+
+    def merge_ft_lora(self, layer, update):
+        merge_block_fp8_projection(layer, update, self.BLOCK)
 
     def create_weights(
         self,

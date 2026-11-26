@@ -4,7 +4,7 @@ py_test(
     name = "test_mla_ft_roundtrip",
     srcs = ["test_mla_ft_roundtrip.py", "test_glm5_mtp_route.py", "test_nextn_route.py", "test_score_route.py"],
     env = checkpoint_reader_test_env(),
-    deps = ["//rtp_llm/models_py:new_weight_loader", "//rtp_llm:models", "//rtp_llm:fastsafetensors", "//rtp_llm:safetensors", "//rtp_llm:torch", "//rtp_llm/tools/convert:convert"],
+    deps = ["//rtp_llm/models_py:checkpoint_reader_test_support", "//rtp_llm/models_py:new_weight_loader", "//rtp_llm:models", "//rtp_llm:fastsafetensors", "//rtp_llm:safetensors", "//rtp_llm:torch", "//rtp_llm/tools/convert:convert"],
 )
 
 py_test(
@@ -12,7 +12,8 @@ py_test(
     srcs = ["test_mla_ft_gpu.py", "test_mla_ft_roundtrip.py", "test_glm5_mtp_route.py", "test_nextn_route.py", "test_score_route.py"],
     tags = ["H20_CU13"],
     exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
-    deps = ["//rtp_llm/models_py:new_weight_loader", "//rtp_llm:models", "//rtp_llm:fastsafetensors", "//rtp_llm:safetensors", "//rtp_llm:torch", "//rtp_llm/tools/convert:convert"],
+    env = checkpoint_reader_test_env({}),
+    deps = ["//rtp_llm/models_py:checkpoint_reader_test_support", "//rtp_llm/models_py:new_weight_loader", "//rtp_llm:models", "//rtp_llm:fastsafetensors", "//rtp_llm:safetensors", "//rtp_llm:torch", "//rtp_llm/tools/convert:convert"],
 )
 
 py_test(
@@ -31,8 +32,8 @@ py_test(
 py_test(
     name = "test_score_route",
     srcs = ["test_score_route.py"],
-    env = {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"},
-    deps = ["//rtp_llm/models_py:new_weight_loader", "//rtp_llm:models", "//rtp_llm:fastsafetensors", "//rtp_llm:safetensors", "//rtp_llm:torch"],
+    env = checkpoint_reader_test_env({"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"}),
+    deps = ["//rtp_llm/models_py:checkpoint_reader_test_support", "//rtp_llm/models_py:new_weight_loader", "//rtp_llm:models", "//rtp_llm:fastsafetensors", "//rtp_llm:safetensors", "//rtp_llm:torch"],
 )
 
 py_test(
@@ -89,15 +90,15 @@ py_test(
 py_test(
     name = "test_nextn_route",
     srcs = ["test_nextn_route.py", "test_score_route.py"],
-    env = {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"},
-    deps = ["//rtp_llm/models_py:new_weight_loader", "//rtp_llm:models", "//rtp_llm:fastsafetensors", "//rtp_llm:safetensors", "//rtp_llm:torch"],
+    env = checkpoint_reader_test_env({"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"}),
+    deps = ["//rtp_llm/models_py:checkpoint_reader_test_support", "//rtp_llm/models_py:new_weight_loader", "//rtp_llm:models", "//rtp_llm:fastsafetensors", "//rtp_llm:safetensors", "//rtp_llm:torch"],
 )
 
 py_test(
     name = "test_glm5_mtp_route",
     srcs = ["test_glm5_mtp_route.py", "test_nextn_route.py", "test_score_route.py"],
     env = checkpoint_reader_test_env(),
-    deps = ["//rtp_llm/models_py:new_weight_loader", "//rtp_llm:models", "//rtp_llm:fastsafetensors", "//rtp_llm:safetensors", "//rtp_llm:torch"],
+    deps = ["//rtp_llm/models_py:checkpoint_reader_test_support", "//rtp_llm/models_py:new_weight_loader", "//rtp_llm:models", "//rtp_llm:fastsafetensors", "//rtp_llm:safetensors", "//rtp_llm:torch"],
 )
 
 py_test(
@@ -107,7 +108,7 @@ py_test(
     tags = ["L20_CU13"],
     exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"},
     data = ["//rtp_llm/libs:librtp_compute_ops_so"],
-    deps = ["//rtp_llm/models_py:new_weight_loader", "//rtp_llm:models", "//rtp_llm:fastsafetensors", "//rtp_llm:safetensors", "//rtp_llm:torch"],
+    deps = ["//rtp_llm/models_py:checkpoint_reader_test_support", "//rtp_llm/models_py:new_weight_loader", "//rtp_llm:models", "//rtp_llm:fastsafetensors", "//rtp_llm:safetensors", "//rtp_llm:torch"],
 )
 
 py_test(
@@ -116,5 +117,6 @@ py_test(
     main = "test_resident_mla.py",
     tags = ["H20_CU13"],
     exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
-    deps = ["//rtp_llm/models_py:new_weight_loader", "//rtp_llm:models", "//rtp_llm:fastsafetensors", "//rtp_llm:torch", "//rtp_llm/resident_weights"],
+    env = checkpoint_reader_test_env({}),
+    deps = ["//rtp_llm/models_py:checkpoint_reader_test_support", "//rtp_llm/models_py:new_weight_loader", "//rtp_llm:models", "//rtp_llm:fastsafetensors", "//rtp_llm:torch", "//rtp_llm/resident_weights"],
 )

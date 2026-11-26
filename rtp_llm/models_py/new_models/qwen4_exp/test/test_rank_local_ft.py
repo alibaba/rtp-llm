@@ -6,12 +6,13 @@ from pathlib import Path
 import torch
 from safetensors.torch import save_file
 
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers, requires_native_fst
 from rtp_llm.models_py.ft_checkpoint import CheckpointTopology, FTCheckpoint
 from rtp_llm.models_py.model_loader import NewLoaderConfig
 from rtp_llm.models_py.new_models.qwen4_exp.target_weights import Qwen4TargetWeights
 
 
-def write_rank_pair(root):
+def write_rank_pair(root, *, archive_head=True, unknown_source=False):
     text = dict(
         num_hidden_layers=1,
         hidden_size=16,
@@ -35,7 +36,11 @@ def write_rank_pair(root):
     (root / "config.json").write_text(json.dumps({"text_config": text}))
     weight_map = {}
     for rank in range(2):
-        shapes = {"global.embedding": (32, 8), "global.lm_head": (16, 16)}
+        shapes = {"global.embedding": (32, 8)}
+        if archive_head:
+            shapes["global.lm_head"] = (16, 16)
+        if unknown_source:
+            shapes["global.unexpected"] = (1,)
         for prefix in (
             "global.qwen4.hc.mixer",
             "layers.0.qwen4.hc.attn",
@@ -109,13 +114,18 @@ def write_rank_pair(root):
 
 
 class Qwen4FTTest(unittest.TestCase):
-    def check_rank1(self, backend, pruned=False, restart=False):
+    def check_rank1(self, backend, pruned=False, restart=False, *, embedding_task=False,
+                    archive_head=True, unknown_source=False):
         with tempfile.TemporaryDirectory() as directory:
-            write_rank_pair(Path(directory))
+            write_rank_pair(Path(directory), archive_head=archive_head, unknown_source=unknown_source)
             topology = CheckpointTopology(tp_size=2, tp_rank=1, ep_size=2, ep_rank=1)
             ft = FTCheckpoint.open(directory, topology)
             ft.read_backend = backend
             config = {"ckpt_path": directory, "model_type": "qwen4_exp", "moe_k": 1}
+            if embedding_task:
+                from rtp_llm.ops import TaskType
+
+                config["task_type"] = TaskType.DENSE_EMBEDDING
             if pruned:
                 config.update(
                     enable_output_vocab_pruning=True, output_vocab_padded_size=16,
@@ -150,7 +160,9 @@ class Qwen4FTTest(unittest.TestCase):
             torch.testing.assert_close(
                 model.embed_tokens.weight, ft.read("global.embedding")
             )
-            if pruned:
+            if embedding_task:
+                self.assertIsNone(model.lm_head)
+            elif pruned:
                 # Rank 1 needs ID 10 from rank 0 and IDs 29/31 from rank 1.
                 full = torch.cat([
                     ft.read_rank_slice("global.lm_head", peer, (slice(None), slice(None)))
@@ -204,13 +216,26 @@ class Qwen4FTTest(unittest.TestCase):
     def test_ft_restart_rebuilds_constructor_and_host_ple_without_shards(self):
         self.check_rank1("scratch", restart=True)
 
+    @requires_native_fst
     def test_native_fst_rank1(self):
         self.check_rank1("fastsafetensors")
 
     def test_pruned_ft_reads_original_token_rows_from_peer_ranks(self):
-        for backend in ("scratch", "fastsafetensors"):
+        for backend in checkpoint_readers("scratch", "fastsafetensors"):
             with self.subTest(backend=backend):
                 self.check_rank1(backend, pruned=True)
+
+    def test_embedding_task_with_and_without_archived_generation_head(self):
+        for backend in checkpoint_readers("scratch", "fastsafetensors"):
+            for archive_head in (True, False):
+                with self.subTest(backend=backend, archive_head=archive_head):
+                    self.check_rank1(backend, embedding_task=True, archive_head=archive_head)
+
+    def test_headless_import_remains_strict(self):
+        with self.assertRaisesRegex(ValueError, "Unbound FT tensors.*global.unexpected"):
+            self.check_rank1("scratch", embedding_task=True, unknown_source=True)
+        with self.assertRaisesRegex(ValueError, "Missing FT sources for lm_head.weight"):
+            self.check_rank1("scratch", archive_head=False)
 
 
 if __name__ == "__main__":

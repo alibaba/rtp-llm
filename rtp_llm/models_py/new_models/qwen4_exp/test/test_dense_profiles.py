@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import torch
 from safetensors.torch import save_file
 
+from rtp_llm.models_py.checkpoint_reader_test_support import requires_native_fst
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.registry import MODEL_REGISTRY
@@ -62,7 +63,7 @@ class DenseProfileTest(unittest.TestCase):
     def test_real_scratch_and_fst_role_storage_after_rank_selection(self):
         self._run_profiles()
 
-    @unittest.skipUnless(os.environ.get("NEWLOADER_TEST_NATIVE_FST") == "1", "native FST opt-in")
+    @requires_native_fst
     def test_real_two_rank_fst_role_storage(self):
         with tempfile.TemporaryDirectory() as directory:
             torch.multiprocessing.start_processes(_fst_worker,

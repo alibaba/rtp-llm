@@ -11,6 +11,7 @@ import torch
 from safetensors.torch import load_file, save_file
 
 from rtp_llm.models.qwen4_exp.qwen4_exp import Qwen4Exp
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers
 from rtp_llm.models_py.new_models.qwen4_exp.target_weights import Qwen4CheckpointPlan
 from rtp_llm.models_py.new_models.qwen4_exp.test.test_native_service import native_config
 from rtp_llm.models_py.new_models.qwen4_exp.language import Qwen4ForCausalLM
@@ -91,7 +92,6 @@ class PrecisionPlanTest(unittest.TestCase):
             finally:
                 owner.close()
 
-    @unittest.skipUnless(os.environ.get("NEWLOADER_TEST_NATIVE_FST") == "1", "native FST opt-in")
     def test_two_rank_whole_bf16_and_mixed_fst(self):
         with tempfile.TemporaryDirectory() as directory:
             torch.multiprocessing.start_processes(_whole_worker,
@@ -140,7 +140,7 @@ def _whole_worker(rank, rendezvous):
                     pc.local_rank = rank
                     pc = resolve_qwen4_parallelism(config,pc)
                     snapshots = []
-                    for method in ("scratch","fastsafetensors"):
+                    for method in checkpoint_readers("scratch", "fastsafetensors"):
                         load = NewLoaderConfig.from_runtime(pc,device="cpu",compute_dtype=torch.bfloat16,
                             load_method=method,moe_config=MoeConfig(),py_hw_kernel_config=HWKernelConfig())
                         loader = NewModelLoader(config,load,model_path=directory)

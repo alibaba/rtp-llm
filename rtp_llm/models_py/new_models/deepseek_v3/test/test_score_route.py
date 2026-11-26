@@ -15,6 +15,7 @@ from safetensors.torch import save_file
 
 from rtp_llm.models.deepseek_v2 import DeepSeekV2
 from rtp_llm.models.direct_checkpoint import load_owned_model
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers
 from rtp_llm.models_py.model_loader import NewLoaderLoadMethod
 from rtp_llm.models_py.new_models.deepseek_v3.language import DeepSeekV32ForCausalLM
 from rtp_llm.models_py.new_models.deepseek_v3.moe import DeepSeekV32MoEBlock
@@ -238,7 +239,7 @@ class ScoreRouteTest(unittest.TestCase):
                     False,
                     {},
                 )
-                for method in ("scratch", "fastsafetensors"):
+                for method in checkpoint_readers("scratch", "fastsafetensors"):
                     with self.subTest(model=tag, method=method):
                         service = SimpleNamespace(
                             model_config=config,

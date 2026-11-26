@@ -12,6 +12,7 @@ import torch
 from safetensors.torch import save_file
 
 from rtp_llm.lora.lora_manager import LoraManager
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers
 from rtp_llm.models_py.lora_checkpoint import (
     RankLocalCheckpointAdapters,
     merge_startup_lora_checkpoint,
@@ -276,7 +277,7 @@ class DirectAdapterTest(unittest.TestCase):
                 )
 
         path = self.adapter("excluded", ["proj"])
-        for method in ("scratch", "fastsafetensors"):
+        for method in checkpoint_readers("scratch", "fastsafetensors"):
             for rank in range(2):
                 with self.subTest(rank=rank, method=method):
                     config = SimpleNamespace(

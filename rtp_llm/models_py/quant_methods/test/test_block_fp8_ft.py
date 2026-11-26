@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import torch
 from safetensors.torch import save_file
 
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers
 from rtp_llm.models_py.ft_checkpoint import CheckpointTopology, FTCheckpoint
 from rtp_llm.models_py.quant_methods.block_fp8_ft import (
     block_ft_bindings,
@@ -58,6 +59,34 @@ def source_snapshot(w, s, packed):
 
 
 class BlockFTTest(unittest.TestCase):
+    def test_lora_updates_only_affected_calibration_tiles_including_partial_tail(self):
+        from rtp_llm.models_py.runtime_weight_update import LoRAUpdate
+
+        n, k = 129, 130
+        weight = torch.full((n, k), 3.0).to(torch.float8_e4m3fn)
+        scale = torch.tensor([[1.0, 2.0], [4.0, 0.25]])
+        a = torch.zeros(1, k)
+        b = torch.zeros(n, 1)
+        a[0, -2:] = torch.tensor([1.0, -0.5])
+        b[-1] = 600
+        for packed in (False, True):
+            with self.subTest(packed=packed), tempfile.TemporaryDirectory() as root:
+                kernel, steps = source_snapshot(weight, scale, packed)
+                write_ft(root, {"layers.0.kernel": kernel, "layers.0.scale": steps}, producer="cuda")
+                cp = FTCheckpoint.open(root, CheckpointTopology())
+                m = linear(n, k)
+                cp.load_parameters(m, block_ft_bindings(m.proj, "layers.0.kernel", "layers.0.scale", "proj", cp))
+                Fp8BlockLinearMethod(m.proj.quant_config).merge_ft_lora(
+                    m.proj, LoRAUpdate("proj.weight", a, b)
+                )
+                expected_step = scale.clone()
+                expected_step[-1, -1] = 2.0 if packed else 600.75 / 448
+                expected = weight.view(torch.uint8).clone()
+                expected[-1, -2:] = (torch.tensor([600.75, -299.25]) / expected_step[-1, -1]).to(
+                    torch.float8_e4m3fn
+                ).view(torch.uint8)
+                torch.testing.assert_close(m.proj.weight_scale_inv, expected_step, rtol=0, atol=0)
+                torch.testing.assert_close(m.proj.weight.view(torch.uint8), expected)
 
     def test_padded_tp_ffn_keeps_producer_shards_and_zero_scale_blocks(self):
         # The producer pads 320 real channels to 512 BEFORE TP2 splitting.
@@ -184,7 +213,7 @@ class BlockFTTest(unittest.TestCase):
                     root, {"layers.0.kernel": kernel, "layers.0.scale": scale},
                     producer="cuda",
                 )
-                for backend in ("scratch", "fastsafetensors"):
+                for backend in checkpoint_readers("scratch", "fastsafetensors"):
                     with self.subTest(packed=packed, backend=backend):
                         cp = FTCheckpoint.open(root, CheckpointTopology())
                         cp.read_backend = backend
@@ -369,7 +398,7 @@ class BlockFTTest(unittest.TestCase):
                 ft[stem + ".weight_only_quant_scale"] = torch.stack(ss)
             with tempfile.TemporaryDirectory() as root:
                 write_ft(root, ft, producer="cuda")
-                for backend in ("scratch", "fastsafetensors"):
+                for backend in checkpoint_readers("scratch", "fastsafetensors"):
                     with self.subTest(packed=packed, backend=backend):
                         cp = FTCheckpoint.open(root, CheckpointTopology())
                         cp.read_backend = backend

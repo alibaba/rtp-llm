@@ -16,6 +16,7 @@ from rtp_llm.model_loader.load_config import LoadConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeightInfo
 from rtp_llm.model_loader.per_tensor_int8_quant_weight import PerTensorInt8QuantWeight
 from rtp_llm.model_loader.weight_module import AtomicWeight
+from rtp_llm.models_py.checkpoint_reader_test_support import has_native_fst
 from rtp_llm.models_py.fst_range_reader import iter_fst_range_tensors
 from rtp_llm.models_py.quant_methods.int8 import (
     Int8ExportState,
@@ -163,12 +164,15 @@ class Int8FTExportTest(unittest.TestCase):
                 glob + W.pre_decoder_ln_static_quant_reciprocal: torch.tensor([0.5]),
             }
             self.assertEqual(set(actual), set(expected))
+            for key, value in expected.items():
+                torch.testing.assert_close(actual[key], value, rtol=0, atol=0)
+            if not has_native_fst():
+                return
             fst = {
                 name: unwrap_checkpoint_tensor(value)[0]
                 for name, value in iter_fst_range_tensors([str(p) for p in files])
             }
             for key, value in expected.items():
-                torch.testing.assert_close(actual[key], value, rtol=0, atol=0)
                 torch.testing.assert_close(fst[key], value, rtol=0, atol=0)
 
     def test_per_tensor_tp2_replicates_calibration_steps(self):

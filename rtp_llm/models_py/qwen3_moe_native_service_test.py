@@ -10,6 +10,7 @@ import torch
 from safetensors.torch import save_file
 
 from rtp_llm.models.qwen_v3_moe import Qwen3Moe
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers
 from rtp_llm.models_py.model_loader import NewLoaderLoadMethod
 from rtp_llm.models_py.new_models.qwen3_moe.language import Qwen3MoeForCausalLM
 from rtp_llm.models_py.qwen3_moe_checkpoint_test import weights
@@ -29,7 +30,7 @@ class _Server(Qwen3Moe):
 
 class Qwen3MoeServingTest(unittest.TestCase):
     def test_real_registered_owner(self):
-        for method in ("scratch", "fastsafetensors"):
+        for method in checkpoint_readers("scratch", "fastsafetensors"):
             with self.subTest(method=method), tempfile.TemporaryDirectory() as root:
                 path = Path(root)
                 (path / "config.json").write_text(

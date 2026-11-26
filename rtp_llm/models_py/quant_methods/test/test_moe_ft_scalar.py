@@ -17,6 +17,7 @@ from rtp_llm.config.quant_config import (
     Fp8PerChannelCompressedQuantConfig,
     Fp8PerTensorCompressedQuantConfig,
 )
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers
 from rtp_llm.models_py.ft_checkpoint import CheckpointTopology, FTCheckpoint
 from rtp_llm.models_py.layers.moe_experts import BaseMoEExperts
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
@@ -95,7 +96,7 @@ class LegacyScalarFTTest(unittest.TestCase):
             source = Fp8PerChannelCompressedQuantConfig(is_quanted=True)
             cfg, load = self.make(root, source)
             loader = NewModelLoader(cfg, load, model_path=root)
-            for method in ("scratch", "fastsafetensors"):
+            for method in checkpoint_readers("scratch", "fastsafetensors"):
                 with self.subTest(method=method):
                     cp = FTCheckpoint.open(root, CheckpointTopology())
                     self.assertEqual(set(cp.index_metadata["moe_weights_preshuffled"]), marked)
@@ -147,7 +148,7 @@ class LegacyScalarFTTest(unittest.TestCase):
                 loader = NewModelLoader(
                     cfg, replace(lc, quant_config=q), model_path=root
                 )
-                for method in ("scratch", "fastsafetensors"):
+                for method in checkpoint_readers("scratch", "fastsafetensors"):
                     cp = FTCheckpoint.open(root, CheckpointTopology())
                     cp.index_metadata["ft_export_backend"] = abi
                     cp.read_backend = method
@@ -195,7 +196,7 @@ class LegacyScalarFTTest(unittest.TestCase):
                     )
                     checkpoint = FTCheckpoint.open(root, CheckpointTopology())
                     checkpoint.index_metadata["ft_export_backend"] = "rocm"
-                    for method in ("scratch", "fastsafetensors"):
+                    for method in checkpoint_readers("scratch", "fastsafetensors"):
                         checkpoint.read_backend = method
                         cls = (
                             PerChannelFP8FTProjection
@@ -241,7 +242,7 @@ class LegacyScalarFTTest(unittest.TestCase):
             )
             cp = FTCheckpoint.open(root, CheckpointTopology(tp_size=2, ep_size=2))
             placement = ExpertPlacement(4, 2, 0, (3, 1, 3, 2, 0, 1))
-            for method in ("scratch", "fastsafetensors"):
+            for method in checkpoint_readers("scratch", "fastsafetensors"):
                 cp.read_backend = method
                 torch.testing.assert_close(
                     cp.read_expert_rank_scalars(
@@ -317,7 +318,7 @@ class LegacyScalarFTTest(unittest.TestCase):
                 write_ft(root, self.fixture(family, static), producer="cuda")
                 config, load = self.make(root, source)
                 loader = NewModelLoader(config, load, model_path=root)
-                for method in ("scratch", "fastsafetensors"):
+                for method in checkpoint_readers("scratch", "fastsafetensors"):
                     with self.subTest(family=family, method=method):
                         cp = FTCheckpoint.open(root, CheckpointTopology())
                         cp.read_backend = method
@@ -365,7 +366,7 @@ class LegacyScalarFTTest(unittest.TestCase):
             with tempfile.TemporaryDirectory() as root:
                 write_ft(root, ft)
                 config, base = self.make(root, source)
-                for method in ("scratch", "fastsafetensors"):
+                for method in checkpoint_readers("scratch", "fastsafetensors"):
                     with self.subTest(
                         family=family,
                         online=not source.is_quanted(),

@@ -7,6 +7,7 @@ from unittest import mock
 
 import torch
 from safetensors.torch import save_file
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.new_models.qwen4_exp.gdn_weights import Qwen4GDNWeights
@@ -56,7 +57,7 @@ class GDNWeightsTest(unittest.TestCase):
             save_file(weights,os.path.join(directory,"model.safetensors"))
             for tp in (1,2):
                 for rank in range(tp):
-                    methods = ["scratch"] + (["fastsafetensors"] if tp == 1 and os.environ.get("NEWLOADER_TEST_NATIVE_FST") == "1" else [])
+                    methods = checkpoint_readers("scratch", "fastsafetensors") if tp == 1 else ("scratch",)
                     for method in methods:
                         with self.subTest(tp=tp,rank=rank,method=method):
                             model = NewModelLoader({"model_type":"_qwen4_gdn_weights_fixture"},

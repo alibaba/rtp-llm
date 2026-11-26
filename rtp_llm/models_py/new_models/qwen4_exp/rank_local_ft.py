@@ -5,9 +5,11 @@ Never send it through the HF readers or apply those transformations again.
 """
 
 import json
+from copy import copy
 
 import torch
 
+from rtp_llm.models_py.downstream_heads import needs_generation_projection
 from rtp_llm.models_py.ft_checkpoint import RuntimeTensorBinding
 from rtp_llm.models_py.new_models.qwen4_exp.target_weights import Qwen4CheckpointPlan
 from rtp_llm.models_py.quant_methods.channel_tensor_moe_ft import (
@@ -166,7 +168,16 @@ def load_rank_local(model, ft, *, draft=False):
     loans = getattr(model, "_rtp_borrowed_parameter_bindings", {}) if draft else {}
     if "embed_tokens.weight" not in loans:
         add("global.embedding", "embed_tokens.weight")
-    if getattr(model.lm_head, "output_vocab_ids", ()):
+    if model.lm_head is None and not needs_generation_projection(
+        model.checkpoint_plan.model_config
+    ):
+        # A generation archive may also serve an embedding task. Exclude
+        # only its unused head from this import's strict coverage check.
+        if "global.lm_head" in ft.entries:
+            ft = copy(ft)
+            ft.entries = dict(ft.entries)
+            del ft.entries["global.lm_head"]
+    elif getattr(model.lm_head, "output_vocab_ids", ()):
         bindings.append(RuntimeTensorBinding(
             ("global.lm_head",), "lm_head.weight", identity,
             read=lambda: (_pruned_ft_head(ft, model.lm_head),),

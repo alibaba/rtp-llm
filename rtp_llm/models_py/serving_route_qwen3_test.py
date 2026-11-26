@@ -15,6 +15,7 @@ from rtp_llm.models.downstream_modules.reranker.qwen3_reranker import (
     Qwen3RerankerHandler,
 )
 from rtp_llm.models.qwen_v3 import QwenV3
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers
 from rtp_llm.models_py.model_loader import NewLoaderLoadMethod
 from rtp_llm.models_py.new_models.qwen3.language import Qwen3ForCausalLM
 from rtp_llm.models_py.new_models.qwen3.main_pp_checkpoint_test import (
@@ -92,7 +93,7 @@ class Qwen3ServiceRouteTest(unittest.TestCase):
                 )
                 adapters[name] = str(path)
             x = torch.tensor([[2.0, -1.0, 0.0, 1.0]])
-            for method in ("scratch", "fastsafetensors"):
+            for method in checkpoint_readers("scratch", "fastsafetensors"):
                 for names, merge, merged in (
                     ((), False, ""),
                     (("first",), False, ""),
@@ -141,7 +142,7 @@ class Qwen3ServiceRouteTest(unittest.TestCase):
                 custom.handler = Processor(self.model_config)
                 return custom
 
-        for method in ("scratch", "fastsafetensors"):
+        for method in checkpoint_readers("scratch", "fastsafetensors"):
             with self.subTest(method=method), tempfile.TemporaryDirectory() as root:
                 path = os.path.join(root, "model.safetensors")
                 data = checkpoint()
@@ -201,7 +202,7 @@ class Qwen3ServiceRouteTest(unittest.TestCase):
                 custom.handler = Qwen3RerankerHandler(self.model_config, 0, 1)
                 return custom
 
-        for method in ("scratch", "fastsafetensors"):
+        for method in checkpoint_readers("scratch", "fastsafetensors"):
             with self.subTest(method=method), tempfile.TemporaryDirectory() as root:
                 data = checkpoint()
                 save_file(data, os.path.join(root, "model.safetensors"))
@@ -215,7 +216,7 @@ class Qwen3ServiceRouteTest(unittest.TestCase):
                 )
 
     def test_scratch_and_native_fst(self):
-        for method in ("scratch", "fastsafetensors"):
+        for method in checkpoint_readers("scratch", "fastsafetensors"):
             with self.subTest(method=method), tempfile.TemporaryDirectory() as root:
                 data = checkpoint()
                 save_file(data, os.path.join(root, "model.safetensors"))

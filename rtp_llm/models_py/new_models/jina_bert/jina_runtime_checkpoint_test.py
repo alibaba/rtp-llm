@@ -11,6 +11,7 @@ from safetensors.torch import save_file
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.py_config_modules import GenerateEnvConfig, RenderConfig
 from rtp_llm.models.jina_bert.jina_bert import JinaBert
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers
 from rtp_llm.models_py.model_loader import NewLoaderLoadMethod
 from rtp_llm.models_py.new_models.jina_bert.jina_checkpoint_test import (
     checkpoint,
@@ -63,7 +64,7 @@ class _JinaServiceFixture(unittest.TestCase):
                 json.dump({"tokenizer_class": "BertTokenizer"}, f)
             tensors = checkpoint()
             save_file(tensors, os.path.join(directory, "model.safetensors"))
-            for method in ("scratch", "fastsafetensors"):
+            for method in checkpoint_readers("scratch", "fastsafetensors"):
                 config = JinaBert.create_config(directory)
                 config.model_type = "jina_bert_code"
                 config.data_type = "fp32"
@@ -137,7 +138,7 @@ class _JinaServiceFixture(unittest.TestCase):
             # neither the owner nor the management interfaces may be published.
             del tensors["encoder.layer.1.attention.self.layer_norm_k.bias"]
             save_file(tensors, os.path.join(directory, "model.safetensors"))
-            for method in ("scratch", "fastsafetensors"):
+            for method in checkpoint_readers("scratch", "fastsafetensors"):
                 service_args["load_method"] = NewLoaderLoadMethod(method)
                 incomplete = CpuJinaBert(**service_args)
                 with self.assertRaisesRegex(RuntimeError, "layer_norm_k.bias"):

@@ -60,15 +60,15 @@ py_test(
     name = "qwen4_media_embedding_test",
     srcs = ["new_models/qwen4_exp/test/test_media_embedding.py"],
     main = "new_models/qwen4_exp/test/test_media_embedding.py",
-    env = {
+    env = checkpoint_reader_test_env({
         "CUDA_VISIBLE_DEVICES": "",
         "HIP_VISIBLE_DEVICES": "",
         "ROCR_VISIBLE_DEVICES": "",
         "OMP_NUM_THREADS": "1",
         "MKL_NUM_THREADS": "1",
-        "RUN_NATIVE_FST_CPU_TESTS": "1",
-    },
+    }),
     deps = [
+        ":checkpoint_reader_test_support",
         ":new_weight_loader",
         ":new_loader_core",
         ":models",
@@ -85,15 +85,14 @@ py_test(
         name = "qwen4_direct_" + part + "_test",
         srcs = ["new_models/qwen4_exp/test/test_" + part + ".py"],
         main = "new_models/qwen4_exp/test/test_" + part + ".py",
-        env = {
+        env = checkpoint_reader_test_env({
             "CUDA_VISIBLE_DEVICES": "",
             "HIP_VISIBLE_DEVICES": "",
             "ROCR_VISIBLE_DEVICES": "",
             "OMP_NUM_THREADS": "1",
             "MKL_NUM_THREADS": "1",
-            "NEWLOADER_TEST_NATIVE_FST": "1",
-        },
-        deps = [":new_weight_loader", ":new_loader_core", ":models", "//rtp_llm:fastsafetensors"],
+        }),
+        deps = [":checkpoint_reader_test_support", ":new_weight_loader", ":new_loader_core", ":models", "//rtp_llm:fastsafetensors"],
     )
     for part in [
         "attention_weights", "checkpoint_validation", "dense_profiles",
@@ -107,15 +106,14 @@ py_test(
         name = name,
         srcs = [src],
         main = src,
-        env = {
+        env = checkpoint_reader_test_env({
             "CUDA_VISIBLE_DEVICES": "",
             "HIP_VISIBLE_DEVICES": "",
             "ROCR_VISIBLE_DEVICES": "",
             "OMP_NUM_THREADS": "1",
             "MKL_NUM_THREADS": "1",
-            "NEWLOADER_TEST_NATIVE_FST": "1",
-        },
-        deps = [":new_weight_loader", ":new_loader_core", ":models", "//rtp_llm:fastsafetensors"],
+        }),
+        deps = [":checkpoint_reader_test_support", ":new_weight_loader", ":new_loader_core", ":models", "//rtp_llm:fastsafetensors"],
     )
     for name, src in [
         ("qwen4_nvfp4_experts_checkpoint_test", "new_models/qwen4_exp/nvfp4_experts_test.py"),
@@ -141,15 +139,14 @@ py_test(
         # the independent precision owner test remains on ordinary CPU workers.
         tags = ["L20_CU13"] if native_runtime else [],
         exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"} if native_runtime else {},
-        env = {
+        env = checkpoint_reader_test_env({
             "CUDA_VISIBLE_DEVICES": "",
             "HIP_VISIBLE_DEVICES": "",
             "ROCR_VISIBLE_DEVICES": "",
             "OMP_NUM_THREADS": "1",
             "MKL_NUM_THREADS": "1",
-            "NEWLOADER_TEST_NATIVE_FST": "1",
-        },
-        deps = [":new_weight_loader", ":new_loader_core", ":models", "//rtp_llm:models", "//rtp_llm:fastsafetensors"] + (
+        }),
+        deps = [":checkpoint_reader_test_support", ":new_weight_loader", ":new_loader_core", ":models", "//rtp_llm:models", "//rtp_llm:fastsafetensors"] + (
             ["//rtp_llm/tools/convert:convert"] if name == "qwen4_mtp_native_service_checkpoint_test" else []
         ),
     )
@@ -174,7 +171,7 @@ models_py_test(
     gpu = "H20_CU13",
     args = ["Q4SourceExpertTest.test_prequantized_tp2_marlin_slices_weights_and_scales_together"],
     env = {"RUN_Q4_NEWLOADER_MARLIN": "1"},
-    deps = [":new_weight_loader"],
+    deps = [":checkpoint_reader_test_support", ":new_weight_loader"],
 )
 
 models_py_test(
@@ -182,7 +179,7 @@ models_py_test(
     src = "eplb_direct_test.py",
     gpu = "H20_CU13",
     args = ["GraphBucketStatsTest.test_changing_real_rows_in_one_captured_graph"],
-    deps = [":new_weight_loader"],
+    deps = [":checkpoint_reader_test_support", ":new_weight_loader"],
 )
 
 models_py_test(
@@ -194,7 +191,7 @@ models_py_test(
         "Qwen4Nvfp4ExpertTest.test_restart_maps_packed_marlin_weights_without_repacking",
     ],
     env = {"RUN_Q4_NEWLOADER_MARLIN": "1"},
-    deps = [":new_weight_loader"],
+    deps = [":checkpoint_reader_test_support", ":new_weight_loader"],
 )
 
 models_py_test(
@@ -267,8 +264,8 @@ py_library(
 py_test(
     name = "direct_lora_checkpoint_test",
     srcs = ["direct_lora_checkpoint_test.py"],
-    deps = [":new_weight_loader", "//rtp_llm:lora", "//rtp_llm:utils"],
-    env = {"CUDA_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"},
+    deps = [":checkpoint_reader_test_support", ":new_weight_loader", "//rtp_llm:lora", "//rtp_llm:utils"],
+    env = checkpoint_reader_test_env({"CUDA_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"}),
 )
 
 py_test(
@@ -293,8 +290,9 @@ py_test(
 py_test(
     name = "rank_local_ft_test",
     srcs = ["rank_local_ft_test.py"],
-    env = {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"},
+    env = checkpoint_reader_test_env({"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"}),
     deps = [
+        ":checkpoint_reader_test_support",
         ":new_weight_loader",
         "//rtp_llm:fastsafetensors",
         "//rtp_llm/tools/convert:ft_export_metadata",
@@ -353,8 +351,9 @@ _GLOO_CPU_ENV = {
 py_test(
     name = "main_parallel_runtime_test",
     srcs = ["main_parallel_runtime_test.py", "layers/embedding.py"],
-    env = _GLOO_CPU_ENV,
+    env = checkpoint_reader_test_env(_GLOO_CPU_ENV),
     deps = [
+        ":checkpoint_reader_test_support",
         ":new_loader_core",
         ":parallel_checkpoint_test_support",
         "//rtp_llm:fastsafetensors",
@@ -379,8 +378,9 @@ py_test(
 py_test(
     name = "llama_checkpoint_formats_test",
     srcs = ["llama_checkpoint_formats_test.py"],
-    env = {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"},
+    env = checkpoint_reader_test_env({"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"}),
     deps = [
+        ":checkpoint_reader_test_support",
         ":new_weight_loader",
         "//rtp_llm:fastsafetensors",
         "//rtp_llm:models",
@@ -398,7 +398,9 @@ py_test(
     main = "llama_meta_online_fp8_test.py",
     tags = ["H20_CU13"],
     exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+    env = checkpoint_reader_test_env({}),
     deps = [
+        ":checkpoint_reader_test_support",
         ":new_weight_loader",
         "//rtp_llm:models",
         "//rtp_llm/tools/convert:ft_export_metadata",
@@ -409,8 +411,9 @@ py_test(
 py_test(
     name = "qwen2_main_ft_stage_test",
     srcs = ["qwen2_main_ft_stage_test.py"],
-    env = {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"},
+    env = checkpoint_reader_test_env({"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"}),
     deps = [
+        ":checkpoint_reader_test_support",
         ":new_weight_loader",
         "//rtp_llm/tools/convert:ft_export_metadata",
         "//rtp_llm/tools/convert:ft_export_writer",
@@ -646,7 +649,8 @@ py_test(
 py_test(
     name = "serving_route_checkpoint_test",
     srcs = ["serving_route_checkpoint_test.py"],
-    deps = [":new_weight_loader", "//rtp_llm:models"],
+    env = checkpoint_reader_test_env({}),
+    deps = [":checkpoint_reader_test_support", ":new_weight_loader", "//rtp_llm:models"],
 )
 
 [
@@ -668,7 +672,7 @@ py_test(
         name = name,
         srcs = [entry] + extra,
         main = entry,
-        deps = [":new_weight_loader", "//rtp_llm:models"] + (["//rtp_llm/tools/convert:ft_export_engram"] if name == "v41_engram_source_test" else []),
+        deps = [":checkpoint_reader_test_support", ":new_weight_loader", "//rtp_llm:models"] + (["//rtp_llm/tools/convert:ft_export_engram"] if name == "v41_engram_source_test" else []),
         env = {
             "CUDA_VISIBLE_DEVICES": "",
             "HIP_VISIBLE_DEVICES": "",
@@ -711,15 +715,15 @@ py_test(
         "@//:using_cuda13_arm": [],
         "//conditions:default": ["@platforms//:incompatible"],
     }),
-    deps = [":new_weight_loader", "//rtp_llm:models"],
+    deps = [":checkpoint_reader_test_support", ":new_weight_loader", "//rtp_llm:models"],
 )
 
 py_test(
     name = "bert_input_vocab_test",
     srcs = ["bert_input_vocab_test.py", "bert_service_test.py", "serving_route_checkpoint_test.py"],
     main = "bert_input_vocab_test.py",
-    env = {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "ROCR_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"},
-    deps = [":new_weight_loader", "//rtp_llm:models", "//rtp_llm:transformers"],
+    env = checkpoint_reader_test_env({"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "ROCR_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"}),
+    deps = [":checkpoint_reader_test_support", ":new_weight_loader", "//rtp_llm:models", "//rtp_llm:transformers"],
 )
 
 checkpoint_service_tests(
@@ -732,14 +736,15 @@ checkpoint_service_tests(
         "serving_route_checkpoint_test.py",
     ],
     main = "bert_service_test.py",
-    env = {
+    env = checkpoint_reader_test_env({
         "CUDA_VISIBLE_DEVICES": "",
         "HIP_VISIBLE_DEVICES": "",
         "ROCR_VISIBLE_DEVICES": "",
         "OMP_NUM_THREADS": "1",
         "MKL_NUM_THREADS": "1",
-    },
+    }),
     deps = [
+        ":checkpoint_reader_test_support",
         ":new_weight_loader",
         "//rtp_llm:models",
         "//rtp_llm:transformers",
@@ -750,8 +755,8 @@ py_test(
     name = "jina_direct_checkpoint_cpu_test",
     srcs = ["new_models/jina_bert/jina_checkpoint_test.py"],
     main = "new_models/jina_bert/jina_checkpoint_test.py",
-    env = {"CUDA_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"},
-    deps = [":new_weight_loader"],
+    env = checkpoint_reader_test_env({"CUDA_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"}),
+    deps = [":checkpoint_reader_test_support", ":new_weight_loader"],
 )
 
 checkpoint_service_tests(
@@ -764,15 +769,16 @@ checkpoint_service_tests(
         "new_models/jina_bert/jina_runtime_checkpoint_test.py",
     ],
     main = "new_models/jina_bert/jina_runtime_checkpoint_test.py",
-    env = {"CUDA_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"},
-    deps = [":new_weight_loader", "//rtp_llm:models"],
+    env = checkpoint_reader_test_env({"CUDA_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"}),
+    deps = [":checkpoint_reader_test_support", ":new_weight_loader", "//rtp_llm:models"],
 )
 
 py_test(
     name = "qwen3_dspark_newloader_checkpoint_test",
     srcs = ["new_models/qwen3_dspark/checkpoint_test.py"],
     main = "new_models/qwen3_dspark/checkpoint_test.py",
-    deps = [":new_weight_loader"],
+    env = checkpoint_reader_test_env({}),
+    deps = [":checkpoint_reader_test_support", ":new_weight_loader"],
 )
 
 py_test(
@@ -782,7 +788,8 @@ py_test(
         "new_models/qwen3_dspark/checkpoint_test.py",
     ],
     main = "new_models/qwen3_dspark/checkpoint_cuda_test.py",
-    deps = [":new_weight_loader"],
+    env = checkpoint_reader_test_env({}),
+    deps = [":checkpoint_reader_test_support", ":new_weight_loader"],
     tags = ["L20_CU13"],
     exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"},
 )
@@ -806,7 +813,7 @@ py_test(
         "new_models/qwen3_dspark/checkpoint_test.py",
     ],
     main = "new_models/encoder_qwen3_ft_test.py",
-    deps = [":new_weight_loader", "//rtp_llm:models", "//rtp_llm/tools/convert:convert"],
+    deps = [":checkpoint_reader_test_support", ":new_weight_loader", "//rtp_llm:models", "//rtp_llm/tools/convert:convert"],
 )
 
 py_test(
@@ -847,19 +854,21 @@ py_test(
         "new_models/qwen3/main_pp_checkpoint_test.py",
     ],
     main = "serving_route_qwen3_test.py",
-    deps = [":new_weight_loader", "//rtp_llm:models"],
+    env = checkpoint_reader_test_env({}),
+    deps = [":checkpoint_reader_test_support", ":new_weight_loader", "//rtp_llm:models"],
 )
 
 py_test(
     name = "main_native_pp_checkpoint_test",
     srcs = ["new_models/qwen3/main_pp_checkpoint_test.py"],
     main = "new_models/qwen3/main_pp_checkpoint_test.py",
-    env = {
+    env = checkpoint_reader_test_env({
         "CUDA_VISIBLE_DEVICES": "",
         "HIP_VISIBLE_DEVICES": "",
         "ROCR_VISIBLE_DEVICES": "",
-    },
+    }),
     deps = [
+        ":checkpoint_reader_test_support",
         ":new_weight_loader",
         "//rtp_llm:transformers",
     ],
@@ -891,8 +900,8 @@ py_test(
     name = "eplb_direct_reload_test",
     srcs = ["eplb_direct_test.py"],
     main = "eplb_direct_test.py",
-    deps = [":new_weight_loader"],
-    env = {"CUDA_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"},
+    deps = [":checkpoint_reader_test_support", ":new_weight_loader"],
+    env = checkpoint_reader_test_env({"CUDA_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"}),
     timeout = "moderate",
 )
 
@@ -912,7 +921,8 @@ py_test(
         "serving_route_checkpoint_test.py",
     ],
     main = "qwen3_moe_checkpoint_test.py",
-    deps = [":new_weight_loader", "//rtp_llm:models"],
+    env = checkpoint_reader_test_env({}),
+    deps = [":checkpoint_reader_test_support", ":new_weight_loader", "//rtp_llm:models"],
 )
 
 py_test(
@@ -923,7 +933,8 @@ py_test(
         "serving_route_checkpoint_test.py",
     ],
     main = "qwen3_moe_native_service_test.py",
-    deps = [":new_weight_loader", "//rtp_llm:models"],
+    env = checkpoint_reader_test_env({}),
+    deps = [":checkpoint_reader_test_support", ":new_weight_loader", "//rtp_llm:models"],
 )
 
 checkpoint_service_tests(
@@ -937,8 +948,9 @@ checkpoint_service_tests(
         "serving_route_checkpoint_test.py",
     ],
     main = "new_models/qwen3_vl/service_test.py",
-    env = {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"},
+    env = checkpoint_reader_test_env({"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"}),
     deps = [
+        ":checkpoint_reader_test_support",
         ":new_weight_loader",
         "//rtp_llm:models",
         "//rtp_llm:multimodal",
@@ -961,6 +973,7 @@ py_test(
         "//conditions:default": ["@platforms//:incompatible"],
     }),
     deps = [
+        ":checkpoint_reader_test_support",
         ":new_weight_loader",
         "//rtp_llm:fastsafetensors",
         "//rtp_llm:models",
@@ -976,8 +989,8 @@ py_test(
         "serving_route_deepseek_test.py",
     ],
     main = "serving_route_deepseek_test.py",
-    env = {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"},
-    deps = [":new_weight_loader", "//rtp_llm:models"],
+    env = checkpoint_reader_test_env({"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"}),
+    deps = [":checkpoint_reader_test_support", ":new_weight_loader", "//rtp_llm:models"],
 )
 
 py_library(
@@ -992,7 +1005,7 @@ py_library(
     name = "ple_residency_test_cases",
     testonly = True,
     srcs = ["new_models/qwen4_exp/ple_residency_test.py"],
-    deps = [":new_weight_loader"],
+    deps = [":checkpoint_reader_test_support", ":new_weight_loader"],
     visibility = ["//rtp_llm/models/qwen4_exp/test:__pkg__"],
 )
 
@@ -1000,7 +1013,8 @@ py_test(
     name = "ple_host_fst_routing_test",
     srcs = ["new_models/qwen4_exp/ple_residency_test.py"],
     main = "new_models/qwen4_exp/ple_residency_test.py",
-    deps = [":new_weight_loader"],
+    env = checkpoint_reader_test_env({}),
+    deps = [":checkpoint_reader_test_support", ":new_weight_loader"],
 )
 
 py_test(
@@ -1041,12 +1055,13 @@ py_test(
         "new_models/qwen_visual_namespace.py",
     ],
     main = "new_models/qwen_service_vision_test.py",
-    env = {
+    env = checkpoint_reader_test_env({
         "CUDA_VISIBLE_DEVICES": "",
         "HIP_VISIBLE_DEVICES": "",
         "OMP_NUM_THREADS": "1",
-    },
+    }),
     deps = [
+        ":checkpoint_reader_test_support",
         ":new_loader_core",
         "//rtp_llm:fastsafetensors",
         "//rtp_llm:transformers",
@@ -1057,8 +1072,8 @@ py_test(
     name = "megatron_bert_checkpoint_test",
     srcs = ["new_models/megatron_bert/test_checkpoint.py"],
     main = "new_models/megatron_bert/test_checkpoint.py",
-    env = {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "MKL_NUM_THREADS": "1", "OMP_NUM_THREADS": "1"},
-    deps = [":new_weight_loader", "//rtp_llm:fastsafetensors", "//rtp_llm:transformers"],
+    env = checkpoint_reader_test_env({"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "MKL_NUM_THREADS": "1", "OMP_NUM_THREADS": "1"}),
+    deps = [":checkpoint_reader_test_support", ":new_weight_loader", "//rtp_llm:fastsafetensors", "//rtp_llm:transformers"],
 )
 
 checkpoint_service_tests(
@@ -1071,8 +1086,8 @@ checkpoint_service_tests(
         "new_models/megatron_bert/test_checkpoint.py",
     ],
     main = "new_models/megatron_bert/native_checkpoint_test.py",
-    env = {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": ""},
-    deps = [":new_weight_loader", "//rtp_llm:fastsafetensors", "//rtp_llm:models", "//rtp_llm:transformers"],
+    env = checkpoint_reader_test_env({"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": ""}),
+    deps = [":checkpoint_reader_test_support", ":new_weight_loader", "//rtp_llm:fastsafetensors", "//rtp_llm:models", "//rtp_llm:transformers"],
 )
 
 # CPU-only subset of the DSv4 decode package: pure-torch modules plus the
@@ -1524,14 +1539,15 @@ checkpoint_service_tests(
     native_case = "RobertaNativeOutputTest",
     srcs = ["new_models/roberta/test_roberta_checkpoint.py"],
     main = "new_models/roberta/test_roberta_checkpoint.py",
-    env = {
+    env = checkpoint_reader_test_env({
         "CUDA_VISIBLE_DEVICES": "",
         "HIP_VISIBLE_DEVICES": "",
         "ROCR_VISIBLE_DEVICES": "",
         "OMP_NUM_THREADS": "1",
         "MKL_NUM_THREADS": "1",
-    },
+    }),
     deps = [
+        ":checkpoint_reader_test_support",
         ":new_weight_loader",
         "//rtp_llm:models",
         "//rtp_llm:transformers",
@@ -1549,12 +1565,12 @@ py_test(
     main = "bert_input_vocab_native_output_test.py",
     tags = ["L20_CU13"],
     exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"},
-    env = {
+    env = checkpoint_reader_test_env({
         "CUDA_VISIBLE_DEVICES": "",
         "HIP_VISIBLE_DEVICES": "",
         "ROCR_VISIBLE_DEVICES": "",
         "OMP_NUM_THREADS": "1",
         "MKL_NUM_THREADS": "1",
-    },
-    deps = [":new_weight_loader", "//rtp_llm:models", "//rtp_llm:transformers"],
+    }),
+    deps = [":checkpoint_reader_test_support", ":new_weight_loader", "//rtp_llm:models", "//rtp_llm:transformers"],
 )

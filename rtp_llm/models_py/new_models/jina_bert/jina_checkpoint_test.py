@@ -10,6 +10,7 @@ import torch
 from safetensors.torch import save_file
 from torch.nn import functional as F
 
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.new_models.jina_bert.encoder import JinaEncoder
 from rtp_llm.models_py.registry import register_model
@@ -123,7 +124,7 @@ def tp_worker(rank, directory):
     )
     try:
         for method, (attn, ffn) in product(
-            ("scratch", "fastsafetensors"), ((2, 2), (1, 2), (2, 1))
+            checkpoint_readers("scratch", "fastsafetensors"), ((2, 2), (1, 2), (2, 1))
         ):
             load = NewLoaderConfig(
                 device="cpu",
@@ -185,7 +186,7 @@ class JinaCheckpointTest(unittest.TestCase):
                 for seq, kind in zip(ids.split(lengths), types.split(lengths))
             ]
         )
-        for method, alias in (("scratch", False), ("fastsafetensors", True)):
+        for method, alias in checkpoint_readers(("scratch", False), ("fastsafetensors", True)):
             with self.subTest(method=method):
                 payload = {}
                 for k, v in data.items():
@@ -222,11 +223,12 @@ class JinaCheckpointTest(unittest.TestCase):
         data = checkpoint()
         data["classifier.weight"] = torch.arange(24, dtype=torch.float32).reshape(2, 12)
         mapping = (("__custom__.classifier.weight", "classifier.weight"),)
-        model = self._load(data, "fastsafetensors", mapping)
-        torch.testing.assert_close(
-            model.custom_weight_view()["__custom__.classifier.weight"],
-            data["classifier.weight"],
-        )
+        for method in checkpoint_readers("scratch", "fastsafetensors"):
+            model = self._load(data, method, mapping)
+            torch.testing.assert_close(
+                model.custom_weight_view()["__custom__.classifier.weight"],
+                data["classifier.weight"],
+            )
         del data["classifier.weight"]
         with self.assertRaisesRegex(RuntimeError, "missing Jina downstream"):
             self._load(data, "scratch", mapping)
@@ -235,7 +237,7 @@ class JinaCheckpointTest(unittest.TestCase):
         data = checkpoint()
         source = "classifier.weight"
         data[source] = torch.rand(2, 12)
-        for method in ("scratch", "fastsafetensors"):
+        for method in checkpoint_readers("scratch", "fastsafetensors"):
             with self.subTest(method=method):
                 model = self._load(
                     data, method, (("__custom__.head", source, torch.float16),)

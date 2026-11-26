@@ -52,41 +52,15 @@ def bind_attention(owner, parallelism_config, *, layer_idx, is_mtp_draft,
 def bind_gdn(owner, linear_config, parallelism_config, *, norm_activation="silu",
              role="PDFUSION", hw_kernel_config=None):
     """Reuse main GDN cache converters and prefill/decode/target-verification."""
-    from rtp_llm.models_py.model_desc.qwen3_next import Qwen3NextGatedDeltaNet, Qwen3NextGatedDeltaNetDecode
+    from rtp_llm.models_py.model_desc.qwen3_next import (
+        Qwen3NextGatedDeltaNet,
+        Qwen3NextGatedDeltaNetDecode,
+        Qwen3NextGdnStateParameters,
+    )
     from rtp_llm.models_py.modules.qwen4_exp.gdn_prefill_adapter import Qwen4Sm120GdnPrefill
     from rtp_llm.models_py.modules.qwen4_exp.gdn_prefill_norm import Qwen4PrefillGatedNorm
     from rtp_llm.models_py.modules.qwen4_exp.weight_views import Qwen4LinearFactory
     from rtp_llm.models_py.triton_kernels.common.layernorm_gated import RmsNormGated
-    from rtp_llm.models_py.utils.typed_storage_view import LinearCacheConverter
-    from rtp_llm.utils.util import to_torch_dtype
-
-    def initialize_cache_runtime(runtime):
-        nn.Module.__init__(runtime)
-        runtime.linear_attn_config = linear_config
-        runtime.parallelism_config = parallelism_config
-        for name in ("head_k_dim", "head_v_dim", "local_num_k_heads", "local_num_v_heads",
-                     "num_key_value_heads", "linear_conv_kernel_dim", "qkv_size"):
-            setattr(runtime, name, getattr(owner,name))
-        runtime.ssm_state_size = owner.local_num_v_heads*owner.head_k_dim*owner.head_v_dim
-        runtime.conv_state_size = (owner.linear_conv_kernel_dim-1)*owner.qkv_size
-        runtime.ssm_state_dtype = to_torch_dtype(linear_config.ssm_state_dtype)
-        runtime.conv_state_dtype = to_torch_dtype(linear_config.conv_state_dtype)
-        runtime.linear_cache_converter = LinearCacheConverter(
-            local_num_v_heads=owner.local_num_v_heads,head_v_dim=owner.head_v_dim,
-            head_k_dim=owner.head_k_dim,ssm_state_dtype=runtime.ssm_state_dtype,
-            linear_conv_kernel_dim=owner.linear_conv_kernel_dim,qkv_size=owner.qkv_size,
-            conv_state_dtype=runtime.conv_state_dtype)
-        runtime.conv_weights = owner.conv1d_w
-        runtime.dt_bias = owner.dt_bias
-        runtime.alog = owner.a_log
-
-    class DirectPrefill(Qwen4Sm120GdnPrefill):
-        def __init__(self):
-            initialize_cache_runtime(self)
-
-    class DirectDecode(Qwen3NextGatedDeltaNetDecode):
-        def __init__(self):
-            initialize_cache_runtime(self)
 
     class DirectGDN(Qwen3NextGatedDeltaNet):
         def __init__(self):
@@ -119,8 +93,9 @@ def bind_gdn(owner, linear_config, parallelism_config, *, norm_activation="silu"
                     weight = ba.t().contiguous()
                     owner.in_proj_ba_w.data = weight.t()
                     self.in_proj_ba = Fp8Linear(weight, owner.in_proj_ba_storage_scale, role=role)
-            self.prefill_gdn = DirectPrefill()
-            self.decode_gdn = DirectDecode()
+            state = Qwen3NextGdnStateParameters(owner.conv1d_w, owner.dt_bias, owner.a_log)
+            self.prefill_gdn = Qwen4Sm120GdnPrefill(linear_config, parallelism_config, state)
+            self.decode_gdn = Qwen3NextGatedDeltaNetDecode(linear_config, parallelism_config, state)
             self.norm = Qwen4PrefillGatedNorm(RmsNormGated(owner.norm_w,
                 eps=owner.rms_norm_eps,group_size=owner.head_v_dim,activation=norm_activation),role=role)
             self.out_proj = bind_projection(owner.out_proj, hw_kernel_config=hw_kernel_config, role=role)

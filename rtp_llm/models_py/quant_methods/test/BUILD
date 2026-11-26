@@ -71,7 +71,9 @@ py_test(
 py_test(
     name = "test_int8_ft_export",
     srcs = ["test_int8_ft_export.py"],
+    env = checkpoint_reader_test_env({}),
     deps = [
+        "//rtp_llm/models_py:checkpoint_reader_test_support",
         "//rtp_llm/models_py:new_weight_loader",
         "//rtp_llm/models_py:int8_export_helpers",
         "//rtp_llm/model_loader:loader",
@@ -125,14 +127,16 @@ py_test(
     name = "test_groupwise_owners",
     srcs = ["test_groupwise_owners.py", "test_groupwise_checkpoint.py", "staged_checkpoint_fixture.py"],
     main = "test_groupwise_owners.py",
-    env = {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "ROCR_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"},
-    deps = ["//rtp_llm/models_py:new_weight_loader", "//rtp_llm:safetensors_torch"],
+    env = checkpoint_reader_test_env({"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "ROCR_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"}),
+    deps = ["//rtp_llm/models_py:checkpoint_reader_test_support", "//rtp_llm/models_py:new_weight_loader", "//rtp_llm:safetensors_torch"],
 )
 
 py_test(
     name = "test_block_fp8_ft",
     srcs = ["test_block_fp8_ft.py"],
+    env = checkpoint_reader_test_env({}),
     deps = [
+        "//rtp_llm/models_py:checkpoint_reader_test_support",
         "//rtp_llm/models_py:new_weight_loader",
         "//rtp_llm:torch",
     ],
@@ -142,7 +146,9 @@ py_test(
     name = "test_glm_ft_block_tree",
     srcs = ["test_glm_ft_block_tree.py", "test_block_fp8_ft.py"],
     main = "test_glm_ft_block_tree.py",
+    env = checkpoint_reader_test_env({}),
     deps = [
+        "//rtp_llm/models_py:checkpoint_reader_test_support",
         "//rtp_llm/models_py:new_weight_loader",
         "//rtp_llm:torch",
     ],
@@ -153,7 +159,9 @@ py_test(
     srcs = ["test_glm_ft_block_serving.py", "test_glm_ft_block_tree.py", "test_block_fp8_ft.py"],
     main = "test_glm_ft_block_serving.py",
     data = ["//:rtp_compute_ops", "//:th_transformer_config"],
+    env = checkpoint_reader_test_env({}),
     deps = [
+        "//rtp_llm/models_py:checkpoint_reader_test_support",
         "//rtp_llm:config",
         "//rtp_llm:transformers",
         "//rtp_llm/models_py:new_weight_loader",
@@ -170,7 +178,9 @@ py_test(
     name = "test_moe_ft_scalar",
     srcs = ["test_moe_ft_scalar.py", "test_block_fp8_ft.py"],
     main = "test_moe_ft_scalar.py",
+    env = checkpoint_reader_test_env({}),
     deps = [
+        "//rtp_llm/models_py:checkpoint_reader_test_support",
         "//rtp_llm/models_py:new_weight_loader",
         "//rtp_llm/tools/convert:ft_export_metadata",
         "//rtp_llm/tools/convert:ft_export_writer",

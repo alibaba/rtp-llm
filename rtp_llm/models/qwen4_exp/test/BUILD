@@ -1,3 +1,5 @@
+load("//rtp_llm/models_py:checkpoint_test_platforms.bzl", "checkpoint_reader_test_env")
+
 package(default_visibility = ["//visibility:public"])
 
 py_test(
@@ -60,8 +62,8 @@ py_test(
 py_test(
     name = "ple_weight_loading_test",
     srcs = ["ple_weight_loading_test.py"],
-    env = {"GPU_COUNT": "0"},
-    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:ple_residency_test_cases"],
+    env = checkpoint_reader_test_env({"GPU_COUNT": "0"}),
+    deps = ["//rtp_llm/models_py:checkpoint_reader_test_support", "//rtp_llm:testlib", "//rtp_llm/models_py:ple_residency_test_cases"],
 )
 
 py_test(

@@ -10,6 +10,7 @@ import torch
 from safetensors.torch import save_file
 
 from rtp_llm.config.layer_partition import local_layer_range
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers, has_native_fst
 from rtp_llm.models_py.fst_range_reader import iter_fst_range_tensors
 from rtp_llm.models_py.ft_checkpoint import CheckpointTopology, FTCheckpoint
 from rtp_llm.models_py.model_loader import (
@@ -222,14 +223,14 @@ class PPCheckpointTest(unittest.TestCase):
                             ): torch.tensor([10 * i + (rank if i in moe else 0)])
                             for i in scope
                         }
-                        for rows in (
-                            get_all_weights(
-                                [f], name_filter=keep, safetensor_slice_expander=expert
-                            ),
-                            iter_fst_range_tensors(
-                                [f], name_filter=keep, slice_expander=expert
-                            ),
-                        ):
+                        readers = [
+                            get_all_weights([f], name_filter=keep, safetensor_slice_expander=expert)
+                        ]
+                        if has_native_fst():
+                            readers.append(
+                                iter_fst_range_tensors([f], name_filter=keep, slice_expander=expert)
+                            )
+                        for rows in readers:
                             values = dict(rows)
                             self.assertEqual(set(values), set(expected))
                             for key, value in values.items():
@@ -258,7 +259,7 @@ class PPCheckpointTest(unittest.TestCase):
                 )
                 expected = {f"layers.{i}.weight": i for i in scope}
                 expected.update({"global." + name: 99 for name in globals_})
-                for method in ("scratch", "fastsafetensors"):
+                for method in checkpoint_readers("scratch", "fastsafetensors"):
                     ckpt = FTCheckpoint.open(d, CheckpointTopology(tp_size=2))
                     ckpt.read_backend = method
                     ckpt.select_stage(scope, 12)
@@ -343,7 +344,7 @@ class PPQwenStageTest(unittest.TestCase):
         checkpoint = qwen_tensors(3)
         with tempfile.TemporaryDirectory() as directory:
             path = str(Path(directory) / "model.safetensors")
-            for method in ("scratch", "fastsafetensors"):
+            for method in checkpoint_readers("scratch", "fastsafetensors"):
                 with self.subTest(method=method):
                     save_file(checkpoint, path)
                     loader = qwen_loader(cfg, topology([1], 0), method, directory)
@@ -400,7 +401,7 @@ class PPQwenStageTest(unittest.TestCase):
                 if tied:
                     del checkpoint["lm_head.weight"]
                 save_file(checkpoint, str(Path(d) / "model.safetensors"))
-                for method in ("scratch", "fastsafetensors"):
+                for method in checkpoint_readers("scratch", "fastsafetensors"):
                     for stage in range(len(counts)):
                         pc = topology(counts, stage)
                         loader = qwen_loader(cfg, pc, method, d)

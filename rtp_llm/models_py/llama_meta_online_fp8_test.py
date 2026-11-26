@@ -8,6 +8,7 @@ from pathlib import Path
 import torch
 from safetensors.torch import save_file
 
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers
 from rtp_llm.models_py.llama_checkpoint_formats_test import load, values, write_meta_source, write_q_adapter
 from rtp_llm.tools.convert.ft_export_metadata import generate_ft_index
 from rtp_llm.tools.convert.ft_export_writer import write_ft_shards
@@ -40,7 +41,7 @@ class LlamaMetaOnlineFp8Test(unittest.TestCase):
             adapter, delta = write_q_adapter(root, gain=512)
             logical = torch.cat(((values(8, 8) + delta), values(4, 8), values(4, 8))).bfloat16().float()
             step = logical.abs().amax() / 448
-            for method in ("scratch", "fastsafetensors"):
+            for method in checkpoint_readers("scratch", "fastsafetensors"):
                 with self.subTest(method=method):
                     model = load(
                         root, dtype=torch.bfloat16, device="cuda:0", online_quant="fp8_online",

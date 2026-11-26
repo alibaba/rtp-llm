@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import torch
 from safetensors.torch import save_file
 
+from rtp_llm.models_py.checkpoint_reader_test_support import requires_native_fst
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.new_models.qwen4_exp.nvfp4_experts import \
@@ -170,6 +171,7 @@ class Qwen4Nvfp4ExpertTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unknown"):
             leaf.checkpoint_read_spec("8.up_proj.weight", (256, 64))
 
+    @requires_native_fst
     def test_native_cpu_fst_closes_without_invalidating_owned_storage(self):
         with tempfile.TemporaryDirectory() as directory:
             self._save(directory, _payload())

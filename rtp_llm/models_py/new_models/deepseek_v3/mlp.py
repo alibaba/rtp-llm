@@ -7,10 +7,7 @@ import torch
 
 from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.models_py.layers.activation import silu_and_mul
-from rtp_llm.models_py.layers.linear import (
-    MergedColumnParallelLinear,
-    RowParallelLinear,
-)
+from rtp_llm.models_py.layers.groupwise_ffn import merged_ffn_linear, row_ffn_linear
 from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.quant_methods.base import QuantizationConfig
 
@@ -89,7 +86,7 @@ class DeepSeekV32MLP(RtpModule):
             from rtp_llm.models_py.modules.base import FusedSiluAndMul
 
             self.act_fn = FusedSiluAndMul()
-        self.gate_up_proj = MergedColumnParallelLinear(
+        self.gate_up_proj = merged_ffn_linear(
             input_size=hidden_size,
             output_size=2 * self.padded_intermediate_size,
             tp_size=tp_size,
@@ -100,7 +97,7 @@ class DeepSeekV32MLP(RtpModule):
             shard_names=["gate_proj", "up_proj"],
             params_dtype=params_dtype,
         )
-        self.down_proj = RowParallelLinear(
+        self.down_proj = row_ffn_linear(
             input_size=self.padded_intermediate_size,
             output_size=hidden_size,
             tp_size=tp_size,

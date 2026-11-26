@@ -13,6 +13,7 @@ from transformers import BertConfig, BertForSequenceClassification, BertModel
 
 from rtp_llm.config.py_config_modules import GenerateEnvConfig, RenderConfig
 from rtp_llm.models.bert import Bert
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers
 from rtp_llm.models_py.model_loader import NewLoaderLoadMethod
 from rtp_llm.models_py.new_models.bert.language import BertEncoderOwner
 from rtp_llm.models_py.serving_route_checkpoint_test import service
@@ -111,7 +112,7 @@ def check_tp_rank(rank, checkpoint, rendezvous):
     try:
         root = Path(checkpoint)
         state = load_file(str(root / "model.safetensors"))
-        for method in ("scratch", "fastsafetensors"):
+        for method in checkpoint_readers("scratch", "fastsafetensors"):
             model = public_load(root, method, TaskType.DENSE_EMBEDDING, tp=2, rank=rank)
             assert model.model_weights_loader.loaded_method == NewLoaderLoadMethod(
                 method
@@ -173,7 +174,7 @@ def check_static_tp_rank(rank, checkpoint, rendezvous, input_major):
     try:
         root = Path(checkpoint)
         values = load_file(str(root / "model.safetensors"))
-        for method in ("scratch", "fastsafetensors"):
+        for method in checkpoint_readers("scratch", "fastsafetensors"):
             rank_model = public_load(
                 root,
                 method,
@@ -273,7 +274,7 @@ class BertServiceTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             make_checkpoint(root)
-            for method in ("scratch", "fastsafetensors"):
+            for method in checkpoint_readers("scratch", "fastsafetensors"):
                 with self.subTest(method=method), self.assertRaisesRegex(
                     ValueError, "max_seq_len=25.*24-row position"
                 ):
@@ -363,7 +364,7 @@ class BertServiceTest(unittest.TestCase):
                     )
                 ]
             )
-            for method in ("scratch", "fastsafetensors"):
+            for method in checkpoint_readers("scratch", "fastsafetensors"):
                 with self.subTest(method=method):
                     service_model = public_load(
                         root, method, TaskType.DENSE_EMBEDDING, quant=quant
@@ -438,7 +439,7 @@ class BertServiceTest(unittest.TestCase):
             names = load_file(path)
             del names["encoder.layer.1.attention.self.value.weight"]
             replace_fixture(names, path)
-            for method in ("scratch", "fastsafetensors"):
+            for method in checkpoint_readers("scratch", "fastsafetensors"):
                 with self.subTest(method=method), self.assertRaises(
                     (ValueError, RuntimeError)
                 ):
@@ -474,7 +475,7 @@ class BertNativeOutputTest(unittest.TestCase):
                     if classifier:
                         logits.append(ref(**kw).logits[0])
                     offset += n
-                for method in ("scratch", "fastsafetensors"):
+                for method in checkpoint_readers("scratch", "fastsafetensors"):
                     with self.subTest(method=method, classifier=classifier):
                         model = public_load(
                             root,

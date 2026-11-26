@@ -14,6 +14,7 @@ import torch
 from safetensors.torch import save_file
 
 from rtp_llm.models_py import weight_mapper
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers, requires_native_fst
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.new_loader_test import fp4_linear_test as dense_fixture
@@ -100,7 +101,7 @@ class NativeFp4CheckpointTest(unittest.TestCase):
             )
             for tp in (1, 2):
                 for rank in range(tp):
-                    for method in ("scratch", "fastsafetensors"):
+                    for method in checkpoint_readers("scratch", "fastsafetensors"):
                         with self.subTest(tp=tp, rank=rank, method=method):
                             layer = ingest(
                                 directory, "dense", tp=tp, rank=rank, method=method
@@ -129,6 +130,7 @@ class NativeFp4CheckpointTest(unittest.TestCase):
                 "k_proj.k_scale", ()
             )
 
+    @requires_native_fst
     def test_real_scratch_and_native_fst_storage_agree(self):
         for recipe in ("dense", "offline", "online", "quark"):
             kinds = (
@@ -174,7 +176,7 @@ class NativeFp4CheckpointTest(unittest.TestCase):
         for recipe in ("dense", "offline", "quark"):
             weights = source_weights(recipe)
             del weights[next(name for name in weights if name.endswith("weight_scale"))]
-            for method in ("scratch", "fastsafetensors"):
+            for method in checkpoint_readers("scratch", "fastsafetensors"):
                 with self.subTest(
                     recipe=recipe, method=method
                 ), tempfile.TemporaryDirectory() as directory:
@@ -187,7 +189,7 @@ class NativeFp4CheckpointTest(unittest.TestCase):
             weights = source_weights(recipe)
             key = next(name for name in weights if name.endswith("weight"))
             weights[key] = weights[key].float()
-            for method in ("scratch", "fastsafetensors"):
+            for method in checkpoint_readers("scratch", "fastsafetensors"):
                 with self.subTest(
                     recipe=recipe, method=method
                 ), tempfile.TemporaryDirectory() as directory:
@@ -197,7 +199,7 @@ class NativeFp4CheckpointTest(unittest.TestCase):
 
     def test_full_cpu_load_does_not_claim_a_gpu_backend(self):
         for recipe in ("dense", "offline", "online", "quark"):
-            for method in ("scratch", "fastsafetensors"):
+            for method in checkpoint_readers("scratch", "fastsafetensors"):
                 with self.subTest(
                     recipe=recipe, method=method
                 ), tempfile.TemporaryDirectory() as directory:

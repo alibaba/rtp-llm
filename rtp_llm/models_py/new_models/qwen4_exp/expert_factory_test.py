@@ -12,6 +12,7 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
 
+from rtp_llm.models_py.checkpoint_reader_test_support import requires_native_fst
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.new_models.qwen4_exp.expert_factory import make_qwen4_experts
@@ -241,6 +242,7 @@ class Q4SourceExpertTest(unittest.TestCase):
                 self.assertIs(adapter.has_shared_expert_gate, present)
                 self.assertEqual(adapter.expert_num, 2)
 
+    @requires_native_fst
     def test_two_gloo_ranks_native_fst_matches_scratch_including_ep(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -14,6 +14,7 @@ from safetensors.torch import load_file, save_file
 
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.models.qwen4_exp.qwen4_exp_mtp import Qwen4ExpMTP
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers, requires_native_fst
 from rtp_llm.models_py.new_models.qwen4_exp.language import Qwen4ForCausalLM
 from rtp_llm.models_py.new_models.qwen4_exp.test.test_native_service import (
     CheckpointOnlyQwen4,
@@ -138,7 +139,7 @@ class DraftNativeServiceTest(unittest.TestCase):
                 target.py_model.embed_tokens.weight.add_(1)
                 target.py_model.lm_head.weight.add_(2)
             saved = {k: getattr(target.py_model, k).weight.clone() for k in ("embed_tokens", "lm_head")}
-            for method in ("scratch", "fastsafetensors"):
+            for method in checkpoint_readers("scratch", "fastsafetensors"):
                 for borrow in (False, True):
                     with self.subTest(method=method, borrow=borrow):
                         config = CheckpointOnlyDraft._create_config_from_json(archive, json.loads(raw))
@@ -166,6 +167,7 @@ class DraftNativeServiceTest(unittest.TestCase):
                 _profiles_worker, args=(directory,), nprocs=2, join=True
             )
 
+    @requires_native_fst
     def test_two_rank_fst_draft_keeps_local_target_vocabulary(self):
         with tempfile.TemporaryDirectory() as directory:
             shared_checkpoint(directory)
@@ -217,7 +219,7 @@ class DraftNativeServiceTest(unittest.TestCase):
 
     def test_target_and_draft_keep_aliases_and_draft_state(self):
         for source in ("bf16", "nvfp4"):
-            for method in ("scratch", "fastsafetensors"):
+            for method in checkpoint_readers("scratch", "fastsafetensors"):
                 with self.subTest(source=source, method=method):
                     self._exercise(method, source)
 
@@ -452,7 +454,7 @@ def _profiles_worker(rank, directory):
                                 )
                                 Qwen4ExpMTP._configure_precision_recipe(dc)
                             drafts = []
-                            for method in ("scratch", "fastsafetensors"):
+                            for method in checkpoint_readers("scratch", "fastsafetensors"):
                                 load = NewLoaderConfig.from_runtime(
                                     pc_resolved,
                                     device="cpu",

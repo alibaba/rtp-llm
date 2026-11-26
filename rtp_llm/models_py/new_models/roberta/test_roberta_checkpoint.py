@@ -12,6 +12,7 @@ import torch.nn.functional as F
 from safetensors.torch import load_file, save_file
 from transformers import RobertaConfig, RobertaForSequenceClassification, RobertaModel
 
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers
 from rtp_llm.models_py.downstream_heads import handler_weight_mappings
 from rtp_llm.models_py.model_loader import (
     NewLoaderConfig,
@@ -19,6 +20,7 @@ from rtp_llm.models_py.model_loader import (
     NewModelLoader,
 )
 from rtp_llm.models_py.new_models.roberta.language import RobertaEncoderOwner
+from rtp_llm.models_py.weight_mapper import discover_ckpt_files
 
 HEAD_NAMES = (
     "classifier.dense.weight",
@@ -279,7 +281,7 @@ class RobertaNativeOutputTest(unittest.TestCase):
                     if classifier
                     else F.normalize(batch_hidden[:, 0], dim=-1)
                 )
-                for method in ("scratch", "fastsafetensors"):
+                for method in checkpoint_readers("scratch", "fastsafetensors"):
                     with self.subTest(task=task, method=method):
                         config = Roberta._create_config(directory)
                         config.model_type = "roberta"
@@ -353,6 +355,30 @@ class RobertaNativeOutputTest(unittest.TestCase):
 
 class RobertaCheckpointTest(unittest.TestCase):
     @torch.inference_mode()
+    def test_unindexed_torch_encoder_ignores_handler_sidecars(self):
+        reference = RobertaModel(_hf_config()).eval()
+        weights = {f"roberta.{k}": v for k, v in reference.state_dict().items()}
+        sequence = [0, 5, 6, 2]
+        expected = reference(torch.tensor([sequence])).last_hidden_state[0]
+        for suffix in ("pt", "pth"):
+            with self.subTest(suffix=suffix), tempfile.TemporaryDirectory() as directory:
+                reference.config.to_json_file(os.path.join(directory, "config.json"))
+                for name, width in (("sparse_linear.pt", 1), ("colbert_linear.pt", 8)):
+                    torch.save(
+                        {"weight": torch.ones(width, 8), "bias": torch.zeros(width)},
+                        os.path.join(directory, name),
+                    )
+                self.assertEqual(discover_ckpt_files(directory), [])
+                encoder_file = os.path.join(directory, f"encoder.{suffix}")
+                torch.save(weights, encoder_file)
+                self.assertEqual(discover_ckpt_files(directory), [encoder_file])
+                owner = _load(
+                    directory, _runtime_config(reference.config, directory), "scratch"
+                )
+                actual = owner.forward_hidden(_packed_inputs(owner, [sequence]))
+                torch.testing.assert_close(actual, expected, rtol=2e-5, atol=5e-6)
+
+    @torch.inference_mode()
     def test_encoder_matches_transformers_with_offsets_and_padding(self):
         torch.manual_seed(41)
         reference = RobertaModel(_hf_config()).eval()
@@ -365,7 +391,7 @@ class RobertaCheckpointTest(unittest.TestCase):
         expected = torch.cat(
             [expected_batch[i, : len(seq)] for i, seq in enumerate(sequences)]
         )
-        for method in ("scratch", "fastsafetensors"):
+        for method in checkpoint_readers("scratch", "fastsafetensors"):
             for prefix in ("", "roberta."):
                 for legacy_norm in (False, True):
                     with self.subTest(
@@ -400,7 +426,7 @@ class RobertaCheckpointTest(unittest.TestCase):
         torch.manual_seed(52)
         reference = RobertaModel(_hf_config()).eval()
         sequence = [0, 3, 4, 5, 6, 7, 8, 2]  # positions 2..9 in a ten-row table
-        for method in ("scratch", "fastsafetensors"):
+        for method in checkpoint_readers("scratch", "fastsafetensors"):
             with self.subTest(
                 method=method
             ), tempfile.TemporaryDirectory() as directory:
@@ -425,7 +451,7 @@ class RobertaCheckpointTest(unittest.TestCase):
         sequences = [[0, 5, 6, 2], [0, 7, 2]]
         ids, mask = _hf_inputs(sequences)
         expected = reference(ids, attention_mask=mask).logits
-        for method in ("scratch", "fastsafetensors"):
+        for method in checkpoint_readers("scratch", "fastsafetensors"):
             with self.subTest(
                 method=method
             ), tempfile.TemporaryDirectory() as directory:
@@ -459,7 +485,7 @@ class RobertaCheckpointTest(unittest.TestCase):
     def test_tp_checkpoint_hidden_columns_and_replicated_heads(self):
         torch.manual_seed(74)
         reference = RobertaForSequenceClassification(_hf_config()).eval()
-        for method in ("scratch", "fastsafetensors"):
+        for method in checkpoint_readers("scratch", "fastsafetensors"):
             with self.subTest(
                 method=method
             ), tempfile.TemporaryDirectory() as directory:
@@ -487,7 +513,7 @@ class RobertaCheckpointTest(unittest.TestCase):
         )
         sparse = {"weight": torch.randn(1, 8), "bias": torch.randn(1)}
         colbert = {"weight": torch.randn(8, 8), "bias": torch.randn(8)}
-        for method in ("scratch", "fastsafetensors"):
+        for method in checkpoint_readers("scratch", "fastsafetensors"):
             with self.subTest(
                 method=method
             ), tempfile.TemporaryDirectory() as directory:
@@ -528,7 +554,7 @@ class RobertaCheckpointTest(unittest.TestCase):
 
     def test_declared_classifier_cannot_succeed_with_missing_tensor(self):
         reference = RobertaForSequenceClassification(_hf_config()).eval()
-        for method in ("scratch", "fastsafetensors"):
+        for method in checkpoint_readers("scratch", "fastsafetensors"):
             with self.subTest(
                 method=method
             ), tempfile.TemporaryDirectory() as directory:

@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import torch
 
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers, requires_native_fst
 from rtp_llm.models_py.expert_placement import ExpertPlacement
 from rtp_llm.models_py.ft_checkpoint import (
     CheckpointTopology,
@@ -148,7 +149,7 @@ class RankLocalFTTest(unittest.TestCase):
                     self.register_buffer("b", buf[1:])
 
         with tempfile.TemporaryDirectory() as root:
-            for method in ("scratch", "fastsafetensors"):
+            for method in checkpoint_readers("scratch", "fastsafetensors"):
                 for overlap in (False, True):
                     owner = Owner(overlap)
                     save_file({"a": torch.ones(2), "b" if overlap else "model.a": torch.zeros(2)},
@@ -314,7 +315,7 @@ class RankLocalFTTest(unittest.TestCase):
             metadata = json.loads(idx.read_text())
             metadata["ft_export_backend"] = "cuda"
             idx.write_text(json.dumps(metadata))
-            for method in ("scratch", "fastsafetensors"):
+            for method in checkpoint_readers("scratch", "fastsafetensors"):
                 for rank in range(2):
                     with self.subTest(method=method, rank=rank):
                         loader = self._eplb_loader(root, method, rank=rank, size=2)
@@ -385,7 +386,7 @@ class RankLocalFTTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             write_ft_shards([(None, role, value)], root)
             generate_ft_index(root, {"TP_SIZE": 1, "DP_SIZE": 1, "EP_SIZE": 1})
-            for backend in ("scratch", "fastsafetensors"):
+            for backend in checkpoint_readers("scratch", "fastsafetensors"):
                 ckpt = FTCheckpoint.open(root, CheckpointTopology())
                 ckpt.read_backend = backend
                 model = RtpModule()
@@ -433,6 +434,7 @@ class RankLocalFTTest(unittest.TestCase):
             )
         generate_ft_index(str(path), {"TP_SIZE": 2, "DP_SIZE": 1, "EP_SIZE": "0"})
 
+    @requires_native_fst
     def test_two_gloo_ranks_reload_physical_slots_from_real_ft_shards(self):
         with tempfile.TemporaryDirectory() as d:
             self.export(d)
@@ -464,7 +466,7 @@ class RankLocalFTTest(unittest.TestCase):
     def test_full_export_loads_each_stage_and_moved_or_redundant_expert(self):
         with tempfile.TemporaryDirectory() as d:
             self.export(d)
-            for method in ("scratch", "fastsafetensors"):
+            for method in checkpoint_readers("scratch", "fastsafetensors"):
                 for pp in (0, 1):
                     for rank in (0, 1):
                         with self.subTest(method=method, pp=pp, rank=rank):

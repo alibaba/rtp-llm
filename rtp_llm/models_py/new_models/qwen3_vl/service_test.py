@@ -19,6 +19,7 @@ from transformers.models.qwen3_vl.configuration_qwen3_vl import Qwen3VLVisionCon
 
 from rtp_llm.models.qwen3_vl import QWen3_VL
 from rtp_llm.models.qwen3_vl_moe import QWen3_VL_MOE
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers
 from rtp_llm.models_py.downstream_heads import handler_weight_mappings
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.new_models.qwen3_vl.language import (
@@ -186,7 +187,7 @@ class _VLServiceFixture(unittest.TestCase):
         ):
             with tempfile.TemporaryDirectory() as temp:
                 model_type, reference, tensors = checkpoint(Path(temp), moe)
-                for method in ("scratch", "fastsafetensors"):
+                for method in checkpoint_readers("scratch", "fastsafetensors"):
                     with self.subTest(model_type=model_type, method=method):
                         config = server._create_config(temp)
                         config.model_type = model_type
@@ -320,7 +321,7 @@ class PublicVLTest(_VLServiceFixture):
                 config.model_type = model_type
                 config.ckpt_path = temp
                 config.data_type = "fp32"
-                for method in ("scratch", "fastsafetensors"):
+                for method in checkpoint_readers("scratch", "fastsafetensors"):
                     with self.subTest(model_type=model_type, method=method):
                         parallel = service(temp, method).parallelism_config
                         parallel.local_world_size = 1

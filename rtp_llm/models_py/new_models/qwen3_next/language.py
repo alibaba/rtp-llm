@@ -18,11 +18,8 @@ from rtp_llm.models_py.layers.embedding import (
     VocabParallelEmbedding,
     output_vocab_head_kwargs,
 )
-from rtp_llm.models_py.layers.linear import (
-    ColumnParallelLinear,
-    MergedColumnParallelLinear,
-    RowParallelLinear,
-)
+from rtp_llm.models_py.layers.groupwise_ffn import merged_ffn_linear, row_ffn_linear
+from rtp_llm.models_py.layers.linear import ColumnParallelLinear
 from rtp_llm.models_py.layers.norm import RMSNorm, RMSResNorm
 from rtp_llm.models_py.model_desc.generic_moe import (
     GenericMoeLayer,
@@ -478,7 +475,7 @@ class Qwen3NextMLP(RtpModule):
     ):
         super().__init__()
         self.tp_size = tp_size
-        self.gate_up_proj = MergedColumnParallelLinear(
+        self.gate_up_proj = merged_ffn_linear(
             input_size=hidden_size,
             output_size=2 * intermediate_size,
             tp_size=tp_size,
@@ -490,7 +487,7 @@ class Qwen3NextMLP(RtpModule):
             shard_names=["gate_proj", "up_proj"],
             params_dtype=params_dtype,
         )
-        self.down_proj = RowParallelLinear(
+        self.down_proj = row_ffn_linear(
             input_size=intermediate_size,
             output_size=hidden_size,
             tp_size=tp_size,
@@ -529,7 +526,7 @@ class Qwen3NextSharedExpert(RtpModule):
     ):
         super().__init__()
         self.tp_size = tp_size
-        self.gate_up_proj = MergedColumnParallelLinear(
+        self.gate_up_proj = merged_ffn_linear(
             input_size=hidden_size,
             output_size=2 * inter_size,
             tp_size=tp_size,
@@ -540,7 +537,7 @@ class Qwen3NextSharedExpert(RtpModule):
             shard_names=["gate_proj", "up_proj"],
             params_dtype=params_dtype,
         )
-        self.down_proj = RowParallelLinear(
+        self.down_proj = row_ffn_linear(
             input_size=inter_size,
             output_size=hidden_size,
             tp_size=tp_size,

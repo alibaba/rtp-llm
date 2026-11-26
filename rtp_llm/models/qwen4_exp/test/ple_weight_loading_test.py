@@ -9,6 +9,7 @@ from rtp_llm.models.qwen4_exp.qwen4_exp_weight import (
     Qwen4ExpPleNgramWeight,
     Qwen4ExpWeight,
 )
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers, requires_native_fst
 from rtp_llm.models_py.modules.qwen4_exp.ple.ple import Qwen4ExpNGramEmbedding
 from rtp_llm.utils.model_weight import CkptWeightInfo, W
 
@@ -135,7 +136,7 @@ class Qwen4ExpPleNgramWeightTest(unittest.TestCase):
 
     def test_rank_local_ft_preserves_host_table_and_auxiliary(self):
         from rtp_llm.models_py.new_models.qwen4_exp.ple_residency_test import check_local_ple
-        for method in ("scratch", "fastsafetensors"):
+        for method in checkpoint_readers("scratch", "fastsafetensors"):
             for preserved in (False, True):
                 with self.subTest(method=method,preserve_fp8=preserved):
                     check_local_ple(self, method, exported=True, preserve=preserved)
@@ -268,6 +269,7 @@ class Qwen4ExpPleNgramWeightTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "not divisible by tp_size=3"):
             _ngram_weight().get_tensor_names(1, _load_config(3, 0))
 
+    @requires_native_fst
     def test_explicit_fst_reads_only_local_ple_and_still_loads_normal_weights(self):
         from rtp_llm.models_py.new_models.qwen4_exp.ple_residency_test import check_local_ple
         check_local_ple(self, "fastsafetensors", exported=False)

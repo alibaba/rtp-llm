@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import torch
 
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.quant_methods import QuantizationConfig
 from rtp_llm.tools.convert.ft_export_metadata import generate_ft_index
@@ -171,7 +172,7 @@ class MainFTStageTest(unittest.TestCase):
                 capture_aux_hidden_layer_ids=[],
                 hidden_state_capture_layer_ids=[],
             )
-            for method in ("scratch", "fastsafetensors"):
+            for method in checkpoint_readers("scratch", "fastsafetensors"):
                 for stage in (0, 1):
                     for rank in (0, 1):
                         pc = SimpleNamespace(

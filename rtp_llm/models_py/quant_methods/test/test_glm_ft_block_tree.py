@@ -12,6 +12,7 @@ from rtp_llm.config.quant_config import (
     Fp8BlockWiseQuantConfig,
     Fp8PerChannelCompressedQuantConfig,
 )
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers
 from rtp_llm.models_py.ft_checkpoint import CheckpointTopology, FTCheckpoint
 from rtp_llm.models_py.model_loader import NewModelLoader
 from rtp_llm.models_py.module_base import RtpModule
@@ -231,7 +232,7 @@ class GlmFTBlockTest(unittest.TestCase):
             for name, tensor in hf.items():
                 base.load_weights({name: tensor})
             NewModelLoader._validate_loaded_weights(base)
-            for method in ("scratch", "fastsafetensors"):
+            for method in checkpoint_readers("scratch", "fastsafetensors"):
                 with self.subTest(method=method):
                     m = tree(root, channel)
                     cp = FTCheckpoint.open(root, CheckpointTopology())

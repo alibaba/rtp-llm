@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import torch
 from safetensors.torch import save_file
 
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers
 from rtp_llm.models_py.layers.linear import ColumnParallelLinear, RowParallelLinear
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.module_base import RtpModule
@@ -83,7 +84,7 @@ class _Fixture(unittest.TestCase):
 
 class CPUCheckpointBiasTest(_Fixture):
     def test_scratch_and_fst(self):
-        for method in ("scratch", "fastsafetensors"):
+        for method in checkpoint_readers("scratch", "fastsafetensors"):
             with self.subTest(method=method):
                 self.check_load("cpu", False, method)
 

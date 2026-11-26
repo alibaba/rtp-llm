@@ -23,6 +23,7 @@ from rtp_llm.config.quant_config import (
 )
 from rtp_llm.config.server_config_setup import auto_configure_deepep
 from rtp_llm.models.glm4_moe import Glm4Moe
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.quant_methods.base import QuantizationConfig
 from rtp_llm.models_py.quant_methods.test.test_glm_ft_block_tree import (
@@ -232,7 +233,7 @@ class LegacyWriterToServingTest(unittest.TestCase):
 
             with torch.inference_mode():
                 ref = load_and_evaluate(hf, "scratch")
-                for method in ("scratch", "fastsafetensors"):
+                for method in checkpoint_readers("scratch", "fastsafetensors"):
                     out = load_and_evaluate(ft, method)
                     for i, (expected, actual) in enumerate(zip(ref, out)):
                         torch.testing.assert_close(

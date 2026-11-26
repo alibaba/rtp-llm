@@ -11,6 +11,7 @@ from transformers.models.qwen3_5_moe.configuration_qwen3_5_moe import (
 )
 from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeVisionModel
 
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers
 from rtp_llm.models_py.new_models.qwen_service_vision import load_service_vision
 
 
@@ -50,7 +51,7 @@ class ServiceVisionCheckpointTest(unittest.TestCase):
             root = Path(tmp)
             self._save(root, "model.visual.")
             expected = self.reference(pixels, grid_thw=grid)
-            for method in ("scratch", "fastsafetensors"):
+            for method in checkpoint_readers("scratch", "fastsafetensors"):
                 with self.subTest(method=method):
                     tower = Qwen3VLVisionModel(self.config).eval()
                     result = load_service_vision(
@@ -104,7 +105,7 @@ class ServiceVisionCheckpointTest(unittest.TestCase):
             pixels = torch.randn(4, 12, dtype=torch.bfloat16)
             grid = torch.tensor([[1, 2, 2]])
             expected = self.reference(pixels, grid_thw=grid)
-            for method in ("scratch", "fastsafetensors"):
+            for method in checkpoint_readers("scratch", "fastsafetensors"):
                 result = load_service_vision(
                     Qwen3_5MoeVisionModel(config).eval(),
                     tmp,
@@ -134,7 +135,7 @@ class ServiceVisionCheckpointTest(unittest.TestCase):
             save_file(
                 {"visual.mlp.gate_proj.weight": gate}, str(root / "01.safetensors")
             )
-            for method in ("scratch", "fastsafetensors"):
+            for method in checkpoint_readers("scratch", "fastsafetensors"):
                 result = load_service_vision(
                     tower, tmp, torch.bfloat16, "cpu", method, prefix="visual."
                 )

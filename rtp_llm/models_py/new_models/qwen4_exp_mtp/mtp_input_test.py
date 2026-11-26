@@ -1,6 +1,5 @@
 """Release-name Qwen4 MTP checkpoint-to-projection tests (CPU; not model smoke)."""
 
-import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,6 +8,7 @@ from types import SimpleNamespace
 import torch
 from safetensors.torch import save_file
 
+from rtp_llm.models_py.checkpoint_reader_test_support import requires_native_fst
 from rtp_llm.models_py.model_loader import (
     NewLoaderConfig,
     NewLoaderLoadMethod,
@@ -110,9 +110,7 @@ class MTPProjectionCheckpointTest(unittest.TestCase):
             with self.subTest(fp8=fp8):
                 self.compare(fp8, "scratch")
 
-    @unittest.skipUnless(
-        os.environ.get("NEWLOADER_TEST_NATIVE_FST") == "1", "needs native FST"
-    )
+    @requires_native_fst
     def test_native_fst_with_released_stage_buffers(self):
         import fastsafetensors.cpp as native
 

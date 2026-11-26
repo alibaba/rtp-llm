@@ -12,6 +12,7 @@ from safetensors.torch import save_file
 from rtp_llm.models.deepseek_v2 import DeepSeekV2
 from rtp_llm.models.direct_checkpoint import load_owned_model
 from rtp_llm.models.glm4_moe_lite import Glm4MoeLite
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers
 from rtp_llm.models_py.model_loader import NewLoaderLoadMethod
 from rtp_llm.models_py.new_models.deepseek_v3.language import DeepSeekV32ForCausalLM
 from rtp_llm.models_py.serving_route_checkpoint_test import service
@@ -24,7 +25,7 @@ class DeepSeekServiceRouteTest(unittest.TestCase):
             ("deepseek2", DeepSeekV2, None),
             ("glm4_moe_lite", Glm4MoeLite, 4),
         ):
-            for method in ("scratch", "fastsafetensors"):
+            for method in checkpoint_readers("scratch", "fastsafetensors"):
                 with self.subTest(model=model_type, method=method), tempfile.TemporaryDirectory() as root:
                     cfg = dict(
                         model_type=model_type, vocab_size=16, hidden_size=8,

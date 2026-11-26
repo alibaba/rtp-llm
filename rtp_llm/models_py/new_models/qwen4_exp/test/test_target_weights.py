@@ -10,6 +10,7 @@ from unittest import mock
 import torch
 from safetensors.torch import save_file
 from safetensors.torch import load_file
+from rtp_llm.models_py.checkpoint_reader_test_support import requires_native_fst
 from rtp_llm.models_py.model_loader import NewLoaderConfig,NewModelLoader
 from rtp_llm.models_py.new_models.qwen4_exp.target_weights import Qwen4TargetWeights
 from rtp_llm.models_py.registry import register_model
@@ -190,6 +191,7 @@ class TargetWeightsTest(unittest.TestCase):
     def test_complete_target_scratch_tp2_ep2(self):
         self._check_complete_target("scratch")
 
+    @requires_native_fst
     def test_complete_target_native_fst_tp2_ep2(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory)

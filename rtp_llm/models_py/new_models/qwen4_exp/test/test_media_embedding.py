@@ -13,6 +13,7 @@ from unittest.mock import patch
 import torch
 from safetensors.torch import save_file
 
+from rtp_llm.models_py.checkpoint_reader_test_support import requires_native_fst
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewLoaderLoadMethod
 from rtp_llm.models_py.new_models.qwen4_exp.media_text_embedding import (
     Qwen4MediaTextEmbedding,
@@ -186,9 +187,7 @@ class Qwen4MediaEmbeddingTest(unittest.TestCase):
                 load_qwen4_media_text_embedding(directory, torch.float32).weight, value
             )
 
-    @unittest.skipUnless(
-        os.environ.get("RUN_NATIVE_FST_CPU_TESTS") == "1", "native FST CPU opt-in"
-    )
+    @requires_native_fst
     def test_explicit_native_fst_cpu_without_scratch(self):
         import fastsafetensors.cpp as native
 
@@ -212,9 +211,7 @@ class Qwen4MediaEmbeddingTest(unittest.TestCase):
     def test_real_mixin_load_image_video_assembly_without_legacy_database(self):
         self._check_real_mixin(NewLoaderLoadMethod.SCRATCH)
 
-    @unittest.skipUnless(
-        os.environ.get("RUN_NATIVE_FST_CPU_TESTS") == "1", "native FST CPU opt-in"
-    )
+    @requires_native_fst
     def test_real_mixin_native_fst_image_video_without_scratch(self):
         import fastsafetensors.cpp as native
 

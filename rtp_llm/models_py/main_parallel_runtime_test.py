@@ -10,6 +10,7 @@ import torch
 import torch.distributed as dist
 from safetensors.torch import save_file
 
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers, requires_native_fst
 from rtp_llm.models_py.distributed.rank_layout import Group, RankLayout
 from rtp_llm.models_py.layers.embedding import ParallelLMHead, VocabParallelEmbedding
 from rtp_llm.models_py.model_loader import (
@@ -50,7 +51,7 @@ def _worker(rank, temp):
             if not draft or rank >= 2:
                 pc = runtime_config(rank, cp=draft, ffn_replicated=True)
                 directory = os.path.join(temp, f"{pc.pp_rank}-{experts}")
-                for method in ("scratch", "fastsafetensors"):
+                for method in checkpoint_readers("scratch", "fastsafetensors"):
                     load = NewLoaderConfig.from_runtime(
                         pc,
                         device="cpu",
@@ -185,6 +186,7 @@ def _vocab_and_stacked_worker(rank, temp):
 
 
 class MainParallelRuntimeTest(unittest.TestCase):
+    @requires_native_fst
     def test_pruned_tied_vocab_and_stacked_row_order_native_fst(self):
         with tempfile.TemporaryDirectory() as temp:
             experts = torch.arange(12).reshape(4, 3)

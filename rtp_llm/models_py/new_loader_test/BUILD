@@ -1,3 +1,5 @@
+load("//rtp_llm/models_py:checkpoint_test_platforms.bzl", "checkpoint_reader_test_env")
+
 package(default_visibility = ["//visibility:public"])
 
 py_test(
@@ -5,8 +7,8 @@ py_test(
     main = "linear_bias_contract_test.py",
     srcs = ["linear_bias_contract_test.py"],
     args = ["CPUCheckpointBiasTest"],
-    env = {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "ROCR_VISIBLE_DEVICES": ""},
-    deps = ["//rtp_llm/models_py:new_weight_loader", "//rtp_llm:fastsafetensors"],
+    env = checkpoint_reader_test_env({"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "ROCR_VISIBLE_DEVICES": ""}),
+    deps = ["//rtp_llm/models_py:checkpoint_reader_test_support", "//rtp_llm/models_py:new_weight_loader", "//rtp_llm:fastsafetensors"],
 )
 
 py_test(
@@ -16,7 +18,8 @@ py_test(
     args = ["ROCmCheckpointBiasTest"],
     tags = ["rocm"],
     exec_properties = {"gpu": "MI308X-ROCM7", "gpu_count": "1"},
-    deps = ["//rtp_llm/models_py:new_weight_loader"],
+    env = checkpoint_reader_test_env({}),
+    deps = ["//rtp_llm/models_py:checkpoint_reader_test_support", "//rtp_llm/models_py:new_weight_loader"],
 )
 
 py_library(
@@ -43,11 +46,12 @@ py_test(
     name = "fp4_native_checkpoint_test",
     srcs = ["fp4_native_checkpoint_test.py"],
     deps = [
+        "//rtp_llm/models_py:checkpoint_reader_test_support",
         ":fp4_test_fixtures",
         "//rtp_llm/models_py/quant_methods/test:mxfp4_test_fixtures",
         "//rtp_llm:fastsafetensors",
     ],
-    env = {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "ROCR_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"},
+    env = checkpoint_reader_test_env({"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "ROCR_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"}),
 )
 
 py_test(

@@ -13,6 +13,7 @@ from safetensors.torch import save_file
 from rtp_llm.model_factory_register import ModelDict
 from rtp_llm.models.deepseek_v2 import DeepSeekV2, DeepSeekV3Mtp
 from rtp_llm.models.rotary_embedding.deepseek_rotary_embedding import DeepseekV3YarnRotaryEmbedding
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers
 from rtp_llm.models_py.model_loader import NewLoaderLoadMethod
 from rtp_llm.models_py.new_models.deepseek_v3.language import DeepSeekV32ForCausalLM
 from rtp_llm.models_py.new_models.deepseek_v3.test.test_score_route import _score_weights
@@ -102,7 +103,7 @@ def _rank_load(rank, root, init):
         pc.world_rank = pc.local_rank = pc.tp_rank = pc.ep_rank = rank
         pc.ffn_tp_size, pc.ffn_tp_rank = 2, rank
         _, data, prefix = fixture(True)
-        for method in ("scratch", "fastsafetensors"):
+        for method in checkpoint_readers("scratch", "fastsafetensors"):
             service = load_service(root, method, parallel=pc)
             assert service.model_weights_loader.loaded_method == NewLoaderLoadMethod(method)
             model = service.py_model
@@ -184,7 +185,7 @@ class NextNRouteTest(unittest.TestCase):
                 folder.mkdir()
                 (folder/"config.json").write_text(json.dumps(cfg))
                 save_file(weights, str(folder/"model.safetensors"))
-            for method in ("scratch", "fastsafetensors"):
+            for method in checkpoint_readers("scratch", "fastsafetensors"):
                 with self.subTest(method=method):
                     score = load_service(str(score_dir), method, _Score)
                     draft = load_service(str(draft_dir), method)
@@ -203,7 +204,7 @@ class NextNRouteTest(unittest.TestCase):
             for declared in (0, 1):
                 cfg["num_nextn_predict_layers"] = declared
                 (Path(root)/"config.json").write_text(json.dumps(cfg))
-                for method in ("scratch", "fastsafetensors"):
+                for method in checkpoint_readers("scratch", "fastsafetensors"):
                     with self.subTest(declared=declared, method=method):
                         draft = load_service(root, method)
                         self.assertEqual(draft.py_model._checkpoint_layer, 0)
@@ -214,7 +215,7 @@ class NextNRouteTest(unittest.TestCase):
         cfg["first_k_dense_replace"] = 1
         data = {key.replace(prefix, "model.layers.1."): tensor for key, tensor in original.items()
                 if not key.startswith("model.layers.1.")}
-        for suffix, method in (("safetensors", "fastsafetensors"), ("bin", "scratch")):
+        for suffix, method in checkpoint_readers(("bin", "scratch"), ("safetensors", "fastsafetensors")):
             with self.subTest(suffix=suffix), tempfile.TemporaryDirectory() as root:
                 (Path(root)/"config.json").write_text(json.dumps(cfg))
                 name = str(Path(root)/("model."+suffix))
@@ -239,7 +240,7 @@ class NextNRouteTest(unittest.TestCase):
             with tempfile.TemporaryDirectory() as root:
                 (Path(root)/"config.json").write_text(json.dumps(cfg))
                 save_file(data, str(Path(root)/"model.safetensors"))
-                for method in ("scratch", "fastsafetensors"):
+                for method in checkpoint_readers("scratch", "fastsafetensors"):
                     with self.subTest(combined=combined, method=method):
                         score = load_service(root, method, _Score) if combined else None
                         draft = load_service(root, method)
@@ -277,7 +278,7 @@ class NextNRouteTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             (Path(root)/"config.json").write_text(json.dumps(cfg))
             save_file(data, str(Path(root)/"model.safetensors"))
-            for method in ("scratch", "fastsafetensors"):
+            for method in checkpoint_readers("scratch", "fastsafetensors"):
                 with self.subTest(method=method), self.assertRaisesRegex((ValueError, RuntimeError), "lm_head"):
                     load_service(root, method)
 

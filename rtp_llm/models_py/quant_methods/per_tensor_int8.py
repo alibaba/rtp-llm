@@ -53,7 +53,7 @@ class PerTensorInt8LinearMethod(W8A8Int8LinearMethod):
     required_checkpoint_parameters = ("weight", "weight_scale", "input_scale")
 
     def merge_ft_lora(self, layer, update):
-        merge_calibrated_projection(layer, update, per_row=True)
+        merge_calibrated_projection(layer, update, per_row=True, dtype=torch.int8)
 
     def create_weights(self, layer, input_size, output_size, params_dtype):
         layer.weight = nn.Parameter(

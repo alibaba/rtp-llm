@@ -19,6 +19,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 from safetensors.torch import save_file
 
+from rtp_llm.models_py.checkpoint_reader_test_support import has_native_fst, requires_native_fst
 from rtp_llm.models_py.eplb_controller import NewLoaderExpertBalancer
 from rtp_llm.models_py.expert_placement import ExpertPlacement
 from rtp_llm.models_py.fst_range_reader import iter_fst_range_tensors
@@ -630,18 +631,23 @@ class DistributedEplbReloadTest(unittest.TestCase):
                 f = _ExpertRangeFilter(3, 2, rank, config)
                 self.assertEqual(plan_fst_files([path], root, types.SimpleNamespace(size=lambda: 1),
                                                 None, None, expander=f), ([], [path]))
+                if not has_native_fst():
+                    continue
                 got = dict(iter_fst_range_tensors([path], slice_expander=f, catalog=None,
                                                   name_filter=None, read_spec_resolver=None))
                 self.assertEqual(set(got), {PREFIX + f"{i}.down_proj.weight" for i in expected})
                 for i in expected:
                     torch.testing.assert_close(got[PREFIX + f"{i}.down_proj.weight"], rows[i])
 
+    @requires_native_fst
     def test_two_cpu_ranks_real_fst_checkpoint_commit_and_rollback(self):
         self._run(False)
 
+    @requires_native_fst
     def test_two_cpu_ranks_auxiliary_scale_commit_and_rollback(self):
         self._run(False, auxiliary=True)
 
+    @requires_native_fst
     def test_two_stages_four_cpu_ranks_isolated_fst_aux_commit_and_rollback(self):
         self._run(False, auxiliary=True, stages=2)
 

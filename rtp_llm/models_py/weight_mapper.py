@@ -29,6 +29,9 @@ _CONSOLIDATED_RANK_RE = re.compile(r"^consolidated[._-](\d+)(?:[._-]|$)", re.IGN
 _EXCLUDED_WEIGHT_FILES = {
     "adapter_model.bin",
     "adapter_model.safetensors",
+    # Loaded independently by the embedding task handlers, not encoder shards.
+    "colbert_linear.pt",
+    "sparse_linear.pt",
     "optimizer.bin",
     "pytorch_model.bin.index.json",
     "model.safetensors.index.json",

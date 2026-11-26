@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import torch
 
 from rtp_llm.config.quant_config import QuantizationConfig as CheckpointQuantization
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.quant_methods import QuantizationConfig
 from rtp_llm.tools.convert.ft_export_metadata import generate_ft_index
@@ -19,8 +20,8 @@ def values(*shape):
     return torch.arange(torch.Size(shape).numel(), dtype=torch.float32).reshape(shape)
 
 
-def load(root, tp=1, rank=0, kv_heads=1, dtype=torch.float32, task_type=None,
-         *, online_quant=None, device="cpu", force_cpu=False, startup_lora=None,
+def make_loader(root, tp=1, rank=0, kv_heads=1, dtype=torch.float32, task_type=None,
+         *, online_quant=None, device="cpu", force_cpu=False,
          load_method="scratch"):
     config = SimpleNamespace(
         ckpt_path=str(root), model_type="llama", num_layers=1, vocab_size=8,
@@ -46,7 +47,11 @@ def load(root, tp=1, rank=0, kv_heads=1, dtype=torch.float32, task_type=None,
         ),
         load_method=load_method,
     )
-    return NewModelLoader(config, options, model_path=str(root)).load(startup_lora=startup_lora)
+    return NewModelLoader(config, options, model_path=str(root))
+
+
+def load(*args, startup_lora=None, **kwargs):
+    return make_loader(*args, **kwargs).load(startup_lora=startup_lora)
 
 
 def write_q_adapter(root, gain):
@@ -88,6 +93,66 @@ def write_meta_source(root):
 
 
 class LlamaCheckpointFormatsTest(unittest.TestCase):
+    def test_fp8_ft_adapters_preserve_row_and_block_calibration(self):
+        from safetensors.torch import save_file
+
+        from rtp_llm.models_py.ft_checkpoint import CheckpointTopology, FTCheckpoint
+        from rtp_llm.models_py.lora_checkpoint import prepare_ft_lora_merge
+
+        for mode in ("fp8_per_channel", "fp8_block"):
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                h = 8
+                records = [
+                    (None, "embedding", values(8, h).bfloat16()),
+                    (None, "lm_head", values(8, h).bfloat16()),
+                    (None, "final_layernorm.gamma", torch.ones(h, dtype=torch.bfloat16)),
+                    (0, "pre_layernorm_weights.gamma", torch.ones(h, dtype=torch.bfloat16)),
+                    (0, "post_layernorm_weights.gamma", torch.ones(h, dtype=torch.bfloat16)),
+                ]
+                channel = mode == "fp8_per_channel"
+                for stem, rows in (("self_attention_weights.query_weight", 16),
+                                   ("self_attention_weights.attention_output_weight", 8),
+                                   ("ffn_weights.intermediate_weight13", 16),
+                                   ("ffn_weights.intermediate_weight2", 8)):
+                    codes = (values(rows, h) % 13 - 6).to(torch.float8_e4m3fn)
+                    scales = (1 + values(rows, 1)) / 4 if channel else torch.tensor([[0.25]])
+                    records.extend([(0, stem + ".kernel", codes.reshape(h, rows)),
+                                    (0, stem + ".weight_only_quant_scale", scales.T.contiguous())])
+                write_ft_shards(records, str(root), tp_rank=0, ep_rank=0)
+                generate_ft_index(str(root), {"TP_SIZE": 1, "DP_SIZE": 1, "EP_SIZE": 1})
+                adapter = root / "adapter"
+                adapter.mkdir()
+                (adapter / "adapter_config.json").write_text(json.dumps({"r": 1, "lora_alpha": 1}))
+                factors, expected = {}, {}
+                for projection, rows, gain in (("q_proj", 16, 512), ("o_proj", 8, -256)):
+                    stem = "base_model.model.model.layers.0.self_attn." + projection
+                    a, b = torch.ones(1, h), (values(h, 1) - 4) * gain
+                    factors.update({stem + ".lora_A.weight": a, stem + ".lora_B.weight": b})
+                    before = (1 + values(rows, 1)) / 4 if channel else torch.tensor([[0.25]])
+                    merged = (values(rows, h) % 13 - 6) * before
+                    merged[:h] += b @ a  # K and V have no adapter.
+                    step = torch.maximum(before, merged.abs().amax(1 if channel else (0, 1), keepdim=True) / 448)
+                    expected[projection] = step, (merged / step).clamp(-448, 448).to(torch.float8_e4m3fn)
+                save_file(factors, str(adapter / "adapter_model.safetensors"))
+                for reader in checkpoint_readers("scratch", "fastsafetensors"):
+                    with self.subTest(mode=mode, reader=reader):
+                        loader = make_loader(root, dtype=torch.bfloat16, online_quant=mode)
+                        cp = FTCheckpoint.open(root, CheckpointTopology())
+                        # This fixture uses the CUDA FT producer layout, even on a ROCm host.
+                        cp.index_metadata["ft_export_backend"] = "cuda"
+                        cp.read_backend = reader
+                        model = loader._create_checkpoint_model(cp)
+                        model.load_ft_checkpoint(cp)
+                        prepare_ft_lora_merge(model, loader, "adapter", str(adapter))()
+                        loader._validate_loaded_weights(model)
+                        attention = model.layers[0].self_attn
+                        for name, leaf in (("q_proj", attention.qkv_proj), ("o_proj", attention.o_proj)):
+                            step, codes = expected[name]
+                            actual_step = leaf.weight_scale if channel else leaf.weight_scale_inv
+                            torch.testing.assert_close(actual_step, step, rtol=0, atol=0)
+                            torch.testing.assert_close(leaf.weight.view(torch.uint8), codes.view(torch.uint8))
+
     def test_full_depth_static_lora_with_reduced_llama_layer_count(self):
         from safetensors.torch import save_file
 
@@ -163,7 +228,7 @@ class LlamaCheckpointFormatsTest(unittest.TestCase):
 
             delta = 2 * ((values(4, 1) + 1) @ (values(1, 4) + 1))
             attn = "model.layers.0.self_attn."
-            for method in ("scratch", "fastsafetensors"):
+            for method in checkpoint_readers("scratch", "fastsafetensors"):
                 with self.subTest(method=method):
                     model = load_adapter(method)
                     self.assertEqual(len(model.layers), 1)

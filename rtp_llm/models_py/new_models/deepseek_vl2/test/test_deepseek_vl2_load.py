@@ -12,6 +12,7 @@ from safetensors.torch import save_file
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models.deepseek_vl2.deepseek_vl2 import DeepSeekVLV2
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers
 from rtp_llm.models_py.model_loader import NewModelLoader
 from rtp_llm.models_py.new_models.deepseek_vl2.language import DeepSeekVLV2ForCausalLM
 from rtp_llm.models_py.new_models.glm4_moe.test.checkpoint_fixture import checkpoint
@@ -87,7 +88,7 @@ class DeepSeekVLV2LoadTest(unittest.TestCase):
             # the declared physical source; it must not be read a second time.
             tensors["model.classifier.weight"] = torch.zeros(3, 4)
             save_file(tensors, str(path / "model.safetensors"))
-            for method in ("scratch", "fastsafetensors"):
+            for method in checkpoint_readers("scratch", "fastsafetensors"):
                 with self.subTest(method=method):
                     load = replace(
                         make_load_config(), load_method=method,
