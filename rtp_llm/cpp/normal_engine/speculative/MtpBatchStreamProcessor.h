@@ -13,6 +13,26 @@
 
 namespace rtp_llm {
 
+// The CPU sources of the physical and kernel rows selected by this gather.
+// A snapshot row can be narrower than the batch: its unused suffix is zero.
+struct MtpWriterHostRow {
+    const GenerateStream* stream = nullptr;
+    torch::Tensor physical;
+    torch::Tensor kernel;
+    bool compact = false;
+
+    DecodeWriterTables ownTables(const GenerateStream* expected_stream) const {
+        if (stream != expected_stream || !physical.defined() || !kernel.defined()) return {};
+        if (compact) return {physical, kernel};
+        // Do not retain the batch's pinned staging allocation across rounds.
+        const auto own = [](const torch::Tensor& table) {
+            return torch::empty(table.sizes(), torch::TensorOptions().dtype(torch::kInt32)).copy_(table);
+        };
+        return {own(physical), own(kernel)};
+    }
+};
+using MtpWriterHostRows = std::vector<MtpWriterHostRow>;
+
 // Holds the target's processed sampling distribution until acceptance selects
 // emitted content rows. No raw LM-head storage or full logprob matrix is retained.
 struct MtpTargetLogprobs {
@@ -97,7 +117,8 @@ public:
     absl::Status dispatchDecode(const StreamGroups&                          stream_groups,
                                 const speculative::SpeculativeSamplerOutput& spec_decode_output,
                                 const MergedOutput&                          draft_prefill_output,
-                                MtpTargetLogprobs                            target_logprobs) const;
+                                MtpTargetLogprobs                            target_logprobs,
+                                const std::vector<DecodeWriterTables>&       writer_tables = {}) const;
 
     // Wait for accepted lengths/tokens and reduce only accepted target rows.
     // An already-finalized payload is left unchanged.
@@ -106,7 +127,8 @@ public:
                                       MtpTargetLogprobs&                           target_logprobs) const;
 
     absl::StatusOr<GptModelInputs> gatherDecodeModelInput(const StreamGroups& stream_groups,
-                                                          TensorHolder&       host_holder) const;
+                                                        TensorHolder& host_holder,
+                                                        MtpWriterHostRows* writer_host_rows = nullptr) const;
 
     // Produce the next round's immutable page table by applying the exact
     // linear-cache permutation used by GenerateStream::specUpdate.  FULL/SWA
@@ -207,8 +229,9 @@ public:
 
 protected:
     void overlayMtpCacheSnapshots(const StreamGroups& stream_groups,
-                                  GptModelInputs&     model_input,
-                                  TensorHolder&       host_holder) const;
+                                  GptModelInputs& model_input,
+                                  TensorHolder& host_holder,
+                                  MtpWriterHostRows* writer_host_rows = nullptr) const;
 
     torch::Tensor collectDSparkPositionBases(const StreamGroups& stream_groups, TensorHolder& host_holder) const;
 
@@ -228,7 +251,8 @@ protected:
                                      const speculative::SpeculativeSamplerOutput& spec_decode_output,
                                      const MergedOutput&                          draft_prefill_output,
                                      MtpTargetLogprobs&                           target_logprobs,
-                                     std::vector<StreamSpecUpdateInfo>&           spec_update_infos) const;
+                                     std::vector<StreamSpecUpdateInfo>&           spec_update_infos,
+                                     const std::vector<DecodeWriterTables>&       writer_tables = {}) const;
 
     torch::Tensor compactAcceptedPositionIds(const torch::Tensor&    combo_position_ids,
                                              const std::vector<int>& accept_lens,

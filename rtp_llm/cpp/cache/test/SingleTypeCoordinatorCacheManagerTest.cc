@@ -726,11 +726,10 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, InsertIntoCache) {
     }
 }
 
-TEST(SingleTypeDecodeInsertTest, FinalSampledTokenCannotCompleteALocalCacheBlock) {
+TEST(SingleTypeDecodeInsertTest, LocalInsertionIgnoresRemotePublicationMode) {
     struct Case {
         int length;
-        size_t original_keys;
-        size_t native_keys;
+        size_t local_keys;
         size_t endpoint_end{0};
         bool has_tokens{true};
         bool opaque{false};
@@ -738,20 +737,19 @@ TEST(SingleTypeDecodeInsertTest, FinalSampledTokenCannotCompleteALocalCacheBlock
         bool resident{false};
         bool has_draft{false};
     };
-    // Fixed boundary expectations, including the aligned 512/511 regression.
-    const std::vector<Case> cases{{0, 0, 0}, {1, 0, 0}, {255, 0, 0},
-                                  {256, 1, 0}, {257, 1, 1}, {512, 2, 1}, {513, 2, 2},
-                                  {513, 2, 1, 256}, {512, 2, 2, 0, false},
-                                  {512, 2, 0, 0, true, true, true, false},
-                                  {512, 2, 2, 0, true, true, true, true},
-                                  {512, 2, 1, 0, true, true, false, false},
-                                  {512, 2, 1, 0, true, false, true, false},
-                                  {512, 2, 2, 0, true, false, true, true},
-                                  {512, 2, 2, 0, true, false, false, true},
-                                  {512, 2, 2, 0, true, false, false, true, true},
-                                  {512, 2, 0, 0, true, false, false, false, true},
-                                  {513, 2, 2, 256, true, true, true, true},
-                                  {513, 2, 0, 256, true, true, true, false}};
+    const std::vector<Case> cases{{0, 0}, {1, 0}, {255, 0},
+                                  {256, 1}, {257, 1}, {512, 2}, {513, 2},
+                                  {513, 2, 256}, {512, 2, 0, false},
+                                  {512, 2, 0, true, true, true, false},
+                                  {512, 2, 0, true, true, true, true},
+                                  {512, 2, 0, true, true, false, false},
+                                  {512, 2, 0, true, false, true, false},
+                                  {512, 2, 0, true, false, true, true},
+                                  {512, 2, 0, true, false, false, true},
+                                  {512, 2, 0, true, false, false, true, true},
+                                  {512, 2, 0, true, false, false, false, true},
+                                  {513, 2, 256, true, true, true, true},
+                                  {513, 2, 256, true, true, true, false}};
     for (const auto* setting : {"0", "1"}) {
         autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", setting);
         withDecodePublicationStartup([&] {
@@ -792,7 +790,7 @@ TEST(SingleTypeDecodeInsertTest, FinalSampledTokenCannotCompleteALocalCacheBlock
                     initCacheKeys(resource, tokens, 256, config.cache_key_hash_seed);
                     dropLastPartialBlock(resource);
                     const auto keys = resource->cacheKeys();
-                    ASSERT_EQ(keys.size(), c.original_keys);
+                    ASSERT_EQ(keys.size(), c.local_keys);
                     if (c.endpoint_end) {
                         auto endpoint = std::make_shared<DecodeEndpoint>();
                         endpoint->end = c.endpoint_end;
@@ -802,8 +800,7 @@ TEST(SingleTypeDecodeInsertTest, FinalSampledTokenCannotCompleteALocalCacheBlock
                     size_t resident = 0;
                     allocator->insertIntoCache(
                         InsertInfo{resource, c.has_tokens ? tokens : nullptr, c.resident}, resident);
-                    const size_t expected = setting[0] == '1' && role == RoleType::DECODE ?
-                                                c.native_keys : c.original_keys;
+                    const size_t expected = c.local_keys;
                     const auto path = allocator->blockTreeCacheOwner()->tree()->findNode(keys);
                     ASSERT_EQ(path.size(), expected);
                     if (c.resident) {
@@ -813,7 +810,7 @@ TEST(SingleTypeDecodeInsertTest, FinalSampledTokenCannotCompleteALocalCacheBlock
                         EXPECT_EQ(path[i]->group_set_resources.front().device_blocks,
                                   (BlockIndicesType{blocks[i]}));
                     }
-                    EXPECT_EQ(resource->cacheKeys(), keys); // Only insertion is capped.
+                    EXPECT_EQ(resource->cacheKeys(), keys); // The insertion keeps the caller's keys intact.
                 }
             }
         });

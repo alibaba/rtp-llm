@@ -11,6 +11,7 @@ bool remoteCacheGdrEnabled();
 // flags are read. The value is cached on first use during startup and cannot
 // be changed at runtime. Publication is disabled unless explicitly enabled.
 bool remoteCacheDecodePublicationEnabled();
+bool remoteCacheDecodePublishAllResidentState();
 // Invalid startup values reject Decode backend initialization; other roles
 // keep the disabled publication path.
 bool remoteCacheDecodePublicationConfigValid();

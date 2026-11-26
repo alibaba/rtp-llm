@@ -97,7 +97,7 @@ void MtpExecutor::retainDecodePublicationPages(const StreamGroups& streams, cons
     // pending until specUpdate, whose existing final draft_event host wait
     // covers target/draft/Graph writers. CPU accept metadata was joined above.
     for (const auto& stream : streams.allStreams()) {
-        std::vector<std::shared_ptr<const DecodeEndpoint>> endpoints;
+        BatchKVCacheResource::DecodeEndpoints candidates;
         try {
             if (stream->currentBatchSize() != 1 || stream->nextBatchSize() != 1
                 || row >= static_cast<size_t>(accepted.numel()) || row >= static_cast<size_t>(prefixes.numel())
@@ -119,13 +119,13 @@ void MtpExecutor::retainDecodePublicationPages(const StreamGroups& streams, cons
                     ids, target.kv_cache_group_tags, row, h, previous, /*defer_writer_wait=*/true);
                 if (endpoint) {
                     previous = endpoint;
-                    endpoints.push_back(std::move(endpoint));
+                    candidates.push_back(std::move(endpoint));
                 } else RTP_LLM_LOG_WARNING("DSV4.1 optional endpoint capture failed: H=%zu", h);
             }
         } catch (const std::exception& error) {
             RTP_LLM_LOG_WARNING("DSV4.1 optional endpoint capture failed: %s", error.what());
         }
-        stream->setDecodePublicationPages(std::move(endpoints));
+        stream->setDecodePublicationCandidates(std::move(candidates));
         ++row;
     }
     } catch (const std::exception& error) {
@@ -416,24 +416,37 @@ void finalizeSelectedMtpTargetLogprobs(MtpTargetLogprobs&          target_logpro
     RTP_LLM_CHECK(emitted_token_ids.numel() == target_logprobs.dense_row_count);
     const auto device  = target_logprobs.probs.defined() ? target_logprobs.probs.device() :
                                                            target_logprobs.point_mass_token_ids.device();
-    auto       options = torch::TensorOptions().dtype(torch::kLong).device(torch::kCPU).pinned_memory(device.is_cuda());
-    auto&      host_rows = target_logprobs.source_row_indices_cpu_owner;
-    host_rows            = torch::empty({static_cast<int64_t>(selected_dense_row_indices.size())}, options);
-    std::copy(selected_dense_row_indices.begin(), selected_dense_row_indices.end(), host_rows.data_ptr<int64_t>());
-    auto rows   = host_rows.to(device, torch::kLong, /*non_blocking=*/true);
-    auto select = [&](const torch::Tensor& tensor) {
-        if (!tensor.defined()) {
-            return torch::Tensor();
-        }
-        recordSpecTensorUseOnCurrentStream(tensor);
-        return tensor.index_select(0, rows);
-    };
-    auto tokens                           = emitted_token_ids.reshape({-1}).to(device, torch::kLong);
-    auto scores                           = computeSamplingLogprobs(select(target_logprobs.probs),
-                                          select(target_logprobs.candidate_ids),
-                                          select(target_logprobs.point_mass_token_ids),
-                                          select(tokens),
-                                          target_logprobs.requested_top_logprobs);
+    SamplingLogprobs scores;
+    if (selected_dense_row_indices.empty()) {
+        // No content rows means there is nothing to reduce or stage to CPU.
+        // Avoid reading pooled GPU accept tokens with no downstream D2H fence.
+        const int64_t width = target_logprobs.probs.defined() ? target_logprobs.probs.size(1) : 1;
+        const int64_t k = std::clamp<int64_t>(target_logprobs.requested_top_logprobs, 0, width);
+        const auto floats = torch::TensorOptions().dtype(torch::kFloat32).device(device);
+        scores.token_logprobs = torch::empty({0}, floats);
+        scores.top_logprob_token_ids = torch::empty({0, k}, floats.dtype(torch::kInt32));
+        scores.top_logprobs = torch::empty({0, k}, floats);
+    } else {
+        const auto options = torch::TensorOptions().dtype(torch::kLong).device(torch::kCPU).pinned_memory(device.is_cuda());
+        auto& host_rows = target_logprobs.source_row_indices_cpu_owner;
+        host_rows = torch::empty({static_cast<int64_t>(selected_dense_row_indices.size())}, options);
+        std::copy(selected_dense_row_indices.begin(), selected_dense_row_indices.end(), host_rows.data_ptr<int64_t>());
+        auto rows = host_rows.to(device, torch::kLong, /*non_blocking=*/true);
+        auto select = [&](const torch::Tensor& tensor) {
+            if (!tensor.defined()) {
+                return torch::Tensor();
+            }
+            recordSpecTensorUseOnCurrentStream(tensor);
+            return tensor.index_select(0, rows);
+        };
+        recordSpecTensorUseOnCurrentStream(emitted_token_ids);
+        auto tokens = emitted_token_ids.reshape({-1}).to(device, torch::kLong);
+        scores = computeSamplingLogprobs(select(target_logprobs.probs),
+                                        select(target_logprobs.candidate_ids),
+                                        select(target_logprobs.point_mass_token_ids),
+                                        select(tokens),
+                                        target_logprobs.requested_top_logprobs);
+    }
     target_logprobs.token_logprobs        = std::move(scores.token_logprobs);
     target_logprobs.top_logprob_token_ids = std::move(scores.top_logprob_token_ids);
     target_logprobs.top_logprobs          = std::move(scores.top_logprobs);
@@ -1790,6 +1803,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& schedul
     RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.decode_step(decode_stream_size=%zu)", scheduled_streams.size());
 
     const bool publication_frame = remoteCacheDecodePublicationEnabled() && role_type_ == RoleType::DECODE;
+    const size_t dspark_publication_unit =
+        publication_frame && isTpRank0() && is_dspark_ && v41_async_cache_reservation_ ?
+            cache_manager_->decodePublicationUnit() : 0;
     struct SubmissionFrame {
         std::vector<GenerateStreamPtr> streams;
         bool handed_off{false};
@@ -1839,7 +1855,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& schedul
     std::list<GenerateStreamPtr> publication_streams;
     const auto& streams = publication_frame ? publication_streams : scheduled_streams;
     if (frame) for (const auto& stream : scheduled_streams) {
-        if (stream->beginDecodePublicationSubmission()) {
+        if (stream->beginDecodePublicationSubmission(dspark_publication_unit)) {
             frame->streams.push_back(stream); // Capacity prepared before acquiring the submission gate.
             publication_streams.push_back(stream);
         }
@@ -1850,6 +1866,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& schedul
     GptModelOutputs model_output;
     GptModelOutputs draft_prefill_model_output;
     std::optional<GptModelInputs> publication_target;
+    MtpWriterHostRows writer_host_rows;
 
     SamplerOutput                         draft_sampler_output;
     speculative::SpeculativeSamplerOutput speculative_sampler_output;
@@ -1885,7 +1902,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& schedul
         int64_t start_time_us      = autil::TimeUtility::currentTimeInMicroSeconds();
         auto    model_input_status = alignment_only ?
                                          batch_stream_processor_->gatherModelInput(stream_groups, buffer_holder_) :
-                                         batch_stream_processor_->gatherDecodeModelInput(stream_groups, buffer_holder_);
+                                         batch_stream_processor_->gatherDecodeModelInput(
+                                             stream_groups, buffer_holder_,
+                                             dspark_publication_unit ? &writer_host_rows : nullptr);
         RETURN_IF_STATUS_OR_ERROR(model_input_status);
         model_input = std::move(model_input_status.value());
         executor_collector.gather_model_input_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
@@ -2133,10 +2152,10 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& schedul
                 model_input.combo_tokens.numel(),
                 model_input.is_packed_target_verify,
                 model_input.is_fake_stream);
-            if (publication_frame) publication_target.emplace(model_input);
+            if (publication_frame && !dspark_publication_unit) publication_target.emplace(model_input);
             model_output = runTargetVerifyForward(model_input, stream_groups);
         } else {
-            if (publication_frame) publication_target.emplace(model_input);
+            if (publication_frame && !dspark_publication_unit) publication_target.emplace(model_input);
             model_output = runTargetVerifyForward(model_input, stream_groups);
         }
         maybeOverrideLastHiddenWithMtpBuffer(model_output, *model_, model_input.combo_tokens.numel());
@@ -2334,8 +2353,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& schedul
         // round's proposal is produced at the next round head, from this
         // freshly committed ring.
         draft_prefill_model_output = runDraftPrefillForward(model_input);
-        if (publication_target)
+        if (publication_target) {
             retainDecodePublicationPages(stream_groups, *publication_target, model_input, speculative_sampler_output);
+        }
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
@@ -2422,7 +2442,8 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& schedul
                              std::move(rejection_event),
                              std::move(draft_event),
                              engram_anchor_windows,
-                             next_history);
+                             next_history,
+                             writer_host_rows);
     if (frame) frame->handed_off = dispatch_result.ok();
     if (dispatch_result.ok() && dspark_budget_finish
         && std::none_of(speculative_sampler_output.processor_errors.begin(),
@@ -3278,7 +3299,8 @@ absl::Status MtpExecutor::dispatchDecodeOutput(const StreamGroups&              
                                                std::shared_ptr<torch::Event> rejection_event,
                                                std::shared_ptr<torch::Event> draft_event,
                                                const torch::Tensor&          engram_anchor,
-                                               torch::Tensor&                engram_output) {
+                                               torch::Tensor&                engram_output,
+                                               const MtpWriterHostRows& writer_host_rows) {
     RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(dispatch_output)");
     absl::Status result;
     if (useStreamAsync()) {
@@ -3294,18 +3316,29 @@ absl::Status MtpExecutor::dispatchDecodeOutput(const StreamGroups&              
                                      std::move(rejection_event),
                                      std::move(draft_event),
                                      engram_anchor,
-                                     engram_output);
+                                     engram_output,
+                                     writer_host_rows);
     } else {
         MergedOutput draft_prefill_output{std::move(draft_prefill_model_output),
                                           std::move(draft_prefill_sampler_output)};
         if (remoteCacheDecodePublicationEnabled() && role_type_ == RoleType::DECODE) {
+            std::vector<DecodeWriterTables> writer_tables;
+            if (!writer_host_rows.empty()) {
+                writer_tables.reserve(writer_host_rows.size());
+                size_t row = 0;
+                for (const auto& stream : stream_groups.allStreams()) {
+                    writer_tables.push_back(row < writer_host_rows.size() ?
+                        writer_host_rows[row].ownTables(stream.get()) : DecodeWriterTables{});
+                    ++row;
+                }
+            }
             auto publication_output = speculative_sampler_output;
             publication_output.transfer_done_event = bookkeepingReadyEvent(
                 false, speculative_sampler_output.transfer_done_event, draft_event, true);
             // The original processor's single wait covers both accept D2H and
             // the final draft writer, as in the asynchronous dispatch path.
             result = batch_stream_processor_->dispatchDecode(
-                stream_groups, publication_output, draft_prefill_output, std::move(target_logprobs));
+                stream_groups, publication_output, draft_prefill_output, std::move(target_logprobs), writer_tables);
         } else {
             result = batch_stream_processor_->dispatchDecode(
                 stream_groups, speculative_sampler_output, draft_prefill_output, std::move(target_logprobs));
@@ -3868,7 +3901,8 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
                                               std::shared_ptr<torch::Event>                rejection_event,
                                               std::shared_ptr<torch::Event>                draft_event,
                                               const torch::Tensor&                         engram_anchor,
-                                              torch::Tensor&                               engram_output) {
+                                              torch::Tensor&                               engram_output,
+                                               const MtpWriterHostRows& writer_host_rows) {
     RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(dispatch_output_async)");
 
     const auto& accept_len_gpu_all     = spec_decode_output.accept_len;
@@ -4062,6 +4096,7 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
     }
 
     // 4. Assign per-stream views (narrow is metadata-only, no kernel launch)
+    std::vector<DecodeWriterTables> writer_tables(writer_host_rows.size());
     int64_t probs_batch_off = 0;
     int64_t idx             = 0;
     for (auto& stream : all_streams) {
@@ -4097,6 +4132,16 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
         state.allow_async_cache_reservation = v41_async_cache_reservation_ && useDeviceInput();
         state.batch_cache_snapshot_upload   = state.allow_async_cache_reservation;
         state.max_mtp_advance               = static_cast<int>(propose_step_ + 1);
+        if (idx < static_cast<int64_t>(writer_host_rows.size())) {
+            auto& tables = writer_tables[idx];
+            tables = writer_host_rows[idx].ownTables(stream.get());
+            if (next_kv_cache_block_id.defined() && !is_linear_attention_model_ && tables[0].defined()) {
+                // Dispatch advances LINEAR tables only. The existing
+                // DSpark snapshot can share the writer's immutable CPU copy.
+                state.cache_snapshot_host_buffers = {tables[0], tables[1]};
+                state.cache_snapshot_host_row_compact = true;
+            }
+        }
         stream->setMtpAsyncDeviceState(std::move(state));
 
         probs_batch_off += next_batch_size;
@@ -4107,20 +4152,24 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
     auto* processor                      = batch_stream_processor_.get();
     auto  spec_decode_copy               = spec_decode_output;
     const bool protect_decode = remoteCacheDecodePublicationEnabled() && role_type_ == RoleType::DECODE;
+    const bool v41_device_input = v41_async_cache_reservation_ && useDeviceInput();
     spec_decode_copy.transfer_done_event = bookkeepingReadyEvent(
-        v41_async_cache_reservation_ && useDeviceInput(), spec_decode_output.transfer_done_event, draft_event,
-        protect_decode);
+        v41_device_input, spec_decode_output.transfer_done_event, draft_event, protect_decode);
     auto target_logprobs_copy = std::move(target_logprobs);
     auto draft_prefill_copy   = std::move(draft_prefill_output);
     auto stream_groups_copy   = stream_groups;
 
     auto streams_for_inc = stream_groups_copy.allStreams();
+    // V4.1 device-input dispatch already host-waits the final writer for
+    // both toggle states. DSpark's optional output ops use owned tensors,
+    // and no worker code accesses native KV pages after that wait.
+    const bool reuse_writer_wait = protect_decode && is_dspark_ && v41_device_input;
     struct BookkeepingHold {
         std::list<GenerateStreamPtr> streams;
         std::shared_ptr<torch::Event> initial;
-        std::optional<torch::Event> final_event;
         std::optional<torch::Stream> worker_stream;
-        bool counted{false}, protect{false};
+        bool counted{false}, protect{false}, reuse_writer_wait{false};
+        bool writer_wait_succeeded{false};
         std::atomic<bool> entered{false}, writer_dependency_ready{false}, retired{false};
         ~BookkeepingHold() { finish(); }
         void finish() {
@@ -4129,11 +4178,14 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
             try {
                 if (!entered.load()) {
                     if (initial) initial->synchronize(); else safe = false;
-                } else if (protect) {
+                } else if (protect && !writer_wait_succeeded) {
                     safe = writer_dependency_ready.load();
                     if (safe) {
-                        final_event->record(*worker_stream);
-                        final_event->synchronize(); // Includes bookkeeping GPU copies, not just the model writer.
+                        // The fast path only needs an extra retirement event
+                        // if execution failed before proving writer readiness.
+                        auto final_event = cuda_graph::makeGraphEvent();
+                        final_event.record(*worker_stream);
+                        final_event.synchronize(); // Includes bookkeeping GPU copies, not just the model writer.
                     }
                 }
             } catch (...) { safe = false; }
@@ -4150,9 +4202,9 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
     retirement->streams = std::move(streams_for_inc);
     retirement->initial = draft_event;
     retirement->protect = protect_decode;
+    retirement->reuse_writer_wait = reuse_writer_wait;
     if (retirement->protect) {
         retirement->worker_stream = spec_bookkeeping_runner_.stream();
-        retirement->final_event.emplace(cuda_graph::makeGraphEvent());
     }
     for (const auto& stream : retirement->streams) stream->incPendingAsyncBookkeeping();
     retirement->counted = true;
@@ -4162,6 +4214,7 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
                                      spec_decode_copy     = std::move(spec_decode_copy),
                                      target_logprobs_copy = std::move(target_logprobs_copy),
                                      draft_prefill_copy   = std::move(draft_prefill_copy),
+                                     writer_tables        = std::move(writer_tables),
                                      rejection_event,
                                      draft_event]() mutable {
         retirement->entered.store(true); // Before any fallible profiling or worker preparation.
@@ -4191,7 +4244,10 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
         // Move into dispatch so the worker closure itself does not retain the
         // full target tensor after selected-row statistics have been produced.
         auto status = processor->dispatchDecode(
-            stream_groups_copy, spec_decode_copy, draft_prefill_copy, std::move(target_logprobs_copy));
+            stream_groups_copy, spec_decode_copy, draft_prefill_copy, std::move(target_logprobs_copy), writer_tables);
+        // The processor's existing host wait has already proved the writer.
+        // Optional DSpark output copies do not consume the native KV pages.
+        retirement->writer_wait_succeeded = retirement->reuse_writer_wait && status.ok();
         if (!status.ok()) {
             RTP_LLM_LOG_ERROR("[stream-async] dispatchDecode (worker) failed: %s", status.ToString().c_str());
         }

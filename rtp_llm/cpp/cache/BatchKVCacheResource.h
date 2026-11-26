@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <memory>
 #include <chrono>
 #include <cstdint>
@@ -10,14 +11,23 @@
 #include <string>
 #include <vector>
 
+#include <torch/types.h>
+
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
 class DeviceBlockPool;
-// One actual complete endpoint. No schema, per-token history or Graph inputs.
+class StorageCompletionAdmission;
+using DecodeWriterTables = std::array<torch::Tensor, 2>;
+// A completed FULL prefix and the native state pages admitted for publication.
 struct DecodeEndpoint {
     size_t end{0};
+    // A release snapshot can carry validated state at multiple absolute slots.
+    // Null state slots are intentionally FULL-only keys.
+    bool release_snapshot{false};
+    // Bytes owned by the complete endpoint, including shared FULL prefix pages.
+    size_t retained_page_bytes{0};
     std::unordered_map<std::string, BlockIndicesType> blocks;
     // The original per-page pin, shared only for matching FULL slots. Holding
     // a pool/block prevents recycling; it is not a writer-completion proof.
@@ -36,6 +46,24 @@ struct DecodeEndpoint {
     // FULL holds are slot-indexed. STATE/SWA hold only this endpoint's required
     // tail pages and are never inherited from another endpoint.
     std::unordered_map<std::string, PageHolds> pages;
+
+    // DSpark candidates share each unchanged FULL prefix as one owner.
+    // Only the new suffix is allocated or released on the Decode path.
+    struct FullPrefix {
+        size_t first = 0;
+        std::shared_ptr<const FullPrefix> previous;
+        PageHolds suffix;
+
+        BlockIndicesType blockIds() const {
+            BlockIndicesType blocks(first + suffix.size(), NULL_BLOCK_IDX);
+            for (auto segment = this; segment; segment = segment->previous.get()) {
+                for (size_t i = 0; i < segment->suffix.size(); ++i)
+                    blocks.at(segment->first + i) = segment->suffix[i]->block;
+            }
+            return blocks;
+        }
+    };
+    std::unordered_map<std::string, std::shared_ptr<const FullPrefix>> full_prefixes;
 };
 class BatchKVCacheResource {
 public:
@@ -49,7 +77,8 @@ public:
     void resetBatchSize(size_t batch_size) {
         if (batch_size != batch_resource.size()) {
             resetDecodePublication();
-            decode_endpoint.reset(); decode_round_endpoints.clear();
+            decode_endpoint.reset();
+            decode_provisional_endpoints.clear();
         }
         batch_resource.resize(batch_size);
         cache_keys_initialized_ = false;
@@ -125,7 +154,8 @@ public:
 
     void clearBlocks() {
         resetDecodePublication();
-        decode_endpoint.reset(); decode_round_endpoints.clear();
+        decode_endpoint.reset();
+        decode_provisional_endpoints.clear();
         resizeBlocks(0, 0);
     }
 
@@ -211,7 +241,15 @@ public:
 
     void swap(BatchKVCacheResource& other) noexcept {
         decode_endpoint.swap(other.decode_endpoint);
-        decode_round_endpoints.swap(other.decode_round_endpoints);
+        decode_provisional_endpoints.swap(other.decode_provisional_endpoints);
+        decode_publication_keys.swap(other.decode_publication_keys);
+        std::swap(dspark_decode_publication_unit, other.dspark_decode_publication_unit);
+        std::swap(dspark_decode_start, other.dspark_decode_start);
+        std::swap(dspark_release_computed_end, other.dspark_release_computed_end);
+        dspark_release_writer_tables.swap(other.dspark_release_writer_tables);
+        dspark_state_backfills.swap(other.dspark_state_backfills);
+        dspark_release_admission.swap(other.dspark_release_admission);
+        std::swap(dspark_release_provenance_lost, other.dspark_release_provenance_lost);
         std::swap(decode_completion_submitted_, other.decode_completion_submitted_);
         std::swap(decode_preparing_, other.decode_preparing_);
         std::swap(decode_attempts_, other.decode_attempts_);
@@ -284,9 +322,20 @@ public:
     }
 
     std::shared_ptr<const DecodeEndpoint> decode_endpoint;
-    // Native endpoints retained through EOS, plus not-yet-validated candidates
-    // from the current verify packet. They carry pages, never token snapshots.
-    std::vector<std::shared_ptr<const DecodeEndpoint>> decode_round_endpoints;
+    // Only the latest confirmed endpoint survives the current verify packet.
+    // Its FULL prefix may share pages with earlier captures.
+    using DecodeEndpoints = std::vector<std::shared_ptr<const DecodeEndpoint>>;
+    DecodeEndpoints decode_provisional_endpoints;
+    std::shared_ptr<const CacheKeysType> decode_publication_keys;
+    size_t dspark_decode_publication_unit = 0;
+    size_t dspark_decode_start = 0;
+    std::optional<size_t> dspark_release_computed_end;
+    DecodeWriterTables dspark_release_writer_tables;
+    // Sparse provenance for hole fills during decode. A recycled slot can
+    // have the same numeric page ID, but cannot prove pre-allocation writes.
+    std::unordered_map<std::string, std::unordered_map<size_t, size_t>> dspark_state_backfills;
+    std::shared_ptr<StorageCompletionAdmission> dspark_release_admission;
+    bool dspark_release_provenance_lost = false;
 
     // Scheduler-owned idempotency only. Payloads stay in their native GPU pools;
     // StorageBackend owns the retained references after EOS admission.
@@ -328,6 +377,14 @@ private:
     mutable std::optional<DecodePublicationClock::time_point> decode_eos_at_, decode_deadline_;
     mutable std::optional<int64_t> prefill_computed_end_;
     void resetDecodePublication() {
+        decode_publication_keys.reset();
+        dspark_decode_publication_unit = 0;
+        dspark_decode_start = 0;
+        dspark_release_computed_end.reset();
+        dspark_release_writer_tables = {};
+        dspark_state_backfills.clear();
+        dspark_release_admission.reset();
+        dspark_release_provenance_lost = false;
         decode_completion_submitted_ = decode_preparing_ = false;
         decode_attempts_ = 0;
         decode_eos_at_.reset(); decode_deadline_.reset(); prefill_computed_end_.reset();

@@ -155,8 +155,10 @@ bool CompleteTokenIds::matchEosToken(int batch_id, int token_id) {
 }
 
 bool CompleteTokenIds::matchStopWordsList(int batch_id, const std::vector<int>& stop_words) {
-    int* token_ids = data(batch_id);
-    for (size_t i = start_check_seq_length_; i <= seq_length_; ++i) {
+    const auto* token_ids = data(batch_id);
+    // A stop word longer than the available history cannot match.
+    const size_t first_end = std::max(static_cast<size_t>(start_check_seq_length_), stop_words.size());
+    for (size_t i = first_end; i <= static_cast<size_t>(seq_length_); ++i) {
         bool   match_one   = true;
         size_t begin_index = i - stop_words.size();
         for (auto& token : stop_words) {

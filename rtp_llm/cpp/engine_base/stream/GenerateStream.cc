@@ -298,10 +298,16 @@ bool GenerateStream::mayCrossDecodePublicationBoundary(size_t unit, size_t advan
     return before / unit != upper / unit;
 }
 
-bool GenerateStream::beginDecodePublicationSubmission() {
+bool GenerateStream::beginDecodePublicationSubmission(size_t dspark_publication_unit) {
     std::lock_guard<std::mutex> lock(*mutex_);
     if (!stream_cache_resource_ || stream_cache_resource_->isResourceReleased() || isFinished()
         || hasErrorWithoutLock() || unknown_decode_publication_) return false;
+    if (dspark_publication_unit && !isFakeStream() && maxBatchSize() == 1 && !hasNumBeams()
+        && !kvCache().dspark_decode_publication_unit) {
+        auto& resource = kvCacheMutable();
+        resource.dspark_decode_publication_unit = dspark_publication_unit;
+        resource.dspark_decode_start = std::max(0, seqLength() - 1);
+    }
     ++async_bookkeeping_->submissions;
     {
         std::lock_guard<std::mutex> wait_lock(async_bookkeeping_->mu);
@@ -1220,6 +1226,7 @@ bool GenerateStream::replaceMtpCacheSnapshot(uint64_t                   expected
     mtp_async_state_.next_kv_cache_block_id_gpu        = std::move(physical);
     mtp_async_state_.next_kv_cache_kernel_block_id_gpu = std::move(kernel);
     mtp_async_state_.cache_snapshot_host_buffers       = std::move(host_buffers);
+    mtp_async_state_.cache_snapshot_host_row_compact   = false;
     mtp_async_state_.cache_snapshot_upload_pending     = upload_pending;
     return true;
 }
@@ -1528,19 +1535,14 @@ void GenerateStream::matchStopWordsList(int batch_id) {
 
 std::shared_ptr<const DecodeEndpoint> GenerateStream::latestDecodePublicationEndpoint() const {
     std::lock_guard<std::mutex> lock(*mutex_);
-    if (!stream_cache_resource_) return {};
-    const auto& resource = kvCache();
-    auto latest = resource.decode_endpoint;
-    for (const auto& candidate : resource.decode_round_endpoints)
-        if (candidate && (!latest || candidate->end > latest->end)) latest = candidate;
-    return latest;
+    return stream_cache_resource_ ? kvCache().decode_endpoint : nullptr;
 }
 
-void GenerateStream::setDecodePublicationPages(std::vector<std::shared_ptr<const DecodeEndpoint>> pages) {
+void GenerateStream::setDecodePublicationCandidates(BatchKVCacheResource::DecodeEndpoints candidates) {
     std::lock_guard<std::mutex> lock(*mutex_);
     if (!stream_cache_resource_ || hasErrorWithoutLock() || isFinished()) return;
-    auto& pending = kvCacheMutable().decode_round_endpoints;
-    pending.insert(pending.end(), std::make_move_iterator(pages.begin()), std::make_move_iterator(pages.end()));
+    auto& resource = kvCacheMutable();
+    resource.decode_provisional_endpoints = std::move(candidates);
 }
 
 void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
@@ -1710,19 +1712,56 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     if (remoteCacheDecodePublicationEnabled() && stream_cache_resource_
         && resourceContext().role_type == RoleType::DECODE && seqLength() > 0) {
         auto& resource = kvCacheMutable();
-        const size_t final_computed = seqLength() - 1;
-        if (resource.decode_endpoint && resource.decode_endpoint->end > final_computed) resource.decode_endpoint.reset();
-        for (const auto& endpoint : resource.decode_round_endpoints)
-            if (endpoint && endpoint->end <= final_computed
-                && (!resource.decode_endpoint || endpoint->end > resource.decode_endpoint->end)) resource.decode_endpoint = endpoint;
+        size_t final_computed = seqLength() - 1;
         const bool finished = generate_status_->checkFinished();
-        auto& pending = resource.decode_round_endpoints;
-        pending.erase(std::remove_if(pending.begin(), pending.end(), [&](const auto& endpoint) {
-            // Accepted endpoints remain pinned until the one EOS publication.
-            // A future asynchronous candidate is unresolved, not rejected;
-            // only final EOS/stop clipping makes its over-end range invalid.
-            return !endpoint || (finished && endpoint->end > final_computed);
-        }), pending.end());
+        const auto unit = resource.dspark_decode_publication_unit;
+        if (unit && resource.dspark_release_computed_end) return;
+        const size_t prefix = std::max(0, old_seq_length - 1);
+        auto& candidates = resource.decode_provisional_endpoints;
+        if (finished && (unit || std::any_of(candidates.begin(), candidates.end(), [&](const auto& endpoint) {
+                                  return endpoint && endpoint->end > prefix && endpoint->end <= final_computed;
+                              }))) {
+            // Keep the normal output/termination path intact. At maxlen it can
+            // skip checking stops inside the speculative packet. A stop also
+            // limits what can be published, even when the output has advanced
+            // further according to the existing business logic.
+            const auto& config = *generate_input_->generate_config;
+            const auto* tokens = complete_token_ids_->data(0);
+            const int first = std::max(old_seq_length + 1, inputLength() + config.min_new_tokens);
+            const int eos = special_tokens_.eos_token_id;
+            for (int end = first; end < seqLength(); ++end) {
+                const bool is_stop = (!config.ignore_eos && tokens[end - 1] == eos)
+                    || std::any_of(config.stop_words_list.begin(), config.stop_words_list.end(), [&](const auto& word) {
+                        if (word.empty() || word.size() > static_cast<size_t>(end)
+                            || (config.ignore_eos && word.size() == 1 && word.front() == eos)) {
+                            return false;
+                        }
+                        return std::equal(word.begin(), word.end(), tokens + end - word.size());
+                    });
+                if (is_stop) {
+                    final_computed = end - 1;
+                    break;
+                }
+            }
+        }
+        if (unit) {
+            // The original processor fence proves both writers. Record the
+            // clipped end for release without scanning pages or enqueuing I/O.
+            if (finished && hasEventWithoutLock(StreamEvents::GenerateDone) && !hasErrorWithoutLock()) {
+                resource.dspark_release_writer_tables = update_info.decode_writer_tables;
+                resource.dspark_release_computed_end = final_computed;
+            }
+            return;
+        }
+        if (resource.decode_endpoint && resource.decode_endpoint->end > final_computed) resource.decode_endpoint.reset();
+        // The fallback already bounded each candidate by both writer ranges.
+        for (auto& endpoint : candidates) {
+            if (endpoint && endpoint->end <= final_computed
+                && (!resource.decode_endpoint || endpoint->end > resource.decode_endpoint->end)) {
+                resource.decode_endpoint = std::move(endpoint);
+            }
+        }
+        candidates.clear();
         if (finished && hasEventWithoutLock(StreamEvents::GenerateDone)
             && !hasErrorWithoutLock() && resource.decode_endpoint)
             stream_cache_resource_->publishCompletedDecode(final_computed);
@@ -1836,15 +1875,11 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
             const size_t previous_computed = old_seq_length > 0 ? old_seq_length - 1 : 0;
             if (unit && previous_computed / unit < computed / unit) {
                 try {
-                    auto previous = resource.decode_endpoint;
-                    for (size_t h = (previous_computed / unit + 1) * unit; h <= computed; h += unit) {
-                        auto endpoint = manager->retainDecodeEndpoint(resource, h, previous);
-                        if (!endpoint) {
-                            RTP_LLM_LOG_WARNING("optional Decode endpoint capture failed: H=%zu", h);
-                            continue;
-                        }
-                        resource.decode_round_endpoints.push_back(endpoint);
-                        resource.decode_endpoint = previous = std::move(endpoint);
+                    const size_t h = computed / unit * unit;
+                    if (auto endpoint = manager->retainDecodeEndpoint(resource, h, resource.decode_endpoint)) {
+                        resource.decode_endpoint = std::move(endpoint);
+                    } else {
+                        RTP_LLM_LOG_WARNING("optional Decode endpoint capture failed: H=%zu", h);
                     }
                 } catch (const std::exception& error) {
                     RTP_LLM_LOG_WARNING("optional Decode endpoint capture failed: %s", error.what());

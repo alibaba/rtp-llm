@@ -26,6 +26,7 @@
 namespace rtp_llm {
 
 class CPSlotMapper;
+class DSparkPublicationManagerAccess;
 class CacheStore;
 class BroadcastManager;
 class PrefillCacheHitMetricsReporter;
@@ -101,6 +102,9 @@ public:
     // Outputs the resident key-prefix count; ordinary inserts report zero.
     void insertIntoCache(const InsertInfo& insert_info, size_t& resident_prefix_length);
     bool captureCompletedDecode(const BatchKVCacheResource& resource, size_t computed_end, bool finished = true) const;
+    // On success the preparation worker owns the request's block references.
+    // The caller must not free them again. Rejection leaves the resource intact.
+    bool tryDeferDSparkPublication(const FreeInfo& free_info, bool append_only, bool all_resident_state);
 
     size_t decodePublicationUnit() const;
     // No writer last-use proof: keep ownership and charge the existing frozen
@@ -115,11 +119,17 @@ public:
     // specUpdate. Standalone captures retain their synchronous default.
     std::shared_ptr<const DecodeEndpoint> retainDecodeEndpoint(const torch::Tensor& physical_ids,
         const std::vector<std::string>& tags, size_t row, size_t end,
-        const std::shared_ptr<const DecodeEndpoint>& previous = {}, bool defer_writer_wait = false) const;
+        const std::shared_ptr<const DecodeEndpoint>& previous = {}, bool defer_writer_wait = false,
+        const torch::Tensor& writer_kernel_ids = {}) const;
     // Ordinary dispatch has already joined its writer before updating the
     // stream. Read its host block map without another GPU metadata copy/wait.
     std::shared_ptr<const DecodeEndpoint> retainDecodeEndpoint(const BatchKVCacheResource& resource,
         size_t end, const std::shared_ptr<const DecodeEndpoint>& previous = {}) const;
+    // The final DSpark writer has retired. Validate still-owned pages against
+    // its immutable input tables before handing them to asynchronous storage.
+    std::shared_ptr<const DecodeEndpoint> retainReleasedDSparkPages(const BatchKVCacheResource& resource,
+        const torch::Tensor& physical_ids, const torch::Tensor& kernel_ids, bool all_resident_state,
+        std::shared_ptr<StorageCompletionAdmission>* admission = nullptr) const;
 
     // Decode-side P/D admission allocates destination blocks before cache handoff.  When pools are
     // temporarily full, waiters use this generation instead of polling malloc in a tight loop.
@@ -224,7 +234,8 @@ private:
     template<typename ReadGroup>
     std::shared_ptr<const DecodeEndpoint> retainDecodeEndpointPages(size_t end,
         const std::shared_ptr<const DecodeEndpoint>& previous, ReadGroup&& read_group,
-        bool defer_writer_wait) const;
+        bool defer_writer_wait, bool share_full_prefix = false,
+        const std::unordered_map<std::string, std::vector<size_t>>* release_state_slots = nullptr) const;
     std::function<void()>             allocationChangeCallback() const;
     void                              reportMetricsLoop();
     void                              missingCleanupLoop();
@@ -236,6 +247,7 @@ private:
         std::chrono::steady_clock::time_point completion_deadline = std::chrono::steady_clock::time_point::max()) const;
     TransferTaskRegistry::ForgetResult localForgetTransferCompletion(
         const TransferExecutionTrace& trace_id, bool force = false) const;
+    void initDSparkPublicationHandoff();
     bool startFrozenTaskRecovery();
     void stopFrozenTaskRecovery() noexcept;
 
@@ -267,6 +279,7 @@ private:
     bool                    missing_cleanup_stopped_{false};
     std::thread             missing_cleanup_thread_;
 
+    std::shared_ptr<DSparkPublicationManagerAccess> dspark_publication_access_;
     BlockTreeCachePtr                           block_tree_cache_;
     std::shared_ptr<BroadcastManager>           transfer_broadcast_manager_;
     std::unique_ptr<FrozenTaskRecovery>         frozen_task_recovery_;

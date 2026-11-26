@@ -3855,6 +3855,7 @@ TEST_F(MtpExecutorTest, DecodeEndpointSkipsFakeAndUnsampledRoundsBeforeWaitingOn
             EXPECT_FALSE(gate.timedOut()) << "idle/unsampled round waited for a transfer event";
             EXPECT_FALSE(sampled.transfer_done_event->query());
             EXPECT_FALSE(stream->latestDecodePublicationEndpoint());
+            EXPECT_TRUE(stream->kvCache().decode_provisional_endpoints.empty());
             gate.release();
             sampled.transfer_done_event->synchronize();
         }
@@ -3907,7 +3908,9 @@ TEST_F(MtpExecutorTest, DecodeEndpointCapturePinsPendingPagesWithoutWaitingForFi
         EXPECT_FALSE(gate.timedOut()) << "capture waited for the final writer instead of pinning pending pages";
         EXPECT_FALSE(final_writer->query());
         EXPECT_FALSE(stream->kvCache().decode_endpoint);
-        auto pending = stream->latestDecodePublicationEndpoint();
+        const auto& candidates = stream->kvCache().decode_provisional_endpoints;
+        ASSERT_EQ(candidates.size(), 1u);
+        const auto& pending = candidates.front();
         ASSERT_TRUE(pending);
         EXPECT_EQ(pending->end, 4u);
         ASSERT_FALSE(pending->pages.empty());
@@ -5969,6 +5972,10 @@ TEST_F(MtpExecutorTest, testProcessedTargetLogprobsEmptyContentAndTopKBounds) {
         EXPECT_TRUE(empty.finalized());
         EXPECT_EQ(empty.token_logprobs.numel(), 0);
         EXPECT_EQ(empty.top_logprobs.sizes(), (torch::IntArrayRef{0, 2}));
+        EXPECT_EQ(empty.top_logprob_token_ids.sizes(), (torch::IntArrayRef{0, 2}));
+        EXPECT_EQ(empty.token_logprobs.device(), tokens.device());
+        EXPECT_EQ(empty.top_logprob_token_ids.scalar_type(), torch::kInt32);
+        EXPECT_FALSE(empty.source_row_indices_cpu_owner.defined()); // No selected rows were uploaded.
         EXPECT_FALSE(empty.probs.defined());
         for (int64_t k : {-1, 0, 99}) {
             auto scores = captureMtpTargetProbs(target, k);

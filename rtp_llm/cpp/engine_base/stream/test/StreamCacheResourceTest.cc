@@ -142,6 +142,24 @@ public:
         return false;
     }
 
+    bool is_decode_backend{false};
+    StorageWriteTask prepareWrite(StorageRequest request) override {
+        // Match KVCM's ordinary D write gate before the generic code takes pins.
+        if (is_decode_backend && !request.decode_completion) return {};
+        return StorageBackend::prepareWrite(std::move(request));
+    }
+
+    bool allow_decode_preparation{false};
+    size_t decode_reservations{0};
+    bool canStartDecodePublication(const BatchKVCacheResource&) const override {
+        return allow_decode_preparation;
+    }
+    std::shared_ptr<StorageCompletionAdmission> reserveDecodePublication(size_t bytes) override {
+        EXPECT_GT(bytes, 0u);
+        ++decode_reservations;
+        return {};
+    }
+
     void blockMatches() {
         std::lock_guard<std::mutex> lock(mutex_);
         release_matches_ = false;
@@ -460,7 +478,7 @@ struct PublicationObservations {
 
 class PublicationCallPointTest: public StreamCacheResourceTest {
 protected:
-    void prepare(bool dspark, RoleType role = RoleType::DECODE, bool retained = false) {
+    void prepare(bool dspark, RoleType role = RoleType::DECODE, bool retained = false, int input_length = 255) {
         ModelConfig model;
         model.model_type = "deepseek_v41";
         model.num_layers = 1;
@@ -505,6 +523,7 @@ protected:
                                                          RuntimeConfig{}, speculation, pd);
         ASSERT_TRUE(cache_manager_->init());
         backend_ = std::make_shared<StreamReadStorageBackend>();
+        backend_->is_decode_backend = role == RoleType::DECODE;
         cache_manager_->coordinator_manager_->block_tree_cache_.reset();
         cache_manager_->block_tree_cache_.reset();
         settings.enable_remote_cache = true;
@@ -519,7 +538,7 @@ protected:
         context.reuse_cache = true;
         context.enable_device_cache = false; // Release frees pages instead of inserting local cache entries.
         auto input = std::make_shared<GenerateInput>();
-        input->input_ids = torch::ones({255}, torch::kInt32);
+        input->input_ids = torch::ones({input_length}, torch::kInt32);
         input->generate_config = std::make_shared<GenerateConfig>();
         input->generate_config->num_return_sequences = 1;
         input->generate_config->max_new_tokens = 3;
@@ -540,7 +559,8 @@ protected:
             snapshot.phase = observations->phase;
             snapshot.end = end;
             snapshot.aligned = value.lastBlockAligned();
-            snapshot.keys = value.cacheKeys(0);
+            ASSERT_TRUE(value.decode_publication_keys);
+            snapshot.keys = *value.decode_publication_keys;
             snapshot.endpoint = value.decode_endpoint;
             if (value.decode_endpoint) snapshot.endpoint_end = value.decode_endpoint->end;
             const auto& tags = live_manager->cacheConfig().groupTags();
@@ -604,7 +624,7 @@ protected:
             auto endpoint = cache_manager_->retainDecodeEndpoint(ids, tags, 0, 256);
             ASSERT_TRUE(endpoint);
             ASSERT_FALSE(endpoint->pages.empty());
-            resource.kvCacheMutable().decode_round_endpoints.push_back(endpoint);
+            stream_->setDecodePublicationCandidates({endpoint});
             endpoint.reset(); // Only the real request resource owns it from here.
         }
         if (dspark) {
@@ -746,9 +766,11 @@ TEST_F(PublicationCallPointTest, CompletedDecodeKeepsMapsOwnersAndReleasePolicy)
                     ASSERT_FALSE(HasFatalFailure());
                 }
                 if (mode == Release::LOCAL_TREE) {
-                    EXPECT_TRUE(cache_manager_->blockTreeCache()->getKeySnapshot().keys.empty());
-                    for (const auto& pool : cache_manager_->coordinator_manager_->groupBlockPools()) {
-                        EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::CACHE), 0u);
+                    EXPECT_EQ(cache_manager_->blockTreeCache()->getKeySnapshot().keys, observations_->calls[0].keys);
+                    const auto& pools = cache_manager_->coordinator_manager_->groupBlockPools();
+                    EXPECT_GT(pools.front()->referencedBlocksNum(BlockTreeRefType::CACHE), 0u);
+                    EXPECT_EQ(backend_->writeCalls(), 0u);
+                    for (const auto& pool : pools) {
                         EXPECT_EQ(pool->referencedBlocksNum(DeviceBlockRefType::REMOTE_CONNECTOR), 0u);
                     }
                 }
@@ -758,6 +780,75 @@ TEST_F(PublicationCallPointTest, CompletedDecodeKeepsMapsOwnersAndReleasePolicy)
             }
         }
     }, [&] { cleanup(); TearDown(); });
+}
+
+TEST_F(PublicationCallPointTest, DSparkRemoteRejectionKeepsOriginalOpaqueLocalInsert) {
+    for (const char* enabled : {"0", "1"}) {
+        autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", enabled);
+        test::withDecodePublicationStartup([&] {
+            prepare(true);
+            ASSERT_FALSE(HasFatalFailure());
+            if (enabled[0] == '1') {
+                cache_manager_->initDSparkPublicationHandoff();
+            }
+            auto& resource = stream_->streamCacheResource();
+            resource.resource_context_.enable_device_cache = true;
+            auto& kv = resource.kvCacheMutable();
+            kv.dspark_decode_publication_unit = 256;
+            finish(true, false);
+            ASSERT_FALSE(HasFatalFailure());
+            ASSERT_FALSE(resource.cacheKeys(0).empty());
+            const auto original_key = resource.cacheKeys(0).front();
+            const auto& tags = cache_manager_->cacheConfig().groupTags();
+            const int64_t width = kv.curBlocksNum();
+            auto physical = torch::full({static_cast<int64_t>(tags.size()), 1, width}, NULL_BLOCK_IDX, torch::kInt32);
+            auto kernel = torch::full({static_cast<int64_t>(tags.size()), 1, 2 * width}, NULL_BLOCK_IDX, torch::kInt32);
+            for (size_t group = 0; group < tags.size(); ++group) {
+                const auto& blocks = kv.blocks(0, tags[group]);
+                const auto& kernel_blocks = kv.kernelBlocks(0, tags[group]);
+                ASSERT_LE(blocks.size(), static_cast<size_t>(width));
+                ASSERT_LE(kernel_blocks.size(), static_cast<size_t>(2 * width));
+                std::copy(blocks.begin(), blocks.end(), physical.data_ptr<int32_t>() + group * width);
+                std::copy(kernel_blocks.begin(), kernel_blocks.end(), kernel.data_ptr<int32_t>() + group * 2 * width);
+            }
+            kv.dspark_release_computed_end = 257;
+            kv.dspark_release_writer_tables = {physical, kernel};
+            backend_->allow_decode_preparation = true; // Reject before detaching the request pages.
+            EXPECT_EQ(stream_->moveToNext(), StreamState::FINISHED);
+            EXPECT_EQ(backend_->decode_reservations, enabled[0] == '1' ? 1u : 0u);
+            EXPECT_EQ(backend_->writeCalls(), 0u);
+            EXPECT_TRUE(resource.isResourceReleased());
+            EXPECT_TRUE(observations_->calls.empty());
+            EXPECT_EQ(cache_manager_->blockTreeCache()->getKeySnapshot().keys, (CacheKeysType{original_key}));
+            for (const auto& pool : cache_manager_->coordinator_manager_->groupBlockPools()) {
+                EXPECT_EQ(pool->referencedBlocksNum(DeviceBlockRefType::REMOTE_CONNECTOR), 0u);
+            }
+        }, [&] { cleanup(); TearDown(); });
+    }
+}
+
+TEST_F(PublicationCallPointTest, FinalSampledTokenDoesNotAddALocalCacheBlock) {
+    for (const char* enabled : {"0", "1"}) {
+        autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", enabled);
+        test::withDecodePublicationStartup([&] {
+            prepare(false, RoleType::DECODE, false, 511);
+            ASSERT_FALSE(HasFatalFailure());
+            auto& resource = stream_->streamCacheResource();
+            resource.resource_context_.enable_device_cache = true;
+            ASSERT_EQ(resource.cacheKeys(0).size(), 2u);
+            ASSERT_FALSE(resource.kvCache().lastBlockAligned());
+            const auto original_key = resource.cacheKeys(0).front();
+
+            stream_->generateConfig()->max_new_tokens = 1;
+            stream_->update({torch::ones({1, 1}, torch::kInt32), 1});
+            ASSERT_EQ(stream_->seqLength(), 512);
+            ASSERT_TRUE(stream_->hasEvent(StreamEvents::GenerateDone));
+            EXPECT_EQ(stream_->moveToNext(), StreamState::FINISHED);
+            EXPECT_TRUE(resource.isResourceReleased());
+            EXPECT_EQ(cache_manager_->blockTreeCache()->getKeySnapshot().keys, (CacheKeysType{original_key}));
+            EXPECT_EQ(backend_->writeCalls(), 0u);
+        }, [&] { cleanup(); TearDown(); });
+    }
 }
 
 TEST_F(PublicationCallPointTest, PrefillRetainedPrefillAndToggleOffNeverCapture) {
@@ -1618,7 +1709,7 @@ TEST_F(StreamCacheResourceTest, RequestFinishFiltersRemoteReuseOnlyForSingleRepl
     }, [&] { TearDown(); stream_.reset(); cache_manager_.reset(); });
 }
 
-TEST_F(StreamCacheResourceTest, CompletedPublicationRefreshesChangedKeysBeforeLocalInsert) {
+TEST_F(StreamCacheResourceTest, CompletedPublicationKeepsRemoteAndLocalKeysIndependent) {
     autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
     ::rtp_llm::test::withDecodePublicationStartup([&] {
         auto backend = prepareStorageBackendResource(false, false, RoleType::DECODE, false,
@@ -1626,79 +1717,48 @@ TEST_F(StreamCacheResourceTest, CompletedPublicationRefreshesChangedKeysBeforeLo
         auto& resource = stream_->streamCacheResource();
         ASSERT_TRUE(resource.initKVBlock().ok());
         ASSERT_TRUE(resource.waitForAllocatorLoad().ok());
-        ASSERT_EQ(stream_->seqLength(), 5); // Final retained history has a partial key.
-        stream_->reportEventWithoutLock(StreamEvents::GenerateDone);
-        EXPECT_FALSE(resource.publicationKeysFresh());
-        resource.publishCompletedDecode(4);
-        EXPECT_EQ(resource.publication_key_tokens_, 5u);
-        ASSERT_TRUE(resource.publicationKeysFresh());
-        const auto partial_keys = resource.cacheKeys(0);
-        ASSERT_EQ(partial_keys.size(), 3u);
-        ASSERT_FALSE(resource.batch_kv_cache_resource_->lastBlockAligned());
-        resource.batch_kv_cache_resource_->decodeCompletionSubmitted() = true;
-        resource.publishCompletedDecode(4);
-        EXPECT_EQ(resource.cacheKeys(0), partial_keys); // Same final history, same insert keys.
+        const auto original_keys = resource.cacheKeys(0);
+        ASSERT_EQ(original_keys.size(), 3u);
+        EXPECT_FALSE(resource.kvCache().lastBlockAligned());
 
-        // A malloc/update can drop the partial key without changing token length
-        // or initialized=true. Length-only caching would wrongly skip refresh.
-        updateCacheKeys(resource.batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), 2,
-                        cache_manager_->cacheConfig().cache_key_hash_seed);
-        ASSERT_TRUE(resource.batch_kv_cache_resource_->cacheKeysInitialized());
-        ASSERT_EQ(resource.cacheKeys(0).size(), 2u);
-        EXPECT_FALSE(resource.publicationKeysFresh());
-        resource.publishCompletedDecode(4);
-        EXPECT_EQ(resource.cacheKeys(0), partial_keys);
-        EXPECT_TRUE(resource.publicationKeysFresh());
-
-        // The public forced-update path can append after GenerateDone. It must
-        // refresh keys despite permanent publication admission, not publish twice.
+        std::shared_ptr<const CacheKeysType> remote_keys;
+        int captures = 0;
+        backend->observe_completed_decode = [&](const BatchKVCacheResource& cache, size_t end, bool finished) {
+            EXPECT_EQ(end, 6u);
+            EXPECT_TRUE(finished);
+            EXPECT_EQ(cache.cacheKeys(0), original_keys);
+            remote_keys = cache.decode_publication_keys;
+            ++captures;
+            cache.decodeCompletionSubmitted() = true;
+        };
         stream_->vocab_size_ = 1000;
+        stream_->reportEventWithoutLock(StreamEvents::GenerateDone);
         stream_->generate_status_->status = StreamState::FINISHED;
         stream_->fillSubGenerateStatus(StreamState::FINISHED);
-        StreamUpdateInfo update{torch::tensor(std::vector<int32_t>{7}, torch::kInt32).reshape({1, 1}), 1};
+        StreamUpdateInfo update{torch::tensor(std::vector<int32_t>{7, 8}, torch::kInt32).reshape({1, 2}), 2};
         update.force_update_info = true;
         stream_->update(update);
-        ASSERT_EQ(stream_->seqLength(), 6);
-        EXPECT_TRUE(resource.batch_kv_cache_resource_->decodeCompletionSubmitted());
-        EXPECT_EQ(resource.publication_key_tokens_, 6u);
-        ASSERT_TRUE(resource.publicationKeysFresh());
+        ASSERT_EQ(stream_->seqLength(), 7);
+        resource.publishCompletedDecode(6);
+        ASSERT_TRUE(remote_keys);
+        ASSERT_EQ(remote_keys->size(), 3u);
+        EXPECT_EQ(captures, 1);
+        EXPECT_EQ(resource.cacheKeys(0), original_keys);
+        EXPECT_FALSE(resource.kvCache().lastBlockAligned());
+        EXPECT_FALSE(resource.kvCache().decode_publication_keys);
+
         auto expected = std::make_shared<BatchKVCacheResource>();
         expected->resetBatchSize(1);
         initCacheKeys(expected, stream_->completeTokenIdsPtr(), 2, cache_manager_->cacheConfig().cache_key_hash_seed);
-        EXPECT_EQ(resource.cacheKeys(0), expected->cacheKeys());
+        EXPECT_EQ(*remote_keys, CacheKeysType(expected->cacheKeys().begin(), expected->cacheKeys().begin() + 3));
+        EXPECT_NE(remote_keys->back(), original_keys.back());
+
         stream_->releaseResource();
         backend->shutdown();
-        EXPECT_EQ(backend->writtenKeyValues(), (CacheKeysType{partial_keys[0], partial_keys[1]}));
-        // Key refresh for local insertion must not extend an already-admitted remote endpoint.
-    }, [&] { TearDown(); stream_.reset(); cache_manager_.reset(); });
-}
-
-TEST_F(StreamCacheResourceTest, PublicationFreshnessRequiresSingleRowAndExistingAdmissionBudget) {
-    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
-    ::rtp_llm::test::withDecodePublicationStartup([&] {
-        prepareResourceWithCacheConfig(init_config(), {1, 2, 3, 4, 5}, true, RoleType::DECODE, {}, 1);
-        auto& resource = stream_->streamCacheResource();
-        stream_->reportEventWithoutLock(StreamEvents::GenerateDone);
-        const auto& publication = *resource.batch_kv_cache_resource_;
-        EXPECT_TRUE(publication.beginDecodePublication());
-        publication.endDecodePublication();
-        EXPECT_TRUE(publication.beginDecodePublication());
-        publication.endDecodePublication();
-        resource.publishCompletedDecode(4); // No prior prepared keys: still refresh for local insertion.
-        ASSERT_TRUE(resource.publicationKeysFresh());
-        EXPECT_FALSE(publication.mayAttemptDecodePublication());
-        EXPECT_EQ(publication.decodePublicationAttempts(), 2u);
-        resource.publishCompletedDecode(4);
-        EXPECT_EQ(publication.decodePublicationAttempts(), 2u);
-        resource.batch_kv_cache_resource_->clearCacheKeys();
-        EXPECT_FALSE(resource.publicationKeysFresh());
-        resource.publishCompletedDecode(4);
-        EXPECT_TRUE(resource.publicationKeysFresh());
-        // Even a temporary one-row resource may have come from multi-row history.
-        stream_->generateConfig()->num_return_sequences = 2;
-        EXPECT_FALSE(resource.publicationKeysFresh());
-        resource.init(1);
-        EXPECT_EQ(resource.publication_key_tokens_, 0u);
+        EXPECT_EQ(captures, 1);
+        EXPECT_THAT(cache_manager_->blockTreeCache()->getKeySnapshot().keys,
+                    ::testing::UnorderedElementsAre(original_keys[0], original_keys[1]));
+        EXPECT_EQ(remote_keys->size(), 3u);
     }, [&] { TearDown(); stream_.reset(); cache_manager_.reset(); });
 }
 

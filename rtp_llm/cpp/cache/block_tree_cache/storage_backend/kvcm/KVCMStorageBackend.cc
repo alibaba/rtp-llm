@@ -3173,6 +3173,39 @@ std::vector<std::shared_ptr<FrozenTask>> KVCMStorageBackend::frozenTasks() const
 }  // namespace rtp_llm
 
 namespace rtp_llm {
+std::shared_ptr<StorageCompletionAdmission> KVCMStorageBackend::reserveDecodePublication(size_t bytes) {
+    return remoteCacheEnabled() ? impl_->reserveDecodePublication(bytes) : nullptr;
+}
+
+bool KVCMStorageBackend::canStartDecodePublication(const BatchKVCacheResource& resource) const {
+    return remoteCacheEnabled() && Clock::now() < resource.decodePublicationDeadline(operationTimeout())
+           && resource.mayAttemptDecodePublication();
+}
+
+StorageWriteTask KVCMStorageBackend::prepareCompletedDecodeWrite(
+    const BatchKVCacheResource& source, size_t end, Clock::time_point deadline,
+    std::shared_ptr<StorageCompletionAdmission> admission) {
+    auto request = impl_->planCompletedDecode(source, end, deadline, std::move(admission));
+    if (request.empty()) return {};
+    const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now());
+    if (remaining.count() <= 0) return {};
+    request.transfer_task.emplace(std::vector<TransferDescriptor>{}, remaining, request.request_id);
+    return prepareWrite(std::move(request));
+}
+
+bool KVCMStorageBackend::enqueueCompletedDecode(const BatchKVCacheResource& resource, size_t computed_end,
+                                                DecodePublicationPrepare prepare_source) {
+    if (!canStartDecodePublication(resource)) return false;
+    const auto deadline = resource.decodePublicationDeadline(operationTimeout());
+    return enqueuePlannedWrite(
+        [this, prepare_source = std::move(prepare_source), computed_end, deadline] {
+            const auto source = prepare_source();
+            if (!source) return StorageWriteTask{};
+            return prepareCompletedDecodeWrite(*source, computed_end, deadline, source->dspark_release_admission);
+        },
+        deadline);
+}
+
 bool KVCMStorageBackend::captureCompletedDecode(const BatchKVCacheResource& resource, size_t end, bool finished) {
     // A progress callback is intentionally a no-op: no GPU query, pin or copy.
     if (!finished)
@@ -3185,15 +3218,43 @@ bool KVCMStorageBackend::captureCompletedDecode(const BatchKVCacheResource& reso
         if (!resource.beginDecodePublication()) return true;
         block_tree_cache_detail::ScopeRollback end_preparing([&resource] { resource.endDecodePublication(); });
         const auto deadline = resource.decodePublicationDeadline(operationTimeout());
-        auto request = impl_->planCompletedDecode(resource, end, deadline);
-        if (request.empty()) return true;
-        const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
-            deadline - Clock::now());
-        if (remaining.count() <= 0) return true;
-        request.transfer_task.emplace(std::vector<TransferDescriptor>{}, remaining, request.request_id);
-        auto task = prepareWrite(std::move(request));
-        if (!task) return true;
-        const bool admitted = write(std::move(task));
+        bool admitted = false;
+        if (resource.dspark_decode_publication_unit) {
+            if (resource.dspark_release_provenance_lost || !resource.decode_endpoint
+                || resource.batchSize() != 1) {
+                return true;
+            }
+            // Reserve the FULL prefix and verified STATE/SWA pages before
+            // handing their pins to the storage queue.
+            const auto bytes = resource.decode_endpoint->retained_page_bytes;
+            auto admission = resource.dspark_release_admission ? resource.dspark_release_admission
+                                                              : reserveDecodePublication(bytes);
+            if (!admission) {
+                RTP_LLM_LOG_WARNING("DTOP_GPU admission=rejected retained_bytes=%zu",
+                                    bytes);
+                return true;
+            }
+            // The existing writer fence ran before EOS. Pass the retained
+            // allocation owners and finalized keys, with no live stream/table
+            // reference, so release can run as soon as we enqueue.
+            auto snapshot = std::make_shared<BatchKVCacheResource>();
+            snapshot->resetBatchSize(1);
+            snapshot->decode_publication_keys = resource.decode_publication_keys;
+            if (!snapshot->decode_publication_keys) {
+                snapshot->decode_publication_keys = std::make_shared<const CacheKeysType>(resource.cacheKeys(0));
+            }
+            snapshot->decode_endpoint = resource.decode_endpoint;
+            if (const auto handoff = resource.prefillComputedEnd()) snapshot->recordPrefillComputedEnd(*handoff);
+            admitted = enqueuePlannedWrite(
+                [this, snapshot = std::move(snapshot), admission = std::move(admission), end, deadline] {
+                    return prepareCompletedDecodeWrite(*snapshot, end, deadline, admission);
+                },
+                deadline);
+        } else {
+            auto task = prepareCompletedDecodeWrite(resource, end, deadline);
+            if (!task) return true;
+            admitted = write(std::move(task));
+        }
         if (admitted) resource.decodeCompletionSubmitted() = true; // Before fallible logging after admission.
         RTP_LLM_LOG_DEBUG("DTOP_GPU EOS_queued=%d computed_end=%zu", static_cast<int>(admitted), end);
     } catch (const std::exception& error) {

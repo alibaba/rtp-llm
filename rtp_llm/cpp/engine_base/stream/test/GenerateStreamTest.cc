@@ -364,7 +364,7 @@ TEST_F(GenerateStreamTest, SpeculativeEndpointBookkeepingIsDecodeOnly) {
                 // A sentinel makes accidental P bookkeeping observable; no
                 // actual P capture or publication is introduced by the test.
                 resource.decode_endpoint = stale;
-                resource.decode_round_endpoints = {nullptr, accepted};
+                resource.decode_provisional_endpoints = {nullptr, accepted};
                 StreamSpecUpdateInfo update{torch::tensor({{17}}, torch::kInt32), 1, -1, {}, {}};
                 stream->specUpdate(update);
                 ASSERT_FALSE(stream->hasError()) << stream->statusInfo().ToString();
@@ -372,19 +372,93 @@ TEST_F(GenerateStreamTest, SpeculativeEndpointBookkeepingIsDecodeOnly) {
                 EXPECT_FALSE(stream->hasEvent(StreamEvents::GenerateDone));
                 if (enabled && role == RoleType::DECODE) {
                     EXPECT_EQ(resource.decode_endpoint, accepted);
-                    ASSERT_EQ(resource.decode_round_endpoints.size(), 1u);
-                    EXPECT_EQ(resource.decode_round_endpoints.front(), accepted);
+                    EXPECT_TRUE(resource.decode_provisional_endpoints.empty());
                 } else {
                     EXPECT_EQ(resource.decode_endpoint, stale);
-                    ASSERT_EQ(resource.decode_round_endpoints.size(), 2u);
-                    EXPECT_EQ(resource.decode_round_endpoints.back(), accepted);
+                    ASSERT_EQ(resource.decode_provisional_endpoints.size(), 2u);
+                    EXPECT_EQ(resource.decode_provisional_endpoints.back(), accepted);
                 }
             }
         });
     }
 }
 
-TEST_F(GenerateStreamTest, SpecUpdateCannotPromoteALaterRoundEndpointBeforeItsComputedBoundary) {
+TEST_F(GenerateStreamTest, TerminalPublicationRespectsStopsWithoutChangingGeneration) {
+    autil::EnvGuard publish("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
+        auto builder = GenerateStreamBuilder();
+        ResourceContext context;
+        context.role_type = RoleType::DECODE;
+        context.cache_manager = std::make_shared<KVCacheManager>(builder.init_config());
+        ASSERT_TRUE(context.cache_manager->init());
+
+        struct Case {
+            std::vector<int> tokens;
+            std::vector<std::vector<int>> stops;
+            int min_new_tokens;
+            int publication_packet_end;
+        };
+        const std::vector<Case> cases{
+            {{17, 18, 19}, {{17}}, 0, 1},
+            {{19, 18, 17}, {{17}, {19}}, 0, 1},
+            {{17, 18, 19}, {{17}}, 2, 3},
+            {{17, 18, 19}, {{17, 18}}, 2, 2},
+            {{17, 18, 19}, {{1, 2, 3, 17, 18, 19, 20}}, 0, 3},
+        };
+        for (const size_t unit : {0u, 2u}) {
+            for (size_t i = 0; i < cases.size(); ++i) {
+                SCOPED_TRACE(::testing::Message() << "unit=" << unit << " case=" << i);
+                const auto& test = cases[i];
+                auto stream = builder.createContextStream({1, 2, 3}, nullptr, context);
+                stream->generateConfig()->max_new_tokens = 3;
+                stream->generateConfig()->min_new_tokens = test.min_new_tokens;
+                stream->generateConfig()->stop_words_list = test.stops;
+                stream->generate_status_->status.store(StreamState::RUNNING);
+                auto output = std::make_shared<SpeculativeExecutorStreamOutput>();
+                output->tokens = torch::zeros({1, 1}, torch::kInt32);
+                stream->setSPOutputBuffer(output);
+
+                auto& resource = stream->kvCacheMutable();
+                resource.dspark_decode_publication_unit = unit;
+                auto earlier = std::make_shared<DecodeEndpoint>();
+                earlier->end = 2;
+                resource.decode_endpoint = earlier;
+                auto candidate = std::make_shared<DecodeEndpoint>();
+                candidate->end = 4;
+                if (!unit) stream->setDecodePublicationCandidates({candidate});
+
+                StreamSpecUpdateInfo completion{torch::tensor(test.tokens, torch::kInt32).unsqueeze(0), 3, -1, {}, {}};
+                completion.decode_writer_tables = {torch::tensor({5}, torch::kInt32), torch::tensor({6}, torch::kInt32)};
+                stream->specUpdate(completion);
+                ASSERT_FALSE(stream->hasError());
+                EXPECT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
+                EXPECT_EQ(stream->seqLength(), 6); // Preserve the existing maxlen output for both toggle states.
+                if (unit) {
+                    const size_t expected_end = 2u + test.publication_packet_end;
+                    ASSERT_TRUE(resource.dspark_release_computed_end.has_value());
+                    EXPECT_EQ(*resource.dspark_release_computed_end, expected_end);
+                    // The sync-device path can replace the entire next-round
+                    // state after dispatch. A stale round may also finish.
+                    stream->setMtpAsyncDeviceState({});
+                    StreamSpecUpdateInfo late{torch::tensor({{20}}, torch::kInt32), 1, -1, {}, {}};
+                    late.decode_writer_tables = {torch::tensor({7}, torch::kInt32), torch::tensor({8}, torch::kInt32)};
+                    stream->specUpdate(late);
+                    EXPECT_EQ(*resource.dspark_release_computed_end, expected_end);
+                    EXPECT_TRUE(resource.dspark_release_writer_tables[0].is_same(completion.decode_writer_tables[0]));
+                    EXPECT_TRUE(resource.dspark_release_writer_tables[1].is_same(completion.decode_writer_tables[1]));
+                    EXPECT_EQ(resource.decode_endpoint, earlier); // No capture or publication from bookkeeping.
+                    EXPECT_FALSE(resource.decodeCompletionSubmitted());
+                } else {
+                    EXPECT_EQ(resource.decode_endpoint, test.publication_packet_end == 1 ? earlier : candidate);
+                }
+                EXPECT_TRUE(resource.decode_provisional_endpoints.empty());
+                EXPECT_FALSE(resource.dspark_release_provenance_lost);
+            }
+        }
+    });
+}
+
+TEST_F(GenerateStreamTest, SpecUpdateKeepsOnlyLatestConfirmedEndpoint) {
     autil::EnvGuard publish("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
     ::rtp_llm::test::withDecodePublicationStartup([&] {
         ResourceContext context; context.role_type = RoleType::DECODE;
@@ -395,36 +469,41 @@ TEST_F(GenerateStreamTest, SpecUpdateCannotPromoteALaterRoundEndpointBeforeItsCo
         output->tokens = torch::zeros({1, 1}, torch::kInt32); stream->setSPOutputBuffer(output);
         auto current = std::make_shared<DecodeEndpoint>(); current->end = 3;
         auto later = std::make_shared<DecodeEndpoint>(); later->end = 4;
-        stream->setDecodePublicationPages({current, later});
+        std::weak_ptr<const DecodeEndpoint> rejected = later;
+        stream->setDecodePublicationCandidates({current, later});
+        later.reset();
         auto& resource = stream->kvCacheMutable();
         EXPECT_FALSE(resource.decode_endpoint); // Capture alone is never readable promotion.
         stream->specUpdate({torch::tensor({{17}}, torch::kInt32), 1, -1, {}, {}});
         ASSERT_FALSE(stream->hasError());
         EXPECT_EQ(resource.decode_endpoint, current);
-        ASSERT_EQ(resource.decode_round_endpoints.size(), 2u);
-        EXPECT_EQ(resource.decode_round_endpoints.front(), current);
-        EXPECT_EQ(resource.decode_round_endpoints.back(), later);
+        EXPECT_TRUE(resource.decode_provisional_endpoints.empty());
+        EXPECT_TRUE(rejected.expired()); // A later round must capture its own writer's pages.
+        std::weak_ptr<const DecodeEndpoint> replaced = current;
+        current.reset();
+        later = std::make_shared<DecodeEndpoint>();
+        later->end = 4;
+        stream->setDecodePublicationCandidates({later});
         stream->specUpdate({torch::tensor({{18}}, torch::kInt32), 1, -1, {}, {}});
         ASSERT_FALSE(stream->hasError());
         EXPECT_EQ(resource.decode_endpoint, later);
-        ASSERT_EQ(resource.decode_round_endpoints.size(), 2u); // Both accepted states survive to EOS.
+        EXPECT_TRUE(resource.decode_provisional_endpoints.empty());
+        EXPECT_TRUE(replaced.expired());
         EXPECT_FALSE(resource.decodeCompletionSubmitted());
         auto clipped = std::make_shared<DecodeEndpoint>(); clipped->end = 6;
-        stream->setDecodePublicationPages({clipped});
+        stream->setDecodePublicationCandidates({clipped});
         stream->generateConfig()->max_new_tokens = 3;
         stream->specUpdate({torch::tensor({{19}}, torch::kInt32), 1, -1, {}, {}});
         ASSERT_FALSE(stream->hasError());
         EXPECT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
         EXPECT_EQ(resource.decode_endpoint, later);
-        ASSERT_EQ(resource.decode_round_endpoints.size(), 2u);
-        EXPECT_EQ(resource.decode_round_endpoints.front(), current);
-        EXPECT_EQ(resource.decode_round_endpoints.back(), later); // Only the unreachable H=6 was discarded.
+        EXPECT_TRUE(resource.decode_provisional_endpoints.empty()); // Uncomputed H=6 was discarded.
         // This checks the promotion boundary; real draft-event ordering is
         // checked by the native executor path and the model trace separately.
     });
 }
 
-TEST_F(GenerateStreamTest, OrdinaryDecodeRetainsOnlyNewCompleteEndpointsBeforeEos) {
+TEST_F(GenerateStreamTest, OrdinaryDecodeReplacesThePreviousCompleteEndpoint) {
     autil::EnvGuard publish("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
     test::withDecodePublicationStartup([&] {
         auto builder = GenerateStreamBuilder();
@@ -439,38 +518,41 @@ TEST_F(GenerateStreamTest, OrdinaryDecodeRetainsOnlyNewCompleteEndpointsBeforeEo
         ASSERT_TRUE(stream->initKVBlock().ok());
         stream->setIsContextStream(false);
         stream->generate_status_->status.store(StreamState::RUNNING);
+        std::weak_ptr<const DecodeEndpoint> first;
+        std::shared_ptr<const DecodeEndpoint::PageHold> first_full_page;
         for (int step = 0; step < 5; ++step) {
             ASSERT_TRUE(stream->incrKVBlock().ok());
             stream->update({torch::tensor({{17 + step}}, torch::kInt32), 1});
             ASSERT_FALSE(stream->hasError()) << stream->statusInfo().ToString();
             EXPECT_FALSE(stream->hasEvent(StreamEvents::GenerateDone));
             EXPECT_FALSE(stream->kvCache().decodeCompletionSubmitted());
+            const auto& endpoint = stream->kvCache().decode_endpoint;
+            if (endpoint && endpoint->end == 4 && !first_full_page) {
+                first = endpoint;
+                first_full_page = endpoint->pages.at("default").front();
+            }
         }
-        const auto& resource = stream->kvCache();
-        ASSERT_EQ(resource.decode_round_endpoints.size(), 2u);
-        const auto& first = resource.decode_round_endpoints.front();
-        const auto& last = resource.decode_round_endpoints.back();
-        EXPECT_EQ(first->end, 4u);
+        const auto& last = stream->kvCache().decode_endpoint;
+        ASSERT_TRUE(last);
+        ASSERT_TRUE(first_full_page);
+        EXPECT_TRUE(first.expired());
         EXPECT_EQ(last->end, 6u); // The emitted token at seqLength()-1 has no KV yet.
-        EXPECT_EQ(resource.decode_endpoint, last);
-        EXPECT_EQ(first->pages.at("default").front(), last->pages.at("default").front());
+        EXPECT_EQ(first_full_page, last->pages.at("default").front());
     });
 }
 
-TEST_F(GenerateStreamTest, LatestDecodeEndpointIncludesPendingCandidatesAndRetainsSnapshot) {
+TEST_F(GenerateStreamTest, LatestDecodeEndpointExposesOnlyAConfirmedSnapshot) {
     auto stream = GenerateStreamBuilder().createContextStream({1, 2, 3});
     auto selected = std::make_shared<DecodeEndpoint>(); selected->end = 4;
     auto pending = std::make_shared<DecodeEndpoint>(); pending->end = 12;
-    auto middle = std::make_shared<DecodeEndpoint>(); middle->end = 8;
     auto& resource = stream->kvCacheMutable();
     resource.decode_endpoint = selected;
-    resource.decode_round_endpoints = {nullptr, pending, middle};
+    resource.decode_provisional_endpoints = {pending};
     auto snapshot = stream->latestDecodePublicationEndpoint();
-    EXPECT_EQ(snapshot, pending);
-    std::weak_ptr<const DecodeEndpoint> lifetime = pending;
+    EXPECT_EQ(snapshot, selected);
+    std::weak_ptr<const DecodeEndpoint> lifetime = selected;
     resource.decode_endpoint.reset();
-    resource.decode_round_endpoints.clear();
-    pending.reset();
+    selected.reset();
     EXPECT_FALSE(lifetime.expired());
     snapshot.reset();
     EXPECT_TRUE(lifetime.expired());

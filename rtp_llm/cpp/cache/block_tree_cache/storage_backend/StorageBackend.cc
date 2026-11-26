@@ -758,15 +758,57 @@ StorageWriteTask StorageBackend::prepareWrite(StorageRequest request) {
 }
 
 bool StorageBackend::write(StorageWriteTask task) {
-    RTP_LLM_CHECK(initialized_);
     RTP_LLM_CHECK(task.state_ != nullptr);
+    const auto deadline = task.state_->request.transfer_task->deadline();
+    return dispatchWrite(std::move(task), {}, deadline);
+}
+
+bool StorageBackend::enqueuePlannedWrite(std::function<StorageWriteTask()> prepare,
+                                         StorageBackendExecutor::Clock::time_point deadline) {
+    if (!remoteCacheEnabled()) return false;
+    return dispatchWrite({}, std::move(prepare), deadline);
+}
+
+bool StorageBackend::dispatchWrite(StorageWriteTask task,
+                                   std::function<StorageWriteTask()> prepare,
+                                   StorageBackendExecutor::Clock::time_point deadline) {
+    RTP_LLM_CHECK(initialized_);
     auto state = std::move(task.state_);
-    auto total = stageTimer("write_total", state->request, "write", state->trace_id, AsyncProfileKind::Lifecycle);
-    auto queue = stageTimer("write_queue_wait", state->request, "write", state->trace_id, AsyncProfileKind::Wait);
+    // A lazy write has no request ID or handles yet, but its wait and full
+    // latency start at admission, including expiry and preparation failure.
+    const StorageRequest planning_request;
+    const auto& timer_request = state ? state->request : planning_request;
+    const auto trace_id = state ? state->trace_id : storage_backend_detail::nextTraceId();
+    auto total = stageTimer("write_total", timer_request, "write", trace_id, AsyncProfileKind::Lifecycle);
+    auto queue = stageTimer("write_queue_wait", timer_request, "write", trace_id, AsyncProfileKind::Wait);
     const bool skip_remote = !remoteCacheEnabled();
-    const bool admitted = dispatch([this, skip_remote, state, total, queue](Lifecycle outcome, Task finished) {
+    const bool admitted = dispatch(
+        [this, skip_remote, state, total, queue, prepare = std::move(prepare), deadline, trace_id](
+            Lifecycle outcome, Task finished) mutable {
         const bool accepting = outcome == Lifecycle::ACCEPTING;
-        queue.finish(accepting && !state->request.transfer_task->expired());
+        if (prepare) {
+            const bool can_plan = accepting && !skip_remote && remoteCacheEnabled()
+                                  && StorageBackendExecutor::Clock::now() < deadline;
+            queue.finish(can_plan);
+            if (can_plan) {
+                try {
+                    state = prepare().state_;
+                } catch (const std::exception& error) {
+                    RTP_LLM_LOG_WARNING("Decode publication planning failed: %s", error.what());
+                } catch (...) {
+                    RTP_LLM_LOG_WARNING("Decode publication planning failed: unknown exception");
+                }
+            }
+            if (!state) {
+                total.finish(false);
+                finished();
+                return;
+            }
+            prepare = {};
+            state->trace_id = trace_id;
+        } else {
+            queue.finish(accepting && !state->request.transfer_task->expired());
+        }
         const bool disabled = accepting && (skip_remote || !remoteCacheEnabled());
         if (disabled)
             onRemoteCacheSkipped("write");
@@ -902,7 +944,7 @@ bool StorageBackend::write(StorageWriteTask task) {
             return;
         }
         complete({}, false, {});
-    }, BlockTreeTaskClass::BACKGROUND, skip_remote, state->request.transfer_task->deadline());
+    }, BlockTreeTaskClass::BACKGROUND, skip_remote && static_cast<bool>(state), deadline);
     return admitted && !skip_remote;
 }
 

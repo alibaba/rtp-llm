@@ -1095,7 +1095,7 @@ TEST_F(KVCMSubmissionBoundaryTest, OrdinaryFullPrefixIntersectsGroupsAndEndpoint
     });
 }
 
-TEST_F(KVCMSubmissionBoundaryTest, RetainedEndpointUnionUsesRegisteredMasksAndChargesUniqueSourcesOnce) {
+TEST_F(KVCMSubmissionBoundaryTest, TerminalEndpointUsesOnlyItsStateWindowsAndChargesUniqueSourcesOnce) {
     autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
     autil::EnvGuard budget("RTP_LLM_REMOTE_CACHE_DECODE_PENDING_MIB", "1");
     test::withDecodePublicationStartup([&] {
@@ -1116,7 +1116,7 @@ TEST_F(KVCMSubmissionBoundaryTest, RetainedEndpointUnionUsesRegisteredMasksAndCh
             {{0}, {1}, {2}}, {CacheGroupType::FULL, CacheGroupType::SWA, CacheGroupType::SWA},
             {"full", "state", "swa"}, {full, state, swa});
         env.cache_config.finalizeBlockNums(16, RuntimeConfig{});
-        initializeEnvironmentPools(env, "all_endpoint_union", 16);
+        initializeEnvironmentPools(env, "terminal_endpoint_windows", 16);
         ScopedReferencedBlocks pages(env, 4);
         const auto blocks = pages.get();
         auto client = std::make_shared<MockClientWrapper>();
@@ -1149,50 +1149,46 @@ TEST_F(KVCMSubmissionBoundaryTest, RetainedEndpointUnionUsesRegisteredMasksAndCh
             }
             return endpoint;
         };
-        auto first = capture(1), second = capture(2), last = capture(3);
-        resource.decode_round_endpoints = {first, second, first}; // Repeated owner is not another physical source.
-        resource.decode_endpoint = last; // Latest must also be included when absent from the list.
-        std::weak_ptr<const DecodeEndpoint> first_owner = first, last_owner = last;
+        auto last = capture(3);
+        resource.decode_endpoint = last;
+        std::weak_ptr<const DecodeEndpoint> last_owner = last;
         auto request = backend.backend->impl_->planCompletedDecode(resource, 24);
         ASSERT_FALSE(request.empty());
         EXPECT_EQ(*request.keys, (CacheKeysType{101, 102, 103}));
         for (size_t key = 0; key < request.handles.size(); ++key) {
-            ASSERT_EQ(request.handles[key].size(), 3u);
+            // FULL is complete. The windows at H=24 require two SWA blocks
+            // and one STATE block across the existing key layout.
+            ASSERT_EQ(request.handles[key].size(), key + 1);
             for (const auto& handle : request.handles[key]) EXPECT_EQ(handle.block, blocks[key]);
         }
         std::vector<std::string> masks;
         ASSERT_TRUE(backend.backend->impl_->group_policy_->getNeedWriteGroups(request, 3, masks));
         ASSERT_EQ(masks.size(), 3u);
-        EXPECT_EQ(masks[0], masks[1]);
-        EXPECT_EQ(masks[1], masks[2]);
-        size_t expected_bytes = 0;
-        for (const auto& [tag, pool] : env.pools_by_tag) expected_bytes += 3 * pool->blockSizeBytes();
+        EXPECT_NE(masks[0], masks[1]);
+        EXPECT_NE(masks[1], masks[2]);
+        const auto expected_bytes = 3 * env.pools_by_tag.at("full")->blockSizeBytes()
+            + env.pools_by_tag.at("state")->blockSizeBytes() + 2 * env.pools_by_tag.at("swa")->blockSizeBytes();
         EXPECT_EQ(backend.backend->impl_->publication_budget_->snapshot().bytes, expected_bytes);
         EXPECT_EQ(backend.backend->impl_->publication_budget_->snapshot().jobs, 1u);
         resource.clearBlocks();
-        first.reset(); second.reset(); last.reset();
-        EXPECT_FALSE(first_owner.expired());
+        last.reset();
         EXPECT_FALSE(last_owner.expired());
         request = {};
-        EXPECT_TRUE(first_owner.expired());
         EXPECT_TRUE(last_owner.expired());
         EXPECT_EQ(backend.backend->impl_->publication_budget_->snapshot().bytes, 0u);
 
-        first = capture(1);
-        auto conflicting = capture(1);
-        conflicting->blocks["state"][0] = blocks[3];
-        resource.decode_round_endpoints = {first, conflicting};
-        resource.decode_endpoint = capture(3);
         resource.setBatchCacheKeys(0, {101, 102, 103, 104});
-        EXPECT_TRUE(backend.backend->impl_->planCompletedDecode(resource, 24).empty());
-        EXPECT_EQ(backend.backend->impl_->publication_budget_->snapshot().jobs, 0u);
-        resource.decode_endpoint.reset();
-        EXPECT_TRUE(backend.backend->impl_->planCompletedDecode(resource, 24).empty());
-        resource.decode_endpoint = capture(3);
-        first->blocks.erase("state");
-        resource.decode_round_endpoints = {first};
-        EXPECT_TRUE(backend.backend->impl_->planCompletedDecode(resource, 24).empty());
-        EXPECT_EQ(backend.backend->impl_->publication_budget_->snapshot().jobs, 0u);
+        for (const bool missing_group : {false, true}) {
+            auto incomplete = capture(3);
+            if (missing_group) {
+                incomplete->blocks.erase("state");
+            } else {
+                incomplete->blocks.at("swa")[1] = NULL_BLOCK_IDX;
+            }
+            resource.decode_endpoint = std::move(incomplete);
+            EXPECT_TRUE(backend.backend->impl_->planCompletedDecode(resource, 24).empty());
+            EXPECT_EQ(backend.backend->impl_->publication_budget_->snapshot().jobs, 0u);
+        }
     });
 }
 

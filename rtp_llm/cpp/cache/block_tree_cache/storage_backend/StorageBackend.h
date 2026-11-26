@@ -226,12 +226,23 @@ public:
     virtual bool captureCompletedDecode(const BatchKVCacheResource&, size_t, bool = true) {
         return false;
     }
+    // A rejected submission does not invoke prepare_source. After admission
+    // a canceled/expired job may discard it without calling it.
+    using DecodePublicationPrepare = std::function<std::shared_ptr<const BatchKVCacheResource>()>;
+    virtual bool enqueueCompletedDecode(const BatchKVCacheResource&, size_t, DecodePublicationPrepare) {
+        return false;
+    }
+    virtual std::shared_ptr<StorageCompletionAdmission> reserveDecodePublication(size_t) { return {}; }
+    virtual bool canStartDecodePublication(const BatchKVCacheResource&) const { return false; }
     // Must not be called from backend I/O or completion callbacks.
     void shutdown();
 
 protected:
     using Task = StorageBackendExecutor::Task;
     std::chrono::milliseconds operationTimeout() const noexcept { return timeout_; }
+    // Plan and start the write in one existing storage-queue slot.
+    bool enqueuePlannedWrite(std::function<StorageWriteTask()> prepare,
+                             StorageBackendExecutor::Clock::time_point deadline);
     // The completion callable only checks results and updates local state; it
     // must not start blocking I/O on the RPC completion/settlement thread.
     using ReadCompletion = std::function<void(Task)>;
@@ -312,6 +323,9 @@ private:
                                         const char*           operation,
                                         uint64_t              trace_id) const noexcept;
     void validateRequest(const StorageRequest& request, bool allow_null_blocks, bool for_write = false) const;
+    bool dispatchWrite(StorageWriteTask task,
+                       std::function<StorageWriteTask()> prepare,
+                       StorageBackendExecutor::Clock::time_point deadline);
     bool dispatch(Operation operation, BlockTreeTaskClass task_class, bool run_inline = false,
                   std::optional<StorageBackendExecutor::Clock::time_point> io_deadline = std::nullopt);
     void                                 taskFinished();

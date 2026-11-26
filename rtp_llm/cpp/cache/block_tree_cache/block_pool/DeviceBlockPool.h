@@ -57,6 +57,12 @@ public:
     void decRef(BlockIdxType block, DeviceBlockRefType ref_type = DeviceBlockRefType::REQUEST);
     void decRef(const BlockIdList& blocks, DeviceBlockRefType ref_type = DeviceBlockRefType::REQUEST);
 
+    // Prepare capacity before an asynchronous owner takes existing REQUEST
+    // references. The release accepts null slots and reports capacity change
+    // to its caller, which is responsible for notifying allocation waiters.
+    void prepareDeferredRequestRelease();
+    bool releaseDeferredRequestReferences(const BlockIdList& blocks) noexcept;
+
     // Storage I/O. Snapshot the callback and reserve free-list capacity before
     // acquiring the connector reference. Keep the pool alive until the token is
     // reset/destroyed. Release performs no allocation and isolates notification
@@ -142,6 +148,7 @@ private:
     template<DeviceBlockRefType RefType>
     RemotePublicationPin pinForIONoLock(BlockIdxType block);
     void releaseIOPin(BlockIdxType block, DeviceBlockRefType type, const std::function<void()>& notify) noexcept;
+    void decRefNoLock(BlockIdxType block, size_t type_index);
     bool                         hasRequestRefNoLock(BlockIdxType block) const;
     bool                         isExclusiveRequestBlockNoLock(BlockIdxType block) const;
     const DeviceBlockPoolConfig& config() const;

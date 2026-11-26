@@ -199,7 +199,8 @@ protected:
                                       std::shared_ptr<torch::Event>                rejection_event,
                                       std::shared_ptr<torch::Event>                draft_event,
                                       const torch::Tensor&                         engram_anchor,
-                                      torch::Tensor&                               engram_output);
+                                      torch::Tensor&                               engram_output,
+                                      const MtpWriterHostRows& writer_host_rows = {});
 
     void draftModelDecode(GptModelInputs&             model_input,
                           const StreamGroups&         stream_groups,
@@ -261,7 +262,8 @@ protected:
                                      std::shared_ptr<torch::Event>                rejection_event,
                                      std::shared_ptr<torch::Event>                draft_event,
                                      const torch::Tensor&                         engram_anchor,
-                                     torch::Tensor&                               engram_output);
+                                     torch::Tensor&                               engram_output,
+                                      const MtpWriterHostRows& writer_host_rows = {});
 
     // Synchronous dispatch also publishes the same per-stream device state as
     // the async path, using the host seqLength after specUpdate as truth.

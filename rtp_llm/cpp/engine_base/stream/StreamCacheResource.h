@@ -146,7 +146,6 @@ private:
         return !status || status->load(std::memory_order_acquire);
     }
     std::shared_ptr<const std::atomic<bool>> pd_load_ready_;
-    bool         publicationKeysFresh() const;
     void         clearCacheReuseState();
     void         recordCacheReuseMallocResult(const MallocResult& result);
     void         publishReuseLengths(int total_length, int host_length, int disk_length, int backend_length);
@@ -159,8 +158,6 @@ private:
     ResourceContext                resource_context_;
     std::vector<TaggedBlockIdPair> block_update_mapping_;
 
-    // Only keys prepared here for the current single-row token history.
-    size_t                           publication_key_tokens_{0};
     bool                             need_release_resource_ = true;
     bool                             last_block_aligned_    = false;
     int                              malloc_failed_times_   = 0;

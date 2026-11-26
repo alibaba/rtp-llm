@@ -5,6 +5,25 @@
 #include "rtp_llm/cpp/utils/HashUtil.h"
 
 namespace rtp_llm {
+namespace {
+
+void appendCacheKeys(CacheKeysType& keys, CompleteTokenIds& token_ids, int row,
+                     int seq_size_per_block, int seq_len, int total_blocks, int64_t initial_hash) {
+    const auto* tokens = token_ids.data(row);
+    auto hash = keys.empty() ? initial_hash : keys.back();
+    for (int index = static_cast<int>(keys.size()); index < total_blocks; ++index) {
+        const int pos = index * seq_size_per_block;
+        const int block_len = std::min(seq_size_per_block, seq_len - pos);
+        hash = hashInt64Array(hash, tokens + pos, tokens + pos + block_len);
+        const auto identity = token_ids.multimodalCacheIdentity(pos, block_len);
+        if (!identity.empty()) {
+            hash = hashInt64Array(hash, identity.data(), identity.data() + identity.size());
+        }
+        keys.push_back(hash);
+    }
+}
+
+}  // namespace
 
 void initCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource,
                    CompleteTokenIdsPtr     complete_token_ids,
@@ -19,18 +38,8 @@ void initCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource,
     for (int i = 0; i < batch_size; ++i) {
         batch_kv_cache_resource->clearCacheKeys(i);
 
-        int64_t rolling_hash = initial_hash;
-        auto*   token_ids    = complete_token_ids->data(i);
-        for (int index = 0; index < desired_blocks; ++index) {
-            const int pos       = index * seq_size_per_block;
-            const int block_len = std::min(seq_size_per_block, seq_len - pos);
-            rolling_hash        = rtp_llm::hashInt64Array(rolling_hash, token_ids + pos, token_ids + pos + block_len);
-            const auto identity = complete_token_ids->multimodalCacheIdentity(pos, block_len);
-            if (!identity.empty()) {
-                rolling_hash = hashInt64Array(rolling_hash, identity.data(), identity.data() + identity.size());
-            }
-            batch_kv_cache_resource->pushBackCacheKey(i, rolling_hash);
-        }
+        appendCacheKeys(batch_kv_cache_resource->cacheResource(i).cacheKeys(), *complete_token_ids, i,
+                        seq_size_per_block, seq_len, desired_blocks, initial_hash);
     }
 
     batch_kv_cache_resource->setLastBlockAligned(seq_len % seq_size_per_block == 0);
@@ -62,28 +71,12 @@ void updateCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource,
         }
     }
     for (int i = 0; i < batch_size; ++i) {
-        const auto& keys = batch_kv_cache_resource->cacheKeys(i);
-
-        // If last_block_aligned was false previously, the last cache key corresponds to a partial block.
-        // Drop it before we append new full-block cache keys.
+        auto& keys = batch_kv_cache_resource->cacheResource(i).cacheKeys();
+        // The old partial key cannot seed a new complete block.
         if (!batch_kv_cache_resource->lastBlockAligned() && !keys.empty()) {
-            batch_kv_cache_resource->popBackCacheKey(i);
+            keys.pop_back();
         }
-
-        auto*   token_ids = complete_token_ids->data(i);
-        int64_t hash      = keys.empty() ? initial_hash : keys.back();
-        int     start_idx = static_cast<int>(keys.size());
-
-        for (int index = start_idx; index < total_blocks; ++index) {
-            const int pos = index * seq_size_per_block;
-            const int block_len = std::min(seq_size_per_block, seq_len - pos);
-            hash = rtp_llm::hashInt64Array(hash, token_ids + pos, token_ids + pos + block_len);
-            const auto identity = complete_token_ids->multimodalCacheIdentity(pos, block_len);
-            if (!identity.empty()) {
-                hash = hashInt64Array(hash, identity.data(), identity.data() + identity.size());
-            }
-            batch_kv_cache_resource->pushBackCacheKey(i, hash);
-        }
+        appendCacheKeys(keys, *complete_token_ids, i, seq_size_per_block, seq_len, total_blocks, initial_hash);
     }
 
     // Default callers retain the original full-block-only contract.
@@ -92,6 +85,24 @@ void updateCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource,
         batch_kv_cache_resource->cacheResource(i).ensureLinearBlockDependencies();
     }
     batch_kv_cache_resource->markCacheKeysInitialized();
+}
+
+CacheKeysType buildDecodePublicationKeys(CompleteTokenIds& tokens, int seq_size_per_block,
+                                         size_t computed_end, int64_t initial_hash,
+                                         const BatchKVCacheResource* append_only_source) {
+    const int seq_len = tokens.seqLength();
+    const int blocks = static_cast<int>(std::min(computed_end, static_cast<size_t>(seq_len))) / seq_size_per_block;
+    CacheKeysType keys;
+    keys.reserve(blocks);
+    if (append_only_source && append_only_source->cacheKeysInitialized()) {
+        const auto& source = append_only_source->cacheKeys(0);
+        const auto complete = source.size() - (!append_only_source->lastBlockAligned() && !source.empty());
+        if (complete <= static_cast<size_t>(seq_len / seq_size_per_block)) {
+            keys.assign(source.begin(), source.begin() + std::min(complete, static_cast<size_t>(blocks)));
+        }
+    }
+    appendCacheKeys(keys, tokens, 0, seq_size_per_block, seq_len, blocks, initial_hash);
+    return keys;
 }
 
 void dropLastPartialBlock(BatchKVCacheResourcePtr batch_kv_cache_resource) {

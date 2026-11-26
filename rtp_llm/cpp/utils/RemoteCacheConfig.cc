@@ -52,6 +52,14 @@ bool remoteCacheDecodePublicationEnabled() {
     return decodePublicationSetting().value_or(false);
 }
 
+bool remoteCacheDecodePublishAllResidentState() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("RTP_LLM_REMOTE_CACHE_DECODE_PUBLISH_ALL_RESIDENT_STATE");
+        return value && std::string_view(value) == "1";
+    }();
+    return enabled;
+}
+
 bool remoteCacheDecodePublicationConfigValid() {
     return decodePublicationSetting().has_value();
 }

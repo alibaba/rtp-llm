@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstddef>
+
 namespace rtp_llm {
 
 // Task-owned admission lifetime only; the original task teardown releases it.
@@ -7,6 +9,9 @@ namespace rtp_llm {
 class StorageCompletionAdmission {
 public:
     virtual ~StorageCompletionAdmission() = default;
+    // A preparation task may have reserved space for all request pages.
+    // Drop the excess only after returning the original request references.
+    virtual void reduceTo(std::size_t) noexcept {}
 };
 
 }  // namespace rtp_llm

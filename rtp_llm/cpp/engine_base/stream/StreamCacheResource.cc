@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/cache/CacheTopology.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/Types.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
@@ -44,7 +45,6 @@ std::shared_ptr<const CacheTopology> warmupCacheTopology() {
 }  // namespace
 
 void StreamCacheResource::init(int batch_size) {
-    publication_key_tokens_ = 0;
     batch_kv_cache_resource_->resetBatchSize(batch_size);
     // cache manager is null when warmup
     const auto topology = resource_context_.cache_manager ?
@@ -100,46 +100,29 @@ void StreamCacheResource::releaseResource() {
     resource_released_ = true;
 }
 
-bool StreamCacheResource::publicationKeysFresh() const {
-    const auto& resource = *batch_kv_cache_resource_;
-    const size_t tokens = publication_key_tokens_;
-    const size_t block = resource_context_.cache_manager->cacheConfig().seq_size_per_block;
-    // Multi-row/beam selection can replace same-shaped keys. Keep its original
-    // refresh behavior even if the current resource has temporarily one row.
-    return tokens && block && stream_->maxBatchSize() == 1 && resource.batchSize() == 1
-           && resource.cacheKeysInitialized()
-           && static_cast<size_t>(stream_->completeTokenIdsPtr()->seqLength()) == tokens
-           && resource.cacheKeys(0).size() == tokens / block + (tokens % block != 0)
-           && resource.lastBlockAligned() == (tokens % block == 0);
-}
-
 void StreamCacheResource::publishCompletedDecode(size_t computed_end) {
     if (!pdLoadReady() || !remoteCacheDecodePublicationEnabled() || resource_context_.role_type != RoleType::DECODE
         || !resource_context_.cache_manager || !reuseCache() || stream_->hasErrorWithoutLock() || !computed_end
-        || !stream_->hasEventWithoutLock(StreamEvents::GenerateDone))
-        return;
-    const auto& resource = *batch_kv_cache_resource_;
-    if (!resource.mayAttemptDecodePublication()
-        && publicationKeysFresh()) return;
-    const auto& config = resource_context_.cache_manager->cacheConfig();
+        || !stream_->hasEventWithoutLock(StreamEvents::GenerateDone)) return;
+    auto& resource = *batch_kv_cache_resource_;
+    if (resource.batchSize() != 1 || resource.dspark_decode_publication_unit
+        || !resource.mayAttemptDecodePublication()) return;
+
+    auto& manager = *resource_context_.cache_manager;
+    const auto& config = manager.cacheConfig();
     try {
-        // Release-time local insertion still needs refreshed final keys after
-        // a token-length or partial-key shape change, even if admission is over.
-        if (resource.cacheKeysInitialized() && resource.batchSize() == 1 && stream_->maxBatchSize() == 1
-            && !stream_->hasNumBeams()) {
-            // Non-beam Decode appends tokens. Reuse the original rolling keys,
-            // keeping the final partial key for local insertion, not publication.
-            updateCacheKeys(batch_kv_cache_resource_, stream_->completeTokenIdsPtr(),
-                            config.seq_size_per_block, config.cache_key_hash_seed, true);
-        } else {
-            initCacheKeys(batch_kv_cache_resource_, stream_->completeTokenIdsPtr(),
-                          config.seq_size_per_block, config.cache_key_hash_seed);
-        }
-        publication_key_tokens_ = resource.batchSize() == 1 && stream_->maxBatchSize() == 1 ?
-                                      stream_->completeTokenIdsPtr()->seqLength() : 0;
-        (void)resource_context_.cache_manager->captureCompletedDecode(resource, computed_end, true);
+        // The storage plan owns its finalized keys. Local insertion still sees
+        // the allocator's original keys and block rows, including its tail policy.
+        const auto* append_only_source = stream_->maxBatchSize() == 1 && !stream_->hasNumBeams() ? &resource : nullptr;
+        block_tree_cache_detail::ScopeRollback clear_keys([&resource] { resource.decode_publication_keys.reset(); });
+        resource.decode_publication_keys = std::make_shared<const CacheKeysType>(buildDecodePublicationKeys(
+            *stream_->completeTokenIdsPtr(), config.seq_size_per_block, computed_end,
+            config.cache_key_hash_seed, append_only_source));
+        (void)manager.captureCompletedDecode(resource, computed_end, true);
     } catch (const std::exception& error) {
         RTP_LLM_LOG_WARNING("optional D publication failed before submission: %s", error.what());
+    } catch (...) {
+        RTP_LLM_LOG_WARNING("optional D publication failed before submission");
     }
 }
 
@@ -162,6 +145,7 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
     RTP_LLM_CHECK(nums == total_blocks);
 
     if (total_blocks > 0) {
+        FreeInfo free_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), stream_->streamId()};
         if (pdLoadReady() && reuseCache() && !stream_->hasErrorWithoutLock()
             && stream_->getStatus() == StreamState::FINISHED) {
             const Tier target_tier = insertTarget();
@@ -169,13 +153,30 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
                               stream_->streamId(),
                               total_blocks,
                               tierName(target_tier));
-            if (stream_->completeTokenIdsPtr()->seqLength() > 0)
-                publishCompletedDecode(stream_->completeTokenIdsPtr()->seqLength() - 1);
+            const bool dspark_publication = batch_kv_cache_resource_->dspark_decode_publication_unit != 0;
+            if (!dspark_publication && free_info.complete_token_ids->seqLength() > 0) {
+                publishCompletedDecode(free_info.complete_token_ids->seqLength() - 1);
+            }
             if (target_tier != Tier::NONE) {
                 InsertInfo insert_info{
                     batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false, target_tier, stream_->streamId()};
                 size_t resident_prefix_length = 0;
                 resource_context_.cache_manager->insertIntoCache(insert_info, resident_prefix_length);
+            }
+            if (dspark_publication && remoteCacheDecodePublicationEnabled()
+                && resource_context_.role_type == RoleType::DECODE
+                && stream_->hasEventWithoutLock(StreamEvents::GenerateDone)) {
+                try {
+                    if (resource_context_.cache_manager->tryDeferDSparkPublication(
+                            free_info, stream_->maxBatchSize() == 1 && !stream_->hasNumBeams(),
+                            remoteCacheDecodePublishAllResidentState())) {
+                        return total_blocks;
+                    }
+                } catch (const std::exception& error) {
+                    RTP_LLM_LOG_WARNING("optional DSpark publication handoff failed: %s", error.what());
+                } catch (...) {
+                    RTP_LLM_LOG_WARNING("optional DSpark publication handoff failed");
+                }
             }
         } else {
             RTP_LLM_LOG_DEBUG(
@@ -185,9 +186,6 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
                 stream_->hasErrorWithoutLock(),
                 StreamStateToString(stream_->getStatus()).c_str());
         }
-
-        FreeInfo free_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr()};
-        free_info.request_id = stream_->streamId();
 
         resource_context_.cache_manager->free(free_info);
     }

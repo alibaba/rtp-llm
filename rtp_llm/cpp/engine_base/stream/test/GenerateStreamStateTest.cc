@@ -288,10 +288,16 @@ TEST_F(GenerateStreamStateTest, UnknownWriterFreezesRetainedEndpointPagesOutside
         const auto extra = pool->malloc();
         ASSERT_TRUE(extra);
         pool->incRef(*extra);
-        auto extra_request = std::shared_ptr<void>(nullptr, [pool, block = *extra](void*) { pool->decRef(block); });
+        const auto pending_extra = pool->malloc();
+        ASSERT_TRUE(pending_extra);
+        pool->incRef(*pending_extra);
+        auto extra_requests = std::shared_ptr<void>(nullptr, [pool, confirmed = *extra, pending = *pending_extra](void*) {
+            pool->decRef(confirmed);
+            pool->decRef(pending);
+        });
         auto endpoint = std::make_shared<DecodeEndpoint>();
         // A retained endpoint can own a physical page no longer in the current
-        // table (STATE/SWA), and share other pages with both endpoint lists.
+        // table (STATE/SWA), and share other pages with the current candidate.
         auto protected_blocks = current;
         protected_blocks.push_back(*extra);
         for (auto block : protected_blocks) {
@@ -302,9 +308,17 @@ TEST_F(GenerateStreamStateTest, UnknownWriterFreezesRetainedEndpointPagesOutside
             endpoint->pages["default"].push_back(std::move(page));
         }
         stream->kvCacheMutable().decode_endpoint = endpoint;
-        stream->kvCacheMutable().decode_round_endpoints.push_back(endpoint);
+        auto pending = std::make_shared<DecodeEndpoint>();
+        pending->pages["default"].push_back(endpoint->pages.at("default").front());
+        auto pending_page = std::make_shared<DecodeEndpoint::PageHold>();
+        pending_page->pool = pool;
+        pending_page->block = *pending_extra;
+        pending_page->pin = pool->pinForRemotePublication(*pending_extra);
+        pending->pages["default"].push_back(std::move(pending_page));
+        stream->kvCacheMutable().decode_provisional_endpoints.push_back(std::move(pending));
+        protected_blocks.push_back(*pending_extra);
         endpoint.reset();
-        extra_request.reset(); // The out-of-table allocation now has only its endpoint pin.
+        extra_requests.reset(); // The out-of-table allocations now have only their endpoint pins.
         std::vector<std::function<void()>> releases;
         for (auto block : protected_blocks)
             releases.push_back(pool->prepareFrozenReferenceRelease({block}));

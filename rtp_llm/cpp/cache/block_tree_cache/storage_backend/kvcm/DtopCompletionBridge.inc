@@ -14,6 +14,13 @@ struct PublicationBudget: std::enable_shared_from_this<PublicationBudget> {
             owner->bytes -= bytes;
             --owner->jobs;
         }
+        void reduceTo(size_t retained) noexcept override {
+            std::lock_guard<std::mutex> lock(owner->mutex);
+            if (retained < bytes) {
+                owner->bytes -= bytes - retained;
+                bytes = retained;
+            }
+        }
     };
     explicit PublicationBudget(DecodePublicationLimits limits): limits(limits) {}
     std::shared_ptr<StorageCompletionAdmission> tryAcquire(size_t amount) {
@@ -199,6 +206,10 @@ size_t publicationWireBytes(const std::string& tag) const {
     return bytes;
 }
 
+std::shared_ptr<StorageCompletionAdmission> reserveDecodePublication(size_t bytes) {
+    return publication_budget_ ? publication_budget_->tryAcquire(bytes) : nullptr;
+}
+
 std::string publicationPeerTag(const std::string& tag, int peer) const {
     return decode_publication_enabled_ && is_decode_role_ ? tag + "#cp" + std::to_string(peer) : tag;
 }
@@ -207,7 +218,8 @@ std::string publicationPeerTag(const std::string& tag, int peer) const {
 // particular, floor(E/unit) is only a candidate: all FULL pages and every
 // required terminal STATE/SWA page must still be present at that exact key.
 StorageRequest planCompletedDecode(const BatchKVCacheResource& resource, size_t computed_end,
-                                   Clock::time_point deadline = Clock::time_point::max()) {
+                                   Clock::time_point deadline = Clock::time_point::max(),
+                                   std::shared_ptr<StorageCompletionAdmission> admission = {}) {
     StorageRequest request;
     if (!decode_publication_enabled_ || !is_decode_role_ || parallelism_config_.tp_rank != 0
         || completion_stopped_.load() || resource.decodeCompletionSubmitted())
@@ -219,19 +231,24 @@ StorageRequest planCompletedDecode(const BatchKVCacheResource& resource, size_t 
     const size_t canonical_unit = base * target_physical_shards_;
     const size_t actual_computed_end = computed_end;
     const auto endpoint = resource.decode_endpoint;
-    if (!endpoint && !resource.decode_round_endpoints.empty()) {
-        RTP_LLM_LOG_WARNING("DTOP_GPU retained endpoints have no accepted latest endpoint");
-        return request;
-    }
+    const bool release_snapshot = endpoint && endpoint->release_snapshot;
     if (!cache_config_.mtp_sub_configs.empty()) {
         if (!endpoint || endpoint->end > computed_end) return request;
         computed_end = endpoint->end;
     }
+    std::unordered_map<std::string, BlockIndicesType> full_blocks;
+    if (endpoint) {
+        for (const auto& [tag, latest] : endpoint->full_prefixes)
+            full_blocks.emplace(tag, latest->blockIds());
+    }
     const auto& source_blocks = [&](const std::string& tag) -> const BlockIndicesType& {
+        const auto full = full_blocks.find(tag);
+        if (full != full_blocks.end()) return full->second;
         return endpoint ? endpoint->blocks.at(tag) : resource.blocks(0, tag);
     };
     const size_t completed_full = computed_end / base;
-    const auto&  source_keys    = resource.cacheKeys(0);
+    const auto&  source_keys    = resource.decode_publication_keys ? *resource.decode_publication_keys :
+                                                                   resource.cacheKeys(0);
     if (source_keys.size() < completed_full) {
         RTP_LLM_LOG_WARNING("DTOP_GPU incomplete key vector computed=%zu keys=%zu", computed_end, source_keys.size());
         return request;
@@ -241,6 +258,10 @@ StorageRequest planCompletedDecode(const BatchKVCacheResource& resource, size_t 
     size_t full_prefix = completed_full;
     for (const auto& entry : group_policy_->groups()) {
         const auto& group = topology_->group(entry.second.tag);
+        if (endpoint && !full_blocks.count(group.tag) && !endpoint->blocks.count(group.tag)) {
+            RTP_LLM_LOG_WARNING("DTOP_GPU missing retained group H=%zu tag=%s", endpoint->end, group.tag.c_str());
+            return request;
+        }
         if (!entry.second.is_full)
             unit = std::lcm(unit, group.seqSizePerBlock());
         else if (!endpoint) {
@@ -270,7 +291,7 @@ StorageRequest planCompletedDecode(const BatchKVCacheResource& resource, size_t 
                         ready = false;
                         break;
                     }
-            } else {
+            } else if (!release_snapshot) {
                 const size_t required = group.reuseBlockCount(count);
                 for (size_t key = count - std::min(count, required); key < count; ++key) {
                     const size_t tokens = (key + 1) * canonical_unit;
@@ -306,24 +327,8 @@ StorageRequest planCompletedDecode(const BatchKVCacheResource& resource, size_t 
             "DTOP_GPU no_new_checkpoint computed=%zu published=%zu prefill=%ld", computed_end, end, *handoff);
         return request;
     }
-    // Own the list itself, not an alias into a mutable/released stream. These
-    // are native page references; no GPU payload is copied at EOS.
-    std::vector<std::shared_ptr<const DecodeEndpoint>> retained_endpoints;
-    if (endpoint) {
-        retained_endpoints.push_back(endpoint);
-        for (const auto& retained : resource.decode_round_endpoints) {
-            if (!retained || retained->end > end) continue;
-            if (!retained->end || retained->end % unit) {
-                RTP_LLM_LOG_WARNING("DTOP_GPU invalid retained endpoint H=%zu", retained->end);
-                return {};
-            }
-            if (std::find(retained_endpoints.begin(), retained_endpoints.end(), retained) == retained_endpoints.end())
-                retained_endpoints.push_back(retained);
-        }
-    }
-    const auto endpoints = std::make_shared<const std::vector<std::shared_ptr<const DecodeEndpoint>>>(
-        std::move(retained_endpoints));
-    if (!endpoints->empty()) request.source_owner = endpoints;
+    // Keep the terminal snapshot's native page pins alive after EOS.
+    request.source_owner = endpoint;
     CacheKeysType complete_keys(source_keys.begin(), source_keys.begin() + end / base);
     request.keys = std::make_shared<const CacheKeysType>(mapper.canonicalCacheKeys(complete_keys));
     request.handles.resize(request.keys->size());
@@ -338,39 +343,7 @@ StorageRequest planCompletedDecode(const BatchKVCacheResource& resource, size_t 
     for (const auto& entry : group_policy_->groups()) {
         const auto& spec  = entry.second;
         const auto& group = topology_->group(spec.tag);
-        BlockIndicesType state_blocks;
-        if (!spec.is_full && !endpoints->empty()) {
-            state_blocks.assign(request.keys->size(), NULL_BLOCK_IDX);
-            for (const auto& retained : *endpoints) {
-                const size_t count = retained->end / canonical_unit;
-                const size_t first = count - std::min(count, group.reuseBlockCount(count));
-                const auto source = retained->blocks.find(spec.tag);
-                if (source == retained->blocks.end()) {
-                    RTP_LLM_LOG_WARNING("DTOP_GPU missing retained group H=%zu tag=%s",
-                                        retained->end, spec.tag.c_str());
-                    return {};
-                }
-                const auto& blocks = source->second;
-                for (size_t key = first; key < count; ++key) {
-                    const size_t tokens = (key + 1) * canonical_unit;
-                    if (tokens % group.seqSizePerBlock()
-                        || tokens / group.seqSizePerBlock() - 1 >= blocks.size()) {
-                        RTP_LLM_LOG_WARNING("DTOP_GPU incomplete retained group H=%zu tag=%s",
-                                            retained->end, spec.tag.c_str());
-                        return {};
-                    }
-                    const auto block = blocks[tokens / group.seqSizePerBlock() - 1];
-                    auto& selected = state_blocks[key];
-                    if (isNullBlockIdx(block) || (!isNullBlockIdx(selected) && selected != block)) {
-                        RTP_LLM_LOG_WARNING("DTOP_GPU missing/conflicting retained source H=%zu key=%zu tag=%s",
-                                            retained->end, key, spec.tag.c_str());
-                        return {};
-                    }
-                    selected = block;
-                }
-            }
-        }
-        const size_t first = spec.is_full || !state_blocks.empty() ? 0 : request.keys->size()
+        const size_t first = (spec.is_full || release_snapshot) ? 0 : request.keys->size()
             - std::min(request.keys->size(), group.reuseBlockCount(request.keys->size()));
         if (first == request.keys->size()) continue;
         const auto& blocks = source_blocks(spec.tag);
@@ -395,9 +368,11 @@ StorageRequest planCompletedDecode(const BatchKVCacheResource& resource, size_t 
                         blocks.at(target_physical_shards_ * key + (target_physical_shards_ > 1 ? peer : 0)));
                 block = projected->at(key).front();
             } else {
-                block = state_blocks.empty() ?
-                    blocks.at((key + 1) * canonical_unit / group.seqSizePerBlock() - 1) : state_blocks[key];
-                if (isNullBlockIdx(block)) continue;
+                const size_t tokens = (key + 1) * canonical_unit;
+                const size_t span = group.seqSizePerBlock();
+                if (release_snapshot && (tokens % span || tokens / span > blocks.size())) continue;
+                block = blocks.at(tokens / span - 1);
+                if (release_snapshot && isNullBlockIdx(block)) continue;
             }
             if (spec.is_full && target_physical_shards_ > 1)
                 for (auto peer : projected->at(key)) charge(peer);
@@ -420,7 +395,12 @@ StorageRequest planCompletedDecode(const BatchKVCacheResource& resource, size_t 
         check_cuda_value(writer_status);
 #endif
     if (Clock::now() >= deadline) return {};
-    request.completion_admission = publication_budget_->tryAcquire(bytes);
+    if (admission && (!endpoint || bytes > endpoint->retained_page_bytes)) {
+        RTP_LLM_LOG_ERROR("DTOP_GPU EOS plan exceeded reserved bytes: needed=%zu reserved=%zu",
+                          bytes, endpoint ? endpoint->retained_page_bytes : 0);
+        return {};
+    }
+    request.completion_admission = admission ? std::move(admission) : publication_budget_->tryAcquire(bytes);
     if (!request.completion_admission) {
         const auto pending = publication_budget_->snapshot();
         RTP_LLM_LOG_WARNING("DTOP_GPU admission=rejected retained_bytes=%zu pending_bytes=%zu pending_jobs=%zu",

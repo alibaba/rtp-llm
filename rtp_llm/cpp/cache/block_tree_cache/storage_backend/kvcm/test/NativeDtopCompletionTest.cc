@@ -198,8 +198,7 @@ protected:
         std::map<std::string, std::string>  specs;
         std::atomic<int>                    starts{0}, saves{0}, finishes{0}, aborts{0};
         std::atomic<size_t>                 requested_keys{0};
-        bool                                block_start = false, fail_save = false, lose_commit = false,
-                                            all_state = false;
+        bool                                block_start = false, fail_save = false, lose_commit = false;
         std::promise<void>                  entered, released;
         std::shared_future<void>            release = released.get_future().share();
         std::future<void>                   started = entered.get_future();
@@ -268,7 +267,7 @@ protected:
                             for (int peer = 0; peer < cp; ++peer) {
                                 const auto suffix = std::to_string(key) + ":" + std::to_string(peer);
                                 one.push_back({specs.at("full#cp" + std::to_string(peer)), "pace://F:" + suffix});
-                                if (all_state || keys.size() - key
+                                if (keys.size() - key
                                     <= env.cache_config.topology().group("state").reuseBlockCount(keys.size()))
                                     one.push_back({specs.at("state#cp" + std::to_string(peer)), "pace://S:" + suffix});
                             }
@@ -365,7 +364,7 @@ protected:
     };
 };
 
-TEST(NativeEndpointPublicationTest, AllCapturedDsparkEndpointsShareOneEosTransferAndOutliveTheStream) {
+static void verifyReleasedDsparkStatePublication(bool all_resident_state) {
     autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
     autil::EnvGuard budget("RTP_LLM_REMOTE_CACHE_DECODE_PENDING_MIB", "1");
     test::withDecodePublicationStartup([&] {
@@ -432,13 +431,11 @@ TEST(NativeEndpointPublicationTest, AllCapturedDsparkEndpointsShareOneEosTransfe
         }
         // Real capture owns/fences these synthetic writers. This is not a
         // model-kernel, CUDA-call-count, probe-error or performance test.
-        resource.decode_endpoint = manager->retainDecodeEndpoint(ids, tags, 0, 8);
+        ASSERT_EQ(cudaStreamSynchronize(at::cuda::getCurrentCUDAStream().stream()), cudaSuccess);
+        resource.dspark_decode_publication_unit = 8;
+        resource.dspark_release_computed_end = 19;
+        resource.decode_endpoint = manager->retainReleasedDSparkPages(resource, ids, ids, all_resident_state);
         ASSERT_TRUE(resource.decode_endpoint);
-        resource.decode_round_endpoints.push_back(resource.decode_endpoint);
-        std::weak_ptr<const DecodeEndpoint> first_endpoint = resource.decode_endpoint;
-        resource.decode_endpoint = manager->retainDecodeEndpoint(ids, tags, 0, 16, resource.decode_endpoint);
-        ASSERT_TRUE(resource.decode_endpoint);
-        resource.decode_round_endpoints.push_back(resource.decode_endpoint);
         std::weak_ptr<const DecodeEndpoint> endpoint = resource.decode_endpoint;
         block_tree_cache_test::CallbackBarrier barrier;
         std::map<std::string, std::string> specs;
@@ -460,7 +457,8 @@ TEST(NativeEndpointPublicationTest, AllCapturedDsparkEndpointsShareOneEosTransfe
                 for (size_t key = 0; key < keys.size(); ++key) {
                     kv_cache_manager::Location row;
                     for (const auto& group : env.cache_config.topology().groups()) {
-                        if (!group.policy.enable_prefix_reuse) continue;
+                        if (!group.policy.enable_prefix_reuse
+                            || (key == 0 && !all_resident_state && group.policy.group_type != CacheGroupType::FULL)) continue;
                         row.push_back({specs.at(group.tag + "#cp0"),
                             "pace://endpoint/" + group.tag + "/" + std::to_string(key)});
                     }
@@ -492,6 +490,10 @@ TEST(NativeEndpointPublicationTest, AllCapturedDsparkEndpointsShareOneEosTransfe
             [&](const auto&, const auto&, const auto&, const auto& mask, const auto& locations) {
                 EXPECT_EQ(std::get<kv_cache_manager::BlockMaskOffset>(mask), 2u);
                 EXPECT_EQ(locations.size(), 2u);
+                if (locations.size() == 2) {
+                    EXPECT_EQ(locations[0].size(), all_resident_state ? 3u : 1u);
+                    EXPECT_EQ(locations[1].size(), 3u);
+                }
                 for (const auto& row : locations)
                     for (const auto& item : row) EXPECT_EQ(item.uri.rfind("actual_", 0), 0u);
                 ++finished;
@@ -508,28 +510,37 @@ TEST(NativeEndpointPublicationTest, AllCapturedDsparkEndpointsShareOneEosTransfe
             env.cache_config, settings, runtime, parallel, speculation, nullptr, true, nullptr, client));
         block_tree_cache_detail::ScopeRollback unblock([&] { barrier.release(); });
         ASSERT_TRUE(initSingleRank(*backend.backend, env));
+        BatchKVCacheResource expired;
+        expired.recordDecodePublicationEos(BatchKVCacheResource::DecodePublicationClock::now() - std::chrono::hours(24));
+        EXPECT_FALSE(backend->canStartDecodePublication(expired));
         ASSERT_TRUE(backend->captureCompletedDecode(resource, 8, false));
         ASSERT_TRUE(backend->captureCompletedDecode(resource, 16, false));
-        EXPECT_EQ(saved.load(), 0u); // Pinning endpoints never uploads during generation.
+        EXPECT_EQ(saved.load(), 0u);
         ASSERT_TRUE(backend->captureCompletedDecode(resource, 19, true));
         ASSERT_TRUE(barrier.waitUntilEnteredFor(1, std::chrono::seconds(5)));
         ASSERT_TRUE(backend->captureCompletedDecode(resource, 19, true)); // Once guard covers all endpoints.
         resource.clearBlocks();
         pages.reset();
         EXPECT_FALSE(endpoint.expired()); // Only the actual publication task owns the endpoint now.
-        EXPECT_FALSE(first_endpoint.expired());
         barrier.release();
         ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
         backend->shutdown(); // Joins callbacks before checking final owner/ref release.
-        EXPECT_EQ(saved.load(), 6u);
+        EXPECT_EQ(saved.load(), all_resident_state ? 6u : 4u);
         EXPECT_EQ(finished.load(), 1u);
         EXPECT_TRUE(endpoint.expired());
-        EXPECT_TRUE(first_endpoint.expired());
         for (const auto& [tag, pool] : env.pools_by_tag) {
             EXPECT_EQ(pool->referencedBlocksNum(DeviceBlockRefType::REMOTE_CONNECTOR), 0u) << tag;
             EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u) << tag;
         }
     });
+}
+
+TEST(NativeEndpointPublicationTest, OnlyTerminalDsparkStateIsPublishedAndOutlivesTheStream) {
+    verifyReleasedDsparkStatePublication(false);
+}
+
+TEST(NativeEndpointPublicationTest, AllResidentDsparkStatesUseTheirOwnBytesInOnePublication) {
+    verifyReleasedDsparkStatePublication(true);
 }
 
 TEST_P(EosGpuCompletionTest, DisabledAtInitializationDoesNotPublishPinOrChangeNativePages) {
@@ -555,7 +566,7 @@ TEST_P(EosGpuCompletionTest, DisabledAtInitializationDoesNotPublishPinOrChangeNa
         EXPECT_EQ(s.aborts, 0);
         EXPECT_FALSE(s.resource.decodeCompletionSubmitted());
         EXPECT_FALSE(s.resource.decode_endpoint);
-        EXPECT_TRUE(s.resource.decode_round_endpoints.empty());
+        EXPECT_TRUE(s.resource.decode_provisional_endpoints.empty());
         for (const auto& tag : {std::string("full"), std::string("state")}) {
             const auto& blocks = tag == "full" ? s.full : s.state;
             const auto pool = s.env.pools_by_tag.at(tag);
@@ -763,7 +774,7 @@ TEST_P(EosGpuCompletionTest, KnownPrefillBoundarySkipsCheckpointWithoutNewDecode
 
 TEST_P(EosGpuCompletionTest, UnknownSdkCompletionUsesNativeFrozenCustodyAcrossShutdown) {
     ::rtp_llm::test::withDecodePublicationStartup([&] {
-    // Leave the native guard enabled. Even the maximum FULL source union
+    // Leave the native guard enabled. Even the maximum FULL prefix
     // occupies at most 25% of this fixture's pool, below its 30% lower bound.
     const int physical_shards = std::get<1>(GetParam()) ? std::get<0>(GetParam()) : 1;
     const int pool_blocks = std::max(64, 4 * Scenario::kCheckpointCount * physical_shards);
@@ -793,30 +804,24 @@ TEST_P(EosGpuCompletionTest, UnknownSdkCompletionUsesNativeFrozenCustodyAcrossSh
     };
     pin("full", 0, s.count * s.shards, s.full);
     const auto state_count = s.env.cache_config.topology().group("state").reuseBlockCount(s.count);
-    pin("state", s.count - static_cast<int>(std::min<size_t>(s.count, state_count)), s.count, s.state);
+    const int first_state = s.count - static_cast<int>(std::min<size_t>(s.count, state_count));
+    ASSERT_GT(first_state, 0);
+    pin("state", first_state, s.count, s.state);
     s.resource.decode_endpoint = std::move(endpoint);
-    auto earlier = std::make_shared<DecodeEndpoint>();
-    earlier->end = s.shards * 128;
-    earlier->blocks["full"] = BlockIndicesType(s.full.begin(), s.full.begin() + s.shards);
-    earlier->blocks["state"] = {s.state.front()};
-    auto old_state = std::make_shared<DecodeEndpoint::PageHold>();
-    old_state->pool = s.env.pools_by_tag.at("state");
-    old_state->block = s.state.front();
-    old_state->pin = old_state->pool->pinForRemotePublication(old_state->block);
-    earlier->pages["state"].push_back(std::move(old_state));
-    s.resource.decode_round_endpoints.push_back(std::move(earlier));
-    s.all_state = true;
     s.fail_save = true;
     ASSERT_TRUE(s.backend->captureCompletedDecode(s.resource, s.end(), true));
-    s.resource.decode_endpoint.reset(); // Only the real in-flight request owns the endpoints now.
-    s.resource.decode_round_endpoints.clear();
+    s.resource.decode_endpoint.reset(); // Only the in-flight write owns the terminal endpoint now.
     ASSERT_TRUE(waitForBackendOperationsForTest(*s.backend));
     s.dropRequestRefs();
     EXPECT_EQ(s.finishes, 0);
     // Unknown DMA completion must retain the remote WRITING session as well as
     // local GPU pages. An immediate abort could recycle its destination.
     EXPECT_EQ(s.aborts, 0);
-    EXPECT_TRUE(s.env.pools_by_tag.at("state")->isFrozen(s.state.front()));
+    const auto& state_pool = s.env.pools_by_tag.at("state");
+    EXPECT_FALSE(state_pool->isAllocated(s.state.front()));
+    for (int i = first_state; i < s.count; ++i) {
+        EXPECT_TRUE(state_pool->isFrozen(s.state[i]));
+    }
     for (int i = 0; i < s.count * s.shards; ++i) {
         EXPECT_TRUE(s.env.pools_by_tag.at("full")->isAllocated(s.full[i]));
         EXPECT_TRUE(s.env.pools_by_tag.at("full")->isFrozen(s.full[i]));

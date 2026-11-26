@@ -79,6 +79,10 @@ public:
     // Optional EOS publication; true means handled/skipped, not committed.
     bool
     captureCompletedDecode(const BatchKVCacheResource& resource, size_t computed_end, bool finished = true) override;
+    bool enqueueCompletedDecode(const BatchKVCacheResource& resource, size_t computed_end,
+                                DecodePublicationPrepare prepare_source) override;
+    std::shared_ptr<StorageCompletionAdmission> reserveDecodePublication(size_t bytes) override;
+    bool canStartDecodePublication(const BatchKVCacheResource& resource) const override;
 
 protected:
     bool               initImpl() override;
@@ -99,6 +103,9 @@ protected:
                              const StorageQuarantineBreakdown& breakdown) noexcept override;
 
 private:
+    StorageWriteTask prepareCompletedDecodeWrite(const BatchKVCacheResource& source, size_t end,
+                                                 std::chrono::steady_clock::time_point deadline,
+                                                 std::shared_ptr<StorageCompletionAdmission> admission = {});
     class Impl;
     std::unique_ptr<Impl> impl_;
 };

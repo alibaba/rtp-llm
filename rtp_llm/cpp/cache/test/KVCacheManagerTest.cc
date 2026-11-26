@@ -324,6 +324,59 @@ TEST_F(KVCacheManagerTest, EndpointReadsStridedCpuBlockTablesWithoutChangingPage
     EXPECT_EQ(f.refs(), baseline);
 }
 
+TEST_F(KVCacheManagerTest, DsparkReleaseSelectsCompleteResidentStateIndependently) {
+    EndpointHoldFixture f;
+    const auto baseline = f.refs();
+    BatchKVCacheResource resource;
+    resource.resetBatchSize(1);
+    resource.initGroups(f.manager->cacheConfig().topologyPtr());
+    for (const auto& tag : f.tags) {
+        BlockIndicesType blocks;
+        for (size_t slot = 0; slot < 4; ++slot) blocks.push_back(f.block(tag, slot));
+        resource.setBatchBlocks(0, tag, std::move(blocks));
+    }
+    resource.dspark_decode_publication_unit = 4;
+    resource.dspark_release_computed_end = 13;
+    auto latest = f.manager->retainReleasedDSparkPages(resource, f.ids, f.ids, false);
+    ASSERT_TRUE(latest);
+    EXPECT_EQ(latest->end, 12u);
+    EXPECT_EQ(latest->blocks.at("swa"), (BlockIndicesType{NULL_BLOCK_IDX, NULL_BLOCK_IDX, f.block("swa", 2)}));
+    latest.reset();
+    auto all = f.manager->retainReleasedDSparkPages(resource, f.ids, f.ids, true);
+    ASSERT_TRUE(all);
+    EXPECT_EQ(all->blocks.at("state"), (BlockIndicesType{f.block("state", 0), f.block("state", 1), f.block("state", 2)}));
+    EXPECT_EQ(f.refs("full", 0), 2u);
+    EXPECT_EQ(f.refs("state", 2), 2u);
+    EXPECT_EQ(f.refs("state", 3), 1u); // The incomplete fourth endpoint is never retained.
+    all.reset();
+
+    // A late backfill can have a perfectly matching numeric page ID. Reject H=8
+    // as a whole, and reject H=12 on an independent missing SWA slot.
+    resource.dspark_state_backfills["state"][1] = 8;
+    resource.mutableBlockIds(0, "swa").setAt(2, NULL_BLOCK_IDX);
+    auto earlier = f.manager->retainReleasedDSparkPages(resource, f.ids, f.ids, true);
+    ASSERT_TRUE(earlier);
+    EXPECT_EQ(earlier->end, 12u); // FULL publication is independent from missing state.
+    for (const auto& tag : {"state", "swa"}) {
+        EXPECT_EQ(earlier->blocks.at(tag), (BlockIndicesType{f.block(tag, 0), NULL_BLOCK_IDX, NULL_BLOCK_IDX}));
+        EXPECT_EQ(f.refs(tag, 0), 2u);
+        EXPECT_EQ(f.refs(tag, 1), 1u);
+    }
+    earlier.reset();
+    auto full_only = f.manager->retainReleasedDSparkPages(resource, f.ids, f.ids, false);
+    ASSERT_TRUE(full_only);
+    EXPECT_EQ(full_only->blocks.at("state"), (BlockIndicesType(3, NULL_BLOCK_IDX)));
+    full_only.reset();
+    EXPECT_EQ(f.refs(), baseline);
+
+    resource.dspark_state_backfills.clear();
+    resource.mutableBlockIds(0, "swa").setAt(2, f.block("swa", 2));
+    std::shared_ptr<StorageCompletionAdmission> admission;
+    EXPECT_FALSE(f.manager->retainReleasedDSparkPages(resource, f.ids, f.ids, false, &admission));
+    EXPECT_FALSE(admission);
+    EXPECT_EQ(f.refs(), baseline);
+}
+
 TEST_F(KVCacheManagerTest, OrdinaryHostMapCaptureUsesTheSameNativePagesAndPreservesEarlierState) {
     EndpointHoldFixture f;
     const auto baseline = f.refs();

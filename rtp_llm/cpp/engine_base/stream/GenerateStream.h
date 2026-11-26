@@ -107,6 +107,7 @@ struct StreamSpecUpdateInfo {
     // Target-verified draft candidates for this published row, excluding the
     // anchor/bonus and before EOS/window/output clipping. -1 means unknown.
     int64_t verified_draft_tokens = -1;
+    DecodeWriterTables decode_writer_tables;
 };
 
 struct SpeculativeExecutorStreamOutput {
@@ -200,7 +201,7 @@ public:
     }
     void update(const StreamUpdateInfo& update_info);
     std::shared_ptr<const DecodeEndpoint> latestDecodePublicationEndpoint() const;
-    void setDecodePublicationPages(std::vector<std::shared_ptr<const DecodeEndpoint>> pages);
+    void setDecodePublicationCandidates(BatchKVCacheResource::DecodeEndpoints candidates);
     void specUpdate(const StreamSpecUpdateInfo& update_info);
     bool updateKvCacheBlocks(const torch::Tensor& src_batch_indices);
 
@@ -664,7 +665,7 @@ public:
     // releaseResource waits for zero so worker-side update/specUpdate cannot
     // write into blocks already returned to the pool.
     bool mayCrossDecodePublicationBoundary(size_t unit, size_t advance) const;
-    bool beginDecodePublicationSubmission();
+    bool beginDecodePublicationSubmission(size_t dspark_publication_unit = 0);
     void endDecodePublicationSubmission();
     void retainUnknownDecodePublication(const std::shared_ptr<GenerateStream>& owner);
     void incPendingAsyncBookkeeping();
@@ -720,6 +721,7 @@ public:
         int  max_mtp_advance               = 0;
         // Immutable pinned sources for an asynchronously published grown table.
         std::vector<torch::Tensor> cache_snapshot_host_buffers;
+        bool cache_snapshot_host_row_compact = false;
         // The MTP executor materializes these immutable host snapshots at its
         // batch boundary, before constructing StreamGroups or reading pages.
         bool batch_cache_snapshot_upload   = false;
@@ -820,6 +822,7 @@ public:
         mtp_async_state_.next_kv_cache_kernel_block_id_gpu = torch::Tensor();
         mtp_async_state_.cache_snapshot_upload_pending     = false;
         mtp_async_state_.cache_snapshot_host_buffers.clear();
+        mtp_async_state_.cache_snapshot_host_row_compact = false;
     }
     torch::Tensor getLastHiddenStatesGpu() const {
         std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);

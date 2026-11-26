@@ -3986,25 +3986,48 @@ TEST_F(MtpBatchStreamProcessorTest, testCacheSnapshotOverlayKeepsPhysicalKernelP
     steady->setIsContextStream(false);
     fresh->setIsContextStream(false);
 
-    const auto                          cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    const auto cuda_i32        = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    const auto steady_physical = torch::tensor({11, 12, 13}, torch::kInt32).reshape({1, 1, 3});
+    const auto steady_kernel   = torch::tensor({101, 102, 103, 104}, torch::kInt32).reshape({1, 1, 4});
     GenerateStream::MtpAsyncDeviceState state;
-    state.next_kv_cache_block_id_gpu = torch::tensor({11, 12, 13}, torch::kInt32).reshape({1, 1, 3}).to(cuda_i32);
-    state.next_kv_cache_kernel_block_id_gpu =
-        torch::tensor({101, 102, 103, 104}, torch::kInt32).reshape({1, 1, 4}).to(cuda_i32);
+    state.next_kv_cache_block_id_gpu        = steady_physical.to(cuda_i32);
+    state.next_kv_cache_kernel_block_id_gpu = steady_kernel.to(cuda_i32);
+    state.cache_snapshot_host_buffers      = {steady_physical, steady_kernel};
+    state.cache_snapshot_host_row_compact  = true;
     steady->setMtpAsyncDeviceState(std::move(state));
 
+    const auto fresh_physical = torch::tensor({21, 22, 23, 24, 25}, torch::kInt32).reshape({1, 1, 5});
+    const auto fresh_kernel   = torch::tensor({201, 202, 203, 204, 205, 206, 207}, torch::kInt32).reshape({1, 1, 7});
     GptModelInputs model_input;
     auto           pinned_i32            = torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true);
     model_input.kv_cache_block_id        = torch::zeros({1, 2, 5}, pinned_i32);
     model_input.kv_cache_kernel_block_id = torch::zeros({1, 2, 7}, pinned_i32);
-    model_input.kv_cache_block_id.select(1, 1).copy_(torch::tensor({21, 22, 23, 24, 25}, torch::kInt32));
-    model_input.kv_cache_kernel_block_id.select(1, 1).copy_(
-        torch::tensor({201, 202, 203, 204, 205, 206, 207}, torch::kInt32));
+    model_input.kv_cache_block_id.narrow(1, 1, 1).copy_(fresh_physical);
+    model_input.kv_cache_kernel_block_id.narrow(1, 1, 1).copy_(fresh_kernel);
 
     TestableMtpBatchStreamProcessor processor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
-    TensorHolder holder;
-    processor.overlayMtpCacheSnapshots(StreamGroups({steady, fresh}), model_input, holder);
+    TensorHolder      holder;
+    MtpWriterHostRows writer_rows;
+    processor.overlayMtpCacheSnapshots(StreamGroups({steady, fresh}), model_input, holder, &writer_rows);
+
+    ASSERT_EQ(writer_rows.size(), 2u);
+    const auto steady_tables = writer_rows[0].ownTables(steady.get());
+    const auto fresh_tables  = writer_rows[1].ownTables(fresh.get());
+    ASSERT_TRUE(steady_tables[0].defined() && steady_tables[0].is_cpu());
+    ASSERT_TRUE(steady_tables[1].defined() && steady_tables[1].is_cpu());
+    ASSERT_TRUE(fresh_tables[0].defined() && fresh_tables[0].is_cpu());
+    ASSERT_TRUE(fresh_tables[1].defined() && fresh_tables[1].is_cpu());
+    EXPECT_TRUE(torch::equal(steady_tables[0], steady_physical));
+    EXPECT_TRUE(torch::equal(steady_tables[1], steady_kernel));
+    EXPECT_TRUE(torch::equal(fresh_tables[0], fresh_physical));
+    EXPECT_TRUE(torch::equal(fresh_tables[1], fresh_kernel));
+    const auto wrong_steady_tables = writer_rows[0].ownTables(fresh.get());
+    const auto wrong_fresh_tables  = writer_rows[1].ownTables(steady.get());
+    EXPECT_FALSE(wrong_steady_tables[0].defined());
+    EXPECT_FALSE(wrong_steady_tables[1].defined());
+    EXPECT_FALSE(wrong_fresh_tables[0].defined());
+    EXPECT_FALSE(wrong_fresh_tables[1].defined());
 
     ASSERT_TRUE(model_input.kv_cache_block_id.is_cuda());
     ASSERT_TRUE(model_input.kv_cache_kernel_block_id.is_cuda());
@@ -4207,12 +4230,33 @@ TEST_F(MtpBatchStreamProcessorTest, AllSnapshotDecodeGatherSkipsHostTablesForUni
                 strided.copy_(state.next_kv_cache_block_id_gpu);
                 state.next_kv_cache_block_id_gpu = strided;
             }
+            if (row != 1) {
+                state.cache_snapshot_host_buffers = {physical, kernel};
+                state.cache_snapshot_host_row_compact = true;
+            }
             stream->setMtpAsyncDeviceState(std::move(state));
             streams.push_back(stream);
         }
-        TensorHolder holder;
-        auto         input = processor.gatherDecodeModelInput(StreamGroups(streams), holder);
+        TensorHolder      holder;
+        MtpWriterHostRows writer_rows;
+        auto              input = processor.gatherDecodeModelInput(StreamGroups(streams), holder, &writer_rows);
         ASSERT_TRUE(input.ok()) << "mode=" << mode;
+        ASSERT_EQ(writer_rows.size(), streams.size());
+        size_t row = 0;
+        for (const auto& stream : streams) {
+            const auto tables = writer_rows[row].ownTables(stream.get());
+            if (row == 1) {
+                EXPECT_FALSE(tables[0].defined());
+                EXPECT_FALSE(tables[1].defined());
+            } else {
+                const auto state = stream->getMtpAsyncDeviceState();
+                ASSERT_TRUE(tables[0].defined() && tables[0].is_cpu());
+                ASSERT_TRUE(tables[1].defined() && tables[1].is_cpu());
+                EXPECT_EQ(tables[0].data_ptr<int32_t>(), state.cache_snapshot_host_buffers[0].data_ptr<int32_t>());
+                EXPECT_EQ(tables[1].data_ptr<int32_t>(), state.cache_snapshot_host_buffers[1].data_ptr<int32_t>());
+            }
+            ++row;
+        }
         ASSERT_TRUE(input->kv_cache_block_id.defined() && input->kv_cache_block_id.is_cuda()) << "mode=" << mode;
         ASSERT_TRUE(input->kv_cache_kernel_block_id.defined() && input->kv_cache_kernel_block_id.is_cuda())
             << "mode=" << mode;
