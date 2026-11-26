@@ -461,6 +461,7 @@ class WorkerCountMetricsTest(TestCase):
 class VitProxyRpcServerStatusTest(TestCase):
     def test_worker_status_exposes_admission_count_including_zero(self):
         engine = MagicMock()
+        engine.is_alive.return_value = True
         engine.get_inflight_input_count.return_value = 13
         server = MultimodalRpcServer(engine)
         result = server.GetWorkerStatus(StatusVersionPB(), FakeContext())
@@ -470,6 +471,16 @@ class VitProxyRpcServerStatusTest(TestCase):
         result = server.GetWorkerStatus(StatusVersionPB(), FakeContext())
         self.assertTrue(result.HasField("mm_inflight_inputs"))
         self.assertEqual(result.mm_inflight_inputs.value, 0)
+
+    def test_stopped_worker_reports_unhealthy_without_a_load_sample(self):
+        engine = MagicMock()
+        engine.is_alive.return_value = False
+        result = MultimodalRpcServer(engine).GetWorkerStatus(
+            StatusVersionPB(), FakeContext()
+        )
+        self.assertFalse(result.alive)
+        self.assertFalse(result.HasField("mm_inflight_inputs"))
+        engine.get_inflight_input_count.assert_not_called()
 
     def test_load_sums_all_children_and_does_not_turn_missing_sample_into_zero(self):
         first = WorkerStatusPB(role="VIT", alive=True, status_version=1)

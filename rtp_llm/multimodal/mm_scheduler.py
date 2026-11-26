@@ -820,6 +820,9 @@ class MMScheduler:
                 except InvalidStateError:
                     pass
 
+    def is_alive(self) -> bool:
+        return not self._stopped.is_set() and self._executor.is_alive()
+
     def _executor_loop(self) -> None:
         # Pin this thread to the engine's device once, up front: a new thread
         # inherits cuda:0, so a non-zero local rank would otherwise forward on the

@@ -463,6 +463,9 @@ class MMProcessEngine:
         with self.query_num_lock:
             return self.query_num
 
+    def is_alive(self) -> bool:
+        return not self._stopped and self._scheduler.is_alive()
+
     def get_inflight_input_count(self) -> int:
         """Remote ViT media work, including executor queue and publication.
 

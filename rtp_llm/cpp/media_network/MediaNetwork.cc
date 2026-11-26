@@ -137,6 +137,12 @@ struct Job {
     long              status  = 0;
     bool              hit     = false;
     int               retries = 0, connect_retries = 0, proxy_attempts = 0, fallbacks = 0;
+
+    void finish() {
+        finished = Clock::now();
+        req      = Request{};
+        completed.store(true);
+    }
 };
 struct Transfer {
     Job&                                            job;
@@ -157,15 +163,6 @@ struct Transfer {
             throw Failure("too_large");
         }
         body.append(bytes);
-    }
-
-    std::string failure() const {
-        if (job.canceled.load())
-            return "cancelled";
-        auto now = Clock::now();
-        if (now >= job.deadline || now - last_io >= std::chrono::milliseconds(job.req.idle_ms))
-            return "timeout";
-        return {};
     }
 };
 size_t write_body(char* data, size_t sz, size_t n, void* ptr) noexcept {
@@ -361,19 +358,25 @@ bool trusted_oss_endpoint(const std::string& host, const Policy& policy) {
     return false;
 }
 
-struct DirectPeerCheck {
-    const Policy& policy;
-    bool          blocked = false;
+struct ConnectionState {
+    const Policy* direct_policy = nullptr;
+    bool          ready_to_send = false;
+    bool          blocked       = false;
 };
 
 int check_connected_peer(void* user, char* ip, char*, int, int) noexcept {
-    auto&    check = *static_cast<DirectPeerCheck*>(user);
+    auto& check = *static_cast<ConnectionState*>(user);
+    // libcurl invokes this after the proxy tunnel and TLS handshake, just before
+    // sending the origin request (also for reused connections).
+    check.ready_to_send = true;
+    if (!check.direct_policy)
+        return CURL_PREREQFUNC_OK;
     in_addr  v4{};
     in6_addr v6{};
     if (ip && inet_pton(AF_INET, ip, &v4) == 1)
-        check.blocked = check.policy.blocked_networks.contains(AF_INET, &v4);
+        check.blocked = check.direct_policy->blocked_networks.contains(AF_INET, &v4);
     else if (ip && inet_pton(AF_INET6, ip, &v6) == 1)
-        check.blocked = check.policy.blocked_networks.contains(AF_INET6, &v6);
+        check.blocked = check.direct_policy->blocked_networks.contains(AF_INET6, &v6);
     else
         check.blocked = true;
     return check.blocked ? CURL_PREREQFUNC_ABORT : CURL_PREREQFUNC_OK;
@@ -396,7 +399,7 @@ void pin_media_origin(CURL*              curl,
                       Job&               job,
                       bool               proxied,
                       HeaderList&        pins,
-                      DirectPeerCheck&   peer) {
+                      ConnectionState&   peer) {
     std::unique_ptr<CURLU, decltype(&curl_url_cleanup)> parsed(curl_url(), curl_url_cleanup);
     if (!parsed || curl_url_set(parsed.get(), CURLUPART_URL, url.c_str(), 0) != CURLUE_OK)
         throw Failure("invalid_url");
@@ -412,10 +415,8 @@ void pin_media_origin(CURL*              curl,
         return;
     // The multi handle also caches connections made for service requests.
     // Check the peer even when curl reuses an already-open direct connection.
-    if (!proxied
-        && (curl_easy_setopt(curl, CURLOPT_PREREQFUNCTION, check_connected_peer) != CURLE_OK
-            || curl_easy_setopt(curl, CURLOPT_PREREQDATA, &peer) != CURLE_OK))
-        throw Failure("transport");
+    if (!proxied)
+        peer.direct_policy = &policy;
     in_addr literal{};
     if (inet_aton(host.c_str(), &literal)) {
         if (policy.blocked_networks.contains(AF_INET, &literal))
@@ -428,8 +429,7 @@ void pin_media_origin(CURL*              curl,
         // approved numeric origin while preserving the original HTTP/TLS host.
         auto address = std::find_if(addresses.begin(), addresses.end(), [](const auto& s) { return s.front() != '['; });
         pins.append("::" + (address == addresses.end() ? addresses.front() : *address) + ":");
-        if (curl_easy_setopt(curl, CURLOPT_CONNECT_TO, pins.head) != CURLE_OK
-            || curl_easy_setopt(curl, CURLOPT_SUPPRESS_CONNECT_HEADERS, 1L) != CURLE_OK)
+        if (curl_easy_setopt(curl, CURLOPT_CONNECT_TO, pins.head) != CURLE_OK)
             throw Failure("transport");
     } else {
         std::string entry = "+" + host + ":" + port + ":";
@@ -538,7 +538,10 @@ void exchange(CurlConnectionPool& connections, CURL* curl, Job& job, const Polic
         strip     = strip || dest.origin != first.origin;
         curl_easy_reset(curl);
         HeaderList      pins;
-        DirectPeerCheck peer{policy};
+        ConnectionState peer;
+        if (curl_easy_setopt(curl, CURLOPT_PREREQFUNCTION, check_connected_peer) != CURLE_OK
+            || curl_easy_setopt(curl, CURLOPT_PREREQDATA, &peer) != CURLE_OK)
+            throw Failure("transport");
         if (req.media && policy.internal)
             pin_media_origin(curl, url, dest, policy, job, !proxy.empty(), pins, peer);
         auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(job.deadline - Clock::now()).count();
@@ -567,8 +570,11 @@ void exchange(CurlConnectionPool& connections, CURL* curl, Job& job, const Polic
                 throw Failure("transport");
         }
         curl_easy_setopt(curl, CURLOPT_PROXY, proxy.c_str());
-        if (!proxy.empty())
+        if (!proxy.empty()) {
             curl_easy_setopt(curl, CURLOPT_NOPROXY, "");
+            if (curl_easy_setopt(curl, CURLOPT_SUPPRESS_CONNECT_HEADERS, 1L) != CURLE_OK)
+                throw Failure("transport");
+        }
         if (!policy.ca.empty())
             curl_easy_setopt(curl, CURLOPT_CAINFO, policy.ca.c_str());
         curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, std::min<long>(ms, req.connect_ms));
@@ -597,13 +603,13 @@ void exchange(CurlConnectionPool& connections, CURL* curl, Job& job, const Polic
         if (transfer.large)
             throw Failure("too_large");
         if (rc != CURLE_OK && !(req.media && rc == CURLE_TOO_MANY_REDIRECTS)) {
-            auto stopped = transfer.failure();
-            if (!stopped.empty())
-                throw Failure(stopped);
-            if (rc == CURLE_OPERATION_TIMEDOUT) {
-                double pretransfer = 0;
-                curl_easy_getinfo(curl, CURLINFO_PRETRANSFER_TIME, &pretransfer);
-                throw Failure(!transfer.received_response && pretransfer == 0 ? "connect_timeout" : "timeout");
+            const auto now = Clock::now();
+            // libcurl takes whole milliseconds. Its total timeout can fire just
+            // before our steady-clock deadline, with no usable time for fallback.
+            if (job.deadline - now < std::chrono::milliseconds(1))
+                throw Failure("timeout");
+            if (rc == CURLE_OPERATION_TIMEDOUT || now - transfer.last_io >= std::chrono::milliseconds(req.idle_ms)) {
+                throw Failure(peer.ready_to_send || transfer.received_response ? "timeout" : "connect_timeout");
             }
             if (rc == CURLE_URL_MALFORMAT || rc == CURLE_UNSUPPORTED_PROTOCOL)
                 throw Failure("invalid_url");
@@ -662,12 +668,31 @@ public:
             || (req.media ? req.method != "GET" : (req.method != "GET" && req.method != "POST" && req.method != "PUT")))
             throw std::invalid_argument("invalid network request options");
         auto job      = std::make_shared<Job>();
-        job->deadline = Clock::now() + std::chrono::milliseconds(req.budget_ms);
+        job->started  = Clock::now();
+        job->deadline = job->started + std::chrono::milliseconds(req.budget_ms);
         job->req      = std::move(req);
+        bool ready;
+        try {
+            if (Clock::now() >= job->deadline)
+                throw Failure("timeout");
+            if (job->req.media)
+                endpoint(rewrite(job->req.url, policy_), policy_, true);
+            ready = cached(*job);
+        } catch (const Failure& e) {
+            job->error = e.what();
+            ready      = true;
+        }
+        if (ready)
+            job->finish();
         {
             std::lock_guard<std::mutex> lock(mu_);
             if (closed_)
                 throw Failure("network is closed");
+            if (ready) {
+                done_.push_back(job);
+                done_cv_.notify_one();
+                return job;
+            }
             if (queue_.size() >= 4096)
                 throw Failure("network queue full");
             queue_.push_back(job);
@@ -696,6 +721,7 @@ public:
                 job->canceled = true;
         }
         cv_.notify_all();
+        backoff_cv_.notify_all();
         connections_->stop();
         for (auto& worker : workers_)
             if (worker.joinable())
@@ -734,65 +760,59 @@ private:
             lru_.pop_back();
         }
     }
-    void perform(CURL* curl, Job& job) {
-        const auto& req = job.req;
-        for (int retry = 0;; ++retry) {
-            try {
-                if (!req.proxy.empty())
-                    ++job.proxy_attempts;
-                try {
-                    exchange(*connections_, curl, job, policy_, req.proxy);
-                } catch (const Failure& e) {
-                    if (req.proxy.empty() || std::string(e.what()) != "transport")
-                        throw;
-                    ++job.fallbacks;
-                    exchange(*connections_, curl, job, policy_, "");
-                }
-                return;
-            } catch (const Failure& e) {
-                if (std::string(e.what()) != "connect_timeout")
-                    throw;
-                if (!req.media || retry >= 2 || Clock::now() >= job.deadline)
-                    throw Failure("timeout");
-                ++job.connect_retries;
-            }
-        }
-    }
-
     void run(CURL* curl, Job& job) {
-        auto& req = job.req;
-        if (job.canceled.load())
-            throw Failure("cancelled");
-        if (Clock::now() >= job.deadline)
-            throw Failure("timeout");
-        if (req.media)
-            endpoint(rewrite(req.url, policy_), policy_, true);
-        if (cached(job))
-            return;
-        for (int attempt = 0;; ++attempt) {
-            bool transient = false;
+        const auto& req       = job.req;
+        bool        use_proxy = !req.proxy.empty();
+        // Generic media only retries connect timeouts by default. Proxy fallback
+        // and status/transport retries all consume the same transfer budget.
+        const int max_attempts = req.media ? 3 : std::max(req.attempts, use_proxy ? 2 : 1);
+        for (int attempt = 1;; ++attempt) {
+            if (job.canceled.load())
+                throw Failure("cancelled");
+            if (job.deadline - Clock::now() < std::chrono::milliseconds(1))
+                throw Failure("timeout");
+            // Another worker may have populated the LRU after submit().
+            if (attempt == 1 && cached(job))
+                return;
             try {
-                perform(curl, job);
-                transient = req.media
-                            && (job.status == 408 || job.status == 429 || job.status == 500 || job.status == 502
-                                || job.status == 503 || job.status == 504);
-                if (!transient || attempt + 1 >= req.attempts) {
+                if (use_proxy)
+                    ++job.proxy_attempts;
+                exchange(*connections_, curl, job, policy_, use_proxy ? req.proxy : "");
+                const bool transient = req.media
+                                       && (job.status == 408 || job.status == 429 || job.status == 500
+                                           || job.status == 502 || job.status == 503 || job.status == 504);
+                if (!transient || attempt >= req.attempts) {
                     remember(job);
                     return;
                 }
             } catch (const Failure& e) {
-                if ((std::string(e.what()) != "transport" && std::string(e.what()) != "timeout"
-                     && std::string(e.what()) != "body_transport" && std::string(e.what()) != "dns")
-                    || attempt + 1 >= req.attempts)
+                const std::string_view reason          = e.what();
+                const bool             connect_timeout = reason == "connect_timeout";
+                if (use_proxy && attempt < max_attempts && (reason == "transport" || connect_timeout)) {
+                    use_proxy = false;
+                    ++job.fallbacks;
+                    if (connect_timeout)
+                        ++job.connect_retries;
+                    continue;
+                }
+                if (connect_timeout) {
+                    if (!req.media || attempt >= max_attempts)
+                        throw Failure("timeout");
+                    ++job.connect_retries;
+                    continue;
+                }
+                if (attempt >= req.attempts
+                    || (reason != "transport" && reason != "timeout" && reason != "body_transport" && reason != "dns"))
                     throw;
             }
-            if (Clock::now() >= job.deadline)
+            if (job.deadline - Clock::now() < std::chrono::milliseconds(1))
                 throw Failure("timeout");
             ++job.retries;
             std::unique_lock<std::mutex> lock(mu_);
-            cv_.wait_until(lock,
-                           std::min(job.deadline, Clock::now() + std::chrono::milliseconds(200 * (1 << attempt))),
-                           [&job] { return job.canceled.load(); });
+            backoff_cv_.wait_until(
+                lock,
+                std::min(job.deadline, Clock::now() + std::chrono::milliseconds(200 * (1 << (attempt - 1)))),
+                [&job] { return job.canceled.load(); });
         }
     }
     void work() {
@@ -817,9 +837,7 @@ private:
             } catch (const std::exception& e) {
                 job->error = e.what();
             }
-            job->finished = Clock::now();
-            job->req      = Request{};
-            job->completed.store(true);
+            job->finish();
             {
                 std::lock_guard<std::mutex> lock(mu_);
                 running_.erase(job);
@@ -833,7 +851,7 @@ private:
     Policy                                                      policy_;
     bool                                                        closed_ = false;
     std::mutex                                                  mu_, cache_mu_;
-    std::condition_variable                                     cv_, done_cv_;
+    std::condition_variable                                     cv_, done_cv_, backoff_cv_;
     std::deque<std::shared_ptr<Job>>                            queue_, done_;
     std::unordered_set<std::shared_ptr<Job>>                    running_;
     std::unique_ptr<CurlConnectionPool>                         connections_;

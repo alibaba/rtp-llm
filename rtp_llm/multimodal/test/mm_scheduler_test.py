@@ -282,6 +282,26 @@ class MMSchedulerTest(TestCase):
                     caller.join(5)
                     self.assertTrue(sched.close())
 
+    def test_idle_capture_failure_marks_scheduler_unhealthy(self):
+        fake = _FakeMMPart()
+        fail_capture = threading.Event()
+
+        def maintain():
+            if fail_capture.is_set():
+                raise RuntimeError("capture failed")
+
+        fake.run_embedding_idle_work = maintain
+        sched = MMScheduler(
+            fake, batch_wait_ms=0, max_batch_size=1, allow_idle_work=True
+        )
+        try:
+            self.assertTrue(sched.is_alive())
+            fail_capture.set()
+            self.assertTrue(sched._stopped.wait(5))
+            self.assertFalse(sched.is_alive())
+        finally:
+            self.assertTrue(sched.close())
+
     def test_integrated_owner_does_not_run_idle_gpu_maintenance(self):
         fake = _FakeMMPart()
         fake.run_embedding_idle_work = mock.Mock()

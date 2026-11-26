@@ -29,6 +29,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_CONNECT(self):
         self.server.tunnels.append(self.path)
+        if getattr(self.server, "delay_connect", None) is not None:
+            self.server.delay_connect.wait(5)
+            self.close_connection = True
+            return
         self.send_response(200)
         self.end_headers()
         self.close_connection = False
@@ -62,6 +66,8 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(200, self.headers["Host"].encode())
         elif self.path == "/policy":
             self.reply(302, b"", "http://denied.invalid/image")
+        elif self.path == "/busy":
+            self.reply(503, b"")
         elif self.path == "/retry" and self.server.visits.count("/retry") == 1:
             self.reply(503, b"")
         else:
@@ -85,6 +91,7 @@ class MediaNetworkTest(unittest.TestCase):
         self.addCleanup(self.server.server_close)
         self.addCleanup(self.server.shutdown)
         policy = native.Policy()
+        policy.ca = requests.certs.where()
         policy.internal = True
         policy.set_networks(["192.0.2.0/24"])
         policy.denied = {"denied.invalid"}
@@ -116,6 +123,109 @@ class MediaNetworkTest(unittest.TestCase):
         self.assertEqual(self.server.visits, ["/redirect", "/binary"])
         self.assertEqual(self.fetch("/binary", cache_key="b")[1], "")
         self.assertFalse(self.fetch("/redirect", cache_key="a")[3])
+
+    def test_hot_url_completes_while_all_download_workers_are_busy(self):
+        self.assertFalse(self.fetch("/binary", cache_key="hot")[3])
+        slow_jobs = []
+        for path, (started, release) in self.server.gates.items():
+            self.addCleanup(release.set)
+            req = native.Request()
+            req.url = f"http://127.0.0.1:{self.server.server_port}{path}"
+            slow_jobs.append(self.net.submit(req))
+            self.assertTrue(started.wait(3))
+
+        hit = self.fetch("/binary", cache_key="hot", budget_ms=250)
+        self.assertEqual(hit[:4], (200, "", b"\x00\xffbinary", True))
+        self.assertEqual(self.server.visits.count("/binary"), 1)
+        self.assertEqual(
+            self.fetch("/binary", cache_key="hot", limit=1)[1], "too_large"
+        )
+        self.assertEqual(
+            self.fetch("/binary", cache_key="hot", budget_ms=0)[1], "timeout"
+        )
+        for _, release in self.server.gates.values():
+            release.set()
+        self.assertCountEqual([self.net.next() for _ in slow_jobs], slow_jobs)
+
+    def test_proxy_connect_timeout_uses_direct_with_remaining_attempts(self):
+        self.server.delay_connect = threading.Event()
+        self.addCleanup(self.server.delay_connect.set)
+        proxy = f"http://127.0.0.1:{self.server.server_port}"
+        for path, attempts, status, direct_visits in (
+            ("/binary", 1, 200, 1),
+            ("/busy", 3, 503, 2),
+        ):
+            with self.subTest(path=path):
+                result = self.fetch(
+                    path,
+                    url=f"http://localhost:{self.server.server_port}{path}",
+                    proxy=proxy,
+                    attempts=attempts,
+                    connect_ms=200,
+                    budget_ms=3000,
+                )
+                self.assertEqual(result[:2], (status, ""))
+                self.assertEqual(result[5], (1, 1, 1))
+                self.assertEqual(self.server.visits.count(path), direct_visits)
+        self.assertEqual(len(self.server.tunnels), 2)
+
+    def test_proxy_timeout_at_total_deadline_does_not_start_direct(self):
+        self.server.delay_connect = threading.Event()
+        self.addCleanup(self.server.delay_connect.set)
+        port = self.server.server_port
+        result = self.fetch(
+            "/binary",
+            url=f"http://localhost:{port}/binary",
+            proxy=f"http://127.0.0.1:{port}",
+            attempts=3,
+            connect_ms=2000,
+            budget_ms=200,
+        )
+        self.assertEqual(result[1], "timeout")
+        self.assertEqual(result[5], (1, 0, 0))
+        self.assertEqual(self.server.visits, [])
+
+    def test_direct_connect_timeouts_share_the_three_attempt_budget(self):
+        # Accept TCP and hold the TLS handshake open to time out just the connect phase.
+        class PendingTLS(Handler):
+            def handle(self):
+                self.server.connections.append(self.client_address)
+                self.server.release.wait(5)
+
+        origin = ThreadingHTTPServer(("127.0.0.1", 0), PendingTLS)
+        origin.connections = []
+        origin.release = threading.Event()
+        threading.Thread(target=origin.serve_forever, daemon=True).start()
+        self.addCleanup(origin.server_close)
+        self.addCleanup(origin.shutdown)
+        self.addCleanup(origin.release.set)
+        result = self.fetch(
+            "/binary",
+            url=f"https://127.0.0.1:{origin.server_port}/binary",
+            attempts=3,
+            connect_ms=200,
+            budget_ms=5000,
+        )
+        self.assertEqual(result[1], "timeout")
+        self.assertEqual(result[5], (0, 0, 2))
+        self.assertEqual(len(origin.connections), 3)
+
+    def test_slow_image_response_does_not_fall_back_to_direct(self):
+        port = self.server.server_port
+        started, release = self.server.gates["/slow"]
+        self.addCleanup(release.set)
+        result = self.fetch(
+            "/slow",
+            url=f"http://localhost:{port}/slow",
+            proxy=f"http://127.0.0.1:{port}",
+            idle_ms=200,
+            budget_ms=3000,
+            attempts=1,
+        )
+        self.assertTrue(started.is_set())
+        self.assertEqual(result[1], "timeout")
+        self.assertEqual(result[5], (1, 0, 0))
+        self.assertEqual(self.server.visits.count("/slow"), 1)
 
     def test_policy_deadline_retry_and_size(self):
         self.assertEqual(self.fetch("/policy")[1], "blocked")

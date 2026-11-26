@@ -12,6 +12,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     GreenNetQueryPB,
     MultimodalInputsPB,
     MultimodalOutputPB,
+    ReleaseLeasePB,
     StatusVersionPB,
     WorkerStatusPB,
 )
@@ -31,6 +32,7 @@ class BlockingWorker(MultimodalRpcServiceServicer):
         self.inspection_entered = threading.Event()
         self.status_thread = None
         self.cache_thread = None
+        self.lease_calls = []
 
     def RemoteMultimodalEmbedding(self, request, context):
         self.entered.set()
@@ -53,6 +55,14 @@ class BlockingWorker(MultimodalRpcServiceServicer):
         status = WorkerStatusPB(role="VIT", alive=True, status_version=1)
         status.mm_inflight_inputs.value = 7
         return status
+
+    def ClaimRdmaLease(self, request, context):
+        self.lease_calls.append(("claim", threading.current_thread().name))
+        return EmptyPB()
+
+    def ReleaseRdmaLease(self, request, context):
+        self.lease_calls.append(("release", threading.current_thread().name))
+        return EmptyPB()
 
     def GetCacheStatus(self, request, context):
         self.cache_thread = threading.current_thread().name
@@ -104,7 +114,7 @@ class VitRpcControlTest(unittest.TestCase):
         self.assertEqual(restored.mm_inflight_inputs.value, 7)
         self.assertEqual(restored.SerializeToString(), wire)
 
-    def test_only_scalar_status_bypasses_saturated_business_executor(self):
+    def test_control_rpcs_bypass_saturated_business_executor(self):
         work = self.stub.RemoteMultimodalEmbedding.future(
             MultimodalInputsPB(), timeout=5
         )
@@ -114,6 +124,14 @@ class VitRpcControlTest(unittest.TestCase):
         self.assertTrue(status.alive)
         self.assertEqual(status.mm_inflight_inputs.value, 7)
         self.assertTrue(self.worker.status_thread.startswith("vit-status"))
+        lease = ReleaseLeasePB(lease_id=["test"])
+        self.stub.ClaimRdmaLease(lease, timeout=1)
+        self.stub.ReleaseRdmaLease(lease, timeout=1)
+        self.assertEqual(
+            [op for op, _ in self.worker.lease_calls], ["claim", "release"]
+        )
+        for _, thread in self.worker.lease_calls:
+            self.assertTrue(thread.startswith("vit-lease"), thread)
         self.assertFalse(work.done())
         self.assertFalse(self.worker.cache_entered.is_set())
         self.worker.release.set()

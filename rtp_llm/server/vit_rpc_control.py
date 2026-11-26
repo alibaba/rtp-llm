@@ -9,11 +9,15 @@ from rtp_llm.telemetry.vit_rpc import VitServerTraceInterceptor
 
 
 class _VitExecutorInterceptor(grpc.ServerInterceptor):
-    def __init__(self, status_executor, inspection_executor, embedding_serializer):
+    def __init__(
+        self, status_executor, inspection_executor, lease_executor, embedding_serializer
+    ):
         self.embedding_serializer = embedding_serializer
         self.executors = {
             "/MultimodalRpcService/GetWorkerStatus": status_executor,
             "/MultimodalRpcService/GetGreenNetVerdict": inspection_executor,
+            "/MultimodalRpcService/ClaimRdmaLease": lease_executor,
+            "/MultimodalRpcService/ReleaseRdmaLease": lease_executor,
         }
 
     def intercept_service(self, continuation, details):
@@ -56,12 +60,18 @@ def create_vit_rpc_server(max_workers=200, *, embedding_serializer=None):
     inspection_executor = futures.ThreadPoolExecutor(
         max_workers=max_workers, thread_name_prefix="vit-inspection"
     )
+    lease_executor = futures.ThreadPoolExecutor(
+        max_workers=4, thread_name_prefix="vit-lease"
+    )
     try:
         server = grpc.server(
             data_executor,
             interceptors=[
                 _VitExecutorInterceptor(
-                    status_executor, inspection_executor, embedding_serializer
+                    status_executor,
+                    inspection_executor,
+                    lease_executor,
+                    embedding_serializer,
                 ),
                 VitServerTraceInterceptor(),
             ],
@@ -77,6 +87,7 @@ def create_vit_rpc_server(max_workers=200, *, embedding_serializer=None):
         data_executor.shutdown(wait=False, cancel_futures=True)
         status_executor.shutdown(wait=False, cancel_futures=True)
         inspection_executor.shutdown(wait=False, cancel_futures=True)
+        lease_executor.shutdown(wait=False, cancel_futures=True)
         raise
     original_stop = server.stop
 
@@ -90,6 +101,7 @@ def create_vit_rpc_server(max_workers=200, *, embedding_serializer=None):
             data_executor.shutdown(wait=False)
             status_executor.shutdown(wait=False)
             inspection_executor.shutdown(wait=False)
+            lease_executor.shutdown(wait=False)
 
         threading.Thread(
             target=close_executors, name="vit-rpc-shutdown", daemon=True
