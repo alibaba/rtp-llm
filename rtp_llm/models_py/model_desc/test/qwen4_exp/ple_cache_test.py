@@ -1,5 +1,6 @@
 from types import SimpleNamespace
-from unittest import TestCase, main
+from unittest import TestCase, main, skipUnless
+from unittest.mock import patch
 
 import torch
 from torch import nn
@@ -140,6 +141,51 @@ class Qwen4ExpPLECacheTest(PLERuntimeFixture, TestCase):
                 torch.testing.assert_close(
                     self.ctx_base, expected_context, atol=0, rtol=0
                 )
+
+    @skipUnless(torch.cuda.is_available() and torch.version.hip is None, "needs CUDA")
+    def test_prefill_uploads_checkpoint_pairs_once_for_both_tables(self):
+        device = torch.device("cuda")
+        self._move_ple_to_cuda(device)
+        lengths = (self._PAGE + 1, 1)
+        hyper = torch.randn(
+            sum(lengths), _HC * _HIDDEN, dtype=torch.bfloat16, device=device
+        )
+        ids = torch.randint(0, 10, (sum(lengths),), device=device)
+        inputs = self._inputs_by_tag(
+            is_prefill=True,
+            input_lengths=torch.tensor(lengths, dtype=torch.int32),
+            prefix_lengths=torch.zeros(2, dtype=torch.int32),
+            sequence_lengths=torch.empty(0, dtype=torch.int32),
+        )
+        expected = reference_apply_ple(
+            self.model._ple_execution(), 1, hyper, ids, inputs
+        )
+        expected_state, expected_ctx = self.state_base.clone(), self.ctx_base.clone()
+        self.state_base.zero_()
+        self.ctx_base.zero_()
+
+        original_to = torch.Tensor.to
+        uploads = []
+
+        def track_upload(tensor, *args, **kwargs):
+            result = original_to(tensor, *args, **kwargs)
+            if (
+                tensor.device.type == "cpu"
+                and tensor.dtype == torch.long
+                and tensor.shape == (2, 3)
+                and result.is_cuda
+            ):
+                self.assertTrue(tensor.is_pinned())
+                self.assertTrue(kwargs.get("non_blocking"))
+                uploads.append(tensor.tolist())
+            return result
+
+        with patch.object(torch.Tensor, "to", track_upload):
+            actual = self.model._apply_ple(1, hyper, ids, inputs)
+        self.assertEqual(uploads, [[[0, 0, 1], [0, 1, 0]]])
+        torch.testing.assert_close(actual, expected)
+        torch.testing.assert_close(self.state_base, expected_state)
+        torch.testing.assert_close(self.ctx_base, expected_ctx, atol=0, rtol=0)
 
     def test_ragged_prefill_and_decode_use_tag_local_state_pools(self):
         ids, hyper, got = self._prefill()
