@@ -17,6 +17,8 @@ cc_library(
     srcs = ["lib/libkvs_client.so"],
     hdrs = glob(["include/kvs/*.h"]),
     includes = ["include"],
+    additional_linker_inputs = glob(["runtime-libs/*.so*"]),
+    linkopts = ["-Wl,-rpath-link,external/kvs2_sdk/runtime-libs"],
     data = glob(["runtime-libs/*.so*"]),
     visibility = ["//visibility:public"],
 )
