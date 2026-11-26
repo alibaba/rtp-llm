@@ -5,6 +5,7 @@ from typing import Optional
 from jinja2 import Environment
 from typing_extensions import override
 
+from rtp_llm.config.stop_words import checkpoint_stop_word_ids
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.openai.renderer_factory_register import register_renderer
 from rtp_llm.openai.renderers.reasoning_tool_base_renderer import (
@@ -24,8 +25,9 @@ class ChatGlm45Renderer(ReasoningToolBaseRenderer):
 
     @override
     def _setup_stop_words(self):
-        """设置GLM45特定的停止词"""
-        self.add_extra_stop_words(["<|user|>", "<|observation|>"])
+        self.add_extra_stop_word_ids(
+            checkpoint_stop_word_ids(self.tokenizer, self.eos_token_id)
+        )
 
     @override
     def _preprocess_messages(self, messages: list[dict]) -> list[dict]:

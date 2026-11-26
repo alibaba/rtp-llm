@@ -1,5 +1,6 @@
 from typing import Any, Dict, List
 
+from rtp_llm.config.stop_words import checkpoint_stop_word_ids
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory_register import (
     register_tokenizer,
 )
@@ -71,14 +72,11 @@ class ChatGLMV5Tokenizer(BaseTokenizer):
 
     @property
     def stop_words_id_list(self):
-        return [
-            self.tokenizer.encode("<|user|>", add_special_tokens=False),
-            self.tokenizer.encode("<|observation|>", add_special_tokens=False),
-        ]
+        return checkpoint_stop_word_ids(self, self.eos_token_id)
 
     @property
     def stop_words_str_list(self):
-        return ["<|user|>", "<|observation|>"]
+        return [self.decode(ids) for ids in self.stop_words_id_list]
 
 
 register_tokenizer(["chatglm2", "chat_glm_2"], ChatGLMV2Tokenizer)

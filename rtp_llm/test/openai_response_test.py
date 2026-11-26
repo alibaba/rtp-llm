@@ -2899,6 +2899,11 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         def _get_tokenizer_path(self):
             return "glm45/tokenizer/"
 
+        def _create_tokenizer(self, tokenizer_path):
+            return TokenizerFactory.create(
+                tokenizer_path, tokenizer_path, self._get_model_type()
+            )
+
         def _get_test_data(self, include_stop_word=False):
             """获取测试数据"""
             # <think>用户询问杭州和北京的天气怎么样。</think>
@@ -2993,6 +2998,9 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             assert isinstance(
                 chat_renderer, ChatGlm45Renderer
             ), f"Expected renderer type: ChatGlm45Renderer, got: {type(chat_renderer).__name__}\nFull renderer: {chat_renderer}"
+            self.parent.assertEqual(
+                chat_renderer.get_all_extra_stop_word_ids_list(), [[151336], [151338]]
+            )
 
         def _assert_tool_call_response(
             self,

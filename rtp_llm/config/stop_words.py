@@ -15,8 +15,19 @@ def primary_eos_id(tokenizer: Any, model_config: Any) -> Optional[int]:
 
 
 def checkpoint_eos_ids(tokenizer: Any) -> List[int]:
-    ids = tokenizer.config_json.get("eos_token_id", [])
+    config = tokenizer.config_json
+    ids = config.get("eos_token_id")
+    text_config = config.get("text_config")
+    if ids is None and isinstance(text_config, dict):
+        ids = text_config.get("eos_token_id")
     return [ids] if isinstance(ids, int) else list(ids or [])
+
+
+def checkpoint_stop_word_ids(
+    tokenizer: Any, primary_eos: Optional[int]
+) -> List[List[int]]:
+    """Return secondary checkpoint EOS tokens as single-token stop sequences."""
+    return [[i] for i in checkpoint_eos_ids(tokenizer) if i != primary_eos]
 
 
 def resolve_stop_word_ids(
@@ -43,7 +54,7 @@ def resolve_stop_word_ids(
         sequences.extend(special.stop_words_id_list)
         strings.extend(special.stop_words_str_list)
         primary_eos = primary_eos_id(tokenizer, model_config)
-        sequences.extend([i] for i in checkpoint_eos_ids(tokenizer) if i != primary_eos)
+        sequences.extend(checkpoint_stop_word_ids(tokenizer, primary_eos))
         params = RendererParams(
             model_type=model_config.model_type,
             max_seq_len=model_config.max_seq_len,
