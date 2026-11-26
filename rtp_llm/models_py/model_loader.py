@@ -63,9 +63,35 @@ def _complete_shared_fst(reader):
         except Exception as read_error:
             raise owner_error from read_error
         raise
-    else:
-        # Usually exhausted. An owner that stops early must still participate.
-        deque(reader, maxlen=0)
+
+
+def _dispatch_checkpoint_weights(model, checked):
+    """The owner may close its view, but only the loader can certify exhaustion."""
+    input_error = None
+
+    def owner_view():
+        nonlocal input_error
+        try:
+            # A delegating 'yield from' would forward close() to our cursor.
+            for item in checked:
+                yield item
+        except Exception as exc:
+            input_error = exc
+            raise
+
+    view = owner_view()
+    try:
+        model.load_weights(view)
+    finally:
+        view.close()
+    if input_error is not None:
+        # An owner catching a reader/validation error did not consume clean EOF.
+        raise input_error
+    try:
+        remaining = next(checked)[0]
+    except StopIteration:
+        return
+    raise ValueError(f"Checkpoint owner returned before consuming {remaining!r}")
 
 
 _CUSTOM_WEIGHT_PREFIX = "__custom__."
@@ -2997,7 +3023,7 @@ class NewModelLoader:
         with self._checkpoint_preflight(model, requested_method), dispatch_context:
             try:
                 with shared_completion:
-                    model.load_weights(checked_weights())
+                    _dispatch_checkpoint_weights(model, checked_weights())
                 if staged_coordinator is not None:
                     staged_coordinator.finish()
             finally:

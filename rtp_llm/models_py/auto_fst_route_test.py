@@ -270,6 +270,44 @@ class _CheckpointCase(unittest.TestCase):
 
 
 class DefaultFstRouteTest(_CheckpointCase):
+    def test_dispatch_checks_full_stream_and_only_drains_shared_reads_on_failure(self):
+        from itertools import chain
+        from rtp_llm.models_py.model_loader import _complete_shared_fst, _dispatch_checkpoint_weights
+
+        for prefix, missing, remaining_local in (
+            (0, "overlay", ["independent1", "independent2"]),
+            (1, "shared1", ["independent1", "independent2"]),
+            (3, "independent1", ["independent2"]),
+        ):
+            with self.subTest(prefix=prefix):
+                shared = iter([("shared1", 1), ("shared2", 2)])
+                local = iter([("independent1", 3), ("independent2", 4)])
+                checked = iter(chain([("overlay", 0)], shared, local))
+
+                def stop(view):
+                    for _ in range(prefix):
+                        next(view)
+                    view.close()
+
+                with self.assertRaisesRegex(ValueError, missing), _complete_shared_fst(shared):
+                    _dispatch_checkpoint_weights(SimpleNamespace(load_weights=stop), checked)
+                self.assertEqual(list(shared), [])
+                self.assertEqual([k for k, _ in local], remaining_local)
+
+    def test_owner_cannot_turn_input_validation_error_into_eof(self):
+        from rtp_llm.models_py.model_loader import _dispatch_checkpoint_weights
+
+        def invalid():
+            yield "valid", 1
+            raise ValueError("ambiguous input mapping")
+
+        def consume(view):
+            with self.assertRaisesRegex(ValueError, "ambiguous"):
+                list(view)
+
+        with self.assertRaisesRegex(ValueError, "ambiguous"):
+            _dispatch_checkpoint_weights(SimpleNamespace(load_weights=consume), invalid())
+
     def test_auto_memory_excludes_pure_host_but_not_mixed_shards(self):
         from rtp_llm.models_py.borrowed_parameters import FixedHostCheckpointStorage
 
@@ -431,30 +469,43 @@ def _shared_fst_dispatch_failure(rank, root, store):
     dist.init_process_group("gloo", init_method=store, rank=rank, world_size=2,
                             timeout=timedelta(seconds=12))
     try:
-        loader = _loader(root, device="cpu", load_method=Method.FASTSAFETENSORS,
-                         tp_size=2, tp_rank=rank)
-        loader.model_config["model_type"] = "_test_overlay_local_stage"
         case = unittest.TestCase()
-        reads = []
         original = _OverlayStage.load_weights
+        for mode in ("reject", "return", "close", "last_without_eof"):
+            loader = _loader(root, device="cpu", load_method=Method.FASTSAFETENSORS,
+                             tp_size=2, tp_rank=rank)
+            loader.model_config["model_type"] = "_test_overlay_local_stage"
+            reads = []
 
-        def consume(owner, weights):
-            def checked():
-                for name, value in weights:
-                    reads.append(name)
-                    if rank == 1:
-                        raise ValueError("rejected first shared weight")
-                    yield name, value
-            return original(owner, checked())
+            def consume(owner, weights):
+                def selected():
+                    for name, value in weights:
+                        reads.append(name)
+                        if rank == 1 and mode == "reject":
+                            raise ValueError("rejected first shared weight")
+                        yield name, value
+                        if rank == 1 and mode in ("return", "close"):
+                            if mode == "close":
+                                weights.close()
+                            return
+                        if mode == "last_without_eof" and len(reads) == 2:
+                            weights.close()
+                            return
+                return original(owner, selected())
 
-        with patch.object(_OverlayStage, "load_weights", consume), case.assertRaisesRegex(
-            RuntimeError, "rank 1: ValueError: rejected first shared weight"
-        ):
-            loader.load()
-        case.assertEqual(len(reads), 1 if rank == 1 else 2)
-        case.assertIsNone(loader.loaded_method)
-        # A timeout or process-group abort is not successful error propagation.
-        dist.barrier()
+            with patch.object(_OverlayStage, "load_weights", consume):
+                if mode == "last_without_eof":
+                    model = loader.load()
+                    case.assertEqual(loader.loaded_method, Method.FASTSAFETENSORS)
+                    case.assertTrue(torch.equal(model.weight, model.bias))
+                else:
+                    error = "rejected first shared weight" if mode == "reject" else "returned before consuming"
+                    with case.assertRaisesRegex(RuntimeError, "rank 1: ValueError: .*" + error):
+                        loader.load()
+                    case.assertIsNone(loader.loaded_method)
+            case.assertEqual(len(reads), 1 if rank == 1 and mode != "last_without_eof" else 2)
+            # A timeout or process-group abort is not successful error propagation.
+            dist.barrier()
     finally:
         dist.destroy_process_group()
 
