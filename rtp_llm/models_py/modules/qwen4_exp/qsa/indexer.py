@@ -423,6 +423,8 @@ class Qwen4ExpQSAIndexer(nn.Module):
     tensors; the ``+1`` is applied inside :func:`exact_head_rms_norm`.
     """
 
+    _allow_flashinfer_prefill = True
+
     def __init__(
         self,
         qk_proj: torch.Tensor,
@@ -642,7 +644,8 @@ class Qwen4ExpQSAIndexer(nn.Module):
             )
 
         if (
-            past_len == 0
+            self._allow_flashinfer_prefill
+            and past_len == 0
             and ratio == 4
             and self.block_topk == 512
             and use_flashinfer_indexer()

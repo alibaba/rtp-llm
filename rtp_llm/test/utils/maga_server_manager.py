@@ -10,6 +10,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import suppress
 from typing import Any, Dict, List, Optional
 
 import psutil
@@ -45,6 +46,7 @@ class MagaServerManager(object):
         self._log_file = None
         self._device_ids = device_ids
         self._server_process = None
+        self._server_identity = None
         self._role_name = role_name
         self._file_stream = None
         self._process_file_name = process_file_name
@@ -53,6 +55,8 @@ class MagaServerManager(object):
         self._health_check_path = health_check_path
         self._exit_code: Optional[int] = None
         self._state_lock = threading.Lock()
+        self._stop_lock = threading.Lock()
+        self._server_children = set()
         self._stop_requested = False
         if self._port is None:
             self._port = MagaServerManager.get_free_port()
@@ -264,6 +268,9 @@ class MagaServerManager(object):
         )
         with self._state_lock:
             self._server_process = p
+            self._server_identity = None
+            with suppress(psutil.NoSuchProcess):
+                self._server_identity = psutil.Process(p.pid)
             stop_requested = self._stop_requested
 
         if stop_requested:
@@ -274,49 +281,64 @@ class MagaServerManager(object):
             self.stop_server()
             return False
 
-        return self.wait_sever_done(timeout)
+        ready = self.wait_sever_done(timeout)
+        if ready:
+            # Keep the healthy workers' identities even if their launcher exits
+            # before teardown. psutil checks process creation time before signaling.
+            with self._stop_lock, suppress(psutil.NoSuchProcess):
+                with self._state_lock:
+                    parent = (
+                        self._server_identity if self._server_process is p else None
+                    )
+                if parent is not None:
+                    self._server_children.update(parent.children(recursive=True))
+        return ready
 
     def stop_server(self):
+        with self._stop_lock:
+            return self._stop_server()
+
+    def _stop_server(self):
         with self._state_lock:
             self._stop_requested = True
             server_process = self._server_process
+            parent = self._server_identity
 
         if server_process is not None and server_process.pid is not None:
+            logging.info("stop server and children: %d", server_process.pid)
+            if parent is not None and server_process.returncode is None:
+                with suppress(psutil.NoSuchProcess):
+                    self._server_children.update(parent.children(recursive=True))
+                    parent.terminate()
+            for child in self._server_children:
+                with suppress(psutil.NoSuchProcess):
+                    child.terminate()
+            _, alive = psutil.wait_procs(self._server_children, timeout=5)
+            for child in alive:
+                with suppress(psutil.NoSuchProcess):
+                    child.kill()
             try:
-                # 只 kill start_server 会残留 frontend/dash_sc/vit；测试侧须在此递归 kill。
-                logging.info("stop server and children: %d", server_process.pid)
-                parent = psutil.Process(server_process.pid)
-                children = list(
-                    parent.children(recursive=True)
-                )  # 获取所有子进程（递归）
-                for child in children:
-                    child.terminate()  # 先尝试优雅终止
-                _, alive = psutil.wait_procs(children, timeout=5)
-                for child in alive:
-                    child.kill()  # 强制终止未退出的进程
-                parent.terminate()
-                # 添加超时机制，避免永久阻塞
-                try:
-                    parent.wait(timeout=10)
-                except psutil.TimeoutExpired:
-                    logging.warning(
-                        "Parent process did not exit gracefully, force killing"
-                    )
-                    parent.kill()
-                    parent.wait(timeout=5)
-                with self._state_lock:
-                    if self._server_process is server_process:
-                        self._server_process = None
-            except Exception as e:
+                server_process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                server_process.kill()
+                server_process.wait(timeout=30)
+            _, alive = psutil.wait_procs(alive, timeout=30)
+            self._server_children.clear()
+            for child in alive:
+                with suppress(psutil.NoSuchProcess):
+                    if child.status() != psutil.STATUS_ZOMBIE:
+                        self._server_children.add(child)
+            if self._server_children:
                 logging.error(
-                    "stop_server: pid=%s already gone (%s); its children are "
-                    "orphaned and will not be reclaimed here",
-                    getattr(server_process, "pid", "?"),
-                    e,
+                    "Server %d still has live children after SIGKILL: %s",
+                    server_process.pid,
+                    [p.pid for p in self._server_children],
                 )
-                with self._state_lock:
-                    if self._server_process is server_process:
-                        self._server_process = None
+                return False
+            with self._state_lock:
+                if self._server_process is server_process:
+                    self._server_process = None
+                    self._server_identity = None
         if self._file_stream is not None:
             self._file_stream.close()
             self._file_stream = None

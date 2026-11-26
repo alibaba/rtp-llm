@@ -149,6 +149,7 @@ def _write_indexer_cache_vectorized(
     capture_undo: bool,
     rope_is_token_aligned: bool,
     is_s_padded: bool = False,
+    pool_completed_keys=None,
 ) -> dict:
     """Device-vectorized writer used by the production CUDA path.
 
@@ -355,8 +356,13 @@ def _write_indexer_cache_vectorized(
         )
         kv_slots[completed_indices[kv_write_valid]] = completed_kv_slots[kv_write_valid]
 
-        pooled = gathered.mean(dim=1).to(raw_keys.dtype)
-        pooled = exact_head_rms_norm(pooled, k_norm_gamma, norm_eps)
+        if pool_completed_keys is None:
+            pooled = gathered.mean(dim=1).to(raw_keys.dtype)
+            pooled = exact_head_rms_norm(pooled, k_norm_gamma, norm_eps)
+        else:
+            pooled = pool_completed_keys(
+                gathered, raw_keys.dtype, k_norm_gamma, norm_eps
+            )
         if rope_is_token_aligned:
             cos = rope_cos.index_select(0, completed_indices)
             sin = rope_sin.index_select(0, completed_indices)
@@ -435,6 +441,7 @@ def write_indexer_cache(
     capture_undo: bool = False,
     rope_is_token_aligned: bool = False,
     is_s_padded: bool = False,
+    pool_completed_keys=None,
 ) -> dict:
     """Write ragged raw indexer keys to the state ring and completed means to KV.
 
@@ -568,6 +575,7 @@ def write_indexer_cache(
             capture_undo=capture_undo,
             rope_is_token_aligned=rope_is_token_aligned,
             is_s_padded=is_s_padded,
+            pool_completed_keys=pool_completed_keys,
         )
 
     offsets = [int(v) for v in cu_seqlens.tolist()]

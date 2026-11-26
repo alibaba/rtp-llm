@@ -205,13 +205,32 @@ def verify_execution(log_dir, offsets, neighbors=(), target_first=True, chunked=
     )
 
 
-def run_mixed(stub, blocker, order, target, steps, vocab_size):
+def run_mixed(
+    stub,
+    blocker,
+    order,
+    target,
+    steps,
+    vocab_size,
+    *,
+    target_request=None,
+    blocker_steps=BLOCKER_STEPS,
+    peer=None,
+):
     # Keep the worker busy so all the measured requests can queue together.
-    hold = start_request(stub, blocker, BLOCKER_STEPS)
+    hold = start_request(stub, blocker, blocker_steps)
     next(hold)
+    if peer:
+        peer_stub, peer_request = peer
+        peer_call = peer_stub.GenerateStreamCall(peer_request, timeout=180)
     calls = []
     for ids in order:
-        calls.append(start_request(stub, ids, steps, measure=ids is target))
+        request = (
+            target_request
+            if ids is target and target_request is not None
+            else make_request(ids, steps, measure=ids is target)
+        )
+        calls.append(stub.GenerateStreamCall(request, timeout=180))
         time.sleep(0.025)
     for _ in hold:
         pass
@@ -221,6 +240,9 @@ def run_mixed(stub, blocker, order, target, steps, vocab_size):
         else:
             for _ in call:
                 pass
+    if peer:
+        for _ in peer_call:
+            pass
     return result
 
 
@@ -238,6 +260,7 @@ def main():
     chunked = args.reference is not None
     tokenizer = Tokenizer.from_file(str(args.checkpoint / "tokenizer.json"))
     vocab_size = read_vocab_size(args.checkpoint)
+
     def encode(text):
         return tokenizer.encode(text, add_special_tokens=False).ids
 

@@ -2,7 +2,7 @@
 
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch, sentinel
+from unittest.mock import Mock, patch, sentinel
 
 import torch
 
@@ -26,6 +26,22 @@ def select_attention(config, inputs, enabled=True, **kwargs):
 
 
 class BatchInvariantAttentionTest(unittest.TestCase):
+    def test_sparse_gqa_uses_registered_backend_with_batch_invariant_setting(self):
+        from rtp_llm.models_py.modules.factory.attention import AttnImplFactory
+
+        config = SimpleNamespace(
+            use_mla=False, is_sparse=True, use_sparse_gqa_fmha=True, max_seq_len=8192
+        )
+        inputs = SimpleNamespace(is_prefill=False)
+        sparse = Mock()
+        with patch.dict(AttnImplFactory.FMHA_IMPL_REGISTRY, sparse_gqa=sparse):
+            select_attention(config, inputs, enabled=False)
+            self.assertEqual(sparse.call_args.kwargs, {})
+            select_attention(
+                config, inputs, enabled=True, decode_cascade_max_requests=2
+            )
+            self.assertEqual(sparse.call_args.kwargs, {"batch_invariant": True})
+
     def test_factory_requires_explicit_opt_in_and_propagates_failures(self):
         from rtp_llm.device.device_type import DeviceType
         from rtp_llm.models_py.modules.factory.attention import AttnImplFactory

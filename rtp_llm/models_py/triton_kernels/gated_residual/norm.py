@@ -41,12 +41,17 @@ def _grouped_rms_norm_kernel(
         tl.store(amax_ptr + row * (WIDTH // GROUP_SIZE) + group, tl.max(absolute, 0))
 
 
-def is_supported(x: torch.Tensor, gamma: torch.Tensor, group_size: int) -> bool:
+def is_supported(
+    x: torch.Tensor, gamma: torch.Tensor, group_size: int, *, allow_fp32_gamma=False
+) -> bool:
     return (
         x.is_cuda
         and torch.version.hip is None
         and x.dtype == torch.bfloat16
-        and gamma.dtype == torch.bfloat16
+        and (
+            gamma.dtype == torch.bfloat16
+            or (allow_fp32_gamma and gamma.dtype == torch.float32)
+        )
         and gamma.device == x.device
         and x.is_contiguous()
         and gamma.is_contiguous()
@@ -67,15 +72,22 @@ def is_supported(x: torch.Tensor, gamma: torch.Tensor, group_size: int) -> bool:
 
 
 def grouped_rms_norm_triton(
-    x: torch.Tensor, gamma: torch.Tensor, group_size: int, eps: float
+    x: torch.Tensor,
+    gamma: torch.Tensor,
+    group_size: int,
+    eps: float,
+    *,
+    allow_fp32_gamma=False,
 ) -> torch.Tensor:
     """Match the upstream FP32 gain and return BF16 in the input layout."""
-    if not is_supported(x, gamma, group_size):
+    if not is_supported(x, gamma, group_size, allow_fp32_gamma=allow_fp32_gamma):
         raise ValueError("unsupported Qwen4 grouped RMSNorm layout")
     width = int(x.shape[-1])
     groups = width // group_size
     rows = x.numel() // width
     result = torch.empty_like(x)
+    if rows == 0:
+        return result
     _grouped_rms_norm_kernel[(rows, groups)](
         x,
         gamma,

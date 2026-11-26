@@ -6,6 +6,7 @@
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include <cstdlib>
 #include <algorithm>
+#include <chrono>
 #include <limits>
 #include <memory>
 #include <string>
@@ -23,6 +24,11 @@ using namespace std;
 namespace rtp_llm {
 
 namespace {
+
+int64_t monotonicTimeUs() {
+    return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
 
 bool readEnvFlagOnce(const char* env_name, const char* log_tag, const char* label) {
     const char* env = std::getenv(env_name);
@@ -93,7 +99,6 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     Executor(),
     cache_manager_(cache_manager),
     warm_up_(warm_up),
-    use_all_gather_(params.moe_config.use_all_gather && !params.moe_config.use_deepep_low_latency),
     metrics_reporter_(params.metrics_reporter),
     tps_reporter_(MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(
         params.parallelism_config.tp_rank == 0 && !warm_up ? metrics_reporter_ : nullptr)),
@@ -112,6 +117,11 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     tp_rank_                   = params.parallelism_config.tp_rank;
     parallelism_config_        = params.parallelism_config;
     role_type_                 = params.pd_sep_config.role_type;
+    record_aligned_dp_forwards_ =
+        !warm_up_ && !is_propose_ && params.moe_config.moe_strategy == "mega_moe" && parallelism_config_.tp_size == 1
+        && parallelism_config_.pp_size == 1 && parallelism_config_.dp_size > 1
+        && parallelism_config_.dp_size == parallelism_config_.ep_size
+        && parallelism_config_.world_size == parallelism_config_.local_world_size;
 #if USING_CUDA
     qwen4_decode_lookahead_ =
         params.model_config_.model_type == "qwen4_exp" && params.hw_kernel_config.enable_cuda_graph
@@ -432,8 +442,19 @@ absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int6
             const auto role = is_propose_ ? ModelInputsModelRole::DRAFT : ModelInputsModelRole::NORMAL;
             model_inputs_logger_->log(model_input, role, model_->model_id_);
         }
-        lookahead_lease.forward_started      = lookahead;
-        model_output                        = std::move(model_->forward(model_input));
+        // Single-host DP/EP ranks enter the same MegaMoE collectives. Count fake-only and
+        // unsampled forwards too, so real batches on different ranks share a step number.
+        if (record_owner && record_aligned_dp_forwards_) {
+            ++dp_forward_step_;
+        }
+        const bool    record_forward   = recorded_batch && record_aligned_dp_forwards_;
+        const int64_t forward_start_us = record_forward ? monotonicTimeUs() : 0;
+        lookahead_lease.forward_started = lookahead;
+        model_output                    = std::move(model_->forward(model_input));
+        if (record_forward) {
+            recorded_batch->setDpForward(
+                parallelism_config_.dp_rank, dp_forward_step_, forward_start_us, monotonicTimeUs());
+        }
         executor_collector.model_forward_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
     if (expert_balancer_) {

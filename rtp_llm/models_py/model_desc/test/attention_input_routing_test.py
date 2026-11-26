@@ -58,6 +58,7 @@ class RoutingModel(GptModelBase):
         self.parallelism_config = object()
         self.weight = object()
         self.fmha_config = object()
+        self.py_hw_kernel_config = None
         self.fmha_group_tags = fmha_group_tags
 
     def _get_fmha_group_tags(self) -> list[str] | None:
@@ -166,6 +167,7 @@ class AttentionInputRoutingTest(unittest.TestCase):
             parallelism_config=object(),
             weight=object(),
             fmha_config=object(),
+            py_hw_kernel_config=None,
         )
         attention_inputs = PyAttentionInputs()
         inputs = SimpleNamespace(attention_inputs=attention_inputs)
@@ -179,6 +181,7 @@ class AttentionInputRoutingTest(unittest.TestCase):
                 weight=model.weight,
                 attn_inputs=attention_inputs,
                 fmha_config=model.fmha_config,
+                hw_kernel_config=model.py_hw_kernel_config,
                 is_cuda_graph=False,
                 cuda_graph_selection_mode=None,
                 decode_cascade_max_requests=0,
@@ -204,6 +207,7 @@ class AttentionInputRoutingTest(unittest.TestCase):
             parallelism_config=object(),
             weight=object(),
             fmha_config=object(),
+            py_hw_kernel_config=None,
         )
         attention_inputs = PyAttentionInputs()
         inputs = SimpleNamespace(attention_inputs=attention_inputs)
@@ -221,6 +225,7 @@ class AttentionInputRoutingTest(unittest.TestCase):
                 weight=model.weight,
                 attn_inputs=attention_inputs,
                 fmha_config=model.fmha_config,
+                hw_kernel_config=model.py_hw_kernel_config,
                 is_cuda_graph=True,
                 cuda_graph_selection_mode="generation_prefill_graph",
                 decode_cascade_max_requests=0,
@@ -236,6 +241,7 @@ class AttentionInputRoutingTest(unittest.TestCase):
             parallelism_config=object(),
             weight=object(),
             fmha_config=object(),
+            py_hw_kernel_config=None,
         )
         attention_inputs = PyAttentionInputs()
         inputs = SimpleNamespace(attention_inputs=attention_inputs)
@@ -253,6 +259,7 @@ class AttentionInputRoutingTest(unittest.TestCase):
                 weight=model.weight,
                 attn_inputs=attention_inputs,
                 fmha_config=model.fmha_config,
+                hw_kernel_config=model.py_hw_kernel_config,
                 is_cuda_graph=True,
                 cuda_graph_selection_mode=CudaGraphSelectionMode.GENERATION_PREFILL_GRAPH,
                 decode_cascade_max_requests=0,
@@ -355,6 +362,7 @@ class AttentionInputRoutingTest(unittest.TestCase):
             parallelism_config=object(),
             weight=object(),
             fmha_config=object(),
+            py_hw_kernel_config=None,
         )
         invalid_mappings = (
             {"default": object(), "indexer_kv": object(), "extra": object()},

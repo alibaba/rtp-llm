@@ -19,8 +19,10 @@ std::shared_ptr<RecordedBatch> Executor::recordBatchInputs(const GptModelInputs&
                 Json row{{"phase", std::string(phase)},
                                       {"input_len", stream->inputLength()},
                                       {"reuse_len", stream->initialReuseLength()}};
-                if (request)
-                    row["request_id"] = "r" + std::to_string(request->id());
+                if (request) {
+                    row["request_id"]     = "r" + std::to_string(request->id());
+                    row["rpc_request_id"] = std::to_string(stream->streamId());
+                }
                 if (i != 0)
                     row["sequence_id"] = i;
                 if (stream->isFakeStream())

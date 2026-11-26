@@ -91,7 +91,9 @@ def try_ple_gate(
     projection_scales=None,
     *,
     reuse_key=False,
+    single_pass_triton: bool = False,
 ):
+    """Optionally keep each branch's full gate reduction in a single Triton CTA."""
     if not (hidden.is_cuda and torch.version.hip is None and hidden.ndim == 3):
         return None
     width = hidden.shape[-1]
@@ -150,7 +152,8 @@ def try_ple_gate(
     batch, length, _ = hidden.shape
     rows = batch * length
     if (
-        capability == (10, 3)
+        not single_pass_triton
+        and capability == (10, 3)
         and group_size == 8192
         and (rows >= 4 or (length == 1 and batch > 0))
         and all(x.is_contiguous() for x in (key, value, hidden))
@@ -199,7 +202,7 @@ def try_ple_gate(
             num_warps=4,
             PROJECTED_FP32=projected,
         )
-        if group_size == 8192:
+        if group_size == 8192 and not single_pass_triton:
             # The BF16 agreement can cross a rounding midpoint if Triton
             # sums the products in a different order than the original op.
             products = gated.view(batch, length, 4, group_size)

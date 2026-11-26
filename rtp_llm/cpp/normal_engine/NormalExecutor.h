@@ -102,11 +102,12 @@ private:
     std::shared_ptr<ModelInputsLogger>                                       model_inputs_logger_;
     std::shared_ptr<ExpertBalancer>                                          expert_balancer_;
     bool                                                                     warm_up_;
-    bool                                                                     use_all_gather_;
     kmonitor::MetricsReporterPtr                                             metrics_reporter_ = nullptr;
     MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector> tps_reporter_;
     WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector> wall_tps_reporter_;
-    bool enable_detail_log_       = false;
+    bool    enable_detail_log_          = false;
+    bool    record_aligned_dp_forwards_ = false;
+    int64_t dp_forward_step_            = 0;
 
     bool qwen4_decode_lookahead_ = false;
 

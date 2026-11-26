@@ -134,7 +134,8 @@ class PLEGatherTritonTest(unittest.TestCase):
         )
 
         device = torch.device("cuda", torch.cuda.current_device())
-        with tempfile.TemporaryDirectory() as directory:
+        # Use the same RAM-backed mapping as the shared checkpoint table.
+        with tempfile.TemporaryDirectory(dir="/dev/shm") as directory:
             path = Path(directory) / "ple"
             path.write_bytes(bytes(i % 31 for i in range(4 * 512)))
             shard = torch.from_file(

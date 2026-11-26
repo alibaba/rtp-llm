@@ -263,6 +263,7 @@ def try_ple_conv(
     cache_commit=None,
     history=None,
     page_size=128,
+    row_block_size: int | None = None,
 ):
     """Apply PLE convolution with optional state and destination.
 
@@ -270,6 +271,7 @@ def try_ple_conv(
     gated value at its own offset before replacing it. Other inputs stay disjoint
     from the destination.
     Prefill cache destinations must have validated IDs and cannot alias inputs.
+    Supplying a row block size selects the per-row kernel for every length.
     """
     if not (
         gated.is_cuda
@@ -329,6 +331,15 @@ def try_ple_conv(
             warps = 2
     else:
         return None
+    if row_block_size is not None:
+        if (
+            row_block_size <= 0
+            or row_block_size & (row_block_size - 1)
+            or width % row_block_size
+            or cache_commit is not None
+        ):
+            return None
+        block = row_block_size
     state_pool = ctx_pool = state_blocks = ctx_blocks = None
     if cache_commit is not None:
         state_pool, ctx_pool, state_blocks, ctx_blocks = cache_commit
@@ -368,7 +379,7 @@ def try_ple_conv(
     output = torch.empty_like(gated) if out is None else out
     initial_batch_stride = initial.stride(0) if initial is not None else 0
     initial_row_stride = initial.stride(1) if initial is not None else 0
-    if width == 32768 and length >= 192:
+    if row_block_size is None and width == 32768 and length >= 192:
         block, time = 128, 8
         groups = triton.cdiv(length, 3 * time) * 3
         tiles = groups * (width // block)

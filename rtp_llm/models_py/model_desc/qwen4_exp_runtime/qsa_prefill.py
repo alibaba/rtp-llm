@@ -889,6 +889,7 @@ def _incremental_prefill_selection(
             state_tokens_per_block=int(plan.state_tokens_per_block),
             norm_eps=float(indexer.norm_eps),
             rope_is_token_aligned=True,
+            pool_completed_keys=getattr(indexer, "pool_completed_keys", None),
         )
 
     rotated_q = apply_partial_rope(
@@ -907,7 +908,12 @@ def _incremental_prefill_selection(
     )
 
     if not draft:
-        return _select_prefix_prefill_chunks(rotated_q, score_weights, plan)
+        return _select_prefix_prefill_chunks(
+            rotated_q,
+            score_weights,
+            plan,
+            topk=getattr(indexer, "topk_blocks", None),
+        )
 
     # The draft has at most one compression group's worth of rows per
     # request. Pad only that short dimension so all requests share one
@@ -951,7 +957,7 @@ def _incremental_prefill_selection(
     )
 
 
-def _select_prefix_prefill_chunks(q, weights, plan):
+def _select_prefix_prefill_chunks(q, weights, plan, *, topk=None):
     """Bound score storage without padding the batch to its longest request."""
     from rtp_llm.models_py.kernels.cuda.qsa.indexer_paged_score import (
         qsa_paged_indexer_score,
@@ -1001,6 +1007,7 @@ def _select_prefix_prefill_chunks(q, weights, plan):
                 token_budget=int(plan.token_budget),
                 validate_lengths=False,
                 scores_are_masked=True,
+                topk=topk,
             )
             output[offset + start : offset + end].copy_(selected)
             del logits, selected

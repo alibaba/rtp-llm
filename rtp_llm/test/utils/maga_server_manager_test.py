@@ -4,6 +4,8 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import Mock, patch
 
+import psutil
+
 from rtp_llm.test.utils.maga_server_manager import MagaServerManager
 
 
@@ -70,7 +72,7 @@ class MagaServerManagerTest(unittest.TestCase):
                 self.manager.print_process_log.assert_called_once_with()
 
     def test_concurrent_stop_preserves_probed_process_diagnostics(self):
-        process = Mock(pid=4242)
+        process = Mock(pid=4242, returncode=None)
         process.poll.return_value = -signal.SIGTERM
         self.manager._server_process = process
         health_started = threading.Event()
@@ -85,12 +87,9 @@ class MagaServerManagerTest(unittest.TestCase):
 
         parent = Mock()
         parent.children.return_value = []
+        self.manager._server_identity = parent
         with (
             patch("rtp_llm.utils.util.wait_sever_done", side_effect=health_check),
-            patch(
-                "rtp_llm.test.utils.maga_server_manager.psutil.Process",
-                return_value=parent,
-            ),
             patch(
                 "rtp_llm.test.utils.maga_server_manager.psutil.wait_procs",
                 return_value=([], []),
@@ -115,6 +114,53 @@ class MagaServerManagerTest(unittest.TestCase):
         self.assertIn("pid=4242 killed by SIGTERM", "\n".join(logs.output))
         self.assertNotIn("still alive", "\n".join(logs.output))
         self.manager.print_process_log.assert_called_once_with()
+
+    def test_reaps_surviving_worker_when_a_sibling_exits_during_stop(self):
+        launcher = Mock(pid=4242, returncode=None)
+        vanished = Mock()
+        vanished.terminate.side_effect = psutil.NoSuchProcess(4243)
+        worker = Mock(pid=4244)
+        parent = Mock()
+        parent.children.return_value = [vanished, worker]
+        self.manager._server_process = launcher
+        self.manager._server_identity = parent
+        with patch(
+            "rtp_llm.test.utils.maga_server_manager.psutil.wait_procs",
+            side_effect=[([vanished], [worker]), ([worker], [])],
+        ) as wait:
+            self.assertTrue(self.manager.stop_server())
+
+        worker.terminate.assert_called_once_with()
+        worker.kill.assert_called_once_with()
+        wait.assert_called_with([worker], timeout=30)
+        launcher.wait.assert_called_once_with(timeout=10)
+        self.assertIsNone(self.manager.server_pid)
+
+    def test_retains_surviving_worker_after_launcher_exit_until_cleanup_succeeds(self):
+        launcher = Mock(pid=4242, returncode=0)
+        worker = Mock(pid=4243)
+        worker.status.return_value = psutil.STATUS_RUNNING
+        self.manager._server_process = launcher
+        self.manager._server_identity = Mock()
+        self.manager._server_children.add(worker)
+        parent = self.manager._server_identity
+        with (
+            patch(
+                "rtp_llm.test.utils.maga_server_manager.psutil.Process",
+            ) as lookup,
+            patch(
+                "rtp_llm.test.utils.maga_server_manager.psutil.wait_procs",
+                side_effect=[([], [worker]), ([], [worker]), ([worker], []), ([], [])],
+            ),
+        ):
+            with self.assertLogs(level="ERROR"):
+                self.assertFalse(self.manager.stop_server())
+            self.assertTrue(self.manager.stop_server())
+
+        lookup.assert_not_called()
+        parent.terminate.assert_not_called()
+        worker.kill.assert_called_once_with()
+        self.assertIsNone(self.manager.server_pid)
 
 
 if __name__ == "__main__":

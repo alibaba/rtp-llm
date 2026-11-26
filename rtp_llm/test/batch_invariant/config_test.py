@@ -4,7 +4,15 @@ from unittest.mock import MagicMock, patch
 
 from rtp_llm.model_factory import configure_batch_invariant_model
 from rtp_llm.models_py.determinism import batch_invariant_config as bi
-from rtp_llm.ops import DataType, KvCacheDataType, RoleType, SpeculativeType, TaskType
+from rtp_llm.ops import (
+    DataType,
+    HybridAttentionType,
+    KvCacheDataType,
+    RoleType,
+    SpeculativeType,
+    TaskType,
+    VitSeparation,
+)
 
 
 class BatchInvariantConfigTest(unittest.TestCase):
@@ -12,7 +20,6 @@ class BatchInvariantConfigTest(unittest.TestCase):
         self.hw = SimpleNamespace(
             batch_invariant=True,
             enable_cuda_graph=False,
-            enable_dynamic_decode_backend=True,
             enable_decode_cascade_attention=True,
         )
         self.parallel = SimpleNamespace(
@@ -75,7 +82,6 @@ class BatchInvariantConfigTest(unittest.TestCase):
     def test_disabled_leaves_regular_options(self):
         self.hw.batch_invariant = False
         configure_batch_invariant_model(self.engine, None)
-        self.assertTrue(self.hw.enable_dynamic_decode_backend)
         self.assertTrue(self.hw.enable_decode_cascade_attention)
 
     def test_only_explicit_true_enables_validation(self):
@@ -123,6 +129,83 @@ class BatchInvariantConfigTest(unittest.TestCase):
                         self.engine.moe_config.moe_strategy, "no_quant_cpp"
                     )
 
+    def _set_m11(self):
+        self._set_qwen3_moe()
+        model = self.model
+        model.model_type = "qwen4_exp"
+        model.num_layers, model.hidden_size = 60, 8192
+        model.inter_size = model.moe_inter_size = 2048
+        model.expert_num, model.moe_k = 768, 10
+        model.quantization = ""
+        model._qwen4_mxfp4_source = True
+        model.hc_mult, model._qwen4_ple_layer_ids = 4, [2]
+        model._qwen4_indexer_budget, model._qwen4_indexer_compress_ratio = 2048, 4
+        model._qwen4_indexer_kv_heads = 1
+        cycle = [HybridAttentionType.LINEAR] * 3 + [HybridAttentionType.NONE]
+        model.hybrid_attention_config = SimpleNamespace(
+            hybrid_attention_types=cycle * 15
+        )
+        model.linear_attention_config = SimpleNamespace(
+            ssm_state_dtype=DataType.TYPE_FP32
+        )
+        model.vit_separation = VitSeparation.VIT_SEPARATION_REMOTE
+        model.mm_model_config = SimpleNamespace(is_multimodal=True)
+        attn = model.attn_config
+        attn.head_num, attn.kv_head_num, attn.size_per_head = 64, 4, 256
+        attn.is_sparse = attn.use_sparse_gqa_fmha = True
+        attn.indexer_head_num, attn.indexer_head_dim = 8, 128
+        attn.tokens_per_block = attn.kernel_tokens_per_block = 128
+        self.parallel.world_size = self.parallel.local_world_size = 8
+        self.parallel.dp_size = self.parallel.ep_size = 8
+        self.engine.moe_config.moe_strategy = "mega_moe"
+        self.engine.moe_config.use_all_gather = False
+
+    def test_m11_uses_native_mega_moe_and_sparse_text_attention(self):
+        self._set_m11()
+        configure_batch_invariant_model(self.engine, self.model)
+        self.assertFalse(self.model.mm_model_config.is_multimodal)
+        self.assertFalse(self.model.enable_fp32_lm_head)
+        self.assertFalse(self.hw.enable_decode_cascade_attention)
+        self.assertTrue(self.model.attn_config.use_sparse_gqa_fmha)
+        self.assertEqual(self.engine.moe_config.moe_strategy, "mega_moe")
+        self.assertFalse(self.engine.moe_config.use_all_gather)
+
+    def test_m11_rejects_incompatible_checkpoint_execution_and_topology(self):
+        self._set_m11()
+        model = self.model
+        for obj, key, value, message in (
+            (model, "moe_k", 8, "Qwen4-Max M11"),
+            (model, "_qwen4_mxfp4_source", False, "MXFP4"),
+            (model, "quantization", "MXFP8", "MXFP4"),
+            (model, "_qwen4_indexer_budget", 1024, "QSA"),
+            (model, "_qwen4_ple_layer_ids", [], "PLE"),
+            (model.hybrid_attention_config, "hybrid_attention_types", [], "GDN"),
+            (model.attn_config, "use_sparse_gqa_fmha", False, "QSA"),
+            (model.attn_config, "tokens_per_block", 64, "128-token"),
+            (
+                model.linear_attention_config,
+                "ssm_state_dtype",
+                DataType.TYPE_BF16,
+                "FP32",
+            ),
+            (
+                model,
+                "vit_separation",
+                VitSeparation.VIT_SEPARATION_LOCAL,
+                "vit_separation",
+            ),
+            (self.parallel, "local_world_size", 4, "single-node"),
+            (self.parallel, "ep_size", 4, "DP8/EP8"),
+            (self.parallel, "tp_size", 2, "TP1"),
+            (self.engine.moe_config, "moe_strategy", "auto", "mega_moe"),
+            (self.engine.sp_config, "type", SpeculativeType.MTP, "eager"),
+            (self.cache, "reuse_cache", True, "prefix reuse"),
+        ):
+            with self.subTest(key=key), patch.object(obj, key, value):
+                with self.assertRaisesRegex(ValueError, message):
+                    configure_batch_invariant_model(self.engine, model)
+            self.assertTrue(model.mm_model_config.is_multimodal)
+
     def test_disabled_qwen3_moe_preserves_automatic_selection(self):
         self._set_qwen3_moe()
         self.hw.batch_invariant = False
@@ -160,18 +243,16 @@ class BatchInvariantConfigTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, reason):
                     configure_batch_invariant_model(self.engine, self.model)
             self.assertEqual(moe.moe_strategy, "auto")
-            self.assertTrue(self.hw.enable_dynamic_decode_backend)
+            self.assertTrue(self.hw.enable_decode_cascade_attention)
 
     def test_pure_tp_eager_uses_bf16_head_and_static_attention(self):
         for size in (1, 2, 4):
             with self.subTest(size=size):
                 self._set_tp_size(size)
                 self.model.enable_fp32_lm_head = True
-                self.hw.enable_dynamic_decode_backend = True
                 self.hw.enable_decode_cascade_attention = True
                 configure_batch_invariant_model(self.engine, self.model)
                 self.assertFalse(self.model.enable_fp32_lm_head)
-                self.assertFalse(self.hw.enable_dynamic_decode_backend)
                 self.assertFalse(self.hw.enable_decode_cascade_attention)
 
     def test_unsupported_tp_sizes_are_rejected(self):
@@ -244,7 +325,7 @@ class BatchInvariantConfigTest(unittest.TestCase):
             "prefix reuse",
         ):
             self.assertIn(reason, str(raised.exception))
-        self.assertTrue(self.hw.enable_dynamic_decode_backend)
+        self.assertTrue(self.hw.enable_decode_cascade_attention)
         self.assertTrue(self.model.enable_fp32_lm_head)
 
 

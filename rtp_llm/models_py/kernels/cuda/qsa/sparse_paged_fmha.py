@@ -291,6 +291,7 @@ def sparse_paged_gqa_attn(
     selected_has_count: bool = False,
     fp16_pv: bool = False,
     validate_selected: bool = True,
+    _prepare_grouped_splits=None,
     _validated_plan=None,
 ) -> torch.Tensor:
     """Attend to request-local token indices in a paged main MHA cache.
@@ -457,6 +458,23 @@ def sparse_paged_gqa_attn(
     if batch == 0 or query_len == 0:
         return output
 
+    # A model-specific grouped schedule can pack the validated selection and
+    # choose its split count. Allocation, split execution and merge stay shared.
+    splits = None
+    if _prepare_grouped_splits is not None:
+        selected, splits = _prepare_grouped_splits(
+            q,
+            kv_cache,
+            selected,
+            page_size=page_size,
+            block_k=block_k,
+            selected_has_count=selected_has_count,
+            graph_capture=graph_capture,
+            output_gate=output_gate,
+            fp16_pv=fp16_pv,
+        )
+        selected_has_count = True
+
     selected_width = int(selected.shape[2]) - int(selected_has_count)
     if selected_width == 0:
         output.zero_()
@@ -464,7 +482,8 @@ def sparse_paged_gqa_attn(
             output = output * torch.sigmoid(output_gate.transpose(1, 2))
         return output
     if (
-        query_len >= 16
+        splits is None
+        and query_len >= 16
         and head_dim == 256
         and kv_heads in (1, 2)
         and q_heads % kv_heads == 0
@@ -485,16 +504,18 @@ def sparse_paged_gqa_attn(
             selected_has_count=selected_has_count,
             output_gate=output_gate,
         )
-    splits = min(8, triton.next_power_of_2(triton.cdiv(selected_width, block_k)))
-    from rtp_llm.models_py.kernels.cuda.qsa.grouped_sparse_paged_fmha import (
-        preferred_splits,
-    )
+    if splits is None:
+        from rtp_llm.models_py.kernels.cuda.qsa.grouped_sparse_paged_fmha import (
+            preferred_splits,
+        )
 
-    tuned_splits = preferred_splits(
-        q, kv_cache, selected, page_size=page_size, block_k=block_k
-    )
-    if tuned_splits is not None:
-        splits = tuned_splits
+        splits = preferred_splits(
+            q, kv_cache, selected, page_size=page_size, block_k=block_k
+        )
+        if splits is None:
+            splits = min(
+                8, triton.next_power_of_2(triton.cdiv(selected_width, block_k))
+            )
 
     partial = (
         torch.empty(
@@ -505,13 +526,12 @@ def sparse_paged_gqa_attn(
         if splits > 1
         else output
     )
-    grouped = False
     from rtp_llm.models_py.kernels.cuda.qsa.grouped_sparse_paged_fmha import (
         grouped_sparse_paged_split,
         is_supported,
     )
 
-    grouped = is_supported(
+    grouped = _prepare_grouped_splits is not None or is_supported(
         q,
         kv_cache,
         block_table,

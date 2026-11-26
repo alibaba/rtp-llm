@@ -13,6 +13,7 @@ def select_qsa_paged_tokens(
     token_budget: int,
     validate_lengths: bool = True,
     scores_are_masked: bool = False,
+    topk=None,
 ) -> torch.Tensor:
     """Expand scored block top-k plus the unscored partial tail to token ids.
 
@@ -53,17 +54,21 @@ def select_qsa_paged_tokens(
                 "block_logits do not cover every completed block in token_lengths"
             )
 
-    from rtp_llm.models_py.kernels.cuda.qsa.qsa_topk_triton import try_select_qsa_tokens
+    if topk is None:
+        from rtp_llm.models_py.kernels.cuda.qsa.qsa_topk_triton import (
+            try_select_qsa_tokens,
+        )
 
-    result = try_select_qsa_tokens(
-        block_logits,
-        token_lengths,
-        compress_ratio=compress_ratio,
-        token_budget=token_budget,
-        scores_are_masked=scores_are_masked,
-    )
-    if result is not None:
-        return result
+        result = try_select_qsa_tokens(
+            block_logits,
+            token_lengths,
+            compress_ratio=compress_ratio,
+            token_budget=token_budget,
+            scores_are_masked=scores_are_masked,
+        )
+        if result is not None:
+            return result
+        topk = torch.topk
 
     if not validate_lengths:
         complete_blocks = token_lengths // compress_ratio
@@ -87,7 +92,7 @@ def select_qsa_paged_tokens(
                 block_logits,
                 torch.full_like(block_logits, float("-inf")),
             )
-        values, blocks = torch.topk(masked_logits, selected_block_count, dim=-1)
+        values, blocks = topk(masked_logits, selected_block_count)
         valid = torch.isfinite(values)
         block_tokens = blocks.unsqueeze(-1) * compress_ratio + torch.arange(
             compress_ratio, device=block_logits.device

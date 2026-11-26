@@ -1,4 +1,29 @@
-# Qwen3 batch-invariant inference
+# Batch-invariant inference
+
+## Qwen4-Max M11
+
+The native MXFP4 text path runs on one eight-GPU SM103 CUDA 13 host with
+TP1, DP8, EP8, BF16 dense projections and KV, FP32 SSM state and 128-token
+cache pages. Set `RTP_BATCH_INVARIANT=1` and use the native `mega_moe` backend.
+The M11 service test sets these options, runs budgets 0 and 256 in sequence,
+and records every decode step. It compares generated IDs, full-vocabulary
+FP32 logits and sampled probabilities bit for bit across target row positions,
+DP ranks, load on a second rank, and chunk boundaries. It also runs the M11
+Chinese-answer and long-context retrieval checks.
+
+```bash
+bazel test --config=cuda13 //rtp_llm/test/batch_invariant:config_test
+bazel test --config=cuda13 //rtp_llm/test/batch_invariant:m11_gdn_test //rtp_llm/test/batch_invariant:m11_ops_test
+export QWEN4_M11_CHECKPOINT=/mnt/fuse/oss-wlcb-qwen4-m11
+bazel test --config=cuda13 --test_env=QWEN4_M11_CHECKPOINT --test_output=errors \
+    //rtp_llm/test/batch_invariant:qwen4_m11_mxfp4_sm10x
+```
+
+The two operator tests each use one SM103 GPU. The service test requires the
+full native M11 checkpoint on the eight-GPU worker and writes its unchunked
+reference to `budget-0/solo.npz` in the Bazel test outputs.
+
+## Qwen3
 
 Set `RTP_BATCH_INVARIANT=1` for Qwen3-8B Dense or Qwen3-30B-A3B with unquantized BF16
 weights on one node with 1, 2 or 4 SM103 CUDA GPUs. The mode uses eager text
@@ -65,8 +90,9 @@ Repeat the two service runs for each TP size. For TP2 and TP4 check that
 the worker startup logs show all expected ranks and the requested world size.
 The test checks real prefill and decode co-batching,
 target row placement and prefill grants. It compares the token IDs,
-full-vocabulary FP32 logits, sampled-token softmax probabilities and token
-logprobs returned by gRPC bit for bit. Regenerate older reference files with `--save`.
+full-vocabulary FP32 logits and sampled-token softmax probabilities returned
+by gRPC bit for bit. With an RPC schema that exposes token logprobs, it also
+compares those values. Regenerate older reference files with `--save`.
 
 The Linear and Attention factories select the fixed-order implementations
 using the same separation between model code and backend selection as vLLM.

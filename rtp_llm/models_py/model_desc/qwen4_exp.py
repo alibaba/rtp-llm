@@ -16,6 +16,7 @@ from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
     PLE_NGRAM_CTX_TAG,
     PLE_STATE_TAG,
 )
+from rtp_llm.models_py.determinism import batch_invariant as invariant_ops
 from rtp_llm.models_py.model_desc.block_map import (
     get_attention_inputs_value,
     get_layer_tags,
@@ -88,6 +89,27 @@ from rtp_llm.utils.fp8_constants import FP8_STORAGE_SCALE_SUFFIX
 from rtp_llm.utils.model_weight import W
 
 
+# Bind the fixed-order operators to the checkpoint-backed Qwen4 layers.
+class BatchInvariantQSAIndexer(invariant_ops.Qwen4QSAIndexerMixin, Qwen4ExpQSAIndexer):
+    pass
+
+
+class BatchInvariantQwen4GatedResidual(
+    invariant_ops.Qwen4GatedResidualMixin, GatedResidual
+):
+    pass
+
+
+class BatchInvariantQwen4QKRMSNorm(
+    invariant_ops.Qwen4QKRMSNormMixin, ZeroCenteredFusedQKRMSNorm
+):
+    pass
+
+
+def _batch_invariant_enabled(hw_kernel_config):
+    return getattr(hw_kernel_config, "batch_invariant", False) is True
+
+
 class Qwen4ExpAttention(Qwen3NextAttention):
     """Qwen4 full attention plus its checkpoint-backed QSA indexer.
 
@@ -96,6 +118,8 @@ class Qwen4ExpAttention(Qwen3NextAttention):
     QSA compression group. The runtime side context owns the compressed-KV/state
     writes and hands request-local token selections to sparse GQA FMHA.
     """
+
+    _indexer_cls = Qwen4ExpQSAIndexer
 
     def __init__(
         self,
@@ -146,7 +170,9 @@ class Qwen4ExpAttention(Qwen3NextAttention):
             raise RuntimeError(
                 f"qwen4_exp QSA layer {layer_idx} has incomplete indexer geometry"
             )
-        self.qsa_indexer = Qwen4ExpQSAIndexer(
+        if _batch_invariant_enabled(hw_kernel_config):
+            self._indexer_cls = BatchInvariantQSAIndexer
+        self.qsa_indexer = self._indexer_cls(
             weights[W.qwen4_indexer_qk_proj_w],
             weights[W.qwen4_indexer_q_ln_gamma],
             weights[W.qwen4_indexer_k_ln_gamma],
@@ -176,6 +202,13 @@ class Qwen4ExpAttention(Qwen3NextAttention):
     ) -> torch.Tensor:
         """Project once, persist raw keys, then build request-local selections."""
         assert self.qsa_indexer is not None
+        if getattr(self.qsa_indexer, "batch_invariant", False) is True:
+            return self.qsa_indexer.select_paged_indices(
+                hidden_states,
+                qsa_runtime,
+                self.qsa_rope_config,
+                projected=projected,
+            )
         raw_draft = (
             bool(getattr(self, "is_mtp_draft", False))
             and bool(qsa_runtime.main_inputs.is_prefill)
@@ -465,8 +498,10 @@ class Qwen4ExpAttention(Qwen3NextAttention):
                     use_fused_indexer_prep,
                 )
 
+                batch_invariant = getattr(self.qsa_indexer, "batch_invariant", False)
                 if (
-                    type(qsa_runtime) is Qwen4ExpQSARuntimeContext
+                    not batch_invariant
+                    and type(qsa_runtime) is Qwen4ExpQSARuntimeContext
                     and attention_inputs.is_prefill
                     and not attention_inputs.is_target_verify
                     and not self.is_mtp_draft
@@ -509,7 +544,7 @@ class Qwen4ExpAttention(Qwen3NextAttention):
                 )
                 if (
                     type(self) is Qwen4ExpAttention
-                    and type(self.qsa_indexer) is Qwen4ExpQSAIndexer
+                    and type(self.qsa_indexer) is self._indexer_cls
                     and type(fmha_impl) is _sparse_gqa_backend.SparseGqaFmhaImpl
                     and (
                         (
@@ -594,6 +629,7 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
     """
 
     _moe_layer_cls = Qwen4MoeLayer
+    _residual_cls = GatedResidual
 
     def __init__(
         self,
@@ -610,6 +646,9 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
             getattr(config, "online_mxfp8", False)
         )
         self._execution_role = getattr(parallelism_config, "role_type", "PDFUSION")
+        batch_invariant = _batch_invariant_enabled(hw_kernel_config)
+        if batch_invariant:
+            self._residual_cls = BatchInvariantQwen4GatedResidual
         super().__init__(
             config,
             parallelism_config,
@@ -621,11 +660,14 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
             hw_kernel_config,
         )
         if self.layer_type == HybridAttentionType.LINEAR:
-            from rtp_llm.models_py.modules.qwen4_exp.gdn_prefill_adapter import (
-                install_qwen4_gdn_backends,
-            )
+            if batch_invariant:
+                invariant_ops.install_batch_invariant_gdn(self.self_attn)
+            else:
+                from rtp_llm.models_py.modules.qwen4_exp.gdn_prefill_adapter import (
+                    install_qwen4_gdn_backends,
+                )
 
-            install_qwen4_gdn_backends(self.self_attn)
+                install_qwen4_gdn_backends(self.self_attn)
             from rtp_llm.models_py.modules.qwen4_exp.gdn_prefill_norm import (
                 Qwen4PrefillGatedNorm,
             )
@@ -636,9 +678,13 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
                     gdn_norm, role=self._execution_role
                 )
         if hasattr(self.mlp, "select_topk"):
-            from rtp_llm.models_py.modules.qwen4_exp.moe.topk import Qwen4ExpMoeTopk
+            if batch_invariant:
+                router_cls = invariant_ops.BatchInvariantQwen4MoeTopk
+            else:
+                from rtp_llm.models_py.modules.qwen4_exp.moe.topk import Qwen4ExpMoeTopk
 
-            self.mlp.select_topk = Qwen4ExpMoeTopk(self.mlp.select_topk)
+                router_cls = Qwen4ExpMoeTopk
+            self.mlp.select_topk = router_cls(self.mlp.select_topk)
             self.mlp.prepare_shared_expert_overlap()
         from rtp_llm.models_py.modules.qwen4_exp.tp_reduce import (
             install_target_graph_all_reduce,
@@ -650,7 +696,12 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
         # version would silently drop upstream's +1 -- see norm.py.
         fused = getattr(self.self_attn, "qk_fuse_norm", None)
         if fused is not None:
-            self.self_attn.qk_fuse_norm = ZeroCenteredFusedQKRMSNorm.replacing(fused)
+            norm_cls = (
+                BatchInvariantQwen4QKRMSNorm
+                if batch_invariant
+                else ZeroCenteredFusedQKRMSNorm
+            )
+            self.self_attn.qk_fuse_norm = norm_cls.replacing(fused)
 
     def _attention_quant_config(self, config, weights):
         if getattr(config, "_qwen4_nvfp4_source", False):
@@ -691,7 +742,7 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
     def _build_residual_modules(
         self, config: ModelConfig, weights: Dict[str, torch.Tensor]
     ) -> None:
-        self.attn_hyper_connection = GatedResidual(
+        self.attn_hyper_connection = self._residual_cls(
             weights[W.qwen4_hc_attn_norm],
             weights[W.qwen4_hc_attn_mix_down],
             weights[W.qwen4_hc_attn_mix_up],
@@ -708,7 +759,7 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
                 )
             ),
         )
-        self.mlp_hyper_connection = GatedResidual(
+        self.mlp_hyper_connection = self._residual_cls(
             weights[W.qwen4_hc_mlp_norm],
             weights[W.qwen4_hc_mlp_mix_down],
             weights[W.qwen4_hc_mlp_mix_up],
@@ -1119,6 +1170,7 @@ class Qwen4ExpModel(Qwen35Model):
         per_rank = total_shards // tp_size
         expected_shards = set(range(tp_rank * per_rank, (tp_rank + 1) * per_rank))
         prefix = W.qwen4_ple_ngram_shards + "."
+        batch_invariant = _batch_invariant_enabled(self.py_hw_kernel_config)
 
         for upstream_layer_id in layer_ids:
             layer_idx = int(upstream_layer_id) - 1
@@ -1191,6 +1243,7 @@ class Qwen4ExpModel(Qwen35Model):
                     for name in (W.qwen4_ple_key_proj_w, W.qwen4_ple_value_proj_w)
                 ),
                 norm_eps=self.config.layernorm_eps,
+                batch_invariant=batch_invariant,
             )
 
             unit = self.ple_layers[str(layer_idx)]
@@ -1396,7 +1449,12 @@ class Qwen4ExpModel(Qwen35Model):
         self, model_config: ModelConfig, weights: ModelWeights
     ) -> None:
         self.hc_mult = model_config.hc_mult
-        self.hyper_connection_mixer = GatedResidual(
+        residual_cls = (
+            BatchInvariantQwen4GatedResidual
+            if _batch_invariant_enabled(self.py_hw_kernel_config)
+            else GatedResidual
+        )
+        self.hyper_connection_mixer = residual_cls(
             weights.get_global_weight(W.qwen4_hc_mixer_norm),
             weights.get_global_weight(W.qwen4_hc_mixer_mix_down),
             weights.get_global_weight(W.qwen4_hc_mixer_mix_up),

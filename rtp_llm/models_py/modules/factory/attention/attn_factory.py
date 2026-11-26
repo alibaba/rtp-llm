@@ -357,13 +357,15 @@ class AttnImplFactory(object):
             parallelism_config.get_attn_tp_size()
         )
         attn_inputs.headwise_config = getattr(model_config, "headwise_config", None)
-        if getattr(hw_kernel_config, "batch_invariant", False) is True:
-            from .cuda_impl.batch_invariant import create_batch_invariant_impl
+        batch_invariant = getattr(hw_kernel_config, "batch_invariant", False) is True
+        if batch_invariant:
+            if _select_attention_impl_key(attn_configs) != "sparse_gqa":
+                from .cuda_impl.batch_invariant import create_batch_invariant_impl
 
-            return create_batch_invariant_impl(
-                attn_configs, attn_inputs, is_cuda_graph, cuda_graph_selection_mode
-            )
-        if (
+                return create_batch_invariant_impl(
+                    attn_configs, attn_inputs, is_cuda_graph, cuda_graph_selection_mode
+                )
+        elif (
             decode_cascade_max_requests > 0
             and not attn_inputs.is_prefill
             and not attn_configs.use_mla
@@ -424,6 +426,7 @@ class AttnImplFactory(object):
             model_config.max_seq_len,
             parallelism_config,
             cuda_graph_selection_mode,
+            **({"batch_invariant": True} if batch_invariant else {}),
         )
         logging.debug(f"get fmha impl: {type(instance).__name__}")
         return instance

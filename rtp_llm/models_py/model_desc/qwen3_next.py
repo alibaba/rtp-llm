@@ -489,6 +489,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         weights: Dict[str, torch.Tensor],
     ):
         super().__init__(linear_attn_config, parallelism_config, weights)
+        self.chunk_rule = chunk_gated_delta_rule
 
     def _conv1d(
         self,
@@ -653,7 +654,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
                 use_qk_l2norm_in_kernel=True,
             )
         else:
-            attn_out, h, final_state = chunk_gated_delta_rule(
+            attn_out, h, final_state = self.chunk_rule(
                 query,
                 key,
                 value,

@@ -386,7 +386,8 @@ class PLEExecution:
                 write_contexts = []
                 offset = 0
                 full_m11_prefill = (
-                    hyper_states.is_cuda
+                    not getattr(ple, "batch_invariant", False)
+                    and hyper_states.is_cuda
                     and torch.version.hip is None
                     and ple.hc_hidden_size == 32768
                     and page_size == 128

@@ -54,15 +54,20 @@ if TYPE_CHECKING:
 class SparseGqaFmhaImpl(FMHAImplBase):
     """Block-sparse GQA attention for qwen4 prefill and paged decode."""
 
+    batch_invariant = False
+
     def __init__(
         self,
         attn_configs: AttentionConfigs,
         attn_inputs: PyAttentionInputs,
         parallelism_config: Optional[ParallelismConfig] = None,
+        *,
+        batch_invariant: bool = False,
     ) -> None:
         self.attn_configs = attn_configs
         self.attn_inputs = attn_inputs
         self.parallelism_config = parallelism_config
+        self.batch_invariant = batch_invariant
         self.head_num = attn_configs.head_num
         self.kv_head_num = attn_configs.kv_head_num
         self.head_dim = attn_configs.size_per_head
@@ -162,13 +167,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         return self._qsa_main_cache_mutation_started
 
     def _is_prefix_reuse_prefill(self) -> bool:
-        """Ragged prefill batch containing at least one reused prefix.
-
-        Covers both the MTP draft's post-rejection incremental commit and the
-        target's page-aligned prefix-reuse prefill: both carry an explicit
-        prefix and consume the ragged paged bridge. Cold rows with prefix zero
-        may share the same target batch and are handled by that bridge as well.
-        """
+        """Whether this prefill batch contains a nonzero prefix."""
         return (
             self.is_prefill
             and not self.is_target_verify
@@ -212,6 +211,8 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         )
 
     def _prepare_flashinfer_qtoken(self, runtime, hidden_states):
+        if self.batch_invariant:
+            return
         from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_context import (
             Qwen4ExpQSARuntimeContext,
         )
@@ -473,19 +474,23 @@ class SparseGqaFmhaImpl(FMHAImplBase):
     def forward_with_qk_norm_and_output_gate(
         self, qkv, kv_cache, layer_idx, gate, norm
     ):
-        if (
-            self._use_qtoken_selection()
-            and gate.dtype == torch.bfloat16
-            and gate.is_contiguous()
-        ):
-            return self.forward(
-                qkv, kv_cache, layer_idx, qk_norm=norm, output_gate=gate
+        if getattr(self, "batch_invariant", False):
+            return self.forward_with_output_gate(
+                norm(qkv) if norm is not None else qkv, kv_cache, layer_idx, gate
             )
         if (
             norm is not None
             and self.is_target_verify
             and not self._is_mtp_draft
             and not self.attn_configs.use_logn_attn
+        ):
+            return self.forward(
+                qkv, kv_cache, layer_idx, qk_norm=norm, output_gate=gate
+            )
+        if (
+            self._use_qtoken_selection()
+            and gate.dtype == torch.bfloat16
+            and gate.is_contiguous()
         ):
             return self.forward(
                 qkv, kv_cache, layer_idx, qk_norm=norm, output_gate=gate
@@ -511,7 +516,8 @@ class SparseGqaFmhaImpl(FMHAImplBase):
 
     def forward_with_output_gate(self, qkv, kv_cache, layer_idx, gate):
         if (
-            (
+            not self.batch_invariant
+            and (
                 self.is_target_verify
                 or not self.is_prefill
                 or self._use_qtoken_selection()
@@ -669,10 +675,10 @@ class SparseGqaFmhaImpl(FMHAImplBase):
                 self._selected_indices = None
                 self._trusted_prefill_cu_seqlens = None
             return output
-        is_incremental_prefill = self._is_prefix_reuse_prefill()
+        is_paged_prefill = fmha_validation.uses_paged_prefill(self)
 
         paged_plan = None
-        if is_incremental_prefill:
+        if is_paged_prefill:
             paged_plan = self._prepare_incremental_prefill_inputs(
                 qkv, kv_cache, selected_indices
             )
@@ -773,7 +779,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
                 self._selected_indices = None
                 self._trusted_prefill_cu_seqlens = None
             return output
-        if is_incremental_prefill:
+        if is_paged_prefill:
             if int(qkv.shape[1]) < self.q_width:
                 raise RuntimeError(
                     "qwen4_exp incremental-prefill RoPE writer returned an "
@@ -940,12 +946,15 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         block_table = plan.block_table
         page_size = int(plan.page_size)
 
-        from rtp_llm.models_py.kernels.cuda.qsa.sparse_paged_fmha import (
-            sparse_paged_gqa_attn,
-        )
+        if self.batch_invariant:
+            from rtp_llm.models_py.determinism.batch_invariant import paged_attention
+        else:
+            from rtp_llm.models_py.kernels.cuda.qsa.sparse_paged_fmha import (
+                sparse_paged_gqa_attn as paged_attention,
+            )
 
         q = q.view(batch, query_len, self.head_num, self.head_dim).transpose(1, 2)
-        output = sparse_paged_gqa_attn(
+        output = paged_attention(
             q.contiguous(),
             kv_cache.kv_cache_base,
             block_table,
@@ -987,6 +996,21 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             raise ValueError(
                 "incremental-prefill RoPE writer returned query geometry "
                 "inconsistent with preflight"
+            )
+
+        if self.batch_invariant:
+            from rtp_llm.models_py.determinism.batch_invariant import (
+                ragged_paged_attention,
+            )
+
+            return ragged_paged_attention(
+                q,
+                kv_cache.kv_cache_base,
+                plan,
+                heads=self.head_num,
+                kv_heads=self.kv_head_num,
+                head_dim=self.head_dim,
+                trusted_selected=trusted_selected,
             )
 
         from rtp_llm.models_py.kernels.cuda.qsa.sparse_paged_fmha import (
@@ -1124,6 +1148,8 @@ def create_sparse_gqa_impl(
     max_seq_len: int = 0,
     parallelism_config: Optional[ParallelismConfig] = None,
     cuda_graph_selection_mode: Optional[Union[str, CudaGraphSelectionMode]] = None,
+    *,
+    batch_invariant: bool = False,
 ) -> AttentionImpl:
     """Factory entry for the sparse GQA family (qwen4 prefill and decode).
 
@@ -1139,6 +1165,11 @@ def create_sparse_gqa_impl(
         )
     )
     if (
+        batch_invariant
+        and (is_cuda_graph or selection_mode != CudaGraphSelectionMode.EAGER)
+    ):
+        raise ValueError("batch-invariant sparse GQA requires eager execution")
+    if (
         selection_mode != CudaGraphSelectionMode.EAGER
         and selection_mode != CudaGraphSelectionMode.DECODE_GRAPH
     ):
@@ -1149,7 +1180,9 @@ def create_sparse_gqa_impl(
             f"target_verify={attn_inputs.is_target_verify})"
         )
     attn_inputs.is_cuda_graph = is_cuda_graph
-    return SparseGqaFmhaImpl(attn_configs, attn_inputs, parallelism_config)
+    return SparseGqaFmhaImpl(
+        attn_configs, attn_inputs, parallelism_config, batch_invariant=batch_invariant
+    )
 
 
 AttnImplFactory.register_fmha_impl("sparse_gqa", create_sparse_gqa_impl)

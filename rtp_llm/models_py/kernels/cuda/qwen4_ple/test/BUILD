@@ -9,6 +9,13 @@ models_py_test(
 )
 
 models_py_test(
+    name = "ple_gather_triton_sm103_test",
+    src = "ple_gather_triton_test.py",
+    gpu = "SM103_CU13",
+    args = ["PLEGatherTritonTest.test_shared_cpu_fp8_m11_shard_width"],
+)
+
+models_py_test(
     name = "ple_outer_residual_test",
     src = "ple_outer_residual_test.py",
     gpu = "RTX_5000_PRO_CU13",
