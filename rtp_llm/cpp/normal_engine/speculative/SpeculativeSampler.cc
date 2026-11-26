@@ -1101,7 +1101,7 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
     {
         int idx = 0;
         for (const auto& stream : streams) {
-            const bool need    = do_sample_ptr[idx] && !force_mask_ptr[idx];
+            const bool need    = do_sample_ptr[idx] && !(finalize_in_kernel && force_mask_ptr[idx]);
             needs_uniform[idx] = need;
             any_needs_uniform |= need;
             if (need) {
@@ -1123,7 +1123,9 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
         // resolved device index: Tensor::device() always carries one, while
         // target_device is index-less.
         const auto uniform_device =
-            torch::Device(target_device.type(), cuda_graph::graphGetCurrentStream().device_index());
+            target_device.is_cuda() ?
+                torch::Device(target_device.type(), cuda_graph::graphGetCurrentStream().device_index()) :
+                target_device;
         if (!uniform_samples_buffer_.defined() || uniform_samples_buffer_.device() != uniform_device
             || uniform_samples_buffer_.scalar_type() != torch::kFloat || uniform_samples_buffer_.dim() != 2
             || uniform_samples_buffer_.size(0) < batch_size || uniform_samples_buffer_.size(1) != uniform_width) {
@@ -1135,7 +1137,7 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
         // unseeded. Otherwise every needed row is overwritten below and the
         // initial RNG kernel is pure overhead.
         if (all_needed_rows_seeded) {
-            uniform_samples_d = torch::empty({(long)batch_size, uniform_width}, rand_options);
+            uniform_samples_d = torch::zeros({(long)batch_size, uniform_width}, rand_options);
         } else {
             uniform_samples_d = torch::rand({(long)batch_size, uniform_width}, rand_options);
         }

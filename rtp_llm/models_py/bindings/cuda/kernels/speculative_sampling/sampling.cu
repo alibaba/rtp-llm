@@ -322,66 +322,10 @@ __global__ void rejection_sampling_kernel(DType*         draft_probs,
         if (output_verified_draft_lengths) {
             output_verified_draft_lengths[row_idx] = valid_length;
         }
-        bool direct_target_fallback = false;
-        int  pos                    = valid_length;
-        for (int i = 0; i < valid_length; ++i) {
-            IdType draft_id  = draft_token_ids[row_idx * num_speculative_tokens + i];
-            IdType target_id = target_token_ids[(row_idx * (num_speculative_tokens + 1) + i) * target_token_stride
-                                                + target_token_stride - 1];
-
-            // A point-mass target row is the one-hot at its greedy target
-            // token, so q(draft_id) is exactly 1.0f when the draft proposed
-            // that token and 0.0f otherwise — bit-identical to reading the
-            // materialized one-hot matrix, which the greedy sampler skipped.
-            float q = target_candidate_ids ?
-                          accept_target_probs[row_idx * num_speculative_tokens + i] :
-                      target_probs_point_mass ?
-                          (draft_id == target_id ? 1.0f : 0.0f) :
-                          target_probs[(row_idx * (num_speculative_tokens + 1) + i) * target_vocab_size + draft_id];
-            float p = target_candidate_ids ?
-                          accept_draft_probs[row_idx * num_speculative_tokens + i] :
-                      draft_probs_point_mass ?
-                          1.0f :
-                          draft_probs[(row_idx * num_speculative_tokens + i) * target_vocab_size + draft_id];
-            DType u = uniform_samples[row_idx * (num_speculative_tokens + 1) + i];
-
-            bool same_token = target_id == draft_id;
-            bool accept     = (do_sample[row_idx] && u * p < q) || (!do_sample[row_idx] && same_token);
-            if (accept) {
-                output_token_ids[row_idx * (num_speculative_tokens + 1) + i] = draft_id;
-            } else {
-                pos = i;
-                // Greedy verification already has the exact target token.
-                // Rejection-residual sampling is only valid for stochastic
-                // speculative decoding.
-                if (!do_sample[row_idx]) {
-                    output_token_ids[row_idx * (num_speculative_tokens + 1) + i] = target_id;
-                    for (int p = i + 1; p < num_speculative_tokens + 1; ++p) {
-                        output_token_ids[row_idx * (num_speculative_tokens + 1) + p] = -1;
-                    }
-                    direct_target_fallback = true;
-                }
-                break;
-            }
-        }
-
-        output_accepted_token_num[row_idx] = pos + 1;
-
-        if (pos == valid_length) {
-            IdType bonus_token_id =
-                target_token_ids[(row_idx * (num_speculative_tokens + 1) + pos) * target_token_stride
-                                 + target_token_stride - 1];
-            output_token_ids[row_idx * (num_speculative_tokens + 1) + pos] = bonus_token_id;
-            for (int p = pos + 1; p < num_speculative_tokens + 1; ++p) {
-                output_token_ids[row_idx * (num_speculative_tokens + 1) + p] = -1;
-            }
-        }
-
-        s_pos                    = pos;
-        s_skip_residual_sampling = direct_target_fallback || pos == valid_length;
-        if (finalize_outputs && s_skip_residual_sampling) {
-            // This row's rejection outputs are final; fold the caller's
-            // post-rejection finalization (force override + -1 -> 0 reset).
+        if (finalize_outputs && force_mask != nullptr && force_mask[row_idx]) {
+            // Forced-accept rows ignore rejection/residual draws completely;
+            // finalize immediately so stochastic forced rows neither read
+            // unused uniform_samples nor run the full-vocab residual scan.
             finalizeSpecAcceptRow(output_token_ids,
                                   output_accepted_token_num,
                                   draft_token_ids,
@@ -391,6 +335,80 @@ __global__ void rejection_sampling_kernel(DType*         draft_probs,
                                   static_cast<int>(row_idx),
                                   num_speculative_tokens,
                                   valid_length);
+            s_pos                    = valid_length;
+            s_skip_residual_sampling = true;
+        } else {
+            bool       direct_target_fallback = false;
+            int        pos                    = valid_length;
+            const bool sample_row             = do_sample[row_idx];
+            for (int i = 0; i < valid_length; ++i) {
+                IdType draft_id  = draft_token_ids[row_idx * num_speculative_tokens + i];
+                IdType target_id = target_token_ids[(row_idx * (num_speculative_tokens + 1) + i) * target_token_stride
+                                                    + target_token_stride - 1];
+
+                // A point-mass target row is the one-hot at its greedy target
+                // token, so q(draft_id) is exactly 1.0f when the draft proposed
+                // that token and 0.0f otherwise — bit-identical to reading the
+                // materialized one-hot matrix, which the greedy sampler skipped.
+                float q = target_candidate_ids ?
+                              accept_target_probs[row_idx * num_speculative_tokens + i] :
+                          target_probs_point_mass ?
+                              (draft_id == target_id ? 1.0f : 0.0f) :
+                              target_probs[(row_idx * (num_speculative_tokens + 1) + i) * target_vocab_size + draft_id];
+                float p = target_candidate_ids ?
+                              accept_draft_probs[row_idx * num_speculative_tokens + i] :
+                          draft_probs_point_mass ?
+                              1.0f :
+                              draft_probs[(row_idx * num_speculative_tokens + i) * target_vocab_size + draft_id];
+                DType u = sample_row ? uniform_samples[row_idx * (num_speculative_tokens + 1) + i] : DType(0);
+
+                bool same_token = target_id == draft_id;
+                bool accept     = (sample_row && u * p < q) || (!sample_row && same_token);
+                if (accept) {
+                    output_token_ids[row_idx * (num_speculative_tokens + 1) + i] = draft_id;
+                } else {
+                    pos = i;
+                    // Greedy verification already has the exact target token.
+                    // Rejection-residual sampling is only valid for stochastic
+                    // speculative decoding.
+                    if (!sample_row) {
+                        output_token_ids[row_idx * (num_speculative_tokens + 1) + i] = target_id;
+                        for (int p_idx = i + 1; p_idx < num_speculative_tokens + 1; ++p_idx) {
+                            output_token_ids[row_idx * (num_speculative_tokens + 1) + p_idx] = -1;
+                        }
+                        direct_target_fallback = true;
+                    }
+                    break;
+                }
+            }
+
+            output_accepted_token_num[row_idx] = pos + 1;
+
+            if (pos == valid_length) {
+                IdType bonus_token_id =
+                    target_token_ids[(row_idx * (num_speculative_tokens + 1) + pos) * target_token_stride
+                                     + target_token_stride - 1];
+                output_token_ids[row_idx * (num_speculative_tokens + 1) + pos] = bonus_token_id;
+                for (int p_idx = pos + 1; p_idx < num_speculative_tokens + 1; ++p_idx) {
+                    output_token_ids[row_idx * (num_speculative_tokens + 1) + p_idx] = -1;
+                }
+            }
+
+            s_pos                    = pos;
+            s_skip_residual_sampling = direct_target_fallback || pos == valid_length;
+            if (finalize_outputs && s_skip_residual_sampling) {
+                // This row's rejection outputs are final; fold the caller's
+                // post-rejection finalization (force override + -1 -> 0 reset).
+                finalizeSpecAcceptRow(output_token_ids,
+                                      output_accepted_token_num,
+                                      draft_token_ids,
+                                      target_token_ids,
+                                      target_token_stride,
+                                      force_mask,
+                                      static_cast<int>(row_idx),
+                                      num_speculative_tokens,
+                                      valid_length);
+            }
         }
     }
     __syncthreads();

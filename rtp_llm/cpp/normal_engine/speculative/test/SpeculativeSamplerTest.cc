@@ -848,6 +848,89 @@ TEST(DSparkSamplerTest, MixedGreedyAndSeededStochasticKeepsSeededUniforms) {
 #endif
 }
 
+// Mixed batch with greedy + forced-accept stochastic + seeded stochastic rows:
+// forced stochastic rows short-circuit in-kernel without consuming generator
+// draws or running residual sampling, while seeded stochastic rows remain exact.
+TEST(DSparkSamplerTest, MixedForcedStochasticAndSeededStochasticShortCircuitsForcedRow) {
+#if USING_CUDA
+    const c10::cuda::CUDAGuard guard(0);
+    constexpr int64_t          batch = 3, steps = 3, vocab = 8;
+    const auto                 f32 = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    const auto                 i32 = f32.dtype(torch::kInt32);
+    ModelConfig                model;
+    model.max_seq_len        = 64;
+    model.vocab_size         = vocab;
+    auto greedy              = makeSamplerStream(model, /*do_sample=*/false, /*top_k=*/1, /*force_accept=*/false, 42);
+    auto forced_stochastic   = makeSamplerStream(model, /*do_sample=*/true, /*top_k=*/0, /*force_accept=*/true, 99);
+    auto seeded_stochastic   = makeSamplerStream(model, /*do_sample=*/true, /*top_k=*/0, /*force_accept=*/false, 7);
+    auto greedy_state        = greedy->getGenerator().get_state().clone();
+    auto forced_state        = forced_stochastic->getGenerator().get_state().clone();
+    auto seeded_before_state = seeded_stochastic->getGenerator().get_state().clone();
+    std::list<GenerateStreamPtr> streams{greedy, forced_stochastic, seeded_stochastic};
+
+    auto ref_gen = torch::make_generator<torch::CUDAGeneratorImpl>();
+    ref_gen.set_current_seed(7);
+    auto        seeded_uniforms = torch::rand({steps + 1}, ref_gen, std::nullopt, f32);
+    const float threshold       = 0.5f * (seeded_uniforms.min().item<float>() + seeded_uniforms.max().item<float>());
+
+    auto draft_ids   = torch::tensor({{1, 2, 3}, {4, 5, 6}, {1, 2, 3}}, i32);
+    auto target_ids  = torch::tensor({{1}, {2}, {5}, {7}, {0}, {0}, {0}, {6}, {1}, {2}, {3}, {4}}, i32);
+    auto draft_probs = torch::zeros({batch, steps, vocab}, f32);
+    for (int64_t row = 0; row < batch; ++row) {
+        for (int64_t pos = 0; pos < steps; ++pos) {
+            draft_probs[row][pos][draft_ids[row][pos].item<int32_t>()] = 1.0f;
+        }
+    }
+    auto target_probs = torch::zeros({batch, steps + 1, vocab}, f32);
+    // Row 1 (forced stochastic) assigns zero target mass to draft tokens so an
+    // unguarded rejection loop would reject at pos 0 and enter residual scan.
+    target_probs[1].select(1, 0).fill_(1.0f);
+    for (int64_t row : {int64_t{0}, int64_t{2}}) {
+        for (int64_t pos = 0; pos < steps + 1; ++pos) {
+            const int64_t anchor = pos < steps ? draft_ids[row][pos].item<int32_t>() : 0;
+            target_probs[row][pos].fill_((1.0f - threshold) / static_cast<float>(vocab - 1));
+            target_probs[row][pos][anchor] = threshold;
+        }
+    }
+
+    SamplerOutput draft, target;
+    draft.token_ids                 = draft_ids;
+    draft.all_probs                 = draft_probs;
+    draft.token_ids_are_point_mass  = false;
+    target.token_ids                = target_ids;
+    target.all_probs                = target_probs;
+    target.token_ids_are_point_mass = false;
+
+    SpeculativeSampler sampler({}, steps);
+    auto               output = sampler.forward(streams, draft, target);
+    output.transfer_done_event->synchronize();
+
+    auto uniforms = torch::zeros({batch, steps + 1}, f32);
+    uniforms[2].copy_(seeded_uniforms);
+    const auto do_sample  = torch::tensor({false, true, true}, torch::kBool).to(torch::kCUDA);
+    const auto force_mask = torch::tensor({false, true, false}, torch::kBool).to(torch::kCUDA);
+    auto       reference  = runRejectionReference(draft_ids,
+                                           target_ids,
+                                           draft_probs,
+                                           target_probs,
+                                           uniforms,
+                                           do_sample,
+                                           force_mask,
+                                           /*draft_point_mass=*/false,
+                                           /*target_point_mass=*/false,
+                                           steps);
+    EXPECT_TRUE(torch::equal(output.accept_tokens, reference.tokens));
+    EXPECT_TRUE(torch::equal(output.accept_len, reference.lengths));
+    EXPECT_TRUE(torch::equal(output.accept_tokens.select(0, 1), torch::tensor({4, 5, 6, 6}, i32)));
+    EXPECT_EQ(output.accept_len_cpu[1].item<int32_t>(), steps + 1);
+    EXPECT_TRUE(torch::equal(greedy->getGenerator().get_state(), greedy_state));
+    EXPECT_TRUE(torch::equal(forced_stochastic->getGenerator().get_state(), forced_state));
+    EXPECT_FALSE(torch::equal(seeded_stochastic->getGenerator().get_state(), seeded_before_state));
+#else
+    GTEST_SKIP() << "CUDA only";
+#endif
+}
+
 // Two fresh streams with the same seed and the same inputs must produce the
 // same rejection bytes, and the result must match the historical seeded draw.
 TEST(DSparkSamplerTest, SeededStochasticBatchIsBitReproducible) {
