@@ -37,6 +37,7 @@ public:
 
         Tier          target_tier{Tier::NONE};
         CacheKeysType cache_keys;
+        RoutedExpertPages route_pages;
         TransferTask  transfer_task;
         Phase         phase{Phase::CREATED};
     };

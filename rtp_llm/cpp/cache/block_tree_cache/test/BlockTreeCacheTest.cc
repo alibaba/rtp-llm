@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <ATen/ATen.h>
 
 #include <algorithm>
 #include <array>
@@ -3632,6 +3633,44 @@ TEST_F(BlockTreeCacheTest, ClearAllEvictsTreeRestoresPoolsAndAllowsReuse) {
     auto hit = cache->match({200});
     EXPECT_EQ(hit.matched_device_blocks, 1u);
     releaseRequestRefsForTest(*cache, hit.matched_device_resources);
+}
+
+TEST_F(BlockTreeCacheTest, RoutePagesFollowTheProducingPrefixAndCannotBridgeAHole) {
+    // Exercise logical KV ownership with a fresh free list. This test never reads a KV payload.
+    auto pool_config = std::make_shared<DeviceBlockPoolConfig>(cache_->groupSets()[0]->devicePools()[0]->config());
+    auto pool = std::make_shared<DeviceBlockPool>(pool_config);
+    pool->markInitialized();
+    const std::vector<DeviceBlockPoolPtr> pools{pool};
+    auto full = std::make_shared<FullGroupSet>(pools, nullptr, nullptr);
+    initializeTestGroupSet(full, pools);
+    auto cache = makeBlockTreeCacheForTest({full});
+    std::vector<std::vector<GroupSetResource>> resources(3, std::vector<GroupSetResource>(1));
+    for (auto& entry : resources) {
+        const auto block = pools[0]->malloc().value();
+        pools[0]->incRef(block);
+        entry[0].device_blocks = {block};
+    }
+    auto first = std::make_shared<at::Tensor>(at::full({2, 1, 2}, 123, at::kShort));
+    auto last = std::make_shared<at::Tensor>(at::full({2, 1, 2}, 456, at::kShort));
+    const CacheKeysType keys{11, 22, 33};
+    cache->insert(keys, resources, Tier::DEVICE, false, {first, nullptr, last});
+    cache->insert(keys, resources, Tier::DEVICE, false, {last, last, last});
+    for (const auto& entry : resources) {
+        pools[0]->decRef(entry[0].device_blocks.front());
+    }
+    RoutedExpertPages observed;
+    auto hit = cache->match(keys, {}, &observed);
+    ASSERT_EQ(hit.matched_device_blocks, 1u);
+    ASSERT_EQ(observed.size(), 1u);
+    EXPECT_EQ(observed[0], first);
+    releaseRequestRefsForTest(*cache, hit.matched_device_resources);
+    auto normal = cache->match(keys);
+    ASSERT_EQ(normal.matched_device_blocks, 3u);
+    releaseRequestRefsForTest(*cache, normal.matched_device_resources);
+    std::string error;
+    ASSERT_TRUE(cache->clearAll(&error)) << error;
+    EXPECT_EQ(cache->match(keys, {}, &observed).matched_device_blocks, 0u);
+    EXPECT_TRUE(observed.empty());
 }
 
 TEST_F(BlockTreeCacheTest, ClearAllFailsClosedWhenBlockIsReferenced) {

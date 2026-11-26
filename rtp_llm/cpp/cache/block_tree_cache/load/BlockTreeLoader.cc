@@ -47,14 +47,28 @@ BlockTreeLoader::BlockTreeLoader(BlockTree*                      tree,
         })) {}
 
 BlockTreeMatchResult BlockTreeLoader::matchLocked(const CacheKeysType&               cache_keys,
-                                                  const std::function<bool(size_t)>& valid_prefix) {
+                                                  const std::function<bool(size_t)>& valid_prefix, RoutedExpertPages* route_pages) {
     if (cache_keys.empty()) {
         RTP_LLM_LOG_DEBUG("empty cache_keys, returning empty result");
         return {};
     }
 
     std::vector<TreeNode*> path   = tree_->findNode(cache_keys);
-    BlockTreeMatchResult   result = createMatchResult(path, cache_keys, valid_prefix);
+    if (route_pages) {
+        // A later hybrid snapshot can repair a KV gap, but cannot supply an earlier missing route.
+        const auto gap = std::find_if(path.begin(), path.end(), [](TreeNode* node) {
+            return !node->routed_experts;
+        });
+        path.erase(gap, path.end());
+    }
+    BlockTreeMatchResult result = createMatchResult(path, cache_keys, valid_prefix, route_pages == nullptr);
+    if (route_pages) {
+        const size_t count = result.async_context ? result.async_context->localMatchedBlocks() : result.matched_device_blocks;
+        route_pages->clear();
+        for (size_t i = 0; i < count; ++i) {
+            route_pages->push_back(path.at(i)->routed_experts);
+        }
+    }
     RTP_LLM_LOG_DEBUG("matched %zu device blocks, cache_keys=%zu, tree_nodes=%zu",
                       result.matched_device_blocks,
                       cache_keys.size(),
@@ -143,7 +157,7 @@ void BlockTreeLoader::collectReuseTimeSnapshots(TreeNode*                       
 
 BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>&            path,
                                                         const CacheKeysType&               cache_keys,
-                                                        const std::function<bool(size_t)>& valid_prefix) {
+                                                        const std::function<bool(size_t)>& valid_prefix, bool allow_storage) {
     BlockTreeMatchResult result;
     std::vector<bool>    candidate_valid;
     if (!path.empty() && !validMatch(path, candidate_valid, valid_prefix) && !storage_backend_) {
@@ -222,7 +236,7 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
     }
 
     StorageRequest storage_request;
-    if (storage_backend_ && path.size() < cache_keys.size()) {
+    if (allow_storage && storage_backend_ && path.size() < cache_keys.size()) {
         storage_request = makeStorageRequest(cache_keys, path.size());
     }
     const bool use_storage = !storage_request.empty();

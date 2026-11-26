@@ -374,6 +374,7 @@ struct PyModelInputs {
 };
 
 struct PyModelOutputs {
+    torch::Tensor routed_experts;
     torch::Tensor hidden_states;
     // Optional model-side features consumed by speculative decoders.  This is
     // a first-class forward output because CUDA graph replay does not execute

@@ -85,7 +85,8 @@ class RTPReplica(RolloutReplica):
         from rtp_multinode_server import launch_multinode_server
 
         self._server_handle, self._native_owners = launch_multinode_server(
-            self.model_config.path, topology.to_dict(), node_ids
+            self.model_config.path, topology.to_dict(), node_ids,
+            enable_return_routed_experts=self.config.enable_rollout_routing_replay,
         )
         self.servers = [self._server_handle]
         try:

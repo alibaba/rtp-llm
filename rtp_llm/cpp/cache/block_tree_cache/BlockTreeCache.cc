@@ -145,14 +145,14 @@ TransferResult BlockTreeCache::executeTransfer(TransferTask task) {
 }
 
 BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType&               cache_keys,
-                                           const std::function<bool(size_t)>& valid_prefix) {
+                                           const std::function<bool(size_t)>& valid_prefix, RoutedExpertPages* route_pages) {
     BlockTreeMatchResult result;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (commit_fenced_) {
             return result;
         }
-        result = loader_.matchLocked(cache_keys, valid_prefix);
+        result = loader_.matchLocked(cache_keys, valid_prefix, route_pages);
     }
     metrics_reporter_->reportCacheReuseTimeMetrics(result.reuse_time_metrics_snapshots);
     return result;
@@ -167,7 +167,7 @@ void BlockTreeCache::insert(const CacheKeysType&                              ca
 size_t BlockTreeCache::insert(const CacheKeysType&                              cache_keys,
                               const std::vector<std::vector<GroupSetResource>>& resources,
                               Tier                                              target_tier,
-                              bool                                              is_resident) {
+                              bool                                              is_resident, const RoutedExpertPages& route_pages) {
     size_t           resident_prefix_length = 0;
     StorageWriteTask storage_write;
     {
@@ -175,7 +175,7 @@ size_t BlockTreeCache::insert(const CacheKeysType&                              
         if (commit_fenced_) {
             return 0;
         }
-        storage_write = storer_.storeLocked(cache_keys, resources, target_tier, is_resident, resident_prefix_length);
+        storage_write = storer_.storeLocked(cache_keys, resources, target_tier, is_resident, resident_prefix_length, route_pages);
     }
     if (storage_write) {
         storage_backend_->write(std::move(storage_write));

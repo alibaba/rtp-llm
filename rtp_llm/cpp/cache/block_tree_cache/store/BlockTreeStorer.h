@@ -39,7 +39,7 @@ public:
                                  const std::vector<std::vector<GroupSetResource>>& resources,
                                  Tier                                              target_tier,
                                  bool                                              is_resident,
-                                 size_t&                                           resident_prefix_length);
+                                 size_t&                                           resident_prefix_length, const RoutedExpertPages& route_pages = {});
     void             stopAdmissionLocked();
     void             resumeAdmissionLocked();
 
@@ -50,12 +50,12 @@ private:
     void             publishDeviceLocked(const CacheKeysType&                              cache_keys,
                                          const std::vector<std::vector<GroupSetResource>>& resources,
                                          bool                                              is_resident,
-                                         size_t&                                           resident_prefix_length);
+                                         size_t&                                           resident_prefix_length, const RoutedExpertPages& route_pages = {});
     StorageRequest   makeStorageRequest(const CacheKeysType&                              cache_keys,
                                         const std::vector<std::vector<GroupSetResource>>& resources) const;
     void             submitLowerTierLocked(const CacheKeysType&                              cache_keys,
                                            const std::vector<std::vector<GroupSetResource>>& resources,
-                                           Tier                                              target_tier);
+                                           Tier                                              target_tier, const RoutedExpertPages& route_pages = {});
     void             runStoreTask(const StoreTaskPtr& task);
     void             scheduleStoreSettlement(const StoreTaskPtr& task, ErrorInfo error);
     void             settleTask(const StoreTask& task, bool copy_success);

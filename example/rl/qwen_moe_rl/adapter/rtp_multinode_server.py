@@ -91,7 +91,7 @@ def gpu_inventory():
 class NativeNodeOwner(RTPServer):
     """One local process tree, holding a contiguous subset of native TP ranks."""
 
-    def __init__(self, replica_rank, model_path, topology, node_index):
+    def __init__(self, replica_rank, model_path, topology, node_index, enable_return_routed_experts=False):
         self.topology = ReplicaTopology.from_dict(topology)
         self.node_index = int(node_index)
         self.node = self.topology.node_groups[self.node_index]
@@ -103,6 +103,7 @@ class NativeNodeOwner(RTPServer):
             ",".join(self.node["gpu_ids"]),
             self.topology.tp_size,
         )
+        self.enable_return_routed_experts = enable_return_routed_experts
         self.owner_identity = dict(
             pid=os.getpid(),
             create_time=psutil.Process().create_time(),
@@ -156,8 +157,11 @@ class NativeNodeOwner(RTPServer):
             ),
         )
         self.log = (own_root / f"rtp_replica_{self.replica_rank}.log").open("wb")
+        command = ["/bin/bash", os.environ["RTP_SERVER_LAUNCHER"]]
+        if self.enable_return_routed_experts:
+            command += ["--enable_return_routed_experts", "1"]
         self.process = subprocess.Popen(
-            ["/bin/bash", os.environ["RTP_SERVER_LAUNCHER"]],
+            command,
             env=environment,
             stdout=self.log,
             stderr=subprocess.STDOUT,
@@ -341,7 +345,7 @@ class NativeNodeOwner(RTPServer):
 class MultiNodeRTPServer(RTPServer):
     """Stable RPC/gateway actor; native process ownership lives on each host."""
 
-    def __init__(self, replica_rank, model_path, topology, owners):
+    def __init__(self, replica_rank, model_path, topology, owners, enable_return_routed_experts=False):
         self.topology = ReplicaTopology.from_dict(topology)
         self.owners = owners
         self.boot = -1
@@ -354,6 +358,7 @@ class MultiNodeRTPServer(RTPServer):
         self._last_suspend = None
         self._owner_identities = []
         super().__init__(replica_rank, model_path, "", self.topology.tp_size)
+        self.enable_return_routed_experts = enable_return_routed_experts
         self.controller_identity = dict(
             pid=os.getpid(),
             create_time=psutil.Process().create_time(),
@@ -490,8 +495,11 @@ class MultiNodeRTPServer(RTPServer):
         generation = json.loads(gen_path.read_text()) if gen_path.exists() else {}
         eos = generation.get("eos_token_id", self.tokenizer.eos_token_id)
         eos = eos if isinstance(eos, list) else ([] if eos is None else [eos])
+        text_cfg = getattr(config, "text_config", config)
         self.client = TokenRpcClient(
             self.topology.addresses[0],
+            routed_expert_shape=(text_cfg.num_hidden_layers, text_cfg.num_experts_per_tok)
+            if self.enable_return_routed_experts else None,
             vocab_size=getattr(config, "text_config", config).vocab_size,
             eos_token_ids=eos,
             timeout=float(os.environ.get("RLLM_RTP_TOKEN_TIMEOUT", "600")),
@@ -596,7 +604,7 @@ class MultiNodeRTPServer(RTPServer):
         return result
 
 
-def launch_multinode_server(model_path, topology, node_ids):
+def launch_multinode_server(model_path, topology, node_ids, *, enable_return_routed_experts=False):
     """Create the stable controller and local owners on an existing Ray cluster."""
     topology = ReplicaTopology.from_dict(topology)
     if not ray.is_initialized() or len(node_ids) != len(topology.node_groups):
@@ -617,7 +625,7 @@ def launch_multinode_server(model_path, topology, node_ids):
                     node_id, soft=False
                 ),
                 runtime_env=runtime,
-            ).remote(topology.replica_rank, model_path, topology.to_dict(), index)
+            ).remote(topology.replica_rank, model_path, topology.to_dict(), index, enable_return_routed_experts)
         )
     controller_class = ray.remote(num_cpus=1, num_gpus=0)(MultiNodeRTPServer)
     controller = controller_class.options(
@@ -625,5 +633,5 @@ def launch_multinode_server(model_path, topology, node_ids):
         max_concurrency=128,
         scheduling_strategy=NodeAffinitySchedulingStrategy(node_ids[0], soft=False),
         runtime_env=runtime,
-    ).remote(topology.replica_rank, model_path, topology.to_dict(), owners)
+    ).remote(topology.replica_rank, model_path, topology.to_dict(), owners, enable_return_routed_experts)
     return controller, owners

@@ -175,6 +175,7 @@ py_library(
     ],
     deps = [
         ":grpcio-tools",
+        ":numpy",
         ":protobuf",
         "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_py_proto",
     ],

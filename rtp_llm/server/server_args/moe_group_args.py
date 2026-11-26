@@ -190,6 +190,13 @@ def init_moe_group_args(parser, moe_config, eplb_config, deep_ep_config):
         help="是否使用 all_gather 进行通信。",
     )
     moe_group.add_argument(
+        "--enable_return_routed_experts",
+        bind_to=(moe_config, "enable_return_routed_experts"),
+        type=str2bool,
+        default=False,
+        help="Capture Qwen4 MoE routing for rollout requests and reusable KV prefixes.",
+    )
+    moe_group.add_argument(
         "--moe_strategy",
         env_name="MOE_STRATEGY",
         bind_to=(moe_config, "moe_strategy"),

@@ -10,7 +10,15 @@
 
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
+namespace at {
+class Tensor;
+}
+
 namespace rtp_llm {
+
+// A reusable KV page retains the immutable route rows produced by the same forward.
+using RoutedExpertPage  = std::shared_ptr<const at::Tensor>;
+using RoutedExpertPages = std::vector<RoutedExpertPage>;
 
 class CacheTopology;
 

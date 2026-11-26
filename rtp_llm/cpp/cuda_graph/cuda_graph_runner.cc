@@ -1188,6 +1188,9 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
             }
         }
         auto& mem_hold        = graph_instances_[state.current_real_graph_seq_len].mem_hold_;
+        if (mem_hold.routed_experts_.defined()) {
+            outputs.routed_experts = mem_hold.routed_experts_.slice(0, 0, state.current_seq_len);
+        }
         outputs.hidden_states = mem_hold.decoder_layer_hidden_states_.slice(0, 0, state.current_seq_len);
         if (mem_hold.mtp_target_hidden_states_.defined()) {
             outputs.mtp_target_hidden_states = mem_hold.mtp_target_hidden_states_.slice(0, 0, state.current_seq_len);
@@ -1200,6 +1203,10 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
         outputs.hidden_states =
             graph_instances_[state.current_real_graph_bs].mem_hold_.decoder_layer_hidden_states_.slice(
                 0, 0, state.seq_len_sum);
+        const auto& routes = graph_instances_[state.current_real_graph_bs].mem_hold_.routed_experts_;
+        if (routes.defined()) {
+            outputs.routed_experts = routes.slice(0, 0, state.seq_len_sum);
+        }
         const auto& mtp_target_hidden_states =
             graph_instances_[state.current_real_graph_bs].mem_hold_.mtp_target_hidden_states_;
         if (mtp_target_hidden_states.defined()) {
@@ -2090,6 +2097,7 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
                 RTP_LLM_LOG_ERROR("Capture forward failed for %s %d: %s", key_type, key, e.what());
                 throw;
             }
+            graph_instances_[key].mem_hold_.routed_experts_ = outputs.routed_experts;
             graph_instances_[key].mem_hold_.decoder_layer_hidden_states_.copy_(outputs.hidden_states);
             auto& mtp_target_hidden_states = graph_instances_[key].mem_hold_.mtp_target_hidden_states_;
             RTP_LLM_CHECK_WITH_INFO(mtp_target_hidden_states.defined() == outputs.mtp_target_hidden_states.defined(),

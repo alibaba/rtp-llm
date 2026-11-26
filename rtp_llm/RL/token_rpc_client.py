@@ -10,7 +10,10 @@ import math
 import struct
 import time
 from dataclasses import dataclass
-from typing import Optional, Sequence
+from typing import TYPE_CHECKING, Optional, Sequence
+
+if TYPE_CHECKING:
+    import numpy as np
 
 import grpc
 
@@ -108,6 +111,7 @@ class TokenResult:
     local_reuse_len: int = 0
     prefill_local_reuse_len: int = 0
     has_raw_logprobs: bool = False
+    routed_experts: Optional["np.ndarray"] = None
 
 
 class TokenRpcClient:
@@ -118,9 +122,11 @@ class TokenRpcClient:
         vocab_size: int,
         eos_token_ids: Sequence[int],
         timeout: float = 120,
+        routed_expert_shape: Optional[tuple[int, int]] = None,
     ):
         if vocab_size <= 0 or not math.isfinite(timeout) or timeout <= 0:
             raise ValueError("vocab_size and timeout must be positive")
+        self.routed_expert_shape = routed_expert_shape
         self.address = address
         self.vocab_size = vocab_size
         self.eos_token_ids = frozenset(eos_token_ids)
@@ -155,7 +161,7 @@ class TokenRpcClient:
             self._channel = grpc.aio.insecure_channel(
                 self.address,
                 options=[
-                    ("grpc.max_receive_message_length", 64 * 1024 * 1024),
+                    ("grpc.max_receive_message_length", 1024 * 1024 * 1024),
                 ],
             )
         config.timeout_ms = max(1, int(self.timeout * 1000))
@@ -302,6 +308,22 @@ class TokenRpcClient:
             raise TokenProtocolError(
                 "Generation ended without EOS, stop token, or length limit"
             )
+        routes = None
+        if params.return_routed_experts:
+            import numpy as np
+
+            if not info.HasField("routed_experts"):
+                raise TokenProtocolError("Requested routed_experts missing from terminal response")
+            tensor = info.routed_experts
+            shape = tuple(tensor.shape)
+            if (tensor.data_type != pb.TensorPB.INT16 or len(shape) != 3
+                    or shape[0] != len(prompt_ids) + len(ids) - 1 or min(shape) < 1
+                    or self.routed_expert_shape is not None and shape[1:] != self.routed_expert_shape):
+                raise TokenProtocolError(f"Invalid routed expert tensor dtype or shape: {shape}")
+            payload = tensor.int16_data
+            if len(payload) != math.prod(shape) * 2:
+                raise TokenProtocolError("Invalid routed expert byte count")
+            routes = np.frombuffer(payload, dtype="<i2").reshape(shape)
         return TokenResult(
             token_ids=ids,
             log_probs=scores,
@@ -313,6 +335,7 @@ class TokenRpcClient:
             local_reuse_len=int(info.local_reuse_len),
             prefill_local_reuse_len=int(info.prefill_local_reuse_len),
             has_raw_logprobs=has_raw_logprobs,
+            routed_experts=routes,
         )
 
     async def score_tokens(

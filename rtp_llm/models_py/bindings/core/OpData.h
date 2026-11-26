@@ -151,6 +151,7 @@ struct GptModelOutputs {
     // this separate from all_hidden_states lets the executor distinguish a
     // real graph-instance output from the ordinary decoder hidden tensor.
     torch::Tensor mtp_target_hidden_states;
+    torch::Tensor routed_experts;
 
     // A single request-visible status. `REPLAYED` means this forward actually
     // executed a captured generation-prefill CUDA Graph; every other non-default value is

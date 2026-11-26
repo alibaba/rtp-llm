@@ -485,6 +485,16 @@ absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int6
         return absl::OkStatus();
     }
 
+    if (model_output.routed_experts.defined()) {
+        const auto& device_rows = model_output.routed_experts;
+        RTP_LLM_CHECK_WITH_INFO(device_rows.dim() == 3 && device_rows.size(0) == static_cast<int64_t>(stream_groups.modelExecuteTokenSize()),
+                                "router must provide one row per executed input token");
+        auto cpu_rows = torch::empty(device_rows.sizes(), torch::TensorOptions().dtype(torch::kInt16).pinned_memory(true));
+        // Enqueue before the sampler event, on the producer stream. An overlapping dispatch
+        // reads this batch's pinned storage, never the workspace reused by the next graph.
+        cpu_rows.copy_(device_rows, /*non_blocking=*/true);
+        model_output.routed_experts = std::move(cpu_rows);
+    }
     // Gather selects the execution mode from non-errored streams in model order.
     // Use that same decision: streams.front() may already have failed or be reordered.
     const bool zero_token_batch = model_input.skip_lm_head;
@@ -569,7 +579,8 @@ absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int6
         if (zero_token_batch) {
             cudaSyncAndCheck();
             result = batch_stream_processor_->dispatchPrefillOnly(stream_groups,
-                                                                  model_output.generation_prefill_cuda_graph_status);
+                                                                  model_output.generation_prefill_cuda_graph_status,
+                                                                  model_output.routed_experts);
         } else {
             MergedOutput merge_outputs{std::move(model_output), std::move(sampler_output), std::move(recorded_batch)};
             if (useDeviceInput()) {

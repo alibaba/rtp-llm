@@ -1186,6 +1186,11 @@ protected:
     unique_ptr<NormalBatchStreamProcessor> processor_;
 };
 
+class CpuChunkedPrefillBatchStreamProcessorTest: public ChunkedPrefillBatchStreamProcessorTest {
+protected:
+    void initTestDevices() override {}
+};
+
 TEST_F(NormalBatchStreamProcessorTest, testBatchTtftCapturedAtOutputUpdate) {
     const auto config    = makeLogprobsModelConfig();
     auto       processor = makeLogprobsProcessor(config);
@@ -2675,6 +2680,74 @@ TEST_F(ChunkedPrefillBatchStreamProcessorTest, testChunkedPrefillPositionIdsCopy
 
     EXPECT_EQ(combo_tokens, toVec<int>(model_input.combo_tokens));
     EXPECT_EQ(combo_position_ids, toVec<int>(model_input.combo_position_ids));
+}
+
+TEST_F(CpuChunkedPrefillBatchStreamProcessorTest, testPrefillOnlyDispatchKeepsRoutedExpertsAlignedAcrossChunks) {
+    auto first_config                   = std::make_shared<GenerateConfig>();
+    first_config->aux_info               = true;
+    first_config->return_routed_experts  = true;
+    auto second_config                   = std::make_shared<GenerateConfig>();
+    second_config->aux_info              = true;
+    second_config->return_routed_experts = true;
+    auto route_cache_config = rtp_llm::test::makeSimpleMhaCacheConfig(
+        model_config_.num_layers, /*block_num=*/256, /*tokens_per_block=*/128, DataType::TYPE_BF16);
+    ResourceContext context;
+    context.cache_manager = std::make_shared<KVCacheManager>(route_cache_config);
+    const auto make_stream = [&](std::vector<int32_t> tokens, const std::shared_ptr<GenerateConfig>& config) {
+        auto query             = std::make_shared<GenerateInput>();
+        query->input_ids       = hostIntBuffer(std::move(tokens));
+        query->generate_config = config;
+        auto stream = std::make_shared<NormalGenerateStream>(query, model_config_, RuntimeConfig{}, context, nullptr);
+        stream->generate_status_->status = StreamState::RUNNING;
+        stream->setChunkSize(8);
+        return stream;
+    };
+    auto first  = make_stream(
+        {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19}, first_config);
+    auto second = make_stream({21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33}, second_config);
+
+    const auto make_route_rows = [](int stream_id, int token_begin, int token_count) {
+        auto routes = torch::empty({token_count, 2, 10}, torch::kInt16);
+        auto* data   = routes.data_ptr<int16_t>();
+        for (int token = 0; token < token_count; ++token) {
+            for (int layer = 0; layer < 2; ++layer) {
+                for (int expert = 0; expert < 10; ++expert) {
+                    data[token * 20 + layer * 10 + expert] =
+                        static_cast<int16_t>(stream_id * 1000 + (token_begin + token) * 20 + layer * 10 + expert);
+                }
+            }
+        }
+        return routes;
+    };
+    const auto make_batch_routes = [&](const std::list<GenerateStreamPtr>& streams) {
+        std::vector<torch::Tensor> rows;
+        rows.reserve(streams.size());
+        for (const auto& stream : streams) {
+            const int stream_id = stream.get() == first.get() ? 1 : 2;
+            rows.push_back(make_route_rows(stream_id, stream->prefixLength(), stream->currentExecuteTokenSize()));
+        }
+        return torch::cat(rows, 0);
+    };
+    const auto dispatch_chunk = [&](const std::list<GenerateStreamPtr>& streams) {
+        StreamGroups groups(streams);
+        return processor_->dispatchPrefillOnly(
+            groups, GenerationPrefillCudaGraphStatus::NOT_REQUESTED, make_batch_routes(streams));
+    };
+
+    std::list<GenerateStreamPtr> both_streams{first, second};
+    ASSERT_TRUE(dispatch_chunk(both_streams).ok());
+    ASSERT_TRUE(first->isMiddleChunk());
+    EXPECT_FALSE(second->isMiddleChunk());
+
+    ASSERT_TRUE(dispatch_chunk(both_streams).ok());
+    EXPECT_FALSE(first->isMiddleChunk());
+    EXPECT_FALSE(second->isMiddleChunk());
+
+    std::list<GenerateStreamPtr> first_stream{first};
+    ASSERT_TRUE(dispatch_chunk(first_stream).ok());
+
+    EXPECT_TRUE(torch::equal(first->streamCacheResource().materializeRoutedExperts(19), make_route_rows(1, 0, 19)));
+    EXPECT_TRUE(torch::equal(second->streamCacheResource().materializeRoutedExperts(13), make_route_rows(2, 0, 13)));
 }
 
 TEST_F(ChunkedPrefillBatchStreamProcessorTest, testAllAttentionChunkInputsPreservePrefixesAndCacheRows) {

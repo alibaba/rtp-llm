@@ -96,6 +96,7 @@ public:
     bool                          force_disable_sp_run     = false;
     bool                          force_sp_accept          = false;
     ReturnAllProbsMode            return_all_probs         = ReturnAllProbsMode::NONE;
+    bool                          return_routed_experts    = false;
     bool                          return_softmax_probs     = false;
     bool                          aux_info                 = true;
     std::vector<std::vector<int>> stop_words_list;

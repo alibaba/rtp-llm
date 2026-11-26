@@ -55,6 +55,7 @@ struct StreamUpdateInfo {
     // Appended to preserve existing aggregate initializers. CPU context rows.
     const torch::Tensor custom_output{};
     torch::Tensor       raw_logprobs{};
+    torch::Tensor       routed_experts{};
 };
 
 struct StreamSpecUpdateInfo {

@@ -21,6 +21,17 @@ namespace rtp_llm {
 
 class QueryConverterTest: public DeviceTestBase {};
 
+TEST(QueryConverterWireTest, RoutedExpertsUseInt16WirePayload) {
+    auto ids = torch::arange(12, torch::TensorOptions().dtype(torch::kInt16)).reshape({2, 3, 2}).transpose(0, 1);
+    TensorPB pb;
+    QueryConverter::transTensorPB(&pb, ids);
+    EXPECT_EQ(pb.data_type(), TensorPB::INT16);
+    EXPECT_EQ(pb.int16_data().size(), 2 * ids.numel());
+    EXPECT_TRUE(torch::equal(QueryConverter::transTensor(pb), ids));
+    pb.mutable_int16_data()->pop_back();
+    EXPECT_THROW(QueryConverter::transTensor(pb), std::runtime_error);
+}
+
 TEST_F(QueryConverterTest, PrefillOnlyFlagWithZeroMaxNewTokensMeansPrefillOnly) {
     for (const bool enable_disk_cache : {false, true}) {
         SCOPED_TRACE(enable_disk_cache);

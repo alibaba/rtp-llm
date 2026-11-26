@@ -1129,6 +1129,7 @@ class MoeConfig:
     hack_moe_expert: bool
     ll_num_max_token: int
     masked_max_token_num: int
+    enable_return_routed_experts: bool
     moe_strategy: str
     use_all_gather: bool
     use_deepep_internode: bool

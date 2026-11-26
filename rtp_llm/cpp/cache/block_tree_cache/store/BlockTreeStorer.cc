@@ -47,16 +47,16 @@ StorageWriteTask BlockTreeStorer::storeLocked(const CacheKeysType&              
                                               const std::vector<std::vector<GroupSetResource>>& resources,
                                               Tier                                              target_tier,
                                               bool                                              is_resident,
-                                              size_t& resident_prefix_length) {
+                                              size_t& resident_prefix_length, const RoutedExpertPages& route_pages) {
     resident_prefix_length = 0;
     assert(!is_resident || target_tier == Tier::DEVICE);
     RTP_LLM_CHECK_WITH_INFO(target_tier == Tier::DEVICE || target_tier == Tier::HOST || target_tier == Tier::DISK,
                             "unsupported store target tier: %s",
                             tierName(target_tier));
     if (target_tier == Tier::DEVICE) {
-        publishDeviceLocked(cache_keys, resources, is_resident, resident_prefix_length);
+        publishDeviceLocked(cache_keys, resources, is_resident, resident_prefix_length, route_pages);
     } else {
-        submitLowerTierLocked(cache_keys, resources, target_tier);
+        submitLowerTierLocked(cache_keys, resources, target_tier, route_pages);
         return {};
     }
     return storage_backend_ ? storage_backend_->prepareWrite(makeStorageRequest(cache_keys, resources)) :
@@ -66,8 +66,8 @@ StorageWriteTask BlockTreeStorer::storeLocked(const CacheKeysType&              
 void BlockTreeStorer::publishDeviceLocked(const CacheKeysType&                              cache_keys,
                                           const std::vector<std::vector<GroupSetResource>>& resources,
                                           bool                                              is_resident,
-                                          size_t&                                           resident_prefix_length) {
-    const BlockTreeInsertResult insert_result = tree_->insertNode(cache_keys, resources, false, is_resident);
+                                          size_t&                                           resident_prefix_length, const RoutedExpertPages& route_pages) {
+    const BlockTreeInsertResult insert_result = tree_->insertNode(cache_keys, resources, false, is_resident, route_pages);
     const bool resources_inserted = !insert_result.inserted_nodes.empty() || !insert_result.adopted_nodes.empty();
     if (resources_inserted || !insert_result.newly_resident_nodes.empty()) {
         evictor_.onInserted(insert_result);
@@ -100,7 +100,7 @@ StorageRequest BlockTreeStorer::makeStorageRequest(const CacheKeysType&         
 
 void BlockTreeStorer::submitLowerTierLocked(const CacheKeysType&                              cache_keys,
                                             const std::vector<std::vector<GroupSetResource>>& resources,
-                                            Tier                                              target_tier) {
+                                            Tier                                              target_tier, const RoutedExpertPages& route_pages) {
     if (stopping_.load()) {
         return;
     }
@@ -110,6 +110,7 @@ void BlockTreeStorer::submitLowerTierLocked(const CacheKeysType&                
         cache_keys,
         std::chrono::milliseconds(target_tier == Tier::DISK ? disk_timeout_ms_ : host_timeout_ms_));
 
+    task->route_pages = route_pages;
     block_tree_cache_detail::ScopeRollback prepare_guard([this, &task]() { settleLocked(*task, /*publish=*/false); });
 
     if (!store_task_runner_.prepareTask(*task, resources)) {
@@ -221,7 +222,7 @@ size_t BlockTreeStorer::settleLocked(const StoreTask& task, bool publish) {
             resources[descriptor.path_index][descriptor.group_set_id].setBlocks(
                 task.target_tier, {descriptor.singleBlockAt(task.target_tier)});
         }
-        insert_result = tree_->insertNode(task.cache_keys, resources, true, false);
+        insert_result = tree_->insertNode(task.cache_keys, resources, true, false, task.route_pages);
     }
 
     store_task_runner_.releaseTaskResources(task);

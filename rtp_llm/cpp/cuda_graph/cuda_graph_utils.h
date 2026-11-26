@@ -74,6 +74,7 @@ public:
     py::object               attn_pyobj_{py::none()};
     at::Tensor               decoder_layer_hidden_states_;
     at::Tensor               mtp_target_hidden_states_;
+    at::Tensor               routed_experts_;  // View of the target model's shared workspace.
     torch_ext::PyModelInputs py_model_inputs_;
 };
 

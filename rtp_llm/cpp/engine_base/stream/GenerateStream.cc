@@ -1543,6 +1543,10 @@ void GenerateStream::update(const StreamUpdateInfo& update_info,
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(*mutex_);
     RTP_LLM_LOG_DEBUG("stream [%s] update", streamLogTag().c_str());
+    if (update_info.routed_experts.defined() && !hasErrorWithoutLock() && !isFinished()) {
+        stream_cache_resource_->appendRoutedExperts(isContextStream() ? prefixLength() : seqLength() - 1,
+                                                    update_info.routed_experts);
+    }
     if (!prepareUpdateWithoutLock(update_info.error_info, update_info.force_update_info)) {
         return;
     }

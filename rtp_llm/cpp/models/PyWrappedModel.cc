@@ -1044,6 +1044,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             if (py_model_outputs.mtp_target_hidden_states.defined()) {
                 outputs.mtp_target_hidden_states = py_model_outputs.mtp_target_hidden_states;
             }
+            outputs.routed_experts   = py_model_outputs.routed_experts;
             outputs.pp_intermediates = py_model_outputs.pp_intermediates;
             return outputs;
         };

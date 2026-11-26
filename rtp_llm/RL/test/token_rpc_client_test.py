@@ -61,6 +61,27 @@ class TokenRpcClientTest(unittest.IsolatedAsyncioTestCase):
             await self.client.close()
         await self.server.stop(0)
 
+    async def test_routed_experts_cover_full_causal_input(self):
+        def reply(req):
+            self.assertTrue(req.generate_config.return_routed_experts)
+            out = pb.GenerateOutputsPB(request_id=req.request_id)
+            out.flatten_output.finished.append(True)
+            out.flatten_output.output_ids.CopyFrom(_packed([11, 22], integer=True))
+            info = out.flatten_output.aux_info.add(input_len=3, output_len=2)
+            info.routed_experts.CopyFrom(pb.TensorPB(
+                data_type=pb.TensorPB.INT16, shape=[4, 1, 2], int16_data=struct.pack("<8h", *range(8))
+            ))
+            return [out]
+
+        self.service.reply_fn = reply
+        params = TokenSamplingParams(max_new_tokens=2, logprobs=False, return_routed_experts=True)
+        result = await self.client.generate(100, [1, 2, 3], params)
+        self.assertEqual(result.routed_experts.shape, (4, 1, 2))
+        self.assertEqual(result.routed_experts[-1, 0].tolist(), [6, 7])
+        self.client.routed_expert_shape = (2, 2)
+        with self.assertRaisesRegex(TokenProtocolError, "shape"):
+            await self.client.generate(102, [1, 2, 3], params)
+
     async def test_native_raw_logprobs_and_reuse_flags(self):
         expected_lp = [-0.25, -1.5]
 

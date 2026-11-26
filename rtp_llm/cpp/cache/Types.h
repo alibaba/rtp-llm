@@ -81,6 +81,8 @@ struct MallocInfo {
     // even if the new page table evicts them.
     std::vector<std::shared_ptr<void>>* previous_decode_pages = nullptr;
 
+    RoutedExpertPages* matched_route_pages = nullptr;
+
     int incrSeqLen() const;
 };
 
@@ -144,6 +146,7 @@ struct InsertInfo {
     CompleteTokenIdsPtr     complete_token_ids;
     bool                    is_resident;
     Tier                    target_tier{Tier::DEVICE};
+    const RoutedExpertPages* route_pages = nullptr;
 };
 
 }  // namespace rtp_llm

@@ -597,8 +597,12 @@ TEST(BlockTreeTest, InsertAdoptsIdleEmptyFullNodeBeforeAddingSuffix) {
     tree.groupSets()[0]->unreferenceBlocks(device_resource, BlockTreeRefType::CACHE);
     empty_resource.evictFromTier(Tier::DEVICE);
 
+    auto old_page = std::make_shared<at::Tensor>();
+    auto new_page = std::make_shared<at::Tensor>();
+    empty_node->routed_experts = old_page;
     const BlockTreeInsertResult result =
-        tree.insertNode({100, 200, 300}, make2DResources(1, 3, 20), /*collect_path=*/false, /*is_resident=*/false);
+        tree.insertNode({100, 200, 300}, make2DResources(1, 3, 20), false, false, {nullptr, new_page});
+    EXPECT_EQ(empty_node->routed_experts, new_page);
 
     ASSERT_EQ(result.adopted_nodes.size(), 1u);
     EXPECT_EQ(result.adopted_nodes[0].first, empty_node);

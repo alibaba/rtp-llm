@@ -114,7 +114,7 @@ bool NormalGenerateStream::canDeferTerminalOutput(const StreamUpdateInfo& update
     // materialized empty result when variable beam counts reach zero.
     return finished_ && currentBatchSize() > 0 && !config.is_streaming && !queryPdSep() && !config.return_logits
            && !config.return_prompt_logits && !config.return_hidden_states && !config.return_all_hidden_states
-           && !config.return_softmax_probs && config.return_all_probs == ReturnAllProbsMode::NONE
+           && !config.return_routed_experts && !config.return_softmax_probs && config.return_all_probs == ReturnAllProbsMode::NONE
            && config.calculate_loss == 0 && !loss_.defined() && !custom_output_.defined()
            && !sampling_state_.raw_logprobs.defined()
            && !update_info.prompt_logits.has_value()
@@ -273,6 +273,9 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
 
         generate_output.finished = isSubGenerateDoneWithoutLock(i);
         generate_output.aux_info = prepareAuxInfo(output_len);
+        if (generate_output.finished && generateConfig()->return_routed_experts) {
+            generate_output.aux_info.routed_experts = stream_cache_resource_->materializeRoutedExperts(seqLength() - 1);
+        }
         if (generate_input_->generate_config->aux_info) {
             if (calculateSoftmaxProbs() && softmax_probs_.defined()) {
                 generate_output.aux_info.softmax_probs =

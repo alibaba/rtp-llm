@@ -59,10 +59,12 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups& stream_gro
 }
 
 absl::Status NormalBatchStreamProcessor::dispatchPrefillOnly(
-    const StreamGroups& stream_groups, GenerationPrefillCudaGraphStatus generation_prefill_cuda_graph_status) const {
+    const StreamGroups& stream_groups, GenerationPrefillCudaGraphStatus generation_prefill_cuda_graph_status,
+    const torch::Tensor& routed_experts) const {
+    int64_t offset = 0;
     for (const auto& stream : stream_groups.allStreams()) {
         auto empty_token_ids = torch::empty({stream->currentBatchSize(), 0}, torch::kInt32);
-        stream->update({empty_token_ids,
+        StreamUpdateInfo update{empty_token_ids,
                         /*num_new_tokens=*/0,
                         /*hidden_states=*/torch::Tensor(),
                         /*logits=*/torch::Tensor(),
@@ -76,7 +78,13 @@ absl::Status NormalBatchStreamProcessor::dispatchPrefillOnly(
                         /*force_update_info=*/false,
                         /*prompt_logits=*/std::nullopt,
                         /*error_info=*/std::nullopt,
-                        generation_prefill_cuda_graph_status});
+                        generation_prefill_cuda_graph_status};
+        if (routed_experts.defined()) {
+            const int count = stream->currentExecuteTokenSize();
+            update.routed_experts = routed_experts.narrow(0, offset, count);
+            offset += count;
+        }
+        stream->update(update);
     }
     return absl::OkStatus();
 }

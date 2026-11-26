@@ -146,6 +146,7 @@ class RTPServer:
     """A Ray controller owns one native RTP process group and token client."""
 
     def __init__(self, replica_rank: int, model_path: str, cuda_device: str, tp_size: int):
+        self.enable_return_routed_experts = False
         self.replica_rank = replica_rank
         self.model_path = model_path
         self.cuda_device = cuda_device
@@ -284,11 +285,7 @@ class RTPServer:
         reuse_cache = bool(
             params.pop("reuse_cache", os.environ.get("RLLM_RTP_REUSE_CACHE", "1") != "0")
         )
-        return_routed_experts = bool(params.pop("return_routed_experts", False))
-        if return_routed_experts:
-            raise NotImplementedError(
-                "live RTP return_routed_experts is not yet implemented on this build"
-            )
+        return_routed_experts = bool(params.pop("return_routed_experts", self.enable_return_routed_experts))
         if params:
             raise ValueError(f"unsupported RTP sampling parameters: {sorted(params)}")
         native_params = TokenSamplingParams(
@@ -300,6 +297,7 @@ class RTPServer:
             logprobs=True,
             logprobs_mode="raw_logprobs",
             require_raw_logprobs=True,
+            return_routed_experts=return_routed_experts,
             reuse_cache=reuse_cache,
             enable_device_cache=reuse_cache,
             stop_token_ids=tuple(sorted(self.client.eos_token_ids)),
@@ -356,6 +354,7 @@ class RTPServer:
             token_ids=result.token_ids,
             log_probs=result.log_probs,
             stop_reason=result.finish_reason,
+            routed_experts=result.routed_experts,
             extra_fields=receipt,
         )
 

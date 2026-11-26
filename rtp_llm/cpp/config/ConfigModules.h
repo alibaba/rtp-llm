@@ -315,6 +315,7 @@ struct HWKernelConfig {
 };
 
 struct MoeConfig {
+    bool enable_return_routed_experts = false;
     bool        use_deepep_moe             = false;
     bool        use_deepep_internode       = false;
     bool        use_deepep_low_latency     = true;

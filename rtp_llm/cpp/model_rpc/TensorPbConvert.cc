@@ -29,6 +29,12 @@ torch::Tensor TensorPbConvert::pbToTorch(const TensorPB& tensor_pb) {
             element_size = sizeof(c10::Half);
             break;
         }
+        case TensorPB::INT16: {
+            payload      = &tensor_pb.int16_data();
+            scalar_type  = torch::kInt16;
+            element_size = sizeof(int16_t);
+            break;
+        }
         case TensorPB::BF16: {
             payload      = &tensor_pb.bf16_data();
             scalar_type  = torch::kBFloat16;
@@ -77,6 +83,9 @@ void TensorPbConvert::torchToPb(TensorPB* tensor_pb, const torch::Tensor& tensor
         case torch::kFloat16:
             tensor_pb->set_data_type(TensorPB::FP16);
             break;
+        case torch::kInt16:
+            tensor_pb->set_data_type(TensorPB::INT16);
+            break;
         case torch::kBFloat16:
             tensor_pb->set_data_type(TensorPB::BF16);
             break;
@@ -105,6 +114,10 @@ void TensorPbConvert::torchToPb(TensorPB* tensor_pb, const torch::Tensor& tensor
             size_t      num_bytes = contiguous_tensor.numel() * sizeof(c10::Half);
             const char* data_ptr  = static_cast<const char*>(contiguous_tensor.data_ptr());
             tensor_pb->set_fp16_data(data_ptr, num_bytes);
+            break;
+        }
+        case torch::kInt16: {
+            tensor_pb->set_int16_data(contiguous_tensor.data_ptr(), contiguous_tensor.nbytes());
             break;
         }
         case torch::kBFloat16: {

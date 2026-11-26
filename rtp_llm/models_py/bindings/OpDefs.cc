@@ -305,6 +305,7 @@ void registerPyOpDefs(pybind11::module& m) {
              pybind11::arg("mtp_target_hidden_states"),
              "Initialize with hidden states and speculative target features")
         .def_readwrite("hidden_states", &PyModelOutputs::hidden_states, "Hidden states output tensor")
+        .def_readwrite("routed_experts", &PyModelOutputs::routed_experts)
         .def_readwrite("mtp_target_hidden_states",
                        &PyModelOutputs::mtp_target_hidden_states,
                        "Optional target features consumed by speculative decoding")

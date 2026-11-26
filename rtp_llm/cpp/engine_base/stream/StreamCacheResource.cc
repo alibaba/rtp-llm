@@ -130,6 +130,48 @@ void StreamCacheResource::releaseResource() {
     resource_released_ = true;
 }
 
+void StreamCacheResource::appendRoutedExperts(int start, const at::Tensor& rows) {
+    const int page_size = seqSizePerBlock();
+    RTP_LLM_CHECK(rows.device().is_cpu() && rows.scalar_type() == at::kShort && rows.dim() == 3 && start >= 0);
+    // A lower-tier match can settle on a shorter prefix than the candidate pages returned by match().
+    const size_t completed = start / page_size;
+    const int offset = start % page_size;
+    RTP_LLM_CHECK(completed <= route_pages_.size());
+    if (completed < route_pages_.size()) {
+        RTP_LLM_CHECK(offset == 0);
+        route_pages_.resize(completed);
+        route_tail_ = at::Tensor();
+        route_tail_size_ = 0;
+    }
+    RTP_LLM_CHECK(offset == route_tail_size_);
+    for (int64_t row = 0; row < rows.size(0);) {
+        if (!route_tail_.defined()) {
+            route_tail_ = at::empty({page_size, rows.size(1), rows.size(2)}, at::TensorOptions().dtype(at::kShort));
+        }
+        const int count = std::min<int64_t>(page_size - route_tail_size_, rows.size(0) - row);
+        route_tail_.narrow(0, route_tail_size_, count).copy_(rows.narrow(0, row, count));
+        route_tail_size_ += count;
+        row += count;
+        if (route_tail_size_ == page_size) {
+            route_pages_.push_back(std::make_shared<at::Tensor>(std::move(route_tail_)));
+            route_tail_size_ = 0;
+        }
+    }
+}
+
+at::Tensor StreamCacheResource::materializeRoutedExperts(int executed_tokens) const {
+    RTP_LLM_CHECK(static_cast<int64_t>(route_pages_.size()) * seqSizePerBlock() + route_tail_size_ == executed_tokens);
+    std::vector<at::Tensor> pages;
+    pages.reserve(route_pages_.size() + 1);
+    for (const auto& page : route_pages_) {
+        pages.push_back(*page);
+    }
+    if (route_tail_size_ > 0) {
+        pages.push_back(route_tail_.narrow(0, 0, route_tail_size_));
+    }
+    return at::cat(pages, 0);
+}
+
 int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("stream [%s] try release [%lu] blocks", stream_->streamLogTag().c_str(), nums);
@@ -157,7 +199,10 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
                               tierName(target_tier));
             if (target_tier != Tier::NONE) {
                 InsertInfo insert_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false, target_tier};
-                size_t     resident_prefix_length = 0;
+                if (resource_context_.capture_routed_experts) {
+                    insert_info.route_pages = &route_pages_;
+                }
+                size_t resident_prefix_length = 0;
                 resource_context_.cache_manager->insertIntoCache(insert_info, resident_prefix_length);
             }
         } else {
@@ -232,6 +277,12 @@ absl::Status StreamCacheResource::initKVBlock() {
     } else {
         malloc_info.reuse_cache         = reuseCache();
         malloc_info.enable_cache_lookup = enableCacheLookup();
+    }
+    if (resource_context_.capture_routed_experts) {
+        route_pages_.clear();
+        route_tail_ = at::Tensor();
+        route_tail_size_ = 0;
+        malloc_info.matched_route_pages = &route_pages_;
     }
     malloc_info.enable_remove_skipped_blocks = false;
     malloc_info.max_chunk_tokens =

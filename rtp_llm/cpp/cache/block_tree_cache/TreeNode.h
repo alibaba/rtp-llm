@@ -11,6 +11,7 @@
 namespace rtp_llm {
 
 struct TreeNode {
+    RoutedExpertPage                            routed_experts;  // Immutable CPU rows owned by the KV-producing node.
     CacheKeyType                                cache_key{0};
     size_t                                      index{std::numeric_limits<size_t>::max()};
     std::vector<int>                            token_ids;

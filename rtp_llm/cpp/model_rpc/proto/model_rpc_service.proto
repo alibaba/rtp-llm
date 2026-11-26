@@ -8,6 +8,7 @@ message TensorPB {
         INT32 = 1;
         FP16 = 2;
         BF16 = 3;
+        INT16 = 4;
     }
     DataType data_type = 1;
     repeated int64 shape = 2;
@@ -15,6 +16,7 @@ message TensorPB {
     bytes int32_data = 4;
     bytes fp16_data = 5;
     bytes bf16_data = 6;
+    bytes int16_data = 7;
 }
 
 message IntVector {
@@ -167,7 +169,7 @@ message GenerateConfigPB {
     // Explicit target-prefill assertion. true requires max_new_tokens == 0 and cannot be combined with
     // return_prompt_logits. false/omitted does not change the legacy bare-zero behavior above.
     bool prefill_only = 76;
-    // Reserved for RL R3 routed-expert export contract (default false; unsupported until implemented).
+    // Return logical MoE expert IDs for causal input positions in the terminal response.
     bool return_routed_experts = 77;
 }
 
@@ -361,6 +363,7 @@ message AuxInfoPB {
     int32 decode_disk_reuse_len = 33;
     // Native FP32 selected-token log-probabilities computed directly from raw model logits.
     TensorPB raw_logprobs = 34;
+    TensorPB routed_experts = 35;
 }
 
 message PromptLogitsOutputPB {

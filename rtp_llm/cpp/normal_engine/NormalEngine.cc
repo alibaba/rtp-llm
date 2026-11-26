@@ -242,6 +242,12 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     };
     std::unique_ptr<NormalEngine, decltype(cleanup_on_failure)> construction_guard(this, cleanup_on_failure);
     resource_context_.defer_grammar_to_pp_tail = parallelism_config.pp_size > 1 && parallelism_config.pp_rank == 0;
+    if (params.moe_config.enable_return_routed_experts) {
+        RTP_LLM_CHECK_WITH_INFO(rl_enabled_ && model_config_.model_type == "qwen4_exp"
+                                    && parallelism_config.dp_size == 1 && pd_sep_config.role_type == RoleType::PDFUSION,
+                                "routed expert capture requires a Qwen4 BF16 colocated RL target");
+        resource_context_.capture_routed_experts = parallelism_config.tp_rank == 0;
+    }
     resource_context_.batch_invariant          = params.hw_kernel_config.batch_invariant;
     if (params.py_model && !params.py_model.is_none()) {
         py::gil_scoped_acquire gil;
@@ -1045,6 +1051,17 @@ absl::Status NormalEngine::trySaveStepError() const {
 
 bool NormalEngine::validateStreamForScheduling(const GenerateStreamPtr& stream) const {
     if (stream->hasError()) {
+        return false;
+    }
+    const auto& config = *stream->generateConfig();
+    if (config.return_routed_experts && !resource_context_.capture_routed_experts) {
+        stream->reportError(ErrorCode::INVALID_PARAMS, "enable_return_routed_experts is required on this replica");
+        return false;
+    }
+    if (resource_context_.capture_routed_experts &&
+        (config.num_beams != 1 || !config.variable_num_beams.empty() || config.num_return_sequences != 1
+         || (config.return_routed_experts && (config.isPrefillOnly() || !config.aux_info)))) {
+        stream->reportError(ErrorCode::INVALID_PARAMS, "routed expert capture requires a single generating sequence");
         return false;
     }
     if (pd_sep_config.role_type != RoleType::DECODE || !stream->generateConfig()->isPrefillOnly()) {

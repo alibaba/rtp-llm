@@ -217,7 +217,7 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
             token_ids_for_copy     = sampler_output.token_ids.narrow(1, last_col, 1).contiguous();
         }
     }
-    bool                need_d2h_sync = false;
+    bool                need_d2h_sync = merge_outputs.model_output.routed_experts.defined();
     const torch::Tensor token_ids_cpu = copyToPinnedCpuAsync(token_ids_for_copy, need_d2h_sync);
     const torch::Tensor success_cpu   = copyToPinnedCpuAsync(sampler_output.success, need_d2h_sync);
     const torch::Tensor custom_output_cpu =
@@ -573,6 +573,9 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
                                  stream->isContextStream() ? model_output.generation_prefill_cuda_graph_status :
                                                              GenerationPrefillCudaGraphStatus::NOT_REQUESTED,
                                  batch_custom_output};
+    if (model_output.routed_experts.defined()) {
+        update_info.routed_experts = model_output.routed_experts.narrow(0, token_offset, token_size);
+    }
     if (stream->calculateSoftmaxProbs() && selected_logprobs_cpu.defined()) {
         update_info.raw_logprobs = selected_logprobs_cpu.narrow(0, batch_idx_out, next_batch_size);
     }

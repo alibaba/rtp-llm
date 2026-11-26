@@ -857,6 +857,31 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
         return hyper_states, hidden_states, inject_weights
 
 
+class _RoutedExpertsBatch:
+    def __init__(self, workspace):
+        self.workspace = workspace
+        self.rows = workspace[:0]
+
+    def begin(self, count):
+        if count > self.workspace.shape[0]:
+            raise ValueError("Qwen4 route capture exceeds the configured token capacity")
+        self.rows = self.workspace[:count]
+
+
+class _RouteRecordingTopk(torch.nn.Module):
+    def __init__(self, router, batch, layer):
+        super().__init__()
+        self.router = router
+        self.batch = batch
+        self.layer = layer
+
+    def forward(self, logits, ids, weights):
+        self.router(logits, ids, weights)
+        if ids.shape[0] != self.batch.rows.shape[0]:
+            raise RuntimeError("Qwen4 route capture requires complete token rows on the TP leader")
+        self.batch.rows[:, self.layer].copy_(ids)
+
+
 class Qwen4ExpModel(Qwen35Model):
     """Qwen3.8-Flash-Next.
 
@@ -915,6 +940,37 @@ class Qwen4ExpModel(Qwen35Model):
             fmha_config,
             py_hw_kernel_config,
         )
+        self._route_capture = None
+        if getattr(moe_config, "enable_return_routed_experts", False):
+            if (model_config.is_mtp or model_config.quant_config is not None
+                    or getattr(model_config, "online_mxfp8", False)
+                    or moe_config.fake_balance_expert or moe_config.hack_moe_expert):
+                raise ValueError("Qwen4 route capture requires the unquantized target router")
+            if parallelism_config.tp_rank == 0:
+                prefill_rows = model_config.moe_prefill_max_tokens_per_rank
+                if not prefill_rows or prefill_rows < 1:
+                    raise ValueError("Route capture requires the finalized scheduler batch-token budget")
+                # The prefill bound already covers every context request. A mixed step may
+                # also contain one row per active decode sequence.
+                max_rows = max(
+                    prefill_rows + max_generate_batch_size, 1,
+                    *getattr(py_hw_kernel_config, "decode_capture_batch_sizes", ()),
+                    *getattr(py_hw_kernel_config, "generation_prefill_capture_token_buckets", ()),
+                )
+                workspace = torch.empty(
+                    (max_rows, len(self.layers), model_config.moe_k),
+                    device=weights.get_global_weight(W.embedding).device,
+                    dtype=torch.int16,
+                )
+                self._route_capture = _RoutedExpertsBatch(workspace)
+                for index, layer in enumerate(self.layers):
+                    if (getattr(layer.mlp.fused_moe, "supports_gate_pack", False)
+                            or not hasattr(layer.mlp, "select_topk")
+                            or layer.mlp.correction_bias is not None):
+                        raise ValueError("This Qwen4 expert backend bypasses the logical router capture point")
+                    layer.mlp.select_topk = _RouteRecordingTopk(
+                        layer.mlp.select_topk, self._route_capture, index
+                    )
         fp8_embedding = (
             getattr(self.config, "_qwen4_full_fp8_nvfp4", False)
             and self.embed_tokens.weight.dtype == torch.float8_e4m3fn
@@ -1473,6 +1529,9 @@ class Qwen4ExpModel(Qwen35Model):
         try:
             from .qwen4_exp_runtime.prefill_preflight import prefill_geometry_scope
 
+            capture = getattr(self, "_route_capture", None)
+            if capture is not None:
+                capture.begin(inputs.input_ids.numel())
             with prefill_geometry_scope(self, inputs, fmha_impl):
                 outputs = self._forward_with_ple_prefetch(inputs, fmha_impl)
             return outputs
@@ -1715,4 +1774,7 @@ class Qwen4ExpModel(Qwen35Model):
         hidden_states, _, _ = self.hyper_connection_mixer(hyper_states)
         if self._mtp_target_hidden_states is not None:
             return PyModelOutputs(hidden_states, self._mtp_target_hidden_states)
-        return PyModelOutputs(hidden_states)
+        outputs = PyModelOutputs(hidden_states)
+        if getattr(self, "_route_capture", None) is not None:
+            outputs.routed_experts = self._route_capture.rows
+        return outputs

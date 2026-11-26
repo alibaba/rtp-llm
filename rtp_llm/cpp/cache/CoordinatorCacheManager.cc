@@ -515,12 +515,12 @@ CoordinatorCacheManager::prepareKVCache(const CacheKeysType&                 cac
                                         BatchKVCacheResource&                kv_resource,
                                         const std::shared_ptr<CPSlotMapper>& cp_mapper,
                                         PreparedKVCache&                     prepared,
-                                        const std::function<bool(size_t)>&   valid_prefix) {
+                                        const std::function<bool(size_t)>&   valid_prefix, RoutedExpertPages* route_pages) {
     if (!block_tree_cache_ || cache_keys.empty()) {
         return nullptr;
     }
     const int                         cp_scale     = (cp_mapper && cp_mapper->isSharded()) ? cp_mapper->cpSize() : 1;
-    BlockTreeMatchResult              match_result = block_tree_cache_->match(cache_keys, valid_prefix);
+    BlockTreeMatchResult              match_result = block_tree_cache_->match(cache_keys, valid_prefix, route_pages);
     std::shared_ptr<LoadAsyncContext> load_context = std::move(match_result.async_context);
     prepared.matched_device_blocks                 = match_result.matched_device_blocks;
     prepared.total_logical_blocks =
@@ -604,7 +604,7 @@ MallocResult CoordinatorCacheManager::initMallocForCommonLen(const MallocInfo& m
                            prepared,
                            [tokens = malloc_info.complete_token_ids, reuse_unit_tokens](size_t count) {
                                return tokens->isValidReuseLength(static_cast<int>(count) * reuse_unit_tokens);
-                           });
+                           }, malloc_info.matched_route_pages);
         match_end_time_us  = currentTimeUs();
         match_cost_time_us = match_end_time_us - begin_us;
         load_attempted     = load_context != nullptr;
@@ -1073,7 +1073,16 @@ void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info, siz
         }
         insert_keys.resize(publish_prefix);
         resources.resize(publish_prefix);
-        if (insert_info.is_resident) {
+        if (insert_info.route_pages) {
+            RTP_LLM_CHECK(batch_size == 1 && !cp_active && !insert_info.is_resident);
+            // The last sampled token has never been forwarded. Only complete executed pages are reusable.
+            const size_t count = std::min(insert_keys.size(), insert_info.route_pages->size());
+            insert_keys.resize(count);
+            resources.resize(count);
+            if (count > 0) {
+                block_tree_cache_->insert(insert_keys, resources, insert_info.target_tier, false, *insert_info.route_pages);
+            }
+        } else if (insert_info.is_resident) {
             const size_t batch_resident_prefix_length =
                 block_tree_cache_->insert(insert_keys, resources, insert_info.target_tier, true);
             resident_prefix_length += batch_resident_prefix_length;

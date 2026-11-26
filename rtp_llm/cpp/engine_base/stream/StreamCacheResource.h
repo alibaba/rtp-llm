@@ -1,5 +1,6 @@
 #pragma once
 
+#include <ATen/core/Tensor.h>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -33,6 +34,8 @@ public:
     ~StreamCacheResource() = default;
 
     void                 init(int batch_size);
+    void                 appendRoutedExperts(int start, const at::Tensor& rows);
+    at::Tensor           materializeRoutedExperts(int executed_tokens) const;
     bool                 hasCacheKeys() const;
     const CacheKeysType& cacheKeys(int32_t batch_id) const;
     absl::Status         initKVBlock();
@@ -136,6 +139,9 @@ public:
     }
 
 private:
+    RoutedExpertPages route_pages_;
+    at::Tensor              route_tail_;
+    int                     route_tail_size_ = 0;
     void         clearCacheReuseState();
     void         recordCacheReuseMallocResult(const MallocResult& result);
     void         publishReuseLengths(int total_length, int host_length, int disk_length, int backend_length);
