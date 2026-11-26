@@ -49,6 +49,13 @@ local_repository(
     path = "arch_config",
 )
 
+# Share CUDA 13 pip locks and wheel requirements by default. A build profile
+# can override this repository to select a matching pair for each architecture.
+local_repository(
+    name = "rtp_cuda13_profile",
+    path = "arch_config",
+)
+
 # Closed-impl seam: the public default is the internal_impls/ stub; the closed
 # checkout overrides the repository with internal_source/impls.bzl.
 local_repository(

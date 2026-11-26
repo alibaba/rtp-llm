@@ -192,6 +192,7 @@ py_library(
         "//conditions:default": [],
     }),
     data = [
+        "modules/hybrid/glm5_router.cc",
         ":cutlass_moe_config",
         ":dsv41_jit_sources",
         ":rocm_fp8_ptpc_hipb_solutions",

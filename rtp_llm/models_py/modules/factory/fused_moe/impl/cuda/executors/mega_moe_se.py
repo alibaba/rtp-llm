@@ -298,7 +298,6 @@ class MegaMoeFusedBackend(MegaMoeExecutor):
     """Adapter for the legacy fused kernel's separate shared-workspace ABI."""
 
     includes_shared_expert = True
-    _fp4_transform_name = "transform_weights_for_mega_moe_fused"
     _defer_jit_until_shared_weights = True
 
     @classmethod
@@ -310,10 +309,15 @@ class MegaMoeFusedBackend(MegaMoeExecutor):
             checker.check(False)
             return
 
-        checker.check(hasattr(deep_gemm, cls._fp4_transform_name))
+        checker.check(hasattr(deep_gemm, "transform_weights_for_mega_moe_fused"))
         checker.check(
             hasattr(deep_gemm, "transform_shared_expert_weights_for_mega_moe_fused")
         )
+
+    def _routed_transform(self):
+        import deep_gemm
+
+        return deep_gemm.transform_weights_for_mega_moe_fused
 
     def _allocate_mega_buffer(self):
         return get_or_create_mega_buf_fused(**self._buffer_kwargs())

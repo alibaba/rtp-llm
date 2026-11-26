@@ -9,6 +9,8 @@ def fixed_m_linear(
     linear: Callable[[torch.Tensor], torch.Tensor],
     input: torch.Tensor,
     chunk_rows: int,
+    *,
+    fuse_pad: bool = True,
 ) -> torch.Tensor:
     """Run ``linear`` with one fixed GEMM M dimension.
 
@@ -32,10 +34,20 @@ def fixed_m_linear(
         chunk = input[begin:end]
         valid_rows = end - begin
         if valid_rows != chunk_rows:
-            padded = torch.zeros(
-                (chunk_rows, hidden_size), dtype=input.dtype, device=input.device
-            )
-            padded[:valid_rows].copy_(chunk)
+            padded = None
+            if fuse_pad and chunk.is_cuda:
+                from rtp_llm.models_py.modules.factory.linear.fixed_m_pad_triton import (
+                    try_pad_rows,
+                )
+
+                padded = try_pad_rows(chunk, chunk_rows)
+            if padded is None:
+                padded = torch.zeros(
+                    (chunk_rows, hidden_size), dtype=input.dtype, device=input.device
+                )
+                padded[:valid_rows].copy_(chunk)
             chunk = padded
         output_chunks.append(linear(chunk)[:valid_rows])
+    if len(output_chunks) == 1:
+        return output_chunks[0]
     return torch.cat(output_chunks, dim=0)

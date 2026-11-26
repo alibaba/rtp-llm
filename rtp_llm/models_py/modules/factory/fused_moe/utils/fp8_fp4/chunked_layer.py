@@ -246,7 +246,7 @@ def synchronized_moe_chunk_plan(
     synchronized_tokens: Optional[int] = None,
 ):
     """Share one EP MAX token count across all prefill layers and recipes."""
-    from rtp_llm.config.mega_moe import MEGA_MOE_STRATEGIES
+    from rtp_llm.config.mega_moe import is_mega_moe_strategy
 
     phase_token = _MOE_DECODE_FORWARD.set(is_decode_forward)
     plan_token = None
@@ -263,7 +263,7 @@ def synchronized_moe_chunk_plan(
         needs_sync = not is_decode_forward and any(
             (
                 not getattr(layer, "_is_decode_role", False)
-                and getattr(layer, "strategy_name", None) in MEGA_MOE_STRATEGIES
+                and is_mega_moe_strategy(getattr(layer, "strategy_name", None))
                 and getattr(layer, "chunking_enabled", False)
             )
             or (

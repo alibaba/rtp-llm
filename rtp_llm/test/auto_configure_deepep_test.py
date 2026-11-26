@@ -8,7 +8,13 @@ from rtp_llm.config.server_config_setup import (
     auto_configure_deepep,
     finalize_rank_local_deepep_internode,
 )
-from rtp_llm.ops import CPRotateMethod, MoeConfig, ParallelismConfig, RoleType
+from rtp_llm.ops import (
+    CPRotateMethod,
+    MoeConfig,
+    ParallelismConfig,
+    RoleType,
+    RuntimeConfig,
+)
 
 
 class AutoConfigureDeepepTest(TestCase):
@@ -966,6 +972,7 @@ class AutoConfigurePPDeepepTest(TestCase):
 
     def test_local_rank_reconfigures_deepep_after_world_rank_is_set(self):
         configs = SimpleNamespace(
+            runtime_config=RuntimeConfig(),
             parallelism_config=SimpleNamespace(pp_size=4, world_rank=0),
             prefill_cp_config=None,
             moe_config=SimpleNamespace(ll_num_max_token=321),

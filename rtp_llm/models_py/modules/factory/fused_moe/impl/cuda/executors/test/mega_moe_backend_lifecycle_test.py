@@ -42,6 +42,23 @@ CHUNK_MODULE = "rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunke
 
 
 class MegaMoeLifecycleTest(unittest.TestCase):
+    def test_resident_key_distinguishes_routed_weight_layouts(self):
+        with (
+            patch(
+                f"{PACKAGE}.mega_moe.resident_init_tensors",
+                return_value=(torch.empty(0),) * 4,
+            ) as lookup,
+            patch("deep_gemm.transform_weights_for_mega_moe_fused", create=True) as legacy_fused,
+        ):
+            legacy_fused.__name__ = "transform_weights_for_mega_moe_fused"
+            for backend in (MegaMoeSEExecutor, MegaMoeFusedBackend):
+                self.backend(backend)._transform_routed_weights(
+                    {}, None, 8, w1_layout="gate_up"
+                )
+        standard, fused = [call.kwargs["transform_key"] for call in lookup.call_args_list]
+        self.assertTrue(standard.endswith(":transform_weights_for_mega_moe"))
+        self.assertEqual(fused, standard + "_fused")
+
     def test_routed_arena_is_cached_per_collective_group(self):
         from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe import buffer
 

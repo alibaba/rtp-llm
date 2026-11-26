@@ -369,6 +369,7 @@ class Glm5FmhaDispatchTest(unittest.TestCase):
                 )
                 parallel = SimpleNamespace(
                     role_type=RoleType.DECODE,
+                    get_attn_tp_size=lambda: 1,
                     get_ffn_tp_size=lambda: 1,
                     ep_size=2,
                 )
@@ -453,6 +454,7 @@ class Glm5FmhaDispatchTest(unittest.TestCase):
         parallel = SimpleNamespace(
             role_type=RoleType.PREFILL if cp_prefill else RoleType.DECODE,
             prefill_cp_config=SimpleNamespace(is_enabled=lambda: cp_prefill),
+            get_attn_tp_size=lambda: 1,
             get_ffn_tp_size=lambda: ffn_tp_size,
             ep_size=2,
         )
@@ -508,7 +510,7 @@ class Glm5FmhaDispatchTest(unittest.TestCase):
             "rtp_llm.models_py.model_desc.glm5.fixed_m_linear", return_value=logits
         ) as linear:
             ids, weights = layer._route(hidden)
-        linear.assert_called_once_with(layer.gate, hidden, 8192)
+        linear.assert_called_once_with(layer.gate, hidden, 8192, fuse_pad=True)
         self.assertEqual(ids.dtype, torch.int64)
         self.assertEqual(weights.dtype, torch.float32)
         topk_args = layer.group_topk.call_args.kwargs
