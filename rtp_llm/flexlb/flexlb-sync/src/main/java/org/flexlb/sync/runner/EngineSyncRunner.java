@@ -338,8 +338,7 @@ public class EngineSyncRunner implements Runnable {
             int statusPort = worker.discoveredStatusPort();
             if (statusPort > 0
                     && worker.isActiveGeneration()
-                    && workerDirectory.isCurrentStatus(
-                            roleType, worker.getLogicalIpPort(), worker)) {
+                    && workerDirectory.isCurrentStatus(roleType, worker.routingAddress(), worker)) {
                 var topology = worker.topologySnapshot();
                 submitPolls(worker, statusPort, topology.site(), topology.group(), pollCache);
             }
@@ -365,7 +364,7 @@ public class EngineSyncRunner implements Runnable {
             String site,
             String group,
             boolean pollCache) {
-        String workerIpPort = workerStatus.getLogicalIpPort();
+        String workerIpPort = workerStatus.routingAddress();
         WorkerStatus.PollLease statusPollLease = workerStatus.tryBeginStatusPoll();
         if (statusPollLease != null) {
             boolean handedOff = false;

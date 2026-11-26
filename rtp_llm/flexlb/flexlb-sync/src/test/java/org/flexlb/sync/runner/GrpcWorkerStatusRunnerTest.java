@@ -62,8 +62,7 @@ class GrpcWorkerStatusRunnerTest {
                 RunnerTestSupport.discovered(role, null, "127.0.0.1", 8080, 8081, "test-site");
         WorkerDirectory directory = directory(registry, status);
         WorkerEndpoint endpoint =
-                RunnerTestSupport.publishEndpoint(
-                        registry, role, status.getLogicalIpPort(), status);
+                RunnerTestSupport.publishEndpoint(registry, role, status.routingAddress(), status);
         CacheAwareService cache = mock(CacheAwareService.class);
         EngineHealthReporter reporter = mock(EngineHealthReporter.class);
         long lastSuccessfulPoll = status.pollHealth().lastSuccessfulPollUs();
@@ -85,7 +84,7 @@ class GrpcWorkerStatusRunnerTest {
             assertNotNull(lease);
             new GrpcWorkerStatusRunner(
                             "test-model",
-                            status.getLogicalIpPort(),
+                            status.routingAddress(),
                             "test-site",
                             role,
                             null,
@@ -99,8 +98,8 @@ class GrpcWorkerStatusRunnerTest {
                             Runnable::run)
                     .run();
             if (!reportedDead) {
-                assertSame(status, directory.statusSnapshot(role).get(status.getLogicalIpPort()));
-                assertSame(endpoint, registry.get(role, status.getLogicalIpPort()));
+                assertSame(status, directory.statusSnapshot(role).get(status.routingAddress()));
+                assertSame(endpoint, registry.get(role, status.routingAddress()));
                 verifyNoInteractions(cache);
             }
         }
@@ -116,11 +115,11 @@ class GrpcWorkerStatusRunnerTest {
                         BalanceStatusEnum.WORKER_STATUS_SERVER_FAILED,
                         status.getMetricIpPort(),
                         role);
-        assertNull(registry.get(role, status.getLogicalIpPort()));
+        assertNull(registry.get(role, status.routingAddress()));
         assertTrue(directory.statusSnapshot(role).isEmpty());
         assertNull(status.tryBeginStatusPoll(), "retired generation cannot poll again");
         if (needsCacheKeys) {
-            verify(cache).removeEngineBlockCache(status.getLogicalIpPort());
+            verify(cache).removeEngineBlockCache(status.routingAddress());
         } else {
             verifyNoInteractions(cache);
         }
@@ -150,7 +149,7 @@ class GrpcWorkerStatusRunnerTest {
 
         new GrpcWorkerStatusRunner(
                         "test-model",
-                        status.getLogicalIpPort(),
+                        status.routingAddress(),
                         "test-site",
                         RoleType.PREFILL,
                         null,
@@ -181,7 +180,7 @@ class GrpcWorkerStatusRunnerTest {
         WorkerStatus status =
                 RunnerTestSupport.discovered(
                         RoleType.DECODE, null, "127.0.0.1", 8080, 8081, "test-site");
-        String ipPort = status.getLogicalIpPort();
+        String ipPort = status.routingAddress();
         WorkerEndpoint endpoint = mock(WorkerEndpoint.class);
         EndpointRegistry registry = mock(EndpointRegistry.class);
         WorkerDirectory directory = directory(registry, status);
@@ -248,7 +247,7 @@ class GrpcWorkerStatusRunnerTest {
         WorkerStatus status =
                 RunnerTestSupport.discovered(
                         RoleType.DECODE, null, "127.0.0.1", 8080, 8081, "test-site");
-        String ipPort = status.getLogicalIpPort();
+        String ipPort = status.routingAddress();
         WorkerStatus.PollLease pollLease = status.tryBeginStatusPoll();
         assertNotNull(pollLease);
 
@@ -310,7 +309,7 @@ class GrpcWorkerStatusRunnerTest {
         WorkerStatus status =
                 RunnerTestSupport.alive(
                         RoleType.DECODE, null, "127.0.0.1", 8080, 8081, "test-site");
-        String ipPort = status.getLogicalIpPort();
+        String ipPort = status.routingAddress();
         WorkerStatus.PollLease pollLease = status.tryBeginStatusPoll();
         assertNotNull(pollLease);
 
@@ -373,7 +372,7 @@ class GrpcWorkerStatusRunnerTest {
     void acceptedSameVersionVitStatusReplacesLoadAtApplication(Long reported, long expected) {
         WorkerStatus status =
                 RunnerTestSupport.alive(RoleType.VIT, null, "127.0.0.1", 8080, 8081, "test-site");
-        String address = status.getLogicalIpPort();
+        String address = status.routingAddress();
         EndpointRegistry registry = mock(EndpointRegistry.class);
         WorkerDirectory directory = directory(registry, status);
         when(registry.get(RoleType.VIT, address, status)).thenReturn(new WorkerEndpoint(status));
@@ -414,7 +413,7 @@ class GrpcWorkerStatusRunnerTest {
             WorkerDirectory directory = directory(registry, status);
             WorkerEndpoint endpoint =
                     RunnerTestSupport.publishEndpoint(
-                            registry, RoleType.VIT, status.getLogicalIpPort(), status);
+                            registry, RoleType.VIT, status.routingAddress(), status);
             var response =
                     EngineRpcService.WorkerStatusPB.newBuilder()
                             .setRoleType(EngineRpcService.RoleTypePB.ROLE_TYPE_VIT)
@@ -451,7 +450,7 @@ class GrpcWorkerStatusRunnerTest {
                         WorkerStatus.PollOutcome.APPLICATION_BUSY,
                         status.latestStatusPollDiagnostics().outcome());
                 try (var captured =
-                        directory.captureEndpoint(RoleType.VIT, status.getLogicalIpPort())) {
+                        directory.captureEndpoint(RoleType.VIT, status.routingAddress())) {
                     assertNull(captured);
                 }
                 try (var existingWork = endpoint.tryPinGeneration()) {
@@ -466,8 +465,7 @@ class GrpcWorkerStatusRunnerTest {
             assertEquals(
                     WorkerStatus.PollOutcome.APPLICATION_BUSY,
                     status.latestStatusPollDiagnostics().outcome());
-            try (var captured =
-                    directory.captureEndpoint(RoleType.VIT, status.getLogicalIpPort())) {
+            try (var captured = directory.captureEndpoint(RoleType.VIT, status.routingAddress())) {
                 assertNotNull(captured);
             }
         } finally {
@@ -486,7 +484,7 @@ class GrpcWorkerStatusRunnerTest {
         EndpointRegistry registry = mock(EndpointRegistry.class);
         WorkerDirectory directory = directory(registry, status);
         if (hasEndpoint) {
-            when(registry.get(RoleType.VIT, status.getLogicalIpPort(), status))
+            when(registry.get(RoleType.VIT, status.routingAddress(), status))
                     .thenReturn(new WorkerEndpoint(status));
         }
         status.recordVitLoad(OptionalLong.of(17), status.vitRoutedInputs(), System.nanoTime());
@@ -515,7 +513,7 @@ class GrpcWorkerStatusRunnerTest {
                 .thenReturn(response);
         new GrpcWorkerStatusRunner(
                         "test-model",
-                        status.getLogicalIpPort(),
+                        status.routingAddress(),
                         "test-site",
                         RoleType.VIT,
                         null,
@@ -532,7 +530,7 @@ class GrpcWorkerStatusRunnerTest {
 
     private static WorkerDirectory directory(EndpointRegistry registry, WorkerStatus status) {
         WorkerDirectory directory = new WorkerDirectory(registry, Runnable::run);
-        directory.currentOrDiscover(status.getRole(), status.getLogicalIpPort(), () -> status);
+        directory.currentOrDiscover(status.getRole(), status.routingAddress(), () -> status);
         return directory;
     }
 }

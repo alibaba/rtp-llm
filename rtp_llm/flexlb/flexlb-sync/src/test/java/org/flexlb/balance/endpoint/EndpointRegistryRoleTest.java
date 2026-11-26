@@ -97,7 +97,7 @@ class EndpointRegistryRoleTest {
     @Test
     void vitRoutingSnapshotKeepsExactGenerationsAcrossReplacement() {
         WorkerStatus original = status(RoleType.VIT, 8021);
-        String address = original.getLogicalIpPort();
+        String address = original.routingAddress();
         EndpointTestSupport.publishEndpoint(registry, RoleType.VIT, address, original);
         var before = registry.vitRoutingSnapshot();
         assertSame(original, before.get(address));

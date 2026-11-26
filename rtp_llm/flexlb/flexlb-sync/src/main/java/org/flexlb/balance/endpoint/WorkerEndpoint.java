@@ -150,7 +150,7 @@ public class WorkerEndpoint {
                 && !isGenerationRetiringOrRetired()
                 && hasFreshSchedulingStatus()) {
             placementAvailability.capacityChanged(
-                    status.getRole(), status.topologySnapshot().group(), status.getLogicalIpPort());
+                    status.getRole(), status.topologySnapshot().group(), status.routingAddress());
         }
     }
 

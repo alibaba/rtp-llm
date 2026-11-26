@@ -201,7 +201,7 @@ class VitCacheDirectoryTest {
         b.recordVitLoad(OptionalLong.of(1), 0L, System.nanoTime());
         CountDownLatch bothSelectedA = new CountDownLatch(2);
         var endpoint = new WorkerEndpoint(a);
-        when(workers.captureEndpoint(RoleType.VIT, a.getLogicalIpPort()))
+        when(workers.captureEndpoint(RoleType.VIT, a.routingAddress()))
                 .thenAnswer(
                         call -> {
                             bothSelectedA.countDown();
@@ -222,8 +222,8 @@ class VitCacheDirectoryTest {
         }
         assertEquals(2L, a.vitRoutedInputs());
         assertEquals(2L, b.vitRoutedInputs());
-        verify(workers, times(2)).captureEndpoint(RoleType.VIT, a.getLogicalIpPort());
-        verify(workers).captureEndpoint(RoleType.VIT, b.getLogicalIpPort());
+        verify(workers, times(2)).captureEndpoint(RoleType.VIT, a.routingAddress());
+        verify(workers).captureEndpoint(RoleType.VIT, b.routingAddress());
     }
 
     @Test

@@ -105,7 +105,7 @@ class WorkerStatusRecoverySchedulingTest {
         try {
             publishWorker(directory, endpoints, RoleType.PDFUSION, 8080, false);
             WorkerStatus vision = publishWorker(directory, endpoints, visionRole, 8090, true);
-            String address = vision.getLogicalIpPort();
+            String address = vision.routingAddress();
             var generation = endpoints.get(visionRole, address);
             assertNull(directory.captureEndpoint(visionRole, address));
 
@@ -139,7 +139,7 @@ class WorkerStatusRecoverySchedulingTest {
             boolean stale) {
         WorkerStatus worker =
                 WorkerStatus.createDiscovered(role, "g1", "127.0.0.1", port, port + 1, "test");
-        String address = worker.getLogicalIpPort();
+        String address = worker.routingAddress();
         directory.currentOrDiscover(role, address, () -> worker);
         var response = new WorkerStatusResponse();
         response.setRole(role);
@@ -183,7 +183,7 @@ class WorkerStatusRecoverySchedulingTest {
                 .thenReturn(CompletableFuture.completedFuture(response));
         new GrpcWorkerStatusRunner(
                         "test",
-                        worker.getLogicalIpPort(),
+                        worker.routingAddress(),
                         worker.getSite(),
                         role,
                         null,

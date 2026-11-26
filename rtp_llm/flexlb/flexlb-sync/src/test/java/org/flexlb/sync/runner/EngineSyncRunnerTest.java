@@ -160,7 +160,15 @@ class EngineSyncRunnerTest {
                         false,
                         STATUS_STALE_AFTER_US);
 
+        when(engineGrpcService.getWorkerStatusAsync(any(), anyInt(), anyLong(), anyLong(), any()))
+                .thenReturn(new java.util.concurrent.CompletableFuture<>());
         runner.run();
+
+        ArgumentCaptor<Runnable> submitted = ArgumentCaptor.forClass(Runnable.class);
+        verify(statusCheckExecutor, times(2)).submit(submitted.capture());
+        submitted.getAllValues().getFirst().run();
+        verify(engineGrpcService)
+                .getWorkerStatusAsync("127.0.0.1", 8081, -1L, syncRequestTimeoutMs, RoleType.VIT);
 
         assertTrue(
                 workerDirectory
