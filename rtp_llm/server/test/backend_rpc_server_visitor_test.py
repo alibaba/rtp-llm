@@ -260,9 +260,25 @@ class BackendRPCServerVisitorFrontendCacheMetricTest(unittest.TestCase):
 
 
 class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
+    async def test_decode_load_routing_scope(self):
+        for hip, role, entrance, expected in (
+            ("rocm", RoleType.PREFILL, False, True),
+            ("rocm", RoleType.PREFILL, True, False),
+            ("rocm", RoleType.DECODE, True, False),
+            (None, RoleType.PREFILL, False, False),
+        ):
+            with self.subTest(hip=hip, role=role, entrance=entrance):
+                config = Mock(role_type=role, decode_entrance=entrance, max_rpc_timeout_ms=0)
+                with patch.object(torch.version, "hip", hip):
+                    visitor = BackendRPCServerVisitor(128, 64, config, [])
+                try:
+                    self.assertEqual(visitor._balance_decode_load, expected)
+                finally:
+                    await visitor.close()
+
     async def test_decode_domain_load_selection(self):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
-        visitor._balance_atom_decode = True
+        visitor._balance_decode_load = True
         visitor.backend_role_list = [RoleType.DECODE]
         visitor.host_service = MagicMock()
         vip = visitor.host_service.role_vip_map[RoleType.DECODE]

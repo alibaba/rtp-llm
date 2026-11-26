@@ -100,7 +100,6 @@ class BackendRPCServerVisitor:
         source_role: str = "frontend",
         mm_model_config=None,
         model_config=None,
-        model_type: str = "",
     ) -> None:
         """Initialize BackendRPCServerVisitor.
 
@@ -158,13 +157,13 @@ class BackendRPCServerVisitor:
             self.pd_sep_config, host_args, vit_separation
         )
         self.host_service = HostService(host_args)
-        self._balance_atom_decode = (
+        self._balance_decode_load = (
             bool(torch.version.hip)
             and pd_sep_config.role_type == RoleType.PREFILL
-            and (model_type or getattr(model_config, "model_type", "")) == "atom_qwen4_exp"
+            and RoleType.DECODE in self.backend_role_list
         )
-        if self._balance_atom_decode:
-            route_logger.info("Enabled load-aware ATOM decode domain fallback")
+        if self._balance_decode_load:
+            route_logger.info("Enabled load-aware ROCm decode domain fallback")
         self.master_config = master_config
         self._page_rr_route_cache_keys = False
         self._page_rr_cp_size = 1
@@ -746,7 +745,7 @@ class BackendRPCServerVisitor:
         role_addrs: List[RoleAddr] = self.host_service.get_backend_role_addrs(
             missing_roles
         )
-        if self._balance_atom_decode:
+        if self._balance_decode_load:
             for addr in role_addrs:
                 if addr.role != RoleType.DECODE:
                     continue
