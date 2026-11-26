@@ -62,6 +62,7 @@ public:
         capture_stream_(cuda_graph::graphGetStreamFromPool(true)),
         enable_cuda_graph_debug_mode_(graph_params.enable_cuda_graph_debug_mode),
         num_tokens_per_bs_(graph_params.num_tokens_per_bs),
+        linear_replay_group_count_(graph_params.linear_replay_group_count),
         max_seq_len_(graph_params.max_seq_len),
         request_max_seq_len_(graph_params.request_max_seq_len > 0 ? graph_params.request_max_seq_len :
                                                                     graph_params.max_seq_len),
@@ -263,6 +264,7 @@ private:
     bool                    enable_cuda_graph_debug_mode_{false};
     size_t                  max_bs_{1};
     int                     num_tokens_per_bs_{1};
+    int                     linear_replay_group_count_{0};
     int                     max_num_token_{1};
     int64_t                 max_kernel_block_table_width_{0};
     int                     max_seq_len_{0};

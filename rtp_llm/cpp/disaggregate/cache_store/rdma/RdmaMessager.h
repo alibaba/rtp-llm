@@ -14,10 +14,11 @@ public:
                  const std::shared_ptr<RequestBlockBufferStore>& request_block_buffer_store,
                  const kmonitor::MetricsReporterPtr&             metrics_reporter):
         Messager(memory_util, request_block_buffer_store, metrics_reporter) {}
-    virtual ~RdmaMessager() = default;
+    ~RdmaMessager() override;
 
 public:
     bool init(MessagerInitParams params) override;
+    void stopMetricsReporter() override;
     void load(const std::shared_ptr<LoadRequest>&                          request,
               const std::shared_ptr<CacheStoreClientLoadMetricsCollector>& collector) override;
 

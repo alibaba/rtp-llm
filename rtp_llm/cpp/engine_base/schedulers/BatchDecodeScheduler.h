@@ -15,6 +15,8 @@
 #include <thread>
 #include <list>
 #include <unordered_set>
+#include <exception>
+#include <limits>
 
 namespace rtp_llm {
 
@@ -23,7 +25,7 @@ struct BatchDecodeSchedulerConfigLocal: public autil::legacy::Jsonizable {
         json.Jsonize("batch_size", batch_size_);
         json.Jsonize("mode", mode_, "decode");
     }
-    uint32_t    batch_size_;
+    int64_t     batch_size_ = 0;
     std::string mode_;
 };
 // Test-only scheduler that preserves explicitly requested batches.
@@ -135,16 +137,37 @@ public:
         return {std::move(enqueue_successes), streams};
     }
 
-    void updateSchedulerInfo(const std::string& scheduler_info) override {
+    absl::Status updateSchedulerInfo(const std::string& scheduler_info) override {
         BatchDecodeSchedulerConfigLocal config;
-        autil::legacy::FromJsonString(config, scheduler_info);
-        batch_size_ = config.batch_size_;
-        if (config.mode_ == "decode") {
-            scheduler_type_ = SchedulerType::kBatchDecode;
-        } else if (config.mode_ == "prefill") {
-            scheduler_type_ = SchedulerType::kBatchPrefill;
+        try {
+            autil::legacy::FromJsonString(config, scheduler_info);
+        } catch (const std::exception& e) {
+            return absl::InvalidArgumentError(e.what());
         }
-        RTP_LLM_LOG_INFO("BatchDecodeScheduler update batch size to %d, mode to %d", batch_size_, int(scheduler_type_));
+        if (config.batch_size_ <= 0 || config.batch_size_ > std::numeric_limits<uint32_t>::max()) {
+            return absl::InvalidArgumentError("BatchDecodeScheduler requires a positive batch_size fitting uint32");
+        }
+        if (config.mode_ != "decode" && config.mode_ != "prefill") {
+            return absl::InvalidArgumentError("BatchDecodeScheduler mode must be decode or prefill");
+        }
+        if (cache_manager_) {
+            const auto& replay = cache_manager_->cacheConfig().linear_replay;
+            if (replay.enabled() && config.batch_size_ > replay.slotCount()) {
+                return absl::InvalidArgumentError(
+                    "BatchDecodeScheduler batch_size " + std::to_string(config.batch_size_)
+                    + " exceeds LINEAR replay slot capacity " + std::to_string(replay.slotCount()));
+            }
+        }
+        const auto batch_size = static_cast<uint32_t>(config.batch_size_);
+        const auto mode       = config.mode_ == "decode" ? SchedulerType::kBatchDecode : SchedulerType::kBatchPrefill;
+        {
+            std::lock_guard<std::mutex> lock(lock_);
+            batch_size_     = batch_size;
+            scheduler_type_ = mode;
+        }
+        cond_.notify_all();
+        RTP_LLM_LOG_INFO("BatchDecodeScheduler update batch size to %u, mode to %d", batch_size, int(mode));
+        return absl::OkStatus();
     }
 
     // 根据状态机转移后的目标状态，将 stream 路由到对应的队列
@@ -202,27 +225,31 @@ public:
                   });
     }
 
-    bool evaluateWaitingStreams() {
+    std::chrono::milliseconds evaluateWaitingStreams() {
+        using namespace std::chrono_literals;
         // Finalize errored streams before selecting a batch so they cannot count toward its size.
-        for (auto it = waiting_streams_.begin(); it != waiting_streams_.end();) {
-            if (!(*it)->hasError()) {
-                ++it;
-                continue;
-            }
+        const auto reap = [this](auto it) {
             (*it)->moveToNext();
             (*it)->cancelHiddenStateCapture();
             waiting_reservations_.erase(*it);
             capture_batch_.remove(*it);
-            it = waiting_streams_.erase(it);
+            return waiting_streams_.erase(it);
+        };
+        for (auto it = waiting_streams_.begin(); it != waiting_streams_.end();) {
+            if (!(*it)->isFinished() && !(*it)->hasError()) {
+                ++it;
+                continue;
+            }
+            it = reap(it);
         }
 
         std::list<GenerateStreamPtr> selected_streams;
         selected_streams.swap(capture_batch_);
         const bool continuing = !selected_streams.empty();
         const bool strict_only = !continuing && waiting_streams_.size() < batch_size_ && !draining_mixed_modes_;
+        bool has_other_mode = false;
         if (!continuing) {
             // Select main's batch before considering capture; only a native zero/positive mix opens the tail gate.
-            bool has_other_mode = false;
             for (const auto& stream : waiting_streams_) {
                 if (strict_only && !isReservedStrictCapture(stream)) {
                     continue;
@@ -233,10 +260,29 @@ public:
                     selected_streams.push_back(stream);
                 }
             }
-            draining_mixed_modes_ = has_other_mode;
         }
         if (selected_streams.empty()) {
-            return false;
+            draining_mixed_modes_ = false;
+            return 0ms;
+        }
+
+        // Only positive-token batches consume replay slots. Capture continuations are prefill-only.
+        const bool replay_batch = !isPrefillOnly(selected_streams.front()) && cache_manager_
+                                  && cache_manager_->cacheConfig().linear_replay.enabled();
+        if (replay_batch) {
+            if (auto blocked = tryReserveBatchReplaySlots(selected_streams)) {
+                if (stop_requested_.load()) {
+                    return 0ms;
+                }
+                if (blocked->isFinished() || blocked->hasError()) {
+                    reap(std::find(waiting_streams_.begin(), waiting_streams_.end(), blocked));
+                    return 0ms;
+                }
+                return 1ms;
+            }
+        }
+        if (!continuing) {
+            draining_mixed_modes_ = has_other_mode;
         }
 
         const auto reserved = [](const auto& stream) { return stream->canExecuteReservedHiddenStateCapture(); };
@@ -246,7 +292,12 @@ public:
         if (!single_step) {
             for (auto& stream : selected_streams) {
                 if (stop_requested_.load()) {
-                    return false;
+                    return 0ms;
+                }
+                if (scheduler_type_ == SchedulerType::kBatchDecode && replay_batch) {
+                    // Initialize the processed prefix before the first KV grow in direct decode.
+                    stream->setPerfTest(true);
+                    stream->setIsContextStream(false);
                 }
                 stream->reportEvent(StreamEvents::CanRun);
                 // This synchronous benchmark scheduler cannot execute the selected streams to
@@ -278,7 +329,7 @@ public:
                 }
                 // Keep selected streams in waiting_streams_ for finalizeStop().
                 if (stop_requested_.load()) {
-                    return false;
+                    return 0ms;
                 }
             }
         }
@@ -289,7 +340,7 @@ public:
             auto state = stream->getStatus();
             if (single_step) {
                 if (stop_requested_.load()) {
-                    return false;
+                    return 0ms;
                 }
                 if (strict_only && !isReservedStrictCapture(stream)) {
                     continue;
@@ -324,7 +375,7 @@ public:
         }
         // Finish this partition (including any KV-owning loads) before starting its incompatible peers.
         capture_batch_.splice(capture_batch_.end(), deferred);
-        return retry;
+        return retry ? 10ms : 0ms;
     }
 
     void initRunningStreams() {
@@ -377,9 +428,9 @@ public:
             draining_mixed_modes_ = false;
         }
 
-        bool retry = false;
+        std::chrono::milliseconds retry_delay{0};
         if (running_streams_.empty() && waitingBatchReady()) {
-            retry = evaluateWaitingStreams();
+            retry_delay = evaluateWaitingStreams();
             if (stop_requested_.load()) {
                 return ScheduleOutput{{}, {}};
             }
@@ -390,10 +441,12 @@ public:
             }
         }
 
-        if (running_streams_.empty() && (retry || !loading_cache_streams_.empty())) {
-            // Only single-step admission parks a load here. KV release doesn't notify cond_,
-            // and the normal work predicate stays true for a blocked reservation/full batch.
-            cond_.wait_for(lock, std::chrono::milliseconds(10), [this] { return stop_requested_.load(); });
+        if (!loading_cache_streams_.empty() && retry_delay.count() == 0) {
+            retry_delay = std::chrono::milliseconds(10);
+        }
+        if (running_streams_.empty() && retry_delay.count() > 0) {
+            // Neither replay-slot nor KV release notifies cond_; keep the retry interruptible by stop.
+            cond_.wait_for(lock, retry_delay, [this] { return stop_requested_.load(); });
         }
         return ScheduleOutput{running_streams_};
     }
@@ -446,6 +499,24 @@ public:
     }
 
 private:
+    GenerateStreamPtr tryReserveBatchReplaySlots(const std::list<GenerateStreamPtr>& streams) {
+        std::vector<StreamCacheResource*> reservations;
+        for (const auto& stream : streams) {
+            auto& resource       = stream->streamCacheResource();
+            bool  newly_reserved = false;
+            if (!resource.reserveLinearReplaySlot(&newly_reserved)) {
+                for (auto* reserved : reservations) {
+                    reserved->releaseUnusedLinearReplaySlot();
+                }
+                return stream;
+            }
+            if (newly_reserved) {
+                reservations.push_back(&resource);
+            }
+        }
+        return nullptr;
+    }
+
     std::atomic<bool>            stop_requested_{false};
     std::mutex                   lock_;
     std::condition_variable      cond_;

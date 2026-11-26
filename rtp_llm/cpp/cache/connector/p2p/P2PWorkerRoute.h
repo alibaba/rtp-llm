@@ -31,7 +31,10 @@ struct P2PWorkerRoute {
     std::string dst_ip;
     uint32_t    dst_port = 0;
     std::set<int> prefill_layer_ids;
+    // Empty means that the worker publishes every local key for this route.
+    std::set<int64_t> prefill_cache_keys;
     size_t        slice_payload_bytes = 0;
+    bool          linear_qkv_segments = false;
 
     bool sendsLayer(int layer_id, const std::string& tag) const {
         return cache_tag == tag && (prefill_layer_ids.empty() || prefill_layer_ids.count(layer_id) != 0);

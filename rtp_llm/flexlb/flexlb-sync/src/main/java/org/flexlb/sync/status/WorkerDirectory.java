@@ -83,7 +83,7 @@ public final class WorkerDirectory implements WorkerStatusProvider {
                                     Objects.requireNonNull(
                                             discoveredFactory.get(), "discovered status");
                             if (discovered.getRole() != role
-                                    || !address.equals(discovered.getLogicalIpPort())) {
+                                    || !address.equals(discovered.routingAddress())) {
                                 throw new IllegalArgumentException(
                                         "Discovered WorkerStatus identity does not match directory key");
                             }

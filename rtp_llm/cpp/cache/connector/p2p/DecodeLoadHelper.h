@@ -123,29 +123,31 @@ public:
     };
 
     /// @brief 向 Prefill server 发起异步 StartLoad RPC，通知其开始向 Decode 发送 KV cache
-    std::shared_ptr<Result> load(int64_t                 request_id,
-                                 const std::string&      prefill_ip,
-                                 uint32_t                prefill_port,
-                                 const std::string&      unique_key,
-                                 int64_t                 request_deadline_ms,
-                                 int64_t                 transfer_deadline_ms,
-                                 int64_t                 load_timeout_ms,
-                                 bool                    no_transfer            = false,
-                                 uint64_t                plan_digest            = 0,
-                                 const std::vector<int>& active_route_ids       = {},
-                                 const std::string&      decode_pipeline_layout = {});
+    std::shared_ptr<Result> load(int64_t                                request_id,
+                                 const std::string&                     prefill_ip,
+                                 uint32_t                               prefill_port,
+                                 const std::string&                     unique_key,
+                                 int64_t                                request_deadline_ms,
+                                 int64_t                                transfer_deadline_ms,
+                                 int64_t                                load_timeout_ms,
+                                 bool                                   no_transfer            = false,
+                                 uint64_t                               plan_digest            = 0,
+                                 const std::vector<int>&                active_route_ids       = {},
+                                 const std::string&                     decode_pipeline_layout = {},
+                                 const std::vector<PrefillRouteKeysPB>& prefill_route_keys     = {});
 
 private:
-    bool buildAndStartAsyncRpc(const std::shared_ptr<Result>& result,
-                               const std::string&             unique_key,
-                               int64_t                        request_deadline_ms,
-                               int64_t                        transfer_deadline_ms,
-                               int64_t                        load_timeout_ms,
-                               int64_t                        request_id,
-                               bool                           no_transfer,
-                               uint64_t                       plan_digest,
-                               const std::vector<int>&        active_route_ids,
-                               const std::string&             decode_pipeline_layout);
+    bool buildAndStartAsyncRpc(const std::shared_ptr<Result>&         result,
+                               const std::string&                     unique_key,
+                               int64_t                                request_deadline_ms,
+                               int64_t                                transfer_deadline_ms,
+                               int64_t                                load_timeout_ms,
+                               int64_t                                request_id,
+                               bool                                   no_transfer,
+                               uint64_t                               plan_digest,
+                               const std::vector<int>&                active_route_ids,
+                               const std::string&                     decode_pipeline_layout,
+                               const std::vector<PrefillRouteKeysPB>& prefill_route_keys);
 
     std::vector<std::string>    worker_addrs_;
     const int                   decode_tp_size_;

@@ -152,6 +152,11 @@ public class ServerStatus {
         return routingMultiEngineNum;
     }
 
+    @JsonIgnore
+    public String getPhysicalIpPort() {
+        return workerIdentity.getPhysicalIpPort();
+    }
+
     /**
      * Returns the internal logical worker identity in {@code ip:port@engineIndex} format.
      * The index identifies one independently routable engine behind the physical frontend.

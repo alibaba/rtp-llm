@@ -41,6 +41,12 @@ P2PConnectorPrefill::P2PConnectorPrefill(P2PConnectorConfig                     
 
 P2PConnectorPrefill::~P2PConnectorPrefill() = default;
 
+void P2PConnectorPrefill::stop() {
+    if (worker_) {
+        worker_->stop();
+    }
+}
+
 bool P2PConnectorPrefill::init() {
     if (config_.tp_rank == 0) {
         tp_broadcast_client_ = std::make_shared<P2PBroadcastClient>(
@@ -226,12 +232,13 @@ void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& requ
     std::optional<P2PSchedulerPrefillRead::PreparedPlan> prepared_plan;
     if (!request.no_transfer()) {
         const auto check_plan_start_us = currentTimeUs();
-        auto       plan = scheduler_->preparePlan(decode_tp_size,
+        auto       plan                                = scheduler_->preparePlan(decode_tp_size,
                                             request.plan_digest(),
                                             unique_key,
                                             decode_transfer_servers.size(),
-                                            {request.active_route_ids().begin(), request.active_route_ids().end()},
-                                            request.decode_pipeline_layout());
+                                                                                 {request.active_route_ids().begin(), request.active_route_ids().end()},
+                                            request.decode_pipeline_layout(),
+                                            request.prefill_route_keys());
         collector.prefill_scheduler_check_plan_time_us = currentTimeUs() - check_plan_start_us;
         if (!plan.ok()) {
             const auto& plan_error = plan.status();
@@ -440,6 +447,9 @@ bool P2PConnectorPrefill::processReadPerRank(int64_t                            
         worker_route.partition = local.partition;
         worker_route.slice     = local.slice;
         worker_route.slice_payload_bytes = route_pb.slice_payload_bytes();
+        worker_route.linear_qkv_segments = local.linear_qkv_segments;
+        worker_route.prefill_cache_keys.insert(route_pb.prefill_cache_keys().begin(),
+                                               route_pb.prefill_cache_keys().end());
         for (auto layer_id : route_pb.prefill_layer_ids()) {
             if (!config_.worker_config.topology || layer_id >= config_.worker_config.topology->layers().size()
                 || !worker_route.prefill_layer_ids.insert(layer_id).second) {

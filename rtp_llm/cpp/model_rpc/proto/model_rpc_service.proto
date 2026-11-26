@@ -862,6 +862,9 @@ message TransferRoutePB {
     // Prefill's stage-local layers for this PP route. Empty for the TP-only path.
     repeated uint32 prefill_layer_ids = 10;
     uint64 slice_payload_bytes = 11;
+    bool linear_qkv_segments = 12;
+    // Prefill direction: exact keys requested on a PageRR fan-out route.
+    repeated int64 prefill_cache_keys = 13;
 }
 
 message P2PShardLayoutPB {
@@ -878,6 +881,10 @@ message P2PShardLayoutPB {
         uint64 seq_size_per_block = 10;
         bool pre_sliced = 11;
         uint32 global_kv_heads = 12;
+        uint64 linear_q_row_bytes = 13;
+        uint64 linear_k_row_bytes = 14;
+        uint64 linear_v_row_bytes = 15;
+        uint32 linear_history_rows = 16;
     }
     int32 tp_size = 1;
     int32 cp_method = 2;
@@ -887,6 +894,8 @@ message P2PShardLayoutPB {
     bool use_group_cache_transfer_policy = 6;
     bool use_mla = 7;
     repeated Group groups = 8;
+    bool local_full_page_rr = 9;
+    bool preserve_tp_layout = 10;
 }
 
 message P2PPipelineLayoutPB {
@@ -980,6 +989,11 @@ message LeaseStatusResponsePB {
     bool stopped = 4;      // sealed && started_ops == finished_ops
 }
 
+message PrefillRouteKeysPB {
+    int32 route_id = 1;
+    repeated int64 cache_keys = 2;
+}
+
 message P2PConnectorStartLoadRequestPB {
     string unique_key = 1;
     repeated TPWorkerInfoPB workers = 2;
@@ -1005,6 +1019,7 @@ message P2PConnectorStartLoadRequestPB {
     // Decode TP width. The worker list can also include other pipeline stages.
     int32 decode_tp_size = 9;
     bytes decode_pipeline_layout = 10;  // Serialized P2PPipelineLayoutPB.
+    repeated PrefillRouteKeysPB prefill_route_keys = 11;
 }
 
 // Side-channel tensor blob: carries named tensor data between prefill and decode

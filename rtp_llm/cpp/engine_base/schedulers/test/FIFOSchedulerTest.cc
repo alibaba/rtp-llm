@@ -2478,6 +2478,30 @@ TEST_F(FIFOSchedulerTest, testBatchDecodeSchedulerDrainsMixedTailAfterReapingErr
     }
 }
 
+TEST_F(FIFOSchedulerTest, testBatchDecodeSchedulerRestoresBatchGateAfterEntireMixedTailIsReaped) {
+    auto [cache_manager, resource_context, model_config, runtime_config] =
+        makeBatchDecodeResources(test::makeSimpleMhaCacheConfig(1, 16, 1, rtp_llm::DataType::TYPE_FP16, 1, 4));
+    ASSERT_TRUE(cache_manager->init());
+    BatchDecodeScheduler scheduler(runtime_config, cache_manager, nullptr);
+    auto prefill = makeStream({1, 2}, model_config, runtime_config, resource_context, /*max_new_tokens=*/0);
+    auto tail    = makeStream({3, 4}, model_config, runtime_config, resource_context, /*max_new_tokens=*/1);
+    ASSERT_TRUE(enqueueIndividually(scheduler, {prefill, tail}));
+    ASSERT_NO_FATAL_FAILURE(verifyOnlyScheduledStream(scheduler, prefill));
+    ASSERT_TRUE(scheduler.draining_mixed_modes_);
+
+    prefill->reportEvent(StreamEvents::GenerateDone);
+    tail->reportError(ErrorCode::CANCELLED, "cancelled before tail admission");
+    auto reaped = scheduler.schedule();
+    ASSERT_TRUE(reaped.ok());
+    ASSERT_TRUE(reaped->streams.empty());
+    ASSERT_EQ(tail->getStatus(), StreamState::FINISHED);
+
+    // Enqueue before another schedule() can observe the empty queue.
+    auto late = makeStream({5, 6}, model_config, runtime_config, resource_context, /*max_new_tokens=*/1);
+    ASSERT_TRUE(scheduler.enqueue(late).ok());
+    EXPECT_FALSE(scheduler.waitingBatchReady());
+}
+
 TEST_F(FIFOSchedulerTest, testBatchDecodeSchedulerSchedulesNonzeroBatch) {
     auto [cache_manager, resource_context, model_config, runtime_config] = makeBatchDecodeResources(
         makeMhaCacheConfig(1, 11, 1, 4, 8, rtp_llm::DataType::TYPE_FP16), /*tokens_per_block=*/0);

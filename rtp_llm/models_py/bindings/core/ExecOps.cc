@@ -20,6 +20,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <memory>
+#include <limits>
 #include <mutex>
 #include <atomic>
 #include <stdexcept>

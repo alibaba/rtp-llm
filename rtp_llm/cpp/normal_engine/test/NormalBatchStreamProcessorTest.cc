@@ -1390,8 +1390,9 @@ TEST_F(NormalBatchStreamProcessorTest, testMixedGroupBlockWidthsGatherCompleteRo
             cache_config.layer_num = 2;
             auto      full         = std::make_shared<MHAKVCacheSpec>("full", 128, 128 / full_bpk, 1);
             auto      swa          = std::make_shared<MHAKVCacheSpec>("swa", 128, 128, 1);
-            const int full_gid     = full_first ? 0 : 1;
-            const int swa_gid      = 1 - full_gid;
+            // Topology and payload tags are canonical for either input order.
+            const int full_gid     = 0;
+            const int swa_gid      = 1;
             if (full_first) {
                 cache_config.fromGroupedSpecs(
                     {full, swa}, {{0}, {1}}, {CacheGroupType::FULL, CacheGroupType::SWA}, {"full", "swa"});

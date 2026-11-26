@@ -59,6 +59,7 @@ RdmaClient::RdmaClient(const std::shared_ptr<IRdmaMemoryManager>&        memory_
     memory_manager_(memory_manager) {}
 
 RdmaClient::~RdmaClient() {
+    stopMetricsReporter();
     if (deadline_sweep_thread_) {
         deadline_sweep_thread_->stop();
     }
@@ -68,6 +69,12 @@ RdmaClient::~RdmaClient() {
         host_connection_pools_.clear();
     }
     // RdmaMempoolFactory 的 Shutdown 会在全局析构时调用，这里不需要手动调用
+}
+
+void RdmaClient::stopMetricsReporter() {
+    if (auto reporter = barex_metrics_reporter_.lock()) {
+        reporter->release();
+    }
 }
 
 bool RdmaClient::init(int io_thread_count, int worker_thread_count) {
@@ -99,6 +106,7 @@ bool RdmaClient::init(int io_thread_count, int worker_thread_count) {
         RTP_LLM_LOG_ERROR("rdma client init failed, metrics reporter init failed");
         return false;
     }
+    barex_metrics_reporter_ = metrics_reporter;
 
     // 创建 XClientTransport
     ::accl::barex::XClientTransportConfig config(io_thread_count, worker_thread_count, xmempool, metrics_reporter);

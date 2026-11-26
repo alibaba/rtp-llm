@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBufferUtil.h"
 
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
+#include "rtp_llm/cpp/cache/LinearTpCacheLayout.h"
 #include <algorithm>
 #include <exception>
 #include <map>
@@ -312,6 +313,60 @@ LayerCacheBufferUtil::buildKeyBlockInfos(const std::shared_ptr<LayerBlockConvert
         info.cache_key = key;
         info.blocks    = std::move(parts);
         result.emplace(key, std::make_shared<const transfer::KeyBlockInfo>(std::move(info)));
+    }
+    return std::move(result);
+}
+
+ErrorResult<transfer::KeyBlockInfoMap>
+LayerCacheBufferUtil::buildKeyBlockInfosLinearQkv(const std::shared_ptr<LayerBlockConverter>& converter,
+                                                  const std::shared_ptr<LayerCacheBuffer>&    buffer,
+                                                  const PartitionSpec&                        partition,
+                                                  const KVCacheSpec*                          spec) {
+    if (!spec || spec->type != KVCacheSpecType::LinearAttention
+        || spec->tp_transfer.mode != TpCacheTransferMode::LINEAR_QKV || partition.count <= 0 || partition.id < 0
+        || partition.id >= partition.count) {
+        return conversionError("missing or invalid local LINEAR_QKV transfer layout");
+    }
+
+    std::vector<LinearTpCacheSlice> slices;
+    try {
+        const auto& layout = spec->tp_transfer;
+        slices             = linearTpCacheSlices(spec->k_block_size_bytes(),
+                                     layout.q_row_bytes,
+                                     layout.k_row_bytes,
+                                     layout.v_row_bytes,
+                                     layout.history_rows,
+                                     static_cast<size_t>(partition.count),
+                                     static_cast<size_t>(partition.id));
+    } catch (const std::exception& error) {
+        return conversionError("invalid LINEAR_QKV partition: " + std::string(error.what()));
+    }
+
+    auto whole_blocks = buildKeyBlockInfos(converter, buffer);
+    if (!whole_blocks.ok()) {
+        return whole_blocks.status();
+    }
+    transfer::KeyBlockInfoMap result;
+    for (const auto& [key, info] : whole_blocks.value()) {
+        const auto context = bufferContext(*buffer, key, buffer->getBlockId(key));
+        if (info->blocks.size() != 1) {
+            return conversionError(context + ": LINEAR_QKV requires one contiguous block");
+        }
+        const auto&            whole = info->blocks.front();
+        transfer::KeyBlockInfo projected;
+        projected.cache_key = key;
+        projected.blocks.reserve(slices.size());
+        for (const auto& slice : slices) {
+            if (slice.destination_offset > whole.size_bytes
+                || slice.bytes > whole.size_bytes - slice.destination_offset) {
+                return conversionError(context + ": LINEAR_QKV segment out of bounds");
+            }
+            auto subspan       = whole;
+            subspan.addr       = static_cast<char*>(whole.addr) + slice.destination_offset;
+            subspan.size_bytes = slice.bytes;
+            projected.blocks.push_back(subspan);
+        }
+        result.emplace(key, std::make_shared<const transfer::KeyBlockInfo>(std::move(projected)));
     }
     return std::move(result);
 }

@@ -32,6 +32,7 @@ bool RdmaServer::init(uint32_t listen_port, uint32_t io_thread_count, uint32_t w
         RTP_LLM_LOG_ERROR("rdma reporter init failed");
         return false;
     }
+    metrics_reporter_ = metric_reporter;
 
     ::accl::barex::XServerTransportConfig config(io_thread_count, worker_thread_count, xmempool, metric_reporter);
 
@@ -48,6 +49,12 @@ bool RdmaServer::init(uint32_t listen_port, uint32_t io_thread_count, uint32_t w
     }
     RTP_LLM_LOG_ERROR("rdma server init rdma server failed, accl server listen port %d failed", listen_port);
     return false;
+}
+
+void RdmaServer::stopMetricsReporter() {
+    if (auto reporter = metrics_reporter_.lock()) {
+        reporter->release();
+    }
 }
 
 std::shared_ptr<RdmaConnection>

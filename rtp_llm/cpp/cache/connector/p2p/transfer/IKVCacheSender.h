@@ -28,6 +28,7 @@ using SendRequestPtr = std::shared_ptr<SendRequest>;
 class IKVCacheSender {
 public:
     virtual ~IKVCacheSender() = default;
+    virtual void stop() {}
 
     /// @brief 注册内存到 RDMA MR（建议在 send 之前对所有 buffer 调用）
     virtual bool regMem(const BlockInfo& block_info, uint64_t aligned_size = 0) = 0;

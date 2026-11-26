@@ -928,6 +928,7 @@ class LinearAttentionConfig:
     ssm_state_dtype: DataType
     conv_state_dtype: DataType
     supports_history_state_reclaim: bool
+    replay_vector_gate: bool
 
     def __init__(self, linear_conv_kernel_dim: int = 0, linear_key_head_dim: int = 0, linear_num_key_heads: int = 0, linear_num_value_heads: int = 0, linear_value_head_dim: int = 0, ssm_state_dtype: DataType = DataType.TYPE_BF16, conv_state_dtype: DataType = DataType.TYPE_BF16, supports_history_state_reclaim: bool = False) -> None:
         ...
@@ -1078,6 +1079,7 @@ class ModelConfig:
     embedding_size: int
     eplb_config: EPLBConfig
     kv_cache_spec_descs: list[list[KVCacheSpecDesc]]
+    use_page_rr_kv_cache: bool
     cache_min_replay_tokens: int
     cache_key_hash_seed: int
     expert_num: int
@@ -1336,6 +1338,7 @@ class PrefillCPConfig:
     kv_cache_sharded: bool
     method: CPRotateMethod
     prefill_cp_size: int
+    preserve_tp_layout: bool
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:
@@ -1631,6 +1634,7 @@ class RopeStyle:
     def value(self) -> int:
         ...
 class RuntimeConfig:
+    enable_linear_replay: bool
     output_dispatcher_worker_count: int
     max_block_size_per_item: int
     max_generate_batch_size: int

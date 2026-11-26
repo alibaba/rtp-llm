@@ -17,6 +17,8 @@ from rtp_llm.ops.compute_ops import (
     CacheStoreWriter,
     KVCache,
     LayerKVCache,
+    LinearReplayInputs,
+    LinearReplayLayerCache,
     PyAttentionInputs,
     PyModelInputs,
     PyModelOutputs,
@@ -135,6 +137,8 @@ class PyModelInputsCompatTest(unittest.TestCase):
             ("CacheStoreWriter", CacheStoreWriter),
             ("KVCache", KVCache),
             ("LayerKVCache", LayerKVCache),
+            ("LinearReplayInputs", LinearReplayInputs),
+            ("LinearReplayLayerCache", LinearReplayLayerCache),
             ("PyAttentionInputs", PyAttentionInputs),
         ):
             with self.subTest(class_name=class_name):
@@ -246,14 +250,19 @@ class PyModelInputsCompatTest(unittest.TestCase):
         self.assertEqual(scale.data_ptr(), layer.kv_scale_base.data_ptr())
         self.assertEqual(16, layer.seq_size_per_block)
         self.assertEqual(3, layer.layer_id)
-        self.assertFalse(hasattr(layer, "group_id"))
+        self.assertEqual(-1, layer.group_id)
+        self.assertIsNone(layer.linear_replay)
+        with self.assertRaises(AttributeError):
+            layer.group_id = 2
         self.assertEqual("full", layer.tag)
 
         positional = LayerKVCache(base, 16, 3, "full", scale)
         self.assertEqual("full", positional.tag)
         self.assertEqual(3, positional.layer_id)
         self.assertEqual(scale.data_ptr(), positional.kv_scale_base.data_ptr())
-        self.assertFalse(hasattr(LayerKVCache(), "group_id"))
+        default_layer = LayerKVCache()
+        self.assertEqual(-1, default_layer.group_id)
+        self.assertIsNone(default_layer.linear_replay)
 
         with self.assertRaises(TypeError):
             LayerKVCache(base, 16, layer_id=3, group_id=2, tag="full")

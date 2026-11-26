@@ -478,7 +478,9 @@ void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_s
             continue;
         }
 
-        if (!evaluateRunningBatch(schedule_runtime, stream)) {
+        bool newly_reserved = false;
+        if (!evaluateRunningBatch(schedule_runtime, stream)
+            || !stream->streamCacheResource().reserveLinearReplaySlot(&newly_reserved)) {
             continue;
         }
 
@@ -494,6 +496,9 @@ void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_s
         const bool scheduling_progress = new_state == StreamState::RUNNING || new_state == StreamState::LOADING_CACHE
                                          || (new_state == StreamState::WAITING && (kv_initialized || load_initiated));
 
+        if (newly_reserved && !scheduling_progress) {
+            stream->streamCacheResource().releaseUnusedLinearReplaySlot();
+        }
         if (scheduling_progress) {
             // A failed KV allocation owns no work this round and must not pin its execution mode.
             if (!scheduling_stream) {
@@ -629,7 +634,9 @@ void FIFOScheduler::evaluateWaitingGroupQueue() {
             && inited_kv_streams + newly_inited_kv_streams >= max_inited_kv_cache_streams_) {
             continue;
         }
-        if (!evaluateRunningBatch(admitted_streams, stream)) {
+        bool newly_reserved = false;
+        if (!evaluateRunningBatch(admitted_streams, stream)
+            || !stream->streamCacheResource().reserveLinearReplaySlot(&newly_reserved)) {
             continue;
         }
 
@@ -637,6 +644,9 @@ void FIFOScheduler::evaluateWaitingGroupQueue() {
             stream->reportEvent(StreamEvents::CanRun);
         }
         const auto state = stream->moveToNext();
+        if (newly_reserved && state == StreamState::WAITING) {
+            stream->streamCacheResource().releaseUnusedLinearReplaySlot();
+        }
         if (!already_inited_kv && stream->curBlocksNum() > 0) {
             ++newly_inited_kv_streams;
         }

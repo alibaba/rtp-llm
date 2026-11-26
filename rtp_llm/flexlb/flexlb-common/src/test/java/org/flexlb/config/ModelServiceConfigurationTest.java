@@ -2,8 +2,9 @@ package org.flexlb.config;
 
 import org.flexlb.dao.route.OptimizerConfig;
 import org.flexlb.dao.route.ServiceRoute;
+import org.flexlb.discovery.ServiceDiscoveryProvider;
 import org.flexlb.discovery.ServiceDiscoveryType;
-import org.flexlb.util.JsonUtils;
+import org.flexlb.service.config.parser.ModelServiceConfigParser;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -60,6 +61,100 @@ class ModelServiceConfigurationTest {
                         });
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"VipServer", "vipserver"})
+    void loadsLegacyVipServerEndpoint(String type) {
+        var provider = mock(ServiceDiscoveryProvider.class);
+        when(provider.getType()).thenReturn(ServiceDiscoveryType.VIPSERVER);
+        String config =
+                """
+                {"service_id":"test-service","role_endpoints":[{"group":"default",
+                "vit_endpoint":{"type":"%s","address":"vit-service","protocol":"http","path":"/"}}]}
+                """
+                        .formatted(type);
+        withModelConfig(config)
+                .withBean(ServiceDiscoveryProvider.class, () -> provider)
+                .run(
+                        context -> {
+                            assertThat(context).hasNotFailed();
+                            var endpoint =
+                                    context.getBean(ModelMetaConfig.class)
+                                            .getServiceRoute("test-service")
+                                            .getAllEndpoints()
+                                            .getFirst();
+                            assertThat(endpoint.getDiscovery().getType())
+                                    .isEqualTo(ServiceDiscoveryType.VIPSERVER);
+                        });
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void explicitDiscoveryOverridesLegacyTypeRegardlessOfFieldOrder(boolean legacyFirst) {
+        String legacy = "\"type\":\"VipServer\"";
+        String discovery =
+                "\"discovery\":{\"type\":\"dashscope\",\"base_url\":\"http://127.0.0.1:8880\"}";
+        String fields = legacyFirst ? legacy + "," + discovery : discovery + "," + legacy;
+        var provider = mock(ServiceDiscoveryProvider.class);
+        when(provider.getType()).thenReturn(ServiceDiscoveryType.DASHSCOPE);
+        withModelConfig(
+                        """
+                {"service_id":"test-service","role_endpoints":[{"group":"default",
+                "vit_endpoint":{"address":"vit-service","protocol":"http","path":"/",%s}}]}
+                """
+                                .formatted(fields))
+                .withBean(ServiceDiscoveryProvider.class, () -> provider)
+                .run(
+                        context -> {
+                            assertThat(context).hasNotFailed();
+                            var endpoint =
+                                    context.getBean(ModelMetaConfig.class)
+                                            .getServiceRoute("test-service")
+                                            .getAllEndpoints()
+                                            .getFirst();
+                            assertThat(endpoint.getDiscovery().getType())
+                                    .isEqualTo(ServiceDiscoveryType.DASHSCOPE);
+                            assertThat(endpoint.getDiscovery().getBaseUrl())
+                                    .isEqualTo("http://127.0.0.1:8880");
+                        });
+    }
+
+    @Test
+    void rejectsUnknownLegacyDiscoveryType() {
+        withModelConfig(
+                        """
+                {"service_id":"test-service","role_endpoints":[{"group":"default",
+                "vit_endpoint":{"type":"unknown","address":"vit-service","protocol":"http","path":"/"}}]}
+                """)
+                .run(
+                        context -> {
+                            assertThat(context).hasFailed();
+                            assertThat(context.getStartupFailure())
+                                    .hasRootCauseMessage(
+                                            "endpoint discovery must be configured for address: vit-service");
+                        });
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void explicitDiscoveryWithoutTypeIsNotReplacedByLegacyType(boolean legacyFirst) {
+        String legacy = "\"type\":\"VipServer\"";
+        String discovery = "\"discovery\":{}";
+        String fields = legacyFirst ? legacy + "," + discovery : discovery + "," + legacy;
+        withModelConfig(
+                        """
+                {"service_id":"test-service","role_endpoints":[{"group":"default",
+                "vit_endpoint":{"address":"vit-service","protocol":"http","path":"/",%s}}]}
+                """
+                                .formatted(fields))
+                .run(
+                        context -> {
+                            assertThat(context).hasFailed();
+                            assertThat(context.getStartupFailure())
+                                    .hasRootCauseMessage(
+                                            "endpoint discovery type must be configured for address: vit-service");
+                        });
+    }
+
     @Test
     void loadsMultiEngineEndpointConfiguration() {
         withModelConfig(
@@ -85,6 +180,23 @@ class ModelServiceConfigurationTest {
         assertEndpointRejected(
                 "\"worker_status_port\":18002,\"multi_engine_num\":" + multiEngineNum + ",",
                 "MODEL_SERVICE_CONFIG endpoint multi_engine_num must be greater than zero: service-a");
+    }
+
+    @Test
+    void rejectsMultipleVitWorkersSharingOneAddress() {
+        String config =
+                staticModelConfig()
+                        .replace("pd_fusion_endpoint", "vit_endpoint")
+                        .replace(
+                                "\"worker_status_port\":18002,",
+                                "\"worker_status_port\":18002,\"multi_engine_num\":2,");
+
+        withModelConfig(config)
+                .run(
+                        context ->
+                                assertThat(context.getStartupFailure())
+                                        .hasRootCauseMessage(
+                                                "MODEL_SERVICE_CONFIG vit_endpoint supports one worker per address: service-a"));
     }
 
     @ParameterizedTest
@@ -253,7 +365,7 @@ class ModelServiceConfigurationTest {
     }
 
     private ApplicationContextRunner withModelConfig(String configJson) {
-        ServiceRoute serviceRoute = JsonUtils.toObject(configJson, ServiceRoute.class);
+        ServiceRoute serviceRoute = ModelServiceConfigParser.parse(configJson);
         ConfigService configService = mock(ConfigService.class);
         when(configService.modelServiceConfig()).thenReturn(serviceRoute);
         return contextRunner.withBean(ConfigService.class, () -> configService);
