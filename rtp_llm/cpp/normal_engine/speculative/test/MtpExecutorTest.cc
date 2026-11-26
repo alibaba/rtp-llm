@@ -371,91 +371,6 @@ public:
         return publication_error_;
     }
 
-    std::function<std::optional<bool>(bool)> host_status_reducer;
-    std::optional<bool>                      reduceSpeculativeTargetPrepareStatus(bool local_ok) override {
-        return host_status_reducer ? host_status_reducer(local_ok) : std::nullopt;
-    }
-
-    SpeculativeTargetCommit* speculativeTargetCommit() const override {
-        return target_commit_.get();
-    }
-
-    struct TargetCommit final: SpeculativeTargetCommit {
-        explicit TargetCommit(FakeModel& model): model(model) {}
-
-        std::string prepareSpeculativeTargetCommit(const torch::Tensor& accept_len) override {
-            model.recordEvent("prepare_target_commit");
-            model.prepared_accept_len_ = accept_len.cpu().contiguous();
-            if (model.speculative_target_prepare_throws_) {
-                throw std::runtime_error("injected prepare exception");
-            }
-            return model.speculative_target_prepare_error_;
-        }
-
-        std::string finishSpeculativeTargetCommit(bool commit) override {
-            model.recordEvent(commit ? "commit_target" : "abort_target");
-            if (commit) {
-                ++model.speculative_target_commit_count_;
-                model.speculative_target_state_committed_ = true;
-                model.speculative_target_undo_retained_   = true;
-                if (model.speculative_target_commit_throws_) {
-                    throw std::runtime_error("injected commit exception");
-                }
-            } else {
-                ++model.speculative_target_abort_count_;
-                model.speculative_target_state_committed_ = false;
-                model.speculative_target_undo_retained_   = false;
-            }
-            return {};
-        }
-
-        std::string finalizeSpeculativeTargetCommit() override {
-            model.recordEvent("finalize_target");
-            ++model.speculative_target_finalize_count_;
-            model.speculative_target_undo_retained_ = false;
-            return {};
-        }
-
-        FakeModel& model;
-    };
-
-    void enableSpeculativeTargetCommit(std::string prepare_error = {}) {
-        target_commit_                    = std::make_unique<TargetCommit>(*this);
-        speculative_target_prepare_error_ = std::move(prepare_error);
-    }
-
-    void setSpeculativeTargetPrepareThrows(bool enabled) {
-        speculative_target_prepare_throws_ = enabled;
-    }
-
-    void setSpeculativeTargetCommitThrows(bool enabled) {
-        speculative_target_commit_throws_ = enabled;
-    }
-
-    bool speculativeTargetStateCommitted() const {
-        return speculative_target_state_committed_;
-    }
-
-    bool speculativeTargetUndoRetained() const {
-        return speculative_target_undo_retained_;
-    }
-
-    const torch::Tensor& preparedAcceptLen() const {
-        return prepared_accept_len_;
-    }
-
-    size_t speculativeTargetCommitCount() const {
-        return speculative_target_commit_count_;
-    }
-
-    size_t speculativeTargetAbortCount() const {
-        return speculative_target_abort_count_;
-    }
-
-    size_t speculativeTargetFinalizeCount() const {
-        return speculative_target_finalize_count_;
-    }
-
     void setPublicationResult(std::string error) {
         publication_error_ = std::move(error);
     }
@@ -652,16 +567,6 @@ private:
     std::shared_ptr<std::vector<std::string>>  event_log_;
     std::string                                event_name_;
     size_t                                     prepare_attention_count_            = 0;
-    std::unique_ptr<TargetCommit>              target_commit_;
-    bool                                       speculative_target_prepare_throws_  = false;
-    bool                                       speculative_target_commit_throws_   = false;
-    bool                                       speculative_target_state_committed_ = false;
-    bool                                       speculative_target_undo_retained_   = false;
-    std::string                                speculative_target_prepare_error_;
-    torch::Tensor                              prepared_accept_len_;
-    size_t                                     speculative_target_commit_count_   = 0;
-    size_t                                     speculative_target_abort_count_    = 0;
-    size_t                                     speculative_target_finalize_count_ = 0;
 };
 
 class FakeFastTopKSampler: public spec::FastTopKSampler {
@@ -853,34 +758,8 @@ private:
 class TestableMtpExecutor: public MtpExecutor {
 public:
     using MtpExecutor::MtpExecutor;
-    using MtpExecutor::asyncPrepareAllowed;
-    using MtpExecutor::prepareAndCommitSpeculativeTargetState;
-    using MtpExecutor::reduceSpeculativeTargetPrepareStatus;
-    using MtpExecutor::rendezvousSpeculativeTargetPhaseStatus;
-    using MtpExecutor::rendezvousSpeculativeTargetSamplingStatus;
     using MtpExecutor::runTargetVerifyForward;
-    using MtpExecutor::validateSpeculativeTargetExecutionPolicy;
 };
-
-TEST(MtpExecutorPolicyTest, TargetHooksDisableSpeculativeAsyncPrepare) {
-    EXPECT_TRUE(TestableMtpExecutor::asyncPrepareAllowed(/*requested=*/true, /*target_commit_hooks=*/false));
-    EXPECT_FALSE(TestableMtpExecutor::asyncPrepareAllowed(/*requested=*/true, /*target_commit_hooks=*/true));
-    EXPECT_FALSE(TestableMtpExecutor::asyncPrepareAllowed(/*requested=*/false, /*target_commit_hooks=*/false));
-    EXPECT_FALSE(TestableMtpExecutor::asyncPrepareAllowed(/*requested=*/false, /*target_commit_hooks=*/true));
-}
-
-TEST(MtpExecutorPolicyTest, TargetHooksRejectEplbBeforeForward) {
-    EXPECT_TRUE(TestableMtpExecutor::validateSpeculativeTargetExecutionPolicy(
-                    /*target_commit_hooks=*/false, /*eplb_enabled=*/true)
-                    .ok());
-    EXPECT_TRUE(TestableMtpExecutor::validateSpeculativeTargetExecutionPolicy(
-                    /*target_commit_hooks=*/true, /*eplb_enabled=*/false)
-                    .ok());
-    const auto unsupported = TestableMtpExecutor::validateSpeculativeTargetExecutionPolicy(
-        /*target_commit_hooks=*/true, /*eplb_enabled=*/true);
-    EXPECT_EQ(unsupported.code(), absl::StatusCode::kFailedPrecondition);
-    EXPECT_NE(std::string(unsupported.message()).find("do not yet support EPLB"), std::string::npos);
-}
 
 struct MtpExecutorComponents {
     std::unique_ptr<TestableMtpExecutor>    executor;
@@ -2426,23 +2305,6 @@ TEST_F(MtpExecutorTest, testDpFakeDecodePreservesDecodeWorkContract) {
     EXPECT_FALSE(fake_decode_stream->generateConfig()->isPrefillOnly());
     ASSERT_NE(fake_decode_stream->getSPOutputBuffer(), nullptr);
     EXPECT_EQ(fake_decode_stream->getSPOutputBuffer()->propose_step, propose_step);
-
-    auto* target_model = components.fake_target_model.get();
-    target_model->enableSpeculativeTargetCommit("fake block tables must not be prepared");
-    components.executor->setTargetModel(std::move(components.fake_target_model));
-    size_t reductions                                                = 0;
-    components.executor->speculative_target_status_reducer_for_test_ = [&](bool ok) {
-        ++reductions;
-        return ok;
-    };
-    auto accept_len = torch::tensor({propose_step + 1}, torch::kInt32).to(torch::kCUDA);
-    auto status = components.executor->prepareAndCommitSpeculativeTargetState(accept_len, 1, /*is_fake_stream=*/true);
-    ASSERT_TRUE(status.ok());
-    EXPECT_FALSE(target_model->preparedAcceptLen().defined());
-    EXPECT_EQ(target_model->speculativeTargetCommitCount(), 0u);
-    EXPECT_EQ(target_model->speculativeTargetAbortCount(), 1u);
-    EXPECT_EQ(target_model->speculativeTargetFinalizeCount(), 0u);
-    EXPECT_EQ(reductions, 1u);
 }
 
 TEST_F(MtpExecutorTest, testDecodeRoleRejectsPrefillOnlyWithoutModelWork) {
@@ -3243,13 +3105,6 @@ TEST_F(MtpExecutorTest, testDecodeSpecLogitsCapReplacesInvalidDraftWithTargetTok
     components.fake_draft_model->setOutputs({draft_output_1, next_draft_output});
     components.fake_target_model->setInputs({target_input});
     components.fake_target_model->setOutputs({target_output});
-    auto  transaction_events = std::make_shared<std::vector<std::string>>();
-    auto* target_model       = components.fake_target_model.get();
-    auto* draft_model        = components.fake_draft_model.get();
-    target_model->enableSpeculativeTargetCommit();
-    target_model->setEventLog(transaction_events, "target");
-    components.fake_draft_model->setEventLog(transaction_events, "draft");
-
     auto draft_sampler_output_1 = spec::FastTopKSamplerOutput{torch::tensor({1.0f, 0.0f, 0.0f, 0.0f}).reshape({1, 4}),
                                                               torch::tensor({0}, torch::kInt32).reshape({1, 1})};
     auto next_draft_sampler_output = spec::FastTopKSamplerOutput{
@@ -3285,34 +3140,6 @@ TEST_F(MtpExecutorTest, testDecodeSpecLogitsCapReplacesInvalidDraftWithTargetTok
 
     auto status = components.executor->process(ScheduleOutput{{stream}});
     ASSERT_TRUE(status.ok());
-
-    EXPECT_EQ(toVec<int32_t>(target_model->preparedAcceptLen()), (std::vector<int32_t>{1}));
-    EXPECT_EQ(target_model->speculativeTargetCommitCount(), 1u);
-    EXPECT_EQ(target_model->speculativeTargetAbortCount(), 0u);
-    EXPECT_EQ(target_model->speculativeTargetFinalizeCount(), 1u);
-    EXPECT_FALSE(target_model->speculativeTargetUndoRetained());
-    EXPECT_EQ(target_model->prepareAttentionCount(), 1u);
-    EXPECT_EQ(draft_model->prepareAttentionCount(), 1u);
-    auto target_prepare = std::find(transaction_events->begin(), transaction_events->end(), "target.prepare_attention");
-    auto target_forward = std::find(transaction_events->begin(), transaction_events->end(), "target.forward");
-    auto prepare_commit =
-        std::find(transaction_events->begin(), transaction_events->end(), "target.prepare_target_commit");
-    auto finish_commit   = std::find(transaction_events->begin(), transaction_events->end(), "target.commit_target");
-    auto finalize_commit = std::find(transaction_events->begin(), transaction_events->end(), "target.finalize_target");
-    ASSERT_NE(target_prepare, transaction_events->end());
-    ASSERT_NE(target_forward, transaction_events->end());
-    ASSERT_NE(prepare_commit, transaction_events->end());
-    ASSERT_NE(finish_commit, transaction_events->end());
-    ASSERT_NE(finalize_commit, transaction_events->end());
-    EXPECT_LT(target_prepare, target_forward);
-    EXPECT_LT(target_forward, prepare_commit);
-    EXPECT_LT(prepare_commit, finish_commit);
-    EXPECT_LT(finish_commit, finalize_commit);
-    auto draft_prepare = std::find(finalize_commit + 1, transaction_events->end(), "draft.prepare_attention");
-    auto draft_forward = std::find(finalize_commit + 1, transaction_events->end(), "draft.forward");
-    ASSERT_NE(draft_prepare, transaction_events->end());
-    ASSERT_NE(draft_forward, transaction_events->end());
-    EXPECT_LT(draft_prepare, draft_forward);
 
     checkOutput(stream, {0, 1, 2, 1}, {1, 2}, {0.0, 0.0, 1.0, 0.0}, {0.21, 0.22});
 }
@@ -4354,262 +4181,6 @@ TEST_F(MtpExecutorTest, MixedPreviousTargetTokensUseDeviceStateWithoutBookkeepin
     result = components.executor->gatherPreviousTargetTokens(StreamGroups({fresh}), 1, true, from_device);
     EXPECT_FALSE(from_device);
     EXPECT_EQ((std::vector<int>{21}), toVec<int>(result));
-}
-
-TEST_F(MtpExecutorTest, HostTargetStatusDoesNotAllocateDeviceStatusAndPropagatesFailure) {
-    auto  components = createMtpExecutorComponents(MtpExecutorTestConfig{});
-    auto* model      = components.fake_target_model.get();
-    model->enableSpeculativeTargetCommit();
-    components.executor->setTargetModel(std::move(components.fake_target_model));
-    components.executor->parallelism_config_.tp_size = 2;
-    std::vector<bool> seen;
-    model->host_status_reducer = [&seen](bool ok) -> std::optional<bool> {
-        seen.push_back(ok);
-        return false;
-    };
-    EXPECT_FALSE(components.executor->reduceSpeculativeTargetPrepareStatus(true));
-    EXPECT_FALSE(components.executor->reduceSpeculativeTargetPrepareStatus(false));
-    EXPECT_EQ(seen, (std::vector<bool>{true, false}));
-    model->host_status_reducer = [](bool ok) -> std::optional<bool> { return ok; };
-    EXPECT_TRUE(components.executor->reduceSpeculativeTargetPrepareStatus(true));
-    model->host_status_reducer = [](bool) -> std::optional<bool> { throw std::runtime_error("poisoned host status"); };
-    EXPECT_THROW(components.executor->reduceSpeculativeTargetPrepareStatus(true), std::runtime_error);
-    model->host_status_reducer = {};
-    EXPECT_THROW(components.executor->reduceSpeculativeTargetPrepareStatus(true), std::runtime_error);
-    // TP1 remains local and never enters the transport, even when configured.
-    components.executor->parallelism_config_.tp_size = 1;
-    EXPECT_TRUE(components.executor->reduceSpeculativeTargetPrepareStatus(true));
-    EXPECT_FALSE(components.executor->reduceSpeculativeTargetPrepareStatus(false));
-}
-
-TEST_F(MtpExecutorTest, testSpeculativeTargetCommitDefaultIsNoop) {
-    MtpExecutorTestConfig test_config;
-    test_config.gen_num_per_cycle = 2;
-    auto components               = createMtpExecutorComponents(test_config);
-
-    auto* target_model = components.fake_target_model.get();
-    components.executor->setTargetModel(std::move(components.fake_target_model));
-    auto accept_len = torch::tensor({2}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
-
-    auto status = components.executor->prepareAndCommitSpeculativeTargetState(accept_len, 1);
-    EXPECT_TRUE(status.ok());
-    EXPECT_FALSE(target_model->preparedAcceptLen().defined());
-    EXPECT_EQ(target_model->speculativeTargetCommitCount(), 0u);
-    EXPECT_EQ(target_model->speculativeTargetAbortCount(), 0u);
-}
-
-TEST_F(MtpExecutorTest, testLocalSamplingFailureRendezvousAbortsWithoutCommit) {
-    MtpExecutorTestConfig test_config;
-    test_config.gen_num_per_cycle = 2;
-    auto components               = createMtpExecutorComponents(test_config);
-
-    auto* target_model = components.fake_target_model.get();
-    target_model->enableSpeculativeTargetCommit();
-    components.executor->setTargetModel(std::move(components.fake_target_model));
-    size_t reduction_count                                           = 0;
-    components.executor->speculative_target_status_reducer_for_test_ = [&reduction_count](bool local_ok) {
-        ++reduction_count;
-        return local_ok;
-    };
-
-    auto status = components.executor->rendezvousSpeculativeTargetSamplingStatus(
-        absl::InternalError("injected local sampling failure"));
-    EXPECT_FALSE(status.ok());
-    EXPECT_EQ(status.code(), absl::StatusCode::kInternal);
-    EXPECT_EQ(std::string(status.message()), "speculative target sampling/cap failed on at least one TP rank");
-    EXPECT_EQ(reduction_count, 2u);  // sampling readiness, then rollback consensus
-    EXPECT_EQ(target_model->speculativeTargetCommitCount(), 0u);
-    EXPECT_EQ(target_model->speculativeTargetAbortCount(), 1u);
-    EXPECT_EQ(target_model->speculativeTargetFinalizeCount(), 0u);
-}
-
-TEST_F(MtpExecutorTest, testRemoteSpecLogitsLaunchFailureRendezvousAbortsBeforeTargetForward) {
-    MtpExecutorTestConfig test_config;
-    test_config.gen_num_per_cycle = 2;
-    auto components               = createMtpExecutorComponents(test_config);
-
-    auto* target_model = components.fake_target_model.get();
-    target_model->enableSpeculativeTargetCommit();
-    components.executor->setTargetModel(std::move(components.fake_target_model));
-    size_t reduction_count                                           = 0;
-    components.executor->speculative_target_status_reducer_for_test_ = [&reduction_count](bool local_ok) {
-        ++reduction_count;
-        if (reduction_count == 1) {
-            EXPECT_TRUE(local_ok);
-            return false;  // Simulate rank 0 failing event/check/async launch.
-        }
-        return local_ok;
-    };
-
-    auto status = components.executor->rendezvousSpeculativeTargetPhaseStatus(absl::OkStatus(), "spec-logits launch");
-    EXPECT_FALSE(status.ok());
-    EXPECT_EQ(status.code(), absl::StatusCode::kInternal);
-    EXPECT_EQ(std::string(status.message()), "speculative target spec-logits launch failed on at least one TP rank");
-    EXPECT_EQ(reduction_count, 2u);  // launch readiness, then rollback consensus
-    EXPECT_EQ(target_model->forwardCount(), 0u);
-    EXPECT_EQ(target_model->speculativeTargetCommitCount(), 0u);
-    EXPECT_EQ(target_model->speculativeTargetAbortCount(), 1u);
-    EXPECT_EQ(target_model->speculativeTargetFinalizeCount(), 0u);
-}
-
-TEST_F(MtpExecutorTest, testRemoteSamplingFailureRendezvousAbortsWithoutCommit) {
-    MtpExecutorTestConfig test_config;
-    test_config.gen_num_per_cycle = 2;
-    auto components               = createMtpExecutorComponents(test_config);
-
-    auto* target_model = components.fake_target_model.get();
-    target_model->enableSpeculativeTargetCommit();
-    components.executor->setTargetModel(std::move(components.fake_target_model));
-    size_t reduction_count                                           = 0;
-    components.executor->speculative_target_status_reducer_for_test_ = [&reduction_count](bool local_ok) {
-        ++reduction_count;
-        if (reduction_count == 1) {
-            EXPECT_TRUE(local_ok);
-            return false;  // Simulate another TP rank failing sampling.
-        }
-        return local_ok;
-    };
-
-    auto status = components.executor->rendezvousSpeculativeTargetSamplingStatus(absl::OkStatus());
-    EXPECT_FALSE(status.ok());
-    EXPECT_EQ(status.code(), absl::StatusCode::kInternal);
-    EXPECT_EQ(std::string(status.message()), "speculative target sampling/cap failed on at least one TP rank");
-    EXPECT_EQ(reduction_count, 2u);  // sampling readiness, then rollback consensus
-    EXPECT_EQ(target_model->speculativeTargetCommitCount(), 0u);
-    EXPECT_EQ(target_model->speculativeTargetAbortCount(), 1u);
-    EXPECT_EQ(target_model->speculativeTargetFinalizeCount(), 0u);
-}
-
-TEST_F(MtpExecutorTest, testSamplingFailureWithoutHooksPreservesLocalStatus) {
-    MtpExecutorTestConfig test_config;
-    test_config.gen_num_per_cycle = 2;
-    auto components               = createMtpExecutorComponents(test_config);
-
-    auto* target_model = components.fake_target_model.get();
-    components.executor->setTargetModel(std::move(components.fake_target_model));
-    size_t reduction_count                                           = 0;
-    components.executor->speculative_target_status_reducer_for_test_ = [&reduction_count](bool local_ok) {
-        ++reduction_count;
-        return local_ok;
-    };
-    const auto local_status = absl::InvalidArgumentError("legacy no-hook sampling failure");
-
-    auto status = components.executor->rendezvousSpeculativeTargetSamplingStatus(local_status);
-    EXPECT_EQ(status, local_status);
-    EXPECT_EQ(reduction_count, 0u);
-    EXPECT_EQ(target_model->speculativeTargetCommitCount(), 0u);
-    EXPECT_EQ(target_model->speculativeTargetAbortCount(), 0u);
-}
-
-TEST_F(MtpExecutorTest, testSpeculativeTargetPrepareFailureAbortsBeforeCommit) {
-    MtpExecutorTestConfig test_config;
-    test_config.gen_num_per_cycle = 2;
-    auto components               = createMtpExecutorComponents(test_config);
-
-    auto* target_model = components.fake_target_model.get();
-    target_model->enableSpeculativeTargetCommit("injected prepare failure");
-    components.executor->setTargetModel(std::move(components.fake_target_model));
-    auto accept_len = torch::tensor({2}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
-
-    auto status = components.executor->prepareAndCommitSpeculativeTargetState(accept_len, 1);
-    EXPECT_FALSE(status.ok());
-    EXPECT_NE(status.ToString().find("injected prepare failure"), std::string::npos);
-    EXPECT_EQ(toVec<int32_t>(target_model->preparedAcceptLen()), (std::vector<int32_t>{2}));
-    EXPECT_EQ(target_model->speculativeTargetCommitCount(), 0u);
-    EXPECT_EQ(target_model->speculativeTargetAbortCount(), 1u);
-}
-
-TEST_F(MtpExecutorTest, testSpeculativeTargetPrepareExceptionBecomesStatusAndAborts) {
-    MtpExecutorTestConfig test_config;
-    test_config.gen_num_per_cycle = 2;
-    auto components               = createMtpExecutorComponents(test_config);
-
-    auto* target_model = components.fake_target_model.get();
-    target_model->enableSpeculativeTargetCommit();
-    target_model->setSpeculativeTargetPrepareThrows(true);
-    components.executor->setTargetModel(std::move(components.fake_target_model));
-    auto accept_len = torch::tensor({2}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
-
-    auto status = components.executor->prepareAndCommitSpeculativeTargetState(accept_len, 1);
-    EXPECT_FALSE(status.ok());
-    EXPECT_NE(status.ToString().find("injected prepare exception"), std::string::npos);
-    EXPECT_EQ(toVec<int32_t>(target_model->preparedAcceptLen()), (std::vector<int32_t>{2}));
-    EXPECT_EQ(target_model->speculativeTargetCommitCount(), 0u);
-    EXPECT_EQ(target_model->speculativeTargetAbortCount(), 1u);
-}
-
-TEST_F(MtpExecutorTest, testSpeculativeTargetInvalidAcceptLenRendezvousBeforeReturn) {
-    MtpExecutorTestConfig test_config;
-    test_config.gen_num_per_cycle = 2;
-    auto components               = createMtpExecutorComponents(test_config);
-
-    auto* target_model = components.fake_target_model.get();
-    target_model->enableSpeculativeTargetCommit();
-    components.executor->setTargetModel(std::move(components.fake_target_model));
-    size_t reduction_count                                           = 0;
-    components.executor->speculative_target_status_reducer_for_test_ = [&reduction_count](bool local_ok) {
-        ++reduction_count;
-        return local_ok;
-    };
-    auto invalid_accept_len = torch::tensor({2}, torch::kInt32);
-
-    auto status = components.executor->prepareAndCommitSpeculativeTargetState(invalid_accept_len, 1);
-    EXPECT_FALSE(status.ok());
-    EXPECT_NE(status.ToString().find("accept_len validation failed"), std::string::npos);
-    EXPECT_EQ(reduction_count, 2u);  // readiness failure, then rollback consensus
-    EXPECT_FALSE(target_model->preparedAcceptLen().defined());
-    EXPECT_EQ(target_model->speculativeTargetCommitCount(), 0u);
-    EXPECT_EQ(target_model->speculativeTargetAbortCount(), 1u);
-}
-
-TEST_F(MtpExecutorTest, testSpeculativeTargetCommitExceptionRollsBack) {
-    MtpExecutorTestConfig test_config;
-    test_config.gen_num_per_cycle = 2;
-    auto components               = createMtpExecutorComponents(test_config);
-
-    auto* target_model = components.fake_target_model.get();
-    target_model->enableSpeculativeTargetCommit();
-    target_model->setSpeculativeTargetCommitThrows(true);
-    components.executor->setTargetModel(std::move(components.fake_target_model));
-    auto accept_len = torch::tensor({2}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
-
-    auto status = components.executor->prepareAndCommitSpeculativeTargetState(accept_len, 1);
-    EXPECT_FALSE(status.ok());
-    EXPECT_NE(status.ToString().find("injected commit exception"), std::string::npos);
-    EXPECT_EQ(target_model->speculativeTargetCommitCount(), 1u);
-    EXPECT_EQ(target_model->speculativeTargetAbortCount(), 1u);
-    EXPECT_EQ(target_model->speculativeTargetFinalizeCount(), 0u);
-    EXPECT_FALSE(target_model->speculativeTargetStateCommitted());
-    EXPECT_FALSE(target_model->speculativeTargetUndoRetained());
-}
-
-TEST_F(MtpExecutorTest, testSpeculativeTargetPeerCommitFailureRollsBackLocalCommit) {
-    MtpExecutorTestConfig test_config;
-    test_config.gen_num_per_cycle = 2;
-    auto components               = createMtpExecutorComponents(test_config);
-
-    auto* target_model = components.fake_target_model.get();
-    target_model->enableSpeculativeTargetCommit();
-    components.executor->setTargetModel(std::move(components.fake_target_model));
-    size_t reduction_count                                           = 0;
-    components.executor->speculative_target_status_reducer_for_test_ = [&reduction_count](bool local_ok) {
-        ++reduction_count;
-        if (reduction_count == 3) {
-            return false;  // Simulate another TP rank failing tentative commit.
-        }
-        return local_ok;
-    };
-    auto accept_len = torch::tensor({2}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
-
-    auto status = components.executor->prepareAndCommitSpeculativeTargetState(accept_len, 1);
-    EXPECT_FALSE(status.ok());
-    EXPECT_NE(status.ToString().find("commit failed on at least one TP rank"), std::string::npos);
-    EXPECT_EQ(reduction_count, 4u);  // readiness, prepare, commit, rollback
-    EXPECT_EQ(target_model->speculativeTargetCommitCount(), 1u);
-    EXPECT_EQ(target_model->speculativeTargetAbortCount(), 1u);
-    EXPECT_EQ(target_model->speculativeTargetFinalizeCount(), 0u);
-    EXPECT_FALSE(target_model->speculativeTargetStateCommitted());
-    EXPECT_FALSE(target_model->speculativeTargetUndoRetained());
 }
 
 TEST_F(MtpExecutorTest, DispatchStateUsesAcceptedLengths) {

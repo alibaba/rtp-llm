@@ -388,7 +388,7 @@ PPExecutor::PPExecutor(const EngineInitParams&                params,
         model_ = std::make_unique<PyWrappedModel>(model_init_params,
                                                   params.py_model,
                                                   false,
-                                                  sp_enabled_ && !warm_up_ && (isFirstStage() || isLastStage()),
+                                                  sp_enabled_ && isLastStage() && !warm_up_,
                                                   DSparkModelRole::NONE,
                                                   false,
                                                   track_dspark_cache_store_);
@@ -397,11 +397,6 @@ PPExecutor::PPExecutor(const EngineInitParams&                params,
         model_ = test_model_factory(model_init_params);
     } else {
         RTP_LLM_LOG_WARNING("py_model is None — model will not be initialized (test mode)");
-    }
-
-    if (sp_enabled_ && !warm_up_ && isFirstStage() && model_ && model_->speculativeTargetCommit()) {
-        RTP_LLM_CHECK_WITH_INFO(params.sp_config.type == SP_TYPE_MTP && !params.eplb_config.enable_eplb(),
-                                "PP target commits require MTP with EPLB disabled");
     }
 
     if (propose_params && propose_params->draftModel() && !warm_up_ && isLastStage()) {
@@ -535,7 +530,6 @@ PPExecutor::~PPExecutor() {
         }
     }
     stopResultSender();
-    stopTargetCommitWorker();
     /** Finish local model-buffer consumers before destroying the models. */
     last_compute_done_.synchronize();
     cudaProfilerEnd();
@@ -1127,7 +1121,6 @@ absl::Status PPExecutor::finish() {
         }
     }
     stopResultSender();
-    stopTargetCommitWorker();
     for (auto& slot : slots_) {
         waitAll(slot.plan_sends);
         waitAll(slot.activation_sends);
@@ -1211,7 +1204,6 @@ absl::Status PPExecutor::processImpl(const ScheduleOutput& schedule_output, int6
 
     auto&      model_input  = plan.model_input;
     const bool prefill_only = model_input.skip_lm_head;
-    std::optional<TargetVerify> target_verify;
 
     /** 3. Wait on this slot's previous sends before reusing it. CUDA waits order subsequent operations on the current
      * stream after communication. */
@@ -1312,23 +1304,6 @@ absl::Status PPExecutor::processImpl(const ScheduleOutput& schedule_output, int6
         }
 
         if (!isLastStage()) {
-            // Prompt chunks write PLE during forward. Only MTP decode stages candidates for acceptance.
-            if (isFirstStage() && model_input.is_target_verify) {
-                auto commit = model_->takeSpeculativeTargetCommit();
-                if (commit && !model_input.is_fake_stream && !prefill_only) {
-                    // The writeback stream consumes tensors produced by this forward.
-                    auto ready = cuda_graph::makeGraphEvent();
-                    ready.record(cuda_graph::graphGetCurrentStream());
-                    target_verify.emplace(
-                        TargetVerify{std::move(commit), std::move(ready), model_input.input_lengths.numel()});
-                    startTargetCommitWorker();
-                    if (!isStageRoot()) {
-                        ResultRecvTask task;
-                        task.target_verify = std::move(target_verify);
-                        enqueueTargetCommit({std::move(task), {}});
-                    }
-                }
-            }
             PPIntermediateTensors output_tensors{std::move(model_output.pp_intermediates)};
             const auto            start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
             asyncSendTensors(output_tensors, inflight.activation_sends);
@@ -1378,8 +1353,7 @@ absl::Status PPExecutor::processImpl(const ScheduleOutput& schedule_output, int6
                                schedule_time_us,
                                std::move(executor_collector),
                                std::move(tps_guard),
-                               std::move(wall_tps_guard),
-                               std::move(target_verify)});
+                               std::move(wall_tps_guard)});
     } else if (isLastStage() && isStageRoot() && !model_input.skip_run) {
         enqueueResultSendTask(
             {std::move(plan), std::move(pending_result), current_slot_, std::move(executor_collector)});
@@ -1481,7 +1455,8 @@ void PPExecutor::resultRecvLoop() {
                 result_recv_tasks_.pop_front();
                 result_recv_processing_ = true;
             }
-            receiveAndProcessResult(std::move(task));
+            receiveAndProcessResult(task.snapshot, task.schedule_time_us, task.executor_collector);
+            /** Drain must include stream and guard cleanup; destroy the task before marking it idle. */
         }
         {
             std::lock_guard<std::mutex> lock(result_recv_mutex_);
@@ -1491,128 +1466,36 @@ void PPExecutor::resultRecvLoop() {
     }
 }
 
-PPExecutionResult PPExecutor::receiveExecutionResult(const PPExecutionSnapshot& snapshot) {
+void PPExecutor::receiveAndProcessResult(const PPExecutionSnapshot&      snapshot,
+                                         int64_t                         schedule_time_us,
+                                         RtpLLMExecutorMetricsCollector& executor_collector) {
     /** Fake batches still complete the PP round trip before their result is discarded. */
-    PPExecutionResult result;
-    {
-        RTP_LLM_PROFILE_SCOPE("executor.pp.recv_result");
-        result = pp_serialization::deserializeExecutionResult(receiveObject(kPPResultGroupName));
-    }
-    if (!snapshot.is_fake) {
-        batch_stream_processor_->validateExecutionResult(snapshot, result);
-    }
-    return result;
-}
-
-void PPExecutor::startTargetCommitWorker() {
-    if (!target_commit_thread_.joinable()) {
-        torch::Stream stream = cuda_graph::graphGetStreamFromPool(false);
-        target_commit_thread_ = std::thread(&PPExecutor::targetCommitLoop, this, stream);
-    }
-}
-
-void PPExecutor::enqueueTargetCommit(TargetCommitTask task) {
-    {
-        std::lock_guard<std::mutex> lock(result_recv_mutex_);
-        target_commit_tasks_.push_back(std::move(task));
-    }
-    target_commit_cv_.notify_one();
-}
-
-void PPExecutor::targetCommitLoop(torch::Stream stream) {
-    cuda_graph::setDevice(static_cast<int>(stream.device_index()));
-    cuda_graph::GraphStreamGuard stream_guard(cuda_graph::toGraphStream(stream));
-    c10::InferenceMode inference_guard(true);
-    const auto all_ranks_ok = [this](bool ok) {
-        return parallelism_config_.tp_size == 1 ? ok : model_->reduceSpeculativeTargetPrepareStatus(ok).value();
-    };
-
-    while (true) {
-        {
-            TargetCommitTask pending;
-            {
-                std::unique_lock<std::mutex> lock(result_recv_mutex_);
-                target_commit_cv_.wait(lock, [this] { return target_commit_stop_ || !target_commit_tasks_.empty(); });
-                if (target_commit_tasks_.empty()) {
-                    return;
-                }
-                pending = std::move(target_commit_tasks_.front());
-                target_commit_tasks_.pop_front();
-                target_commit_processing_ = true;
-            }
-
-            auto& verify = *pending.task.target_verify;
-            {
-                RTP_LLM_PROFILE_SCOPE("executor.pp.target_commit");
-                static const auto pinned_i32 = torch::TensorOptions(torch::kInt32).pinned_memory(true);
-                auto lengths = isStageRoot() ? pending.result.new_token_lengths :
-                                               torch::empty({verify.batch_size}, pinned_i32);
-                if (parallelism_config_.tp_size > 1) {
-                    RTP_LLM_PROFILE_SCOPE("executor.pp.target_accept_broadcast");
-                    model_->broadcastPPTargetAcceptLengths(lengths);
-                }
-                verify.candidates_ready.block(stream);
-                auto accepted = lengths.to(torch::kCUDA, /*non_blocking=*/true);
-                THROW_IF_STATUS_ERROR(mtp::commitSpeculativeTargetState(*verify.commit, accepted, all_ranks_ok));
-            }
-            if (isStageRoot()) {
-                dispatchResult(pending.task, pending.result);
-            }
-        }
-        {
-            std::lock_guard<std::mutex> lock(result_recv_mutex_);
-            target_commit_processing_ = false;
-        }
-        target_commit_cv_.notify_all();
-    }
-}
-
-void PPExecutor::stopTargetCommitWorker() {
-    if (target_commit_thread_.joinable()) {
-        {
-            std::lock_guard<std::mutex> lock(result_recv_mutex_);
-            target_commit_stop_ = true;
-        }
-        target_commit_cv_.notify_all();
-        target_commit_thread_.join();
-    }
-}
-
-void PPExecutor::receiveAndProcessResult(ResultRecvTask task) {
-    auto result = receiveExecutionResult(task.snapshot);
-    if (task.snapshot.is_fake) {
+    auto result = pp_serialization::deserializeExecutionResult(receiveObject(kPPResultGroupName));
+    if (snapshot.is_fake) {
         RTP_LLM_LOG_DEBUG("PP fake batch completed: dp_rank=%ld", parallelism_config_.dp_rank);
         return;
     }
 
-    if (task.target_verify) {
-        enqueueTargetCommit({std::move(task), std::move(result)});
-    } else {
-        dispatchResult(task, result);
-    }
-}
+    batch_stream_processor_->validateExecutionResult(snapshot, result);
 
-void PPExecutor::dispatchResult(ResultRecvTask& task, const PPExecutionResult& result) {
     /** Count input work and returned tokens before dispatch changes stream state. */
     StreamGroups::TokenCountsByPriority     token_counts_by_priority;
     RtpLLMSpeculativeEngineMetricsCollector sp_collector;
-    collectTokenCounts(task.snapshot, result, token_counts_by_priority, sp_collector);
+    collectTokenCounts(snapshot, result, token_counts_by_priority, sp_collector);
 
     {
         const auto start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        // A verification stays PPInflight until its PLE writes are complete on all TP ranks.
-        batch_stream_processor_->dispatchExecutionResult(task.snapshot, result);
-        task.executor_collector.dispatch_output_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        batch_stream_processor_->dispatchExecutionResult(snapshot, result);
+        executor_collector.dispatch_output_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
-    task.executor_collector.sample_input_us = result.sample_input_us;
-    reportResultMetrics(task.schedule_time_us, task.executor_collector, token_counts_by_priority, sp_collector);
+    executor_collector.sample_input_us = result.sample_input_us;
+    reportResultMetrics(schedule_time_us, executor_collector, token_counts_by_priority, sp_collector);
 }
 
 void PPExecutor::drainPendingResults() {
     std::unique_lock<std::mutex> lock(result_recv_mutex_);
     result_recv_cv_.wait(lock, [this] { return result_recv_tasks_.empty() && !result_recv_processing_; });
-    target_commit_cv_.wait(lock, [this] { return target_commit_tasks_.empty() && !target_commit_processing_; });
 }
 
 void PPExecutor::requestResultRecvStop() {

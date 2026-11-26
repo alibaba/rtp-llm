@@ -47,37 +47,6 @@ torch::Tensor toHostAsync(const torch::Tensor& tensor, bool& has_d2h) {
     return host;
 }
 
-class PySpeculativeTargetCommit final: public SpeculativeTargetCommit {
-public:
-    explicit PySpeculativeTargetCommit(py::object owner): owner_(std::move(owner)) {}
-
-    ~PySpeculativeTargetCommit() override {
-        py::gil_scoped_acquire gil;
-        owner_ = py::object();
-    }
-
-    std::string prepareSpeculativeTargetCommit(const torch::Tensor& accept_len) override {
-        py::gil_scoped_acquire gil;
-        owner_.attr("prepare_speculative_target_commit")(accept_len);
-        return {};
-    }
-
-    std::string finishSpeculativeTargetCommit(bool commit) override {
-        py::gil_scoped_acquire gil;
-        owner_.attr("finish_speculative_target_commit")(commit);
-        return {};
-    }
-
-    std::string finalizeSpeculativeTargetCommit() override {
-        py::gil_scoped_acquire gil;
-        owner_.attr("finalize_speculative_target_commit")();
-        return {};
-    }
-
-private:
-    py::object owner_;
-};
-
 /** Pair init() with a full drain on exceptional exits. On the normal tracked
  * path, finish submissions here and leave publication completion and error
  * handling to the caller. */
@@ -243,37 +212,6 @@ bool PyWrappedModel::hasMtpTargetHiddenBuffer() const {
     return has_mtp_hidden_buffer_;
 }
 
-void PyWrappedModel::initializeSpeculativeTargetCommit() {
-    speculative_target_commit_ = std::make_unique<PySpeculativeTargetCommit>(py_model_);
-}
-
-SpeculativeTargetCommit* PyWrappedModel::speculativeTargetCommit() const {
-    return speculative_target_commit_.get();
-}
-
-std::unique_ptr<SpeculativeTargetCommit> PyWrappedModel::takeSpeculativeTargetCommit() {
-    if (!speculative_target_commit_) {
-        return nullptr;
-    }
-    py::gil_scoped_acquire gil;
-    return std::make_unique<PySpeculativeTargetCommit>(py_model_.attr("take_speculative_target_commit")());
-}
-
-void PyWrappedModel::broadcastPPTargetAcceptLengths(const torch::Tensor& accept_lengths) {
-    py::gil_scoped_acquire gil;
-    py_model_.attr("broadcast_pp_target_accept_lengths")(accept_lengths);
-}
-
-std::optional<bool> PyWrappedModel::reduceSpeculativeTargetPrepareStatus(bool local_ok) {
-    if (!has_speculative_target_status_reducer_) {
-        return std::nullopt;
-    }
-    py::gil_scoped_acquire gil;
-    // Native waiting releases the GIL. Do not catch errors and switch transports:
-    // the published generation may already have been consumed by the peer.
-    return py_model_.attr("reduce_speculative_target_prepare_status")(local_ok).cast<bool>();
-}
-
 void PyWrappedModel::loadMtpIndexerTopk(const torch::Tensor& topk) {
     py::gil_scoped_acquire gil;
     py_model_.attr("load_mtp_indexer_topk")(topk);
@@ -295,7 +233,6 @@ PyWrappedModel::~PyWrappedModel() {
         }
         generation_prefill_graph_runner_.reset();
         graph_runner_.reset();
-        speculative_target_commit_.reset();
         // Runners retain Python methods and graph-owned tensors. Drain and
         // destroy them before releasing the model object they reference.
         if (py_model_ && py::hasattr(py_model_, "close")) {

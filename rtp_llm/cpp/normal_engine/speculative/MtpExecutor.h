@@ -117,17 +117,6 @@ protected:
     bool finishDSparkPrefillCachePublication(const GptModelInputs&               model_input,
                                              const std::list<GenerateStreamPtr>& streams);
 
-    bool                reduceSpeculativeTargetPrepareStatus(bool local_ok);
-    static bool         asyncPrepareAllowed(bool requested, bool target_commit_hooks);
-    static absl::Status validateSpeculativeTargetExecutionPolicy(bool target_commit_hooks, bool eplb_enabled);
-    bool                speculativeTargetTransactionsEnabled() const;
-    absl::Status        rendezvousSpeculativeTargetPhaseStatus(const absl::Status& local_status, const char* phase);
-    absl::Status        rendezvousSpeculativeTargetSamplingStatus(const absl::Status& local_status);
-    absl::Status
-    prepareAndCommitSpeculativeTargetState(torch::Tensor& accept_len, size_t batch_size, bool is_fake_stream = false);
-    void                rollbackSpeculativeTargetStateOrFailStop(const char* phase);
-    void                rollbackSpeculativeTargetStateBestEffort(const char* phase) noexcept;
-
     void maybePrintModelInput(const GptModelInputs& model_input, const std::string& prefix) const;
     void beginProfiledWork();
 
@@ -353,7 +342,6 @@ private:
     // True between the post-rejection prepare fork and runDraftPrefillForward:
     // the forked worker already prepared the final input, so the hooks-mode
     // synchronous rebuild inside the forward is skipped for that call only.
-    bool draft_prefill_prepare_forked_ = false;
     // Declare the worker after its target so destruction joins the worker first.
     std::unique_ptr<SpecLogitsVerifyRunner> spec_logits_verify_runner_;
     AsyncRunner                             spec_logits_verify_async_runner_;
@@ -366,8 +354,6 @@ private:
     torch::Tensor             dspark_cache_store_status_;
     std::function<bool(bool)> dspark_cache_store_status_reducer_for_test_;
 
-    // Test seam for the host transaction control transport.
-    std::function<bool(bool)> speculative_target_status_reducer_for_test_;
     std::function<void()>     before_model_forward_;
     std::function<void()>     after_model_forward_;
     bool                      profile_work_started_ = false;

@@ -1,4 +1,3 @@
-import weakref
 from collections.abc import Mapping
 from typing import Any, Dict, Optional
 
@@ -35,12 +34,6 @@ from rtp_llm.models_py.model_desc.qwen4_exp_runtime.pd_publication import (
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.ple_execution import (
     PLEExecution,
     ple_input_ids,
-)
-from rtp_llm.models_py.model_desc.qwen4_exp_runtime.ple_state import (
-    _PLETargetTransaction,
-)
-from rtp_llm.models_py.model_desc.qwen4_exp_runtime.ple_transaction import (
-    PLETransactionCoordinator,
 )
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_context import (
     Qwen4ExpQSARuntimeContext,
@@ -809,20 +802,9 @@ class Qwen4ExpModel(Qwen35Model):
                 role=getattr(parallelism_config, "role_type", "PDFUSION")
             )
         self.ple_layers = nn.ModuleDict()
-        self._ple_target_transaction: Optional[_PLETargetTransaction] = None
-        self._ple_graph_target_transactions: Dict[int, _PLETargetTransaction] = {}
         self._capture_mtp_target_hidden = bool(getattr(self.config, "is_mtp", False))
         if getattr(self.config, "enable_qwen4_ple", False):
             self._build_ple_layers()
-        from rtp_llm.models_py.modules.qwen4_exp.cpu_target_status import (
-            prepare_cpu_target_status,
-        )
-
-        self._cpu_target_status = (
-            prepare_cpu_target_status(config, parallelism_config)
-            if int(getattr(parallelism_config, "pp_size", 1)) == 1
-            else None
-        )
         from rtp_llm.models_py.modules.qwen4_exp.tp_reduce import (
             install_target_graph_all_reduce,
             prepare_target_reduce,
@@ -834,20 +816,6 @@ class Qwen4ExpModel(Qwen35Model):
             for layer in self.layers:
                 install_target_graph_all_reduce(layer.self_attn, layer.mlp, dispatch)
 
-    def _ple_coordinator(self) -> PLETransactionCoordinator:
-        coordinator = self.__dict__.get("_ple_transaction_coordinator")
-        if coordinator is None:
-            owner = weakref.ref(self)
-
-            def fault(phase: str) -> None:
-                model = owner()
-                if model is not None:
-                    model._maybe_inject_speculative_fault(phase)
-
-            coordinator = PLETransactionCoordinator(self.ple_layers, fault)
-            self._ple_transaction_coordinator = coordinator
-        return coordinator
-
     def _ple_execution(self) -> PLEExecution:
         execution = self.__dict__.get("_ple_execution_runtime")
         if execution is None or execution.kv_cache is not self.kv_cache:
@@ -856,26 +824,9 @@ class Qwen4ExpModel(Qwen35Model):
                 self.kv_cache,
                 self.parallelism_config,
                 ple_eos_token_id(self.config),
-                self._ple_coordinator(),
             )
             self._ple_execution_runtime = execution
         return execution
-
-    @property
-    def _ple_target_transaction(self):
-        return self._ple_coordinator().active_transaction
-
-    @_ple_target_transaction.setter
-    def _ple_target_transaction(self, value):
-        self._ple_coordinator().active_transaction = value
-
-    @property
-    def _ple_graph_target_transactions(self):
-        return self._ple_coordinator().captured_transactions
-
-    @_ple_graph_target_transactions.setter
-    def _ple_graph_target_transactions(self, value):
-        self._ple_coordinator().captured_transactions = value
 
     def resource_usage(self) -> dict[str, int]:
         totals = {}
@@ -906,41 +857,15 @@ class Qwen4ExpModel(Qwen35Model):
         }
         for device in devices:
             torch.cuda.synchronize(device)
-        coordinator = self.__dict__.get("_ple_transaction_coordinator")
-        if coordinator is not None:
-            coordinator.close()
         for ple in self.ple_layers.values():
             ple.ple_embedding.close()
         self._ple_execution_runtime = None
-        status = self.__dict__.get("_cpu_target_status")
-        if status is not None:
-            status.close()
         target_reduce = self.__dict__.get("_target_reduce")
         if target_reduce is not None:
             target_reduce.close()
         self._closed = True
 
     def initialize(self, init_resource) -> bool:
-        if (
-            int(getattr(self.parallelism_config, "pp_size", 1)) > 1
-            and bool(init_resource.is_speculative)
-            and self.requires_speculative_target_commit()
-        ):
-            if not self.owns_model_input:
-                raise RuntimeError(
-                    "qwen4_exp PP + MTP requires all PLE layers on the first stage"
-                )
-            if (
-                self.parallelism_config.tp_size > 1
-                and self._cpu_target_status is None
-            ):
-                from rtp_llm.models_py.modules.qwen4_exp.cpu_target_status import (
-                    prepare_cpu_target_status,
-                )
-
-                self._cpu_target_status = prepare_cpu_target_status(
-                    self.config, self.parallelism_config, broadcast_accept_lengths=True
-                )
         initialized = super().initialize(init_resource)
         # The target and the draft both export their wide post-block residual:
         # target -> first draft step, draft -> subsequent draft steps.  Draft
@@ -1132,64 +1057,13 @@ class Qwen4ExpModel(Qwen35Model):
             mark_projection_for_restart(layer_weights, unit.key_projection)
             mark_projection_for_restart(layer_weights, unit.value_projection)
 
-    def _maybe_inject_speculative_fault(self, phase: str) -> None:
-        """Invoke the private transaction test hook with actual phase and rank."""
-        hook = getattr(self, "_speculative_test_hook", None)
-        if hook is not None:
-            hook(phase, int(self.parallelism_config.get_attn_tp_rank()))
-
-    def on_cuda_graph_warmup(self, inputs: PyModelInputs) -> None:
-        """Release eager-only state after each graph warmup forward."""
-        if get_primary_attention_inputs(inputs).is_target_verify:
-            self._ple_coordinator().clear_speculative_target_graph_capture()
-
     def on_cuda_graph_capture(self, graph_key: int, inputs: PyModelInputs) -> None:
-        """Retain model-owned tensors for this captured graph instance."""
+        """Register the addresses used by the captured TP reduction."""
         if not get_primary_attention_inputs(inputs).is_target_verify:
             return
         target_reduce = self.__dict__.get("_target_reduce")
         if target_reduce is not None:
             target_reduce.finish_graph_capture()
-        return self._ple_coordinator().save_speculative_target_graph_capture(graph_key)
-
-    def on_cuda_graph_replay(self, graph_key: int, inputs: PyModelInputs) -> None:
-        """Activate the model state belonging to the graph that just replayed."""
-        if not get_primary_attention_inputs(inputs).is_target_verify:
-            return
-        self._ple_coordinator().activate_speculative_target_graph_replay(graph_key)
-
-    def requires_speculative_target_commit(self) -> bool:
-        parallelism = getattr(self, "parallelism_config", None)
-        role = str(getattr(parallelism, "role_type", "PDFUSION")).rsplit(".", 1)[-1]
-        return (
-            role in ("DECODE", "PDFUSION")
-            and bool(self.ple_layers)
-            and not bool(getattr(self.config, "is_mtp", False))
-        )
-
-    def has_speculative_target_status_reducer(self) -> bool:
-        return self.__dict__.get("_cpu_target_status") is not None
-
-    def reduce_speculative_target_prepare_status(self, local_ok: bool) -> bool:
-        status = self.__dict__.get("_cpu_target_status")
-        if status is None:
-            raise RuntimeError("CPU target status was not initialized collectively")
-        return status.reduce(local_ok)
-
-    def take_speculative_target_commit(self) -> PLETransactionCoordinator:
-        return self._ple_coordinator().take_pending_commit()
-
-    def broadcast_pp_target_accept_lengths(self, accept_lengths: torch.Tensor) -> None:
-        self._cpu_target_status.broadcast(accept_lengths)
-
-    def prepare_speculative_target_commit(self, accept_len: torch.Tensor) -> None:
-        return self._ple_coordinator().prepare_speculative_target_commit(accept_len)
-
-    def finish_speculative_target_commit(self, commit: bool) -> None:
-        return self._ple_coordinator().finish_speculative_target_commit(commit)
-
-    def finalize_speculative_target_commit(self) -> None:
-        return self._ple_coordinator().finalize_speculative_target_commit()
 
     def _start_eager_ple_prefetch(
         self,
@@ -1396,14 +1270,6 @@ class Qwen4ExpModel(Qwen35Model):
     def _forward_with_ple_prefetch(
         self, inputs: PyModelInputs, fmha_impl: Any = None
     ) -> PyModelOutputs:
-        if (
-            self.ple_layers
-            and getattr(self, "_ple_target_transaction", None) is not None
-        ):
-            raise RuntimeError(
-                "qwen4_exp PLE target transaction must be finalized or rolled "
-                "back before the next forward"
-            )
         attention_inputs = get_attention_inputs_value(inputs)
         has_side_caches = bool(self.ple_layers) or any(
             getattr(getattr(layer, "self_attn", None), "qsa_indexer", None) is not None

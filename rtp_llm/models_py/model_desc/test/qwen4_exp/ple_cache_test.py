@@ -16,71 +16,6 @@ from rtp_llm.models_py.model_desc.test.qwen4_exp.ple_page_reference import (
 
 
 class Qwen4ExpPLECacheTest(PLERuntimeFixture, TestCase):
-    def test_eager_dp_fake_target_rows_preserve_pools_through_commit_and_abort(self):
-        self.state_base.normal_()
-        self.ctx_base.random_(1, 7)
-        before_state, before_ctx = self.state_base.clone(), self.ctx_base.clone()
-        self.state_blocks.zero_()
-        self.ctx_blocks.zero_()
-        for finalize in (True, False):
-            inputs = self._target_inputs((0, 0), 3)
-            for item in inputs.values():
-                item.is_s_padded = True
-            hyper = torch.randn(6, _HC * _HIDDEN, dtype=torch.bfloat16)
-            output = self.model._apply_ple(
-                1, hyper, torch.ones(6, dtype=torch.long), inputs
-            )
-            torch.testing.assert_close(output, hyper, rtol=0, atol=0)
-            self.model.prepare_speculative_target_commit(
-                torch.zeros(2, dtype=torch.int32)
-            )
-            self.assertEqual(self.model._ple_target_transaction.prepared_writes, [])
-            self.model.finish_speculative_target_commit(True)
-            if finalize:
-                self.model.finalize_speculative_target_commit()
-            else:
-                self.model.finish_speculative_target_commit(False)
-            self.assertIsNone(self.model._ple_target_transaction)
-            torch.testing.assert_close(self.state_base, before_state, rtol=0, atol=0)
-            torch.testing.assert_close(self.ctx_base, before_ctx, rtol=0, atol=0)
-
-    def test_eager_dp_target_commit_selects_nonleading_live_rows_and_preserves_undo(
-        self,
-    ):
-        prefixes = (self._PAGE, self._PAGE - 1)
-        initial_state, initial_context = self._seed_target_history(prefixes)
-        ids = torch.tensor([[4, 5, 6], [8, 9, 10]], dtype=torch.long)
-        hyper = torch.randn(2, 3, _HC * _HIDDEN, dtype=torch.bfloat16)
-        expected, states, contexts = self._target_baseline(
-            hyper, ids, initial_state, initial_context
-        )
-        before_state, before_ctx = self.state_base.clone(), self.ctx_base.clone()
-        self.state_blocks[0].zero_()
-        self.ctx_blocks[0].zero_()
-        inputs = self._target_inputs((0, prefixes[1]), 3)
-        for item in inputs.values():
-            item.is_s_padded = True
-        output = self.model._apply_ple(
-            1, hyper.flatten(0, 1), ids.flatten(), inputs
-        ).view_as(hyper)
-        torch.testing.assert_close(output[0], hyper[0], rtol=0, atol=0)
-        torch.testing.assert_close(output[1], hyper[1] + expected[1])
-        self.model.prepare_speculative_target_commit(
-            torch.tensor([0, 2], dtype=torch.int32)
-        )
-        self.model.finish_speculative_target_commit(True)
-        # The live row crosses a page boundary; only its pages may change.
-        state_row, ctx_row = int(self.state_blocks[1, 1]), int(self.ctx_blocks[1, 1])
-        torch.testing.assert_close(
-            self.state_base[state_row].view_as(states[1][1]), states[1][1]
-        )
-        torch.testing.assert_close(self.ctx_base[ctx_row], contexts[1][1])
-        torch.testing.assert_close(self.state_base[0], before_state[0], rtol=0, atol=0)
-        torch.testing.assert_close(self.ctx_base[0], before_ctx[0], rtol=0, atol=0)
-        self.model.finish_speculative_target_commit(False)
-        torch.testing.assert_close(self.state_base, before_state, rtol=0, atol=0)
-        torch.testing.assert_close(self.ctx_base, before_ctx, rtol=0, atol=0)
-
     def test_eager_dp_target_still_rejects_missing_live_pages(self):
         self.state_blocks[1].zero_()
         self.ctx_blocks[1].zero_()
@@ -181,421 +116,82 @@ class Qwen4ExpPLECacheTest(PLERuntimeFixture, TestCase):
         )
         torch.testing.assert_close(self.ctx_base[[3, 4]], decode_ids.view(2, 1))
 
-    def test_padded_target_commit_slices_live_rows_and_preserves_undo(self):
-        prefixes = (self._PAGE - 1, self._PAGE)
-        self._seed_target_history(prefixes)
-        ids = torch.tensor([[4, 5, 6], [3, 4, 5]], dtype=torch.long)
-        hyper = torch.randn(6, _HC * _HIDDEN, dtype=torch.bfloat16)
-        inputs = self._target_inputs(prefixes, 3)
-        self.model._apply_ple(1, hyper, ids.flatten(), inputs)
-        self.model.on_cuda_graph_capture(2, SimpleNamespace(attention_inputs=inputs))
-        captured = self.model._ple_graph_target_transactions[2]
-        before_state, before_ctx = self.state_base.clone(), self.ctx_base.clone()
-        # Capacity two is reused by live batches one, two, then one. Padding
-        # must never reach destination validation, candidate selection or undo.
-        for accepted in ([3], [1, 2], [2]):
-            self.model.on_cuda_graph_replay(2, SimpleNamespace(attention_inputs=inputs))
-            self.model.prepare_speculative_target_commit(
-                torch.tensor(accepted, dtype=torch.int32)
-            )
-            writes = captured.prepared_writes
-            self.assertEqual(writes[0].state_blocks.numel(), len(accepted))
-            self.model.finish_speculative_target_commit(True)
-            if len(accepted) == 1:
-                torch.testing.assert_close(
-                    self.state_base[[2, 4, 8]], before_state[[2, 4, 8]]
-                )
-                torch.testing.assert_close(
-                    self.ctx_base[[4, 2, 10]], before_ctx[[4, 2, 10]]
-                )
-            self.model.finish_speculative_target_commit(False)
-            torch.testing.assert_close(self.state_base, before_state)
-            torch.testing.assert_close(self.ctx_base, before_ctx)
-
-    def test_target_verify_commit_finalize_and_next_decode_match_baseline(self):
-        prefixes = (self._PAGE - 1, self._PAGE)
-        query_len = 5
-        accepted = torch.tensor([1, query_len], dtype=torch.int32)
-        initial_state, initial_context = self._seed_target_history(prefixes)
-        ids = torch.tensor([[4, 5, 6, 8, 9], [3, 4, 5, 6, 8]], dtype=torch.long)
-        hyper = torch.randn(2, query_len, _HC * _HIDDEN, dtype=torch.bfloat16)
-        expected_output, states, contexts = self._target_baseline(
-            hyper, ids, initial_state, initial_context
-        )
-        inputs = self._target_inputs(prefixes, query_len)
-        state_before = self.state_base.clone()
-        context_before = self.ctx_base.clone()
-
-        got = self.model._apply_ple(
-            1, hyper.reshape(-1, _HC * _HIDDEN), ids.reshape(-1), inputs
-        )
-
-        torch.testing.assert_close(got.reshape_as(hyper), hyper + expected_output)
-        torch.testing.assert_close(self.state_base, state_before)
-        torch.testing.assert_close(self.ctx_base, context_before)
-
-        self.model.prepare_speculative_target_commit(accepted)
-        torch.testing.assert_close(self.state_base, state_before)
-        torch.testing.assert_close(self.ctx_base, context_before)
-
-        self.model.finish_speculative_target_commit(True)
-        final_positions = torch.tensor(prefixes) + accepted.to(torch.long) - 1
-        final_pages = torch.div(final_positions, self._PAGE, rounding_mode="floor")
-        state_destinations = self.state_blocks.gather(
-            1, final_pages.unsqueeze(1).to(torch.long)
-        ).squeeze(1)
-        context_destinations = self.ctx_blocks.gather(
-            1, final_pages.unsqueeze(1).to(torch.long)
-        ).squeeze(1)
-        expected_state = torch.stack(
-            [states[int(accepted[b]) - 1][b] for b in range(2)]
-        )
-        expected_context = torch.stack(
-            [contexts[int(accepted[b]) - 1][b] for b in range(2)]
-        )
-        torch.testing.assert_close(
-            self.state_base.index_select(0, state_destinations).view_as(expected_state),
-            expected_state,
-        )
-        torch.testing.assert_close(
-            self.ctx_base.index_select(0, context_destinations), expected_context
-        )
-        self.assertIsNotNone(self.model._ple_target_transaction)
-
-        self.model.finalize_speculative_target_commit()
-        self.assertIsNone(self.model._ple_target_transaction)
-
-        next_ids = torch.tensor([10, 11], dtype=torch.long)
-        next_hyper = torch.randn(2, _HC * _HIDDEN, dtype=torch.bfloat16)
-        expected_next, expected_next_state = self.ple.decode_step(
-            next_hyper.view(2, 1, -1),
-            torch.cat([expected_context, next_ids.view(2, 1)], dim=1),
-            expected_state,
-        )
-        committed_lengths = torch.tensor(prefixes) + accepted
-        decode_inputs = self._inputs_by_tag(
-            is_prefill=False,
-            input_lengths=committed_lengths.to(torch.int32),
-            prefix_lengths=torch.empty(0, dtype=torch.int32),
-            sequence_lengths=committed_lengths.to(torch.int32),
-        )
-        got_next = self.model._apply_ple(1, next_hyper, next_ids, decode_inputs)
-        torch.testing.assert_close(got_next, next_hyper + expected_next.squeeze(1))
-        next_write_pages = torch.div(
-            committed_lengths, self._PAGE, rounding_mode="floor"
-        )
-        next_state_destinations = self.state_blocks.gather(
-            1, next_write_pages.unsqueeze(1).to(torch.long)
-        ).squeeze(1)
-        torch.testing.assert_close(
-            self.state_base.index_select(0, next_state_destinations).view_as(
-                expected_next_state
-            ),
-            expected_next_state,
-        )
-
-    def test_target_commit_refreshes_the_page_an_accepted_window_crosses(self):
-        prefixes = (self._PAGE - 2, 2 * self._PAGE + 2)
-        query_len = 5
-        accepted = torch.tensor([4, 2], dtype=torch.int32)
-        initial_state, initial_context = self._seed_target_history(prefixes)
-        ids = torch.tensor([[4, 5, 6, 8, 9], [3, 4, 5, 6, 8]], dtype=torch.long)
-        hyper = torch.randn(2, query_len, _HC * _HIDDEN, dtype=torch.bfloat16)
-        _, states, contexts = self._target_baseline(
-            hyper, ids, initial_state, initial_context
-        )
-        inputs = self._target_inputs(prefixes, query_len)
-
-        self.model._apply_ple(
-            1, hyper.reshape(-1, _HC * _HIDDEN), ids.reshape(-1), inputs
-        )
-        self.model.prepare_speculative_target_commit(accepted)
-        self.model.finish_speculative_target_commit(True)
-
-        # Request 0 starts at prefix 6 and accepts 4 tokens, crossing page
-        # boundary 8: the page it completes must now hold the checkpoint that
-        # ends at that boundary (the window after query token 1), not the one
-        # this step originally read.
-        crossed_state_row = int(self.state_blocks[0, 0])
-        crossed_ctx_row = int(self.ctx_blocks[0, 0])
-        torch.testing.assert_close(
-            self.state_base[crossed_state_row].view_as(states[1][0]), states[1][0]
-        )
-        torch.testing.assert_close(self.ctx_base[crossed_ctx_row], contexts[1][0])
-
-        # The final destinations keep the windows ending at the last accepted
-        # token; request 1 never crosses a boundary and stays unaffected.
-        final_positions = torch.tensor(prefixes) + accepted.to(torch.long) - 1
-        final_pages = torch.div(final_positions, self._PAGE, rounding_mode="floor")
-        state_destinations = self.state_blocks.gather(
-            1, final_pages.unsqueeze(1).to(torch.long)
-        ).squeeze(1)
-        ctx_destinations = self.ctx_blocks.gather(
-            1, final_pages.unsqueeze(1).to(torch.long)
-        ).squeeze(1)
-        expected_state = torch.stack(
-            [states[int(accepted[b]) - 1][b] for b in range(2)]
-        )
-        expected_context = torch.stack(
-            [contexts[int(accepted[b]) - 1][b] for b in range(2)]
-        )
-        torch.testing.assert_close(
-            self.state_base.index_select(0, state_destinations).view_as(expected_state),
-            expected_state,
-        )
-        torch.testing.assert_close(
-            self.ctx_base.index_select(0, ctx_destinations), expected_context
-        )
-        self.model.finalize_speculative_target_commit()
-
-    def test_pp_results_commit_their_own_forward_candidates(self):
-        query_len = 3
-        initial_state, initial_ctx = self._seed_target_history((2, 2))
-        ids = torch.tensor([[4, 5, 6], [8, 9, 10]])
-        hyper = torch.randn(2, query_len, _HC * _HIDDEN, dtype=torch.bfloat16)
-        _, states, contexts = self._target_baseline(
+    def test_candidates_resume_after_a_crossed_page_and_a_prefix_hit(self):
+        prefix, width = self._PAGE - 2, 4
+        self.state_blocks = torch.tensor([[1, 5, 7, 6]], dtype=torch.int32)
+        self.ctx_blocks = torch.tensor([[3, 1, 9, 6]], dtype=torch.int32)
+        initial_state, initial_ctx = self._seed_target_history((prefix,))
+        initial_state_pool = self.state_base.clone()
+        initial_ctx_pool = self.ctx_base.clone()
+        ids = torch.tensor([[4, 5, 6, 8]])
+        hyper = torch.randn(1, width, _HC * _HIDDEN, dtype=torch.bfloat16)
+        expected, states, contexts = self._target_baseline(
             hyper, ids, initial_state, initial_ctx
         )
+        got = self.model._apply_ple(
+            1, hyper.flatten(0, 1), ids.flatten(), self._target_inputs((prefix,), width)
+        )
+        torch.testing.assert_close(got, (hyper + expected).flatten(0, 1))
 
-        pending = []
-        for row in range(2):
-            inputs = self._target_inputs((2,), query_len)
-            for side in inputs.values():
-                side.kv_cache_block_id = side.kv_cache_block_id[row : row + 1]
-                side.kv_cache_block_id_device = side.kv_cache_block_id
-            self.model._apply_ple(1, hyper[row], ids[row], inputs)
-            pending.append(self.model.take_speculative_target_commit())
-
-        # Both forwards finished before A's result arrived. Only A may change.
-        for row, length in enumerate((1, 3)):
-            commit = pending[row]
-            commit.prepare_speculative_target_commit(
-                torch.tensor([length], dtype=torch.int32)
+        if torch.cuda.is_available():
+            from rtp_llm.models_py.kernels.cuda.qwen4_ple.candidate_store import (
+                store_candidate_states,
             )
-            commit.finish_speculative_target_commit(True)
-            commit.finalize_speculative_target_commit()
+
+            _, candidate = self.ple.decode_chunk(
+                hyper, torch.cat((initial_ctx, ids), dim=1), initial_state
+            )
+            state_pool = initial_state_pool.cuda().view(
+                -1, self.ple.short_conv_state_len, _HC * _HIDDEN
+            )
+            ctx_pool = initial_ctx_pool.cuda()
+            store_candidate_states(
+                initial_state.cuda(),
+                candidate.cuda(),
+                initial_ctx.cuda(),
+                ids.cuda(),
+                state_pool,
+                ctx_pool,
+                torch.tensor([prefix], dtype=torch.int32, device="cuda"),
+                self._PAGE,
+                self.state_blocks.cuda(),
+                self.ctx_blocks.cuda(),
+            )
+            torch.testing.assert_close(state_pool.flatten(1).cpu(), self.state_base)
+            torch.testing.assert_close(ctx_pool.cpu(), self.ctx_base)
+
+        # Dispatch selects the page boundary (step 2) and the live tail (step 4).
+        self.state_blocks = self.state_blocks[:, [1, 3, 2, 0]]
+        self.ctx_blocks = self.ctx_blocks[:, [1, 3, 2, 0]]
+        for page, step in enumerate((1, 3)):
             torch.testing.assert_close(
-                self.state_base[self.state_blocks[row, 0]].view_as(states[length - 1][row]),
-                states[length - 1][row],
+                self.state_base[self.state_blocks[0, page]].view_as(states[step][0]),
+                states[step][0],
             )
             torch.testing.assert_close(
-                self.ctx_base[self.ctx_blocks[row, 0]], contexts[length - 1][row]
-            )
-            if row == 0:
-                torch.testing.assert_close(
-                    self.state_base[self.state_blocks[1, 0]].view_as(initial_state[1]),
-                    initial_state[1],
-                )
-                torch.testing.assert_close(self.ctx_base[self.ctx_blocks[1, 0]], initial_ctx[1])
-
-    def test_target_verify_tentative_commit_can_be_rolled_back_idempotently(self):
-        prefixes = (self._PAGE - 1, self._PAGE)
-        query_len = 3
-        self._seed_target_history(prefixes)
-        inputs = self._target_inputs(prefixes, query_len)
-        hyper = torch.randn(2, query_len, _HC * _HIDDEN, dtype=torch.bfloat16)
-        ids = torch.tensor([[4, 5, 6], [8, 9, 10]], dtype=torch.long)
-        state_before = self.state_base.clone()
-        context_before = self.ctx_base.clone()
-        self.model._apply_ple(
-            1, hyper.reshape(-1, _HC * _HIDDEN), ids.reshape(-1), inputs
-        )
-        self.model.prepare_speculative_target_commit(
-            torch.tensor([2, 3], dtype=torch.int32)
-        )
-
-        self.model.finish_speculative_target_commit(True)
-        self.assertFalse(torch.equal(self.state_base, state_before))
-        self.assertFalse(torch.equal(self.ctx_base, context_before))
-
-        self.model.finish_speculative_target_commit(False)
-        torch.testing.assert_close(self.state_base, state_before)
-        torch.testing.assert_close(self.ctx_base, context_before)
-        self.assertIsNone(self.model._ple_target_transaction)
-        self.model.finish_speculative_target_commit(False)
-        torch.testing.assert_close(self.state_base, state_before)
-        torch.testing.assert_close(self.ctx_base, context_before)
-
-    def test_target_prepare_rejects_invalid_accept_len_without_side_effects(self):
-        cases = (
-            torch.tensor([0, 1], dtype=torch.int32),
-            torch.tensor([1, 4], dtype=torch.int32),
-            torch.tensor([1, 2], dtype=torch.int64),
-            torch.tensor([1], dtype=torch.int32),
-        )
-        for accept_len in cases:
-            with self.subTest(accept_len=accept_len):
-                prefixes = (self._PAGE - 1, self._PAGE)
-                self._seed_target_history(prefixes)
-                inputs = self._target_inputs(prefixes, 3)
-                state_before = self.state_base.clone()
-                context_before = self.ctx_base.clone()
-                self.model._apply_ple(
-                    1,
-                    torch.randn(6, _HC * _HIDDEN, dtype=torch.bfloat16),
-                    torch.tensor([4, 5, 6, 8, 9, 10]),
-                    inputs,
-                )
-
-                with self.assertRaisesRegex(RuntimeError, "accept_len"):
-                    self.model.prepare_speculative_target_commit(accept_len)
-
-                torch.testing.assert_close(self.state_base, state_before)
-                torch.testing.assert_close(self.ctx_base, context_before)
-                self.model.finish_speculative_target_commit(False)
-
-    def test_target_prepare_rejects_missing_or_duplicate_destinations_before_write(
-        self,
-    ):
-        prefixes = (2 * self._PAGE - 1, 2 * self._PAGE - 1)
-        query_len = 2
-        for failure in ("missing", "duplicate"):
-            with self.subTest(failure=failure):
-                self.state_base.zero_()
-                self.ctx_base.zero_()
-                self.model._ple_target_transaction = None
-                initial_state, initial_context = self._seed_target_history(prefixes)
-                self.assertEqual(initial_state.shape[0], 2)
-                self.assertEqual(initial_context.shape[0], 2)
-                inputs = self._target_inputs(prefixes, query_len)
-                if failure == "missing":
-                    inputs[PLE_STATE_TAG].kv_cache_block_id_device = (
-                        self.state_blocks.clone()
-                    )
-                    inputs[PLE_STATE_TAG].kv_cache_block_id_device[0, 2] = 0
-                else:
-                    duplicate = self.state_blocks.clone()
-                    duplicate[1, 2] = duplicate[0, 2]
-                    inputs[PLE_STATE_TAG].kv_cache_block_id_device = duplicate
-                state_before = self.state_base.clone()
-                context_before = self.ctx_base.clone()
-                self.model._apply_ple(
-                    1,
-                    torch.randn(
-                        2 * query_len,
-                        _HC * _HIDDEN,
-                        dtype=torch.bfloat16,
-                    ),
-                    torch.tensor([4, 5, 8, 9]),
-                    inputs,
-                )
-
-                expected = "unallocated" if failure == "missing" else "duplicate"
-                with self.assertRaisesRegex(RuntimeError, expected):
-                    self.model.prepare_speculative_target_commit(
-                        torch.tensor([2, 2], dtype=torch.int32)
-                    )
-
-                torch.testing.assert_close(self.state_base, state_before)
-                torch.testing.assert_close(self.ctx_base, context_before)
-                self.model.finish_speculative_target_commit(False)
-
-    def test_target_prepare_requires_every_ple_layer_before_any_write(self):
-        self.model.ple_layers["2"] = self.ple
-        prefixes = (self._PAGE - 1, self._PAGE)
-        self._seed_target_history(prefixes)
-        inputs = self._target_inputs(prefixes, 2)
-        state_before = self.state_base.clone()
-        context_before = self.ctx_base.clone()
-        self.model._apply_ple(
-            1,
-            torch.randn(4, _HC * _HIDDEN, dtype=torch.bfloat16),
-            torch.tensor([4, 5, 8, 9]),
-            inputs,
-        )
-
-        with self.assertRaisesRegex(RuntimeError, r"missing=\[2\]"):
-            self.model.prepare_speculative_target_commit(
-                torch.tensor([1, 2], dtype=torch.int32)
+                self.ctx_base[self.ctx_blocks[0, page]], contexts[step][0]
             )
 
-        torch.testing.assert_close(self.state_base, state_before)
-        torch.testing.assert_close(self.ctx_base, context_before)
-        self.model.finish_speculative_target_commit(False)
-
-    def test_target_prepare_syncs_before_publishing_and_abort_syncs_before_clear(self):
-        prefixes = (self._PAGE - 1, self._PAGE)
-        self._seed_target_history(prefixes)
-        inputs = self._target_inputs(prefixes, 2)
-        self.model._apply_ple(
-            1,
-            torch.randn(4, _HC * _HIDDEN, dtype=torch.bfloat16),
-            torch.tensor([4, 5, 8, 9]),
-            inputs,
-        )
-        transaction = self.model._ple_target_transaction
-        self.assertIsNotNone(transaction)
-        sync_observations = []
-
-        def observe_sync(current):
-            sync_observations.append(
-                (
-                    current.prepared_writes is None,
-                    self.model._ple_target_transaction is current,
-                )
+        next_id = torch.tensor([12])
+        next_hidden = torch.randn(1, _HC * _HIDDEN, dtype=torch.bfloat16)
+        for start, step, is_prefill in ((prefix + width, 3, False), (self._PAGE, 1, True)):
+            if is_prefill:
+                # The new request shares the completed page and owns a different tail.
+                self.state_blocks[0, 1] = 10
+                self.ctx_blocks[0, 1] = 11
+            inputs = self._inputs_by_tag(
+                is_prefill=is_prefill,
+                input_lengths=torch.tensor([1], dtype=torch.int32),
+                prefix_lengths=torch.tensor([start] if is_prefill else [], dtype=torch.int32),
+                sequence_lengths=torch.tensor([] if is_prefill else [start], dtype=torch.int32),
             )
-
-        self.model._ple_coordinator()._synchronize_ple_transaction = observe_sync
-        self.model.prepare_speculative_target_commit(
-            torch.tensor([1, 2], dtype=torch.int32)
-        )
-        self.assertEqual(sync_observations, [(True, True)])
-        self.assertIsNotNone(transaction.prepared_writes)
-
-        self.model.finish_speculative_target_commit(False)
-        self.assertEqual(sync_observations, [(True, True), (False, True)])
-        self.assertIsNone(self.model._ple_target_transaction)
-
-    def test_target_prepare_sync_failure_is_settled_by_abort(self):
-        prefixes = (self._PAGE - 1, self._PAGE)
-        self._seed_target_history(prefixes)
-        inputs = self._target_inputs(prefixes, 2)
-        self.model._apply_ple(
-            1,
-            torch.randn(4, _HC * _HIDDEN, dtype=torch.bfloat16),
-            torch.tensor([4, 5, 8, 9]),
-            inputs,
-        )
-        transaction = self.model._ple_target_transaction
-        state_before = self.state_base.clone()
-        context_before = self.ctx_base.clone()
-        sync_calls = []
-
-        def fail_prepare_sync(current):
-            sync_calls.append(current)
-            raise RuntimeError("injected prepare synchronize failure")
-
-        self.model._ple_coordinator()._synchronize_ple_transaction = fail_prepare_sync
-        with self.assertRaisesRegex(RuntimeError, "injected prepare"):
-            self.model.prepare_speculative_target_commit(
-                torch.tensor([1, 2], dtype=torch.int32)
+            expected, _, _ = self._target_baseline(
+                next_hidden.unsqueeze(0), next_id.unsqueeze(0), states[step], contexts[step]
             )
-        self.assertEqual(len(sync_calls), 1)
-        self.assertIs(sync_calls[0], transaction)
-        self.assertIsNone(transaction.prepared_writes)
-        self.assertIs(self.model._ple_target_transaction, transaction)
-        torch.testing.assert_close(self.state_base, state_before)
-        torch.testing.assert_close(self.ctx_base, context_before)
-
-        self.model._ple_coordinator()._synchronize_ple_transaction = sync_calls.append
-        self.model.finish_speculative_target_commit(False)
-        self.assertEqual(len(sync_calls), 2)
-        self.assertIs(sync_calls[1], transaction)
-        self.assertIsNone(self.model._ple_target_transaction)
-        torch.testing.assert_close(self.state_base, state_before)
-        torch.testing.assert_close(self.ctx_base, context_before)
-
-    def test_target_prepare_without_staging_fails_when_ple_is_enabled(self):
-        self.assertIsNone(getattr(self.model, "_ple_target_transaction", None))
-        with self.assertRaisesRegex(RuntimeError, "no staged transaction"):
-            self.model.prepare_speculative_target_commit(
-                torch.tensor([1, 1], dtype=torch.int32)
+            torch.testing.assert_close(
+                self.model._apply_ple(1, next_hidden, next_id, inputs),
+                next_hidden + expected.squeeze(0),
             )
-
-        self.model.ple_layers.clear()
-        self.model.prepare_speculative_target_commit(
-            torch.tensor([1, 1], dtype=torch.int32)
-        )
 
     def test_multimodal_placeholders_hash_as_eos(self):
         """Vision positions hash as EOS, mirroring upstream's PLE ids."""

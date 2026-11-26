@@ -244,7 +244,6 @@ class Qwen4ExpMTPInputProjectionTest(unittest.TestCase):
             layers=[],
             kv_cache=None,
             _capture_mtp_target_hidden=True,
-            _ple_target_transaction=None,
             word_embedding=lambda _: embedding,
             _build_attn_meta=lambda *_: None,
             _initial_hyper_states=lambda _: wide,

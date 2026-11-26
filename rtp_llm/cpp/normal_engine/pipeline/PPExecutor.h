@@ -114,24 +114,12 @@ private:
         PPTickets execution_result_sends;
     };
 
-    struct TargetVerify {
-        std::unique_ptr<SpeculativeTargetCommit> commit;
-        torch::Event                             candidates_ready;
-        int64_t                                  batch_size;
-    };
-
     struct ResultRecvTask {
         PPExecutionSnapshot            snapshot;
         int64_t                        schedule_time_us = 0;
         RtpLLMExecutorMetricsCollector executor_collector;
         TpsActiveGuard                 tps_active_guard;
         WallTpsActiveGuard             wall_tps_active_guard;
-        std::optional<TargetVerify>    target_verify;
-    };
-
-    struct TargetCommitTask {
-        ResultRecvTask        task;
-        PPExecutionResult result;
     };
 
     struct ResultSendTask {
@@ -149,19 +137,9 @@ private:
 
     void resultRecvLoop();
 
-    PPExecutionResult receiveExecutionResult(const PPExecutionSnapshot& snapshot);
-
-    void receiveAndProcessResult(ResultRecvTask task);
-
-    void dispatchResult(ResultRecvTask& task, const PPExecutionResult& result);
-
-    void startTargetCommitWorker();
-
-    void enqueueTargetCommit(TargetCommitTask task);
-
-    void targetCommitLoop(torch::Stream stream);
-
-    void stopTargetCommitWorker();
+    void receiveAndProcessResult(const PPExecutionSnapshot&      snapshot,
+                                 int64_t                         schedule_time_us,
+                                 RtpLLMExecutorMetricsCollector& executor_collector);
 
     /** Ask the first-stage root's result thread to exit after its queued tasks; does not join. */
     void requestResultRecvStop();
@@ -315,13 +293,6 @@ private:
     bool                       result_recv_processing_ = false;
     bool                       result_recv_stop_       = false;
     std::thread                result_recv_thread_;
-
-    // Both TP0's result thread and its TP peers' compute threads enqueue verification batches in PP order.
-    std::condition_variable      target_commit_cv_;
-    std::deque<TargetCommitTask> target_commit_tasks_;
-    bool                         target_commit_processing_ = false;
-    bool                         target_commit_stop_ = false;
-    std::thread                  target_commit_thread_;
 
     /** One pending result is sufficient: waitLastRun() completes it before the next batch uses its state. */
     std::mutex                    result_send_mutex_;

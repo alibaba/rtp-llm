@@ -252,7 +252,7 @@ torch::Tensor MtpBatchStreamProcessor::advanceEngramTokenWindows(const torch::Te
 torch::Tensor MtpBatchStreamProcessor::advanceLinearCacheBlockTable(const torch::Tensor& current_table,
                                                                     const torch::Tensor& previous_seq_lengths,
                                                                     const torch::Tensor& accept_lengths,
-                                                                    const std::vector<CacheGroupType>& group_types,
+                                                                    const std::vector<bool>& state_block_groups,
                                                                     int64_t seq_size_per_block) {
     RTP_LLM_PROFILE_SCOPE("executor.mtp.advance_linear_cache_block_table");
     RTP_LLM_CHECK_WITH_INFO(current_table.defined() && current_table.is_cuda()
@@ -270,10 +270,10 @@ torch::Tensor MtpBatchStreamProcessor::advanceLinearCacheBlockTable(const torch:
     const int64_t group_count = current_table.size(0);
     const int64_t batch_size  = current_table.size(1);
     const int64_t block_count = current_table.size(2);
-    RTP_LLM_CHECK_WITH_INFO(static_cast<int64_t>(group_types.size()) == group_count,
+    RTP_LLM_CHECK_WITH_INFO(static_cast<int64_t>(state_block_groups.size()) == group_count,
                             "MTP cache snapshot group count mismatch: table=%ld config=%zu",
                             group_count,
-                            group_types.size());
+                            state_block_groups.size());
     RTP_LLM_CHECK_WITH_INFO(previous_seq_lengths.numel() == batch_size && accept_lengths.numel() == batch_size,
                             "MTP cache snapshot batch mismatch: table=%ld previous=%ld accept=%ld",
                             batch_size,
@@ -283,7 +283,7 @@ torch::Tensor MtpBatchStreamProcessor::advanceLinearCacheBlockTable(const torch:
         return current_table.clone();
     }
 
-    // Build one permutation per request, then apply it to every LINEAR group.
+    // Build one permutation per request, then apply it to every group with speculative state blocks.
     // This is the vectorized form of LinearBlocksUtil.h's two sequential
     // swaps.  The scheduler's reserve_step contract guarantees active source
     // and destination indices are within block_count.
@@ -320,7 +320,7 @@ torch::Tensor MtpBatchStreamProcessor::advanceLinearCacheBlockTable(const torch:
 
     auto next_table = current_table.clone();
     for (int64_t group_id = 0; group_id < group_count; ++group_id) {
-        if (group_types[static_cast<size_t>(group_id)] != CacheGroupType::LINEAR) {
+        if (!state_block_groups[static_cast<size_t>(group_id)]) {
             continue;
         }
         next_table.select(0, group_id).copy_(current_table.select(0, group_id).gather(1, permutation));

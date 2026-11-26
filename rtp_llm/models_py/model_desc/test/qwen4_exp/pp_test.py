@@ -62,7 +62,6 @@ def _bare_stage(counts, rank, hidden_size=2, hc_mult=2):
     )
     model.ple_layers = nn.ModuleDict()
     model.kv_cache = None
-    model._ple_target_transaction = None
     model._capture_mtp_target_hidden = False
     model._mtp_target_hidden_states = None
     model.hyper_connection_mixer = (
@@ -179,42 +178,6 @@ class Qwen4ExpPPConstructionTest(unittest.TestCase):
             last._build_output_head(config, weights)
             self.assertIsInstance(last.hyper_connection_mixer, _Mixer)
             self.assertEqual(weights.get_global_weight.call_count, 3)
-
-    def test_speculative_pp_rejects_ple_on_a_later_stage(self):
-        model = self._output_model([2, 2], 1)
-        model.ple_layers = nn.ModuleDict({"0": nn.Identity()})
-        with self.assertRaisesRegex(
-            RuntimeError, "requires all PLE layers on the first stage"
-        ):
-            model.initialize(SimpleNamespace(is_speculative=True))
-
-    def test_pd_pp_bootstraps_ple_writeback_only_on_decode(self):
-        init_resource = SimpleNamespace(is_speculative=True)
-        for role, rank in (("PREFILL", 1), ("DECODE", 0)):
-            with self.subTest(role=role):
-                model = self._output_model([2, 2], rank)
-                model.ple_layers = nn.ModuleDict({"0": nn.Identity()})
-                model.parallelism_config.role_type = role
-                model.parallelism_config.tp_size = 2
-                model._cpu_target_status = None
-                with (
-                    patch.object(qwen4_exp.Qwen35Model, "initialize", return_value=True),
-                    patch(
-                        "rtp_llm.models_py.modules.qwen4_exp.cpu_target_status."
-                        "prepare_cpu_target_status"
-                    ) as prepare,
-                ):
-                    self.assertTrue(model.initialize(init_resource))
-                    if role == "DECODE":
-                        prepare.assert_called_once_with(
-                            model.config,
-                            model.parallelism_config,
-                            broadcast_accept_lengths=True,
-                        )
-                        self.assertIs(model._cpu_target_status, prepare.return_value)
-                    else:
-                        prepare.assert_not_called()
-                        self.assertIsNone(model._cpu_target_status)
 
 
 class Qwen4ExpPPPLEMappingTest(unittest.TestCase):

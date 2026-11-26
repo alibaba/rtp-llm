@@ -267,10 +267,11 @@ void PPScheduler::maintainWaitingStreams() {
                                 "this request is not using PD separation.");
         }
 
-        /** Mixing context and decode streams violates the speculative verify input layout.
-         * Reject context streams on DECODE instances to keep scheduled batches decode-only.
+        /** A PD request enters Decode as a context stream so admission can start the KV load.
+         * The handoff installs the first token before the stream can be admitted for execution.
          */
-        if (pd_sep_config_.role_type == RoleType::DECODE && stream->isContextStream()) {
+        if (pd_sep_config_.role_type == RoleType::DECODE && stream->isContextStream()
+            && (!stream->queryPdSep() || stream->hasEvent(StreamEvents::LoadInitiated))) {
             stream->reportError(ErrorCode::INVALID_PARAMS,
                                 "PP DECODE does not support local prefill; "
                                 "prefill must be completed on a PREFILL instance before decode scheduling.");

@@ -79,6 +79,7 @@ struct KVCacheSpecDesc {
     std::optional<CacheTailPolicyDesc>     tail;
     std::optional<CacheCpPolicyDesc>       cp;
     TpCacheTransferMode                    tp_transfer_mode = TpCacheTransferMode::LEGACY;
+    bool                                   speculative_state_blocks = false;
 };
 
 struct SpecBuildContext {

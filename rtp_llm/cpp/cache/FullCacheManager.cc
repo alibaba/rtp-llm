@@ -1,11 +1,15 @@
 #include "rtp_llm/cpp/cache/FullCacheManager.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/utils/LinearBlocksUtil.h"
 
 namespace rtp_llm {
 
 int FullCacheManager::needBlocksNum(int seq_len, int current_blocks, int reserve_step) const {
     const int block_size = seqSizePerBlock();
-    return std::max((seq_len + reserve_step + block_size - 1) / block_size - current_blocks, 0);
+    const int total = policy().usesSpeculativeStateBlocks() ?
+                          linearStateBlockCount(seq_len, block_size, reserve_step) :
+                          (seq_len + reserve_step + block_size - 1) / block_size;
+    return std::max(total - current_blocks, 0);
 }
 
 int FullCacheManager::estimatePeakNeedBlocks(int                     seq_len,
@@ -16,8 +20,7 @@ int FullCacheManager::estimatePeakNeedBlocks(int                     seq_len,
                                              bool /*reclaim_history*/) const {
     (void)enable_reuse_cache;
     const int current_blocks = static_cast<int>(current_block_indices.size());
-    return std::max(
-        (seq_len + remaining_tokens + reserve_step + seqSizePerBlock() - 1) / seqSizePerBlock() - current_blocks, 0);
+    return needBlocksNum(seq_len + remaining_tokens, current_blocks, reserve_step);
 }
 
 int FullCacheManager::estimateInitialBatchPeakNeedBlocks(int  seq_len,
@@ -29,8 +32,8 @@ int FullCacheManager::estimateInitialBatchPeakNeedBlocks(int  seq_len,
                                                          bool /*reclaim_history*/) const {
     (void)enable_reuse_cache;
     const int batch_size    = std::max(target_batch_size, 1);
-    const int common_blocks = (common_seq_len + seqSizePerBlock() - 1) / seqSizePerBlock();
-    const int peak_blocks   = (seq_len + remaining_tokens + reserve_step + seqSizePerBlock() - 1) / seqSizePerBlock();
+    const int common_blocks = needBlocksNum(common_seq_len);
+    const int peak_blocks   = needBlocksNum(seq_len + remaining_tokens, 0, reserve_step);
     return common_blocks + batch_size * std::max(peak_blocks - common_blocks, 0);
 }
 

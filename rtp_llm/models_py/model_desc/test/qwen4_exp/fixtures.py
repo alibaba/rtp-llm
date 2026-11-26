@@ -195,8 +195,6 @@ class PLERuntimeFixture:
         self.model = qwen4_exp.Qwen4ExpModel.__new__(qwen4_exp.Qwen4ExpModel)
         nn.Module.__init__(self.model)
         self.model.ple_layers = nn.ModuleDict({"1": self.ple})
-        self.model._ple_target_transaction = None
-        self.model._ple_graph_target_transactions = {}
         self.model.kv_cache = _Cache(self)
         self.model.layer_num = 2
         self.model.config = SimpleNamespace(

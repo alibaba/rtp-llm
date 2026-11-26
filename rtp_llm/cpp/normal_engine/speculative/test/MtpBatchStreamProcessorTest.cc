@@ -2296,7 +2296,7 @@ TEST_F(MtpBatchStreamProcessorTest, testAdvanceLinearCacheBlockTableMatchesHostC
                       current.to(torch::kCUDA),
                       torch::tensor(previous_lengths, torch::kInt32).to(torch::kCUDA),
                       torch::tensor(accept_lengths, torch::kInt32).to(torch::kCUDA),
-                      {CacheGroupType::LINEAR, CacheGroupType::FULL, CacheGroupType::LINEAR},
+                      {true, false, true},
                       /*seq_size_per_block=*/64)
                       .cpu();
 
@@ -2346,7 +2346,7 @@ TEST_F(MtpBatchStreamProcessorTest, testAdvanceLinearCacheBlockTableMatchesEvery
                       current.to(torch::kCUDA),
                       torch::tensor(previous_lengths, torch::kInt32).to(torch::kCUDA),
                       torch::tensor(accept_lengths, torch::kInt32).to(torch::kCUDA),
-                      {CacheGroupType::LINEAR, CacheGroupType::FULL},
+                      {true, false},
                       block_size)
                       .cpu();
 
@@ -2422,7 +2422,7 @@ TEST_F(MtpBatchStreamProcessorTest, testSparseLinearSnapshotCommitsAcceptedState
                       device_current,
                       torch::tensor(previous_lengths, torch::kInt32).to(torch::kCUDA),
                       torch::tensor(accept_lengths, torch::kInt32).to(torch::kCUDA),
-                      {CacheGroupType::LINEAR, CacheGroupType::FULL, CacheGroupType::LINEAR},
+                      {true, false, true},
                       block_size)
                       .cpu();
 

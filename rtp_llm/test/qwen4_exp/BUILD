@@ -7,7 +7,6 @@ test_suite(
         "//rtp_llm/cpp/cache/test:tp_cache_transfer_layout_test",
         "//rtp_llm/model_loader/test:nvfp4_cache_test",
         "//rtp_llm/models/qwen4_exp/test:qwen4_config",
-        "//rtp_llm/models_py/modules/qwen4_exp/test:cpu_target_status_test",
         "//rtp_llm/models_py/modules/qwen4_exp/test:indexer_compressor_test",
         "//rtp_llm/models_py/modules/qwen4_exp/test:indexer_cpu_contract_test",
         "//rtp_llm/models_py/modules/qwen4_exp/test:tp_registered_input_test",

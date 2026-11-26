@@ -464,47 +464,6 @@ private:
     const bool is_last_stage_;
 };
 
-class RecordingTargetVerifyModel: public RecordingStageModel {
-public:
-    using RecordingStageModel::RecordingStageModel;
-
-    struct BatchCommit: SpeculativeTargetCommit {
-        BatchCommit(RecordingTargetVerifyModel& model, int64_t index): model(model), index(index) {}
-
-        std::string prepareSpeculativeTargetCommit(const torch::Tensor& lengths) override {
-            EXPECT_TRUE(lengths.is_cuda());
-            model.accepted.push_back(tensorToVector<int32_t>(lengths));
-            model.phases.emplace_back("prepare");
-            return {};
-        }
-
-        std::string finishSpeculativeTargetCommit(bool commit) override {
-            model.phases.emplace_back(commit ? "commit" : "rollback");
-            return {};
-        }
-
-        std::string finalizeSpeculativeTargetCommit() override {
-            model.finalized.push_back(index);
-            model.phases.emplace_back("finalize");
-            model.on_finalize(index);
-            return {};
-        }
-
-        RecordingTargetVerifyModel& model;
-        int64_t                     index;
-    };
-
-    std::unique_ptr<SpeculativeTargetCommit> takeSpeculativeTargetCommit() override {
-        return std::make_unique<BatchCommit>(*this, next_index++);
-    }
-
-    int64_t                           next_index = 0;
-    std::vector<int64_t>              finalized;
-    std::vector<std::vector<int32_t>> accepted;
-    std::vector<std::string>          phases;
-    std::function<void(int64_t)>      on_finalize;
-};
-
 struct WorkState {
     int  waits     = 0;
     int  destroyed = 0;
@@ -3315,7 +3274,7 @@ TEST_F(PPExecutorTest, FirstFakeResultIsConsumedWithoutDispatchOrMetrics) {
     const auto snapshot = PPBatchStreamProcessor::captureExecution(stream_groups);
     /** Completion uses the submitted batch's fake flag, not the stream's current flag. */
     stream->setIsFakeStream(false);
-    executor.receiveAndProcessResult({snapshot, schedule_time_us, executor_collector, {}, {}});
+    executor.receiveAndProcessResult(snapshot, schedule_time_us, executor_collector);
     stream->setIsFakeStream(true);
     EXPECT_EQ(recorded_transport->receive_index.load(), 2);
     EXPECT_EQ(stream->completeTokenIdsVec(0), history);
@@ -3325,115 +3284,6 @@ TEST_F(PPExecutorTest, FirstFakeResultIsConsumedWithoutDispatchOrMetrics) {
     EXPECT_EQ(tensorToVector<int64_t>(received.request_ids), (std::vector<int64_t>{101}));
     EXPECT_EQ(tensorToVector<int32_t>(received.new_token_ids), (std::vector<int32_t>{7}));
     EXPECT_EQ(recorded_transport->receive_index.load(), 4);
-}
-
-TEST_F(PPExecutorTest, FirstMtpVerifyOverlapsAcceptanceAndWritebackWithOtherBatches) {
-    auto params = makeMtpParams(3);
-    ResourceContext resources;
-    resources.cache_manager =
-        std::make_shared<KVCacheManager>(test::makeSimpleMhaCacheConfig(2, 16, 4, DataType::TYPE_FP16));
-    ASSERT_TRUE(resources.cache_manager->init());
-    PPExecutor executor(params, resources.cache_manager, false);
-    auto* wire  = attachTransport(executor);
-    auto* model = installModel<RecordingTargetVerifyModel>(executor, params.parallelism_config);
-    EXPECT_FALSE(executor.target_commit_thread_.joinable());
-
-    auto a = makeStream(resources, params.model_config_, 101, {1, 2}, 1, 2);
-    auto b = makeStream(resources, params.model_config_, 202, {3, 4}, 1);
-    auto c = makeStream(resources, params.model_config_, 303, {5, 6, 7, 8}, 1);
-    c->fakeInitKVBlock(4);
-    c->setChunkSize(2);
-    c->setPPInflight();
-    for (const auto& stream : {a, b}) {
-        stream->fakeInitKVBlock(4);
-        stream->setPPInflight();
-        stream->setIsContextStream(false);
-        auto proposals    = std::make_shared<SpeculativeExecutorStreamOutput>();
-        proposals->tokens = intTensor({4, 17, 18, 19});
-        stream->setSPOutputBuffer(proposals);
-    }
-
-    auto a_result             = makeSingleTokenResult(101, 17);
-    a_result.new_token_ids     = intTensor({17, 20}).reshape({1, 2});
-    a_result.new_token_lengths = intTensor({2});
-    a_result.propose_token_ids = intTensor({21, 22, 23}).reshape({1, 3});
-    auto b_result              = makeSingleTokenResult(202, 27);
-    b_result.propose_token_ids = intTensor({31, 32, 33}).reshape({1, 3});
-
-    std::promise<void> b_entered;
-    auto b_started = b_entered.get_future();
-    std::promise<void> a_writing;
-    auto a_started = a_writing.get_future();
-    std::promise<void> allow_chunk;
-    auto chunk_gate = allow_chunk.get_future();
-    std::promise<void> allow_commit;
-    auto commit_gate = allow_commit.get_future();
-    model->on_forward = [&] {
-        if (model->inputs.size() == 1) {
-            EXPECT_TRUE(a->isPPInflight());
-            b_entered.set_value();
-        }
-    };
-    model->on_finalize = [&](int64_t batch_id) {
-        const auto& stream = batch_id == 0 ? a : b;
-        EXPECT_TRUE(stream->isPPInflight());
-        EXPECT_EQ(stream->seqLength(), 2);
-        EXPECT_FALSE(stream->streamCacheResource().isResourceReleased());
-        if (batch_id == 0) {
-            a_writing.set_value();
-            commit_gate.wait();
-        }
-    };
-
-    const auto device = cuda_graph::graphGetCurrentStream().device_index();
-    auto execution = std::async(std::launch::async, [&] {
-        cuda_graph::setDevice(device);
-        c10::InferenceMode inference_guard(true);
-        auto status = executor.process(ScheduleOutput{{a}});
-        if (status.ok()) {
-            status = executor.process(ScheduleOutput{{b}});
-        }
-        if (status.ok()) {
-            chunk_gate.wait();
-            status = executor.process(ScheduleOutput{{c}});
-        }
-        return status;
-    });
-    const auto started_before_reply = b_started.wait_for(std::chrono::seconds(5));
-    // The writer must start from the result alone, while the compute thread is idle.
-    wire->enqueueObject(pp_serialization::serializeExecutionResult(a_result));
-    wire->enqueueObject(pp_serialization::serializeExecutionResult(b_result));
-    const auto writeback_before_next_step = a_started.wait_for(std::chrono::seconds(5));
-    allow_chunk.set_value();
-    wire->enqueueObject(pp_serialization::serializeExecutionResult(makeSingleTokenResult(303, 0)));
-    bool chunk_dispatched = false;
-    if (execution.wait_for(std::chrono::seconds(5)) == std::future_status::ready) {
-        std::unique_lock<std::mutex> lock(executor.result_recv_mutex_);
-        chunk_dispatched = executor.result_recv_cv_.wait_for(lock, std::chrono::seconds(5), [&] {
-            return !c->isPPInflight();
-        });
-    }
-    EXPECT_TRUE(a->isPPInflight());
-    EXPECT_TRUE(b->isPPInflight());
-    EXPECT_EQ(a->moveToNext(), StreamState::RUNNING);
-    allow_commit.set_value();
-    ASSERT_TRUE(execution.get().ok());
-    executor.drainPendingResults();
-    EXPECT_EQ(started_before_reply, std::future_status::ready);
-    EXPECT_EQ(writeback_before_next_step, std::future_status::ready);
-    EXPECT_TRUE(chunk_dispatched);
-    EXPECT_EQ(model->finalized, (std::vector<int64_t>{0, 1}));
-    EXPECT_EQ(model->accepted, (std::vector<std::vector<int32_t>>{{2}, {1}}));
-    EXPECT_EQ(model->phases,
-              (std::vector<std::string>{"prepare", "commit", "finalize", "prepare", "commit", "finalize"}));
-    EXPECT_FALSE(a->isPPInflight());
-    EXPECT_FALSE(b->isPPInflight());
-    EXPECT_EQ(a->moveToNext(), StreamState::FINISHED);
-    EXPECT_TRUE(a->streamCacheResource().isResourceReleased());
-    ASSERT_EQ(model->inputs.size(), 3u);
-    EXPECT_TRUE(model->inputs.back().is_middle_chunk_only);
-    EXPECT_EQ(a->completeTokenIdsVec(0), (std::vector<int32_t>{1, 2, 17, 20}));
-    EXPECT_EQ(b->completeTokenIdsVec(0), (std::vector<int32_t>{3, 4, 27}));
 }
 
 TEST_F(PPExecutorTest, FirstPrefillCountsInputWorkEvenWhenSamplingFails) {
@@ -3528,7 +3378,7 @@ TEST_F(PPExecutorTest, FirstReturnedAcceptanceSurvivesBudgetClippingAndCancellat
     RtpLLMSpeculativeEngineMetricsCollector sp_collector;
     const auto                              snapshot = PPBatchStreamProcessor::captureExecution(stream_groups);
     executor.collectTokenCounts(snapshot, result, counts, sp_collector);
-    executor.receiveAndProcessResult({snapshot, schedule_time_us, executor_collector, {}, {}});
+    executor.receiveAndProcessResult(snapshot, schedule_time_us, executor_collector);
     EXPECT_EQ(accepted->seqLength(), 4);
     EXPECT_EQ(capped->seqLength(), 3);
     EXPECT_TRUE(capped->hasEvent(StreamEvents::GenerateDone));

@@ -295,27 +295,6 @@ models_py_test(
 )
 
 models_py_test(
-    name = "ple_commit_metadata_test",
-    src = "ple/ple_commit_metadata_test.py",
-    gpu = "RTX_5000_PRO_CU13",
-    deps = _REFERENCE_DEPS,
-)
-
-models_py_test(
-    name = "ple_commit_prepare_test",
-    src = "ple/ple_commit_prepare_test.py",
-    gpu = "RTX_5000_PRO_CU13",
-    deps = _REFERENCE_DEPS,
-)
-
-models_py_test(
-    name = "ple_commit_test",
-    src = "ple/ple_commit_test.py",
-    gpu = "L20_CU13",
-    deps = _REFERENCE_DEPS,
-)
-
-models_py_test(
     name = "gdn_prefill_norm_test",
     src = "gdn/gdn_prefill_norm_test.py",
     gpu = "RTX_5000_PRO_CU13",
@@ -420,15 +399,6 @@ models_py_test(
 )
 
 models_py_test(
-    name = "cpu_target_status_test",
-    src = "distributed/cpu_target_status_test.py",
-    # Native CPU bindings share a CUDA-linked library; no CUDA device is needed.
-    gpu = "L20_CU13",
-    gpus = 0,
-    deps = _REFERENCE_DEPS,
-)
-
-models_py_test(
     name = "eager_validation_test",
     src = "qsa/eager_validation_test.py",
 )
@@ -467,9 +437,6 @@ test_suite(
 test_suite(
     name = "qwen4_ple",
     tests = [
-        ":ple_commit_metadata_test",
-        ":ple_commit_prepare_test",
-        ":ple_commit_test",
         ":ple_decode_test",
         ":ple_gate_test",
         "//rtp_llm/models_py/kernels/cuda/qwen4_ple/test:gate_test",
@@ -571,7 +538,6 @@ test_suite(
 test_suite(
     name = "qwen4_distributed",
     tests = [
-        ":cpu_target_status_test",
         ":tp_registered_input_test",
     ],
 )

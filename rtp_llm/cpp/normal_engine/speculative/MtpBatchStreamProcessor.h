@@ -63,13 +63,13 @@ public:
                                                           TensorHolder&       host_holder) const;
 
     // Produce the next round's immutable page table by applying the exact
-    // linear-cache permutation used by GenerateStream::specUpdate.  FULL/SWA
-    // groups are copied unchanged.  Keeping this operation tensor-native lets
+    // state-block permutation used by GenerateStream::specUpdate. Other
+    // cache groups are copied unchanged.  Keeping this operation tensor-native lets
     // proposal/verify overlap host bookkeeping without a per-round D2H join.
     static torch::Tensor advanceLinearCacheBlockTable(const torch::Tensor&               current_table,
                                                       const torch::Tensor&               previous_seq_lengths,
                                                       const torch::Tensor&               accept_lengths,
-                                                      const std::vector<CacheGroupType>& group_types,
+                                                      const std::vector<bool>& state_block_groups,
                                                       int64_t                            seq_size_per_block);
 
     absl::StatusOr<SamplerInputs> gatherSpecSamplerInput(const StreamGroups&                         stream_groups,

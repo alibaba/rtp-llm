@@ -2707,6 +2707,17 @@ TEST_F(PPBatchStreamProcessorTest, MtpDispatchCommitsAcceptedLinearState) {
         SCOPED_TRACE(::testing::Message() << "input_len=" << c.input_len << " num_new_tokens=" << c.num_new_tokens
                                           << " max_new_tokens=" << c.max_new_tokens);
         cache_config_            = test::makeSimpleHybridMhaCacheConfig(2, 16, 4, DataType::TYPE_FP16, 1);
+        auto groups = cache_config_.topology().groups();
+        auto layers = cache_config_.topology().layers();
+        for (const std::string tag : {"ple_conv_state", "ple_ngram_ctx"}) {
+            auto spec = test::makeTestFixedStateSpec(4);
+            spec->tag = tag;
+            auto policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
+            policy.speculative_state_blocks = true;
+            groups.push_back({tag, spec, policy, groups.front().block_num});
+            layers.front().group_tags.push_back(tag);
+        }
+        cache_config_.setTopology(std::move(groups), std::move(layers));
         resources_.cache_manager = std::make_shared<KVCacheManager>(cache_config_);
         GenerateConfig cfg;
         cfg.num_return_sequences                 = 0;
@@ -2723,6 +2734,8 @@ TEST_F(PPBatchStreamProcessorTest, MtpDispatchCommitsAcceptedLinearState) {
         auto& resource = stream->kvCacheMutable().cacheResource(0);
         resource.mutableBlockIds("linear").assign(BlockIndicesType{1, 2, 3, 4});
         resource.mutableBlockIds("full1").assign(BlockIndicesType{5, 6, 7, 8});
+        resource.mutableBlockIds("ple_conv_state").assign(BlockIndicesType{1, 2, 3, 4});
+        resource.mutableBlockIds("ple_ngram_ctx").assign(BlockIndicesType{5, 6, 7, 8});
 
         auto              processor = makeProcessor(SP_TYPE_MTP);
         PPExecutionResult result;
@@ -2737,6 +2750,12 @@ TEST_F(PPBatchStreamProcessorTest, MtpDispatchCommitsAcceptedLinearState) {
         EXPECT_EQ(stream->seqLength(), c.input_len + std::min(c.num_new_tokens, c.max_new_tokens));
         EXPECT_EQ(resource.blocks("linear"), c.expected_linear_blocks);
         EXPECT_EQ(resource.kernelBlocks("linear"), c.expected_linear_blocks);
+        EXPECT_EQ(resource.blocks("ple_conv_state"), c.expected_linear_blocks);
+        auto expected_context_blocks = c.expected_linear_blocks;
+        for (auto& block : expected_context_blocks) {
+            block += 4;
+        }
+        EXPECT_EQ(resource.blocks("ple_ngram_ctx"), expected_context_blocks);
         EXPECT_EQ(resource.blocks("full1"), BlockIndicesType({5, 6, 7, 8}));
     }
 }

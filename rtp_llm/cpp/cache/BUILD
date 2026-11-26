@@ -270,6 +270,7 @@ cc_library(
     deps = [
         ":cache_types",
         "//rtp_llm/cpp/cache/block_tree_cache:device_block_pool",
+        "//rtp_llm/cpp/utils:linear_blocks_util",
     ],
 )
 

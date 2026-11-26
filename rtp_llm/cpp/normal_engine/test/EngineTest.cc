@@ -957,8 +957,9 @@ TEST_F(NormalEngineTest, testPpChunkedPrefillWarmupUsesStageCacheAndChunkShapes)
                         EXPECT_TRUE(input.is_fake_stream);
                         EXPECT_EQ(input.sequence_lengths.numel(), 0);
                         EXPECT_EQ(input.kv_cache_group_tags, expected_tags);
-                        EXPECT_TRUE(input.kv_cache_block_id.eq(0).all().item<bool>());
-                        EXPECT_TRUE(input.kv_cache_kernel_block_id.eq(0).all().item<bool>());
+                        // Prefill warmup aliases logical pages to the first nonzero physical block.
+                        EXPECT_TRUE(input.kv_cache_block_id.eq(1).all().item<bool>());
+                        EXPECT_TRUE(input.kv_cache_kernel_block_id.eq(1).all().item<bool>());
                     },
                     test_case.shapes.size());
             };

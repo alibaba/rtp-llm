@@ -13,7 +13,6 @@
 #include <map>
 #include <memory>
 #include <optional>
-#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -202,18 +201,6 @@ std::vector<int64_t> decodeKvBlockTableShape(int64_t rank, int64_t group_num, in
 
 void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallelism_config);
 
-class SpeculativeTargetCommit {
-public:
-    virtual ~SpeculativeTargetCommit() = default;
-
-    // Select accepted candidates and retain undo state before writing.
-    virtual std::string prepareSpeculativeTargetCommit(const torch::Tensor& accept_len) = 0;
-    // Apply the write, or discard/rollback it on failure.
-    virtual std::string finishSpeculativeTargetCommit(bool commit) = 0;
-    // Release undo state once every TP rank has committed.
-    virtual std::string finalizeSpeculativeTargetCommit() = 0;
-};
-
 class ModelBase {
 public:
     virtual ~ModelBase() = default;
@@ -237,18 +224,6 @@ public:
     // publication have nothing to wait for.
     virtual std::string waitCacheStorePublication() {
         return {};
-    }
-
-    // Model-owned writeback for the current target verification, if supported.
-    virtual SpeculativeTargetCommit* speculativeTargetCommit() const {
-        return nullptr;
-    }
-
-    // Optional host consensus, selected collectively at model startup. nullopt
-    // means the original device collective. A transport/protocol exception is
-    // fail-stop and must propagate; asymmetric fallback is forbidden.
-    virtual std::optional<bool> reduceSpeculativeTargetPrepareStatus(bool /*local_ok*/) {
-        return std::nullopt;
     }
 
     // Optional spec-decode hand-off: target model exposes the pre-output-projection
@@ -285,15 +260,6 @@ public:
     // written row count.
     virtual torch::Tensor getMtpLastHiddenStates(int64_t /*num_tokens*/) {
         return torch::Tensor();
-    }
-
-    // Transfer this forward's candidates to its PP task if writeback is enabled.
-    virtual std::unique_ptr<SpeculativeTargetCommit> takeSpeculativeTargetCommit() {
-        return nullptr;
-    }
-
-    virtual void broadcastPPTargetAcceptLengths(const torch::Tensor& /*accept_lengths*/) {
-        throw std::logic_error("target model does not support PP acceptance broadcast");
     }
 
     rtp_llm::Weights            weights_;

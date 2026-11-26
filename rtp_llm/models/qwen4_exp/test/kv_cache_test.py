@@ -59,22 +59,32 @@ class FixedLinearCapacityTest(unittest.TestCase):
         }
         for layer in layers:
             for desc in layer:
+                uses_candidate_slots = desc.tag in (PLE_STATE_TAG, PLE_NGRAM_CTX_TAG)
                 desc.tag = "renamed_" + desc.tag
                 restored = pickle.loads(pickle.dumps(desc))
                 self.assertEqual(restored.tp_transfer_mode, expected[desc.cache_type])
                 self.assertEqual(restored.tag, desc.tag)
+                self.assertEqual(
+                    restored.speculative_state_blocks, uses_candidate_slots
+                )
 
-    def test_legacy_descriptor_pickle_defaults_to_legacy_transfer(self):
+    def test_legacy_descriptor_pickle_restores_defaults(self):
         layers = build_qwen4_exp_kv_cache_spec_descs(
             _config(), [1], _PLE_KERNEL, _NGRAM, 128, 4
         )
-        desc = layers[0][0]
+        desc = next(d for d in layers[1] if d.tag == PLE_STATE_TAG)
         state = desc.__getstate__()
-        self.assertEqual(len(state), 21)
-        restored = type(desc).__new__(type(desc))
-        restored.__setstate__(state[:20])
-        self.assertEqual(restored.tag, desc.tag)
-        self.assertEqual(restored.tp_transfer_mode, TpCacheTransferMode.LEGACY)
+        self.assertEqual(len(state), 22)
+        for state_size, transfer_mode in (
+            (20, TpCacheTransferMode.LEGACY),
+            (21, TpCacheTransferMode.REPLICATED),
+        ):
+            with self.subTest(state_size=state_size):
+                restored = type(desc).__new__(type(desc))
+                restored.__setstate__(state[:state_size])
+                self.assertEqual(restored.tag, desc.tag)
+                self.assertEqual(restored.tp_transfer_mode, transfer_mode)
+                self.assertFalse(restored.speculative_state_blocks)
 
     def test_common_planner_owns_linear_capacity_and_native_pickle_preserves_budget(
         self,

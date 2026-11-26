@@ -10,10 +10,10 @@ from rtp_llm.models_py.model_desc.block_map import select_attention_inputs_for_t
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.pd_publication import (
     validate_pd_cache_inputs,
 )
+from rtp_llm.models_py.modules.qwen4_exp.ple.ple import Qwen4ExpPLELayer
 from rtp_llm.ops.compute_ops import PyAttentionInputs, PyModelInputs
 
 from .ple_cache_views import PLECacheViews
-from .ple_transaction import PLETransactionCoordinator
 
 
 class PLEExecution:
@@ -23,21 +23,177 @@ class PLEExecution:
         cache,
         parallelism,
         eos_token_id,
-        coordinator: PLETransactionCoordinator,
     ):
         self.ple_layers = layers
         self.kv_cache = cache
         self.parallelism_config = parallelism
         self.eos_token_id = eos_token_id
-        self.coordinator = coordinator
 
     _fixed_state_pool = staticmethod(PLECacheViews._fixed_state_pool)
     _physical_blocks = staticmethod(PLECacheViews._physical_blocks)
     _physical_blocks_for_pairs = staticmethod(PLECacheViews._physical_blocks_for_pairs)
     _same_metadata = staticmethod(PLECacheViews._same_metadata)
 
-    def _stage_ple_target_verify(self, **kwargs):
-        return self.coordinator._stage_ple_target_verify(**kwargs)
+    def _verify_target(
+        self,
+        *,
+        ple: Qwen4ExpPLELayer,
+        hyper_states: torch.Tensor,
+        ids: torch.Tensor,
+        state_inputs: PyAttentionInputs,
+        ctx_inputs: PyAttentionInputs,
+        state_pool: torch.Tensor,
+        ctx_pool: torch.Tensor,
+        page_size: int,
+        embeddings: torch.Tensor | None = None,
+        live_rows: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Evaluate target rows and write candidate states for the existing block swap."""
+        if not bool(state_inputs.is_prefill):
+            raise RuntimeError(
+                "qwen4_exp PLE target verification must use context-style prefill"
+            )
+        lengths = state_inputs.input_lengths
+        prefixes = state_inputs.prefix_lengths
+        sequence_lengths = state_inputs.sequence_lengths
+        graph_capture = bool(getattr(state_inputs, "is_cuda_graph", False))
+        if (
+            lengths.dim() != 1
+            or lengths.dtype not in (torch.int32, torch.int64)
+            or not int(lengths.numel())
+        ):
+            raise RuntimeError(
+                "qwen4_exp PLE target verify requires integer input_lengths [B]"
+            )
+        batch_size = int(lengths.numel())
+        query_len = int(lengths[0].item())
+        if query_len <= 0 or bool(torch.any(lengths != query_len).item()):
+            raise RuntimeError(
+                "qwen4_exp PLE target verify requires one uniform gamma+1 width"
+            )
+        # GraphRunner keeps a host sequence-length mirror even for context-style
+        # target verification.  The target path uses prefix_lengths instead.
+        if sequence_lengths.numel() != 0 and not graph_capture:
+            raise RuntimeError(
+                "qwen4_exp PLE target verify requires empty sequence_lengths"
+            )
+        if (
+            prefixes.dim() != 1
+            or prefixes.dtype != torch.int32
+            or int(prefixes.numel()) != batch_size
+        ):
+            raise RuntimeError(
+                "qwen4_exp PLE target verify requires int32 prefix_lengths [B]"
+            )
+        prefix_source = (
+            state_inputs.prefix_lengths_device if graph_capture else prefixes
+        )
+        prefixes_device = prefix_source.to(
+            device=hyper_states.device, dtype=torch.long, non_blocking=True
+        ).contiguous()
+        invalid_history = prefixes <= 0
+        if live_rows is not None:
+            invalid_history = invalid_history & live_rows.to(prefixes.device)
+        if not graph_capture and bool(torch.any(invalid_history).item()):
+            raise RuntimeError(
+                "qwen4_exp PLE target verify requires a non-empty committed history"
+            )
+        if int(ids.numel()) != batch_size * query_len:
+            raise RuntimeError(
+                "qwen4_exp PLE target verify input lengths do not partition "
+                f"the {ids.numel()} packed ids"
+            )
+        if (
+            state_pool.device != hyper_states.device
+            or ctx_pool.device != hyper_states.device
+        ):
+            raise RuntimeError(
+                "qwen4_exp PLE target projection and side pools must share a device"
+            )
+
+        gathered = None
+        if graph_capture:
+            from rtp_llm.models_py.kernels.cuda.qwen4_ple.commit import (
+                gather_target_read_state,
+            )
+
+            gathered = gather_target_read_state(
+                prefixes_device,
+                ids,
+                PLECacheViews._resolve_block_table(state_inputs, PLE_STATE_TAG),
+                PLECacheViews._resolve_block_table(ctx_inputs, PLE_NGRAM_CTX_TAG),
+                state_pool,
+                ctx_pool,
+                page_size,
+            )
+        candidate_ids = ids.reshape(batch_size, query_len)
+        if gathered is not None:
+            initial_state, initial_context, history = gathered
+        else:
+            # Graph fallback must read the live device mirror, including B>32
+            # where the fused gather is unavailable. Host page arithmetic both
+            # freezes capture-time metadata and creates an unpinned H2D copy.
+            read_pages = torch.div(
+                (
+                    prefixes
+                    if not graph_capture and prefixes.device.type == "cpu"
+                    else prefixes_device
+                )
+                - 1,
+                page_size,
+                rounding_mode="floor",
+            )
+            state_read_blocks = self._physical_blocks(
+                state_inputs,
+                PLE_STATE_TAG,
+                read_pages,
+                int(state_pool.shape[0]),
+                state_pool.device,
+                graph_capture=graph_capture,
+            )
+            ctx_read_blocks = self._physical_blocks(
+                ctx_inputs,
+                PLE_NGRAM_CTX_TAG,
+                read_pages,
+                int(ctx_pool.shape[0]),
+                ctx_pool.device,
+                graph_capture=graph_capture,
+            )
+            initial_state = state_pool.index_select(0, state_read_blocks)
+            initial_context = ctx_pool.index_select(0, ctx_read_blocks)
+            if live_rows is not None:
+                live = live_rows.to(hyper_states.device)
+                initial_state = torch.where(live[:, None, None], initial_state, 0)
+                initial_context = torch.where(
+                    live[:, None], initial_context, ple.ple_embedding.eos_token_id
+                )
+            history = torch.cat([initial_context, candidate_ids], dim=1)
+        output, candidate_state_inputs = ple.decode_chunk(
+            hyper_states.reshape(batch_size, query_len, -1),
+            history,
+            initial_state,
+            **({"embeddings": embeddings} if embeddings is not None else {}),
+        )
+
+        if live_rows is not None:
+            output = torch.where(live_rows.to(output.device)[:, None, None], output, 0)
+        from rtp_llm.models_py.kernels.cuda.qwen4_ple.candidate_store import (
+            store_candidate_states,
+        )
+
+        store_candidate_states(
+            initial_state,
+            candidate_state_inputs,
+            initial_context,
+            candidate_ids,
+            state_pool,
+            ctx_pool,
+            prefixes_device,
+            page_size,
+            PLECacheViews._resolve_block_table(state_inputs, PLE_STATE_TAG),
+            PLECacheViews._resolve_block_table(ctx_inputs, PLE_NGRAM_CTX_TAG),
+        )
+        return hyper_states + output.reshape_as(hyper_states)
 
     def _validate_ple_mode(
         self,
@@ -298,8 +454,7 @@ class PLEExecution:
                     if local_rows is not None and local_rows[0] is not None
                     else None
                 )
-                return self._stage_ple_target_verify(
-                    layer_idx=layer_idx,
+                return self._verify_target(
                     ple=ple,
                     hyper_states=hyper_states,
                     ids=ids,
