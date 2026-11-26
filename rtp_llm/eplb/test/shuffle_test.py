@@ -185,10 +185,11 @@ class ShuffleTest(unittest.TestCase):
                             (rank, layer, index, slot, expert),
                         )
 
-    def _exercise(self, intranode, p2p_groups=1, noop=False):
+    def _exercise(self, intranode, p2p_groups=1, noop=False, batch_rows=False):
         size = 4
         origin = torch.tensor(
             [
+                [0, 1, 2, 3, 4, 5, 0, 2, 4, 1, 3, 5],
                 [0, 1, 2, 3, 4, 5, 0, 2, 4, 1, 3, 5],
                 [5, 4, 3, 2, 1, 0, 5, 3, 1, 4, 2, 0],
             ]
@@ -196,6 +197,7 @@ class ShuffleTest(unittest.TestCase):
         next_mapping = torch.tensor(
             [
                 [3, 3, 0, 0, 5, 2, 1, 1, 4, 4, 2, 5],
+                [0, 1, 2, 3, 4, 5, 0, 2, 4, 1, 3, 5],
                 [2, 2, 5, 5, 0, 3, 4, 4, 1, 1, 3, 0],
             ]
         )
@@ -225,7 +227,12 @@ class ShuffleTest(unittest.TestCase):
                 def run(rank):
                     if intranode:
                         shuffle.expert_model_parallel_shuffle_inplace_intranode(
-                            mirrors, old, weights[rank], new, groups[rank]
+                            mirrors,
+                            old,
+                            weights[rank],
+                            new,
+                            groups[rank],
+                            batch_rows=batch_rows,
                         )
                     else:
                         shuffle.expert_model_parallel_shuffle_inplace(
@@ -239,7 +246,7 @@ class ShuffleTest(unittest.TestCase):
         self.assertTrue(all(not queue for queue in transport.recvs.values()))
         self.assertEqual(
             [group.barrier_count for group in groups],
-            [8 if intranode else 0] * size,
+            [8 if intranode and not noop else 0] * size,
         )
         if noop or intranode:
             self.assertEqual(transport.batches, [])
@@ -264,6 +271,7 @@ class ShuffleTest(unittest.TestCase):
 
     def test_intranode_mirror_reuse_preserves_all_weight_representations(self):
         self._exercise(True)
+        self._exercise(True, batch_rows=True)
 
     def test_unchanged_maps_submit_no_p2p(self):
         self._exercise(False, noop=True)
