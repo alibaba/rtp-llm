@@ -477,11 +477,17 @@ class ResidentWeights:
         Only None means that all participating ranks must take the cold path.
         """
         self._restore_error = None
-        if self.verify:
-            self.begin_verify()
-            restored = None
-        else:
-            restored = self.attach()
+        restored = None
+        error = None
+        try:
+            if self.verify:
+                self.begin_verify()
+            else:
+                restored = self.attach()
+        except Exception as exc:
+            if not synchronize_ranks:
+                raise
+            error = exc
         if self._restore_error is not None:
             local_state = _ATTACH_RESTORE_FAILED
         elif restored is not None:
@@ -490,11 +496,13 @@ class ResidentWeights:
             local_state = _ATTACH_MISS
         # A PP draft participates on its own stage, not WORLD. Every consumer
         # must agree before any rank enters checkpoint reads or replay.
-        state = (
-            all_ranks_min_state(local_state, device, group=group)
-            if synchronize_ranks
-            else local_state
-        )
+        state = local_state
+        if synchronize_ranks:
+            try:
+                state = agree_resident_step(local_state, error, device, group, "attach")
+            except Exception:
+                self.release_attach()
+                raise
         if state == _ATTACH_RESTORE_FAILED:
             self.release_attach()
             raise RuntimeError(
@@ -1746,3 +1754,23 @@ def all_ranks_min_state(state: int, device: str, *, group=None) -> int:
 def all_ranks_true(value: bool, device: str, *, group=None) -> bool:
     """Agree before entering or skipping checkpoint-loader collectives."""
     return bool(all_ranks_min_state(int(value), device, group=group))
+
+
+def agree_resident_step(state: int, error: Optional[Exception], device: str, group, step: str) -> int:
+    """Complete the existing stage vote even when local work raises.
+
+    Nonnegative states retain their normal MIN semantics. Only a failure
+    exchanges diagnostics; a successful multi-rank step has just one vote.
+    """
+    result = all_ranks_min_state(-1 if error is not None else state, device, group=group)
+    if result >= 0:
+        return result
+    dist = torch.distributed
+    if not dist.is_initialized() or dist.get_world_size(group) == 1:
+        assert error is not None
+        raise error
+    reasons = [None] * dist.get_world_size(group)
+    reason = f"{type(error).__name__}: {error}" if error is not None else None
+    dist.all_gather_object(reasons, reason, group=group)
+    details = "; ".join(f"group rank {i}: {s}" for i, s in enumerate(reasons) if s)
+    raise RuntimeError(f"resident checkpoint {step} failed: {details}") from error

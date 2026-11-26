@@ -9,9 +9,10 @@ import os
 import tempfile
 import unittest
 from datetime import timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Optional
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 import torch
 import torch.multiprocessing as mp
@@ -20,7 +21,7 @@ from rtp_llm.config.py_config_modules import ResidentWeightsConfig
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.resident_weights import vmm
 from rtp_llm.resident_weights.store import StoreOp, StoreSettings
-from rtp_llm.resident_weights.weights import ResidentWeights, all_ranks_true
+from rtp_llm.resident_weights.weights import ResidentWeights, all_ranks_true, checkpoint_digest
 from rtp_llm.utils.model_weight import W
 
 
@@ -143,20 +144,19 @@ class ResidentWeightsRankBarrierTest(unittest.TestCase):
             BaseModel, "_create_resident_weights", return_value=manager
         ), patch("torch.distributed.is_initialized", return_value=initialized), patch(
             "torch.distributed.get_world_size", return_value=world_size
-        ), patch(
-            "torch.distributed.barrier"
-        ) as barrier, patch(
-            "rtp_llm.models.base_model.all_ranks_true",
-            side_effect=lambda value, device, *, group: value,
-        ):
-            model._load_with_residency("cuda:0", model.model_weights_loader.load)
+        ), patch("torch.distributed.get_backend", return_value="gloo"), patch(
+            "torch.distributed.all_reduce"
+        ) as barrier:
+            model._load_with_residency("cpu", model.model_weights_loader.load)
         return barrier
 
     def test_a_multi_rank_start_waits_for_every_rank(self):
         barrier = self._load(
             ResidentWeightsConfig(mode="dev"), initialized=True, world_size=4
         )
-        barrier.assert_called_once_with(group=None)
+        # One setup vote and one completion vote (the fake manager does not attach).
+        self.assertEqual(barrier.call_count, 2)
+        self.assertTrue(all(c.kwargs["group"] is None for c in barrier.call_args_list))
 
     def test_a_process_without_a_process_group_does_not_wait(self):
         barrier = self._load(
@@ -212,7 +212,76 @@ def _distributed_load(rank, world_size, rendezvous, mixed):
         torch.distributed.destroy_process_group()
 
 
+def _resident_failures(rank, world_size, directory):
+    dist = torch.distributed
+    dist.init_process_group(
+        "gloo", init_method="file://" + directory + "/group", rank=rank,
+        world_size=world_size, timeout=timedelta(seconds=8),
+    )
+    try:
+        # A PP draft is instantiated on the tail stage only. The other ranks
+        # go directly to the final barrier, never participating in the votes.
+        group = dist.new_group([2, 3], timeout=timedelta(seconds=8)) if world_size == 4 else None
+        if world_size == 2 or rank >= 2:
+            last = rank == world_size - 1
+            root = Path(directory) / str(rank)
+            root.mkdir()
+            (root / "model.safetensors.index.json").write_text(
+                json.dumps({"weight_map": {"param": "shards/missing.safetensors"}})
+            )
+            for mode, expected in (
+                ("setup", ("setup", "FileNotFoundError", "missing.safetensors")),
+                ("attach", ("attach", "bad FD")),
+                ("scratch", ("load", "bad shard")),
+                ("replay", ("load", "bad record")),
+                ("cold", None), ("warm", None),
+            ):
+                manager = ResidentWeights.__new__(ResidentWeights)
+                manager.verify = False
+                manager.release_attach = Mock()
+                manager.discard_attach = Mock()
+                if mode == "attach" and last:
+                    manager.attach = Mock(side_effect=ValueError("bad FD"))
+                else:
+                    manager.attach = Mock(return_value=[] if mode in ("warm", "replay") else None)
+                model = _model(ResidentWeightsConfig(mode="dev", role="draft"))
+                model.parallelism_config.pp_size = world_size // 2
+
+                def create():
+                    if mode == "setup" and last:
+                        checkpoint_digest(str(root), follow_index=True)
+                    return manager
+
+                def load(*, resident, restored):
+                    assert resident is manager
+                    if last and mode in ("scratch", "replay"):
+                        raise ValueError("bad shard" if restored is None else "bad record")
+                    return "cold" if restored is None else "warm"
+
+                with patch.object(model, "_create_resident_weights", side_effect=create):
+                    try:
+                        owner = model._load_with_residency("cpu", load, group=group)
+                    except RuntimeError as exc:
+                        assert expected is not None, str(exc)
+                        assert all(s in str(exc) for s in (*expected, "group rank 1")), str(exc)
+                    else:
+                        assert expected is None and owner == mode, mode
+                if mode == "attach":
+                    manager.release_attach.assert_called_once()
+        dist.barrier()
+    finally:
+        dist.destroy_process_group()
+
+
 class ResidentWeightsRegressionTest(unittest.TestCase):
+    def test_setup_attach_and_local_load_failures_reach_all_checkpoint_ranks(self):
+        for world_size in (2, 4):
+            with self.subTest(world_size=world_size), tempfile.TemporaryDirectory() as directory:
+                mp.start_processes(
+                    _resident_failures, args=(world_size, directory), nprocs=world_size,
+                    join=True, start_method="fork",
+                )
+
     def test_world_hit_consensus_precedes_loader_collectives(self):
         for mixed in (False, True):
             with self.subTest(mixed=mixed), tempfile.TemporaryDirectory() as directory:
@@ -234,14 +303,14 @@ class ResidentWeightsRegressionTest(unittest.TestCase):
         with patch.object(
             BaseModel, "_create_resident_weights", return_value=model._created
         ), patch(
-            "rtp_llm.models.base_model.all_ranks_true", return_value=True
-        ) as vote, patch.object(
-            BaseModel, "_wait_for_loading_ranks"
-        ) as barrier:
+            "rtp_llm.models.base_model.agree_resident_step", return_value=1
+        ) as vote:
             stage = object()
             model._load_with_residency("cuda:0", model.model_weights_loader.load, group=stage)
-            vote.assert_called_once_with(True, "cuda:0", group=stage)
-            barrier.assert_called_once_with(group=stage)
+            self.assertEqual(vote.call_args_list, [
+                call(1, None, "cuda:0", stage, "setup"),
+                call(1, None, "cuda:0", stage, "load"),
+            ])
 
     def _consensus_failure_load(self, manager):
         """Load with manager creation agreed by no one; returns the ordered side effects."""
@@ -258,10 +327,8 @@ class ResidentWeightsRegressionTest(unittest.TestCase):
 
         with patch.object(
             BaseModel, "_create_resident_weights", return_value=manager
-        ), patch("rtp_llm.models.base_model.all_ranks_true", return_value=False), patch(
+        ), patch("rtp_llm.models.base_model.agree_resident_step", side_effect=(0, 1)), patch(
             "rtp_llm.resident_weights.store.request", side_effect=request
-        ), patch.object(
-            BaseModel, "_wait_for_loading_ranks"
         ):
             self.assertEqual(
                 model._load_with_residency("cuda:0", model.model_weights_loader.load), "checkpoint weights"

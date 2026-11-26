@@ -30,7 +30,7 @@ from rtp_llm.ops import (
 )
 from rtp_llm.resident_weights import ResidentWeights, checkpoint_digest, vmm
 from rtp_llm.resident_weights.store import StoreSettings
-from rtp_llm.resident_weights.weights import all_ranks_true
+from rtp_llm.resident_weights.weights import agree_resident_step
 from rtp_llm.utils.model_weight import sp_0_pad8_size
 from rtp_llm.utils.time_util import timer_wrapper
 
@@ -197,35 +197,38 @@ class BaseModel(object):
             and group is None
         ):
             raise RuntimeError("A distributed PP draft requires its checkpoint stage group")
-        self._resident_weights = self._create_resident_weights()
+        manager = None
+        error = None
+        try:
+            manager = self._create_resident_weights()
+        except Exception as exc:
+            error = exc
         # Use exactly the loader's participants for *both* decisions. Otherwise
         # a warm rank may replay its owner while a peer enters FST cold-load collectives.
-        if not all_ranks_true(self._resident_weights is not None, device, group=group):
-            if self._resident_weights is not None:
+        if not agree_resident_step(int(manager is not None), error, device, group, "setup"):
+            if manager is not None:
                 # Every rank now loads from the checkpoint. A record this rank published
                 # earlier would otherwise keep its memory alongside the new copy.
                 logging.warning(
                     "resident weights %s: another rank cannot use resident weights; "
                     "dropping this rank's record and loading from the checkpoint",
-                    self._resident_weights.slot_key,
+                    manager.slot_key,
                 )
-                self._resident_weights.discard_attach()
-            self._resident_weights = None
-        manager = self._resident_weights
+                manager.discard_attach()
+            manager = None
+        self._resident_weights = manager
         restored = None if manager is None else manager.acquire_for_load(
             device, synchronize_ranks=True, group=group
         )
-        owner = load() if manager is None else load(resident=manager, restored=restored)
-        self._wait_for_loading_ranks(group=group)
+        owner = None
+        try:
+            owner = load() if manager is None else load(resident=manager, restored=restored)
+        except Exception as exc:
+            error = exc
+        # This vote replaces the success-only barrier. Scratch/isolated or
+        # resident replay can fail on one rank without synchronizing internally.
+        agree_resident_step(1, error, device, group, "load")
         return owner
-
-    def _wait_for_loading_ranks(self, *, group=None) -> None:
-        """Finish loading on every participating rank before entering C++ engine initialization."""
-        if not torch.distributed.is_initialized():
-            return
-        if torch.distributed.get_world_size(group) <= 1:
-            return
-        torch.distributed.barrier(group=group)
 
     @property
     def resident_initialize_gpu_growth_bytes(self) -> int:
