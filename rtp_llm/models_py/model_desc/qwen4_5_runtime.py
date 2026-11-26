@@ -3222,6 +3222,10 @@ class Qwen4_5PagedStateBridge:
                         )
             else:
                 assert layer.self_attn is not None
+                sa = layer.self_attn
+                preproj = sa.project_qkv_and_indexer(
+                    attn_in, need_idx=(sa.indexer is not None)
+                )
                 if not layer.is_consumer:
                     kv_c = layer_caches[FULL_ATTN_KV_TAG]
                     sc_c = layer_caches.get(FULL_ATTN_KV_SCONV_TAG)
@@ -3265,7 +3269,8 @@ class Qwen4_5PagedStateBridge:
                             compress_ratio=idx.compress_ratio,
                             head_dim=idx.head_dim,
                         )
-                        q_idx, raw_k_idx = idx.project(attn_in)
+                        assert preproj[3] is not None and preproj[4] is not None
+                        q_idx, raw_k_idx = preproj[3], preproj[4]
                         use_pad_mask = decode_attn_handle.is_cuda_graph or _is_padded_group(
                             attention_inputs, FULL_ATTN_KV_TAG
                         )
@@ -3323,7 +3328,7 @@ class Qwen4_5PagedStateBridge:
                     else:
                         decode_fn = decode_attn_handle.forward
 
-                    attn_out = layer.self_attn.forward_paged_decode(
+                    attn_out = sa.forward_paged_decode(
                         attn_in,
                         positions_2d,
                         kv_c,
@@ -3333,6 +3338,7 @@ class Qwen4_5PagedStateBridge:
                         k_sconv_state=k_sc_st,
                         v_sconv_state=v_sc_st,
                         write_kv_fn=_store_decode_full_attn_kv_gpu,
+                        preprojected=preproj,
                     )
                     full_kv_layer_caches[lid] = kv_c
                     if (
@@ -3366,7 +3372,8 @@ class Qwen4_5PagedStateBridge:
                         src_bt_kv = _block_table_for_tag(
                             attention_inputs, FULL_ATTN_KV_TAG
                         )
-                        q_idx, _ = idx.project(attn_in)
+                        assert preproj[3] is not None
+                        q_idx = preproj[3]
                         use_pad_mask = decode_attn_handle.is_cuda_graph or _is_padded_group(
                             attention_inputs, FULL_ATTN_KV_TAG
                         )
@@ -3407,11 +3414,12 @@ class Qwen4_5PagedStateBridge:
                     else:
                         c_decode_fn = decode_attn_handle.forward
 
-                    attn_out = layer.self_attn.forward_paged_decode(
+                    attn_out = sa.forward_paged_decode(
                         attn_in,
                         positions_2d,
                         src_kv_c,
                         c_decode_fn,
+                        preprojected=preproj,
                     )
 
             # 4. Attention Output ShortConv
@@ -3900,6 +3908,10 @@ class Qwen4_5PagedStateBridge:
                             _pack_linear_block(base_lin[phys], gdn_state.ssm_state[b], gdn_state.conv_state[b])
             else:
                 assert layer.self_attn is not None and full_block_table is not None
+                sa = layer.self_attn
+                preproj = sa.project_qkv_and_indexer(
+                    attn_in, need_idx=(sa.indexer is not None)
+                )
                 if not layer.is_consumer:
                     kv_c = layer_caches[FULL_ATTN_KV_TAG]
                     sc_c = layer_caches.get(FULL_ATTN_KV_SCONV_TAG)
@@ -3950,7 +3962,8 @@ class Qwen4_5PagedStateBridge:
                             compress_ratio=idx.compress_ratio,
                             head_dim=idx.head_dim,
                         )
-                        q_idx, raw_k_idx = idx.project(attn_in)
+                        assert preproj[3] is not None and preproj[4] is not None
+                        q_idx, raw_k_idx = preproj[3], preproj[4]
                         seq_b_t = torch.tensor(
                             seq_lens_before, dtype=torch.int32, device=device
                         )
@@ -3996,7 +4009,7 @@ class Qwen4_5PagedStateBridge:
                     # NOTE: FullAttn MQA-1 needs exact per-request valid KV slice when batch has
                     # different sequence_lengths! When all seq_lens_before match, batched attention is exact.
                     if len(set(seq_lens_before)) == 1:
-                        attn_out = layer.self_attn(
+                        attn_out = sa(
                             attn_in,
                             positions=positions_2d,
                             kv_cache=ephemeral_kv,
@@ -4004,6 +4017,7 @@ class Qwen4_5PagedStateBridge:
                             v_sconv_state=v_sc_st,
                             seq_offset=max_prev,
                             qsa_selected=src_selected,
+                            preprojected=preproj,
                         )
                     else:
                         req_outs: List[torch.Tensor] = []
@@ -4014,7 +4028,8 @@ class Qwen4_5PagedStateBridge:
                             ks_b = ShortConvState(k_sc_st.conv_state[b : b + 1]) if k_sc_st is not None else None
                             vs_b = ShortConvState(v_sc_st.conv_state[b : b + 1]) if v_sc_st is not None else None
                             sel_b = src_selected[b : b + 1] if src_selected is not None else None
-                            out_b = layer.self_attn(
+                            pre_b = tuple(t[b : b + 1] if t is not None else None for t in preproj)
+                            out_b = sa(
                                 attn_in[b : b + 1],
                                 positions=positions_2d[b : b + 1],
                                 kv_cache=kv_b,
@@ -4022,6 +4037,7 @@ class Qwen4_5PagedStateBridge:
                                 v_sconv_state=vs_b,
                                 seq_offset=plen,
                                 qsa_selected=sel_b,
+                                preprojected=pre_b,
                             )
                             ephemeral_kv.k_cache[b, plen].copy_(kv_b.k_cache[0, plen])
                             ephemeral_kv.v_cache[b, plen].copy_(kv_b.v_cache[0, plen])
@@ -4070,10 +4086,11 @@ class Qwen4_5PagedStateBridge:
                 else:
                     src_lid = layer.kv_cache_owner
                     cons_selected: Optional[torch.Tensor] = None
-                    if layer.self_attn.indexer is not None:
-                        idx = layer.self_attn.indexer
+                    if sa.indexer is not None:
+                        idx = sa.indexer
                         src_idx_kv_pool, src_bt_idx_kv = source_idx_local[src_lid]
-                        q_idx, _ = idx.project(attn_in)
+                        assert preproj[3] is not None
+                        q_idx = preproj[3]
                         seq_b_t = torch.tensor(
                             seq_lens_before, dtype=torch.int32, device=device
                         )
@@ -4101,12 +4118,13 @@ class Qwen4_5PagedStateBridge:
                     shared_kv = full_kv_ephemeral[src_lid]
                     per_req = getattr(shared_kv, "_per_req", None)
                     if per_req is None:
-                        attn_out = layer.self_attn(
+                        attn_out = sa(
                             attn_in,
                             positions=positions_2d,
                             kv_cache=shared_kv,
                             seq_offset=max_prev,
                             qsa_selected=cons_selected,
+                            preprojected=preproj,
                         )
                     else:
                         src_base, src_bt, src_tpb = per_req
@@ -4127,13 +4145,15 @@ class Qwen4_5PagedStateBridge:
                                 seq_len=plen + 1,
                             )
                             sel_b = cons_selected[b : b + 1] if cons_selected is not None else None
+                            pre_b = tuple(t[b : b + 1] if t is not None else None for t in preproj)
                             req_outs.append(
-                                layer.self_attn(
+                                sa(
                                     attn_in[b : b + 1],
                                     positions=positions_2d[b : b + 1],
                                     kv_cache=kv_b,
                                     seq_offset=plen,
                                     qsa_selected=sel_b,
+                                    preprojected=pre_b,
                                 )
                             )
                         attn_out = torch.cat(req_outs, dim=0)
@@ -4640,8 +4660,10 @@ class Qwen4_5PagedStateBridge:
             else:
                 assert layer.self_attn is not None
                 sa = layer.self_attn
-                # 3a. Batched Q projection + Q GemmaRMSNorm + Partial NeoX RoPE across ALL N tokens
-                q_packed = sa.q_proj(attn_in)
+                # 3a. Batched Q (+ optional KV & QSA indexer) projection + Q norm/RoPE across ALL N tokens
+                q_packed, pre_k_raw, pre_v_raw, pre_q_idx, pre_raw_k_idx = (
+                    sa.project_qkv_and_indexer(attn_in, need_idx=(sa.indexer is not None))
+                )
                 if sa.attn_output_gate:
                     q_unnorm, gate_flat = q_packed.unflatten(
                         -1, (sa.num_heads, sa.head_dim * 2)
@@ -4662,8 +4684,8 @@ class Qwen4_5PagedStateBridge:
                 cu_list = plan.cu_seqlens_i32.tolist()
                 if not layer.is_consumer:
                     assert sa.k_proj is not None and sa.v_proj is not None and sa.k_norm is not None
-                    k_raw = sa.k_proj(attn_in)
-                    v_raw = sa.v_proj(attn_in)
+                    k_raw = pre_k_raw if pre_k_raw is not None else sa.k_proj(attn_in)
+                    v_raw = pre_v_raw if pre_v_raw is not None else sa.v_proj(attn_in)
                     if sa.use_kv_sconv and sa.k_sconv is not None and sa.v_sconv is not None:
                         if kv_cache is not None and FULL_ATTN_KV_SCONV_TAG in layer_caches:
                             sc_c = layer_caches[FULL_ATTN_KV_SCONV_TAG]
@@ -4741,14 +4763,14 @@ class Qwen4_5PagedStateBridge:
                             )
 
                     k_all = gemma_rmsnorm_and_partial_rope(
-                        k_raw.view(1, total_tokens, sa.num_kv_heads, sa.head_dim),
+                        k_raw.unflatten(-1, (sa.num_kv_heads, sa.head_dim)).unsqueeze(0),
                         sa.k_norm.weight,
                         flat_pos_2d,
                         sa.inv_freq,
                         sa.rotary_dim,
                         eps=sa.rms_norm_eps,
                     )
-                    v_all = v_raw.view(1, total_tokens, sa.num_kv_heads, sa.head_dim)
+                    v_all = v_raw.unflatten(-1, (sa.num_kv_heads, sa.head_dim)).unsqueeze(0)
 
                     kv_c = layer_caches.get(FULL_ATTN_KV_TAG) if kv_cache is not None else None
                     bt_kv_act = _active_bt(FULL_ATTN_KV_TAG) if kv_cache is not None else None
@@ -4768,7 +4790,11 @@ class Qwen4_5PagedStateBridge:
                     bt_idx_kv_act: Optional[torch.Tensor] = None
                     if sa.indexer is not None:
                         idx = sa.indexer
-                        q_idx_all, raw_k_idx_all = idx.project(attn_in.unsqueeze(0))
+                        if pre_q_idx is not None and pre_raw_k_idx is not None:
+                            q_idx_all = pre_q_idx.unsqueeze(0)
+                            raw_k_idx_all = pre_raw_k_idx.unsqueeze(0)
+                        else:
+                            q_idx_all, raw_k_idx_all = idx.project(attn_in.unsqueeze(0))
                         if kv_cache is not None:
                             idx_kv_c = layer_caches[INDEXER_KV_TAG]
                             idx_st_c = layer_caches[INDEXER_STATE_TAG]
@@ -5071,7 +5097,10 @@ class Qwen4_5PagedStateBridge:
                     src_kv_list = full_kv_reqs[src_lid]
                     q_idx_cons: Optional[torch.Tensor] = None
                     if sa.indexer is not None:
-                        q_idx_cons, _ = sa.indexer.project(attn_in.unsqueeze(0))
+                        if pre_q_idx is not None:
+                            q_idx_cons = pre_q_idx.unsqueeze(0)
+                        else:
+                            q_idx_cons, _ = sa.indexer.project(attn_in.unsqueeze(0))
 
                     out_flat = None
                     if uniform_full_batch and (src_lid in full_kv_batched or src_lid in source_kv_prefill):
@@ -5712,7 +5741,9 @@ class Qwen4_5PagedStateBridge:
                 if sa.indexer is not None:
                     # Batched V-step QSA Sparse Verify (ZERO step loops!)
                     idx = sa.indexer
-                    q_packed = sa.q_proj(attn_in)
+                    q_packed, pre_k_raw, pre_v_raw, pre_q_idx, pre_raw_k_idx = (
+                        sa.project_qkv_and_indexer(attn_in, need_idx=True)
+                    )
                     if sa.attn_output_gate:
                         q_unnorm, gate_flat = q_packed.unflatten(
                             -1, (sa.num_heads, sa.head_dim * 2)
@@ -5737,8 +5768,8 @@ class Qwen4_5PagedStateBridge:
                         bt_kv = _block_table_for_tag(attention_inputs, FULL_ATTN_KV_TAG)
                         active_kv = (bt_kv != 0).any(dim=1)
 
-                        k_raw = sa.k_proj(attn_in)
-                        v_raw = sa.v_proj(attn_in)
+                        k_raw = pre_k_raw if pre_k_raw is not None else sa.k_proj(attn_in)
+                        v_raw = pre_v_raw if pre_v_raw is not None else sa.v_proj(attn_in)
                         if sc_c is not None and sa.use_kv_sconv and sa.k_sconv is not None and sa.v_sconv is not None:
                             bt_sc = _block_table_for_tag(attention_inputs, FULL_ATTN_KV_SCONV_TAG)
                             sc_shape = (
@@ -5845,7 +5876,10 @@ class Qwen4_5PagedStateBridge:
                             INDEXER_STATE_TAG, lid, idx_st_c, bt_idx_st, idx_st_shape, torch.float32
                         )[:bsz]
                         active_idx = (bt_idx_st != 0).any(dim=1)
-                        q_idx, raw_k_idx = idx.project(attn_in)
+                        if pre_q_idx is not None and pre_raw_k_idx is not None:
+                            q_idx, raw_k_idx = pre_q_idx, pre_raw_k_idx
+                        else:
+                            q_idx, raw_k_idx = idx.project(attn_in)
                         write_qsa_verify_cache_gpu_(
                             raw_k_idx,
                             seq_lens_before_dev,
@@ -5894,7 +5928,10 @@ class Qwen4_5PagedStateBridge:
                         src_lid = layer.kv_cache_owner
                         src_kv_c, src_bt_kv, src_active_kv = full_kv_layer_caches[src_lid]
                         src_idx_kv_pool, src_bt_idx_kv = source_idx_caches[src_lid]
-                        q_idx, _ = idx.project(attn_in)
+                        if pre_q_idx is not None:
+                            q_idx = pre_q_idx
+                        else:
+                            q_idx, _ = idx.project(attn_in)
                         visible_lens = torch.where(
                             src_active_kv.unsqueeze(1),
                             seq_lens_before_dev.unsqueeze(1) + steps_i32 + 1,
@@ -5924,7 +5961,8 @@ class Qwen4_5PagedStateBridge:
                     out_flat = apply_attn_output_gate_flatten(attn_bhsd, gate_4d)
                     attn_out = sa._maybe_all_reduce(sa.o_proj(out_flat))
                 else:
-                    # Legacy dense MQA attention path (left untouched per scope directive)
+                    # Legacy dense MQA attention path (preproject Q+K+V across V steps in 1 GEMM)
+                    pre_vrf = sa.project_qkv_and_indexer(attn_in, need_idx=False)
                     attn_out_steps = []
                     if not layer.is_consumer:
                         kv_c = layer_caches[FULL_ATTN_KV_TAG]
@@ -5962,6 +6000,13 @@ class Qwen4_5PagedStateBridge:
                                     q_3d, kv_l, bt_kv=_bt, kv_lens=_vl, active_rows=_act
                                 )
 
+                            pre_step = (
+                                pre_vrf[0][:, step : step + 1],
+                                pre_vrf[1][:, step : step + 1] if pre_vrf[1] is not None else None,
+                                pre_vrf[2][:, step : step + 1] if pre_vrf[2] is not None else None,
+                                None,
+                                None,
+                            )
                             a_step = sa.forward_paged_decode(
                                 step_in,
                                 pos_step_2d,
@@ -5972,6 +6017,7 @@ class Qwen4_5PagedStateBridge:
                                 k_sconv_state=k_sc_st,
                                 v_sconv_state=v_sc_st,
                                 write_kv_fn=_store_decode_full_attn_kv_gpu,
+                                preprojected=pre_step,
                             )
                             attn_out_steps.append(a_step)
                             if stage_kv_sc is not None and k_sc_st is not None and v_sc_st is not None:
@@ -5996,8 +6042,19 @@ class Qwen4_5PagedStateBridge:
                                     q_3d, kv_l, bt_kv=_bt, kv_lens=_vl, active_rows=_act
                                 )
 
+                            pre_step = (
+                                pre_vrf[0][:, step : step + 1],
+                                None,
+                                None,
+                                None,
+                                None,
+                            )
                             a_step = sa.forward_paged_decode(
-                                step_in, pos_step_2d, src_kv_c, _dense_cons_step_fn
+                                step_in,
+                                pos_step_2d,
+                                src_kv_c,
+                                _dense_cons_step_fn,
+                                preprojected=pre_step,
                             )
                             attn_out_steps.append(a_step)
                     attn_out = torch.cat(attn_out_steps, dim=1)

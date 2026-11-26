@@ -22,7 +22,7 @@ Architecture (1109-bf16-re-mxfp4-ple-fp8):
 
 from __future__ import annotations
 
-from typing import Any, Optional, Tuple
+from typing import Callable, Any, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -512,26 +512,41 @@ def _gdn_recurrent_kernel(
     D_V: tl.constexpr,
     HAS_INIT_STATE: tl.constexpr,
     STORE_FINAL_STATE: tl.constexpr,
+    BLOCK_DV: tl.constexpr = 64,
+    IS_CONTIG_INIT: tl.constexpr = False,
+    IS_CONTIG_FS: tl.constexpr = False,
 ):
-    """Fused FP32 recurrent Gated Delta Rule kernel holding [D_K, D_V] state in registers."""
-    b = tl.program_id(0)
-    h_v = tl.program_id(1)
+    """Fused FP32 recurrent Gated Delta Rule kernel holding [D_K, BLOCK_DV] state in registers."""
+    b = tl.program_id(0).to(tl.int64)
+    h_v = tl.program_id(1).to(tl.int64)
+    dv_blk = tl.program_id(2).to(tl.int64)
     h_k = h_v // GQA_RATIO
 
     offs_k = tl.arange(0, D_K)
-    offs_v = tl.arange(0, D_V)
+    offs_v = dv_blk * BLOCK_DV + tl.arange(0, BLOCK_DV)
 
     if HAS_INIT_STATE:
-        s_ptrs = (
-            InitState_ptr
-            + b * stride_sb
-            + h_v * stride_shv
-            + offs_k[:, None] * stride_sk
-            + offs_v[None, :] * stride_sv
-        )
-        h = tl.load(s_ptrs).to(tl.float32)
+        if IS_CONTIG_INIT:
+            sk_init: tl.constexpr = D_V
+            s_ptrs = (
+                InitState_ptr
+                + b * stride_sb
+                + h_v * stride_shv
+                + offs_k[:, None] * sk_init
+                + offs_v[None, :]
+            )
+            h = tl.load(s_ptrs, eviction_policy="evict_first").to(tl.float32)
+        else:
+            s_ptrs = (
+                InitState_ptr
+                + b * stride_sb
+                + h_v * stride_shv
+                + offs_k[:, None] * stride_sk
+                + offs_v[None, :] * stride_sv
+            )
+            h = tl.load(s_ptrs).to(tl.float32)
     else:
-        h = tl.zeros((D_K, D_V), dtype=tl.float32)
+        h = tl.zeros((D_K, BLOCK_DV), dtype=tl.float32)
 
     q_head_base = Q_ptr + b * stride_qb + h_k * stride_qhk + offs_k * stride_qd
     k_head_base = K_ptr + b * stride_kb + h_k * stride_khk + offs_k * stride_kd
@@ -561,14 +576,25 @@ def _gdn_recurrent_kernel(
         tl.store(out_head_base + t * stride_ot, o_t.to(out_dtype))
 
     if STORE_FINAL_STATE:
-        fs_ptrs = (
-            FinalState_ptr
-            + b * stride_fsb
-            + h_v * stride_fshv
-            + offs_k[:, None] * stride_fsk
-            + offs_v[None, :] * stride_fsv
-        )
-        tl.store(fs_ptrs, h)
+        if IS_CONTIG_FS:
+            sk_fs: tl.constexpr = D_V
+            fs_ptrs = (
+                FinalState_ptr
+                + b * stride_fsb
+                + h_v * stride_fshv
+                + offs_k[:, None] * sk_fs
+                + offs_v[None, :]
+            )
+            tl.store(fs_ptrs, h, eviction_policy="evict_first")
+        else:
+            fs_ptrs = (
+                FinalState_ptr
+                + b * stride_fsb
+                + h_v * stride_fshv
+                + offs_k[:, None] * stride_fsk
+                + offs_v[None, :] * stride_fsv
+            )
+            tl.store(fs_ptrs, h)
 
 
 def gdn_recurrent_triton(
@@ -615,7 +641,17 @@ def gdn_recurrent_triton(
     init_ptr = initial_state if has_init else out
     fs_ptr = final_state if output_final_state else out
 
-    _gdn_recurrent_kernel[(bsz, num_v_heads)](
+    is_contig_init = (not has_init) or (
+        initial_state.stride(-1) == 1 and initial_state.stride(-2) == d_v
+    )
+    is_contig_fs = (not output_final_state) or (
+        final_state.stride(-1) == 1 and final_state.stride(-2) == d_v
+    )
+    # Keep (BLOCK_DV=d_v, num_warps=4) matching _yoco_gdn_decode_readout_kernel so
+    # tl.sum(h * q_t[:, None], axis=0) stays bitwise identical between YoCo ON and OFF.
+    block_dv = d_v
+
+    _gdn_recurrent_kernel[(bsz, num_v_heads, 1)](
         q,
         k,
         v,
@@ -662,6 +698,9 @@ def gdn_recurrent_triton(
         D_V=d_v,
         HAS_INIT_STATE=has_init,
         STORE_FINAL_STATE=output_final_state,
+        BLOCK_DV=block_dv,
+        IS_CONTIG_INIT=is_contig_init,
+        IS_CONTIG_FS=is_contig_fs,
         num_warps=4,
     )
     return out, final_state
@@ -1735,6 +1774,9 @@ def _gdn_verify_scan_kernel(
     BLOCK_DV: tl.constexpr,
     HAS_INIT_STATE: tl.constexpr,
     HAS_STAGE_STATE: tl.constexpr,
+    IS_CONTIG_INIT: tl.constexpr = False,
+    IS_CONTIG_STAGE: tl.constexpr = False,
+    EVICT_ST: tl.constexpr = False,
 ):
     """Single-launch GDN verify scan keeping [D_K, BLOCK_DV] FP32 SSM state in registers over V steps."""
     b = tl.program_id(0).to(tl.int64)
@@ -1746,13 +1788,27 @@ def _gdn_verify_scan_kernel(
     offs_v = dv_blk * BLOCK_DV + tl.arange(0, BLOCK_DV)
 
     if HAS_INIT_STATE:
-        h = tl.load(
-            InitState_ptr
-            + b * stride_sb
-            + h_v * stride_shv
-            + offs_k[:, None] * stride_sk
-            + offs_v[None, :] * stride_sv
-        ).to(tl.float32)
+        if IS_CONTIG_INIT:
+            sk_init: tl.constexpr = D_V
+            init_ptrs = (
+                InitState_ptr
+                + b * stride_sb
+                + h_v * stride_shv
+                + offs_k[:, None] * sk_init
+                + offs_v[None, :]
+            )
+        else:
+            init_ptrs = (
+                InitState_ptr
+                + b * stride_sb
+                + h_v * stride_shv
+                + offs_k[:, None] * stride_sk
+                + offs_v[None, :] * stride_sv
+            )
+        if EVICT_ST:
+            h = tl.load(init_ptrs, eviction_policy="evict_first").to(tl.float32)
+        else:
+            h = tl.load(init_ptrs).to(tl.float32)
     else:
         h = tl.zeros((D_K, BLOCK_DV), dtype=tl.float32)
 
@@ -1762,13 +1818,23 @@ def _gdn_verify_scan_kernel(
     g_base = G_ptr + b * stride_gb + h_v * stride_ghv
     b_base = Beta_ptr + b * stride_bb + h_v * stride_bhv
     o_base = Out_ptr + b * stride_ob + h_v * stride_ohv + offs_v * stride_od
-    st_base = (
-        StageState_ptr
-        + b * stride_ssb
-        + h_v * stride_sshv
-        + offs_k[:, None] * stride_ssk
-        + offs_v[None, :] * stride_ssvv
-    )
+    if IS_CONTIG_STAGE:
+        sk_stg: tl.constexpr = D_V
+        st_base = (
+            StageState_ptr
+            + b * stride_ssb
+            + h_v * stride_sshv
+            + offs_k[:, None] * sk_stg
+            + offs_v[None, :]
+        )
+    else:
+        st_base = (
+            StageState_ptr
+            + b * stride_ssb
+            + h_v * stride_sshv
+            + offs_k[:, None] * stride_ssk
+            + offs_v[None, :] * stride_ssvv
+        )
     out_dtype = Out_ptr.dtype.element_ty
 
     for t in tl.static_range(V_STEPS):
@@ -1789,7 +1855,10 @@ def _gdn_verify_scan_kernel(
 
         tl.store(o_base + t * stride_ov, o_t.to(out_dtype))
         if HAS_STAGE_STATE:
-            tl.store(st_base + t * stride_ssv, h)
+            if EVICT_ST:
+                tl.store(st_base + t * stride_ssv, h, eviction_policy="evict_first")
+            else:
+                tl.store(st_base + t * stride_ssv, h)
 
 
 @triton.jit
@@ -1817,6 +1886,8 @@ def _yoco_gdn_verify_readout_kernel(
     D_K: tl.constexpr,
     D_V: tl.constexpr,
     BLOCK_DV: tl.constexpr = 64,
+    BK: tl.constexpr = 0,
+    IS_S_CONTIG: tl.constexpr = False,
 ):
     """Fused batched V-step YoCo GDN verify readout against source per-step SSM states."""
     bv = tl.program_id(0).to(tl.int64)
@@ -1828,23 +1899,35 @@ def _yoco_gdn_verify_readout_kernel(
 
     offs_k = tl.arange(0, D_K)
     offs_v = dv * BLOCK_DV + tl.arange(0, BLOCK_DV)
+    q_row = Q_ptr + b * stride_qb + t * stride_qv + h_k * stride_qhk
+    q_full = tl.load(q_row + offs_k * stride_qd).to(tl.float32)
+    q_inv = tl.rsqrt(tl.sum(q_full * q_full, axis=0) + eps) * scale
 
-    q = tl.load(
-        Q_ptr + b * stride_qb + t * stride_qv + h_k * stride_qhk + offs_k * stride_qd
-    ).to(tl.float32)
-    q_scaled = q * (tl.rsqrt(tl.sum(q * q, axis=0) + eps) * scale)
+    if BK > 0 and IS_S_CONTIG:
+        s_base = S_ptr + b * stride_sb + t * stride_sv + h_v * stride_shv
+        out = tl.zeros((BLOCK_DV,), dtype=tl.float32)
+        sk_s: tl.constexpr = D_V
+        for k0 in tl.static_range(0, D_K, BK):
+            ok = k0 + tl.arange(0, BK)
+            q_k = tl.load(q_row + ok * stride_qd).to(tl.float32) * q_inv
+            s_k = tl.load(
+                s_base + ok[:, None] * sk_s + offs_v[None, :],
+                eviction_policy="evict_first",
+            ).to(tl.float32)
+            out += tl.sum(s_k * q_k[:, None], axis=0)
+    else:
+        q_scaled = q_full * q_inv
+        s = tl.load(
+            S_ptr
+            + b * stride_sb
+            + t * stride_sv
+            + h_v * stride_shv
+            + offs_k[:, None] * stride_sk
+            + offs_v[None, :] * stride_svv,
+            eviction_policy="evict_first",
+        ).to(tl.float32)
+        out = tl.sum(s * q_scaled[:, None], axis=0)
 
-    s = tl.load(
-        S_ptr
-        + b * stride_sb
-        + t * stride_sv
-        + h_v * stride_shv
-        + offs_k[:, None] * stride_sk
-        + offs_v[None, :] * stride_svv,
-        eviction_policy="evict_first",
-    ).to(tl.float32)
-
-    out = tl.sum(s * q_scaled[:, None], axis=0)
     tl.store(
         Out_ptr + b * stride_ob + t * stride_ov + h_v * stride_ohv + offs_v * stride_od,
         out.to(Out_ptr.dtype.element_ty),
@@ -1960,83 +2043,81 @@ def _gdn_chunk_prep_wy_ragged_kernel(
     k_2 = k_2 * tl.rsqrt(tl.sum(k_2 * k_2, axis=1) + l2_eps)[:, None]
     k_3 = k_3 * tl.rsqrt(tl.sum(k_3 * k_3, axis=1) + l2_eps)[:, None]
 
-    v_0 = tl.load(v_base + t_0[:, None] * stride_vn + ov[None, :] * stride_vd, mask=m_0[:, None], other=0.0).to(tl.float32)
-    v_1 = tl.load(v_base + t_1[:, None] * stride_vn + ov[None, :] * stride_vd, mask=m_1[:, None], other=0.0).to(tl.float32)
-    v_2 = tl.load(v_base + t_2[:, None] * stride_vn + ov[None, :] * stride_vd, mask=m_2[:, None], other=0.0).to(tl.float32)
-    v_3 = tl.load(v_base + t_3[:, None] * stride_vn + ov[None, :] * stride_vd, mask=m_3[:, None], other=0.0).to(tl.float32)
-
-    # Scaled RHS for W and U
-    ks_0 = k_0 * (beta_0 * tl.exp(G_0))[:, None]
-    ks_1 = k_1 * (beta_1 * tl.exp(G_1))[:, None]
-    ks_2 = k_2 * (beta_2 * tl.exp(G_2))[:, None]
-    ks_3 = k_3 * (beta_3 * tl.exp(G_3))[:, None]
-
-    vs_0 = v_0 * beta_0[:, None]
-    vs_1 = v_1 * beta_1[:, None]
-    vs_2 = v_2 * beta_2[:, None]
-    vs_3 = v_3 * beta_3[:, None]
-
-    # Block 0: (I + A_00) W_0 = ks_0
+    # Phase A: lower-triangular coupling blocks A_ij and diagonal inverses M_ii (no V live yet)
     diff_00 = tl.where(tril_mask, G_0[:, None] - G_0[None, :], -1e9)
     A_00 = tl.where(tril_mask, beta_0[:, None] * tl.exp(diff_00) * tl.dot(k_0, tl.trans(k_0), input_precision="tf32"), 0.0)
     M_00 = _invert_unit_tril_16(A_00)
-    W_0 = tl.dot(M_00, ks_0, input_precision="tf32")
-    U_0 = tl.dot(M_00, vs_0, input_precision="tf32")
 
-    # Block 1: (I + A_11) W_1 = ks_1 - A_10 W_0
     A_10 = beta_1[:, None] * tl.exp(G_1[:, None] - G_0[None, :]) * tl.dot(k_1, tl.trans(k_0), input_precision="tf32")
     diff_11 = tl.where(tril_mask, G_1[:, None] - G_1[None, :], -1e9)
     A_11 = tl.where(tril_mask, beta_1[:, None] * tl.exp(diff_11) * tl.dot(k_1, tl.trans(k_1), input_precision="tf32"), 0.0)
     M_11 = _invert_unit_tril_16(A_11)
-    W_1 = tl.dot(M_11, ks_1 - tl.dot(A_10, W_0, input_precision="tf32"), input_precision="tf32")
-    U_1 = tl.dot(M_11, vs_1 - tl.dot(A_10, U_0, input_precision="tf32"), input_precision="tf32")
 
-    # Block 2: (I + A_22) W_2 = ks_2 - A_20 W_0 - A_21 W_1
     A_20 = beta_2[:, None] * tl.exp(G_2[:, None] - G_0[None, :]) * tl.dot(k_2, tl.trans(k_0), input_precision="tf32")
     A_21 = beta_2[:, None] * tl.exp(G_2[:, None] - G_1[None, :]) * tl.dot(k_2, tl.trans(k_1), input_precision="tf32")
     diff_22 = tl.where(tril_mask, G_2[:, None] - G_2[None, :], -1e9)
     A_22 = tl.where(tril_mask, beta_2[:, None] * tl.exp(diff_22) * tl.dot(k_2, tl.trans(k_2), input_precision="tf32"), 0.0)
     M_22 = _invert_unit_tril_16(A_22)
-    rhs_w2 = ks_2 - tl.dot(A_20, W_0, input_precision="tf32") - tl.dot(A_21, W_1, input_precision="tf32")
-    rhs_u2 = vs_2 - tl.dot(A_20, U_0, input_precision="tf32") - tl.dot(A_21, U_1, input_precision="tf32")
-    W_2 = tl.dot(M_22, rhs_w2, input_precision="tf32")
-    U_2 = tl.dot(M_22, rhs_u2, input_precision="tf32")
 
-    # Block 3: (I + A_33) W_3 = ks_3 - A_30 W_0 - A_31 W_1 - A_32 W_2
     A_30 = beta_3[:, None] * tl.exp(G_3[:, None] - G_0[None, :]) * tl.dot(k_3, tl.trans(k_0), input_precision="tf32")
     A_31 = beta_3[:, None] * tl.exp(G_3[:, None] - G_1[None, :]) * tl.dot(k_3, tl.trans(k_1), input_precision="tf32")
     A_32 = beta_3[:, None] * tl.exp(G_3[:, None] - G_2[None, :]) * tl.dot(k_3, tl.trans(k_2), input_precision="tf32")
     diff_33 = tl.where(tril_mask, G_3[:, None] - G_3[None, :], -1e9)
     A_33 = tl.where(tril_mask, beta_3[:, None] * tl.exp(diff_33) * tl.dot(k_3, tl.trans(k_3), input_precision="tf32"), 0.0)
     M_33 = _invert_unit_tril_16(A_33)
+
+    # Phase B: solve W_0..W_3 and store immediately to free K/W register pressure
+    w_base = W_ptr + h_v * stride_wh + c * stride_wc
+    w_dtype = W_ptr.dtype.element_ty
+
+    ks_0 = k_0 * (beta_0 * tl.exp(G_0))[:, None]
+    W_0 = tl.dot(M_00, ks_0, input_precision="tf32")
+    tl.store(w_base + o16[:, None] * stride_wt + ok[None, :] * stride_wd, W_0.to(w_dtype))
+
+    ks_1 = k_1 * (beta_1 * tl.exp(G_1))[:, None]
+    W_1 = tl.dot(M_11, ks_1 - tl.dot(A_10, W_0, input_precision="tf32"), input_precision="tf32")
+    tl.store(w_base + (16 + o16)[:, None] * stride_wt + ok[None, :] * stride_wd, W_1.to(w_dtype))
+
+    ks_2 = k_2 * (beta_2 * tl.exp(G_2))[:, None]
+    rhs_w2 = ks_2 - tl.dot(A_20, W_0, input_precision="tf32") - tl.dot(A_21, W_1, input_precision="tf32")
+    W_2 = tl.dot(M_22, rhs_w2, input_precision="tf32")
+    tl.store(w_base + (32 + o16)[:, None] * stride_wt + ok[None, :] * stride_wd, W_2.to(w_dtype))
+
+    ks_3 = k_3 * (beta_3 * tl.exp(G_3))[:, None]
     rhs_w3 = (
         ks_3
         - tl.dot(A_30, W_0, input_precision="tf32")
         - tl.dot(A_31, W_1, input_precision="tf32")
         - tl.dot(A_32, W_2, input_precision="tf32")
     )
+    W_3 = tl.dot(M_33, rhs_w3, input_precision="tf32")
+    tl.store(w_base + (48 + o16)[:, None] * stride_wt + ok[None, :] * stride_wd, W_3.to(w_dtype))
+
+    # Phase C: stream v_0..v_3 one tile at a time and store U_0..U_3 immediately
+    u_base = U_ptr + h_v * stride_uh + c * stride_uc
+    u_dtype = U_ptr.dtype.element_ty
+
+    v_0 = tl.load(v_base + t_0[:, None] * stride_vn + ov[None, :] * stride_vd, mask=m_0[:, None], other=0.0).to(tl.float32)
+    U_0 = tl.dot(M_00, v_0 * beta_0[:, None], input_precision="tf32")
+    tl.store(u_base + o16[:, None] * stride_ut + ov[None, :] * stride_ud, U_0.to(u_dtype))
+
+    v_1 = tl.load(v_base + t_1[:, None] * stride_vn + ov[None, :] * stride_vd, mask=m_1[:, None], other=0.0).to(tl.float32)
+    U_1 = tl.dot(M_11, v_1 * beta_1[:, None] - tl.dot(A_10, U_0, input_precision="tf32"), input_precision="tf32")
+    tl.store(u_base + (16 + o16)[:, None] * stride_ut + ov[None, :] * stride_ud, U_1.to(u_dtype))
+
+    v_2 = tl.load(v_base + t_2[:, None] * stride_vn + ov[None, :] * stride_vd, mask=m_2[:, None], other=0.0).to(tl.float32)
+    rhs_u2 = v_2 * beta_2[:, None] - tl.dot(A_20, U_0, input_precision="tf32") - tl.dot(A_21, U_1, input_precision="tf32")
+    U_2 = tl.dot(M_22, rhs_u2, input_precision="tf32")
+    tl.store(u_base + (32 + o16)[:, None] * stride_ut + ov[None, :] * stride_ud, U_2.to(u_dtype))
+
+    v_3 = tl.load(v_base + t_3[:, None] * stride_vn + ov[None, :] * stride_vd, mask=m_3[:, None], other=0.0).to(tl.float32)
     rhs_u3 = (
-        vs_3
+        v_3 * beta_3[:, None]
         - tl.dot(A_30, U_0, input_precision="tf32")
         - tl.dot(A_31, U_1, input_precision="tf32")
         - tl.dot(A_32, U_2, input_precision="tf32")
     )
-    W_3 = tl.dot(M_33, rhs_w3, input_precision="tf32")
     U_3 = tl.dot(M_33, rhs_u3, input_precision="tf32")
-
-    w_base = W_ptr + h_v * stride_wh + c * stride_wc
-    u_base = U_ptr + h_v * stride_uh + c * stride_uc
-    w_dtype = W_ptr.dtype.element_ty
-    u_dtype = U_ptr.dtype.element_ty
-
-    tl.store(w_base + o16[:, None] * stride_wt + ok[None, :] * stride_wd, W_0.to(w_dtype))
-    tl.store(w_base + (16 + o16)[:, None] * stride_wt + ok[None, :] * stride_wd, W_1.to(w_dtype))
-    tl.store(w_base + (32 + o16)[:, None] * stride_wt + ok[None, :] * stride_wd, W_2.to(w_dtype))
-    tl.store(w_base + (48 + o16)[:, None] * stride_wt + ok[None, :] * stride_wd, W_3.to(w_dtype))
-
-    tl.store(u_base + o16[:, None] * stride_ut + ov[None, :] * stride_ud, U_0.to(u_dtype))
-    tl.store(u_base + (16 + o16)[:, None] * stride_ut + ov[None, :] * stride_ud, U_1.to(u_dtype))
-    tl.store(u_base + (32 + o16)[:, None] * stride_ut + ov[None, :] * stride_ud, U_2.to(u_dtype))
     tl.store(u_base + (48 + o16)[:, None] * stride_ut + ov[None, :] * stride_ud, U_3.to(u_dtype))
 
 
@@ -3256,7 +3337,13 @@ class Qwen4_5GatedDeltaNet(nn.Module):
         """Run fused unpack + K=4 causal dwconv1d (+ in-place conv_state update) on [B, T, P]."""
         bsz, seq_len, _ = projected.shape
         device = projected.device
-        proj_2d = projected.contiguous().view(bsz * seq_len, -1)
+        if (
+            projected.stride(-1) == 1
+            and (bsz == 1 or projected.stride(0) == seq_len * projected.stride(1))
+        ):
+            proj_2d = projected.view(bsz * seq_len, projected.shape[-1])
+        else:
+            proj_2d = projected.contiguous().view(bsz * seq_len, -1)
         block_t = 32
         nt_per_req = (seq_len + block_t - 1) // block_t
         cu_seqlens = torch.arange(
@@ -3319,9 +3406,18 @@ class Qwen4_5GatedDeltaNet(nn.Module):
         )
         has_init_s = init_ssm_state is not None
         has_stage_s = stage_ssm_state is not None
+        is_contig_init = (not has_init_s) or (
+            init_ssm_state.stride(-1) == 1 and init_ssm_state.stride(-2) == self.head_v_dim
+        )
+        is_contig_stage = (not has_stage_s) or (
+            stage_ssm_state.stride(-1) == 1 and stage_ssm_state.stride(-2) == self.head_v_dim
+        )
+        use_fast_scan = (
+            bsz >= 2 and is_contig_init and is_contig_stage and self.head_v_dim % 32 == 0
+        )
         block_dv = (
             32
-            if (bsz == 1 and self.head_v_dim % 32 == 0)
+            if (use_fast_scan or (bsz == 1 and self.head_v_dim % 32 == 0))
             else (16 if self.head_v_dim % 16 == 0 else self.head_v_dim)
         )
         _gdn_verify_scan_kernel[(bsz, self.num_v_heads, self.head_v_dim // block_dv)](
@@ -3373,6 +3469,9 @@ class Qwen4_5GatedDeltaNet(nn.Module):
             BLOCK_DV=block_dv,
             HAS_INIT_STATE=has_init_s,
             HAS_STAGE_STATE=has_stage_s,
+            IS_CONTIG_INIT=is_contig_init,
+            IS_CONTIG_STAGE=is_contig_stage,
+            EVICT_ST=use_fast_scan,
             num_warps=1 if bsz >= 2 else (8 if block_dv <= 16 else 2),
         )
         return core_out
@@ -3477,11 +3576,26 @@ class Qwen4_5GatedDeltaNet(nn.Module):
                     device=device,
                 )
                 s_st = shared.ssm_state
-                block_dv_ro = (
-                    32
-                    if (bsz * verify_w * self.num_v_heads >= 512 and self.head_v_dim % 32 == 0)
-                    else self.head_v_dim
+                is_s_contig = s_st.stride(-1) == 1 and s_st.stride(-2) == self.head_v_dim
+                use_bk8_ro = (
+                    is_s_contig
+                    and self.head_k_dim % 8 == 0
+                    and bsz * verify_w * self.num_v_heads >= 64
                 )
+                if use_bk8_ro:
+                    block_dv_ro = self.head_v_dim
+                    bk_ro = 8
+                    nw_ro = 1
+                    ro_kw = {"num_stages": 2}
+                else:
+                    block_dv_ro = (
+                        32
+                        if (bsz * verify_w * self.num_v_heads >= 512 and self.head_v_dim % 32 == 0)
+                        else self.head_v_dim
+                    )
+                    bk_ro = 0
+                    nw_ro = 1 if (block_dv_ro < 64 or bsz >= 2) else 2
+                    ro_kw = {}
                 _yoco_gdn_verify_readout_kernel[
                     (bsz * verify_w, self.num_v_heads, self.head_v_dim // block_dv_ro)
                 ](
@@ -3508,7 +3622,10 @@ class Qwen4_5GatedDeltaNet(nn.Module):
                     D_K=self.head_k_dim,
                     D_V=self.head_v_dim,
                     BLOCK_DV=block_dv_ro,
-                    num_warps=1 if (block_dv_ro < 64 or bsz >= 2) else 2,
+                    BK=bk_ro,
+                    IS_S_CONTIG=is_s_contig,
+                    num_warps=nw_ro,
+                    **ro_kw,
                 )
             else:
                 core_out = self._launch_gdn_verify_scan(

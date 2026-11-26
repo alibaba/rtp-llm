@@ -360,6 +360,128 @@ def _ple_gather_shards_kernel(
     )
 
 
+@triton.jit(do_not_specialize=["N", "SHARD_ROWS"])
+def _ple_gather_shards_u64_kernel(
+    IDS_PTR,
+    SHARD_PTRS,
+    SCALE_PTR,
+    OUT_PTR,
+    N,
+    SHARD_ROWS,
+    TOTAL_SHARDS: tl.constexpr,
+    D: tl.constexpr,
+    BD: tl.constexpr,
+    BD64: tl.constexpr,
+    BR: tl.constexpr,
+    EVICT_FIRST: tl.constexpr,
+):
+    """Vectorized uint64 FP8 shard gather for 1D / general ngram_ids (D % 8 == 0)."""
+    D64: tl.constexpr = D // 8
+    rows = tl.program_id(0).to(tl.int64) * BR + tl.arange(0, BR).to(tl.int64)
+    cols64 = tl.arange(0, BD64).to(tl.int64)
+    row_mask = rows < N
+    col64_mask = cols64 < D64
+
+    ids = tl.load(IDS_PTR + rows, mask=row_mask, other=0).to(tl.int64)
+    sr64 = SHARD_ROWS.to(tl.int64)
+    shard_idx = ids // sr64
+    local_row = ids % sr64
+    in_range = row_mask & (ids >= 0) & (shard_idx < TOTAL_SHARDS)
+    addr = tl.load(SHARD_PTRS + shard_idx, mask=in_range, other=0)
+    valid = in_range & (addr != 0)
+
+    base = addr.to(tl.pointer_type(tl.uint64))
+    d64_stride = tl.full((), D64, tl.int64)
+    ptrs = base[:, None] + local_row[:, None] * d64_stride + cols64[None, :]
+    load_mask = valid[:, None] & col64_mask[None, :]
+    if EVICT_FIRST:
+        packed = tl.load(ptrs, mask=load_mask, other=0, eviction_policy="evict_first").to(tl.uint64)
+    else:
+        packed = tl.load(ptrs, mask=load_mask, other=0).to(tl.uint64)
+
+    shifts = tl.arange(0, 8).to(tl.uint64) * 8
+    bytes_u8 = ((packed[:, :, None] >> shifts[None, None, :]) & 0xFF).to(tl.uint8)
+    out_ty = OUT_PTR.dtype.element_ty
+    scale = tl.load(SCALE_PTR).to(out_ty)
+    vals = (bytes_u8.to(tl.float8e4nv, bitcast=True).to(out_ty) * scale).reshape(BR, BD64 * 8)
+    d_stride = tl.full((), D, tl.int64)
+    if BD64 * 8 == D:
+        tl.store(
+            OUT_PTR + rows[:, None] * d_stride + tl.arange(0, D).to(tl.int64)[None, :],
+            vals,
+            mask=row_mask[:, None],
+        )
+    else:
+        cols_pad = tl.arange(0, BD64 * 8).to(tl.int64)
+        tl.store(
+            OUT_PTR + rows[:, None] * d_stride + cols_pad[None, :],
+            vals,
+            mask=row_mask[:, None] & (cols_pad[None, :] < D),
+        )
+
+
+@triton.jit(do_not_specialize=["M", "SHARD_ROWS"])
+def _ple_gather_head_grouped_u64_kernel(
+    IDS_PTR,
+    SHARD_PTRS,
+    SCALE_PTR,
+    OUT_PTR,
+    M,
+    SHARD_ROWS,
+    TOTAL_SHARDS: tl.constexpr,
+    H_NG: tl.constexpr,
+    D: tl.constexpr,
+    BD64: tl.constexpr,
+    BR: tl.constexpr,
+    EVICT_FIRST: tl.constexpr,
+):
+    """Head-grouped uint64 FP8 gather: groups token lookups by ngram head for CPU-UVA/L2 locality."""
+    D64: tl.constexpr = D // 8
+    toks = tl.program_id(0).to(tl.int64) * BR + tl.arange(0, BR).to(tl.int64)
+    h = tl.program_id(1).to(tl.int64)
+    cols64 = tl.arange(0, BD64).to(tl.int64)
+    tok_mask = toks < M
+    col64_mask = cols64 < D64
+
+    ids = tl.load(IDS_PTR + toks * H_NG + h, mask=tok_mask, other=0).to(tl.int64)
+    sr64 = SHARD_ROWS.to(tl.int64)
+    shard_idx = ids // sr64
+    local_row = ids % sr64
+    in_range = tok_mask & (ids >= 0) & (shard_idx < TOTAL_SHARDS)
+    addr = tl.load(SHARD_PTRS + shard_idx, mask=in_range, other=0)
+    valid = in_range & (addr != 0)
+
+    base = addr.to(tl.pointer_type(tl.uint64))
+    d64_stride = tl.full((), D64, tl.int64)
+    ptrs = base[:, None] + local_row[:, None] * d64_stride + cols64[None, :]
+    load_mask = valid[:, None] & col64_mask[None, :]
+    if EVICT_FIRST:
+        packed = tl.load(ptrs, mask=load_mask, other=0, eviction_policy="evict_first").to(tl.uint64)
+    else:
+        packed = tl.load(ptrs, mask=load_mask, other=0).to(tl.uint64)
+
+    shifts = tl.arange(0, 8).to(tl.uint64) * 8
+    bytes_u8 = ((packed[:, :, None] >> shifts[None, None, :]) & 0xFF).to(tl.uint8)
+    out_ty = OUT_PTR.dtype.element_ty
+    scale = tl.load(SCALE_PTR).to(out_ty)
+    vals = (bytes_u8.to(tl.float8e4nv, bitcast=True).to(out_ty) * scale).reshape(BR, BD64 * 8)
+    d_stride = tl.full((), D, tl.int64)
+    out_row = toks * H_NG + h
+    if BD64 * 8 == D:
+        tl.store(
+            OUT_PTR + out_row[:, None] * d_stride + tl.arange(0, D).to(tl.int64)[None, :],
+            vals,
+            mask=tok_mask[:, None],
+        )
+    else:
+        cols_pad = tl.arange(0, BD64 * 8).to(tl.int64)
+        tl.store(
+            OUT_PTR + out_row[:, None] * d_stride + cols_pad[None, :],
+            vals,
+            mask=tok_mask[:, None] & (cols_pad[None, :] < D),
+        )
+
+
 @triton.jit
 def _ple_gate_and_norm_kernel(
     KEY_PTR,
@@ -570,6 +692,7 @@ def ple_gather_fp8_triton(
     is_bf16: bool = False,
     is_cpu_uva: bool = False,
     out_dtype: torch.dtype = torch.bfloat16,
+    allow_u64_vec: bool = True,
 ) -> torch.Tensor:
     """Gather rows from CUDA or CPU-UVA sharded/flat table and dequantize FP8 -> out_dtype."""
     ids_c = ngram_ids.contiguous()
@@ -577,6 +700,48 @@ def ple_gather_fp8_triton(
     n = ids_c.numel()
     out = torch.empty((*ids_c.shape, head_dim), device=ids_c.device, dtype=out_dtype)
     if n == 0:
+        return out
+
+    if allow_u64_vec and is_fp8 and not is_bf16 and head_dim % 8 == 0 and head_dim >= 16:
+        bd64 = max(2, triton.next_power_of_2(head_dim // 8))
+        h_ng = int(ids_c.shape[-1]) if ids_c.ndim >= 2 else 1
+        if h_ng > 1 and n % h_ng == 0:
+            m_tok = n // h_ng
+            br = 8 if m_tok >= 64 else (4 if m_tok >= 8 else 1)
+            nw = 4 if (br >= 4 or head_dim >= 256) else 2
+            _ple_gather_head_grouped_u64_kernel[(triton.cdiv(m_tok, br), h_ng)](
+                ids_c,
+                pointer_table,
+                weight_scale,
+                out,
+                M=m_tok,
+                SHARD_ROWS=shard_rows,
+                TOTAL_SHARDS=total_shards,
+                H_NG=h_ng,
+                D=head_dim,
+                BD64=bd64,
+                BR=br,
+                EVICT_FIRST=is_cpu_uva or n >= 4096,
+                num_warps=nw,
+            )
+            return out
+        rows_per_cta = 8 if n >= 64 else 4
+        bd = max(16, triton.next_power_of_2(head_dim))
+        _ple_gather_shards_u64_kernel[(triton.cdiv(n, rows_per_cta),)](
+            ids_c,
+            pointer_table,
+            weight_scale,
+            out,
+            N=n,
+            SHARD_ROWS=shard_rows,
+            TOTAL_SHARDS=total_shards,
+            D=head_dim,
+            BD=bd,
+            BD64=bd64,
+            BR=rows_per_cta,
+            EVICT_FIRST=is_cpu_uva or n >= 4096,
+            num_warps=4,
+        )
         return out
 
     rows_per_cta = 4 if (is_cpu_uva or n <= 64) else 8
@@ -972,6 +1137,7 @@ class Qwen4_5PLELayer(nn.Module):
         self._table_enable_cpu_uva: bool = True
         self._pointer_cache_device: Optional[torch.device] = None
         self._pointer_table: Optional[torch.Tensor] = None
+        self._pointer_u64_aligned: bool = True
         self._weight_scale_cuda: Optional[torch.Tensor] = None
         self._cpu_uva_active: bool = False
 
@@ -1130,6 +1296,7 @@ class Qwen4_5PLELayer(nn.Module):
                     ptrs[self._shard_offset + idx] = int(s.data_ptr())
             else:
                 ptrs = [int(s.data_ptr()) for s in shards]
+            self._pointer_u64_aligned = all((p & 7) == 0 for p in ptrs)
             self._pointer_table = torch.tensor(ptrs, dtype=torch.int64, device=target_device)
             return self._pointer_table
 
@@ -1139,6 +1306,7 @@ class Qwen4_5PLELayer(nn.Module):
             )
             if resolved is not None:
                 self._ngram_shards, self._pointer_table = resolved
+                self._pointer_u64_aligned = all((int(s.data_ptr()) & 7) == 0 for s in self._ngram_shards)
                 self._cpu_uva_active = True
                 return self._pointer_table
         return None
@@ -1270,6 +1438,7 @@ class Qwen4_5PLELayer(nn.Module):
                 is_bf16=is_bf16,
                 is_cpu_uva=self._cpu_uva_active,
                 out_dtype=dtype,
+                allow_u64_vec=self._pointer_u64_aligned,
             )
             out = gathered.reshape(B, T, self.ple_embed_dim)
             if self._total_shards > len(shards):

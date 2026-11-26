@@ -589,19 +589,27 @@ class TestQwen4_5E2E(unittest.TestCase):
         _stabilize_router_margins(m_auto)
         rtp_view = Qwen4_5RTPModel.from_causal_lm(m_auto, parallelism_config=ParallelismConfig())
         qkvz_ptr = m_auto.model.layers[1].linear_attn.in_proj_qkvz.weight.data_ptr()
-        qproj_ptr = m_auto.model.layers[3].self_attn.q_proj.weight.data_ptr()
+        ba_ptr = m_auto.model.layers[1].linear_attn.in_proj_ba.weight.data_ptr()
         lm_ptr = m_auto.lm_head.weight.data_ptr()
         m_auto.prepare_weights(dense_linear_mode="auto")
 
+        la1 = m_auto.model.layers[1].linear_attn
+        sa3 = m_auto.model.layers[3].self_attn
         self.assertIsInstance(m_auto.lm_head, SM100FP8Linear)
         self.assertIs(rtp_view.lm_head, m_auto.lm_head)
         self.assertEqual(m_auto.lm_head.weight.data_ptr(), lm_ptr)
-        self.assertIsInstance(m_auto.model.layers[1].linear_attn.in_proj_qkvz, SM100FP8Linear)
-        self.assertIsInstance(m_auto.model.layers[1].linear_attn.out_proj, SM100FP8Linear)
-        self.assertEqual(m_auto.model.layers[1].linear_attn.in_proj_qkvz.weight.data_ptr(), qkvz_ptr)
-        self.assertIsInstance(m_auto.model.layers[3].self_attn.q_proj, SM100FP8Linear)
-        self.assertIsInstance(m_auto.model.layers[3].self_attn.o_proj, SM100FP8Linear)
-        self.assertEqual(m_auto.model.layers[3].self_attn.q_proj.weight.data_ptr(), qproj_ptr)
+        # R5-fix: GDN stays split (in_proj_qkvz SM100FP8Linear, in_proj_ba BF16); QSA keeps fused qkv_idx_proj
+        self.assertIsNone(getattr(la1, "in_proj_qkvz_ba", None))
+        self.assertIsInstance(la1.in_proj_qkvz, SM100FP8Linear)
+        self.assertNotIsInstance(la1.in_proj_ba, SM100FP8Linear)
+        self.assertEqual(la1.in_proj_qkvz.weight.data_ptr(), qkvz_ptr)
+        self.assertEqual(la1.in_proj_ba.weight.data_ptr(), ba_ptr)
+        self.assertIsInstance(la1.out_proj, SM100FP8Linear)
+        self.assertIsInstance(sa3.qkv_idx_proj, SM100FP8Linear)
+        self.assertNotIsInstance(sa3.q_proj, SM100FP8Linear)
+        self.assertEqual(sa3.q_proj.weight.data_ptr(), sa3.qkv_idx_proj.weight.data_ptr())
+        self.assertEqual(sa3.indexer.qk_proj.data_ptr(), sa3.indexer.index_qk_proj.weight.data_ptr())
+        self.assertIsInstance(sa3.o_proj, SM100FP8Linear)
         self.assertIsNotNone(m_auto.model.layers[0].mlp._fp8_gate_up)
         self.assertIsNotNone(m_auto.model.layers[1].mlp._fp8_latent_down_gate)
 
@@ -624,10 +632,14 @@ class TestQwen4_5E2E(unittest.TestCase):
         self.assertTrue(m_auto.model.layers[0]._ffn_sconv_has_clip)
         # R4: Only lm_head opts into allow_decode_scaled_mm=True; wide non-lm_head stay BF16 at M<=512
         self.assertTrue(m_auto.lm_head._allow_decode_scaled_mm)
-        self.assertFalse(m_auto.model.layers[1].linear_attn.in_proj_qkvz._allow_decode_scaled_mm)
-        self.assertFalse(m_auto.model.layers[1].linear_attn.out_proj._allow_decode_scaled_mm)
-        self.assertFalse(m_auto.model.layers[3].self_attn.q_proj._allow_decode_scaled_mm)
-        self.assertFalse(m_auto.model.layers[3].self_attn.o_proj._allow_decode_scaled_mm)
+        self.assertFalse(la1.in_proj_qkvz._allow_decode_scaled_mm)
+        self.assertFalse(la1.out_proj._allow_decode_scaled_mm)
+        self.assertFalse(sa3.qkv_idx_proj._allow_decode_scaled_mm)
+        self.assertFalse(sa3.o_proj._allow_decode_scaled_mm)
+        # Re-preparing after in-place fused alias refresh remains consistent
+        m_auto.prepare_weights(dense_linear_mode="auto")
+        auto_p2 = m_auto(tokens[:, :T_prompt], state=m_auto.create_runtime_state(B, max_seq_len=64, enable_yoco_decode=True), enable_yoco_decode=True)
+        self.assertGreater(_cos_sim(auto_p2, ref_p), 0.999)
         self.assertFalse(m_auto.model.layers[0].mlp._fp8_gate_up._allow_decode_scaled_mm)
 
         from rtp_llm.models_py.model_desc.qwen4_5 import _wrap_linear_with_sm100_fp8

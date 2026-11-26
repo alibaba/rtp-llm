@@ -162,6 +162,56 @@ def _hc_combine_and_norm_kernel(
 
 
 @triton.jit
+def _hc_combine_and_norm_split5120_shared_sub_kernel(
+    RES_PTR,
+    SUB_PTR,
+    INJ_PTR,
+    W_PTR,
+    B_PTR,
+    COMB_PTR,
+    NORM_PTR,
+    HIDDEN: tl.constexpr,
+    HC_COUNT: tl.constexpr,
+    SINGLE_STREAM: tl.constexpr,
+    EPS: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
+):
+    """Exact 4096+1024 split HC combine+norm loading sub once per row across all 4 branches."""
+    row = tl.program_id(0).to(tl.int64)
+    o0 = tl.arange(0, 4096)
+    o1 = 4096 + tl.arange(0, 1024)
+    sub0 = tl.load(SUB_PTR + row * HIDDEN + o0)
+    sub1 = tl.load(SUB_PTR + row * HIDDEN + o1)
+    res_base = row * (HC_COUNT * HIDDEN)
+    for br in tl.static_range(HC_COUNT):
+        c0 = br * HIDDEN + o0
+        c1 = br * HIDDEN + o1
+        in0 = (row * HIDDEN + o0) if SINGLE_STREAM else (res_base + c0)
+        in1 = (row * HIDDEN + o1) if SINGLE_STREAM else (res_base + c1)
+        inj = tl.load(INJ_PTR + row * HC_COUNT + br).to(tl.float32)
+        r0 = tl.load(RES_PTR + in0).to(tl.float32)
+        r1 = tl.load(RES_PTR + in1).to(tl.float32)
+        cb0 = (r0 + sub0.to(tl.float32) * inj).to(RES_PTR.dtype.element_ty)
+        cb1 = (r1 + sub1.to(tl.float32) * inj).to(RES_PTR.dtype.element_ty)
+        tl.store(COMB_PTR + res_base + c0, cb0)
+        tl.store(COMB_PTR + res_base + c1, cb1)
+        f0 = cb0.to(tl.float32)
+        f1 = cb1.to(tl.float32)
+        inv_rms = 1.0 / tl.sqrt(
+            (tl.sum(f0 * f0, axis=0) + tl.sum(f1 * f1, axis=0)) / HIDDEN + EPS
+        )
+        w0 = tl.load(W_PTR + c0).to(tl.float32)
+        w1 = tl.load(W_PTR + c1).to(tl.float32)
+        n0 = f0 * inv_rms * (1.0 + w0)
+        n1 = f1 * inv_rms * (1.0 + w1)
+        if HAS_BIAS:
+            n0 = n0 + tl.load(B_PTR + c0).to(tl.float32)
+            n1 = n1 + tl.load(B_PTR + c1).to(tl.float32)
+        tl.store(NORM_PTR + res_base + c0, n0)
+        tl.store(NORM_PTR + res_base + c1, n1)
+
+
+@triton.jit
 def _hc_mix_reduce_kernel(
     LOGITS_PTR,
     NORMED_PTR,
@@ -479,6 +529,24 @@ def hc_combine_and_norm_triton(
     combined = torch.empty(out_shape, dtype=res_c.dtype, device=res_c.device)
     normed = torch.empty(out_shape, dtype=res_c.dtype, device=res_c.device)
     if rows == 0:
+        return combined, normed
+
+    if hidden_size == 5120 and hc_count == 4 and rows >= 1024:
+        _hc_combine_and_norm_split5120_shared_sub_kernel[(rows,)](
+            res_c,
+            sub_c,
+            inj_c,
+            w_c,
+            b_c,
+            combined,
+            normed,
+            HIDDEN=hidden_size,
+            HC_COUNT=hc_count,
+            SINGLE_STREAM=single_stream,
+            EPS=eps,
+            HAS_BIAS=norm_bias is not None,
+            num_warps=4,
+        )
         return combined, normed
 
     block = max(128, triton.next_power_of_2(hidden_size))

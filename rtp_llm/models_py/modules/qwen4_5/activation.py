@@ -1459,10 +1459,110 @@ def situ_glu_fp8_quant_masked_packed(
     return q, sc
 
 
+@triton.jit(do_not_specialize=["M", "m_aligned", "stride_xm", "stride_qm"])
+def _quant_fp8_1x128_dg_kernel(
+    x_ptr,
+    q_ptr,
+    sc_ptr,
+    M,
+    m_aligned,
+    stride_xm: tl.int64,
+    stride_qm: tl.int64,
+    K: tl.constexpr,
+    NUM_GROUPS: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+):
+    """Coalesced 1x128 FP8 quant producing MN-major TMA-aligned packed UE8M0 int32 scales."""
+    pid_m = tl.program_id(0)
+    pid_p = tl.program_id(1)
+    rows = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    row_mask = rows < M
+    g_offs = tl.arange(0, 4)
+    g_idx = pid_p * 4 + g_offs
+    g_mask = g_idx < NUM_GROUPS
+    k_offs = g_idx[:, None] * 128 + tl.arange(0, 128)[None, :]
+    load_mask = row_mask[:, None, None] & g_mask[None, :, None]
+    vals = tl.load(
+        x_ptr + rows[:, None, None].to(tl.int64) * stride_xm + k_offs[None, :, :],
+        mask=load_mask,
+        other=0.0,
+    ).to(tl.float32)
+    amax = tl.maximum(tl.max(tl.abs(vals), axis=2), 1.0e-4)
+    bits = (amax * (1.0 / 448.0)).to(tl.int32, bitcast=True)
+    biased = ((bits >> 23) & 0xFF) + ((bits & 0x7FFFFF) != 0).to(tl.int32)
+    biased = tl.maximum(tl.minimum(biased, 254), 1)
+    inv_scale = tl.div_rn(1.0, (biased << 23).to(tl.float32, bitcast=True))
+    q_vals = tl.clamp(vals * inv_scale[:, :, None], -448.0, 448.0).to(tl.float8e4nv)
+    tl.store(
+        q_ptr + rows[:, None, None].to(tl.int64) * stride_qm + k_offs[None, :, :],
+        q_vals,
+        mask=load_mask,
+    )
+    biased_valid = tl.where(g_mask[None, :], biased & 0xFF, 0)
+    packed = tl.sum(biased_valid << (g_offs[None, :] * 8), axis=1)
+    tl.store(sc_ptr + pid_p * m_aligned.to(tl.int64) + rows.to(tl.int64), packed, mask=row_mask)
+
+
+def quant_fp8_1x128_deepgemm_triton(
+    x: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Quantize [M, K] into E4M3FN + MN-major TMA-aligned packed UE8M0 int32 [M, ceil_div(K//128, 4)]."""
+    K = int(x.shape[-1])
+    if K % 128 != 0:
+        raise ValueError(f"quant_fp8_1x128_deepgemm_triton requires K % 128 == 0, got K={K}")
+    orig_shape = x.shape
+    x_2d = x.reshape(-1, K)
+    if x_2d.stride(-1) != 1:
+        x_2d = x_2d.contiguous()
+    M = int(x_2d.shape[0])
+    num_groups = K // 128
+    num_packs = (num_groups + 3) // 4
+    m_aligned = ((M + 3) // 4) * 4
+
+    q = torch.empty((M, K), dtype=torch.float8_e4m3fn, device=x.device)
+    sc = torch.empty(
+        (num_packs, max(m_aligned, 4)), dtype=torch.int32, device=x.device
+    ).transpose(0, 1)[:M, :]
+    if M == 0:
+        return q.reshape(*orig_shape[:-1], K), sc
+
+    if not x_2d.is_cuda:
+        x_g = x_2d.float().view(M, num_groups, 128)
+        amax = x_g.abs().amax(dim=2).clamp_min(1.0e-4)
+        bits = (amax * (1.0 / 448.0)).view(torch.int32)
+        exp = (((bits >> 23) & 0xFF) + ((bits & 0x7FFFFF) != 0).to(torch.int32)).clamp(1, 254)
+        sf = (exp << 23).view(torch.float32)
+        q.copy_((x_g * (1.0 / sf.unsqueeze(2))).clamp(-448.0, 448.0).to(torch.float8_e4m3fn).view(M, K))
+        pad_g = num_packs * 4 - num_groups
+        if pad_g > 0:
+            exp = torch.nn.functional.pad(exp, (0, pad_g), value=0)
+        sc.copy_(exp.to(torch.uint8).contiguous().view(torch.int32))
+        return q.reshape(*orig_shape[:-1], K), sc
+
+    bm = 1 if M <= 4 else (2 if M <= 2048 else 8)
+    grid = (triton.cdiv(M, bm), num_packs)
+    with _cuda_device_ctx(x.device):
+        _quant_fp8_1x128_dg_kernel[grid](
+            x_2d,
+            q,
+            sc,
+            M,
+            m_aligned,
+            x_2d.stride(0),
+            q.stride(0),
+            K=K,
+            NUM_GROUPS=num_groups,
+            BLOCK_M=bm,
+            num_warps=4,
+        )
+    return q.reshape(*orig_shape[:-1], K), sc
+
+
 __all__ = [
     "SituAndMul",
     "per_token_group_quant_fp8_ue8m0",
     "per_token_group_quant_fp8_ue8m0_ref",
+    "quant_fp8_1x128_deepgemm_triton",
     "situ_and_mul_ref",
     "situ_and_mul_triton",
     "situ_glu_fp8_quant_masked_packed",

@@ -1244,6 +1244,296 @@ if _HAS_TRITON:
             out_val = out_val * tl.sigmoid(g_val)
         tl.store(o_ptrs, out_val.to(out_ptr.dtype.element_ty), mask=mask_d)
 
+    @triton.jit(
+        do_not_specialize=[
+            "batch_size",
+            "max_blocks",
+            "num_blocks",
+            "window_left",
+        ]
+    )
+    def _dflash2_paged_noncausal_mha_fused_single_triton(
+        q_ptr,
+        kv_cache_ptr,
+        bt_ptr,
+        prefix_lens_ptr,
+        pos_ptr,
+        active_ptr,
+        k_scale_ptr,
+        v_scale_ptr,
+        gate_ptr,
+        out_ptr,
+        sm_scale,
+        batch_size: tl.int32,
+        query_len: tl.int32,
+        num_kv_heads: tl.int32,
+        gqa_groups: tl.int32,
+        num_g_tiles: tl.int32,
+        page_size: tl.int32,
+        head_dim: tl.int32,
+        max_blocks: tl.int32,
+        num_blocks: tl.int32,
+        window_left: tl.int32,
+        q_stride_tok: tl.int64,
+        q_stride_h: tl.int64,
+        q_stride_d: tl.int64,
+        bt_stride_req: tl.int64,
+        bt_stride_col: tl.int64,
+        kv_stride_page: tl.int64,
+        kv_stride_kv: tl.int64,
+        kv_stride_head: tl.int64,
+        kv_stride_pos: tl.int64,
+        kv_stride_dim: tl.int64,
+        g_stride_tok: tl.int64,
+        g_stride_h: tl.int64,
+        g_stride_d: tl.int64,
+        o_stride_tok: tl.int64,
+        o_stride_h: tl.int64,
+        o_stride_d: tl.int64,
+        HAS_SWA: tl.constexpr,
+        IS_FP8_KV: tl.constexpr,
+        USE_FP8_DOT: tl.constexpr,
+        HAS_GATE: tl.constexpr,
+        HEAD_DIM_MATCH: tl.constexpr,
+        ALL_M_VALID: tl.constexpr,
+        BLOCK_Q: tl.constexpr,
+        BLOCK_G: tl.constexpr,
+        BLOCK_M: tl.constexpr,
+        BLOCK_N: tl.constexpr,
+        BLOCK_D: tl.constexpr,
+    ):
+        """Single-kernel fused paged non-causal MHA with online SWA/tail edges and output gate."""
+        qg_tile_id = tl.program_id(0)
+        pid_bh = tl.program_id(1)
+        q_tile_id = qg_tile_id // num_g_tiles
+        g_tile_id = qg_tile_id % num_g_tiles
+        b = pid_bh // num_kv_heads
+        h_kv = pid_bh % num_kv_heads
+
+        offs_m = tl.arange(0, BLOCK_M)
+        q_idx = q_tile_id * BLOCK_Q + (offs_m // BLOCK_G)
+        g_idx = g_tile_id * BLOCK_G + (offs_m % BLOCK_G)
+        valid_m = (q_idx < query_len) & (g_idx < gqa_groups)
+        safe_q = tl.where(q_idx < query_len, q_idx, 0)
+        safe_g = tl.where(g_idx < gqa_groups, g_idx, 0)
+        tok_m = b * query_len + safe_q
+        hq_m = h_kv * gqa_groups + safe_g
+        offs_d = tl.arange(0, BLOCK_D)
+        mask_d = offs_d < head_dim
+
+        o_ptrs = (
+            out_ptr
+            + tok_m[:, None].to(tl.int64) * o_stride_tok
+            + hq_m[:, None].to(tl.int64) * o_stride_h
+            + offs_d[None, :]
+        )
+
+        act = tl.load(active_ptr + b).to(tl.int32)
+        total_kv = tl.where(
+            act != 0,
+            tl.minimum(tl.load(prefix_lens_ptr + b).to(tl.int32) + query_len, max_blocks * page_size),
+            0,
+        )
+        if total_kv <= 0:
+            zeros_out = tl.zeros((BLOCK_M, BLOCK_D), dtype=tl.float32).to(out_ptr.dtype.element_ty)
+            if ALL_M_VALID and HEAD_DIM_MATCH:
+                tl.store(o_ptrs, zeros_out)
+            else:
+                tl.store(o_ptrs, zeros_out, mask=valid_m[:, None] & mask_d[None, :])
+            return
+
+        q_ptrs = (
+            q_ptr
+            + tok_m[:, None].to(tl.int64) * q_stride_tok
+            + hq_m[:, None].to(tl.int64) * q_stride_h
+            + offs_d[None, :]
+        )
+        q_tile = (
+            tl.load(q_ptrs)
+            if (ALL_M_VALID and HEAD_DIM_MATCH)
+            else tl.load(q_ptrs, mask=valid_m[:, None] & mask_d[None, :], other=0.0)
+        )
+        if USE_FP8_DOT:
+            q_f32 = q_tile.to(tl.float32)
+            q_s = tl.maximum(tl.max(tl.abs(q_f32)) / 448.0, 1.0e-6)
+            q_dot = tl.clamp(q_f32 / q_s, -448.0, 448.0).to(tl.float8e4nv)
+            k_s = tl.load(k_scale_ptr).to(tl.float32)
+            v_s = tl.load(v_scale_ptr).to(tl.float32)
+            qk_scale = sm_scale * q_s * k_s
+        else:
+            q_dot = q_tile.to(tl.bfloat16) if q_tile.dtype == tl.float32 else q_tile
+            k_s = tl.load(k_scale_ptr).to(tl.float32) if IS_FP8_KV else 1.0
+            v_s = tl.load(v_scale_ptr).to(tl.float32) if IS_FP8_KV else 1.0
+            qk_scale = sm_scale * k_s
+
+        m_i = tl.full((BLOCK_M,), float("-inf"), dtype=tl.float32)
+        l_i = tl.zeros((BLOCK_M,), dtype=tl.float32)
+        acc = tl.zeros((BLOCK_M, BLOCK_D), dtype=tl.float32)
+        LOG_P_SCALE: tl.constexpr = 5.545177444479562
+        P_INV_SCALE: tl.constexpr = 1.0 / 256.0
+        offs_n = tl.arange(0, BLOCK_N)
+        max_phys_idx = tl.maximum(num_blocks - 1, 0)
+
+        last_tile = tl.cdiv(total_kv, BLOCK_N)
+        if HAS_SWA:
+            q_pos_m = tl.load(pos_ptr + tok_m, mask=(q_idx < query_len), other=0).to(tl.int32)
+            kv_start_m = tl.maximum(0, q_pos_m - window_left)
+            tile_kv_start = tl.minimum(
+                tl.min(tl.where(valid_m, kv_start_m, total_kv), axis=0), total_kv
+            )
+            tile_kv_max_start = tl.max(tl.where(valid_m, kv_start_m, 0), axis=0)
+            left_tile = tl.minimum(tile_kv_start // BLOCK_N, last_tile)
+            body_first = tl.minimum(tl.cdiv(tile_kv_max_start, BLOCK_N), last_tile)
+        else:
+            kv_start_m = tl.zeros((BLOCK_M,), dtype=tl.int32)
+            left_tile = 0
+            body_first = 0
+        body_last = tl.minimum(last_tile, tl.maximum(body_first, total_kv // BLOCK_N))
+
+        # 1) Fast unmasked interior KV tiles
+        for tile_idx in range(body_first, body_last):
+            kv_base = tile_idx * BLOCK_N
+            page_idx = kv_base // page_size
+            slot_base = kv_base - page_idx * page_size
+            phys = tl.load(
+                bt_ptr + b.to(tl.int64) * bt_stride_req + page_idx.to(tl.int64) * bt_stride_col
+            ).to(tl.int32)
+            safe_phys = tl.maximum(0, tl.minimum(phys, max_phys_idx))
+            k_base = (
+                safe_phys.to(tl.int64) * kv_stride_page
+                + h_kv.to(tl.int64) * kv_stride_head
+                + (slot_base + offs_n[:, None]).to(tl.int64) * kv_stride_pos
+                + offs_d[None, :]
+            )
+            if HEAD_DIM_MATCH:
+                k_tile = tl.load(kv_cache_ptr + k_base, eviction_policy="evict_first")
+                v_tile = tl.load(kv_cache_ptr + k_base + kv_stride_kv, eviction_policy="evict_first")
+            else:
+                k_tile = tl.load(
+                    kv_cache_ptr + k_base, mask=mask_d[None, :], other=0.0, eviction_policy="evict_first"
+                )
+                v_tile = tl.load(
+                    kv_cache_ptr + k_base + kv_stride_kv,
+                    mask=mask_d[None, :],
+                    other=0.0,
+                    eviction_policy="evict_first",
+                )
+            if not USE_FP8_DOT and IS_FP8_KV:
+                k_tile = k_tile.to(q_dot.dtype)
+                v_tile = v_tile.to(q_dot.dtype)
+            qk = tl.dot(q_dot, tl.trans(k_tile)).to(tl.float32) * qk_scale
+            if not ALL_M_VALID:
+                qk = tl.where(valid_m[:, None], qk, float("-inf"))
+            m_ij = tl.maximum(m_i, tl.max(qk, axis=1))
+            if USE_FP8_DOT:
+                p = tl.exp(qk - m_ij[:, None] + LOG_P_SCALE)
+                if not ALL_M_VALID:
+                    p = tl.where(valid_m[:, None] & (m_ij[:, None] > float("-inf")), p, 0.0)
+                p_dot = p.to(tl.float8e4nv)
+                p_sum = tl.sum(p, axis=1) * P_INV_SCALE
+            else:
+                p = tl.exp(qk - m_ij[:, None])
+                if not ALL_M_VALID:
+                    p = tl.where(valid_m[:, None] & (m_ij[:, None] > float("-inf")), p, 0.0)
+                p_dot = p.to(v_tile.dtype)
+                p_sum = tl.sum(p, axis=1)
+            alpha = (
+                tl.exp(m_i - m_ij)
+                if ALL_M_VALID
+                else tl.where((m_i > float("-inf")) & (m_ij > float("-inf")), tl.exp(m_i - m_ij), 0.0)
+            )
+            l_i = l_i * alpha + p_sum
+            acc = acc * alpha[:, None]
+            acc = tl.dot(p_dot, v_tile, acc)
+            m_i = m_ij
+
+        # 2) Masked SWA left boundary & partial tail KV tiles
+        for pass_id in range(2 if HAS_SWA else 1):
+            is_left = HAS_SWA and (pass_id == 0)
+            r_start = left_tile if is_left else body_last
+            r_end = body_first if is_left else last_tile
+            for tile_idx in range(r_start, r_end):
+                kv_base = tile_idx * BLOCK_N
+                page_idx = kv_base // page_size
+                slot_base = kv_base - page_idx * page_size
+                in_bt = (page_idx >= 0) & (page_idx < max_blocks)
+                phys = tl.load(
+                    bt_ptr
+                    + b.to(tl.int64) * bt_stride_req
+                    + tl.where(in_bt, page_idx, 0).to(tl.int64) * bt_stride_col
+                ).to(tl.int32)
+                phys_ok = in_bt & (phys >= 0) & (phys < num_blocks)
+                safe_phys = tl.where(phys_ok, phys, 0)
+                kv_pos = kv_base + offs_n
+                valid_n = phys_ok & (kv_pos < total_kv)
+                k_base = (
+                    safe_phys.to(tl.int64) * kv_stride_page
+                    + h_kv.to(tl.int64) * kv_stride_head
+                    + (slot_base + offs_n[:, None]).to(tl.int64) * kv_stride_pos
+                    + offs_d[None, :]
+                )
+                mask_kd = valid_n[:, None] & mask_d[None, :]
+                k_tile = tl.load(kv_cache_ptr + k_base, mask=mask_kd, other=0.0, eviction_policy="evict_first")
+                v_tile = tl.load(kv_cache_ptr + k_base + kv_stride_kv, mask=mask_kd, other=0.0, eviction_policy="evict_first")
+                if not USE_FP8_DOT and IS_FP8_KV:
+                    k_tile = k_tile.to(q_dot.dtype)
+                    v_tile = v_tile.to(q_dot.dtype)
+                vmn = (
+                    valid_m[:, None] & valid_n[None, :] & (kv_pos[None, :] >= kv_start_m[:, None])
+                    if HAS_SWA
+                    else (valid_m[:, None] & valid_n[None, :])
+                )
+                qk = tl.where(vmn, tl.dot(q_dot, tl.trans(k_tile)).to(tl.float32) * qk_scale, float("-inf"))
+                m_ij = tl.maximum(m_i, tl.max(qk, axis=1))
+                if USE_FP8_DOT:
+                    p = tl.where(
+                        vmn & (m_ij[:, None] > float("-inf")),
+                        tl.exp(qk - m_ij[:, None] + LOG_P_SCALE),
+                        0.0,
+                    )
+                    p_dot = p.to(tl.float8e4nv)
+                    p_sum = tl.sum(p, axis=1) * P_INV_SCALE
+                else:
+                    p = tl.where(
+                        vmn & (m_ij[:, None] > float("-inf")),
+                        tl.exp(qk - m_ij[:, None]),
+                        0.0,
+                    )
+                    p_dot = p.to(v_tile.dtype)
+                    p_sum = tl.sum(p, axis=1)
+                alpha = tl.where((m_i > float("-inf")) & (m_ij > float("-inf")), tl.exp(m_i - m_ij), 0.0)
+                l_i = l_i * alpha + p_sum
+                acc = acc * alpha[:, None]
+                acc = tl.dot(p_dot, v_tile, acc)
+                m_i = m_ij
+
+        has_out = valid_m & (l_i > 0.0)
+        inv_l = tl.where(has_out, 1.0 / tl.maximum(l_i, 1.0e-12), 0.0)
+        out_scale = (
+            inv_l * (v_s * P_INV_SCALE)
+            if USE_FP8_DOT
+            else (inv_l * v_s if IS_FP8_KV else inv_l)
+        )
+        out_val = acc * out_scale[:, None]
+        if HAS_GATE:
+            g_ptrs = (
+                gate_ptr
+                + tok_m[:, None].to(tl.int64) * g_stride_tok
+                + hq_m[:, None].to(tl.int64) * g_stride_h
+                + offs_d[None, :]
+            )
+            g_val = (
+                tl.load(g_ptrs)
+                if (ALL_M_VALID and HEAD_DIM_MATCH)
+                else tl.load(g_ptrs, mask=valid_m[:, None] & mask_d[None, :], other=0.0)
+            ).to(tl.float32)
+            out_val = out_val * tl.sigmoid(g_val)
+        out_val = tl.where(has_out[:, None], out_val, 0.0)
+        if ALL_M_VALID and HEAD_DIM_MATCH:
+            tl.store(o_ptrs, out_val.to(out_ptr.dtype.element_ty))
+        else:
+            tl.store(o_ptrs, out_val.to(out_ptr.dtype.element_ty), mask=valid_m[:, None] & mask_d[None, :])
+
     @triton.jit
     def _dflash2_grouped_conv_kernel(
         x_ptr,
@@ -2596,13 +2886,76 @@ class _DFlash2PagedFMHADispatcher(FMHAImplBase):
                 )
                 num_q_tiles = (q_len + block_q - 1) // block_q
                 num_g_tiles = (gqa_groups + block_g - 1) // block_g
+                out = torch.empty_like(q)
+                base_ctas = max(1, batch_size * kv_head_num * num_q_tiles * num_g_tiles)
+                all_m_valid = (q_len % block_q == 0) and (gqa_groups % block_g == 0)
+                head_dim_match = head_dim == block_d
+                has_gate = output_gate is not None
+                gate_arg = output_gate.reshape(total_tokens, head_num, head_dim) if has_gate else out
+                if has_gate and gate_arg.stride(-1) != 1:
+                    gate_arg = gate_arg.contiguous()
+
+                if page_aligned and body_splits == 1 and use_fp8_dot:
+                    _dflash2_paged_noncausal_mha_fused_single_triton[
+                        (num_q_tiles * num_g_tiles, batch_size * kv_head_num)
+                    ](
+                        q,
+                        kv_hnd,
+                        bt,
+                        pref_d,
+                        pos_d,
+                        act_d,
+                        ks_t,
+                        vs_t,
+                        gate_arg,
+                        out,
+                        sm_scale,
+                        batch_size,
+                        q_len,
+                        kv_head_num,
+                        gqa_groups,
+                        num_g_tiles,
+                        self._page_size,
+                        head_dim,
+                        max_blocks,
+                        num_blocks,
+                        w_left,
+                        int(q.stride(0)),
+                        int(q.stride(1)),
+                        int(q.stride(2)),
+                        int(bt.stride(0)),
+                        int(bt.stride(1)),
+                        int(kv_hnd.stride(0)),
+                        int(kv_hnd.stride(1)),
+                        int(kv_hnd.stride(2)),
+                        int(kv_hnd.stride(3)),
+                        int(kv_hnd.stride(4)),
+                        int(gate_arg.stride(0)),
+                        int(gate_arg.stride(1)),
+                        int(gate_arg.stride(2)),
+                        int(out.stride(0)),
+                        int(out.stride(1)),
+                        int(out.stride(2)),
+                        HAS_SWA=has_swa,
+                        IS_FP8_KV=is_fp8_kv,
+                        USE_FP8_DOT=use_fp8_dot,
+                        HAS_GATE=has_gate,
+                        HEAD_DIM_MATCH=head_dim_match,
+                        ALL_M_VALID=all_m_valid,
+                        BLOCK_Q=block_q,
+                        BLOCK_G=block_g,
+                        BLOCK_M=block_m,
+                        BLOCK_N=block_n,
+                        BLOCK_D=block_d,
+                        num_warps=4,
+                        num_stages=2,
+                    )
+                    return out
+
                 num_splits = (body_splits + 1) if use_body_edge else body_splits
                 ws_m, ws_l, ws_acc = self.split_kv_workspace.ensure_capacity(
                     batch_size, head_num, q_len, num_splits, block_d, q.device
                 )
-
-                out = torch.empty_like(q)
-                base_ctas = max(1, batch_size * kv_head_num * num_q_tiles * num_g_tiles)
                 if use_fp8_dot:
                     body_warps = 4 if base_ctas >= 64 else 8
                     body_stages = 2
@@ -2612,8 +2965,6 @@ class _DFlash2PagedFMHADispatcher(FMHAImplBase):
                     body_warps, body_stages = 8, 2
 
                 if use_body_edge:
-                    all_m_valid = (q_len % block_q == 0) and (gqa_groups % block_g == 0)
-                    head_dim_match = head_dim == block_d
                     _dflash2_paged_noncausal_mha_stage1_body_triton[
                         (num_q_tiles * num_g_tiles, batch_size * kv_head_num, body_splits)
                     ](
@@ -2783,8 +3134,7 @@ class _DFlash2PagedFMHADispatcher(FMHAImplBase):
                         num_stages=2 if block_n >= 32 else 3,
                     )
 
-                has_gate = output_gate is not None
-                gate_arg = output_gate.view(total_tokens, head_num, head_dim) if has_gate else out
+
                 split_block = max(1, int(triton.next_power_of_2(num_splits)))
                 _dflash2_paged_noncausal_mha_stage2_triton[(total_tokens, head_num)](
                     ws_m,
@@ -3162,14 +3512,13 @@ class Qwen4_5DFlashAttention(nn.Module):
             k_rot = apply_partial_neox_rope(kn, pos_2d, self.inv_freq, self.rotary_dim)
         return q_rot.squeeze(0), k_rot.squeeze(0)
 
-    def forward_context_kv(
-        self, main_x: torch.Tensor, positions: torch.Tensor
+    def finish_context_kv(
+        self, kv: torch.Tensor, positions: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        fused_kv_w = self._get_fused_qkvg_weight()[self.q_size : self.q_size + 2 * self.kv_size]
-        kv = F.linear(main_x, fused_kv_w)
         k_raw, v_raw = torch.split(kv, [self.kv_size, self.kv_size], dim=-1)
-        k = k_raw.reshape(main_x.size(0), self.num_kv_heads, self.head_dim)
-        v = v_raw.reshape(main_x.size(0), self.num_kv_heads, self.head_dim)
+        num_tokens = kv.size(0)
+        k = k_raw.reshape(num_tokens, self.num_kv_heads, self.head_dim)
+        v = v_raw.reshape(num_tokens, self.num_kv_heads, self.head_dim)
         pos_2d = positions.unsqueeze(0)
         k_4d = k.unsqueeze(0)
         if self.zero_centered_block_norms:
@@ -3180,6 +3529,12 @@ class Qwen4_5DFlashAttention(nn.Module):
             kn = _apply_rmsnorm(k_4d, self.k_norm.weight, self.eps)
             k_rot = apply_partial_neox_rope(kn, pos_2d, self.inv_freq, self.rotary_dim).squeeze(0)
         return k_rot, v
+
+    def forward_context_kv(
+        self, main_x: torch.Tensor, positions: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        fused_kv_w = self._get_fused_qkvg_weight()[self.q_size : self.q_size + 2 * self.kv_size]
+        return self.finish_context_kv(F.linear(main_x, fused_kv_w), positions)
 
     def forward(
         self,
@@ -3856,6 +4211,8 @@ class Qwen4_5DSparkModel(DSparkProposerMixin, GptModelBase):
         self._fc_version: Optional[int] = None
         self._fp8_lm_head: Optional[Any] = None
         self._lm_head_version: Optional[int] = None
+        self._fused_ctx_kv_weight: Optional[torch.Tensor] = None
+        self._fused_ctx_kv_version: Optional[Tuple[Tuple[int, ...], ...]] = None
         self.requires_grad_(False)
         for layer in self.layers:
             for hc in (layer.attn_hyper_connection, layer.mlp_hyper_connection):
@@ -3904,12 +4261,30 @@ class Qwen4_5DSparkModel(DSparkProposerMixin, GptModelBase):
                 transpose_mxfp4=transpose_mxfp4,
                 dense_linear_mode=eff_mode,
             )
+        if len(self.layers) > 1 and not torch.cuda.is_current_stream_capturing():
+            self._get_fused_ctx_kv_weight()
         if (
             self.all_to_all_comm is not None
             and not torch.cuda.is_current_stream_capturing()
             and hasattr(self.all_to_all_comm, "_ensure_tbo_resources")
         ):
             self.all_to_all_comm._ensure_tbo_resources()
+
+    def _get_fused_ctx_kv_weight(self) -> torch.Tensor:
+        ver = tuple(layer.self_attn._weight_versions() for layer in self.layers)
+        if self._fused_ctx_kv_weight is not None and self._fused_ctx_kv_version == ver:
+            return self._fused_ctx_kv_weight
+        if self._fused_ctx_kv_weight is not None and torch.cuda.is_current_stream_capturing():
+            return self._fused_ctx_kv_weight
+        parts = [
+            layer.self_attn._get_fused_qkvg_weight()[
+                layer.self_attn.q_size : layer.self_attn.q_size + 2 * layer.self_attn.kv_size
+            ]
+            for layer in self.layers
+        ]
+        self._fused_ctx_kv_weight = torch.cat(parts, dim=0).contiguous()
+        self._fused_ctx_kv_version = ver
+        return self._fused_ctx_kv_weight
 
     def cuda_graph_input_hidden_size(self) -> int:
         return int(self._dspark_aux_feature_dim)
@@ -4072,11 +4447,28 @@ class Qwen4_5DSparkModel(DSparkProposerMixin, GptModelBase):
         if create_write_cache_store_impl is not None:
             cache_store_writer = create_write_cache_store_impl(attn_inputs, self.kv_cache)
 
+        active_layers: List[Tuple[int, Any, Any]] = []
         for layer_idx, layer in enumerate(self.layers):
             layer_kv = self._get_layer_full_kv(layer_idx)
             if layer_kv is None or getattr(layer_kv, "kv_cache_base", None) is None:
                 continue
-            k, v = layer.self_attn.forward_context_kv(main_x, safe_pos)
+            active_layers.append((layer_idx, layer, layer_kv))
+        if not active_layers:
+            return
+
+        if main_x.is_cuda and len(active_layers) == len(self.layers) and len(self.layers) > 1:
+            fused_w = self._get_fused_ctx_kv_weight()
+            kv_all = F.linear(main_x, fused_w)
+            split_dims = [2 * layer.self_attn.kv_size for layer in self.layers]
+            kv_slices = torch.split(kv_all, split_dims, dim=-1)
+        else:
+            kv_slices = None
+
+        for idx, (_layer_idx, layer, layer_kv) in enumerate(active_layers):
+            if kv_slices is not None:
+                k, v = layer.self_attn.finish_context_kv(kv_slices[idx], safe_pos)
+            else:
+                k, v = layer.self_attn.forward_context_kv(main_x, safe_pos)
             scatter_kv_to_paged_cache(
                 k,
                 v,
@@ -4089,7 +4481,6 @@ class Qwen4_5DSparkModel(DSparkProposerMixin, GptModelBase):
             )
             if cache_store_writer is not None:
                 cache_store_writer(layer_kv)
-
     def forward_query_block(
         self,
         query_ids: torch.Tensor,

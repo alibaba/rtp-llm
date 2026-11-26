@@ -134,6 +134,7 @@ def _causal_dwconv1d_decode_k4_kernel(
     W_PTR,
     STATE_PTR,
     OUT_PTR,
+    stride_xb: tl.int64,
     C: tl.constexpr,
     RESIDUAL: tl.constexpr,
     USE_SILU: tl.constexpr,
@@ -153,7 +154,7 @@ def _causal_dwconv1d_decode_k4_kernel(
     s0_raw = tl.load(STATE_PTR + s_base + 0, mask=c_mask, other=0.0)
     s1_raw = tl.load(STATE_PTR + s_base + 1, mask=c_mask, other=0.0)
     s2_raw = tl.load(STATE_PTR + s_base + 2, mask=c_mask, other=0.0)
-    x0_raw = tl.load(X_PTR + x_off, mask=c_mask, other=0.0)
+    x0_raw = tl.load(X_PTR + batch * stride_xb + c_offs, mask=c_mask, other=0.0)
 
     w0 = tl.load(W_PTR + w_base + 0, mask=c_mask, other=0.0).to(tl.float32)
     w1 = tl.load(W_PTR + w_base + 1, mask=c_mask, other=0.0).to(tl.float32)
@@ -743,9 +744,9 @@ def causal_dwconv1d_decode_triton(
     if not conv_state.is_contiguous():
         raise ValueError("conv_state must be contiguous for in-place Triton update")
 
-    x_c = x.contiguous()
-    w_c = weight.contiguous()
-    out = torch.empty_like(x_c)
+    x_c = x if x.stride(-1) == 1 else x.contiguous()
+    w_c = weight if weight.is_contiguous() else weight.contiguous()
+    out = torch.empty((B, T, C), dtype=x_c.dtype, device=x_c.device)
     if B == 0:
         return out
 
@@ -756,6 +757,7 @@ def causal_dwconv1d_decode_triton(
         w_c,
         conv_state,
         out,
+        int(x_c.stride(0)),
         C=C,
         RESIDUAL=residual,
         USE_SILU=use_activation,

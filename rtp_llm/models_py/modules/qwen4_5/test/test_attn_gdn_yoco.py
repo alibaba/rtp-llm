@@ -870,6 +870,184 @@ def test_r4_rmsnorm_gated_packed_yoco_subdv_and_prefill_tuning() -> None:
     print("  PASS: R4 GDN RMSNormGated + YoCo BLOCK_DV=32 + Gating prealloc + Prefill tuning verified.")
 
 
+
+def test_r5_gdn_verify_readout_stage1_and_fused_projections() -> None:
+    print("[R5 Test] GDN Recurrent/Verify/Readout/Stage1 + Attention prepare_fused_projections...")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    dtype = torch.bfloat16
+    if device.type != "cuda":
+        print("  SKIP (CUDA required)")
+        return
+    torch.manual_seed(202651)
+    from rtp_llm.models_py.modules.qwen4_5.fp8_linear import SM100FP8Linear
+
+    # 1. gdn_recurrent_triton B>=2 IS_CONTIG_INIT/FS & non-contiguous initial_state fallback
+    for is_nc in (False, True):
+        B_r, T_r, Hk_r, Hv_r = 8, 1, 16, 128
+        qr = torch.randn((B_r, T_r, Hk_r, 64), device=device, dtype=dtype) * 0.2
+        kr = torch.randn((B_r, T_r, Hk_r, 64), device=device, dtype=dtype) * 0.2
+        vr = torch.randn((B_r, T_r, Hv_r, 64), device=device, dtype=dtype) * 0.2
+        gr = -torch.rand((B_r, T_r, Hv_r), device=device, dtype=torch.float32) * 0.2
+        br = torch.sigmoid(torch.randn((B_r, T_r, Hv_r), device=device, dtype=torch.float32))
+        st0 = torch.randn((B_r, Hv_r, 64, 64), device=device, dtype=torch.float32) * 0.1
+        if is_nc:
+            st0 = torch.randn((B_r, Hv_r, 64, 128), device=device, dtype=torch.float32)[..., ::2] * 0.1
+        o_tri, fs_tri = gdn_recurrent_triton(qr, kr, vr, gr, br, initial_state=st0, output_final_state=True)
+        o_ref, fs_ref = gdn_recurrent_ref(qr, kr, vr, gr, br, initial_state=st0, output_final_state=True)
+        assert F.cosine_similarity(o_tri.float().flatten(), o_ref.float().flatten(), dim=0).item() > 0.9999
+        assert float((fs_tri - fs_ref).abs().max().item()) < 1e-3
+
+    # 2. GDN Verify Scan IS_CONTIG+EVICT_ST + YoCo Readout BK=8 + Stage1 Phase-split d_ssm < 1e-3
+    cfg = make_config(5120)
+    plan = YoCoSharingPlan.from_config(cfg)
+    gdn_src = Qwen4_5GatedDeltaNet.from_config(cfg, layer_idx=20, sharing_plan=plan).to(device=device, dtype=dtype).eval()
+    gdn_cons = Qwen4_5GatedDeltaNet.from_config(cfg, layer_idx=21, sharing_plan=plan).to(device=device, dtype=dtype).eval()
+    init_realistic_weights(gdn_src)
+    init_realistic_weights(gdn_cons)
+
+    B_v, V_v = 8, 8
+    hv_s = torch.randn((B_v, V_v, 5120), device=device, dtype=dtype) * 0.15
+    st_s = gdn_src.create_state(B_v, device, dtype)
+    st_c = gdn_cons.create_state(B_v, device, dtype)
+    sc_s = torch.empty((B_v, V_v, gdn_src.conv_dim, 3), device=device, dtype=dtype)
+    ss_s = torch.empty((B_v, V_v, gdn_src.num_v_heads, 64, 64), device=device, dtype=torch.float32)
+    sc_c = torch.empty((B_v, V_v, gdn_cons.conv_dim, 3), device=device, dtype=dtype)
+    y_vs_ref, sh_vs_ref = gdn_src.forward_verify(
+        hv_s, init_conv_state=st_s.conv_state, init_ssm_state=st_s.ssm_state, stage_conv_state=sc_s, stage_ssm_state=ss_s
+    )
+    y_vc_ref, _ = gdn_cons.forward_verify(
+        hv_s, init_conv_state=st_c.conv_state, stage_conv_state=sc_c, shared=sh_vs_ref, enable_yoco_decode=True
+    )
+
+    # Check Stage 1 Phase-split tf32 SSM state precision < 1e-3
+    _, cu, _, _, c_req, c_t0, rcs, _, _, rss, sle, sp_phys, _, pool_sz = _build_ragged_meta_for_test([256, 192], device=device)
+    cu_list = cu.tolist()
+    Nt = int(cu[-1].item())
+    q_s1 = torch.randn((Nt, 16, 64), device=device, dtype=dtype) * 0.2
+    k_s1 = torch.randn((Nt, 16, 64), device=device, dtype=dtype) * 0.2
+    v_s1 = torch.randn((Nt, 128, 64), device=device, dtype=dtype) * 0.2
+    g_s1 = -torch.rand((Nt, 128), device=device, dtype=torch.float32) * 0.2
+    b_s1 = torch.sigmoid(torch.randn((Nt, 128), device=device, dtype=torch.float32))
+    out_s1, fs_s1 = gdn_chunk_prefill_ragged_with_snapshots_triton(
+        q_s1, k_s1, v_s1, g_s1, b_s1, cu, c_req, c_t0, rcs,
+        req_snap_start=rss, snap_local_end=sle, snap_phys=sp_phys,
+        ssm_dst_pool=torch.zeros((pool_sz, 128, 64, 64), device=device, dtype=torch.float32),
+        output_final_states=True,
+    )
+    for ri in range(2):
+        si, ei = int(cu_list[ri]), int(cu_list[ri + 1])
+        _, f_ref = gdn_recurrent_ref(
+            q_s1[si:ei].unsqueeze(0), k_s1[si:ei].unsqueeze(0), v_s1[si:ei].unsqueeze(0),
+            g_s1[si:ei].unsqueeze(0), b_s1[si:ei].unsqueeze(0), output_final_state=True,
+        )
+        assert float((fs_s1[ri] - f_ref[0]).abs().max().item()) < 1e-3
+
+    # 3. GDN Verify CG replay + separated in_proj_qkvz (128-aligned) & BF16 in_proj_ba guard
+    assert not hasattr(gdn_src, "in_proj_qkvz_ba") and not hasattr(gdn_src, "prepare_fused_projections")
+    sc_sf = torch.empty_like(sc_s)
+    ss_sf = torch.empty_like(ss_s)
+    cg_v = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(cg_v):
+        y_vs_cg, sh_vs_cg = gdn_src.forward_verify(
+            hv_s, init_conv_state=st_s.conv_state, init_ssm_state=st_s.ssm_state, stage_conv_state=sc_sf, stage_ssm_state=ss_sf
+        )
+        y_vc_cg, _ = gdn_cons.forward_verify(
+            hv_s, init_conv_state=st_c.conv_state, stage_conv_state=sc_c, shared=sh_vs_cg, enable_yoco_decode=True
+        )
+    hv_s.copy_(torch.randn_like(hv_s) * 0.15)
+    cg_v.replay()
+    y_vs_e, sh_vs_e = gdn_src.forward_verify(
+        hv_s, init_conv_state=st_s.conv_state, init_ssm_state=st_s.ssm_state, stage_conv_state=torch.empty_like(sc_s), stage_ssm_state=torch.empty_like(ss_s)
+    )
+    y_vc_e, _ = gdn_cons.forward_verify(
+        hv_s, init_conv_state=st_c.conv_state, stage_conv_state=torch.empty_like(sc_c), shared=sh_vs_e, enable_yoco_decode=True
+    )
+    assert F.cosine_similarity(y_vs_cg.float().flatten(), y_vs_e.float().flatten(), dim=0).item() > 0.99999
+    assert F.cosine_similarity(y_vc_cg.float().flatten(), y_vc_e.float().flatten(), dim=0).item() > 0.99999
+
+    def _wrap_sm100(mod: torch.nn.Module) -> torch.nn.Module:
+        if not isinstance(mod, torch.nn.Linear):
+            return mod
+        inst = SM100FP8Linear(
+            in_features=mod.in_features,
+            out_features=mod.out_features,
+            bias=(mod.bias is not None),
+            mode="auto",
+            keep_bf16=False,
+            prepare_trtllm_ll=True,
+            prepare_mxfp8=False,
+            dtype=mod.weight.dtype,
+            device=mod.weight.device,
+        )
+        inst.weight = mod.weight
+        inst.prepare_weights()
+        return inst
+
+    gdn_tp4 = Qwen4_5GatedDeltaNet.from_config(cfg, layer_idx=0, sharing_plan=plan, tp_size=4, tp_rank=0).to(device=device, dtype=dtype).eval()
+    init_realistic_weights(gdn_tp4)
+    assert gdn_tp4.in_proj_qkvz.weight.shape[0] % 128 == 0 and gdn_tp4.in_proj_ba.weight.shape[0] == 64
+    h_tp4 = torch.randn((4, 8, 5120), device=device, dtype=dtype) * 0.15
+    y_tp4_ref, _ = gdn_tp4.forward(h_tp4, state=gdn_tp4.create_state(4, device, dtype))
+    gdn_tp4.in_proj_qkvz = _wrap_sm100(gdn_tp4.in_proj_qkvz)
+    assert isinstance(gdn_tp4.in_proj_qkvz, SM100FP8Linear) and isinstance(gdn_tp4.in_proj_ba, torch.nn.Linear)
+    y_tp4_f, _ = gdn_tp4.forward(h_tp4, state=gdn_tp4.create_state(4, device, dtype))
+    assert F.cosine_similarity(y_tp4_f.float().flatten(), y_tp4_ref.float().flatten(), dim=0).item() > 0.9999
+
+    # 4. Qwen4_5Attention prepare_fused_projections (Producer Q+K+V+Idx & Consumer Q+Idx, sconv=True/False)
+    for use_sconv in (True, False):
+        cfg_qsa_c = Qwen4_5ArchConfig(
+            hidden_size=512,
+            num_hidden_layers=24,
+            full_attention_interval=4,
+            num_attention_heads=16,
+            num_key_value_heads=1,
+            head_dim=256,
+            attn_output_gate=True,
+            use_full_attn_kv_sconv=use_sconv,
+            indexer_head_dim=128,
+            indexer_n_heads=8,
+            indexer_kv_heads=1,
+            indexer_compress_ratio=4,
+            indexer_budget=16,
+            share_map="19->23",
+            enable_yoco_decode=True,
+        )
+        assert cfg_qsa_c.has_qsa
+        p_a = YoCoSharingPlan.from_config(cfg_qsa_c)
+        sa_p = Qwen4_5Attention.from_config(cfg_qsa_c, layer_idx=19, sharing_plan=p_a).to(device=device, dtype=dtype).eval()
+        sa_c = Qwen4_5Attention.from_config(cfg_qsa_c, layer_idx=23, sharing_plan=p_a).to(device=device, dtype=dtype).eval()
+        init_realistic_weights(sa_p)
+        init_realistic_weights(sa_c)
+        ha = torch.randn((2, 16, 512), device=device, dtype=dtype) * 0.2
+        posa = torch.arange(16, device=device, dtype=torch.int64).unsqueeze(0).expand(2, 16)
+        raw_src = []
+        kv_ref = sa_p.create_kv_cache(2, 32, device, dtype)
+        ks_r, vs_r = sa_p.create_sconv_states(2, device, dtype)
+        out_p_ref = sa_p(ha, positions=posa, kv_cache=kv_ref, k_sconv_state=ks_r, v_sconv_state=vs_r, seq_offset=0, qsa_on_raw_keys=raw_src.append)
+        out_c_ref = sa_c(ha, positions=posa, kv_cache=kv_ref, seq_offset=0, qsa_source_raw_keys=raw_src[0])
+
+        assert sa_p.prepare_fused_projections() is not None
+        assert sa_c.prepare_fused_projections() is not None
+        assert sa_p.q_proj.weight.untyped_storage().data_ptr() == sa_p.qkv_idx_proj.weight.untyped_storage().data_ptr()
+        assert sa_p.indexer.qk_proj.data_ptr() == sa_p.indexer.index_qk_proj.weight.data_ptr()
+        assert sa_c.indexer.qk_proj.data_ptr() == sa_c.indexer.index_qk_proj.weight.data_ptr()
+
+        raw_f = []
+        kv_f = sa_p.create_kv_cache(2, 32, device, dtype)
+        ks_f, vs_f = sa_p.create_sconv_states(2, device, dtype)
+        out_p_f = sa_p(ha, positions=posa, kv_cache=kv_f, k_sconv_state=ks_f, v_sconv_state=vs_f, seq_offset=0, qsa_on_raw_keys=raw_f.append)
+        out_c_f = sa_c(ha, positions=posa, kv_cache=kv_f, seq_offset=0, qsa_source_raw_keys=raw_f[0])
+        assert F.cosine_similarity(out_p_f.float().flatten(), out_p_ref.float().flatten(), dim=0).item() > 0.9999
+        assert F.cosine_similarity(out_c_f.float().flatten(), out_c_ref.float().flatten(), dim=0).item() > 0.9999
+
+    # Non-QSA Consumer returns None; Q_proj reload triggers data_ptr() mismatch fallback
+    sa_dense_c = Qwen4_5Attention.from_config(make_config(512), layer_idx=23).to(device=device, dtype=dtype).eval()
+    assert sa_dense_c.prepare_fused_projections() is None
+    sa_p.q_proj.weight = torch.nn.Parameter(torch.randn_like(sa_p.q_proj.weight) * 0.05)
+    assert not sa_p._fused_qkv_idx_ptrs_valid()
+    print("  PASS: R5 GDN kernels, Stage1 Phase-split, and Attention prepare_fused_projections verified.")
+
+
 @torch.no_grad()
 def bench_cuda(fn, warmup: int = 10, iters: int = 50) -> tuple[float, float]:
     """Return (median_ms, mean_ms) using CUDA events."""
@@ -1052,6 +1230,7 @@ def main() -> None:
     test_gdn_fused_unpack_verify_ragged_and_tp()
     test_r3_gdn_stage2_sub_dv_and_verify_nw1()
     test_r4_rmsnorm_gated_packed_yoco_subdv_and_prefill_tuning()
+    test_r5_gdn_verify_readout_stage1_and_fused_projections()
     run_b300_benchmarks()
     print(f"\nALL TESTS & BENCHMARKS PASSED in {time.time() - t0:.2f}s")
 

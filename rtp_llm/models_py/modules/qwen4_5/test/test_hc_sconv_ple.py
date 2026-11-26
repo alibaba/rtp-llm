@@ -14,6 +14,8 @@ from rtp_llm.models_py.modules.qwen4_5.hyper_connection import (
     grouped_gemma_rmsnorm_bias_ref,
     grouped_gemma_rmsnorm_bias_triton,
     hc_combine_ref,
+    grouped_gemma_rmsnorm_bias_ref,
+    hc_combine_and_norm_triton,
     hc_combine_triton,
 )
 from rtp_llm.models_py.modules.qwen4_5.ple import (
@@ -22,6 +24,7 @@ from rtp_llm.models_py.modules.qwen4_5.ple import (
     compute_ngram_vocab_sizes,
     ple_add3_and_hc_norm_triton,
     ple_add3_triton,
+    ple_gather_fp8_triton,
     ple_gate_and_norm_triton,
 )
 from rtp_llm.models_py.modules.qwen4_5.short_conv import (
@@ -29,6 +32,8 @@ from rtp_llm.models_py.modules.qwen4_5.short_conv import (
     causal_dwconv1d_prefill_with_snapshots_triton,
     causal_dwconv1d_ragged_prefill_with_snapshots_triton,
     causal_dwconv1d_verify_opaque_triton,
+    causal_dwconv1d_decode_triton,
+    causal_dwconv1d_ref,
     causal_dwconv1d_verify_triton,
 )
 
@@ -1130,6 +1135,116 @@ def run_benchmarks() -> None:
         print(f"    PLE (CPU-UVA 128-shard FP8) B={B:2d}, T={T:4d} | latency={t_ple_uva:7.2f} us")
 
 
+
+def test_r5_ple_u64_hc_split5120_and_strided_shortconv() -> None:
+    print("\n=== [3f] R5 PLE u64 Head-Grouped + HC Split5120 + ShortConv Strided Decode ===")
+    device = torch.device("cuda")
+    dtype = torch.bfloat16
+    torch.manual_seed(202650)
+
+    # 1. PLE u64 aligned gather (1D shard u64 + 2D/3D head-grouped u64, GPU + CPU-UVA) & CUDA Graph
+    B_p, T_p, H_ng, D_ple = 16, 16, 4, 256
+    n_shards, shard_rows = 8, 256
+    gpu_shards = [
+        (torch.randn((shard_rows, D_ple), device=device) * 0.5).to(torch.float8_e4m3fn)
+        for _ in range(n_shards)
+    ]
+    ptr_gpu = torch.tensor([int(s.data_ptr()) for s in gpu_shards], device=device, dtype=torch.int64)
+    w_sc = torch.tensor(float(DEFAULT_PLE_WEIGHT_SCALE), device=device, dtype=torch.float32)
+    ids_hg = torch.randint(0, n_shards * shard_rows, (B_p, T_p, H_ng), device=device, dtype=torch.int64)
+    out_u64 = ple_gather_fp8_triton(ids_hg, ptr_gpu, shard_rows, D_ple, w_sc, allow_u64_vec=True)
+    out_ref = ple_gather_fp8_triton(ids_hg, ptr_gpu, shard_rows, D_ple, w_sc, allow_u64_vec=False)
+    assert float((out_u64 - out_ref).abs().max().item()) == 0.0
+    ids_1d = ids_hg.reshape(-1)
+    assert float((
+        ple_gather_fp8_triton(ids_1d, ptr_gpu, shard_rows, D_ple, w_sc, allow_u64_vec=True)
+        - ple_gather_fp8_triton(ids_1d, ptr_gpu, shard_rows, D_ple, w_sc, allow_u64_vec=False)
+    ).abs().max().item()) == 0.0
+
+    ple = Qwen4_5PLELayer(
+        hidden_size=256,
+        hc_count=4,
+        ple_embed_dim=H_ng * D_ple,
+        ngram_size=3,
+        heads_per_ngram=2,
+        split_ngram_parts=n_shards,
+        ngram_heads_vocab_sizes=[512] * H_ng,
+        dtype=dtype,
+        device=device,
+    ).eval()
+    cpu_shards = [
+        (torch.randn((shard_rows, D_ple)) * 0.5).to(torch.float8_e4m3fn).pin_memory()
+        for _ in range(n_shards)
+    ]
+    ple.set_ngram_table(cpu_shards, pin_cpu=False, enable_cpu_uva=True)
+    assert ple._pointer_u64_aligned
+    h_ple = torch.randn((B_p, T_p, 4 * 256), device=device, dtype=dtype)
+    toks_ple = torch.randint(0, 2048, (B_p, T_p), device=device, dtype=torch.int64)
+    st_uva = ple.alloc_state(B_p, device=device, dtype=dtype)
+    y_uva = ple(h_ple, toks_ple, state=st_uva)
+    ple._pointer_u64_aligned = False
+    y_uva_ref = ple(h_ple, toks_ple, state=ple.alloc_state(B_p, device=device, dtype=dtype))
+    ple._pointer_u64_aligned = True
+    assert float((y_uva - y_uva_ref).abs().max().item()) == 0.0
+    cg_ple = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(cg_ple):
+        y_uva_cg = ple(h_ple, toks_ple)
+    h_ple.copy_(torch.randn_like(h_ple))
+    toks_ple.copy_(torch.randint(0, 2048, (B_p, T_p), device=device, dtype=torch.int64))
+    cg_ple.replay()
+    assert float((y_uva_cg - ple(h_ple, toks_ple)).abs().max().item()) == 0.0
+
+    # 2. HC _hc_combine_and_norm_split5120_shared_sub_kernel (rows >= 1024, H=5120, HC=4) + CG
+    H_hc, HC_n = 5120, 4
+    for rows, single_stream, use_bias in [(1024, False, True), (1280, True, False), (1280, False, True)]:
+        res = (
+            torch.randn((rows, H_hc), device=device, dtype=dtype) * 0.4
+            if single_stream
+            else torch.randn((rows, HC_n * H_hc), device=device, dtype=dtype) * 0.4
+        )
+        sub = torch.randn((rows, H_hc), device=device, dtype=dtype) * 0.4
+        inj = torch.randn((rows, HC_n), device=device, dtype=dtype) * 0.25
+        nw = torch.randn((HC_n * H_hc,), device=device, dtype=dtype) * 0.2
+        nb = (torch.randn((HC_n * H_hc,), device=device, dtype=dtype) * 0.1) if use_bias else None
+        c_tri, n_tri = hc_combine_and_norm_triton(sub, res, inj, nw, nb, eps=1e-6)
+        c_ref = hc_combine_ref(sub, res, inj)
+        n_ref = grouped_gemma_rmsnorm_bias_ref(c_ref, nw, nb, HC_n, eps=1e-6)
+        c_max, _ = _diff_stats(c_tri, c_ref)
+        n_max, _ = _diff_stats(n_tri, n_ref)
+        cos_n = torch.nn.functional.cosine_similarity(n_tri.float().flatten(), n_ref.float().flatten(), dim=0).item()
+        assert c_max < 2e-2 and n_max < 0.08 and cos_n > 0.99999, (
+            f"HC split5120 rows={rows} ss={single_stream} bias={use_bias}: c_max={c_max} n_max={n_max} cos={cos_n}"
+        )
+    cg_hc = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(cg_hc):
+        c_cg, n_cg = hc_combine_and_norm_triton(sub, res, inj, nw, nb, eps=1e-6)
+    sub.copy_(torch.randn_like(sub) * 0.4)
+    cg_hc.replay()
+    c_eag, n_eag = hc_combine_and_norm_triton(sub, res, inj, nw, nb, eps=1e-6)
+    assert float((c_cg - c_eag).abs().max().item()) == 0.0 and float((n_cg - n_eag).abs().max().item()) == 0.0
+
+    # 3. ShortConv strided decode (slice [B, 1, 256] from wide [B, 1, 19072], zero .contiguous())
+    B_sc, C_sc = 16, 256
+    wide_buf = torch.randn((B_sc, 1, 19072), device=device, dtype=dtype)
+    x_strided = wide_buf[:, :, 16384 : 16384 + C_sc]
+    assert x_strided.stride() == (19072, 19072, 1) and not x_strided.is_contiguous()
+    w_scv = torch.randn((C_sc, 1, 4), device=device, dtype=dtype) * 0.2
+    st_s = torch.randn((B_sc, C_sc, 3), device=device, dtype=dtype) * 0.2
+    st_c = st_s.clone()
+    y_s = causal_dwconv1d_decode_triton(x_strided, w_scv, st_s, residual=True, use_activation=False)
+    y_c = causal_dwconv1d_decode_triton(x_strided.contiguous(), w_scv, st_c, residual=True, use_activation=False)
+    assert float((y_s - y_c).abs().max().item()) == 0.0 and float((st_s - st_c).abs().max().item()) == 0.0
+    cg_sc = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(cg_sc):
+        y_scg = causal_dwconv1d_decode_triton(x_strided, w_scv, st_s, residual=True, use_activation=False)
+    wide_buf[:, :, 16384 : 16384 + C_sc].copy_(torch.randn_like(x_strided))
+    st_ref_cg = st_s.clone()
+    cg_sc.replay()
+    y_se = causal_dwconv1d_decode_triton(x_strided.contiguous(), w_scv, st_ref_cg, residual=True, use_activation=False)
+    assert float((y_scg - y_se).abs().max().item()) == 0.0
+    print("  PASS: PLE u64, HC Split5120, ShortConv strided decode & CUDA Graph parity verified.")
+
+
 def main() -> int:
     print(
         f"Device: {torch.cuda.get_device_name(0)} "
@@ -1144,6 +1259,7 @@ def main() -> int:
     test_ple_packed_prefill_verify_and_tp_hooks()
     test_r2_hc_aligned_projections_and_ple_p2p()
     test_r4_shortconv_opaque_verify_and_clip_value()
+    test_r5_ple_u64_hc_split5120_and_strided_shortconv()
     run_benchmarks()
     print(f"\nALL TESTS & BENCHMARKS PASSED in {time.perf_counter() - t0:.2f}s!")
     return 0

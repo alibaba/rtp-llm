@@ -29,6 +29,7 @@ from rtp_llm.models_py.modules.qwen4_5.activation import (
     SituAndMul,
     per_token_group_quant_fp8_ue8m0,
     per_token_group_quant_fp8_ue8m0_ref,
+    quant_fp8_1x128_deepgemm_triton,
     situ_and_mul_ref,
     situ_and_mul_triton,
     situ_glu_fp8_quant_masked_packed,
@@ -1691,7 +1692,21 @@ def test_sm100_fp8_linear(device: torch.device) -> None:
     assert narrow_lin._resolve_backend(512, device) == "bf16"
     assert narrow_lin._resolve_backend(2048, device) == "bf16"
     assert narrow_lin._resolve_backend(4096, device) == "bf16"
-    assert narrow_lin._resolve_backend(8192, device) == (
+    exp_narrow = (
+        "deepgemm_fp8"
+        if has_deepgemm_fp8(dev_idx)
+        else ("mxfp8" if has_flashinfer_mxfp8(dev_idx) else "bf16")
+    )
+    assert narrow_lin._resolve_backend(8192, device) == exp_narrow
+    narrow_mx = SM100FP8Linear(
+        5120, 2560, mode="auto", keep_bf16=True, prepare_deepgemm_fp8=False, device=device
+    )
+    torch.nn.init.normal_(narrow_mx.weight, 0.0, 0.02)
+    narrow_mx.prepare_weights()
+    if has_deepgemm_fp8(dev_idx):
+        assert narrow_lin.w_mxfp8 is None
+    assert narrow_lin.w_fp8_row is None and narrow_lin.w_trtllm_ll is None
+    assert narrow_mx._resolve_backend(8192, device) == (
         "mxfp8" if has_flashinfer_mxfp8(dev_idx) else "bf16"
     )
     if has_flashinfer_mxfp8(dev_idx):
@@ -1699,15 +1714,18 @@ def test_sm100_fp8_linear(device: torch.device) -> None:
 
         xp = torch.randn((64, 5120), dtype=torch.bfloat16, device=device) * 0.5
         ax, asc = flashinfer.mxfp8_quantize(xp, is_sf_swizzled_layout=True, alignment=32)
-        yp_pq = narrow_lin.forward_prequant_mxfp8(ax, asc, orig_shape=(64,))
-        assert _diff_stats(yp_pq, F.linear(xp, narrow_lin.weight))[2] >= 0.999
+        yp_pq = narrow_mx.forward_prequant_mxfp8(ax, asc, orig_shape=(64,))
+        assert _diff_stats(yp_pq, F.linear(xp, narrow_mx.weight))[2] >= 0.999
+    del narrow_mx
 
     sh_dn_lin = SM100FP8Linear(1280, 5120, mode="auto", keep_bf16=True, device=device)
     torch.nn.init.normal_(sh_dn_lin.weight, 0.0, 0.02)
     sh_dn_lin.prepare_weights()
     assert sh_dn_lin._resolve_backend(8192, device) == "bf16"
     assert sh_dn_lin._resolve_backend(20480, device) == (
-        "mxfp8" if has_flashinfer_mxfp8(dev_idx) else "bf16"
+        "deepgemm_fp8"
+        if has_deepgemm_fp8(dev_idx)
+        else ("mxfp8" if has_flashinfer_mxfp8(dev_idx) else "bf16")
     )
 
     tp4_sh_dn = SM100FP8Linear(320, 5120, mode="auto", keep_bf16=True, device=device)
@@ -1752,7 +1770,9 @@ def test_sm100_fp8_linear(device: torch.device) -> None:
         yw_auto = wide_lin(xw)
         assert _diff_stats(yw_auto, yw_ref)[2] >= 0.999, f"wide lm_head M={m_w} cos low"
     assert wide_lin._resolve_backend(2048, device) == (
-        "mxfp8" if has_flashinfer_mxfp8(dev_idx) else "scaled_mm"
+        "deepgemm_fp8"
+        if has_deepgemm_fp8(dev_idx)
+        else ("mxfp8" if has_flashinfer_mxfp8(dev_idx) else "scaled_mm")
     )
     prev_pref_ll = os.environ.get("QWEN4_5_FP8_PREFER_TRTLLM_LL")
     try:
@@ -1783,12 +1803,21 @@ def test_sm100_fp8_linear(device: torch.device) -> None:
         assert mlp_fp8._fp8_gate_up is not None
         assert mlp_fp8._fp8_gate_up._resolve_backend(64, device) == "bf16"
         assert mlp_fp8._fp8_gate_up._resolve_backend(4096, device) == "bf16"
-        for m in (8, 64, 512):
+        assert mlp_fp8._fp8_down is not None
+        assert mlp_fp8._fp8_down._resolve_backend(512, device) == "bf16"
+        exp_dn_4k = (
+            "deepgemm_fp8"
+            if has_deepgemm_fp8(dev_idx)
+            else ("mxfp8" if has_flashinfer_mxfp8(dev_idx) else "bf16")
+        )
+        assert mlp_fp8._fp8_down._resolve_backend(4096, device) == exp_dn_4k
+        for m in (8, 64, 512, 1024):
             xm = torch.randn((m, 5120), dtype=torch.bfloat16, device=device) * 0.5
             ym_ref = mlp_bf16(xm)
             ym_fp8 = mlp_fp8(xm)
             _, _, cos_mlp = _diff_stats(ym_fp8, ym_ref)
-            assert cos_mlp >= 0.9999, f"Qwen4_5DenseMLP TP={tp_sz} auto M={m} cos={cos_mlp}"
+            min_cos = 0.9999 if m < 1024 or tp_sz == 4 else 0.999
+            assert cos_mlp >= min_cos, f"Qwen4_5DenseMLP TP={tp_sz} auto M={m} cos={cos_mlp}"
         del mlp_bf16, mlp_fp8
 
     # LatentMoE fused W_3x + [2, H] epilogue + 2-pass norm (Decode, Prefill M=4096, TBO, CG, L=5120)
@@ -2018,6 +2047,208 @@ def test_r4_combine_bitwise_schedule_and_multigpu(device: torch.device) -> None:
     print("  PASS R4 combine bitwise parity, fused Decode schedule & multi-GPU device ctx")
 
 
+def test_r5_deepgemm_w3x_a2a_and_no_cutlass80(device: torch.device) -> None:
+    print("\n=== [10e] Test R5 deepgemm_fp8 (1x128), W_3x has_a2a=True & Zero cutlass_80 ===")
+    import deep_gemm  # type: ignore
+
+    dev_idx = int(device.index or 0)
+    torch.manual_seed(2026112605)
+
+    # 1. quant_fp8_1x128_deepgemm_triton bitwise parity (CPU & CUDA) + forward_prequant_dg
+    for dev in (torch.device("cpu"), device):
+        q0, sc0 = quant_fp8_1x128_deepgemm_triton(torch.empty((0, 1280), dtype=torch.bfloat16, device=dev))
+        assert q0.shape == (0, 1280) and sc0.shape == (0, 3)
+    for M, K in ((1, 1280), (5, 1280), (17, 2560), (512, 5120), (1024, 12800)):
+        x = torch.randn((M, K), dtype=torch.bfloat16, device=device) * 2.0
+        x[:, :128] = 0.0
+        ref_q, ref_sf = deep_gemm.per_token_cast_to_fp8(x, use_ue8m0=True)
+        ref_sc = deep_gemm.get_mn_major_tma_aligned_packed_ue8m0_tensor(ref_sf)
+        tri_q, tri_sc = quant_fp8_1x128_deepgemm_triton(x)
+        assert tri_sc.shape == ref_sc.shape and tri_sc.stride() == ref_sc.stride()
+        assert torch.equal(tri_sc, ref_sc), f"1x128 scale mismatch at ({M},{K})"
+        assert torch.equal(tri_q.view(torch.uint8), ref_q.view(torch.uint8)), f"1x128 q mismatch"
+        if M <= 17:
+            cq, csc = quant_fp8_1x128_deepgemm_triton(x.cpu())
+            assert torch.equal(csc.to(device), tri_sc)
+            assert torch.equal(cq.to(device).view(torch.uint8), tri_q.view(torch.uint8))
+
+    # 2. Target fused GDN/FullAttn 128-aligned routing + TP4 N=5184 safe BF16 fallback
+    for out_f, m_exp in (
+        (20736, {512: "bf16", 1024: "deepgemm_fp8"}),
+        (19072, {512: "bf16", 1024: "deepgemm_fp8"}),
+        (6272, {1024: "bf16", 2048: "deepgemm_fp8"}),
+        (5184, {512: "bf16", 1024: "bf16", 8192: "bf16"}),
+    ):
+        base = torch.nn.Linear(5120, out_f, bias=False, dtype=torch.bfloat16, device=device)
+        torch.nn.init.normal_(base.weight, 0.0, 0.02)
+        fp8 = SM100FP8Linear(
+            5120, out_f, mode="auto", keep_bf16=False, prepare_mxfp8=True, dtype=torch.bfloat16, device=device
+        )
+        fp8.weight = base.weight
+        fp8.prepare_weights()
+        # Non-lm_head auto must not store redundant w_fp8_row / w_mxfp8 / w_trtllm_ll
+        assert fp8.w_fp8_row is None and fp8.w_trtllm_ll is None
+        if out_f % 128 == 0 and has_deepgemm_fp8(dev_idx):
+            assert fp8.w_dg_fp8 is not None and fp8.w_mxfp8 is None
+        else:
+            assert fp8.w_dg_fp8 is None and fp8.w_mxfp8 is None
+        for m_val, want in m_exp.items():
+            if want == "deepgemm_fp8" and not has_deepgemm_fp8(dev_idx):
+                continue
+            assert fp8._resolve_backend(m_val, device) == want, f"({out_f}, M={m_val}) got {fp8._resolve_backend(m_val, device)}"
+            xm = torch.randn((m_val, 5120), dtype=torch.bfloat16, device=device) * 0.5
+            assert _diff_stats(fp8(xm), base(xm))[2] >= 0.999
+        del fp8, base
+
+    dn_lin = SM100FP8Linear(12800, 5120, mode="auto", keep_bf16=True, prepare_mxfp8=False, prepare_deepgemm_fp8=True, device=device)
+    torch.nn.init.normal_(dn_lin.weight, 0.0, 0.02)
+    dn_lin.prepare_weights()
+    if has_deepgemm_fp8(dev_idx):
+        assert dn_lin._resolve_backend(512, device) == "bf16"
+        assert dn_lin._resolve_backend(1024, device) == "deepgemm_fp8"
+        xdn = torch.randn((1024, 12800), dtype=torch.bfloat16, device=device) * 0.5
+        xq, xsc = quant_fp8_1x128_deepgemm_triton(xdn)
+        assert torch.equal(dn_lin.forward_prequant_dg(xq, xsc, orig_shape=(1024,)), dn_lin(xdn))
+        assert _diff_stats(dn_lin(xdn), F.linear(xdn, dn_lin.weight))[2] >= 0.999
+    del dn_lin
+
+    # 3. LatentMoE W_3x with has_a2a=True (forward & TBO), zero cutlass_80, & M=1024 deepgemm_masked
+    class _MockA2AState:
+        def __init__(self, hidden, topk_ids, topk_weights):
+            self.hidden = hidden
+            self.topk_ids = topk_ids
+            self.topk_weights = topk_weights
+            self.hidden_fp8 = None
+
+    class _MockA2AComm:
+        world_size = 4
+
+        def __init__(self):
+            self.dispatch_calls = 0
+
+        def dispatch(self, routed, topk_ids, topk_weights, **kwargs):
+            self.dispatch_calls += 1
+            return _MockA2AState(routed, topk_ids, topk_weights)
+
+        def combine(self, routed_ep, state, **kwargs):
+            return routed_ep
+
+        def dispatch_async(self, routed, topk_ids, topk_weights, **kwargs):
+            return self.dispatch(routed, topk_ids, topk_weights, **kwargs)
+
+        def wait_dispatch(self, handle):
+            return handle
+
+        def combine_async(self, routed_ep, state, **kwargs):
+            return routed_ep
+
+        def wait_combine(self, handle):
+            return handle
+
+    moe_r5 = Qwen4_5LatentMoE(
+        hidden_size=5120,
+        routed_expert_hidden_size=1280,
+        moe_intermediate_size=128,
+        shared_expert_intermediate_size=128,
+        num_experts=64,
+        num_experts_per_tok=10,
+        dtype=torch.bfloat16,
+        device=device,
+        enable_shared_overlap=True,
+        dense_linear_mode="auto",
+        backend="deepgemm_masked",
+    )
+    _init_latent_moe_weights(moe_r5, seed=5555)
+    with torch.no_grad():
+        moe_r5.gate.weight.mul_(4.0)
+    moe_r5.prepare_weights()
+    assert moe_r5._latent_down_gate_shared_gu_weight is not None
+    assert moe_r5._latent_shared_gates_pad8 is not None
+    assert moe_r5._fp8_latent_up is not None
+    assert moe_r5._fp8_latent_up.weight.data_ptr() == moe_r5.latent_up_proj.weight.data_ptr()
+    assert moe_r5.shared_expert._fp8_down.weight.data_ptr() == moe_r5.shared_expert.down_proj.weight.data_ptr()
+    assert moe_r5._fp8_latent_up.w_fp8_row is None and moe_r5._fp8_latent_up.w_trtllm_ll is None
+    if has_deepgemm_fp8(dev_idx):
+        assert moe_r5._fp8_latent_up.w_dg_fp8 is not None and moe_r5._fp8_latent_up.w_mxfp8 is None
+        assert moe_r5.shared_expert._fp8_down.w_dg_fp8 is not None and moe_r5.shared_expert._fp8_down.w_mxfp8 is None
+    assert "_fp8_latent_up.weight" not in moe_r5.state_dict()
+
+    # Standalone _project_gate_no_cutlass80 single-op parity (cos >= 0.9999 vs BF16 & FP32)
+    for m_g in (1, 8, 64, 512, 1024, 4096):
+        xg = torch.randn((m_g, 5120), dtype=torch.bfloat16, device=device) * 0.4
+        g_out = moe_r5._project_gate_no_cutlass80(
+            xg, moe_r5._latent_shared_gates_weight, moe_r5._latent_shared_gates_pad8, run_triton=True
+        )
+        g_bf = F.linear(xg, moe_r5._latent_shared_gates_weight)
+        g_fp = F.linear(xg.float(), moe_r5._latent_shared_gates_weight.float())
+        assert _diff_stats(g_out, g_bf)[2] >= 0.9999
+        assert _diff_stats(g_out, g_fp)[2] >= 0.9999
+
+    # Zero cutlass_80 profiler audit at M=64, 512, 4096 (and triton_splitk BF16 parity)
+    for m_prof in (64, 512, 4096):
+        xp = torch.randn((m_prof, 5120), dtype=torch.bfloat16, device=device) * 0.4
+        moe_r5(xp)
+        torch.cuda.synchronize(device)
+        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as prof:
+            yp = moe_r5(xp)
+        torch.cuda.synchronize(device)
+        c80 = [e.key for e in prof.key_averages() if "cutlass_80" in e.key.lower()]
+        assert not c80, f"Detected forbidden cutlass_80 kernel at M={m_prof}: {c80}"
+        y_tri_bf16 = moe_r5(xp, backend="triton_splitk")
+        y_nontri = moe_r5(xp, use_triton_mxfp4=False)
+        assert _diff_stats(y_tri_bf16, y_nontri)[2] >= 0.999
+        assert _diff_stats(yp, y_nontri)[2] >= 0.998
+
+    # Exercise M=1024 deepgemm_masked vs FP8-activation exact ref
+    x1024 = torch.randn((1024, 1280), dtype=torch.bfloat16, device=device) * 0.4
+    ids1024 = torch.stack([torch.randperm(64, device=device)[:10] for _ in range(1024)]).to(torch.int32)
+    w1024 = torch.softmax(torch.randn((1024, 10), device=device, dtype=torch.float32), dim=-1)
+    y_dg_1k = mxfp4_moe_forward(
+        x1024, ids1024, w1024, moe_r5._mxfp4_weights(), ep_size=4, backend="deepgemm_masked"
+    )
+    y_fp8_ref = mxfp4_moe_forward_ref(
+        x1024, ids1024, w1024, moe_r5._mxfp4_weights(), ep_size=4, fp8_activations=True
+    )
+    assert _diff_stats(y_dg_1k, y_fp8_ref)[2] >= 0.9999
+
+    # Verify W_3x active under has_a2a=True (forward + TBO) + zero-token rank dispatch preserved
+    mock_a2a = _MockA2AComm()
+    moe_r5.ep_size = 4
+    moe_r5.ep_group = None
+    moe_r5.all_to_all_comm = mock_a2a
+    x_a2a = torch.randn((32, 5120), dtype=torch.bfloat16, device=device) * 0.4
+    orig_shared_fwd = moe_r5.shared_expert.forward
+
+    def _forbid_shared_fwd(*a, **kw):
+        raise AssertionError("shared_expert.forward called redundantly when W_3x active!")
+
+    # Reference without W_3x
+    moe_r5.ep_size = 1
+    moe_r5.all_to_all_comm = None
+    y_no_a2a = moe_r5(x_a2a)
+    moe_r5.ep_size = 4
+    moe_r5.all_to_all_comm = mock_a2a
+    moe_r5.shared_expert.forward = _forbid_shared_fwd  # type: ignore[method-assign]
+    try:
+        y_a2a = moe_r5(x_a2a)
+        ctx = moe_r5.forward_route_and_dispatch(x_a2a)
+        assert ctx.shared_gate_up is not None
+        ctx = moe_r5.forward_routed_compute_and_combine(ctx)
+        assert ctx.shared_gate_up is None
+        y_tbo_a2a = moe_r5.forward_finish_combine(ctx)
+        assert _diff_stats(y_a2a, y_no_a2a)[2] >= 0.9999
+        assert _diff_stats(y_tbo_a2a, y_no_a2a)[2] >= 0.9999
+    finally:
+        moe_r5.shared_expert.forward = orig_shared_fwd  # type: ignore[method-assign]
+
+    # Zero-token rank under has_a2a=True must still call dispatch cleanly
+    before_calls = mock_a2a.dispatch_calls
+    y_zero = moe_r5(torch.empty((0, 5120), dtype=torch.bfloat16, device=device))
+    assert y_zero.shape == (0, 5120) and mock_a2a.dispatch_calls == before_calls + 1
+    del moe_r5
+    print("  PASS R5 deepgemm_fp8 (1x128), zero-redundancy FP8 cache, W_3x has_a2a=True & zero cutlass_80")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Qwen 4.5-Flash LatentMoE & SM100 MXFP4 test suite")
     parser.add_argument("--distributed", action="store_true", help="Run multi-GPU FastAllReduce/TP/EP tests")
@@ -2079,6 +2310,7 @@ def main() -> int:
         test_dense_mlp_tp_simulated(device)
         test_sm100_fp8_linear(device)
         test_r4_combine_bitwise_schedule_and_multigpu(device)
+        test_r5_deepgemm_w3x_a2a_and_no_cutlass80(device)
 
     if args.distributed:
         test_distributed_fast_comm_tp_ep(world_size=args.world_size)

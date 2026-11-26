@@ -11,8 +11,8 @@ FP8/MXFP8 modes and 4x weight compression in opt-in ``w4a8`` mode:
     Decode/medium-M ``1 <= M < 2048`` (``cos >= 0.9993``; zero weight pre-shuffle).
   - ``mxfp8`` (``flashinfer.mxfp8_quantize`` + ``flashinfer.mm_mxfp8(cutlass)``):
     Compute-bound Prefill ``M >= 2048`` (or ``M >= 1024, N >= 32768``), ~2700-2800 TF.
-  - ``deepgemm_fp8`` (``deep_gemm.per_token_cast_to_fp8`` + ``deep_gemm.fp8_gemm_nt``):
-    SM100 block-128 fallback when FlashInfer MXFP8 is unavailable.
+  - ``deepgemm_fp8`` (``quant_fp8_1x128_deepgemm_triton`` + ``deep_gemm.fp8_gemm_nt(..., recipe=(1, 1, 128))``):
+    SM100 primary Prefill FP8 GEMM (``M >= 1024, M*K*N >= 6.4e10, min(K, N) >= 1280``).
   - ``w4a8`` (``per_token_group_quant_fp8_ue8m0`` + ``deep_gemm.fp8_fp4_gemm_nt``):
     Opt-in W4A8 (~2800-2957 TF, 4x smaller weights, ``cos ~ 0.993``).
   - ``bf16`` (``F.linear``): Clean fallback for small Decode GEMMs (``M <= 64, N <= 8192``)
@@ -32,7 +32,10 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
-from rtp_llm.models_py.modules.qwen4_5.activation import per_token_group_quant_fp8_ue8m0
+from rtp_llm.models_py.modules.qwen4_5.activation import (
+    per_token_group_quant_fp8_ue8m0,
+    quant_fp8_1x128_deepgemm_triton,
+)
 from rtp_llm.models_py.modules.qwen4_5.mxfp4_ops import (
     has_deepgemm_fp8_fp4,
     prepare_fp4_weight_scale_for_deepgemm,
@@ -303,7 +306,10 @@ def quantize_fp8_tensorwise_triton(
 
 
 def quantize_weight_fp8_rowwise(w: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Quantize ``[N, K]`` weight into col-major ``w_q.t()`` and ``[1, N]`` FP32 scale."""
+    """Quantize ``[N, K]`` weight into ``[N, K]`` FP8 and ``[1, N]`` FP32 scale without FP32 copies."""
+    if w.is_cuda:
+        q, sc = quantize_fp8_rowwise_triton(w)
+        return q, sc.reshape(1, -1).contiguous()
     amax = w.float().abs().amax(dim=-1, keepdim=True).clamp(min=_QUANT_EPS * _FP8_E4M3_MAX)
     sc = (amax / _FP8_E4M3_MAX).squeeze(-1).contiguous()
     q = (w.float() / sc[:, None]).clamp(-_FP8_E4M3_MAX, _FP8_E4M3_MAX).to(torch.float8_e4m3fn).contiguous()
@@ -311,6 +317,10 @@ def quantize_weight_fp8_rowwise(w: torch.Tensor) -> Tuple[torch.Tensor, torch.Te
 
 
 def quantize_weight_fp8_tensorwise(w: torch.Tensor) -> Tuple[torch.Tensor, float]:
+    """Quantize ``[N, K]`` weight with tensorwise scale without full FP32 temporaries on CUDA."""
+    if w.is_cuda:
+        q, alpha = quantize_fp8_tensorwise_triton(w, weight_scale=1.0)
+        return q, float(alpha.item())
     amax = float(w.float().abs().max().clamp(min=_QUANT_EPS * _FP8_E4M3_MAX).item())
     sc = amax / _FP8_E4M3_MAX
     q = (w.float() / sc).clamp(-_FP8_E4M3_MAX, _FP8_E4M3_MAX).to(torch.float8_e4m3fn).contiguous()
@@ -343,7 +353,7 @@ class SM100FP8Linear(nn.Module):
         keep_bf16: bool = True,
         prepare_trtllm_ll: bool = True,
         prepare_mxfp8: bool = True,
-        prepare_deepgemm_fp8: bool = False,
+        prepare_deepgemm_fp8: Optional[bool] = None,
         prepare_w4a8: bool = False,
         allow_decode_scaled_mm: bool = False,
         dtype: torch.dtype = torch.bfloat16,
@@ -383,7 +393,8 @@ class SM100FP8Linear(nn.Module):
 
         self._prepare_trtllm_ll_flag = bool(prepare_trtllm_ll)
         self._prepare_mxfp8_flag = bool(prepare_mxfp8)
-        self._prepare_dg_fp8_flag = bool(prepare_deepgemm_fp8)
+        self._explicit_dg_fp8_flag: Optional[bool] = prepare_deepgemm_fp8
+        self._prepare_dg_fp8_flag = bool(prepare_mxfp8 if prepare_deepgemm_fp8 is None else prepare_deepgemm_fp8)
         self._prepare_w4a8_flag = bool(prepare_w4a8 or mode == "w4a8")
         self._allow_decode_scaled_mm = bool(allow_decode_scaled_mm)
         self._k_mul_n = self.in_features * self.out_features
@@ -399,7 +410,7 @@ class SM100FP8Linear(nn.Module):
         keep_bf16: bool = False,
         prepare_trtllm_ll: bool = True,
         prepare_mxfp8: bool = True,
-        prepare_deepgemm_fp8: bool = False,
+        prepare_deepgemm_fp8: Optional[bool] = None,
         prepare_w4a8: bool = False,
         allow_decode_scaled_mm: bool = False,
     ) -> "SM100FP8Linear":
@@ -447,8 +458,46 @@ class SM100FP8Linear(nn.Module):
     def _prepare_weights_cuda(
         self, w_d: torch.Tensor, N: int, K: int, dev_idx: int
     ) -> None:
-        auto_like = ("auto", "fp8")
-        if K % 16 == 0 and N % 16 == 0 and (self.mode in auto_like or self.mode == "scaled_mm"):
+        self.w_fp8_row = None
+        self.w_sc_row = None
+        self.w_mxfp8 = None
+        self.w_mxfp8_sc = None
+        self.w_dg_fp8 = None
+        self.w_dg_sc = None
+        self.w_trtllm_ll = None
+        self._w_trtllm_ll_scale = 1.0
+        self.w_fp4_i8 = None
+        self.w_fp4_sc = None
+
+        explicit_multi = bool(self._prepare_mxfp8_flag and self._explicit_dg_fp8_flag is True)
+        allow_row_or_ll = (
+            self._allow_decode_scaled_mm or self.weight is None or explicit_multi
+        )
+
+        # Prepare primary Prefill 1x128 DeepGEMM FP8 first so unused mxfp8 duplicate is skipped.
+        if (
+            self._prepare_dg_fp8_flag
+            and K % 128 == 0
+            and N % 128 == 0
+            and self.mode in ("auto", "fp8", "deepgemm_fp8")
+            and has_deepgemm_fp8(dev_idx)
+        ):
+            try:
+                wdq, wds = quant_fp8_1x128_deepgemm_triton(w_d)
+                self.w_dg_fp8 = wdq
+                self.w_dg_sc = wds
+            except Exception:
+                self.w_dg_fp8 = None
+                self.w_dg_sc = None
+
+        if (
+            K % 16 == 0
+            and N % 16 == 0
+            and (
+                self.mode in ("fp8", "scaled_mm")
+                or (self.mode == "auto" and allow_row_or_ll)
+            )
+        ):
             wq, wsc = quantize_weight_fp8_rowwise(w_d)
             self.w_fp8_row = wq
             self.w_sc_row = wsc
@@ -457,7 +506,10 @@ class SM100FP8Linear(nn.Module):
             self._prepare_mxfp8_flag
             and K % 128 == 0
             and N % 128 == 0
-            and self.mode in ("auto", "fp8", "mxfp8")
+            and (
+                self.mode in ("fp8", "mxfp8")
+                or (self.mode == "auto" and (self.w_dg_fp8 is None or explicit_multi))
+            )
             and has_flashinfer_mxfp8(dev_idx)
         ):
             try:
@@ -471,27 +523,13 @@ class SM100FP8Linear(nn.Module):
                 self.w_mxfp8_sc = None
 
         if (
-            self._prepare_dg_fp8_flag
-            and K % 128 == 0
-            and N % 128 == 0
-            and self.mode in ("auto", "fp8", "deepgemm_fp8")
-            and has_deepgemm_fp8(dev_idx)
-        ):
-            try:
-                import deep_gemm  # type: ignore
-
-                wdq, wds = deep_gemm.per_block_cast_to_fp8(w_d, use_ue8m0=True)
-                self.w_dg_fp8 = wdq
-                self.w_dg_sc = wds
-            except Exception:
-                self.w_dg_fp8 = None
-                self.w_dg_sc = None
-
-        if (
             self._prepare_trtllm_ll_flag
             and K % 128 == 0
             and N % 128 == 0
-            and self.mode in ("auto", "fp8", "trtllm_ll")
+            and (
+                self.mode in ("fp8", "trtllm_ll")
+                or (self.mode == "auto" and allow_row_or_ll)
+            )
             and has_flashinfer_trtllm_ll(dev_idx)
         ):
             try:
@@ -502,6 +540,7 @@ class SM100FP8Linear(nn.Module):
                     wq_t, _TRTLLM_PERM_CACHE
                 )
                 self._w_trtllm_ll_scale = w_sc_t
+                del wq_t
             except Exception:
                 self.w_trtllm_ll = None
 
@@ -538,10 +577,12 @@ class SM100FP8Linear(nn.Module):
             return "w4a8" if self.w_fp4_i8 is not None else "bf16"
 
         # Empirical SM100/SM103 Pareto frontier (cos >= 0.999):
-        #   - Decode / low-FLOP (M*K*N < 1e11): keep non-lm_head layers (including
-        #     wide DenseMLP N=25600, GDN qkvz N=40960, DFlash qkvg N=16896) in BF16
+        #   - Decode / low-FLOP: keep non-lm_head layers (including wide DenseMLP
+        #     N=25600, GDN qkvz N=40960, fused qkvz_ba N=20736/5184, DFlash qkvg) in BF16
         #     unless allow_decode_scaled_mm=True (lm_head opt-in) is enabled.
-        #   - Prefill (M*K*N >= 1e11 with min(K, N) >= 1280): use block-32 mxfp8.
+        #   - Prefill deepgemm_fp8: M >= 1024 and M*K*N >= 6.4e10 and min(K, N) >= 1280
+        #     and K % 128 == 0 and N % 128 == 0.
+        #   - Fallback mxfp8: M*K*N >= 1e11 with min(K, N) >= 1280 when w_dg_fp8 is absent.
         is_wide = self._is_wide
         if M <= 512:
             if not (self._allow_decode_scaled_mm and is_wide) and self.weight is not None:
@@ -556,9 +597,21 @@ class SM100FP8Linear(nn.Module):
                     return "trtllm_ll"
             if self.weight is not None:
                 return "bf16"
+        flop_est = M * self._k_mul_n
         if (
-            M * self._k_mul_n >= 100_000_000_000
+            M >= 1024
+            and flop_est >= 64_000_000_000
             and min(K, N) >= 1280
+            and K % 128 == 0
+            and N % 128 == 0
+            and self.w_dg_fp8 is not None
+        ):
+            return "deepgemm_fp8"
+        if (
+            flop_est >= 100_000_000_000
+            and min(K, N) >= 1280
+            and K % 128 == 0
+            and N % 128 == 0
             and self.w_mxfp8 is not None
         ):
             return "mxfp8"
@@ -597,6 +650,25 @@ class SM100FP8Linear(nn.Module):
             out = out + self.bias
         return out.reshape(*orig_shape, self.out_features)
 
+    def forward_prequant_dg(
+        self, x_q: torch.Tensor, x_sc: torch.Tensor, *, orig_shape: Tuple[int, ...]
+    ) -> torch.Tensor:
+        """Execute ``deep_gemm.fp8_gemm_nt`` reusing pre-quantized 1x128 UE8M0 FP8 input."""
+        if self.w_dg_fp8 is None or self.w_dg_sc is None:
+            raise RuntimeError("w_dg_fp8 is not prepared on SM100FP8Linear")
+        import deep_gemm  # type: ignore
+
+        out = torch.empty(
+            (int(x_q.shape[0]), self.out_features), dtype=self.dtype, device=x_q.device
+        )
+        with _cuda_device_ctx(x_q.device):
+            deep_gemm.fp8_gemm_nt(
+                (x_q, x_sc), (self.w_dg_fp8, self.w_dg_sc), out, recipe=(1, 1, 128)
+            )
+        if self.bias is not None:
+            out = out + self.bias
+        return out.reshape(*orig_shape, self.out_features)
+
     def forward_prequant_rowwise(
         self, x_q: torch.Tensor, x_sc: torch.Tensor, *, orig_shape: Tuple[int, ...]
     ) -> torch.Tensor:
@@ -629,11 +701,21 @@ class SM100FP8Linear(nn.Module):
                     return torch.empty(
                         (*x.shape[:-1], self.out_features), dtype=self.dtype, device=x.device
                     )
-                if (
-                    self.w_mxfp8 is None
-                    or m_est * self._k_mul_n < 100_000_000_000
-                    or min(self.in_features, self.out_features) < 1280
-                ):
+                min_dim = min(self.in_features, self.out_features)
+                flop_est = m_est * self._k_mul_n
+                dg_hit = (
+                    self.w_dg_fp8 is not None
+                    and m_est >= 1024
+                    and flop_est >= 64_000_000_000
+                    and min_dim >= 1280
+                )
+                mx_hit = (
+                    self.w_dg_fp8 is None
+                    and self.w_mxfp8 is not None
+                    and flop_est >= 100_000_000_000
+                    and min_dim >= 1280
+                )
+                if not (dg_hit or mx_hit):
                     return F.linear(x, self.weight, self.bias)
 
         orig_prefix = x.shape[:-1]
@@ -693,10 +775,10 @@ class SM100FP8Linear(nn.Module):
         elif chosen == "deepgemm_fp8" and self.w_dg_fp8 is not None and self.w_dg_sc is not None:
             import deep_gemm  # type: ignore
 
-            ax, asc = deep_gemm.per_token_cast_to_fp8(x_2d, use_ue8m0=True)
+            ax, asc = quant_fp8_1x128_deepgemm_triton(x_2d)
             out = torch.empty((M, self.out_features), dtype=self.dtype, device=x_2d.device)
             deep_gemm.fp8_gemm_nt(
-                (ax, asc), (self.w_dg_fp8, self.w_dg_sc), out, recipe=(1, 128, 128)
+                (ax, asc), (self.w_dg_fp8, self.w_dg_sc), out, recipe=(1, 1, 128)
             )
         elif chosen == "w4a8" and self.w_fp4_i8 is not None and self.w_fp4_sc is not None:
             import deep_gemm  # type: ignore

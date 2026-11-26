@@ -2184,5 +2184,179 @@ class Qwen4_5QSATest(unittest.TestCase):
                     self.assertGreaterEqual(_cosine(out_cg, out_eag), 0.99999)
 
 
+    def test_r5_qsa_dsplit_and_fused_projections_runtime(self) -> None:
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA required")
+        dev = _device()
+        dt = torch.bfloat16
+        torch.manual_seed(202652)
+        with torch.no_grad():
+            # 1. QSA Prefill & Decode D-split kernels (D=256, Hq=32/16, FP8+BF16, WITH_GATE, CG)
+            ps, D, K_p, T_p = 64, 256, 320, 640
+            for hq in (32, 16):
+                B_p, S_p = 2, 16
+                qp = torch.randn((B_p, hq, S_p, D), device=dev, dtype=dt)
+                kp = torch.randn((B_p, 1, T_p, D), device=dev, dtype=dt)
+                vp = torch.randn((B_p, 1, T_p, D), device=dev, dtype=dt)
+                sel_p = torch.stack([
+                    torch.stack([torch.randperm(T_p, device=dev, dtype=torch.int32)[:K_p] for _ in range(S_p)])
+                    for _ in range(B_p)
+                ])
+                got_u = qsa_sparse_prefill_attention(qp, kp, vp, sel_p)
+                ref_u = qsa_sparse_prefill_attention(qp.cpu(), kp.cpu(), vp.cpu(), sel_p.cpu()).to(dev)
+                self.assertGreaterEqual(_cosine(got_u, ref_u), 0.9999)
+
+                n_lp = T_p // ps
+                kv_raw = torch.randn((B_p * n_lp + 4, 2, 1, ps, D), device=dev, dtype=dt) * 0.5
+                sc_p = 0.3 + torch.rand((B_p * n_lp + 4, 2, 1, ps), device=dev, dtype=torch.float32) * 1.4
+                kv_fp8 = (kv_raw.float() / sc_p.unsqueeze(-1)).to(torch.float8_e4m3fn)
+                bt_p = torch.arange(1, 1 + B_p * n_lp, device=dev, dtype=torch.int32).view(B_p, n_lp)
+                got_pg = qsa_sparse_paged_prefill_attention(
+                    qp, kv_fp8, bt_p, sel_p, page_size=ps, kv_heads=1, head_dim=D, max_ctx_len=T_p, kv_scale=sc_p
+                )
+                kv_f = (kv_fp8.float() * sc_p.unsqueeze(-1)).to(dt)
+                ref_pg = torch.zeros_like(qp, dtype=torch.float32)
+                for b in range(B_p):
+                    for s in range(S_p):
+                        ids = sel_p[b, s].long()
+                        pp, sl = bt_p[b, ids // ps].long(), ids % ps
+                        kk = kv_f[pp, 0, 0, sl].float().unsqueeze(0).expand(hq, -1, -1)
+                        vv = kv_f[pp, 1, 0, sl].float().unsqueeze(0).expand(hq, -1, -1)
+                        pr = torch.softmax(torch.einsum("hd,hkd->hk", qp[b, :, s].float(), kk) * (D ** -0.5), dim=-1)
+                        ref_pg[b, :, s] = torch.einsum("hk,hkd->hd", pr, vv)
+                self.assertGreaterEqual(_cosine(got_pg, ref_pg.to(dt)), 0.9998)
+
+            # Decode D-split WITH_GATE across FP8 (split>1 and split=1) + BF16 + CG
+            for fp8, hq, B_d, S_d, K_d in [
+                (True, 32, 64, 1, 512),
+                (True, 32, 16, 8, 512),
+                (False, 32, 16, 8, 512),
+            ]:
+                T_d = 1024
+                n_lp = T_d // ps
+                num_p = B_d * n_lp + 4
+                qd = torch.randn((B_d, hq, S_d, D), device=dev, dtype=dt)
+                gd = torch.randn((B_d, S_d, hq, D), device=dev, dtype=dt)
+                kv_raw_d = torch.randn((num_p, 2, 1, ps, D), device=dev, dtype=dt) * 0.5
+                if fp8:
+                    sc_d = 0.3 + torch.rand((num_p, 2, 1, ps), device=dev, dtype=torch.float32) * 1.4
+                    kv_d = (kv_raw_d.float() / sc_d.unsqueeze(-1)).to(torch.float8_e4m3fn)
+                else:
+                    sc_d = None
+                    kv_d = kv_raw_d
+                bt_d = torch.arange(1, 1 + B_d * n_lp, device=dev, dtype=torch.int32).view(B_d, n_lp)
+                kl_d = torch.full((B_d, S_d), T_d, device=dev, dtype=torch.int32)
+                sel_d = torch.randint(0, T_d, (B_d, S_d, K_d), device=dev, dtype=torch.int32)
+                got_d = qsa_sparse_paged_decode_attention(
+                    qd, kv_d, bt_d, kl_d, sel_d, page_size=ps, kv_heads=1, head_dim=D, kv_scale=sc_d, output_gate=gd, is_cuda_graph=True
+                )
+                kv_df = (kv_d.float() * sc_d.unsqueeze(-1)) if fp8 else kv_d.float()
+                ref_d = torch.zeros_like(qd, dtype=torch.float32)
+                for b in range(B_d):
+                    for s in range(S_d):
+                        ids = sel_d[b, s].long()
+                        pp, sl = bt_d[b, ids // ps].long(), ids % ps
+                        kk = kv_df[pp, 0, 0, sl].unsqueeze(0).expand(hq, -1, -1)
+                        vv = kv_df[pp, 1, 0, sl].unsqueeze(0).expand(hq, -1, -1)
+                        pr = torch.softmax(torch.einsum("hd,hkd->hk", qd[b, :, s].float(), kk) * (D ** -0.5), dim=-1)
+                        res = torch.einsum("hk,hkd->hd", pr, vv).to(dt).float()
+                        ref_d[b, :, s] = res * torch.sigmoid(gd[b, s].float()).to(dt).float()
+                self.assertGreaterEqual(_cosine(got_d, ref_d.to(dt)), 0.9995 if fp8 else 0.9999)
+
+            # 2. End-to-End 8L QSA+GDN YoCo Runtime with prepare_fused_projections (Prefill + V=8 Verify + Decode)
+            arch = _make_mini_arch(
+                indexer_head_dim=128,
+                indexer_n_heads=8,
+                indexer_kv_heads=1,
+                indexer_compress_ratio=4,
+                indexer_budget=16,
+                max_position_embeddings=512,
+            )
+            pools = {
+                t: 48
+                for t in [
+                    INDEXER_KV_TAG,
+                    INDEXER_STATE_TAG,
+                    FULL_ATTN_KV_TAG,
+                    "linear",
+                    "gdn_consumer_q_conv",
+                    "full_attn_kv_sconv",
+                    "full_attn_output_sconv",
+                    "linear_attn_output_sconv",
+                    "ffn_output_sconv",
+                    "ple_conv_state",
+                    "ple_ngram_ctx",
+                ]
+            }
+            lm_ref = Qwen4_5ForCausalLM(arch, use_triton_mxfp4=True, compute_mode="bf16", dtype=dt, device=dev)
+            lm_ref.init_synthetic_weights(seed=202652, ple_mode="gpu_full", ple_fp8=False)
+            _stabilize_router_margins(lm_ref)
+            raw_sd = {k: v.detach().clone() for k, v in lm_ref.state_dict().items()}
+            lm_ref.prepare_weights()
+            # Force unfused independent projections on lm_ref so lm_fused is validated against unfused baseline
+            for layer in lm_ref.model.layers:
+                if layer.self_attn is not None:
+                    layer.self_attn.qkv_idx_proj = None
+                    layer.self_attn._qkv_idx_ptrs = None
+
+            lm_fused = Qwen4_5ForCausalLM(arch, use_triton_mxfp4=True, compute_mode="bf16", dtype=dt, device=dev)
+            lm_fused.init_synthetic_weights(seed=202652, ple_mode="gpu_full", ple_fp8=False)
+            lm_fused.load_state_dict(raw_sd, strict=True)
+            lm_fused.prepare_weights()
+            for layer in lm_fused.model.layers:
+                if layer.linear_attn is not None:
+                    assert not hasattr(layer.linear_attn, "in_proj_qkvz_ba")
+                if layer.self_attn is not None:
+                    assert layer.self_attn.qkv_idx_proj is not None
+
+            plan = build_qwen4_5_kv_cache_plan(arch)
+            kv_ref = LocalKVCache(plan, tokens_per_block=64, num_blocks_per_tag=pools, device=dev, dtype=dt)
+            kv_fused = LocalKVCache(plan, tokens_per_block=64, num_blocks_per_tag=pools, device=dev, dtype=dt)
+            rt_ref = Qwen4_5RTPModel.from_causal_lm(lm_ref, kv_cache=kv_ref)
+            rt_fused = Qwen4_5RTPModel.from_causal_lm(lm_fused, kv_cache=kv_fused)
+
+            gen = torch.Generator(device="cpu").manual_seed(4052)
+            p0 = torch.randint(4, 240, (62,), generator=gen, dtype=torch.int64).to(dev)
+            p1 = torch.randint(4, 240, (63,), generator=gen, dtype=torch.int64).to(dev)
+            v_toks = torch.randint(4, 240, (2, 8), generator=gen, dtype=torch.int64).to(dev)
+            next_tok = torch.randint(4, 240, (2,), generator=gen, dtype=torch.int64).to(dev)
+
+            tbls_r = build_block_tables_for_requests(kv_ref, [80, 80])
+            tbls_f = build_block_tables_for_requests(kv_fused, [80, 80])
+
+            def _run_all(rt, tbls):
+                pref = LocalPyModelInputs(
+                    input_ids=torch.cat([p0, p1], dim=0),
+                    attention_inputs=make_tagged_attention_inputs(
+                        tbls, is_prefill=True, input_lengths=[62, 63], sequence_lengths=[62, 63], prefix_lengths=[0, 0], device=dev
+                    ),
+                )
+                o_pref = rt.compute_logits(rt.forward(pref).hidden_states)
+                va = make_tagged_attention_inputs(
+                    tbls, is_prefill=True, input_lengths=[8, 8], sequence_lengths=[], prefix_lengths=[62, 63], device=dev
+                )
+                for grp in va.values():
+                    grp.is_target_verify = True
+                o_ver = rt.compute_logits(rt.forward(LocalPyModelInputs(input_ids=v_toks.reshape(-1), attention_inputs=va)).hidden_states)
+                acc = torch.tensor([5, 3], dtype=torch.int32, device=dev)
+                rt.prepare_speculative_target_commit(acc)
+                rt.finish_speculative_target_commit(True)
+                rt.finalize_speculative_target_commit()
+                dec = LocalPyModelInputs(
+                    input_ids=next_tok,
+                    attention_inputs=make_tagged_attention_inputs(
+                        tbls, is_prefill=False, input_lengths=[1, 1], sequence_lengths=[67, 66], prefix_lengths=[0, 0], device=dev
+                    ),
+                )
+                o_dec = rt.compute_logits(rt.forward(dec).hidden_states)
+                return o_pref, o_ver, o_dec
+
+            pr, vr, dr = _run_all(rt_ref, tbls_r)
+            pf, vf, df = _run_all(rt_fused, tbls_f)
+            self.assertGreaterEqual(_cosine(pf, pr), 0.9998)
+            self.assertGreaterEqual(_cosine(vf, vr), 0.9998)
+            self.assertGreaterEqual(_cosine(df, dr), 0.9998)
+
+
 if __name__ == "__main__":
     unittest.main()

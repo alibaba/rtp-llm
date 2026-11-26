@@ -2117,6 +2117,193 @@ if _HAS_TRITON:
         )
 
     @triton.jit
+    def _qsa_sparse_prefill_dsplit_kernel(
+        q_ptr,
+        k_ptr,
+        v_ptr,
+        sc_ptr,
+        bt_ptr,
+        idx_ptr,
+        out_ptr,
+        stride_q_b: tl.int64,
+        stride_q_h: tl.int64,
+        stride_q_s: tl.int64,
+        stride_out_b: tl.int64,
+        stride_out_h: tl.int64,
+        stride_out_s: tl.int64,
+        stride_k_b: tl.int64,
+        stride_k_kv: tl.int64,
+        stride_k_h: tl.int64,
+        stride_k_t: tl.int64,
+        stride_v_b: tl.int64,
+        stride_v_h: tl.int64,
+        stride_v_t: tl.int64,
+        stride_sc_p: tl.int64,
+        stride_sc_kv: tl.int64,
+        stride_sc_h: tl.int64,
+        stride_sc_t: tl.int64,
+        stride_bt_b: tl.int64,
+        stride_bt_p: tl.int64,
+        stride_idx_b: tl.int64,
+        stride_idx_s: tl.int64,
+        K,
+        T,
+        MAX_PAGES,
+        NUM_PAGES,
+        SCALE: tl.constexpr,
+        q_per_kv: tl.constexpr,
+        PAGE_SIZE: tl.constexpr,
+        MAX_BLKS: tl.constexpr,
+        BLK_K: tl.constexpr,
+        BLK_H: tl.constexpr,
+        IS_PAGED: tl.constexpr,
+        IS_FP8: tl.constexpr,
+        HAS_SCALE: tl.constexpr,
+        FP8_QK: tl.constexpr,
+        SUB_G: tl.constexpr = 1,
+    ):
+        """Sequential D=256 (2x128) grouped QSA prefill avoiding register spills + native FP8 QK TC."""
+        pid_s = tl.num_programs(0).to(tl.int64) - 1 - tl.program_id(0).to(tl.int64)
+        pid_b = tl.program_id(1).to(tl.int64)
+        pid_g = tl.program_id(2).to(tl.int64)
+        pid_kv = pid_g // SUB_G
+        sub_g = pid_g % SUB_G
+
+        rh = tl.arange(0, BLK_H)
+        q_off = sub_g * BLK_H + rh
+        live_h = q_off < q_per_kv
+        r128 = tl.arange(0, 128)
+        q_base = (
+            q_ptr
+            + pid_b * stride_q_b
+            + (pid_kv * q_per_kv + q_off[:, None]) * stride_q_h
+            + pid_s * stride_q_s
+        )
+        q0 = tl.load(q_base + r128[None, :], mask=live_h[:, None], other=0.0)
+        q1 = tl.load(q_base + 128 + r128[None, :], mask=live_h[:, None], other=0.0)
+        if IS_FP8 and FP8_QK:
+            q_abs = tl.maximum(
+                tl.max(tl.abs(q0.to(tl.float32)), axis=1),
+                tl.max(tl.abs(q1.to(tl.float32)), axis=1),
+            )
+            q_sc = tl.maximum(q_abs, 1e-6) / 448.0
+            q0_f8 = (q0.to(tl.float32) / q_sc[:, None]).to(tl.float8e4nv)
+            q1_f8 = (q1.to(tl.float32) / q_sc[:, None]).to(tl.float8e4nv)
+            q_scale_vec = q_sc * SCALE
+
+        idx_base = idx_ptr + pid_b * stride_idx_b + pid_s * stride_idx_s
+        max_score = tl.full((BLK_H,), float("-inf"), tl.float32)
+        sum_exp = tl.zeros((BLK_H,), tl.float32)
+        acc0 = tl.zeros((BLK_H, 128), tl.float32)
+        acc1 = tl.zeros((BLK_H, 128), tl.float32)
+
+        for blk in range(MAX_BLKS):
+            tr = blk * BLK_K + tl.arange(0, BLK_K)
+            idx = tl.load(idx_base + tr, mask=tr < K, other=-1)
+            valid = (tr < K) & (idx >= 0) & (idx < T)
+            if tl.sum(valid.to(tl.int32), 0) > 0:
+                if IS_PAGED:
+                    safe_idx = tl.where(valid, idx, 0)
+                    log_p = safe_idx // PAGE_SIZE
+                    p_ok = valid & (log_p < MAX_PAGES)
+                    phys = tl.load(
+                        bt_ptr
+                        + pid_b * stride_bt_b
+                        + tl.minimum(log_p, MAX_PAGES - 1) * stride_bt_p,
+                        mask=p_ok,
+                        other=0,
+                    ).to(tl.int64)
+                    valid = p_ok & (phys > 0) & (phys < NUM_PAGES)
+                    slot = (safe_idx % PAGE_SIZE).to(tl.int64)
+                    k_base = (
+                        k_ptr
+                        + phys[:, None] * stride_k_b
+                        + pid_kv * stride_k_h
+                        + slot[:, None] * stride_k_t
+                    )
+                    v_base = k_base + stride_k_kv
+                    if HAS_SCALE:
+                        sc_base = (
+                            sc_ptr
+                            + phys * stride_sc_p
+                            + pid_kv * stride_sc_h
+                            + slot * stride_sc_t
+                        )
+                else:
+                    safe_idx = tl.where(valid, idx, 0).to(tl.int64)
+                    k_base = (
+                        k_ptr
+                        + pid_b * stride_k_b
+                        + pid_kv * stride_k_h
+                        + safe_idx[:, None] * stride_k_t
+                    )
+                    v_base = (
+                        v_ptr
+                        + pid_b * stride_v_b
+                        + pid_kv * stride_v_h
+                        + safe_idx[:, None] * stride_v_t
+                    )
+
+                k0 = tl.load(k_base + r128[None, :], mask=valid[:, None], other=0.0)
+                if IS_FP8 and FP8_QK:
+                    score = tl.dot(q0_f8, tl.trans(k0))
+                else:
+                    if IS_FP8:
+                        k0 = k0.to(tl.bfloat16)
+                    score = tl.dot(q0, tl.trans(k0))
+                k1 = tl.load(k_base + 128 + r128[None, :], mask=valid[:, None], other=0.0)
+                if IS_FP8 and FP8_QK:
+                    score = tl.dot(q1_f8, tl.trans(k1), score) * q_scale_vec[:, None]
+                else:
+                    if IS_FP8:
+                        k1 = k1.to(tl.bfloat16)
+                    score = tl.dot(q1, tl.trans(k1), score) * SCALE
+                if IS_FP8 and HAS_SCALE:
+                    sc_k = tl.load(sc_base, mask=valid, other=1.0).to(tl.float32)
+                    score = score * sc_k[None, :]
+                score = tl.where(valid[None, :], score, float("-inf"))
+                next_max = tl.maximum(max_score, tl.max(score, axis=1))
+                rescale = tl.where(
+                    next_max == float("-inf"), 0.0, tl.exp(max_score - next_max)
+                )
+                weights = tl.where(valid[None, :], tl.exp(score - next_max[:, None]), 0.0)
+                if IS_FP8 and HAS_SCALE:
+                    sc_v = tl.load(sc_base + stride_sc_kv, mask=valid, other=1.0).to(tl.float32)
+                    w_pv = (weights * sc_v[None, :]).to(tl.bfloat16)
+                else:
+                    w_pv = weights.to(tl.bfloat16)
+                v0 = tl.load(v_base + r128[None, :], mask=valid[:, None], other=0.0)
+                if IS_FP8:
+                    v0 = v0.to(tl.bfloat16)
+                acc0 = acc0 * rescale[:, None]
+                acc0 = tl.dot(w_pv, v0, acc0)
+                v1 = tl.load(v_base + 128 + r128[None, :], mask=valid[:, None], other=0.0)
+                if IS_FP8:
+                    v1 = v1.to(tl.bfloat16)
+                acc1 = acc1 * rescale[:, None]
+                acc1 = tl.dot(w_pv, v1, acc1)
+                sum_exp = sum_exp * rescale + tl.sum(weights, axis=1)
+                max_score = next_max
+
+        inv_sum = tl.where(sum_exp > 0, 1.0 / sum_exp, 0.0)[:, None]
+        out_base = (
+            out_ptr
+            + pid_b * stride_out_b
+            + (pid_kv * q_per_kv + q_off[:, None]) * stride_out_h
+            + pid_s * stride_out_s
+        )
+        tl.store(
+            out_base + r128[None, :],
+            (acc0 * inv_sum).to(out_ptr.dtype.element_ty),
+            mask=live_h[:, None],
+        )
+        tl.store(
+            out_base + 128 + r128[None, :],
+            (acc1 * inv_sum).to(out_ptr.dtype.element_ty),
+            mask=live_h[:, None],
+        )
+
+    @triton.jit
     def _qsa_gqa_paged_split_tc_kernel(
         q_ptr,
         kv_ptr,
@@ -2265,6 +2452,187 @@ if _HAS_TRITON:
                 acc,
                 mask=live_h[:, None],
             )
+            tl.store(p_m_ptr + row_base, mx, mask=live_h)
+            tl.store(p_z_ptr + row_base, z, mask=live_h)
+
+    @triton.jit
+    def _qsa_gqa_paged_split_tc_dsplit_kernel(
+        q_ptr,
+        kv_ptr,
+        sc_ptr,
+        bt_ptr,
+        kv_lens_ptr,
+        sel_ptr,
+        p_out_ptr,
+        p_m_ptr,
+        p_z_ptr,
+        gate_ptr,
+        stride_qb: tl.int64,
+        stride_qh: tl.int64,
+        stride_qs: tl.int64,
+        stride_kp: tl.int64,
+        stride_kkv: tl.int64,
+        stride_kh: tl.int64,
+        stride_kt: tl.int64,
+        stride_scp: tl.int64,
+        stride_sckv: tl.int64,
+        stride_sch: tl.int64,
+        stride_sct: tl.int64,
+        stride_btb: tl.int64,
+        stride_btp: tl.int64,
+        stride_lb: tl.int64,
+        stride_ls: tl.int64,
+        stride_sb: tl.int64,
+        stride_ss: tl.int64,
+        stride_ob: tl.int64,
+        stride_oh: tl.int64,
+        stride_os: tl.int64,
+        S,
+        K,
+        MAX_PAGES,
+        NUM_PAGES,
+        HK: tl.constexpr,
+        G: tl.constexpr,
+        M_ROWS: tl.constexpr,
+        PAGE_SIZE: tl.constexpr,
+        SCALE: tl.constexpr,
+        KT: tl.constexpr,
+        NUM_SPLITS: tl.constexpr,
+        WITH_GATE: tl.constexpr,
+        IS_FP8: tl.constexpr,
+        HAS_SCALE: tl.constexpr,
+        FP8_QK: tl.constexpr,
+        SUB_G: tl.constexpr = 1,
+    ):
+        """Sequential D=256 (2x128) split-KV decode/verify kernel eliminating register spills."""
+        pid_m = tl.program_id(0).to(tl.int64)
+        split = tl.program_id(1).to(tl.int64)
+        hk_sub = pid_m % (HK * SUB_G)
+        bs = pid_m // (HK * SUB_G)
+        hk = hk_sub // SUB_G
+        sub_g = hk_sub % SUB_G
+        b = bs // S
+        s = bs % S
+
+        r = tl.arange(0, M_ROWS)
+        q_off = sub_g * M_ROWS + r
+        live_h = q_off < G
+        h = hk * G + q_off
+        r128 = tl.arange(0, 128)
+
+        q_base = q_ptr + b * stride_qb + h[:, None] * stride_qh + s * stride_qs
+        q0 = tl.load(q_base + r128[None, :], mask=live_h[:, None], other=0.0)
+        q1 = tl.load(q_base + 128 + r128[None, :], mask=live_h[:, None], other=0.0)
+        if IS_FP8 and FP8_QK:
+            q_abs = tl.maximum(
+                tl.max(tl.abs(q0.to(tl.float32)), axis=1),
+                tl.max(tl.abs(q1.to(tl.float32)), axis=1),
+            )
+            q_sc = tl.maximum(q_abs, 1e-6) / 448.0
+            q0_f8 = (q0.to(tl.float32) / q_sc[:, None]).to(tl.float8e4nv)
+            q1_f8 = (q1.to(tl.float32) / q_sc[:, None]).to(tl.float8e4nv)
+            q_scale_vec = q_sc * SCALE
+
+        kv_len = tl.load(kv_lens_ptr + b * stride_lb + s * stride_ls).to(tl.int32)
+        sel_row = sel_ptr + b * stride_sb + s * stride_ss
+
+        mx = tl.full((M_ROWS,), float("-inf"), tl.float32)
+        z = tl.zeros((M_ROWS,), tl.float32)
+        acc0 = tl.zeros((M_ROWS, 128), tl.float32)
+        acc1 = tl.zeros((M_ROWS, 128), tl.float32)
+
+        step = NUM_SPLITS * KT
+        n_blks = tl.maximum(0, tl.cdiv(K - split * KT, step))
+        for blk in range(n_blks):
+            off = (blk * NUM_SPLITS + split) * KT + tl.arange(0, KT)
+            in_k = off < K
+            tok = tl.load(sel_row + off, mask=in_k, other=-1)
+            cand = in_k & (tok >= 0) & (tok < kv_len)
+            safe_tok = tl.where(cand, tok, 0)
+            log_p = safe_tok // PAGE_SIZE
+            p_in = cand & (log_p < MAX_PAGES)
+            phys = tl.load(
+                bt_ptr + b * stride_btb + tl.minimum(log_p, MAX_PAGES - 1) * stride_btp,
+                mask=p_in,
+                other=0,
+            ).to(tl.int64)
+            valid = p_in & (phys > 0) & (phys < NUM_PAGES)
+            if tl.sum(valid.to(tl.int32), 0) > 0:
+                slot = (safe_tok % PAGE_SIZE).to(tl.int64)
+                k_base = (
+                    kv_ptr
+                    + phys[:, None] * stride_kp
+                    + hk * stride_kh
+                    + slot[:, None] * stride_kt
+                )
+                k0 = tl.load(k_base + r128[None, :], mask=valid[:, None], other=0.0)
+                if IS_FP8 and FP8_QK:
+                    logits = tl.dot(q0_f8, tl.trans(k0))
+                else:
+                    if IS_FP8:
+                        k0 = k0.to(tl.bfloat16)
+                    logits = tl.dot(q0, tl.trans(k0))
+                k1 = tl.load(k_base + 128 + r128[None, :], mask=valid[:, None], other=0.0)
+                if IS_FP8 and FP8_QK:
+                    logits = tl.dot(q1_f8, tl.trans(k1), logits) * q_scale_vec[:, None]
+                else:
+                    if IS_FP8:
+                        k1 = k1.to(tl.bfloat16)
+                    logits = tl.dot(q1, tl.trans(k1), logits) * SCALE
+                if IS_FP8 and HAS_SCALE:
+                    sc_base = sc_ptr + phys * stride_scp + hk * stride_sch + slot * stride_sct
+                    sc_k = tl.load(sc_base, mask=valid, other=1.0).to(tl.float32)
+                    logits = logits * sc_k[None, :]
+                logits = tl.where(valid[None, :], logits, float("-inf"))
+                nxt = tl.maximum(mx, tl.max(logits, 1))
+                rescale = tl.where(nxt == float("-inf"), 0.0, tl.exp(mx - nxt))
+                prob = tl.where(valid[None, :], tl.exp(logits - nxt[:, None]), 0.0)
+                v_base = k_base + stride_kkv
+                if IS_FP8 and HAS_SCALE:
+                    sc_v = tl.load(sc_base + stride_sckv, mask=valid, other=1.0).to(tl.float32)
+                    prob_v = (prob * sc_v[None, :]).to(tl.bfloat16)
+                else:
+                    prob_v = prob.to(tl.bfloat16)
+                v0 = tl.load(v_base + r128[None, :], mask=valid[:, None], other=0.0)
+                if IS_FP8:
+                    v0 = v0.to(tl.bfloat16)
+                acc0 = acc0 * rescale[:, None]
+                acc0 = tl.dot(prob_v, v0, acc0)
+                v1 = tl.load(v_base + 128 + r128[None, :], mask=valid[:, None], other=0.0)
+                if IS_FP8:
+                    v1 = v1.to(tl.bfloat16)
+                acc1 = acc1 * rescale[:, None]
+                acc1 = tl.dot(prob_v, v1, acc1)
+                z = z * rescale + tl.sum(prob, 1)
+                mx = nxt
+
+        if NUM_SPLITS == 1:
+            inv_z = tl.where(z > 0, 1.0 / z, 0.0)[:, None]
+            o0 = acc0 * inv_z
+            o1 = acc1 * inv_z
+            if WITH_GATE:
+                hq_tot = HK * G
+                g_base = gate_ptr + ((b * S + s) * hq_tot + h[:, None]) * 256
+                g0 = tl.load(g_base + r128[None, :], mask=live_h[:, None], other=0.0).to(tl.float32)
+                g1 = tl.load(g_base + 128 + r128[None, :], mask=live_h[:, None], other=0.0).to(tl.float32)
+                o0 = o0.to(tl.bfloat16).to(tl.float32) * tl.sigmoid(g0).to(tl.bfloat16).to(tl.float32)
+                o1 = o1.to(tl.bfloat16).to(tl.float32) * tl.sigmoid(g1).to(tl.bfloat16).to(tl.float32)
+            out_base = p_out_ptr + b * stride_ob + h[:, None] * stride_oh + s * stride_os
+            tl.store(
+                out_base + r128[None, :],
+                o0.to(p_out_ptr.dtype.element_ty),
+                mask=live_h[:, None],
+            )
+            tl.store(
+                out_base + 128 + r128[None, :],
+                o1.to(p_out_ptr.dtype.element_ty),
+                mask=live_h[:, None],
+            )
+        else:
+            row_base = (bs * (HK * G) + h) * NUM_SPLITS + split
+            po_base = p_out_ptr + row_base[:, None] * 256
+            tl.store(po_base + r128[None, :], acc0, mask=live_h[:, None])
+            tl.store(po_base + 128 + r128[None, :], acc1, mask=live_h[:, None])
             tl.store(p_m_ptr + row_base, mx, mask=live_h)
             tl.store(p_z_ptr + row_base, z, mask=live_h)
 
@@ -2635,53 +3003,102 @@ def qsa_sparse_prefill_attention(
                     else (64 if (blk_h == 32 or D < 256) else 32)
                 )
                 out = torch.empty_like(q_c)
-                _qsa_sparse_prefill_grouped_fast_kernel[(S, B, H_kv * sub_g)](
-                    q_c,
-                    k_c,
-                    v_c,
-                    k_c,
-                    sel_c,
-                    sel_c,
-                    out,
-                    int(q_c.stride(0)),
-                    int(q_c.stride(1)),
-                    int(q_c.stride(2)),
-                    int(out.stride(0)),
-                    int(out.stride(1)),
-                    int(out.stride(2)),
-                    int(k_c.stride(0)),
-                    0,
-                    int(k_c.stride(1)),
-                    int(k_c.stride(2)),
-                    int(v_c.stride(0)),
-                    int(v_c.stride(1)),
-                    int(v_c.stride(2)),
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    int(sel_c.stride(0)),
-                    int(sel_c.stride(1)),
-                    K,
-                    T,
-                    1,
-                    1,
-                    D=D,
-                    SCALE=D**-0.5,
-                    q_per_kv=q_per_kv,
-                    PAGE_SIZE=1,
-                    MAX_BLKS=triton.cdiv(K, blk_k),
-                    BLK_K=blk_k,
-                    BLK_H=blk_h,
-                    IS_PAGED=False,
-                    IS_FP8=False,
-                    HAS_SCALE=False,
-                    SUB_G=sub_g,
-                    num_warps=4,
-                    num_stages=1 if blk_h == 32 else 2,
-                )
+                if D == 256 and blk_h == 32 and blk_k >= 64:
+                    _qsa_sparse_prefill_dsplit_kernel[(S, B, H_kv * sub_g)](
+                        q_c,
+                        k_c,
+                        v_c,
+                        k_c,
+                        sel_c,
+                        sel_c,
+                        out,
+                        int(q_c.stride(0)),
+                        int(q_c.stride(1)),
+                        int(q_c.stride(2)),
+                        int(out.stride(0)),
+                        int(out.stride(1)),
+                        int(out.stride(2)),
+                        int(k_c.stride(0)),
+                        0,
+                        int(k_c.stride(1)),
+                        int(k_c.stride(2)),
+                        int(v_c.stride(0)),
+                        int(v_c.stride(1)),
+                        int(v_c.stride(2)),
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        int(sel_c.stride(0)),
+                        int(sel_c.stride(1)),
+                        K,
+                        T,
+                        1,
+                        1,
+                        SCALE=D**-0.5,
+                        q_per_kv=q_per_kv,
+                        PAGE_SIZE=1,
+                        MAX_BLKS=triton.cdiv(K, blk_k),
+                        BLK_K=blk_k,
+                        BLK_H=blk_h,
+                        IS_PAGED=False,
+                        IS_FP8=False,
+                        HAS_SCALE=False,
+                        FP8_QK=False,
+                        SUB_G=sub_g,
+                        num_warps=4,
+                        num_stages=1,
+                    )
+                else:
+                    _qsa_sparse_prefill_grouped_fast_kernel[(S, B, H_kv * sub_g)](
+                        q_c,
+                        k_c,
+                        v_c,
+                        k_c,
+                        sel_c,
+                        sel_c,
+                        out,
+                        int(q_c.stride(0)),
+                        int(q_c.stride(1)),
+                        int(q_c.stride(2)),
+                        int(out.stride(0)),
+                        int(out.stride(1)),
+                        int(out.stride(2)),
+                        int(k_c.stride(0)),
+                        0,
+                        int(k_c.stride(1)),
+                        int(k_c.stride(2)),
+                        int(v_c.stride(0)),
+                        int(v_c.stride(1)),
+                        int(v_c.stride(2)),
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        int(sel_c.stride(0)),
+                        int(sel_c.stride(1)),
+                        K,
+                        T,
+                        1,
+                        1,
+                        D=D,
+                        SCALE=D**-0.5,
+                        q_per_kv=q_per_kv,
+                        PAGE_SIZE=1,
+                        MAX_BLKS=triton.cdiv(K, blk_k),
+                        BLK_K=blk_k,
+                        BLK_H=blk_h,
+                        IS_PAGED=False,
+                        IS_FP8=False,
+                        HAS_SCALE=False,
+                        SUB_G=sub_g,
+                        num_warps=4,
+                        num_stages=1 if blk_h == 32 else 2,
+                    )
                 return out
 
         from rtp_llm.models_py.kernels.cuda.qsa.sparse_fmha import (
@@ -2797,53 +3214,102 @@ def qsa_sparse_paged_prefill_attention(
         is_fp8 = kv_hnd.dtype == torch.float8_e4m3fn
         has_scale = is_fp8 and sc_hnd is not None
         dummy_sc = sc_hnd if has_scale and sc_hnd is not None else kv_hnd
-        _qsa_sparse_prefill_grouped_fast_kernel[(S, B, kv_heads * sub_g)](
-            q_c,
-            kv_hnd,
-            kv_hnd,
-            dummy_sc,
-            kv_block_table,
-            sel_c,
-            out,
-            int(q_c.stride(0)),
-            int(q_c.stride(1)),
-            int(q_c.stride(2)),
-            int(out.stride(0)),
-            int(out.stride(1)),
-            int(out.stride(2)),
-            int(kv_hnd.stride(0)),
-            int(kv_hnd.stride(1)),
-            int(kv_hnd.stride(2)),
-            int(kv_hnd.stride(3)),
-            0,
-            0,
-            0,
-            int(sc_hnd.stride(0)) if has_scale and sc_hnd is not None else 0,
-            int(sc_hnd.stride(1)) if has_scale and sc_hnd is not None else 0,
-            int(sc_hnd.stride(2)) if has_scale and sc_hnd is not None else 0,
-            int(sc_hnd.stride(3)) if has_scale and sc_hnd is not None else 0,
-            int(kv_block_table.stride(0)),
-            int(kv_block_table.stride(1)),
-            int(sel_c.stride(0)),
-            int(sel_c.stride(1)),
-            K,
-            max_ctx_len,
-            int(kv_block_table.shape[1]),
-            int(kv_hnd.shape[0]),
-            D=D,
-            SCALE=D**-0.5,
-            q_per_kv=q_per_kv,
-            PAGE_SIZE=page_size,
-            MAX_BLKS=triton.cdiv(K, blk_k),
-            BLK_K=blk_k,
-            BLK_H=blk_h,
-            IS_PAGED=True,
-            IS_FP8=is_fp8,
-            HAS_SCALE=has_scale,
-            SUB_G=sub_g,
-            num_warps=4,
-            num_stages=1 if (is_fp8 or blk_h == 32) else 2,
-        )
+        if D == 256 and blk_h == 32 and blk_k >= 64:
+            _qsa_sparse_prefill_dsplit_kernel[(S, B, kv_heads * sub_g)](
+                q_c,
+                kv_hnd,
+                kv_hnd,
+                dummy_sc,
+                kv_block_table,
+                sel_c,
+                out,
+                int(q_c.stride(0)),
+                int(q_c.stride(1)),
+                int(q_c.stride(2)),
+                int(out.stride(0)),
+                int(out.stride(1)),
+                int(out.stride(2)),
+                int(kv_hnd.stride(0)),
+                int(kv_hnd.stride(1)),
+                int(kv_hnd.stride(2)),
+                int(kv_hnd.stride(3)),
+                0,
+                0,
+                0,
+                int(sc_hnd.stride(0)) if has_scale and sc_hnd is not None else 0,
+                int(sc_hnd.stride(1)) if has_scale and sc_hnd is not None else 0,
+                int(sc_hnd.stride(2)) if has_scale and sc_hnd is not None else 0,
+                int(sc_hnd.stride(3)) if has_scale and sc_hnd is not None else 0,
+                int(kv_block_table.stride(0)),
+                int(kv_block_table.stride(1)),
+                int(sel_c.stride(0)),
+                int(sel_c.stride(1)),
+                K,
+                max_ctx_len,
+                int(kv_block_table.shape[1]),
+                int(kv_hnd.shape[0]),
+                SCALE=D**-0.5,
+                q_per_kv=q_per_kv,
+                PAGE_SIZE=page_size,
+                MAX_BLKS=triton.cdiv(K, blk_k),
+                BLK_K=blk_k,
+                BLK_H=blk_h,
+                IS_PAGED=True,
+                IS_FP8=is_fp8,
+                HAS_SCALE=has_scale,
+                FP8_QK=is_fp8,
+                SUB_G=sub_g,
+                num_warps=4,
+                num_stages=1,
+            )
+        else:
+            _qsa_sparse_prefill_grouped_fast_kernel[(S, B, kv_heads * sub_g)](
+                q_c,
+                kv_hnd,
+                kv_hnd,
+                dummy_sc,
+                kv_block_table,
+                sel_c,
+                out,
+                int(q_c.stride(0)),
+                int(q_c.stride(1)),
+                int(q_c.stride(2)),
+                int(out.stride(0)),
+                int(out.stride(1)),
+                int(out.stride(2)),
+                int(kv_hnd.stride(0)),
+                int(kv_hnd.stride(1)),
+                int(kv_hnd.stride(2)),
+                int(kv_hnd.stride(3)),
+                0,
+                0,
+                0,
+                int(sc_hnd.stride(0)) if has_scale and sc_hnd is not None else 0,
+                int(sc_hnd.stride(1)) if has_scale and sc_hnd is not None else 0,
+                int(sc_hnd.stride(2)) if has_scale and sc_hnd is not None else 0,
+                int(sc_hnd.stride(3)) if has_scale and sc_hnd is not None else 0,
+                int(kv_block_table.stride(0)),
+                int(kv_block_table.stride(1)),
+                int(sel_c.stride(0)),
+                int(sel_c.stride(1)),
+                K,
+                max_ctx_len,
+                int(kv_block_table.shape[1]),
+                int(kv_hnd.shape[0]),
+                D=D,
+                SCALE=D**-0.5,
+                q_per_kv=q_per_kv,
+                PAGE_SIZE=page_size,
+                MAX_BLKS=triton.cdiv(K, blk_k),
+                BLK_K=blk_k,
+                BLK_H=blk_h,
+                IS_PAGED=True,
+                IS_FP8=is_fp8,
+                HAS_SCALE=has_scale,
+                SUB_G=sub_g,
+                num_warps=4,
+                num_stages=1 if (is_fp8 or blk_h == 32) else 2,
+            )
         return out
 
     from rtp_llm.models_py.kernels.cuda.qsa.sparse_paged_fmha import (
@@ -3001,17 +3467,177 @@ def qsa_sparse_paged_decode_attention(
         dummy_sc = sc_hnd if has_scale and sc_hnd is not None else kv_hnd
         dummy_gate = output_gate if with_gate and output_gate is not None else out
 
+        use_dsplit = D == 256 and m_rows == 32 and kt >= 64
         if splits == 1:
-            _qsa_gqa_paged_split_tc_kernel[(m_ctas, 1)](
+            if use_dsplit:
+                _qsa_gqa_paged_split_tc_dsplit_kernel[(m_ctas, 1)](
+                    q_c,
+                    kv_hnd,
+                    dummy_sc,
+                    kv_block_table,
+                    kv_lens_2d,
+                    sel_c,
+                    out,
+                    out,
+                    out,
+                    dummy_gate,
+                    int(q_c.stride(0)),
+                    int(q_c.stride(1)),
+                    int(q_c.stride(2)),
+                    int(kv_hnd.stride(0)),
+                    int(kv_hnd.stride(1)),
+                    int(kv_hnd.stride(2)),
+                    int(kv_hnd.stride(3)),
+                    int(sc_hnd.stride(0)) if has_scale and sc_hnd is not None else 0,
+                    int(sc_hnd.stride(1)) if has_scale and sc_hnd is not None else 0,
+                    int(sc_hnd.stride(2)) if has_scale and sc_hnd is not None else 0,
+                    int(sc_hnd.stride(3)) if has_scale and sc_hnd is not None else 0,
+                    int(kv_block_table.stride(0)),
+                    int(kv_block_table.stride(1)),
+                    int(kv_lens_2d.stride(0)),
+                    int(kv_lens_2d.stride(1)),
+                    int(sel_c.stride(0)),
+                    int(sel_c.stride(1)),
+                    int(out.stride(0)),
+                    int(out.stride(1)),
+                    int(out.stride(2)),
+                    S,
+                    K,
+                    int(kv_block_table.shape[1]),
+                    int(kv_hnd.shape[0]),
+                    HK=kv_heads,
+                    G=q_per_kv,
+                    M_ROWS=m_rows,
+                    PAGE_SIZE=page_size,
+                    SCALE=D**-0.5,
+                    KT=kt,
+                    NUM_SPLITS=1,
+                    WITH_GATE=with_gate,
+                    IS_FP8=is_fp8,
+                    HAS_SCALE=has_scale,
+                    FP8_QK=is_fp8,
+                    SUB_G=sub_g,
+                    num_warps=nw,
+                    num_stages=stg,
+                )
+            else:
+                _qsa_gqa_paged_split_tc_kernel[(m_ctas, 1)](
+                    q_c,
+                    kv_hnd,
+                    dummy_sc,
+                    kv_block_table,
+                    kv_lens_2d,
+                    sel_c,
+                    out,
+                    out,
+                    out,
+                    dummy_gate,
+                    int(q_c.stride(0)),
+                    int(q_c.stride(1)),
+                    int(q_c.stride(2)),
+                    int(kv_hnd.stride(0)),
+                    int(kv_hnd.stride(1)),
+                    int(kv_hnd.stride(2)),
+                    int(kv_hnd.stride(3)),
+                    int(sc_hnd.stride(0)) if has_scale and sc_hnd is not None else 0,
+                    int(sc_hnd.stride(1)) if has_scale and sc_hnd is not None else 0,
+                    int(sc_hnd.stride(2)) if has_scale and sc_hnd is not None else 0,
+                    int(sc_hnd.stride(3)) if has_scale and sc_hnd is not None else 0,
+                    int(kv_block_table.stride(0)),
+                    int(kv_block_table.stride(1)),
+                    int(kv_lens_2d.stride(0)),
+                    int(kv_lens_2d.stride(1)),
+                    int(sel_c.stride(0)),
+                    int(sel_c.stride(1)),
+                    int(out.stride(0)),
+                    int(out.stride(1)),
+                    int(out.stride(2)),
+                    S,
+                    K,
+                    int(kv_block_table.shape[1]),
+                    int(kv_hnd.shape[0]),
+                    HK=kv_heads,
+                    G=q_per_kv,
+                    M_ROWS=m_rows,
+                    PAGE_SIZE=page_size,
+                    D=D,
+                    SCALE=D**-0.5,
+                    KT=kt,
+                    NUM_SPLITS=1,
+                    WITH_GATE=with_gate,
+                    IS_FP8=is_fp8,
+                    HAS_SCALE=has_scale,
+                    SUB_G=sub_g,
+                    num_warps=nw,
+                    num_stages=stg,
+                )
+            return out
+
+        p_out = torch.empty((B, S, H_q, splits, D), dtype=torch.float32, device=q_c.device)
+        p_m = torch.empty((B, S, H_q, splits), dtype=torch.float32, device=q_c.device)
+        p_z = torch.empty((B, S, H_q, splits), dtype=torch.float32, device=q_c.device)
+        if use_dsplit:
+            _qsa_gqa_paged_split_tc_dsplit_kernel[(m_ctas, splits)](
                 q_c,
                 kv_hnd,
                 dummy_sc,
                 kv_block_table,
                 kv_lens_2d,
                 sel_c,
-                out,
-                out,
-                out,
+                p_out,
+                p_m,
+                p_z,
+                dummy_gate,
+                int(q_c.stride(0)),
+                int(q_c.stride(1)),
+                int(q_c.stride(2)),
+                int(kv_hnd.stride(0)),
+                int(kv_hnd.stride(1)),
+                int(kv_hnd.stride(2)),
+                int(kv_hnd.stride(3)),
+                int(sc_hnd.stride(0)) if has_scale and sc_hnd is not None else 0,
+                int(sc_hnd.stride(1)) if has_scale and sc_hnd is not None else 0,
+                int(sc_hnd.stride(2)) if has_scale and sc_hnd is not None else 0,
+                int(sc_hnd.stride(3)) if has_scale and sc_hnd is not None else 0,
+                int(kv_block_table.stride(0)),
+                int(kv_block_table.stride(1)),
+                int(kv_lens_2d.stride(0)),
+                int(kv_lens_2d.stride(1)),
+                int(sel_c.stride(0)),
+                int(sel_c.stride(1)),
+                int(out.stride(0)),
+                int(out.stride(1)),
+                int(out.stride(2)),
+                S,
+                K,
+                int(kv_block_table.shape[1]),
+                int(kv_hnd.shape[0]),
+                HK=kv_heads,
+                G=q_per_kv,
+                M_ROWS=m_rows,
+                PAGE_SIZE=page_size,
+                SCALE=D**-0.5,
+                KT=kt,
+                NUM_SPLITS=splits,
+                WITH_GATE=False,
+                IS_FP8=is_fp8,
+                HAS_SCALE=has_scale,
+                FP8_QK=is_fp8,
+                SUB_G=sub_g,
+                num_warps=nw,
+                num_stages=stg,
+            )
+        else:
+            _qsa_gqa_paged_split_tc_kernel[(m_ctas, splits)](
+                q_c,
+                kv_hnd,
+                dummy_sc,
+                kv_block_table,
+                kv_lens_2d,
+                sel_c,
+                p_out,
+                p_m,
+                p_z,
                 dummy_gate,
                 int(q_c.stride(0)),
                 int(q_c.stride(1)),
@@ -3044,69 +3670,14 @@ def qsa_sparse_paged_decode_attention(
                 D=D,
                 SCALE=D**-0.5,
                 KT=kt,
-                NUM_SPLITS=1,
-                WITH_GATE=with_gate,
+                NUM_SPLITS=splits,
+                WITH_GATE=False,
                 IS_FP8=is_fp8,
                 HAS_SCALE=has_scale,
                 SUB_G=sub_g,
                 num_warps=nw,
                 num_stages=stg,
             )
-            return out
-
-        p_out = torch.empty((B, S, H_q, splits, D), dtype=torch.float32, device=q_c.device)
-        p_m = torch.empty((B, S, H_q, splits), dtype=torch.float32, device=q_c.device)
-        p_z = torch.empty((B, S, H_q, splits), dtype=torch.float32, device=q_c.device)
-        _qsa_gqa_paged_split_tc_kernel[(m_ctas, splits)](
-            q_c,
-            kv_hnd,
-            dummy_sc,
-            kv_block_table,
-            kv_lens_2d,
-            sel_c,
-            p_out,
-            p_m,
-            p_z,
-            dummy_gate,
-            int(q_c.stride(0)),
-            int(q_c.stride(1)),
-            int(q_c.stride(2)),
-            int(kv_hnd.stride(0)),
-            int(kv_hnd.stride(1)),
-            int(kv_hnd.stride(2)),
-            int(kv_hnd.stride(3)),
-            int(sc_hnd.stride(0)) if has_scale and sc_hnd is not None else 0,
-            int(sc_hnd.stride(1)) if has_scale and sc_hnd is not None else 0,
-            int(sc_hnd.stride(2)) if has_scale and sc_hnd is not None else 0,
-            int(sc_hnd.stride(3)) if has_scale and sc_hnd is not None else 0,
-            int(kv_block_table.stride(0)),
-            int(kv_block_table.stride(1)),
-            int(kv_lens_2d.stride(0)),
-            int(kv_lens_2d.stride(1)),
-            int(sel_c.stride(0)),
-            int(sel_c.stride(1)),
-            int(out.stride(0)),
-            int(out.stride(1)),
-            int(out.stride(2)),
-            S,
-            K,
-            int(kv_block_table.shape[1]),
-            int(kv_hnd.shape[0]),
-            HK=kv_heads,
-            G=q_per_kv,
-            M_ROWS=m_rows,
-            PAGE_SIZE=page_size,
-            D=D,
-            SCALE=D**-0.5,
-            KT=kt,
-            NUM_SPLITS=splits,
-            WITH_GATE=False,
-            IS_FP8=is_fp8,
-            HAS_SCALE=has_scale,
-            SUB_G=sub_g,
-            num_warps=nw,
-            num_stages=stg,
-        )
         sp_pad = max(1, triton.next_power_of_2(splits))
         _qsa_gqa_paged_merge_kernel[(B * S * H_q,)](
             p_out,

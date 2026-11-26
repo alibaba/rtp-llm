@@ -879,20 +879,25 @@ class Qwen4_5DecoderLayer(nn.Module):
             )
         else:
             self.mlp.prepare_weights(fuse_gate_up=True, dense_linear_mode=eff_mode)
+        def _wrap_fn(mod: nn.Module) -> nn.Module:
+            return _wrap_linear_with_sm100_fp8(mod, eff_mode)
+
         if self.linear_attn is not None:
-            self.linear_attn.in_proj_qkvz = _wrap_linear_with_sm100_fp8(
-                self.linear_attn.in_proj_qkvz, eff_mode
-            )
-            self.linear_attn.out_proj = _wrap_linear_with_sm100_fp8(
-                self.linear_attn.out_proj, eff_mode
-            )
+            self.linear_attn.in_proj_qkvz = _wrap_fn(self.linear_attn.in_proj_qkvz)
+            self.linear_attn.out_proj = _wrap_fn(self.linear_attn.out_proj)
         if self.self_attn is not None:
-            self.self_attn.q_proj = _wrap_linear_with_sm100_fp8(
-                self.self_attn.q_proj, eff_mode
+            prev_attn_fused = getattr(self.self_attn, "qkv_idx_proj", None)
+            fused_attn = (
+                self.self_attn.prepare_fused_projections(_wrap_fn)
+                if hasattr(self.self_attn, "prepare_fused_projections")
+                else None
             )
-            self.self_attn.o_proj = _wrap_linear_with_sm100_fp8(
-                self.self_attn.o_proj, eff_mode
-            )
+            if fused_attn is not None:
+                if fused_attn is prev_attn_fused and not isinstance(fused_attn, nn.Linear):
+                    self.self_attn.qkv_idx_proj = _wrap_fn(fused_attn)
+            else:
+                self.self_attn.q_proj = _wrap_fn(self.self_attn.q_proj)
+            self.self_attn.o_proj = _wrap_fn(self.self_attn.o_proj)
 
     def forward_pre_mlp(
         self,

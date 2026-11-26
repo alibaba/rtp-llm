@@ -26,7 +26,7 @@ from rtp_llm.models_py.modules.qwen4_5.contracts import (
     ShortConvState,
 )
 from rtp_llm.models_py.modules.qwen4_5.yoco import YoCoSharingPlan
-from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import Qwen4ExpQSAIndexer
+from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import Qwen4ExpQSAIndexer, exact_head_rms_norm
 
 
 @triton.jit
@@ -579,6 +579,12 @@ class Qwen4_5Attention(nn.Module):
             self.indexer_rotary_dim = 0
             self.indexer = None
 
+        self.qkv_idx_proj: Optional[nn.Module] = None
+        self._qkv_idx_ptrs: Optional[Tuple[int, ...]] = None
+        self._qkv_idx_splits: Tuple[int, ...] = ()
+        self._qkv_idx_has_kv: bool = False
+        self._qkv_idx_has_idx: bool = False
+
     @classmethod
     def from_config(
         cls,
@@ -671,6 +677,179 @@ class Qwen4_5Attention(nn.Module):
             ),
         )
 
+    def _collect_fusable_projections(
+        self,
+    ) -> Optional[Tuple[Tuple[nn.Linear, ...], bool, bool]]:
+        has_kv = not self.is_consumer
+        mods: list[nn.Linear] = []
+        if not isinstance(self.q_proj, nn.Linear) or self.q_proj.bias is not None:
+            return None
+        mods.append(self.q_proj)
+        if has_kv:
+            if (
+                not isinstance(self.k_proj, nn.Linear)
+                or not isinstance(self.v_proj, nn.Linear)
+                or self.k_proj.bias is not None
+                or self.v_proj.bias is not None
+            ):
+                return None
+            mods.extend((self.k_proj, self.v_proj))
+
+        has_idx = False
+        if self.indexer is not None:
+            idx_lin = getattr(self.indexer, "index_qk_proj", None)
+            if not isinstance(idx_lin, nn.Linear) or idx_lin.bias is not None:
+                return None
+            mods.append(idx_lin)
+            has_idx = True
+
+        if len(mods) < 2:
+            return None
+        w0 = mods[0].weight
+        for m in mods[1:]:
+            w = m.weight
+            if (
+                w.dtype != w0.dtype
+                or w.device != w0.device
+                or w.shape[1] != w0.shape[1]
+            ):
+                return None
+        return tuple(mods), has_kv, has_idx
+
+    def _fused_qkv_idx_ptrs_valid(self) -> bool:
+        ptrs = self._qkv_idx_ptrs
+        if self.qkv_idx_proj is None or ptrs is None:
+            return False
+        if int(self.q_proj.weight.data_ptr()) != ptrs[0]:
+            return False
+        pos = 1
+        if self._qkv_idx_has_kv:
+            if (
+                self.k_proj is None
+                or self.v_proj is None
+                or int(self.k_proj.weight.data_ptr()) != ptrs[pos]
+                or int(self.v_proj.weight.data_ptr()) != ptrs[pos + 1]
+            ):
+                return False
+            pos += 2
+        if self._qkv_idx_has_idx:
+            if self.indexer is None:
+                return False
+            idx_lin = getattr(self.indexer, "index_qk_proj", None)
+            if (
+                idx_lin is None
+                or int(idx_lin.weight.data_ptr()) != ptrs[pos]
+                or int(self.indexer.qk_proj.data_ptr()) != ptrs[pos]
+            ):
+                return False
+            pos += 1
+        return pos == len(ptrs)
+
+    def prepare_fused_projections(
+        self,
+        wrap_linear_fn: Optional[Callable[[nn.Module], nn.Module]] = None,
+    ) -> Optional[nn.Module]:
+        """Fuse ``q_proj [+ k_proj + v_proj] [+ indexer.index_qk_proj]`` with zero BF16 duplication."""
+        spec = self._collect_fusable_projections()
+        if spec is None:
+            return None
+        mods, has_kv, has_idx = spec
+
+        if self._fused_qkv_idx_ptrs_valid():
+            if wrap_linear_fn is not None and isinstance(self.qkv_idx_proj, nn.Linear):
+                self.qkv_idx_proj = wrap_linear_fn(self.qkv_idx_proj)
+            return self.qkv_idx_proj
+
+        splits = tuple(int(m.weight.shape[0]) for m in mods)
+        in_features = int(mods[0].weight.shape[1])
+        dtype = mods[0].weight.dtype
+        device = mods[0].weight.device
+        total_out = sum(splits)
+
+        fused = nn.Linear(in_features, total_out, bias=False, dtype=dtype, device=device)
+        with torch.no_grad():
+            off = 0
+            for m, dim in zip(mods, splits):
+                fused.weight.data[off : off + dim].copy_(m.weight.data)
+                off += dim
+
+        base_w = fused.weight
+        wrapped = wrap_linear_fn(fused) if wrap_linear_fn is not None else fused
+        alias_owner = getattr(wrapped, "weight", None)
+        alias_base = (
+            alias_owner.data
+            if (isinstance(alias_owner, torch.Tensor) and tuple(alias_owner.shape) == tuple(base_w.shape))
+            else base_w.data
+        )
+        with torch.no_grad():
+            off = 0
+            for m, dim in zip(mods, splits):
+                m.weight.data = alias_base[off : off + dim]
+                off += dim
+            if has_idx and self.indexer is not None:
+                self.indexer.qk_proj = mods[-1].weight
+
+        self.qkv_idx_proj = wrapped
+        self._qkv_idx_splits = splits
+        self._qkv_idx_has_kv = has_kv
+        self._qkv_idx_has_idx = has_idx
+        self._qkv_idx_ptrs = tuple(int(m.weight.data_ptr()) for m in mods)
+        return wrapped
+
+    def project_qkv_and_indexer(
+        self,
+        hidden_states: torch.Tensor,
+        *,
+        need_idx: bool = True,
+        need_idx_norm: bool = True,
+    ) -> Tuple[
+        torch.Tensor,
+        Optional[torch.Tensor],
+        Optional[torch.Tensor],
+        Optional[torch.Tensor],
+        Optional[torch.Tensor],
+    ]:
+        """Project ``(q_packed, k_raw, v_raw, q_idx, raw_k_idx)`` in one fused GEMM when valid."""
+        if self._fused_qkv_idx_ptrs_valid():
+            assert self.qkv_idx_proj is not None
+            packed = self.qkv_idx_proj(hidden_states)
+            chunks = torch.split(packed, self._qkv_idx_splits, dim=-1)
+            q_packed = chunks[0]
+            if self._qkv_idx_has_kv:
+                k_raw: Optional[torch.Tensor] = chunks[1]
+                v_raw: Optional[torch.Tensor] = chunks[2]
+                idx_pos = 3
+            else:
+                k_raw = None
+                v_raw = None
+                idx_pos = 1
+
+            q_idx: Optional[torch.Tensor] = None
+            raw_k_idx: Optional[torch.Tensor] = None
+            if self._qkv_idx_has_idx and need_idx and self.indexer is not None:
+                q_idx_raw, raw_k_idx = self.indexer.split_projected(chunks[idx_pos])
+                q_idx = (
+                    exact_head_rms_norm(
+                        q_idx_raw, self.indexer.q_norm_gamma, self.indexer.norm_eps
+                    )
+                    if need_idx_norm
+                    else q_idx_raw
+                )
+            return q_packed, k_raw, v_raw, q_idx, raw_k_idx
+
+        q_packed = self.q_proj(hidden_states)
+        k_raw = self.k_proj(hidden_states) if (not self.is_consumer and self.k_proj is not None) else None
+        v_raw = self.v_proj(hidden_states) if (not self.is_consumer and self.v_proj is not None) else None
+        if self.indexer is not None and need_idx:
+            if need_idx_norm:
+                q_idx, raw_k_idx = self.indexer.project(hidden_states)
+            else:
+                q_idx, raw_k_idx = self.indexer.project_raw(hidden_states)
+        else:
+            q_idx = None
+            raw_k_idx = None
+        return q_packed, k_raw, v_raw, q_idx, raw_k_idx
+
     def _resolve_positions(
         self,
         positions: Optional[torch.Tensor],
@@ -701,6 +880,15 @@ class Qwen4_5Attention(nn.Module):
         qsa_source_raw_keys: Optional[torch.Tensor] = None,
         qsa_source_k_norm_gamma: Optional[torch.Tensor] = None,
         qsa_on_raw_keys: Optional[Callable[[torch.Tensor], None]] = None,
+        preprojected: Optional[
+            Tuple[
+                torch.Tensor,
+                Optional[torch.Tensor],
+                Optional[torch.Tensor],
+                Optional[torch.Tensor],
+                Optional[torch.Tensor],
+            ]
+        ] = None,
     ) -> torch.Tensor:
         """Forward pass for dense MQA-1 Full Attention (producer/normal or YoCo consumer).
 
@@ -723,8 +911,14 @@ class Qwen4_5Attention(nn.Module):
         bsz, seq_len, _ = hidden_states.shape
         device = hidden_states.device
 
-        # 1. Q projection (+ output gate)
-        q_packed = self.q_proj(hidden_states)
+        # 1. Q (+ optional KV & QSA indexer) projection
+        if preprojected is not None:
+            q_packed, pre_k_raw, pre_v_raw, pre_q_idx, pre_raw_k_idx = preprojected
+        else:
+            need_idx_in_fwd = self.indexer is not None and qsa_selected is None
+            q_packed, pre_k_raw, pre_v_raw, pre_q_idx, pre_raw_k_idx = (
+                self.project_qkv_and_indexer(hidden_states, need_idx=need_idx_in_fwd)
+            )
         if self.attn_output_gate:
             q, gate = q_packed.unflatten(-1, (self.num_heads, self.head_dim * 2)).chunk(2, dim=-1)
         else:
@@ -775,8 +969,8 @@ class Qwen4_5Attention(nn.Module):
             v_full = kv_cache.v_cache[:, :total_seq]  # [B, total_seq, 1, 256]
         else:
             assert self.k_proj is not None and self.v_proj is not None and self.k_norm is not None
-            k_raw = self.k_proj(hidden_states)  # [B, T, 256]
-            v_raw = self.v_proj(hidden_states)  # [B, T, 256]
+            k_raw = pre_k_raw if pre_k_raw is not None else self.k_proj(hidden_states)  # [B, T, 256]
+            v_raw = pre_v_raw if pre_v_raw is not None else self.v_proj(hidden_states)  # [B, T, 256]
 
             if self.use_kv_sconv:
                 if k_sconv_fn is not None:
@@ -840,14 +1034,20 @@ class Qwen4_5Attention(nn.Module):
 
             if qsa_selected is None:
                 if not self.is_consumer:
-                    q_idx, raw_k_idx = self.indexer.project(hidden_states)
+                    if pre_q_idx is not None and pre_raw_k_idx is not None:
+                        q_idx, raw_k_idx = pre_q_idx, pre_raw_k_idx
+                    else:
+                        q_idx, raw_k_idx = self.indexer.project(hidden_states)
                     if qsa_on_raw_keys is not None:
                         qsa_on_raw_keys(raw_k_idx)
                     cur_raw = raw_k_idx
                     past_raw = qsa_past_raw_keys
                     k_gamma = self.indexer.k_norm_gamma
                 else:
-                    q_idx, _ = self.indexer.project(hidden_states)
+                    if pre_q_idx is not None:
+                        q_idx = pre_q_idx
+                    else:
+                        q_idx, _ = self.indexer.project(hidden_states)
                     if qsa_source_raw_keys is None:
                         raise ValueError(
                             f"YoCo consumer FullAttn layer {self.layer_idx} QSA forward "
@@ -947,6 +1147,15 @@ class Qwen4_5Attention(nn.Module):
         write_kv_fn: Optional[
             Callable[[Any, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor], None]
         ] = None,
+        preprojected: Optional[
+            Tuple[
+                torch.Tensor,
+                Optional[torch.Tensor],
+                Optional[torch.Tensor],
+                Optional[torch.Tensor],
+                Optional[torch.Tensor],
+            ]
+        ] = None,
     ) -> torch.Tensor:
         """CUDA-graph-safe B*1 paged decode path for producer and YoCo consumer layers."""
         bsz, seq_len, _ = hidden_states.shape
@@ -954,7 +1163,12 @@ class Qwen4_5Attention(nn.Module):
             raise ValueError(f"forward_paged_decode expects seq_len=1, got {seq_len}")
         pos = positions.unsqueeze(1) if positions.ndim == 1 else positions
 
-        q_packed = self.q_proj(hidden_states)
+        if preprojected is not None:
+            q_packed, pre_k_raw, pre_v_raw, _, _ = preprojected
+        else:
+            q_packed, pre_k_raw, pre_v_raw, _, _ = self.project_qkv_and_indexer(
+                hidden_states, need_idx=False
+            )
         if self.attn_output_gate:
             q, gate = q_packed.unflatten(-1, (self.num_heads, self.head_dim * 2)).chunk(
                 2, dim=-1
@@ -981,8 +1195,8 @@ class Qwen4_5Attention(nn.Module):
                 and block_table is not None
                 and seq_before_dev is not None
             )
-            k_raw = self.k_proj(hidden_states)
-            v_raw = self.v_proj(hidden_states)
+            k_raw = pre_k_raw if pre_k_raw is not None else self.k_proj(hidden_states)
+            v_raw = pre_v_raw if pre_v_raw is not None else self.v_proj(hidden_states)
             if self.use_kv_sconv:
                 if self.k_sconv is not None:
                     k_raw = causal_dwconv1d(

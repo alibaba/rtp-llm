@@ -2373,8 +2373,11 @@ class TestDFlash2Phase2MHAAndTP4(unittest.TestCase):
         self.assertGreater(F.cosine_similarity(qkvg_a.float().reshape(-1), qkvg_r.float().reshape(-1), dim=0).item(), 0.999)
         self.assertGreater(F.cosine_similarity(qkvg_s.float().reshape(-1), qkvg_r.float().reshape(-1), dim=0).item(), 0.999)
 
-        # Verify torch.inference_mode() + CUDA Graph safety on TP=1
         spec = m1_ref.spec
+        del m1_ref, m1_auto, m1_smm
+        torch.cuda.empty_cache()
+
+        # Verify torch.inference_mode() + CUDA Graph safety on TP=1
         page_size = 16
         kv_init = [
             torch.randn((8, 2, 1, page_size, spec.head_dim), dtype=torch.bfloat16, device=device) * 0.1
@@ -2410,6 +2413,9 @@ class TestDFlash2Phase2MHAAndTP4(unittest.TestCase):
             _ = m_inf.combine_hidden_states(feat8)
             _ = m_inf.compute_logits(out_inf)
             _ = m_inf.vocab_parallel_topk(out_inf, k=8)
+
+        del m_inf, out_inf, fmha_inf
+        torch.cuda.empty_cache()
 
         # 2) TP=4 wide-lm_head/fc auto mode: 5-layer E2E forward + CUDA Graph capture/replay parity vs bf16
         pc4 = ParallelismConfig()
@@ -2837,6 +2843,184 @@ class TestDFlash2Phase2MHAAndTP4(unittest.TestCase):
         kv_buf.copy_(kv_snap)
         out_contig = fi_disp.append_and_attend(q_s, k_s, v_s, kv_obj, output_gate=g_strided.contiguous())
         self.assertEqual(float((out_strided - out_contig).abs().max().item()), 0.0)
+
+    @torch.no_grad()
+    def test_dflash2_r5_fused_single_mha_and_batched_commit_kv_gpu(self) -> None:
+        """Verify R5 DFlash2 fused single-kernel MHA (SWA/Full/partial/gate/CG) and batched commit KV."""
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA unavailable")
+        import torch.nn.functional as F
+        from rtp_llm.models_py.model_desc import qwen4_5_dspark_model as dm
+        from rtp_llm.ops import AttentionConfigs
+
+        device = torch.device("cuda:0")
+        B, PS, D, HKV, HQ = 64, 64, 256, 1, 32
+        max_blocks = 36
+        n_blks = B * max_blocks
+        bt = torch.arange(n_blks, dtype=torch.int32, device=device).view(B, max_blocks)
+
+        class _KV:
+            pass
+
+        class _AI:
+            pass
+
+        for q_len, swa, use_gate in [(8, 2048, True), (8, None, True), (5, 2048, False)]:
+            pref = torch.full((B,), 2260, dtype=torch.int32, device=device)
+            pref[0] = 150
+            pref[1] = 2047
+            act = torch.ones((B,), dtype=torch.bool, device=device)
+            act[2] = False
+            pos = (pref[:, None] + torch.arange(q_len, dtype=torch.int32, device=device)[None, :]).reshape(-1)
+            q = torch.randn((B * q_len, HQ, D), dtype=torch.bfloat16, device=device) * 0.15
+            k = torch.randn((B * q_len, HKV, D), dtype=torch.bfloat16, device=device) * 0.15
+            v = torch.randn((B * q_len, HKV, D), dtype=torch.bfloat16, device=device) * 0.15
+            gate = torch.randn((B * q_len, HQ, D), dtype=torch.bfloat16, device=device) * 0.2 if use_gate else None
+
+            kv_buf = (torch.randn((n_blks, 2, HKV, PS, D), dtype=torch.bfloat16, device=device) * 1.2).clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
+            kv_snap = kv_buf.clone()
+            kv_obj = _KV()
+            kv_obj.kv_cache_base = kv_buf
+            kv_obj.kv_scale_base = torch.tensor([0.2, 0.2], dtype=torch.float32, device=device)
+
+            ai = _AI()
+            ai.kv_cache_kernel_block_id_device = bt
+            ai.prefix_lengths = pref
+            ai.input_lengths = torch.full((B,), q_len, dtype=torch.int32, device=device)
+            attn_cfg = AttentionConfigs()
+            attn_cfg.head_num = HQ
+            attn_cfg.kv_head_num = HKV
+            attn_cfg.size_per_head = D
+            attn_cfg.kernel_tokens_per_block = PS
+            attn_cfg.is_causal = False
+            attn_cfg.dtype = torch.bfloat16
+
+            ws = dm._DFlash2SplitKVWorkspace(B, HQ, q_len, 4, D, device=device)
+            disp = dm._DFlash2PagedFMHADispatcher(
+                attn_cfg, ai, use_triton_paged=True, use_flashinfer=False, is_cuda_graph=True,
+                query_positions=pos, prefix_lengths=pref, active_requests=act, query_width=q_len, split_kv_workspace=ws,
+            )
+            out_fused = disp.append_and_attend(q, k, v, kv_obj, sliding_window=swa, output_gate=gate)
+            # Inactive request b=2 must remain zero
+            self.assertEqual(float(out_fused[2 * q_len : 3 * q_len].abs().max().item()), 0.0)
+
+            # Compare fused single-kernel MHA against FP32 SDPA reference across SWA/FULL/tail/inactive cases.
+            kv_bf_cmp = (kv_snap.float() * 0.2).to(torch.bfloat16)
+            out_list = []
+            for b_chk in (0, 1, 2, 3, 63):
+                q_off = b_chk * q_len
+                if not bool(act[b_chk].item()):
+                    out_list.append(torch.zeros((q_len, HQ, D), dtype=torch.bfloat16, device=device))
+                    continue
+                tot = min(int(pref[b_chk].item()) + q_len, max_blocks * PS)
+                kv_pos = torch.arange(tot, device=device, dtype=torch.long)
+                pages = bt[b_chk, kv_pos // PS].long()
+                slots = kv_pos % PS
+                kb_1 = (kv_bf_cmp[pages, 0, :, slots, :].float()).transpose(0, 1).unsqueeze(0).clone()
+                vb_1 = (kv_bf_cmp[pages, 1, :, slots, :].float()).transpose(0, 1).unsqueeze(0).clone()
+                qb = q[q_off : q_off + q_len].float().transpose(0, 1).unsqueeze(0)
+                # include newly scattered tokens
+                scatter_pos = pos[q_off : q_off + q_len].long()
+                for qi in range(q_len):
+                    p0 = int(scatter_pos[qi].item())
+                    if p0 < tot:
+                        fp8_k = (k[q_off + qi].float() / 0.2).clamp(-448.0, 448.0).to(torch.float8_e4m3fn).float() * 0.2
+                        fp8_v = (v[q_off + qi].float() / 0.2).clamp(-448.0, 448.0).to(torch.float8_e4m3fn).float() * 0.2
+                        kb_1[:, :, p0, :] = fp8_k
+                        vb_1[:, :, p0, :] = fp8_v
+                kb = kb_1.expand(1, HQ, tot, D)
+                vb = vb_1.expand(1, HQ, tot, D)
+                mask = None
+                if swa is not None:
+                    mask = kv_pos[None, :] >= (scatter_pos[:, None] - swa)
+                ob = F.scaled_dot_product_attention(qb, kb, vb, attn_mask=mask, is_causal=False).squeeze(0).transpose(0, 1)
+                if gate is not None:
+                    ob = ob * torch.sigmoid(gate[q_off : q_off + q_len].float())
+                out_list.append(ob.to(torch.bfloat16))
+            sel_out = torch.cat([out_fused[b_chk * q_len : (b_chk + 1) * q_len] for b_chk in (0, 1, 2, 3, 63)], dim=0)
+            ref_out = torch.cat(out_list, dim=0)
+            cos = F.cosine_similarity(sel_out.float().reshape(-1), ref_out.float().reshape(-1), dim=0).item()
+            self.assertGreaterEqual(cos, 0.999, f"fused single MHA vs FP32 SDPA q_len={q_len} swa={swa} gate={use_gate}: cos={cos}")
+
+            # Also verify >= 0.99995 parity against the 3-kernel Split-KV FP8-DOT path
+            ws_3k = dm._DFlash2SplitKVWorkspace(B, HQ, q_len, 2, D, device=device)
+            ws_m, ws_l, ws_acc = ws_3k.ensure_capacity(B, HQ, q_len, 2, D, device)
+            out_3k = torch.empty_like(q)
+            w_left_3k = int(swa) if swa is not None else -1
+            ks_t, vs_t = kv_obj.kv_scale_base[:1], kv_obj.kv_scale_base[1:2]
+            num_qt = (q_len + 3) // 4
+            num_gt = HQ // 16
+            all_mv = (q_len % 4 == 0) and (HQ % 16 == 0)
+            g_arg = gate.reshape(B * q_len, HQ, D) if gate is not None else out_3k
+            dm._dflash2_paged_noncausal_mha_stage1_body_triton[(num_qt * num_gt, B * HKV, 1)](
+                q, kv_buf, bt, pref, pos, act, ks_t, vs_t, ws_m, ws_l, ws_acc, D ** -0.5,
+                B, q_len, HKV, HQ, num_gt, 1, 2, PS, D, max_blocks, n_blks, w_left_3k,
+                q.stride(0), q.stride(1), q.stride(2), bt.stride(0), bt.stride(1),
+                kv_buf.stride(0), kv_buf.stride(1), kv_buf.stride(2), kv_buf.stride(3), kv_buf.stride(4),
+                ws_m.stride(0), ws_m.stride(1), ws_m.stride(2),
+                ws_acc.stride(0), ws_acc.stride(1), ws_acc.stride(2), ws_acc.stride(3),
+                HAS_SWA=(swa is not None), IS_FP8_KV=True, USE_FP8_DOT=True,
+                HEAD_DIM_MATCH=True, ALL_M_VALID=all_mv,
+                BLOCK_Q=4, BLOCK_G=16, BLOCK_M=64, BLOCK_N=64, BLOCK_D=256,
+            )
+            dm._dflash2_paged_noncausal_mha_stage1_edge_triton[(num_qt * num_gt, B * HKV)](
+                q, kv_buf, bt, pref, pos, act, ks_t, vs_t, ws_m, ws_l, ws_acc, D ** -0.5,
+                B, q_len, HKV, HQ, num_gt, 1, 2, PS, D, max_blocks, n_blks, w_left_3k,
+                q.stride(0), q.stride(1), q.stride(2), bt.stride(0), bt.stride(1),
+                kv_buf.stride(0), kv_buf.stride(1), kv_buf.stride(2), kv_buf.stride(3), kv_buf.stride(4),
+                ws_m.stride(0), ws_m.stride(1), ws_m.stride(2),
+                ws_acc.stride(0), ws_acc.stride(1), ws_acc.stride(2), ws_acc.stride(3),
+                HAS_SWA=(swa is not None), IS_FP8_KV=True, USE_FP8_DOT=True,
+                BLOCK_Q=4, BLOCK_G=16, BLOCK_M=64, BLOCK_N=64, BLOCK_D=256,
+            )
+            dm._dflash2_paged_noncausal_mha_stage2_triton[(B * q_len, HQ)](
+                ws_m, ws_l, ws_acc, act, g_arg, out_3k,
+                B, q_len, HQ, 2, D,
+                ws_m.stride(0), ws_m.stride(1), ws_m.stride(2),
+                ws_acc.stride(0), ws_acc.stride(1), ws_acc.stride(2), ws_acc.stride(3),
+                g_arg.stride(0), g_arg.stride(1), g_arg.stride(2),
+                out_3k.stride(0), out_3k.stride(1), out_3k.stride(2),
+                HAS_GATE=use_gate, SPLIT_BLOCK=2, BLOCK_D=256, num_warps=2,
+            )
+            cos_3k = F.cosine_similarity(out_fused.float().reshape(-1), out_3k.float().reshape(-1), dim=0).item()
+            self.assertGreaterEqual(cos_3k, 0.99995, f"fused single vs 3-kernel FP8 q_len={q_len} swa={swa}: {cos_3k}")
+            kv_buf.copy_(kv_snap)
+
+            if q_len == 8 and swa == 2048 and use_gate:
+                kv_buf.copy_(kv_snap)
+                g_mha = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(g_mha):
+                    cg_out = disp.append_and_attend(q, k, v, kv_obj, sliding_window=swa, output_gate=gate)
+                q.mul_(0.5)
+                kv_buf.copy_(kv_snap)
+                g_mha.replay()
+                torch.cuda.synchronize()
+                eager_after = disp.append_and_attend(q, k, v, kv_obj, sliding_window=swa, output_gate=gate)
+                self.assertEqual(float((cg_out - eager_after).abs().max().item()), 0.0)
+
+        # 2) Verify 5-layer batched commit_feature_rows context-KV vs per-layer forward_context_kv + version invalidation
+        cfg, mw = _load_dspark_model_weights(MOCK_8L_DFLASH, device="cuda:0")
+        model = Qwen4_5DSparkModel(cfg, ParallelismConfig(), mw, max_generate_batch_size=4)
+        model.prepare_weights()
+        main_x = torch.randn((16, model.spec.hidden_size), dtype=torch.bfloat16, device=device) * 0.1
+        pos_ctx = torch.arange(16, dtype=torch.int32, device=device)
+        fused_w = model._get_fused_ctx_kv_weight()
+        split_dims = [2 * lyr.self_attn.kv_size for lyr in model.layers]
+        kv_slices = torch.split(F.linear(main_x, fused_w), split_dims, dim=-1)
+        for lyr, kv_s in zip(model.layers, kv_slices):
+            k_bat, v_bat = lyr.self_attn.finish_context_kv(kv_s, pos_ctx)
+            k_sep, v_sep = lyr.self_attn.forward_context_kv(main_x, pos_ctx)
+            self.assertLessEqual(float((k_bat - k_sep).abs().max().item()), 1e-2)
+            self.assertLessEqual(float((v_bat - v_sep).abs().max().item()), 1e-2)
+        old_ver = model._fused_ctx_kv_version
+        model.layers[0].self_attn.k_proj.weight.mul_(0.5)
+        new_w = model._get_fused_ctx_kv_weight()
+        self.assertNotEqual(model._fused_ctx_kv_version, old_ver)
+        k_mut_bat, _ = model.layers[0].self_attn.finish_context_kv(
+            torch.split(F.linear(main_x, new_w), split_dims, dim=-1)[0], pos_ctx
+        )
+        k_mut_sep, _ = model.layers[0].self_attn.forward_context_kv(main_x, pos_ctx)
+        self.assertLessEqual(float((k_mut_bat - k_mut_sep).abs().max().item()), 1e-2)
 
 @torch.no_grad()
 def _dflash2_gloo_tp4_worker(rank: int, world_size: int, port: int, err_q) -> None:
