@@ -21,10 +21,20 @@ def _mhc_pre_big_fuse(
     sinkhorn_repeat: int,
     n_splits: int = 16,
     mhc_mult: int = 4,
+    h_split: int = 1,
 ):
     num_tokens = T.dynamic("num_tokens")
     mhc_mult3 = mhc_mult * (2 + mhc_mult)
-    hidden_block = math.gcd(512, hidden_size)
+    # 2D grid (num_tokens, h_split): each CTA owns one contiguous h_slice-wide
+    # hidden slice tiled by hidden_block so register usage stays bounded for
+    # large hidden dimensions (e.g. dim=7168). Small decode batches use h_split=4
+    # to saturate SMs; prefill uses h_split=1 to avoid 4x CTA overhead.
+    # Degrade toward a plain 1D layout when hidden_size is not divisible.
+    h_split = max(int(h_split), 1)
+    while h_split > 1 and hidden_size % h_split != 0:
+        h_split -= 1
+    h_slice = hidden_size // h_split
+    hidden_block = math.gcd(512, h_slice)
 
     @T.prim_func
     def mhc_pre_big_fuse(
@@ -38,11 +48,11 @@ def _mhc_pre_big_fuse(
         comb_mix: T.Tensor[(num_tokens, mhc_mult * mhc_mult), T.float32],
         layer_input: T.Tensor[(num_tokens, hidden_size), T.bfloat16],
     ) -> None:
-        with T.Kernel(num_tokens, threads=96) as pid:
-            ##################################################################
-            # _mhc_pre_norm_fn_fwd_norm
+        with T.Kernel(num_tokens, h_split, threads=96) as (pid, pid_h):
             mixes_shared = T.alloc_shared(mhc_mult3, T.float32)
             if T.get_thread_binding() < 32:
+                ##################################################################
+                # _mhc_pre_norm_fn_fwd_norm
                 rms = T.alloc_fragment(1, T.float32)
                 mixes = T.alloc_fragment(mhc_mult3, T.float32)
                 T.clear(mixes)
@@ -58,56 +68,59 @@ def _mhc_pre_big_fuse(
                 T.copy(mixes, mixes_shared, disable_tma=True)
 
             if T.get_thread_binding() < 32:
-                ##################################################################
-                # _mhc_pre_split_mixes_fwd (post & comb)
-                cm = T.alloc_fragment((mhc_mult, mhc_mult), T.float32)
-                for j in T.Parallel(mhc_mult):
-                    post_mix[pid, j] = (
-                        T.sigmoid(
-                            mixes_shared[j + mhc_mult] * mhc_scale[1]
-                            + mhc_base[j + mhc_mult]
+                # Only slice-0 CTA consumes post_mix/comb_mix, so skip the 20-iter
+                # Sinkhorn reduction on pid_h != 0 CTAs.
+                if pid_h == 0:
+                    ##############################################################
+                    # _mhc_pre_split_mixes_fwd (post & comb)
+                    cm = T.alloc_fragment((mhc_mult, mhc_mult), T.float32)
+                    for j in T.Parallel(mhc_mult):
+                        post_mix[pid, j] = (
+                            T.sigmoid(
+                                mixes_shared[j + mhc_mult] * mhc_scale[1]
+                                + mhc_base[j + mhc_mult]
+                            )
+                            * mhc_post_mult_value
                         )
-                        * mhc_post_mult_value
-                    )
-                for j, k in T.Parallel(mhc_mult, mhc_mult):
-                    cm[j, k] = (
-                        mixes_shared[j * mhc_mult + k + mhc_mult * 2] * mhc_scale[2]
-                        + mhc_base[j * mhc_mult + k + mhc_mult * 2]
-                    )
+                    for j, k in T.Parallel(mhc_mult, mhc_mult):
+                        cm[j, k] = (
+                            mixes_shared[j * mhc_mult + k + mhc_mult * 2] * mhc_scale[2]
+                            + mhc_base[j * mhc_mult + k + mhc_mult * 2]
+                        )
 
-                ##################################################################
-                # _mhc_sinkhorn_fwd
-                row_sum = T.alloc_fragment(mhc_mult, T.float32)
-                col_sum = T.alloc_fragment(mhc_mult, T.float32)
+                    ##############################################################
+                    # _mhc_sinkhorn_fwd
+                    row_sum = T.alloc_fragment(mhc_mult, T.float32)
+                    col_sum = T.alloc_fragment(mhc_mult, T.float32)
 
-                # comb = comb.softmax(-1) + eps
-                row_max = T.alloc_fragment(mhc_mult, T.float32)
-                T.reduce_max(cm, row_max, dim=1)
-                for j, k in T.Parallel(mhc_mult, mhc_mult):
-                    cm[j, k] = T.exp(cm[j, k] - row_max[j])
-                T.reduce_sum(cm, row_sum, dim=1)
-                for j, k in T.Parallel(mhc_mult, mhc_mult):
-                    cm[j, k] = cm[j, k] / row_sum[j] + mhc_sinkhorn_eps
-
-                # comb = comb / (comb.sum(-2) + eps)
-                T.reduce_sum(cm, col_sum, dim=0)
-                for j, k in T.Parallel(mhc_mult, mhc_mult):
-                    cm[j, k] = cm[j, k] / (col_sum[k] + mhc_sinkhorn_eps)
-
-                for _ in T.serial(sinkhorn_repeat - 1):
-                    # comb = comb / (comb.sum(-1) + eps)
+                    # comb = comb.softmax(-1) + eps
+                    row_max = T.alloc_fragment(mhc_mult, T.float32)
+                    T.reduce_max(cm, row_max, dim=1)
+                    for j, k in T.Parallel(mhc_mult, mhc_mult):
+                        cm[j, k] = T.exp(cm[j, k] - row_max[j])
                     T.reduce_sum(cm, row_sum, dim=1)
                     for j, k in T.Parallel(mhc_mult, mhc_mult):
-                        cm[j, k] = cm[j, k] / (row_sum[j] + mhc_sinkhorn_eps)
+                        cm[j, k] = cm[j, k] / row_sum[j] + mhc_sinkhorn_eps
 
                     # comb = comb / (comb.sum(-2) + eps)
                     T.reduce_sum(cm, col_sum, dim=0)
                     for j, k in T.Parallel(mhc_mult, mhc_mult):
                         cm[j, k] = cm[j, k] / (col_sum[k] + mhc_sinkhorn_eps)
 
-                # save comb_mix to global memory
-                for j, k in T.Parallel(mhc_mult, mhc_mult):
-                    comb_mix[pid, j * mhc_mult + k] = cm[j, k]
+                    for _ in T.serial(sinkhorn_repeat - 1):
+                        # comb = comb / (comb.sum(-1) + eps)
+                        T.reduce_sum(cm, row_sum, dim=1)
+                        for j, k in T.Parallel(mhc_mult, mhc_mult):
+                            cm[j, k] = cm[j, k] / (row_sum[j] + mhc_sinkhorn_eps)
+
+                        # comb = comb / (comb.sum(-2) + eps)
+                        T.reduce_sum(cm, col_sum, dim=0)
+                        for j, k in T.Parallel(mhc_mult, mhc_mult):
+                            cm[j, k] = cm[j, k] / (col_sum[k] + mhc_sinkhorn_eps)
+
+                    # save comb_mix to global memory
+                    for j, k in T.Parallel(mhc_mult, mhc_mult):
+                        comb_mix[pid, j * mhc_mult + k] = cm[j, k]
             else:
                 ##################################################################
                 # _mhc_pre_split_mixes_fwd (pre)
@@ -120,11 +133,12 @@ def _mhc_pre_big_fuse(
                         + mhc_pre_eps
                     )
                 ###################################################################
-                # _mhc_pre_apply_mix_fwd
-                for i0_h in T.Pipelined(hidden_size // hidden_block, num_stages=2):
+                # _mhc_pre_apply_mix_fwd (this CTA's hidden slice, tiled)
+                for i0_h in T.Pipelined(h_slice // hidden_block, num_stages=2):
                     xs = T.alloc_shared((mhc_mult, hidden_block), T.bfloat16)
                     xl = T.alloc_fragment((mhc_mult, hidden_block), T.float32)
-                    T.copy(residual[pid, 0, i0_h * hidden_block], xs, disable_tma=True)
+                    col_off = pid_h * h_slice + i0_h * hidden_block
+                    T.copy(residual[pid, 0, col_off], xs, disable_tma=True)
                     T.copy(xs, xl, disable_tma=True)
 
                     ol = T.alloc_fragment(hidden_block, T.float32)
@@ -135,6 +149,6 @@ def _mhc_pre_big_fuse(
                         for i1_h in T.Parallel(hidden_block):
                             ol[i1_h] += pre * xl[i_mhc, i1_h]
 
-                    T.copy(ol, layer_input[pid, i0_h * hidden_block], disable_tma=True)
+                    T.copy(ol, layer_input[pid, col_off], disable_tma=True)
 
     return mhc_pre_big_fuse

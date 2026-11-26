@@ -73,7 +73,9 @@ def mhc_pre_big_fuse(
 
     block_k = 64
     block_m = 64
-    n_splits = _compute_num_split(block_k, mhc_hidden_size, _ceil_div(num_tokens, block_m))
+    n_splits = _compute_num_split(
+        block_k, mhc_hidden_size, _ceil_div(num_tokens, block_m)
+    )
 
     post_mix = torch.empty(
         num_tokens, mhc_mult, dtype=torch.float32, device=residual.device
@@ -99,6 +101,7 @@ def mhc_pre_big_fuse(
         n_splits,
     )
 
+    h_split = 4 if num_tokens <= 256 else 1
     _mhc_pre_big_fuse(
         hidden_size,
         rms_eps,
@@ -108,6 +111,7 @@ def mhc_pre_big_fuse(
         sinkhorn_repeat,
         n_splits=n_splits,
         mhc_mult=mhc_mult,
+        h_split=h_split,
     )(
         gemm_out_mul,
         gemm_out_sqrsum,

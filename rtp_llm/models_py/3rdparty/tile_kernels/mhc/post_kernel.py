@@ -13,12 +13,21 @@ from tilelang import language as T
     },
 )
 def _mhc_post_fwd(
-    mhc: int, hidden: int, n_thr: int = 128, h_blk: int = 1024
+    mhc: int, hidden: int, n_thr: int = 128, h_blk: int = 1024, h_split: int = 1
 ) -> tilelang.JITKernel:
     n = T.dynamic("num_tokens")
     h = hidden
 
     h_blk = math.gcd(hidden, h_blk)
+    # 2D grid (num_tokens, h_split): each CTA owns one contiguous slice of
+    # h_blk-sized hidden blocks. Small decode batches use h_split=8 to saturate
+    # SMs; prefill uses h_split=1 so T.Pipelined overlaps across multiple stages
+    # without CTA explosion.
+    h_split = max(int(h_split), 1)
+    n_h_blk = h // h_blk
+    while h_split > 1 and n_h_blk % h_split != 0:
+        h_split -= 1
+    n_sub = n_h_blk // h_split
 
     @T.prim_func
     def _mhc_post_fwd_kernel(
@@ -28,7 +37,7 @@ def _mhc_post_fwd(
         d: T.Tensor[(n, h), T.bfloat16],
         x: T.Tensor[(n, mhc, h), T.bfloat16],
     ) -> None:
-        with T.Kernel(n, threads=n_thr) as pid_n:
+        with T.Kernel(n, h_split, threads=n_thr) as (pid_n, pid_h):
             x_shared = T.alloc_shared((mhc, h_blk), T.bfloat16)
             b_shared = T.alloc_shared((mhc, h_blk), T.bfloat16)
             d_shared = T.alloc_shared(h_blk, T.bfloat16)
@@ -43,9 +52,13 @@ def _mhc_post_fwd(
             T.copy(c[pid_n, 0], c_local)
             T.pdl_sync()
 
-            for i0_h in T.Pipelined(T.ceildiv(h, h_blk), num_stages=2):
-                T.copy(b[pid_n, 0, i0_h * h_blk], b_shared, disable_tma=True)
-                T.copy(d[pid_n, i0_h * h_blk], d_shared, disable_tma=True)
+            # In-place out=b aliasing: each CTA reads its own b slice into
+            # shared memory before writing the same x slice, so h-splitting
+            # keeps the read-before-write property per slice.
+            h_off = pid_h * n_sub * h_blk
+            for i0_h in T.Pipelined(n_sub, num_stages=2):
+                T.copy(b[pid_n, 0, h_off + i0_h * h_blk], b_shared, disable_tma=True)
+                T.copy(d[pid_n, h_off + i0_h * h_blk], d_shared, disable_tma=True)
 
                 T.copy(b_shared, b_local)
                 T.copy(d_shared, d_local)
@@ -57,7 +70,7 @@ def _mhc_post_fwd(
                         )
                 T.copy(x_local, x_shared)
 
-                T.copy(x_shared, x[pid_n, 0, i0_h * h_blk], disable_tma=True)
+                T.copy(x_shared, x[pid_n, 0, h_off + i0_h * h_blk], disable_tma=True)
 
     return _mhc_post_fwd_kernel
 
@@ -190,7 +203,9 @@ def mhc_post_fwd(
 
     if out is None:
         out = torch.empty_like(residual)
-    kernel = _mhc_post_fwd(mhc, hidden)
+    total_tokens = num_seqs * num_tokens
+    h_blk, h_split = (256, 8) if total_tokens <= 256 else (1024, 1)
+    kernel = _mhc_post_fwd(mhc, hidden, h_blk=h_blk, h_split=h_split)
     kernel(
         comb_res_mix.flatten(0, 1),
         residual.flatten(0, 1),

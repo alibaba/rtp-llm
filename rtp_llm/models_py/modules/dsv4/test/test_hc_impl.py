@@ -385,6 +385,171 @@ class TestHCImpl(unittest.TestCase):
                     self.assertEqual(tuple(s_got.shape), tuple(s_ref.shape))
                     self.assertEqual(tuple(s_got.stride()), tuple(s_ref.stride()))
 
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+    def test_mhc_pre_and_post_decode_prefill_and_dim7168(self) -> None:
+        major, _ = torch.cuda.get_device_capability()
+        if major != 10:
+            self.skipTest("requires SM100/SM103 for tf32_hc_prenorm_gemm")
+
+        def _ref_mhc_pre(
+            x: torch.Tensor,
+            fn: torch.Tensor,
+            base: torch.Tensor,
+            scale: torch.Tensor,
+            *,
+            hc: int,
+            dim: int,
+            sinkhorn_iters: int = 10,
+            eps: float = 1e-6,
+        ):
+            x_f = x.float()
+            flat = x_f.reshape(x_f.shape[0], hc * dim)
+            rms = torch.rsqrt(flat.square().mean(dim=-1, keepdim=True) + eps)
+            mixes = (flat @ fn.t()) * rms
+            pre = torch.sigmoid(mixes[:, :hc] * scale[0] + base[:hc]) + eps
+            post = (
+                torch.sigmoid(mixes[:, hc : 2 * hc] * scale[1] + base[hc : 2 * hc])
+                * 2.0
+            )
+            cm = (mixes[:, 2 * hc :] * scale[2] + base[2 * hc :]).reshape(
+                x_f.shape[0], hc, hc
+            )
+            cm = torch.softmax(cm, dim=-1) + eps
+            cm = cm / (cm.sum(dim=-2, keepdim=True) + eps)
+            for _ in range(sinkhorn_iters - 1):
+                cm = cm / (cm.sum(dim=-1, keepdim=True) + eps)
+                cm = cm / (cm.sum(dim=-2, keepdim=True) + eps)
+            y = (pre.unsqueeze(-1) * x_f).sum(dim=1).to(torch.bfloat16)
+            return y, post.unsqueeze(-1), cm
+
+        def _ref_mhc_post(
+            layer_out: torch.Tensor,
+            residual: torch.Tensor,
+            post: torch.Tensor,
+            comb: torch.Tensor,
+        ):
+            res = post * layer_out.float().unsqueeze(1) + torch.einsum(
+                "tio,tid->tod", comb, residual.float()
+            )
+            return res.to(torch.bfloat16)
+
+        # Cover both decode-split (T=18 <= 256) and prefill (T=512 > 256)
+        # dispatch regimes plus large hidden dimension (dim=7168) for register
+        # tiling safety in pre_big_fuse_kernel / post_kernel.
+        for tokens, dim in ((18, 4096), (512, 4096), (18, 7168)):
+            with self.subTest(tokens=tokens, dim=dim):
+                hc = 4
+                fn, base, scale = _weights(hc, dim, device="cuda")
+                unit = TileLangHCUnit(
+                    fn,
+                    base,
+                    scale,
+                    dim=dim,
+                    hc_mult=hc,
+                    hc_sinkhorn_iters=10,
+                    norm_eps=1e-6,
+                    hc_eps=1e-6,
+                )
+                x = torch.randn(tokens, hc, dim, device="cuda", dtype=torch.bfloat16)
+                layer_out = torch.randn(
+                    tokens, dim, device="cuda", dtype=torch.bfloat16
+                )
+                with torch.inference_mode():
+                    pre_got, post_got, comb_got = unit.pre(x)
+                    pre_ref, post_ref, comb_ref = _ref_mhc_pre(
+                        x, fn, base, scale, hc=hc, dim=dim
+                    )
+                    # Pre-norm linear uses DeepGEMM TF32 (~5e-4 vs FP32 matmul).
+                    torch.testing.assert_close(post_got, post_ref, atol=5e-3, rtol=5e-3)
+                    torch.testing.assert_close(comb_got, comb_ref, atol=5e-3, rtol=5e-3)
+                    torch.testing.assert_close(pre_got, pre_ref, atol=2e-2, rtol=2e-2)
+
+                    out_got = unit.post(layer_out, x.clone(), post_got, comb_got)
+                    out_ref = _ref_mhc_post(layer_out, x.clone(), post_ref, comb_ref)
+                    torch.testing.assert_close(out_got, out_ref, atol=2e-2, rtol=2e-2)
+
+        # Decode h_split=4/8 (T <= 256) must match the 1-CTA (h_split=1) kernel
+        # outputs bit-for-bit, including dim=7168 (hidden_block=256 tiling).
+        import importlib
+
+        from rtp_llm.models_py.modules.dsv4 import tilelang_kernels  # noqa: F401
+
+        _mhc_post_fwd = importlib.import_module(
+            "rtp_llm.models_py.3rdparty.tile_kernels.mhc.post_kernel"
+        )._mhc_post_fwd
+        _mhc_pre_big_fuse = importlib.import_module(
+            "rtp_llm.models_py.3rdparty.tile_kernels.mhc.pre_big_fuse_kernel"
+        )._mhc_pre_big_fuse
+        pre_ops = importlib.import_module(
+            "rtp_llm.models_py.3rdparty.tile_kernels.modeling.mhc.ops.pre_big_fuse"
+        )
+        _compute_num_split = pre_ops._compute_num_split
+        _run_deepgemm_splitk_gemm = pre_ops._run_deepgemm_splitk_gemm
+
+        for tokens, dim in ((18, 4096), (18, 7168)):
+            with self.subTest(bit_exact_tokens=tokens, dim=dim):
+                hc = 4
+                fn, base, scale = _weights(hc, dim, device="cuda")
+                unit = TileLangHCUnit(
+                    fn,
+                    base,
+                    scale,
+                    dim=dim,
+                    hc_mult=hc,
+                    hc_sinkhorn_iters=10,
+                    norm_eps=1e-6,
+                    hc_eps=1e-6,
+                )
+                x = torch.randn(tokens, hc, dim, device="cuda", dtype=torch.bfloat16)
+                layer_out = torch.randn(
+                    tokens, dim, device="cuda", dtype=torch.bfloat16
+                )
+                with torch.inference_mode():
+                    pre_got, post_got, comb_got = unit.pre(x)
+                    out_got = unit.post(layer_out, x.clone(), post_got, comb_got)
+
+                    n_splits = _compute_num_split(64, hc * dim, (tokens + 63) // 64)
+                    g_mul = torch.empty(
+                        n_splits, tokens, 24, dtype=torch.float32, device="cuda"
+                    )
+                    g_sq = torch.empty(
+                        n_splits, tokens, dtype=torch.float32, device="cuda"
+                    )
+                    _run_deepgemm_splitk_gemm(
+                        x.view(tokens, hc * dim), fn, g_mul, g_sq, n_splits
+                    )
+                    post_1 = torch.empty(tokens, hc, dtype=torch.float32, device="cuda")
+                    comb_1 = torch.empty(
+                        tokens, hc * hc, dtype=torch.float32, device="cuda"
+                    )
+                    pre_1 = torch.empty(
+                        tokens, dim, dtype=torch.bfloat16, device="cuda"
+                    )
+                    _mhc_pre_big_fuse(
+                        dim,
+                        1e-6,
+                        1e-6,
+                        1e-6,
+                        2.0,
+                        10,
+                        n_splits=n_splits,
+                        mhc_mult=hc,
+                        h_split=1,
+                    )(g_mul, g_sq, scale, base, x, post_1, comb_1, pre_1)
+                    out_1 = x.clone()
+                    _mhc_post_fwd(hc, dim, h_blk=1024, h_split=1)(
+                        comb_got.view(tokens, hc, hc),
+                        out_1,
+                        post_got.view(tokens, hc),
+                        layer_out,
+                        out_1,
+                    )
+
+                    self.assertTrue(torch.equal(post_got, post_1.view(tokens, hc, 1)))
+                    self.assertTrue(torch.equal(comb_got, comb_1.view(tokens, hc, hc)))
+                    self.assertTrue(torch.equal(pre_got, pre_1))
+                    self.assertTrue(torch.equal(out_got, out_1))
+
 
 if __name__ == "__main__":
     unittest.main()
