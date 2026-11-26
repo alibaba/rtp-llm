@@ -12,6 +12,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.OptionalLong;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -300,6 +301,90 @@ class PrefillRequestCapacityTest {
     }
 
     @Test
+    void queuedComputeSnapshotMovesWorkAcrossStagesWithoutCountingItTwice() {
+        ScheduledRequest queued = item(1);
+        when(queued.seqLen()).thenReturn(300L);
+        when(queued.hitCache()).thenReturn(200L);
+        assertTrue(enqueue(queued, 0L));
+        assertEquals(new PrefillState.QueuedComputeSnapshot(
+                OptionalLong.of(100L), OptionalLong.empty(), OptionalLong.empty(),
+                OptionalLong.empty()), state.queuedComputeSnapshot());
+
+        ScheduledRequest dispatched = item(2);
+        when(dispatched.seqLen()).thenReturn(100L);
+        when(dispatched.hitCache()).thenReturn(90L);
+        var registration = reserve(dispatched, 0L).reservation();
+        try (var handoff = commit(dispatched, registration)) { }
+        var foreign = waiting(3L, 30L);
+        heartbeat(Map.of("foreign", foreign), 1L);
+        assertQueuedCompute(100L, 10L, 70L);
+
+        heartbeat(Map.of("owned", waiting(2L, 0L), "foreign", foreign), 2L);
+        assertQueuedCompute(100L, 0L, 80L);
+
+        heartbeat(Map.of("owned", observed(2), "foreign", foreign), 1L, 1L);
+        assertQueuedCompute(100L, 0L, 70L);
+    }
+
+    @Test
+    void queuedComputeSnapshotKeepsLocalQueueWhenWorkerDetailsAreIncomplete() {
+        ScheduledRequest queued = item(1);
+        when(queued.seqLen()).thenReturn(100L);
+        assertTrue(enqueue(queued, 0L));
+        heartbeat(Map.of(), 1L);
+        assertEquals(new PrefillState.QueuedComputeSnapshot(
+                OptionalLong.of(100L), OptionalLong.of(0L), OptionalLong.empty(),
+                OptionalLong.empty()), state.queuedComputeSnapshot());
+
+        ScheduledRequest dispatched = item(2);
+        when(dispatched.seqLen()).thenReturn(40L);
+        var registration = reserve(dispatched, 0L).reservation();
+        try (var handoff = commit(dispatched, registration)) { }
+        heartbeat(Map.of(), 0L, 1L);
+        assertEquals(new PrefillState.QueuedComputeSnapshot(
+                OptionalLong.of(100L), OptionalLong.empty(), OptionalLong.of(0L),
+                OptionalLong.empty()), state.queuedComputeSnapshot());
+        assertTrue(state.queuedComputeTokens().isEmpty());
+    }
+
+    @Test
+    void queuedComputeSnapshotUsesExactQueueMembershipForLocalStock() {
+        heartbeat(Map.of("earlier", observed(1)), 0L, 1L);
+        ScheduledRequest queued = item(1);
+        when(queued.seqLen()).thenReturn(100L);
+        assertTrue(enqueue(queued, 0L));
+        ScheduledRequest direct = item(2);
+        when(direct.seqLen()).thenReturn(20L);
+        try (var registration = reserve(direct, 0L).reservation()) {
+            assertEquals(new PrefillState.QueuedComputeSnapshot(
+                    OptionalLong.of(100L), OptionalLong.of(0L), OptionalLong.of(0L),
+                    OptionalLong.of(20L)), state.queuedComputeSnapshot());
+        }
+    }
+
+    @Test
+    void queuedComputeSnapshotDoesNotReclassifyAnObservedRequestAsInTransit() {
+        ScheduledRequest dispatched = item(2);
+        when(dispatched.seqLen()).thenReturn(40L);
+        var registration = reserve(dispatched, 0L).reservation();
+        try (var handoff = commit(dispatched, registration)) { }
+        heartbeat(Map.of("local", waiting(2L, 0L)), 1L);
+        assertQueuedCompute(0L, 0L, 40L);
+
+        heartbeat(Map.of(), 0L);
+        assertEquals(new PrefillState.QueuedComputeSnapshot(
+                OptionalLong.of(0L), OptionalLong.of(0L), OptionalLong.empty(),
+                OptionalLong.of(40L)), state.queuedComputeSnapshot());
+    }
+
+    private void assertQueuedCompute(long queued, long inTransit, long workerWaiting) {
+        assertEquals(new PrefillState.QueuedComputeSnapshot(OptionalLong.of(queued), OptionalLong.of(inTransit),
+                OptionalLong.of(workerWaiting), OptionalLong.of(queued + inTransit + workerWaiting)),
+                state.queuedComputeSnapshot());
+        assertEquals(queued + inTransit + workerWaiting, state.queuedComputeTokens().orElseThrow());
+    }
+
+    @Test
     void fullStatusPublishesUnknownCapacityBeforeEndpointNotification() {
         var observation = mock(WorkerStatus.StatusObservation.class);
         var engine = mock(WorkerStatus.EngineObservation.class);
@@ -349,6 +434,11 @@ class PrefillRequestCapacityTest {
     private static WorkerStatus.TaskObservation observed(long id) {
         return new WorkerStatus.TaskObservation(id, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, "", 0L,
                 TaskPhase.RUNNING, 0L, PriorityPreemptionProgress.NONE);
+    }
+
+    private static WorkerStatus.TaskObservation waiting(long id, long prefix) {
+        return new WorkerStatus.TaskObservation(id, prefix, 0L, 100L, 0L, 0L, 0L, 0L, 0L, "", 0L,
+                TaskPhase.RECEIVED, 0L, PriorityPreemptionProgress.NONE);
     }
 
     private static ScheduledRequest item(long id) {

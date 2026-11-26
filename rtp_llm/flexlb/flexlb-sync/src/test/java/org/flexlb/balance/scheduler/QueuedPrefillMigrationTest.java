@@ -37,6 +37,7 @@ import java.util.concurrent.locks.ReentrantLock;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -147,6 +148,8 @@ class QueuedPrefillMigrationTest {
     @Test
     void transferReplacesOnlyPrefillAndMovesTheWorkOnce() {
         var old = queued(101);
+        assertEquals(List.of(new PrefillQueueFlow.Entry(PrefillQueueFlow.Event.ENQUEUE, 1, 8)),
+                source.queueMetricsSnapshot().flow().entries());
         assertTrue(registry.tryMigrateQueued(old, 3, () -> select(target, old)));
         var next = registry.requestSlot(101).scheduledItem();
         assertEquals(List.of(), source.captureQueueSnapshot().items());
@@ -162,6 +165,10 @@ class QueuedPrefillMigrationTest {
         assertEquals(0L, source.tokenWorkloadSnapshot().pendingTokens());
         assertEquals(4L, target.tokenWorkloadSnapshot().pendingTokens());
         assertEquals(0L, target.tokenWorkloadSnapshot().plannedTokens());
+        assertEquals(List.of(new PrefillQueueFlow.Entry(PrefillQueueFlow.Event.MIGRATION_OUT, 1, 8)),
+                source.queueMetricsSnapshot().flow().entries());
+        assertEquals(List.of(new PrefillQueueFlow.Entry(PrefillQueueFlow.Event.MIGRATION_IN, 1, 4)),
+                target.queueMetricsSnapshot().flow().entries());
         var roles = next.execution().routeResponse().getServerStatus();
         assertEquals(old.execution().routeResponse().getServerStatus().getFirst(), roles.getFirst());
         assertEquals(target.getIp(), roles.getLast().getServerIp());
@@ -193,12 +200,19 @@ class QueuedPrefillMigrationTest {
         var foreign = new ScheduledRequest(item.ctx(), item.future(), item.execution().routeResponse(),
                 status(target, 103, 0L), null, target, null, null, item.enqueuedAtMs(), item.decodeBinding());
         try (var pin = target.tryPinGeneration()) { assertTrue(target.offerPinned(pin, foreign)); }
+        source.queueMetricsSnapshot();
+        target.queueMetricsSnapshot();
         assertFalse(registry.tryMigrateQueued(item, 1, () -> select(target, item)));
         assertEquals(List.of(item), source.captureQueueSnapshot().items());
         assertEquals(List.of(foreign), target.captureQueueSnapshot().items());
         assertSame(item, registry.requestSlot(103).scheduledItem());
         assertEquals(8L, source.tokenWorkloadSnapshot().pendingTokens());
         assertEquals(0L, target.tokenWorkloadSnapshot().plannedTokens());
+        assertEquals(List.of(
+                new PrefillQueueFlow.Entry(PrefillQueueFlow.Event.MIGRATION_RESTORED, 1, 8),
+                new PrefillQueueFlow.Entry(PrefillQueueFlow.Event.MIGRATION_OUT, 1, 8)),
+                source.queueMetricsSnapshot().flow().entries());
+        assertTrue(target.queueMetricsSnapshot().flow().entries().isEmpty());
         assertFalse(registry.tryMigrateQueued(item, 1, () -> fail("retry limit reached")));
         assertTrue(target.removeQueued(foreign, "test cleanup"));
         assertTrue(registry.tryMigrateQueued(item, 2, () -> select(target, item)));
@@ -398,7 +412,7 @@ class QueuedPrefillMigrationTest {
         var receiver = mock(PrefillEndpoint.class);
         var intervening = new ScheduledRequest(item.ctx(), item.future(), item.execution().routeResponse(),
                 item.prefill(), null, source, null, null, item.enqueuedAtMs(), item.decodeBinding());
-        when(receiver.offerPinned(any(), any())).thenAnswer(call -> {
+        when(receiver.offerPinned(any(), any(), eq(PrefillQueueFlow.Event.MIGRATION_IN))).thenAnswer(call -> {
             try (var pin = source.tryPinGeneration()) { assertTrue(source.offerPinned(pin, intervening)); }
             return false;
         });
@@ -413,7 +427,7 @@ class QueuedPrefillMigrationTest {
     void cancellationDuringDestinationPublicationSettlesOriginalFuture() throws Exception {
         var item = queued(107);
         var receiver = mock(PrefillEndpoint.class);
-        when(receiver.offerPinned(any(), any())).thenAnswer(call -> {
+        when(receiver.offerPinned(any(), any(), eq(PrefillQueueFlow.Event.MIGRATION_IN))).thenAnswer(call -> {
             registry.cancelRequest(107, 0L, CancelReason.CLIENT_CANCELLED);
             return false;
         });

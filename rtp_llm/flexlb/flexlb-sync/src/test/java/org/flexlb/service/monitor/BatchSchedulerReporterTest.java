@@ -2,6 +2,7 @@ package org.flexlb.service.monitor;
 
 import io.micrometer.prometheus.PrometheusConfig;
 import io.micrometer.prometheus.PrometheusMeterRegistry;
+import org.flexlb.balance.scheduler.PrefillQueueFlow;
 import org.flexlb.config.WhitelistMetricsFilterConfig;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.FlexMetricType;
@@ -15,6 +16,8 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.util.List;
+
 import static org.flexlb.constant.MetricConstant.BATCHER_QUEUE_SIZE;
 import static org.flexlb.constant.MetricConstant.DECODE_INFLIGHT_HARD_KV_RESERVED_TOKENS;
 import static org.flexlb.constant.MetricConstant.DISPATCH_ACK_TIME_MS;
@@ -22,7 +25,11 @@ import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_DISPATC
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_SELECT_DETAIL;
 import static org.flexlb.constant.MetricConstant.INFLIGHT_MAX_AGE_MS;
 import static org.flexlb.constant.MetricConstant.INFLIGHT_TTL_EXPIRED_QPS;
+import static org.flexlb.constant.MetricConstant.PREFILL_LOCAL_QUEUE_REQUESTS;
 import static org.flexlb.constant.MetricConstant.PREFILL_QUEUED_COMPUTE_TOKENS;
+import static org.flexlb.constant.MetricConstant.PREFILL_QUEUED_COMPUTE_TOKENS_BY_STAGE;
+import static org.flexlb.constant.MetricConstant.PREFILL_QUEUE_FLOW_COMPUTE_TOKENS;
+import static org.flexlb.constant.MetricConstant.PREFILL_QUEUE_FLOW_REQUESTS;
 import static org.flexlb.constant.MetricConstant.ROUTE_SUBMIT_TIME_MS;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_LENGTH;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_WAIT_TIME_MS;
@@ -131,6 +138,26 @@ class BatchSchedulerReporterTest {
         verify(monitor).register(INFLIGHT_TTL_EXPIRED_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
         verify(monitor).register(DECODE_INFLIGHT_HARD_KV_RESERVED_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         verify(monitor).register(PREFILL_QUEUED_COMPUTE_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        verify(monitor).register(PREFILL_QUEUED_COMPUTE_TOKENS_BY_STAGE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        verify(monitor).register(PREFILL_LOCAL_QUEUE_REQUESTS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        verify(monitor).register(PREFILL_QUEUE_FLOW_REQUESTS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        verify(monitor).register(PREFILL_QUEUE_FLOW_COMPUTE_TOKENS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+    }
+
+    @Test
+    void reportsQueueFlowAsIncrementsTaggedByEndpointAndEvent() {
+        var flow = new PrefillQueueFlow.Snapshot(List.of(
+                new PrefillQueueFlow.Entry(PrefillQueueFlow.Event.ENQUEUE, 2, 80),
+                new PrefillQueueFlow.Entry(PrefillQueueFlow.Event.EXPIRED, 1, 30)));
+
+        reporter.reportPrefillQueueFlow(RoleType.PREFILL, "p", flow);
+
+        var enqueued = FlexMetricTags.ofEngine("p", "role", "PREFILL", "event", "ENQUEUE");
+        var expired = FlexMetricTags.ofEngine("p", "role", "PREFILL", "event", "EXPIRED");
+        verify(monitor).report(PREFILL_QUEUE_FLOW_REQUESTS, enqueued, 2.0);
+        verify(monitor).report(PREFILL_QUEUE_FLOW_COMPUTE_TOKENS, enqueued, 80.0);
+        verify(monitor).report(PREFILL_QUEUE_FLOW_REQUESTS, expired, 1.0);
+        verify(monitor).report(PREFILL_QUEUE_FLOW_COMPUTE_TOKENS, expired, 30.0);
     }
 
     @Test
@@ -145,12 +172,20 @@ class BatchSchedulerReporterTest {
             exporter.init();
             exporter.reportPrefillQueuedComputeTokens(RoleType.PREFILL, "p", 12);
             exporter.reportPrefillQueuedComputeTokens(RoleType.PDFUSION, "f", Double.NaN);
+            exporter.reportPrefillQueuedComputeTokensByStage(RoleType.PREFILL, "p", 5, 0, Double.NaN);
 
             String scrape = registry.scrape();
             assertTrue(scrape.lines().anyMatch(line -> line.startsWith(series + "{")
                     && line.contains("engineIp=\"p\"") && line.contains("role=\"PREFILL\"") && line.endsWith(" 12.0")));
             assertTrue(scrape.lines().anyMatch(line -> line.startsWith(series + "{")
                     && line.contains("engineIp=\"f\"") && line.contains("role=\"PDFUSION\"") && line.endsWith(" NaN")));
+            assertTrue(scrape.lines().anyMatch(line -> line.startsWith(series + "_by_stage{")
+                    && line.contains("engineIp=\"p\"") && line.contains("stage=\"MASTER_QUEUED\"")
+                    && line.endsWith(" 5.0")));
+            assertTrue(scrape.lines().anyMatch(line -> line.startsWith(series + "_by_stage{")
+                    && line.contains("stage=\"DISPATCHED_UNOBSERVED\"") && line.endsWith(" 0.0")));
+            assertTrue(scrape.lines().anyMatch(line -> line.startsWith(series + "_by_stage{")
+                    && line.contains("stage=\"WORKER_WAITING\"") && line.endsWith(" NaN")));
         } finally {
             registry.close();
             MicrometerFlexMonitor.setAllowedMetrics(null);

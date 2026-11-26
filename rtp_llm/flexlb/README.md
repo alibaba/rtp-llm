@@ -227,6 +227,27 @@ To expose this gauge in Prometheus, include
 `flexlb_app_flexlb_prefill_queued_compute_tokens` in
 `flexlb.monitor.metric-whitelist`. Compare workers within the same Master.
 
+The companion `app.flexlb.prefill.queued.compute.tokens.by.stage` gauge
+reports `MASTER_QUEUED` (local unsent queue), `DISPATCHED_UNOBSERVED`
+(Master dispatch committed, Worker has not reported the request), and
+`WORKER_WAITING` (Worker reports the request waiting). A stage with missing
+information reports `NaN`. Use the active Master and keep each stage separate.
+
+On the same local queue snapshot, `app.flexlb.prefill.local.queue.requests`
+reports the unsent request count. `app.flexlb.prefill.queue.flow.requests`
+and `app.flexlb.prefill.queue.flow.compute.tokens` report request and estimated
+uncached-token deltas by `event`. For each endpoint, stock increases at
+`ENQUEUE`, `MIGRATION_IN`, and `MIGRATION_RESTORED`. Stock decreases at
+`DISPATCH_COMMITTED`, `EXPIRED`, `CANCELLED`, `MIGRATION_OUT`, or another
+recorded removal. A failed move that restores the source has both
+`MIGRATION_OUT` and `MIGRATION_RESTORED`. Compare consecutive stock samples
+with the changes since the previous sample. Use the stock sample values
+for reconciliation. A time-bucket maximum is useful for locating peaks.
+KMonitor reports the flow as rates. Prometheus exposes the flow as
+counters with a `_total` suffix. Add
+`flexlb_app_flexlb_prefill_local_queue_requests` and
+`flexlb_app_flexlb_prefill_queue_flow` to the Prometheus whitelist.
+
 Outbound `EngineGrpcClient` failures are counted once per logical RPC by
 `app.grpc.call.failure` (QPS, PRECISE), only after the final failure. A successful
 read-only retry reports success only; its first failure produces no failure metric

@@ -80,7 +80,7 @@ class QueuedDecodeWithdrawalTest {
         }
         assertNotNull(reservation);
         var prefill = mock(PrefillEndpoint.class);
-        when(prefill.removeQueued(any(), anyString())).thenReturn(true);
+        when(prefill.removeQueued(any(), anyString(), eq(PrefillQueueFlow.Event.WITHDRAWN))).thenReturn(true);
         var item = new ScheduledRequest(context, future, new Response(), new ServerStatus(), new ServerStatus(),
                 prefill, decode, reservation, System.currentTimeMillis());
         try (var admission = registry.claimAdmissionHandle(id, future)) {
@@ -163,7 +163,7 @@ class QueuedDecodeWithdrawalTest {
                     "withdrawal must fence batch preparation before releasing the old route");
             registry.cancelRequest(4, 0, reason);
             return true;
-        }).when(item.prefillEp()).removeQueued(eq(item), anyString());
+        }).when(item.prefillEp()).removeQueued(eq(item), anyString(), eq(PrefillQueueFlow.Event.WITHDRAWN));
         assertTrue(replace(item));
         assertFalse(item.future().get(2, TimeUnit.SECONDS).isSuccess());
         assertNull(decode.reservationHandle(4));
@@ -179,7 +179,7 @@ class QueuedDecodeWithdrawalTest {
         assertFalse(registry.replaceQueuedDecodeReservations(decode, List.of(stale), 100, 16, 16, 80, capacity));
         assertSame(item.execution(), registry.requestSlot(5).activeItem());
         assertTrue(RequestLifecycleTestSupport.prepareMember(registry, item));
-        verify(item.prefillEp(), never()).removeQueued(any(), anyString());
+        verify(item.prefillEp(), never()).removeQueued(any(), anyString(), any());
     }
 
     @Test
@@ -225,7 +225,7 @@ class QueuedDecodeWithdrawalTest {
             removing.countDown();
             assertTrue(resume.await(5, TimeUnit.SECONDS));
             return true;
-        }).when(item.prefillEp()).removeQueued(eq(item), anyString());
+        }).when(item.prefillEp()).removeQueued(eq(item), anyString(), eq(PrefillQueueFlow.Event.WITHDRAWN));
         try (var executor = Executors.newSingleThreadExecutor()) {
             var replacement = executor.submit(() -> replace(item));
             try {

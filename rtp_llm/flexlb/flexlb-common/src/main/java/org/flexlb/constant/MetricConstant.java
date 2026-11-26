@@ -188,6 +188,14 @@ public class MetricConstant {
 
     /** Uncached compute tokens waiting for Prefill per role and engine IP. */
     public static final String PREFILL_QUEUED_COMPUTE_TOKENS = "app.flexlb.prefill.queued.compute.tokens";
+    public static final String PREFILL_QUEUED_COMPUTE_TOKENS_BY_STAGE =
+            "app.flexlb.prefill.queued.compute.tokens.by.stage";
+
+    /** Local unsent request stock aligned with the queue-flow sampling interval. */
+    public static final String PREFILL_LOCAL_QUEUE_REQUESTS = "app.flexlb.prefill.local.queue.requests";
+    /** Committed changes to the Master queue, grouped by the queue transition. */
+    public static final String PREFILL_QUEUE_FLOW_REQUESTS = "app.flexlb.prefill.queue.flow.requests";
+    public static final String PREFILL_QUEUE_FLOW_COMPUTE_TOKENS = "app.flexlb.prefill.queue.flow.compute.tokens";
 
     /**
      * Engine finished task list size

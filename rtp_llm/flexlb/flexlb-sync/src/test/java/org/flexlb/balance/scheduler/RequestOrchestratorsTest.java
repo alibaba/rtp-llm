@@ -3,6 +3,7 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.endpoint.PrefillState.QueuedComputeSnapshot;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
@@ -146,8 +147,11 @@ class RequestOrchestratorsTest {
         DecodeEndpoint decode = mock(DecodeEndpoint.class);
         when(failingPrefill.getIp()).thenReturn("host1");
         when(healthyPrefill.getIp()).thenReturn("host2");
-        when(failingPrefill.queuedComputeTokens()).thenThrow(new IllegalStateException("unavailable"));
-        when(healthyPrefill.queuedComputeTokens()).thenReturn(OptionalLong.of(19));
+        var enqueue = new PrefillQueueFlow.Snapshot(List.of(new PrefillQueueFlow.Entry(
+                PrefillQueueFlow.Event.ENQUEUE, 2, 10)));
+        when(failingPrefill.queueMetricsSnapshot()).thenThrow(new IllegalStateException("unavailable"));
+        when(healthyPrefill.queueMetricsSnapshot()).thenReturn(new WorkerBatcher.QueueMetrics(
+                queuedCompute(10, 2, 7), 2, enqueue));
         when(lifecycle.liveRequestCount()).thenReturn(7);
         when(registry.prefillRoutingSnapshot(RoleType.PREFILL)).thenReturn(List.of(
                 new EndpointRegistry.PrefillRoutingEntry("p1", failingPrefill),
@@ -165,6 +169,11 @@ class RequestOrchestratorsTest {
         verify(decode).reportBatchMetrics(reporter);
         verify(reporter).reportPrefillQueuedComputeTokens(RoleType.PREFILL, "host1", Double.NaN);
         verify(reporter).reportPrefillQueuedComputeTokens(RoleType.PREFILL, "host2", 19);
+        verify(reporter).reportPrefillQueuedComputeTokensByStage(RoleType.PREFILL, "host1",
+                Double.NaN, Double.NaN, Double.NaN);
+        verify(reporter).reportPrefillQueuedComputeTokensByStage(RoleType.PREFILL, "host2", 10, 2, 7);
+        verify(reporter).reportPrefillLocalQueueRequests(RoleType.PREFILL, "host2", 2);
+        verify(reporter).reportPrefillQueueFlow(RoleType.PREFILL, "host2", enqueue);
         verify(admissionReporter).reportPrefillQueueDepth("p1", 0);
         verify(admissionReporter).reportPrefillQueueDepth("p2", 0);
         verify(decode).reportAdmissionMetrics(admissionReporter);
@@ -182,9 +191,15 @@ class RequestOrchestratorsTest {
         when(first.getIp()).thenReturn("shared");
         when(second.getIp()).thenReturn("shared");
         when(fusion.getIp()).thenReturn("shared");
-        when(first.queuedComputeTokens()).thenReturn(OptionalLong.of(20));
-        when(second.queuedComputeTokens()).thenReturn(OptionalLong.of(30), OptionalLong.empty());
-        when(fusion.queuedComputeTokens()).thenReturn(OptionalLong.of(0));
+        var emptyFlow = new PrefillQueueFlow.Snapshot(List.of());
+        when(first.queueMetricsSnapshot()).thenReturn(new WorkerBatcher.QueueMetrics(
+                queuedCompute(10, 2, 8), 1, emptyFlow));
+        when(second.queueMetricsSnapshot()).thenReturn(new WorkerBatcher.QueueMetrics(
+                queuedCompute(20, 1, 9), 2, emptyFlow),
+                new WorkerBatcher.QueueMetrics(new QueuedComputeSnapshot(
+                        OptionalLong.of(20), OptionalLong.of(1), OptionalLong.empty(), OptionalLong.empty()), 2, emptyFlow));
+        when(fusion.queueMetricsSnapshot()).thenReturn(new WorkerBatcher.QueueMetrics(
+                queuedCompute(0, 0, 0), 0, emptyFlow));
         var pair = List.of(new EndpointRegistry.PrefillRoutingEntry("shared:1", first),
                 new EndpointRegistry.PrefillRoutingEntry("shared:2", second));
         when(registry.prefillRoutingSnapshot(RoleType.PREFILL)).thenReturn(pair)
@@ -201,8 +216,20 @@ class RequestOrchestratorsTest {
         // One unknown constituent in sample 2, then the last endpoint retired in sample 4.
         verify(reporter, times(2)).reportPrefillQueuedComputeTokens(RoleType.PREFILL, "shared", Double.NaN);
         verify(reporter, times(5)).reportPrefillQueuedComputeTokens(RoleType.PDFUSION, "shared", 0);
+        verify(reporter).reportPrefillQueuedComputeTokensByStage(RoleType.PREFILL, "shared", 30, 3, 17);
+        verify(reporter).reportPrefillQueuedComputeTokensByStage(RoleType.PREFILL, "shared", 30, 3, Double.NaN);
+        verify(reporter).reportPrefillQueuedComputeTokensByStage(RoleType.PREFILL, "shared",
+                Double.NaN, Double.NaN, Double.NaN);
+        verify(reporter, times(2)).reportPrefillLocalQueueRequests(RoleType.PREFILL, "shared", 3);
+        verify(reporter).reportPrefillLocalQueueRequests(RoleType.PREFILL, "shared", 1);
+        verify(reporter).reportPrefillLocalQueueRequests(RoleType.PREFILL, "shared", Double.NaN);
         verify(fusion, never()).reportBatchMetrics(any());
         verify(admission, never()).reportPrefillQueueDepth("shared:3", 0);
+    }
+
+    private static QueuedComputeSnapshot queuedCompute(long local, long handoff, long waiting) {
+        return new QueuedComputeSnapshot(OptionalLong.of(local), OptionalLong.of(handoff),
+                OptionalLong.of(waiting), OptionalLong.of(local + handoff + waiting));
     }
 
     private static SchedulerRuntime runtime(

@@ -110,37 +110,63 @@ final class SchedulerRuntime {
             directory = List.of(); // No usable sample for previously published IPs in this role.
         }
 
-        Map<String, Double> tokensByIp = new HashMap<>();
+        Map<String, QueuedComputeMetrics> tokensByIp = new HashMap<>();
         for (var entry : directory) {
             PrefillEndpoint endpoint = entry.endpoint();
             if (role == RoleType.PREFILL) {
                 reportPrefillSchedulingMetrics(entry.address(), endpoint);
             }
             String ip = endpoint.getIp();
-            double tokens = Double.NaN;
+            QueuedComputeMetrics tokens = QueuedComputeMetrics.UNKNOWN;
             try {
-                OptionalLong queued = endpoint.queuedComputeTokens();
-                if (queued.isPresent()) {
-                    tokens = queued.getAsLong();
-                }
+                var sample = endpoint.queueMetricsSnapshot();
+                tokens = QueuedComputeMetrics.from(sample);
+                reporter.reportPrefillQueueFlow(role, ip, sample.flow());
             } catch (RuntimeException failure) {
-                warnIsolated("Failed to sample queued compute on " + entry.address(), failure);
+                warnIsolated("Failed to sample or report Prefill queue metrics on " + entry.address(), failure);
             }
             // Ports on the same host share the engineIp label. A missing constituent makes the sum unknown.
-            tokensByIp.merge(ip, tokens, Double::sum);
+            tokensByIp.merge(ip, tokens, QueuedComputeMetrics::plus);
         }
         Set<String> published = computeGaugeIps.computeIfAbsent(role, ignored -> new HashSet<>());
         published.addAll(tokensByIp.keySet());
         published.removeIf(ip -> {
             boolean retired = !tokensByIp.containsKey(ip);
             try {
-                reporter.reportPrefillQueuedComputeTokens(role, ip, tokensByIp.getOrDefault(ip, Double.NaN));
+                var tokens = tokensByIp.getOrDefault(ip, QueuedComputeMetrics.UNKNOWN);
+                reporter.reportPrefillQueuedComputeTokens(role, ip, tokens.total());
+                reporter.reportPrefillQueuedComputeTokensByStage(role, ip,
+                        tokens.masterQueued(), tokens.dispatchedUnobserved(), tokens.workerWaiting());
+                reporter.reportPrefillLocalQueueRequests(role, ip, tokens.waitingRequests());
                 return retired;
             } catch (RuntimeException failure) {
                 warnIsolated("Failed to report queued compute on " + ip, failure);
                 return false;
             }
         });
+    }
+
+    private record QueuedComputeMetrics(double total, double masterQueued,
+            double dispatchedUnobserved, double workerWaiting, double waitingRequests) {
+        private static final QueuedComputeMetrics UNKNOWN =
+                new QueuedComputeMetrics(Double.NaN, Double.NaN, Double.NaN, Double.NaN, Double.NaN);
+
+        private static QueuedComputeMetrics from(WorkerBatcher.QueueMetrics sample) {
+            var snapshot = sample.compute();
+            return new QueuedComputeMetrics(asDouble(snapshot.totalTokens()), asDouble(snapshot.masterQueuedTokens()),
+                    asDouble(snapshot.inTransitTokens()), asDouble(snapshot.workerWaitingTokens()),
+                    sample.waitingRequests());
+        }
+
+        private static double asDouble(OptionalLong tokens) {
+            return tokens.isPresent() ? tokens.getAsLong() : Double.NaN;
+        }
+
+        private QueuedComputeMetrics plus(QueuedComputeMetrics other) {
+            return new QueuedComputeMetrics(total + other.total, masterQueued + other.masterQueued,
+                    dispatchedUnobserved + other.dispatchedUnobserved, workerWaiting + other.workerWaiting,
+                    waitingRequests + other.waitingRequests);
+        }
     }
 
     private void reportPrefillSchedulingMetrics(String address, PrefillEndpoint endpoint) {

@@ -487,7 +487,7 @@ public final class RequestSlot {
 
     void detachWithdrawnRoute(AdmissionHandle claim, ScheduledRequest exact, String reason) {
         // Never acquire the Prefill queue lock under the request monitor.
-        if (!exact.prefillEp().removeQueued(exact, reason)) {
+        if (!exact.prefillEp().removeQueued(exact, reason, PrefillQueueFlow.Event.WITHDRAWN)) {
             throw new IllegalStateException("withdrawn route is no longer queued: " + requestId);
         }
         synchronized (this) {

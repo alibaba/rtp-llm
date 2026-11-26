@@ -299,7 +299,7 @@ class RequestLifecycleDeliveryLockContractTest {
 
         assertFalse(registered.future().get(5, TimeUnit.SECONDS).isSuccess());
         verify(prefill).removeQueued(
-                eq(registered.item()), anyString());
+                eq(registered.item()), anyString(), eq(PrefillQueueFlow.Event.CANCELLED));
     }
 
     @Test

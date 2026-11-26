@@ -11,6 +11,7 @@ import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.balance.scheduler.EndpointEventProjector;
 import org.flexlb.balance.scheduler.PlacementAvailability;
+import org.flexlb.balance.scheduler.PrefillQueueFlow;
 import org.flexlb.balance.scheduler.RequestExecution;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.balance.scheduler.WorkerBatcher;
@@ -180,6 +181,11 @@ public class PrefillEndpoint extends WorkerEndpoint {
         return runtime.offer(exactItem);
     }
 
+    public boolean offerPinned(GenerationPin exactPin, ScheduledRequest exactItem, PrefillQueueFlow.Event event) {
+        requirePinnedGeneration(exactPin);
+        return runtime.offer(exactItem, event);
+    }
+
     /** Publish a role/group-scoped edge after real queue or status progress. */
     public void signalPlacementCapacityChanged() {
         WorkerStatus.TopologySnapshot topology =
@@ -198,6 +204,14 @@ public class PrefillEndpoint extends WorkerEndpoint {
             ScheduledRequest exactItem,
             String reason) {
         return runtime.removeQueued(exactItem, reason);
+    }
+
+    public boolean removeQueued(ScheduledRequest exactItem, String reason, PrefillQueueFlow.Event event) {
+        return runtime.removeQueued(exactItem, reason, event);
+    }
+
+    public WorkerBatcher.QueueMetrics queueMetricsSnapshot() {
+        return runtime.queueMetricsSnapshot();
     }
 
     /** Read the last scheduling decision without traversing or locking the queue. */
@@ -221,9 +235,13 @@ public class PrefillEndpoint extends WorkerEndpoint {
         // publication. Ordinary stop cleanup failures are returned only after
         // the exact worker has exited, and are aggregated below.
         Throwable retirementFailure = runtime.stopAndAwait();
+        int retiredWaitingRequests = 0;
+        long retiredWaitingComputeTokens = 0L;
         try {
             PrefillState.Retirement retirement =
                     prefillState.retireGenerationOwnership();
+            retiredWaitingRequests = retirement.retiredWaitingRequests();
+            retiredWaitingComputeTokens = retirement.retiredWaitingComputeTokens();
             if (!retirement.ownedItems().isEmpty()) {
                 try {
                     endpointEvents.onPrefillGenerationRetired(
@@ -250,6 +268,18 @@ public class PrefillEndpoint extends WorkerEndpoint {
         } catch (Throwable committedRetirementFailure) {
             retirementFailure = appendRetirementFailure(
                     retirementFailure, committedRetirementFailure);
+        }
+        try {
+            var flow = runtime.drainRetiredQueueFlow(retiredWaitingRequests, retiredWaitingComputeTokens);
+            if (!flow.entries().isEmpty()) {
+                reporter.reportPrefillQueueFlow(getStatus().getRole(), getIp(), flow);
+            }
+        } catch (Throwable reportingFailure) {
+            try {
+                logger.warn("Failed to report retired Prefill queue flow: engine={}", ipPort(), reportingFailure);
+            } catch (Throwable ignoredLoggingFailure) {
+                // Telemetry cannot prevent endpoint retirement.
+            }
         }
         rethrowEndpointRetirementFailure(retirementFailure);
     }
