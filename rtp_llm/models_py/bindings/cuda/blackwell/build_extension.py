@@ -42,35 +42,32 @@ def configure_compiler():
 
 
 def build_mhc(
-    sources,
+    deep_gemm,
+    deep_gemm_license,
+    bundle,
     root,
     binding,
-    kernel_dir,
     format_header,
-    elfutils_headers,
-    licenses,
     cuda,
 ):
     import torch
     from torch.utils.cpp_extension import include_paths, library_paths
 
-    source = sources["deep_gemm"]
     root.mkdir(exist_ok=True)
-    shutil.copytree(source / "csrc", root / "csrc")
+    shutil.copytree(deep_gemm / "csrc", root / "csrc")
     headers = [
-        source / "deep_gemm/include/deep_gemm",
-        sources["cutlass_mhc"] / "include/cute",
-        sources["cutlass_mhc"] / "include/cutlass",
-        sources["fmt"] / "include/fmt",
+        deep_gemm / "include/deep_gemm",
+        deep_gemm / "include/cute",
+        deep_gemm / "include/cutlass",
+        bundle / "fmt/include/fmt",
+        bundle / "deep_jit/include/deep_jit",
     ]
-    include_dirs = [kernel_dir, root, root / "include"]
-    headers.append(sources["deep_jit"] / "include/deep_jit")
+    include_dirs = [bundle, root, root / "include"]
     (root / "compat").mkdir()
     shutil.copyfile(format_header, root / "compat/format")
     include_dirs.insert(0, root / "compat")
-    (root / "licenses").mkdir()
-    for name, license_file in licenses.items():
-        shutil.copyfile(license_file, root / "licenses" / (name + ".txt"))
+    shutil.copytree(bundle / "licenses", root / "licenses")
+    shutil.copyfile(deep_gemm_license, root / "licenses/deep_gemm.txt")
     for path in headers:
         shutil.copytree(path, root / "include" / path.name)
     # Upstream binding headers use quoted csrc paths. Both the compiler and
@@ -111,20 +108,26 @@ def build_mhc(
     with tempfile.TemporaryDirectory() as temp:
         elfutils = Path(temp) / "elfutils"
         elfutils.mkdir()
-        for header in elfutils_headers:
+        for name in (
+            "libdwfl/libdwfl.h",
+            "libdw/libdw.h",
+            "libelf/gelf.h",
+            "libelf/libelf.h",
+        ):
+            header = bundle / "elfutils" / name
             include = elfutils if header.name.startswith("libdw") else Path(temp)
             shutil.copyfile(header, include / header.name)
         command.insert(1, "-I" + temp)
         subprocess.run(command, check=True)
 
 
-def build_sparse(sources, output, binding, kernel_dir, cuda):
+def build_sparse(bundle, output, binding, cuda):
     from setuptools import Distribution
     from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
     configure_compiler()
-    repo = sources["flash_mla"]
-    cutlass = sources["cutlass_mla"]
+    repo = bundle / "flash_mla"
+    cutlass = bundle / "cutlass_mla"
     common = [
         "-O3",
         "-std=c++20",
@@ -155,12 +158,12 @@ def build_sparse(sources, output, binding, kernel_dir, cuda):
         "rtp_fp8_sparse_decode",
         sources=[
             str(binding),
-            str(kernel_dir / "sparse_fp8_decode.cpp"),
-            str(kernel_dir / "sparse_fp8_kernel.cu"),
+            str(bundle / "sparse_fp8_decode.cpp"),
+            str(bundle / "sparse_fp8_kernel.cu"),
             *[str(repo / name) for name in SPARSE_SOURCES],
         ],
         include_dirs=[
-            str(kernel_dir),
+            str(bundle),
             str(repo / "csrc"),
             str(cutlass / "include"),
             str(cutlass / "tools/util/include"),
@@ -215,28 +218,18 @@ def write_manifest(output, assets, sources):
     output.write_text(json.dumps(metadata, sort_keys=True, indent=2) + "\n")
 
 
-def named_paths(values):
-    return {
-        name: Path(value).absolute()
-        for name, value in (entry.split("=", 1) for entry in values)
-    }
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="part", required=True)
     for part in ("mhc", "sparse"):
         build = commands.add_parser(part)
-        build.add_argument("--source", action="append", required=True)
+        build.add_argument("--bundle", type=Path, required=True)
         build.add_argument("--binding", type=Path, required=True)
-        build.add_argument("--kernel-dir", type=Path, required=True)
         build.add_argument("--output", type=Path, required=True)
         if part == "mhc":
-            build.add_argument("--license", action="append", required=True)
+            build.add_argument("--deep-gemm", type=Path, required=True)
+            build.add_argument("--deep-gemm-license", type=Path, required=True)
             build.add_argument("--format-header", type=Path, required=True)
-            build.add_argument(
-                "--elfutils-header", type=Path, action="append", required=True
-            )
     manifest = commands.add_parser("manifest")
     manifest.add_argument("--output", type=Path, required=True)
     manifest.add_argument("--asset", type=Path, action="append", required=True)
@@ -255,24 +248,21 @@ def main():
         raise RuntimeError("The Blackwell extension wheel requires CUDA 13 x86_64")
     if not CUDA_HOME:
         raise RuntimeError("CUDA toolkit is required")
-    sources = named_paths(args.source)
     if args.part == "sparse":
         build_sparse(
-            sources,
+            args.bundle.absolute(),
             args.output,
             args.binding.absolute(),
-            args.kernel_dir.absolute(),
             Path(CUDA_HOME),
         )
     else:
         build_mhc(
-            sources,
+            args.deep_gemm.absolute(),
+            args.deep_gemm_license,
+            args.bundle.absolute(),
             args.output.absolute(),
             args.binding.absolute(),
-            args.kernel_dir.absolute(),
-            getattr(args, "format_header", None),
-            getattr(args, "elfutils_header", []),
-            named_paths(getattr(args, "license", [])),
+            args.format_header,
             Path(CUDA_HOME),
         )
 

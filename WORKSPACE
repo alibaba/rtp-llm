@@ -68,10 +68,6 @@ load("@rtp_deps//:git.bzl", "git_deps")
 
 git_deps()
 
-load("//3rdparty/blackwell:repositories.bzl", "blackwell_repositories")
-
-blackwell_repositories()
-
 load("//3rdparty/xgrammar:repositories.bzl", "xgrammar_deps")
 
 xgrammar_deps()
@@ -89,15 +85,6 @@ load("@rtp_pip_deps//:pip.bzl", "pip_deps")
 pip_deps()
 
 load("@rules_python//python:pip.bzl", "pip_parse")
-
-pip_parse(
-    name = "pip_glm53_deepgemm",
-    requirements_lock = "@rtp_blackwell_wheel_lock//:requirements.txt",
-    python_interpreter = "/opt/conda310/bin/python3",
-)
-
-load("@pip_glm53_deepgemm//:requirements.bzl", pip_glm53_install_deps = "install_deps")
-pip_glm53_install_deps()
 
 # Test-only, platform-independent pytest closure; do not alter runtime locks.
 pip_parse(
@@ -128,6 +115,9 @@ pip_gpu_cuda12_9_torch_install_deps()
 
 load("@pip_gpu_cuda13_torch//:requirements.bzl", pip_gpu_cuda13_torch_install_deps = "install_deps")
 pip_gpu_cuda13_torch_install_deps()
+
+load("@pip_glm53_deepgemm//:requirements.bzl", pip_glm53_install_deps = "install_deps")
+pip_glm53_install_deps()
 
 load("@pip_cuda12_arm_torch//:requirements.bzl", pip_cuda12_arm_torch_install_deps = "install_deps")
 pip_cuda12_arm_torch_install_deps()

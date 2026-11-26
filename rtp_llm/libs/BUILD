@@ -1,7 +1,7 @@
 load("@arch_config//:arch_select.bzl", "copy_all_so")
 load("@internal_impls//:impls.bzl", "CUDA_EXTENSION")
 load("@rules_python//python:defs.bzl", "py_test")
-load("//3rdparty/blackwell:extensions.bzl", "blackwell_extensions")
+load("//rtp_llm/models_py/bindings/cuda/blackwell:extensions.bzl", "blackwell_extensions")
 load("//bazel:defs.bzl", "copy_files", "copy_so")
 
 package(default_visibility = ["//rtp_llm:__subpackages__"])

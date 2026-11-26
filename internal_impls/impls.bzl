@@ -8,7 +8,6 @@ SUBSCRIBE_IMPL = "@rtp_llm//rtp_llm/cpp/disaggregate/load_balancer/subscribe:sub
 
 # Open builds use the shared HC, selected-KV MLA and indexer paths.
 CUDA_EXTENSION = None
-MHC_SOURCE = None
 
 DEEP_GEMM_WHEEL = struct(
     url = "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu130/deep_gemm-2.8.2%2B522942a.cu132-cp310-cp310-linux_x86_64.whl",

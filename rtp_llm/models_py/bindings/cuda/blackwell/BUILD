@@ -1,7 +1,6 @@
 load("@rules_python//python:defs.bzl", "py_binary")
 
 package(default_visibility = [
-    "//3rdparty/blackwell:__pkg__",
     "//rtp_llm/libs:__pkg__",
 ])
 
