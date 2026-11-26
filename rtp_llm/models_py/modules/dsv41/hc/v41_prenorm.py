@@ -68,7 +68,7 @@ def is_supported(
     limit = (
         max_supported_tokens(torch.cuda.get_device_capability(residual.device))
         if max_tokens is None
-        else int(max_tokens)
+        else min(int(max_tokens), configured_max_tokens())
     )
     return (
         limit > 0
@@ -101,7 +101,8 @@ def prepare_tf32_weight(fn: torch.Tensor) -> torch.Tensor:
     if cached is not None and cached[0] == key:
         return cached[1]
     weight = ((fn.view(torch.int32) + 0x1000) & -8192).view(torch.float32)
-    fn._dsv41_prenorm_tf32_cache = (key, weight)
+    if not (fn.is_cuda and torch.cuda.is_current_stream_capturing()):
+        fn._dsv41_prenorm_tf32_cache = (key, weight)
     return weight
 
 

@@ -356,5 +356,6 @@ def prepare_tf32_rne_weight(fn: torch.Tensor) -> torch.Tensor:
     if cached is not None and cached[0] == key:
         return cached[1]
     weight = round_to_tf32_rne(fn)
-    fn._dsv41_tf32_rne_cache = (key, weight)
+    if not (fn.is_cuda and torch.cuda.is_current_stream_capturing()):
+        fn._dsv41_tf32_rne_cache = (key, weight)
     return weight

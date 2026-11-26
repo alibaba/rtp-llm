@@ -87,7 +87,7 @@ def _big_pre_backend(capability: tuple[int, int], deepgemm_ok: bool):
         if deepgemm_ok:
             return "deepgemm"
         requested = os.environ.get("DSV4_MHC_PRE_GEMM_BACKEND", "").strip().lower()
-        if requested in _EXPLICIT_TILELANG_BACKENDS:
+        if requested in ("tilelang_single", "tilelang", "single"):
             return None
         return "tilelang_splitk"
     return "deepgemm" if deepgemm_ok else None

@@ -348,7 +348,7 @@ def _warmup_capability(device) -> tuple[int, int]:
 def _fused_pre_row_budget(capability: tuple[int, int]) -> int:
     """Mirror the runtime fused-pre DeepGEMM row budget."""
     if capability[0] == 9:
-        return _SM90_BIG_PRE_MAX_ROWS
+        return min(_SM90_BIG_PRE_MAX_ROWS, v41_prenorm.configured_max_tokens())
     return v41_prenorm.max_supported_tokens(capability)
 
 
@@ -466,8 +466,10 @@ def warmup_v41_hc_jit(v4, *, max_m, device):
     fused_enabled = can_fuse_big_pre()
     fused_deepgemm = fused_enabled and v41_prenorm.configured_max_tokens() > 64
     # SM90 falls back to the TileLang split-K planner only when DeepGEMM is
-    # not installed (or an explicit TileLang backend is selected).
-    dg_pre_available = v41_prenorm._has_prenorm_gemm()
+    # not installed (or an explicit TileLang split-K backend is selected).
+    dg_pre_available = (
+        v41_prenorm._has_prenorm_gemm() and v41_prenorm.configured_max_tokens() > 64
+    )
     fused_splitk = (
         fused_enabled
         and arch_major == 9
@@ -609,26 +611,32 @@ def warmup_v41_hc_jit(v4, *, max_m, device):
         if sm90_mega_enabled:
             for config, source in pairs.items():
                 pair = _clone_pair(source, device)
-                # T<16 and T>=16 select different projection tile widths.
-                for tokens in (1, 16):
-                    if tokens > min(int(max_m), 32):
+                # T<16, 16<=T<=24, and 25<=T<=64 select distinct SM90 two-kernel
+                # regimes (4-col TileLang, 1-warp N=24 TileLang, and coalesced
+                # post+collapse + DeepGEMM split-80 / 12-col TileLang).
+                for tokens in (1, 16, 25):
+                    if tokens > min(int(max_m), 64):
                         continue
                     detail = f"config={config} m={tokens} vllm-two-kernel"
+                    launch_step = partial(_launch_sm90_mega, pair, tokens, device)
+                    if tokens >= 25 and small_enabled:
+                        launch_step = partial(
+                            common._run_deepgemm_warmup_launch_with_retry,
+                            "V41 SM90 mega_mhc",
+                            detail,
+                            launch_step,
+                            device=device,
+                        )
                     common._run_tilelang_warmup_launch_with_retry(
                         "V41 SM90 mega_mhc",
                         detail,
-                        partial(_launch_sm90_mega, pair, tokens, device),
+                        launch_step,
                         device=device,
                     )
                 del pair
                 common._sync_cuda(device)
                 common._release_cuda_cache(device)
         if sm90_largebs_enabled:
-            retry = (
-                common._run_deepgemm_warmup_launch_with_retry
-                if largebs_backend == "deepgemm"
-                else common._run_tilelang_warmup_launch_with_retry
-            )
             for config, source in pairs.items():
                 tokens_ms = largebs_ms.get(config, ())
                 if not tokens_ms:
@@ -642,16 +650,25 @@ def warmup_v41_hc_jit(v4, *, max_m, device):
                             f"config={config} m={tokens} three-kernel "
                             f"combine={combine} backend={largebs_backend}"
                         )
-                        retry(
+                        launch_step = partial(
+                            _launch_sm90_largebs,
+                            pair,
+                            tokens,
+                            device,
+                            combine=combine,
+                        )
+                        if largebs_backend == "deepgemm":
+                            launch_step = partial(
+                                common._run_deepgemm_warmup_launch_with_retry,
+                                "V41 SM90 largebs mHC",
+                                detail,
+                                launch_step,
+                                device=device,
+                            )
+                        common._run_tilelang_warmup_launch_with_retry(
                             "V41 SM90 largebs mHC",
                             detail,
-                            partial(
-                                _launch_sm90_largebs,
-                                pair,
-                                tokens,
-                                device,
-                                combine=combine,
-                            ),
+                            launch_step,
                             device=device,
                         )
                 del pair

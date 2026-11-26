@@ -1210,10 +1210,10 @@ def create_engram_prefetch(device, layer_embeddings):
         embedding._uva is None for _, embedding in layer_embeddings
     ):
         return None, 0
-    configured = os.environ.get("DSV41_ENGRAM_PREFETCH_MAX_ROWS")
+    configured = os.environ.get("DSV41_ENGRAM_PREFETCH_MAX_ROWS", "").strip()
     max_rows = (
         int(configured)
-        if configured is not None
+        if configured
         else _default_engram_prefetch_max_rows()
     )
     if max_rows <= 0:

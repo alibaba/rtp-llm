@@ -71,12 +71,20 @@ _EXPLICIT_TILELANG_BACKENDS = frozenset(
     ("tilelang_single", "tilelang", "single", "tilelang_splitk", "splitk")
 )
 
-_WARMED_STREAMS: set[tuple[int, int]] = set()
+_WARMED_STREAMS: set[tuple[int, int, str, int, bool]] = set()
 
 
-def _stream_key(device: torch.device) -> tuple[int, int]:
+def _stream_key(
+    device: torch.device, tokens: int, backend: str, combine: bool
+) -> tuple[int, int, str, int, bool]:
     stream = torch.cuda.current_stream(device)
-    return stream.device.index, stream.cuda_stream
+    return (
+        stream.device.index,
+        stream.cuda_stream,
+        backend,
+        projection_splits(tokens, backend, device),
+        combine,
+    )
 
 
 def _has_deepgemm() -> bool:
@@ -333,7 +341,7 @@ def run(
         sinkhorn_repeat=sinkhorn_repeat,
         norm_eps=rmsnorm_eps,
         n_splits=n_splits,
-        mhc_mult=HC,
+        hc_mult=HC,
         use_pre_mix_in=True,
         save_pre_mix=True,
         rms_numel=HC_HIDDEN,
@@ -431,9 +439,11 @@ def try_sm90_largebs_post_pre(
         attn_out.requires_grad or any(value.requires_grad for value, _, _ in contracts)
     ):
         return None
+    backend = _select_gemm_backend()
     with torch.cuda.device(device):
         capturing = torch.cuda.is_current_stream_capturing()
-        if capturing and _stream_key(device) not in _WARMED_STREAMS:
+        skey = _stream_key(device, tokens, backend, combine is not None)
+        if capturing and skey not in _WARMED_STREAMS:
             return None
         new_residual, normalized, new_pre, new_post, new_comb = run(
             attn_out.view(tokens, DIM),
@@ -458,9 +468,10 @@ def try_sm90_largebs_post_pre(
                     combine[1].view(tokens, DIM),
                 )
             ),
+            backend=backend,
         )
         if not capturing:
-            _WARMED_STREAMS.add(_stream_key(device))
+            _WARMED_STREAMS.add(skey)
     next_hc.pre_mix_out = new_pre.view(*leading, HC)
     return (
         new_residual.view(*leading, HC, DIM),

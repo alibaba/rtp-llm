@@ -193,6 +193,20 @@ class LargebsHostTest(unittest.TestCase):
             self.assertEqual(lb.projection_splits(264, "tilelang_splitk"), 10)
             plan.assert_called_once_with(264, HC * DIM, 132)
 
+    def test_stream_key_distinguishes_backend_splits_and_combine(self):
+        fake_stream = mock.Mock(device=torch.device("cuda", 0), cuda_stream=0x1234)
+        with mock.patch.object(
+            torch.cuda, "current_stream", return_value=fake_stream
+        ), mock.patch.object(
+            lb, "projection_splits", side_effect=lambda t, b, d=None: 52 if t < 128 else 26
+        ):
+            dev = torch.device("cuda", 0)
+            k_96_plain = lb._stream_key(dev, 96, "deepgemm", False)
+            k_96_comb = lb._stream_key(dev, 96, "deepgemm", True)
+            k_264_plain = lb._stream_key(dev, 264, "deepgemm", False)
+            k_96_tl = lb._stream_key(dev, 96, "tilelang_splitk", False)
+            self.assertEqual(len({k_96_plain, k_96_comb, k_264_plain, k_96_tl}), 4)
+
     def test_combine_dispatch_uses_largebs_above_64(self):
         from rtp_llm.models_py.modules.dsv41.hc import v41_mega_mhc as mega
 

@@ -572,6 +572,80 @@ class V41HCJitWarmupCPU(unittest.TestCase):
                 [call.args[1] for call in sm90_mega.call_args_list], [1]
             )
 
+    def test_sm90_warms_all_three_two_kernel_regimes_and_largebs(self):
+        fake_largebs = SimpleNamespace(
+            MAX_TOKENS=512,
+            _select_gemm_backend=lambda: "deepgemm",
+        )
+        orig_clone_unit = warmup._clone_unit
+        orig_clone_pair = warmup._clone_pair
+        with contextlib.ExitStack() as stack:
+            self._mock_device(stack)
+            stack.enter_context(
+                patch.object(torch.cuda, "get_device_capability", return_value=(9, 0))
+            )
+            stack.enter_context(
+                patch.object(
+                    warmup, "_clone_unit", side_effect=lambda u, _d: orig_clone_unit(u, "cpu")
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    warmup, "_clone_pair", side_effect=lambda p, _d: orig_clone_pair(p, "cpu")
+                )
+            )
+            stack.enter_context(patch.object(warmup, "_launch_small_prenorm"))
+            stack.enter_context(patch.object(warmup, "_launch_tilelang_chain"))
+            stack.enter_context(patch.object(warmup, "_launch_tilelang_norm"))
+            fused = stack.enter_context(patch.object(warmup, "_launch_fused_pre"))
+            stack.enter_context(
+                patch.object(
+                    warmup.v41_mega_mhc, "_get_sm90_mega_mhc", return_value=Mock()
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    warmup.v41_mega_mhc,
+                    "_get_sm90_largebs_mega_mhc",
+                    return_value=fake_largebs,
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    warmup, "_largebs_representative_ms", return_value=(65, 256)
+                )
+            )
+            sm90_mega = stack.enter_context(
+                patch.object(warmup, "_launch_sm90_mega")
+            )
+            sm90_largebs = stack.enter_context(
+                patch.object(warmup, "_launch_sm90_largebs")
+            )
+            warmup.warmup_v41_hc_jit(model(block()), max_m=256, device="cuda:0")
+            self.assertEqual(
+                [call.args[1] for call in sm90_mega.call_args_list], [1, 16, 25]
+            )
+            self.assertEqual(
+                [
+                    (call.args[1], call.kwargs["combine"])
+                    for call in sm90_largebs.call_args_list
+                ],
+                [(65, False), (65, True), (256, False), (256, True)],
+            )
+            with patch.dict(
+                os.environ, {"DSV4_MHC_PRE_GEMM_BACKEND": "tilelang_splitk"}
+            ), patch.object(
+                warmup, "can_fuse_big_pre", return_value=True
+            ), patch.object(
+                warmup, "_fused_pre_splitk_specs", return_value=((20, 65), (10, 225))
+            ):
+                warmup._WARMED_KEYS.clear()
+                fused.reset_mock()
+                warmup.warmup_v41_hc_jit(model(block()), max_m=256, device="cpu")
+                self.assertEqual(
+                    [call.args[1] for call in fused.call_args_list], [1, 65, 225]
+                )
+
     def test_missing_native_backends_compile_reachable_tilelang_fallback_only(self):
         with contextlib.ExitStack() as stack:
             self._mock_device(stack)

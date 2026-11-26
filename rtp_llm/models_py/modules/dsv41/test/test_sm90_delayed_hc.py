@@ -195,10 +195,6 @@ class Sm90DelayedHCTest(unittest.TestCase):
                         dg_probe.assert_not_called()
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 def _tf32_rne_host(weight):
     """Independent host oracle for the native tensor-map conversion."""
     bits = weight.detach().cpu().contiguous().view(torch.int32).to(torch.int64)
@@ -267,6 +263,11 @@ class Sm90BigPreRoutingTest(unittest.TestCase):
             os.environ, {"DSV4_MHC_PRE_GEMM_BACKEND": "tilelang_single"}
         ):
             self.assertIsNone(_big_pre_backend(sm90, False))
+            self.assertEqual(_big_pre_backend(sm100, True), "deepgemm")
+        with patch.dict(
+            os.environ, {"DSV4_MHC_PRE_GEMM_BACKEND": "tilelang_splitk"}
+        ):
+            self.assertEqual(_big_pre_backend(sm90, False), "tilelang_splitk")
             self.assertEqual(_big_pre_backend(sm100, True), "deepgemm")
 
 
@@ -459,3 +460,7 @@ class Sm90BigFuseSplitKTest(unittest.TestCase):
                 torch.testing.assert_close(post, expected_post, rtol=2e-4, atol=1e-5)
                 torch.testing.assert_close(comb, expected_comb, rtol=2e-4, atol=1e-5)
                 torch.testing.assert_close(y, expected_y, rtol=2e-2, atol=3.2e-2)
+
+
+if __name__ == "__main__":
+    unittest.main()
