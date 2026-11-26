@@ -889,8 +889,8 @@ flash-attn @ https://pkg.flytiger-eco.com/artifactory/pypi_generic/flash_attn/2.
 flash-attn-3 @ https://pkg.flytiger-eco.com/artifactory/pypi_generic/flash_attn_3/2.8.2+v0.2.0.ppu2.2.0/flash_attn_3-2.8.2+cu130torch2.11.0alios7u2oe-cp312-cp312-linux_x86_64.whl#sha256=2eb7b83c68f6f20a6e543b352237a0e2216c90a216d795ec25bb9f913d67d427 \
     --hash=sha256:2eb7b83c68f6f20a6e543b352237a0e2216c90a216d795ec25bb9f913d67d427
     # via -r work/requirements.in
-flash-mla @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/ppu/flashmla-a40/flash_mla-2.1.0.dev8%2Bv1.0.0.ppu2.2.0.ga7cc971-cp312-cp312-linux_x86_64.whl#sha256=26f074fd4af1ecb059e3544a169bb67bd617cdfea82b5aef2d36b8f06243b173 \
-    --hash=sha256:26f074fd4af1ecb059e3544a169bb67bd617cdfea82b5aef2d36b8f06243b173
+flash-mla @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/ppu/flashmla-a40/sha256-77741580a79d32202e2d05e3836678aeea40125d31c3b3b34d5a878a69648fac/flash_mla-2.1.0.dev8%2Bv1.0.0.ppu2.2.0.ga7cc971-cp312-cp312-linux_x86_64.whl#sha256=77741580a79d32202e2d05e3836678aeea40125d31c3b3b34d5a878a69648fac \
+    --hash=sha256:77741580a79d32202e2d05e3836678aeea40125d31c3b3b34d5a878a69648fac
     # via -r work/requirements.in
 flashinfer-python @ https://pkg.flytiger-eco.com/artifactory/pypi_generic/flashinfer_python/0.6.8.post1+v0.2.0.ppu2.2.0/flashinfer_python-0.6.8.post1+cu130torch2.11.0alios7u2oe-cp312-cp312-linux_x86_64.whl#sha256=57c9072c2a41af8d19735c03ae1eb0d0d92bd6f2d5e0154fac44997c00b02031 \
     --hash=sha256:57c9072c2a41af8d19735c03ae1eb0d0d92bd6f2d5e0154fac44997c00b02031
