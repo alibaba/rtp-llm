@@ -9,13 +9,14 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/FrozenTask.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTaskRegistry.h"
 
+class FunctionRequestPB;
+class RemoteOperationRequestPB;
+class RemoteOperationResponsePB;
+
 namespace rtp_llm {
 
 class BroadcastManager;
 struct CacheConfig;
-class FunctionRequestPB;
-class RemoteOperationRequestPB;
-class RemoteOperationResponsePB;
 
 class Kvs2StorageBackend final: public StorageBackend {
 public:
