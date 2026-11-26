@@ -8,7 +8,7 @@ slot 数，`--transfer-queue-max-size` 控制每方向驻留 batch 总预算。�
 记录这些容量、批次上限、`transfer_implementation=workloop` 和 Device 路径的 `actual_copy_strategy=crc`。
 
 Disk→Device staging 只在 load owner 上分配。每 rank 的 staging 预算按 worker 拆分，每个 owner 的
-FULL/SWA 池独立，两个类别按参考字节预算分配。每个池须容纳完整配置批次。
+FULL、SWA、LINEAR 各按自己的块数和 stride 独立分配，缺少该类别时不建池。每个池须容纳完整配置批次。
 结果分别报告 `staging_full_blocks`、`staging_swa_blocks` 和 `staging_data_bytes`。
 PerRank 统一推导磁盘读队列 `Q * min(M, read_threads)` 和写队列 `Q`，结果记录实际容量。
 

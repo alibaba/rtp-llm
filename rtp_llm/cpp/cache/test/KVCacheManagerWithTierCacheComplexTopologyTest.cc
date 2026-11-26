@@ -836,13 +836,14 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LongDiskRoundTripExceedsStagingCapac
         ASSERT_GT(reuse_count, 0u);
         ASSERT_LE(reuse_count, static_cast<size_t>(logical_blocks));
         expected_load_descriptors += reuse_count;
-        const size_t staging_lane                 = group_set->groupType() == CacheGroupType::SWA ? 1 : 0;
-        bool         exceeds_all_owner_capacities = true;
+        const auto staging_type                 = group_set->groupType();
+        bool       exceeds_all_owner_capacities = true;
         ASSERT_FALSE(engine->load_loops_.empty());
         for (const auto& owner : engine->load_loops_) {
-            const auto& staging = owner->staging_.pools[staging_lane];
-            ASSERT_NE(staging, nullptr);
-            exceeds_all_owner_capacities = exceeds_all_owner_capacities && reuse_count > staging->capacity();
+            const auto it = owner->staging_.pools.find(staging_type);
+            ASSERT_NE(it, owner->staging_.pools.end());
+            ASSERT_NE(it->second, nullptr);
+            exceeds_all_owner_capacities = exceeds_all_owner_capacities && reuse_count > it->second->capacity();
         }
         exceeds_staging_capacity = exceeds_staging_capacity || exceeds_all_owner_capacities;
         const size_t reuse_begin = static_cast<size_t>(logical_blocks) - reuse_count;

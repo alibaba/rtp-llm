@@ -136,6 +136,9 @@ std::string KVCacheConfig::to_string() const {
         << "disk_cache_evict_timeout_ms: " << disk_cache_evict_timeout_ms << "\n"
         << "disk_cache_evict_max_pending_bytes: " << disk_cache_evict_max_pending_bytes << "\n"
         << "disk_cache_staging_block_count: " << disk_cache_staging_block_count << "\n"
+        << "disk_cache_full_staging_block_count: " << disk_cache_full_staging_block_count.value_or(disk_cache_staging_block_count) << "\n"
+        << "disk_cache_swa_staging_block_count: " << disk_cache_swa_staging_block_count.value_or(disk_cache_staging_block_count) << "\n"
+        << "disk_cache_linear_staging_block_count: " << disk_cache_linear_staging_block_count.value_or(disk_cache_staging_block_count) << "\n"
         << "memory_cache_max_descriptors_per_transfer_batch: " << memory_cache_max_descriptors_per_transfer_batch
         << "\n"
         << "block_tree_task_pool_size: " << block_tree_task_pool_size << "\n"

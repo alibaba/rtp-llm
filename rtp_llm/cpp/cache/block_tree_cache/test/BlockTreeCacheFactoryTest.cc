@@ -2285,18 +2285,158 @@ TEST_F(BlockTreeCacheFactoryTest, DisabledDiskCacheKeepsHostTimeouts) {
     EXPECT_EQ(cache->config().disk_cache_evict_timeout_ms, 1234);
 }
 
-TEST_F(BlockTreeCacheFactoryTest, RejectsDiskCacheForReusableLinearGroupSet) {
-    const auto    config    = makeHybridConfig();
-    auto          allocator = initAllocator<CoordinatorCacheManager>(config);
-    KVCacheConfig kv_cache_config;
-    kv_cache_config.enable_memory_cache  = true;
-    kv_cache_config.memory_cache_size_mb = 1;
-    kv_cache_config.enable_disk_cache  = true;
-    kv_cache_config.disk_cache_size_mb = 1;
-    kv_cache_config.disk_cache_paths   = "/unused/rejected-before-disk-init";
+class LinearDiskCacheFactoryTest: public BlockTreeCacheFactoryTest, public ::testing::WithParamInterface<bool> {
+protected:
+    void verifyDiskRoundTrip(
+        bool with_swa, uint32_t full_head_dim, size_t full_stride_kib, std::optional<int64_t> linear_blocks);
+};
 
-    expectFactoryRejects(config, allocator, kv_cache_config);
+void LinearDiskCacheFactoryTest::verifyDiskRoundTrip(
+    bool with_swa, uint32_t full_head_dim, size_t full_stride_kib, std::optional<int64_t> linear_blocks) {
+    const bool crc_enabled = GetParam();
+    if (crc_enabled && !CrcCopyWorkspace::available())
+        GTEST_SKIP() << "CRC requires CUDA13";
+
+    CacheConfig config;
+    config.dtype                   = DataType::TYPE_FP16;
+    config.layer_num               = with_swa ? 4 : 3;
+    config.seq_size_per_block      = 4;
+    config.reuse_cache_tail_blocks = 2;
+    const auto linear = test::makeResolvedLinearSpec(config.dtype, 1, 1, 32, 32, 2, 4);
+    const auto full   = test::makeResolvedMhaSpec(config.dtype, 1, full_head_dim, 4);
+    if (with_swa) {
+        const auto swa                 = test::makeResolvedMhaSpec(config.dtype, 1, 8, 4);
+        auto       swa_policy          = defaultCacheGroupPolicy(CacheGroupType::SWA);
+        swa_policy.enable_prefix_reuse = true;
+        swa_policy.sliding_window_size = 8;
+        test::configureIndexedTestGroups(config,
+                                         {linear, full, swa},
+                                         {{0, 1}, {2}, {3}},
+                                         {CacheGroupType::LINEAR, CacheGroupType::FULL, CacheGroupType::SWA},
+                                         {defaultCacheGroupPolicy(CacheGroupType::LINEAR),
+                                          defaultCacheGroupPolicy(CacheGroupType::FULL),
+                                          swa_policy});
+    } else {
+        test::configureIndexedTestGroups(
+            config, {linear, full}, {{0, 1}, {2}}, {CacheGroupType::LINEAR, CacheGroupType::FULL});
+    }
+    config.finalizeBlockNums(8, RuntimeConfig{});
+
+    auto                                     allocator = initAllocator<CoordinatorCacheManager>(config);
+    block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_factory_linear_disk");
+    KVCacheConfig                            options;
+    options.enable_memory_cache                             = true;
+    options.memory_cache_size_mb                            = 1;
+    options.enable_disk_cache                               = true;
+    options.disk_cache_size_mb                              = 1;
+    options.disk_cache_paths                                = disk_dir.path;
+    options.disk_cache_buffered_io                          = true;
+    options.enable_crc                                      = crc_enabled;
+    options.block_tree_transfer_worker_count                = 1;
+    options.disk_cache_staging_block_count                  = 16;
+    options.memory_cache_max_descriptors_per_transfer_batch = 1;
+
+    options.disk_cache_linear_staging_block_count = linear_blocks;
+    if (with_swa) {
+        options.disk_cache_full_staging_block_count = 5;
+        options.disk_cache_swa_staging_block_count  = 9;
+    }
+
+    const auto cache = createBlockTreeCache(config, options, allocator);
+    ASSERT_NE(cache, nullptr);
+    ASSERT_EQ(cache->groupSets().size(), with_swa ? 3u : 2u);
+    const auto& loops = cache->transfer_dispatcher_->per_rank_engine_->load_loops_;
+    ASSERT_EQ(loops.size(), 1u);
+    const auto& pools = loops.front()->staging_.pools;
+    ASSERT_EQ(pools.size(), cache->groupSets().size());
+    ASSERT_NE(pools.at(CacheGroupType::FULL), nullptr);
+    ASSERT_NE(pools.at(CacheGroupType::LINEAR), nullptr);
+    EXPECT_EQ(pools.at(CacheGroupType::FULL)->strideBytes(), full_stride_kib * 1024);
+    EXPECT_EQ(pools.at(CacheGroupType::LINEAR)->strideBytes(), 8u * 1024);
+    EXPECT_EQ(pools.at(CacheGroupType::FULL)->capacity(), with_swa ? 5u : 16u);
+    EXPECT_EQ(pools.at(CacheGroupType::LINEAR)->capacity(), static_cast<size_t>(linear_blocks.value_or(16)));
+    if (with_swa) {
+        ASSERT_NE(pools.at(CacheGroupType::SWA), nullptr);
+        EXPECT_EQ(pools.at(CacheGroupType::SWA)->strideBytes(), 4u * 1024);
+        EXPECT_EQ(pools.at(CacheGroupType::SWA)->capacity(), 9u);
+    } else {
+        EXPECT_EQ(pools.count(CacheGroupType::SWA), 0u);
+    }
+    const auto& group = cache->groupSets().front();
+    ASSERT_EQ(group->groupType(), CacheGroupType::LINEAR);
+    const auto& tag        = group->groupTags().front();
+    const auto& spec       = config.group(tag).spec;
+    const auto  ssm_bytes  = static_cast<int64_t>(spec->k_block_size_bytes());
+    const auto  conv_bytes = static_cast<int64_t>(spec->v_block_size_bytes());
+    ASSERT_GT(ssm_bytes, 0);
+    ASSERT_GT(conv_bytes, 0);
+
+    const auto blocks = block_tree_cache_test::allocateDeviceBlocksForTest(*group, 1);
+    ASSERT_EQ(blocks.size(), 1u);
+    ASSERT_EQ(blocks.front().size(), 1u);
+    const auto host = group->allocateSingleBlock(Tier::HOST, BlockTreeRefType::EVICT);
+    const auto disk = group->allocateSingleBlock(Tier::DISK, BlockTreeRefType::EVICT);
+    ASSERT_NE(host, NULL_BLOCK_IDX);
+    ASSERT_NE(disk, NULL_BLOCK_IDX);
+
+    const auto device_state = [&](int layer) {
+        auto* data = allocator->convertIndexToAddr(layer, tag, blocks.front().front()).kv_addr;
+        return torch::from_blob(data, {ssm_bytes + conv_bytes}, torch::TensorOptions(torch::kUInt8).device(torch::kCUDA));
+    };
+    const auto expected_state = [&](int layer) {
+        return (torch::arange(ssm_bytes + conv_bytes, torch::kInt32) + (1 + layer * 16)).to(torch::kUInt8);
+    };
+    const auto& layers = config.layerIdsForGroup(tag);
+    ASSERT_FALSE(layers.empty());
+    for (int layer : layers)
+        device_state(layer).copy_(expected_state(layer));
+    runtimeSyncAndCheck();
+
+    const auto transfer = [&](TransferDescriptor descriptor) {
+        return cache->executeTransfer(block_transfer_engine_test::makeTransferTask({std::move(descriptor)}));
+    };
+    const auto id = group->groupSetId();
+    const auto write_host = transfer(TransferDescriptor::deviceToHost(id, blocks.front(), host));
+    ASSERT_TRUE(write_host.ok()) << write_host.status.ToString();
+    const auto write_disk = transfer(TransferDescriptor::hostToDisk(id, host, disk));
+    ASSERT_TRUE(write_disk.ok()) << write_disk.status.ToString();
+    std::memset(group->hostPool()->blockBuffer(host).addr, 0, group->storageBytes());
+    for (int layer : layers)
+        device_state(layer).zero_();
+    runtimeSyncAndCheck();
+
+    const auto occupied_full_pool = pools.at(CacheGroupType::FULL)->tryMallocBatch(pools.at(CacheGroupType::FULL)->capacity());
+    ASSERT_TRUE(occupied_full_pool.has_value());
+    const auto occupied_swa_pool = with_swa ? pools.at(CacheGroupType::SWA)->tryMallocBatch(pools.at(CacheGroupType::SWA)->capacity()) : std::nullopt;
+    ASSERT_EQ(occupied_swa_pool.has_value(), with_swa);
+    const auto read_disk = transfer(TransferDescriptor::diskToDevice(id, disk, blocks.front()));
+    ASSERT_TRUE(read_disk.ok()) << read_disk.status.ToString();
+    for (int layer : layers) {
+        SCOPED_TRACE(layer);
+        const auto restored = device_state(layer).cpu();
+        const auto expected = expected_state(layer);
+        EXPECT_TRUE(restored.narrow(0, 0, ssm_bytes).equal(expected.narrow(0, 0, ssm_bytes))) << "ssm_state";
+        EXPECT_TRUE(restored.narrow(0, ssm_bytes, conv_bytes).equal(expected.narrow(0, ssm_bytes, conv_bytes)))
+            << "conv_state";
+    }
+    group->releaseSingleBlock(Tier::DISK, disk, BlockTreeRefType::EVICT);
+    group->releaseSingleBlock(Tier::HOST, host, BlockTreeRefType::EVICT);
+    block_tree_cache_test::unreferenceDeviceBlocksForTest(*group, blocks);
 }
+
+TEST_P(LinearDiskCacheFactoryTest, DiskRoundTripUsesIndependentPoolCounts) {
+    verifyDiskRoundTrip(true, 896, 16, 13);
+}
+
+TEST_P(LinearDiskCacheFactoryTest, DiskRoundTripUsesLargerFullStrideWithoutSwa) {
+    verifyDiskRoundTrip(false, 896, 16, std::nullopt);
+}
+
+TEST_P(LinearDiskCacheFactoryTest, DiskRoundTripUsesLargerLinearStrideWithoutSwa) {
+    verifyDiskRoundTrip(false, 128, 4, 7);
+}
+
+INSTANTIATE_TEST_SUITE_P(Crc, LinearDiskCacheFactoryTest, ::testing::Bool());
 
 TEST_F(BlockTreeCacheFactoryTest, DiskCacheAllowsDisabledLinearReuse) {
     const auto                               config    = makeHybridConfig(/*disable_linear_reuse=*/true);
@@ -2400,6 +2540,25 @@ TEST_F(BlockTreeCacheFactoryTest, DiskStagingBlockCountPropagatesAndValidates) {
         EXPECT_EQ(cache->config().device_disk_staging_block_count, 2u);
     }
 
+    {
+        auto allocator = initAllocator<CoordinatorCacheManager>(config);
+        block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_factory_per_type_blocks");
+        auto options = makeDiskKvCacheConfig(disk_dir.path);
+        options.disk_cache_staging_block_count = 8;
+        options.disk_cache_full_staging_block_count = 0;
+        expectFactoryRejects(config, allocator, options);
+        options.disk_cache_full_staging_block_count = 3;
+        options.disk_cache_swa_staging_block_count = 1;
+        auto cache = createBlockTreeCache(config, options, allocator);
+        ASSERT_NE(cache, nullptr);
+        const auto& loops = cache->transfer_dispatcher_->per_rank_engine_->load_loops_;
+        ASSERT_EQ(loops.size(), 2u);
+        EXPECT_EQ(loops[0]->staging_.pools.at(CacheGroupType::FULL)->capacity(), 2u);
+        EXPECT_EQ(loops[1]->staging_.pools.at(CacheGroupType::FULL)->capacity(), 1u);
+        EXPECT_EQ(loops[0]->staging_.pools.count(CacheGroupType::SWA), 0u);
+        EXPECT_EQ(loops[0]->staging_.pools.count(CacheGroupType::LINEAR), 0u);
+    }
+
     for (const int64_t bad_block_count : {int64_t{0}, int64_t{-1}, int64_t{1}, int64_t{3}}) {
         auto                                     allocator = initAllocator<CoordinatorCacheManager>(config);
         block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_factory_staging_bad_blocks");
@@ -2428,9 +2587,9 @@ TEST_F(BlockTreeCacheFactoryTest, DiskStagingBlockCountPropagatesAndValidates) {
         ASSERT_NE(cache, nullptr);
         const auto& loops = cache->transfer_dispatcher_->per_rank_engine_->load_loops_;
         ASSERT_EQ(loops.size(), 3u);
-        EXPECT_EQ(loops[0]->staging_.pools[1]->capacity(), 2u);
-        EXPECT_EQ(loops[1]->staging_.pools[1]->capacity(), 1u);
-        EXPECT_EQ(loops[2]->staging_.pools[1]->capacity(), 1u);
+        EXPECT_EQ(loops[0]->staging_.pools.at(CacheGroupType::FULL)->capacity(), 2u);
+        EXPECT_EQ(loops[1]->staging_.pools.at(CacheGroupType::FULL)->capacity(), 1u);
+        EXPECT_EQ(loops[2]->staging_.pools.at(CacheGroupType::FULL)->capacity(), 1u);
     }
 
     if (CrcCopyWorkspace::available()) {
@@ -3160,18 +3319,16 @@ void verifyCrcLocalTierBudgets(int tokens_per_block = 64) {
             ASSERT_EQ(engine->evict_loops_.size(), cache->config().transfer_worker_count);
             for (const auto& owner : engine->load_loops_) {
                 ASSERT_NE(owner, nullptr);
-                for (const auto& pool : owner->staging_.pools) {
-                    ASSERT_NE(pool, nullptr);
-                    EXPECT_EQ(pool->stride_bytes_, staging_stride);
-                    staging_bytes += pool->block_count_ * pool->stride_bytes_;
-                    if (!host_on)
-                        std::memset(pool->backing_.data(), 0xa5, pool->block_count_ * pool->stride_bytes_);
-                }
+                const auto& pool = owner->staging_.pools.at(CacheGroupType::FULL);
+                ASSERT_NE(pool, nullptr);
+                EXPECT_EQ(owner->staging_.pools.count(CacheGroupType::SWA), 0u);
+                EXPECT_EQ(owner->staging_.pools.count(CacheGroupType::LINEAR), 0u);
+                EXPECT_EQ(pool->stride_bytes_, staging_stride);
+                staging_bytes += pool->block_count_ * pool->stride_bytes_;
             }
-            EXPECT_EQ(staging_bytes, 2 * cache->config().device_disk_staging_block_count * staging_stride);
+            EXPECT_EQ(staging_bytes, cache->config().device_disk_staging_block_count * staging_stride);
             for (const auto& owner : engine->evict_loops_) {
-                for (const auto& pool : owner->staging_.pools)
-                    EXPECT_EQ(pool, nullptr);
+                EXPECT_TRUE(owner->staging_.pools.empty());
             }
         }
 

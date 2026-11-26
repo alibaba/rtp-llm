@@ -774,6 +774,9 @@ class KVCacheConfig:
     disk_cache_evict_timeout_ms: int
     disk_cache_evict_max_pending_bytes: int
     disk_cache_staging_block_count: int
+    disk_cache_full_staging_block_count: int | None
+    disk_cache_swa_staging_block_count: int | None
+    disk_cache_linear_staging_block_count: int | None
     memory_cache_max_descriptors_per_transfer_batch: int
     multi_task_prompt: str
     multi_task_prompt_str: str

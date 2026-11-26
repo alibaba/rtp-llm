@@ -85,8 +85,8 @@ class KVCacheConfigPickleTest(TestCase):
         config.reserve_block_ratio = 9
         config.kv_cache_event_instance_group = "weighted-pools"
         state = config.__getstate__()
-        self.assertEqual(state[:2], ("KVCacheConfig", 25))
-        self.assertEqual(len(state), 81)
+        self.assertEqual(state[:2], ("KVCacheConfig", 26))
+        self.assertEqual(len(state), 84)
         self.assertEqual(state[80], config.kv_cache_pool_block_weights)
         self.assertTrue(state[79])
 
@@ -98,6 +98,19 @@ class KVCacheConfigPickleTest(TestCase):
         self.assertTrue(restored.enable_linear_cache_reclaim)
         self.assertEqual(restored.reserve_block_ratio, 9)
         self.assertEqual(restored.kv_cache_event_instance_group, "weighted-pools")
+
+    def test_staging_overrides_round_trip_and_v25_inherits_the_shared_count(self):
+        config = KVCacheConfig()
+        config.disk_cache_staging_block_count = 16
+        config.disk_cache_full_staging_block_count = 3
+        config.disk_cache_linear_staging_block_count = 7
+        state = config.__getstate__()
+        self.assertEqual(state[81:], (3, None, 7))
+        self.assertEqual(pickle.loads(pickle.dumps(config)).__getstate__(), state)
+        restored = KVCacheConfig.__new__(KVCacheConfig)
+        restored.__setstate__((state[0], 25, *state[2:81]))
+        self.assertEqual(restored.disk_cache_staging_block_count, 16)
+        self.assertEqual(restored.__getstate__()[81:], (None, None, None))
 
     def test_version_nine_state_keeps_reclaim_and_defaults_pool_weights_empty(self):
         config = KVCacheConfig()
@@ -149,8 +162,8 @@ class KVCacheConfigPickleTest(TestCase):
                 config.kv_cache_pool_block_weights = '{"full":7,"linear":2}'
                 state = config.__getstate__()
                 v22_state = _version_twenty_two_state(config)
-                self.assertEqual(len(state), 81)
-                self.assertEqual(state[:2], ("KVCacheConfig", 25))
+                self.assertEqual(len(state), 84)
+                self.assertEqual(state[:2], ("KVCacheConfig", 26))
                 self.assertEqual(state[63:68], tuple(BASE_EVENT_FIELD_VALUES.values()))
                 self.assertIs(state[68], enable_crc)
                 self.assertEqual(state[77], 6)
@@ -421,7 +434,7 @@ class KVCacheConfigPickleTest(TestCase):
             ):
                 state = KVCacheConfig().__getstate__()
                 restored = KVCacheConfig.__new__(KVCacheConfig)
-                restored.__setstate__((*state[:78], timeout, state[79], state[80]))
+                restored.__setstate__((*state[:78], timeout, *state[79:]))
 
     def test_previous_versions_use_default_frozen_force_release_timeout(self):
         source = KVCacheConfig()

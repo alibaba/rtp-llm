@@ -691,8 +691,11 @@ TEST_F(TransferWorkLoopTest, SuppliedBatchLimitStaysFixedWhileStagingIsLeased) {
         SCOPED_TRACE(limits.blocks);
         auto pool =
             limits.blocks ? std::make_shared<HostStagingBlockPool>(limits.blocks, disk->strideBytes()) : nullptr;
+        TransferWorkLoop::StagingPools staging;
+        if (pool)
+            staging.emplace(CacheGroupType::FULL, pool);
         TransferWorkLoop owner(
-            {group}, nullptr, direct_disk_executor.get(), TransferOperation::LOAD, limits.expected, 8, pool);
+            {group}, nullptr, direct_disk_executor.get(), TransferOperation::LOAD, limits.expected, 8, std::move(staging));
         EXPECT_EQ(owner.batchLimit(), limits.expected);
         // A fully occupied pool does not change the cached admission geometry.
         const auto leases = pool ? pool->tryMallocBatch(limits.blocks) : std::nullopt;
@@ -1604,9 +1607,9 @@ TEST_F(TransferWorkLoopCrcTest, DeadlineSkipsUnsubmittedCrcAndReleasesResources)
         SCOPED_TRACE(from_disk);
         for (bool expire_while_waiting : {true, false}) {
             SCOPED_TRACE(expire_while_waiting);
-            std::shared_ptr<HostStagingBlockPool> pool;
+            TransferWorkLoop::StagingPools pools;
             if (from_disk)
-                pool = std::make_shared<HostStagingBlockPool>(1, disk->strideBytes());
+                pools.emplace(CacheGroupType::FULL, std::make_shared<HostStagingBlockPool>(1, disk->strideBytes()));
             TransferWorkLoop owner(
                 {group},
                 std::make_unique<CrcCopyExecutor>(std::vector<GroupSetPtr>{group}, CrcCopyDirection::LOAD, 1, 1),
@@ -1614,7 +1617,7 @@ TEST_F(TransferWorkLoopCrcTest, DeadlineSkipsUnsubmittedCrcAndReleasesResources)
                 TransferOperation::LOAD,
                 1,
                 8,
-                std::move(pool));
+                std::move(pools));
             block_tree_cache_detail::ScopeRollback finish([&] {
                 owner.start();
                 owner.shutdown();
@@ -1676,7 +1679,7 @@ TEST_F(TransferWorkLoopCrcTest, DeadlineSkipsUnsubmittedCrcAndReleasesResources)
             EXPECT_EQ(actual, guard);
             EXPECT_TRUE(owner.wait_deadlines_.empty());
             if (from_disk) {
-                EXPECT_EQ(owner.staging_.pools[0]->free_id_list_.size(), 1u);
+                EXPECT_EQ(owner.staging_.pools.at(CacheGroupType::FULL)->free_id_list_.size(), 1u);
             }
         }
     }
@@ -1953,7 +1956,7 @@ TEST_F(TransferWorkLoopCrcTest, ExpiredStagingWaiterIsSkippedWithoutBlockingTheN
                 });
         auto             pool = std::make_shared<HostStagingBlockPool>(1, disk->strideBytes());
         TransferWorkLoop owner(
-            {group}, std::move(crc), direct_disk_executor.get(), operation, 1, 3, std::move(pool), reporter, 3);
+            {group}, std::move(crc), direct_disk_executor.get(), operation, 1, 3, {{CacheGroupType::FULL, std::move(pool)}}, reporter, 3);
         block_tree_cache_detail::ScopeRollback finish([&] {
             if (!owner.thread_.joinable())
                 owner.start();
@@ -2016,7 +2019,7 @@ TEST_F(TransferWorkLoopCrcTest, ExpiredStagingWaiterIsSkippedWithoutBlockingTheN
         EXPECT_EQ(owner.entry_count_, 0u);
         EXPECT_TRUE(owner.wait_deadlines_.empty());
         EXPECT_TRUE(owner.staging_.waiting.empty());
-        EXPECT_EQ(owner.staging_.pools[0]->free_id_list_.size(), 1u);
+        EXPECT_EQ(owner.staging_.pools.at(CacheGroupType::FULL)->free_id_list_.size(), 1u);
         reporter->flushStageMetrics();
         EXPECT_EQ(seriesCount(metrics()->transfer_stage_qps_metric), 11u);
         const auto source = operation == TransferOperation::LOAD ? Tier::DISK : Tier::DEVICE;
@@ -2081,7 +2084,7 @@ TEST_F(TransferWorkLoopCrcTest, RequestStagingTimeoutPreservesCompletedBatchResu
     EXPECT_EQ(io->reads, 1u);
     EXPECT_EQ(io->writes, 0u);
     EXPECT_EQ(owner.entry_count_, 0u);
-    EXPECT_EQ(owner.staging_.pools[0]->free_id_list_.size(), 1u);
+    EXPECT_EQ(owner.staging_.pools.at(CacheGroupType::FULL)->free_id_list_.size(), 1u);
     expectTarget(0);
 }
 
@@ -2432,7 +2435,7 @@ TEST_F(TransferWorkLoopCrcTest, DiskDeviceBatchRetainsAllStagingUntilReadComplet
     auto marker  = engine->execute(makeTransferTask({TransferDescriptor::hostToDevice(0, hosts[3], {targets[3]})}));
     ASSERT_TRUE(await(marker));
     ASSERT_TRUE(marker->success());
-    auto* pool = engine->load_loops_.front()->staging_.pools[0].get();
+    auto* pool = engine->load_loops_.front()->staging_.pools.at(CacheGroupType::FULL).get();
     EXPECT_FALSE(pool->tryMallocBatch(1));
     EXPECT_FALSE(loaded->done());
     EXPECT_FALSE(waiting->done());
@@ -2577,13 +2580,12 @@ TEST_F(TransferWorkLoopCrcTest, UnifiedStagingQueueAdmitsSwaWhileFullWaiterIsBlo
         engine->shutdown();
     });
     auto&                                  load_staging = engine->load_loops_.front()->staging_;
-    const auto&                            full_pool    = load_staging.pools[0];
-    const auto&                            swa_pool     = load_staging.pools[1];
+    const auto&                            full_pool    = load_staging.pools.at(CacheGroupType::FULL);
+    const auto&                            swa_pool     = load_staging.pools.at(CacheGroupType::SWA);
     ASSERT_EQ(full_pool->capacity(), 2u);
     ASSERT_EQ(swa_pool->capacity(), 2u);
     EXPECT_NE(full_pool, swa_pool);
-    for (const auto& pool : engine->evict_loops_.front()->staging_.pools)
-        EXPECT_EQ(pool, nullptr);
+    EXPECT_TRUE(engine->evict_loops_.front()->staging_.pools.empty());
     ASSERT_TRUE(await(engine->execute(evict(4))));
     seedDisk(0);
     seedDisk(1);
@@ -2628,9 +2630,9 @@ TEST_F(TransferWorkLoopCrcTest, PrivateStagingIsolatesOwnerCapacityAndCancellati
     ASSERT_TRUE(sealed->success());
     auto& first_owner  = *engine->load_loops_[0];
     auto& second_owner = *engine->load_loops_[1];
-    ASSERT_NE(first_owner.staging_.pools[0], second_owner.staging_.pools[0]);
-    ASSERT_EQ(first_owner.staging_.pools[0]->capacity(), 1u);
-    ASSERT_EQ(second_owner.staging_.pools[0]->capacity(), 1u);
+    ASSERT_NE(first_owner.staging_.pools.at(CacheGroupType::FULL), second_owner.staging_.pools.at(CacheGroupType::FULL));
+    ASSERT_EQ(first_owner.staging_.pools.at(CacheGroupType::FULL)->capacity(), 1u);
+    ASSERT_EQ(second_owner.staging_.pools.at(CacheGroupType::FULL)->capacity(), 1u);
     block_tree_cache_detail::ScopeRollback cleanup([&] {
         io->release();
         engine->cancelPendingStagingTransfers();
@@ -2653,7 +2655,7 @@ TEST_F(TransferWorkLoopCrcTest, PrivateStagingIsolatesOwnerCapacityAndCancellati
     auto independent = load(second_owner, 2);
     ASSERT_TRUE(await(marker(second_owner)));
     EXPECT_TRUE(second_owner.staging_.waiting.empty());
-    EXPECT_FALSE(second_owner.staging_.pools[0]->tryMallocBatch(1));
+    EXPECT_FALSE(second_owner.staging_.pools.at(CacheGroupType::FULL)->tryMallocBatch(1));
     first_owner.cancelPendingStagingTransfers();
     ASSERT_TRUE(await(waiting));
     EXPECT_FALSE(waiting->success());
@@ -2668,13 +2670,13 @@ TEST_F(TransferWorkLoopCrcTest, PrivateStagingIsolatesOwnerCapacityAndCancellati
     expectTarget(0);
     expectTarget(2);
     EXPECT_EQ(io->reads, 2u);
-    EXPECT_TRUE(first_owner.staging_.pools[0]->tryMallocBatch(1));
-    EXPECT_TRUE(second_owner.staging_.pools[0]->tryMallocBatch(1));
+    EXPECT_TRUE(first_owner.staging_.pools.at(CacheGroupType::FULL)->tryMallocBatch(1));
+    EXPECT_TRUE(second_owner.staging_.pools.at(CacheGroupType::FULL)->tryMallocBatch(1));
 }
 
 TEST_F(TransferWorkLoopCrcTest, EvictFailsStagingRequestWithMissingPool) {
     auto pool = std::make_shared<HostStagingBlockPool>(1, 4096);
-    EXPECT_THROW((TransferWorkLoop({group}, nullptr, direct_disk_executor.get(), TransferOperation::EVICT, 1, 1, pool)),
+    EXPECT_THROW((TransferWorkLoop({group}, nullptr, direct_disk_executor.get(), TransferOperation::EVICT, 1, 1, {{CacheGroupType::FULL, pool}})),
                  std::invalid_argument);
     TransferWorkLoop owner({group}, nullptr, direct_disk_executor.get(), TransferOperation::EVICT, 1, 1, {});
     size_t           proofs = 0;
@@ -2731,8 +2733,8 @@ TEST_F(TransferWorkLoopCrcTest, DirectionPollScansAllDevicesWithIndependentSlots
 TEST_F(TransferWorkLoopCrcTest, AllRoutesUseConfiguredBatchLimit) {
     engine = std::make_shared<PerRankBlockTransferEngine>(
         std::vector<GroupSetPtr>{group}, true, 8, 8, 1, 8, nullptr, 0, 1, diskOptions());
-    ASSERT_EQ(engine->load_loops_.front()->staging_.pools[0]->capacity(), 8u);
-    EXPECT_EQ(engine->evict_loops_.front()->staging_.pools[0], nullptr);
+    ASSERT_EQ(engine->load_loops_.front()->staging_.pools.at(CacheGroupType::FULL)->capacity(), 8u);
+    EXPECT_EQ(engine->evict_loops_.front()->staging_.pools.count(CacheGroupType::FULL), 0u);
     EXPECT_EQ(engine->load_loops_.front()->batchLimit(), 8u);
     EXPECT_EQ(engine->evict_loops_.front()->batchLimit(), 8u);
     EXPECT_EQ(engine->batchLimit(), 8u);
@@ -2779,10 +2781,11 @@ TEST_F(TransferWorkLoopCrcTest, StagingClassStridesPreserveConfiguredBatchLimit)
         SCOPED_TRACE(groups.size());
         PerRankBlockTransferEngine bounded(groups, true, 12, 6, 2, 8, nullptr, 0, 1);
         EXPECT_THROW((PerRankBlockTransferEngine(groups, true, 12, 7, 2, 8, nullptr, 0, 1)),
-                     std::invalid_argument);  // SWA capacity is six, even when FULL can hold twelve.
+                     std::invalid_argument);
 
         for (const auto* loops : {&bounded.load_loops_}) {
-            const auto& pool = loops->front()->staging_.pools[1];
+            ASSERT_EQ(loops->front()->staging_.pools.size(), groups.size());
+            const auto& pool = loops->front()->staging_.pools.at(CacheGroupType::SWA);
             ASSERT_NE(pool, nullptr);
             EXPECT_EQ(pool->capacity(), 6u);
             EXPECT_EQ(pool->stride_bytes_, 8192u);
@@ -2790,13 +2793,13 @@ TEST_F(TransferWorkLoopCrcTest, StagingClassStridesPreserveConfiguredBatchLimit)
         }
         EXPECT_EQ(bounded.batchLimit(), 6u);
         if (groups.size() == 2) {
-            EXPECT_EQ(bounded.load_loops_.front()->staging_.pools[0]->capacity(), 12u);
-            EXPECT_EQ(bounded.load_loops_.front()->staging_.pools[0]->strideBytes(), 4096u);
+            EXPECT_EQ(bounded.load_loops_.front()->staging_.pools.at(CacheGroupType::FULL)->capacity(), 6u);
+            EXPECT_EQ(bounded.load_loops_.front()->staging_.pools.at(CacheGroupType::FULL)->strideBytes(), 4096u);
         }
     }
 }
 
-TEST_F(TransferWorkLoopCrcTest, SwaReferenceBudgetIsSplitAcrossPrivateLoadPools) {
+TEST_F(TransferWorkLoopCrcTest, PerTypeBlockCountsAreSplitAcrossLoadWorkers) {
     auto swa_policy                = defaultCacheGroupPolicy(CacheGroupType::SWA);
     swa_policy.sliding_window_size = 128;
     auto topology     = makeTestTopology({makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, 384),
@@ -2814,31 +2817,30 @@ TEST_F(TransferWorkLoopCrcTest, SwaReferenceBudgetIsSplitAcrossPrivateLoadPools)
     auto swa  = makeTestGroupSet(1, topology, {"group1"}, {device}, host, disk, true);
     for (const auto& [blocks, workers] : {std::pair<size_t, size_t>{128, 1}, {128, 2}, {128, 4}, {5, 2}, {2, 1}}) {
         SCOPED_TRACE("B=" + std::to_string(blocks) + " W=" + std::to_string(workers));
-        const size_t               batch_limit = blocks / workers / 2;
+        const size_t               batch_limit = blocks / workers;
         PerRankBlockTransferEngine bounded({full, swa}, true, blocks, batch_limit, workers, 8, nullptr, 0, 1);
         size_t                     swa_blocks = 0, full_bytes = 0;
         std::set<const HostStagingBlockPool*> pools;
         for (size_t worker = 0; worker < workers; ++worker) {
             const auto&  staging      = bounded.load_loops_[worker]->staging_;
-            const size_t expected_swa = blocks / workers + (worker < blocks % workers ? 1 : 0);
-            EXPECT_EQ(staging.pools[1]->capacity(), expected_swa);
-            EXPECT_EQ(staging.pools[0]->capacity(), expected_swa / 2);
-            EXPECT_EQ(staging.pools[1]->strideBytes(), 4096u);
-            EXPECT_EQ(staging.pools[0]->strideBytes(), 8192u);
-            swa_blocks += staging.pools[1]->capacity();
-            full_bytes += staging.pools[0]->capacity() * 8192;
-            for (const auto& pool : staging.pools)
-                EXPECT_TRUE(pools.insert(pool.get()).second);
-            for (const auto& pool : bounded.evict_loops_[worker]->staging_.pools)
-                EXPECT_EQ(pool, nullptr);
+            const size_t expected_blocks = blocks / workers + (worker < blocks % workers ? 1 : 0);
+            EXPECT_EQ(staging.pools.at(CacheGroupType::SWA)->capacity(), expected_blocks);
+            EXPECT_EQ(staging.pools.at(CacheGroupType::FULL)->capacity(), expected_blocks);
+            EXPECT_EQ(staging.pools.at(CacheGroupType::SWA)->strideBytes(), 4096u);
+            EXPECT_EQ(staging.pools.at(CacheGroupType::FULL)->strideBytes(), 8192u);
+            swa_blocks += staging.pools.at(CacheGroupType::SWA)->capacity();
+            full_bytes += staging.pools.at(CacheGroupType::FULL)->capacity() * 8192;
+            EXPECT_EQ(staging.pools.count(CacheGroupType::LINEAR), 0u);
+            EXPECT_TRUE(pools.insert(staging.pools.at(CacheGroupType::FULL).get()).second);
+            EXPECT_TRUE(pools.insert(staging.pools.at(CacheGroupType::SWA).get()).second);
+            EXPECT_TRUE(bounded.evict_loops_[worker]->staging_.pools.empty());
         }
         EXPECT_EQ(swa_blocks, blocks);
-        EXPECT_LE(full_bytes, blocks * 4096);
+        EXPECT_EQ(full_bytes, blocks * 8192);
         EXPECT_EQ(bounded.batchLimit(), batch_limit);
     }
-    // Reject budgets that cannot fit the configured batch after FULL conversion.
-    EXPECT_THROW((PerRankBlockTransferEngine({full, swa}, true, 128, 33, 2, 8, nullptr, 0, 1)),
-                 std::invalid_argument);  // SWA fits 64, but FULL fits only 32.
+    EXPECT_THROW((PerRankBlockTransferEngine({full, swa}, true, 128, 65, 2, 8, nullptr, 0, 1)),
+                 std::invalid_argument);
     EXPECT_THROW((PerRankBlockTransferEngine({full, swa}, true, 1, 8, 1, 8, nullptr, 0, 1)), std::invalid_argument);
     EXPECT_THROW((PerRankBlockTransferEngine({full, swa}, true, 3, 8, 2, 8, nullptr, 0, 1)), std::invalid_argument);
 }
@@ -2880,21 +2882,21 @@ TEST_F(TransferWorkLoopCrcTest, LoadOwnersHavePrivateStagingAndAllOwnersKeepInde
             const auto& loop = (*loops)[worker];
             EXPECT_EQ(loop->batchLimit(), 2u);
             if (loops == &engine->load_loops_) {
-                const auto& full_pool = loop->staging_.pools[0];
-                const auto& swa_pool  = loop->staging_.pools[1];
+                const auto& full_pool = loop->staging_.pools.at(CacheGroupType::FULL);
+                const auto& swa_pool  = loop->staging_.pools.at(CacheGroupType::SWA);
                 ASSERT_NE(full_pool, nullptr);
                 ASSERT_NE(swa_pool, nullptr);
-                EXPECT_EQ(full_pool->capacity(), 8u);
+                EXPECT_EQ(full_pool->capacity(), 4u);
                 EXPECT_EQ(full_pool->strideBytes(), 4096u);
                 EXPECT_EQ(swa_pool->capacity(), 4u);
                 EXPECT_EQ(swa_pool->strideBytes(), 8192u);
-                for (const auto& pool : loop->staging_.pools) {
+                EXPECT_EQ(loop->staging_.pools.count(CacheGroupType::LINEAR), 0u);
+                for (const auto& pool : {full_pool, swa_pool}) {
                     EXPECT_TRUE(pools.insert(pool.get()).second);
                     staging_bytes += pool->capacity() * pool->strideBytes();
                 }
             } else {
-                for (const auto& pool : loop->staging_.pools)
-                    EXPECT_EQ(pool, nullptr);
+                EXPECT_TRUE(loop->staging_.pools.empty());
             }
             ASSERT_NE(loop->crc_, nullptr);
             const auto expected =
@@ -2919,19 +2921,20 @@ TEST_F(TransferWorkLoopCrcTest, LoadOwnersHavePrivateStagingAndAllOwnersKeepInde
     }
     EXPECT_EQ(pools.size(), 4u);
     EXPECT_EQ(copies.size(), 8u);  // Two directions * two owners * two slots.
-    EXPECT_EQ(staging_bytes, 2u * 8u * 8192u);
+    EXPECT_EQ(staging_bytes, 8u * (4096u + 8192u));
     // Increasing the owner count must not multiply the rank's staging budget.
     PerRankBlockTransferEngine more_owners({group, swa}, true, 8, 2, 4, 8, nullptr, 3, 2, diskOptions());
     size_t                     more_bytes = 0;
     for (const auto& loop : more_owners.load_loops_) {
-        EXPECT_EQ(loop->staging_.pools[0]->capacity(), 4u);
-        EXPECT_EQ(loop->staging_.pools[1]->capacity(), 2u);
-        for (const auto& pool : loop->staging_.pools)
+        EXPECT_EQ(loop->staging_.pools.at(CacheGroupType::FULL)->capacity(), 2u);
+        EXPECT_EQ(loop->staging_.pools.at(CacheGroupType::SWA)->capacity(), 2u);
+        for (const auto& [type, pool] : loop->staging_.pools)
             more_bytes += pool->capacity() * pool->strideBytes();
     }
     EXPECT_EQ(more_bytes, staging_bytes);
-    EXPECT_NE(more_owners.load_loops_[3]->staging_.pools[0], more_owners.load_loops_[0]->staging_.pools[0]);
-    EXPECT_EQ(more_owners.evict_loops_[3]->staging_.pools[1], nullptr);
+    EXPECT_NE(more_owners.load_loops_[3]->staging_.pools.at(CacheGroupType::FULL),
+              more_owners.load_loops_[0]->staging_.pools.at(CacheGroupType::FULL));
+    EXPECT_EQ(more_owners.evict_loops_[3]->staging_.pools.count(CacheGroupType::SWA), 0u);
     std::vector<std::shared_ptr<TransferAsyncContext>> contexts;
     for (size_t i = 0; i < 2; ++i)
         contexts.push_back(engine->execute(evict(i)));
@@ -2968,12 +2971,12 @@ TEST_F(TransferWorkLoopCrcTest, LargerPhysicalDiskStridePreservesConfiguredStagi
     ASSERT_TRUE(wider_disk->init());
     auto wider_group = makeTestGroupSet(0, group->topologyPtr(), {"group0"}, {device}, host, wider_disk, true);
     PerRankBlockTransferEngine minimum({wider_group}, true, 2, 2, 1, 8, nullptr, 0, 1);
-    EXPECT_EQ(minimum.load_loops_.front()->staging_.pools[0]->capacity(), 2u);
-    EXPECT_EQ(minimum.evict_loops_.front()->staging_.pools[0], nullptr);
+    EXPECT_EQ(minimum.load_loops_.front()->staging_.pools.at(CacheGroupType::FULL)->capacity(), 2u);
+    EXPECT_EQ(minimum.evict_loops_.front()->staging_.pools.count(CacheGroupType::FULL), 0u);
     PerRankBlockTransferEngine bounded({wider_group}, true, 8, 8, 1, 8, nullptr, 0, 1);
-    EXPECT_EQ(bounded.load_loops_.front()->staging_.pools[0]->capacity(), 8u);
-    EXPECT_EQ(bounded.evict_loops_.front()->staging_.pools[0], nullptr);
-    EXPECT_EQ(bounded.load_loops_.front()->staging_.pools[0]->stride_bytes_, 8192u);
+    EXPECT_EQ(bounded.load_loops_.front()->staging_.pools.at(CacheGroupType::FULL)->capacity(), 8u);
+    EXPECT_EQ(bounded.evict_loops_.front()->staging_.pools.count(CacheGroupType::FULL), 0u);
+    EXPECT_EQ(bounded.load_loops_.front()->staging_.pools.at(CacheGroupType::FULL)->stride_bytes_, 8192u);
 }
 
 TEST_F(TransferWorkLoopCrcTest, InitializationRejectsInvalidStaging) {

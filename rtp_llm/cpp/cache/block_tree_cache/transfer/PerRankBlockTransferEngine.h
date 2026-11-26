@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstddef>
+#include <map>
 #include <memory>
 #include <vector>
 
@@ -16,13 +17,25 @@
 
 namespace rtp_llm {
 
+struct DiskLoadStagingBlockCounts {
+    DiskLoadStagingBlockCounts(size_t count): default_count(count) {}
+
+    size_t forType(CacheGroupType type) const {
+        const auto it = overrides.find(type);
+        return it == overrides.end() ? default_count : it->second;
+    }
+
+    size_t default_count;
+    std::map<CacheGroupType, size_t> overrides;
+};
+
 class PerRankBlockTransferEngine {
 public:
     // Disk queue sizes are derived from Q and the configured batch limit;
     // disk_io_config supplies the shared read/write thread counts.
     explicit PerRankBlockTransferEngine(std::vector<GroupSetPtr> group_sets,
                                         bool                     enable_disk_cache                      = false,
-                                        size_t                   device_disk_staging_block_count        = 128,
+                                        DiskLoadStagingBlockCounts staging_block_counts                 = 128,
                                         size_t                   max_descriptors_per_batch              = 32,
                                         size_t                   transfer_worker_count                  = 2,
                                         size_t                   transfer_queue_max_size                = 10000,
