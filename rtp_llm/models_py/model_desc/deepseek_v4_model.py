@@ -238,6 +238,31 @@ def _resolve_dsv4_moe_strategy(moe_config) -> str:
     return requested or "auto"
 
 
+def _apply_parallelism_to_v4_args(args: V4Args, parallelism_config) -> None:
+    """Apply runtime parallelism fields (incl. CP attention TP=1) onto V4Args."""
+    if parallelism_config is None:
+        return
+    if hasattr(parallelism_config, "get_attn_tp_size"):
+        args.tp_size = int(parallelism_config.get_attn_tp_size() or 1)
+        args.tp_rank = int(parallelism_config.get_attn_tp_rank() or 0)
+    else:
+        args.tp_size = int(getattr(parallelism_config, "tp_size", 1) or 1)
+        args.tp_rank = int(getattr(parallelism_config, "tp_rank", 0) or 0)
+    for field_name, default in (
+        ("ep_size", 1),
+        ("ep_rank", 0),
+        ("dp_size", 1),
+        ("dp_rank", 0),
+        ("world_size", 1),
+        ("world_rank", 0),
+    ):
+        setattr(
+            args,
+            field_name,
+            int(getattr(parallelism_config, field_name, default) or default),
+        )
+
+
 def _resolve_dsv4_moe_inter_dim(model_config: ModelConfig) -> int:
     """Resolve one routed expert's width and validate shared-expert metadata."""
     n_shared_experts = int(model_config.n_shared_experts)
@@ -417,19 +442,7 @@ class DeepSeekV4Model(GptModelBase):
         # the sequence-axis work instead runs via CP.  The helper
         # ``ParallelismConfig.get_attn_tp_size()`` already returns 1 in
         # that case; use it instead of raw ``tp_size``.
-        if parallelism_config is not None:
-            if hasattr(parallelism_config, "get_attn_tp_size"):
-                args.tp_size = int(parallelism_config.get_attn_tp_size() or 1)
-                args.tp_rank = int(parallelism_config.get_attn_tp_rank() or 0)
-            else:
-                args.tp_size = int(getattr(parallelism_config, "tp_size", 1) or 1)
-                args.tp_rank = int(getattr(parallelism_config, "tp_rank", 0) or 0)
-            args.ep_size = int(getattr(parallelism_config, "ep_size", 1) or 1)
-            args.ep_rank = int(getattr(parallelism_config, "ep_rank", 0) or 0)
-            args.dp_size = int(getattr(parallelism_config, "dp_size", 1) or 1)
-            args.dp_rank = int(getattr(parallelism_config, "dp_rank", 0) or 0)
-            args.world_size = int(getattr(parallelism_config, "world_size", 1) or 1)
-            args.world_rank = int(getattr(parallelism_config, "world_rank", 0) or 0)
+        _apply_parallelism_to_v4_args(args, parallelism_config)
         if args.world_size > 1:
             logging.info(
                 "[DeepSeekV4Model] parallelism: world=%d tp=%d/%d ep=%d/%d dp=%d/%d "

@@ -105,6 +105,7 @@ class Block(nn.Module):
         fp8_kv_cache: bool = False,
         commit_only: bool = False,
         n_physical_experts: Optional[int] = None,
+        attn_workspace: Optional[object] = None,
     ):
         super().__init__()
         self.layer_id = layer_id
@@ -137,6 +138,7 @@ class Block(nn.Module):
             layer_weights=layer_weights,
             tp_size=tp_size,
             tp_rank=tp_rank,
+            attn_workspace=attn_workspace,
         )
         self._cp_sync_after_attn_done = False
         if commit_only:

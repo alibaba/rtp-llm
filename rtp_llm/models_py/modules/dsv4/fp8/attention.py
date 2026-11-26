@@ -30,6 +30,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from rtp_llm.models_py.modules.dsv4.fp8.attention_backend import (  # noqa: F401
+    _prepare_wo_a_stacked,
+)
 from rtp_llm.models_py.modules.dsv4.utils import (  # noqa: F401
     _V4_FP8_BLOCK_CFG,
     _repack_v4_fp8_scale_to_int32,
@@ -316,36 +319,6 @@ if _FLASH_MLA_SPARSE_Q_CHUNK <= 0:
         "DSV4_FLASH_MLA_SPARSE_Q_CHUNK must be positive for streaming "
         "attention output projection"
     )
-
-
-def _prepare_wo_a_stacked(
-    weight_fp8: torch.Tensor,
-    scale_raw: torch.Tensor,
-    G: int,
-    R: int,
-    K: int,
-) -> tuple:
-    """Stack V4 wo_a ckpt (``[G*R, K]`` fp8 + ``[G*R/128, K/128]`` e8m0fnu)
-    into the ``fp8_einsum``-expected layout, computed once at init:
-
-    - weight: ``[G, R, K]`` fp8 contiguous (free view)
-    - scale : ``[G, R, K/512]`` int32 UE8M0 packed, MN-major TMA-aligned
-      (stride ``(K/512 * tma_R, 1, tma_R)``)
-
-    Cast e8m0fnu → fp32, row-repeat by 128 along R so
-    ``get_mn_major_tma_aligned_packed_ue8m0_tensor`` (which operates on
-    fp32 ``[*, mn, k/128]``) sees the full [G, R, K/128] grid.  The helper
-    floor-log2 bitcasts each block scale and packs 4 UE8M0 bytes per
-    int32; output shape ``[G, R, K/512]`` matches
-    ``deep_gemm.fp8_einsum(..., recipe=(1, 1, 128))`` expectations."""
-    from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
-
-    w_stk = weight_fp8.view(G, R, K).contiguous()
-    scale_fp32 = scale_raw.float().view(G, R // 128, K // 128)
-    idx = torch.arange(R, device=scale_raw.device) // 128
-    scale_rep = scale_fp32.index_select(-2, idx).contiguous()  # [G, R, K/128]
-    s_stk = get_mn_major_tma_aligned_packed_ue8m0_tensor(scale_rep)
-    return w_stk, s_stk
 
 
 def _get_window_topk_idxs(
@@ -802,6 +775,7 @@ class AttentionFP8(nn.Module):
         layer_weights: Optional[Dict[str, torch.Tensor]] = None,
         tp_size: int = 1,
         tp_rank: int = 0,
+        attn_workspace: Optional[Any] = None,
     ):
         """``layer_weights`` is the framework's per-layer dict
         (``ModelWeights.weights[layer_id]``) keyed by ``W.v4_*`` enum.
@@ -884,7 +858,26 @@ class AttentionFP8(nn.Module):
                     s = s[:, col_slice.start // 128 : col_slice.stop // 128]
             if row_slice is not None or col_slice is not None:
                 w = w.contiguous()
-                s = s.contiguous()
+                if scale_is_packed_int32:
+                    import importlib
+
+                    try:
+                        layout_mod = importlib.import_module("deep_gemm.utils.layout")
+                        get_tma = getattr(layout_mod, "get_tma_aligned_size", None)
+                    except ImportError:
+                        get_tma = None
+                    tma_n = (
+                        get_tma(w.shape[0], s.element_size())
+                        if get_tma is not None
+                        else ((w.shape[0] + 3) // 4) * 4
+                    )
+                    s_mn = torch.zeros(
+                        (s.shape[1], tma_n), dtype=s.dtype, device=s.device
+                    ).t()[: w.shape[0], :]
+                    s_mn.copy_(s)
+                    s = s_mn
+                else:
+                    s = s.contiguous()
             return _v4_fp8_linear(w, s)
 
         self.wq_a = _fp8_w_s(W.v4_attn_wq_a_w, W.v4_attn_wq_a_s)
@@ -1059,6 +1052,7 @@ class AttentionFP8(nn.Module):
         # of one planner setup per layer per step. Built lazily on the
         # first FP8 decode call so BF16-KV runs don't pay the import cost.
         self._fp8_decode_op: Optional[Any] = None
+        self._sparse_mla_workspace: Optional[Any] = attn_workspace
 
         # CP context bound per-forward by V4Transformer.  None = no CP.
         self._cp_ctx: Optional[CPContext] = None
@@ -1838,6 +1832,7 @@ class AttentionFP8(nn.Module):
                 n_heads=self.n_heads,
                 head_dim=self.head_dim,
                 softmax_scale=self.softmax_scale,
+                attn_workspace=getattr(self, "_sparse_mla_workspace", None),
             )
         return self._fp8_decode_op
 
@@ -5679,6 +5674,7 @@ class CommitOnlyAttentionFP8(AttentionFP8):
         layer_weights: Optional[Dict[str, torch.Tensor]] = None,
         tp_size: int = 1,
         tp_rank: int = 0,
+        attn_workspace: Optional[Any] = None,
     ):
         del compress_rope_theta, original_seq_len, max_batch_size, index_topk
         if layer_weights is None:
@@ -5751,6 +5747,7 @@ class CommitOnlyAttentionFP8(AttentionFP8):
             self._rope_beta_slow,
         )
         self._fp8_decode_op: Optional[Any] = None
+        self._sparse_mla_workspace: Optional[Any] = attn_workspace
         self._cp_ctx: Optional[CPContext] = None
         self._prefill_meta_shared: Optional["PrefillMeta"] = None
         self._kv_cache: Optional[Any] = None

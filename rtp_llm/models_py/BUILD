@@ -185,6 +185,20 @@ cc_binary(
     visibility = ["//visibility:public"],
 )
 
+filegroup(
+    name = "prefill_optimization_source_data",
+    srcs = glob([
+        "modules/dsv4/**/*.py",
+        "modules/dsv4/*.py",
+        "3rdparty/tile_kernels/modeling/mhc/**/*.py",
+        "utils/arch.py",
+        "utils/cuda_graph_warmup.py",
+        "kernels/cuda/deepgemm_wrapper.py",
+        "utils/profiler.py",
+    ]) + ["//rtp_llm:device_type_source"],
+    visibility = ["//visibility:public"],
+)
+
 py_library(
     name = "modules",
     srcs = glob([

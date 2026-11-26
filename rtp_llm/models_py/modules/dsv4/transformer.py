@@ -21,6 +21,9 @@ from rtp_llm.models_py.modules.base.common.embedding import EmbeddingTorch
 from rtp_llm.models_py.modules.dsv4 import _profiler
 from rtp_llm.models_py.modules.dsv4.block import Block
 from rtp_llm.models_py.modules.dsv4.cp import CPContext, build_cp_context
+from rtp_llm.models_py.modules.dsv4.fp8.attention_backend import (
+    SparseAttentionWorkspace,
+)
 from rtp_llm.models_py.modules.dsv4.hc import build_hc_head
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
     synchronized_moe_chunk_plan,
@@ -187,14 +190,70 @@ def _block_kwargs(
     )
 
 
+class ShardedEmbeddingTorch(EmbeddingTorch):
+    """TP-aware embedding preserving zero-overhead fast path when unsharded."""
+
+    def __init__(
+        self,
+        weight: torch.Tensor,
+        full_dim: int,
+        *,
+        expected_tp_size: Optional[int] = None,
+    ) -> None:
+        super().__init__(weight)
+        self.full_dim = int(full_dim)
+        local_dim = int(weight.size(-1))
+        if weight.dim() == 2 and local_dim != self.full_dim:
+            if local_dim <= 0 or self.full_dim % local_dim != 0:
+                raise ValueError(
+                    "DSV4 TP embedding shard has incompatible hidden size: "
+                    f"local={local_dim} dim={self.full_dim}"
+                )
+            shard_count = self.full_dim // local_dim
+            if expected_tp_size is not None and shard_count != int(expected_tp_size):
+                raise ValueError(
+                    f"DSV4 TP embedding shard count {shard_count} does not match "
+                    f"attention TP size {expected_tp_size}"
+                )
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        h = super().forward(input)
+        if h.size(-1) == self.full_dim:
+            return h
+        local_dim = h.size(-1)
+        if local_dim <= 0 or self.full_dim % local_dim != 0:
+            raise ValueError(
+                "DSV4 TP embedding shard has incompatible hidden size: "
+                f"local={local_dim} dim={self.full_dim}"
+            )
+        from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
+
+        shard_count = self.full_dim // local_dim
+        flat = h.reshape(-1, local_dim).contiguous()
+        gathered = all_gather(flat, group=Group.TP)
+        if gathered.size(0) != shard_count * flat.size(0):
+            raise ValueError(
+                "DSV4 TP embedding all_gather row count mismatch: "
+                f"got {gathered.size(0)}, expected {shard_count * flat.size(0)}"
+            )
+        return (
+            gathered.view(shard_count, flat.size(0), local_dim)
+            .transpose(0, 1)
+            .contiguous()
+            .view(*h.shape[:-1], self.full_dim)
+        )
+
+
 def _build_block(
     layer_id: int,
     args: V4Args,
     layer_weights: Optional[Dict[str, torch.Tensor]] = None,
     commit_only: bool = False,
+    attn_workspace: Optional[SparseAttentionWorkspace] = None,
 ) -> Block:
     return Block(
-        **_block_kwargs(layer_id, args, layer_weights, commit_only=commit_only)
+        **_block_kwargs(layer_id, args, layer_weights, commit_only=commit_only),
+        attn_workspace=attn_workspace,
     )
 
 
@@ -257,6 +316,7 @@ class V4Transformer(nn.Module):
                         args.dim,
                     )
 
+        self._attn_workspace = SparseAttentionWorkspace()
         self.layers = nn.ModuleList(
             [
                 _build_block(
@@ -264,6 +324,7 @@ class V4Transformer(nn.Module):
                     args,
                     layer_weights=mw.weights[i],
                     commit_only=self.commit_only,
+                    attn_workspace=self._attn_workspace,
                 )
                 for i in range(args.n_layers)
             ]
@@ -290,7 +351,19 @@ class V4Transformer(nn.Module):
             # ``EmbeddingTorch`` keeps ``self.weight`` as a plain attribute (no
             # ``nn.Parameter``); the framework dict supplies the real tensor.
             assert embedding_weight is not None
-            self.embed = EmbeddingTorch(embedding_weight)
+            attn_tp_size = int(getattr(args, "tp_size", 1) or 1)
+            if (
+                isinstance(embedding_weight, torch.Tensor)
+                and embedding_weight.dim() == 2
+                and int(embedding_weight.size(-1)) != int(args.dim)
+            ):
+                self.embed = ShardedEmbeddingTorch(
+                    embedding_weight,
+                    args.dim,
+                    expected_tp_size=attn_tp_size,
+                )
+            else:
+                self.embed = EmbeddingTorch(embedding_weight)
             self.norm = RMSNorm(gw[W.final_ln_gamma], args.norm_eps)
             if self._mega_decode_enabled:
                 from rtp_llm.models_py.modules.dsv4.fp8.decode.mega_csa_runtime import (

@@ -38,6 +38,7 @@ the slot indices we produce here are ``r * stride + offset_in_request``.
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -248,6 +249,7 @@ def get_or_build_sched_meta(
     num_heads: int,
     topk: int,
     extra_attn_type: Optional[str] = None,
+    device: Optional[torch.device] = None,
 ) -> Any:
     """Lazy-build + cache FlashMLA ``sched_meta`` on the metadata object.
 
@@ -289,11 +291,22 @@ def get_or_build_sched_meta(
         get_mla_metadata,  # type: ignore[import-not-found]
     )
 
+    target_device = device
+    if target_device is None:
+        for pool in getattr(metadata, "pool_block_tables", {}).values():
+            if isinstance(pool, torch.Tensor) and pool.is_cuda:
+                target_device = pool.device
+                break
+    dev_ctx = (
+        torch.cuda.device(target_device)
+        if isinstance(target_device, torch.device) and target_device.type == "cuda"
+        else contextlib.nullcontext()
+    )
     capturing = False
     try:
-        capturing = (
-            torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()
-        )
+        if torch.cuda.is_available():
+            with dev_ctx:
+                capturing = torch.cuda.is_current_stream_capturing()
     except Exception:
         capturing = False
     # On the non-capturing -> capturing transition (entry into the captured
@@ -307,14 +320,15 @@ def get_or_build_sched_meta(
     key = (batch_size, extra_attn_type)
     sched_meta = metadata.sched_meta_cache.get(key)
     if sched_meta is None:
-        sched_meta, _ = get_mla_metadata(
-            cache_seqlens=None,
-            num_q_tokens_per_head_k=batch_size * q_len * num_heads,
-            topk=topk,
-            num_heads_q=num_heads,
-            num_heads_k=1,
-            is_fp8_kvcache=True,
-        )
+        with dev_ctx:
+            sched_meta, _ = get_mla_metadata(
+                cache_seqlens=None,
+                num_q_tokens_per_head_k=batch_size * q_len * num_heads,
+                topk=topk,
+                num_heads_q=num_heads,
+                num_heads_k=1,
+                is_fp8_kvcache=True,
+            )
         metadata.sched_meta_cache[key] = sched_meta
     return sched_meta
 
