@@ -111,6 +111,7 @@ class AttentionConfigs:
     indexer_head_dim: int
     indexer_head_num: int
     indexer_topk: int
+    nvfp4_indexer_kv_cache: bool
     is_causal: bool
     is_sparse: bool
     kv_cache_dtype: KvCacheDataType
@@ -845,6 +846,7 @@ class KVCacheConfig:
     fp8_kv_cache: int
     int8_kv_cache: int
     nvfp4_kv_cache: int
+    nvfp4_indexer_kv_cache: int
     kv_cache_mem_mb: int
     linear_step: int
     max_block_size_per_item: int

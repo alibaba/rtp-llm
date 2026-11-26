@@ -542,6 +542,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         use_cuda_graph: bool = False,
         bf16_prefill_num_heads: Optional[int] = None,
         use_nvfp4_cache: bool = False,
+        deinterleave_rope: bool = True,
     ):
         super().__init__(
             num_heads=num_heads,
@@ -554,6 +555,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             use_cuda_graph=use_cuda_graph,
             bf16_prefill_num_heads=bf16_prefill_num_heads,
             use_nvfp4_cache=use_nvfp4_cache,
+            deinterleave_rope=deinterleave_rope,
         )
         self.attn_inputs = None
         self.cp_info = None
@@ -1653,6 +1655,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             use_cuda_graph: bool = False,
             bf16_prefill_num_heads: Optional[int] = None,
             use_nvfp4_cache: bool = False,
+            deinterleave_rope: bool = True,
         ):
             super().__init__(
                 num_heads=num_heads,
@@ -1665,6 +1668,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
                 use_cuda_graph=use_cuda_graph,
                 bf16_prefill_num_heads=bf16_prefill_num_heads,
                 use_nvfp4_cache=use_nvfp4_cache,
+                deinterleave_rope=deinterleave_rope,
             )
             self.attn_inputs = None
             self.cp_info = None

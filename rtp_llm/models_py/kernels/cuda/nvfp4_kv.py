@@ -1,15 +1,22 @@
 """Packed NVFP4 rows and FP8 staging for GLM sparse attention.
 
-The latent cache stores 512 E2M1 values, 32 E4M3 block scales, one FP32
-row scale, and the unquantized 64-element BF16 RoPE tail. The indexer
-uses the same convention for 128 elements, with no RoPE tail.
+The MLA cache stores 512 E2M1 NoPE values (292B: 256B E2M1 + 32B E4M3 block-16
+scales + 4B FP32 row scale) followed by 64 E2M1 RoPE values (40B: 32B E2M1 +
+4B E4M3 block-16 scales + 4B FP32 row scale), padded to 16-byte alignment
+(336B). When interleaved MLA RoPE is active, k_pe is de-interleaved into
+[even_0..31, odd_0..31] before block-16 NVFP4 quantization to match GLM-5.3
+QAD training, and re-interleaved back to [e0, o0, ...] when staged into
+FlashMLA's 656B FP8+BF16 rows. The optional NVFP4 indexer cache uses the same
+per-token NVFP4 convention for 128 elements (80B), with no RoPE tail.
 """
 
 import torch
 import triton
 import triton.language as tl
 
-MLA_ROW_BYTES = 432
+MLA_NOPE_BYTES = 292
+MLA_ROPE_BYTES = 40
+MLA_ROW_BYTES = 336
 INDEXER_ROW_BYTES = 80
 FP8_MLA_ROW_BYTES = 656
 FP8_INDEXER_ROW_BYTES = 132
@@ -24,56 +31,106 @@ def _row_bytes(width: int) -> int:
         return MLA_ROW_BYTES
     if width == 128:
         return INDEXER_ROW_BYTES
+    if width == 64:
+        return MLA_ROPE_BYTES
     raise ValueError(f"Unsupported NVFP4 KV width {width}")
 
 
+def _ceil_ue8m0_fp32(scale: torch.Tensor) -> torch.Tensor:
+    """Round positive FP32 scale values up to exact power-of-2 (UE8M0) via IEEE-754 bits."""
+    bits = scale.contiguous().view(torch.int32)
+    exponent = (bits & 0x7F800000) + (
+        (bits & 0x007FFFFF) != 0
+    ).to(torch.int32) * 0x00800000
+    return exponent.view(torch.float32)
+
+
+def _pack_nvfp4_segment(
+    values: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Encode ModelOpt NVFP4QTensor per-token E2M1, E4M3 block-16 scales, and FP32 row scale."""
+    width = values.shape[-1]
+    if width % _BLOCK_VALUES != 0:
+        raise ValueError(
+            f"NVFP4 per-token quantization requires width divisible by 16, got {width}"
+        )
+    prefix = values.shape[:-1]
+    groups = values.float().reshape(*prefix, width // _BLOCK_VALUES, _BLOCK_VALUES)
+    abs_groups = groups.abs()
+    is_neg = torch.signbit(groups)
+    maxima = abs_groups.amax(dim=-1)
+    row_max = maxima.amax(dim=-1, keepdim=True)
+    row_scale = row_max / (_E2M1_MAX * _E4M3_MAX)
+    row_scale = torch.where(row_scale == 0.0, torch.ones_like(row_scale), row_scale)
+
+    raw_scale = maxima / (_E2M1_MAX * row_scale)
+    raw_scale = torch.where(raw_scale == 0.0, torch.ones_like(raw_scale), raw_scale)
+    raw_scale = raw_scale.clamp(min=_E4M3_MIN, max=_E4M3_MAX)
+    group_scale = raw_scale.to(torch.float8_e4m3fn)
+    eff_scale = (group_scale.float() * row_scale).unsqueeze(-1)
+
+    scaled_abs = abs_groups / eff_scale
+    bins = torch.where(scaled_abs > 5.0, 7, 6)
+    bins = torch.where(scaled_abs < 3.5, 5, bins)
+    bins = torch.where(scaled_abs <= 2.5, 4, bins)
+    bins = torch.where(scaled_abs < 1.75, 3, bins)
+    bins = torch.where(scaled_abs <= 1.25, 2, bins)
+    bins = torch.where(scaled_abs < 0.75, 1, bins)
+    bins = torch.where(scaled_abs <= 0.25, 0, bins).to(torch.uint8)
+    sign_bits = torch.where(is_neg & (bins != 0), 8, 0).to(torch.uint8)
+    encoded = (bins | sign_bits).reshape(*prefix, width)
+    packed = encoded[..., 0::2] | (encoded[..., 1::2] << 4)
+    return packed, group_scale.view(torch.uint8), row_scale.contiguous().view(torch.uint8)
+
+
 def pack_nvfp4_rows(
-    values: torch.Tensor, rope: torch.Tensor | None = None
+    values: torch.Tensor,
+    rope: torch.Tensor | None = None,
+    *,
+    deinterleave_rope: bool = True,
 ) -> torch.Tensor:
     """Encode E2M1 in low-nibble-first order with one scale per 16 values."""
     width = values.shape[-1]
+    if width not in (512, 128):
+        raise ValueError(f"Unsupported NVFP4 KV width {width}")
     stride = _row_bytes(width)
     prefix = values.shape[:-1]
     if width == 512:
-        if rope is None or rope.shape != (*prefix, 64) or rope.dtype != torch.bfloat16:
-            raise ValueError("NVFP4 MLA requires a BF16 RoPE tail of width 64")
+        if (
+            rope is None
+            or rope.shape != (*prefix, 64)
+            or rope.dtype not in (torch.bfloat16, torch.float16, torch.float32)
+        ):
+            raise ValueError("NVFP4 MLA requires a floating-point RoPE tail of width 64")
     elif rope is not None:
         raise ValueError("NVFP4 indexer rows do not have a RoPE tail")
 
-    groups = values.float().reshape(*prefix, width // _BLOCK_VALUES, _BLOCK_VALUES)
-    maxima = groups.abs().amax(dim=-1)
-    row_max = maxima.amax(dim=-1, keepdim=True)
-    row_scale = torch.where(row_max > 0, row_max / (_E2M1_MAX * _E4M3_MAX), 1.0)
-    row_scale = row_scale.clamp_min(torch.finfo(torch.float32).tiny)
-    group_scale = (maxima / row_scale / _E2M1_MAX).clamp(_E4M3_MIN, _E4M3_MAX)
-    group_scale = group_scale.to(torch.float8_e4m3fn)
-    scale = (group_scale.float() * row_scale).clamp_min(torch.finfo(torch.float32).tiny)
-    normalized = groups / scale.unsqueeze(-1)
-    magnitude = normalized.abs().clamp_max(_E2M1_MAX)
-    # E2M1 magnitudes are [0, .5, 1, 1.5, 2, 3, 4, 6]. Round-to-even
-    # in each exponent range gives the correct rounding at their boundaries.
-    bins = torch.where(
-        magnitude <= 2,
-        (magnitude * 2).round(),
-        torch.where(magnitude < 4, magnitude.round() + 2, (magnitude / 2).round() + 4),
-    ).to(torch.uint8)
-    encoded = (bins | ((normalized < 0).to(torch.uint8) << 3)).reshape(*prefix, width)
-    packed = encoded[..., 0::2] | (encoded[..., 1::2] << 4)
-
+    packed, group_scale, row_scale = _pack_nvfp4_segment(values)
     result = torch.zeros((*prefix, stride), dtype=torch.uint8, device=values.device)
     scale_start = width // 2
     row_scale_start = scale_start + width // _BLOCK_VALUES
     result[..., :scale_start] = packed
-    result[..., scale_start:row_scale_start] = group_scale.view(torch.uint8)
-    result[..., row_scale_start : row_scale_start + 4] = row_scale.view(torch.uint8)
+    result[..., scale_start:row_scale_start] = group_scale
+    result[..., row_scale_start : row_scale_start + 4] = row_scale
     if rope is not None:
-        result[..., 292:420] = rope.contiguous().view(torch.uint8)
+        rope_in = (
+            torch.cat((rope[..., 0::2], rope[..., 1::2]), dim=-1)
+            if deinterleave_rope
+            else rope
+        )
+        r_packed, r_group_scale, r_row_scale = _pack_nvfp4_segment(rope_in)
+        result[..., 292:324] = r_packed
+        result[..., 324:328] = r_group_scale
+        result[..., 328:332] = r_row_scale
     return result
 
 
 def unpack_nvfp4_rows(rows: torch.Tensor, width: int) -> torch.Tensor:
     """Decode to float32 before requantizing for the FP8 consumers."""
-    if rows.dtype != torch.uint8 or rows.size(-1) != _row_bytes(width):
+    expected_bytes = (
+        (MLA_ROW_BYTES, MLA_NOPE_BYTES) if width == 512 else (_row_bytes(width),)
+    )
+    if rows.dtype != torch.uint8 or rows.size(-1) not in expected_bytes:
         raise ValueError(f"Expected packed uint8 NVFP4 KV rows for width {width}")
     rows = rows.contiguous()
     scale_start = width // 2
@@ -89,10 +146,21 @@ def unpack_nvfp4_rows(rows: torch.Tensor, width: int) -> torch.Tensor:
     return (grouped * (blocks * row_scale).unsqueeze(-1)).flatten(-2)
 
 
-def unpack_nvfp4_rope(rows: torch.Tensor) -> torch.Tensor:
+def unpack_nvfp4_rope(
+    rows: torch.Tensor,
+    *,
+    deinterleave_rope: bool = True,
+    dtype: torch.dtype = torch.bfloat16,
+) -> torch.Tensor:
+    """Unpack the 40B NVFP4 RoPE segment (bytes 292..332) and restore channel order."""
     if rows.dtype != torch.uint8 or rows.size(-1) != MLA_ROW_BYTES:
         raise ValueError("Expected packed uint8 NVFP4 MLA rows")
-    return rows[..., 292:420].contiguous().view(torch.bfloat16)
+    unpacked = unpack_nvfp4_rows(rows[..., 292:332], 64)
+    if deinterleave_rope:
+        unpacked = torch.stack((unpacked[..., :32], unpacked[..., 32:]), dim=-1).flatten(
+            -2
+        )
+    return unpacked.to(dtype)
 
 
 def _fp8_quantize(
@@ -104,16 +172,32 @@ def _fp8_quantize(
     groups = values.unflatten(-1, (-1, group_width))
     scale = groups.abs().amax(-1).clamp_min(eps) / _E4M3_MAX
     if scale_ue8m0:
-        scale = scale.log2().ceil().exp2()
+        scale = _ceil_ue8m0_fp32(scale)
     quantized = (groups / scale.unsqueeze(-1)).clamp(-_E4M3_MAX, _E4M3_MAX)
     return quantized.flatten(-2).to(torch.float8_e4m3fn), scale.contiguous()
 
 
-def nvfp4_mla_rows_to_fp8(rows: torch.Tensor) -> torch.Tensor:
+def nvfp4_mla_rows_to_fp8(
+    rows: torch.Tensor, *, deinterleave_rope: bool = True
+) -> torch.Tensor:
     """Produce the FlashMLA 656B row format from gathered NVFP4 rows."""
-    values, scale = _fp8_quantize(unpack_nvfp4_rows(rows, 512), 128)
+    # Round dequantized kv_c through BF16 before FP8 1x128 UE8M0 quantization
+    # to match GLM-5.3 QAD mla_cache_qdq bit-for-bit.
+    values, scale = _fp8_quantize(
+        unpack_nvfp4_rows(rows, 512).to(torch.bfloat16).float(),
+        128,
+        scale_ue8m0=True,
+    )
+    rope = unpack_nvfp4_rope(
+        rows, deinterleave_rope=deinterleave_rope, dtype=torch.bfloat16
+    )
     return torch.cat(
-        (values.view(torch.uint8), scale.view(torch.uint8), rows[..., 292:420]), dim=-1
+        (
+            values.view(torch.uint8),
+            scale.view(torch.uint8),
+            rope.contiguous().view(torch.uint8),
+        ),
+        dim=-1,
     )
 
 
@@ -226,7 +310,11 @@ def _decode_indexer_fp8_kernel(
     else:
         scale = tl.maximum(tl.max(tl.abs(v), 1), 1e-4) / 448.0
         if power2_scale:
-            scale = tl.exp2(tl.ceil(tl.log2(scale)))
+            s_bits = scale.to(tl.int32, bitcast=True)
+            scale = (
+                (s_bits & 0x7F800000)
+                + tl.where((s_bits & 0x007FFFFF) != 0, 0x00800000, 0)
+            ).to(tl.float32, bitcast=True)
         normalized = v / scale[:, None]
     fp8 = tl.clamp(normalized, -448.0, 448.0).to(tl.float8e4nv)
     row_offset = row.to(tl.int64)

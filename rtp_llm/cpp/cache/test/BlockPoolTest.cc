@@ -295,9 +295,9 @@ TEST_F(BlockPoolTest, Nvfp4SparseMlaAndIndexerStorageGeometry) {
     auto cache      = SingleConfigCreator::createSingleConfig(model, ParallelismConfig{}, false);
     cache.block_num = 8;
     EXPECT_EQ(cache.dtype, DataType::TYPE_UINT8);
-    EXPECT_EQ(cache.kv_block_stride_bytes, 432u * 64u);
-    EXPECT_EQ(cache.kv_scale_stride_bytes, 80u * 64u);
-    EXPECT_EQ(cache.block_size_bytes, (432u * 4u + 80u * 2u) * 64u);
+    EXPECT_EQ(cache.kv_block_stride_bytes, 336u * 64u);
+    EXPECT_EQ(cache.kv_scale_stride_bytes, 132u * 64u);
+    EXPECT_EQ(cache.block_size_bytes, (336u * 4u + 132u * 2u) * 64u);
 
     BlockPool pool(BlockPoolConfigHelper::createConfig(cache), AllocationType::HOST);
     ASSERT_TRUE(pool.init());
@@ -306,20 +306,31 @@ TEST_F(BlockPoolTest, Nvfp4SparseMlaAndIndexerStorageGeometry) {
     ASSERT_EQ(mla.size(), 4u);
     ASSERT_EQ(indexer.size(), 4u);
     EXPECT_EQ(mla[0].scalar_type(), torch::kUInt8);
-    EXPECT_EQ(mla[0].sizes().vec(), (std::vector<int64_t>{8, 64, 432}));
-    EXPECT_EQ(indexer[0].sizes().vec(), (std::vector<int64_t>{8, 64, 80}));
+    EXPECT_EQ(mla[0].sizes().vec(), (std::vector<int64_t>{8, 64, 336}));
+    EXPECT_EQ(indexer[0].sizes().vec(), (std::vector<int64_t>{8, 64, 132}));
     EXPECT_FALSE(indexer[1].defined());
     EXPECT_TRUE(indexer[2].defined());
     EXPECT_FALSE(indexer[3].defined());
 
     const auto parts = pool.convertIndexToBuffer(0, 3);
     ASSERT_EQ(parts.size(), 2u);
-    EXPECT_EQ(parts[0].size_bytes, 432u * 64u);
-    EXPECT_EQ(parts[1].size_bytes, 80u * 64u);
+    EXPECT_EQ(parts[0].size_bytes, 336u * 64u);
+    EXPECT_EQ(parts[1].size_bytes, 132u * 64u);
     EXPECT_EQ(parts[0].addr, mla[0][3].data_ptr());
     EXPECT_EQ(parts[1].addr, indexer[0][3].data_ptr());
     EXPECT_EQ(pool.convertIndexToBuffer(1, 3).size(), 1u);
 
+    model.attn_config.nvfp4_indexer_kv_cache = true;
+    auto nvfp4_idx                           = SingleConfigCreator::createSingleConfig(model, ParallelismConfig{}, false);
+    nvfp4_idx.block_num                      = 8;
+    EXPECT_EQ(nvfp4_idx.kv_block_stride_bytes, 336u * 64u);
+    EXPECT_EQ(nvfp4_idx.kv_scale_stride_bytes, 80u * 64u);
+    EXPECT_EQ(nvfp4_idx.block_size_bytes, (336u * 4u + 80u * 2u) * 64u);
+    BlockPool idx_pool(BlockPoolConfigHelper::createConfig(nvfp4_idx), AllocationType::HOST);
+    ASSERT_TRUE(idx_pool.init());
+    EXPECT_EQ(idx_pool.allLayerScaleCacheBase()[0].sizes().vec(), (std::vector<int64_t>{8, 64, 80}));
+
+    model.attn_config.nvfp4_indexer_kv_cache = false;
     model.attn_config.kv_cache_dtype = KvCacheDataType::FP8;
     auto fp8                         = SingleConfigCreator::createSingleConfig(model, ParallelismConfig{}, false);
     EXPECT_EQ(fp8.kv_block_stride_bytes, 656u * 64u);

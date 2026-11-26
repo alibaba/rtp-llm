@@ -15,10 +15,17 @@ struct MLAKVCacheSpec: public KVCacheSpec {
     uint32_t kv_lora_rank;
     uint32_t rope_head_dim;
     bool     is_nvfp4 = false;
-    // Each row contains packed E2M1, one E4M3 scale per 16 values, a FP32
-    // row scale, then BF16 RoPE for MLA. Pad both rows to 16-byte alignment.
+    bool     is_indexer_nvfp4 = false;
+    /**
+     * NVFP4 MLA row layout (332B payload, 16-byte aligned to 336B):
+     * - kv_c (512): 256B E2M1 + 32B E4M3 block-16 scales + 4B FP32 row scale = 292B
+     * - k_pe  (64):  32B E2M1 +  4B E4M3 block-16 scales + 4B FP32 row scale =  40B
+     * - 4B alignment padding -> 336B per token.
+     * Indexer K cache is decoupled: 132B FP8 by default, or 80B NVFP4 when enabled.
+     */
     static constexpr size_t kNvfp4MlaNopeBytes    = 256 + 32 + 4;
-    static constexpr size_t kNvfp4MlaRowBytes     = 432;
+    static constexpr size_t kNvfp4MlaRopeBytes    = 32 + 4 + 4;
+    static constexpr size_t kNvfp4MlaRowBytes     = 336;
     static constexpr size_t kNvfp4IndexerRowBytes = 80;
     // DSA (DeepSeek Sparse Attention) indexer K cache piggybacks on the kv_scale
     // slot of the layout (132 bytes per token = 128B fp8 K + 4B fp32 scale per
@@ -43,9 +50,14 @@ struct MLAKVCacheSpec: public KVCacheSpec {
         is_sparse          = attn_config.is_sparse;
         indexer_head_dim   = static_cast<uint32_t>(attn_config.indexer_head_dim);
         is_nvfp4           = attn_config.kv_cache_dtype == KvCacheDataType::NVFP4;
+        is_indexer_nvfp4   = attn_config.nvfp4_indexer_kv_cache;
         if (is_nvfp4) {
             RTP_LLM_CHECK_WITH_INFO(is_sparse && kv_lora_rank == 512 && rope_head_dim == 64 && indexer_head_dim == 128,
                                     "NVFP4 KV requires sparse MLA with dimensions 512/64/128");
+        }
+        if (is_indexer_nvfp4) {
+            RTP_LLM_CHECK_WITH_INFO(is_sparse && indexer_head_dim == 128,
+                                    "NVFP4 Indexer KV requires sparse MLA with indexer_head_dim=128");
         }
     }
 
@@ -94,7 +106,7 @@ struct MLAKVCacheSpec: public KVCacheSpec {
         if (!is_sparse || indexer_head_dim == 0) {
             return 0;
         }
-        if (is_nvfp4) {
+        if (is_indexer_nvfp4) {
             return kNvfp4IndexerRowBytes * seq_size_per_block;
         }
         return static_cast<size_t>(indexer_head_dim + indexer_head_dim / 128 * 4)

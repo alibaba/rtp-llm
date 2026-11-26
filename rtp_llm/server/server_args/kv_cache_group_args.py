@@ -76,7 +76,16 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         type=int,
         choices=(0, 1),
         default=0,
-        help="将 GLM5 稀疏 MLA 和 Indexer KV 存储设为 NVFP4，计算时按需解包为 FP8",
+        help="将 GLM5 稀疏 MLA KV 存储（kv_c 512 + k_pe 64）设为 336B NVFP4，计算时按需解包为 FlashMLA 656B FP8；Indexer K 默认保持 132B FP8",
+    )
+    kv_cache_group.add_argument(
+        "--nvfp4_indexer_kv_cache",
+        env_name="NVFP4_INDEXER_KV_CACHE",
+        bind_to=(kv_cache_config, "nvfp4_indexer_kv_cache"),
+        type=int,
+        choices=(0, 1),
+        default=0,
+        help="可选将 GLM5 稀疏 Indexer K Cache 也设为 80B NVFP4（默认 0 保持 132B FP8）",
     )
     # compatible with old version
     kv_cache_group.add_argument(

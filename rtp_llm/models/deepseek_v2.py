@@ -648,6 +648,7 @@ class DeepSeekV2(BaseModel):
         with open(config_path) as reader:
             content = reader.read()
             config_json = json.loads(content)
+            config.dense_inter_size = config_json["intermediate_size"]
             config.inter_size = config_json["intermediate_size"]
             config.attn_config.head_num = config_json["num_attention_heads"]
             config.attn_config.kv_head_num = config_json.get(
@@ -745,6 +746,7 @@ class DeepSeekV2(BaseModel):
             config.moe_k = config_json["num_experts_per_tok"]
             config.expert_num = config_json["n_routed_experts"]
             moe_intermediate_size = config_json["moe_intermediate_size"]
+            config.moe_inter_size = moe_intermediate_size
             config.moe_n_group = config_json.get("n_group", 1)
             config.moe_topk_group = config_json.get("topk_group", 1)
 
@@ -764,7 +766,9 @@ class DeepSeekV2(BaseModel):
                 if i >= first_k_dense_replace and i % moe_step == 0
             ]
 
-            config.config_dtype = config_json.get("torch_dtype", None)
+            config.config_dtype = config_json.get(
+                "torch_dtype", config_json.get("dtype")
+            )
 
             if config_json.get("index_topk") is not None:
                 config.attn_config.is_sparse = True
@@ -783,6 +787,12 @@ class DeepSeekV2(BaseModel):
 
                 architectures = config_json.get("architectures") or []
                 config._is_glm52_architecture = "GlmMoeDsaForCausalLM" in architectures
+                if any(
+                    arch in ("GlmMoeDsaForCausalLM", "GlmMoeDsaMtpForCausalLM")
+                    for arch in architectures
+                ):
+                    # GLM-5 DSA indexer k_norm is LayerNorm(eps=1e-6), independent of rms_norm_eps=1e-5.
+                    config.indexer_layernorm_eps = 1e-6
 
     @staticmethod
     def get_weight_cls():

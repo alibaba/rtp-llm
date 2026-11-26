@@ -239,13 +239,100 @@ class OnlineMegaMoeNvfp4FromFp8Weight(_NativeOutput, OnlineMegaMoeFp4FromFp8Weig
         )
 
 
+def _quantize_modelopt_nvfp4_batch(
+    weight_3d: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Pack a 3D batch [B, rows, cols] into ModelOpt dynamic_block_quant NVFP4."""
+    batch, rows, cols = weight_3d.shape
+    if cols % NVFP4_BLOCK_SIZE != 0:
+        raise ValueError(
+            f"NVFP4 requires last dim divisible by {NVFP4_BLOCK_SIZE}, got {cols}"
+        )
+    src = weight_3d.detach().float()
+    amax_f32 = (
+        src.abs().amax(dim=(1, 2))
+        if src.numel() > 0
+        else src.new_zeros((batch,), dtype=torch.float32)
+    )
+    global_scale = amax_f32 / 2688.0
+    gs_view = global_scale.view(batch, 1, 1)
+    gs_safe = torch.where(gs_view > 0.0, gs_view, torch.ones_like(gs_view))
+
+    blocks = src.reshape(batch, -1, NVFP4_BLOCK_SIZE)
+    abs_blocks = blocks.abs()
+    block_amax = abs_blocks.amax(dim=-1, keepdim=True)
+    scale_in_fp8 = torch.where(
+        gs_view > 0.0,
+        block_amax / (6.0 * gs_safe),
+        torch.zeros_like(block_amax),
+    )
+    block_scale_fp8 = torch.clamp(scale_in_fp8, max=448.0).to(torch.float8_e4m3fn)
+    eff_scale = block_scale_fp8.float() * gs_view
+    zero_or_bad = (eff_scale == 0.0) | (~torch.isfinite(eff_scale))
+    scale_safe = torch.where(zero_or_bad, torch.ones_like(eff_scale), eff_scale)
+
+    scaled_abs = abs_blocks / scale_safe
+    mag_code = torch.where(scaled_abs > 5.0, 7, 6)
+    mag_code = torch.where(scaled_abs < 3.5, 5, mag_code)
+    mag_code = torch.where(scaled_abs <= 2.5, 4, mag_code)
+    mag_code = torch.where(scaled_abs < 1.75, 3, mag_code)
+    mag_code = torch.where(scaled_abs <= 1.25, 2, mag_code)
+    mag_code = torch.where(scaled_abs < 0.75, 1, mag_code)
+    mag_code = torch.where(scaled_abs <= 0.25, 0, mag_code).to(torch.uint8)
+    mag_code = torch.where(zero_or_bad, torch.zeros_like(mag_code), mag_code)
+    sign_bit = torch.where((blocks < 0.0) & (mag_code != 0), 8, 0).to(torch.uint8)
+    nibbles = (mag_code | sign_bit).reshape(batch, -1, NVFP4_BLOCK_SIZE // 2, 2)
+    packed = (
+        (nibbles[..., 0] | (nibbles[..., 1] << 4))
+        .reshape(batch, rows, cols // 2)
+        .contiguous()
+    )
+    clean_scale_fp8 = torch.where(
+        zero_or_bad.squeeze(-1),
+        torch.zeros((), dtype=torch.float8_e4m3fn, device=src.device),
+        block_scale_fp8.squeeze(-1),
+    ).reshape(batch, rows, cols // NVFP4_BLOCK_SIZE)
+    return packed.view(torch.int8), clean_scale_fp8.contiguous(), global_scale
+
+
 class OnlineMegaMoeNvfp4Weight(_NativeOutput, OnlineMegaMoeFp4Weight):
-    """Convert BF16 experts, including unquantized MTP layers, to native NVFP4."""
+    """Convert BF16 QAD experts to ModelOpt native NVFP4 with shared w13 per-expert outer amax."""
+
+    _EXPERT_CHUNK_SIZE = 8
 
     def _load_raw_tensor(self, tensor_source, layer_id, device, load_config):
         weight = self.kernel._load_raw_tensor(
             tensor_source, layer_id, device, load_config
         )[self.kernel.name]
-        return self._output(
-            weight.shape, weight.device, self.scale.name, weight.__getitem__
+        experts, rows, hidden = weight.shape
+        parts = 2 if self.name == W.moe_w1 else 1
+        if not experts or not rows or not hidden or hidden % NVFP4_BLOCK_SIZE:
+            raise ValueError(
+                "NVFP4 expert weights require nonempty, block-16-aligned shapes"
+            )
+        if rows % parts:
+            raise ValueError("NVFP4 W1 must contain equal up/gate projections")
+        target_device = weight.device
+        packed = torch.empty(
+            (experts, rows, hidden // 2), dtype=torch.int8, device=target_device
         )
+        scales = torch.empty(
+            (experts, rows, hidden // NVFP4_BLOCK_SIZE),
+            dtype=torch.float8_e4m3fn,
+            device=target_device,
+        )
+        globals_out = torch.empty(
+            (experts, parts), dtype=torch.float32, device=target_device
+        )
+        for start in range(0, experts, self._EXPERT_CHUNK_SIZE):
+            end = min(start + self._EXPERT_CHUNK_SIZE, experts)
+            p_chunk, s_chunk, g_chunk = _quantize_modelopt_nvfp4_batch(
+                weight[start:end]
+            )
+            packed[start:end].copy_(p_chunk)
+            scales[start:end].copy_(s_chunk)
+            globals_out[start:end].copy_(g_chunk.unsqueeze(-1).expand(-1, parts))
+        del weight
+        gsf = globals_out if parts == 2 else globals_out[:, 0].contiguous()
+        key = W.moe_w1_s2 if self.name == W.moe_w1 else W.moe_w2_s2
+        return {self.name: packed, self.scale.name: scales, key: gsf}

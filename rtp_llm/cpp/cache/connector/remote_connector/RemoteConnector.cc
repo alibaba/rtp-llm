@@ -329,7 +329,11 @@ remote_connector::ClientWrapper::ConfigMap RemoteConnector::genClientConfig() {
                         << ";location_spec_info:" << autil::legacy::ToJsonString(location_spec_info_map, true)
                         << ";draft_model_info:" << draft_model_info;
     if (nvfp4_kv_cache) {
-        instance_id_hash_ss << ";kv_layout:nvfp4_mla_432_indexer_80";
+        if (init_params_->kv_cache_config.nvfp4_indexer_kv_cache) {
+            instance_id_hash_ss << ";kv_layout:nvfp4_mla_336_indexer_80";
+        } else {
+            instance_id_hash_ss << ";kv_layout:nvfp4_mla_336_indexer_132";
+        }
     }
     std::string instace_id_hash_str = instance_id_hash_ss.str();
     std::string instance_id_hash    = std::to_string(hashString(instace_id_hash_str));

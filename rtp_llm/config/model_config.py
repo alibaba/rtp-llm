@@ -284,8 +284,11 @@ class ModelConfig(CppModelConfig):
                 if self.enable_glm52_shared_indexer_kv_cache and mapping
                 else self.num_layers
             )
-            # Match the aligned rows in MLAKVCacheSpec.
-            return (432 * self.num_layers + 80 * indexer_layers) * self.max_seq_len
+            indexer_row_bytes = 80 if self.attn_config.nvfp4_indexer_kv_cache else 132
+            # Match the aligned rows in MLAKVCacheSpec (336B MLA + 132B FP8 or 80B NVFP4 Indexer).
+            return (
+                336 * self.num_layers + indexer_row_bytes * indexer_layers
+            ) * self.max_seq_len
         kv_cache_bytes = (
             1
             if kv_cache_dtype_enum in [KvCacheDataType.FP8, KvCacheDataType.INT8]
@@ -727,6 +730,12 @@ class ModelConfig(CppModelConfig):
         # Explicit NVFP4 storage takes precedence over FP8 defaults. The
         # checkpoint's weight quantization and FP8 consumer formats are separate.
         if kv_cache_config is not None:
+            nvfp4_indexer = bool(kv_cache_config.nvfp4_indexer_kv_cache)
+            if nvfp4_indexer and not nvfp4_cache:
+                raise ValueError(
+                    "NVFP4_INDEXER_KV_CACHE requires NVFP4_KV_CACHE=1"
+                )
+            self.attn_config.nvfp4_indexer_kv_cache = nvfp4_indexer
             if nvfp4_cache:
                 if kv_cache_config.int8_kv_cache:
                     raise ValueError(
@@ -745,7 +754,10 @@ class ModelConfig(CppModelConfig):
                         "kv_lora_rank=512, rope_head_dim=64 and indexer_head_dim=128"
                     )
                 attn.kv_cache_dtype = KvCacheDataType.NVFP4
-                logging.info("Using NVFP4 KV cache storage")
+                logging.info(
+                    "Using NVFP4 MLA KV cache storage (336B/row, indexer_nvfp4=%s)",
+                    nvfp4_indexer,
+                )
             elif kv_cache_config.int8_kv_cache:
                 self.attn_config.kv_cache_dtype = KvCacheDataType.INT8
                 logging.info(

@@ -69,6 +69,14 @@ class Nvfp4MlaCacheTest(TestCase):
         )
         cache = backing[:, :64]
         nope, rope = self._rows(5)
+        # Exercise (0x3f9c, 0x3f6a) boundary where div_rn vs PyTorch CUDA's
+        # tensor / 2688.0 reciprocal multiply flips E4M3 block scale 0x7b vs 0x7a.
+        nope[3].zero_()
+        nope[3, :16] = 1.21875
+        nope[3, 16:32] = 0.9140625
+        rope[3].zero_()
+        rope[3, 0:32:2] = 1.21875
+        rope[3, 32:64:2] = 0.9140625
         slots = torch.tensor([0, 63, 65, 191, -1], device=self.device)
         write_nvfp4_mla_cache(nope, rope, cache, slots)
         self.assertTrue(torch.all(backing[:, 64] == 0xAA).item())
@@ -77,6 +85,8 @@ class Nvfp4MlaCacheTest(TestCase):
         torch.testing.assert_close(
             torch.stack([cache[0, 0], cache[0, 63], cache[1, 1], cache[2, 63]]),
             expected_pack[:4],
+            rtol=0,
+            atol=0,
         )
         physical = torch.tensor(
             [[191, 0, 63, -1], [63, 65, 191, 193]], device=self.device
@@ -92,6 +102,105 @@ class Nvfp4MlaCacheTest(TestCase):
         expected = nvfp4_mla_rows_to_fp8(selected_src)
         got = fp8.view(-1, FP8_MLA_ROW_BYTES)[[0, 1, 2, 4, 5, 6]]
         self._compare_fp8_rows(got, expected)
+
+    def test_interleaved_rope_matches_training_deinterleaved_nvfp4_blocks(self):
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.rope_emb_new import (
+            NewMlaRotaryEmbeddingOp,
+        )
+
+        tokens, heads = 6, 4
+        inv_freq = 1.0 / (
+            8_000_000.0 ** (torch.arange(0, 64, 2, dtype=torch.float32, device=self.device) / 64.0)
+        )
+        pos = torch.arange(tokens, dtype=torch.int32, device=self.device)
+        freqs = torch.outer(pos.float(), inv_freq)
+        cos_sin_cache = torch.cat((torch.cos(freqs), torch.sin(freqs)), dim=-1).contiguous()
+
+        q_raw = torch.randn((tokens, heads, 64), device=self.device, dtype=torch.bfloat16)
+        k_raw = torch.randn((tokens, 64), device=self.device, dtype=torch.bfloat16)
+        # Exaggerate odd vs even pre-RoPE channels so block-16 NVFP4 grouping is decisive.
+        k_raw[:, 0::2] *= 0.05
+        k_raw[:, 1::2] *= 32.0
+        nope = torch.randn((tokens, 512), device=self.device, dtype=torch.bfloat16)
+
+        # 1. Exact bit-level parity against FP32-arithmetic half-split RoPE (matching FlashInfer's FP32 sin/cos rotation).
+        cos_fp32 = torch.cat((torch.cos(freqs), torch.cos(freqs)), dim=-1)
+        sin_fp32 = torch.cat((torch.sin(freqs), torch.sin(freqs)), dim=-1)
+
+        def ref_rope_fp32(x):
+            x_de = torch.cat((x[..., 0::2], x[..., 1::2]), dim=-1)
+            x_rot = torch.cat((-x_de[..., 32:], x_de[..., :32]), dim=-1)
+            c = cos_fp32.unsqueeze(1) if x.ndim == 3 else cos_fp32
+            s = sin_fp32.unsqueeze(1) if x.ndim == 3 else sin_fp32
+            return (x_de.float() * c + x_rot.float() * s).to(x.dtype)
+
+        q_ref = ref_rope_fp32(q_raw)
+        k_ref = ref_rope_fp32(k_raw)
+        k_ref_q = pack_nvfp4_rows(nope, k_ref, deinterleave_rope=False)
+        k_ref_unpacked = nvfp4_mla_rows_to_fp8(k_ref_q, deinterleave_rope=False)[
+            :, 528:
+        ].view(torch.bfloat16)
+        ref_dots = torch.einsum("thd,sd->ths", q_ref.float(), k_ref_unpacked.float())
+
+        # RTP-LLM runtime path: FlashInfer interleave=True -> write_nvfp4_mla_cache -> gather_selected_mla_fp8.
+        q_rt = q_raw.clone()
+        k_rt = k_raw.clone()
+        rope_op = NewMlaRotaryEmbeddingOp(cos_sin_cache=cos_sin_cache, is_neox_style=False)
+        rope_op.forward(q_rt, k_rt, SimpleNamespace(positions_d=pos))
+        cache = torch.zeros((1, 64, MLA_ROW_BYTES), dtype=torch.uint8, device=self.device)
+        write_nvfp4_mla_cache(
+            nope,
+            k_rt,
+            cache,
+            torch.arange(tokens, dtype=torch.int64, device=self.device),
+            deinterleave_rope=True,
+        )
+        fp8_staged, _ = gather_selected_mla_fp8(
+            cache,
+            torch.arange(tokens, dtype=torch.int32, device=self.device).unsqueeze(0),
+            deinterleave_rope=True,
+        )
+        k_rt_unpacked = fp8_staged[0, :tokens, 0, 528:].contiguous().view(torch.bfloat16)
+        torch.testing.assert_close(
+            torch.cat((k_rt_unpacked[:, 0::2], k_rt_unpacked[:, 1::2]), dim=-1),
+            k_ref_unpacked,
+            rtol=0,
+            atol=0,
+        )
+        rt_dots = torch.einsum("thd,sd->ths", q_rt.float(), k_rt_unpacked.float())
+        torch.testing.assert_close(rt_dots, ref_dots, rtol=1e-5, atol=1e-5)
+
+        # 2. Also verify alignment against Megatron-Bridge BF16-arithmetic RoPE and confirm
+        # deinterleave_rope=True strictly prevents cross-channel NVFP4 block scale pollution.
+        cos_bf16 = cos_fp32.to(torch.bfloat16)
+        sin_bf16 = sin_fp32.to(torch.bfloat16)
+
+        def ref_rope_bf16(x):
+            x_de = torch.cat((x[..., 0::2], x[..., 1::2]), dim=-1)
+            x_rot = torch.cat((-x_de[..., 32:], x_de[..., :32]), dim=-1)
+            c = cos_bf16.unsqueeze(1) if x.ndim == 3 else cos_bf16
+            s = sin_bf16.unsqueeze(1) if x.ndim == 3 else sin_bf16
+            return x_de * c + x_rot * s
+
+        q_mb = ref_rope_bf16(q_raw)
+        k_mb = ref_rope_bf16(k_raw)
+        k_mb_unpacked = nvfp4_mla_rows_to_fp8(
+            pack_nvfp4_rows(nope, k_mb, deinterleave_rope=False), deinterleave_rope=False
+        )[:, 528:].view(torch.bfloat16)
+        mb_dots = torch.einsum("thd,sd->ths", q_mb.float(), k_mb_unpacked.float())
+
+        wrong_staged = nvfp4_mla_rows_to_fp8(
+            pack_nvfp4_rows(nope, k_rt, deinterleave_rope=False), deinterleave_rope=False
+        )[:, 528:].view(torch.bfloat16)
+        wrong_dots = torch.einsum("thd,sd->ths", q_rt.float(), wrong_staged.float())
+
+        err_deinterleaved = (rt_dots - mb_dots).norm().item()
+        err_interleaved_bug = (wrong_dots - mb_dots).norm().item()
+        cos_sim = torch.nn.functional.cosine_similarity(
+            rt_dots.flatten(), mb_dots.flatten(), dim=0
+        ).item()
+        self.assertGreater(cos_sim, 0.999)
+        self.assertLess(err_deinterleaved, err_interleaved_bug * 0.5)
 
     def _compare_fp8_rows(self, got, expected):
         torch.testing.assert_close(got[..., 528:], expected[..., 528:])
@@ -236,6 +345,20 @@ class Nvfp4MlaCacheTest(TestCase):
         want = self._ref_attention(q, fp8_pages, expected_ids, op.scale)
         result = op._attend_nvfp4_cp(q, None, topk, combined, None)
         torch.testing.assert_close(result, want, rtol=0.02, atol=0.01)
+
+        op_no_deinterleave = flashmla_sparse_cp_impl.SparseMlaFp8CPOp(
+            64,
+            512,
+            64,
+            128,
+            64,
+            1.0,
+            64,
+            use_nvfp4_cache=True,
+            deinterleave_rope=False,
+        )
+        self.assertFalse(op_no_deinterleave.deinterleave_rope)
+        self.assertTrue(op.deinterleave_rope)
 
 
 def _cp_nvfp4_worker(rank: int, port: int) -> None:

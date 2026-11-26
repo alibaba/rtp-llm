@@ -45,20 +45,45 @@ class Nvfp4KVTest(unittest.TestCase):
         values[4, 0:16] *= 1000
         values[4, 16:32] *= 0.01
         rope = torch.randn(5, 64, generator=gen, dtype=torch.bfloat16)
+        rope[3].zero_()
         packed = pack_nvfp4_rows(values, rope)
         self.assertEqual(packed.shape, (5, MLA_ROW_BYTES))
-        torch.testing.assert_close(unpack_nvfp4_rope(packed), rope, rtol=0, atol=0)
+        self.assertEqual(MLA_ROW_BYTES, 336)
+        self.assertTrue((packed[:, 332:] == 0).all())
+        unpacked_rope = unpack_nvfp4_rope(packed)
+        self.assertEqual(unpacked_rope.dtype, torch.bfloat16)
+        self.assertEqual(unpacked_rope.shape, (5, 64))
+        self.assertTrue((unpacked_rope[3] == 0).all())
+        cos = torch.nn.functional.cosine_similarity(
+            unpacked_rope[:3].float(), rope[:3].float(), dim=-1
+        )
+        self.assertTrue((cos > 0.985).all(), f"RoPE NVFP4 cosine too low: {cos}")
+        # Verify de-interleave block grouping: even channels [0::2] and odd channels [1::2]
+        # occupy independent 16-element NVFP4 blocks (0..1 vs 2..3).
+        asym_rope = torch.zeros(1, 64, dtype=torch.bfloat16)
+        asym_rope[0, 0::2] = 0.25
+        asym_rope[0, 1::2] = 256.0
+        asym_unpacked = unpack_nvfp4_rope(pack_nvfp4_rows(values[:1], asym_rope))
+        torch.testing.assert_close(
+            asym_unpacked[0, 0::2], asym_rope[0, 0::2], rtol=0.05, atol=0.01
+        )
         # Use the actual NVFP4 quantized values as the transcoding reference.
         rows = nvfp4_mla_rows_to_fp8(packed[[4, 0, 3, 4]])
+        scales = rows[:, 512:528].view(torch.float32)
+        # UE8M0 scales must be exact powers of two (mantissa == 0).
+        self.assertTrue(((scales.view(torch.int32) & 0x007FFFFF) == 0).all())
         decoded = decode_fp8(
             rows[:, :512].reshape(-1, 4, 128),
-            rows[:, 512:528].view(torch.float32).unsqueeze(-1),
+            scales.unsqueeze(-1),
         ).flatten(1)
         expected = unpack_nvfp4_rows(packed, 512)[[4, 0, 3, 4]]
-        torch.testing.assert_close(decoded, expected, rtol=0.065, atol=0.004)
+        torch.testing.assert_close(decoded, expected, rtol=0.08, atol=0.01)
         self.assertTrue(torch.isfinite(decoded).all())
         torch.testing.assert_close(
-            rows[:, 528:].view(torch.bfloat16), rope[[4, 0, 3, 4]], rtol=0, atol=0
+            rows[:, 528:].view(torch.bfloat16),
+            unpacked_rope[[4, 0, 3, 4]],
+            rtol=0,
+            atol=0,
         )
 
     def _indexer_cache(self, device):

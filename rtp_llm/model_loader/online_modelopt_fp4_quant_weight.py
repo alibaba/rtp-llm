@@ -872,7 +872,7 @@ from rtp_llm.model_loader.per_block_fp8_quant_weight import (  # noqa: E402
 class OnlineModelOptFp4HybridFp8AttnWeight(LoadQuantPerBlockFp8Weight):
     """FP8_PER_BLOCK loader used by ``MODELOPT_FP4`` hybrid mode for non-MoE weights."""
 
-    _excluded_names = (W.moe_w1, W.moe_w2, W.mla_kc, W.mla_vc)
+    _excluded_names = (W.moe_w1, W.moe_w2)
 
     @classmethod
     def support(
@@ -900,32 +900,13 @@ class OnlineModelOptFp4HybridFp8AttnWeight(LoadQuantPerBlockFp8Weight):
     ):
         # FP4 quant_config has group_size=16; for the FP8 block-wise path used by
         # attention weights we lock to the canonical FP8 per-block size (128).
-        self.group_size = Fp8BlockWiseQuantConfig.DEFAULT_FP8_QUANT_BLOCK_SIZE
-        params = src_weight_info.extract_params(
-            src_weight_info.__class__, src_weight_info, quant_config
+        self._init_online_fp8_weights(
+            src_weight_info,
+            quant_config,
+            Fp8BlockWiseQuantConfig.DEFAULT_FP8_QUANT_BLOCK_SIZE,
+            *args,
+            **kwargs,
         )
-        kernel: AtomicWeight = create_w8a8_fp8_per_block_weight(
-            src_weight_info, **params
-        )
-        sub_weights = {kernel.name: kernel}
-        scale_name = self.w8a8_weight_list.get(src_weight_info.name)
-        scale = None
-        if scale_name:
-            scale_params = {**params}
-            scale_params["name"] = scale_name
-            scale = create_w8a8_fp8_per_block_weight(src_weight_info, **scale_params)
-            sub_weights.update({scale.name: scale})
-
-        CompositeWeight.__init__(
-            self, sub_weights, quant_config=quant_config, *args, **kwargs
-        )
-        self.kernel = kernel
-        self.scale = scale
-
-    def get_tensor_names(
-        self, layer_id: Optional[int], load_config: LoadConfig
-    ) -> set[str]:
-        return self.kernel.get_tensor_names(layer_id, load_config)
 
 
 # ---------------------------------------------------------------------------

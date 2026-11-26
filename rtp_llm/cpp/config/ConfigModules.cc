@@ -129,6 +129,7 @@ std::string KVCacheConfig::to_string() const {
         << "int8_kv_cache: " << int8_kv_cache << "\n"
         << "fp8_kv_cache: " << fp8_kv_cache << "\n"
         << "nvfp4_kv_cache: " << nvfp4_kv_cache << "\n"
+        << "nvfp4_indexer_kv_cache: " << nvfp4_indexer_kv_cache << "\n"
         << "ssm_state_dtype: " << ssm_state_dtype << "\n"
         << "kv_cache_mem_mb: " << kv_cache_mem_mb << "\n"
         << "seq_size_per_block: " << seq_size_per_block << "\n"

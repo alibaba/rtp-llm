@@ -102,6 +102,261 @@ class NativeNvfp4LoaderTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "requires BF16 activations"):
                 config.init_precision_config(None, "fp16")
 
+    def test_online_bf16_megamoe_nvfp4_shared_w13_parity(self):
+        from rtp_llm.model_loader.native_mega_moe_nvfp4_weight import (
+            OnlineMegaMoeNvfp4Weight,
+        )
+
+        def _ref_nvfp4_tensor_pack(weight: torch.Tensor):
+            x = weight.float()
+            gsf = x.abs().amax() / 2688.0
+            gs_safe = torch.where(gsf > 0.0, gsf, torch.ones_like(gsf))
+            blocks = x.reshape(-1, 16)
+            abs_blocks = blocks.abs()
+            bmax = abs_blocks.amax(dim=-1, keepdim=True)
+            raw_sf = torch.where(gsf > 0.0, bmax / (6.0 * gs_safe), torch.zeros_like(bmax))
+            sf_fp8 = raw_sf.clamp(max=448.0).to(torch.float8_e4m3fn)
+            eff = sf_fp8.float() * gsf
+            zero_or_bad = (eff == 0.0) | (~torch.isfinite(eff))
+            scaled = abs_blocks / torch.where(zero_or_bad, torch.ones_like(eff), eff)
+            code = torch.where(scaled > 5.0, 7, 6)
+            code = torch.where(scaled < 3.5, 5, code)
+            code = torch.where(scaled <= 2.5, 4, code)
+            code = torch.where(scaled < 1.75, 3, code)
+            code = torch.where(scaled <= 1.25, 2, code)
+            code = torch.where(scaled < 0.75, 1, code)
+            code = torch.where(scaled <= 0.25, 0, code).to(torch.uint8)
+            code = torch.where(zero_or_bad, torch.zeros_like(code), code)
+            sign = torch.where((blocks < 0.0) & (code != 0), 8, 0).to(torch.uint8)
+            nibbles = (code | sign).reshape(-1, 8, 2)
+            packed = (nibbles[..., 0] | (nibbles[..., 1] << 4)).reshape(
+                x.shape[0], x.shape[1] // 2
+            )
+            clean_sf = torch.where(
+                zero_or_bad.squeeze(-1),
+                torch.zeros((), dtype=torch.float8_e4m3fn, device=x.device),
+                sf_fp8.squeeze(-1),
+            ).reshape(x.shape[0], x.shape[1] // 16)
+            return packed.contiguous(), clean_sf.contiguous(), gsf
+
+        gen = torch.Generator().manual_seed(909)
+        experts, inter, hidden = 3, 128, 256
+        tensors = {}
+        for e in range(experts):
+            tensors[f"e.{e}.up_proj.weight"] = (
+                torch.randn((inter, hidden), generator=gen, dtype=torch.bfloat16) * 0.25
+            )
+            tensors[f"e.{e}.gate_proj.weight"] = (
+                torch.randn((inter, hidden), generator=gen, dtype=torch.bfloat16) * 2.0
+            )
+            tensors[f"e.{e}.down_proj.weight"] = (
+                torch.randn((hidden, inter), generator=gen, dtype=torch.bfloat16) * 0.5
+            )
+        tensors["e.0.up_proj.weight"][0, :16] = 0.0
+
+        source = SimpleNamespace(
+            load_tensor=lambda name, dtype=None: [tensors[name]],
+        )
+        cfg = SimpleNamespace(
+            get_selected_experts=lambda *_: list(range(experts)),
+            compute_dtype=torch.bfloat16,
+        )
+        w1_src = MoeAtomicWeight(
+            W.moe_w1,
+            [
+                CkptWeightInfo("e.{expert_id}.up_proj.weight", identity),
+                CkptWeightInfo("e.{expert_id}.gate_proj.weight", identity),
+            ],
+            stack_moe_w1,
+            config=MoeConfig(expert_num=experts),
+        )
+        w2_src = MoeAtomicWeight(
+            W.moe_w2,
+            [CkptWeightInfo("e.{expert_id}.down_proj.weight", identity)],
+            stack_,
+            config=MoeConfig(expert_num=experts),
+        )
+        w1_res = OnlineMegaMoeNvfp4Weight(w1_src)._load_raw_tensor(
+            source, 0, "cpu", cfg
+        )
+        w2_res = OnlineMegaMoeNvfp4Weight(w2_src)._load_raw_tensor(
+            source, 0, "cpu", cfg
+        )
+
+        self.assertEqual(tuple(w1_res[W.moe_w1_s2].shape), (experts, 2))
+        self.assertTrue(
+            torch.equal(w1_res[W.moe_w1_s2][:, 0], w1_res[W.moe_w1_s2][:, 1])
+        )
+        for e in range(experts):
+            w1_cat = torch.cat(
+                (tensors[f"e.{e}.up_proj.weight"], tensors[f"e.{e}.gate_proj.weight"]),
+                dim=0,
+            )
+            p_ref, s_ref, g_ref = _ref_nvfp4_tensor_pack(w1_cat)
+            self.assertTrue(torch.equal(w1_res[W.moe_w1][e].view(torch.uint8), p_ref))
+            self.assertTrue(
+                torch.equal(
+                    w1_res[W.moe_s1][e].view(torch.uint8), s_ref.view(torch.uint8)
+                )
+            )
+            torch.testing.assert_close(w1_res[W.moe_w1_s2][e, 0], g_ref, rtol=0, atol=0)
+
+            p2_ref, s2_ref, g2_ref = _ref_nvfp4_tensor_pack(
+                tensors[f"e.{e}.down_proj.weight"]
+            )
+            self.assertTrue(torch.equal(w2_res[W.moe_w2][e].view(torch.uint8), p2_ref))
+            self.assertTrue(
+                torch.equal(
+                    w2_res[W.moe_s2][e].view(torch.uint8), s2_ref.view(torch.uint8)
+                )
+            )
+            torch.testing.assert_close(w2_res[W.moe_w2_s2][e], g2_ref, rtol=0, atol=0)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "requires a CUDA device")
+    def test_single_pass_ue8m0_fp8_and_flat_kv_b_proj_parity(self):
+        import functools
+        import torch.nn.functional as F
+
+        from rtp_llm.config.quant_config import (
+            Fp8BlockWiseQuantConfig,
+            ModelOptFp4Config,
+        )
+        from rtp_llm.model_loader.attn_weight import MlaAttnAtomicWeight, MlaConfig
+        from rtp_llm.model_loader.online_modelopt_fp4_quant_weight import (
+            OnlineModelOptFp4HybridFp8AttnWeight,
+        )
+        from rtp_llm.model_loader.per_block_fp8_quant_weight import (
+            LoadQuantPerBlockFp8Weight,
+            per_block_cast_to_fp8,
+        )
+        from rtp_llm.utils.model_weight import transpose_slice_k, transpose_slice_v
+
+        def _ref_fp8_block128(value: torch.Tensor):
+            rows, cols = value.shape
+            padded = F.pad(value.float(), (0, -cols % 128, 0, -rows % 128))
+            blocks = padded.view(
+                padded.shape[0] // 128, 128, padded.shape[1] // 128, 128
+            )
+            amax = blocks.abs().amax(dim=(1, 3), keepdim=True).clamp_min(1.0e-4)
+            scale = torch.pow(2.0, torch.ceil(torch.log2(amax / 448.0)))
+            q_blocks = (blocks * scale.reciprocal()).to(torch.float8_e4m3fn)
+            q_fp8 = q_blocks.reshape(padded.shape)[:rows, :cols].contiguous()
+            dq = (
+                (q_blocks.float() * scale)
+                .reshape(padded.shape)[:rows, :cols]
+                .to(value.dtype)
+            )
+            exp_u8 = (
+                (scale.squeeze(3).squeeze(1).contiguous().view(torch.int32) >> 23)
+                & 0xFF
+            ).to(torch.uint8)
+            return q_fp8, exp_u8, dq
+
+        device = torch.device("cuda")
+        gen = torch.Generator(device=device).manual_seed(77)
+
+        q_a = (
+            torch.randn((512, 512), generator=gen, device=device, dtype=torch.bfloat16)
+            * 0.3
+        )
+        kv_a = (
+            torch.randn((576, 512), generator=gen, device=device, dtype=torch.bfloat16)
+            * 0.3
+        )
+        fused_src = torch.cat((q_a, kv_a), dim=0)
+        q_rt, s_rt = per_block_cast_to_fp8(fused_src, 128, use_ue8m0=True)
+        q_ref, exp_ref, _ = _ref_fp8_block128(fused_src)
+        self.assertEqual(s_rt.dtype, torch.float8_e8m0fnu)
+        self.assertTrue(torch.equal(q_rt.view(torch.uint8), q_ref.view(torch.uint8)))
+        self.assertTrue(torch.equal(s_rt.view(torch.uint8), exp_ref))
+
+        heads, nope, v_dim, lora = 8, 192, 256, 512
+        kv_b = torch.randn(
+            (heads * (nope + v_dim), lora),
+            generator=gen,
+            device=device,
+            dtype=torch.bfloat16,
+        )
+        kv_b[384:448] *= 50.0
+        kv_b[448:512] *= 0.02
+
+        _, _, flat_qdq = _ref_fp8_block128(kv_b)
+        ref_3d = flat_qdq.view(heads, nope + v_dim, lora)
+        expected_kc = ref_3d[:, :nope, :].contiguous()
+        expected_vc = ref_3d[:, nope:, :].transpose(1, 2).contiguous()
+
+        naive_kc = torch.stack(
+            [
+                _ref_fp8_block128(kv_b.view(heads, nope + v_dim, lora)[h, :nope])[2]
+                for h in range(heads)
+            ]
+        )
+        self.assertFalse(torch.equal(naive_kc, expected_kc))
+
+        mla_cfg = MlaConfig(
+            head_num=heads,
+            nope_head_dim=nope,
+            rope_head_dim=64,
+            kv_lora_rank=lora,
+            ope_head_dim=nope,
+            v_head_dim=v_dim,
+            use_mla=True,
+            q_use_lora=True,
+        )
+        source = SimpleNamespace(load_tensor=lambda name, dtype=None: [kv_b.cpu()])
+        load_cfg = SimpleNamespace(
+            tp_size=1,
+            tp_rank=0,
+            dp_size=1,
+            dp_rank=0,
+            ep_size=1,
+            ep_rank=0,
+            ffn_tp_size=1,
+            ffn_tp_rank=0,
+            merge_lora=False,
+            compute_dtype=torch.bfloat16,
+            exported_device=SimpleNamespace(
+                maybe_rewrite_weight_by_key=lambda key, t: t
+            ),
+        )
+        for loader_cls, qcfg in (
+            (
+                LoadQuantPerBlockFp8Weight,
+                Fp8BlockWiseQuantConfig(
+                    bits=8, group_size=128, is_quanted=False, skip_moe=True
+                ),
+            ),
+            (
+                OnlineModelOptFp4HybridFp8AttnWeight,
+                ModelOptFp4Config(
+                    bits=4,
+                    group_size=16,
+                    is_quanted=False,
+                    hybrid_attn_quant_method="FP8_PER_BLOCK",
+                ),
+            ),
+        ):
+            for w_name, slice_fn, expected in (
+                (W.mla_kc, transpose_slice_k, expected_kc),
+                (W.mla_vc, transpose_slice_v, expected_vc),
+            ):
+                src_info = MlaAttnAtomicWeight(
+                    w_name,
+                    [CkptWeightInfo("kv_b_proj.weight", identity)],
+                    functools.partial(
+                        slice_fn,
+                        head_num=heads,
+                        nope_head_dim=nope,
+                        v_head_dim=v_dim,
+                        lora_rank=lora,
+                    ),
+                    config=mla_cfg,
+                )
+                self.assertTrue(loader_cls.support(qcfg, src_info))
+                wrapped = loader_cls(src_info, qcfg)
+                loaded = wrapped.load(source, 0, "cuda", load_cfg)[w_name]
+                torch.testing.assert_close(loaded, expected, rtol=0, atol=0)
+
     def test_mxfp4_nibbles_and_both_scale_encodings(self):
         from rtp_llm.model_loader.native_mega_moe_nvfp4_weight import (
             dequantize_mxfp4_expert,

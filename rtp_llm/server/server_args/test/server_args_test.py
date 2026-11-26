@@ -55,23 +55,32 @@ class ServerArgsSetTest(TestCase):
         )
         from rtp_llm.server.server_args.server_args import EnvArgumentParser
 
-        for env, argv, expected in (
-            (None, [], 0),
-            ("1", [], 1),
-            ("1", ["--nvfp4_kv_cache", "0"], 0),
+        for env, argv, expected, idx_env, idx_argv, expected_idx in (
+            (None, [], 0, None, [], 0),
+            ("1", [], 1, None, [], 0),
+            ("1", ["--nvfp4_kv_cache", "0"], 0, None, [], 0),
+            ("1", [], 1, "1", [], 1),
+            ("1", [], 1, "1", ["--nvfp4_indexer_kv_cache", "0"], 0),
         ):
-            with self.subTest(env=env, argv=argv):
+            with self.subTest(
+                env=env, argv=argv, idx_env=idx_env, idx_argv=idx_argv
+            ):
                 os.environ.pop("NVFP4_KV_CACHE", None)
+                os.environ.pop("NVFP4_INDEXER_KV_CACHE", None)
                 if env is not None:
                     os.environ["NVFP4_KV_CACHE"] = env
+                if idx_env is not None:
+                    os.environ["NVFP4_INDEXER_KV_CACHE"] = idx_env
                 config = KVCacheConfig()
                 parser = EnvArgumentParser()
                 parser.set_root_config(SimpleNamespace())
                 init_kv_cache_group_args(parser, config)
-                parser.parse_args(argv)
+                parser.parse_args(argv + idx_argv)
                 self.assertEqual(config.nvfp4_kv_cache, expected)
+                self.assertEqual(config.nvfp4_indexer_kv_cache, expected_idx)
                 restored = pickle.loads(pickle.dumps(config))
                 self.assertEqual(restored.nvfp4_kv_cache, expected)
+                self.assertEqual(restored.nvfp4_indexer_kv_cache, expected_idx)
 
     def test_env_vars_set_to_py_env_configs(self):
         """Test that environment variables are correctly set to py_env_configs."""

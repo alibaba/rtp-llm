@@ -103,7 +103,7 @@ def cast_to_fp8(x: torch.Tensor):
 
 
 def per_block_cast_to_fp8(
-    x: torch.Tensor, group_size: int
+    x: torch.Tensor, group_size: int, *, use_ue8m0: bool = False
 ) -> tuple[torch.Tensor, torch.Tensor]:
     is_2d = x.dim() == 2
     if is_2d:
@@ -120,9 +120,15 @@ def per_block_cast_to_fp8(
         b, m_padded // group_size, group_size, n_padded // group_size, group_size
     )
     x_amax = x_view.abs().float().amax(dim=(2, 4), keepdim=True).clamp(1e-4)
-    x_scaled = (x_view * (FP8_E4M3_MAX / x_amax)).to(torch.float8_e4m3fn)
+    if use_ue8m0:
+        scale = torch.pow(2.0, torch.ceil(torch.log2(x_amax / FP8_E4M3_MAX)))
+        x_scaled = (x_view * scale.reciprocal()).to(torch.float8_e4m3fn)
+        exp_u8 = ((scale.view(torch.int32) >> 23) & 0xFF).to(torch.uint8)
+        scales = exp_u8.view(torch.float8_e8m0fnu)
+    else:
+        x_scaled = (x_view * (FP8_E4M3_MAX / x_amax)).to(torch.float8_e4m3fn)
+        scales = (x_amax / FP8_E4M3_MAX).to(torch.float32)
     x_quantized = x_scaled.view(b, m_padded, n_padded)[:, :m, :n]
-    scales = (x_amax / FP8_E4M3_MAX).to(torch.float32)
     squeeze_dims = []
 
     if scales.size(2) == 1:
@@ -884,7 +890,7 @@ class LoadQuantPerBlockFp8Weight(PerBlockFp8Weight):
         ):
             return False
         name = src_weight_info.name
-        if name not in cls.w8a8_weight_list or name in [W.mla_kc, W.mla_vc]:
+        if name not in cls.w8a8_weight_list:
             return False
         # skip_moe normally leaves MoE w1/w2 in compute dtype so the FP8->FP4
         # mega_moe path can quantize them itself.  The FP8 mega kernel consumes
@@ -898,17 +904,23 @@ class LoadQuantPerBlockFp8Weight(PerBlockFp8Weight):
             )
         return True
 
-    def __init__(
+    def _init_online_fp8_weights(
         self,
         src_weight_info: AtomicWeight,
         quant_config: QuantizationConfig,
+        group_size: int,
         *args,
         **kwargs,
-    ):
-        self.group_size = quant_config.group_size()
+    ) -> None:
+        self.group_size = group_size
         params = src_weight_info.extract_params(
             src_weight_info.__class__, src_weight_info, quant_config
         )
+        self._kv_b_slice_fun = None
+        if src_weight_info.name in (W.mla_kc, W.mla_vc):
+            # Quantize flat 2D kv_b_proj.weight BEFORE head splitting into W_UK / W_UV.
+            self._kv_b_slice_fun = params.get("process_fun")
+            params["process_fun"] = identity
         kernel: AtomicWeight = create_w8a8_fp8_per_block_weight(
             src_weight_info, **params
         )
@@ -918,16 +930,30 @@ class LoadQuantPerBlockFp8Weight(PerBlockFp8Weight):
         if scale_name:
             scale_params = {**params}
             scale_params["name"] = scale_name
-            scale: AtomicWeight = create_w8a8_fp8_per_block_weight(
-                src_weight_info, **scale_params
-            )
+            scale = create_w8a8_fp8_per_block_weight(src_weight_info, **scale_params)
             sub_weights.update({scale.name: scale})
 
+        kwargs.setdefault("name", src_weight_info.name)
         CompositeWeight.__init__(
             self, sub_weights, quant_config=quant_config, *args, **kwargs
         )
         self.kernel = kernel
         self.scale = scale
+
+    def __init__(
+        self,
+        src_weight_info: AtomicWeight,
+        quant_config: QuantizationConfig,
+        *args,
+        **kwargs,
+    ):
+        self._init_online_fp8_weights(
+            src_weight_info,
+            quant_config,
+            quant_config.group_size(),
+            *args,
+            **kwargs,
+        )
 
     def _load_raw_tensor(
         self,
@@ -936,29 +962,56 @@ class LoadQuantPerBlockFp8Weight(PerBlockFp8Weight):
         device: str,
         load_config: LoadConfig,
     ):
+        from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
+            is_deep_gemm_e8m0_used,
+        )
+
         kernel = self.kernel._load_raw_tensor(
             tensor_source, layer_id, device, load_config
         )
+        raw_weight = kernel.get(self.kernel.name)
+        e8m0_enabled = bool(is_deep_gemm_e8m0_used())
 
-        res = {}
-        scale = None
+        if self.kernel.name in (W.mla_kc, W.mla_vc):
+            q_fp8, scale = per_block_cast_to_fp8(
+                raw_weight, self.group_size, use_ue8m0=e8m0_enabled
+            )
+            rows, cols = q_fp8.shape
+            scale_expanded = (
+                scale.float()
+                .repeat_interleave(self.group_size, dim=0)
+                .repeat_interleave(self.group_size, dim=1)[:rows, :cols]
+            )
+            dequant_flat = (q_fp8.float() * scale_expanded).to(
+                load_config.compute_dtype
+            )
+            sliced = self._kv_b_slice_fun([dequant_flat]).to(load_config.compute_dtype)
+            return {self.kernel.name: sliced.contiguous().to(device)}
+
+        is_moe = self.kernel.name in (W.moe_w1, W.moe_w2)
+        skip_moe_ue8m0 = (
+            os.environ.get("MOE_STRATEGY") in ("mega_moe_fp8", "mega_moe_fp8_se")
+            and is_moe
+        )
+        use_ue8m0 = e8m0_enabled and not skip_moe_ue8m0
+        src_for_quant = (
+            raw_weight.T.contiguous()
+            if (not is_moe and raw_weight.dim() == 2)
+            else raw_weight
+        )
+
         if self.scale:
             quant_kernel, scale = per_block_cast_to_fp8(
-                kernel.get(self.kernel.name), self.group_size
+                src_for_quant, self.group_size, use_ue8m0=use_ue8m0
             )
             if quant_kernel.dim() == 2:
                 scale = scale.reshape([scale.shape[0], -1])
         else:
-            quant_kernel = cast_to_fp8(kernel.get(self.kernel.name))
-
-        if self.kernel.name == W.moe_w1 or self.kernel.name == W.moe_w2:
-            pass
-        elif quant_kernel.dim() == 2:
-            quant_kernel = quant_kernel.T
+            quant_kernel = cast_to_fp8(src_for_quant)
+            scale = None
 
         res = {self.kernel.name: quant_kernel.contiguous().to(device)}
         if self.scale:
-            scale = scale.T if scale.dim() == 2 else scale
             res.update({self.scale.name: scale.contiguous().to(device)})
 
         return res

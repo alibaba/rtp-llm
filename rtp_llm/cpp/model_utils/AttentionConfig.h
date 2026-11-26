@@ -62,6 +62,7 @@ struct AttentionConfigs {
     int  indexer_head_dim = 0;
     int  indexer_head_num = 0;
     int  indexer_topk     = 0;
+    bool nvfp4_indexer_kv_cache = false;
 
     // DeepSeek-V4 specific
     // Per-layer attention type schedule. Length == num_layers (+1 for MTP).

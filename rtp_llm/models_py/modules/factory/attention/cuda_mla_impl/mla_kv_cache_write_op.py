@@ -18,11 +18,16 @@ from .nvfp4_mla_cache import write_nvfp4_mla_cache
 class MlaKVCacheWriteOp:
     """Write compressed KV cache for Multi-Latent Attention."""
 
+    deinterleave_rope: bool = True
+
     def __init__(
         self,
         kv_cache_dtype: KvCacheDataType,
+        *,
+        is_neox_style: bool = False,
     ) -> None:
         self.use_nvfp4_cache = kv_cache_dtype == getattr(KvCacheDataType, "NVFP4", None)
+        self.deinterleave_rope = not is_neox_style
         if self.use_nvfp4_cache:
             self.kv_cache_type = "nvfp4_ds_mla"
         else:
@@ -57,7 +62,11 @@ class MlaKVCacheWriteOp:
                 slot_mapping = fmha_params.slot_mapping[total_global_ids]
             if self.use_nvfp4_cache:
                 write_nvfp4_mla_cache(
-                    append_ckv_t, key_pe, kv_cache.kv_cache_base, slot_mapping
+                    append_ckv_t,
+                    key_pe,
+                    kv_cache.kv_cache_base,
+                    slot_mapping,
+                    deinterleave_rope=self.deinterleave_rope,
                 )
                 return
             compute_ops.concat_and_cache_mla(

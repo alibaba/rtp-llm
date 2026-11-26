@@ -317,6 +317,7 @@ class SparseMlaFp8Op(SparseMlaOp):
     def __init__(self, *args, **kwargs):
         self.use_cuda_graph = bool(kwargs.pop("use_cuda_graph", False))
         self.use_nvfp4_cache = bool(kwargs.pop("use_nvfp4_cache", False))
+        self.deinterleave_rope = bool(kwargs.pop("deinterleave_rope", True))
         bf16_prefill_num_heads = kwargs.pop("bf16_prefill_num_heads", None)
         super().__init__(*args, **kwargs)
         self.bf16_num_heads = (
@@ -521,7 +522,11 @@ class SparseMlaFp8Op(SparseMlaOp):
         )
         for start in range(0, q.size(0), chunk_rows):
             end = min(start + chunk_rows, q.size(0))
-            fp8_cache, remapped = gather_selected_mla_fp8(kv, indices[start:end])
+            fp8_cache, remapped = gather_selected_mla_fp8(
+                kv,
+                indices[start:end],
+                deinterleave_rope=self.deinterleave_rope,
+            )
             sched_meta, _ = get_mla_metadata()
             sink_kwargs = {} if attn_sink is None else {"attn_sink": attn_sink}
             result, _ = flash_mla_with_kvcache(
@@ -652,6 +657,9 @@ class SparseMlaImpl(MlaImplBase):
             op_kwargs["use_cuda_graph"] = is_cuda_graph
             if self.use_nvfp4_cache:
                 op_kwargs["use_nvfp4_cache"] = True
+                op_kwargs["deinterleave_rope"] = (
+                    not attn_configs.rope_config.is_neox_style
+                )
         has_hy4_sink = any(W.hy4_attn_sink in layer for layer in weights)
         kernel_num_heads = attn_configs.head_num
         if has_hy4_sink:
@@ -678,6 +686,7 @@ class SparseMlaImpl(MlaImplBase):
         )
         self.kv_cache_write_op = MlaKVCacheWriteOp(
             kv_cache_dtype=attn_configs.kv_cache_dtype,
+            is_neox_style=self.attn_configs.rope_config.is_neox_style,
         )
 
         self._fuse_qk_rope_cat_cache_mla = (

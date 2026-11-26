@@ -155,9 +155,8 @@ class Indexer(nn.Module):
             scale_fmt=self.scale_fmt,
             is_neox_style=self.is_neox_style,
             use_hadamard=self.use_hadamard,
-            nvfp4_kv_cache=(
-                getattr(attn_config, "kv_cache_dtype", None)
-                == getattr(KvCacheDataType, "NVFP4", object())
+            nvfp4_kv_cache=bool(
+                getattr(attn_config, "nvfp4_indexer_kv_cache", False)
             ),
         )
 
