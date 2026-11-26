@@ -429,7 +429,7 @@ class IndexerTest(TestCase):
         fmha_params = rtp_llm_ops.prepare_sparse_mla_params(
             attn_inputs, config.attn_config.tokens_per_block
         )
-        fmha_params.schedule_metadata = deep_gemm.get_paged_mqa_logits_metadata(
+        fmha_params.schedule_metadata = indexer_op_module._paged_mqa_logits_metadata(
             fmha_params.kvlen_d.view(-1, 1),
             config.attn_config.tokens_per_block,
             deep_gemm.get_num_sms(),

@@ -174,8 +174,9 @@ def _lazy_init_deep_gemm(symbols: List[str]) -> None:
     ):
         # already initialized
         return
-    if not has_deep_gemm():
-        # deep_gemm is not available
+    if not has_deep_gemm() or not torch.cuda.is_available():
+        # deep_gemm 2.8.2 calls cudaGetDevice at import time and raises
+        # cudaErrorNoDevice on GPU-less CPU runners even when installed.
         return
 
     import deep_gemm

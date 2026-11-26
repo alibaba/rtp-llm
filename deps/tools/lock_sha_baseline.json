@@ -7,9 +7,9 @@
      "from": [
       "8ca0bce659a60b2a5c3459792b5eb4bcc46ed3b28b9b6bd94f278d670a7ffa7f"
      ],
-     "reason": "2.8.0+6d6aaad.cu132 removed from the wheel index; re-pinned to 2.8.0+122e18b.cu132",
+     "reason": "2.8.0+6d6aaad.cu132 removed from the wheel index (re-pinned to 2.8.0+122e18b.cu132, 5d5afc1d); then re-pinned to 2.8.2+a5165ad.cu132 for the SM120 FP8xFP4 grouped GEMM kernels",
      "to": [
-      "5d5afc1d58bb24f7c8a460f74e8dff39a99d7a6ebae35152cdcfd5f393ead080"
+      "4cfa7d2a31acfe426ec48ba13fd93f8fa6944bbaf1efe95cea091c8dfec34c92"
      ]
     },
     "flash-mla": {
@@ -25816,7 +25816,7 @@
    "76c04452cfbd8acf363ceeea1b59dc95b970fc945f86dec5b39bbb1b200dfcf0"
   ],
   "deep-gemm": [
-   "5d5afc1d58bb24f7c8a460f74e8dff39a99d7a6ebae35152cdcfd5f393ead080"
+   "4cfa7d2a31acfe426ec48ba13fd93f8fa6944bbaf1efe95cea091c8dfec34c92"
   ],
   "distro": [
    "2fa77c6fd8940f116ee1d6b94a2f90b13b5ea8d019b98bc8bafdcabcdd9bdbed",

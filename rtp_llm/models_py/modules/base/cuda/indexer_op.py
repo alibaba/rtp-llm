@@ -1,5 +1,6 @@
 """CUDA-specific indexer operations for DeepSeek-V3.2 DSA mechanism."""
 
+from contextlib import nullcontext
 from typing import Any, Dict, Optional, Tuple
 
 import torch
@@ -8,6 +9,10 @@ from torch import nn
 from rtp_llm.models_py.distributed.collective_torch import Group
 from rtp_llm.models_py.distributed.pynccl_cp import all_gather
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
+from rtp_llm.models_py.modules.dsv4.fp8._indexer_score import (
+    supports_mqa_logits,
+    supports_paged_mqa_logits,
+)
 from rtp_llm.models_py.utils.arch import is_sm10x
 from rtp_llm.ops.compute_ops import LayerKVCache, rtp_llm_ops
 
@@ -31,10 +36,55 @@ from rtp_llm.models_py.triton_kernels.legacy_fp8_indexer_score import (
 )
 
 
+def _can_use_deepgemm_mqa(q: torch.Tensor) -> bool:
+    if deep_gemm is None or not hasattr(deep_gemm, "fp8_mqa_logits"):
+        return False
+    if q is None or not getattr(q, "is_cuda", False):
+        return True
+    return supports_mqa_logits(q.device, backend=deep_gemm)
+
+
+def _can_use_deepgemm_paged_mqa(
+    q: torch.Tensor,
+    block_kv: Optional[int] = None,
+    *,
+    has_schedule_metadata: bool = False,
+) -> bool:
+    if deep_gemm is None or not hasattr(deep_gemm, "fp8_paged_mqa_logits"):
+        return False
+    if not has_schedule_metadata and not (
+        hasattr(deep_gemm, "get_legacy_paged_mqa_logits_metadata")
+        or hasattr(deep_gemm, "get_paged_mqa_logits_metadata")
+    ):
+        return False
+    if q is None or not getattr(q, "is_cuda", False):
+        return True
+    return supports_paged_mqa_logits(q.device, block_kv, backend=deep_gemm)
+
+
 def _fp8_mqa_logits_compat(*args, **kwargs):
-    if deep_gemm is not None and hasattr(deep_gemm, "fp8_mqa_logits"):
-        return deep_gemm.fp8_mqa_logits(*args, **kwargs)
+    q = args[0] if args else kwargs.get("q")
+    if _can_use_deepgemm_mqa(q):
+        dev_ctx = (
+            torch.cuda.device(q.device)
+            if q is not None and getattr(q, "is_cuda", False)
+            else nullcontext()
+        )
+        with dev_ctx:
+            return deep_gemm.fp8_mqa_logits(*args, **kwargs)
     return legacy_fp8_mqa_logits(*args, **kwargs)
+
+
+def _paged_mqa_logits_metadata(*args, **kwargs):
+    """Schedule for ``deep_gemm.fp8_paged_mqa_logits``.
+
+    DeepGEMM 2.8.2 pairs that kernel with a dedicated legacy entry; on SM100
+    its ``get_paged_mqa_logits_metadata`` only serves the fp8_fp4 kernels.
+    """
+    metadata = getattr(deep_gemm, "get_legacy_paged_mqa_logits_metadata", None)
+    if not callable(metadata):
+        metadata = deep_gemm.get_paged_mqa_logits_metadata
+    return metadata(*args, **kwargs)
 
 
 _paged_mqa_context_lens_dim: Optional[int] = None
@@ -47,17 +97,23 @@ def _get_paged_mqa_logits_metadata_compat(
     flat = context_lens.reshape(-1).contiguous()
     cached_dim = _paged_mqa_context_lens_dim
     lengths = flat if cached_dim == 1 else flat.view(-1, 1)
+    dev_ctx = (
+        torch.cuda.device(context_lens.device)
+        if isinstance(context_lens, torch.Tensor) and context_lens.is_cuda
+        else nullcontext()
+    )
     # Metadata acceptance alone does not establish the logits ABI. Only the
     # complete logits call below may publish _paged_mqa_context_lens_dim.
-    try:
-        return deep_gemm.get_paged_mqa_logits_metadata(lengths, block_kv, num_sms)
-    except (AssertionError, RuntimeError) as error:
-        if cached_dim is not None:
-            raise
+    with dev_ctx:
         try:
-            return deep_gemm.get_paged_mqa_logits_metadata(flat, block_kv, num_sms)
-        except (AssertionError, RuntimeError) as fallback_error:
-            raise error from fallback_error
+            return _paged_mqa_logits_metadata(lengths, block_kv, num_sms)
+        except (AssertionError, RuntimeError) as error:
+            if cached_dim is not None:
+                raise
+            try:
+                return _paged_mqa_logits_metadata(flat, block_kv, num_sms)
+            except (AssertionError, RuntimeError) as fallback_error:
+                raise error from fallback_error
 
 
 def _fp8_paged_mqa_logits_compat(
@@ -79,7 +135,9 @@ def _fp8_paged_mqa_logits_compat(
     rank only after the complete logits call succeeds, instead of coupling
     RTP-LLM to a vendor package version string.
     """
-    if deep_gemm is None or not hasattr(deep_gemm, "fp8_paged_mqa_logits"):
+    if not _can_use_deepgemm_paged_mqa(
+        q, block_kv, has_schedule_metadata=schedule_metadata is not None
+    ):
         return legacy_fp8_paged_mqa_logits(
             q, kv_cache, weights, context_lens, block_table, max_context_len
         )
@@ -91,39 +149,45 @@ def _fp8_paged_mqa_logits_compat(
     flat_context_lens = context_lens.reshape(-1).contiguous()
     candidates = (cached_dim,) if cached_dim is not None else (2, 1)
     first_error: Optional[Exception] = None
-    for context_lens_dim in candidates:
-        adapted_context_lens = (
-            flat_context_lens.view(-1, 1)
-            if context_lens_dim == 2
-            else flat_context_lens
-        )
-        try:
-            metadata = schedule_metadata
-            if metadata is None:
-                metadata = deep_gemm.get_paged_mqa_logits_metadata(
-                    adapted_context_lens,
-                    block_kv,
-                    deep_gemm.get_num_sms(),
-                )
-            logits = deep_gemm.fp8_paged_mqa_logits(
-                q,
-                kv_cache,
-                weights,
-                adapted_context_lens,
-                block_table,
-                metadata,
-                max_context_len,
-                clean_logits=False,
+    dev_ctx = (
+        torch.cuda.device(q.device)
+        if isinstance(q, torch.Tensor) and q.is_cuda
+        else nullcontext()
+    )
+    with dev_ctx:
+        for context_lens_dim in candidates:
+            adapted_context_lens = (
+                flat_context_lens.view(-1, 1)
+                if context_lens_dim == 2
+                else flat_context_lens
             )
-        except (AssertionError, RuntimeError) as error:
-            if cached_dim is not None:
-                raise
-            if first_error is None:
-                first_error = error
-                continue
-            raise first_error from error
-        _paged_mqa_context_lens_dim = context_lens_dim
-        return logits
+            try:
+                metadata = schedule_metadata
+                if metadata is None:
+                    metadata = _paged_mqa_logits_metadata(
+                        adapted_context_lens,
+                        block_kv,
+                        deep_gemm.get_num_sms(),
+                    )
+                logits = deep_gemm.fp8_paged_mqa_logits(
+                    q,
+                    kv_cache,
+                    weights,
+                    adapted_context_lens,
+                    block_table,
+                    metadata,
+                    max_context_len,
+                    clean_logits=False,
+                )
+            except (AssertionError, RuntimeError) as error:
+                if cached_dim is not None:
+                    raise
+                if first_error is None:
+                    first_error = error
+                    continue
+                raise first_error from error
+            _paged_mqa_context_lens_dim = context_lens_dim
+            return logits
 
     raise RuntimeError("DeepGEMM paged MQA context-lens probing failed")
 

@@ -163,7 +163,7 @@ def whl_deps():
             "torch==2.11.0+cu130",
             "torchvision==0.26.0+cu130",
             # GLM5 kernels shared by the CUDA13 inference paths.
-            "deep-gemm==2.8.0+122e18b.cu132",
+            "deep-gemm==2.8.2+a5165ad.cu132",
             "flash-mla==1.0.0+9241ae3",
             "deep-ep==2.1.0+a56d615",
             "fast-hadamard-transform@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/whls/fast_hadamard/fast_hadamard_transform-1.1.0-cp310-cp310-linux_x86_64.whl",

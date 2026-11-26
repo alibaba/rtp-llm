@@ -116,6 +116,43 @@ class IndexerPagedContractTest(unittest.TestCase):
                     if precomputed:
                         vendor.get_paged_mqa_logits_metadata.assert_not_called()
 
+    def test_legacy_logits_use_the_legacy_schedule_entry(self):
+        lengths = torch.tensor([7, 11], dtype=torch.int32)
+        schedule = torch.tensor([[0, 0], [2, 0]], dtype=torch.int32)
+        legacy = Mock(return_value=schedule)
+        shared = Mock(side_effect=RuntimeError("varlen indices required"))
+
+        def logits(q, kv, weights, context, table, metadata, max_len, **kw):
+            self.assertIs(metadata, schedule)
+            return torch.zeros(2, 64)
+
+        vendor = SimpleNamespace(
+            fp8_paged_mqa_logits=logits,
+            get_legacy_paged_mqa_logits_metadata=legacy,
+            get_paged_mqa_logits_metadata=shared,
+            get_num_sms=lambda: 1,
+        )
+        with (
+            patch.object(indexer_op, "deep_gemm", vendor),
+            patch.object(indexer_op, "_paged_mqa_context_lens_dim", None),
+        ):
+            self.assertIs(
+                indexer_op._get_paged_mqa_logits_metadata_compat(lengths, 64, 1),
+                schedule,
+            )
+            result = indexer_op._fp8_paged_mqa_logits_compat(
+                torch.empty(0),
+                torch.empty(0),
+                torch.empty(0),
+                lengths,
+                torch.empty(0),
+                64,
+                64,
+            )
+        self.assertEqual(result.shape, (2, 64))
+        shared.assert_not_called()
+        self.assertEqual(legacy.call_count, 2)
+
     def test_stable_topk_dispatch_respects_architecture(self):
         for sm10x in (False, True):
             with (
