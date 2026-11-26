@@ -6,7 +6,10 @@ import torch
 import triton
 import triton.language as tl
 
-from rtp_llm.models_py.utils.device_capability import cached_device_capability
+from rtp_llm.models_py.utils.device_capability import (
+    cached_device_capability,
+    sm90_pdl_enabled,
+)
 
 try:
     from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
@@ -161,7 +164,7 @@ class Qwen4PrefillGatedNorm(torch.nn.Module):
             )
         return self.native(x, gate)
 
-    def forward_project(self, x, gate, projection):
+    def forward_project(self, x, gate, projection, *, pre_ready_gate=False):
         """Preserve the BF16 norm rounding and the selected FP8 quantizer."""
         capability = cached_device_capability(x.device)
         sm90 = capability == (9, 0)
@@ -227,6 +230,7 @@ class Qwen4PrefillGatedNorm(torch.nn.Module):
                 groups=groups,
                 scale_ue8m0=not sm90,
                 v2=v2,
+                pdl=pre_ready_gate and sm90_pdl_enabled(x.device),
             )
             return consumer.forward_quantized(quantized, scales)
         return projection(self(x, gate))

@@ -1686,11 +1686,13 @@ class Qwen3NextGatedDeltaNet(nn.Module):
 
         return self._output_project(local_attn_out, z)
 
-    def _output_project(self, attn_output, gate):
+    def _output_project(self, attn_output, gate, *, pre_ready_gate=False):
         value = attn_output.reshape(-1, self.local_num_v_heads * self.head_v_dim)
         project = getattr(self.norm, "forward_project", None)
         if callable(project):
-            return project(value, gate, self.out_proj)
+            return project(
+                value, gate, self.out_proj, pre_ready_gate=pre_ready_gate
+            )
         return self.out_proj(self.norm(value, gate))
 
     def forward(
@@ -1710,12 +1712,12 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         ), "prefill_conv1d_meta is required for prefill"
         is_prefill = attention_inputs.is_prefill and not attn_meta.is_target_verify
         overlap_ba = not is_prefill and hidden_states.shape[0] <= 512
-        defer_ba_wait = (
+        fp8_packed_decode = (
             overlap_ba
-            and torch.cuda.is_current_stream_capturing()
             and self._fp8_input_project_pair is not None
             and getattr(self.decode_gdn, "_packed_decode", None) is not None
         )
+        defer_ba_wait = fp8_packed_decode and torch.cuda.is_current_stream_capturing()
         projected_states_qkvz, projected_states_ba = self._input_project(
             hidden_states,
             overlap_ba=overlap_ba,
@@ -1756,7 +1758,12 @@ class Qwen3NextGatedDeltaNet(nn.Module):
                 torch.cuda.current_stream(hidden_states.device).wait_stream(
                     ba_ready_stream
                 )
-        attn_output = self._output_project(attn_output, z)
+        # Z is already available. Compile the same PDL variant before capture.
+        pre_ready_gate = defer_ba_wait or (
+            fp8_packed_decode
+            and os.environ.get("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD") == "1"
+        )
+        attn_output = self._output_project(attn_output, z, pre_ready_gate=pre_ready_gate)
         if self.parallelism_config.get_attn_tp_size() > 1:
             reduce_output = getattr(self, "tp_all_reduce", all_reduce)
             if not is_prefill:
