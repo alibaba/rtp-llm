@@ -392,6 +392,7 @@ bool RtpLLMHiddenStateCaptureMetrics::init(kmonitor::MetricsGroupManager* manage
     REGISTER_GAUGE_MUTABLE_METRIC(quota_samples_metric, "rtp_llm_hidden_state_capture_quota_samples");
     REGISTER_GAUGE_MUTABLE_METRIC(quota_bytes_metric, "rtp_llm_hidden_state_capture_quota_bytes");
     REGISTER_GAUGE_MUTABLE_METRIC(quota_tokens_metric, "rtp_llm_hidden_state_capture_quota_tokens");
+    REGISTER_QPS_MUTABLE_METRIC(pending_put_dropped_samples_qps_metric, "rtp_llm_hidden_state_capture_pending_put_dropped_samples_qps");
     REGISTER_QPS_MUTABLE_METRIC(batch_qps_metric, "rtp_llm_hidden_state_capture_batch_qps");
     REGISTER_QPS_MUTABLE_METRIC(publish_success_qps_metric, "rtp_llm_hidden_state_capture_publish_success_qps");
     REGISTER_QPS_MUTABLE_METRIC(failure_qps_metric, "rtp_llm_hidden_state_capture_failure_qps");
@@ -456,6 +457,9 @@ void RtpLLMHiddenStateCaptureMetrics::report(const kmonitor::MetricsTags*       
         RTP_REPORT_MUTABLE_METRIC(quota_samples_metric, collector->quota_samples);
         RTP_REPORT_MUTABLE_METRIC(quota_bytes_metric, collector->quota_bytes);
         RTP_REPORT_MUTABLE_METRIC(quota_tokens_metric, collector->quota_tokens);
+    }
+    if (collector->pending_put_dropped_samples > 0) {
+        RTP_REPORT_MUTABLE_METRIC(pending_put_dropped_samples_qps_metric, collector->pending_put_dropped_samples);
     }
     REPORT_QPS(batch_qps);
     REPORT_QPS(publish_success_qps);

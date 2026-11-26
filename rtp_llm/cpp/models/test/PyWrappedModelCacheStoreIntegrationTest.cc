@@ -322,6 +322,7 @@ public:
         addMetric(values, types, metrics->quota_samples_metric);
         addMetric(values, types, metrics->quota_bytes_metric);
         addMetric(values, types, metrics->quota_tokens_metric);
+        addMetric(values, types, metrics->pending_put_dropped_samples_qps_metric);
         addMetric(values, types, metrics->batch_qps_metric);
         addMetric(values, types, metrics->publish_success_qps_metric);
         addMetric(values, types, metrics->failure_qps_metric);
@@ -1821,7 +1822,7 @@ py::dict runGenerationPrefillCaptureScenario(py::object                         
             }
             const auto calls_before      = py_model.attr("forward_calls").cast<int64_t>();
             GptModelOutputs output;
-            py::dict        forward;
+            py::dict forward;
             model.prepareAttentionInputs(inputs);
             forward["prepared_after_prepare"] = PyWrappedModelTestPeer::attentionInputsPrepared(model);
             forward["attention_metadata_after_prepare"] = PyWrappedModelTestPeer::preparedAttentionMetadata(model);

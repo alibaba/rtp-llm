@@ -440,6 +440,7 @@ public:
     int64_t quota_bytes   = 0;
     int64_t quota_tokens  = 0;
 
+    int64_t pending_put_dropped_samples = 0;
     bool batch_qps                  = false;
     bool publish_success_qps        = false;
     bool failure_qps                = false;
@@ -492,6 +493,7 @@ public:
     kmonitor::MutableMetric* quota_bytes_metric              = nullptr;
     kmonitor::MutableMetric* quota_tokens_metric             = nullptr;
 
+    kmonitor::MutableMetric* pending_put_dropped_samples_qps_metric = nullptr;
     kmonitor::MutableMetric* batch_qps_metric                  = nullptr;
     kmonitor::MutableMetric* publish_success_qps_metric        = nullptr;
     kmonitor::MutableMetric* failure_qps_metric                = nullptr;

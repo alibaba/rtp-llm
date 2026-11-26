@@ -819,7 +819,7 @@ bool HiddenStateCapturePublisher::observeAsyncErrors(FailureStage failure_stage,
         if (!PyExceptionInstance_Check(error.ptr())) {
             throw std::runtime_error("take_async_errors returned a non-exception entry");
         }
-        success = false;
+        success           = false;
         const auto failure = CaptureFailure::fromPython(*this, failure_stage, FailureDisposition::OPERATIONAL,
                                                         error, nullptr, failure_stage != FailureStage::SHUTDOWN);
         // The FIFO reports a historical error, not a request ID or a completion fence.
@@ -1155,6 +1155,13 @@ void HiddenStateCapturePublisher::publishOnWorker(PublishTask& task) {
 
             if (put_completion_pending_) {
                 // Only the original task's drain and fence may unblock staging reuse.
+                RtpLLMHiddenStateCaptureMetricsCollector collector;
+                collector.pending_put_dropped_samples = task.ids.size();
+                reportMetrics(collector);
+                RTP_LLM_INTERVAL_LOG(300, WARN,
+                                     "[TorchSpec hidden-state publisher] skipping admitted batch (first request %ld, "
+                                     "%zu samples) without PUT: previous PUT completion is unconfirmed",
+                                     task.ids.front(), task.ids.size());
                 record_failed_publish();
                 return;
             }

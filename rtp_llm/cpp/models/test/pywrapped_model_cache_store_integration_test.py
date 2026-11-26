@@ -97,6 +97,7 @@ _CAPTURE_QPS_METRICS = {
     f"{_CAPTURE_METRIC_PREFIX}skip_config_qps",
     f"{_CAPTURE_METRIC_PREFIX}skip_unavailable_qps",
     f"{_CAPTURE_METRIC_PREFIX}batch_qps",
+    f"{_CAPTURE_METRIC_PREFIX}pending_put_dropped_samples_qps",
     f"{_CAPTURE_METRIC_PREFIX}publish_success_qps",
     f"{_CAPTURE_METRIC_PREFIX}failure_qps",
     f"{_CAPTURE_METRIC_PREFIX}initialization_failure_qps",
@@ -4299,7 +4300,7 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         )
 
     def test_capture_async_memory_error_is_not_a_put_fence(self) -> None:
-        publisher = self.capturePublisher(samples=2, bytes=96, tokens=2, poll_interval_ms=60000)
+        publisher = self.capturePublisher(samples=3, bytes=144, tokens=3, poll_interval_ms=60000)
         self.addCleanup(publisher.close)
         store = _FakeEagleMooncakeStore.instances[-1]
         with patch.object(store, "flush", side_effect=RuntimeError("PUT drain unconfirmed")):
@@ -4307,13 +4308,23 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
             first.cancel()
             store.abandon_capture("rtp_TestActor_1")
             store.pending_async_errors.append(MemoryError("completed future without a request ID"))
-            self.submitCapture(publisher, 2)
+            reservations = [publisher.reserve(i, 1).reservation for i in (2, 3)]
+            self.assertTrue(all(reservations))
+            self.assertTrue(publisher.submit(
+                torch.zeros((2, 3), dtype=torch.float16), torch.tensor([8, 9]),
+                torch.ones(2, dtype=torch.int32), torch.tensor([2, 3]), 2, "batch after unconfirmed PUT",
+            ))
+            self.assertTrue(publisher.drain())
             self.assertEqual(store.pending_async_errors, [])
             self.assertFalse(publisher.fatal)
             self.assertTrue(publisher.poll())
             self.assertEqual(store.put_attempts, 1)
             self.assertEqual(store.reclaim_calls, [])
             self.assertEqual((publisher.inflight_samples, publisher.inflight_bytes), (1, 48))
+            self.assertIn("completed future without a request ID", publisher.diagnostic)
+            metrics, _ = publisher.metrics()
+            self.assertCaptureQps(metrics, batch=0, publish_success=0, failure=2,
+                                  store_failure=2, operational_failure=2, pending_put_dropped_samples=2)
 
     def test_capture_unformattable_async_fatal_retains_owners_without_cleanup(self) -> None:
         fatal_before_format = []

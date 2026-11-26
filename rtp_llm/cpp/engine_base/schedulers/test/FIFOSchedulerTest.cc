@@ -2276,6 +2276,65 @@ TEST_F(FIFOSchedulerTest, testBatchDecodeLoneReservedCaptureBacksOffWhileExterna
     EXPECT_EQ(cache_manager->freeBlocksNum(), 3);
 }
 
+TEST_F(FIFOSchedulerTest, testBatchDecodeReservedCaptureExpiresWhileExternalKVIsHeld) {
+    using namespace std::chrono_literals;
+    for (int batch_size : {2, 1}) {
+        SCOPED_TRACE(batch_size == 2 ? "strict_only" : "full batch continuation");
+        auto [cache_manager, resource_context, model_config, runtime_config] =
+            makeBatchDecodeResources(makeMhaCacheConfig(1, 4, 1, 4, 1, rtp_llm::DataType::TYPE_FP16));
+        ASSERT_TRUE(cache_manager->init());
+        resource_context.role_type = RoleType::PREFILL;
+        runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size = batch_size;
+        auto now = std::chrono::steady_clock::time_point{};
+        int quota_returns = 0;
+        BatchDecodeScheduler scheduler(runtime_config, cache_manager, nullptr, 0, 20ms, [&now] { return now; });
+        auto holder = makeStream({1}, model_config, runtime_config, resource_context, /*max_new_tokens=*/0);
+        holder->reportEvent(StreamEvents::CanRun);
+        ASSERT_EQ(holder->moveToNext(), StreamState::RUNNING);
+        ASSERT_EQ(cache_manager->freeBlocksNum(), 2);
+
+        auto blocked = makeStream({2, 3, 4}, model_config, runtime_config, resource_context, /*max_new_tokens=*/0);
+        blocked->generateConfig()->capture_hidden_states = true;
+        blocked->generateConfig()->reuse_cache = false;
+        blocked->setHiddenStateCaptureReservation(
+            std::make_shared<HiddenStateCaptureReservation>([&quota_returns]() noexcept { ++quota_returns; }));
+        ASSERT_TRUE(blocked->canExecuteReservedHiddenStateCapture());
+        ASSERT_LE(blocked->getTimeoutMs(), 0);
+        ASSERT_TRUE(scheduler.enqueue(blocked).ok());
+        const auto start = now;
+        for (auto elapsed : {0ms, 19ms}) {
+            now = start + elapsed;
+            auto pending = scheduler.schedule();
+            ASSERT_TRUE(pending.ok());
+            ASSERT_TRUE(pending->streams.empty());
+            ASSERT_EQ(blocked->getStatus(), StreamState::WAITING);
+            ASSERT_GT(blocked->streamCacheResource().mallocFailedTimes(), 0);
+            ASSERT_TRUE(blocked->hasHiddenStateCaptureReservation());
+            EXPECT_EQ(quota_returns, 0);
+        }
+        now = start + 20ms;
+        auto expired = scheduler.schedule();
+        ASSERT_TRUE(expired.ok());
+        ASSERT_TRUE(expired->streams.empty());
+        ASSERT_EQ(blocked->getStatus(), StreamState::FINISHED);
+        EXPECT_EQ(blocked->statusInfo().code(), ErrorCode::MALLOC_FAILED);
+        EXPECT_FALSE(blocked->hasHiddenStateCaptureReservation());
+        EXPECT_EQ(quota_returns, 1);
+        EXPECT_EQ(scheduler.onflightStreams(), 0);
+
+        // A fresh batch fits without releasing the holder or retrying the expired capture.
+        std::list<GenerateStreamPtr> peers;
+        for (int i = 0; i < batch_size; ++i) {
+            peers.push_back(makeStream({5 + i}, model_config, runtime_config, resource_context, /*max_new_tokens=*/0));
+            ASSERT_TRUE(scheduler.enqueue(peers.back()).ok());
+        }
+        auto next = scheduler.schedule();
+        ASSERT_TRUE(next.ok());
+        EXPECT_EQ(next->streams, peers);
+        EXPECT_EQ(quota_returns, 1);
+    }
+}
+
 TEST_F(FIFOSchedulerTest, testBatchDecodeSchedulerReleasesCancelledReservationBelowBatchSize) {
     auto [cache_manager, resource_context, model_config, runtime_config] =
         makeBatchDecodeResources(makeMhaCacheConfig(1, 16, 1, 4, 1, rtp_llm::DataType::TYPE_FP16));

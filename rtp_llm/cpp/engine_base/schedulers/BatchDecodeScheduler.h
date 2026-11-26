@@ -14,6 +14,7 @@
 #include <functional>
 #include <thread>
 #include <list>
+#include <unordered_map>
 #include <unordered_set>
 #include <exception>
 #include <limits>
@@ -231,6 +232,7 @@ public:
         const auto reap = [this](auto it) {
             (*it)->moveToNext();
             (*it)->cancelHiddenStateCapture();
+            allocation_retry_deadlines_.erase(it->get());
             waiting_reservations_.erase(*it);
             capture_batch_.remove(*it);
             return waiting_streams_.erase(it);
@@ -315,10 +317,7 @@ public:
                         // that allocation its own budget, independent of time spent doing I/O.
                         allocation_deadline = now_() + allocation_wait_timeout_;
                     } else if (state == StreamState::WAITING && now_() >= allocation_deadline) {
-                        stream->reportError(ErrorCode::MALLOC_FAILED,
-                                            "BatchDecodeScheduler: KV allocation reached the "
-                                                + std::to_string(allocation_wait_timeout_.count()) + " ms wait limit");
-                        stream->moveToNext();
+                        finishAllocationTimeout(stream);
                         break;
                     }
                     std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -353,8 +352,20 @@ public:
                     capture_batch_.push_back(stream);
                     continue;
                 }
+                const auto previous_state = state;
+                const auto failed_before  = stream->streamCacheResource().mallocFailedTimes();
                 stream->reportEvent(StreamEvents::CanRun);
                 state = stream->moveToNext();
+                if (previous_state == StreamState::WAITING && state == StreamState::WAITING
+                    && stream->streamCacheResource().mallocFailedTimes() > failed_before) {
+                    // Always yield the first miss so runnable peers can release KV, even with a zero budget.
+                    const auto now = now_();
+                    const auto [it, first_miss] =
+                        allocation_retry_deadlines_.try_emplace(stream.get(), now + allocation_wait_timeout_);
+                    if (!first_miss && now >= it->second && !stop_requested_.load()) {
+                        state = finishAllocationTimeout(stream);
+                    }
+                }
                 if (state == StreamState::WAITING || state == StreamState::LOADING_CACHE) {
                     stream->clearCanRun();
                     retry = true;
@@ -369,6 +380,7 @@ public:
                     stream->cancelHiddenStateCapture();
                 }
             }
+            allocation_retry_deadlines_.erase(stream.get());
             waiting_streams_.remove(stream);
             waiting_reservations_.erase(stream);
             addStreamToNewState(stream, state);
@@ -475,6 +487,9 @@ public:
                     stream->reportError(ErrorCode::CANCELLED, "scheduler stopped");
                 }
                 stream->moveToNext();
+                if (allocation_retry_deadlines_.erase(stream.get())) {
+                    stream->cancelHiddenStateCapture();
+                }
             }
             streams->clear();
         }
@@ -499,6 +514,13 @@ public:
     }
 
 private:
+    StreamState finishAllocationTimeout(const GenerateStreamPtr& stream) {
+        stream->reportError(ErrorCode::MALLOC_FAILED,
+                            "BatchDecodeScheduler: KV allocation reached the "
+                                + std::to_string(allocation_wait_timeout_.count()) + " ms wait limit");
+        return stream->moveToNext();
+    }
+
     GenerateStreamPtr tryReserveBatchReplaySlots(const std::list<GenerateStreamPtr>& streams) {
         std::vector<StreamCacheResource*> reservations;
         for (const auto& stream : streams) {
@@ -529,6 +551,8 @@ private:
     bool                         draining_mixed_modes_ = false;
     // Index reservations at queue entry, not by rescanning ordinary underfilled queues on wakeup.
     std::unordered_set<GenerateStreamPtr> waiting_reservations_;
+    // Non-owning: only streams still in waiting_streams_ can have an outstanding allocation retry.
+    std::unordered_map<const GenerateStream*, std::chrono::steady_clock::time_point> allocation_retry_deadlines_;
     // Outstanding members of one normally admitted capture-bearing zero-token batch (at most B).
     std::list<GenerateStreamPtr> capture_batch_;
 
