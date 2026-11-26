@@ -5,8 +5,9 @@ Subject: [PATCH 1/1] Rename gettid() functions.
 
 glibc 2.30 will declare its own gettid; see https://sourceware.org/git/?p=glibc.git;a=commit;h=1d0fc213824eaa2a8f8c4385daaa698ee8fb7c92. Rename the grpc versions to avoid naming conflicts.
 
-Downstream RTP-LLM addition: require compile-time Linux error-queue support
-before enabling gRPC error tracking.
+Downstream RTP-LLM addition: let the TCP implementation report error-queue
+support to the event engine. Its callback and the event engine can be built
+with different Linux error-queue capabilities.
 ---
  src/core/lib/gpr/log_linux.cc          | 4 ++--
  src/core/lib/gpr/log_posix.cc          | 4 ++--
@@ -82,20 +83,47 @@ index b6d13b44d1..e1cda21b3e 100644
 diff --git src/core/lib/iomgr/ev_posix.cc src/core/lib/iomgr/ev_posix.cc
 --- src/core/lib/iomgr/ev_posix.cc
 +++ src/core/lib/iomgr/ev_posix.cc
-@@ -239,7 +239,9 @@
+@@ -38,3 +38,3 @@
+ #include "src/core/lib/iomgr/ev_poll_posix.h"
+-#include "src/core/lib/iomgr/internal_errqueue.h"
++#include "src/core/lib/iomgr/tcp_posix.h"
+
+@@ -239,7 +239,3 @@
  bool grpc_event_engine_can_track_errors(void) {
 -  /* Only track errors if platform supports errqueue. */
 -  if (grpc_core::kernel_supports_errqueue()) {
 -    return g_event_engine->can_track_err;
 -  }
-+#ifdef GRPC_LINUX_ERRQUEUE
-+  return grpc_core::kernel_supports_errqueue() && g_event_engine->can_track_err;
-+#else
-+  // The TCP error-queue callback requires compile-time support. Leave socket
-+  // errors on the ordinary read/write path when that callback is unavailable.
-   return false;
-+#endif
+-  return false;
++  return grpc_tcp_supports_errqueue() && g_event_engine->can_track_err;
  }
+diff --git src/core/lib/iomgr/tcp_posix.cc src/core/lib/iomgr/tcp_posix.cc
+--- src/core/lib/iomgr/tcp_posix.cc
++++ src/core/lib/iomgr/tcp_posix.cc
+@@ -52,2 +52,3 @@
+ #include "src/core/lib/iomgr/executor.h"
++#include "src/core/lib/iomgr/internal_errqueue.h"
+ #include "src/core/lib/profiling/timers.h"
+@@ -596,2 +597,10 @@
+ static void tcp_handle_error(void* arg /* grpc_tcp */, grpc_error* error);
++
++bool grpc_tcp_supports_errqueue(void) {
++#ifdef GRPC_LINUX_ERRQUEUE
++  return grpc_core::kernel_supports_errqueue();
++#else
++  return false;
++#endif
++}
+
+diff --git src/core/lib/iomgr/tcp_posix.h src/core/lib/iomgr/tcp_posix.h
+--- src/core/lib/iomgr/tcp_posix.h
++++ src/core/lib/iomgr/tcp_posix.h
+@@ -42,2 +42,5 @@
+
++/* Report error-queue support from the build that supplies the TCP callback. */
++bool grpc_tcp_supports_errqueue(void);
++
+ /* Create a tcp endpoint given a file desciptor and a read slice size.
 --
 2.20.1.12.g72788fdb
 
