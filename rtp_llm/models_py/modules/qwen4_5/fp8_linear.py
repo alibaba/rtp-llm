@@ -21,7 +21,6 @@ FP8/MXFP8 modes and 4x weight compression in opt-in ``w4a8`` mode:
 
 from __future__ import annotations
 
-import contextlib
 import functools
 import os
 from typing import Any, Dict, Optional, Tuple
@@ -33,6 +32,7 @@ import triton
 import triton.language as tl
 
 from rtp_llm.models_py.modules.qwen4_5.activation import (
+    _cuda_device_ctx,
     per_token_group_quant_fp8_ue8m0,
     quant_fp8_1x128_deepgemm_triton,
 )
@@ -47,16 +47,6 @@ _QUANT_EPS = 1.0e-12
 _TRTLLM_PERM_CACHE: Dict[torch.Size, torch.Tensor] = {}
 _MXFP8_PROBE_CACHE: Dict[int, bool] = {}
 _TRTLLM_LL_PROBE_CACHE: Dict[int, bool] = {}
-
-
-def _cuda_device_ctx(device: torch.device):
-    if (
-        device.type == "cuda"
-        and device.index is not None
-        and device.index != torch.cuda.current_device()
-    ):
-        return torch.cuda.device(device)
-    return contextlib.nullcontext()
 
 
 def has_flashinfer_mxfp8(device_index: int = 0) -> bool:
@@ -399,6 +389,57 @@ class SM100FP8Linear(nn.Module):
         self._allow_decode_scaled_mm = bool(allow_decode_scaled_mm)
         self._k_mul_n = self.in_features * self.out_features
         self._is_wide = self.out_features >= 16384
+        self._has_bias = bool(bias)
+        self._min_dim = min(self.in_features, self.out_features)
+        self._dims_128_ok = (self.in_features & 127) == 0 and (self.out_features & 127) == 0
+        self._auto_dg_min_m = 1 << 60
+        self._auto_mx_min_m = 1 << 60
+        self._fast_bf16_max_elems = 0
+        self._refresh_fast_dispatch()
+
+    def _refresh_fast_dispatch(self) -> None:
+        N, K = self.out_features, self.in_features
+        self._has_bias = self.bias is not None
+        min_dim = K if K < N else N
+        self._min_dim = min_dim
+        dims_128 = (K & 127) == 0 and (N & 127) == 0
+        self._dims_128_ok = dims_128
+
+        dg_min_m = 1 << 60
+        if dims_128 and self.w_dg_fp8 is not None:
+            if self._allow_decode_scaled_mm:
+                # L20A SM100 lm_head empirical winner: deepgemm_fp8 beats BF16 & scaled_mm for M >= 256 (cos >= 0.99928).
+                if min_dim >= 1280:
+                    dg_min_m = 256
+            elif min_dim >= 4096:
+                # L20A SM100 empirical frontier (cos >= 0.999): M*K*N >= 6.4e10 (M >= 512)
+                # keeps TP4 M=2048 self_attn.qkv_idx_proj in BF16 while enabling deepgemm_fp8
+                # on large-M self_attn.{qkv_idx_proj,o_proj}, dflash fc, and explicit dense layers
+                # (linear_attn and DenseMLP/SharedExpert pass prepare_deepgemm_fp8=False in auto).
+                dg_min_m = max(512, (64_000_000_000 + self._k_mul_n - 1) // self._k_mul_n)
+            elif min_dim >= 1280:
+                dg_min_m = max(4096, (64_000_000_000 + self._k_mul_n - 1) // self._k_mul_n)
+
+        mx_min_m = 1 << 60
+        if (
+            dims_128
+            and self.w_dg_fp8 is None
+            and self.w_mxfp8 is not None
+            and min_dim >= 1280
+        ):
+            mx_min_m = (100_000_000_000 + self._k_mul_n - 1) // self._k_mul_n
+
+        self._auto_dg_min_m = dg_min_m
+        self._auto_mx_min_m = mx_min_m
+        low_m = dg_min_m if dg_min_m < mx_min_m else mx_min_m
+        if (
+            not self._allow_decode_scaled_mm
+            and self.mode in ("auto", "fp8")
+            and self.weight is not None
+        ):
+            self._fast_bf16_max_elems = low_m * K if low_m < (1 << 50) else (1 << 60)
+        else:
+            self._fast_bf16_max_elems = 0
 
     @classmethod
     @torch.no_grad()
@@ -449,10 +490,12 @@ class SM100FP8Linear(nn.Module):
         dev_idx = int(dev.index or 0) if dev.type == "cuda" else 0
 
         if not w_d.is_cuda or self.mode == "bf16":
+            self._refresh_fast_dispatch()
             return
 
         with _cuda_device_ctx(dev):
             self._prepare_weights_cuda(w_d, N, K, dev_idx)
+        self._refresh_fast_dispatch()
 
     @torch.no_grad()
     def _prepare_weights_cuda(
@@ -580,14 +623,14 @@ class SM100FP8Linear(nn.Module):
         #   - Decode / low-FLOP: keep non-lm_head layers (including wide DenseMLP
         #     N=25600, GDN qkvz N=40960, fused qkvz_ba N=20736/5184, DFlash qkvg) in BF16
         #     unless allow_decode_scaled_mm=True (lm_head opt-in) is enabled.
-        #   - Prefill deepgemm_fp8: M >= 1024 and M*K*N >= 6.4e10 and min(K, N) >= 1280
-        #     and K % 128 == 0 and N % 128 == 0.
+        #   - Non-lm_head deepgemm_fp8: M*K*N >= 6.4e10 (M >= 512 if min_dim >= 4096 else M >= 4096)
+        #     with K % 128 == 0 and N % 128 == 0; lm_head uses M >= 256 (min_dim >= 1280).
         #   - Fallback mxfp8: M*K*N >= 1e11 with min(K, N) >= 1280 when w_dg_fp8 is absent.
         is_wide = self._is_wide
-        if M <= 512:
-            if not (self._allow_decode_scaled_mm and is_wide) and self.weight is not None:
-                return "bf16"
-            if self._allow_decode_scaled_mm:
+        if self._allow_decode_scaled_mm:
+            if M >= self._auto_dg_min_m and self.w_dg_fp8 is not None:
+                return "deepgemm_fp8"
+            if M <= 512:
                 prefer_ll = os.environ.get("QWEN4_5_FP8_PREFER_TRTLLM_LL", "0") == "1"
                 if M <= 16 and prefer_ll and self.w_trtllm_ll is not None and (is_wide or self.weight is None):
                     return "trtllm_ll"
@@ -595,30 +638,24 @@ class SM100FP8Linear(nn.Module):
                     return "scaled_mm"
                 if M <= 16 and self.w_trtllm_ll is not None:
                     return "trtllm_ll"
+            if (
+                M * self._k_mul_n >= 100_000_000_000
+                and self._min_dim >= 1280
+                and self._dims_128_ok
+                and self.w_mxfp8 is not None
+            ):
+                return "mxfp8"
+            if is_wide and self.w_fp8_row is not None:
+                return "scaled_mm"
             if self.weight is not None:
                 return "bf16"
-        flop_est = M * self._k_mul_n
-        if (
-            M >= 1024
-            and flop_est >= 64_000_000_000
-            and min(K, N) >= 1280
-            and K % 128 == 0
-            and N % 128 == 0
-            and self.w_dg_fp8 is not None
-        ):
-            return "deepgemm_fp8"
-        if (
-            flop_est >= 100_000_000_000
-            and min(K, N) >= 1280
-            and K % 128 == 0
-            and N % 128 == 0
-            and self.w_mxfp8 is not None
-        ):
-            return "mxfp8"
-        if self._allow_decode_scaled_mm and is_wide and self.w_fp8_row is not None:
-            return "scaled_mm"
-        if self.weight is not None:
-            return "bf16"
+        else:
+            if M >= self._auto_dg_min_m and self.w_dg_fp8 is not None:
+                return "deepgemm_fp8"
+            if M >= self._auto_mx_min_m and self.w_mxfp8 is not None:
+                return "mxfp8"
+            if self.weight is not None:
+                return "bf16"
         if self.w_fp8_row is not None:
             return "scaled_mm"
         if self.w_trtllm_ll is not None:
@@ -688,35 +725,20 @@ class SM100FP8Linear(nn.Module):
 
     def forward(self, x: torch.Tensor, *, mode: Optional[str] = None) -> torch.Tensor:
         if (
-            self.weight is not None
-            and x.device.type == "cuda"
+            mode is None
+            and x.is_cuda
             and not os.environ.get("QWEN4_5_DENSE_LINEAR_MODE", "")
         ):
-            req = self.mode if mode is None else str(mode)
-            if req == "bf16":
-                return F.linear(x, self.weight, self.bias)
-            if req in ("auto", "fp8") and not self._allow_decode_scaled_mm:
-                m_est = x.numel() // self.in_features
-                if m_est == 0:
-                    return torch.empty(
-                        (*x.shape[:-1], self.out_features), dtype=self.dtype, device=x.device
-                    )
-                min_dim = min(self.in_features, self.out_features)
-                flop_est = m_est * self._k_mul_n
-                dg_hit = (
-                    self.w_dg_fp8 is not None
-                    and m_est >= 1024
-                    and flop_est >= 64_000_000_000
-                    and min_dim >= 1280
-                )
-                mx_hit = (
-                    self.w_dg_fp8 is None
-                    and self.w_mxfp8 is not None
-                    and flop_est >= 100_000_000_000
-                    and min_dim >= 1280
-                )
-                if not (dg_hit or mx_hit):
-                    return F.linear(x, self.weight, self.bias)
+            req = self.mode
+            if req in ("auto", "fp8"):
+                if x.numel() < self._fast_bf16_max_elems:
+                    w = self.weight
+                    if w is not None:
+                        return F.linear(x, w, self.bias if self._has_bias else None)
+            elif req == "bf16":
+                w = self.weight
+                if w is not None:
+                    return F.linear(x, w, self.bias if self._has_bias else None)
 
         orig_prefix = x.shape[:-1]
         x_2d = x.reshape(-1, self.in_features)
@@ -731,8 +753,10 @@ class SM100FP8Linear(nn.Module):
             if mode is None
             else str(mode)
         )
-        if chosen == "bf16" and self.weight is not None:
-            return F.linear(x, self.weight, self.bias)
+        if chosen == "bf16":
+            w = self.weight
+            if w is not None:
+                return F.linear(x, w, self.bias if self._has_bias else None)
 
         with _cuda_device_ctx(x_2d.device):
             return self._forward_low_prec(x, x_2d, orig_prefix, M, chosen)

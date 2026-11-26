@@ -18,6 +18,10 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.qwen4_5.short_conv import _triton_int_spec, triton_fast_launch
+
+_HC_TRITON_CACHE: dict = {}
+
 
 # ---------------------------------------------------------------------------
 # Triton Kernels
@@ -211,6 +215,237 @@ def _hc_combine_and_norm_split5120_shared_sub_kernel(
         tl.store(NORM_PTR + res_base + c1, n1)
 
 
+@triton.jit(do_not_specialize=["TPB", "MAX_BLOCKS", "NUM_BLOCKS"])
+def _hc_sconv_decode_opaque_combine_norm_kernel(
+    RES_PTR,
+    RAW_SUB_PTR,
+    INJ_PTR,
+    W_HC_PTR,
+    B_HC_PTR,
+    CONV_W_PTR,
+    POOL_PTR,
+    BT_PTR,
+    SEQ_BEFORE_PTR,
+    COMB_PTR,
+    NORM_PTR,
+    stride_xb: tl.int64,
+    stride_pb: tl.int64,
+    stride_bt_b: tl.int64,
+    stride_bt_p: tl.int64,
+    TPB,
+    MAX_BLOCKS,
+    NUM_BLOCKS,
+    HIDDEN: tl.constexpr,
+    HC_COUNT: tl.constexpr,
+    SINGLE_STREAM: tl.constexpr,
+    EPS: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
+    CONV_RESIDUAL: tl.constexpr,
+    CONV_USE_SILU: tl.constexpr,
+    HAS_CLAMP: tl.constexpr,
+    CLAMP_VAL: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    """Fused paged T=1 K=4 ShortConv(+clamp+pool roll) + HC 4-stream combine+norm (H <= 4096)."""
+    row = tl.program_id(0).to(tl.int64)
+    offs = tl.arange(0, BLOCK).to(tl.int64)
+    mask = offs < HIDDEN
+
+    seq_b = tl.load(SEQ_BEFORE_PTR + row).to(tl.int32)
+    has_pfx = seq_b > 0
+    in_blk = tl.where(has_pfx, (seq_b - 1) // TPB, 0)
+    ok_in_blk = has_pfx & (in_blk < MAX_BLOCKS)
+    in_phys = tl.load(
+        BT_PTR + row * stride_bt_b + tl.minimum(in_blk, MAX_BLOCKS - 1) * stride_bt_p,
+        mask=ok_in_blk,
+        other=0,
+    ).to(tl.int64)
+    ok_in = ok_in_blk & (in_phys > 0) & (in_phys < NUM_BLOCKS)
+    in_base = POOL_PTR + in_phys * stride_pb + offs * 3
+    m_in = ok_in & mask
+    s0_raw = tl.load(in_base + 0, mask=m_in, other=0.0)
+    s1_raw = tl.load(in_base + 1, mask=m_in, other=0.0)
+    s2_raw = tl.load(in_base + 2, mask=m_in, other=0.0)
+
+    x0_raw = tl.load(RAW_SUB_PTR + row * stride_xb + offs, mask=mask, other=0.0)
+    cw_base = offs * 4
+    cw0 = tl.load(CONV_W_PTR + cw_base + 0, mask=mask, other=0.0).to(tl.float32)
+    cw1 = tl.load(CONV_W_PTR + cw_base + 1, mask=mask, other=0.0).to(tl.float32)
+    cw2 = tl.load(CONV_W_PTR + cw_base + 2, mask=mask, other=0.0).to(tl.float32)
+    cw3 = tl.load(CONV_W_PTR + cw_base + 3, mask=mask, other=0.0).to(tl.float32)
+    x0_f = x0_raw.to(tl.float32)
+    sub = s0_raw.to(tl.float32) * cw0 + s1_raw.to(tl.float32) * cw1 + s2_raw.to(tl.float32) * cw2 + x0_f * cw3
+    if CONV_USE_SILU:
+        sub = sub * tl.sigmoid(sub)
+    if CONV_RESIDUAL:
+        sub = x0_f + sub
+    res_ty = RES_PTR.dtype.element_ty
+    if HAS_CLAMP:
+        sub = sub.to(res_ty).to(tl.float32)
+        sub = tl.minimum(tl.maximum(sub, -CLAMP_VAL), CLAMP_VAL)
+    sub_bf = sub.to(res_ty)
+
+    out_blk = seq_b // TPB
+    ok_out_blk = (seq_b >= 0) & (out_blk < MAX_BLOCKS)
+    out_phys = tl.load(
+        BT_PTR + row * stride_bt_b + tl.minimum(tl.maximum(out_blk, 0), MAX_BLOCKS - 1) * stride_bt_p,
+        mask=ok_out_blk,
+        other=0,
+    ).to(tl.int64)
+    ok_out = ok_out_blk & (out_phys > 0) & (out_phys < NUM_BLOCKS)
+    out_base = POOL_PTR + out_phys * stride_pb + offs * 3
+    m_out = ok_out & mask
+    tl.store(out_base + 0, s1_raw, mask=m_out)
+    tl.store(out_base + 1, s2_raw, mask=m_out)
+    tl.store(out_base + 2, x0_raw, mask=m_out)
+
+    res_base = row * (HC_COUNT * HIDDEN)
+    sub_f = sub_bf.to(tl.float32)
+    for br in tl.static_range(HC_COUNT):
+        col = br * HIDDEN + offs
+        res_off = res_base + col
+        res_in_off = (row * HIDDEN + offs) if SINGLE_STREAM else res_off
+        inj = tl.load(INJ_PTR + row * HC_COUNT + br).to(tl.float32)
+        res = tl.load(RES_PTR + res_in_off, mask=mask, other=0.0).to(tl.float32)
+        comb = (res + sub_f * inj).to(res_ty)
+        tl.store(COMB_PTR + res_off, comb, mask=mask)
+        comb_f = tl.where(mask, comb.to(tl.float32), 0.0)
+        inv_rms = 1.0 / tl.sqrt(tl.sum(comb_f * comb_f, axis=0) / HIDDEN + EPS)
+        w = tl.load(W_HC_PTR + col, mask=mask, other=0.0).to(tl.float32)
+        normed = comb_f * inv_rms * (1.0 + w)
+        if HAS_BIAS:
+            normed = normed + tl.load(B_HC_PTR + col, mask=mask, other=0.0).to(tl.float32)
+        tl.store(NORM_PTR + res_off, normed, mask=mask)
+
+
+@triton.jit(do_not_specialize=["TPB", "MAX_BLOCKS", "NUM_BLOCKS"])
+def _hc_sconv_decode_opaque_combine_norm_split5120_kernel(
+    RES_PTR,
+    RAW_SUB_PTR,
+    INJ_PTR,
+    W_HC_PTR,
+    B_HC_PTR,
+    CONV_W_PTR,
+    POOL_PTR,
+    BT_PTR,
+    SEQ_BEFORE_PTR,
+    COMB_PTR,
+    NORM_PTR,
+    stride_xb: tl.int64,
+    stride_pb: tl.int64,
+    stride_bt_b: tl.int64,
+    stride_bt_p: tl.int64,
+    TPB,
+    MAX_BLOCKS,
+    NUM_BLOCKS,
+    HIDDEN: tl.constexpr,
+    HC_COUNT: tl.constexpr,
+    SINGLE_STREAM: tl.constexpr,
+    EPS: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
+    CONV_RESIDUAL: tl.constexpr,
+    CONV_USE_SILU: tl.constexpr,
+    HAS_CLAMP: tl.constexpr,
+    CLAMP_VAL: tl.constexpr,
+):
+    """Exact 4096+1024 split fused paged T=1 K=4 ShortConv(+clamp+pool roll) + HC combine+norm."""
+    row = tl.program_id(0).to(tl.int64)
+    o0 = tl.arange(0, 4096).to(tl.int64)
+    o1 = 4096 + tl.arange(0, 1024).to(tl.int64)
+
+    seq_b = tl.load(SEQ_BEFORE_PTR + row).to(tl.int32)
+    has_pfx = seq_b > 0
+    in_blk = tl.where(has_pfx, (seq_b - 1) // TPB, 0)
+    ok_in_blk = has_pfx & (in_blk < MAX_BLOCKS)
+    in_phys = tl.load(
+        BT_PTR + row * stride_bt_b + tl.minimum(in_blk, MAX_BLOCKS - 1) * stride_bt_p,
+        mask=ok_in_blk,
+        other=0,
+    ).to(tl.int64)
+    ok_in = ok_in_blk & (in_phys > 0) & (in_phys < NUM_BLOCKS)
+
+    in_b0 = POOL_PTR + in_phys * stride_pb + o0 * 3
+    in_b1 = POOL_PTR + in_phys * stride_pb + o1 * 3
+    s0_0 = tl.load(in_b0 + 0, mask=ok_in, other=0.0)
+    s1_0 = tl.load(in_b0 + 1, mask=ok_in, other=0.0)
+    s2_0 = tl.load(in_b0 + 2, mask=ok_in, other=0.0)
+    s0_1 = tl.load(in_b1 + 0, mask=ok_in, other=0.0)
+    s1_1 = tl.load(in_b1 + 1, mask=ok_in, other=0.0)
+    s2_1 = tl.load(in_b1 + 2, mask=ok_in, other=0.0)
+
+    x0_0 = tl.load(RAW_SUB_PTR + row * stride_xb + o0)
+    x0_1 = tl.load(RAW_SUB_PTR + row * stride_xb + o1)
+    cw_b0 = o0 * 4
+    cw_b1 = o1 * 4
+    sub0 = (
+        s0_0.to(tl.float32) * tl.load(CONV_W_PTR + cw_b0 + 0).to(tl.float32)
+        + s1_0.to(tl.float32) * tl.load(CONV_W_PTR + cw_b0 + 1).to(tl.float32)
+        + s2_0.to(tl.float32) * tl.load(CONV_W_PTR + cw_b0 + 2).to(tl.float32)
+        + x0_0.to(tl.float32) * tl.load(CONV_W_PTR + cw_b0 + 3).to(tl.float32)
+    )
+    sub1 = (
+        s0_1.to(tl.float32) * tl.load(CONV_W_PTR + cw_b1 + 0).to(tl.float32)
+        + s1_1.to(tl.float32) * tl.load(CONV_W_PTR + cw_b1 + 1).to(tl.float32)
+        + s2_1.to(tl.float32) * tl.load(CONV_W_PTR + cw_b1 + 2).to(tl.float32)
+        + x0_1.to(tl.float32) * tl.load(CONV_W_PTR + cw_b1 + 3).to(tl.float32)
+    )
+    if CONV_USE_SILU:
+        sub0 = sub0 * tl.sigmoid(sub0)
+        sub1 = sub1 * tl.sigmoid(sub1)
+    if CONV_RESIDUAL:
+        sub0 = x0_0.to(tl.float32) + sub0
+        sub1 = x0_1.to(tl.float32) + sub1
+    res_ty = RES_PTR.dtype.element_ty
+    if HAS_CLAMP:
+        sub0 = tl.minimum(tl.maximum(sub0.to(res_ty).to(tl.float32), -CLAMP_VAL), CLAMP_VAL)
+        sub1 = tl.minimum(tl.maximum(sub1.to(res_ty).to(tl.float32), -CLAMP_VAL), CLAMP_VAL)
+    sub0_f = sub0.to(res_ty).to(tl.float32)
+    sub1_f = sub1.to(res_ty).to(tl.float32)
+
+    out_blk = seq_b // TPB
+    ok_out_blk = (seq_b >= 0) & (out_blk < MAX_BLOCKS)
+    out_phys = tl.load(
+        BT_PTR + row * stride_bt_b + tl.minimum(tl.maximum(out_blk, 0), MAX_BLOCKS - 1) * stride_bt_p,
+        mask=ok_out_blk,
+        other=0,
+    ).to(tl.int64)
+    ok_out = ok_out_blk & (out_phys > 0) & (out_phys < NUM_BLOCKS)
+    out_b0 = POOL_PTR + out_phys * stride_pb + o0 * 3
+    out_b1 = POOL_PTR + out_phys * stride_pb + o1 * 3
+    tl.store(out_b0 + 0, s1_0, mask=ok_out)
+    tl.store(out_b0 + 1, s2_0, mask=ok_out)
+    tl.store(out_b0 + 2, x0_0, mask=ok_out)
+    tl.store(out_b1 + 0, s1_1, mask=ok_out)
+    tl.store(out_b1 + 1, s2_1, mask=ok_out)
+    tl.store(out_b1 + 2, x0_1, mask=ok_out)
+
+    res_base = row * (HC_COUNT * HIDDEN)
+    for br in tl.static_range(HC_COUNT):
+        c0 = br * HIDDEN + o0
+        c1 = br * HIDDEN + o1
+        in0 = (row * HIDDEN + o0) if SINGLE_STREAM else (res_base + c0)
+        in1 = (row * HIDDEN + o1) if SINGLE_STREAM else (res_base + c1)
+        inj = tl.load(INJ_PTR + row * HC_COUNT + br).to(tl.float32)
+        r0 = tl.load(RES_PTR + in0).to(tl.float32)
+        r1 = tl.load(RES_PTR + in1).to(tl.float32)
+        cb0 = (r0 + sub0_f * inj).to(res_ty)
+        cb1 = (r1 + sub1_f * inj).to(res_ty)
+        tl.store(COMB_PTR + res_base + c0, cb0)
+        tl.store(COMB_PTR + res_base + c1, cb1)
+        f0 = cb0.to(tl.float32)
+        f1 = cb1.to(tl.float32)
+        inv_rms = 1.0 / tl.sqrt((tl.sum(f0 * f0, axis=0) + tl.sum(f1 * f1, axis=0)) / HIDDEN + EPS)
+        w0 = tl.load(W_HC_PTR + c0).to(tl.float32)
+        w1 = tl.load(W_HC_PTR + c1).to(tl.float32)
+        n0 = f0 * inv_rms * (1.0 + w0)
+        n1 = f1 * inv_rms * (1.0 + w1)
+        if HAS_BIAS:
+            n0 = n0 + tl.load(B_HC_PTR + c0).to(tl.float32)
+            n1 = n1 + tl.load(B_HC_PTR + c1).to(tl.float32)
+        tl.store(NORM_PTR + res_base + c0, n0)
+        tl.store(NORM_PTR + res_base + c1, n1)
+
+
 @triton.jit
 def _hc_mix_reduce_kernel(
     LOGITS_PTR,
@@ -253,7 +488,7 @@ def _hc_head_mix_kernel(
     tl.store(OUT_PTR + row * HIDDEN + col, out, mask=mask)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["ROWS"])
 def _hc_down_inject_epilogue_kernel(
     RAW_PTR,
     LATENT_PTR,
@@ -300,7 +535,7 @@ def _hc_down_inject_epilogue_kernel(
     )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["ROWS"])
 def _hc_inject_epilogue_kernel(
     RAW_PTR,
     INJ_PTR,
@@ -396,18 +631,12 @@ def grouped_gemma_rmsnorm_bias_triton(
     if group_size <= 8192:
         block = max(128, triton.next_power_of_2(group_size))
         num_warps = 8 if block >= 4096 else 4
-        _grouped_gemma_rmsnorm_bias_kernel[(rows, hc_count)](
-            x_c,
-            w_c,
-            b_c,
-            out,
-            WIDTH=width,
-            GROUP_SIZE=group_size,
-            X_STRIDE=x_width,
-            SINGLE_STREAM=single_stream,
-            EPS=eps,
-            HAS_BIAS=has_bias,
-            BLOCK=block,
+        ckey = (x_c.device.index, 0, x_c.dtype, w_c.dtype, b_c.dtype, out.dtype, width, group_size, x_width, single_stream, float(eps), has_bias, block, num_warps)
+        triton_fast_launch(
+            _HC_TRITON_CACHE, ckey, _grouped_gemma_rmsnorm_bias_kernel,
+            rows, hc_count, 1, x_c.data_ptr() | w_c.data_ptr() | b_c.data_ptr() | out.data_ptr(),
+            (x_c, w_c, b_c, out),
+            {"WIDTH": width, "GROUP_SIZE": group_size, "X_STRIDE": x_width, "SINGLE_STREAM": single_stream, "EPS": eps, "HAS_BIAS": has_bias, "BLOCK": block},
             num_warps=num_warps,
         )
     else:
@@ -477,15 +706,12 @@ def hc_combine_triton(
     if rows == 0:
         return dst
     block = 512 if hidden_size >= 512 else max(128, triton.next_power_of_2(hidden_size))
-    _hc_combine_kernel[(rows, triton.cdiv(hidden_size, block))](
-        res_c,
-        out_c,
-        inj_c,
-        dst,
-        HIDDEN=hidden_size,
-        HC_COUNT=hc_count,
-        SINGLE_STREAM=single_stream,
-        BLOCK=block,
+    ckey = (res_c.device.index, 1, res_c.dtype, out_c.dtype, inj_c.dtype, hidden_size, hc_count, single_stream, block)
+    triton_fast_launch(
+        _HC_TRITON_CACHE, ckey, _hc_combine_kernel,
+        rows, triton.cdiv(hidden_size, block), 1, res_c.data_ptr() | out_c.data_ptr() | inj_c.data_ptr() | dst.data_ptr(),
+        (res_c, out_c, inj_c, dst),
+        {"HIDDEN": hidden_size, "HC_COUNT": hc_count, "SINGLE_STREAM": single_stream, "BLOCK": block},
         num_warps=4,
     )
     return dst
@@ -531,41 +757,118 @@ def hc_combine_and_norm_triton(
     if rows == 0:
         return combined, normed
 
+    has_b = norm_bias is not None
+    ptr_or = res_c.data_ptr() | sub_c.data_ptr() | inj_c.data_ptr() | w_c.data_ptr() | b_c.data_ptr() | combined.data_ptr() | normed.data_ptr()
     if hidden_size == 5120 and hc_count == 4 and rows >= 1024:
-        _hc_combine_and_norm_split5120_shared_sub_kernel[(rows,)](
-            res_c,
-            sub_c,
-            inj_c,
-            w_c,
-            b_c,
-            combined,
-            normed,
-            HIDDEN=hidden_size,
-            HC_COUNT=hc_count,
-            SINGLE_STREAM=single_stream,
-            EPS=eps,
-            HAS_BIAS=norm_bias is not None,
+        ckey = (res_c.device.index, 2, res_c.dtype, sub_c.dtype, inj_c.dtype, w_c.dtype, b_c.dtype, single_stream, float(eps), has_b)
+        triton_fast_launch(
+            _HC_TRITON_CACHE, ckey, _hc_combine_and_norm_split5120_shared_sub_kernel,
+            rows, 1, 1, ptr_or, (res_c, sub_c, inj_c, w_c, b_c, combined, normed),
+            {"HIDDEN": hidden_size, "HC_COUNT": hc_count, "SINGLE_STREAM": single_stream, "EPS": eps, "HAS_BIAS": has_b},
             num_warps=4,
         )
         return combined, normed
 
     block = max(128, triton.next_power_of_2(hidden_size))
     num_warps = 4
-    _hc_combine_and_norm_kernel[(rows, hc_count)](
-        res_c,
-        sub_c,
-        inj_c,
-        w_c,
-        b_c,
-        combined,
-        normed,
-        HIDDEN=hidden_size,
-        HC_COUNT=hc_count,
-        SINGLE_STREAM=single_stream,
-        EPS=eps,
-        HAS_BIAS=norm_bias is not None,
-        BLOCK=block,
+    ckey = (res_c.device.index, 3, res_c.dtype, sub_c.dtype, inj_c.dtype, w_c.dtype, b_c.dtype, hidden_size, hc_count, single_stream, float(eps), has_b, block)
+    triton_fast_launch(
+        _HC_TRITON_CACHE, ckey, _hc_combine_and_norm_kernel,
+        rows, hc_count, 1, ptr_or, (res_c, sub_c, inj_c, w_c, b_c, combined, normed),
+        {"HIDDEN": hidden_size, "HC_COUNT": hc_count, "SINGLE_STREAM": single_stream, "EPS": eps, "HAS_BIAS": has_b, "BLOCK": block},
         num_warps=num_warps,
+    )
+    return combined, normed
+
+
+def hc_sconv_decode_opaque_combine_norm_triton(
+    raw_sub: torch.Tensor,
+    residual: torch.Tensor,
+    prev_inject_w: torch.Tensor,
+    norm_weight: torch.Tensor,
+    norm_bias: Optional[torch.Tensor],
+    conv_weight: torch.Tensor,
+    pool_2d: torch.Tensor,
+    block_table: torch.Tensor,
+    seq_before: torch.Tensor,
+    *,
+    page_size: int,
+    eps: float = 1e-6,
+    conv_residual: bool = False,
+    conv_use_silu: bool = False,
+    clamp_val: Optional[float] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Single-launch T=1 K=4 paged opaque ShortConv(+clamp+pool roll) + HC combine+norm."""
+    hc_count = int(prev_inject_w.shape[-1])
+    hidden_size = int(raw_sub.shape[-1])
+    res_c = residual if residual.is_contiguous() else residual.contiguous()
+    sub_c = raw_sub if raw_sub.stride(-1) == 1 else raw_sub.contiguous()
+    inj_c = prev_inject_w if prev_inject_w.is_contiguous() else prev_inject_w.contiguous()
+    w_c = norm_weight if norm_weight.is_contiguous() else norm_weight.contiguous()
+    has_bias = norm_bias is not None
+    b_c = (norm_bias if norm_bias.is_contiguous() else norm_bias.contiguous()) if has_bias else w_c
+    cw_c = conv_weight if conv_weight.is_contiguous() else conv_weight.contiguous()
+
+    res_width = int(res_c.shape[-1])
+    width = hc_count * hidden_size
+    single_stream = hc_count > 1 and res_width == hidden_size
+    rows = res_c.numel() // res_width
+    out_shape = (*res_c.shape[:-1], width)
+    combined = torch.empty(out_shape, dtype=res_c.dtype, device=res_c.device)
+    normed = torch.empty(out_shape, dtype=res_c.dtype, device=res_c.device)
+    if rows == 0:
+        return combined, normed
+
+    sxb = int(sub_c.reshape(rows, hidden_size).stride(0))
+    spb = int(pool_2d.stride(0))
+    sbt0 = int(block_table.stride(0))
+    sbt1 = int(block_table.stride(1))
+    has_c = clamp_val is not None
+    cval = float(clamp_val) if has_c else 0.0
+    rt_args = (
+        res_c, sub_c, inj_c, w_c, b_c, cw_c, pool_2d, block_table, seq_before, combined, normed,
+        sxb, spb, sbt0, sbt1, int(page_size), int(block_table.shape[1]), int(pool_2d.shape[0]),
+    )
+    ptr_or = (
+        res_c.data_ptr() | sub_c.data_ptr() | inj_c.data_ptr() | w_c.data_ptr() | b_c.data_ptr()
+        | cw_c.data_ptr() | pool_2d.data_ptr() | block_table.data_ptr() | seq_before.data_ptr()
+        | combined.data_ptr() | normed.data_ptr()
+    )
+    if hidden_size == 5120 and hc_count == 4:
+        ckey = (
+            res_c.device.index, 20, res_c.dtype, sub_c.dtype, inj_c.dtype, w_c.dtype, b_c.dtype, cw_c.dtype, pool_2d.dtype,
+            block_table.dtype, seq_before.dtype,
+            _triton_int_spec(sxb), _triton_int_spec(spb), _triton_int_spec(sbt0), _triton_int_spec(sbt1),
+            single_stream, float(eps), has_bias, conv_residual, conv_use_silu, has_c, cval,
+        )
+        triton_fast_launch(
+            _HC_TRITON_CACHE, ckey, _hc_sconv_decode_opaque_combine_norm_split5120_kernel,
+            rows, 1, 1, ptr_or, rt_args,
+            {
+                "HIDDEN": hidden_size, "HC_COUNT": hc_count, "SINGLE_STREAM": single_stream,
+                "EPS": float(eps), "HAS_BIAS": has_bias, "CONV_RESIDUAL": conv_residual,
+                "CONV_USE_SILU": conv_use_silu, "HAS_CLAMP": has_c, "CLAMP_VAL": cval,
+            },
+            num_warps=4,
+        )
+        return combined, normed
+
+    block = max(128, triton.next_power_of_2(hidden_size))
+    ckey = (
+        res_c.device.index, 21, res_c.dtype, sub_c.dtype, inj_c.dtype, w_c.dtype, b_c.dtype, cw_c.dtype, pool_2d.dtype,
+        block_table.dtype, seq_before.dtype,
+        _triton_int_spec(sxb), _triton_int_spec(spb), _triton_int_spec(sbt0), _triton_int_spec(sbt1),
+        hidden_size, hc_count, single_stream, float(eps), has_bias, conv_residual, conv_use_silu, has_c, cval, block,
+    )
+    triton_fast_launch(
+        _HC_TRITON_CACHE, ckey, _hc_sconv_decode_opaque_combine_norm_kernel,
+        rows, 1, 1, ptr_or, rt_args,
+        {
+            "HIDDEN": hidden_size, "HC_COUNT": hc_count, "SINGLE_STREAM": single_stream,
+            "EPS": float(eps), "HAS_BIAS": has_bias, "CONV_RESIDUAL": conv_residual,
+            "CONV_USE_SILU": conv_use_silu, "HAS_CLAMP": has_c, "CLAMP_VAL": cval, "BLOCK": block,
+        },
+        num_warps=4,
     )
     return combined, normed
 
@@ -595,13 +898,12 @@ def hc_mix_reduce_triton(
     if rows == 0:
         return out
     block = 512 if hidden_size >= 512 else max(128, triton.next_power_of_2(hidden_size))
-    _hc_mix_reduce_kernel[(rows, triton.cdiv(hidden_size, block))](
-        logits_c,
-        normed_c,
-        out,
-        HIDDEN=hidden_size,
-        HC_COUNT=hc_count,
-        BLOCK=block,
+    ckey = (logits_c.device.index, 4, logits_c.dtype, normed_c.dtype, hidden_size, hc_count, block)
+    triton_fast_launch(
+        _HC_TRITON_CACHE, ckey, _hc_mix_reduce_kernel,
+        rows, triton.cdiv(hidden_size, block), 1, logits_c.data_ptr() | normed_c.data_ptr() | out.data_ptr(),
+        (logits_c, normed_c, out),
+        {"HIDDEN": hidden_size, "HC_COUNT": hc_count, "BLOCK": block},
         num_warps=4,
     )
     return out
@@ -626,13 +928,12 @@ def hc_head_mix_triton(
     if rows == 0:
         return out
     block = 512 if hidden_size >= 512 else max(128, triton.next_power_of_2(hidden_size))
-    _hc_head_mix_kernel[(rows, triton.cdiv(hidden_size, block))](
-        logits_c,
-        normed_c,
-        out,
-        HIDDEN=hidden_size,
-        HC_WIDTH=hc_width,
-        BLOCK=block,
+    ckey = (logits_c.device.index, 5, logits_c.dtype, normed_c.dtype, hidden_size, hc_width, block)
+    triton_fast_launch(
+        _HC_TRITON_CACHE, ckey, _hc_head_mix_kernel,
+        rows, triton.cdiv(hidden_size, block), 1, logits_c.data_ptr() | normed_c.data_ptr() | out.data_ptr(),
+        (logits_c, normed_c, out),
+        {"HIDDEN": hidden_size, "HC_WIDTH": hc_width, "BLOCK": block},
         num_warps=4,
     )
     return out
@@ -664,17 +965,12 @@ def hc_down_inject_epilogue_triton(
     block_r = 1 if rows <= 8 else (8 if rows <= 128 else 16)
     block_l = max(16, triton.next_power_of_2(hc_lowrank))
     block_h = max(16, triton.next_power_of_2(hc_count))
-    _hc_down_inject_epilogue_kernel[(triton.cdiv(rows, block_r),)](
-        raw_c,
-        latent,
-        inject_w,
-        ROWS=rows,
-        LOWRANK=hc_lowrank,
-        HC_COUNT=hc_count,
-        RAW_STRIDE=raw_stride,
-        BLOCK_R=block_r,
-        BLOCK_L=block_l,
-        BLOCK_H=block_h,
+    ckey = (raw_c.device.index, 6, raw_c.dtype, hc_lowrank, hc_count, raw_stride, block_r, block_l, block_h)
+    triton_fast_launch(
+        _HC_TRITON_CACHE, ckey, _hc_down_inject_epilogue_kernel,
+        triton.cdiv(rows, block_r), 1, 1, raw_c.data_ptr() | latent.data_ptr() | inject_w.data_ptr(),
+        (raw_c, latent, inject_w, rows),
+        {"LOWRANK": hc_lowrank, "HC_COUNT": hc_count, "RAW_STRIDE": raw_stride, "BLOCK_R": block_r, "BLOCK_L": block_l, "BLOCK_H": block_h},
         num_warps=4,
     )
     return latent, inject_w
@@ -700,14 +996,12 @@ def hc_inject_epilogue_triton(
 
     block_r = 1 if rows <= 8 else (8 if rows <= 128 else 16)
     block_h = max(16, triton.next_power_of_2(hc_count))
-    _hc_inject_epilogue_kernel[(triton.cdiv(rows, block_r),)](
-        raw_c,
-        inject_w,
-        ROWS=rows,
-        HC_COUNT=hc_count,
-        RAW_STRIDE=raw_stride,
-        BLOCK_R=block_r,
-        BLOCK_H=block_h,
+    ckey = (raw_c.device.index, 7, raw_c.dtype, hc_count, raw_stride, block_r, block_h)
+    triton_fast_launch(
+        _HC_TRITON_CACHE, ckey, _hc_inject_epilogue_kernel,
+        triton.cdiv(rows, block_r), 1, 1, raw_c.data_ptr() | inject_w.data_ptr(),
+        (raw_c, inject_w, rows),
+        {"HC_COUNT": hc_count, "RAW_STRIDE": raw_stride, "BLOCK_R": block_r, "BLOCK_H": block_h},
         num_warps=4,
     )
     return inject_w

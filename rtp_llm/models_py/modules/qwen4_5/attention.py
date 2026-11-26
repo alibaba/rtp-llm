@@ -27,6 +27,9 @@ from rtp_llm.models_py.modules.qwen4_5.contracts import (
 )
 from rtp_llm.models_py.modules.qwen4_5.yoco import YoCoSharingPlan
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import Qwen4ExpQSAIndexer, exact_head_rms_norm
+from rtp_llm.models_py.modules.qwen4_5.short_conv import _triton_int_spec, triton_fast_launch
+
+_ATTN_TRITON_CACHE: dict = {}
 
 
 @triton.jit
@@ -163,6 +166,76 @@ def causal_dwconv1d(
     if residual:
         out = out + x
     return out
+
+
+@triton.jit
+def _qsa_head_rmsnorm_d128_kernel(
+    X_ptr,
+    G_ptr,
+    OUT_ptr,
+    TOK_STRIDE: tl.int64,
+    HEAD_STRIDE: tl.int64,
+    OUT_STRIDE: tl.int64,
+    HEADS: tl.constexpr,
+    EPS: tl.constexpr,
+    D: tl.constexpr,
+):
+    """SM80+ FP32 1+gamma QSA head RMSNorm matching exact_head_rms_norm."""
+    row = tl.program_id(0).to(tl.int64)
+    cols = tl.arange(0, D)
+    off = (row // HEADS) * TOK_STRIDE + (row % HEADS) * HEAD_STRIDE + cols
+    x = tl.load(X_ptr + off).to(tl.float32)
+    rstd = tl.rsqrt(tl.sum(x * x, axis=0) * (1.0 / D) + EPS)
+    g = 1.0 + tl.load(G_ptr + cols).to(tl.float32)
+    out = (x * rstd) * g
+    tl.store(OUT_ptr + row * OUT_STRIDE + cols, out.to(OUT_ptr.dtype.element_ty))
+
+
+def _fast_qsa_head_rmsnorm(x: torch.Tensor, gamma: torch.Tensor, eps: float) -> torch.Tensor:
+    if (
+        x.is_cuda
+        and gamma.is_cuda
+        and x.dtype in (torch.bfloat16, torch.float16, torch.float32)
+        and x.ndim in (2, 3, 4)
+        and int(x.shape[-1]) == 128
+        and x.stride(-1) == 1
+        and all(int(s) > 0 for s in x.stride())
+        and (x.ndim != 4 or int(x.stride(0)) == int(x.shape[1]) * int(x.stride(1)))
+        and gamma.is_contiguous()
+        and not (x.requires_grad or gamma.requires_grad)
+    ):
+        heads = int(x.shape[-2]) if x.ndim > 2 else 1
+        tok_stride = int(x.stride(-3)) if x.ndim > 2 else int(x.stride(0))
+        head_stride = int(x.stride(-2)) if x.ndim > 2 else 128
+        rows = x.numel() // 128
+        out = torch.empty(x.shape, dtype=x.dtype, device=x.device)
+        if rows == 0:
+            return out
+        ckey = (
+            x.device.index,
+            0,
+            x.dtype,
+            gamma.dtype,
+            heads,
+            _triton_int_spec(tok_stride),
+            _triton_int_spec(head_stride),
+            _triton_int_spec(128),
+            float(eps),
+        )
+        triton_fast_launch(
+            _ATTN_TRITON_CACHE,
+            ckey,
+            _qsa_head_rmsnorm_d128_kernel,
+            rows,
+            1,
+            1,
+            x.data_ptr() | gamma.data_ptr() | out.data_ptr(),
+            (x, gamma, out, tok_stride, head_stride, 128),
+            {"HEADS": heads, "EPS": float(eps), "D": 128},
+            num_warps=4,
+        )
+        return out
+    return exact_head_rms_norm(x, gamma, eps)
 
 
 @triton.jit
@@ -304,25 +377,44 @@ def gemma_rmsnorm_and_partial_rope(
     ):
         bsz, seq_len, num_heads, head_dim = x.shape
         out = torch.empty((bsz, seq_len, num_heads, head_dim), dtype=x.dtype, device=x.device)
-        grid = (bsz * seq_len, num_heads)
-        _gemma_rmsnorm_partial_rope_d256_r64_kernel[grid](
+        rt_args = (
             x,
             weight,
             positions,
             inv_freq,
             out,
-            x.stride(0),
-            x.stride(1),
-            x.stride(2),
-            x.stride(3),
-            positions.stride(0),
-            positions.stride(1),
-            out.stride(0),
-            out.stride(1),
-            out.stride(2),
-            out.stride(3),
+            int(x.stride(0)),
+            int(x.stride(1)),
+            int(x.stride(2)),
+            int(x.stride(3)),
+            int(positions.stride(0)),
+            int(positions.stride(1)),
+            int(out.stride(0)),
+            int(out.stride(1)),
+            int(out.stride(2)),
+            int(out.stride(3)),
             seq_len,
             float(eps),
+        )
+        ckey = (
+            x.device.index,
+            1,
+            x.dtype,
+            weight.dtype,
+            positions.dtype,
+            inv_freq.dtype,
+            tuple(_triton_int_spec(v) for v in rt_args[5:16]),
+        )
+        triton_fast_launch(
+            _ATTN_TRITON_CACHE,
+            ckey,
+            _gemma_rmsnorm_partial_rope_d256_r64_kernel,
+            bsz * seq_len,
+            num_heads,
+            1,
+            x.data_ptr() | weight.data_ptr() | positions.data_ptr() | inv_freq.data_ptr() | out.data_ptr(),
+            rt_args,
+            {},
             num_warps=4,
         )
         return out
@@ -398,25 +490,43 @@ def apply_attn_output_gate_flatten(
             device=attn_bhtd.device,
         )
         block_d = max(16, triton.next_power_of_2(head_dim))
-        _fused_attn_output_gate_kernel[(bsz * seq_len, num_heads)](
+        rt_args = (
             attn_bhtd,
             gate_bthd,
             out,
-            attn_bhtd.stride(0),
-            attn_bhtd.stride(1),
-            attn_bhtd.stride(2),
-            attn_bhtd.stride(3),
-            gate_bthd.stride(0),
-            gate_bthd.stride(1),
-            gate_bthd.stride(2),
-            gate_bthd.stride(3),
-            out.stride(0),
-            out.stride(1),
+            int(attn_bhtd.stride(0)),
+            int(attn_bhtd.stride(1)),
+            int(attn_bhtd.stride(2)),
+            int(attn_bhtd.stride(3)),
+            int(gate_bthd.stride(0)),
+            int(gate_bthd.stride(1)),
+            int(gate_bthd.stride(2)),
+            int(gate_bthd.stride(3)),
+            int(out.stride(0)),
+            int(out.stride(1)),
             head_dim,
             1,
             seq_len,
-            D=head_dim,
-            BLOCK_D=block_d,
+        )
+        ckey = (
+            attn_bhtd.device.index,
+            2,
+            attn_bhtd.dtype,
+            gate_bthd.dtype,
+            tuple(_triton_int_spec(v) for v in rt_args[3:]),
+            head_dim,
+            block_d,
+        )
+        triton_fast_launch(
+            _ATTN_TRITON_CACHE,
+            ckey,
+            _fused_attn_output_gate_kernel,
+            bsz * seq_len,
+            num_heads,
+            1,
+            attn_bhtd.data_ptr() | gate_bthd.data_ptr() | out.data_ptr(),
+            rt_args,
+            {"D": head_dim, "BLOCK_D": block_d},
             num_warps=4,
         )
         return out
@@ -829,7 +939,7 @@ class Qwen4_5Attention(nn.Module):
             if self._qkv_idx_has_idx and need_idx and self.indexer is not None:
                 q_idx_raw, raw_k_idx = self.indexer.split_projected(chunks[idx_pos])
                 q_idx = (
-                    exact_head_rms_norm(
+                    _fast_qsa_head_rmsnorm(
                         q_idx_raw, self.indexer.q_norm_gamma, self.indexer.norm_eps
                     )
                     if need_idx_norm
@@ -1032,6 +1142,9 @@ class Qwen4_5Attention(nn.Module):
                 qsa_sparse_prefill_attention,
             )
 
+            qsa_selected_is_q4_valid = (
+                qsa_selected is None and int(getattr(self.indexer, "compress_ratio", 0)) == 4
+            )
             if qsa_selected is None:
                 if not self.is_consumer:
                     if pre_q_idx is not None and pre_raw_k_idx is not None:
@@ -1094,6 +1207,7 @@ class Qwen4_5Attention(nn.Module):
                 v_bhtd,
                 qsa_selected,
                 validate_selected=False,
+                assume_unique_selected=qsa_selected_is_q4_valid,
             )
         elif seq_len == 1:
             attn_out = F.scaled_dot_product_attention(
@@ -1156,6 +1270,7 @@ class Qwen4_5Attention(nn.Module):
                 Optional[torch.Tensor],
             ]
         ] = None,
+        preconv_kv: bool = False,
     ) -> torch.Tensor:
         """CUDA-graph-safe B*1 paged decode path for producer and YoCo consumer layers."""
         bsz, seq_len, _ = hidden_states.shape
@@ -1197,7 +1312,7 @@ class Qwen4_5Attention(nn.Module):
             )
             k_raw = pre_k_raw if pre_k_raw is not None else self.k_proj(hidden_states)
             v_raw = pre_v_raw if pre_v_raw is not None else self.v_proj(hidden_states)
-            if self.use_kv_sconv:
+            if self.use_kv_sconv and not preconv_kv:
                 if self.k_sconv is not None:
                     k_raw = causal_dwconv1d(
                         k_raw,
@@ -1227,10 +1342,11 @@ class Qwen4_5Attention(nn.Module):
             )
             write_kv_fn(kv_cache_layer, block_table, seq_before_dev, k, v)
 
-        attn_out = decode_attn_fn(q.squeeze(1), kv_cache_layer).unsqueeze(1)
+        attn_out = decode_attn_fn(q.squeeze(1), kv_cache_layer)
         if gate is not None:
-            attn_out = attn_out * torch.sigmoid(gate)
-        out_flat = attn_out.reshape(bsz, seq_len, self.num_heads * self.head_dim)
+            out_flat = apply_attn_output_gate_flatten(attn_out.unsqueeze(2), gate)
+        else:
+            out_flat = attn_out.reshape(bsz, seq_len, self.num_heads * self.head_dim)
         return self._maybe_all_reduce(self.o_proj(out_flat))
 
 

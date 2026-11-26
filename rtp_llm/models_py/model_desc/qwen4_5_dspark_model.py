@@ -50,7 +50,9 @@ from rtp_llm.models_py.modules.qwen4_5.moe import Qwen4_5LatentMoE
 from rtp_llm.models_py.speculative.dspark_proposer_mixin import (
     DSparkProposerMixin,
     device_metadata_tensor,
+    optional_tensor,
 )
+from rtp_llm.models_py.modules.dsv4.kv_cache_utils import primary_attention_inputs
 from rtp_llm.ops import AttentionConfigs, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
     KVCache,
@@ -86,6 +88,116 @@ _DEFAULT_DFLASH2_FI_WS_BYTES = 256 * 1024 * 1024
 _MAX_DFLASH2_FI_WS_BYTES = 1024 * 1024 * 1024
 _FI_WS_RE = re.compile(r"with size (\d+)")
 _UNIT_FP8_KV_SCALE_CACHE: Dict[Tuple[int, str], torch.Tensor] = {}
+_TILE_SPLIT_CACHE: Dict[Tuple[Any, ...], Tuple[int, int, int, int]] = {}
+
+_TRITON_CUDA_DRIVER: Optional[Any] = None
+
+
+def _get_triton_cuda_driver() -> Any:
+    """Resolve active Triton CUDA driver lazily so CPU-only imports never fail."""
+    global _TRITON_CUDA_DRIVER
+    drv = _TRITON_CUDA_DRIVER
+    if drv is None:
+        drv = triton.runtime.driver.active
+        _TRITON_CUDA_DRIVER = drv
+    return drv
+_TRITON_KNOBS_RT = getattr(getattr(triton, "knobs", None), "runtime", None) if _HAS_TRITON else None
+_TRITON_KNOBS_COMP = getattr(getattr(triton, "knobs", None), "compilation", None) if _HAS_TRITON else None
+
+_KC_RMSNORM: Dict[Any, Any] = {}
+_KC_MAP_COMMIT: Dict[Any, Any] = {}
+_KC_FUSED_5L_KV: Dict[Any, Any] = {}
+_KC_PREP_PROPOSE: Dict[Any, Any] = {}
+_KC_SCATTER_KV: Dict[Any, Any] = {}
+_KC_K_ROPE_SCATTER: Dict[Any, Any] = {}
+_KC_ROPE_Q: Dict[Any, Any] = {}
+_KC_MHA_SINGLE: Dict[Any, Any] = {}
+_KC_MHA_BODY: Dict[Any, Any] = {}
+_KC_MHA_EDGE: Dict[Any, Any] = {}
+_KC_MHA_STAGE2: Dict[Any, Any] = {}
+_KC_GATE: Dict[Any, Any] = {}
+_KC_FI_CSR: Dict[Any, Any] = {}
+_KC_GCONV: Dict[Any, Any] = {}
+_KC_SCORE_EDGES: Dict[Any, Any] = {}
+_KC_GREEDY_WALK: Dict[Any, Any] = {}
+_KC_TP_PACK: Dict[Any, Any] = {}
+_KC_TP_MERGE: Dict[Any, Any] = {}
+
+
+def _t_spec(t: torch.Tensor) -> Tuple[Any, bool]:
+    return (t.dtype, (int(t.data_ptr()) & 15) == 0)
+
+
+def _i_spec(v: int) -> Tuple[bool, bool]:
+    return (v == 1, (v & 15) == 0)
+
+
+def _has_active_triton_hooks(hook: Any) -> bool:
+    if hook is None:
+        return False
+    calls = getattr(hook, "calls", None)
+    return bool(calls) if calls is not None else True
+
+
+def _launch_triton_cached(
+    kernel_cache: Dict[Any, Any],
+    jit_fn: Any,
+    grid_xyz: Tuple[int, int, int],
+    spec_key: Tuple[Any, ...],
+    call_args: Tuple[Any, ...],
+    launch_kwargs: Dict[str, Any],
+) -> Any:
+    """Bypass jit.py binder overhead on cached Triton launches when runtime hooks are absent."""
+    knobs_rt = _TRITON_KNOBS_RT
+    knobs_comp = _TRITON_KNOBS_COMP
+    hooks_free = (
+        knobs_rt is not None
+        and not bool(getattr(knobs_rt, "debug", False))
+        and not bool(getattr(jit_fn, "debug", False))
+        and not bool(getattr(knobs_comp, "instrumentation_mode", False))
+        and not _has_active_triton_hooks(knobs_rt.launch_enter_hook)
+        and not _has_active_triton_hooks(knobs_rt.launch_exit_hook)
+        and not jit_fn.pre_run_hooks
+    )
+    if hooks_free:
+        entry = kernel_cache.get(spec_key)
+        if entry is not None:
+            compiled, run_obj, fn_obj, packed_meta, get_stream = entry
+            run_obj(
+                grid_xyz[0],
+                grid_xyz[1],
+                grid_xyz[2],
+                get_stream(spec_key[0]),
+                fn_obj,
+                packed_meta,
+                None,
+                None,
+                None,
+                *call_args,
+            )
+            return compiled
+    compiled = jit_fn[grid_xyz](*call_args, **launch_kwargs)
+    if hooks_free:
+        run_obj = getattr(compiled, "run", None)
+        meta = getattr(compiled, "metadata", None)
+        fn_obj = getattr(compiled, "function", None)
+        packed_meta = getattr(compiled, "packed_metadata", None)
+        if (
+            run_obj is not None
+            and fn_obj is not None
+            and packed_meta is not None
+            and getattr(meta, "global_scratch_size", 0) == 0
+            and getattr(meta, "profile_scratch_size", 0) == 0
+            and getattr(compiled, "global_scratch_size", 0) == 0
+            and getattr(compiled, "profile_scratch_size", 0) == 0
+            and getattr(run_obj, "global_scratch_size", 0) == 0
+            and getattr(run_obj, "profile_scratch_size", 0) == 0
+        ):
+            drv = _TRITON_CUDA_DRIVER
+            if drv is None:
+                drv = _get_triton_cuda_driver()
+            kernel_cache[spec_key] = (compiled, run_obj, fn_obj, packed_meta, drv.get_current_stream)
+    return compiled
 
 
 def _tensor_version(tensor: Optional[torch.Tensor]) -> int:
@@ -154,7 +266,10 @@ def _resolve_fp8_kv_scales(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     sc = getattr(layer_kv, "kv_scale_base", None) if layer_kv is not None else None
     if sc is not None and isinstance(sc, torch.Tensor) and sc.numel() >= 1:
-        sc_f = sc.to(device=device, dtype=torch.float32).reshape(-1)
+        if sc.device == device and sc.dtype == torch.float32:
+            sc_f = sc if sc.ndim == 1 else sc.reshape(-1)
+        else:
+            sc_f = sc.to(device=device, dtype=torch.float32).reshape(-1)
         if sc_f.numel() >= 2:
             return sc_f[0:1], sc_f[1:2]
         return sc_f[0:1], sc_f[0:1]
@@ -180,23 +295,56 @@ QWEN4_5_OPAQUE_STATE_TAGS: Tuple[str, ...] = (
 )
 
 
+def _apply_rmsnorm_impl(
+    x: torch.Tensor, weight: torch.Tensor, eps: float, *, zero_centered: bool
+) -> torch.Tensor:
+    d = int(x.shape[-1])
+    if (
+        _HAS_TRITON
+        and x.is_cuda
+        and weight.is_cuda
+        and x.numel() > 0
+        and 0 < d <= 8192
+    ):
+        x_2d = (
+            x
+            if (x.ndim == 2 and x.stride(-1) == 1)
+            else (x.contiguous().reshape(-1, d) if x.stride(-1) != 1 else x.reshape(-1, d))
+        )
+        w_c = weight if weight.is_contiguous() else weight.contiguous()
+        num_rows = int(x_2d.shape[0])
+        out = torch.empty_like(x_2d)
+        block_d = max(16, int(triton.next_power_of_2(d)))
+        nw = 8 if block_d >= 2048 else 4
+        dev_idx = x_2d.device.index if x_2d.device.index is not None else torch.cuda.current_device()
+        x_st = int(x_2d.stride(0))
+        _launch_triton_cached(
+            _KC_RMSNORM,
+            _dflash2_rmsnorm_kernel,
+            (num_rows, 1, 1),
+            (dev_idx, block_d, d, zero_centered, nw, _t_spec(x_2d), _t_spec(w_c), _t_spec(out), _i_spec(x_st)),
+            (x_2d, w_c, out, num_rows, x_st, float(eps), d, block_d, zero_centered),
+            {"num_warps": nw},
+        )
+        return out if x.ndim == 2 else out.view(x.shape)
+    orig_dtype = x.dtype
+    xf = x.float()
+    normed = xf * torch.rsqrt(xf.square().mean(dim=-1, keepdim=True) + eps)
+    w_f = (1.0 + weight.float()) if zero_centered else weight.float()
+    return (normed * w_f).to(orig_dtype)
+
+
 def _apply_gemma_rmsnorm(
     x: torch.Tensor, weight: torch.Tensor, eps: float
 ) -> torch.Tensor:
     """Zero-centered Gemma RMSNorm: ``(1.0 + weight) * rmsnorm(x)``."""
-    orig_dtype = x.dtype
-    xf = x.float()
-    normed = xf * torch.rsqrt(xf.square().mean(dim=-1, keepdim=True) + eps)
-    return (normed * (1.0 + weight.float())).to(orig_dtype)
+    return _apply_rmsnorm_impl(x, weight, eps, zero_centered=True)
 
 
 def _apply_rmsnorm(
     x: torch.Tensor, weight: torch.Tensor, eps: float
 ) -> torch.Tensor:
-    orig_dtype = x.dtype
-    xf = x.float()
-    normed = xf * torch.rsqrt(xf.square().mean(dim=-1, keepdim=True) + eps)
-    return (normed * weight.float()).to(orig_dtype)
+    return _apply_rmsnorm_impl(x, weight, eps, zero_centered=False)
 
 
 def _resolve_host_or_device(
@@ -282,7 +430,7 @@ if _HAS_TRITON:
             tl.store(kv_cache_ptr + dst_k, k_val, mask=mask_d)
             tl.store(kv_cache_ptr + dst_v, v_val, mask=mask_d)
 
-    @triton.jit
+    @triton.jit(do_not_specialize=["batch_size", "query_len", "max_blocks", "num_blocks"])
     def _dflash2_scatter_block_kv_triton(
         k_ptr,
         v_ptr,
@@ -361,6 +509,480 @@ if _HAS_TRITON:
         else:
             tl.store(kv_cache_ptr + dst_k, k_val, mask=mask_d)
             tl.store(kv_cache_ptr + dst_k + kv_stride_kv, v_val, mask=mask_d)
+
+    @triton.jit(do_not_specialize=["num_rows"])
+    def _dflash2_rmsnorm_kernel(
+        x_ptr,
+        w_ptr,
+        out_ptr,
+        num_rows: tl.int32,
+        x_stride_row: tl.int64,
+        eps,
+        D: tl.constexpr,
+        BLOCK_D: tl.constexpr,
+        ZERO_CENTERED: tl.constexpr,
+    ):
+        row = tl.program_id(0)
+        if row >= num_rows:
+            return
+        offs = tl.arange(0, BLOCK_D)
+        mask = offs < D
+        x_f = tl.load(x_ptr + row.to(tl.int64) * x_stride_row + offs, mask=mask, other=0.0).to(tl.float32)
+        w_f = tl.load(w_ptr + offs, mask=mask, other=0.0).to(tl.float32)
+        mean_sq = tl.sum(x_f * x_f, axis=0) / D
+        rstd = tl.rsqrt(mean_sq + eps)
+        scale = (1.0 + w_f) if ZERO_CENTERED else w_f
+        out = (x_f * rstd) * scale
+        tl.store(out_ptr + row.to(tl.int64) * D + offs, out.to(out_ptr.dtype.element_ty), mask=mask)
+
+    @triton.jit(do_not_specialize=["batch_size", "row_count"])
+    def _dflash2_map_commit_rows_fused_kernel(
+        pref_ptr,
+        len_ptr,
+        req_out_ptr,
+        pos_out_ptr,
+        batch_size: tl.int32,
+        row_count: tl.int32,
+        pref_stride: tl.int64,
+        len_stride: tl.int64,
+        BLOCK_B: tl.constexpr,
+        BLOCK_R: tl.constexpr,
+    ):
+        offs_b = tl.arange(0, BLOCK_B)
+        mask_b = offs_b < batch_size
+        lens = tl.load(len_ptr + offs_b.to(tl.int64) * len_stride, mask=mask_b, other=0).to(tl.int64)
+        prefs = tl.load(pref_ptr + offs_b.to(tl.int64) * pref_stride, mask=mask_b, other=0).to(tl.int64)
+        starts = tl.cumsum(lens, axis=0) - lens
+
+        rows = (tl.program_id(0) * BLOCK_R + tl.arange(0, BLOCK_R)).to(tl.int64)
+        mask_r = rows < row_count
+        req_idx = tl.max(
+            tl.where(mask_b[None, :] & (starts[None, :] <= rows[:, None]), offs_b[None, :], -1),
+            axis=1,
+        )
+        safe_req = tl.maximum(0, tl.minimum(req_idx, batch_size - 1))
+        match = mask_b[None, :] & (offs_b[None, :] == safe_req[:, None])
+        start_r = tl.sum(tl.where(match, starts[None, :], 0), axis=1)
+        len_r = tl.sum(tl.where(match, lens[None, :], 0), axis=1)
+        pref_r = tl.sum(tl.where(match, prefs[None, :], 0), axis=1)
+        valid = (req_idx >= 0) & (rows >= start_r) & (rows < start_r + len_r)
+        pos_r = pref_r + (rows - start_r)
+        tl.store(req_out_ptr + rows, tl.where(valid, req_idx, -1).to(tl.int32), mask=mask_r)
+        tl.store(pos_out_ptr + rows, tl.where(valid, pos_r, -1).to(tl.int32), mask=mask_r)
+
+    @triton.jit(do_not_specialize=["num_rows", "page_size", "max_blocks", "num_blocks"])
+    def _dflash2_fused_5layer_kv_norm_rope_scatter_kernel(
+        kv_all_ptr,
+        k_norms_ptr,
+        inv_freqs_ptr,
+        req_ids_ptr,
+        pos_ptr,
+        bt_ptr,
+        kv0,
+        kv1,
+        kv2,
+        kv3,
+        kv4,
+        ks0,
+        vs0,
+        ks1,
+        vs1,
+        ks2,
+        vs2,
+        ks3,
+        vs3,
+        ks4,
+        vs4,
+        num_rows: tl.int32,
+        page_size: tl.int32,
+        max_blocks: tl.int32,
+        num_blocks: tl.int32,
+        kv_all_stride: tl.int64,
+        kn_stride: tl.int64,
+        inv_stride: tl.int64,
+        bt_stride_req: tl.int64,
+        bt_stride_col: tl.int64,
+        kv_stride_page: tl.int64,
+        kv_stride_kv: tl.int64,
+        kv_stride_head: tl.int64,
+        kv_stride_pos: tl.int64,
+        kv_stride_dim: tl.int64,
+        eps,
+        IS_FP8_DST: tl.constexpr,
+    ):
+        row = tl.program_id(0)
+        if row >= num_rows:
+            return
+        req_id = tl.load(req_ids_ptr + row).to(tl.int32)
+        pos = tl.load(pos_ptr + row).to(tl.int32)
+        if req_id < 0 or pos < 0:
+            return
+        block_idx = pos // page_size
+        if block_idx < 0 or block_idx >= max_blocks:
+            return
+        slot_idx = pos - block_idx * page_size
+        page_id = tl.load(
+            bt_ptr + req_id.to(tl.int64) * bt_stride_req + block_idx.to(tl.int64) * bt_stride_col
+        ).to(tl.int32)
+        if page_id < 0 or page_id >= num_blocks:
+            return
+
+        offs_32 = tl.arange(0, 32)
+        offs_64 = tl.arange(0, 64)
+        offs_128 = tl.arange(0, 128)
+        pos_f = pos.to(tl.float32)
+        row_base = kv_all_ptr + row.to(tl.int64) * kv_all_stride
+        dst_k = page_id.to(tl.int64) * kv_stride_page + slot_idx.to(tl.int64) * kv_stride_pos
+        dst_v = dst_k + kv_stride_kv
+        kv_ptrs = (kv0, kv1, kv2, kv3, kv4)
+        ks_ptrs = (ks0, ks1, ks2, ks3, ks4)
+        vs_ptrs = (vs0, vs1, vs2, vs3, vs4)
+        src_dtype = kv_all_ptr.dtype.element_ty
+
+        for lid in tl.static_range(5):
+            l_off = lid * 512
+            k0 = tl.load(row_base + l_off + offs_32).to(tl.float32)
+            k1 = tl.load(row_base + l_off + 32 + offs_32).to(tl.float32)
+            k2 = tl.load(row_base + l_off + 64 + offs_64).to(tl.float32)
+            k3 = tl.load(row_base + l_off + 128 + offs_128).to(tl.float32)
+            sum_sq = (
+                tl.sum(k0 * k0, axis=0)
+                + tl.sum(k1 * k1, axis=0)
+                + tl.sum(k2 * k2, axis=0)
+                + tl.sum(k3 * k3, axis=0)
+            )
+            rstd = tl.rsqrt(sum_sq * (1.0 / 256.0) + eps)
+            kn_base = k_norms_ptr + lid * kn_stride
+            w0 = tl.load(kn_base + offs_32).to(tl.float32)
+            w1 = tl.load(kn_base + 32 + offs_32).to(tl.float32)
+            w2 = tl.load(kn_base + 64 + offs_64).to(tl.float32)
+            w3 = tl.load(kn_base + 128 + offs_128).to(tl.float32)
+            y0 = (k0 * rstd) * (1.0 + w0)
+            y1 = (k1 * rstd) * (1.0 + w1)
+            y2 = (k2 * rstd) * (1.0 + w2)
+            y3 = (k3 * rstd) * (1.0 + w3)
+            inv_f = tl.load(inv_freqs_ptr + lid * inv_stride + offs_32).to(tl.float32)
+            freqs = pos_f * inv_f
+            c = tl.cos(freqs)
+            s = tl.sin(freqs)
+            r0 = (y0 * c - y1 * s).to(src_dtype)
+            r1 = (y1 * c + y0 * s).to(src_dtype)
+            y2b = y2.to(src_dtype)
+            y3b = y3.to(src_dtype)
+            v0 = tl.load(row_base + l_off + 256 + offs_32)
+            v1 = tl.load(row_base + l_off + 256 + 32 + offs_32)
+            v2 = tl.load(row_base + l_off + 256 + 64 + offs_64)
+            v3 = tl.load(row_base + l_off + 256 + 128 + offs_128)
+            kv_p = kv_ptrs[lid]
+            if IS_FP8_DST:
+                ks = tl.load(ks_ptrs[lid]).to(tl.float32)
+                vs = tl.load(vs_ptrs[lid]).to(tl.float32)
+                inv_ks = 1.0 / tl.maximum(ks, 1.0e-12)
+                inv_vs = 1.0 / tl.maximum(vs, 1.0e-12)
+                tl.store(kv_p + dst_k + offs_32, tl.clamp(r0.to(tl.float32) * inv_ks, -448.0, 448.0).to(tl.float8e4nv))
+                tl.store(kv_p + dst_k + 32 + offs_32, tl.clamp(r1.to(tl.float32) * inv_ks, -448.0, 448.0).to(tl.float8e4nv))
+                tl.store(kv_p + dst_k + 64 + offs_64, tl.clamp(y2b.to(tl.float32) * inv_ks, -448.0, 448.0).to(tl.float8e4nv))
+                tl.store(kv_p + dst_k + 128 + offs_128, tl.clamp(y3b.to(tl.float32) * inv_ks, -448.0, 448.0).to(tl.float8e4nv))
+                tl.store(kv_p + dst_v + offs_32, tl.clamp(v0.to(tl.float32) * inv_vs, -448.0, 448.0).to(tl.float8e4nv))
+                tl.store(kv_p + dst_v + 32 + offs_32, tl.clamp(v1.to(tl.float32) * inv_vs, -448.0, 448.0).to(tl.float8e4nv))
+                tl.store(kv_p + dst_v + 64 + offs_64, tl.clamp(v2.to(tl.float32) * inv_vs, -448.0, 448.0).to(tl.float8e4nv))
+                tl.store(kv_p + dst_v + 128 + offs_128, tl.clamp(v3.to(tl.float32) * inv_vs, -448.0, 448.0).to(tl.float8e4nv))
+            else:
+                tl.store(kv_p + dst_k + offs_32, r0)
+                tl.store(kv_p + dst_k + 32 + offs_32, r1)
+                tl.store(kv_p + dst_k + 64 + offs_64, y2b)
+                tl.store(kv_p + dst_k + 128 + offs_128, y3b)
+                tl.store(kv_p + dst_v + offs_32, v0)
+                tl.store(kv_p + dst_v + 32 + offs_32, v1)
+                tl.store(kv_p + dst_v + 64 + offs_64, v2)
+                tl.store(kv_p + dst_v + 128 + offs_128, v3)
+
+    @triton.jit(do_not_specialize=["batch_size", "width", "hidden_dim", "noise_token_id", "embed_scale"])
+    def _dflash2_prepare_propose_state_and_embed_kernel(
+        ids_ptr,
+        pref_src_ptr,
+        embed_ptr,
+        raw_pos_out_ptr,
+        safe_pos_out_ptr,
+        pref_out_ptr,
+        act_out_ptr,
+        hidden_ptr,
+        batch_size: tl.int32,
+        width: tl.int32,
+        hidden_dim: tl.int32,
+        noise_token_id: tl.int64,
+        embed_scale,
+        ids_stride: tl.int64,
+        pref_src_stride: tl.int64,
+        embed_stride_row: tl.int64,
+        hidden_stride_row: tl.int64,
+        HC_COUNT: tl.constexpr,
+        BLOCK_H: tl.constexpr,
+        HAS_EMBED_SCALE: tl.constexpr,
+    ):
+        row = tl.program_id(0)
+        h_blk = tl.program_id(1)
+        total_rows = batch_size * width
+        if row >= total_rows:
+            return
+        b = row // width
+        q_col = row - b * width
+        pref = tl.load(pref_src_ptr + b.to(tl.int64) * pref_src_stride).to(tl.int32)
+        raw_p = pref + q_col
+        safe_p = tl.maximum(0, raw_p)
+        if h_blk == 0:
+            tl.store(raw_pos_out_ptr + row, raw_p)
+            tl.store(safe_pos_out_ptr + row, safe_p)
+            if q_col == 0:
+                tl.store(pref_out_ptr + b, pref)
+                tl.store(act_out_ptr + b, pref > 0)
+        tok = tl.load(ids_ptr + row.to(tl.int64) * ids_stride).to(tl.int64) if q_col == 0 else noise_token_id
+        offs_h = h_blk * BLOCK_H + tl.arange(0, BLOCK_H)
+        mask_h = offs_h < hidden_dim
+        emb = tl.load(embed_ptr + tok * embed_stride_row + offs_h, mask=mask_h, other=0.0)
+        out_dt = hidden_ptr.dtype.element_ty
+        if HAS_EMBED_SCALE:
+            emb = (emb.to(tl.float32) * embed_scale).to(out_dt)
+        else:
+            emb = emb.to(out_dt)
+        row_out = hidden_ptr + row.to(tl.int64) * hidden_stride_row
+        for c in tl.static_range(HC_COUNT):
+            tl.store(row_out + c * hidden_dim + offs_h, emb, mask=mask_h)
+
+    @triton.jit(do_not_specialize=["num_tokens"])
+    def _dflash2_gemma_rmsnorm_partial_rope_d256_r64_kernel(
+        x_ptr,
+        w_ptr,
+        pos_ptr,
+        inv_freq_ptr,
+        out_ptr,
+        num_tokens: tl.int32,
+        x_stride_t: tl.int64,
+        x_stride_h: tl.int64,
+        pos_stride_t: tl.int64,
+        out_stride_t: tl.int64,
+        out_stride_h: tl.int64,
+        eps,
+    ):
+        tok = tl.program_id(0)
+        h = tl.program_id(1)
+        if tok >= num_tokens:
+            return
+        offs_32 = tl.arange(0, 32)
+        offs_64 = tl.arange(0, 64)
+        offs_128 = tl.arange(0, 128)
+        x_base = x_ptr + tok.to(tl.int64) * x_stride_t + h.to(tl.int64) * x_stride_h
+        x0 = tl.load(x_base + offs_32).to(tl.float32)
+        x1 = tl.load(x_base + 32 + offs_32).to(tl.float32)
+        x2 = tl.load(x_base + 64 + offs_64).to(tl.float32)
+        x3 = tl.load(x_base + 128 + offs_128).to(tl.float32)
+        sum_sq = (
+            tl.sum(x0 * x0, axis=0)
+            + tl.sum(x1 * x1, axis=0)
+            + tl.sum(x2 * x2, axis=0)
+            + tl.sum(x3 * x3, axis=0)
+        )
+        rstd = tl.rsqrt(sum_sq * (1.0 / 256.0) + eps)
+        w0 = tl.load(w_ptr + offs_32).to(tl.float32)
+        w1 = tl.load(w_ptr + 32 + offs_32).to(tl.float32)
+        w2 = tl.load(w_ptr + 64 + offs_64).to(tl.float32)
+        w3 = tl.load(w_ptr + 128 + offs_128).to(tl.float32)
+        y0 = (x0 * rstd) * (1.0 + w0)
+        y1 = (x1 * rstd) * (1.0 + w1)
+        y2 = (x2 * rstd) * (1.0 + w2)
+        y3 = (x3 * rstd) * (1.0 + w3)
+        pos = tl.load(pos_ptr + tok.to(tl.int64) * pos_stride_t).to(tl.float32)
+        inv_f = tl.load(inv_freq_ptr + offs_32).to(tl.float32)
+        freqs = pos * inv_f
+        c = tl.cos(freqs)
+        s = tl.sin(freqs)
+        r0 = y0 * c - y1 * s
+        r1 = y1 * c + y0 * s
+        out_base = out_ptr + tok.to(tl.int64) * out_stride_t + h.to(tl.int64) * out_stride_h
+        out_dt = out_ptr.dtype.element_ty
+        tl.store(out_base + offs_32, r0.to(out_dt))
+        tl.store(out_base + 32 + offs_32, r1.to(out_dt))
+        tl.store(out_base + 64 + offs_64, y2.to(out_dt))
+        tl.store(out_base + 128 + offs_128, y3.to(out_dt))
+
+    @triton.jit(do_not_specialize=["batch_size", "query_len", "page_size", "max_blocks", "num_blocks"])
+    def _dflash2_k_norm_rope_scatter_block_kv_triton(
+        k_ptr,
+        v_ptr,
+        k_norm_ptr,
+        inv_freq_ptr,
+        active_ptr,
+        pos_ptr,
+        bt_ptr,
+        kv_cache_ptr,
+        k_scale_ptr,
+        v_scale_ptr,
+        batch_size: tl.int32,
+        query_len: tl.int32,
+        page_size: tl.int32,
+        max_blocks: tl.int32,
+        num_blocks: tl.int32,
+        k_stride_tok: tl.int64,
+        k_stride_d: tl.int64,
+        v_stride_tok: tl.int64,
+        v_stride_d: tl.int64,
+        bt_stride_req: tl.int64,
+        bt_stride_col: tl.int64,
+        kv_stride_page: tl.int64,
+        kv_stride_kv: tl.int64,
+        kv_stride_pos: tl.int64,
+        kv_stride_dim: tl.int64,
+        eps,
+        IS_FP8_DST: tl.constexpr,
+    ):
+        tok = tl.program_id(0)
+        b = tok // query_len
+        if b >= batch_size:
+            return
+        if tl.load(active_ptr + b).to(tl.int32) == 0:
+            return
+        pos = tl.load(pos_ptr + tok).to(tl.int32)
+        if pos < 0:
+            return
+        page = pos // page_size
+        if page < 0 or page >= max_blocks:
+            return
+        slot = pos - page * page_size
+        phys = tl.load(
+            bt_ptr + b.to(tl.int64) * bt_stride_req + page.to(tl.int64) * bt_stride_col
+        ).to(tl.int32)
+        if phys < 0 or phys >= num_blocks:
+            return
+
+        offs_32 = tl.arange(0, 32)
+        offs_64 = tl.arange(0, 64)
+        offs_128 = tl.arange(0, 128)
+        k_base = k_ptr + tok.to(tl.int64) * k_stride_tok
+        k0 = tl.load(k_base + offs_32 * k_stride_d).to(tl.float32)
+        k1 = tl.load(k_base + (32 + offs_32) * k_stride_d).to(tl.float32)
+        k2 = tl.load(k_base + (64 + offs_64) * k_stride_d).to(tl.float32)
+        k3 = tl.load(k_base + (128 + offs_128) * k_stride_d).to(tl.float32)
+        sum_sq = (
+            tl.sum(k0 * k0, axis=0)
+            + tl.sum(k1 * k1, axis=0)
+            + tl.sum(k2 * k2, axis=0)
+            + tl.sum(k3 * k3, axis=0)
+        )
+        rstd = tl.rsqrt(sum_sq * (1.0 / 256.0) + eps)
+        w0 = tl.load(k_norm_ptr + offs_32).to(tl.float32)
+        w1 = tl.load(k_norm_ptr + 32 + offs_32).to(tl.float32)
+        w2 = tl.load(k_norm_ptr + 64 + offs_64).to(tl.float32)
+        w3 = tl.load(k_norm_ptr + 128 + offs_128).to(tl.float32)
+        y0 = (k0 * rstd) * (1.0 + w0)
+        y1 = (k1 * rstd) * (1.0 + w1)
+        y2 = (k2 * rstd) * (1.0 + w2)
+        y3 = (k3 * rstd) * (1.0 + w3)
+        freqs = pos.to(tl.float32) * tl.load(inv_freq_ptr + offs_32).to(tl.float32)
+        c = tl.cos(freqs)
+        s = tl.sin(freqs)
+        src_dtype = k_ptr.dtype.element_ty
+        r0 = (y0 * c - y1 * s).to(src_dtype)
+        r1 = (y1 * c + y0 * s).to(src_dtype)
+        y2b = y2.to(src_dtype)
+        y3b = y3.to(src_dtype)
+
+        v_base = v_ptr + tok.to(tl.int64) * v_stride_tok
+        v0 = tl.load(v_base + offs_32 * v_stride_d)
+        v1 = tl.load(v_base + (32 + offs_32) * v_stride_d)
+        v2 = tl.load(v_base + (64 + offs_64) * v_stride_d)
+        v3 = tl.load(v_base + (128 + offs_128) * v_stride_d)
+        dst_k = phys.to(tl.int64) * kv_stride_page + slot.to(tl.int64) * kv_stride_pos
+        dst_v = dst_k + kv_stride_kv
+        if IS_FP8_DST:
+            ks = tl.load(k_scale_ptr).to(tl.float32)
+            vs = tl.load(v_scale_ptr).to(tl.float32)
+            inv_ks = 1.0 / tl.maximum(ks, 1.0e-12)
+            inv_vs = 1.0 / tl.maximum(vs, 1.0e-12)
+            tl.store(kv_cache_ptr + dst_k + offs_32 * kv_stride_dim, tl.clamp(r0.to(tl.float32) * inv_ks, -448.0, 448.0).to(tl.float8e4nv))
+            tl.store(kv_cache_ptr + dst_k + (32 + offs_32) * kv_stride_dim, tl.clamp(r1.to(tl.float32) * inv_ks, -448.0, 448.0).to(tl.float8e4nv))
+            tl.store(kv_cache_ptr + dst_k + (64 + offs_64) * kv_stride_dim, tl.clamp(y2b.to(tl.float32) * inv_ks, -448.0, 448.0).to(tl.float8e4nv))
+            tl.store(kv_cache_ptr + dst_k + (128 + offs_128) * kv_stride_dim, tl.clamp(y3b.to(tl.float32) * inv_ks, -448.0, 448.0).to(tl.float8e4nv))
+            tl.store(kv_cache_ptr + dst_v + offs_32 * kv_stride_dim, tl.clamp(v0.to(tl.float32) * inv_vs, -448.0, 448.0).to(tl.float8e4nv))
+            tl.store(kv_cache_ptr + dst_v + (32 + offs_32) * kv_stride_dim, tl.clamp(v1.to(tl.float32) * inv_vs, -448.0, 448.0).to(tl.float8e4nv))
+            tl.store(kv_cache_ptr + dst_v + (64 + offs_64) * kv_stride_dim, tl.clamp(v2.to(tl.float32) * inv_vs, -448.0, 448.0).to(tl.float8e4nv))
+            tl.store(kv_cache_ptr + dst_v + (128 + offs_128) * kv_stride_dim, tl.clamp(v3.to(tl.float32) * inv_vs, -448.0, 448.0).to(tl.float8e4nv))
+        else:
+            tl.store(kv_cache_ptr + dst_k + offs_32 * kv_stride_dim, r0)
+            tl.store(kv_cache_ptr + dst_k + (32 + offs_32) * kv_stride_dim, r1)
+            tl.store(kv_cache_ptr + dst_k + (64 + offs_64) * kv_stride_dim, y2b)
+            tl.store(kv_cache_ptr + dst_k + (128 + offs_128) * kv_stride_dim, y3b)
+            tl.store(kv_cache_ptr + dst_v + offs_32 * kv_stride_dim, v0)
+            tl.store(kv_cache_ptr + dst_v + (32 + offs_32) * kv_stride_dim, v1)
+            tl.store(kv_cache_ptr + dst_v + (64 + offs_64) * kv_stride_dim, v2)
+            tl.store(kv_cache_ptr + dst_v + (128 + offs_128) * kv_stride_dim, v3)
+
+    @triton.jit(do_not_specialize=["vocab_start", "row_count"])
+    def _dflash2_tp_pack_topk_kernel(
+        vals_ptr,
+        ids_ptr,
+        out_ptr,
+        vocab_start: tl.int32,
+        row_count: tl.int32,
+        v_stride_r: tl.int64,
+        i_stride_r: tl.int64,
+        out_stride_p: tl.int64,
+        out_stride_r: tl.int64,
+        TOP_K: tl.constexpr,
+        BLOCK_K: tl.constexpr,
+        IS_16BIT: tl.constexpr,
+    ):
+        row = tl.program_id(0)
+        if row >= row_count:
+            return
+        offs = tl.arange(0, BLOCK_K)
+        mask = offs < TOP_K
+        if IS_16BIT:
+            vi = tl.load(vals_ptr + row.to(tl.int64) * v_stride_r + offs, mask=mask, other=0).to(tl.int32)
+        else:
+            vi = tl.load(vals_ptr + row.to(tl.int64) * v_stride_r + offs, mask=mask, other=0)
+        gid = tl.load(ids_ptr + row.to(tl.int64) * i_stride_r + offs, mask=mask, other=0).to(tl.int32) + vocab_start
+        tl.store(out_ptr + row.to(tl.int64) * out_stride_r + offs, vi, mask=mask)
+        tl.store(out_ptr + out_stride_p + row.to(tl.int64) * out_stride_r + offs, gid, mask=mask)
+
+    @triton.jit(do_not_specialize=["row_count", "total_cands"])
+    def _dflash2_tp_merge_topk_kernel(
+        gath_ptr,
+        out_vals_ptr,
+        out_ids_ptr,
+        row_count: tl.int32,
+        total_cands: tl.int32,
+        g_stride_p: tl.int64,
+        g_stride_r: tl.int64,
+        TOP_K: tl.constexpr,
+        BLOCK_C: tl.constexpr,
+        VAL_DTYPE_CODE: tl.constexpr,
+    ):
+        row = tl.program_id(0)
+        if row >= row_count:
+            return
+        offs_c = tl.arange(0, BLOCK_C)
+        mask_c = offs_c < total_cands
+        raw_v = tl.load(gath_ptr + row.to(tl.int64) * g_stride_r + offs_c, mask=mask_c, other=0)
+        raw_id = tl.load(gath_ptr + g_stride_p + row.to(tl.int64) * g_stride_r + offs_c, mask=mask_c, other=0)
+        if VAL_DTYPE_CODE == 0:
+            vals_f = raw_v.to(tl.float32, bitcast=True)
+        elif VAL_DTYPE_CODE == 1:
+            vals_f = raw_v.to(tl.int16).to(tl.bfloat16, bitcast=True).to(tl.float32)
+        else:
+            vals_f = raw_v.to(tl.int16).to(tl.float16, bitcast=True).to(tl.float32)
+        vals_f = tl.where(mask_c, vals_f, float("-inf"))
+        out_dt = out_vals_ptr.dtype.element_ty
+        out_id_dt = out_ids_ptr.dtype.element_ty
+        v_base = out_vals_ptr + row.to(tl.int64) * TOP_K
+        i_base = out_ids_ptr + row.to(tl.int64) * TOP_K
+        for step in tl.static_range(TOP_K):
+            best_pos = tl.argmax(vals_f, axis=0)
+            is_best = offs_c == best_pos
+            best_v = tl.max(tl.where(is_best, vals_f, float("-inf")), axis=0)
+            best_id = tl.max(tl.where(is_best, raw_id, -2147483648), axis=0)
+            tl.store(v_base + step, best_v.to(out_dt))
+            tl.store(i_base + step, best_id.to(out_id_dt))
+            vals_f = tl.where(is_best, float("-inf"), vals_f)
 
     @triton.jit
     def _dflash2_build_fi_csr_kernel(
@@ -1534,7 +2156,7 @@ if _HAS_TRITON:
         else:
             tl.store(o_ptrs, out_val.to(out_ptr.dtype.element_ty), mask=valid_m[:, None] & mask_d[None, :])
 
-    @triton.jit
+    @triton.jit(do_not_specialize=["num_rows"])
     def _dflash2_grouped_conv_kernel(
         x_ptr,
         delta_ptr,
@@ -1591,7 +2213,7 @@ if _HAS_TRITON:
             acc = tl.minimum(tl.maximum(acc, -clip_value), clip_value)
         tl.store(out_ptr + row * out_stride_row + offs, acc, mask=mask)
 
-    @triton.jit
+    @triton.jit(do_not_specialize=["num_steps"])
     def _dflash2_score_edges_fused_kernel(
         hidden_proj_ptr,
         unary_ptr,
@@ -1869,25 +2491,56 @@ def grouped_conv_forward(
         grid = (num_rows * triton.cdiv(num_channels, element_block),)
         has_clip = bool(clip_value is not None and clip_value > 0)
         eff_clip = float(clip_value) if has_clip else 0.0
-        _dflash2_grouped_conv_kernel[grid](
-            x_c,
-            delta_c,
-            base_c,
-            out,
-            x_c.stride(0),
-            delta_c.stride(0),
-            delta_c.stride(1),
-            base_c.stride(0),
-            out.stride(0),
-            num_rows,
-            eff_clip,
-            HAS_CLIP=has_clip,
-            NUM_CHANNELS=num_channels,
-            BLOCK_SIZE=block_size,
-            GROUP_SIZE=group_size,
-            TAPS=taps,
-            ELEMENT_BLOCK=element_block,
-            num_warps=4,
+        dev_idx = x_c.device.index if x_c.device.index is not None else torch.cuda.current_device()
+        xs, ds0, ds1, bs0, os0 = (
+            int(x_c.stride(0)),
+            int(delta_c.stride(0)),
+            int(delta_c.stride(1)),
+            int(base_c.stride(0)),
+            int(out.stride(0)),
+        )
+        _launch_triton_cached(
+            _KC_GCONV,
+            _dflash2_grouped_conv_kernel,
+            (grid[0], 1, 1),
+            (
+                dev_idx,
+                has_clip,
+                num_channels,
+                block_size,
+                group_size,
+                taps,
+                element_block,
+                _t_spec(x_c),
+                _t_spec(delta_c),
+                _t_spec(base_c),
+                _t_spec(out),
+                _i_spec(xs),
+                _i_spec(ds0),
+                _i_spec(ds1),
+                _i_spec(bs0),
+                _i_spec(os0),
+            ),
+            (
+                x_c,
+                delta_c,
+                base_c,
+                out,
+                xs,
+                ds0,
+                ds1,
+                bs0,
+                os0,
+                num_rows,
+                eff_clip,
+                has_clip,
+                num_channels,
+                block_size,
+                group_size,
+                taps,
+                element_block,
+            ),
+            {"num_warps": 4},
         )
         return out
     return grouped_conv_ref(
@@ -2011,14 +2664,17 @@ def greedy_select_path(
             dtype=candidate_ids.dtype,
             device=candidate_ids.device,
         )
-        _selector_greedy_walk_kernel[(batch_size,)](
-            scores.contiguous(),
-            candidate_ids.contiguous(),
-            tokens,
-            num_steps=num_steps,
-            top_k=top_k,
-            BLOCK_K=triton.next_power_of_2(top_k),
-            num_warps=4,
+        sc_c = scores if scores.is_contiguous() else scores.contiguous()
+        ci_c = candidate_ids if candidate_ids.is_contiguous() else candidate_ids.contiguous()
+        bk = triton.next_power_of_2(top_k)
+        dev_idx = ci_c.device.index if ci_c.device.index is not None else torch.cuda.current_device()
+        _launch_triton_cached(
+            _KC_GREEDY_WALK,
+            _selector_greedy_walk_kernel,
+            (batch_size, 1, 1),
+            (dev_idx, num_steps, top_k, bk, _t_spec(sc_c), _t_spec(ci_c), _t_spec(tokens)),
+            (sc_c, ci_c, tokens, num_steps, top_k, bk),
+            {"num_warps": 4},
         )
         return tokens
     return greedy_select_path_ref(candidate_ids, scores)
@@ -2047,6 +2703,8 @@ class CandidateSelector(nn.Module):
         self.vocab_size = int(vocab_size)
         self.rank = int(rank)
         self.top_k = int(top_k)
+        self._block_k = max(16, int(triton.next_power_of_2(self.top_k))) if _HAS_TRITON else 16
+        self._block_r = max(16, min(64, int(triton.next_power_of_2(self.rank)))) if _HAS_TRITON else 16
 
         self.hidden_projection = nn.Linear(
             self.hidden_size, self.rank, bias=False, dtype=dtype, device=device
@@ -2114,34 +2772,72 @@ class CandidateSelector(nn.Module):
                     dtype=torch.float32,
                     device=hidden.device,
                 )
-                block_k = max(16, int(triton.next_power_of_2(self.top_k)))
-                block_r = max(16, min(64, int(triton.next_power_of_2(self.rank))))
-                _dflash2_score_edges_fused_kernel[(batch_size * num_steps,)](
-                    hp,
-                    unary_c,
-                    cand_c,
-                    anc_1d,
-                    pred_cb,
-                    succ_cb,
-                    out,
-                    int(num_steps),
-                    int(hp.stride(0)),
-                    int(hp.stride(1)),
-                    int(unary_c.stride(0)),
-                    int(unary_c.stride(1)),
-                    int(cand_c.stride(0)),
-                    int(cand_c.stride(1)),
-                    int(anc_1d.stride(0)),
-                    int(pred_cb.stride(0)),
-                    int(succ_cb.stride(0)),
-                    int(out.stride(0)),
-                    int(out.stride(1)),
-                    int(out.stride(2)),
-                    TOP_K=self.top_k,
-                    BLOCK_K=block_k,
-                    RANK=self.rank,
-                    BLOCK_R=block_r,
-                    num_warps=4,
+                block_k = self._block_k
+                block_r = self._block_r
+                sh0, sh1 = int(hp.stride(0)), int(hp.stride(1))
+                su0, su1 = int(unary_c.stride(0)), int(unary_c.stride(1))
+                sc0, sc1 = int(cand_c.stride(0)), int(cand_c.stride(1))
+                sa0 = int(anc_1d.stride(0))
+                spb0, ssb0 = int(pred_cb.stride(0)), int(succ_cb.stride(0))
+                so0, so1, so2 = int(out.stride(0)), int(out.stride(1)), int(out.stride(2))
+                dev_idx = hp.device.index if hp.device.index is not None else torch.cuda.current_device()
+                _launch_triton_cached(
+                    _KC_SCORE_EDGES,
+                    _dflash2_score_edges_fused_kernel,
+                    (batch_size * num_steps, 1, 1),
+                    (
+                        dev_idx,
+                        self.top_k,
+                        block_k,
+                        self.rank,
+                        block_r,
+                        _t_spec(hp),
+                        _t_spec(unary_c),
+                        _t_spec(cand_c),
+                        _t_spec(anc_1d),
+                        _t_spec(pred_cb),
+                        _t_spec(succ_cb),
+                        _t_spec(out),
+                        _i_spec(sh0),
+                        _i_spec(sh1),
+                        _i_spec(su0),
+                        _i_spec(su1),
+                        _i_spec(sc0),
+                        _i_spec(sc1),
+                        _i_spec(sa0),
+                        _i_spec(spb0),
+                        _i_spec(ssb0),
+                        _i_spec(so0),
+                        _i_spec(so1),
+                        _i_spec(so2),
+                    ),
+                    (
+                        hp,
+                        unary_c,
+                        cand_c,
+                        anc_1d,
+                        pred_cb,
+                        succ_cb,
+                        out,
+                        int(num_steps),
+                        sh0,
+                        sh1,
+                        su0,
+                        su1,
+                        sc0,
+                        sc1,
+                        sa0,
+                        spb0,
+                        ssb0,
+                        so0,
+                        so1,
+                        so2,
+                        self.top_k,
+                        block_k,
+                        self.rank,
+                        block_r,
+                    ),
+                    {"num_warps": 4},
                 )
                 return out
 
@@ -2369,6 +3065,10 @@ def _choose_dflash2_tile_and_splits(
     is_fp8_kv: bool = False,
 ) -> Tuple[int, int, int, int]:
     """Select (BLOCK_Q, BLOCK_G, BLOCK_M, num_splits) tuned for L20D/SM100 saturation."""
+    ckey = (batch_size, q_len, num_kv_heads, gqa_groups, max_blocks, page_size, max_splits, has_swa, is_fp8_kv)
+    cached = _TILE_SPLIT_CACHE.get(ckey)
+    if cached is not None:
+        return cached
     max_g = 16 if (q_len <= 1 or (q_len >= 4 and gqa_groups >= 16)) else 8
     block_g = min(max_g, max(1, int(triton.next_power_of_2(max(1, gqa_groups)))))
     target_m = 64 if q_len >= 4 else 16
@@ -2380,11 +3080,11 @@ def _choose_dflash2_tile_and_splits(
     num_q_tiles = (q_len + block_q - 1) // block_q
     num_g_tiles = (gqa_groups + block_g - 1) // block_g
     max_possible_kv = max(0, max_blocks * page_size)
-    if max_possible_kv <= 32 or max_splits <= 1:
+    if max_possible_kv <= 32 or max_splits <= 1 or (is_fp8_kv and max_possible_kv <= 768):
         num_splits = 1
     else:
         base_ctas = max(1, batch_size * num_kv_heads * num_q_tiles * num_g_tiles)
-        if base_ctas >= 256:
+        if base_ctas >= 256 or (is_fp8_kv and has_swa and base_ctas >= 128):
             target_splits = 1
         elif base_ctas >= 128:
             target_splits = 2 if has_swa else 4
@@ -2398,7 +3098,10 @@ def _choose_dflash2_tile_and_splits(
             raw = max(1, min(cap_ctx, int(desired), max(1, (max_possible_kv + 63) // 64)))
             target_splits = 1 << (raw - 1).bit_length()
         num_splits = min(int(max_splits), max(1, target_splits))
-    return block_q, block_g, block_m, max(1, num_splits)
+    res = (block_q, block_g, block_m, max(1, num_splits))
+    if len(_TILE_SPLIT_CACHE) < 4096:
+        _TILE_SPLIT_CACHE[ckey] = res
+    return res
 
 
 class _DFlash2PagedFMHADispatcher(FMHAImplBase):
@@ -2451,6 +3154,9 @@ class _DFlash2PagedFMHADispatcher(FMHAImplBase):
         self._fi_buf_cap_idx: int = 0
         self._fi_last_plan_args: Optional[
             Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int, int, int, int, torch.dtype]
+        ] = None
+        self._round_meta: Optional[
+            Tuple[torch.Tensor, int, torch.Tensor, torch.Tensor, torch.Tensor, int, int]
         ] = None
 
         if self.use_flashinfer and self._fi_window_lefts:
@@ -2569,21 +3275,44 @@ class _DFlash2PagedFMHADispatcher(FMHAImplBase):
             and self._fi_last_page_len_buf is not None
         )
         block_b = max(32, min(1024, int(triton.next_power_of_2(max(1, batch_size)))))
-        _dflash2_build_fi_csr_kernel[(1,)](
-            pref_d,
-            bt_d,
-            self._fi_qo_indptr_buf,
-            self._fi_kv_indptr_buf,
-            self._fi_kv_indices_buf,
-            self._fi_last_page_len_buf,
-            batch_size,
-            q_len,
-            self._page_size,
-            max_blocks,
-            int(bt_d.stride(0)),
-            int(bt_d.stride(1)),
-            BLOCK_B=block_b,
-            num_warps=4,
+        dev_idx = pref_d.device.index if pref_d.device.index is not None else torch.cuda.current_device()
+        bts0, bts1 = int(bt_d.stride(0)), int(bt_d.stride(1))
+        _launch_triton_cached(
+            _KC_FI_CSR,
+            _dflash2_build_fi_csr_kernel,
+            (1, 1, 1),
+            (
+                dev_idx,
+                block_b,
+                _i_spec(batch_size),
+                _i_spec(q_len),
+                _i_spec(self._page_size),
+                _i_spec(max_blocks),
+                _t_spec(pref_d),
+                _t_spec(bt_d),
+                _t_spec(self._fi_qo_indptr_buf),
+                _t_spec(self._fi_kv_indptr_buf),
+                _t_spec(self._fi_kv_indices_buf),
+                _t_spec(self._fi_last_page_len_buf),
+                _i_spec(bts0),
+                _i_spec(bts1),
+            ),
+            (
+                pref_d,
+                bt_d,
+                self._fi_qo_indptr_buf,
+                self._fi_kv_indptr_buf,
+                self._fi_kv_indices_buf,
+                self._fi_last_page_len_buf,
+                batch_size,
+                q_len,
+                self._page_size,
+                max_blocks,
+                bts0,
+                bts1,
+                block_b,
+            ),
+            {"num_warps": 4},
         )
         total_pages = int(self._fi_kv_indptr_buf[batch_size].item())
         return (
@@ -2693,13 +3422,33 @@ class _DFlash2PagedFMHADispatcher(FMHAImplBase):
 
     def prepare(self, attn_inputs: Any) -> None:
         self.attn_inputs = _select_tagged_attn_inputs(attn_inputs)
+        self._round_meta = None
         if self.use_flashinfer:
             self._plan_flashinfer_from_inputs(self.attn_inputs)
 
     def prepare_cuda_graph(self, attn_inputs: Any) -> None:
         self.attn_inputs = _select_tagged_attn_inputs(attn_inputs)
+        self._round_meta = None
         if self.use_flashinfer:
             self._plan_flashinfer_from_inputs(self.attn_inputs)
+
+    def can_fuse_k_norm_rope_scatter(
+        self, k: torch.Tensor, kv_cache: Optional[LayerKVCache]
+    ) -> bool:
+        return (
+            self.use_triton_paged
+            and _HAS_TRITON
+            and k.is_cuda
+            and int(k.size(1)) == 1
+            and int(k.size(-1)) == 256
+            and self.query_width is not None
+            and self.active_requests is not None
+            and self.query_positions is not None
+            and self.prefix_lengths is not None
+            and kv_cache is not None
+            and getattr(kv_cache, "kv_cache_base", None) is not None
+            and kv_cache.kv_cache_base.is_cuda
+        )
 
     def forward(
         self,
@@ -2735,6 +3484,9 @@ class _DFlash2PagedFMHADispatcher(FMHAImplBase):
         *,
         sliding_window: Optional[int] = None,
         output_gate: Optional[torch.Tensor] = None,
+        k_norm_weight: Optional[torch.Tensor] = None,
+        k_inv_freq: Optional[torch.Tensor] = None,
+        k_eps: float = 1e-6,
     ) -> torch.Tensor:
         """Append K/V into paged cache and compute non-causal (SWA/Full) attention."""
         total_tokens = int(q.size(0))
@@ -2766,74 +3518,189 @@ class _DFlash2PagedFMHADispatcher(FMHAImplBase):
                     q = q.contiguous()
                 if output_gate is not None and output_gate.stride(-1) != 1:
                     output_gate = output_gate.contiguous()
-                q_len = max(1, int(self.query_width))
-                batch_size = max(1, int(self.active_requests.numel()))
-                bt = self._resolve_block_table(q.device)
-                if bt.dtype != torch.int32:
-                    bt = bt.to(torch.int32)
-                max_blocks = int(bt.shape[1]) if bt.ndim >= 2 else 0
+                q_dev = q.device
+                meta = self._round_meta
+                if meta is None:
+                    q_len = max(1, int(self.query_width))
+                    batch_size = max(1, int(self.active_requests.numel()))
+                    bt = self._resolve_block_table(q_dev)
+                    if bt.dtype != torch.int32:
+                        bt = bt.to(torch.int32)
+                    max_blocks = int(bt.shape[1]) if bt.ndim >= 2 else 0
+                    pos_d = (
+                        self.query_positions
+                        if self.query_positions.device == q_dev
+                        and self.query_positions.dtype == torch.int32
+                        and self.query_positions.is_contiguous()
+                        else self.query_positions.to(device=q_dev, dtype=torch.int32).contiguous()
+                    )
+                    pref_d = (
+                        self.prefix_lengths
+                        if self.prefix_lengths.device == q_dev
+                        and self.prefix_lengths.dtype == torch.int32
+                        and self.prefix_lengths.is_contiguous()
+                        else self.prefix_lengths.to(device=q_dev, dtype=torch.int32).contiguous()
+                    )
+                    act_d = (
+                        self.active_requests
+                        if self.active_requests.device == q_dev
+                        and self.active_requests.is_contiguous()
+                        else self.active_requests.to(device=q_dev).contiguous()
+                    )
+                    meta = (bt, max_blocks, pos_d, pref_d, act_d, batch_size, q_len)
+                    self._round_meta = meta
+                else:
+                    bt, max_blocks, pos_d, pref_d, act_d, batch_size, q_len = meta
                 num_blocks = int(kv_hnd.shape[0])
                 if max_blocks == 0 or num_blocks == 0:
                     return torch.zeros_like(q)
 
-                pos_d = (
-                    self.query_positions
-                    if self.query_positions.device == q.device
-                    and self.query_positions.dtype == torch.int32
-                    and self.query_positions.is_contiguous()
-                    else self.query_positions.to(device=q.device, dtype=torch.int32).contiguous()
-                )
-                pref_d = (
-                    self.prefix_lengths
-                    if self.prefix_lengths.device == q.device
-                    and self.prefix_lengths.dtype == torch.int32
-                    and self.prefix_lengths.is_contiguous()
-                    else self.prefix_lengths.to(device=q.device, dtype=torch.int32).contiguous()
-                )
-                act_d = (
-                    self.active_requests
-                    if self.active_requests.device == q.device
-                    and self.active_requests.is_contiguous()
-                    else self.active_requests.to(device=q.device).contiguous()
-                )
-
                 fp8_dt = getattr(torch, "float8_e4m3fn", None)
                 is_fp8_kv = fp8_dt is not None and kv_hnd.dtype == fp8_dt
-                ks_t, vs_t = _resolve_fp8_kv_scales(kv_cache, q.device)
+                ks_t, vs_t = _resolve_fp8_kv_scales(kv_cache, q_dev)
 
                 block_d = max(16, int(triton.next_power_of_2(head_dim)))
-                _dflash2_scatter_block_kv_triton[(total_tokens, kv_head_num)](
-                    k,
-                    v,
-                    act_d,
-                    pos_d,
-                    bt,
-                    kv_hnd,
-                    ks_t,
-                    vs_t,
-                    batch_size,
-                    q_len,
-                    kv_head_num,
-                    self._page_size,
-                    head_dim,
-                    max_blocks,
-                    num_blocks,
-                    int(k.stride(0)),
-                    int(k.stride(1)),
-                    int(k.stride(2)),
-                    int(v.stride(0)),
-                    int(v.stride(1)),
-                    int(v.stride(2)),
-                    int(bt.stride(0)),
-                    int(bt.stride(1)),
+                dev_idx = q_dev.index if q_dev.index is not None else torch.cuda.current_device()
+                ks0, ks1, ks2 = int(k.stride(0)), int(k.stride(1)), int(k.stride(2))
+                vs0, vs1, vs2 = int(v.stride(0)), int(v.stride(1)), int(v.stride(2))
+                bts0, bts1 = int(bt.stride(0)), int(bt.stride(1))
+                kvs0, kvs1, kvs2, kvs3, kvs4 = (
                     int(kv_hnd.stride(0)),
                     int(kv_hnd.stride(1)),
                     int(kv_hnd.stride(2)),
                     int(kv_hnd.stride(3)),
                     int(kv_hnd.stride(4)),
-                    IS_FP8_DST=is_fp8_kv,
-                    BLOCK_D=block_d,
                 )
+                if k_norm_weight is not None and k_inv_freq is not None and kv_head_num == 1 and head_dim == 256:
+                    kn_w = k_norm_weight if k_norm_weight.is_contiguous() else k_norm_weight.contiguous()
+                    kinv = k_inv_freq if k_inv_freq.is_contiguous() else k_inv_freq.contiguous()
+                    _launch_triton_cached(
+                        _KC_K_ROPE_SCATTER,
+                        _dflash2_k_norm_rope_scatter_block_kv_triton,
+                        (total_tokens, 1, 1),
+                        (
+                            dev_idx,
+                            is_fp8_kv,
+                            _t_spec(k),
+                            _t_spec(v),
+                            _t_spec(kn_w),
+                            _t_spec(kinv),
+                            _t_spec(act_d),
+                            _t_spec(pos_d),
+                            _t_spec(bt),
+                            _t_spec(kv_hnd),
+                            _t_spec(ks_t),
+                            _t_spec(vs_t),
+                            _i_spec(ks0),
+                            _i_spec(ks2),
+                            _i_spec(vs0),
+                            _i_spec(vs2),
+                            _i_spec(bts0),
+                            _i_spec(bts1),
+                            _i_spec(kvs0),
+                            _i_spec(kvs1),
+                            _i_spec(kvs3),
+                            _i_spec(kvs4),
+                        ),
+                        (
+                            k,
+                            v,
+                            kn_w,
+                            kinv,
+                            act_d,
+                            pos_d,
+                            bt,
+                            kv_hnd,
+                            ks_t,
+                            vs_t,
+                            batch_size,
+                            q_len,
+                            self._page_size,
+                            max_blocks,
+                            num_blocks,
+                            ks0,
+                            ks2,
+                            vs0,
+                            vs2,
+                            bts0,
+                            bts1,
+                            kvs0,
+                            kvs1,
+                            kvs3,
+                            kvs4,
+                            float(k_eps),
+                            is_fp8_kv,
+                        ),
+                        {"num_warps": 4},
+                    )
+                else:
+                    _launch_triton_cached(
+                        _KC_SCATTER_KV,
+                        _dflash2_scatter_block_kv_triton,
+                        (total_tokens, kv_head_num, 1),
+                        (
+                            dev_idx,
+                            kv_head_num,
+                            self._page_size,
+                            head_dim,
+                            is_fp8_kv,
+                            block_d,
+                            _t_spec(k),
+                            _t_spec(v),
+                            _t_spec(act_d),
+                            _t_spec(pos_d),
+                            _t_spec(bt),
+                            _t_spec(kv_hnd),
+                            _t_spec(ks_t),
+                            _t_spec(vs_t),
+                            _i_spec(ks0),
+                            _i_spec(ks1),
+                            _i_spec(ks2),
+                            _i_spec(vs0),
+                            _i_spec(vs1),
+                            _i_spec(vs2),
+                            _i_spec(bts0),
+                            _i_spec(bts1),
+                            _i_spec(kvs0),
+                            _i_spec(kvs1),
+                            _i_spec(kvs2),
+                            _i_spec(kvs3),
+                            _i_spec(kvs4),
+                        ),
+                        (
+                            k,
+                            v,
+                            act_d,
+                            pos_d,
+                            bt,
+                            kv_hnd,
+                            ks_t,
+                            vs_t,
+                            batch_size,
+                            q_len,
+                            kv_head_num,
+                            self._page_size,
+                            head_dim,
+                            max_blocks,
+                            num_blocks,
+                            ks0,
+                            ks1,
+                            ks2,
+                            vs0,
+                            vs1,
+                            vs2,
+                            bts0,
+                            bts1,
+                            kvs0,
+                            kvs1,
+                            kvs2,
+                            kvs3,
+                            kvs4,
+                            is_fp8_kv,
+                            block_d,
+                        ),
+                        {"num_warps": 4},
+                    )
 
                 w_left = int(sliding_window) if (sliding_window is not None and int(sliding_window) >= 0) else -1
                 if (
@@ -2851,16 +3718,25 @@ class _DFlash2PagedFMHADispatcher(FMHAImplBase):
                         out = w.run(q, (kv_hnd[:, 0], kv_hnd[:, 1]))
                         if output_gate is not None:
                             gate_v = output_gate.view(total_tokens, head_num, head_dim)
-                            _dflash2_apply_output_gate_kernel[(total_tokens, head_num)](
-                                out,
-                                gate_v,
-                                int(out.stride(0)),
-                                int(out.stride(1)),
-                                int(gate_v.stride(0)),
-                                int(gate_v.stride(1)),
-                                head_dim,
-                                BLOCK_D=block_d,
-                                num_warps=2,
+                            os0, os1 = int(out.stride(0)), int(out.stride(1))
+                            gs0, gs1 = int(gate_v.stride(0)), int(gate_v.stride(1))
+                            _launch_triton_cached(
+                                _KC_GATE,
+                                _dflash2_apply_output_gate_kernel,
+                                (total_tokens, head_num, 1),
+                                (
+                                    dev_idx,
+                                    block_d,
+                                    _i_spec(head_dim),
+                                    _t_spec(out),
+                                    _t_spec(gate_v),
+                                    _i_spec(os0),
+                                    _i_spec(os1),
+                                    _i_spec(gs0),
+                                    _i_spec(gs1),
+                                ),
+                                (out, gate_v, os0, os1, gs0, gs1, head_dim, block_d),
+                                {"num_warps": 2},
                             )
                         return out
 
@@ -2895,60 +3771,111 @@ class _DFlash2PagedFMHADispatcher(FMHAImplBase):
                 if has_gate and gate_arg.stride(-1) != 1:
                     gate_arg = gate_arg.contiguous()
 
+                qs0, qs1, qs2 = int(q.stride(0)), int(q.stride(1)), int(q.stride(2))
+                gs0, gs1, gs2 = int(gate_arg.stride(0)), int(gate_arg.stride(1)), int(gate_arg.stride(2))
+                os0, os1, os2 = int(out.stride(0)), int(out.stride(1)), int(out.stride(2))
                 if page_aligned and body_splits == 1 and use_fp8_dot:
-                    _dflash2_paged_noncausal_mha_fused_single_triton[
-                        (num_q_tiles * num_g_tiles, batch_size * kv_head_num)
-                    ](
-                        q,
-                        kv_hnd,
-                        bt,
-                        pref_d,
-                        pos_d,
-                        act_d,
-                        ks_t,
-                        vs_t,
-                        gate_arg,
-                        out,
-                        sm_scale,
-                        batch_size,
-                        q_len,
-                        kv_head_num,
-                        gqa_groups,
-                        num_g_tiles,
-                        self._page_size,
-                        head_dim,
-                        max_blocks,
-                        num_blocks,
-                        w_left,
-                        int(q.stride(0)),
-                        int(q.stride(1)),
-                        int(q.stride(2)),
-                        int(bt.stride(0)),
-                        int(bt.stride(1)),
-                        int(kv_hnd.stride(0)),
-                        int(kv_hnd.stride(1)),
-                        int(kv_hnd.stride(2)),
-                        int(kv_hnd.stride(3)),
-                        int(kv_hnd.stride(4)),
-                        int(gate_arg.stride(0)),
-                        int(gate_arg.stride(1)),
-                        int(gate_arg.stride(2)),
-                        int(out.stride(0)),
-                        int(out.stride(1)),
-                        int(out.stride(2)),
-                        HAS_SWA=has_swa,
-                        IS_FP8_KV=is_fp8_kv,
-                        USE_FP8_DOT=use_fp8_dot,
-                        HAS_GATE=has_gate,
-                        HEAD_DIM_MATCH=head_dim_match,
-                        ALL_M_VALID=all_m_valid,
-                        BLOCK_Q=block_q,
-                        BLOCK_G=block_g,
-                        BLOCK_M=block_m,
-                        BLOCK_N=block_n,
-                        BLOCK_D=block_d,
-                        num_warps=4,
-                        num_stages=2,
+                    _launch_triton_cached(
+                        _KC_MHA_SINGLE,
+                        _dflash2_paged_noncausal_mha_fused_single_triton,
+                        (num_q_tiles * num_g_tiles, batch_size * kv_head_num, 1),
+                        (
+                            dev_idx,
+                            q_len,
+                            kv_head_num,
+                            gqa_groups,
+                            num_g_tiles,
+                            self._page_size,
+                            head_dim,
+                            has_swa,
+                            is_fp8_kv,
+                            use_fp8_dot,
+                            has_gate,
+                            head_dim_match,
+                            all_m_valid,
+                            block_q,
+                            block_g,
+                            block_m,
+                            block_n,
+                            block_d,
+                            _t_spec(q),
+                            _t_spec(kv_hnd),
+                            _t_spec(bt),
+                            _t_spec(pref_d),
+                            _t_spec(pos_d),
+                            _t_spec(act_d),
+                            _t_spec(ks_t),
+                            _t_spec(vs_t),
+                            _t_spec(gate_arg),
+                            _t_spec(out),
+                            _i_spec(qs0),
+                            _i_spec(qs1),
+                            _i_spec(qs2),
+                            _i_spec(bts0),
+                            _i_spec(bts1),
+                            _i_spec(kvs0),
+                            _i_spec(kvs1),
+                            _i_spec(kvs2),
+                            _i_spec(kvs3),
+                            _i_spec(kvs4),
+                            _i_spec(gs0),
+                            _i_spec(gs1),
+                            _i_spec(gs2),
+                            _i_spec(os0),
+                            _i_spec(os1),
+                            _i_spec(os2),
+                        ),
+                        (
+                            q,
+                            kv_hnd,
+                            bt,
+                            pref_d,
+                            pos_d,
+                            act_d,
+                            ks_t,
+                            vs_t,
+                            gate_arg,
+                            out,
+                            sm_scale,
+                            batch_size,
+                            q_len,
+                            kv_head_num,
+                            gqa_groups,
+                            num_g_tiles,
+                            self._page_size,
+                            head_dim,
+                            max_blocks,
+                            num_blocks,
+                            w_left,
+                            qs0,
+                            qs1,
+                            qs2,
+                            bts0,
+                            bts1,
+                            kvs0,
+                            kvs1,
+                            kvs2,
+                            kvs3,
+                            kvs4,
+                            gs0,
+                            gs1,
+                            gs2,
+                            os0,
+                            os1,
+                            os2,
+                            has_swa,
+                            is_fp8_kv,
+                            use_fp8_dot,
+                            has_gate,
+                            head_dim_match,
+                            all_m_valid,
+                            block_q,
+                            block_g,
+                            block_m,
+                            block_n,
+                            block_d,
+                        ),
+                        {"num_warps": 4, "num_stages": 2},
                     )
                     return out
 
@@ -2964,23 +3891,11 @@ class _DFlash2PagedFMHADispatcher(FMHAImplBase):
                 else:
                     body_warps, body_stages = 8, 2
 
+                wsm0, wsm1, wsm2 = int(ws_m.stride(0)), int(ws_m.stride(1)), int(ws_m.stride(2))
+                wsa0, wsa1, wsa2, wsa3 = int(ws_acc.stride(0)), int(ws_acc.stride(1)), int(ws_acc.stride(2)), int(ws_acc.stride(3))
                 if use_body_edge:
-                    _dflash2_paged_noncausal_mha_stage1_body_triton[
-                        (num_q_tiles * num_g_tiles, batch_size * kv_head_num, body_splits)
-                    ](
-                        q,
-                        kv_hnd,
-                        bt,
-                        pref_d,
-                        pos_d,
-                        act_d,
-                        ks_t,
-                        vs_t,
-                        ws_m,
-                        ws_l,
-                        ws_acc,
-                        sm_scale,
-                        batch_size,
+                    _mha_common_spec = (
+                        dev_idx,
                         q_len,
                         kv_head_num,
                         gqa_groups,
@@ -2989,93 +3904,160 @@ class _DFlash2PagedFMHADispatcher(FMHAImplBase):
                         num_splits,
                         self._page_size,
                         head_dim,
-                        max_blocks,
-                        num_blocks,
-                        w_left,
-                        int(q.stride(0)),
-                        int(q.stride(1)),
-                        int(q.stride(2)),
-                        int(bt.stride(0)),
-                        int(bt.stride(1)),
-                        int(kv_hnd.stride(0)),
-                        int(kv_hnd.stride(1)),
-                        int(kv_hnd.stride(2)),
-                        int(kv_hnd.stride(3)),
-                        int(kv_hnd.stride(4)),
-                        int(ws_m.stride(0)),
-                        int(ws_m.stride(1)),
-                        int(ws_m.stride(2)),
-                        int(ws_acc.stride(0)),
-                        int(ws_acc.stride(1)),
-                        int(ws_acc.stride(2)),
-                        int(ws_acc.stride(3)),
-                        HAS_SWA=has_swa,
-                        IS_FP8_KV=is_fp8_kv,
-                        USE_FP8_DOT=use_fp8_dot,
-                        HEAD_DIM_MATCH=head_dim_match,
-                        ALL_M_VALID=all_m_valid,
-                        BLOCK_Q=block_q,
-                        BLOCK_G=block_g,
-                        BLOCK_M=block_m,
-                        BLOCK_N=block_n,
-                        BLOCK_D=block_d,
-                        num_warps=body_warps,
-                        num_stages=body_stages,
+                        has_swa,
+                        is_fp8_kv,
+                        use_fp8_dot,
+                        block_q,
+                        block_g,
+                        block_m,
+                        block_n,
+                        block_d,
+                        _t_spec(q),
+                        _t_spec(kv_hnd),
+                        _t_spec(bt),
+                        _t_spec(pref_d),
+                        _t_spec(pos_d),
+                        _t_spec(act_d),
+                        _t_spec(ks_t),
+                        _t_spec(vs_t),
+                        _t_spec(ws_m),
+                        _t_spec(ws_l),
+                        _t_spec(ws_acc),
+                        _i_spec(qs0),
+                        _i_spec(qs1),
+                        _i_spec(qs2),
+                        _i_spec(bts0),
+                        _i_spec(bts1),
+                        _i_spec(kvs0),
+                        _i_spec(kvs1),
+                        _i_spec(kvs2),
+                        _i_spec(kvs3),
+                        _i_spec(kvs4),
+                        _i_spec(wsm0),
+                        _i_spec(wsm1),
+                        _i_spec(wsm2),
+                        _i_spec(wsa0),
+                        _i_spec(wsa1),
+                        _i_spec(wsa2),
+                        _i_spec(wsa3),
                     )
-                    _dflash2_paged_noncausal_mha_stage1_edge_triton[
-                        (num_q_tiles * num_g_tiles, batch_size * kv_head_num)
-                    ](
-                        q,
-                        kv_hnd,
-                        bt,
-                        pref_d,
-                        pos_d,
-                        act_d,
-                        ks_t,
-                        vs_t,
-                        ws_m,
-                        ws_l,
-                        ws_acc,
-                        sm_scale,
-                        batch_size,
-                        q_len,
-                        kv_head_num,
-                        gqa_groups,
-                        num_g_tiles,
-                        body_splits,
-                        num_splits,
-                        self._page_size,
-                        head_dim,
-                        max_blocks,
-                        num_blocks,
-                        w_left,
-                        int(q.stride(0)),
-                        int(q.stride(1)),
-                        int(q.stride(2)),
-                        int(bt.stride(0)),
-                        int(bt.stride(1)),
-                        int(kv_hnd.stride(0)),
-                        int(kv_hnd.stride(1)),
-                        int(kv_hnd.stride(2)),
-                        int(kv_hnd.stride(3)),
-                        int(kv_hnd.stride(4)),
-                        int(ws_m.stride(0)),
-                        int(ws_m.stride(1)),
-                        int(ws_m.stride(2)),
-                        int(ws_acc.stride(0)),
-                        int(ws_acc.stride(1)),
-                        int(ws_acc.stride(2)),
-                        int(ws_acc.stride(3)),
-                        HAS_SWA=has_swa,
-                        IS_FP8_KV=is_fp8_kv,
-                        USE_FP8_DOT=use_fp8_dot,
-                        BLOCK_Q=block_q,
-                        BLOCK_G=block_g,
-                        BLOCK_M=block_m,
-                        BLOCK_N=block_n,
-                        BLOCK_D=block_d,
-                        num_warps=4,
-                        num_stages=2,
+                    _launch_triton_cached(
+                        _KC_MHA_BODY,
+                        _dflash2_paged_noncausal_mha_stage1_body_triton,
+                        (num_q_tiles * num_g_tiles, batch_size * kv_head_num, body_splits),
+                        (*_mha_common_spec, head_dim_match, all_m_valid, body_warps, body_stages),
+                        (
+                            q,
+                            kv_hnd,
+                            bt,
+                            pref_d,
+                            pos_d,
+                            act_d,
+                            ks_t,
+                            vs_t,
+                            ws_m,
+                            ws_l,
+                            ws_acc,
+                            sm_scale,
+                            batch_size,
+                            q_len,
+                            kv_head_num,
+                            gqa_groups,
+                            num_g_tiles,
+                            body_splits,
+                            num_splits,
+                            self._page_size,
+                            head_dim,
+                            max_blocks,
+                            num_blocks,
+                            w_left,
+                            qs0,
+                            qs1,
+                            qs2,
+                            bts0,
+                            bts1,
+                            kvs0,
+                            kvs1,
+                            kvs2,
+                            kvs3,
+                            kvs4,
+                            wsm0,
+                            wsm1,
+                            wsm2,
+                            wsa0,
+                            wsa1,
+                            wsa2,
+                            wsa3,
+                            has_swa,
+                            is_fp8_kv,
+                            use_fp8_dot,
+                            head_dim_match,
+                            all_m_valid,
+                            block_q,
+                            block_g,
+                            block_m,
+                            block_n,
+                            block_d,
+                        ),
+                        {"num_warps": body_warps, "num_stages": body_stages},
+                    )
+                    _launch_triton_cached(
+                        _KC_MHA_EDGE,
+                        _dflash2_paged_noncausal_mha_stage1_edge_triton,
+                        (num_q_tiles * num_g_tiles, batch_size * kv_head_num, 1),
+                        _mha_common_spec,
+                        (
+                            q,
+                            kv_hnd,
+                            bt,
+                            pref_d,
+                            pos_d,
+                            act_d,
+                            ks_t,
+                            vs_t,
+                            ws_m,
+                            ws_l,
+                            ws_acc,
+                            sm_scale,
+                            batch_size,
+                            q_len,
+                            kv_head_num,
+                            gqa_groups,
+                            num_g_tiles,
+                            body_splits,
+                            num_splits,
+                            self._page_size,
+                            head_dim,
+                            max_blocks,
+                            num_blocks,
+                            w_left,
+                            qs0,
+                            qs1,
+                            qs2,
+                            bts0,
+                            bts1,
+                            kvs0,
+                            kvs1,
+                            kvs2,
+                            kvs3,
+                            kvs4,
+                            wsm0,
+                            wsm1,
+                            wsm2,
+                            wsa0,
+                            wsa1,
+                            wsa2,
+                            wsa3,
+                            has_swa,
+                            is_fp8_kv,
+                            use_fp8_dot,
+                            block_q,
+                            block_g,
+                            block_m,
+                            block_n,
+                            block_d,
+                        ),
+                        {"num_warps": 4, "num_stages": 2},
                     )
                 else:
                     _dflash2_paged_noncausal_mha_stage1_triton[
@@ -3136,37 +4118,78 @@ class _DFlash2PagedFMHADispatcher(FMHAImplBase):
 
 
                 split_block = max(1, int(triton.next_power_of_2(num_splits)))
-                _dflash2_paged_noncausal_mha_stage2_triton[(total_tokens, head_num)](
-                    ws_m,
-                    ws_l,
-                    ws_acc,
-                    act_d,
-                    gate_arg,
-                    out,
-                    batch_size,
-                    q_len,
-                    head_num,
-                    num_splits,
-                    head_dim,
-                    int(ws_m.stride(0)),
-                    int(ws_m.stride(1)),
-                    int(ws_m.stride(2)),
-                    int(ws_acc.stride(0)),
-                    int(ws_acc.stride(1)),
-                    int(ws_acc.stride(2)),
-                    int(ws_acc.stride(3)),
-                    int(gate_arg.stride(0)),
-                    int(gate_arg.stride(1)),
-                    int(gate_arg.stride(2)),
-                    int(out.stride(0)),
-                    int(out.stride(1)),
-                    int(out.stride(2)),
-                    HAS_GATE=has_gate,
-                    SPLIT_BLOCK=split_block,
-                    BLOCK_D=block_d,
-                    num_warps=2 if split_block <= 16 else 4,
+                s2_nw = 2 if split_block <= 16 else 4
+                _launch_triton_cached(
+                    _KC_MHA_STAGE2,
+                    _dflash2_paged_noncausal_mha_stage2_triton,
+                    (total_tokens, head_num, 1),
+                    (
+                        dev_idx,
+                        _i_spec(batch_size),
+                        q_len,
+                        head_num,
+                        num_splits,
+                        head_dim,
+                        has_gate,
+                        split_block,
+                        block_d,
+                        s2_nw,
+                        _t_spec(ws_m),
+                        _t_spec(ws_l),
+                        _t_spec(ws_acc),
+                        _t_spec(act_d),
+                        _t_spec(gate_arg),
+                        _t_spec(out),
+                        _i_spec(wsm0),
+                        _i_spec(wsm1),
+                        _i_spec(wsm2),
+                        _i_spec(wsa0),
+                        _i_spec(wsa1),
+                        _i_spec(wsa2),
+                        _i_spec(wsa3),
+                        _i_spec(gs0),
+                        _i_spec(gs1),
+                        _i_spec(gs2),
+                        _i_spec(os0),
+                        _i_spec(os1),
+                        _i_spec(os2),
+                    ),
+                    (
+                        ws_m,
+                        ws_l,
+                        ws_acc,
+                        act_d,
+                        gate_arg,
+                        out,
+                        batch_size,
+                        q_len,
+                        head_num,
+                        num_splits,
+                        head_dim,
+                        wsm0,
+                        wsm1,
+                        wsm2,
+                        wsa0,
+                        wsa1,
+                        wsa2,
+                        wsa3,
+                        gs0,
+                        gs1,
+                        gs2,
+                        os0,
+                        os1,
+                        os2,
+                        has_gate,
+                        split_block,
+                        block_d,
+                    ),
+                    {"num_warps": s2_nw},
                 )
                 return out
+
+        if k_norm_weight is not None and k_inv_freq is not None:
+            k_4d = _apply_gemma_rmsnorm(k.unsqueeze(0), k_norm_weight, k_eps)
+            k = apply_partial_neox_rope(k_4d, self.query_positions.reshape(1, -1).clamp(min=0) if self.query_positions is not None else torch.arange(total_tokens, device=k.device).unsqueeze(0), k_inv_freq, self.rotary_dim if hasattr(self, "rotary_dim") else 64).squeeze(0)
 
         # Eager PyTorch / CPU fallback path.
         prefix_lengths = (
@@ -3307,6 +4330,9 @@ class _DFlash2PagedFMHADispatcher(FMHAImplBase):
         if output_gate is not None:
             out = out * torch.sigmoid(output_gate.view(total_tokens, head_num, head_dim))
         return out
+
+
+_ORIG_DISPATCHER_APPEND = _DFlash2PagedFMHADispatcher.append_and_attend
 
 
 class Qwen4_5DFlashAttention(nn.Module):
@@ -3480,17 +4506,52 @@ class Qwen4_5DFlashAttention(nn.Module):
         return self._fused_qkvg_weight
 
     def _get_fused_qkvg_weight(self) -> torch.Tensor:
+        w_q = self.q_proj.weight
         if (
-            not torch.cuda.is_current_stream_capturing()
-            and (
-                self._fused_qkvg_weight is None
-                or self._fused_qkvg_weight.device != self.q_proj.weight.device
-                or self._weight_versions() != self._qkvg_versions
-            )
-        ):
+            self._fused_qkvg_weight is None
+            or self._fused_qkvg_weight.device != w_q.device
+            or self._weight_versions() != self._qkvg_versions
+        ) and not torch.cuda.is_current_stream_capturing():
             return self.prepare_weights()
         assert self._fused_qkvg_weight is not None
         return self._fused_qkvg_weight
+
+    def _norm_and_rope_q_fast(
+        self, q: torch.Tensor, positions: torch.Tensor
+    ) -> torch.Tensor:
+        num_tokens = int(q.shape[0])
+        if num_tokens == 0:
+            return q
+        out = torch.empty_like(q)
+        w = self.q_norm.weight
+        w_c = w if w.is_contiguous() else w.contiguous()
+        inv_c = self.inv_freq if self.inv_freq.is_contiguous() else self.inv_freq.contiguous()
+        qs0, qs1 = int(q.stride(0)), int(q.stride(1))
+        os0, os1 = int(out.stride(0)), int(out.stride(1))
+        ps0 = int(positions.stride(0))
+        dev_idx = q.device.index if q.device.index is not None else torch.cuda.current_device()
+        _launch_triton_cached(
+            _KC_ROPE_Q,
+            _dflash2_gemma_rmsnorm_partial_rope_d256_r64_kernel,
+            (num_tokens, self.num_heads, 1),
+            (
+                dev_idx,
+                self.num_heads,
+                _t_spec(q),
+                _t_spec(w_c),
+                _t_spec(positions),
+                _t_spec(inv_c),
+                _t_spec(out),
+                _i_spec(qs0),
+                _i_spec(qs1),
+                _i_spec(ps0),
+                _i_spec(os0),
+                _i_spec(os1),
+            ),
+            (q, w_c, positions, inv_c, out, num_tokens, qs0, qs1, ps0, os0, os1, float(self.eps)),
+            {"num_warps": 4},
+        )
+        return out
 
     def _norm_and_rope_qk(
         self, q: torch.Tensor, k: torch.Tensor, positions: torch.Tensor
@@ -3547,8 +4608,8 @@ class Qwen4_5DFlashAttention(nn.Module):
         fused_w = self._get_fused_qkvg_weight()
         if (
             self._fp8_o_proj is not None
-            and not torch.cuda.is_current_stream_capturing()
             and _tensor_version(self.o_proj.weight) != self._o_proj_version
+            and not torch.cuda.is_current_stream_capturing()
         ):
             self.prepare_weights()
         qkvg = (
@@ -3571,15 +4632,40 @@ class Qwen4_5DFlashAttention(nn.Module):
         k = k_raw.reshape(T, self.num_kv_heads, self.head_dim)
         v = v_raw.reshape(T, self.num_kv_heads, self.head_dim)
 
-        q, k = self._norm_and_rope_qk(q, k, positions)
-        attn_out = fmha_impl.append_and_attend(
-            q,
-            k,
-            v,
-            kv_cache,
-            sliding_window=self.sliding_window,
-            output_gate=gate,
-        )
+        if (
+            _HAS_TRITON
+            and self.zero_centered_block_norms
+            and self.head_dim == 256
+            and self.rotary_dim == 64
+            and q.is_cuda
+            and q.stride(-1) == 1
+            and positions.is_cuda
+            and isinstance(fmha_impl, _DFlash2PagedFMHADispatcher)
+            and getattr(fmha_impl.append_and_attend, "__func__", None) is _ORIG_DISPATCHER_APPEND
+            and fmha_impl.can_fuse_k_norm_rope_scatter(k, kv_cache)
+        ):
+            q = self._norm_and_rope_q_fast(q, positions)
+            attn_out = fmha_impl.append_and_attend(
+                q,
+                k,
+                v,
+                kv_cache,
+                sliding_window=self.sliding_window,
+                output_gate=gate,
+                k_norm_weight=self.k_norm.weight,
+                k_inv_freq=self.inv_freq,
+                k_eps=self.eps,
+            )
+        else:
+            q, k = self._norm_and_rope_qk(q, k, positions)
+            attn_out = fmha_impl.append_and_attend(
+                q,
+                k,
+                v,
+                kv_cache,
+                sliding_window=self.sliding_window,
+                output_gate=gate,
+            )
         attn_flat = attn_out.reshape(T, self.q_size).contiguous()
         out = self._fp8_o_proj(attn_flat) if self._fp8_o_proj is not None else self.o_proj(attn_flat)
         if self.tp_size > 1:
@@ -4213,6 +5299,10 @@ class Qwen4_5DSparkModel(DSparkProposerMixin, GptModelBase):
         self._lm_head_version: Optional[int] = None
         self._fused_ctx_kv_weight: Optional[torch.Tensor] = None
         self._fused_ctx_kv_version: Optional[Tuple[Tuple[int, ...], ...]] = None
+        self._fused_k_norms: Optional[torch.Tensor] = None
+        self._fused_inv_freqs: Optional[torch.Tensor] = None
+        self._fused_kn_versions: Optional[Tuple[int, ...]] = None
+        self._commit_scratch_i32: Optional[torch.Tensor] = None
         self.requires_grad_(False)
         for layer in self.layers:
             for hc in (layer.attn_hyper_connection, layer.mlp_hyper_connection):
@@ -4272,9 +5362,19 @@ class Qwen4_5DSparkModel(DSparkProposerMixin, GptModelBase):
 
     def _get_fused_ctx_kv_weight(self) -> torch.Tensor:
         ver = tuple(layer.self_attn._weight_versions() for layer in self.layers)
-        if self._fused_ctx_kv_weight is not None and self._fused_ctx_kv_version == ver:
+        kn_ver = tuple(_tensor_version(layer.self_attn.k_norm.weight) for layer in self.layers)
+        if (
+            self._fused_ctx_kv_weight is not None
+            and self._fused_ctx_kv_version == ver
+            and self._fused_k_norms is not None
+            and self._fused_kn_versions == kn_ver
+        ):
             return self._fused_ctx_kv_weight
-        if self._fused_ctx_kv_weight is not None and torch.cuda.is_current_stream_capturing():
+        if (
+            self._fused_ctx_kv_weight is not None
+            and self._fused_k_norms is not None
+            and torch.cuda.is_current_stream_capturing()
+        ):
             return self._fused_ctx_kv_weight
         parts = [
             layer.self_attn._get_fused_qkvg_weight()[
@@ -4284,6 +5384,14 @@ class Qwen4_5DSparkModel(DSparkProposerMixin, GptModelBase):
         ]
         self._fused_ctx_kv_weight = torch.cat(parts, dim=0).contiguous()
         self._fused_ctx_kv_version = ver
+        if self.layers:
+            self._fused_k_norms = torch.stack(
+                [layer.self_attn.k_norm.weight.contiguous() for layer in self.layers], dim=0
+            ).contiguous()
+            self._fused_inv_freqs = torch.stack(
+                [layer.self_attn.inv_freq.contiguous() for layer in self.layers], dim=0
+            ).contiguous()
+            self._fused_kn_versions = kn_ver
         return self._fused_ctx_kv_weight
 
     def cuda_graph_input_hidden_size(self) -> int:
@@ -4395,11 +5503,12 @@ class Qwen4_5DSparkModel(DSparkProposerMixin, GptModelBase):
         )
 
     def combine_hidden_states(self, features: torch.Tensor) -> torch.Tensor:
-        fc_in = features.to(self.fc.weight.dtype)
+        fc_dt = self.fc.weight.dtype
+        fc_in = features if features.dtype == fc_dt else features.to(fc_dt)
         if self._fp8_fc is not None:
             if (
-                not torch.cuda.is_current_stream_capturing()
-                and _tensor_version(self.fc.weight) != self._fc_version
+                _tensor_version(self.fc.weight) != self._fc_version
+                and not torch.cuda.is_current_stream_capturing()
             ):
                 self.prepare_weights()
             projected = self._fp8_fc(fc_in)
@@ -4459,6 +5568,144 @@ class Qwen4_5DSparkModel(DSparkProposerMixin, GptModelBase):
         if main_x.is_cuda and len(active_layers) == len(self.layers) and len(self.layers) > 1:
             fused_w = self._get_fused_ctx_kv_weight()
             kv_all = F.linear(main_x, fused_w)
+            if (
+                _HAS_TRITON
+                and len(active_layers) == 5
+                and block_table.numel() > 0
+                and self._fused_k_norms is not None
+                and self._fused_inv_freqs is not None
+                and all(
+                    layer.self_attn.zero_centered_block_norms
+                    and layer.self_attn.head_dim == 256
+                    and layer.self_attn.rotary_dim == 64
+                    and layer.self_attn.num_kv_heads == 1
+                    and layer.self_attn.eps == self.layers[0].self_attn.eps
+                    for _, layer, _ in active_layers
+                )
+            ):
+                kv_hnds = [
+                    _as_hnd_kv_pool(lkv.kv_cache_base, 1, page_size, 256)
+                    for _, _, lkv in active_layers
+                ]
+                kv0 = kv_hnds[0]
+                if (
+                    kv0.is_cuda
+                    and kv0.stride(-1) == 1
+                    and all(
+                        kh.is_cuda
+                        and kh.dtype == kv0.dtype
+                        and kh.shape == kv0.shape
+                        and kh.stride() == kv0.stride()
+                        for kh in kv_hnds[1:]
+                    )
+                ):
+                    num_rows = int(main_x.shape[0])
+                    max_blocks = int(block_table.shape[1]) if block_table.ndim >= 2 else 0
+                    num_blocks = int(kv0.shape[0])
+                    if max_blocks > 0 and num_blocks > 0:
+                        req_c = req_ids_dev if (req_ids_dev.dtype == torch.int32 and req_ids_dev.is_contiguous()) else req_ids_dev.to(torch.int32).contiguous()
+                        pos_c = pos_dev if (pos_dev.dtype == torch.int32 and pos_dev.is_contiguous()) else pos_dev.to(torch.int32).contiguous()
+                        bt_c = block_table if block_table.dtype == torch.int32 else block_table.to(torch.int32)
+                        fp8_dt = getattr(torch, "float8_e4m3fn", None)
+                        is_fp8_dst = fp8_dt is not None and kv0.dtype == fp8_dt
+                        sc_pairs = [_resolve_fp8_kv_scales(lkv, kv0.device) for _, _, lkv in active_layers]
+                        kn = self._fused_k_norms
+                        inv = self._fused_inv_freqs
+                        dev_idx = main_x.device.index if main_x.device.index is not None else torch.cuda.current_device()
+                        kv_all_st = int(kv_all.stride(0))
+                        kn_st, inv_st = int(kn.stride(0)), int(inv.stride(0))
+                        bt_s0, bt_s1 = int(bt_c.stride(0)), int(bt_c.stride(1))
+                        kh_s0, kh_s1, kh_s2, kh_s3, kh_s4 = (
+                            int(kv0.stride(0)),
+                            int(kv0.stride(1)),
+                            int(kv0.stride(2)),
+                            int(kv0.stride(3)),
+                            int(kv0.stride(4)),
+                        )
+                        _launch_triton_cached(
+                            _KC_FUSED_5L_KV,
+                            _dflash2_fused_5layer_kv_norm_rope_scatter_kernel,
+                            (num_rows, 1, 1),
+                            (
+                                dev_idx,
+                                is_fp8_dst,
+                                _t_spec(kv_all),
+                                _t_spec(kn),
+                                _t_spec(inv),
+                                _t_spec(req_c),
+                                _t_spec(pos_c),
+                                _t_spec(bt_c),
+                                _t_spec(kv_hnds[0]),
+                                _t_spec(kv_hnds[1]),
+                                _t_spec(kv_hnds[2]),
+                                _t_spec(kv_hnds[3]),
+                                _t_spec(kv_hnds[4]),
+                                _t_spec(sc_pairs[0][0]),
+                                _t_spec(sc_pairs[0][1]),
+                                _t_spec(sc_pairs[1][0]),
+                                _t_spec(sc_pairs[1][1]),
+                                _t_spec(sc_pairs[2][0]),
+                                _t_spec(sc_pairs[2][1]),
+                                _t_spec(sc_pairs[3][0]),
+                                _t_spec(sc_pairs[3][1]),
+                                _t_spec(sc_pairs[4][0]),
+                                _t_spec(sc_pairs[4][1]),
+                                _i_spec(kv_all_st),
+                                _i_spec(kn_st),
+                                _i_spec(inv_st),
+                                _i_spec(bt_s0),
+                                _i_spec(bt_s1),
+                                _i_spec(kh_s0),
+                                _i_spec(kh_s1),
+                                _i_spec(kh_s2),
+                                _i_spec(kh_s3),
+                                _i_spec(kh_s4),
+                            ),
+                            (
+                                kv_all,
+                                kn,
+                                inv,
+                                req_c,
+                                pos_c,
+                                bt_c,
+                                kv_hnds[0],
+                                kv_hnds[1],
+                                kv_hnds[2],
+                                kv_hnds[3],
+                                kv_hnds[4],
+                                sc_pairs[0][0],
+                                sc_pairs[0][1],
+                                sc_pairs[1][0],
+                                sc_pairs[1][1],
+                                sc_pairs[2][0],
+                                sc_pairs[2][1],
+                                sc_pairs[3][0],
+                                sc_pairs[3][1],
+                                sc_pairs[4][0],
+                                sc_pairs[4][1],
+                                num_rows,
+                                page_size,
+                                max_blocks,
+                                num_blocks,
+                                kv_all_st,
+                                kn_st,
+                                inv_st,
+                                bt_s0,
+                                bt_s1,
+                                kh_s0,
+                                kh_s1,
+                                kh_s2,
+                                kh_s3,
+                                kh_s4,
+                                float(self.layers[0].self_attn.eps),
+                                is_fp8_dst,
+                            ),
+                            {"num_warps": 4},
+                        )
+                    if cache_store_writer is not None:
+                        for _, _, layer_kv in active_layers:
+                            cache_store_writer(layer_kv)
+                    return
             split_dims = [2 * layer.self_attn.kv_size for layer in self.layers]
             kv_slices = torch.split(kv_all, split_dims, dim=-1)
         else:
@@ -4481,10 +5728,11 @@ class Qwen4_5DSparkModel(DSparkProposerMixin, GptModelBase):
             )
             if cache_store_writer is not None:
                 cache_store_writer(layer_kv)
-    def forward_query_block(
+    def _forward_query_backbone(
         self,
-        query_ids: torch.Tensor,
-        query_positions: torch.Tensor,
+        hidden: torch.Tensor,
+        flat_pos: torch.Tensor,
+        safe_pos: torch.Tensor,
         prefix_lengths: torch.Tensor,
         active_requests: torch.Tensor,
         inputs: PyModelInputs,
@@ -4493,11 +5741,6 @@ class Qwen4_5DSparkModel(DSparkProposerMixin, GptModelBase):
         enable_tbo: Optional[bool] = None,
         tbo_equal_tokens: Optional[bool] = None,
     ) -> torch.Tensor:
-        flat_ids = query_ids.reshape(-1)
-        flat_pos = query_positions.reshape(-1)
-        input_embeds = self._embed_tokens(flat_ids)
-        hidden = input_embeds.repeat(1, self.spec.hc_count)
-
         attn_inputs = self.dspark_attention_inputs(inputs)
         active_fmha = fmha_impl
         if active_fmha is None or not isinstance(
@@ -4523,6 +5766,7 @@ class Qwen4_5DSparkModel(DSparkProposerMixin, GptModelBase):
             active_fmha.prefix_lengths = prefix_lengths
             active_fmha.active_requests = active_requests
             active_fmha.query_width = self._dspark_query_width
+            active_fmha._round_meta = None
 
         if self._active_tbo_override is not None and enable_tbo is None:
             eff_tbo, ov_eq = self._active_tbo_override
@@ -4531,7 +5775,6 @@ class Qwen4_5DSparkModel(DSparkProposerMixin, GptModelBase):
             eff_tbo = self.enable_tbo if enable_tbo is None else bool(enable_tbo)
             eff_eq = self.tbo_equal_tokens if tbo_equal_tokens is None else tbo_equal_tokens
 
-        safe_pos = flat_pos.clamp(min=0)
         deferred = None
         latent = None
         for layer_idx, layer in enumerate(self.layers):
@@ -4566,12 +5809,42 @@ class Qwen4_5DSparkModel(DSparkProposerMixin, GptModelBase):
             + out
         )
 
+    def forward_query_block(
+        self,
+        query_ids: torch.Tensor,
+        query_positions: torch.Tensor,
+        prefix_lengths: torch.Tensor,
+        active_requests: torch.Tensor,
+        inputs: PyModelInputs,
+        fmha_impl: Any,
+        *,
+        enable_tbo: Optional[bool] = None,
+        tbo_equal_tokens: Optional[bool] = None,
+    ) -> torch.Tensor:
+        flat_ids = query_ids.reshape(-1)
+        flat_pos = query_positions.reshape(-1)
+        input_embeds = self._embed_tokens(flat_ids)
+        hidden = input_embeds.repeat(1, self.spec.hc_count)
+        safe_pos = flat_pos.clamp(min=0)
+        return self._forward_query_backbone(
+            hidden,
+            flat_pos,
+            safe_pos,
+            prefix_lengths,
+            active_requests,
+            inputs,
+            fmha_impl,
+            enable_tbo=enable_tbo,
+            tbo_equal_tokens=tbo_equal_tokens,
+        )
+
     def _linear_lm_head_local_raw(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        x_in = hidden_states.to(self.lm_head_weight.dtype)
+        lm_dt = self.lm_head_weight.dtype
+        x_in = hidden_states if hidden_states.dtype == lm_dt else hidden_states.to(lm_dt)
         if self._fp8_lm_head is not None:
             if (
-                not torch.cuda.is_current_stream_capturing()
-                and _tensor_version(self.lm_head_weight) != self._lm_head_version
+                _tensor_version(self.lm_head_weight) != self._lm_head_version
+                and not torch.cuda.is_current_stream_capturing()
             ):
                 self.prepare_weights()
             return self._fp8_lm_head(x_in)
@@ -4604,7 +5877,11 @@ class Qwen4_5DSparkModel(DSparkProposerMixin, GptModelBase):
         return logits_local[:, : int(self.spec.vocab_size)]
 
     def vocab_parallel_topk(
-        self, hidden_states: torch.Tensor, k: Optional[int] = None
+        self,
+        hidden_states: torch.Tensor,
+        k: Optional[int] = None,
+        *,
+        cast_fp32: bool = True,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Vocab-parallel Top-K in native logits dtype via FlashInfer + packed TP gather."""
         top_k = int(k if k is not None else self.candidate_selector.top_k)
@@ -4649,15 +5926,15 @@ class Qwen4_5DSparkModel(DSparkProposerMixin, GptModelBase):
                     deterministic=True,
                     tie_break=_flashinfer.TopKTieBreak.SMALL,
                 )
-                local_vals = local_vals_2d.reshape(*lead_shape, local_k)
-                local_idx = local_idx_2d.reshape(*lead_shape, local_k)
+                local_vals = local_vals_2d if len(lead_shape) == 1 else local_vals_2d.reshape(*lead_shape, local_k)
+                local_idx = local_idx_2d if len(lead_shape) == 1 else local_idx_2d.reshape(*lead_shape, local_k)
         else:
             local_vals, local_idx = torch.topk(logits_local, local_k, dim=-1)
-        local_ids = local_idx + int(self.lm_head_vocab_start)
+        vocab_start = int(self.lm_head_vocab_start)
 
         if (
             self.tp_size > 1
-            and self.lm_head_sharded
+            and getattr(self, "lm_head_sharded", False)
             and self.tp_group is not None
             and dist.is_available()
             and dist.is_initialized()
@@ -4666,13 +5943,73 @@ class Qwen4_5DSparkModel(DSparkProposerMixin, GptModelBase):
                 int(self.spec.vocab_size) <= 0x7FFFFFFF
                 and local_vals.dtype in (torch.float32, torch.bfloat16, torch.float16)
             ):
-                val_i32 = (
-                    local_vals.contiguous().view(torch.int32)
-                    if local_vals.dtype == torch.float32
-                    else local_vals.contiguous().view(torch.int16).to(torch.int32)
-                )
-                packed = torch.stack((val_i32, local_ids.to(torch.int32)), dim=0)
-                gathered = self._tp_all_gather_lastdim(packed)
+                if (
+                    _HAS_TRITON
+                    and local_vals.is_cuda
+                    and local_vals.ndim >= 2
+                    and local_vals.stride(-1) == 1
+                    and local_idx.stride(-1) == 1
+                ):
+                    lead_shape_tp = local_vals.shape[:-1]
+                    vals_2d = local_vals if local_vals.ndim == 2 else local_vals.contiguous().reshape(-1, local_k)
+                    idx_2d = local_idx if local_idx.ndim == 2 else local_idx.contiguous().reshape(-1, local_k)
+                    row_count = int(vals_2d.shape[0])
+                    packed = torch.empty((2, row_count, local_k), dtype=torch.int32, device=local_vals.device)
+                    is_16 = vals_2d.dtype != torch.float32
+                    vals_view = vals_2d.view(torch.int16) if is_16 else vals_2d.view(torch.int32)
+                    bk = max(16, int(triton.next_power_of_2(local_k)))
+                    dev_idx = local_vals.device.index if local_vals.device.index is not None else torch.cuda.current_device()
+                    vs0, is0 = int(vals_view.stride(0)), int(idx_2d.stride(0))
+                    ps0, ps1 = int(packed.stride(0)), int(packed.stride(1))
+                    if row_count > 0:
+                        _launch_triton_cached(
+                            _KC_TP_PACK,
+                            _dflash2_tp_pack_topk_kernel,
+                            (row_count, 1, 1),
+                            (dev_idx, local_k, bk, is_16, _t_spec(vals_view), _t_spec(idx_2d), _t_spec(packed), _i_spec(vs0), _i_spec(is0), _i_spec(ps0), _i_spec(ps1)),
+                            (vals_view, idx_2d, packed, vocab_start, row_count, vs0, is0, ps0, ps1, local_k, bk, is_16),
+                            {"num_warps": 2},
+                        )
+                    gathered = self._tp_all_gather_lastdim(packed)
+                    total_cands = int(gathered.shape[-1])
+                    if row_count == 0:
+                        out_dt = torch.float32 if cast_fp32 else local_vals.dtype
+                        return (
+                            torch.empty((*lead_shape_tp, top_k), dtype=out_dt, device=local_vals.device),
+                            torch.empty((*lead_shape_tp, top_k), dtype=local_idx.dtype, device=local_idx.device),
+                        )
+                    if (
+                        gathered.is_cuda
+                        and gathered.ndim == 3
+                        and gathered.stride(-1) == 1
+                        and top_k <= total_cands <= 64
+                    ):
+                        out_dt = torch.float32 if cast_fp32 else local_vals.dtype
+                        dtype_code = 0 if local_vals.dtype == torch.float32 else (1 if local_vals.dtype == torch.bfloat16 else 2)
+                        bc = max(16, int(triton.next_power_of_2(total_cands)))
+                        top_vals_2d = torch.empty((row_count, top_k), dtype=out_dt, device=gathered.device)
+                        top_ids_2d = torch.empty((row_count, top_k), dtype=local_idx.dtype, device=gathered.device)
+                        gs0, gs1 = int(gathered.stride(0)), int(gathered.stride(1))
+                        _launch_triton_cached(
+                            _KC_TP_MERGE,
+                            _dflash2_tp_merge_topk_kernel,
+                            (row_count, 1, 1),
+                            (dev_idx, top_k, bc, dtype_code, _t_spec(gathered), _t_spec(top_vals_2d), _t_spec(top_ids_2d), _i_spec(gs0), _i_spec(gs1)),
+                            (gathered, top_vals_2d, top_ids_2d, row_count, total_cands, gs0, gs1, top_k, bc, dtype_code),
+                            {"num_warps": 2},
+                        )
+                        if len(lead_shape_tp) == 1:
+                            return top_vals_2d, top_ids_2d
+                        return top_vals_2d.reshape(*lead_shape_tp, top_k), top_ids_2d.reshape(*lead_shape_tp, top_k)
+                else:
+                    local_ids = local_idx if vocab_start == 0 else (local_idx + vocab_start)
+                    val_i32 = (
+                        local_vals.contiguous().view(torch.int32)
+                        if local_vals.dtype == torch.float32
+                        else local_vals.contiguous().view(torch.int16).to(torch.int32)
+                    )
+                    packed = torch.stack((val_i32, local_ids.to(torch.int32)), dim=0)
+                    gathered = self._tp_all_gather_lastdim(packed)
                 raw_vals = gathered[0]
                 all_vals = (
                     raw_vals.view(torch.float32)
@@ -4680,14 +6017,17 @@ class Qwen4_5DSparkModel(DSparkProposerMixin, GptModelBase):
                     else raw_vals.to(torch.int16).view(local_vals.dtype)
                 )
                 top_vals, top_pos = torch.topk(all_vals, top_k, dim=-1)
-                top_ids = torch.gather(gathered[1], -1, top_pos).to(local_ids.dtype)
-                return top_vals.float(), top_ids
+                top_ids = torch.gather(gathered[1], -1, top_pos).to(local_idx.dtype)
+                return (top_vals.float() if cast_fp32 else top_vals), top_ids
+            local_ids = local_idx if vocab_start == 0 else (local_idx + vocab_start)
             all_vals = self._tp_all_gather_lastdim(local_vals)
             all_ids = self._tp_all_gather_lastdim(local_ids)
             top_vals, top_pos = torch.topk(all_vals, top_k, dim=-1)
             top_ids = torch.gather(all_ids, -1, top_pos)
-            return top_vals.float(), top_ids
-        return local_vals.float(), local_ids
+            return (top_vals.float() if cast_fp32 else top_vals), top_ids
+
+        local_ids = local_idx if vocab_start == 0 else (local_idx + vocab_start)
+        return (local_vals.float() if cast_fp32 else local_vals), local_ids
 
     def propose_with_candidate_selector(
         self,
@@ -4695,18 +6035,244 @@ class Qwen4_5DSparkModel(DSparkProposerMixin, GptModelBase):
         anchor_token_ids: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Compute Vocab-Parallel Top-K logits and run DFlash2 CandidateSelector greedy walk."""
-        unary_logits, candidate_ids = self.vocab_parallel_topk(
-            hidden_states, k=self.candidate_selector.top_k
-        )
+        if (
+            type(self).vocab_parallel_topk is Qwen4_5DSparkModel.vocab_parallel_topk
+            and "vocab_parallel_topk" not in getattr(self, "__dict__", {})
+        ):
+            unary_logits, candidate_ids = self.vocab_parallel_topk(
+                hidden_states, k=self.candidate_selector.top_k, cast_fp32=False
+            )
+        else:
+            unary_logits, candidate_ids = self.vocab_parallel_topk(
+                hidden_states, k=self.candidate_selector.top_k
+            )
         return self.candidate_selector.select_candidates_from_topk(
             unary_logits, candidate_ids, hidden_states, anchor_token_ids
         )
+
+    def _get_commit_scratch_i32(self, row_count: int, device: torch.device) -> torch.Tensor:
+        buf = self._commit_scratch_i32
+        if buf is None or buf.device != device or int(buf.shape[1]) < row_count:
+            if torch.cuda.is_current_stream_capturing():
+                return torch.empty((2, row_count), dtype=torch.int32, device=device)
+            cap = max(256, row_count)
+            buf = torch.empty((2, cap), dtype=torch.int32, device=device)
+            self._commit_scratch_i32 = buf
+        return buf
 
     def forward_commit(
         self, inputs: PyModelInputs, fmha_impl: Any = None
     ) -> PyModelOutputs:
         del fmha_impl
-        return self.run_commit_step(inputs, self.embed_weight.device)
+        device = self.embed_weight.device
+        if (
+            _HAS_TRITON
+            and device.type == "cuda"
+            and type(self).map_commit_rows is DSparkProposerMixin.map_commit_rows
+            and type(self).commit_feature_rows is Qwen4_5DSparkModel.commit_feature_rows
+            and type(self).combine_hidden_states is Qwen4_5DSparkModel.combine_hidden_states
+        ):
+            attention_inputs = primary_attention_inputs(
+                inputs.attention_inputs, getattr(self, "kv_cache", None)
+            )
+            input_lengths = optional_tensor(getattr(attention_inputs, "input_lengths", None))
+            lengths_source = optional_tensor(getattr(attention_inputs, "input_lengths_device", None))
+            if lengths_source is None:
+                lengths_source = input_lengths
+            batch_size = int(input_lengths.numel()) if input_lengths is not None else 0
+            hidden = optional_tensor(getattr(inputs, "input_hiddens", None))
+            if batch_size == 0 or hidden is None or hidden.numel() == 0:
+                return PyModelOutputs(
+                    torch.zeros((0, self._dspark_hidden_dim), dtype=torch.bfloat16, device=device)
+                )
+            aux_dim = self._dspark_aux_feature_dim
+            if hidden.numel() % aux_dim != 0:
+                raise RuntimeError(
+                    "DSpark target feature tensor cannot be reshaped to the "
+                    f"configured width {aux_dim}: shape={tuple(hidden.shape)}"
+                )
+            prefix_lengths_source = device_metadata_tensor(attention_inputs, "prefix_lengths")
+            if prefix_lengths_source is None or int(prefix_lengths_source.numel()) < batch_size:
+                raise RuntimeError(
+                    "DSpark commit requires prefix_lengths with one value per request"
+                )
+            cp_info = getattr(attention_inputs, "context_parallel_info", None)
+            global_lengths = (
+                optional_tensor(getattr(cp_info, "prefill_actual_input_lengths_cpu", None))
+                if cp_info is not None
+                else None
+            )
+            features = hidden.reshape(-1, aux_dim)
+            if features.device != device:
+                features = features.to(device=device)
+            row_count = int(features.shape[0])
+            if (
+                0 < batch_size <= 128
+                and row_count > 0
+                and prefix_lengths_source.is_cuda
+                and lengths_source is not None
+                and lengths_source.is_cuda
+                and (global_lengths is None or int(global_lengths.numel()) < batch_size)
+            ):
+                scratch = self._get_commit_scratch_i32(row_count, device)
+                req = scratch[0, :row_count]
+                positions = scratch[1, :row_count]
+                block_b = max(16, int(triton.next_power_of_2(batch_size)))
+                block_r = 32
+                ps0 = int(prefix_lengths_source.stride(0))
+                ls0 = int(lengths_source.stride(0))
+                dev_idx = device.index if device.index is not None else torch.cuda.current_device()
+                _launch_triton_cached(
+                    _KC_MAP_COMMIT,
+                    _dflash2_map_commit_rows_fused_kernel,
+                    (triton.cdiv(row_count, block_r), 1, 1),
+                    (
+                        dev_idx,
+                        block_b,
+                        block_r,
+                        _t_spec(prefix_lengths_source),
+                        _t_spec(lengths_source),
+                        _t_spec(req),
+                        _t_spec(positions),
+                        _i_spec(ps0),
+                        _i_spec(ls0),
+                    ),
+                    (
+                        prefix_lengths_source,
+                        lengths_source,
+                        req,
+                        positions,
+                        batch_size,
+                        row_count,
+                        ps0,
+                        ls0,
+                        block_b,
+                        block_r,
+                    ),
+                    {"num_warps": 4},
+                )
+                main_x = self.combine_hidden_states(features)
+                self.commit_feature_rows(main_x, req, positions, req[:0], inputs, commit_ctx=None)
+                return PyModelOutputs(main_x)
+        return self.run_commit_step(inputs, device)
+
+    def _run_fast_propose_step(
+        self,
+        inputs: PyModelInputs,
+        fmha_impl: Any,
+        device: torch.device,
+    ) -> PyModelOutputs:
+        width = self._dspark_query_width
+        attention_inputs = primary_attention_inputs(
+            inputs.attention_inputs, getattr(self, "kv_cache", None)
+        )
+        token_count = int(inputs.input_ids.numel())
+        if token_count % width != 0:
+            raise RuntimeError(
+                "DSpark input_ids must contain exactly B*gamma tokens: "
+                f"numel={token_count}, gamma={width}"
+            )
+        batch_size = token_count // width
+        prefix_lengths_source = device_metadata_tensor(attention_inputs, "prefix_lengths")
+        if batch_size > 0 and (
+            prefix_lengths_source is None or int(prefix_lengths_source.numel()) < batch_size
+        ):
+            raise RuntimeError("DSpark requires prefix_lengths with one value per request")
+
+        raw_emb_w = getattr(self.embed_tokens, "weight", None) if self.embed_tokens is not None else self.embed_weight
+        if raw_emb_w is None:
+            raw_emb_w = self.embed_weight
+        if (
+            _HAS_TRITON
+            and self._use_cuda_ops
+            and device.type == "cuda"
+            and batch_size > 0
+            and inputs.input_ids.is_cuda
+            and prefix_lengths_source is not None
+            and prefix_lengths_source.is_cuda
+            and (self.tp_size == 1 or self.embed_tokens is None)
+            and not (self.embed_tokens is not None and getattr(self.embed_tokens, "_forward_hooks", None))
+            and raw_emb_w.is_cuda
+            and raw_emb_w.ndim == 2
+            and int(raw_emb_w.shape[-1]) == int(self.spec.hidden_size)
+            and type(self).forward_query_block is Qwen4_5DSparkModel.forward_query_block
+            and type(self).compute_draft_hidden_states is DSparkProposerMixin.compute_draft_hidden_states
+        ):
+            h_dim = int(self.spec.hidden_size)
+            hc_count = int(self.spec.hc_count)
+            hidden = torch.empty((token_count, hc_count * h_dim), dtype=raw_emb_w.dtype, device=device)
+            meta_i32 = torch.empty((2 * token_count + batch_size,), dtype=torch.int32, device=device)
+            raw_pos = meta_i32[:token_count]
+            safe_pos = meta_i32[token_count : 2 * token_count]
+            pref_i32 = meta_i32[2 * token_count :]
+            act_req = torch.empty((batch_size,), dtype=torch.bool, device=device)
+
+            ids_1d = inputs.input_ids.reshape(-1)
+            emb_w = raw_emb_w if raw_emb_w.is_contiguous() else raw_emb_w.contiguous()
+            block_h = 512 if h_dim >= 512 else max(16, int(triton.next_power_of_2(h_dim)))
+            has_scale = self.input_embedding_scale != 1.0
+            dev_idx = device.index if device.index is not None else torch.cuda.current_device()
+            ids_s = int(ids_1d.stride(0))
+            ps_s = int(prefix_lengths_source.stride(0))
+            ew_s = int(emb_w.stride(0))
+            hd_s = int(hidden.stride(0))
+            _launch_triton_cached(
+                _KC_PREP_PROPOSE,
+                _dflash2_prepare_propose_state_and_embed_kernel,
+                (token_count, triton.cdiv(h_dim, block_h), 1),
+                (
+                    dev_idx,
+                    hc_count,
+                    block_h,
+                    has_scale,
+                    _t_spec(ids_1d),
+                    _t_spec(prefix_lengths_source),
+                    _t_spec(emb_w),
+                    _t_spec(raw_pos),
+                    _t_spec(safe_pos),
+                    _t_spec(pref_i32),
+                    _t_spec(act_req),
+                    _t_spec(hidden),
+                    _i_spec(ids_s),
+                    _i_spec(ps_s),
+                    _i_spec(ew_s),
+                    _i_spec(hd_s),
+                ),
+                (
+                    ids_1d,
+                    prefix_lengths_source,
+                    emb_w,
+                    raw_pos,
+                    safe_pos,
+                    pref_i32,
+                    act_req,
+                    hidden,
+                    batch_size,
+                    width,
+                    h_dim,
+                    int(self._dspark_noise_token_id),
+                    float(self.input_embedding_scale),
+                    ids_s,
+                    ps_s,
+                    ew_s,
+                    hd_s,
+                    hc_count,
+                    block_h,
+                    has_scale,
+                ),
+                {"num_warps": 4},
+            )
+            out_hidden = self._forward_query_backbone(
+                hidden,
+                raw_pos,
+                safe_pos,
+                pref_i32,
+                act_req,
+                inputs,
+                fmha_impl,
+            )
+            return PyModelOutputs(out_hidden)
+        return self.run_propose_step(inputs, fmha_impl, device)
 
     def forward_propose(
         self,
@@ -4716,13 +6282,14 @@ class Qwen4_5DSparkModel(DSparkProposerMixin, GptModelBase):
         enable_tbo: Optional[bool] = None,
         tbo_equal_tokens: Optional[bool] = None,
     ) -> PyModelOutputs:
+        device = self.embed_weight.device
         if enable_tbo is None and tbo_equal_tokens is None:
-            return self.run_propose_step(inputs, fmha_impl, self.embed_weight.device)
+            return self._run_fast_propose_step(inputs, fmha_impl, device)
         prev = self._active_tbo_override
         eff_tbo = self.enable_tbo if enable_tbo is None else bool(enable_tbo)
         self._active_tbo_override = (eff_tbo, tbo_equal_tokens)
         try:
-            return self.run_propose_step(inputs, fmha_impl, self.embed_weight.device)
+            return self._run_fast_propose_step(inputs, fmha_impl, device)
         finally:
             self._active_tbo_override = prev
 

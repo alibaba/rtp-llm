@@ -39,6 +39,8 @@ import triton.language as tl
 from triton.language.extra import libdevice
 
 from rtp_llm.models_py.modules.qwen4_5.activation import (
+    _QUANT_EPS,
+    _compute_ue8m0_fp8_block32,
     _cuda_device_ctx,
     per_token_group_quant_fp8_ue8m0,
     per_token_group_quant_fp8_ue8m0_ref,
@@ -93,12 +95,19 @@ def _get_sm_count(device: torch.device) -> int:
     return cached
 
 
+@functools.lru_cache(maxsize=8)
+def _supports_triton_mxfp4_idx(device_index: int) -> bool:
+    if not torch.cuda.is_available():
+        return False
+    major, _ = torch.cuda.get_device_capability(device_index)
+    return major >= 9 and hasattr(tl, "dot_scaled")
+
+
 def supports_triton_mxfp4(device: torch.device) -> bool:
     """Return True if ``tl.dot_scaled`` MXFP4 hardware/Triton execution is supported."""
     if device.type != "cuda":
         return False
-    major, _ = torch.cuda.get_device_capability(device)
-    return major >= 9 and hasattr(tl, "dot_scaled")
+    return _supports_triton_mxfp4_idx(int(device.index or 0))
 
 
 @functools.lru_cache(maxsize=8)
@@ -1036,6 +1045,71 @@ def _get_m1_static_tensors(
     return cached
 
 
+@triton.jit
+def _seg_scan_fwd(k1, c1, k2, c2):
+    same = k1 == k2
+    return k2, tl.where(same, c1 + c2, c2)
+
+
+@triton.jit(do_not_specialize=["m_total", "ep_start", "num_experts"])
+def _build_small_m_compact_schedule_kernel(
+    ids_ptr,
+    w_ptr,
+    sorted_tok_ids_ptr,
+    sorted_weights_ptr,
+    inv_slots_ptr,
+    tile_e_ptr,
+    tile_m0_ptr,
+    tile_cnt_ptr,
+    n_tiles_buf_ptr,
+    n_slots_buf_ptr,
+    m_total,
+    ep_start,
+    num_experts,
+    TOP_K: tl.constexpr,
+    BM: tl.constexpr,
+    M_PAD: tl.constexpr,
+):
+    """Build complete compact MoE schedule in 1 single CTA without torch.sort."""
+    slot = tl.arange(0, M_PAD)
+    valid = slot < m_total
+    raw_id = tl.load(ids_ptr + slot, mask=valid, other=-1).to(tl.int32)
+    le = raw_id - ep_start
+    act = valid & (le >= 0) & (le < num_experts)
+    eff_e = tl.where(act, le, num_experts)
+    key = (eff_e << 11) | slot
+    sk = tl.sort(key)
+    e_s = sk >> 11
+    src = sk & 2047
+    act_s = (slot < m_total) & (e_s < num_experts)
+    num_act = tl.sum(act_s.to(tl.int32), axis=0)
+
+    seg_key = tl.where(act_s, e_s, -1 - slot)
+    ones = act_s.to(tl.int32)
+    _, inc_pos = tl.associative_scan((seg_key, ones), axis=0, combine_fn=_seg_scan_fwd)
+    rank_in_e = inc_pos - 1
+    _, rem_in_e = tl.associative_scan(
+        (seg_key, ones), axis=0, combine_fn=_seg_scan_fwd, reverse=True
+    )
+
+    valid_s = slot < m_total
+    w_v = tl.load(w_ptr + src, mask=valid_s, other=0.0).to(tl.float32)
+    tl.store(sorted_tok_ids_ptr + slot, src // TOP_K, mask=valid_s)
+    tl.store(sorted_weights_ptr + slot, w_v, mask=valid_s)
+    tl.store(inv_slots_ptr + src, tl.where(act_s, slot, -1), mask=(src < m_total))
+
+    is_head = act_s & ((rank_in_e % BM) == 0)
+    t_idx = tl.cumsum(is_head.to(tl.int32), axis=0) - 1
+    t_cnt = tl.minimum(BM, rem_in_e)
+    tl.store(tile_e_ptr + t_idx, e_s, mask=is_head)
+    tl.store(tile_m0_ptr + t_idx, slot, mask=is_head)
+    tl.store(tile_cnt_ptr + t_idx, t_cnt, mask=is_head)
+
+    n_tiles = tl.sum(is_head.to(tl.int32), axis=0)
+    tl.store(n_tiles_buf_ptr, n_tiles)
+    tl.store(n_slots_buf_ptr, num_act)
+
+
 @triton.jit(do_not_specialize=["m_total", "ep_start"])
 def _ep_local_and_bincount_kernel(
     ids_ptr,
@@ -1354,6 +1428,52 @@ def _build_compact_decode_schedule(
         flat_weights = flat_weights.contiguous()
     a_max = min(num_experts, m_total)
     max_num_tiles = max(1, a_max + (m_total - a_max) // block_m)
+
+    if flat_ids.is_cuda and m_total <= 1024 and num_experts <= 2048:
+        sorted_tok_ids = torch.empty((m_total,), dtype=torch.int32, device=device)
+        sorted_weights = torch.empty((m_total,), dtype=torch.float32, device=device)
+        inv_slots = torch.empty((num_tokens, top_k), dtype=torch.int32, device=device)
+        tile_expert_id = torch.empty((max_num_tiles,), dtype=torch.int32, device=device)
+        tile_m_start = torch.empty((max_num_tiles,), dtype=torch.int32, device=device)
+        tile_m_count = torch.empty((max_num_tiles,), dtype=torch.int32, device=device)
+        num_active_tiles_buf = torch.empty((1,), dtype=torch.int32, device=device)
+        num_active_slots_buf = torch.empty((1,), dtype=torch.int32, device=device)
+        m_pad = max(16, triton.next_power_of_2(m_total))
+        with _cuda_device_ctx(device):
+            _build_small_m_compact_schedule_kernel[(1,)](
+                flat_ids,
+                flat_weights,
+                sorted_tok_ids,
+                sorted_weights,
+                inv_slots.view(-1),
+                tile_expert_id,
+                tile_m_start,
+                tile_m_count,
+                num_active_tiles_buf,
+                num_active_slots_buf,
+                m_total,
+                int(ep_start) if ep_size > 1 else 0,
+                num_experts,
+                TOP_K=top_k,
+                BM=block_m,
+                M_PAD=m_pad,
+                num_warps=4,
+            )
+        return CompactMoETileSchedule(
+            sorted_tok_ids=sorted_tok_ids,
+            sorted_weights=sorted_weights,
+            inv_slots=inv_slots,
+            tile_expert_id=tile_expert_id,
+            tile_m_start=tile_m_start,
+            tile_m_count=tile_m_count,
+            num_active_tiles_buf=num_active_tiles_buf,
+            num_active_slots_buf=num_active_slots_buf,
+            max_num_tiles=max_num_tiles,
+            max_slots=m_total,
+            top_k=top_k,
+            num_tokens=num_tokens,
+            block_m=block_m,
+        )
 
     if flat_ids.is_cuda:
         with _cuda_device_ctx(device):
@@ -2574,7 +2694,11 @@ def mxfp4_moe_triton_splitk(
     )
     out = torch.empty((M, L), dtype=x.dtype, device=x.device)
     BLOCK_L = 512 if L >= 512 else triton.next_power_of_2(max(L, 64))
-    w_f = topk_weights.float().contiguous()
+    w_f = (
+        topk_weights
+        if (topk_weights.dtype == torch.float32 and topk_weights.is_contiguous())
+        else topk_weights.float().contiguous()
+    )
     _decode_stage2_deterministic_reduce_kernel[(M, triton.cdiv(L, BLOCK_L))](
         partial_out,
         sched.inv_slots,
@@ -2597,6 +2721,45 @@ def mxfp4_moe_triton_splitk(
 # DeepGEMM SM100 FP8xMXFP4 Backends (Contiguous Prefill + Masked CG Decode)
 #   + FlashInfer group_gemm_mxfp4_nt_groupwise
 # ---------------------------------------------------------------------------
+
+
+@triton.jit(do_not_specialize=["m_total", "ep_start"])
+def _contig_ep_bincount_only_kernel(
+    ids_ptr,
+    counts_ptr,
+    m_total,
+    ep_start,
+    num_experts: tl.constexpr,
+    HAS_EP: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < m_total
+    gid = tl.load(ids_ptr + offs, mask=mask, other=-1).to(tl.int32)
+    le = gid - ep_start if HAS_EP else gid
+    valid = mask & (le >= 0) & (le < num_experts)
+    tl.atomic_add(counts_ptr + le, 1, mask=valid)
+
+
+@triton.jit
+def _contig_prefix_scan_align_kernel(
+    counts_ptr,
+    aligned_counts_ptr,
+    offsets_ptr,
+    all_tokens_buf_ptr,
+    num_experts: tl.constexpr,
+    ALIGNMENT: tl.constexpr,
+    E_PAD: tl.constexpr,
+):
+    offs = tl.arange(0, E_PAD)
+    mask = offs < num_experts
+    c = tl.load(counts_ptr + offs, mask=mask, other=0).to(tl.int32)
+    ac = tl.where(mask, ((c + ALIGNMENT - 1) // ALIGNMENT) * ALIGNMENT, 0)
+    off = tl.cumsum(ac, axis=0) - ac
+    tl.store(aligned_counts_ptr + offs, ac, mask=mask)
+    tl.store(offsets_ptr + offs, off, mask=mask)
+    tl.store(all_tokens_buf_ptr, tl.sum(ac, axis=0))
 
 
 @triton.jit
@@ -2767,27 +2930,59 @@ def mxfp4_moe_deepgemm_contiguous(
         raise ValueError(f"DeepGEMM FP8xFP4 requires L={L}, I={I} divisible by 128")
 
     alignment = int(deep_gemm.get_mk_alignment_for_contiguous_layout())
-    flat_ids = topk_ids.reshape(-1)
+    ids_c = topk_ids if topk_ids.is_contiguous() else topk_ids.contiguous()
+    flat_ids = ids_c.view(-1)
     e_lo = int(ep_start) if ep_size > 1 else 0
-    if ep_size > 1:
-        in_range = (flat_ids >= e_lo) & (flat_ids < e_lo + E_local)
-        flat_local = torch.where(
-            in_range, flat_ids - e_lo, torch.full_like(flat_ids, E_local)
+    m_total_slots = M * top_k
+    if E_local <= 2048 and ids_c.dtype == torch.int32:
+        counts = torch.zeros((E_local,), dtype=torch.int32, device=dev)
+        _contig_ep_bincount_only_kernel[(triton.cdiv(m_total_slots, 256),)](
+            flat_ids,
+            counts,
+            m_total_slots,
+            e_lo,
+            num_experts=E_local,
+            HAS_EP=(ep_size > 1),
+            BLOCK=256,
+            num_warps=4,
+        )
+        aligned_counts = torch.empty((E_local,), dtype=torch.int32, device=dev)
+        offsets = torch.empty((E_local,), dtype=torch.int32, device=dev)
+        all_tokens_buf = torch.empty((1,), dtype=torch.int32, device=dev)
+        e_pad = max(16, triton.next_power_of_2(E_local))
+        _contig_prefix_scan_align_kernel[(1,)](
+            counts,
+            aligned_counts,
+            offsets,
+            all_tokens_buf,
+            num_experts=E_local,
+            ALIGNMENT=alignment,
+            E_PAD=e_pad,
+            num_warps=4,
         )
     else:
-        flat_local = flat_ids
-    counts = _gpu_expert_bincount(flat_local, E_local)
-    aligned_counts = ((counts + alignment - 1) // alignment) * alignment
-    offsets = torch.cumsum(aligned_counts, dim=0) - aligned_counts
+        if ep_size > 1:
+            in_range = (flat_ids >= e_lo) & (flat_ids < e_lo + E_local)
+            flat_local = torch.where(
+                in_range, flat_ids - e_lo, torch.full_like(flat_ids, E_local)
+            )
+        else:
+            flat_local = flat_ids
+        counts = _gpu_expert_bincount(flat_local, E_local)
+        aligned_counts = ((counts + alignment - 1) // alignment) * alignment
+        offsets = torch.cumsum(aligned_counts, dim=0) - aligned_counts
+        all_tokens_buf = None
     use_cap_nosync = ep_size <= 1
     if use_cap_nosync:
         all_tokens = (
-            (M * top_k + E_local * (alignment - 1) + alignment - 1) // alignment
+            (m_total_slots + E_local * (alignment - 1) + alignment - 1) // alignment
         ) * alignment
         active_rows_t: Optional[torch.Tensor] = torch.empty((1,), dtype=torch.int32, device=dev)
         grid_init = (E_local + 32,)
     else:
-        all_tokens = int(aligned_counts.sum().item())
+        all_tokens = int(
+            all_tokens_buf.item() if all_tokens_buf is not None else aligned_counts.sum().item()
+        )
         if all_tokens == 0:
             return torch.zeros((M, L), dtype=res_dtype, device=dev)
         active_rows_t = None
@@ -2827,7 +3022,7 @@ def mxfp4_moe_deepgemm_contiguous(
     _scatter_fp8_to_contig_kernel[(M_total,)](
         x_q.view(torch.uint8),
         x_sc_raw,
-        topk_ids.contiguous(),
+        ids_c,
         offsets,
         write_cnt,
         a_fp8.view(torch.uint8),
@@ -2879,7 +3074,11 @@ def mxfp4_moe_deepgemm_contiguous(
 
     out = torch.empty((M, L), dtype=res_dtype, device=dev)
     BLOCK_K = 512 if L >= 512 else triton.next_power_of_2(max(L, 64))
-    w_f = topk_weights.float().contiguous()
+    w_f = (
+        topk_weights
+        if (topk_weights.dtype == torch.float32 and topk_weights.is_contiguous())
+        else topk_weights.float().contiguous()
+    )
     _gather_slot_weighted_reduce_kernel[(M, triton.cdiv(L, BLOCK_K))](
         down_out,
         dst_slots,
@@ -2894,6 +3093,80 @@ def mxfp4_moe_deepgemm_contiguous(
         num_warps=4,
     )
     return out
+
+
+@triton.jit(
+    do_not_specialize=[
+        "M",
+        "e_lo",
+        "E_local",
+        "stride_xm",
+        "stride_aqe",
+        "stride_aqm",
+        "stride_asce",
+        "stride_asck",
+    ]
+)
+def _quant_and_scatter_fp8_to_masked_kernel(
+    x_ptr,
+    ids_ptr,
+    masked_m_ptr,
+    a_q_ptr,
+    a_sc_ptr,
+    dst_pos_ptr,
+    M,
+    TOP_K: tl.constexpr,
+    TOP_K_PAD: tl.constexpr,
+    L: tl.constexpr,
+    e_lo,
+    E_local,
+    stride_xm: tl.int64,
+    stride_aqe: tl.int64,
+    stride_aqm: tl.int64,
+    stride_asce: tl.int64,
+    stride_asck: tl.int64,
+    eps: tl.constexpr,
+    BLOCK_L: tl.constexpr,
+):
+    """Fused block-32 UE8M0 FP8 quant + scatter to DeepGEMM masked expert layout."""
+    m = tl.program_id(0).to(tl.int64)
+    if m >= M:
+        return
+    slots_k = tl.arange(0, TOP_K_PAD)
+    mk = slots_k < TOP_K
+    e_raw = tl.load(ids_ptr + m * TOP_K + slots_k, mask=mk, other=-1).to(tl.int32)
+    le = e_raw - e_lo
+    valid_e = mk & (le >= 0) & (le < E_local)
+    pos = tl.where(valid_e, tl.atomic_add(masked_m_ptr + le, 1, mask=valid_e), -1)
+    tl.store(dst_pos_ptr + m * TOP_K + slots_k, pos, mask=mk)
+
+    TILES: tl.constexpr = L // BLOCK_L
+    GROUPS: tl.constexpr = BLOCK_L // 32
+    PACKS: tl.constexpr = GROUPS // 4
+    shifts = (tl.arange(0, 4)[None, :] * 8).to(tl.uint32)
+    xr = x_ptr + m * stride_xm
+    for t in tl.static_range(TILES):
+        ol = t * BLOCK_L + tl.arange(0, BLOCK_L)
+        xv = tl.load(xr + ol).to(tl.float32)
+        q, biased = _compute_ue8m0_fp8_block32(xv.reshape((GROUPS, 32)), eps=eps)
+        qf_u8 = q.reshape((BLOCK_L,)).to(tl.uint8, bitcast=True)
+        pk = tl.sum(
+            biased.to(tl.uint8).to(tl.uint32).reshape((PACKS, 4)) << shifts,
+            axis=1,
+        ).to(tl.int32)
+        po = t * PACKS + tl.arange(0, PACKS)
+        for k in tl.static_range(TOP_K):
+            ek = tl.load(ids_ptr + m * TOP_K + k).to(tl.int32) - e_lo
+            pk_slot = tl.load(dst_pos_ptr + m * TOP_K + k)
+            if pk_slot >= 0:
+                tl.store(
+                    a_q_ptr + ek.to(tl.int64) * stride_aqe + pk_slot.to(tl.int64) * stride_aqm + ol,
+                    qf_u8,
+                )
+                tl.store(
+                    a_sc_ptr + ek.to(tl.int64) * stride_asce + po.to(tl.int64) * stride_asck + pk_slot.to(tl.int64),
+                    pk,
+                )
 
 
 @triton.jit(do_not_specialize=["stride_q_row", "stride_sc_row", "stride_aqe", "stride_aqm", "stride_asce", "stride_asck"])
@@ -3048,11 +3321,6 @@ def mxfp4_moe_deepgemm_masked(
 
     (w13_i8, w13_s), (w2_i8, w2_s) = weights.get_deepgemm_pair()
 
-    if prequant_fp8 is not None:
-        x_q, x_sc_raw = prequant_fp8
-    else:
-        assert x is not None
-        x_q, x_sc_raw = per_token_group_quant_fp8_ue8m0(x, scale_format="raw")
     # Active slots [0..masked_m[e]-1] are fully overwritten and masked_m==0 groups
     # are skipped by DeepGEMM, avoiding costly FillFunctors inside CUDA Graphs.
     a_fp8 = torch.empty((E_local, max_m, L), dtype=torch.float8_e4m3fn, device=dev)
@@ -3063,33 +3331,65 @@ def mxfp4_moe_deepgemm_masked(
     ).transpose(1, 2)
     masked_m = torch.zeros((E_local,), dtype=torch.int32, device=dev)
     dst_pos = torch.empty((M, top_k), dtype=torch.int32, device=dev)
+    ids_c = topk_ids if topk_ids.is_contiguous() else topk_ids.contiguous()
 
-    M_total = M * top_k
-    _scatter_fp8_to_masked_kernel[(M_total,)](
-        x_q.view(torch.uint8),
-        x_sc_raw,
-        topk_ids.contiguous(),
-        masked_m,
-        a_fp8.view(torch.uint8),
-        a_scale,
-        dst_pos.view(-1),
-        M_total,
-        top_k,
-        L,
-        num_groups,
-        num_packs,
-        e_lo,
-        E_local,
-        x_q.stride(0),
-        x_sc_raw.stride(0),
-        a_fp8.stride(0),
-        a_fp8.stride(1),
-        a_scale.stride(0),
-        a_scale.stride(2),
-        BLOCK_K=512,
-        num_warps=4,
-    )
-    del x_q, x_sc_raw
+    if prequant_fp8 is None and x is not None and M <= 2048:
+        x_c = x if x.stride(-1) == 1 else x.contiguous()
+        block_l = 512 if (L % 512 == 0) else (256 if (L % 256 == 0) else 128)
+        _quant_and_scatter_fp8_to_masked_kernel[(M,)](
+            x_c,
+            ids_c,
+            masked_m,
+            a_fp8.view(torch.uint8),
+            a_scale,
+            dst_pos.view(-1),
+            M,
+            TOP_K=top_k,
+            TOP_K_PAD=max(16, triton.next_power_of_2(top_k)),
+            L=L,
+            e_lo=e_lo,
+            E_local=E_local,
+            stride_xm=x_c.stride(0),
+            stride_aqe=a_fp8.stride(0),
+            stride_aqm=a_fp8.stride(1),
+            stride_asce=a_scale.stride(0),
+            stride_asck=a_scale.stride(2),
+            eps=float(_QUANT_EPS),
+            BLOCK_L=block_l,
+            num_warps=4,
+        )
+    else:
+        if prequant_fp8 is not None:
+            x_q, x_sc_raw = prequant_fp8
+        else:
+            assert x is not None
+            x_q, x_sc_raw = per_token_group_quant_fp8_ue8m0(x, scale_format="raw")
+        M_total = M * top_k
+        _scatter_fp8_to_masked_kernel[(M_total,)](
+            x_q.view(torch.uint8),
+            x_sc_raw,
+            ids_c,
+            masked_m,
+            a_fp8.view(torch.uint8),
+            a_scale,
+            dst_pos.view(-1),
+            M_total,
+            top_k,
+            L,
+            num_groups,
+            num_packs,
+            e_lo,
+            E_local,
+            x_q.stride(0),
+            x_sc_raw.stride(0),
+            a_fp8.stride(0),
+            a_fp8.stride(1),
+            a_scale.stride(0),
+            a_scale.stride(2),
+            BLOCK_K=512,
+            num_warps=4,
+        )
+        del x_q, x_sc_raw
 
     gate_up = torch.empty((E_local, max_m, 2 * I), dtype=torch.bfloat16, device=dev)
     deep_gemm.m_grouped_fp8_fp4_gemm_nt_masked(
@@ -3133,7 +3433,7 @@ def mxfp4_moe_deepgemm_masked(
     )
     _gather_masked_weighted_reduce_kernel[(M, triton.cdiv(L, BLOCK_K))](
         down_out,
-        topk_ids.contiguous(),
+        ids_c,
         dst_pos,
         w_f,
         out,
@@ -3340,7 +3640,11 @@ def mxfp4_moe_flashinfer(
 
     out = torch.empty((M, L), dtype=res_dtype, device=dev)
     BLOCK_K = 512 if L >= 512 else triton.next_power_of_2(max(L, 64))
-    w_f = topk_weights.float().contiguous()
+    w_f = (
+        topk_weights
+        if (topk_weights.dtype == torch.float32 and topk_weights.is_contiguous())
+        else topk_weights.float().contiguous()
+    )
     _gather_slot_weighted_reduce_kernel[(M, triton.cdiv(L, BLOCK_K))](
         down_out,
         dst_slots,
@@ -3394,34 +3698,41 @@ def resolve_moe_backend_for_shape(
             return "deepgemm_masked" if dg_masked_ok else ("triton_splitk" if M <= 64 else "triton")
         return req
 
-    strict_bf16 = (
-        str(compute_mode).lower() in ("bf16_strict", "strict_bf16")
+    cm_l = str(compute_mode).lower()
+    if (
+        cm_l in ("bf16_strict", "strict_bf16")
         or os.environ.get("QWEN4_5_MXFP4_STRICT_BF16", "0") == "1"
-    )
-    if strict_bf16:
+    ):
         return "triton_splitk" if M <= 64 else "triton"
 
+    if M <= 64:
+        dec_env = os.environ.get("QWEN4_5_MXFP4_DECODE_BACKEND", "triton_splitk")
+        if dec_env == "sm100_winner":
+            return "deepgemm_masked" if (M >= 2 and dg_masked_ok) else "triton_splitk"
+        if capturing and dec_env in ("deepgemm_contiguous", "flashinfer", "flashinfer_noswap"):
+            return "deepgemm_masked" if dg_masked_ok else "triton_splitk"
+        if dec_env == "deepgemm_masked" and not dg_masked_ok:
+            return "triton_splitk"
+        if dec_env in ("flashinfer", "flashinfer_noswap"):
+            fi_ok = (
+                not weights.weights_transposed
+                and L % 128 == 0
+                and I % 128 == 0
+                and has_flashinfer_mxfp4(dev_idx)
+            )
+            if not fi_ok:
+                return "triton_splitk"
+        return dec_env
+
+    pref_env = os.environ.get("QWEN4_5_MXFP4_PREFILL_BACKEND", "auto")
+    if pref_env == "auto" and capturing:
+        return "deepgemm_masked" if dg_masked_ok else "triton"
     fi_ok = (
         not weights.weights_transposed
         and L % 128 == 0
         and I % 128 == 0
         and has_flashinfer_mxfp4(dev_idx)
     )
-
-    if M <= 64:
-        dec_env = os.environ.get("QWEN4_5_MXFP4_DECODE_BACKEND", "triton_splitk")
-        if dec_env == "sm100_winner":
-            # Empirical SM103 CG frontier: triton_splitk at M=1 (54.3us), deepgemm_masked at M>=2 (61.7 vs 158.3us)
-            return "deepgemm_masked" if (M >= 2 and dg_masked_ok) else "triton_splitk"
-        if capturing and dec_env in ("deepgemm_contiguous", "flashinfer", "flashinfer_noswap"):
-            return "deepgemm_masked" if dg_masked_ok else "triton_splitk"
-        if dec_env == "deepgemm_masked" and not dg_masked_ok:
-            return "triton_splitk"
-        if dec_env in ("flashinfer", "flashinfer_noswap") and not fi_ok:
-            return "triton_splitk"
-        return dec_env
-
-    pref_env = os.environ.get("QWEN4_5_MXFP4_PREFILL_BACKEND", "auto")
     if pref_env != "auto":
         if capturing and pref_env in ("deepgemm_contiguous", "flashinfer", "flashinfer_noswap"):
             return "deepgemm_masked" if dg_masked_ok else "triton"

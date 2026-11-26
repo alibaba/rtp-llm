@@ -29,16 +29,29 @@ _FP8_E4M3_MAX = 448.0
 _QUANT_EPS = 1.0e-10
 _MASKED_PERSIST_MAX_E = 1024
 _MASKED_CHUNK_M = 16
+_NULL_CTX = contextlib.nullcontext()
+_IS_MULTI_GPU: Optional[bool] = None
+_SM_COUNT_CACHE: dict[int, int] = {}
 
 
 def _cuda_device_ctx(device: torch.device):
-    if device.type == "cuda" and device.index is not None and device.index != torch.cuda.current_device():
-        return torch.cuda.device(device)
-    return contextlib.nullcontext()
+    global _IS_MULTI_GPU
+    if device.type == "cuda":
+        multi = _IS_MULTI_GPU
+        if multi is None:
+            multi = torch.cuda.device_count() > 1
+            _IS_MULTI_GPU = multi
+        if multi and device.index is not None and device.index != torch.cuda.current_device():
+            return torch.cuda.device(device)
+    return _NULL_CTX
 
 
 def _get_sm_count(device_index: int) -> int:
-    return int(torch.cuda.get_device_properties(device_index).multi_processor_count)
+    cached = _SM_COUNT_CACHE.get(device_index)
+    if cached is None:
+        cached = int(torch.cuda.get_device_properties(device_index).multi_processor_count)
+        _SM_COUNT_CACHE[device_index] = cached
+    return cached
 
 
 def situ_and_mul_ref(
@@ -950,6 +963,60 @@ def _situ_glu_fp8_quant_masked_packed_kernel(
 
 
 @triton.jit(do_not_specialize=["max_m", "stride_xe", "stride_xm", "stride_qe", "stride_qm", "stride_sce", "stride_sck"])
+def _situ_glu_fp8_quant_masked_row_persistent_kernel(
+    x_ptr,
+    q_ptr,
+    sc_ptr,
+    masked_m_ptr,
+    max_m,
+    E,
+    D: tl.constexpr,
+    stride_xe: tl.int64,
+    stride_xm: tl.int64,
+    stride_qe: tl.int64,
+    stride_qm: tl.int64,
+    stride_sce: tl.int64,
+    stride_sck: tl.int64,
+    gate_beta: tl.constexpr,
+    up_beta: tl.constexpr,
+    eps: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    E_PAD: tl.constexpr,
+):
+    """Row-per-task persistent masked SiTU-GLU + FP8 quant (computes expert offset once per row)."""
+    offs_e, ends, total_rows = _masked_prefix_map(masked_m_ptr, max_m, E, E_PAD)
+    if total_rows == 0:
+        return
+    pid = tl.program_id(0)
+    num_ctas = tl.num_programs(0)
+    TILES: tl.constexpr = D // BLOCK_D
+    GROUPS: tl.constexpr = BLOCK_D // 32
+    PACKS: tl.constexpr = GROUPS // 4
+    shifts = (tl.arange(0, 4)[None, :] * 8).to(tl.uint32)
+
+    for row_id in range(pid, total_rows, num_ctas):
+        e = tl.sum((ends <= row_id).to(tl.int32), axis=0).to(tl.int64)
+        m_start_e = tl.sum(tl.where(offs_e == (e - 1), ends, 0), axis=0).to(tl.int64)
+        m = row_id.to(tl.int64) - m_start_e
+        x_base = x_ptr + e * stride_xe + m * stride_xm
+        q_base = q_ptr + e * stride_qe + m * stride_qm
+        sc_base = sc_ptr + e * stride_sce + m
+        for t in tl.static_range(TILES):
+            offs_d = t * BLOCK_D + tl.arange(0, BLOCK_D)
+            gate = tl.load(x_base + offs_d).to(tl.float32)
+            up = tl.load(x_base + D + offs_d).to(tl.float32)
+            y = _situ_glu_fp32_to_bf16(gate, up, gate_beta=gate_beta, up_beta=up_beta)
+            q, biased = _compute_ue8m0_fp8_block32(y.reshape((GROUPS, 32)), eps=eps)
+            tl.store(q_base + offs_d, q.reshape((BLOCK_D,)))
+            packed = tl.sum(
+                biased.to(tl.uint8).to(tl.uint32).reshape((PACKS, 4)) << shifts,
+                axis=1,
+            ).to(tl.int32)
+            pack_offs = t * PACKS + tl.arange(0, PACKS)
+            tl.store(sc_base + pack_offs.to(tl.int64) * stride_sck, packed)
+
+
+@triton.jit(do_not_specialize=["max_m", "stride_xe", "stride_xm", "stride_qe", "stride_qm", "stride_sce", "stride_sck"])
 def _situ_glu_fp8_quant_masked_packed_persistent_kernel(
     x_ptr,
     q_ptr,
@@ -1299,66 +1366,67 @@ def situ_glu_fp8_quant_packed(
                 break
     has_active_rows = max_active_rows is not None
     active_rows_t = max_active_rows if has_active_rows else q
-    if bd_1d > 0 and D // bd_1d <= 16:
-        nw_1d = 4
-        _situ_glu_fp8_quant_packed_1d_kernel[(M,)](
-            g_2d,
-            u_2d,
-            q,
-            sc,
-            indptr_t,
-            M,
-            D=D,
-            stride_g_row=g_2d.stride(0),
-            stride_u_row=u_2d.stride(0),
-            stride_q_row=q.stride(0),
-            stride_sc_k=sc.stride(1) if fmt_code == 0 else 0,
-            stride_sc_m=sc.stride(0) if fmt_code == 1 else 0,
-            up_offset=up_offset,
-            sf_cols_pad=sf_cols_pad,
-            gate_beta=float(gate_beta),
-            up_beta=float(up_beta),
-            eps=float(eps),
-            BLOCK_D=bd_1d,
-            active_rows_ptr=active_rows_t,
-            SCALE_FMT=fmt_code,
-            HAS_INDPTR=(m_indptr is not None),
-            HAS_ACTIVE_ROWS=has_active_rows,
-            NUM_EP_GROUPS=num_ep_groups,
-            BSEARCH_ITERS=bsearch_iters,
-            num_warps=nw_1d,
-        )
-    else:
-        BLOCK_D = _pick_block_d(D)
-        _situ_glu_fp8_quant_packed_kernel[(M, triton.cdiv(D, BLOCK_D))](
-            g_2d,
-            u_2d,
-            q,
-            sc,
-            indptr_t,
-            M,
-            D,
-            num_groups,
-            num_packs,
-            sf_cols_pad,
-            g_2d.stride(0),
-            u_2d.stride(0),
-            q.stride(0),
-            sc.stride(1) if fmt_code == 0 else 0,
-            sc.stride(0) if fmt_code == 1 else 0,
-            up_offset,
-            gate_beta=float(gate_beta),
-            up_beta=float(up_beta),
-            eps=float(eps),
-            BLOCK_D=BLOCK_D,
-            active_rows_ptr=active_rows_t,
-            SCALE_FMT=fmt_code,
-            HAS_INDPTR=(m_indptr is not None),
-            HAS_ACTIVE_ROWS=has_active_rows,
-            NUM_EP_GROUPS=num_ep_groups,
-            BSEARCH_ITERS=bsearch_iters,
-            num_warps=4,
-        )
+    with _cuda_device_ctx(g_2d.device):
+        if bd_1d > 0 and D // bd_1d <= 16:
+            nw_1d = 4
+            _situ_glu_fp8_quant_packed_1d_kernel[(M,)](
+                g_2d,
+                u_2d,
+                q,
+                sc,
+                indptr_t,
+                M,
+                D=D,
+                stride_g_row=g_2d.stride(0),
+                stride_u_row=u_2d.stride(0),
+                stride_q_row=q.stride(0),
+                stride_sc_k=sc.stride(1) if fmt_code == 0 else 0,
+                stride_sc_m=sc.stride(0) if fmt_code == 1 else 0,
+                up_offset=up_offset,
+                sf_cols_pad=sf_cols_pad,
+                gate_beta=float(gate_beta),
+                up_beta=float(up_beta),
+                eps=float(eps),
+                BLOCK_D=bd_1d,
+                active_rows_ptr=active_rows_t,
+                SCALE_FMT=fmt_code,
+                HAS_INDPTR=(m_indptr is not None),
+                HAS_ACTIVE_ROWS=has_active_rows,
+                NUM_EP_GROUPS=num_ep_groups,
+                BSEARCH_ITERS=bsearch_iters,
+                num_warps=nw_1d,
+            )
+        else:
+            BLOCK_D = _pick_block_d(D)
+            _situ_glu_fp8_quant_packed_kernel[(M, triton.cdiv(D, BLOCK_D))](
+                g_2d,
+                u_2d,
+                q,
+                sc,
+                indptr_t,
+                M,
+                D,
+                num_groups,
+                num_packs,
+                sf_cols_pad,
+                g_2d.stride(0),
+                u_2d.stride(0),
+                q.stride(0),
+                sc.stride(1) if fmt_code == 0 else 0,
+                sc.stride(0) if fmt_code == 1 else 0,
+                up_offset,
+                gate_beta=float(gate_beta),
+                up_beta=float(up_beta),
+                eps=float(eps),
+                BLOCK_D=BLOCK_D,
+                active_rows_ptr=active_rows_t,
+                SCALE_FMT=fmt_code,
+                HAS_INDPTR=(m_indptr is not None),
+                HAS_ACTIVE_ROWS=has_active_rows,
+                NUM_EP_GROUPS=num_ep_groups,
+                BSEARCH_ITERS=bsearch_iters,
+                num_warps=4,
+            )
     if scale_format == "raw":
         return q.reshape(*orig_prefix, D), sc.reshape(*orig_prefix, num_groups)
     return q, sc
@@ -1404,8 +1472,33 @@ def situ_glu_fp8_quant_masked_packed(
 
     BLOCK_D = _pick_block_d(D)
     d_tiles = triton.cdiv(D, BLOCK_D)
-    mm_c = masked_m.contiguous()
-    if E <= _MASKED_PERSIST_MAX_E:
+    mm_c = masked_m if masked_m.is_contiguous() else masked_m.contiguous()
+    if E <= _MASKED_PERSIST_MAX_E and D >= 512 and D % 512 == 0:
+        sm_count = _get_sm_count(int(x_c.device.index or 0))
+        num_ctas = min(sm_count * 4, E * max_m)
+        with _cuda_device_ctx(x_c.device):
+            _situ_glu_fp8_quant_masked_row_persistent_kernel[(num_ctas,)](
+                x_c,
+                q,
+                sc,
+                mm_c,
+                max_m,
+                E,
+                D=D,
+                stride_xe=x_c.stride(0),
+                stride_xm=x_c.stride(1),
+                stride_qe=q.stride(0),
+                stride_qm=q.stride(1),
+                stride_sce=sc.stride(0),
+                stride_sck=sc.stride(2),
+                gate_beta=float(gate_beta),
+                up_beta=float(up_beta),
+                eps=float(eps),
+                BLOCK_D=512,
+                E_PAD=max(32, triton.next_power_of_2(E)),
+                num_warps=4,
+            )
+    elif E <= _MASKED_PERSIST_MAX_E:
         num_ctas = _masked_persist_ctas(x_c.device, E, max_m, d_tiles)
         _situ_glu_fp8_quant_masked_packed_persistent_kernel[(num_ctas,)](
             x_c,
@@ -1539,7 +1632,7 @@ def quant_fp8_1x128_deepgemm_triton(
         sc.copy_(exp.to(torch.uint8).contiguous().view(torch.int32))
         return q.reshape(*orig_shape[:-1], K), sc
 
-    bm = 1 if M <= 4 else (2 if M <= 2048 else 8)
+    bm = 1 if M <= 4 else (4 if M <= 4096 else 8)
     grid = (triton.cdiv(M, bm), num_packs)
     with _cuda_device_ctx(x.device):
         _quant_fp8_1x128_dg_kernel[grid](

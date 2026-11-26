@@ -24,9 +24,13 @@ import triton.language as tl
 from .contracts import PLELayerState
 from .short_conv import (
     Qwen4_5ShortConv,
+    _triton_int_spec,
     causal_dwconv1d_ragged_prefill_with_snapshots_triton,
     causal_dwconv1d_verify_triton,
+    triton_fast_launch,
 )
+
+_PLE_TRITON_CACHE: dict = {}
 
 # Real Qwen 4.5-Flash Layer 1 PLE constants
 DEFAULT_PLE_LAYER_MULTIPLIERS: Tuple[int, ...] = (
@@ -652,26 +656,62 @@ def ple_hash_ngram_ids_triton(
     head_block = max(16, triton.next_power_of_2(num_heads))
     block_rows = 1 if (B * T) <= 4 else (16 if (B * T) <= 64 else 64)
 
-    _ple_hash_ngram_ids_kernel[(triton.cdiv(B * T, block_rows),)](
-        prev_context if has_ctx else ids_c,
-        ids_c,
-        vocab_sizes.contiguous(),
-        offsets.contiguous(),
-        multipliers.contiguous(),
-        out,
-        stage_context if has_stage else ids_c,
-        int(stage_context.stride(0)) if has_stage else 0,
-        int(stage_context.stride(1)) if has_stage else 0,
-        BATCH=B,
-        SEQ=T,
-        EOS=eos_token_id,
-        NUM_HEADS=num_heads,
-        HEADS_PER_NGRAM=heads_per_ngram,
-        HEAD_BLOCK=head_block,
-        BLOCK_ROWS=block_rows,
-        HAS_CTX=has_ctx,
-        UPDATE_CTX_T1=update_t1,
-        WRITE_STAGE_CTX=has_stage,
+    p_ctx = prev_context if has_ctx else ids_c
+    vs_c = vocab_sizes.contiguous()
+    off_c = offsets.contiguous()
+    mul_c = multipliers.contiguous()
+    st_ctx = stage_context if has_stage else ids_c
+    st_sb = int(stage_context.stride(0)) if has_stage else 0
+    st_sv = int(stage_context.stride(1)) if has_stage else 0
+    ptr_or = (
+        p_ctx.data_ptr()
+        | ids_c.data_ptr()
+        | vs_c.data_ptr()
+        | off_c.data_ptr()
+        | mul_c.data_ptr()
+        | out.data_ptr()
+        | st_ctx.data_ptr()
+    )
+    key = (
+        ids_c.device.index,
+        "ple_hash",
+        ids_c.dtype,
+        p_ctx.dtype,
+        vs_c.dtype,
+        off_c.dtype,
+        mul_c.dtype,
+        out.dtype,
+        st_ctx.dtype,
+        _triton_int_spec(st_sb),
+        _triton_int_spec(st_sv),
+        eos_token_id,
+        num_heads,
+        heads_per_ngram,
+        head_block,
+        block_rows,
+        has_ctx,
+        update_t1,
+        has_stage,
+    )
+    triton_fast_launch(
+        _PLE_TRITON_CACHE,
+        key,
+        _ple_hash_ngram_ids_kernel,
+        triton.cdiv(B * T, block_rows),
+        1,
+        1,
+        ptr_or,
+        (p_ctx, ids_c, vs_c, off_c, mul_c, out, st_ctx, st_sb, st_sv, B, T),
+        {
+            "EOS": eos_token_id,
+            "NUM_HEADS": num_heads,
+            "HEADS_PER_NGRAM": heads_per_ngram,
+            "HEAD_BLOCK": head_block,
+            "BLOCK_ROWS": block_rows,
+            "HAS_CTX": has_ctx,
+            "UPDATE_CTX_T1": update_t1,
+            "WRITE_STAGE_CTX": has_stage,
+        },
         num_warps=4,
     )
 
@@ -709,56 +749,131 @@ def ple_gather_fp8_triton(
             m_tok = n // h_ng
             br = 8 if m_tok >= 64 else (4 if m_tok >= 8 else 1)
             nw = 4 if (br >= 4 or head_dim >= 256) else 2
-            _ple_gather_head_grouped_u64_kernel[(triton.cdiv(m_tok, br), h_ng)](
-                ids_c,
-                pointer_table,
-                weight_scale,
-                out,
-                M=m_tok,
-                SHARD_ROWS=shard_rows,
-                TOTAL_SHARDS=total_shards,
-                H_NG=h_ng,
-                D=head_dim,
-                BD64=bd64,
-                BR=br,
-                EVICT_FIRST=is_cpu_uva or n >= 4096,
+            ev_first = is_cpu_uva or n >= 4096
+            ptr_or = (
+                ids_c.data_ptr()
+                | pointer_table.data_ptr()
+                | weight_scale.data_ptr()
+                | out.data_ptr()
+            )
+            key = (
+                ids_c.device.index,
+                "ple_gather_hg_u64",
+                ids_c.dtype,
+                pointer_table.dtype,
+                weight_scale.dtype,
+                out_dtype,
+                total_shards,
+                h_ng,
+                head_dim,
+                bd64,
+                br,
+                ev_first,
+                nw,
+            )
+            triton_fast_launch(
+                _PLE_TRITON_CACHE,
+                key,
+                _ple_gather_head_grouped_u64_kernel,
+                triton.cdiv(m_tok, br),
+                h_ng,
+                1,
+                ptr_or,
+                (ids_c, pointer_table, weight_scale, out, m_tok, shard_rows),
+                {
+                    "TOTAL_SHARDS": total_shards,
+                    "H_NG": h_ng,
+                    "D": head_dim,
+                    "BD64": bd64,
+                    "BR": br,
+                    "EVICT_FIRST": ev_first,
+                },
                 num_warps=nw,
             )
             return out
         rows_per_cta = 8 if n >= 64 else 4
         bd = max(16, triton.next_power_of_2(head_dim))
-        _ple_gather_shards_u64_kernel[(triton.cdiv(n, rows_per_cta),)](
-            ids_c,
-            pointer_table,
-            weight_scale,
-            out,
-            N=n,
-            SHARD_ROWS=shard_rows,
-            TOTAL_SHARDS=total_shards,
-            D=head_dim,
-            BD=bd,
-            BD64=bd64,
-            BR=rows_per_cta,
-            EVICT_FIRST=is_cpu_uva or n >= 4096,
+        ev_first = is_cpu_uva or n >= 4096
+        ptr_or = (
+            ids_c.data_ptr()
+            | pointer_table.data_ptr()
+            | weight_scale.data_ptr()
+            | out.data_ptr()
+        )
+        key = (
+            ids_c.device.index,
+            "ple_gather_u64",
+            ids_c.dtype,
+            pointer_table.dtype,
+            weight_scale.dtype,
+            out_dtype,
+            total_shards,
+            head_dim,
+            bd,
+            bd64,
+            rows_per_cta,
+            ev_first,
+        )
+        triton_fast_launch(
+            _PLE_TRITON_CACHE,
+            key,
+            _ple_gather_shards_u64_kernel,
+            triton.cdiv(n, rows_per_cta),
+            1,
+            1,
+            ptr_or,
+            (ids_c, pointer_table, weight_scale, out, n, shard_rows),
+            {
+                "TOTAL_SHARDS": total_shards,
+                "D": head_dim,
+                "BD": bd,
+                "BD64": bd64,
+                "BR": rows_per_cta,
+                "EVICT_FIRST": ev_first,
+            },
             num_warps=4,
         )
         return out
 
     rows_per_cta = 4 if (is_cpu_uva or n <= 64) else 8
     bd = max(16, triton.next_power_of_2(head_dim))
-    _ple_gather_shards_kernel[(triton.cdiv(n, rows_per_cta),)](
-        ids_c,
-        pointer_table,
-        weight_scale if is_fp8 else pointer_table,
-        out,
-        N=n,
-        SHARD_ROWS=shard_rows,
-        TOTAL_SHARDS=total_shards,
-        D=head_dim,
-        BD=bd,
-        BR=rows_per_cta,
-        IS_FP8=is_fp8,
-        IS_BF16=is_bf16,
+    ws_arg = weight_scale if is_fp8 else pointer_table
+    ptr_or = (
+        ids_c.data_ptr()
+        | pointer_table.data_ptr()
+        | ws_arg.data_ptr()
+        | out.data_ptr()
+    )
+    key = (
+        ids_c.device.index,
+        "ple_gather_gen",
+        ids_c.dtype,
+        ws_arg.dtype,
+        out_dtype,
+        total_shards,
+        head_dim,
+        bd,
+        rows_per_cta,
+        is_fp8,
+        is_bf16,
+    )
+    triton_fast_launch(
+        _PLE_TRITON_CACHE,
+        key,
+        _ple_gather_shards_kernel,
+        triton.cdiv(n, rows_per_cta),
+        1,
+        1,
+        ptr_or,
+        (ids_c, pointer_table, ws_arg, out, n, shard_rows),
+        {
+            "TOTAL_SHARDS": total_shards,
+            "D": head_dim,
+            "BD": bd,
+            "BR": rows_per_cta,
+            "IS_FP8": is_fp8,
+            "IS_BF16": is_bf16,
+        },
         num_warps=4,
     )
     return out
@@ -849,28 +964,75 @@ def ple_gate_and_norm_triton(
 
     block = max(128, triton.next_power_of_2(hidden_size))
     num_warps = 4
-    _ple_gate_and_norm_kernel[(B * T, hc_count)](
-        key_2d,
-        val_2d,
-        hid_2d,
-        norm_key.contiguous(),
-        norm_query.contiguous(),
-        norm_conv.contiguous(),
-        u.view(B * T, width),
-        u_norm.view(B * T, width),
-        sub_2d,
-        inj_2d,
-        comb_2d,
-        KEY_STRIDE=int(key_2d.stride(0)),
-        VAL_STRIDE=int(val_2d.stride(0)),
-        HID_STRIDE=int(hid_2d.stride(0)),
-        COMB_OUT_STRIDE=int(comb_2d.stride(0)),
-        WIDTH=width,
-        H=hidden_size,
-        HC_COUNT=hc_count,
-        EPS=eps,
-        HAS_COMBINE=has_combine,
-        BLOCK=block,
+    nk = norm_key.contiguous()
+    nq = norm_query.contiguous()
+    nc = norm_conv.contiguous()
+    u_2d = u.view(B * T, width)
+    un_2d = u_norm.view(B * T, width)
+    ks = int(key_2d.stride(0))
+    vs = int(val_2d.stride(0))
+    hs = int(hid_2d.stride(0))
+    cs = int(comb_2d.stride(0))
+    ptr_or = (
+        key_2d.data_ptr()
+        | val_2d.data_ptr()
+        | hid_2d.data_ptr()
+        | nk.data_ptr()
+        | nq.data_ptr()
+        | nc.data_ptr()
+        | u_2d.data_ptr()
+        | un_2d.data_ptr()
+        | sub_2d.data_ptr()
+        | inj_2d.data_ptr()
+        | comb_2d.data_ptr()
+    )
+    key = (
+        key_2d.device.index,
+        "ple_gn",
+        key_2d.dtype,
+        val_2d.dtype,
+        hid_2d.dtype,
+        nk.dtype,
+        nq.dtype,
+        nc.dtype,
+        u_2d.dtype,
+        un_2d.dtype,
+        sub_2d.dtype,
+        inj_2d.dtype,
+        comb_2d.dtype,
+        ks,
+        vs,
+        hs,
+        cs,
+        width,
+        hidden_size,
+        hc_count,
+        float(eps),
+        has_combine,
+        block,
+        num_warps,
+    )
+    triton_fast_launch(
+        _PLE_TRITON_CACHE,
+        key,
+        _ple_gate_and_norm_kernel,
+        B * T,
+        hc_count,
+        1,
+        ptr_or,
+        (key_2d, val_2d, hid_2d, nk, nq, nc, u_2d, un_2d, sub_2d, inj_2d, comb_2d),
+        {
+            "KEY_STRIDE": ks,
+            "VAL_STRIDE": vs,
+            "HID_STRIDE": hs,
+            "COMB_OUT_STRIDE": cs,
+            "WIDTH": width,
+            "H": hidden_size,
+            "HC_COUNT": hc_count,
+            "EPS": eps,
+            "HAS_COMBINE": has_combine,
+            "BLOCK": block,
+        },
         num_warps=num_warps,
     )
     return u, u_norm
@@ -892,13 +1054,18 @@ def ple_add3_triton(
     if total == 0:
         return out
     block = 1024
-    _ple_add3_kernel[(triton.cdiv(total, block),)](
-        h_c,
-        u_c,
-        c_c,
-        out,
-        TOTAL=total,
-        BLOCK=block,
+    ptr_or = h_c.data_ptr() | u_c.data_ptr() | c_c.data_ptr() | out.data_ptr()
+    key = (h_c.device.index, "ple_add3", h_c.dtype, u_c.dtype, c_c.dtype, out.dtype, block)
+    triton_fast_launch(
+        _PLE_TRITON_CACHE,
+        key,
+        _ple_add3_kernel,
+        triton.cdiv(total, block),
+        1,
+        1,
+        ptr_or,
+        (h_c, u_c, c_c, out, total),
+        {"BLOCK": block},
         num_warps=4,
     )
     return out
@@ -959,23 +1126,57 @@ def ple_add3_and_hc_norm_triton(
 
     block = max(128, triton.next_power_of_2(hidden_size))
     num_warps = 8 if block >= 4096 else 4
-    _ple_add3_hc_combine_norm_kernel[(rows, hc_count)](
-        h_c,
-        u_c,
-        c_c,
-        sub_c,
-        inj_c,
-        w_c,
-        b_c,
-        out_h,
-        out_norm,
-        WIDTH=width,
-        H=hidden_size,
-        HC_COUNT=hc_count,
-        EPS=eps,
-        HAS_COMBINE=has_combine,
-        HAS_BIAS=norm_bias is not None,
-        BLOCK=block,
+    has_bias = norm_bias is not None
+    ptr_or = (
+        h_c.data_ptr()
+        | u_c.data_ptr()
+        | c_c.data_ptr()
+        | sub_c.data_ptr()
+        | inj_c.data_ptr()
+        | w_c.data_ptr()
+        | b_c.data_ptr()
+        | out_h.data_ptr()
+        | out_norm.data_ptr()
+    )
+    key = (
+        h_c.device.index,
+        "ple_add3_norm",
+        h_c.dtype,
+        u_c.dtype,
+        c_c.dtype,
+        sub_c.dtype,
+        inj_c.dtype,
+        w_c.dtype,
+        b_c.dtype,
+        out_h.dtype,
+        out_norm.dtype,
+        width,
+        hidden_size,
+        hc_count,
+        float(eps),
+        has_combine,
+        has_bias,
+        block,
+        num_warps,
+    )
+    triton_fast_launch(
+        _PLE_TRITON_CACHE,
+        key,
+        _ple_add3_hc_combine_norm_kernel,
+        rows,
+        hc_count,
+        1,
+        ptr_or,
+        (h_c, u_c, c_c, sub_c, inj_c, w_c, b_c, out_h, out_norm),
+        {
+            "WIDTH": width,
+            "H": hidden_size,
+            "HC_COUNT": hc_count,
+            "EPS": eps,
+            "HAS_COMBINE": has_combine,
+            "HAS_BIAS": has_bias,
+            "BLOCK": block,
+        },
         num_warps=num_warps,
     )
     return out_h, out_norm
@@ -1616,6 +1817,9 @@ class Qwen4_5PLELayer(nn.Module):
         snap_req_idx: Optional[torch.Tensor] = None,
         conv_dst_pool: Optional[torch.Tensor] = None,
         conv_snap_phys: Optional[torch.Tensor] = None,
+        req_snap_start: Optional[torch.Tensor] = None,
+        snap_local_ends: Optional[torch.Tensor] = None,
+        snap_aligned: bool = False,
         ctx_dst_pool: Optional[torch.Tensor] = None,
         ctx_snap_phys: Optional[torch.Tensor] = None,
         skip_invalid_phys: bool = True,
@@ -1647,44 +1851,116 @@ class Qwen4_5PLELayer(nn.Module):
             has_ctx = prev_ngram_ctx is not None
             head_block = max(16, triton.next_power_of_2(self.ngram_heads))
             block_rows = 1 if N <= 4 else (16 if N <= 64 else 64)
-            _ple_hash_ngram_ids_ragged_kernel[(triton.cdiv(N, block_rows),)](
-                prev_ngram_ctx.contiguous() if has_ctx else ids_c,
-                ids_c,
-                cu_seqlens,
-                tok_req,
-                self.ngram_heads_vocab_sizes.contiguous(),
-                self.ngram_heads_offsets.contiguous(),
-                self.layer_multipliers.contiguous(),
-                ngram_ids,
-                N=N,
-                EOS=self.eos_token_id,
-                NUM_HEADS=self.ngram_heads,
-                HEADS_PER_NGRAM=self.heads_per_ngram,
-                HEAD_BLOCK=head_block,
-                BLOCK_ROWS=block_rows,
-                HAS_CTX=has_ctx,
+            p_ctx = prev_ngram_ctx.contiguous() if has_ctx else ids_c
+            vs_c = self.ngram_heads_vocab_sizes.contiguous()
+            off_c = self.ngram_heads_offsets.contiguous()
+            mul_c = self.layer_multipliers.contiguous()
+            ptr_or = (
+                p_ctx.data_ptr()
+                | ids_c.data_ptr()
+                | cu_seqlens.data_ptr()
+                | tok_req.data_ptr()
+                | vs_c.data_ptr()
+                | off_c.data_ptr()
+                | mul_c.data_ptr()
+                | ngram_ids.data_ptr()
+            )
+            key = (
+                ids_c.device.index,
+                "ple_hash_rag",
+                ids_c.dtype,
+                p_ctx.dtype,
+                cu_seqlens.dtype,
+                tok_req.dtype,
+                vs_c.dtype,
+                off_c.dtype,
+                mul_c.dtype,
+                ngram_ids.dtype,
+                self.eos_token_id,
+                self.ngram_heads,
+                self.heads_per_ngram,
+                head_block,
+                block_rows,
+                has_ctx,
+            )
+            triton_fast_launch(
+                _PLE_TRITON_CACHE,
+                key,
+                _ple_hash_ngram_ids_ragged_kernel,
+                triton.cdiv(N, block_rows),
+                1,
+                1,
+                ptr_or,
+                (p_ctx, ids_c, cu_seqlens, tok_req, vs_c, off_c, mul_c, ngram_ids, N),
+                {
+                    "EOS": self.eos_token_id,
+                    "NUM_HEADS": self.ngram_heads,
+                    "HEADS_PER_NGRAM": self.heads_per_ngram,
+                    "HEAD_BLOCK": head_block,
+                    "BLOCK_ROWS": block_rows,
+                    "HAS_CTX": has_ctx,
+                },
                 num_warps=4,
             )
+            num_snaps = int(snap_tok_idx.numel()) if snap_tok_idx is not None else 0
             if (
                 snap_tok_idx is not None
                 and snap_req_idx is not None
                 and ctx_dst_pool is not None
                 and ctx_snap_phys is not None
-                and int(snap_tok_idx.numel()) > 0
+                and num_snaps > 0
             ):
-                _scatter_ple_ctx_snapshots_ragged_kernel[(int(snap_tok_idx.numel()),)](
-                    prev_ngram_ctx.contiguous() if has_ctx else ids_c,
-                    ids_c,
-                    cu_seqlens,
-                    snap_tok_idx,
-                    snap_req_idx,
-                    ctx_snap_phys,
-                    ctx_dst_pool,
-                    int(ctx_dst_pool.stride(0)),
-                    int(ctx_dst_pool.shape[0]),
-                    EOS=self.eos_token_id,
-                    HAS_CTX=has_ctx,
-                    SKIP_INVALID_PHYS=skip_invalid_phys,
+                dst_sr = int(ctx_dst_pool.stride(0))
+                dst_rows = int(ctx_dst_pool.shape[0])
+                s_ptr_or = (
+                    p_ctx.data_ptr()
+                    | ids_c.data_ptr()
+                    | cu_seqlens.data_ptr()
+                    | snap_tok_idx.data_ptr()
+                    | snap_req_idx.data_ptr()
+                    | ctx_snap_phys.data_ptr()
+                    | ctx_dst_pool.data_ptr()
+                )
+                s_key = (
+                    ids_c.device.index,
+                    "ple_ctx_snap",
+                    ids_c.dtype,
+                    p_ctx.dtype,
+                    cu_seqlens.dtype,
+                    snap_tok_idx.dtype,
+                    snap_req_idx.dtype,
+                    ctx_snap_phys.dtype,
+                    ctx_dst_pool.dtype,
+                    _triton_int_spec(dst_sr),
+                    _triton_int_spec(dst_rows),
+                    self.eos_token_id,
+                    has_ctx,
+                    skip_invalid_phys,
+                )
+                triton_fast_launch(
+                    _PLE_TRITON_CACHE,
+                    s_key,
+                    _scatter_ple_ctx_snapshots_ragged_kernel,
+                    num_snaps,
+                    1,
+                    1,
+                    s_ptr_or,
+                    (
+                        p_ctx,
+                        ids_c,
+                        cu_seqlens,
+                        snap_tok_idx,
+                        snap_req_idx,
+                        ctx_snap_phys,
+                        ctx_dst_pool,
+                        dst_sr,
+                        dst_rows,
+                    ),
+                    {
+                        "EOS": self.eos_token_id,
+                        "HAS_CTX": has_ctx,
+                        "SKIP_INVALID_PHYS": skip_invalid_phys,
+                    },
                     num_warps=1,
                 )
         else:
@@ -1763,6 +2039,9 @@ class Qwen4_5PLELayer(nn.Module):
             snap_req_idx=snap_req_idx,
             dst_pool=conv_dst_pool,
             snap_dst_idx=conv_snap_phys,
+            req_snap_start=req_snap_start,
+            snap_local_ends=snap_local_ends,
+            snap_aligned=snap_aligned,
             skip_invalid_phys=skip_invalid_phys,
             residual=False,
             use_activation=False,

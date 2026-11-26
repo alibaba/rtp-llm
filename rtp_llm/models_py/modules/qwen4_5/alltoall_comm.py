@@ -579,8 +579,16 @@ class Qwen4_5AllToAllComm:
             )
 
         x_c = hidden if hidden.is_contiguous() else hidden.contiguous()
-        ids_i32 = topk_ids.to(torch.int32).contiguous()
-        w_f32 = topk_weights.to(torch.float32).contiguous()
+        ids_i32 = (
+            topk_ids
+            if (topk_ids.dtype == torch.int32 and topk_ids.is_contiguous())
+            else topk_ids.to(torch.int32).contiguous()
+        )
+        w_f32 = (
+            topk_weights
+            if (topk_weights.dtype == torch.float32 and topk_weights.is_contiguous())
+            else topk_weights.to(torch.float32).contiguous()
+        )
 
         if equal_tokens is None:
             capturing = (
@@ -782,7 +790,7 @@ class Qwen4_5AllToAllComm:
         assert top_k <= 32, f"Expected top_k <= 32, got {top_k}"
         dev = x_c.device
         send_counts = torch.zeros((self.world_size,), dtype=torch.int32, device=dev)
-        tok_rank_mask = torch.zeros((M_local,), dtype=torch.int32, device=dev)
+        tok_rank_mask = torch.empty((M_local,), dtype=torch.int32, device=dev)
         if M_local > 0:
             _count_dedup_dest_ranks_kernel[(M_local,)](
                 ids_i32,

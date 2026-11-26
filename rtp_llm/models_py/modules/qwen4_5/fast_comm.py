@@ -66,7 +66,7 @@ def _hc_combine_add_kernel(
         tl.store(o_base + k * stride_ok + offs_h, ov, mask=mask_h)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["M"])
 def _all_gather_transpose_lastdim_kernel(
     src_ptr,
     dst_ptr,
@@ -87,7 +87,7 @@ def _all_gather_transpose_lastdim_kernel(
     tl.store(dst_ptr + (m * WS + r) * D + offs_d, vals, mask=mask_d)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["M"])
 def _symm_p2p_gather_kernel(
     ptrs_dev_ptr,
     dst_ptr,

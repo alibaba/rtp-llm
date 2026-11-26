@@ -3022,6 +3022,349 @@ class TestDFlash2Phase2MHAAndTP4(unittest.TestCase):
         k_mut_sep, _ = model.layers[0].self_attn.forward_context_kv(main_x, pos_ctx)
         self.assertLessEqual(float((k_mut_bat - k_mut_sep).abs().max().item()), 1e-2)
 
+    @torch.inference_mode()
+    def test_dflash2_r6_fast_commit_propose_topk_and_launch_reduction_gpu(self) -> None:
+        """Verify R6 fast commit/propose/topk kernels, TP pack+merge, CG replay, and launch reduction."""
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA unavailable")
+        import rtp_llm.models_py.model_desc.qwen4_5_dspark_model as dm
+        from rtp_llm.models_py.speculative.dspark_proposer_mixin import DSparkProposerMixin
+        import torch.nn.functional as F
+
+        device = torch.device("cuda:0")
+        _cpu_rng = torch.random.get_rng_state()
+        _cuda_rng = torch.cuda.get_rng_state(device)
+        self.addCleanup(torch.cuda.set_rng_state, _cuda_rng, device)
+        self.addCleanup(torch.random.set_rng_state, _cpu_rng)
+        torch.manual_seed(6060)
+
+        # 1) Standalone Triton Gemma/plain RMSNorm parity (including M=0 and M=1..32)
+        for n_rows in (0, 1, 32):
+            x_rn = torch.randn((n_rows, 5120), dtype=torch.bfloat16, device=device) * 0.5
+            w_rn = torch.randn((5120,), dtype=torch.bfloat16, device=device) * 0.2
+            eps = 1e-6
+            y_g = dm._apply_gemma_rmsnorm(x_rn, w_rn, eps)
+            y_p = dm._apply_rmsnorm(x_rn, w_rn, eps)
+            self.assertEqual(y_g.shape, x_rn.shape)
+            self.assertEqual(y_p.shape, x_rn.shape)
+            if n_rows > 0:
+                x32 = x_rn.float()
+                inv = torch.rsqrt(x32.pow(2).mean(dim=-1, keepdim=True) + eps)
+                ref_g = (x32 * inv * (1.0 + w_rn.float())).to(torch.bfloat16)
+                ref_p = (x32 * inv * w_rn.float()).to(torch.bfloat16)
+                self.assertGreaterEqual(
+                    F.cosine_similarity(y_g.float().reshape(-1), ref_g.float().reshape(-1), dim=0).item(),
+                    0.99999,
+                )
+                self.assertGreaterEqual(
+                    F.cosine_similarity(y_p.float().reshape(-1), ref_p.float().reshape(-1), dim=0).item(),
+                    0.99999,
+                )
+
+        # 2) Single-kernel heuristics for DP4 B=128 SWA (B=32/rank) & short-ctx FP8-KV
+        _, _, _, sp_swa = dm._choose_dflash2_tile_and_splits(
+            32, 8, 1, 32, 1280, 16, has_swa=True, is_fp8_kv=True
+        )
+        _, _, _, sp_short = dm._choose_dflash2_tile_and_splits(
+            4, 8, 1, 32, 33, 16, has_swa=False, is_fp8_kv=True
+        )
+        self.assertEqual(sp_swa, 1)
+        self.assertEqual(sp_short, 1)
+
+        # 3) TP=4 Triton Top-K pack + merge parity against global FP32 sort
+        if dm._HAS_TRITON:
+            row_cnt, local_k, top_k, shard_v = 32, 16, 16, 62080
+            vals_list = [
+                torch.randn((row_cnt, shard_v), dtype=torch.bfloat16, device=device) * 0.5
+                for _ in range(4)
+            ]
+            # Break ties cleanly by adding distinct per-rank epsilon offset in test input
+            for r in range(4):
+                vals_list[r] = vals_list[r] + (r * 0.01)
+            packed_shards = []
+            for r in range(4):
+                lv, li = torch.topk(vals_list[r], k=local_k, dim=-1, largest=True, sorted=True)
+                pk = torch.empty((2, row_cnt, local_k), dtype=torch.int32, device=device)
+                vv = lv.view(torch.int16)
+                bk = max(16, int(dm.triton.next_power_of_2(local_k)))
+                dm._dflash2_tp_pack_topk_kernel[(row_cnt, 1, 1)](
+                    vv, li, pk, r * shard_v, row_cnt,
+                    int(vv.stride(0)), int(li.stride(0)), int(pk.stride(0)), int(pk.stride(1)),
+                    local_k, bk, True, num_warps=2,
+                )
+                packed_shards.append(pk)
+            gathered_tp = torch.cat(packed_shards, dim=-1)
+            out_tp_v = torch.empty((row_cnt, top_k), dtype=torch.bfloat16, device=device)
+            out_tp_i = torch.empty((row_cnt, top_k), dtype=torch.int64, device=device)
+            dm._dflash2_tp_merge_topk_kernel[(row_cnt, 1, 1)](
+                gathered_tp, out_tp_v, out_tp_i, row_cnt, int(gathered_tp.shape[-1]),
+                int(gathered_tp.stride(0)), int(gathered_tp.stride(1)), top_k, 64, 1, num_warps=2,
+            )
+            full_logits = torch.cat(vals_list, dim=-1)
+            ref_v, ref_i = torch.topk(full_logits.float(), k=top_k, dim=-1, largest=True, sorted=True)
+            self.assertEqual(float((out_tp_v.float() - ref_v).abs().max().item()), 0.0)
+            strict_tp = torch.ones_like(ref_v, dtype=torch.bool)
+            strict_tp[..., :-1] &= ref_v[..., :-1] > ref_v[..., 1:]
+            strict_tp[..., 1:] &= ref_v[..., 1:] < ref_v[..., :-1]
+            if bool(strict_tp.any()):
+                self.assertTrue(torch.equal(out_tp_i[strict_tp], ref_i[strict_tp]))
+
+        # 4) Full 5L commit / propose / select parity + CUDA Graph + FP8-KV + launch count assertions
+        _, draft_dir = _resolve_mock_dflash_dirs()
+        cfg, mw = _load_dspark_model_weights(draft_dir, device=str(device))
+        spec = cfg._dflash2_spec
+        B, ctx, PS = 4, 512, 16
+        pps = (ctx + 32 + PS - 1) // PS
+        kv_init = [
+            torch.randn((B * pps, 2, 1, PS, spec.head_dim), dtype=torch.bfloat16, device=device) * 0.05
+            for _ in range(spec.num_hidden_layers)
+        ]
+        bt = torch.arange(B * pps, dtype=torch.int32, device=device).view(B, pps)
+
+        def _make_m(kv_dt: str, init_bufs):
+            mdl = Qwen4_5DSparkModel(
+                cfg, ParallelismConfig(), mw, max_generate_batch_size=16,
+                dflash_attn_backend="triton", dflash_kv_dtype=kv_dt,
+            )
+            for lyr in mdl.layers:
+                lyr.mlp.gate.weight.data.zero_()
+                lyr.mlp.expert_bias.data.copy_(
+                    torch.linspace(8.0, -8.0, lyr.mlp.expert_bias.numel(), device=device)
+                )
+            mdl.kv_cache = _MultiLayerDictKVCache(
+                [LayerKVCache(b, PS, i, "default") for i, b in enumerate(init_bufs)]
+            )
+            if kv_dt == "fp8_e4m3":
+                for i in range(spec.num_hidden_layers):
+                    mdl.kv_cache._layers[i].kv_scale_base = torch.tensor(
+                        [0.05, 0.05], dtype=torch.float32, device=device
+                    )
+            return mdl
+
+        commit_in = _make_dflash2_inputs(
+            batch_size=B, prefix_lens=[ctx - 4, ctx - 8, ctx, ctx - 2], query_width=8,
+            anchor_ids=[15, 25, 35, 45], block_table=bt, noise_token_id=cfg.dspark_noise_token_id,
+            device=str(device), use_device_mirrors=True, is_target_verify=True,
+            active_query_lens=[1, 0, 3, 2],
+        )
+        m_fast = _make_m("bf16", [t.clone() for t in kv_init])
+        m_ref = _make_m("bf16", [t.clone() for t in kv_init])
+        commit_in.input_hiddens = torch.randn(
+            (6, m_fast._dspark_aux_feature_dim), dtype=torch.bfloat16, device=device
+        ) * 0.05
+        propose_in = _make_dflash2_inputs(
+            batch_size=B, prefix_lens=[ctx, ctx - 5, ctx + 2, ctx + 2], query_width=8,
+            anchor_ids=[15, 25, 35, 45], block_table=bt, noise_token_id=cfg.dspark_noise_token_id,
+            device=str(device), use_device_mirrors=True, is_target_verify=False,
+        )
+        anchor_tok = torch.tensor([15, 25, 35, 45], dtype=torch.int32, device=device)
+
+        h_fast = m_fast.forward_propose(propose_in, m_fast.prepare_fmha_impl(propose_in)).hidden_states
+        tok_fast, cands_fast, _ = m_fast.propose_with_candidate_selector(h_fast, anchor_tok)
+        commit_out_fast = m_fast.forward_commit(commit_in).hidden_states
+
+        h_ref = DSparkProposerMixin.run_propose_step(
+            m_ref, propose_in, m_ref.prepare_fmha_impl(propose_in), device
+        ).hidden_states
+        lg_ref = m_ref.compute_logits(h_ref)
+        v_ref, i_ref = torch.topk(lg_ref.float(), k=m_ref.candidate_selector.top_k, dim=-1)
+        tok_ref, _, _ = m_ref.candidate_selector.select_candidates_from_topk(
+            v_ref.to(torch.bfloat16), i_ref, h_ref, anchor_tok
+        )
+        commit_out_ref = DSparkProposerMixin.run_commit_step(m_ref, commit_in, device).hidden_states
+
+        self.assertGreaterEqual(
+            F.cosine_similarity(h_fast.float().reshape(-1), h_ref.float().reshape(-1), dim=0).item(),
+            0.999999,
+        )
+        self.assertGreaterEqual(
+            F.cosine_similarity(commit_out_fast.float().reshape(-1), commit_out_ref.float().reshape(-1), dim=0).item(),
+            0.999999,
+        )
+        for l_idx in range(spec.num_hidden_layers):
+            kv_cos = F.cosine_similarity(
+                m_fast.kv_cache._layers[l_idx].kv_cache_base.float().reshape(-1),
+                m_ref.kv_cache._layers[l_idx].kv_cache_base.float().reshape(-1),
+                dim=0,
+            ).item()
+            self.assertGreaterEqual(kv_cos, 0.999999)
+        self.assertTrue(torch.equal(tok_fast, tok_ref))
+
+        # Empty commit input edge case
+        empty_commit = _make_dflash2_inputs(
+            batch_size=0, prefix_lens=[], query_width=8, anchor_ids=[],
+            block_table=bt[:0], noise_token_id=cfg.dspark_noise_token_id,
+            device=str(device), use_device_mirrors=True, is_target_verify=True,
+            active_query_lens=[],
+        )
+        empty_commit.input_hiddens = torch.empty(
+            (0, m_fast._dspark_aux_feature_dim), dtype=torch.bfloat16, device=device
+        )
+        self.assertEqual(tuple(m_fast.forward_commit(empty_commit).hidden_states.shape), (0, spec.hidden_size))
+
+        # CUDA Graph capture & replay on R6 fast commit + propose + select
+        fmha_cg = m_fast.prepare_fmha_impl(propose_in)
+        post_commit_ref = m_fast.forward_commit(commit_in).hidden_states.clone()
+        post_prop_ref = m_fast.forward_propose(propose_in, fmha_cg).hidden_states.clone()
+        post_tok_ref, _, _ = m_fast.propose_with_candidate_selector(post_prop_ref, anchor_tok)
+        post_tok_ref = post_tok_ref.clone()
+        torch.cuda.synchronize()
+        g_r6 = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g_r6):
+            cg_commit = m_fast.forward_commit(commit_in).hidden_states
+            cg_prop = m_fast.forward_propose(propose_in, fmha_cg).hidden_states
+            cg_toks, _, _ = m_fast.propose_with_candidate_selector(cg_prop, anchor_tok)
+        g_r6.replay()
+        torch.cuda.synchronize()
+        self.assertGreaterEqual(
+            F.cosine_similarity(cg_prop.float().reshape(-1), post_prop_ref.float().reshape(-1), dim=0).item(),
+            0.999999,
+        )
+        self.assertGreaterEqual(
+            F.cosine_similarity(cg_commit.float().reshape(-1), post_commit_ref.float().reshape(-1), dim=0).item(),
+            0.999999,
+        )
+        self.assertTrue(torch.equal(cg_toks, post_tok_ref))
+
+        # Kernel launch count guard for R6 short-ctx paths
+        def _count_cuda_kernels(fn):
+            torch.cuda.synchronize()
+            with torch.profiler.profile(
+                activities=[torch.profiler.ProfilerActivity.CUDA, torch.profiler.ProfilerActivity.CPU]
+            ) as p:
+                fn()
+                torch.cuda.synchronize()
+            return sum(
+                1 for e in p.events()
+                if e.device_type == torch.profiler.DeviceType.CUDA and getattr(e, "device_time_total", 0) > 0
+            )
+
+        self.assertLessEqual(_count_cuda_kernels(lambda: m_fast.forward_commit(commit_in)), 12)
+        self.assertEqual(_count_cuda_kernels(lambda: m_fast.prepare_fmha_impl(propose_in)), 0)
+        self.assertLessEqual(
+            _count_cuda_kernels(lambda: m_fast.propose_with_candidate_selector(h_fast, anchor_tok)), 12
+        )
+
+        # Free BF16 models + CG pool before creating FP8 models so peak GPU memory stays small
+        del m_fast, m_ref, g_r6, cg_commit, cg_prop, cg_toks, post_commit_ref, post_prop_ref, post_tok_ref
+        torch.cuda.empty_cache()
+
+        # FP8-KV commit parity
+        kv_fp8_init = [(t / 0.05).clamp(-448.0, 448.0).to(torch.float8_e4m3fn) for t in kv_init]
+        m_fp8_fast = _make_m("fp8_e4m3", [t.clone() for t in kv_fp8_init])
+        m_fp8_ref = _make_m("fp8_e4m3", [t.clone() for t in kv_fp8_init])
+        m_fp8_fast.forward_commit(commit_in)
+        DSparkProposerMixin.run_commit_step(m_fp8_ref, commit_in, device)
+        for l_idx in range(spec.num_hidden_layers):
+            fp8_cos = F.cosine_similarity(
+                m_fp8_fast.kv_cache._layers[l_idx].kv_cache_base.float().reshape(-1),
+                m_fp8_ref.kv_cache._layers[l_idx].kv_cache_base.float().reshape(-1),
+                dim=0,
+            ).item()
+            self.assertGreaterEqual(fp8_cos, 0.9999)
+
+        # 5) Verify live _launch_triton_cached cache hits across BF16 + FP8-KV single-kernel paths
+        m_fp8_fast.forward_propose(propose_in, m_fp8_fast.prepare_fmha_impl(propose_in))
+        for kc_name in (
+            "_KC_RMSNORM",
+            "_KC_MAP_COMMIT",
+            "_KC_FUSED_5L_KV",
+            "_KC_PREP_PROPOSE",
+            "_KC_K_ROPE_SCATTER",
+            "_KC_ROPE_Q",
+            "_KC_MHA_SINGLE",
+            "_KC_MHA_BODY",
+            "_KC_MHA_EDGE",
+            "_KC_MHA_STAGE2",
+            "_KC_GCONV",
+            "_KC_SCORE_EDGES",
+            "_KC_GREEDY_WALK",
+        ):
+            self.assertGreater(len(getattr(dm, kc_name)), 0, f"{kc_name} stayed empty (cache inactive)")
+
+        # 6) Regression test for _KC_FUSED_5L_KV pointer alignment specialization across all 5 layers & scales:
+        # Reuse m_fp8_fast / m_fp8_ref by swapping kv_cache to avoid extra model memory pressure.
+        dm._KC_FUSED_5L_KV.clear()
+        n_kv_elems = kv_fp8_init[0].numel()
+        unaligned_raw = torch.empty((n_kv_elems + 16,), dtype=torch.uint8, device=device)
+        unaligned_kv2 = unaligned_raw[4 : 4 + n_kv_elems].view(torch.float8_e4m3fn).view(kv_fp8_init[2].shape)
+        self.assertNotEqual(int(unaligned_kv2.data_ptr()) & 15, 0)
+        unaligned_kv2.copy_(kv_fp8_init[2])
+
+        # Case A (1-element scales -> ks, vs both 16B aligned + 16B aligned kv0..kv4)
+        m_fp8_fast.kv_cache = _MultiLayerDictKVCache(
+            [LayerKVCache(t.clone(), PS, i, "default") for i, t in enumerate(kv_fp8_init)]
+        )
+        m_fp8_ref.kv_cache = _MultiLayerDictKVCache(
+            [LayerKVCache(t.clone(), PS, i, "default") for i, t in enumerate(kv_fp8_init)]
+        )
+        for i in range(spec.num_hidden_layers):
+            sc1 = torch.tensor([0.05], dtype=torch.float32, device=device)
+            m_fp8_fast.kv_cache._layers[i].kv_scale_base = sc1
+            m_fp8_ref.kv_cache._layers[i].kv_scale_base = sc1
+        m_fp8_fast.forward_commit(commit_in)
+        DSparkProposerMixin.run_commit_step(m_fp8_ref, commit_in, device)
+        self.assertEqual(len(dm._KC_FUSED_5L_KV), 1)
+        for l_idx in range(spec.num_hidden_layers):
+            self.assertGreaterEqual(
+                F.cosine_similarity(
+                    m_fp8_fast.kv_cache._layers[l_idx].kv_cache_base.float().reshape(-1),
+                    m_fp8_ref.kv_cache._layers[l_idx].kv_cache_base.float().reshape(-1),
+                    dim=0,
+                ).item(),
+                0.9999,
+            )
+
+        # Case B (2-element scales on layers 1..4 -> +4B unaligned vs, and +4B unaligned kv2)
+        kv_b_bufs = [t.clone() for t in kv_fp8_init]
+        kv_b_bufs[2] = unaligned_kv2
+        m_fp8_fast.kv_cache = _MultiLayerDictKVCache(
+            [LayerKVCache(b, PS, i, "default") for i, b in enumerate(kv_b_bufs)]
+        )
+        m_fp8_ref.kv_cache = _MultiLayerDictKVCache(
+            [LayerKVCache(t.clone(), PS, i, "default") for i, t in enumerate(kv_fp8_init)]
+        )
+        for i in range(spec.num_hidden_layers):
+            sc_i = (
+                torch.tensor([0.05], dtype=torch.float32, device=device)
+                if i == 0
+                else torch.tensor([0.05, 0.09], dtype=torch.float32, device=device)
+            )
+            m_fp8_fast.kv_cache._layers[i].kv_scale_base = sc_i
+            m_fp8_ref.kv_cache._layers[i].kv_scale_base = sc_i
+        m_fp8_fast.forward_commit(commit_in)
+        self.assertEqual(len(dm._KC_FUSED_5L_KV), 2)
+        DSparkProposerMixin.run_commit_step(m_fp8_ref, commit_in, device)
+        self.assertEqual(len(dm._KC_FUSED_5L_KV), 3)
+        for l_idx in range(spec.num_hidden_layers):
+            self.assertGreaterEqual(
+                F.cosine_similarity(
+                    m_fp8_fast.kv_cache._layers[l_idx].kv_cache_base.float().reshape(-1),
+                    m_fp8_ref.kv_cache._layers[l_idx].kv_cache_base.float().reshape(-1),
+                    dim=0,
+                ).item(),
+                0.9999,
+            )
+
+        del m_fp8_fast, m_fp8_ref, unaligned_raw, unaligned_kv2, kv_b_bufs
+        torch.cuda.empty_cache()
+
+        # 7) Hook fallback guard: when launch_enter_hook has active callbacks, _launch_triton_cached must invoke it
+        hook_calls = [0]
+        def _on_launch(*args, **kwargs):
+            hook_calls[0] += 1
+        dm.triton.knobs.runtime.launch_enter_hook.add(_on_launch)
+        try:
+            _ = dm._apply_gemma_rmsnorm(
+                torch.randn((4, 256), dtype=torch.bfloat16, device=device),
+                torch.randn((256,), dtype=torch.bfloat16, device=device),
+                1e-6,
+            )
+        finally:
+            dm.triton.knobs.runtime.launch_enter_hook.calls.remove(_on_launch)
+        self.assertEqual(hook_calls[0], 1)
+
+
 @torch.no_grad()
 def _dflash2_gloo_tp4_worker(rank: int, world_size: int, port: int, err_q) -> None:
     try:

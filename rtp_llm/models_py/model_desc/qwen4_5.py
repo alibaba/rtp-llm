@@ -452,6 +452,8 @@ def _wrap_linear_with_sm100_fp8(
     eff_mode: str,
     *,
     allow_decode_scaled_mm: Optional[bool] = None,
+    prepare_deepgemm_fp8: Optional[bool] = None,
+    prepare_mxfp8: Optional[bool] = None,
 ) -> nn.Module:
     from rtp_llm.models_py.modules.qwen4_5.fp8_linear import SM100FP8Linear
 
@@ -460,19 +462,42 @@ def _wrap_linear_with_sm100_fp8(
         mod._prepare_w4a8_flag = bool(eff_mode == "w4a8")
         if allow_decode_scaled_mm is not None and hasattr(mod, "_allow_decode_scaled_mm"):
             mod._allow_decode_scaled_mm = bool(allow_decode_scaled_mm)
+        if prepare_mxfp8 is not None and hasattr(mod, "_prepare_mxfp8_flag"):
+            mod._prepare_mxfp8_flag = bool(prepare_mxfp8)
+            if not prepare_mxfp8:
+                mod.w_mxfp8 = None
+                mod.w_mxfp8_sc = None
+        if prepare_deepgemm_fp8 is not None and hasattr(mod, "_prepare_dg_fp8_flag"):
+            if hasattr(mod, "_explicit_dg_fp8_flag"):
+                mod._explicit_dg_fp8_flag = bool(prepare_deepgemm_fp8)
+            mod._prepare_dg_fp8_flag = bool(prepare_deepgemm_fp8)
+            if not prepare_deepgemm_fp8:
+                mod.w_dg_fp8 = None
+                mod.w_dg_sc = None
+        elif (
+            prepare_mxfp8 is not None
+            and getattr(mod, "_explicit_dg_fp8_flag", None) is None
+            and hasattr(mod, "_prepare_dg_fp8_flag")
+        ):
+            mod._prepare_dg_fp8_flag = bool(prepare_mxfp8)
+            if not prepare_mxfp8:
+                mod.w_dg_fp8 = None
+                mod.w_dg_sc = None
         if eff_mode != "bf16" and mod.weight is not None and mod.weight.is_cuda:
             mod.prepare_weights()
+        else:
+            mod._refresh_fast_dispatch()
         return mod
     if eff_mode == "bf16" or not isinstance(mod, nn.Linear) or not mod.weight.is_cuda:
         return mod
-    extra_kw = _filter_init_kwargs(
-        SM100FP8Linear.__init__,
-        {
-            "allow_decode_scaled_mm": (
-                bool(allow_decode_scaled_mm) if allow_decode_scaled_mm is not None else False
-            )
-        },
-    )
+    raw_extra: Dict[str, Any] = {
+        "allow_decode_scaled_mm": (
+            bool(allow_decode_scaled_mm) if allow_decode_scaled_mm is not None else False
+        )
+    }
+    if prepare_deepgemm_fp8 is not None:
+        raw_extra["prepare_deepgemm_fp8"] = bool(prepare_deepgemm_fp8)
+    extra_kw = _filter_init_kwargs(SM100FP8Linear.__init__, raw_extra)
     inst = SM100FP8Linear(
         in_features=mod.in_features,
         out_features=mod.out_features,
@@ -480,7 +505,7 @@ def _wrap_linear_with_sm100_fp8(
         mode=eff_mode,
         keep_bf16=False,
         prepare_trtllm_ll=True,
-        prepare_mxfp8=True,
+        prepare_mxfp8=(True if prepare_mxfp8 is None else bool(prepare_mxfp8)),
         prepare_w4a8=(eff_mode == "w4a8"),
         dtype=mod.weight.dtype,
         device=mod.weight.device,
@@ -883,8 +908,20 @@ class Qwen4_5DecoderLayer(nn.Module):
             return _wrap_linear_with_sm100_fp8(mod, eff_mode)
 
         if self.linear_attn is not None:
-            self.linear_attn.in_proj_qkvz = _wrap_fn(self.linear_attn.in_proj_qkvz)
-            self.linear_attn.out_proj = _wrap_fn(self.linear_attn.out_proj)
+            gdn_dg = eff_mode == "deepgemm_fp8"
+            gdn_mx = eff_mode == "mxfp8"
+            self.linear_attn.in_proj_qkvz = _wrap_linear_with_sm100_fp8(
+                self.linear_attn.in_proj_qkvz,
+                eff_mode,
+                prepare_deepgemm_fp8=gdn_dg,
+                prepare_mxfp8=gdn_mx,
+            )
+            self.linear_attn.out_proj = _wrap_linear_with_sm100_fp8(
+                self.linear_attn.out_proj,
+                eff_mode,
+                prepare_deepgemm_fp8=gdn_dg,
+                prepare_mxfp8=gdn_mx,
+            )
         if self.self_attn is not None:
             prev_attn_fused = getattr(self.self_attn, "qkv_idx_proj", None)
             fused_attn = (
@@ -919,21 +956,28 @@ class Qwen4_5DecoderLayer(nn.Module):
         """Run PLE, attention HC, attention core, attn ShortConv, and MLP HC mix."""
         cfg = self.config
         lid = self.layer_idx
+        mods = self._modules
+        ple = mods.get("ple")
+        attn_hc = mods["attn_hyper_connection"]
+        linear_attn = mods.get("linear_attn")
+        self_attn = mods.get("self_attn")
+        attn_sconv = mods.get("attn_output_sconv")
+        mlp_hc = mods["mlp_hyper_connection"]
 
         # Step A: PLE injection (Layer 1 only) — flush deferred HC combine before PLE
-        if self.ple is not None:
+        if ple is not None:
             if deferred is not None:
                 if profiler is not None:
                     with profiler.record("hc"):
-                        hyper_hidden = self.attn_hyper_connection.combine(
+                        hyper_hidden = attn_hc.combine(
                             deferred[0], hyper_hidden, deferred[1]
                         )
                 elif use_reference:
-                    hyper_hidden = self.attn_hyper_connection.combine_ref(
+                    hyper_hidden = attn_hc.combine_ref(
                         deferred[0], hyper_hidden, deferred[1]
                     )
                 else:
-                    hyper_hidden = self.attn_hyper_connection.combine(
+                    hyper_hidden = attn_hc.combine(
                         deferred[0], hyper_hidden, deferred[1]
                     )
                 deferred = None
@@ -941,51 +985,51 @@ class Qwen4_5DecoderLayer(nn.Module):
             ple_state = state.ple.get(lid) if state is not None else None
             if profiler is not None:
                 with profiler.record("ple"):
-                    hyper_hidden = self.ple(hyper_hidden, input_ids, state=ple_state)
+                    hyper_hidden = ple(hyper_hidden, input_ids, state=ple_state)
             elif use_reference:
-                hyper_hidden = self.ple.forward_ref(hyper_hidden, input_ids, state=ple_state)
+                hyper_hidden = ple.forward_ref(hyper_hidden, input_ids, state=ple_state)
             else:
-                hyper_hidden = self.ple(hyper_hidden, input_ids, state=ple_state)
+                hyper_hidden = ple(hyper_hidden, input_ids, state=ple_state)
 
         # Step B: Attention Hyper-Connection (fused combine+norm+mix when deferred exists)
         if profiler is not None:
             with profiler.record("hc"):
                 if deferred is None:
                     attn_in, hyper_hidden, attn_inj, prev_latent = (
-                        self.attn_hyper_connection.mix_with_latent(hyper_hidden, prev_latent)
+                        attn_hc.mix_with_latent(hyper_hidden, prev_latent)
                     )
                 else:
                     attn_in, hyper_hidden, attn_inj, prev_latent = (
-                        self.attn_hyper_connection.combine_and_mix_with_latent(
+                        attn_hc.combine_and_mix_with_latent(
                             deferred[0], hyper_hidden, deferred[1], prev_latent
                         )
                     )
         elif use_reference:
             if deferred is None:
                 attn_in, hyper_hidden, attn_inj, prev_latent = (
-                    self.attn_hyper_connection.mix_with_latent_ref(hyper_hidden, prev_latent)
+                    attn_hc.mix_with_latent_ref(hyper_hidden, prev_latent)
                 )
             else:
                 attn_in, hyper_hidden, attn_inj, prev_latent = (
-                    self.attn_hyper_connection.combine_and_mix_with_latent_ref(
+                    attn_hc.combine_and_mix_with_latent_ref(
                         deferred[0], hyper_hidden, deferred[1], prev_latent
                     )
                 )
         else:
             if deferred is None:
                 attn_in, hyper_hidden, attn_inj, prev_latent = (
-                    self.attn_hyper_connection.mix_with_latent(hyper_hidden, prev_latent)
+                    attn_hc.mix_with_latent(hyper_hidden, prev_latent)
                 )
             else:
                 attn_in, hyper_hidden, attn_inj, prev_latent = (
-                    self.attn_hyper_connection.combine_and_mix_with_latent(
+                    attn_hc.combine_and_mix_with_latent(
                         deferred[0], hyper_hidden, deferred[1], prev_latent
                     )
                 )
         assert attn_inj is not None
 
         # Step C: Attention core (GDN or Full Attention)
-        if self.linear_attn is not None:
+        if linear_attn is not None:
             gdn_state = state.gdn.get(lid) if state is not None else None
             if (
                 self.is_source
@@ -1019,17 +1063,17 @@ class Qwen4_5DecoderLayer(nn.Module):
                 if (self.is_consumer and self.source_layer_idx is not None)
                 else None
             )
-            cat = "gdn_consumer" if self.is_consumer else "gdn_normal"
             if profiler is not None:
+                cat = "gdn_consumer" if self.is_consumer else "gdn_normal"
                 with profiler.record(cat):
-                    attn_out, published = self.linear_attn(
+                    attn_out, published = linear_attn(
                         attn_in,
                         state=gdn_call_state,
                         shared=shared_in,
                         enable_yoco_decode=enable_yoco_decode,
                     )
             else:
-                attn_out, published = self.linear_attn(
+                attn_out, published = linear_attn(
                     attn_in,
                     state=gdn_call_state,
                     shared=shared_in,
@@ -1038,18 +1082,18 @@ class Qwen4_5DecoderLayer(nn.Module):
             if published is not None:
                 shared_gdn_by_source[lid] = published
         else:
-            assert self.self_attn is not None
+            assert self_attn is not None
             kv_cache = state.full_attn_kv.get(self.kv_cache_owner) if state is not None else None
             k_sc = state.k_sconv.get(lid) if (state is not None and not self.is_consumer) else None
             v_sc = state.v_sconv.get(lid) if (state is not None and not self.is_consumer) else None
-            qsa_kwargs: Dict[str, Any] = {}
-            if self.self_attn.indexer is not None:
+            if self_attn.indexer is not None:
+                qsa_kwargs: Dict[str, Any] = {}
                 if not self.is_consumer:
                     raw_prev = state.qsa_raw_keys.get(lid) if state is not None else None
                     past_raw = (
                         raw_prev if (raw_prev is not None and raw_prev.shape[1] > 0) else None
                     )
-                    src_k_norm = self.self_attn.indexer.k_norm_gamma
+                    src_k_norm = self_attn.indexer.k_norm_gamma
 
                     def _record_raw(
                         raw_k: torch.Tensor,
@@ -1077,10 +1121,20 @@ class Qwen4_5DecoderLayer(nn.Module):
                         src_raw = state.qsa_raw_keys[src_lid]
                     qsa_kwargs["qsa_source_raw_keys"] = src_raw
                     qsa_kwargs["qsa_source_k_norm_gamma"] = src_k_norm
-            cat = "full_attn_consumer" if self.is_consumer else "full_attn_producer"
-            if profiler is not None:
-                with profiler.record(cat):
-                    attn_out = self.self_attn(
+                if profiler is not None:
+                    cat = "full_attn_consumer" if self.is_consumer else "full_attn_producer"
+                    with profiler.record(cat):
+                        attn_out = self_attn(
+                            attn_in,
+                            positions=positions,
+                            kv_cache=kv_cache,
+                            k_sconv_state=k_sc,
+                            v_sconv_state=v_sc,
+                            seq_offset=seq_offset,
+                            **qsa_kwargs,
+                        )
+                else:
+                    attn_out = self_attn(
                         attn_in,
                         positions=positions,
                         kv_cache=kv_cache,
@@ -1089,50 +1143,59 @@ class Qwen4_5DecoderLayer(nn.Module):
                         seq_offset=seq_offset,
                         **qsa_kwargs,
                     )
+            elif profiler is not None:
+                cat = "full_attn_consumer" if self.is_consumer else "full_attn_producer"
+                with profiler.record(cat):
+                    attn_out = self_attn(
+                        attn_in,
+                        positions=positions,
+                        kv_cache=kv_cache,
+                        k_sconv_state=k_sc,
+                        v_sconv_state=v_sc,
+                        seq_offset=seq_offset,
+                    )
             else:
-                attn_out = self.self_attn(
+                attn_out = self_attn(
                     attn_in,
                     positions=positions,
                     kv_cache=kv_cache,
                     k_sconv_state=k_sc,
                     v_sconv_state=v_sc,
                     seq_offset=seq_offset,
-                    **qsa_kwargs,
                 )
 
         # Step D: Attention output ShortConv (+ optional fused clip)
-        attn_sc_state = (
-            state.attn_output_sconv.get(lid)
-            if (state is not None and self.attn_output_sconv is not None)
-            else None
-        )
-        attn_out = self._run_sconv_with_clip(
-            self.attn_output_sconv,
-            attn_out,
-            attn_sc_state,
-            cfg.clip_attn_output,
-            self._attn_sconv_has_clip,
-            use_reference=use_reference,
-            profiler=profiler,
-        )
+        if attn_sconv is not None:
+            attn_sc_state = state.attn_output_sconv.get(lid) if state is not None else None
+            attn_out = self._run_sconv_with_clip(
+                attn_sconv,
+                attn_out,
+                attn_sc_state,
+                cfg.clip_attn_output,
+                self._attn_sconv_has_clip,
+                use_reference=use_reference,
+                profiler=profiler,
+            )
+        elif cfg.clip_attn_output is not None:
+            attn_out = attn_out.clamp(-cfg.clip_attn_output, cfg.clip_attn_output)
 
         # Step E: MLP Hyper-Connection (fused combine of attn_out + norm + mix)
         if profiler is not None:
             with profiler.record("hc"):
                 mlp_in, hyper_hidden, mlp_inj, prev_latent = (
-                    self.mlp_hyper_connection.combine_and_mix_with_latent(
+                    mlp_hc.combine_and_mix_with_latent(
                         attn_out, hyper_hidden, attn_inj, prev_latent
                     )
                 )
         elif use_reference:
             mlp_in, hyper_hidden, mlp_inj, prev_latent = (
-                self.mlp_hyper_connection.combine_and_mix_with_latent_ref(
+                mlp_hc.combine_and_mix_with_latent_ref(
                     attn_out, hyper_hidden, attn_inj, prev_latent
                 )
             )
         else:
             mlp_in, hyper_hidden, mlp_inj, prev_latent = (
-                self.mlp_hyper_connection.combine_and_mix_with_latent(
+                mlp_hc.combine_and_mix_with_latent(
                     attn_out, hyper_hidden, attn_inj, prev_latent
                 )
             )
@@ -1148,7 +1211,8 @@ class Qwen4_5DecoderLayer(nn.Module):
         enable_moe_tbo: bool = False,
         tbo_equal_tokens: Optional[bool] = None,
     ) -> torch.Tensor:
-        if isinstance(self.mlp, Qwen4_5LatentMoE):
+        mlp = self._modules["mlp"]
+        if isinstance(mlp, Qwen4_5LatentMoE):
             if enable_moe_tbo:
                 return self.forward_mlp_tbo(
                     mlp_in,
@@ -1158,12 +1222,12 @@ class Qwen4_5DecoderLayer(nn.Module):
                 )
             if profiler is not None:
                 with profiler.record("latent_moe"):
-                    return self.mlp(mlp_in, use_triton_mxfp4=not use_reference)
-            return self.mlp(mlp_in, use_triton_mxfp4=not use_reference)
+                    return mlp(mlp_in, use_triton_mxfp4=not use_reference)
+            return mlp(mlp_in, use_triton_mxfp4=not use_reference)
         if profiler is not None:
             with profiler.record("dense_mlp"):
-                return self.mlp(mlp_in, use_triton=not use_reference)
-        return self.mlp(mlp_in, use_triton=not use_reference)
+                return mlp(mlp_in, use_triton=not use_reference)
+        return mlp(mlp_in, use_triton=not use_reference)
 
     def forward_mlp_tbo(
         self,
@@ -1174,18 +1238,19 @@ class Qwen4_5DecoderLayer(nn.Module):
         equal_tokens: Optional[bool] = None,
     ) -> torch.Tensor:
         """Run 3-stage MoE TBO by splitting flattened tokens into 2 microbatches."""
-        if not isinstance(self.mlp, Qwen4_5LatentMoE):
+        mlp = self._modules["mlp"]
+        if not isinstance(mlp, Qwen4_5LatentMoE):
             return self._run_mlp(mlp_in, use_reference=use_reference, profiler=profiler)
         if profiler is not None:
             with profiler.record("latent_moe"):
                 return run_latent_moe_tbo_tokens(
-                    self.mlp,
+                    mlp,
                     mlp_in,
                     use_triton_mxfp4=not use_reference,
                     equal_tokens=equal_tokens,
                 )
         return run_latent_moe_tbo_tokens(
-            self.mlp,
+            mlp,
             mlp_in,
             use_triton_mxfp4=not use_reference,
             equal_tokens=equal_tokens,
@@ -1204,21 +1269,20 @@ class Qwen4_5DecoderLayer(nn.Module):
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Tuple[torch.Tensor, torch.Tensor]]:
         """Run FFN output ShortConv + clamping and emit deferred branch tuple."""
         cfg = self.config
-        lid = self.layer_idx
-        ffn_sc_state = (
-            state.ffn_output_sconv.get(lid)
-            if (state is not None and self.ffn_output_sconv is not None)
-            else None
-        )
-        mlp_out = self._run_sconv_with_clip(
-            self.ffn_output_sconv,
-            mlp_out,
-            ffn_sc_state,
-            cfg.clip_mlp_output,
-            self._ffn_sconv_has_clip,
-            use_reference=use_reference,
-            profiler=profiler,
-        )
+        ffn_sc = self._modules.get("ffn_output_sconv")
+        if ffn_sc is not None:
+            ffn_sc_state = state.ffn_output_sconv.get(self.layer_idx) if state is not None else None
+            mlp_out = self._run_sconv_with_clip(
+                ffn_sc,
+                mlp_out,
+                ffn_sc_state,
+                cfg.clip_mlp_output,
+                self._ffn_sconv_has_clip,
+                use_reference=use_reference,
+                profiler=profiler,
+            )
+        elif cfg.clip_mlp_output is not None:
+            mlp_out = mlp_out.clamp(-cfg.clip_mlp_output, cfg.clip_mlp_output)
         return hyper_hidden, prev_latent, (mlp_out, mlp_inj)
 
     def forward(
@@ -1447,7 +1511,9 @@ class Qwen4_5Model(nn.Module):
         if dense_linear_mode is not None:
             self._dense_linear_mode = dense_linear_mode
         self.requires_grad_(False)
-        for layer in self.layers:
+        layers_mod = self._modules["layers"]
+        layer_iter = layers_mod._modules.values() if isinstance(layers_mod, nn.ModuleList) else layers_mod
+        for layer in layer_iter:
             assert isinstance(layer, Qwen4_5DecoderLayer)
             layer.prepare_weights(
                 transpose_mxfp4=transpose_mxfp4,
@@ -1828,11 +1894,12 @@ class Qwen4_5Model(nn.Module):
         *,
         profiler: Optional[Qwen4_5ProfileRecorder] = None,
     ) -> torch.Tensor:
+        embed_tokens = self._modules["embed_tokens"]
         if profiler is not None:
             with profiler.record("embed"):
-                emb = self.embed_tokens(input_ids)
+                emb = embed_tokens(input_ids)
                 return emb.repeat(1, 1, self.config.hc_count)
-        emb = self.embed_tokens(input_ids)
+        emb = embed_tokens(input_ids)
         return emb.repeat(1, 1, self.config.hc_count)
 
     def _finalize_hyper_streams(
@@ -1846,17 +1913,18 @@ class Qwen4_5Model(nn.Module):
         profiler: Optional[Qwen4_5ProfileRecorder] = None,
     ) -> torch.Tensor:
         assert deferred is not None
+        hm = self._modules["hyper_connection_mixer"]
         if profiler is not None:
             with profiler.record("final_hc"):
-                hidden, _, _, _ = self.hyper_connection_mixer.combine_and_mix_with_latent(
+                hidden, _, _, _ = hm.combine_and_mix_with_latent(
                     deferred[0], hyper_hidden, deferred[1], prev_latent=None
                 )
         elif use_reference:
-            hidden, _, _, _ = self.hyper_connection_mixer.combine_and_mix_with_latent_ref(
+            hidden, _, _, _ = hm.combine_and_mix_with_latent_ref(
                 deferred[0], hyper_hidden, deferred[1], prev_latent=None
             )
         else:
-            hidden, _, _, _ = self.hyper_connection_mixer.combine_and_mix_with_latent(
+            hidden, _, _, _ = hm.combine_and_mix_with_latent(
                 deferred[0], hyper_hidden, deferred[1], prev_latent=None
             )
         if state is not None:
@@ -2306,11 +2374,12 @@ class Qwen4_5ForCausalLM(nn.Module):
     ) -> torch.Tensor:
         if logits_to_keep is not None and logits_to_keep > 0:
             hidden = hidden[:, -logits_to_keep:, :]
+        lm_head = self._modules["lm_head"]
         if profiler is not None:
             with profiler.record("lm_head"):
-                logits = self.lm_head(hidden)
+                logits = lm_head(hidden)
         else:
-            logits = self.lm_head(hidden)
+            logits = lm_head(hidden)
         if (
             self.tp_size > 1
             and self.tp_group is not None

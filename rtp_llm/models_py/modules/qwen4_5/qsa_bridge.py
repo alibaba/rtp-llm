@@ -18,12 +18,16 @@ import torch.nn.functional as F
 try:
     import triton
     import triton.language as tl
+    from triton.language.extra.cuda import libdevice
 
     _HAS_TRITON = True
 except Exception:  # pragma: no cover - pure-Python / no-triton fallback
     triton = None  # type: ignore[assignment]
     tl = None  # type: ignore[assignment]
+    libdevice = None  # type: ignore[assignment]
     _HAS_TRITON = False
+
+from rtp_llm.models_py.modules.qwen4_5.short_conv import _triton_int_spec, triton_fast_launch
 
 from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
     exact_head_rms_norm,
@@ -48,6 +52,384 @@ _PAGED_SCORE_BN = 64
 # ---------------------------------------------------------------------------
 
 
+_QSA_INV_FREQ_CACHE: dict = {}
+_QSA_TRITON_CACHE: dict = {}
+
+
+def _get_qsa_inv_freq(rotary_dim: int, rope_theta: float, device: torch.device) -> torch.Tensor:
+    key = (int(rotary_dim), float(rope_theta), device.type, int(device.index) if device.index is not None else -1)
+    cached = _QSA_INV_FREQ_CACHE.get(key)
+    if cached is not None:
+        return cached
+    half = int(rotary_dim) // 2
+    inv_freq = float(rope_theta) ** (
+        -2.0 * torch.arange(half, dtype=torch.float32, device=device) / int(rotary_dim)
+    )
+    _QSA_INV_FREQ_CACHE[key] = inv_freq
+    return inv_freq
+
+
+if _HAS_TRITON:
+
+    @triton.jit
+    def _build_qsa_neox_cos_sin_kernel(
+        POS_ptr,
+        INV_FREQ_ptr,
+        COS_ptr,
+        SIN_ptr,
+        ROWS,
+        STRIDE_P: tl.int64,
+        HALF: tl.constexpr,
+        BLOCK_R: tl.constexpr,
+    ):
+        row = tl.program_id(0).to(tl.int64) * BLOCK_R + tl.arange(0, BLOCK_R).to(tl.int64)
+        mask_r = row < ROWS
+        pos = tl.load(POS_ptr + row * STRIDE_P, mask=mask_r, other=0).to(tl.float32)
+        freq_idx = tl.arange(0, HALF)
+        inv_f = tl.load(INV_FREQ_ptr + freq_idx)
+        ang = pos[:, None] * inv_f[None, :]
+        out_ty = COS_ptr.dtype.element_ty
+        c_val = libdevice.cos(ang).to(out_ty)
+        s_val = libdevice.sin(ang).to(out_ty)
+        off = row[:, None] * (HALF * 2) + freq_idx[None, :]
+        tl.store(COS_ptr + off, c_val, mask=mask_r[:, None])
+        tl.store(COS_ptr + off + HALF, c_val, mask=mask_r[:, None])
+        tl.store(SIN_ptr + off, s_val, mask=mask_r[:, None])
+        tl.store(SIN_ptr + off + HALF, s_val, mask=mask_r[:, None])
+
+    @triton.jit
+    def _qsa_head_rmsnorm_partial_rope_d128_r64_kernel(
+        Q_ptr,
+        GAMMA_ptr,
+        POS_ptr,
+        INV_FREQ_ptr,
+        OUT_ptr,
+        stride_qb: tl.int64,
+        stride_qs: tl.int64,
+        stride_qh: tl.int64,
+        stride_pb: tl.int64,
+        stride_ps: tl.int64,
+        stride_ob: tl.int64,
+        stride_os: tl.int64,
+        stride_oh: tl.int64,
+        S,
+        H: tl.constexpr,
+        EPS: tl.constexpr,
+        HAS_NORM: tl.constexpr,
+    ):
+        """Single-launch fused QSA head RMSNorm (optional) + inline NeoX partial RoPE (D=128, R=64)."""
+        b = tl.program_id(0).to(tl.int64)
+        s = tl.program_id(1).to(tl.int64)
+        h = tl.program_id(2).to(tl.int64)
+        offs = tl.arange(0, 128)
+
+        q_row = Q_ptr + b * stride_qb + s * stride_qs + h * stride_qh
+        if HAS_NORM:
+            qf = tl.load(q_row + offs).to(tl.float32)
+            inv_rms = tl.rsqrt(tl.sum(qf * qf, axis=0) * (1.0 / 128.0) + EPS)
+            gain = 1.0 + tl.load(GAMMA_ptr + offs).to(tl.float32)
+            x_bf = (qf * inv_rms * gain).to(tl.bfloat16)
+        else:
+            x_bf = tl.load(q_row + offs).to(tl.bfloat16)
+
+        partner = tl.where(offs < 32, offs + 32, offs - 32)
+        rot_half = tl.gather(x_bf, partner, axis=0)
+        pos = tl.load(POS_ptr + b * stride_pb + s * stride_ps).to(tl.float32)
+        freq_idx = tl.where(offs < 32, offs, offs - 32)
+        inv_f = tl.load(INV_FREQ_ptr + freq_idx, mask=offs < 64, other=0.0)
+        ang = pos * inv_f
+        cos_bf = tl.where(offs < 64, libdevice.cos(ang).to(tl.bfloat16), tl.cast(1.0, tl.bfloat16))
+        sin_bf = tl.where(offs < 64, libdevice.sin(ang).to(tl.bfloat16), tl.cast(0.0, tl.bfloat16))
+        sign = tl.where(offs < 32, -1.0, 1.0)
+        left = (x_bf.to(tl.float32) * cos_bf.to(tl.float32)).to(tl.bfloat16)
+        right = (rot_half.to(tl.float32) * sin_bf.to(tl.float32) * sign).to(tl.bfloat16)
+        out_val = tl.where(offs < 64, (left.to(tl.float32) + right.to(tl.float32)).to(tl.bfloat16), x_bf)
+
+        out_row = OUT_ptr + b * stride_ob + s * stride_os + h * stride_oh
+        tl.store(out_row + offs, out_val.to(OUT_ptr.dtype.element_ty))
+
+    @triton.jit(do_not_specialize=["KV_TABLE_WIDTH", "STATE_TABLE_WIDTH", "KV_POOL_BLOCKS", "STATE_POOL_BLOCKS", "KV_TOKENS_PER_BLOCK", "STATE_TOKENS_PER_BLOCK", "KV_ENTRIES_PER_BLOCK"])
+    def _write_decode_qsa_cache_k4_kernel(
+        raw_ptr,
+        seq_before_ptr,
+        valid_ptr,
+        inv_freq_ptr,
+        gamma_ptr,
+        kv_pool_ptr,
+        kv_table_ptr,
+        state_pool_ptr,
+        state_table_ptr,
+        stride_rb: tl.int64,
+        stride_kv_b: tl.int64,
+        stride_kv_p: tl.int64,
+        stride_st_b: tl.int64,
+        stride_st_p: tl.int64,
+        KV_TABLE_WIDTH,
+        STATE_TABLE_WIDTH,
+        KV_POOL_BLOCKS,
+        STATE_POOL_BLOCKS,
+        KV_TOKENS_PER_BLOCK,
+        STATE_TOKENS_PER_BLOCK,
+        KV_ENTRIES_PER_BLOCK,
+        RING_SIZE: tl.constexpr,
+        D: tl.constexpr,
+        ROTARY: tl.constexpr,
+        EPS: tl.constexpr,
+        HAS_VALID: tl.constexpr,
+    ):
+        request = tl.program_id(0).to(tl.int64)
+        d = tl.arange(0, D)
+        active = (tl.load(valid_ptr + request) != 0) if HAS_VALID else True
+        position = tl.load(seq_before_ptr + request).to(tl.int64)
+        state_column = position // STATE_TOKENS_PER_BLOCK
+        ok_st_col = active & (position >= 0) & (state_column < STATE_TABLE_WIDTH)
+        state_id = tl.load(
+            state_table_ptr + request * stride_st_b + tl.minimum(tl.maximum(state_column, 0), STATE_TABLE_WIDTH - 1) * stride_st_p,
+            mask=ok_st_col,
+            other=0,
+        ).to(tl.int64)
+        state_valid = ok_st_col & (state_id > 0) & (state_id < STATE_POOL_BLOCKS)
+        raw = tl.load(raw_ptr + request * stride_rb + d, mask=active, other=0).to(tl.float32)
+        tl.store(
+            state_pool_ptr + (state_id * RING_SIZE + (position % RING_SIZE)) * D + d,
+            raw,
+            mask=state_valid,
+        )
+
+        if active and ((position + 1) % 4 == 0):
+            group = tl.arange(0, 4)
+            source_positions = position - 3 + group
+            source_columns = source_positions // STATE_TOKENS_PER_BLOCK
+            in_b = (source_positions >= 0) & (source_columns < STATE_TABLE_WIDTH)
+            source_ids = tl.load(
+                state_table_ptr + request * stride_st_b + tl.minimum(tl.maximum(source_columns, 0), STATE_TABLE_WIDTH - 1) * stride_st_p,
+                mask=in_b,
+                other=0,
+            ).to(tl.int64)
+            source_valid = in_b & (source_ids > 0) & (source_ids < STATE_POOL_BLOCKS)
+            source_slots = source_ids * RING_SIZE + (source_positions % RING_SIZE)
+            history = tl.load(
+                state_pool_ptr + source_slots[:, None] * D + d[None, :],
+                mask=source_valid[:, None],
+                other=0.0,
+            ).to(tl.float32)
+            history = tl.where(group[:, None] == 3, raw[None, :], history)
+            pooled = (tl.sum(history, axis=0) * 0.25).to(tl.bfloat16).to(tl.float32)
+            gain = 1.0 + tl.load(gamma_ptr + d).to(tl.float32)
+            rms = tl.rsqrt(tl.sum(pooled * pooled, axis=0) / D + EPS)
+            normalized = (pooled * rms * gain).to(tl.bfloat16)
+
+            partner = tl.where(
+                d < ROTARY,
+                tl.where(d < ROTARY // 2, d + ROTARY // 2, d - ROTARY // 2),
+                d,
+            )
+            rotated_half = tl.gather(normalized, partner, axis=0)
+            freq_idx = tl.where(d < ROTARY // 2, d, d - ROTARY // 2)
+            inv_f = tl.load(inv_freq_ptr + freq_idx, mask=d < ROTARY, other=0.0)
+            ang = (position - 3).to(tl.float32) * inv_f
+            cosine = tl.where(d < ROTARY, libdevice.cos(ang).to(tl.bfloat16), tl.cast(1.0, tl.bfloat16))
+            sine = tl.where(d < ROTARY, libdevice.sin(ang).to(tl.bfloat16), tl.cast(0.0, tl.bfloat16))
+            left = (normalized.to(tl.float32) * cosine.to(tl.float32)).to(tl.bfloat16)
+            right = (
+                rotated_half.to(tl.float32)
+                * sine.to(tl.float32)
+                * tl.where(d < ROTARY // 2, -1.0, 1.0)
+            ).to(tl.bfloat16)
+            value = tl.where(
+                d < ROTARY,
+                (left.to(tl.float32) + right.to(tl.float32)).to(tl.bfloat16),
+                normalized,
+            )
+
+            kv_column = position // KV_TOKENS_PER_BLOCK
+            ok_kv = (position >= 0) & (kv_column < KV_TABLE_WIDTH)
+            kv_id = tl.load(
+                kv_table_ptr + request * stride_kv_b + tl.minimum(tl.maximum(kv_column, 0), KV_TABLE_WIDTH - 1) * stride_kv_p,
+                mask=ok_kv,
+                other=0,
+            ).to(tl.int64)
+            kv_valid = ok_kv & (kv_id > 0) & (kv_id < KV_POOL_BLOCKS)
+            entry = (position // 4) % KV_ENTRIES_PER_BLOCK
+            tl.store(
+                kv_pool_ptr + (kv_id * KV_ENTRIES_PER_BLOCK + entry) * D + d,
+                value,
+                mask=kv_valid,
+            )
+
+    @triton.jit(do_not_specialize=["N", "B", "KV_TABLE_WIDTH", "STATE_TABLE_WIDTH", "KV_POOL_BLOCKS", "STATE_POOL_BLOCKS", "KV_TOKENS_PER_BLOCK", "STATE_TOKENS_PER_BLOCK", "KV_ENTRIES_PER_BLOCK"])
+    def _write_prefill_qsa_kv_k4_kernel(
+        raw_ptr,
+        cu_seqlens_ptr,
+        start_pos_ptr,
+        pos_ptr,
+        tok_req_ptr,
+        inv_freq_ptr,
+        gamma_ptr,
+        kv_pool_ptr,
+        kv_table_ptr,
+        state_pool_ptr,
+        state_table_ptr,
+        N,
+        B,
+        stride_rn: tl.int64,
+        stride_kv_b: tl.int64,
+        stride_kv_p: tl.int64,
+        stride_st_b: tl.int64,
+        stride_st_p: tl.int64,
+        KV_TABLE_WIDTH,
+        STATE_TABLE_WIDTH,
+        KV_POOL_BLOCKS,
+        STATE_POOL_BLOCKS,
+        KV_TOKENS_PER_BLOCK,
+        STATE_TOKENS_PER_BLOCK,
+        KV_ENTRIES_PER_BLOCK,
+        HAS_TOK_REQ: tl.constexpr,
+        RING_SIZE: tl.constexpr,
+        D: tl.constexpr,
+        ROTARY: tl.constexpr,
+        EPS: tl.constexpr,
+    ):
+        """Pool completed 4-token blocks from raw_keys (+ pre-prefill state_pool) and write kv_pool."""
+        n = tl.program_id(0).to(tl.int64)
+        if n >= N:
+            return
+        pos = tl.load(pos_ptr + n).to(tl.int64)
+        if pos < 0 or ((pos + 1) % 4) != 0:
+            return
+
+        if HAS_TOK_REQ:
+            b = tl.load(tok_req_ptr + n).to(tl.int64)
+        else:
+            lo = 0
+            hi = B
+            while lo + 1 < hi:
+                mid = (lo + hi) >> 1
+                if tl.load(cu_seqlens_ptr + mid).to(tl.int64) <= n:
+                    lo = mid
+                else:
+                    hi = mid
+            b = lo
+
+        kv_col = pos // KV_TOKENS_PER_BLOCK
+        if kv_col >= KV_TABLE_WIDTH:
+            return
+        kv_id = tl.load(kv_table_ptr + b * stride_kv_b + kv_col * stride_kv_p).to(tl.int64)
+        if kv_id <= 0 or kv_id >= KV_POOL_BLOCKS:
+            return
+
+        req_start = tl.load(cu_seqlens_ptr + b).to(tl.int64)
+        local_t = n - req_start
+        d = tl.arange(0, D)
+
+        acc = tl.zeros((D,), dtype=tl.float32)
+        for j in tl.static_range(4):
+            src_local = local_t - (3 - j)
+            if src_local >= 0:
+                val = tl.load(raw_ptr + (req_start + src_local) * stride_rn + d).to(tl.float32)
+            else:
+                src_pos = pos - (3 - j)
+                st_col = src_pos // STATE_TOKENS_PER_BLOCK
+                ok_st = (src_pos >= 0) & (st_col >= 0) & (st_col < STATE_TABLE_WIDTH)
+                st_id = tl.load(
+                    state_table_ptr + b * stride_st_b + tl.minimum(tl.maximum(st_col, 0), STATE_TABLE_WIDTH - 1) * stride_st_p,
+                    mask=ok_st,
+                    other=0,
+                ).to(tl.int64)
+                ok_row = ok_st & (st_id > 0) & (st_id < STATE_POOL_BLOCKS)
+                slot = st_id * RING_SIZE + (src_pos % RING_SIZE)
+                val = tl.load(state_pool_ptr + slot * D + d, mask=ok_row, other=0.0).to(tl.float32)
+            acc += val
+
+        pooled = (acc * 0.25).to(tl.bfloat16).to(tl.float32)
+        gain = 1.0 + tl.load(gamma_ptr + d).to(tl.float32)
+        rms = tl.rsqrt(tl.sum(pooled * pooled, axis=0) / D + EPS)
+        normalized = (pooled * rms * gain).to(tl.bfloat16)
+
+        partner = tl.where(
+            d < ROTARY,
+            tl.where(d < ROTARY // 2, d + ROTARY // 2, d - ROTARY // 2),
+            d,
+        )
+        rotated_half = tl.gather(normalized, partner, axis=0)
+        freq_idx = tl.where(d < ROTARY // 2, d, d - ROTARY // 2)
+        inv_f = tl.load(inv_freq_ptr + freq_idx, mask=d < ROTARY, other=0.0)
+        ang = (pos - 3).to(tl.float32) * inv_f
+        cosine = tl.where(d < ROTARY, libdevice.cos(ang).to(tl.bfloat16), tl.cast(1.0, tl.bfloat16))
+        sine = tl.where(d < ROTARY, libdevice.sin(ang).to(tl.bfloat16), tl.cast(0.0, tl.bfloat16))
+        left = (normalized.to(tl.float32) * cosine.to(tl.float32)).to(tl.bfloat16)
+        right = (
+            rotated_half.to(tl.float32)
+            * sine.to(tl.float32)
+            * tl.where(d < ROTARY // 2, -1.0, 1.0)
+        ).to(tl.bfloat16)
+        value = tl.where(
+            d < ROTARY,
+            (left.to(tl.float32) + right.to(tl.float32)).to(tl.bfloat16),
+            normalized,
+        )
+        entry = (pos // 4) % KV_ENTRIES_PER_BLOCK
+        tl.store(kv_pool_ptr + (kv_id * KV_ENTRIES_PER_BLOCK + entry) * D + d, value)
+
+    @triton.jit(do_not_specialize=["N", "B", "STATE_TABLE_WIDTH", "STATE_POOL_BLOCKS", "STATE_TOKENS_PER_BLOCK"])
+    def _write_prefill_qsa_state_k4_kernel(
+        raw_ptr,
+        cu_seqlens_ptr,
+        start_pos_ptr,
+        pos_ptr,
+        tok_req_ptr,
+        state_pool_ptr,
+        state_table_ptr,
+        N,
+        B,
+        stride_rn: tl.int64,
+        stride_st_b: tl.int64,
+        stride_st_p: tl.int64,
+        STATE_TABLE_WIDTH,
+        STATE_POOL_BLOCKS,
+        STATE_TOKENS_PER_BLOCK,
+        HAS_TOK_REQ: tl.constexpr,
+        RING_SIZE: tl.constexpr,
+        D: tl.constexpr,
+    ):
+        """Write final ring entries per state page directly without cross-CTA races."""
+        n = tl.program_id(0).to(tl.int64)
+        if n >= N:
+            return
+        if HAS_TOK_REQ:
+            b = tl.load(tok_req_ptr + n).to(tl.int64)
+        else:
+            lo = 0
+            hi = B
+            while lo + 1 < hi:
+                mid = (lo + hi) >> 1
+                if tl.load(cu_seqlens_ptr + mid).to(tl.int64) <= n:
+                    lo = mid
+                else:
+                    hi = mid
+            b = lo
+
+        pos = tl.load(pos_ptr + n).to(tl.int64)
+        if pos < 0:
+            return
+        req_len = tl.load(cu_seqlens_ptr + b + 1).to(tl.int64) - tl.load(cu_seqlens_ptr + b).to(tl.int64)
+        req_end_pos = tl.load(start_pos_ptr + b).to(tl.int64) + req_len
+        blk_end_pos = tl.minimum(req_end_pos, ((pos // STATE_TOKENS_PER_BLOCK) + 1) * STATE_TOKENS_PER_BLOCK)
+        if pos + RING_SIZE < blk_end_pos:
+            return
+
+        st_col = pos // STATE_TOKENS_PER_BLOCK
+        if st_col >= STATE_TABLE_WIDTH:
+            return
+        st_id = tl.load(state_table_ptr + b * stride_st_b + st_col * stride_st_p).to(tl.int64)
+        if st_id <= 0 or st_id >= STATE_POOL_BLOCKS:
+            return
+
+        d = tl.arange(0, D)
+        raw = tl.load(raw_ptr + n * stride_rn + d).to(state_pool_ptr.dtype.element_ty)
+        tl.store(state_pool_ptr + (st_id * RING_SIZE + (pos % RING_SIZE)) * D + d, raw)
+
+
 def build_qsa_neox_cos_sin(
     positions: torch.Tensor,
     rotary_dim: int,
@@ -59,9 +441,39 @@ def build_qsa_neox_cos_sin(
         raise ValueError(f"rotary_dim must be positive even, got {rotary_dim}")
     device = positions.device
     half = rotary_dim // 2
-    inv_freq = float(rope_theta) ** (
-        -2.0 * torch.arange(half, dtype=torch.float32, device=device) / rotary_dim
-    )
+    inv_freq = _get_qsa_inv_freq(rotary_dim, rope_theta, device)
+    if (
+        _HAS_TRITON
+        and positions.is_cuda
+        and rotary_dim <= 256
+        and (rotary_dim & (rotary_dim - 1)) == 0
+        and dtype in (torch.bfloat16, torch.float16, torch.float32)
+        and positions.ndim >= 1
+        and positions.stride(-1) > 0
+        and positions.numel() > 0
+    ):
+        pos_c = positions if (positions.ndim <= 1 or positions.is_contiguous()) else positions.contiguous()
+        rows = int(pos_c.numel())
+        cos_out = torch.empty((*positions.shape, rotary_dim), dtype=dtype, device=device)
+        sin_out = torch.empty((*positions.shape, rotary_dim), dtype=dtype, device=device)
+        block_r = 16 if rows >= 32 else max(1, triton.next_power_of_2(rows))
+        block_r = min(block_r, 32)
+        sp = int(pos_c.stride(-1)) if pos_c.ndim == 1 else 1
+        ckey = (device.index, 0, pos_c.dtype, dtype, _triton_int_spec(rows), _triton_int_spec(sp), half, block_r)
+        triton_fast_launch(
+            _QSA_TRITON_CACHE,
+            ckey,
+            _build_qsa_neox_cos_sin_kernel,
+            triton.cdiv(rows, block_r),
+            1,
+            1,
+            pos_c.data_ptr() | inv_freq.data_ptr() | cos_out.data_ptr() | sin_out.data_ptr(),
+            (pos_c, inv_freq, cos_out, sin_out, rows, sp),
+            {"HALF": half, "BLOCK_R": block_r},
+            num_warps=4,
+        )
+        return cos_out, sin_out
+
     angles = positions.to(dtype=torch.float32).unsqueeze(-1) * inv_freq
     cos_h = torch.cos(angles)
     sin_h = torch.sin(angles)
@@ -1091,11 +1503,15 @@ def qsa_select_causal_from_projected(
     indexer: Qwen4ExpQSAIndexer,
     q_unrot: torch.Tensor,
     raw_keys: torch.Tensor,
-    cos_all: torch.Tensor,
-    sin_all: torch.Tensor,
+    cos_all: Optional[torch.Tensor] = None,
+    sin_all: Optional[torch.Tensor] = None,
     *,
     past_raw_keys: Optional[torch.Tensor] = None,
     k_norm_gamma: Optional[torch.Tensor] = None,
+    q_norm_gamma: Optional[torch.Tensor] = None,
+    positions: Optional[torch.Tensor] = None,
+    rotary_dim: int = 64,
+    rope_theta: float = 10000.0,
 ) -> torch.Tensor:
     """Select causal QSA tokens ``[B, S, max_selected]`` for standalone/cold prefill.
 
@@ -1113,13 +1529,31 @@ def qsa_select_causal_from_projected(
         else raw_keys
     )
     past_len = int(all_raw.shape[1]) - seq_len
-    q_rot = apply_partial_rope(
-        q_unrot, cos_all[:, past_len:].unsqueeze(2), sin_all[:, past_len:].unsqueeze(2)
-    )
+    use_fast_rope = positions is not None
+    if use_fast_rope:
+        pos_q = positions.unsqueeze(0).expand(bsz, seq_len) if positions.ndim == 1 else positions
+        q_rot = _qsa_norm_and_rope_fast(
+            q_unrot,
+            pos_q,
+            rotary_dim,
+            rope_theta,
+            q_norm_gamma=q_norm_gamma,
+            norm_eps=indexer.norm_eps,
+        )
+    else:
+        assert cos_all is not None and sin_all is not None
+        q_in = (
+            exact_head_rms_norm(q_unrot, q_norm_gamma, indexer.norm_eps)
+            if q_norm_gamma is not None
+            else q_unrot
+        )
+        q_rot = apply_partial_rope(
+            q_in, cos_all[:, past_len:].unsqueeze(2), sin_all[:, past_len:].unsqueeze(2)
+        )
 
     num_blocks = int(all_raw.shape[1]) // ratio
-    positions = past_len + torch.arange(seq_len, dtype=torch.int32, device=device)
-    visible_1d = (positions + 1).unsqueeze(0).expand(bsz, seq_len).reshape(-1)
+    q_vis_pos = past_len + torch.arange(seq_len, dtype=torch.int32, device=device)
+    visible_1d = (q_vis_pos + 1).unsqueeze(0).expand(bsz, seq_len).reshape(-1)
     if num_blocks == 0:
         empty_scores = torch.empty((bsz * seq_len, 0), dtype=torch.float32, device=device)
         return _select_top_tokens(
@@ -1133,11 +1567,23 @@ def qsa_select_causal_from_projected(
     gamma = k_norm_gamma if k_norm_gamma is not None else indexer.k_norm_gamma
     groups = all_raw[:, : num_blocks * ratio].unflatten(1, (num_blocks, ratio))
     pooled = groups.float().mean(dim=2).to(all_raw.dtype)
-    pooled = exact_head_rms_norm(pooled, gamma, indexer.norm_eps)
-    starts = torch.arange(num_blocks, device=device) * ratio
-    block_keys = apply_partial_rope(
-        pooled, cos_all.index_select(1, starts), sin_all.index_select(1, starts)
-    )
+    if use_fast_rope:
+        starts_pos = (torch.arange(num_blocks, dtype=torch.int32, device=device) * ratio).unsqueeze(0).expand(bsz, num_blocks)
+        block_keys = _qsa_norm_and_rope_fast(
+            pooled.unsqueeze(2),
+            starts_pos,
+            rotary_dim,
+            rope_theta,
+            q_norm_gamma=gamma,
+            norm_eps=indexer.norm_eps,
+        ).squeeze(2)
+    else:
+        assert cos_all is not None and sin_all is not None
+        pooled = exact_head_rms_norm(pooled, gamma, indexer.norm_eps)
+        starts = torch.arange(num_blocks, device=device) * ratio
+        block_keys = apply_partial_rope(
+            pooled, cos_all.index_select(1, starts), sin_all.index_select(1, starts)
+        )
 
     bytes_per_query = max(1, bsz * num_blocks * (n_heads + 1) * 4)
     chunk_size = max(1, _MAX_SCORE_WORKSPACE_BYTES // bytes_per_query)
@@ -1174,6 +1620,71 @@ def qsa_select_causal_from_projected(
     return out
 
 
+def _qsa_norm_and_rope_fast(
+    q_bf16: torch.Tensor,
+    pos_2d: torch.Tensor,
+    rotary_dim: int,
+    rope_theta: float,
+    *,
+    q_norm_gamma: Optional[torch.Tensor] = None,
+    norm_eps: float = 1e-6,
+) -> torch.Tensor:
+    bsz, seq_len, n_heads, head_dim = q_bf16.shape
+    if (
+        _HAS_TRITON
+        and q_bf16.is_cuda
+        and pos_2d.is_cuda
+        and head_dim == 128
+        and rotary_dim == 64
+        and q_bf16.stride(-1) == 1
+        and q_bf16.dtype == torch.bfloat16
+        and bsz > 0
+        and seq_len > 0
+    ):
+        inv_freq = _get_qsa_inv_freq(rotary_dim, rope_theta, q_bf16.device)
+        out = torch.empty((bsz, seq_len, n_heads, head_dim), dtype=q_bf16.dtype, device=q_bf16.device)
+        has_norm = q_norm_gamma is not None
+        g_ptr = q_norm_gamma if has_norm else inv_freq
+        if has_norm and not q_norm_gamma.is_contiguous():
+            g_ptr = q_norm_gamma.contiguous()
+        sqb = int(q_bf16.stride(0))
+        sqs = int(q_bf16.stride(1))
+        sqh = int(q_bf16.stride(2))
+        spb = int(pos_2d.stride(0))
+        sps = int(pos_2d.stride(1))
+        sob = int(out.stride(0))
+        sos = int(out.stride(1))
+        soh = int(out.stride(2))
+        ckey = (
+            q_bf16.device.index,
+            1,
+            q_bf16.dtype,
+            g_ptr.dtype,
+            pos_2d.dtype,
+            inv_freq.dtype,
+            tuple(_triton_int_spec(v) for v in (sqb, sqs, sqh, spb, sps, sob, sos, soh, seq_len)),
+            n_heads,
+            float(norm_eps),
+            has_norm,
+        )
+        triton_fast_launch(
+            _QSA_TRITON_CACHE,
+            ckey,
+            _qsa_head_rmsnorm_partial_rope_d128_r64_kernel,
+            bsz,
+            seq_len,
+            n_heads,
+            q_bf16.data_ptr() | g_ptr.data_ptr() | pos_2d.data_ptr() | inv_freq.data_ptr() | out.data_ptr(),
+            (q_bf16, g_ptr, pos_2d, inv_freq, out, sqb, sqs, sqh, spb, sps, sob, sos, soh, seq_len),
+            {"H": n_heads, "EPS": float(norm_eps), "HAS_NORM": has_norm},
+            num_warps=4,
+        )
+        return out
+    q_normed = exact_head_rms_norm(q_bf16, q_norm_gamma, norm_eps) if q_norm_gamma is not None else q_bf16
+    cos, sin = build_qsa_neox_cos_sin(pos_2d, rotary_dim, rope_theta, q_bf16.dtype)
+    return apply_partial_rope(q_normed, cos.unsqueeze(2), sin.unsqueeze(2))
+
+
 def score_and_select_qsa_paged(
     q_unrot_bf16: torch.Tensor,
     positions: torch.Tensor,
@@ -1187,11 +1698,13 @@ def score_and_select_qsa_paged(
     rope_theta: float,
     max_ctx_len: Optional[int] = None,
     is_cuda_graph: bool = False,
+    q_norm_gamma: Optional[torch.Tensor] = None,
+    norm_eps: float = 1e-6,
 ) -> torch.Tensor:
     """Zero-sync paged QSA scoring + token selection for prefill reuse & decode.
 
     Args:
-        q_unrot_bf16: Normed unrotated indexer query ``[B, S, H_idx, D_idx]``.
+        q_unrot_bf16: Unrotated indexer query ``[B, S, H_idx, D_idx]`` (raw if ``q_norm_gamma`` passed).
         positions: Token positions ``[B, S]`` or ``[B]``.
         kv_pool: ``indexer_kv`` view ``[pool_blocks, entries_per_block, D_idx]``.
         kv_table: ``indexer_kv`` block table ``[B, max_blocks]`` int32.
@@ -1201,17 +1714,23 @@ def score_and_select_qsa_paged(
     """
     bsz, seq_len, n_heads, head_dim = q_unrot_bf16.shape
     pos_2d = positions.unsqueeze(1) if positions.ndim == 1 else positions
-    cos, sin = build_qsa_neox_cos_sin(
-        pos_2d, rotary_dim, rope_theta, q_unrot_bf16.dtype
+    q_rot = _qsa_norm_and_rope_fast(
+        q_unrot_bf16,
+        pos_2d,
+        rotary_dim,
+        rope_theta,
+        q_norm_gamma=q_norm_gamma,
+        norm_eps=norm_eps,
     )
-    q_rot = apply_partial_rope(q_unrot_bf16, cos.unsqueeze(2), sin.unsqueeze(2))
 
     vis_2d = (
         visible_lens_dev.unsqueeze(1)
         if visible_lens_dev.ndim == 1
         else visible_lens_dev
-    ).to(dtype=torch.int32)
-    ctx_lens = torch.div(vis_2d, compress_ratio, rounding_mode="floor").to(torch.int32)
+    )
+    if vis_2d.dtype != torch.int32:
+        vis_2d = vis_2d.to(dtype=torch.int32)
+    ctx_lens = torch.div(vis_2d, compress_ratio, rounding_mode="floor")
 
     if max_ctx_len is None:
         kv_entries_per_block = int(kv_pool.shape[1])
@@ -1252,8 +1771,97 @@ def write_qsa_prefill_cache(
     rope_theta: float,
     norm_eps: float,
     is_s_padded: bool = False,
+    tok_req_i32: Optional[torch.Tensor] = None,
 ) -> None:
     """Write raw indexer keys (state ring) and pooled keys (kv pool) for prefill/suffix."""
+    token_count = int(raw_keys.shape[0])
+    if token_count == 0:
+        return
+    head_dim = int(raw_keys.shape[1])
+    bsz = int(cu_seqlens.numel()) - 1
+    if (
+        _HAS_TRITON
+        and raw_keys.is_cuda
+        and ratio == 4
+        and head_dim == 128
+        and rotary_dim == 64
+        and kv_tokens_per_block >= 4
+        and kv_tokens_per_block % 4 == 0
+        and state_tokens_per_block >= 4
+        and raw_keys.dtype == torch.bfloat16
+        and kv_pool.dtype == torch.bfloat16
+        and raw_keys.stride(1) == 1
+        and k_norm_gamma.is_contiguous()
+        and bsz > 0
+    ):
+        inv_freq = _get_qsa_inv_freq(rotary_dim, rope_theta, raw_keys.device)
+        cu_c = cu_seqlens if cu_seqlens.is_contiguous() else cu_seqlens.contiguous()
+        sp_c = start_positions if start_positions.is_contiguous() else start_positions.contiguous()
+        pos_c = pos_1d if pos_1d.is_contiguous() else pos_1d.contiguous()
+        has_tr = tok_req_i32 is not None and int(tok_req_i32.numel()) == token_count
+        tr_arg = (tok_req_i32 if tok_req_i32.is_contiguous() else tok_req_i32.contiguous()) if has_tr else cu_c
+        ring_sz = int(state_pool.shape[1])
+        kv_entries = kv_tokens_per_block // ratio
+        srn = int(raw_keys.stride(0))
+        skvb = int(kv_block_table.stride(0))
+        skvp = int(kv_block_table.stride(1))
+        sstb = int(state_block_table.stride(0))
+        sstp = int(state_block_table.stride(1))
+        kv_tw = int(kv_block_table.shape[1])
+        st_tw = int(state_block_table.shape[1])
+        kv_pb = int(kv_pool.shape[0])
+        st_pb = int(state_pool.shape[0])
+
+        # Kernel 1: read raw_keys + pre-prefill state_pool -> write kv_pool (race-free)
+        rt1 = (
+            raw_keys, cu_c, sp_c, pos_c, tr_arg, inv_freq, k_norm_gamma,
+            kv_pool, kv_block_table, state_pool, state_block_table,
+            token_count, bsz, srn, skvb, skvp, sstb, sstp,
+            kv_tw, st_tw, kv_pb, st_pb,
+            kv_tokens_per_block, state_tokens_per_block, kv_entries,
+        )
+        k1 = (
+            raw_keys.device.index, 10, raw_keys.dtype, cu_c.dtype, sp_c.dtype, pos_c.dtype, tr_arg.dtype,
+            inv_freq.dtype, k_norm_gamma.dtype, kv_pool.dtype, kv_block_table.dtype, state_pool.dtype, state_block_table.dtype,
+            _triton_int_spec(srn), _triton_int_spec(skvb), _triton_int_spec(skvp),
+            _triton_int_spec(sstb), _triton_int_spec(sstp),
+            has_tr, ring_sz, float(norm_eps),
+        )
+        ptr1 = (
+            raw_keys.data_ptr() | cu_c.data_ptr() | sp_c.data_ptr() | pos_c.data_ptr()
+            | tr_arg.data_ptr() | inv_freq.data_ptr() | k_norm_gamma.data_ptr()
+            | kv_pool.data_ptr() | kv_block_table.data_ptr() | state_pool.data_ptr() | state_block_table.data_ptr()
+        )
+        triton_fast_launch(
+            _QSA_TRITON_CACHE, k1, _write_prefill_qsa_kv_k4_kernel,
+            token_count, 1, 1, ptr1, rt1,
+            {"HAS_TOK_REQ": has_tr, "RING_SIZE": ring_sz, "D": 128, "ROTARY": 64, "EPS": float(norm_eps)},
+            num_warps=4,
+        )
+
+        # Kernel 2: write final ring entries per state block (race-free)
+        rt2 = (
+            raw_keys, cu_c, sp_c, pos_c, tr_arg, state_pool, state_block_table,
+            token_count, bsz, srn, sstb, sstp, st_tw, st_pb, state_tokens_per_block,
+        )
+        k2 = (
+            raw_keys.device.index, 11, raw_keys.dtype, cu_c.dtype, sp_c.dtype, pos_c.dtype, tr_arg.dtype,
+            state_pool.dtype, state_block_table.dtype,
+            _triton_int_spec(srn), _triton_int_spec(sstb), _triton_int_spec(sstp),
+            has_tr, ring_sz,
+        )
+        ptr2 = (
+            raw_keys.data_ptr() | cu_c.data_ptr() | sp_c.data_ptr() | pos_c.data_ptr()
+            | tr_arg.data_ptr() | state_pool.data_ptr() | state_block_table.data_ptr()
+        )
+        triton_fast_launch(
+            _QSA_TRITON_CACHE, k2, _write_prefill_qsa_state_k4_kernel,
+            token_count, 1, 1, ptr2, rt2,
+            {"HAS_TOK_REQ": has_tr, "RING_SIZE": ring_sz, "D": 128},
+            num_warps=4,
+        )
+        return
+
     pos_i64 = pos_1d.to(torch.int64)
     block_starts = pos_i64 - torch.remainder(pos_i64, ratio)
     block_cos, block_sin = build_qsa_neox_cos_sin(
@@ -1281,13 +1889,12 @@ def write_qsa_prefill_cache(
 
 if _HAS_TRITON:
 
-    @triton.jit
+    @triton.jit(do_not_specialize=["KV_TABLE_WIDTH", "KV_POOL_BLOCKS", "KV_TOKENS_PER_BLOCK", "KV_ENTRIES_PER_BLOCK"])
     def _write_verify_qsa_cache_k4_kernel(
         raw_ptr,
         seq_before_ptr,
         valid_ptr,
-        cos_ptr,
-        sin_ptr,
+        inv_freq_ptr,
         gamma_ptr,
         init_state_ptr,
         stage_state_ptr,
@@ -1295,24 +1902,24 @@ if _HAS_TRITON:
         kv_table_ptr,
         stride_rb: tl.int64,
         stride_rv: tl.int64,
-        stride_cb: tl.int64,
-        stride_cv: tl.int64,
         stride_ib: tl.int64,
         stride_is: tl.int64,
         stride_stb: tl.int64,
         stride_stv: tl.int64,
         stride_sts: tl.int64,
-        KV_TABLE_WIDTH: tl.constexpr,
-        KV_POOL_BLOCKS: tl.constexpr,
-        KV_TOKENS_PER_BLOCK: tl.constexpr,
-        KV_ENTRIES_PER_BLOCK: tl.constexpr,
+        stride_kv_b: tl.int64,
+        stride_kv_p: tl.int64,
+        KV_TABLE_WIDTH,
+        KV_POOL_BLOCKS,
+        KV_TOKENS_PER_BLOCK,
+        KV_ENTRIES_PER_BLOCK,
         V_STEPS: tl.constexpr,
         D: tl.constexpr,
         ROTARY: tl.constexpr,
         EPS: tl.constexpr,
         HAS_VALID: tl.constexpr,
     ):
-        """Batched V-step QSA indexer cache write + per-step ring state staging in registers."""
+        """Batched V-step QSA indexer cache write + per-step ring state staging with inline RoPE."""
         request = tl.program_id(0).to(tl.int64)
         d = tl.arange(0, D)
         ring_offs = tl.arange(0, 8)
@@ -1330,6 +1937,8 @@ if _HAS_TRITON:
             d,
         )
         half_sign = tl.where(d < ROTARY // 2, -1.0, 1.0)
+        freq_idx = tl.where(d < ROTARY // 2, d, d - ROTARY // 2)
+        inv_f = tl.load(inv_freq_ptr + freq_idx, mask=d < ROTARY, other=0.0)
 
         for v in tl.static_range(V_STEPS):
             pos = pos0 + v
@@ -1360,16 +1969,9 @@ if _HAS_TRITON:
                 normalized = (pooled * rms * gain).to(tl.bfloat16)
 
                 rotated_half = tl.gather(normalized, partner, axis=0)
-                cosine = tl.load(
-                    cos_ptr + request * stride_cb + v * stride_cv + d,
-                    mask=d < ROTARY,
-                    other=1.0,
-                )
-                sine = tl.load(
-                    sin_ptr + request * stride_cb + v * stride_cv + d,
-                    mask=d < ROTARY,
-                    other=0.0,
-                )
+                ang = (pos - 3).to(tl.float32) * inv_f
+                cosine = tl.where(d < ROTARY, libdevice.cos(ang).to(tl.bfloat16), tl.cast(1.0, tl.bfloat16))
+                sine = tl.where(d < ROTARY, libdevice.sin(ang).to(tl.bfloat16), tl.cast(0.0, tl.bfloat16))
                 left = (normalized.to(tl.float32) * cosine.to(tl.float32)).to(tl.bfloat16)
                 right = (rotated_half.to(tl.float32) * sine.to(tl.float32) * half_sign).to(
                     tl.bfloat16
@@ -1381,12 +1983,13 @@ if _HAS_TRITON:
                 )
 
                 kv_column = pos // KV_TOKENS_PER_BLOCK
+                ok_kv = kv_column < KV_TABLE_WIDTH
                 kv_id = tl.load(
-                    kv_table_ptr + request * KV_TABLE_WIDTH + kv_column,
-                    mask=kv_column < KV_TABLE_WIDTH,
+                    kv_table_ptr + request * stride_kv_b + tl.minimum(kv_column, KV_TABLE_WIDTH - 1) * stride_kv_p,
+                    mask=ok_kv,
                     other=0,
                 ).to(tl.int64)
-                kv_valid = (kv_id > 0) & (kv_id < KV_POOL_BLOCKS)
+                kv_valid = ok_kv & (kv_id > 0) & (kv_id < KV_POOL_BLOCKS)
                 entry = (pos // 4) % KV_ENTRIES_PER_BLOCK
                 tl.store(
                     kv_pool_ptr + (kv_id * KV_ENTRIES_PER_BLOCK + entry) * D + d,
@@ -1428,46 +2031,82 @@ def write_qsa_verify_cache_gpu_(
         and state_tokens_per_block >= 4
         and raw_keys.stride(-1) == 1
     ):
-        steps = torch.arange(verify_w, dtype=torch.int64, device=raw_keys.device).unsqueeze(0)
-        pos = seq_lens_before_dev.to(dtype=torch.int64).unsqueeze(1) + steps
-        block_starts = pos - torch.remainder(pos, ratio)
-        block_cos, block_sin = build_qsa_neox_cos_sin(
-            block_starts, rotary_dim, rope_theta, raw_keys.dtype
-        )
-        valid_arg = (
-            valid.to(dtype=torch.int8).contiguous()
-            if valid is not None
-            else seq_lens_before_dev
-        )
-        _write_verify_qsa_cache_k4_kernel[(bsz,)](
+        inv_freq = _get_qsa_inv_freq(rotary_dim, rope_theta, raw_keys.device)
+        has_valid = valid is not None
+        valid_arg = valid if has_valid else seq_lens_before_dev
+        srb = int(raw_keys.stride(0))
+        srv = int(raw_keys.stride(1))
+        sib = int(init_state.stride(0))
+        sis = int(init_state.stride(1))
+        sstb = int(stage_state.stride(0))
+        sstv = int(stage_state.stride(1))
+        ssts = int(stage_state.stride(2))
+        skvb = int(kv_table.stride(0))
+        skvp = int(kv_table.stride(1))
+        rt_args = (
             raw_keys,
-            seq_lens_before_dev.to(dtype=torch.int32).contiguous(),
+            seq_lens_before_dev,
             valid_arg,
-            block_cos,
-            block_sin,
+            inv_freq,
             k_norm_gamma,
             init_state,
             stage_state,
             kv_pool,
-            kv_table.contiguous(),
-            int(raw_keys.stride(0)),
-            int(raw_keys.stride(1)),
-            int(block_cos.stride(0)),
-            int(block_cos.stride(1)),
-            int(init_state.stride(0)),
-            int(init_state.stride(1)),
-            int(stage_state.stride(0)),
-            int(stage_state.stride(1)),
-            int(stage_state.stride(2)),
-            KV_TABLE_WIDTH=int(kv_table.shape[1]),
-            KV_POOL_BLOCKS=int(kv_pool.shape[0]),
-            KV_TOKENS_PER_BLOCK=kv_tokens_per_block,
-            KV_ENTRIES_PER_BLOCK=kv_tokens_per_block // ratio,
-            V_STEPS=verify_w,
-            D=head_dim,
-            ROTARY=rotary_dim,
-            EPS=float(norm_eps),
-            HAS_VALID=valid is not None,
+            kv_table,
+            srb,
+            srv,
+            sib,
+            sis,
+            sstb,
+            sstv,
+            ssts,
+            skvb,
+            skvp,
+            int(kv_table.shape[1]),
+            int(kv_pool.shape[0]),
+            kv_tokens_per_block,
+            kv_tokens_per_block // ratio,
+        )
+        ckey = (
+            raw_keys.device.index,
+            2,
+            raw_keys.dtype,
+            seq_lens_before_dev.dtype,
+            valid_arg.dtype,
+            k_norm_gamma.dtype,
+            init_state.dtype,
+            stage_state.dtype,
+            kv_pool.dtype,
+            kv_table.dtype,
+            tuple(_triton_int_spec(v) for v in (srb, srv, sib, sis, sstb, sstv, ssts, skvb, skvp)),
+            verify_w,
+            head_dim,
+            rotary_dim,
+            float(norm_eps),
+            has_valid,
+        )
+        ptr_or = (
+            raw_keys.data_ptr()
+            | seq_lens_before_dev.data_ptr()
+            | valid_arg.data_ptr()
+            | inv_freq.data_ptr()
+            | k_norm_gamma.data_ptr()
+            | init_state.data_ptr()
+            | stage_state.data_ptr()
+            | kv_pool.data_ptr()
+            | kv_table.data_ptr()
+        )
+        triton_fast_launch(
+            _QSA_TRITON_CACHE,
+            ckey,
+            _write_verify_qsa_cache_k4_kernel,
+            bsz,
+            1,
+            1,
+            ptr_or,
+            rt_args,
+            {"V_STEPS": verify_w, "D": head_dim, "ROTARY": rotary_dim, "EPS": float(norm_eps), "HAS_VALID": has_valid},
+            num_warps=4,
         )
         return
 
@@ -1523,12 +2162,6 @@ def write_qsa_decode_cache_gpu_(
     bsz, head_dim = int(raw_keys.shape[0]), int(raw_keys.shape[1])
     if bsz == 0:
         return
-    pos = seq_lens_before_dev.to(dtype=torch.int64)
-    block_starts = pos - torch.remainder(pos, ratio)
-    block_cos, block_sin = build_qsa_neox_cos_sin(
-        block_starts, rotary_dim, rope_theta, raw_keys.dtype
-    )
-
     if (
         _HAS_TRITON
         and raw_keys.is_cuda
@@ -1538,40 +2171,93 @@ def write_qsa_decode_cache_gpu_(
         and kv_tokens_per_block >= 4
         and kv_tokens_per_block % 4 == 0
         and state_tokens_per_block >= 4
+        and raw_keys.stride(-1) == 1
+        and k_norm_gamma.is_contiguous()
     ):
-        from rtp_llm.models_py.kernels.cuda.qsa.indexer_decode import (
-            _write_decode_key,
-        )
-
-        valid_arg = (
-            valid.to(dtype=torch.int8).contiguous()
-            if valid is not None
-            else seq_lens_before_dev
-        )
-        _write_decode_key[(bsz,)](
-            raw_keys.contiguous(),
-            pos.to(dtype=torch.int32).contiguous(),
+        inv_freq = _get_qsa_inv_freq(rotary_dim, rope_theta, raw_keys.device)
+        has_valid = valid is not None
+        valid_arg = valid if has_valid else seq_lens_before_dev
+        ring_sz = int(state_pool.shape[1])
+        srb = int(raw_keys.stride(0))
+        skvb = int(kv_table.stride(0))
+        skvp = int(kv_table.stride(1))
+        sstb = int(state_table.stride(0))
+        sstp = int(state_table.stride(1))
+        rt_args = (
+            raw_keys,
+            seq_lens_before_dev,
             valid_arg,
-            block_cos.contiguous(),
-            block_sin.contiguous(),
+            inv_freq,
             k_norm_gamma,
             kv_pool,
-            kv_table.contiguous(),
+            kv_table,
             state_pool,
-            state_table.contiguous(),
-            KV_TABLE_WIDTH=int(kv_table.shape[1]),
-            STATE_TABLE_WIDTH=int(state_table.shape[1]),
-            KV_POOL_BLOCKS=int(kv_pool.shape[0]),
-            STATE_POOL_BLOCKS=int(state_pool.shape[0]),
-            KV_TOKENS_PER_BLOCK=kv_tokens_per_block,
-            STATE_TOKENS_PER_BLOCK=state_tokens_per_block,
-            KV_ENTRIES_PER_BLOCK=kv_tokens_per_block // ratio,
-            D=head_dim,
-            ROTARY=rotary_dim,
-            EPS=float(norm_eps),
-            HAS_VALID=valid is not None,
+            state_table,
+            srb,
+            skvb,
+            skvp,
+            sstb,
+            sstp,
+            int(kv_table.shape[1]),
+            int(state_table.shape[1]),
+            int(kv_pool.shape[0]),
+            int(state_pool.shape[0]),
+            kv_tokens_per_block,
+            state_tokens_per_block,
+            kv_tokens_per_block // ratio,
+        )
+        ckey = (
+            raw_keys.device.index,
+            3,
+            raw_keys.dtype,
+            seq_lens_before_dev.dtype,
+            valid_arg.dtype,
+            k_norm_gamma.dtype,
+            kv_pool.dtype,
+            kv_table.dtype,
+            state_pool.dtype,
+            state_table.dtype,
+            _triton_int_spec(srb),
+            _triton_int_spec(skvb),
+            _triton_int_spec(skvp),
+            _triton_int_spec(sstb),
+            _triton_int_spec(sstp),
+            ring_sz,
+            head_dim,
+            rotary_dim,
+            float(norm_eps),
+            has_valid,
+        )
+        ptr_or = (
+            raw_keys.data_ptr()
+            | seq_lens_before_dev.data_ptr()
+            | valid_arg.data_ptr()
+            | inv_freq.data_ptr()
+            | k_norm_gamma.data_ptr()
+            | kv_pool.data_ptr()
+            | kv_table.data_ptr()
+            | state_pool.data_ptr()
+            | state_table.data_ptr()
+        )
+        triton_fast_launch(
+            _QSA_TRITON_CACHE,
+            ckey,
+            _write_decode_qsa_cache_k4_kernel,
+            bsz,
+            1,
+            1,
+            ptr_or,
+            rt_args,
+            {"RING_SIZE": ring_sz, "D": head_dim, "ROTARY": rotary_dim, "EPS": float(norm_eps), "HAS_VALID": has_valid},
+            num_warps=4,
         )
         return
+
+    pos = seq_lens_before_dev.to(dtype=torch.int64)
+    block_starts = pos - torch.remainder(pos, ratio)
+    block_cos, block_sin = build_qsa_neox_cos_sin(
+        block_starts, rotary_dim, rope_theta, raw_keys.dtype
+    )
 
     cu_seqlens = torch.arange(bsz + 1, dtype=torch.int32, device=raw_keys.device)
     write_indexer_cache(
@@ -1606,6 +2292,7 @@ if _HAS_TRITON:
         K: tl.constexpr,
         BK: tl.constexpr,
         WORDS,
+        CHECK_DUP: tl.constexpr = True,
     ):
         """Pack per-query selected indices into 1-bit uint32 words and detect duplicates."""
         row = tl.program_id(0).to(tl.int64)
@@ -1620,15 +2307,20 @@ if _HAS_TRITON:
             valid = in_k & (idx >= 0) & (idx < T)
             safe_idx = tl.where(valid, idx, 0)
             bit = tl.full((BK,), 1, tl.uint32) << (safe_idx & 31)
-            old = tl.atomic_or(
-                pack_base + (safe_idx >> 5), bit, mask=valid, sem="relaxed"
-            ).to(tl.uint32)
-            repeated = valid & ((old & bit) != 0)
-            invalid = in_k & (idx >= T)
-            if tl.max((repeated | invalid).to(tl.int32), 0) != 0:
-                has_bad = 1
+            if CHECK_DUP:
+                old = tl.atomic_or(
+                    pack_base + (safe_idx >> 5), bit, mask=valid, sem="relaxed"
+                ).to(tl.uint32)
+                repeated = valid & ((old & bit) != 0)
+                invalid = in_k & (idx >= T)
+                if tl.max((repeated | invalid).to(tl.int32), 0) != 0:
+                    has_bad = 1
+            else:
+                tl.atomic_or(
+                    pack_base + (safe_idx >> 5), bit, mask=valid, sem="relaxed"
+                )
             row_end = tl.maximum(row_end, tl.max(tl.where(valid, idx, -1), 0))
-        if has_bad != 0:
+        if CHECK_DUP and has_bad != 0:
             tl.store(dup_ptr, 1)
         tl.store(ends_ptr + row, row_end + 1)
 
@@ -1746,6 +2438,7 @@ if _HAS_TRITON:
         BK: tl.constexpr,
         N_WORDS,
         N_GRP_S,
+        CHECK_DUP: tl.constexpr = True,
     ):
         """Pack 4 consecutive queries' selected indices into per-quad 16-bit bitmasks."""
         grp = tl.program_id(0).to(tl.int64)
@@ -1767,12 +2460,15 @@ if _HAS_TRITON:
                     w_idx = quad >> 1
                     bit_pos = ((quad & 1) << 4) + (j << 2) + (safe_tok & 3)
                     bit = tl.full((BK,), 1, tl.uint32) << bit_pos.to(tl.uint32)
-                    old = tl.atomic_or(bmp_base + w_idx, bit, mask=valid, sem="relaxed").to(
-                        tl.uint32
-                    )
-                    bad = (valid & ((old & bit) != 0)) | (in_k & (tok >= T))
-                    if tl.max(bad.to(tl.int32), 0) != 0:
-                        tl.store(dup_ptr, 1)
+                    if CHECK_DUP:
+                        old = tl.atomic_or(bmp_base + w_idx, bit, mask=valid, sem="relaxed").to(
+                            tl.uint32
+                        )
+                        bad = (valid & ((old & bit) != 0)) | (in_k & (tok >= T))
+                        if tl.max(bad.to(tl.int32), 0) != 0:
+                            tl.store(dup_ptr, 1)
+                    else:
+                        tl.atomic_or(bmp_base + w_idx, bit, mask=valid, sem="relaxed")
 
     @triton.jit
     def _qsa_q4_compact_quads_kernel(
@@ -2758,6 +3454,7 @@ def _try_run_q4_prefill(
     page_size: int,
     is_paged: bool,
     max_sub_g: int = 1,
+    assume_unique_selected: bool = False,
 ) -> Optional[torch.Tensor]:
     """Attempt Q4 block-dedup sparse prefill; returns None if fallback to Direct is faster/needed."""
     B, H_q, S, D = q_bhtd.shape
@@ -2789,9 +3486,9 @@ def _try_run_q4_prefill(
 
     dev = q_bhtd.device
     bmp = torch.zeros((n_grp, n_words), dtype=torch.int32, device=dev)
-    dup = torch.zeros((1,), dtype=torch.int32, device=dev)
     u_packed = torch.empty((n_grp, cap_u), dtype=torch.int32, device=dev)
     u_cnt = torch.empty((n_grp,), dtype=torch.int32, device=dev)
+    dup = u_cnt if assume_unique_selected else torch.zeros((1,), dtype=torch.int32, device=dev)
     bk = 512 if K >= 256 else max(16, triton.next_power_of_2(K))
     _qsa_q4_pack_quads_kernel[(n_grp,)](
         sel_c,
@@ -2805,6 +3502,7 @@ def _try_run_q4_prefill(
         BK=bk,
         N_WORDS=n_words,
         N_GRP_S=n_grp_s,
+        CHECK_DUP=not assume_unique_selected,
         num_warps=4,
     )
     _qsa_q4_compact_quads_kernel[(n_grp,)](
@@ -2816,13 +3514,14 @@ def _try_run_q4_prefill(
         BW=1024,
         num_warps=8,
     )
-    # 1 tiny sync check: verify no duplicate/OOB AND high enough quad overlap vs Direct
-    has_dup, max_u_seen, sum_u_seen = torch.stack(
-        [dup[0].to(torch.int64), u_cnt.max().to(torch.int64), u_cnt.sum(dtype=torch.int64)]
-    ).tolist()
-    max_avg_u = int(K * (0.625 if sub_g == 1 else 0.42))
-    if has_dup != 0 or max_u_seen > cap_u or sum_u_seen > n_grp * max_avg_u:
-        return None
+    if not assume_unique_selected:
+        # 1 tiny sync check for unverified external selections: verify no duplicate/OOB & overlap
+        has_dup, max_u_seen, sum_u_seen = torch.stack(
+            [dup[0].to(torch.int64), u_cnt.max().to(torch.int64), u_cnt.sum(dtype=torch.int64)]
+        ).tolist()
+        max_avg_u = int(K * (0.625 if sub_g == 1 else 0.42))
+        if has_dup != 0 or max_u_seen > cap_u or sum_u_seen > n_grp * max_avg_u:
+            return None
 
     out = torch.empty_like(q_bhtd)
     m_rows = 16 if g_blk <= 4 else 32
@@ -2889,6 +3588,7 @@ def qsa_sparse_prefill_attention(
     selected: torch.Tensor,
     *,
     validate_selected: bool = False,
+    assume_unique_selected: bool = False,
 ) -> torch.Tensor:
     """Sparse prefill attention ``[B, H_q, S, D]`` over selected token indices."""
     if q_bhtd.is_cuda:
@@ -2929,13 +3629,15 @@ def qsa_sparse_prefill_attention(
             v_c = v_bhtd.contiguous()
             sel_c = selected.contiguous()
 
-            # 1) Dense short/medium context (T <= 2048 and <= 2*K): packed 1-bit bitmap multi-query path
+            # 1) Dense medium-context (T <= 2048 and <= 2*K): packed 1-bit bitmap multi-query path
+            # For D==256 and q_per_kv>=4 (e.g. TP4 Hq=8), Direct dsplit beats bitmap on B*S < 2048 or T < 512 with 0 syncs.
             words = triton.cdiv(T, 32)
             if (
                 not torch.cuda.is_current_stream_capturing()
                 and S >= 128
                 and 64 <= T <= min(2048, 2 * K)
                 and q_per_kv <= 16
+                and (q_per_kv < 4 or D != 256 or (B * S >= 2048 and T >= 512))
                 and (B * S * words) <= 32 * 1024 * 1024
             ):
                 qs32 = 32 // q_per_kv
@@ -2947,7 +3649,7 @@ def qsa_sparse_prefill_attention(
                 kt = 64 if T >= 64 else 32
                 packed = torch.zeros((B, S, words), device=q_c.device, dtype=torch.int32)
                 ends = torch.empty((B, S), device=q_c.device, dtype=torch.int32)
-                dup = torch.zeros((1,), device=q_c.device, dtype=torch.int32)
+                dup = ends if assume_unique_selected else torch.zeros((1,), device=q_c.device, dtype=torch.int32)
                 bk = 512 if K >= 256 else max(16, triton.next_power_of_2(K))
                 _qsa_pack_bitmap_words_kernel[(B * S,)](
                     sel_c,
@@ -2958,9 +3660,10 @@ def qsa_sparse_prefill_attention(
                     K=K,
                     BK=bk,
                     WORDS=words,
+                    CHECK_DUP=not assume_unique_selected,
                     num_warps=4,
                 )
-                if not bool(dup.item()):
+                if assume_unique_selected or not bool(dup.item()):
                     out = torch.empty_like(q_c)
                     _qsa_bitmap_packed_gqa_kernel[(B, H_kv, triton.cdiv(S, qs))](
                         q_c,
@@ -2987,11 +3690,22 @@ def qsa_sparse_prefill_attention(
                     return out
 
             # 2) Sparse long-context Q4 4-query quad-dedup TensorCore kernel
-            q4_out = _try_run_q4_prefill(
-                q_c, k_c, v_c, None, None, sel_c, T=T, page_size=4, is_paged=False
-            )
-            if q4_out is not None:
-                return q4_out
+            # For D==256 and q_per_kv>=4, Direct dsplit beats Q4 on small work (B*S < 1024 or T <= 2048 or K < 256).
+            if D != 256 or q_per_kv < 4 or (B * S >= 1024 and T > 2048 and K >= 256):
+                q4_out = _try_run_q4_prefill(
+                    q_c,
+                    k_c,
+                    v_c,
+                    None,
+                    None,
+                    sel_c,
+                    T=T,
+                    page_size=4,
+                    is_paged=False,
+                    assume_unique_selected=assume_unique_selected,
+                )
+                if q4_out is not None:
+                    return q4_out
 
             # 3) Fast direct grouped GQA TensorCore path (BLK_H=32 for q_per_kv=32, else BLK_H=16)
             if S >= 16 and K >= 32 and q_per_kv >= 3:
@@ -3003,7 +3717,7 @@ def qsa_sparse_prefill_attention(
                     else (64 if (blk_h == 32 or D < 256) else 32)
                 )
                 out = torch.empty_like(q_c)
-                if D == 256 and blk_h == 32 and blk_k >= 64:
+                if D == 256 and blk_h >= 16 and q_per_kv >= 4 and blk_k >= 64:
                     _qsa_sparse_prefill_dsplit_kernel[(S, B, H_kv * sub_g)](
                         q_c,
                         k_c,
@@ -3154,6 +3868,7 @@ def qsa_sparse_paged_prefill_attention(
     head_dim: int,
     max_ctx_len: int,
     kv_scale: Optional[torch.Tensor] = None,
+    assume_unique_selected: bool = False,
 ) -> torch.Tensor:
     """Zero-copy sparse prefill directly against paged MHA KV pool (Q4 dedup + GQA TC fallback)."""
     B, H_q, S, D = q_bhtd.shape
@@ -3189,19 +3904,21 @@ def qsa_sparse_paged_prefill_attention(
     ):
         q_c = q_bhtd if q_bhtd.stride(-1) == 1 else q_bhtd.contiguous()
         sel_c = selected if selected.stride(-1) == 1 else selected.contiguous()
-        q4_out = _try_run_q4_prefill(
-            q_c,
-            kv_hnd,
-            kv_hnd,
-            sc_hnd,
-            kv_block_table,
-            sel_c,
-            T=max_ctx_len,
-            page_size=page_size,
-            is_paged=True,
-        )
-        if q4_out is not None:
-            return q4_out
+        if D != 256 or q_per_kv < 4 or (B * S >= 1024 and max_ctx_len > 2048 and K >= 256):
+            q4_out = _try_run_q4_prefill(
+                q_c,
+                kv_hnd,
+                kv_hnd,
+                sc_hnd,
+                kv_block_table,
+                sel_c,
+                T=max_ctx_len,
+                page_size=page_size,
+                is_paged=True,
+                assume_unique_selected=assume_unique_selected,
+            )
+            if q4_out is not None:
+                return q4_out
 
         blk_h = 32 if (16 < q_per_kv <= 32) else 16
         sub_g = triton.cdiv(q_per_kv, blk_h)
@@ -3214,7 +3931,7 @@ def qsa_sparse_paged_prefill_attention(
         is_fp8 = kv_hnd.dtype == torch.float8_e4m3fn
         has_scale = is_fp8 and sc_hnd is not None
         dummy_sc = sc_hnd if has_scale and sc_hnd is not None else kv_hnd
-        if D == 256 and blk_h == 32 and blk_k >= 64:
+        if D == 256 and blk_h >= 16 and q_per_kv >= 4 and blk_k >= 64:
             _qsa_sparse_prefill_dsplit_kernel[(S, B, kv_heads * sub_g)](
                 q_c,
                 kv_hnd,
@@ -3260,7 +3977,7 @@ def qsa_sparse_paged_prefill_attention(
                 FP8_QK=is_fp8,
                 SUB_G=sub_g,
                 num_warps=4,
-                num_stages=1,
+                num_stages=2 if (is_fp8 and blk_k == 128 and blk_h == 32) else 1,
             )
         else:
             _qsa_sparse_prefill_grouped_fast_kernel[(S, B, kv_heads * sub_g)](

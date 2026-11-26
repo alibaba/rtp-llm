@@ -17,6 +17,7 @@ from rtp_llm.models_py.modules.qwen4_5.hyper_connection import (
     grouped_gemma_rmsnorm_bias_ref,
     hc_combine_and_norm_triton,
     hc_combine_triton,
+    hc_sconv_decode_opaque_combine_norm_triton,
 )
 from rtp_llm.models_py.modules.qwen4_5.ple import (
     DEFAULT_PLE_WEIGHT_SCALE,
@@ -32,6 +33,9 @@ from rtp_llm.models_py.modules.qwen4_5.short_conv import (
     causal_dwconv1d_prefill_with_snapshots_triton,
     causal_dwconv1d_ragged_prefill_with_snapshots_triton,
     causal_dwconv1d_verify_opaque_triton,
+    _SC_TRITON_CACHE,
+    _has_active_hooks,
+    causal_dwconv1d_decode_opaque_triton,
     causal_dwconv1d_decode_triton,
     causal_dwconv1d_ref,
     causal_dwconv1d_verify_triton,
@@ -1245,6 +1249,240 @@ def test_r5_ple_u64_hc_split5120_and_strided_shortconv() -> None:
     print("  PASS: PLE u64, HC Split5120, ShortConv strided decode & CUDA Graph parity verified.")
 
 
+@torch.no_grad()
+def test_r6_fast_launch_opaque_decode_and_ple_snap_aligned() -> None:
+    print("\n=== [3f] R6 HookChain fast_launch, Direct-Opaque Decode ShortConv+HC & PLE snap_aligned Check ===")
+    import triton
+
+    device = torch.device("cuda")
+    dtype = torch.bfloat16
+    torch.manual_seed(202660)
+
+    # 1. HookChain empty-calls detection & triton_fast_launch cache-hit parity
+    knobs = triton.knobs.runtime
+    assert not _has_active_hooks(knobs.launch_enter_hook), (
+        f"Unexpected active launch_enter_hook: {getattr(knobs.launch_enter_hook, 'calls', None)}"
+    )
+    assert not _has_active_hooks(knobs.launch_exit_hook)
+
+    B, ps, num_blocks = 8, 64, 48
+    for C, pool_slots, off_idx in [(256, 2, 1), (512, 1, 0)]:
+        pool_3d = torch.randn((num_blocks, pool_slots, C, 3), device=device, dtype=dtype) * 0.4
+        pool_ref = pool_3d.clone()
+        pool_2d = pool_3d.reshape(num_blocks, pool_slots * C * 3)
+        bt = torch.tensor([[1 + b * 2, 2 + b * 2, 0] for b in range(B)], device=device, dtype=torch.int32)
+        seq_before = torch.tensor([0, 1, 63, 64, 65, 128, 130, 192], device=device, dtype=torch.int32)
+        w_sc = torch.randn((C, 1, 4), device=device, dtype=dtype) * 0.25
+        x = torch.randn((B, 1, C), device=device, dtype=dtype) * 1.8
+
+        init_ref = torch.zeros((B, C, 3), device=device, dtype=dtype)
+        for b in range(B):
+            sb = int(seq_before[b].item())
+            if sb > 0 and ((sb - 1) // ps) < bt.shape[1]:
+                phys = int(bt[b, (sb - 1) // ps].item())
+                if 0 < phys < num_blocks:
+                    init_ref[b].copy_(pool_ref[phys, off_idx])
+        state_ref = init_ref.clone()
+        y_ref = causal_dwconv1d_decode_triton(
+            x, w_sc, state_ref, residual=True, use_activation=True, round_pre_act=True, clamp_val=1.5
+        )
+        # Warmup + steady-state cache hit
+        pool_2d_w = pool_2d.clone()
+        _ = causal_dwconv1d_decode_opaque_triton(
+            x, w_sc, pool_2d_w, bt, seq_before,
+            page_size=ps, pool_col_offset=off_idx * C * 3,
+            residual=True, use_activation=True, round_pre_act=True, clamp_val=1.5,
+        )
+        y_opq = causal_dwconv1d_decode_opaque_triton(
+            x, w_sc, pool_2d, bt, seq_before,
+            page_size=ps, pool_col_offset=off_idx * C * 3,
+            residual=True, use_activation=True, round_pre_act=True, clamp_val=1.5,
+        )
+        assert float((y_opq - y_ref).abs().max().item()) == 0.0
+        for b in range(B):
+            sb = int(seq_before[b].item())
+            l_nxt = sb // ps
+            if l_nxt < bt.shape[1]:
+                phys_w = int(bt[b, l_nxt].item())
+                if 0 < phys_w < num_blocks:
+                    assert float((pool_3d[phys_w, off_idx] - state_ref[b]).abs().max().item()) == 0.0
+
+        # Active hook still invoked cleanly when registered
+        hook_calls = [0]
+        def _count_hook(*_args, **_kwargs):
+            hook_calls[0] += 1
+        enter_hook = knobs.launch_enter_hook
+        if hasattr(enter_hook, "calls") and isinstance(enter_hook.calls, list):
+            enter_hook.calls.append(_count_hook)
+            try:
+                assert _has_active_hooks(enter_hook)
+                pool_hk = pool_ref.clone().reshape(num_blocks, pool_slots * C * 3)
+                y_hk = causal_dwconv1d_decode_opaque_triton(
+                    x, w_sc, pool_hk, bt, seq_before,
+                    page_size=ps, pool_col_offset=off_idx * C * 3,
+                    residual=True, use_activation=True, round_pre_act=True, clamp_val=1.5,
+                )
+                assert hook_calls[0] >= 1
+                assert float((y_hk - y_ref).abs().max().item()) == 0.0
+            finally:
+                enter_hook.calls.remove(_count_hook)
+
+        # CUDA Graph capture & replay
+        pool_cg_3d = pool_ref.clone()
+        pool_cg = pool_cg_3d.reshape(num_blocks, pool_slots * C * 3)
+        x_cg = x.clone()
+        cg = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(cg):
+            y_cg = causal_dwconv1d_decode_opaque_triton(
+                x_cg, w_sc, pool_cg, bt, seq_before,
+                page_size=ps, pool_col_offset=off_idx * C * 3,
+                residual=True, use_activation=True, round_pre_act=True, clamp_val=1.5,
+            )
+        pool_cg_3d.copy_(pool_ref)
+        x_new = torch.randn_like(x_cg) * 1.4
+        x_cg.copy_(x_new)
+        cg.replay()
+        y_eag = causal_dwconv1d_decode_opaque_triton(
+            x_new, w_sc, pool_ref.clone().reshape(num_blocks, pool_slots * C * 3), bt, seq_before,
+            page_size=ps, pool_col_offset=off_idx * C * 3,
+            residual=True, use_activation=True, round_pre_act=True, clamp_val=1.5,
+        )
+        assert float((y_cg - y_eag).abs().max().item()) == 0.0
+
+    # 2. Fused hc_sconv_decode_opaque_combine_norm_triton (5120 split + 256 generic, single_stream, bias, CG)
+    for H_hc, single_stream, use_bias in [(5120, False, True), (5120, True, False), (256, False, True)]:
+        HC_n = 4
+        res = torch.randn((B, 1, H_hc if single_stream else HC_n * H_hc), device=device, dtype=dtype) * 0.4
+        sub = torch.randn((B, 1, H_hc), device=device, dtype=dtype) * 1.6
+        inj = torch.randn((B, 1, HC_n), device=device, dtype=dtype) * 0.2
+        nw = torch.randn((HC_n * H_hc,), device=device, dtype=dtype) * 0.2
+        nb = (torch.randn((HC_n * H_hc,), device=device, dtype=dtype) * 0.1) if use_bias else None
+        cw = torch.randn((H_hc, 1, 4), device=device, dtype=dtype) * 0.2
+        pool_h3 = torch.randn((num_blocks, H_hc, 3), device=device, dtype=dtype) * 0.3
+        pool_href = pool_h3.clone()
+        bt_h = torch.tensor([[1 + b * 2, 2 + b * 2, 0] for b in range(B)], device=device, dtype=torch.int32)
+        sb_h = torch.tensor([0, 1, 63, 64, 65, 128, 130, 192], device=device, dtype=torch.int32)
+
+        y_sc_ref = causal_dwconv1d_decode_opaque_triton(
+            sub, cw, pool_href.reshape(num_blocks, H_hc * 3), bt_h, sb_h,
+            page_size=ps, residual=True, use_activation=True, round_pre_act=False, clamp_val=1.5,
+        )
+        c_ref, n_ref = hc_combine_and_norm_triton(y_sc_ref, res, inj, nw, nb, eps=1e-6)
+        c_fus, n_fus = hc_sconv_decode_opaque_combine_norm_triton(
+            sub, res, inj, nw, nb, cw, pool_h3.reshape(num_blocks, H_hc * 3), bt_h, sb_h,
+            page_size=ps, eps=1e-6, conv_residual=True, conv_use_silu=True, clamp_val=1.5,
+        )
+        c_diff, _ = _diff_stats(c_fus, c_ref)
+        n_diff, _ = _diff_stats(n_fus, n_ref)
+        cos_n = torch.nn.functional.cosine_similarity(n_fus.float().flatten(), n_ref.float().flatten(), dim=0).item()
+        assert c_diff <= 2e-2 and n_diff <= 0.08 and cos_n > 0.99995, (
+            f"hc_sconv H={H_hc} ss={single_stream} bias={use_bias}: c_diff={c_diff} n_diff={n_diff} cos={cos_n}"
+        )
+        for b in range(B):
+            sb = int(sb_h[b].item())
+            l_nxt = sb // ps
+            if l_nxt < bt_h.shape[1]:
+                phys_w = int(bt_h[b, l_nxt].item())
+                if 0 < phys_w < num_blocks:
+                    assert float((pool_h3[phys_w] - pool_href[phys_w]).abs().max().item()) == 0.0
+
+    # 3. PLE forward_packed_prefill_with_hc snap_aligned=True vs False parity
+    ple = Qwen4_5PLELayer(
+        hidden_size=512,
+        hc_count=4,
+        ple_embed_dim=256,
+        ngram_size=3,
+        heads_per_ngram=4,
+        conv_kernel_size=4,
+        split_ngram_parts=4,
+        eos_token_id=0,
+        ngram_heads_vocab_sizes=[251] * 8,
+        dtype=dtype,
+        device=device,
+    ).eval()
+    ple.norm_key.normal_(0.0, 0.1)
+    ple.norm_query.normal_(0.0, 0.1)
+    ple.norm_conv.normal_(0.0, 0.1)
+    ple.conv1d.weight.normal_(0.0, 0.15)
+    ple.set_ngram_table(
+        (torch.randn((ple.total_vocab_size, ple.head_dim), device=device, dtype=torch.float32) * 100.0)
+        .clamp(-448, 448)
+        .to(torch.float8_e4m3fn)
+    )
+    lens = [64, 130]
+    cu = torch.tensor([0, 64, 194], device=device, dtype=torch.int32)
+    tok_req = torch.cat([torch.zeros(64, device=device, dtype=torch.int32), torch.ones(130, device=device, dtype=torch.int32)])
+    tr16 = torch.tensor([0]*4 + [1]*9, device=device, dtype=torch.int32)
+    tt16 = torch.tensor([0, 16, 32, 48] + [k*16 for k in range(9)], device=device, dtype=torch.int32)
+    s_ends = torch.tensor([64, 64, 128, 130], device=device, dtype=torch.int32)
+    s_toks = torch.tensor([63, 64+63, 64+127, 193], device=device, dtype=torch.int32)
+    s_reqs = torch.tensor([0, 1, 1, 1], device=device, dtype=torch.int32)
+    r_ss = torch.tensor([0, 1, 4], device=device, dtype=torch.int32)
+    s_phys = torch.tensor([1, 2, 3, 4], device=device, dtype=torch.int32)
+    conv_a = torch.zeros((8, 4 * 512 * 3), device=device, dtype=dtype)
+    conv_b = torch.zeros_like(conv_a)
+    ctx_a = torch.zeros((8, 2), device=device, dtype=torch.int64)
+    ctx_b = torch.zeros_like(ctx_a)
+    hh = torch.randn((194, 4 * 512), device=device, dtype=dtype) * 0.2
+    f_ids = torch.randint(1, 250, (194,), device=device, dtype=torch.int64)
+    nw_p = torch.randn((4 * 512,), device=device, dtype=dtype) * 0.2
+    o_a, n_a = ple.forward_packed_prefill_with_hc(
+        hh, f_ids, cu, tok_req, tr16, tt16,
+        snap_tok_idx=s_toks, snap_req_idx=s_reqs, conv_dst_pool=conv_a, conv_snap_phys=s_phys,
+        req_snap_start=r_ss, snap_local_ends=s_ends, snap_aligned=True,
+        ctx_dst_pool=ctx_a, ctx_snap_phys=s_phys, hc_norm_weight=nw_p,
+    )
+    o_b, n_b = ple.forward_packed_prefill_with_hc(
+        hh, f_ids, cu, tok_req, tr16, tt16,
+        snap_tok_idx=s_toks, snap_req_idx=s_reqs, conv_dst_pool=conv_b, conv_snap_phys=s_phys,
+        req_snap_start=r_ss, snap_local_ends=s_ends, snap_aligned=False,
+        ctx_dst_pool=ctx_b, ctx_snap_phys=s_phys, hc_norm_weight=nw_p,
+    )
+    assert float((o_a - o_b).abs().max().item()) == 0.0
+    assert float((n_a - n_b).abs().max().item()) == 0.0
+    assert float((conv_a - conv_b).abs().max().item()) == 0.0
+    assert torch.equal(ctx_a, ctx_b)
+    # Cross-dtype weight_scale cache-key regression on BOTH u64 PLE gather paths + HC b_c.dtype + live cache assertions
+    from rtp_llm.models_py.modules.qwen4_5.ple import _PLE_TRITON_CACHE, ple_gather_fp8_triton
+    from rtp_llm.models_py.modules.qwen4_5.short_conv import _SC_TRITON_CACHE
+    from rtp_llm.models_py.modules.qwen4_5.hyper_connection import _HC_TRITON_CACHE, grouped_gemma_rmsnorm_bias_ref
+
+    one_shard = torch.ones((16, 256), device=device, dtype=torch.float32).to(torch.float8_e4m3fn)
+    ptr_1 = torch.tensor([one_shard.data_ptr()], device=device, dtype=torch.int64)
+    sc_f32 = torch.full((1,), 2.0, device=device, dtype=torch.float32)
+    sc_bf16 = torch.full((1,), 2.0, device=device, dtype=torch.bfloat16)
+    sc_bf16_3 = torch.full((1,), 3.0, device=device, dtype=torch.bfloat16)
+    for ids_probe in (
+        torch.zeros((4, 2), device=device, dtype=torch.int64),
+        torch.zeros((8,), device=device, dtype=torch.int64),
+    ):
+        g_f32 = ple_gather_fp8_triton(ids_probe, ptr_1, 16, 256, sc_f32, allow_u64_vec=True)
+        g_bf16 = ple_gather_fp8_triton(ids_probe, ptr_1, 16, 256, sc_bf16, allow_u64_vec=True)
+        g_bf16_3 = ple_gather_fp8_triton(ids_probe, ptr_1, 16, 256, sc_bf16_3, allow_u64_vec=True)
+        assert float((g_f32 - 2.0).abs().max().item()) == 0.0
+        assert float((g_bf16 - 2.0).abs().max().item()) == 0.0
+        assert float((g_bf16_3 - 3.0).abs().max().item()) == 0.0
+
+    # Mixed bias dtype (fp32 -> bf16) in HC grouped norm & combine+norm
+    x_hc = torch.randn((16, 4 * 512), device=device, dtype=dtype) * 0.3
+    sub_hc = torch.randn((16, 512), device=device, dtype=dtype) * 0.2
+    inj_hc = torch.randn((16, 4), device=device, dtype=dtype) * 0.3
+    w_hc = torch.randn((4 * 512,), device=device, dtype=dtype) * 0.2
+    for b_hc in (
+        torch.randn((4 * 512,), device=device, dtype=torch.float32) * 0.2,
+        torch.randn((4 * 512,), device=device, dtype=torch.bfloat16) * 0.2,
+    ):
+        yn = grouped_gemma_rmsnorm_bias_triton(x_hc, w_hc, b_hc, 4, eps=1e-6)
+        yn_r = grouped_gemma_rmsnorm_bias_ref(x_hc, w_hc, b_hc, 4, eps=1e-6)
+        assert float((yn - yn_r).abs().max().item()) < 2e-2
+        _, cn = hc_combine_and_norm_triton(sub_hc, x_hc, inj_hc, w_hc, b_hc, eps=1e-6)
+        cn_r = grouped_gemma_rmsnorm_bias_ref(hc_combine_triton(sub_hc, x_hc, inj_hc), w_hc, b_hc, 4, eps=1e-6)
+        assert float((cn - cn_r).abs().max().item()) < 2e-2
+
+    assert len(_PLE_TRITON_CACHE) > 0 and len(_SC_TRITON_CACHE) > 0 and len(_HC_TRITON_CACHE) > 0
+    print("  PASS: HookChain fast_launch, opaque decode ShortConv+HC, PLE snap_aligned & cross-dtype ckey parity verified.")
+
+
 def main() -> int:
     print(
         f"Device: {torch.cuda.get_device_name(0)} "
@@ -1260,6 +1498,7 @@ def main() -> int:
     test_r2_hc_aligned_projections_and_ple_p2p()
     test_r4_shortconv_opaque_verify_and_clip_value()
     test_r5_ple_u64_hc_split5120_and_strided_shortconv()
+    test_r6_fast_launch_opaque_decode_and_ple_snap_aligned()
     run_benchmarks()
     print(f"\nALL TESTS & BENCHMARKS PASSED in {time.perf_counter() - t0:.2f}s!")
     return 0

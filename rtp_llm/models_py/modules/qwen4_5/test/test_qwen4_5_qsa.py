@@ -48,11 +48,13 @@ from rtp_llm.models_py.modules.qwen4_5.contracts import Qwen4_5ArchConfig
 from rtp_llm.models_py.modules.qwen4_5.qsa_bridge import (
     _select_top_tokens,
     build_qsa_neox_cos_sin,
+    exact_head_rms_norm,
     qsa_paged_score,
     qsa_prefill_score,
     qsa_sparse_paged_decode_attention,
     qsa_sparse_paged_prefill_attention,
     _try_run_q4_prefill,
+    qsa_select_causal_from_projected,
     qsa_sparse_prefill_attention,
     score_and_select_qsa_paged,
     view_indexer_kv_pool,
@@ -2096,8 +2098,21 @@ class Qwen4_5QSATest(unittest.TestCase):
             self.assertEqual(u8_idx_cnt, 0, f"Expected 0 unsigned char opaque indexSelectSmallIndex, got {u8_idx_cnt}")
             rd_triton_cnt = sum(e.count for e in prof_dec.key_averages() if "_read_opaque_rows_triton" in e.key)
             wr_triton_cnt = sum(e.count for e in prof_dec.key_averages() if "_write_opaque_rows_paged_triton" in e.key)
-            self.assertGreaterEqual(rd_triton_cnt, 20)
-            self.assertGreaterEqual(wr_triton_cnt, 20)
+            fused_opaque_cnt = sum(
+                e.count
+                for e in prof_dec.key_averages()
+                if any(
+                    k in e.key
+                    for k in (
+                        "_causal_dwconv1d_decode_opaque_k4_kernel",
+                        "_hc_sconv_decode_opaque_combine_norm",
+                        "_gdn_fused_unpack_conv1d_decode_k4_kernel",
+                        "_gdn_recurrent_kernel",
+                    )
+                )
+            )
+            self.assertGreaterEqual(rd_triton_cnt + fused_opaque_cnt, 20)
+            self.assertGreaterEqual(wr_triton_cnt + fused_opaque_cnt, 20)
 
             # 2. QSA Prefill BLK_K=128 parity (dense + paged FP8/BF16, Hq=32 & Hq=16)
             ps, D, K_p, T_p = 64, 256, 320, 640
@@ -2357,6 +2372,346 @@ class Qwen4_5QSATest(unittest.TestCase):
             self.assertGreaterEqual(_cosine(vf, vr), 0.9998)
             self.assertGreaterEqual(_cosine(df, dr), 0.9998)
 
+
+    def test_r6_qsa_inline_rope_dsplit_h16_and_verify_cg_commit(self) -> None:
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA required")
+        dev = _device()
+        dt = torch.bfloat16
+        torch.manual_seed(202662)
+        with torch.no_grad():
+            # 1. qsa_select_causal_from_projected inline q_norm_gamma with BOTH positions & cos_all/sin_all
+            idx_cfg = _make_mini_arch(
+                indexer_head_dim=128, indexer_n_heads=8, indexer_kv_heads=1,
+                indexer_compress_ratio=4, indexer_budget=16, max_position_embeddings=256,
+            )
+            idx_mod = Qwen4_5QSAIndexer(idx_cfg).to(device=dev, dtype=dt).eval()
+            B_i, S_i = 2, 32
+            q_raw = torch.randn((B_i, S_i, 8, 128), device=dev, dtype=dt) * 0.5
+            k_raw = torch.randn((B_i, S_i, 128), device=dev, dtype=dt) * 0.5
+            pos_i = torch.arange(S_i, device=dev, dtype=torch.int64).unsqueeze(0).expand(B_i, S_i)
+            q_norm_ext = exact_head_rms_norm(q_raw, idx_mod.q_norm_gamma, idx_mod.norm_eps)
+            cos_all, sin_all = build_qsa_neox_cos_sin(pos_i, 64, 10000.0, dt)
+
+            sel_pos_ref = qsa_select_causal_from_projected(
+                idx_mod, q_norm_ext, k_raw, positions=pos_i, rotary_dim=64, rope_theta=10000.0
+            )
+            sel_pos_inl = qsa_select_causal_from_projected(
+                idx_mod, q_raw, k_raw, q_norm_gamma=idx_mod.q_norm_gamma, positions=pos_i, rotary_dim=64, rope_theta=10000.0
+            )
+            self.assertTrue(torch.equal(sel_pos_ref, sel_pos_inl))
+
+            sel_cs_ref = qsa_select_causal_from_projected(
+                idx_mod, q_norm_ext, k_raw, cos_all=cos_all, sin_all=sin_all, rotary_dim=64, rope_theta=10000.0
+            )
+            sel_cs_inl = qsa_select_causal_from_projected(
+                idx_mod, q_raw, k_raw, cos_all=cos_all, sin_all=sin_all, q_norm_gamma=idx_mod.q_norm_gamma, rotary_dim=64, rope_theta=10000.0
+            )
+            self.assertTrue(torch.equal(sel_cs_ref, sel_cs_inl))
+            self.assertTrue(torch.equal(sel_pos_ref, sel_cs_ref))
+
+            # 1b. _qsa_norm_and_rope_fast cross-norm_eps (1e-6 -> 10.0) ckey regression + live cache hit
+            from rtp_llm.models_py.modules.qwen4_5.qsa_bridge import (
+                _QSA_TRITON_CACHE,
+                _qsa_norm_and_rope_fast,
+                apply_partial_rope,
+            )
+
+            cos_e, sin_e = build_qsa_neox_cos_sin(pos_i, 64, 10000.0, dt)
+            for eps_test in (1e-6, 10.0, 10.0):
+                got_nr = _qsa_norm_and_rope_fast(
+                    q_raw, pos_i, 64, 10000.0, q_norm_gamma=idx_mod.q_norm_gamma, norm_eps=eps_test
+                )
+                ref_nr = apply_partial_rope(
+                    exact_head_rms_norm(q_raw, idx_mod.q_norm_gamma, eps_test),
+                    cos_e.unsqueeze(2),
+                    sin_e.unsqueeze(2),
+                )
+                self.assertLess(float((got_nr - ref_nr).abs().max().item()), 0.03)
+            self.assertGreater(len(_QSA_TRITON_CACHE), 0)
+
+            # 2. score_and_select_qsa_paged inline q_norm_gamma parity (decode S=1 & verify S=8)
+            ps, D_idx, T_ctx, K_b = 64, 128, 128, 16
+            n_lp_i = T_ctx // ps
+            kv_idx_p = torch.randn((B_i * n_lp_i + 2, ps // 4, D_idx), device=dev, dtype=dt) * 0.4
+            bt_i = torch.arange(1, 1 + B_i * n_lp_i, device=dev, dtype=torch.int32).view(B_i, n_lp_i)
+            for S_sc in (1, 8):
+                qr = torch.randn((B_i, S_sc, 8, D_idx), device=dev, dtype=dt) * 0.4
+                qn = exact_head_rms_norm(qr, idx_mod.q_norm_gamma, idx_mod.norm_eps)
+                ps_sc = torch.arange(T_ctx - S_sc, T_ctx, device=dev, dtype=torch.int32).unsqueeze(0).expand(B_i, S_sc)
+                vl_sc = ps_sc + 1
+                if S_sc == 1:
+                    ps_sc = ps_sc.squeeze(1)
+                    vl_sc = vl_sc.squeeze(1)
+                sr = score_and_select_qsa_paged(
+                    qn, ps_sc, kv_idx_p, bt_i, vl_sc,
+                    compress_ratio=4, token_budget=K_b, rotary_dim=64, rope_theta=10000.0,
+                )
+                si = score_and_select_qsa_paged(
+                    qr, ps_sc, kv_idx_p, bt_i, vl_sc,
+                    compress_ratio=4, token_budget=K_b, rotary_dim=64, rope_theta=10000.0,
+                    q_norm_gamma=idx_mod.q_norm_gamma, norm_eps=idx_mod.norm_eps,
+                )
+                self.assertTrue(torch.equal(sr, si))
+
+            # 2b. Zero-sync Q4 / bitmap / TP4 dsplit prefill parity (forbids .tolist()/.item() sync on QSA paths)
+            orig_tolist = torch.Tensor.tolist
+            orig_item = torch.Tensor.item
+            sync_calls = []
+
+            def _guarded_tolist(self_t, *args, **kwargs):
+                if self_t.is_cuda:
+                    sync_calls.append(("tolist", tuple(self_t.shape)))
+                return orig_tolist(self_t, *args, **kwargs)
+
+            def _guarded_item(self_t, *args, **kwargs):
+                if self_t.is_cuda:
+                    sync_calls.append(("item", tuple(self_t.shape)))
+                return orig_item(self_t, *args, **kwargs)
+
+            try:
+                torch.Tensor.tolist = _guarded_tolist
+                torch.Tensor.item = _guarded_item
+                # Case A: TP4 B=1 S=64 T=64 (short context -> skips Q4 & bitmap even with default kwargs)
+                q_s64 = torch.randn((1, 8, 64, 256), device=dev, dtype=dt)
+                k_s64 = torch.randn((1, 1, 64, 256), device=dev, dtype=dt)
+                v_s64 = torch.randn((1, 1, 64, 256), device=dev, dtype=dt)
+                sel_s64 = torch.arange(64, device=dev, dtype=torch.int32).view(1, 1, 64).expand(1, 64, 64).contiguous()
+                o_s64 = qsa_sparse_prefill_attention(q_s64, k_s64, v_s64, sel_s64)
+                # Case B: Bitmap dense (B=4, S=512, T=512, K=512) w/ assume_unique_selected=True
+                q_bm = torch.randn((4, 8, 512, 256), device=dev, dtype=dt)
+                k_bm = torch.randn((4, 1, 512, 256), device=dev, dtype=dt)
+                v_bm = torch.randn((4, 1, 512, 256), device=dev, dtype=dt)
+                sel_bm = torch.arange(512, device=dev, dtype=torch.int32).view(1, 1, 512).expand(4, 512, 512).contiguous()
+                o_bm = qsa_sparse_prefill_attention(q_bm, k_bm, v_bm, sel_bm, assume_unique_selected=True)
+                # Case C: Long Q4 Dense + Paged FP8 (B=1, S=1024, T=4096, K=515) w/ assume_unique_selected=True
+                q_lq = torch.randn((1, 8, 1024, 256), device=dev, dtype=dt)
+                k_lq = torch.randn((1, 1, 4096, 256), device=dev, dtype=dt)
+                v_lq = torch.randn((1, 1, 4096, 256), device=dev, dtype=dt)
+                sel_lq = torch.arange(515, device=dev, dtype=torch.int32).view(1, 1, 515).expand(1, 1024, 515).contiguous()
+                o_lq_d = qsa_sparse_prefill_attention(q_lq, k_lq, v_lq, sel_lq, assume_unique_selected=True)
+                ps_lq = 64
+                pages_lq = 4096 // ps_lq + 2
+                kv_lq_bf = torch.zeros((pages_lq, 2, 1, ps_lq, 256), device=dev, dtype=dt)
+                kv_lq_bf[1 : 1 + 4096 // ps_lq, 0, 0] = k_lq[0, 0].view(4096 // ps_lq, ps_lq, 256)
+                kv_lq_bf[1 : 1 + 4096 // ps_lq, 1, 0] = v_lq[0, 0].view(4096 // ps_lq, ps_lq, 256)
+                bt_lq = torch.arange(1, 1 + 4096 // ps_lq, device=dev, dtype=torch.int32).unsqueeze(0)
+                o_lq_p = qsa_sparse_paged_prefill_attention(
+                    q_lq, kv_lq_bf, bt_lq, sel_lq, page_size=ps_lq, kv_heads=1, head_dim=256, max_ctx_len=4096, assume_unique_selected=True
+                )
+            finally:
+                torch.Tensor.tolist = orig_tolist
+                torch.Tensor.item = orig_item
+            self.assertEqual(sync_calls, [], f"Unexpected CUDA tensor syncs: {sync_calls}")
+            ref_s64 = qsa_sparse_prefill_attention(q_s64.cpu(), k_s64.cpu(), v_s64.cpu(), sel_s64.cpu()).to(dev)
+            self.assertGreaterEqual(_cosine(o_s64, ref_s64), 0.9999)
+            ref_bm = qsa_sparse_prefill_attention(q_bm[:, :, :1].cpu(), k_bm.cpu(), v_bm.cpu(), sel_bm[:, :1].cpu()).to(dev)
+            self.assertGreaterEqual(_cosine(o_bm[:, :, :1], ref_bm), 0.9999)
+            ref_lq = qsa_sparse_prefill_attention(q_lq[:, :, :4].cpu(), k_lq.cpu(), v_lq.cpu(), sel_lq[:, :4].cpu()).to(dev)
+            self.assertGreaterEqual(_cosine(o_lq_d[:, :, :4], ref_lq), 0.9999)
+            self.assertGreaterEqual(_cosine(o_lq_p[:, :, :4], ref_lq), 0.9999)
+
+            # 3. Track 2 Hq=8 (blk_h=16) D=256 dsplit prefill (Dense BF16 + Paged FP8 w/ high-entropy random fallback)
+            D_m, T_p, K_p = 256, 512, 192
+            B_p, S_p, hq_tp4 = 2, 24, 8
+            qp = torch.randn((B_p, hq_tp4, S_p, D_m), device=dev, dtype=dt)
+            kp = torch.randn((B_p, 1, T_p, D_m), device=dev, dtype=dt)
+            vp = torch.randn((B_p, 1, T_p, D_m), device=dev, dtype=dt)
+            sel_p = torch.stack([
+                torch.stack([torch.randperm(T_p, device=dev, dtype=torch.int32)[:K_p] for _ in range(S_p)])
+                for _ in range(B_p)
+            ])
+            got_u8 = qsa_sparse_prefill_attention(qp, kp, vp, sel_p)
+            ref_u8 = qsa_sparse_prefill_attention(qp.cpu(), kp.cpu(), vp.cpu(), sel_p.cpu()).to(dev)
+            self.assertGreaterEqual(_cosine(got_u8, ref_u8), 0.9999)
+
+            n_lp = T_p // ps
+            kv_raw = torch.randn((B_p * n_lp + 4, 2, 1, ps, D_m), device=dev, dtype=dt) * 0.5
+            sc_p = 0.3 + torch.rand((B_p * n_lp + 4, 2, 1, ps), device=dev, dtype=torch.float32) * 1.4
+            kv_fp8 = (kv_raw.float() / sc_p.unsqueeze(-1)).to(torch.float8_e4m3fn)
+            bt_p = torch.arange(1, 1 + B_p * n_lp, device=dev, dtype=torch.int32).view(B_p, n_lp)
+            got_pg8 = qsa_sparse_paged_prefill_attention(
+                qp, kv_fp8, bt_p, sel_p, page_size=ps, kv_heads=1, head_dim=D_m, max_ctx_len=T_p, kv_scale=sc_p
+            )
+            kv_f = (kv_fp8.float() * sc_p.unsqueeze(-1)).to(dt)
+            ref_pg8 = torch.zeros_like(qp, dtype=torch.float32)
+            for b in range(B_p):
+                for s in range(S_p):
+                    ids = sel_p[b, s].long()
+                    pp, sl = bt_p[b, ids // ps].long(), ids % ps
+                    kk = kv_f[pp, 0, 0, sl].float().unsqueeze(0).expand(hq_tp4, -1, -1)
+                    vv = kv_f[pp, 1, 0, sl].float().unsqueeze(0).expand(hq_tp4, -1, -1)
+                    pr = torch.softmax(torch.einsum("hd,hkd->hk", qp[b, :, s].float(), kk) * (D_m ** -0.5), dim=-1)
+                    ref_pg8[b, :, s] = torch.einsum("hk,hkd->hd", pr, vv)
+            self.assertGreaterEqual(_cosine(got_pg8, ref_pg8.to(dt)), 0.9998)
+
+            # 4. End-to-End Runtime PreparedCommitPlan cache reuse + Verify/Decode CG capture & replay
+            arch = _make_mini_arch(
+                indexer_head_dim=128, indexer_n_heads=8, indexer_kv_heads=1,
+                indexer_compress_ratio=4, indexer_budget=16, max_position_embeddings=512,
+            )
+            pools = {
+                t: 48
+                for t in [
+                    INDEXER_KV_TAG, INDEXER_STATE_TAG, FULL_ATTN_KV_TAG, "linear",
+                    "gdn_consumer_q_conv", "full_attn_kv_sconv", "full_attn_output_sconv",
+                    "linear_attn_output_sconv", "ffn_output_sconv", "ple_conv_state", "ple_ngram_ctx",
+                ]
+            }
+            lm = Qwen4_5ForCausalLM(arch, use_triton_mxfp4=True, compute_mode="bf16", dtype=dt, device=dev)
+            lm.init_synthetic_weights(seed=202662, ple_mode="gpu_full", ple_fp8=False)
+            _stabilize_router_margins(lm)
+            lm.prepare_weights()
+            kv_a = LocalKVCache(build_qwen4_5_kv_cache_plan(arch), tokens_per_block=64, num_blocks_per_tag=pools, device=dev, dtype=dt)
+            kv_b = LocalKVCache(build_qwen4_5_kv_cache_plan(arch), tokens_per_block=64, num_blocks_per_tag=pools, device=dev, dtype=dt)
+            rt_eag = Qwen4_5RTPModel.from_causal_lm(lm, kv_cache=kv_a)
+            rt_cg = Qwen4_5RTPModel.from_causal_lm(lm, kv_cache=kv_b)
+            tbls_e = build_block_tables_for_requests(kv_a, [120, 120])
+            tbls_c = build_block_tables_for_requests(kv_b, [120, 120])
+            gen = torch.Generator(device="cpu").manual_seed(6262)
+            p0 = torch.randint(4, 240, (64,), generator=gen, dtype=torch.int64).to(dev)
+            p1 = torch.randint(4, 240, (65,), generator=gen, dtype=torch.int64).to(dev)
+            v0 = torch.randint(4, 240, (2, 8), generator=gen, dtype=torch.int64).to(dev)
+            v1 = torch.randint(4, 240, (2, 8), generator=gen, dtype=torch.int64).to(dev)
+            d0 = torch.randint(4, 240, (2,), generator=gen, dtype=torch.int64).to(dev)
+
+            for rt, tbls in ((rt_eag, tbls_e), (rt_cg, tbls_c)):
+                pref = LocalPyModelInputs(
+                    input_ids=torch.cat([p0, p1], dim=0),
+                    attention_inputs=make_tagged_attention_inputs(
+                        tbls, is_prefill=True, input_lengths=[64, 65], sequence_lengths=[64, 65], prefix_lengths=[0, 0], device=dev
+                    ),
+                )
+                rt.forward(pref)
+
+            snap_cg_pre = {
+                (lid_k, tag_k): lc.kv_cache_base.clone()
+                for lid_k, tag_map in enumerate(kv_b.layer_caches)
+                for tag_k, lc in tag_map.items()
+            }
+
+            def _restore_cg() -> None:
+                for (lid_k, tag_k), buf in snap_cg_pre.items():
+                    kv_b.layer_caches[lid_k][tag_k].kv_cache_base.copy_(buf)
+
+            va_c = make_tagged_attention_inputs(
+                tbls_c, is_prefill=True, input_lengths=[8, 8], sequence_lengths=[], prefix_lengths=[64, 65], device=dev
+            )
+            for grp in va_c.values():
+                grp.is_target_verify = True
+                grp.prefix_lengths = grp.prefix_lengths.to(device=dev, dtype=torch.int32)
+            v_ids = v0.reshape(-1).clone()
+            v_cg_in = LocalPyModelInputs(input_ids=v_ids, attention_inputs=va_c)
+            v_cg_handle = rt_cg.prepare_fmha_impl(v_cg_in, is_cuda_graph=True)
+            self.assertTrue(v_cg_handle.support_cuda_graph())
+
+            _ = rt_cg.forward(v_cg_in, fmha_impl=v_cg_handle)
+            rt_cg.on_cuda_graph_warmup(v_cg_in)
+            _restore_cg()
+
+            cg_v = torch.cuda.CUDAGraph()
+            v_cg_handle.prepare_cuda_graph(v_cg_in.attention_inputs)
+            with torch.cuda.graph(cg_v):
+                ov_cg = rt_cg.forward(v_cg_in, fmha_impl=v_cg_handle).hidden_states
+            torch.cuda.synchronize()
+            rt_cg.on_cuda_graph_capture(2, v_cg_in)
+
+            # Mutate tokens & replay verify CG, then test PreparedCommitPlan reuse across 2 rollback/commit cycles
+            v_ids.copy_(v1.reshape(-1))
+            _restore_cg()
+            v_cg_handle.prepare_cuda_graph(v_cg_in.attention_inputs)
+            cg_v.replay()
+            torch.cuda.synchronize()
+            rt_cg.on_cuda_graph_replay(2, v_cg_in)
+
+            va_e = make_tagged_attention_inputs(
+                tbls_e, is_prefill=True, input_lengths=[8, 8], sequence_lengths=[], prefix_lengths=[64, 65], device=dev
+            )
+            for grp in va_e.values():
+                grp.is_target_verify = True
+            ov_eag = rt_eag.forward(LocalPyModelInputs(input_ids=v1.reshape(-1), attention_inputs=va_e)).hidden_states
+            self.assertGreaterEqual(_cosine(ov_cg, ov_eag), 0.99999)
+
+            acc_dev = torch.tensor([4, 3], dtype=torch.int32, device=dev)
+            rt_cg.prepare_speculative_target_commit(acc_dev)
+            plan_obj = rt_cg.tx_manager._active_pending._prepared_plan
+            self.assertIsNotNone(plan_obj)
+            rt_cg.finish_speculative_target_commit(False)
+            rt_cg.finalize_speculative_target_commit()
+
+            # Second verify replay + commit reuses the cached PreparedCommitPlan object
+            v_cg_handle.prepare_cuda_graph(v_cg_in.attention_inputs)
+            cg_v.replay()
+            torch.cuda.synchronize()
+            rt_cg.on_cuda_graph_replay(2, v_cg_in)
+            rt_cg.prepare_speculative_target_commit(acc_dev)
+            self.assertIs(rt_cg.tx_manager._active_pending._prepared_plan, plan_obj)
+            rt_cg.finish_speculative_target_commit(True)
+            rt_cg.finalize_speculative_target_commit()
+
+            rt_eag.prepare_speculative_target_commit(acc_dev)
+            rt_eag.finish_speculative_target_commit(True)
+            rt_eag.finalize_speculative_target_commit()
+
+            # Decode CG capture + replay (after [64, 65] + [4, 3] => seq_lens=[68, 68])
+            snap_dec = {
+                (lid_k, tag_k): lc.kv_cache_base.clone()
+                for lid_k, tag_map in enumerate(kv_b.layer_caches)
+                for tag_k, lc in tag_map.items()
+            }
+
+            def _restore_dec() -> None:
+                for (lid_k, tag_k), buf in snap_dec.items():
+                    kv_b.layer_caches[lid_k][tag_k].kv_cache_base.copy_(buf)
+
+            da_c = make_tagged_attention_inputs(
+                tbls_c, is_prefill=False, input_lengths=[1, 1], sequence_lengths=[68, 68], prefix_lengths=[0, 0], device=dev
+            )
+            for grp in da_c.values():
+                grp.is_cuda_graph = True
+                grp.sequence_lengths_plus_1_device = torch.tensor([69, 69], dtype=torch.int32, device=dev)
+            d_ids = d0.clone()
+            d_cg_in = LocalPyModelInputs(input_ids=d_ids, attention_inputs=da_c)
+            d_cg_handle = rt_cg.prepare_fmha_impl(d_cg_in, is_cuda_graph=True)
+            self.assertTrue(d_cg_handle.support_cuda_graph())
+
+            _ = rt_cg.forward(d_cg_in, fmha_impl=d_cg_handle)
+            rt_cg.on_cuda_graph_warmup(d_cg_in)
+            _restore_dec()
+
+            cg_d = torch.cuda.CUDAGraph()
+            d_cg_handle.prepare_cuda_graph(d_cg_in.attention_inputs)
+            with torch.cuda.graph(cg_d):
+                od_cg = rt_cg.forward(d_cg_in, fmha_impl=d_cg_handle).hidden_states
+            torch.cuda.synchronize()
+            rt_cg.on_cuda_graph_capture(2, d_cg_in)
+
+            _restore_dec()
+            d_cg_handle.prepare_cuda_graph(d_cg_in.attention_inputs)
+            cg_d.replay()
+            torch.cuda.synchronize()
+            rt_cg.on_cuda_graph_replay(2, d_cg_in)
+
+            da_e = make_tagged_attention_inputs(
+                tbls_e, is_prefill=False, input_lengths=[1, 1], sequence_lengths=[68, 68], prefix_lengths=[0, 0], device=dev
+            )
+            od_eag = rt_eag.forward(LocalPyModelInputs(input_ids=d0.clone(), attention_inputs=da_e)).hidden_states
+            self.assertGreaterEqual(_cosine(od_cg, od_eag), 0.9999)
+
+            # Mutate token & sequence_lengths_plus_1_device in-place and replay step 2 ([69, 69]) without re-capture
+            d1 = torch.randint(4, 240, (2,), generator=gen, dtype=torch.int64).to(dev)
+            d_ids.copy_(d1)
+            for grp in da_c.values():
+                grp.sequence_lengths_plus_1_device.fill_(70)
+            d_cg_handle.prepare_cuda_graph(d_cg_in.attention_inputs)
+            cg_d.replay()
+            torch.cuda.synchronize()
+            rt_cg.on_cuda_graph_replay(2, d_cg_in)
+            da_e2 = make_tagged_attention_inputs(
+                tbls_e, is_prefill=False, input_lengths=[1, 1], sequence_lengths=[69, 69], prefix_lengths=[0, 0], device=dev
+            )
+            od_eag2 = rt_eag.forward(LocalPyModelInputs(input_ids=d1, attention_inputs=da_e2)).hidden_states
+            self.assertGreaterEqual(_cosine(od_cg, od_eag2), 0.9999)
 
 if __name__ == "__main__":
     unittest.main()

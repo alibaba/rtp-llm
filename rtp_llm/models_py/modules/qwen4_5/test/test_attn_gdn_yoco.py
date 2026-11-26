@@ -1049,6 +1049,188 @@ def test_r5_gdn_verify_readout_stage1_and_fused_projections() -> None:
 
 
 @torch.no_grad()
+def test_r6_gdn_decode_opaque_and_direct_chunk64_snaps() -> None:
+    print("\n=== [3f] R6 GDN Direct-Opaque Decode & Track 2 Direct-Chunk64 Ragged Prefill ===")
+    device = torch.device("cuda")
+    dtype = torch.bfloat16
+    torch.manual_seed(202661)
+
+    # 1. forward_decode_opaque parity across Normal(L0), YoCo Source(L20), YoCo Consumer(L21), packed vs split pools, and CG
+    cfg = make_config(hidden_size=512)
+    plan = YoCoSharingPlan.from_config(cfg)
+    gdn_norm = Qwen4_5GatedDeltaNet.from_config(cfg, layer_idx=0, sharing_plan=plan).to(device=device, dtype=dtype).eval()
+    gdn_src = Qwen4_5GatedDeltaNet.from_config(cfg, layer_idx=20, sharing_plan=plan).to(device=device, dtype=dtype).eval()
+    gdn_cons = Qwen4_5GatedDeltaNet.from_config(cfg, layer_idx=21, sharing_plan=plan).to(device=device, dtype=dtype).eval()
+    for mod in (gdn_norm, gdn_src, gdn_cons):
+        init_realistic_weights(mod)
+
+    B, ps, num_blocks = 4, 64, 24
+    bt = torch.tensor([[1 + b * 2, 2 + b * 2, 0] for b in range(B)], device=device, dtype=torch.int32)
+    seq_before = torch.tensor([0, 64, 65, 128], device=device, dtype=torch.int32)
+    h_dec = torch.randn((B, 1, 512), device=device, dtype=dtype) * 0.25
+
+    import math
+    _st_s0 = gdn_src.create_state(1, device, dtype)
+    _st_c0 = gdn_cons.create_state(1, device, dtype)
+    ssm_shape = tuple(_st_s0.ssm_state.shape[1:])
+    conv_shape = tuple(_st_s0.conv_state.shape[1:])
+    conv_c_shape = tuple(_st_c0.conv_state.shape[1:])
+    ssm_n = math.prod(ssm_shape)
+    conv_n = math.prod(conv_shape)
+    conv_c_n = math.prod(conv_c_shape)
+
+    # 1a) Packed LINEAR_ATTN_TAG layout (ssm_n fp32 + 2*conv_n bf16)
+    row_fp32 = ssm_n + ((conv_n + 1) // 2)
+    lin_pool = torch.zeros((num_blocks, row_fp32), device=device, dtype=torch.float32)
+    lin_pool[:, :ssm_n].normal_(0.0, 0.1)
+    lin_pool[:, ssm_n:].view(torch.bfloat16)[:, :conv_n].normal_(0.0, 0.2)
+    lin_pool_ref = lin_pool.clone()
+    ssm_pool_2d = lin_pool.view(num_blocks, row_fp32)
+    conv_pool_2d = lin_pool.view(torch.bfloat16).view(num_blocks, row_fp32 * 2)
+
+    st_ref_n = gdn_norm.create_state(B, device, dtype)
+    for b in range(B):
+        sb = int(seq_before[b].item())
+        if sb > 0:
+            phys = int(bt[b, (sb - 1) // ps].item())
+            if 0 < phys < num_blocks:
+                st_ref_n.ssm_state[b].copy_(lin_pool_ref[phys, :ssm_n].view(ssm_shape))
+                st_ref_n.conv_state[b].copy_(
+                    lin_pool_ref[phys, ssm_n:].view(torch.bfloat16)[:conv_n].view(conv_shape)
+                )
+    out_ref_n, _ = gdn_norm.forward(h_dec, state=st_ref_n)
+    out_opq_n, _ = gdn_norm.forward_decode_opaque(
+        h_dec,
+        conv_pool_2d=conv_pool_2d, bt_conv=bt, tpb_conv=ps, conv_col_offset=2 * ssm_n,
+        ssm_pool_2d=ssm_pool_2d, bt_ssm=bt, tpb_ssm=ps, ssm_col_offset=0,
+        seq_before=seq_before,
+    )
+    assert F.cosine_similarity(out_opq_n.float().flatten(), out_ref_n.float().flatten(), dim=0).item() > 0.9999
+    for b in range(B):
+        sb = int(seq_before[b].item())
+        phys_w = int(bt[b, sb // ps].item())
+        if 0 < phys_w < num_blocks:
+            ssm_got = ssm_pool_2d[phys_w, :ssm_n].view(ssm_shape)
+            conv_got = conv_pool_2d[phys_w, 2 * ssm_n : 2 * ssm_n + conv_n].view(conv_shape)
+            assert (ssm_got - st_ref_n.ssm_state[b]).abs().max().item() < 1e-4
+            assert (conv_got - st_ref_n.conv_state[b]).abs().max().item() == 0.0
+
+    # 1b) Split pools + YoCo Source/Consumer + CG capture/replay
+    split_ssm = torch.randn((num_blocks, ssm_n), device=device, dtype=torch.float32) * 0.1
+    split_conv = torch.randn((num_blocks, conv_n), device=device, dtype=dtype) * 0.2
+    split_cons_conv = torch.randn((num_blocks, conv_c_n), device=device, dtype=dtype) * 0.2
+    st_ref_s = gdn_src.create_state(B, device, dtype)
+    st_ref_c = gdn_cons.create_state(B, device, dtype)
+    for b in range(B):
+        sb = int(seq_before[b].item())
+        if sb > 0:
+            phys = int(bt[b, (sb - 1) // ps].item())
+            if 0 < phys < num_blocks:
+                st_ref_s.ssm_state[b].copy_(split_ssm[phys].view(ssm_shape))
+                st_ref_s.conv_state[b].copy_(split_conv[phys].view(conv_shape))
+                st_ref_c.conv_state[b].copy_(split_cons_conv[phys].view(conv_c_shape))
+    out_ref_s, sh_ref = gdn_src.forward(h_dec, state=st_ref_s)
+    out_ref_c, _ = gdn_cons.forward(h_dec, state=st_ref_c, shared=sh_ref)
+
+    ssm_cg, conv_cg, cconv_cg = split_ssm.clone(), split_conv.clone(), split_cons_conv.clone()
+    h_cg = h_dec.clone()
+    cg = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(cg):
+        out_cg_s, sh_cg = gdn_src.forward_decode_opaque(
+            h_cg, conv_pool_2d=conv_cg, bt_conv=bt, tpb_conv=ps, conv_col_offset=0,
+            ssm_pool_2d=ssm_cg, bt_ssm=bt, tpb_ssm=ps, ssm_col_offset=0,
+            seq_before=seq_before, enable_yoco_decode=True,
+        )
+        out_cg_c, _ = gdn_cons.forward_decode_opaque(
+            h_cg, conv_pool_2d=cconv_cg, bt_conv=bt, tpb_conv=ps, conv_col_offset=0,
+            ssm_pool_2d=None, bt_ssm=None, tpb_ssm=ps, ssm_col_offset=0,
+            seq_before=seq_before, shared=sh_cg, enable_yoco_decode=True,
+        )
+    ssm_cg.copy_(split_ssm); conv_cg.copy_(split_conv); cconv_cg.copy_(split_cons_conv)
+    h_new = torch.randn_like(h_dec) * 0.25
+    h_cg.copy_(h_new)
+    cg.replay()
+    st_r2_s = gdn_src.create_state(B, device, dtype)
+    st_r2_c = gdn_cons.create_state(B, device, dtype)
+    for b in range(B):
+        sb = int(seq_before[b].item())
+        if sb > 0:
+            phys = int(bt[b, (sb - 1) // ps].item())
+            if 0 < phys < num_blocks:
+                st_r2_s.ssm_state[b].copy_(split_ssm[phys].view(ssm_shape))
+                st_r2_s.conv_state[b].copy_(split_conv[phys].view(conv_shape))
+                st_r2_c.conv_state[b].copy_(split_cons_conv[phys].view(conv_c_shape))
+    out_r2_s, sh_r2 = gdn_src.forward(h_new, state=st_r2_s)
+    out_r2_c, _ = gdn_cons.forward(h_new, state=st_r2_c, shared=sh_r2)
+    assert F.cosine_similarity(out_cg_s.float().flatten(), out_r2_s.float().flatten(), dim=0).item() > 0.9999
+    assert F.cosine_similarity(out_cg_c.float().flatten(), out_r2_c.float().flatten(), dim=0).item() > 0.9999
+
+    # 2. Track 2 Direct-Chunk64 Stage 1/2 tuning across Hv=32 (bdv=16, ns=3, nw=1 at ctas>=1024) & Hv=128
+    for hv, lens in [(32, [64, 192, 130]), (32, [2048]), (128, [64, 512])]:
+        hk = hv // 2
+        N = sum(lens)
+        _, cu, _, _, chunk_req, chunk_t0, req_chunk_start, _, _, s_end, r_ss, _, _, _ = _build_ragged_meta_for_test(
+            lens, block_t=64, device=device
+        )
+        # Filter s_end to exact per-64-token chunk boundaries matching chunk count
+        snaps = []
+        r_sstart = [0]
+        for ln in lens:
+            for e in range(64, ln + 64, 64):
+                snaps.append(min(ln, e))
+            r_sstart.append(len(snaps))
+        snap_le = torch.tensor(snaps, device=device, dtype=torch.int32)
+        req_ss = torch.tensor(r_sstart, device=device, dtype=torch.int32)
+        snap_phys = torch.arange(1, len(snaps) + 1, device=device, dtype=torch.int32)
+        pool_d = torch.zeros((len(snaps) + 2, hv * 64 * 64), device=device, dtype=torch.float32)
+        pool_w = torch.zeros_like(pool_d)
+
+        qt = torch.randn((N, hk, 64), device=device, dtype=dtype) * 0.1
+        kt = torch.randn((N, hk, 64), device=device, dtype=dtype) * 0.1
+        vt = torch.randn((N, hv, 64), device=device, dtype=dtype) * 0.1
+        gt = -torch.rand((N, hv), device=device, dtype=torch.float32) * 0.2
+        bt_g = torch.sigmoid(torch.randn((N, hv), device=device, dtype=dtype))
+        init_st = torch.randn((len(lens), hv, 64, 64), device=device, dtype=torch.float32) * 0.05
+
+        out_d, fs_d = gdn_chunk_prefill_ragged_with_snapshots_triton(
+            qt, kt, vt, gt, bt_g, cu, chunk_req, chunk_t0, req_chunk_start,
+            initial_state=init_st, req_snap_start=req_ss, snap_local_end=snap_le,
+            snap_phys=snap_phys, ssm_dst_pool=pool_d, snaps_direct_chunk64=True, output_final_states=True,
+        )
+        out_w, fs_w = gdn_chunk_prefill_ragged_with_snapshots_triton(
+            qt, kt, vt, gt, bt_g, cu, chunk_req, chunk_t0, req_chunk_start,
+            initial_state=init_st, req_snap_start=req_ss, snap_local_end=snap_le,
+            snap_phys=snap_phys, ssm_dst_pool=pool_w, snaps_direct_chunk64=False, output_final_states=True,
+        )
+        assert float((out_d - out_w).abs().max().item()) == 0.0
+        assert float((fs_d - fs_w).abs().max().item()) == 0.0
+        assert float((pool_d - pool_w).abs().max().item()) == 0.0
+        if N <= 512:
+            for bi, ln in enumerate(lens):
+                s0, s1 = sum(lens[:bi]), sum(lens[:bi + 1])
+                o_ref, fs_r = gdn_recurrent_ref(
+                    qt[s0:s1].unsqueeze(0), kt[s0:s1].unsqueeze(0), vt[s0:s1].unsqueeze(0),
+                    gt[s0:s1].unsqueeze(0), bt_g[s0:s1].unsqueeze(0), initial_state=init_st[bi:bi+1],
+                    output_final_state=True,
+                )
+                assert F.cosine_similarity(out_d[s0:s1].float().flatten(), o_ref.float().flatten(), dim=0).item() > 0.9998
+                assert (fs_d[bi:bi+1] - fs_r).abs().max().item() < 5e-3
+    # Cross-dtype conv1d.weight (fp32 -> bf16) ckey parity on forward_packed_prefill & live _GDN_TRITON_CACHE hit
+    import copy
+    from rtp_llm.models_py.modules.qwen4_5.gdn import _GDN_TRITON_CACHE
+
+    gdn_f32 = copy.deepcopy(gdn_norm)
+    gdn_f32.conv1d.weight = torch.nn.Parameter(gdn_f32.conv1d.weight.detach().float())
+    _, cu_ck, tr_ck, tt0_ck, cr_ck, ct0_ck, rcs_ck, _, _, _, _, _, _, _ = _build_ragged_meta_for_test([64, 65], device=device)
+    hp_ck = torch.randn((129, 512), device=device, dtype=dtype) * 0.25
+    o_f32, _ = gdn_f32.forward_packed_prefill(hp_ck, cu_ck, tr_ck, tt0_ck, cr_ck, ct0_ck, rcs_ck)
+    o_bf16, _ = gdn_norm.forward_packed_prefill(hp_ck, cu_ck, tr_ck, tt0_ck, cr_ck, ct0_ck, rcs_ck)
+    assert F.cosine_similarity(o_f32.float().flatten(), o_bf16.float().flatten(), dim=0).item() > 0.9999
+    assert len(_GDN_TRITON_CACHE) > 0
+    print("  PASS: GDN forward_decode_opaque (packed & split, YoCo, CG), Direct-Chunk64 & conv_w dtype ckey verified.")
+
+
+@torch.no_grad()
 def bench_cuda(fn, warmup: int = 10, iters: int = 50) -> tuple[float, float]:
     """Return (median_ms, mean_ms) using CUDA events."""
     for _ in range(warmup):
@@ -1231,6 +1413,7 @@ def main() -> None:
     test_r3_gdn_stage2_sub_dv_and_verify_nw1()
     test_r4_rmsnorm_gated_packed_yoco_subdv_and_prefill_tuning()
     test_r5_gdn_verify_readout_stage1_and_fused_projections()
+    test_r6_gdn_decode_opaque_and_direct_chunk64_snaps()
     run_b300_benchmarks()
     print(f"\nALL TESTS & BENCHMARKS PASSED in {time.time() - t0:.2f}s")
 

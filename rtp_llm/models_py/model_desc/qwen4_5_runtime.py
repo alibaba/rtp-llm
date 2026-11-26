@@ -73,11 +73,17 @@ from rtp_llm.models_py.modules.qwen4_5.qsa_bridge import (
     write_qsa_prefill_cache,
     write_qsa_verify_cache_gpu_,
 )
+from rtp_llm.models_py.modules.qwen4_5.hyper_connection import (
+    hc_sconv_decode_opaque_combine_norm_triton,
+)
 from rtp_llm.models_py.modules.qwen4_5.short_conv import (
+    _triton_int_spec,
+    causal_dwconv1d_decode_opaque_triton,
     causal_dwconv1d_decode_triton,
     causal_dwconv1d_ragged_prefill_with_snapshots_triton,
     causal_dwconv1d_verify_opaque_triton,
     causal_dwconv1d_verify_triton,
+    triton_fast_launch,
 )
 from rtp_llm.models_py.modules.qwen4_5.contracts import (
     FullAttnKVCache,
@@ -118,6 +124,29 @@ except Exception:  # pragma: no cover - pure-Python mode
     _RtpPyModelInputs = None
     _RtpPyModelOutputs = None
     _HAS_COMPILED_GPT_BASE = False
+
+
+_RUNTIME_TRITON_CACHE: dict = {}
+_DTYPE_ITEMSIZE: Dict[torch.dtype, int] = {
+    torch.uint8: 1,
+    torch.int8: 1,
+    torch.bool: 1,
+    torch.float8_e4m3fn: 1,
+    torch.float16: 2,
+    torch.bfloat16: 2,
+    torch.int16: 2,
+    torch.float32: 4,
+    torch.int32: 4,
+    torch.float64: 8,
+    torch.int64: 8,
+}
+
+
+def _dtype_itemsize(dtype: torch.dtype) -> int:
+    sz = _DTYPE_ITEMSIZE.get(dtype)
+    if sz is not None:
+        return sz
+    return int(torch.empty((), dtype=dtype).element_size())
 
 
 QWEN4_5_CACHE_TAGS = frozenset(
@@ -669,7 +698,7 @@ def _view_opaque_row(
         and base.dtype == target_dtype
     ):
         return base[phys_id]
-    elem_size = torch.empty((), dtype=target_dtype).element_size()
+    elem_size = _dtype_itemsize(target_dtype)
     need_bytes = math.prod(target_shape) * elem_size
     row_u8 = base[phys_id].reshape(-1).view(torch.uint8)
     if int(row_u8.numel()) < need_bytes:
@@ -1573,7 +1602,7 @@ if _HAS_TRITON:
 def _view_opaque_pool_2d(base: torch.Tensor, target_dtype: torch.dtype) -> Tuple[torch.Tensor, int]:
     """Zero-copy [num_blocks, row_elems] view of an opaque pool in ``target_dtype``."""
     nb = int(base.shape[0])
-    elem_bytes = torch.empty((), dtype=target_dtype).element_size()
+    elem_bytes = _dtype_itemsize(target_dtype)
     if base.dtype == target_dtype:
         if base.ndim == 2:
             return base, int(base.shape[1])
@@ -1647,38 +1676,30 @@ def _store_ragged_full_attn_kv_gpu(
     )
     s_blk, s_kv, s_tok, s_h, s_d = [int(s) for s in pool_nhd.stride()]
     block_d = max(16, int(triton.next_power_of_2(head_dim)))
-    _store_ragged_full_attn_kv_triton[(n_tok, h_kv)](
-        pool_nhd,
-        sc_ptr,
-        k_3d,
-        v_3d,
-        block_table,
-        tok_req_dev,
-        tok_abs_pos_dev,
-        s_blk,
-        s_kv,
-        s_tok,
-        s_h,
-        s_d,
-        sc_sb,
-        sc_skv,
-        sc_sh,
-        sc_st,
-        int(k_3d.stride(0)),
-        int(k_3d.stride(1)),
-        int(k_3d.stride(2)),
-        int(v_3d.stride(0)),
-        int(v_3d.stride(1)),
-        int(v_3d.stride(2)),
-        int(block_table.stride(0)),
-        int(block_table.stride(1)),
-        tpb,
-        max_blocks,
-        num_blocks,
-        head_dim,
-        BLOCK_D=block_d,
-        HAS_SCALE=has_scale,
-        IS_FP8_POOL=(pool_nhd.dtype == torch.float8_e4m3fn),
+    ks0, ks1, ks2 = int(k_3d.stride(0)), int(k_3d.stride(1)), int(k_3d.stride(2))
+    vs0, vs1, vs2 = int(v_3d.stride(0)), int(v_3d.stride(1)), int(v_3d.stride(2))
+    bt0, bt1 = int(block_table.stride(0)), int(block_table.stride(1))
+    is_fp8 = pool_nhd.dtype == torch.float8_e4m3fn
+    rt_args = (
+        pool_nhd, sc_ptr, k_3d, v_3d, block_table, tok_req_dev, tok_abs_pos_dev,
+        s_blk, s_kv, s_tok, s_h, s_d, sc_sb, sc_skv, sc_sh, sc_st,
+        ks0, ks1, ks2, vs0, vs1, vs2, bt0, bt1, tpb, max_blocks, num_blocks, head_dim,
+    )
+    ptr_or = (
+        pool_nhd.data_ptr() | sc_ptr.data_ptr() | k_3d.data_ptr() | v_3d.data_ptr()
+        | block_table.data_ptr() | tok_req_dev.data_ptr() | tok_abs_pos_dev.data_ptr()
+    )
+    ckey = (
+        pool_nhd.device.index, "rt_store_rag", pool_nhd.dtype, sc_ptr.dtype, k_3d.dtype, v_3d.dtype,
+        block_table.dtype, tok_req_dev.dtype, tok_abs_pos_dev.dtype,
+        tuple(_triton_int_spec(x) for x in rt_args[7:]),
+        block_d, has_scale, is_fp8,
+    )
+    triton_fast_launch(
+        _RUNTIME_TRITON_CACHE, ckey, _store_ragged_full_attn_kv_triton,
+        n_tok, h_kv, 1, ptr_or, rt_args,
+        {"BLOCK_D": block_d, "HAS_SCALE": has_scale, "IS_FP8_POOL": is_fp8},
+        num_warps=4,
     )
 
 
@@ -1715,39 +1736,30 @@ def _store_verify_full_attn_kv_gpu(
     )
     s_blk, s_kv, s_h, s_tok, s_d = [int(s) for s in pool_hnd.stride()]
     block_d = max(16, int(triton.next_power_of_2(head_dim)))
-    _store_verify_full_attn_kv_triton[(bsz, verify_w, h_kv)](
-        pool_hnd,
-        sc_ptr,
-        k_4d,
-        v_4d,
-        block_table,
-        seq_before_dev,
-        s_blk,
-        s_kv,
-        s_h,
-        s_tok,
-        s_d,
-        sc_sb,
-        sc_skv,
-        sc_sh,
-        sc_st,
-        int(k_4d.stride(0)),
-        int(k_4d.stride(1)),
-        int(k_4d.stride(2)),
-        int(k_4d.stride(3)),
-        int(v_4d.stride(0)),
-        int(v_4d.stride(1)),
-        int(v_4d.stride(2)),
-        int(v_4d.stride(3)),
-        int(block_table.stride(0)),
-        int(block_table.stride(1)),
-        tpb,
-        max_blocks,
-        num_blocks,
-        head_dim,
-        BLOCK_D=block_d,
-        HAS_SCALE=has_scale,
-        IS_FP8_POOL=(pool_hnd.dtype == torch.float8_e4m3fn),
+    ks0, ks1, ks2, ks3 = int(k_4d.stride(0)), int(k_4d.stride(1)), int(k_4d.stride(2)), int(k_4d.stride(3))
+    vs0, vs1, vs2, vs3 = int(v_4d.stride(0)), int(v_4d.stride(1)), int(v_4d.stride(2)), int(v_4d.stride(3))
+    bt0, bt1 = int(block_table.stride(0)), int(block_table.stride(1))
+    is_fp8 = pool_hnd.dtype == torch.float8_e4m3fn
+    rt_args = (
+        pool_hnd, sc_ptr, k_4d, v_4d, block_table, seq_before_dev,
+        s_blk, s_kv, s_h, s_tok, s_d, sc_sb, sc_skv, sc_sh, sc_st,
+        ks0, ks1, ks2, ks3, vs0, vs1, vs2, vs3, bt0, bt1, tpb, max_blocks, num_blocks, head_dim,
+    )
+    ptr_or = (
+        pool_hnd.data_ptr() | sc_ptr.data_ptr() | k_4d.data_ptr() | v_4d.data_ptr()
+        | block_table.data_ptr() | seq_before_dev.data_ptr()
+    )
+    ckey = (
+        pool_hnd.device.index, "rt_store_vrf", pool_hnd.dtype, sc_ptr.dtype, k_4d.dtype, v_4d.dtype,
+        block_table.dtype, seq_before_dev.dtype,
+        tuple(_triton_int_spec(x) for x in rt_args[6:]),
+        block_d, has_scale, is_fp8,
+    )
+    triton_fast_launch(
+        _RUNTIME_TRITON_CACHE, ckey, _store_verify_full_attn_kv_triton,
+        bsz, verify_w, h_kv, ptr_or, rt_args,
+        {"BLOCK_D": block_d, "HAS_SCALE": has_scale, "IS_FP8_POOL": is_fp8},
+        num_warps=4,
     )
 
 
@@ -1784,37 +1796,30 @@ def _store_decode_full_attn_kv_gpu(
     v_3d = v_4d[:, 0]
     s_blk, s_kv, s_h, s_tok, s_d = pool_hnd.stride()
     block_d = int(triton.next_power_of_2(head_dim))
-    _store_decode_full_attn_kv_triton[(bsz, h_kv)](
-        pool_hnd,
-        sc_ptr,
-        k_3d,
-        v_3d,
-        block_table,
-        seq_before_dev,
-        s_blk,
-        s_kv,
-        s_h,
-        s_tok,
-        s_d,
-        sc_sb,
-        sc_skv,
-        sc_sh,
-        sc_st,
-        int(k_3d.stride(0)),
-        int(k_3d.stride(1)),
-        int(k_3d.stride(2)),
-        int(v_3d.stride(0)),
-        int(v_3d.stride(1)),
-        int(v_3d.stride(2)),
-        int(block_table.stride(0)),
-        int(block_table.stride(1)),
-        tpb,
-        max_blocks,
-        num_blocks,
-        head_dim,
-        BLOCK_D=block_d,
-        HAS_SCALE=has_scale,
-        IS_FP8_POOL=(pool_hnd.dtype == torch.float8_e4m3fn),
+    ks0, ks1, ks2 = int(k_3d.stride(0)), int(k_3d.stride(1)), int(k_3d.stride(2))
+    vs0, vs1, vs2 = int(v_3d.stride(0)), int(v_3d.stride(1)), int(v_3d.stride(2))
+    bt0, bt1 = int(block_table.stride(0)), int(block_table.stride(1))
+    is_fp8 = pool_hnd.dtype == torch.float8_e4m3fn
+    rt_args = (
+        pool_hnd, sc_ptr, k_3d, v_3d, block_table, seq_before_dev,
+        s_blk, s_kv, s_h, s_tok, s_d, sc_sb, sc_skv, sc_sh, sc_st,
+        ks0, ks1, ks2, vs0, vs1, vs2, bt0, bt1, tpb, max_blocks, num_blocks, head_dim,
+    )
+    ptr_or = (
+        pool_hnd.data_ptr() | sc_ptr.data_ptr() | k_3d.data_ptr() | v_3d.data_ptr()
+        | block_table.data_ptr() | seq_before_dev.data_ptr()
+    )
+    ckey = (
+        pool_hnd.device.index, "rt_store_dec", pool_hnd.dtype, sc_ptr.dtype, k_3d.dtype, v_3d.dtype,
+        block_table.dtype, seq_before_dev.dtype,
+        tuple(_triton_int_spec(x) for x in rt_args[6:]),
+        block_d, has_scale, is_fp8,
+    )
+    triton_fast_launch(
+        _RUNTIME_TRITON_CACHE, ckey, _store_decode_full_attn_kv_triton,
+        bsz, h_kv, 1, ptr_or, rt_args,
+        {"BLOCK_D": block_d, "HAS_SCALE": has_scale, "IS_FP8_POOL": is_fp8},
+        num_warps=4,
     )
 
 
@@ -2047,15 +2052,19 @@ def _write_opaque_rows_raw_gpu(
     )
     block_sz = 1024
     grid = (nrows, int(triton.cdiv(n_elems, block_sz)))
-    _write_opaque_rows_triton[grid](
-        dst_view,
-        src_view,
-        phys_i32,
-        int(dst_view.stride(0)),
-        int(src_view.stride(0)),
-        n_elems,
-        num_blocks,
-        BLOCK_SIZE=block_sz,
+    dst_s0, src_s0 = int(dst_view.stride(0)), int(src_view.stride(0))
+    ptr_or = dst_view.data_ptr() | src_view.data_ptr() | phys_i32.data_ptr()
+    ckey = (
+        dst_view.device.index, "rt_write_op", dst_view.dtype, src_view.dtype, phys_i32.dtype,
+        _triton_int_spec(dst_s0), _triton_int_spec(src_s0), _triton_int_spec(n_elems), _triton_int_spec(num_blocks),
+        block_sz,
+    )
+    triton_fast_launch(
+        _RUNTIME_TRITON_CACHE, ckey, _write_opaque_rows_triton,
+        grid[0], grid[1], 1, ptr_or,
+        (dst_view, src_view, phys_i32, dst_s0, src_s0, n_elems, num_blocks),
+        {"BLOCK_SIZE": block_sz},
+        num_warps=4,
     )
 
 
@@ -2279,6 +2288,7 @@ class _RaggedPrefillPlan:
     active_lens: List[int]
     active_pfx: List[int]
     offsets: List[int]
+    cu_seqlens_host: List[int]
     has_any_prefix: bool
     cu_seqlens_i32: torch.Tensor
     start_pos_i64: torch.Tensor
@@ -2293,9 +2303,19 @@ class _RaggedPrefillPlan:
     chunk_t0_64: torch.Tensor
     req_chunk_start_64: torch.Tensor
     act_idx_dev: Optional[torch.Tensor]
-    snap_cache: Dict[int, Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = field(
-        default_factory=dict
-    )
+    snap_cache: Dict[
+        int,
+        Tuple[
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+            bool,
+            bool,
+        ],
+    ] = field(default_factory=dict)
 
 
 class Qwen4_5PagedStateBridge:
@@ -2445,7 +2465,7 @@ class Qwen4_5PagedStateBridge:
         elem_dtype: torch.dtype,
     ) -> Optional[torch.Tensor]:
         """Return [rows, row_elems] view in ``elem_dtype`` if stride and ptr satisfy alignment."""
-        elem_sz = torch.empty((), dtype=elem_dtype).element_size()
+        elem_sz = _dtype_itemsize(elem_dtype)
         if need_bytes % elem_sz != 0:
             return None
         t_u8 = tensor.reshape(rows, -1).view(torch.uint8)
@@ -2545,21 +2565,28 @@ class Qwen4_5PagedStateBridge:
                 fv = 0
             if dst_view is not None and src_view is not None and dst_view.data_ptr() == dst_u8.data_ptr():
                 block_sz = 1024
-                _read_opaque_rows_triton[(bsz, int(triton.cdiv(n_elems, block_sz)))](
-                    dst_view,
-                    src_view,
-                    block_table,
-                    seq_before_dev,
-                    int(dst_view.stride(0)),
-                    int(src_view.stride(0)),
-                    int(block_table.stride(0)),
-                    int(block_table.stride(1)),
-                    tpb,
-                    max_blocks,
-                    num_blocks,
-                    n_elems,
-                    fv,
-                    BLOCK_SIZE=block_sz,
+                dst_s0, src_s0 = int(dst_view.stride(0)), int(src_view.stride(0))
+                bt_s0, bt_s1 = int(block_table.stride(0)), int(block_table.stride(1))
+                ptr_or = (
+                    dst_view.data_ptr() | src_view.data_ptr()
+                    | block_table.data_ptr() | seq_before_dev.data_ptr()
+                )
+                ckey = (
+                    dst_view.device.index, "rt_read_op", dst_view.dtype, src_view.dtype,
+                    block_table.dtype, seq_before_dev.dtype,
+                    _triton_int_spec(dst_s0), _triton_int_spec(src_s0),
+                    _triton_int_spec(bt_s0), _triton_int_spec(bt_s1),
+                    _triton_int_spec(tpb), _triton_int_spec(max_blocks),
+                    _triton_int_spec(num_blocks), _triton_int_spec(n_elems), _triton_int_spec(fv),
+                    block_sz,
+                )
+                triton_fast_launch(
+                    _RUNTIME_TRITON_CACHE, ckey, _read_opaque_rows_triton,
+                    bsz, int(triton.cdiv(n_elems, block_sz)), 1, ptr_or,
+                    (dst_view, src_view, block_table, seq_before_dev,
+                     dst_s0, src_s0, bt_s0, bt_s1, tpb, max_blocks, num_blocks, n_elems, fv),
+                    {"BLOCK_SIZE": block_sz},
+                    num_warps=4,
                 )
                 return dst_buf
 
@@ -2722,11 +2749,36 @@ class Qwen4_5PagedStateBridge:
                 ct64.append(t0)
             rc_start.append(len(cr64))
 
-        act_idx_dev = (
-            None
-            if b_act == bsz and active_reqs == list(range(bsz))
-            else torch.tensor(active_reqs, dtype=torch.int64, device=device)
-        )
+        need_act_idx = not (b_act == bsz and active_reqs == list(range(bsz)))
+        segs: List[List[int]] = [
+            cu_list,
+            active_pfx,
+            t_req_list,
+            t_abs_list,
+            tr16,
+            tt16,
+            tr32,
+            tt32,
+            cr64,
+            ct64,
+            rc_start,
+        ]
+        if need_act_idx:
+            segs.append(active_reqs)
+        flat_host: List[int] = []
+        spans: List[Tuple[int, int]] = []
+        for lst in segs:
+            s0 = len(flat_host)
+            ln_s = len(lst)
+            flat_host.extend(lst)
+            pad = (-ln_s) & 3
+            if pad:
+                flat_host.extend([0] * pad)
+            spans.append((s0, s0 + ln_s))
+        packed_dev = torch.tensor(flat_host, dtype=torch.int32, device=device)
+        views = [packed_dev[a:b] for (a, b) in spans]
+        cu_dev, pfx_dev, treq_dev, tabs_dev, tr16_d, tt16_d, tr32_d, tt32_d, cr64_d, ct64_d, rc64_d = views[:11]
+        act_idx_dev = views[11].to(torch.int64) if need_act_idx else None
         return _RaggedPrefillPlan(
             bsz=b_act,
             total_tokens=cur,
@@ -2734,26 +2786,36 @@ class Qwen4_5PagedStateBridge:
             active_lens=active_lens,
             active_pfx=active_pfx,
             offsets=offsets,
+            cu_seqlens_host=cu_list,
             has_any_prefix=any(p > 0 for p in active_pfx),
-            cu_seqlens_i32=torch.tensor(cu_list, dtype=torch.int32, device=device),
-            start_pos_i64=torch.tensor(active_pfx, dtype=torch.int64, device=device),
-            prefix_i32=torch.tensor(active_pfx, dtype=torch.int32, device=device),
-            tok_req_i32=torch.tensor(t_req_list, dtype=torch.int32, device=device),
-            tok_abs_pos_i32=torch.tensor(t_abs_list, dtype=torch.int32, device=device),
-            tile_req_16=torch.tensor(tr16, dtype=torch.int32, device=device),
-            tile_t0_16=torch.tensor(tt16, dtype=torch.int32, device=device),
-            tile_req_32=torch.tensor(tr32, dtype=torch.int32, device=device),
-            tile_t0_32=torch.tensor(tt32, dtype=torch.int32, device=device),
-            chunk_req_64=torch.tensor(cr64, dtype=torch.int32, device=device),
-            chunk_t0_64=torch.tensor(ct64, dtype=torch.int32, device=device),
-            req_chunk_start_64=torch.tensor(rc_start, dtype=torch.int32, device=device),
+            cu_seqlens_i32=cu_dev,
+            start_pos_i64=pfx_dev.to(torch.int64),
+            prefix_i32=pfx_dev,
+            tok_req_i32=treq_dev,
+            tok_abs_pos_i32=tabs_dev,
+            tile_req_16=tr16_d,
+            tile_t0_16=tt16_d,
+            tile_req_32=tr32_d,
+            tile_t0_32=tt32_d,
+            chunk_req_64=cr64_d,
+            chunk_t0_64=ct64_d,
+            req_chunk_start_64=rc64_d,
             act_idx_dev=act_idx_dev,
         )
 
     @staticmethod
     def _get_snap_schedule(
         plan: _RaggedPrefillPlan, tpb: int, device: torch.device
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        bool,
+        bool,
+    ]:
         cached = plan.snap_cache.get(tpb)
         if cached is not None:
             return cached
@@ -2762,6 +2824,8 @@ class Qwen4_5PagedStateBridge:
         snap_pages: List[int] = []
         snap_local_ends: List[int] = []
         req_snap_start: List[int] = [0]
+        aligned_16 = True
+        aligned_32 = True
         for bi in range(plan.bsz):
             t_in = plan.active_lens[bi]
             t_pfx = plan.active_pfx[bi]
@@ -2778,6 +2842,11 @@ class Qwen4_5PagedStateBridge:
                     take = rem
                     pg = 0
                 loc_end = loc_c + take
+                if loc_end != t_in:
+                    if (loc_end & 15) != 0:
+                        aligned_16 = False
+                    if (loc_end & 31) != 0:
+                        aligned_32 = False
                 snap_toks.append(off_b + loc_end - 1)
                 snap_reqs.append(bi)
                 snap_pages.append(pg)
@@ -2786,13 +2855,27 @@ class Qwen4_5PagedStateBridge:
                 loc_c = loc_end
                 rem -= take
             req_snap_start.append(len(snap_toks))
+        flat_host: List[int] = []
+        spans: List[Tuple[int, int]] = []
+        for lst in (snap_toks, snap_reqs, snap_pages, snap_local_ends, req_snap_start):
+            s0 = len(flat_host)
+            ln_s = len(lst)
+            flat_host.extend(lst)
+            pad = (-ln_s) & 3
+            if pad:
+                flat_host.extend([0] * pad)
+            spans.append((s0, s0 + ln_s))
+        packed_dev = torch.tensor(flat_host, dtype=torch.int32, device=device)
+        s_toks, s_reqs, s_pages_i32, s_ends, r_sstart = [packed_dev[a:b] for (a, b) in spans]
         res = (
-            torch.tensor(snap_toks, dtype=torch.int32, device=device),
-            torch.tensor(snap_reqs, dtype=torch.int32, device=device),
-            torch.tensor(snap_pages, dtype=torch.int64, device=device),
-            torch.tensor(snap_local_ends, dtype=torch.int32, device=device),
-            torch.tensor(req_snap_start, dtype=torch.int32, device=device),
-            torch.tensor(snap_reqs, dtype=torch.int64, device=device),
+            s_toks,
+            s_reqs,
+            s_pages_i32.to(torch.int64),
+            s_ends,
+            r_sstart,
+            s_reqs.to(torch.int64),
+            aligned_16,
+            aligned_32,
         )
         plan.snap_cache[tpb] = res
         return res
@@ -2841,21 +2924,28 @@ class Qwen4_5PagedStateBridge:
                 n_elems = need_bytes
 
         block_sz = 1024
-        grid = (bsz, int(triton.cdiv(n_elems, block_sz)))
-        _write_opaque_rows_paged_triton[grid](
-            dst_view,
-            src_view,
-            block_table,
-            seq_before_dev,
-            int(dst_view.stride(0)),
-            int(src_view.stride(0)),
-            int(block_table.stride(0)),
-            int(block_table.stride(1)),
-            tpb,
-            max_blocks,
-            num_blocks,
-            n_elems,
-            BLOCK_SIZE=block_sz,
+        dst_s0, src_s0 = int(dst_view.stride(0)), int(src_view.stride(0))
+        bt_s0, bt_s1 = int(block_table.stride(0)), int(block_table.stride(1))
+        ptr_or = (
+            dst_view.data_ptr() | src_view.data_ptr()
+            | block_table.data_ptr() | seq_before_dev.data_ptr()
+        )
+        ckey = (
+            dst_view.device.index, "rt_write_op_paged", dst_view.dtype, src_view.dtype,
+            block_table.dtype, seq_before_dev.dtype,
+            _triton_int_spec(dst_s0), _triton_int_spec(src_s0),
+            _triton_int_spec(bt_s0), _triton_int_spec(bt_s1),
+            _triton_int_spec(tpb), _triton_int_spec(max_blocks),
+            _triton_int_spec(num_blocks), _triton_int_spec(n_elems),
+            block_sz,
+        )
+        triton_fast_launch(
+            _RUNTIME_TRITON_CACHE, ckey, _write_opaque_rows_paged_triton,
+            bsz, int(triton.cdiv(n_elems, block_sz)), 1, ptr_or,
+            (dst_view, src_view, block_table, seq_before_dev,
+             dst_s0, src_s0, bt_s0, bt_s1, tpb, max_blocks, num_blocks, n_elems),
+            {"BLOCK_SIZE": block_sz},
+            num_warps=4,
         )
 
     def _run_decode_batch_gpu(
@@ -2882,12 +2972,57 @@ class Qwen4_5PagedStateBridge:
         )
 
         emb = model.embed_tokens(input_ids_2d)
-        hyper_hidden = emb.repeat(1, 1, self.cfg.hc_count)
+        hyper_hidden = (
+            emb
+            if self.cfg.hc_count > 1 and (len(model.layers) == 0 or model.layers[0].ple is None)
+            else emb.repeat(1, 1, self.cfg.hc_count)
+        )
         prev_latent: Optional[torch.Tensor] = None
         deferred: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
+        deferred_sconv: Optional[Tuple[torch.Tensor, torch.Tensor, Any, torch.Tensor, Any, Optional[float]]] = None
         shared_gdn: Dict[int, Any] = {}
         full_kv_layer_caches: Dict[int, Any] = {}
         source_idx_caches: Dict[int, Tuple[torch.Tensor, torch.Tensor]] = {}
+        qsa_vis_cache: Dict[int, Tuple[torch.Tensor, torch.Tensor]] = {}
+        seq_plus1_dev: Optional[torch.Tensor] = None
+
+        def _get_qsa_vis_dec(bt_chk: torch.Tensor, use_pad: bool) -> Tuple[Optional[torch.Tensor], torch.Tensor]:
+            nonlocal seq_plus1_dev
+            if not use_pad:
+                if seq_plus1_dev is None:
+                    seq_plus1_dev = seq_lens_before_dev + 1
+                return None, seq_plus1_dev
+            key = bt_chk.data_ptr()
+            cached = qsa_vis_cache.get(key)
+            if cached is not None:
+                return cached
+            if seq_plus1_dev is None:
+                seq_plus1_dev = seq_lens_before_dev + 1
+            act = (bt_chk != 0).any(dim=1)
+            vis = torch.where(act, seq_plus1_dev, 0)
+            qsa_vis_cache[key] = (act, vis)
+            return act, vis
+
+        def _flush_deferred_sconv() -> None:
+            nonlocal deferred, deferred_sconv
+            if deferred_sconv is None:
+                return
+            s_out, s_inj, c_sc, bt_sc, mod_sc, c_val = deferred_sconv
+            sc_pool_bf16, _ = _view_opaque_pool_2d(c_sc.kv_cache_base, dtype)
+            conv_y = causal_dwconv1d_decode_opaque_triton(
+                s_out,
+                mod_sc.weight,
+                sc_pool_bf16,
+                bt_sc,
+                seq_lens_before_dev,
+                page_size=int(c_sc.seq_size_per_block),
+                pool_col_offset=0,
+                residual=mod_sc.residual,
+                use_activation=mod_sc.use_activation,
+                clamp_val=c_val,
+            )
+            deferred = (conv_y, s_inj)
+            deferred_sconv = None
         cap_slots: Dict[int, List[int]] = {}
         aux_out: Optional[torch.Tensor] = None
         if capture_layer_ids:
@@ -2922,6 +3057,7 @@ class Qwen4_5PagedStateBridge:
 
             # 1. Optional PLE
             if layer.ple is not None:
+                _flush_deferred_sconv()
                 if deferred is not None:
                     hyper_hidden = layer.attn_hyper_connection.combine(
                         deferred[0], hyper_hidden, deferred[1]
@@ -2962,8 +3098,47 @@ class Qwen4_5PagedStateBridge:
                     lid,
                 )
 
-            # 2. Attn Hyper-Connection
-            if deferred is None:
+            # 2. Attn Hyper-Connection (fuse deferred FFN ShortConv + combine + next HC norm)
+            if deferred_sconv is not None:
+                s_out, s_inj, c_sc, bt_sc, mod_sc, c_val = deferred_sconv
+                attn_hc = layer.attn_hyper_connection
+                if (
+                    s_out.is_cuda
+                    and dtype == torch.bfloat16
+                    and mod_sc.kernel_size == 4
+                    and attn_hc.use_combine
+                ):
+                    sc_pool_bf16, _ = _view_opaque_pool_2d(c_sc.kv_cache_base, dtype)
+                    hyper_hidden, attn_normed = hc_sconv_decode_opaque_combine_norm_triton(
+                        s_out,
+                        hyper_hidden,
+                        s_inj,
+                        attn_hc.hc_norm_weight,
+                        attn_hc.hc_norm_bias,
+                        mod_sc.weight,
+                        sc_pool_bf16,
+                        bt_sc,
+                        seq_lens_before_dev,
+                        page_size=int(c_sc.seq_size_per_block),
+                        eps=attn_hc.eps,
+                        conv_residual=mod_sc.residual,
+                        conv_use_silu=mod_sc.use_activation,
+                        clamp_val=c_val,
+                    )
+                    attn_in, hyper_hidden, attn_inj, prev_latent = attn_hc.mix_from_normed(
+                        attn_normed, hyper_hidden, prev_latent
+                    )
+                    deferred_sconv = None
+                else:
+                    _flush_deferred_sconv()
+                    assert deferred is not None
+                    attn_in, hyper_hidden, attn_inj, prev_latent = (
+                        attn_hc.combine_and_mix_with_latent(
+                            deferred[0], hyper_hidden, deferred[1], prev_latent
+                        )
+                    )
+                    deferred = None
+            elif deferred is None:
                 attn_in, hyper_hidden, attn_inj, prev_latent = (
                     layer.attn_hyper_connection.mix_with_latent(hyper_hidden, prev_latent)
                 )
@@ -2984,7 +3159,96 @@ class Qwen4_5PagedStateBridge:
             # 3. Attention (Linear GDN or Full MQA-1)
             if layer.layer_type == "linear_attention":
                 assert layer.linear_attn is not None
-                if layer.is_consumer:
+                la = layer.linear_attn
+                can_gdn_opaque = (
+                    _HAS_TRITON
+                    and attn_in.is_cuda
+                    and dtype == torch.bfloat16
+                    and la.conv_kernel_size == 4
+                    and la.head_k_dim == 64
+                    and la.head_v_dim == 64
+                )
+                if (
+                    can_gdn_opaque
+                    and (
+                        LINEAR_ATTN_TAG in layer_caches
+                        or (
+                            GDN_SSM_STATE_TAG in layer_caches
+                            and (
+                                GDN_CONV_STATE_TAG in layer_caches
+                                or (layer.is_consumer and GDN_CONSUMER_Q_CONV_TAG in layer_caches)
+                                or (layer.is_consumer and la.gdn_no_q_conv)
+                            )
+                        )
+                        or (
+                            layer.is_consumer
+                            and GDN_CONSUMER_Q_CONV_TAG in layer_caches
+                            and (yoco_on or not la.gdn_no_q_conv)
+                        )
+                    )
+                ):
+                    ssm_pool_2d = None
+                    bt_ssm_op = None
+                    tpb_ssm_op = 1
+                    ssm_col_off = 0
+                    conv_pool_2d = None
+                    bt_conv_op = None
+                    tpb_conv_op = 1
+                    conv_col_off = 0
+                    ssm_n = math.prod(self.ssm_shape)
+                    if LINEAR_ATTN_TAG in layer_caches:
+                        c_lin = layer_caches[LINEAR_ATTN_TAG]
+                        bt_lin = _block_table_for_tag(attention_inputs, LINEAR_ATTN_TAG)
+                        ssm_pool_2d, _ = _view_opaque_pool_2d(c_lin.kv_cache_base, torch.float32)
+                        conv_pool_2d, _ = _view_opaque_pool_2d(c_lin.kv_cache_base, dtype)
+                        bt_ssm_op = bt_lin
+                        bt_conv_op = bt_lin
+                        tpb_ssm_op = int(c_lin.seq_size_per_block)
+                        tpb_conv_op = tpb_ssm_op
+                        conv_col_off = 2 * ssm_n
+                    elif GDN_SSM_STATE_TAG in layer_caches:
+                        c_ssm = layer_caches[GDN_SSM_STATE_TAG]
+                        bt_ssm_op = _block_table_for_tag(attention_inputs, GDN_SSM_STATE_TAG)
+                        ssm_pool_2d, _ = _view_opaque_pool_2d(c_ssm.kv_cache_base, torch.float32)
+                        tpb_ssm_op = int(c_ssm.seq_size_per_block)
+                        c_conv_tag = GDN_CONV_STATE_TAG if GDN_CONV_STATE_TAG in layer_caches else (
+                            GDN_CONSUMER_Q_CONV_TAG if (layer.is_consumer and GDN_CONSUMER_Q_CONV_TAG in layer_caches) else None
+                        )
+                        if c_conv_tag is not None:
+                            c_cv = layer_caches[c_conv_tag]
+                            bt_conv_op = _block_table_for_tag(attention_inputs, c_conv_tag)
+                            conv_pool_2d, _ = _view_opaque_pool_2d(c_cv.kv_cache_base, dtype)
+                            tpb_conv_op = int(c_cv.seq_size_per_block)
+                    else:
+                        c_q = layer_caches[GDN_CONSUMER_Q_CONV_TAG]
+                        bt_conv_op = _block_table_for_tag(attention_inputs, GDN_CONSUMER_Q_CONV_TAG)
+                        conv_pool_2d, _ = _view_opaque_pool_2d(c_q.kv_cache_base, dtype)
+                        tpb_conv_op = int(c_q.seq_size_per_block)
+                    if not (layer.is_consumer and not yoco_on and GDN_SSM_STATE_TAG not in layer_caches and LINEAR_ATTN_TAG not in layer_caches):
+                        attn_out, published = la.forward_decode_opaque(
+                            attn_in,
+                            conv_pool_2d=conv_pool_2d,
+                            bt_conv=bt_conv_op,
+                            tpb_conv=tpb_conv_op,
+                            conv_col_offset=conv_col_off,
+                            ssm_pool_2d=ssm_pool_2d,
+                            bt_ssm=bt_ssm_op,
+                            tpb_ssm=tpb_ssm_op,
+                            ssm_col_offset=ssm_col_off,
+                            seq_before=seq_lens_before_dev,
+                            shared=(shared_gdn[layer.source_layer_idx] if layer.is_consumer else None),
+                            enable_yoco_decode=yoco_on,
+                        )
+                        if published is not None:
+                            shared_gdn[lid] = published
+                        can_gdn_opaque = True
+                    else:
+                        can_gdn_opaque = False
+                else:
+                    can_gdn_opaque = False
+                if can_gdn_opaque:
+                    pass
+                elif layer.is_consumer:
                     q_state: Optional[GDNLayerState] = None
                     bt_q = None
                     if GDN_SSM_STATE_TAG in layer_caches:
@@ -3224,7 +3488,7 @@ class Qwen4_5PagedStateBridge:
                 assert layer.self_attn is not None
                 sa = layer.self_attn
                 preproj = sa.project_qkv_and_indexer(
-                    attn_in, need_idx=(sa.indexer is not None)
+                    attn_in, need_idx=(sa.indexer is not None), need_idx_norm=False
                 )
                 if not layer.is_consumer:
                     kv_c = layer_caches[FULL_ATTN_KV_TAG]
@@ -3233,18 +3497,58 @@ class Qwen4_5PagedStateBridge:
                     k_sc_st: Optional[ShortConvState] = None
                     v_sc_st: Optional[ShortConvState] = None
                     bt_sc = None
+                    used_preconv_kv = False
                     if sc_c is not None:
                         bt_sc = _block_table_for_tag(attention_inputs, FULL_ATTN_KV_SCONV_TAG)
-                        kv_sc_buf = self._read_opaque_batch_gpu(
-                            sc_c,
-                            bt_sc,
-                            seq_lens_before_dev,
-                            FULL_ATTN_KV_SCONV_TAG,
-                            lid,
-                            target_dtype=dtype,
-                        )
-                        k_sc_st = ShortConvState(kv_sc_buf[:, 0].clone())
-                        v_sc_st = ShortConvState(kv_sc_buf[:, 1].clone())
+                        if (
+                            sa.use_kv_sconv
+                            and sa.k_sconv is not None
+                            and sa.v_sconv is not None
+                            and preproj[1] is not None
+                            and preproj[2] is not None
+                            and attn_in.is_cuda
+                            and dtype == torch.bfloat16
+                            and sa.k_sconv.kernel_size == 4
+                            and sa.v_sconv.kernel_size == 4
+                        ):
+                            sc_pool_bf16, _ = _view_opaque_pool_2d(sc_c.kv_cache_base, dtype)
+                            tpb_kv_sc = int(sc_c.seq_size_per_block)
+                            kv_dim_sc = self.cfg.num_key_value_heads * self.cfg.head_dim
+                            k_conv = causal_dwconv1d_decode_opaque_triton(
+                                preproj[1],
+                                sa.k_sconv.weight,
+                                sc_pool_bf16,
+                                bt_sc,
+                                seq_lens_before_dev,
+                                page_size=tpb_kv_sc,
+                                pool_col_offset=0,
+                                residual=sa.kv_sconv_residual,
+                                use_activation=sa.kv_sconv_use_activation,
+                            )
+                            v_conv = causal_dwconv1d_decode_opaque_triton(
+                                preproj[2],
+                                sa.v_sconv.weight,
+                                sc_pool_bf16,
+                                bt_sc,
+                                seq_lens_before_dev,
+                                page_size=tpb_kv_sc,
+                                pool_col_offset=kv_dim_sc * 3,
+                                residual=sa.kv_sconv_residual,
+                                use_activation=sa.kv_sconv_use_activation,
+                            )
+                            preproj = (preproj[0], k_conv, v_conv, preproj[3], preproj[4])
+                            used_preconv_kv = True
+                        else:
+                            kv_sc_buf = self._read_opaque_batch_gpu(
+                                sc_c,
+                                bt_sc,
+                                seq_lens_before_dev,
+                                FULL_ATTN_KV_SCONV_TAG,
+                                lid,
+                                target_dtype=dtype,
+                            )
+                            k_sc_st = ShortConvState(kv_sc_buf[:, 0].clone())
+                            v_sc_st = ShortConvState(kv_sc_buf[:, 1].clone())
 
                     if layer.self_attn.indexer is not None:
                         if not isinstance(decode_attn_handle, Qwen4_5QSADecodeHandle):
@@ -3274,14 +3578,7 @@ class Qwen4_5PagedStateBridge:
                         use_pad_mask = decode_attn_handle.is_cuda_graph or _is_padded_group(
                             attention_inputs, FULL_ATTN_KV_TAG
                         )
-                        active_rows = (
-                            (bt_idx_st != 0).any(dim=1) if use_pad_mask else None
-                        )
-                        visible_lens = (
-                            torch.where(active_rows, seq_lens_before_dev + 1, 0)
-                            if active_rows is not None
-                            else (seq_lens_before_dev + 1)
-                        )
+                        active_rows, visible_lens = _get_qsa_vis_dec(bt_idx_st, use_pad_mask)
                         write_qsa_decode_cache_gpu_(
                             raw_k_idx.squeeze(1),
                             seq_lens_before_dev,
@@ -3310,6 +3607,8 @@ class Qwen4_5PagedStateBridge:
                             rope_theta=layer.self_attn.rope_theta,
                             max_ctx_len=decode_qsa_max_ctx_len,
                             is_cuda_graph=decode_attn_handle.is_cuda_graph,
+                            q_norm_gamma=idx.q_norm_gamma,
+                            norm_eps=idx.norm_eps,
                         )
                         source_idx_caches[lid] = (idx_kv_pool, bt_idx_kv)
 
@@ -3339,10 +3638,12 @@ class Qwen4_5PagedStateBridge:
                         v_sconv_state=v_sc_st,
                         write_kv_fn=_store_decode_full_attn_kv_gpu,
                         preprojected=preproj,
+                        preconv_kv=used_preconv_kv,
                     )
                     full_kv_layer_caches[lid] = kv_c
                     if (
-                        sc_c is not None
+                        not used_preconv_kv
+                        and sc_c is not None
                         and bt_sc is not None
                         and k_sc_st is not None
                         and v_sc_st is not None
@@ -3377,14 +3678,7 @@ class Qwen4_5PagedStateBridge:
                         use_pad_mask = decode_attn_handle.is_cuda_graph or _is_padded_group(
                             attention_inputs, FULL_ATTN_KV_TAG
                         )
-                        active_rows = (
-                            (src_bt_idx_kv != 0).any(dim=1) if use_pad_mask else None
-                        )
-                        visible_lens = (
-                            torch.where(active_rows, seq_lens_before_dev + 1, 0)
-                            if active_rows is not None
-                            else (seq_lens_before_dev + 1)
-                        )
+                        _, visible_lens = _get_qsa_vis_dec(src_bt_idx_kv, use_pad_mask)
                         selected = score_and_select_qsa_paged(
                             q_idx,
                             positions_2d,
@@ -3397,6 +3691,8 @@ class Qwen4_5PagedStateBridge:
                             rope_theta=layer.self_attn.rope_theta,
                             max_ctx_len=decode_qsa_max_ctx_len,
                             is_cuda_graph=decode_attn_handle.is_cuda_graph,
+                            q_norm_gamma=idx.q_norm_gamma,
+                            norm_eps=idx.norm_eps,
                         )
 
                         def _qsa_cons_decode_fn(
@@ -3422,8 +3718,14 @@ class Qwen4_5PagedStateBridge:
                         preprojected=preproj,
                     )
 
-            # 4. Attention Output ShortConv
-            if layer.attn_output_sconv is not None:
+            # 4. Attention Output ShortConv + 5. MLP Hyper-Connection (fused opaque when K=4)
+            mlp_hc = layer.mlp_hyper_connection
+            if (
+                layer.attn_output_sconv is not None
+                and attn_out.is_cuda
+                and dtype == torch.bfloat16
+                and layer.attn_output_sconv.kernel_size == 4
+            ):
                 tag_out = (
                     LINEAR_ATTN_OUTPUT_SCONV_TAG
                     if layer.layer_type == "linear_attention"
@@ -3431,89 +3733,125 @@ class Qwen4_5PagedStateBridge:
                 )
                 c_ao = layer_caches[tag_out]
                 bt_ao = _block_table_for_tag(attention_inputs, tag_out)
-                ao_state = ShortConvState(
-                    self._read_opaque_batch_gpu(
-                        c_ao,
+                ao_pool_bf16, _ = _view_opaque_pool_2d(c_ao.kv_cache_base, dtype)
+                if mlp_hc.use_combine:
+                    hyper_hidden, mlp_normed = hc_sconv_decode_opaque_combine_norm_triton(
+                        attn_out,
+                        hyper_hidden,
+                        attn_inj,
+                        mlp_hc.hc_norm_weight,
+                        mlp_hc.hc_norm_bias,
+                        layer.attn_output_sconv.weight,
+                        ao_pool_bf16,
                         bt_ao,
                         seq_lens_before_dev,
-                        tag_out,
-                        lid,
-                        target_dtype=dtype,
+                        page_size=int(c_ao.seq_size_per_block),
+                        eps=mlp_hc.eps,
+                        conv_residual=layer.attn_output_sconv.residual,
+                        conv_use_silu=layer.attn_output_sconv.use_activation,
+                        clamp_val=self.cfg.clip_attn_output,
                     )
-                )
-                if attn_out.is_cuda and layer.attn_output_sconv.kernel_size == 4:
-                    attn_out = causal_dwconv1d_decode_triton(
+                    mlp_in, hyper_hidden, mlp_inj, prev_latent = mlp_hc.mix_from_normed(
+                        mlp_normed, hyper_hidden, prev_latent
+                    )
+                else:
+                    attn_out = causal_dwconv1d_decode_opaque_triton(
                         attn_out,
                         layer.attn_output_sconv.weight,
-                        ao_state.conv_state,
+                        ao_pool_bf16,
+                        bt_ao,
+                        seq_lens_before_dev,
+                        page_size=int(c_ao.seq_size_per_block),
+                        pool_col_offset=0,
                         residual=layer.attn_output_sconv.residual,
                         use_activation=layer.attn_output_sconv.use_activation,
                         clamp_val=self.cfg.clip_attn_output,
                     )
-                else:
-                    attn_out = layer.attn_output_sconv(attn_out, state=ao_state)
-                    if self.cfg.clip_attn_output is not None:
-                        attn_out = attn_out.clamp(-self.cfg.clip_attn_output, self.cfg.clip_attn_output)
-                self._write_opaque_batch_gpu(
-                    c_ao,
-                    bt_ao,
-                    seq_lens_before_dev,
-                    ao_state.conv_state,
-                    tag_out,
-                    lid,
-                )
-            elif self.cfg.clip_attn_output is not None:
-                attn_out = attn_out.clamp(-self.cfg.clip_attn_output, self.cfg.clip_attn_output)
-
-            # 5. MLP Hyper-Connection + MLP
-            mlp_in, hyper_hidden, mlp_inj, prev_latent = (
-                layer.mlp_hyper_connection.combine_and_mix_with_latent(
+                    mlp_in, hyper_hidden, mlp_inj, prev_latent = mlp_hc.combine_and_mix_with_latent(
+                        attn_out, hyper_hidden, attn_inj, prev_latent
+                    )
+            else:
+                if layer.attn_output_sconv is not None:
+                    tag_out = (
+                        LINEAR_ATTN_OUTPUT_SCONV_TAG
+                        if layer.layer_type == "linear_attention"
+                        else FULL_ATTN_OUTPUT_SCONV_TAG
+                    )
+                    c_ao = layer_caches[tag_out]
+                    bt_ao = _block_table_for_tag(attention_inputs, tag_out)
+                    ao_state = ShortConvState(
+                        self._read_opaque_batch_gpu(
+                            c_ao, bt_ao, seq_lens_before_dev, tag_out, lid, target_dtype=dtype,
+                        )
+                    )
+                    if attn_out.is_cuda and layer.attn_output_sconv.kernel_size == 4:
+                        attn_out = causal_dwconv1d_decode_triton(
+                            attn_out,
+                            layer.attn_output_sconv.weight,
+                            ao_state.conv_state,
+                            residual=layer.attn_output_sconv.residual,
+                            use_activation=layer.attn_output_sconv.use_activation,
+                            clamp_val=self.cfg.clip_attn_output,
+                        )
+                    else:
+                        attn_out = layer.attn_output_sconv(attn_out, state=ao_state)
+                        if self.cfg.clip_attn_output is not None:
+                            attn_out = attn_out.clamp(-self.cfg.clip_attn_output, self.cfg.clip_attn_output)
+                    self._write_opaque_batch_gpu(
+                        c_ao, bt_ao, seq_lens_before_dev, ao_state.conv_state, tag_out, lid,
+                    )
+                elif self.cfg.clip_attn_output is not None:
+                    attn_out = attn_out.clamp(-self.cfg.clip_attn_output, self.cfg.clip_attn_output)
+                mlp_in, hyper_hidden, mlp_inj, prev_latent = mlp_hc.combine_and_mix_with_latent(
                     attn_out, hyper_hidden, attn_inj, prev_latent
                 )
-            )
+
             assert mlp_inj is not None
             mlp_out = _run_runtime_mlp(layer, mlp_in)
 
-            # 6. FFN Output ShortConv + clamp
+            # 6. FFN Output ShortConv + clamp (defer K=4 CUDA to fuse with next layer's HC combine+norm)
             if layer.ffn_output_sconv is not None:
                 c_fo = layer_caches[FFN_OUTPUT_SCONV_TAG]
                 bt_fo = _block_table_for_tag(attention_inputs, FFN_OUTPUT_SCONV_TAG)
-                fo_state = ShortConvState(
-                    self._read_opaque_batch_gpu(
+                if mlp_out.is_cuda and dtype == torch.bfloat16 and layer.ffn_output_sconv.kernel_size == 4:
+                    deferred_sconv = (
+                        mlp_out,
+                        mlp_inj,
                         c_fo,
                         bt_fo,
-                        seq_lens_before_dev,
-                        FFN_OUTPUT_SCONV_TAG,
-                        lid,
-                        target_dtype=dtype,
+                        layer.ffn_output_sconv,
+                        self.cfg.clip_mlp_output,
                     )
-                )
-                if mlp_out.is_cuda and layer.ffn_output_sconv.kernel_size == 4:
-                    mlp_out = causal_dwconv1d_decode_triton(
-                        mlp_out,
-                        layer.ffn_output_sconv.weight,
-                        fo_state.conv_state,
-                        residual=layer.ffn_output_sconv.residual,
-                        use_activation=layer.ffn_output_sconv.use_activation,
-                        clamp_val=self.cfg.clip_mlp_output,
-                    )
+                    deferred = None
                 else:
-                    mlp_out = layer.ffn_output_sconv(mlp_out, state=fo_state)
-                    if self.cfg.clip_mlp_output is not None:
-                        mlp_out = mlp_out.clamp(-self.cfg.clip_mlp_output, self.cfg.clip_mlp_output)
-                self._write_opaque_batch_gpu(
-                    c_fo,
-                    bt_fo,
-                    seq_lens_before_dev,
-                    fo_state.conv_state,
-                    FFN_OUTPUT_SCONV_TAG,
-                    lid,
-                )
-            elif self.cfg.clip_mlp_output is not None:
-                mlp_out = mlp_out.clamp(-self.cfg.clip_mlp_output, self.cfg.clip_mlp_output)
+                    fo_state = ShortConvState(
+                        self._read_opaque_batch_gpu(
+                            c_fo, bt_fo, seq_lens_before_dev, FFN_OUTPUT_SCONV_TAG, lid, target_dtype=dtype,
+                        )
+                    )
+                    if mlp_out.is_cuda and layer.ffn_output_sconv.kernel_size == 4:
+                        mlp_out = causal_dwconv1d_decode_triton(
+                            mlp_out,
+                            layer.ffn_output_sconv.weight,
+                            fo_state.conv_state,
+                            residual=layer.ffn_output_sconv.residual,
+                            use_activation=layer.ffn_output_sconv.use_activation,
+                            clamp_val=self.cfg.clip_mlp_output,
+                        )
+                    else:
+                        mlp_out = layer.ffn_output_sconv(mlp_out, state=fo_state)
+                        if self.cfg.clip_mlp_output is not None:
+                            mlp_out = mlp_out.clamp(-self.cfg.clip_mlp_output, self.cfg.clip_mlp_output)
+                    self._write_opaque_batch_gpu(
+                        c_fo, bt_fo, seq_lens_before_dev, fo_state.conv_state, FFN_OUTPUT_SCONV_TAG, lid,
+                    )
+                    deferred = (mlp_out, mlp_inj)
+            else:
+                if self.cfg.clip_mlp_output is not None:
+                    mlp_out = mlp_out.clamp(-self.cfg.clip_mlp_output, self.cfg.clip_mlp_output)
+                deferred = (mlp_out, mlp_inj)
 
-            deferred = (mlp_out, mlp_inj)
-
+        _flush_deferred_sconv()
         assert deferred is not None
         hidden, _, _, _ = model.hyper_connection_mixer.combine_and_mix_with_latent(
             deferred[0], hyper_hidden, deferred[1], prev_latent=None
@@ -4285,20 +4623,33 @@ class Qwen4_5PagedStateBridge:
             bt = _block_table_for_tag(attention_inputs, tag)
             return bt if plan.act_idx_dev is None else bt.index_select(0, plan.act_idx_dev)
 
+        _snap_phys_cache: Dict[
+            Tuple[int, int, int, int, int],
+            Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, bool, bool],
+        ] = {}
+
         def _snap_phys_for(cache: Any, bt_act: torch.Tensor) -> Tuple[
-            torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
+            torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, bool, bool
         ]:
             tpb_c = int(cache.seq_size_per_block)
-            s_toks, s_reqs, s_pages, s_ends, r_sstart, s_reqs_i64 = self._get_snap_schedule(
+            max_cols = int(bt_act.shape[1]) if bt_act.ndim >= 2 else 0
+            s0 = int(bt_act.stride(0))
+            s1 = int(bt_act.stride(1)) if bt_act.ndim >= 2 else 0
+            ck = (tpb_c, bt_act.data_ptr(), max_cols, s0, s1)
+            hit = _snap_phys_cache.get(ck)
+            if hit is not None:
+                return hit
+            s_toks, s_reqs, s_pages, s_ends, r_sstart, s_reqs_i64, a16, a32 = self._get_snap_schedule(
                 plan, tpb_c, device
             )
-            max_cols = int(bt_act.shape[1]) if bt_act.ndim >= 2 else 0
             if max_cols <= 0:
                 s_phys = torch.zeros_like(s_toks)
             else:
                 clamped_pages = s_pages.clamp(max=max_cols - 1)
                 s_phys = bt_act[s_reqs_i64, clamped_pages].to(torch.int32)
-            return s_toks, s_reqs, s_ends, r_sstart, s_phys
+            res_s = (s_toks, s_reqs, s_ends, r_sstart, s_phys, a16, a32)
+            _snap_phys_cache[ck] = res_s
+            return res_s
 
         def _read_init_state(
             cache: Any,
@@ -4416,8 +4767,8 @@ class Qwen4_5PagedStateBridge:
                         (self.cfg.hc_count * self.cfg.hidden_size, max(0, self.cfg.ple_conv_kernel_size - 1)),
                         dtype,
                     )
-                    s_tok_st, s_req_st, _, _, s_phys_st = _snap_phys_for(c_st, bt_st)
-                    _, _, _, _, s_phys_ctx = _snap_phys_for(c_ctx, bt_ctx)
+                    s_tok_st, s_req_st, s_end_st, r_ss_st, s_phys_st, a16_st, _ = _snap_phys_for(c_st, bt_st)
+                    _, _, _, _, s_phys_ctx, _, _ = _snap_phys_for(c_ctx, bt_ctx)
                     conv_pool_bf16, _ = _view_opaque_pool_2d(c_st.kv_cache_base, dtype)
                     ctx_pool_i64, _ = _view_opaque_pool_2d(c_ctx.kv_cache_base, torch.int64)
                     hyper_hidden, ple_hc_normed = layer.ple.forward_packed_prefill_with_hc(
@@ -4433,6 +4784,9 @@ class Qwen4_5PagedStateBridge:
                         snap_req_idx=s_req_st,
                         conv_dst_pool=conv_pool_bf16,
                         conv_snap_phys=s_phys_st,
+                        req_snap_start=r_ss_st,
+                        snap_local_ends=s_end_st,
+                        snap_aligned=a16_st,
                         ctx_dst_pool=ctx_pool_i64,
                         ctx_snap_phys=s_phys_ctx,
                         skip_invalid_phys=True,
@@ -4493,6 +4847,7 @@ class Qwen4_5PagedStateBridge:
                     c_snap_tok = c_snap_req = c_snap_phys = c_pool_bf16 = None
                     c_dst_col_off = 0
                     s_req_start = s_loc_end = s_phys_ssm = s_pool_fp32 = None
+                    c_direct_64 = False
 
                     if kv_cache is not None and LINEAR_ATTN_TAG in layer_caches:
                         lin_c = layer_caches[LINEAR_ATTN_TAG]
@@ -4515,28 +4870,36 @@ class Qwen4_5PagedStateBridge:
                                 .view(plan.bsz, *self.gdn_consumer_conv_shape)
                                 .to(dtype)
                             )
-                        s_tok, s_req, s_end, r_sstart, s_phys = _snap_phys_for(lin_c, bt_lin_c)
+                        s_tok, s_req, s_end, r_sstart, s_phys, _, _ = _snap_phys_for(lin_c, bt_lin_c)
                         c_snap_tok, c_snap_req, c_snap_phys = s_tok, s_req, s_phys
                         c_pool_bf16, _ = _view_opaque_pool_2d(lin_c.kv_cache_base, dtype)
                         c_dst_col_off = 2 * ssm_n
                         s_req_start, s_loc_end, s_phys_ssm = r_sstart, s_end, s_phys
                         s_pool_fp32, _ = _view_opaque_pool_2d(lin_c.kv_cache_base, torch.float32)
+                        c_direct_64 = (
+                            int(lin_c.seq_size_per_block) == 64
+                            and all((p & 63) == 0 for p in plan.active_pfx)
+                        )
                     elif kv_cache is not None and GDN_SSM_STATE_TAG in layer_caches:
                         c_ssm = layer_caches[GDN_SSM_STATE_TAG]
                         bt_ssm = _active_bt(GDN_SSM_STATE_TAG)
                         init_c_ssm = _read_init_state(
                             c_ssm, bt_ssm, GDN_SSM_STATE_TAG, lid, self.ssm_shape, torch.float32
                         )
-                        _, _, s_end, r_sstart, s_phys = _snap_phys_for(c_ssm, bt_ssm)
+                        _, _, s_end, r_sstart, s_phys, _, _ = _snap_phys_for(c_ssm, bt_ssm)
                         s_req_start, s_loc_end, s_phys_ssm = r_sstart, s_end, s_phys
                         s_pool_fp32, _ = _view_opaque_pool_2d(c_ssm.kv_cache_base, torch.float32)
+                        c_direct_64 = (
+                            int(c_ssm.seq_size_per_block) == 64
+                            and all((p & 63) == 0 for p in plan.active_pfx)
+                        )
                         if GDN_CONV_STATE_TAG in layer_caches:
                             c_q = layer_caches[GDN_CONV_STATE_TAG]
                             bt_q = _active_bt(GDN_CONV_STATE_TAG)
                             init_q_conv = _read_init_state(
                                 c_q, bt_q, GDN_CONV_STATE_TAG, lid, self.gdn_consumer_conv_shape, dtype
                             )
-                            s_tok, s_req, _, _, q_phys = _snap_phys_for(c_q, bt_q)
+                            s_tok, s_req, _, _, q_phys, _, _ = _snap_phys_for(c_q, bt_q)
                             c_snap_tok, c_snap_req, c_snap_phys = s_tok, s_req, q_phys
                             c_pool_bf16, _ = _view_opaque_pool_2d(c_q.kv_cache_base, dtype)
                     elif kv_cache is not None and GDN_CONSUMER_Q_CONV_TAG in layer_caches:
@@ -4547,7 +4910,7 @@ class Qwen4_5PagedStateBridge:
                         )
                         if yoco_on and plan.has_any_prefix and layer.source_layer_idx is not None:
                             init_c_ssm = source_prefix_ssm.get(layer.source_layer_idx)
-                        s_tok, s_req, _, _, q_phys = _snap_phys_for(c_q, bt_q)
+                        s_tok, s_req, _, _, q_phys, _, _ = _snap_phys_for(c_q, bt_q)
                         c_snap_tok, c_snap_req, c_snap_phys = s_tok, s_req, q_phys
                         c_pool_bf16, _ = _view_opaque_pool_2d(c_q.kv_cache_base, dtype)
 
@@ -4572,6 +4935,7 @@ class Qwen4_5PagedStateBridge:
                         ssm_dst_pool=s_pool_fp32,
                         ssm_snap_phys=s_phys_ssm,
                         skip_invalid_phys=True,
+                        snaps_direct_chunk64=c_direct_64,
                         block_t=32,
                         enable_yoco_decode=yoco_on,
                     )
@@ -4581,6 +4945,7 @@ class Qwen4_5PagedStateBridge:
                     c_snap_tok = c_snap_req = c_snap_phys = c_pool_bf16 = None
                     c_dst_col_off = 0
                     s_req_start = s_loc_end = s_phys_ssm = s_pool_fp32 = None
+                    s_direct_64 = False
 
                     if kv_cache is not None and GDN_SSM_STATE_TAG in layer_caches:
                         c_ssm = layer_caches[GDN_SSM_STATE_TAG]
@@ -4588,16 +4953,20 @@ class Qwen4_5PagedStateBridge:
                         init_ssm = _read_init_state(
                             c_ssm, bt_ssm, GDN_SSM_STATE_TAG, lid, self.ssm_shape, torch.float32
                         )
-                        _, _, s_end, r_sstart, s_phys = _snap_phys_for(c_ssm, bt_ssm)
+                        _, _, s_end, r_sstart, s_phys, _, _ = _snap_phys_for(c_ssm, bt_ssm)
                         s_req_start, s_loc_end, s_phys_ssm = r_sstart, s_end, s_phys
                         s_pool_fp32, _ = _view_opaque_pool_2d(c_ssm.kv_cache_base, torch.float32)
+                        s_direct_64 = (
+                            int(c_ssm.seq_size_per_block) == 64
+                            and all((p & 63) == 0 for p in plan.active_pfx)
+                        )
                         if GDN_CONV_STATE_TAG in layer_caches:
                             c_conv = layer_caches[GDN_CONV_STATE_TAG]
                             bt_conv = _active_bt(GDN_CONV_STATE_TAG)
                             init_conv = _read_init_state(
                                 c_conv, bt_conv, GDN_CONV_STATE_TAG, lid, self.gdn_conv_shape, dtype
                             )
-                            s_tok, s_req, _, _, conv_phys = _snap_phys_for(c_conv, bt_conv)
+                            s_tok, s_req, _, _, conv_phys, _, _ = _snap_phys_for(c_conv, bt_conv)
                             c_snap_tok, c_snap_req, c_snap_phys = s_tok, s_req, conv_phys
                             c_pool_bf16, _ = _view_opaque_pool_2d(c_conv.kv_cache_base, dtype)
                     elif kv_cache is not None and LINEAR_ATTN_TAG in layer_caches:
@@ -4621,12 +4990,16 @@ class Qwen4_5PagedStateBridge:
                                 .view(plan.bsz, *self.gdn_conv_shape)
                                 .to(dtype)
                             )
-                        s_tok, s_req, s_end, r_sstart, s_phys = _snap_phys_for(lin_c, bt_lin)
+                        s_tok, s_req, s_end, r_sstart, s_phys, _, _ = _snap_phys_for(lin_c, bt_lin)
                         c_snap_tok, c_snap_req, c_snap_phys = s_tok, s_req, s_phys
                         c_pool_bf16, _ = _view_opaque_pool_2d(lin_c.kv_cache_base, dtype)
                         c_dst_col_off = 2 * ssm_n
                         s_req_start, s_loc_end, s_phys_ssm = r_sstart, s_end, s_phys
                         s_pool_fp32, _ = _view_opaque_pool_2d(lin_c.kv_cache_base, torch.float32)
+                        s_direct_64 = (
+                            int(lin_c.seq_size_per_block) == 64
+                            and all((p & 63) == 0 for p in plan.active_pfx)
+                        )
 
                     if layer.is_source:
                         source_prefix_ssm[lid] = init_ssm.clone() if init_ssm is not None else None
@@ -4652,6 +5025,7 @@ class Qwen4_5PagedStateBridge:
                         ssm_dst_pool=s_pool_fp32,
                         ssm_snap_phys=s_phys_ssm,
                         skip_invalid_phys=True,
+                        snaps_direct_chunk64=s_direct_64,
                         block_t=32,
                         enable_yoco_decode=yoco_on,
                     )
@@ -4662,7 +5036,9 @@ class Qwen4_5PagedStateBridge:
                 sa = layer.self_attn
                 # 3a. Batched Q (+ optional KV & QSA indexer) projection + Q norm/RoPE across ALL N tokens
                 q_packed, pre_k_raw, pre_v_raw, pre_q_idx, pre_raw_k_idx = (
-                    sa.project_qkv_and_indexer(attn_in, need_idx=(sa.indexer is not None))
+                    sa.project_qkv_and_indexer(
+                        attn_in, need_idx=(sa.indexer is not None), need_idx_norm=False
+                    )
                 )
                 if sa.attn_output_gate:
                     q_unnorm, gate_flat = q_packed.unflatten(
@@ -4681,7 +5057,7 @@ class Qwen4_5PagedStateBridge:
                     eps=sa.rms_norm_eps,
                 )  # [1, N, H_q, D]
 
-                cu_list = plan.cu_seqlens_i32.tolist()
+                cu_list = plan.cu_seqlens_host
                 if not layer.is_consumer:
                     assert sa.k_proj is not None and sa.v_proj is not None and sa.k_norm is not None
                     k_raw = pre_k_raw if pre_k_raw is not None else sa.k_proj(attn_in)
@@ -4698,7 +5074,7 @@ class Qwen4_5PagedStateBridge:
                                 (2, self.cfg.num_key_value_heads * self.cfg.head_dim, sa.kv_sconv_kernel_size - 1),
                                 dtype,
                             )
-                            s_tok, s_req, _, _, s_phys = _snap_phys_for(sc_c, bt_sc)
+                            s_tok, s_req, s_end, r_sstart, s_phys, _, a32 = _snap_phys_for(sc_c, bt_sc)
                             sc_pool_bf16, _ = _view_opaque_pool_2d(sc_c.kv_cache_base, dtype)
                             kv_dim = self.cfg.num_key_value_heads * self.cfg.head_dim
                             sc_len = sa.kv_sconv_kernel_size - 1
@@ -4714,6 +5090,9 @@ class Qwen4_5PagedStateBridge:
                                 dst_pool=sc_pool_bf16,
                                 snap_dst_idx=s_phys,
                                 dst_col_offset=0,
+                                req_snap_start=r_sstart,
+                                snap_local_ends=s_end,
+                                snap_aligned=a32,
                                 skip_invalid_phys=True,
                                 residual=sa.kv_sconv_residual,
                                 use_activation=sa.kv_sconv_use_activation,
@@ -4732,6 +5111,9 @@ class Qwen4_5PagedStateBridge:
                                 dst_pool=sc_pool_bf16,
                                 snap_dst_idx=s_phys,
                                 dst_col_offset=kv_dim * sc_len,
+                                req_snap_start=r_sstart,
+                                snap_local_ends=s_end,
+                                snap_aligned=a32,
                                 skip_invalid_phys=True,
                                 residual=sa.kv_sconv_residual,
                                 use_activation=sa.kv_sconv_use_activation,
@@ -4829,6 +5211,7 @@ class Qwen4_5PagedStateBridge:
                                 rotary_dim=sa.indexer_rotary_dim,
                                 rope_theta=sa.rope_theta,
                                 norm_eps=idx.norm_eps,
+                                tok_req_i32=plan.tok_req_i32,
                             )
                             source_idx_prefill[lid] = (idx_kv_pool, bt_idx_kv_act)
                         else:
@@ -4878,14 +5261,21 @@ class Qwen4_5PagedStateBridge:
                                 full_kv_batched[lid] = (k_full_b, v_full_b)
                                 k_u_bhtd = k_full_b.transpose(1, 2)
                                 v_u_bhtd = v_full_b.transpose(1, 2)
-                                cos_u, sin_u = build_qsa_neox_cos_sin(
-                                    pos_u, sa.indexer_rotary_dim, sa.rope_theta, attn_in.dtype
-                                )
                                 pref_selected = qsa_select_causal_from_projected(
-                                    idx, q_idx_u, raw_k_u, cos_u, sin_u
+                                    idx,
+                                    q_idx_u,
+                                    raw_k_u,
+                                    q_norm_gamma=idx.q_norm_gamma,
+                                    positions=pos_u,
+                                    rotary_dim=sa.indexer_rotary_dim,
+                                    rope_theta=sa.rope_theta,
                                 )
                                 out_u = qsa_sparse_prefill_attention(
-                                    q_u_bhtd, k_u_bhtd, v_u_bhtd, pref_selected
+                                    q_u_bhtd,
+                                    k_u_bhtd,
+                                    v_u_bhtd,
+                                    pref_selected,
+                                    assume_unique_selected=(idx.compress_ratio == 4),
                                 )
                             else:
                                 assert idx_kv_pool is not None and bt_idx_kv_act is not None
@@ -4906,6 +5296,8 @@ class Qwen4_5PagedStateBridge:
                                     rotary_dim=sa.indexer_rotary_dim,
                                     rope_theta=sa.rope_theta,
                                     max_ctx_len=max_ctx_p,
+                                    q_norm_gamma=idx.q_norm_gamma,
+                                    norm_eps=idx.norm_eps,
                                 )
                                 if use_paged_qsa:
                                     assert kv_c is not None and bt_kv_act is not None
@@ -4919,6 +5311,7 @@ class Qwen4_5PagedStateBridge:
                                         head_dim=sa.head_dim,
                                         max_ctx_len=t_tot,
                                         kv_scale=getattr(kv_c, "kv_scale_base", None),
+                                        assume_unique_selected=(idx.compress_ratio == 4),
                                     )
                                 else:
                                     k_full_b, v_full_b = _load_batched_full_attn_kv(
@@ -4938,6 +5331,7 @@ class Qwen4_5PagedStateBridge:
                                         k_full_b.transpose(1, 2),
                                         v_full_b.transpose(1, 2),
                                         pref_selected,
+                                        assume_unique_selected=(idx.compress_ratio == 4),
                                     )
                         else:
                             if t_pfx > 0 and kv_c is not None and bt_kv_act is not None:
@@ -5040,11 +5434,14 @@ class Qwen4_5PagedStateBridge:
                                 if kv_cache is None:
                                     full_qsa_raw_reqs[lid].append((raw_k_b, idx.k_norm_gamma))
                                 if t_pfx == 0 or kv_cache is None:
-                                    cos_b, sin_b = build_qsa_neox_cos_sin(
-                                        pos_b, sa.indexer_rotary_dim, sa.rope_theta, attn_in.dtype
-                                    )
                                     pref_selected = qsa_select_causal_from_projected(
-                                        idx, q_idx_b, raw_k_b, cos_b, sin_b
+                                        idx,
+                                        q_idx_b,
+                                        raw_k_b,
+                                        q_norm_gamma=idx.q_norm_gamma,
+                                        positions=pos_b,
+                                        rotary_dim=sa.indexer_rotary_dim,
+                                        rope_theta=sa.rope_theta,
                                     )
                                 else:
                                     assert idx_kv_pool is not None and bt_idx_kv_act is not None
@@ -5063,9 +5460,15 @@ class Qwen4_5PagedStateBridge:
                                         rotary_dim=sa.indexer_rotary_dim,
                                         rope_theta=sa.rope_theta,
                                         max_ctx_len=max_ctx_p,
+                                        q_norm_gamma=idx.q_norm_gamma,
+                                        norm_eps=idx.norm_eps,
                                     )
                                 out_b = qsa_sparse_prefill_attention(
-                                    q_b_bhtd, k_b_bhtd, v_b_bhtd, pref_selected
+                                    q_b_bhtd,
+                                    k_b_bhtd,
+                                    v_b_bhtd,
+                                    pref_selected,
+                                    assume_unique_selected=(idx.compress_ratio == 4),
                                 )
                             else:
                                 if t_pfx == 0:
@@ -5100,7 +5503,7 @@ class Qwen4_5PagedStateBridge:
                         if pre_q_idx is not None:
                             q_idx_cons = pre_q_idx.unsqueeze(0)
                         else:
-                            q_idx_cons, _ = sa.indexer.project(attn_in.unsqueeze(0))
+                            q_idx_cons, _ = sa.indexer.project_raw(attn_in.unsqueeze(0))
 
                     out_flat = None
                     if uniform_full_batch and (src_lid in full_kv_batched or src_lid in source_kv_prefill):
@@ -5133,17 +5536,20 @@ class Qwen4_5PagedStateBridge:
                                     rotary_dim=sa.indexer_rotary_dim,
                                     rope_theta=sa.rope_theta,
                                     max_ctx_len=max_ctx_p,
+                                    q_norm_gamma=idx.q_norm_gamma,
+                                    norm_eps=idx.norm_eps,
                                 )
                             else:
                                 src_raw_b, src_kn = full_qsa_raw_batched[src_lid]
-                                cos_u, sin_u = build_qsa_neox_cos_sin(
-                                    torch.arange(t_tot, device=device).unsqueeze(0).expand(bsz_u, t_tot),
-                                    sa.indexer_rotary_dim,
-                                    sa.rope_theta,
-                                    attn_in.dtype,
-                                )
                                 cons_selected = qsa_select_causal_from_projected(
-                                    idx, q_idx_u, src_raw_b, cos_u, sin_u, k_norm_gamma=src_kn
+                                    idx,
+                                    q_idx_u,
+                                    src_raw_b,
+                                    k_norm_gamma=src_kn,
+                                    q_norm_gamma=idx.q_norm_gamma,
+                                    positions=pos_u,
+                                    rotary_dim=sa.indexer_rotary_dim,
+                                    rope_theta=sa.rope_theta,
                                 )
                             if t_pfx > 0 and kv_cache is not None and src_lid in source_kv_prefill:
                                 src_kv_c, src_bt_act = source_kv_prefill[src_lid]
@@ -5157,6 +5563,7 @@ class Qwen4_5PagedStateBridge:
                                     head_dim=sa.head_dim,
                                     max_ctx_len=t_tot,
                                     kv_scale=getattr(src_kv_c, "kv_scale_base", None),
+                                    assume_unique_selected=(idx.compress_ratio == 4),
                                 )
                             else:
                                 k_full_b, v_full_b = _ensure_source_kv_batched(src_lid)
@@ -5165,6 +5572,7 @@ class Qwen4_5PagedStateBridge:
                                     k_full_b[:, :t_tot].transpose(1, 2),
                                     v_full_b[:, :t_tot].transpose(1, 2),
                                     cons_selected,
+                                    assume_unique_selected=(idx.compress_ratio == 4),
                                 )
                         else:
                             k_full_b, v_full_b = _ensure_source_kv_batched(src_lid)
@@ -5237,20 +5645,27 @@ class Qwen4_5PagedStateBridge:
                                         rotary_dim=sa.indexer_rotary_dim,
                                         rope_theta=sa.rope_theta,
                                         max_ctx_len=max_ctx_p,
+                                        q_norm_gamma=idx.q_norm_gamma,
+                                        norm_eps=idx.norm_eps,
                                     )
                                 else:
                                     src_raw, src_kn = full_qsa_raw_reqs[src_lid][bi]
-                                    cos_b, sin_b = build_qsa_neox_cos_sin(
-                                        torch.arange(t_tot, device=device).unsqueeze(0),
-                                        sa.indexer_rotary_dim,
-                                        sa.rope_theta,
-                                        attn_in.dtype,
-                                    )
                                     cons_selected = qsa_select_causal_from_projected(
-                                        idx, q_idx_b, src_raw, cos_b, sin_b, k_norm_gamma=src_kn
+                                        idx,
+                                        q_idx_b,
+                                        src_raw,
+                                        k_norm_gamma=src_kn,
+                                        q_norm_gamma=idx.q_norm_gamma,
+                                        positions=pos_b,
+                                        rotary_dim=sa.indexer_rotary_dim,
+                                        rope_theta=sa.rope_theta,
                                     )
                                 out_b = qsa_sparse_prefill_attention(
-                                    q_b_bhtd, k_b_bhtd, v_b_bhtd, cons_selected
+                                    q_b_bhtd,
+                                    k_b_bhtd,
+                                    v_b_bhtd,
+                                    cons_selected,
+                                    assume_unique_selected=(idx.compress_ratio == 4),
                                 )
                             else:
                                 if t_pfx == 0:
@@ -5299,7 +5714,7 @@ class Qwen4_5PagedStateBridge:
                         (self.cfg.hidden_size, layer.attn_output_sconv.kernel_size - 1),
                         dtype,
                     )
-                    s_tok, s_req, _, _, s_phys = _snap_phys_for(c_ao, bt_ao)
+                    s_tok, s_req, s_end, r_sstart, s_phys, _, a32 = _snap_phys_for(c_ao, bt_ao)
                     ao_pool_bf16, _ = _view_opaque_pool_2d(c_ao.kv_cache_base, dtype)
                     attn_out = causal_dwconv1d_ragged_prefill_with_snapshots_triton(
                         attn_out,
@@ -5312,6 +5727,9 @@ class Qwen4_5PagedStateBridge:
                         snap_req_idx=s_req,
                         dst_pool=ao_pool_bf16,
                         snap_dst_idx=s_phys,
+                        req_snap_start=r_sstart,
+                        snap_local_ends=s_end,
+                        snap_aligned=a32,
                         skip_invalid_phys=True,
                         residual=layer.attn_output_sconv.residual,
                         use_activation=layer.attn_output_sconv.use_activation,
@@ -5355,7 +5773,7 @@ class Qwen4_5PagedStateBridge:
                         (self.cfg.hidden_size, layer.ffn_output_sconv.kernel_size - 1),
                         dtype,
                     )
-                    s_tok, s_req, _, _, s_phys = _snap_phys_for(c_fo, bt_fo)
+                    s_tok, s_req, s_end, r_sstart, s_phys, _, a32 = _snap_phys_for(c_fo, bt_fo)
                     fo_pool_bf16, _ = _view_opaque_pool_2d(c_fo.kv_cache_base, dtype)
                     mlp_out = causal_dwconv1d_ragged_prefill_with_snapshots_triton(
                         mlp_out,
@@ -5368,6 +5786,9 @@ class Qwen4_5PagedStateBridge:
                         snap_req_idx=s_req,
                         dst_pool=fo_pool_bf16,
                         snap_dst_idx=s_phys,
+                        req_snap_start=r_sstart,
+                        snap_local_ends=s_end,
+                        snap_aligned=a32,
                         skip_invalid_phys=True,
                         residual=layer.ffn_output_sconv.residual,
                         use_activation=layer.ffn_output_sconv.use_activation,
@@ -5439,14 +5860,32 @@ class Qwen4_5PagedStateBridge:
             )
 
         emb = model.embed_tokens(input_ids_2d)  # [B, V, H]
-        hyper_hidden = emb.repeat(1, 1, self.cfg.hc_count)
+        hyper_hidden = (
+            emb
+            if self.cfg.hc_count > 1 and (len(model.layers) == 0 or model.layers[0].ple is None)
+            else emb.repeat(1, 1, self.cfg.hc_count)
+        )
         prev_latent: Optional[torch.Tensor] = None
         deferred: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
         shared_gdn_batched: Dict[int, SharedGDNInputs] = {}
         full_kv_layer_caches: Dict[int, Any] = {}
         source_idx_caches: Dict[int, Tuple[torch.Tensor, torch.Tensor]] = {}
-
+        vrf_vis_cache: Dict[int, Tuple[torch.Tensor, torch.Tensor]] = {}
         steps_i32 = tx_stage.get_steps_arange(verify_w, device)
+        vrf_pos_steps_2d: Optional[torch.Tensor] = None
+
+        def _get_vrf_vis(bt_chk: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+            nonlocal vrf_pos_steps_2d
+            k_p = bt_chk.data_ptr()
+            hit = vrf_vis_cache.get(k_p)
+            if hit is not None:
+                return hit
+            if vrf_pos_steps_2d is None:
+                vrf_pos_steps_2d = seq_lens_before_dev.unsqueeze(1) + steps_i32 + 1
+            act = (bt_chk != 0).any(dim=1)
+            vis = torch.where(act.unsqueeze(1), vrf_pos_steps_2d, 0)
+            vrf_vis_cache[k_p] = (act, vis)
+            return act, vis
 
         for layer in model.layers:
             assert isinstance(layer, Qwen4_5DecoderLayer)
@@ -5742,7 +6181,7 @@ class Qwen4_5PagedStateBridge:
                     # Batched V-step QSA Sparse Verify (ZERO step loops!)
                     idx = sa.indexer
                     q_packed, pre_k_raw, pre_v_raw, pre_q_idx, pre_raw_k_idx = (
-                        sa.project_qkv_and_indexer(attn_in, need_idx=True)
+                        sa.project_qkv_and_indexer(attn_in, need_idx=True, need_idx_norm=False)
                     )
                     if sa.attn_output_gate:
                         q_unnorm, gate_flat = q_packed.unflatten(
@@ -5766,7 +6205,7 @@ class Qwen4_5PagedStateBridge:
                         kv_c = layer_caches[FULL_ATTN_KV_TAG]
                         sc_c = layer_caches.get(FULL_ATTN_KV_SCONV_TAG)
                         bt_kv = _block_table_for_tag(attention_inputs, FULL_ATTN_KV_TAG)
-                        active_kv = (bt_kv != 0).any(dim=1)
+                        active_kv, _ = _get_vrf_vis(bt_kv)
 
                         k_raw = pre_k_raw if pre_k_raw is not None else sa.k_proj(attn_in)
                         v_raw = pre_v_raw if pre_v_raw is not None else sa.v_proj(attn_in)
@@ -5875,11 +6314,11 @@ class Qwen4_5PagedStateBridge:
                         stage_idx_st = tx_stage.stage_tensor(
                             INDEXER_STATE_TAG, lid, idx_st_c, bt_idx_st, idx_st_shape, torch.float32
                         )[:bsz]
-                        active_idx = (bt_idx_st != 0).any(dim=1)
+                        active_idx, visible_lens = _get_vrf_vis(bt_idx_st)
                         if pre_q_idx is not None and pre_raw_k_idx is not None:
                             q_idx, raw_k_idx = pre_q_idx, pre_raw_k_idx
                         else:
-                            q_idx, raw_k_idx = idx.project(attn_in)
+                            q_idx, raw_k_idx = idx.project_raw(attn_in)
                         write_qsa_verify_cache_gpu_(
                             raw_k_idx,
                             seq_lens_before_dev,
@@ -5899,11 +6338,6 @@ class Qwen4_5PagedStateBridge:
                         full_kv_layer_caches[lid] = (kv_c, bt_kv, active_kv)
                         source_idx_caches[lid] = (idx_kv_pool, bt_idx_kv)
 
-                        visible_lens = torch.where(
-                            active_idx.unsqueeze(1),
-                            seq_lens_before_dev.unsqueeze(1) + steps_i32 + 1,
-                            0,
-                        )
                         selected = score_and_select_qsa_paged(
                             q_idx,
                             positions_2d,
@@ -5916,6 +6350,8 @@ class Qwen4_5PagedStateBridge:
                             rope_theta=sa.rope_theta,
                             max_ctx_len=None,
                             is_cuda_graph=verify_handle.is_cuda_graph,
+                            q_norm_gamma=idx.q_norm_gamma,
+                            norm_eps=idx.norm_eps,
                         )
                         attn_bhsd = verify_handle.forward_qsa_batch(
                             q_all.transpose(1, 2),
@@ -5931,12 +6367,8 @@ class Qwen4_5PagedStateBridge:
                         if pre_q_idx is not None:
                             q_idx = pre_q_idx
                         else:
-                            q_idx, _ = idx.project(attn_in)
-                        visible_lens = torch.where(
-                            src_active_kv.unsqueeze(1),
-                            seq_lens_before_dev.unsqueeze(1) + steps_i32 + 1,
-                            0,
-                        )
+                            q_idx, _ = idx.project_raw(attn_in)
+                        _, visible_lens = _get_vrf_vis(src_bt_kv)
                         selected = score_and_select_qsa_paged(
                             q_idx,
                             positions_2d,
@@ -5949,6 +6381,8 @@ class Qwen4_5PagedStateBridge:
                             rope_theta=sa.rope_theta,
                             max_ctx_len=None,
                             is_cuda_graph=verify_handle.is_cuda_graph,
+                            q_norm_gamma=idx.q_norm_gamma,
+                            norm_eps=idx.norm_eps,
                         )
                         attn_bhsd = verify_handle.forward_qsa_batch(
                             q_all.transpose(1, 2),
@@ -5968,7 +6402,7 @@ class Qwen4_5PagedStateBridge:
                         kv_c = layer_caches[FULL_ATTN_KV_TAG]
                         sc_c = layer_caches.get(FULL_ATTN_KV_SCONV_TAG)
                         bt_kv = _block_table_for_tag(attention_inputs, FULL_ATTN_KV_TAG)
-                        active_kv = (bt_kv != 0).any(dim=1)
+                        active_kv, _ = _get_vrf_vis(bt_kv)
                         k_sc_st: Optional[ShortConvState] = None
                         v_sc_st: Optional[ShortConvState] = None
                         stage_kv_sc = None
@@ -6211,6 +6645,7 @@ class _Qwen4_5OpaqueTxStage:
         self._batched_meta: Optional[Dict[str, Any]] = None
         self._lazy_sig: Any = None
         self._lazy_meta: Optional[List[Dict[str, Any]]] = None
+        self._prepared_plan: Any = None
 
     def get_steps_arange(self, verify_w: int, device: torch.device) -> torch.Tensor:
         if (
@@ -6242,6 +6677,7 @@ class _Qwen4_5OpaqueTxStage:
         self.kv_cache = kv_cache
         self.attention_inputs = attention_inputs
         self.ready = False
+        self._prepared_plan = None
         self._gen += 1
 
     def get_or_alloc_aux(
@@ -6267,7 +6703,7 @@ class _Qwen4_5OpaqueTxStage:
     ) -> torch.Tensor:
         key = (tag, int(layer_idx))
         wanted_shape = (self.bsz, self.verify_width, *state_shape)
-        elem_bytes = torch.empty((), dtype=dtype).element_size()
+        elem_bytes = _dtype_itemsize(dtype)
         need_bytes = math.prod(state_shape) * elem_bytes
         entry = self.entries.get(key)
         if (
@@ -6519,6 +6955,131 @@ class _Qwen4_5OpaqueTxManager:
         stage.ready = True
         self._active_pending = stage
 
+    @staticmethod
+    def _launch_tx_kernels(
+        stage: _Qwen4_5OpaqueTxStage,
+        live_bs: int,
+        v_w: int,
+        lazy_meta_groups: Optional[List[Dict[str, Any]]],
+        batched_meta: Optional[Dict[str, Any]],
+        prep_specs: List[Tuple[Any, ...]],
+    ) -> None:
+        assert stage.seq_before_buf is not None and stage.accept_len_buf is not None
+        if lazy_meta_groups:
+            for lm in lazy_meta_groups:
+                hk, hv, dk, dv, sk_dt = lm["shape_key"]
+                bdv = min(16, dv)
+                grid_x = lm["num_e"] * hv * (dv // bdv)
+                rt_args = (
+                    lm["sample_kv"],
+                    lm["ptrs_bt"], lm["ptrs_init"], lm["ptrs_k"], lm["ptrs_v"],
+                    lm["ptrs_g"], lm["ptrs_beta"], lm["ptrs_base"], lm["ptrs_phys"],
+                    lm["ptrs_commit"], lm["ptrs_undo"],
+                    stage.seq_before_buf, stage.accept_len_buf,
+                    lm["bt_s0"], lm["bt_s1"], lm["init_sb"],
+                    lm["k_sb"], lm["k_sv"], lm["k_shk"], lm["k_sd"],
+                    lm["v_sb"], lm["v_sv"], lm["v_shv"], lm["v_vd"],
+                    lm["g_sb"], lm["g_sv"], lm["g_shv"],
+                    lm["b_sb"], lm["b_sv"], lm["b_shv"],
+                    lm["base_sb"], lm["commit_sb"], lm["undo_sb"],
+                    lm["tpb"], lm["max_blocks"], lm["num_blocks"],
+                    live_bs,
+                )
+                ptr_or = (
+                    lm["sample_kv"].data_ptr()
+                    | lm["ptrs_bt"].data_ptr() | lm["ptrs_init"].data_ptr()
+                    | lm["ptrs_k"].data_ptr() | lm["ptrs_v"].data_ptr()
+                    | lm["ptrs_g"].data_ptr() | lm["ptrs_beta"].data_ptr()
+                    | lm["ptrs_base"].data_ptr() | lm["ptrs_phys"].data_ptr()
+                    | lm["ptrs_commit"].data_ptr() | lm["ptrs_undo"].data_ptr()
+                    | stage.seq_before_buf.data_ptr() | stage.accept_len_buf.data_ptr()
+                    | lm["bt_s0"].data_ptr() | lm["bt_s1"].data_ptr() | lm["init_sb"].data_ptr()
+                    | lm["k_sb"].data_ptr() | lm["k_sv"].data_ptr() | lm["k_shk"].data_ptr() | lm["k_sd"].data_ptr()
+                    | lm["v_sb"].data_ptr() | lm["v_sv"].data_ptr() | lm["v_shv"].data_ptr() | lm["v_vd"].data_ptr()
+                    | lm["g_sb"].data_ptr() | lm["g_sv"].data_ptr() | lm["g_shv"].data_ptr()
+                    | lm["b_sb"].data_ptr() | lm["b_sv"].data_ptr() | lm["b_shv"].data_ptr()
+                    | lm["base_sb"].data_ptr() | lm["commit_sb"].data_ptr() | lm["undo_sb"].data_ptr()
+                    | lm["tpb"].data_ptr() | lm["max_blocks"].data_ptr() | lm["num_blocks"].data_ptr()
+                )
+                ckey = (
+                    stage.seq_before_buf.device.index, "tx_lazy_gdn",
+                    sk_dt, stage.seq_before_buf.dtype, stage.accept_len_buf.dtype,
+                    _triton_int_spec(live_bs), v_w, hv // hk, hv, dk, dv, bdv,
+                )
+                triton_fast_launch(
+                    _RUNTIME_TRITON_CACHE, ckey, _prepare_gdn_ssm_lazy_commit_batched_triton,
+                    grid_x, 2 * live_bs, 1, ptr_or, rt_args,
+                    {
+                        "V_STEPS": v_w, "GQA_RATIO": hv // hk, "H_V": hv,
+                        "D_K": dk, "D_V": dv, "BLOCK_DV": bdv, "L2_EPS": 1e-6,
+                    },
+                    num_warps=2,
+                )
+        if batched_meta is not None:
+            pm = batched_meta["prep"]
+            if pm is not None and pm["num_tiles"] > 0:
+                bsz_blk = int(batched_meta["block_sz"])
+                rt_args = (
+                    pm["tile_e"], pm["tile_blk"],
+                    pm["ptrs_bt"], pm["ptrs_steps"], pm["ptrs_base"],
+                    pm["ptrs_phys"], pm["ptrs_commit"], pm["ptrs_undo"],
+                    stage.seq_before_buf, stage.accept_len_buf,
+                    pm["bt_s0"], pm["bt_s1"], pm["steps_sb"], pm["steps_sv"],
+                    pm["base_sb"], pm["commit_sb"], pm["undo_sb"],
+                    pm["tpb"], pm["max_blocks"], pm["num_blocks"], pm["n_elems"],
+                    live_bs, v_w,
+                )
+                ptr_or = (
+                    pm["tile_e"].data_ptr() | pm["tile_blk"].data_ptr()
+                    | pm["ptrs_bt"].data_ptr() | pm["ptrs_steps"].data_ptr() | pm["ptrs_base"].data_ptr()
+                    | pm["ptrs_phys"].data_ptr() | pm["ptrs_commit"].data_ptr() | pm["ptrs_undo"].data_ptr()
+                    | stage.seq_before_buf.data_ptr() | stage.accept_len_buf.data_ptr()
+                    | pm["bt_s0"].data_ptr() | pm["bt_s1"].data_ptr() | pm["steps_sb"].data_ptr() | pm["steps_sv"].data_ptr()
+                    | pm["base_sb"].data_ptr() | pm["commit_sb"].data_ptr() | pm["undo_sb"].data_ptr()
+                    | pm["tpb"].data_ptr() | pm["max_blocks"].data_ptr() | pm["num_blocks"].data_ptr() | pm["n_elems"].data_ptr()
+                )
+                ckey = (
+                    stage.seq_before_buf.device.index, "tx_prep_batch",
+                    stage.seq_before_buf.dtype, stage.accept_len_buf.dtype,
+                    _triton_int_spec(live_bs), _triton_int_spec(v_w), bsz_blk,
+                )
+                triton_fast_launch(
+                    _RUNTIME_TRITON_CACHE, ckey, _prepare_opaque_tx_commit_batched_triton,
+                    pm["num_tiles"], 2 * live_bs, 1, ptr_or, rt_args,
+                    {"BLOCK_SIZE": bsz_blk},
+                    num_warps=4,
+                )
+        elif prep_specs:
+            bsz_blk = 2048
+            for s in prep_specs:
+                _prepare_opaque_tx_commit_triton[(2 * live_bs, int(triton.cdiv(s[17], bsz_blk)))](
+                    s[1], stage.seq_before_buf, stage.accept_len_buf,
+                    s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], s[10], s[11], s[12], s[13],
+                    live_bs, v_w, s[14], s[15], s[16], s[17],
+                    BLOCK_SIZE=bsz_blk, num_warps=4,
+                )
+
+    @staticmethod
+    def _launch_write_batched(wm: Dict[str, Any], src_key: str, lbs: int, block_sz: int) -> None:
+        rt_args = (
+            wm["tile_e"], wm["tile_blk"], wm["ptrs_base"], wm[src_key], wm["ptrs_phys"],
+            wm["base_sb"], wm["commit_sb"] if src_key == "ptrs_commit" else wm["undo_sb"],
+            wm["num_blocks"], wm["n_elems"],
+        )
+        sb_src = wm["commit_sb"] if src_key == "ptrs_commit" else wm["undo_sb"]
+        ptr_or = (
+            wm["tile_e"].data_ptr() | wm["tile_blk"].data_ptr() | wm["ptrs_base"].data_ptr()
+            | wm[src_key].data_ptr() | wm["ptrs_phys"].data_ptr() | wm["base_sb"].data_ptr()
+            | sb_src.data_ptr() | wm["num_blocks"].data_ptr() | wm["n_elems"].data_ptr()
+        )
+        ckey = (wm["tile_e"].device.index, "tx_write_batch", block_sz)
+        triton_fast_launch(
+            _RUNTIME_TRITON_CACHE, ckey, _write_opaque_rows_batched_triton,
+            wm["num_tiles"], 2 * lbs, 1, ptr_or, rt_args,
+            {"BLOCK_SIZE": block_sz},
+            num_warps=4,
+        )
+
     def prepare_commit(self, accept_len: torch.Tensor) -> None:
         if self._undo_records:
             raise RuntimeError("Concurrent uncommitted speculative target transaction")
@@ -6536,6 +7097,33 @@ class _Qwen4_5OpaqueTxManager:
         assert stage.accept_len_buf is not None
         stage.accept_len_buf[:live_bs].copy_(accept_len.to(device=dev, dtype=torch.int32))
         v_w = stage.verify_width
+
+        bt_key = (
+            stage._gen,
+            live_bs,
+            tuple(
+                (e.bt.data_ptr(), int(e.bt.shape[1]) if e.bt.ndim >= 2 else 0, int(e.bt.stride(0)), int(e.bt.stride(1)) if e.bt.ndim >= 2 else 0)
+                for e in stage.entries.values()
+                if e.gen == stage._gen
+            ),
+            tuple(
+                (l.bt.data_ptr(), int(l.bt.shape[1]) if l.bt.ndim >= 2 else 0, int(l.bt.stride(0)), int(l.bt.stride(1)) if l.bt.ndim >= 2 else 0)
+                for l in stage.lazy_gdn_entries.values()
+                if l.gen == stage._gen
+            ),
+        )
+        cached_plan = stage._prepared_plan
+        if cached_plan is not None and cached_plan[0] == bt_key:
+            _, undo_tuple, lazy_meta_groups, batched_meta, prep_specs, fallback_recs = cached_plan
+            self._launch_tx_kernels(stage, live_bs, v_w, lazy_meta_groups, batched_meta, prep_specs)
+            self._batched_undo_meta = (
+                {"meta": batched_meta, "live_bs": live_bs, "fallback_recs": fallback_recs}
+                if batched_meta is not None
+                else None
+            )
+            self._undo_records = list(undo_tuple)
+            self._committed = False
+            return
 
         undo_records: List[_TxUndoRecord] = []
         prep_specs: List[Tuple[Any, ...]] = []
@@ -6623,6 +7211,7 @@ class _Qwen4_5OpaqueTxManager:
                 )
 
         fallback_recs: List[_TxUndoRecord] = []
+        lazy_meta_groups: Optional[List[Dict[str, Any]]] = None
         for lentry in stage.lazy_gdn_entries.values():
             if lentry.gen != stage._gen:
                 continue
@@ -6905,58 +7494,6 @@ class _Qwen4_5OpaqueTxManager:
                 stage._lazy_meta = lazy_meta_groups
             if lazy_meta_groups is None:
                 raise RuntimeError("Lazy GDN commit metadata unavailable during CUDA graph capture; run eager warmup first")
-            for lm in lazy_meta_groups:
-                hk, hv, dk, dv, _ = lm["shape_key"]
-                bdv = min(16, dv)
-                grid_x = lm["num_e"] * hv * (dv // bdv)
-                _prepare_gdn_ssm_lazy_commit_batched_triton[(grid_x, 2 * live_bs)](
-                    lm["sample_kv"],
-                    lm["ptrs_bt"],
-                    lm["ptrs_init"],
-                    lm["ptrs_k"],
-                    lm["ptrs_v"],
-                    lm["ptrs_g"],
-                    lm["ptrs_beta"],
-                    lm["ptrs_base"],
-                    lm["ptrs_phys"],
-                    lm["ptrs_commit"],
-                    lm["ptrs_undo"],
-                    stage.seq_before_buf,
-                    stage.accept_len_buf,
-                    lm["bt_s0"],
-                    lm["bt_s1"],
-                    lm["init_sb"],
-                    lm["k_sb"],
-                    lm["k_sv"],
-                    lm["k_shk"],
-                    lm["k_sd"],
-                    lm["v_sb"],
-                    lm["v_sv"],
-                    lm["v_shv"],
-                    lm["v_vd"],
-                    lm["g_sb"],
-                    lm["g_sv"],
-                    lm["g_shv"],
-                    lm["b_sb"],
-                    lm["b_sv"],
-                    lm["b_shv"],
-                    lm["base_sb"],
-                    lm["commit_sb"],
-                    lm["undo_sb"],
-                    lm["tpb"],
-                    lm["max_blocks"],
-                    lm["num_blocks"],
-                    live_bs,
-                    V_STEPS=v_w,
-                    GQA_RATIO=hv // hk,
-                    H_V=hv,
-                    D_K=dk,
-                    D_V=dv,
-                    BLOCK_DV=bdv,
-                    L2_EPS=1e-6,
-                    num_warps=2,
-                )
-
         batched_meta: Optional[Dict[str, Any]] = None
         block_sz = 2048
         if len(write_specs) >= 1:
@@ -6974,65 +7511,26 @@ class _Qwen4_5OpaqueTxManager:
                 }
                 stage._batched_sig = sig
                 stage._batched_meta = batched_meta
-
-            if batched_meta is not None:
-                pm = batched_meta["prep"]
-                if pm is not None and pm["num_tiles"] > 0:
-                    _prepare_opaque_tx_commit_batched_triton[(pm["num_tiles"], 2 * live_bs)](
-                        pm["tile_e"],
-                        pm["tile_blk"],
-                        pm["ptrs_bt"],
-                        pm["ptrs_steps"],
-                        pm["ptrs_base"],
-                        pm["ptrs_phys"],
-                        pm["ptrs_commit"],
-                        pm["ptrs_undo"],
-                        stage.seq_before_buf,
-                        stage.accept_len_buf,
-                        pm["bt_s0"],
-                        pm["bt_s1"],
-                        pm["steps_sb"],
-                        pm["steps_sv"],
-                        pm["base_sb"],
-                        pm["commit_sb"],
-                        pm["undo_sb"],
-                        pm["tpb"],
-                        pm["max_blocks"],
-                        pm["num_blocks"],
-                        pm["n_elems"],
-                        live_bs,
-                        v_w,
-                        BLOCK_SIZE=block_sz,
-                        num_warps=4,
-                    )
-            else:
-                for s in prep_specs:
-                    _prepare_opaque_tx_commit_triton[(2 * live_bs, int(triton.cdiv(s[17], block_sz)))](
-                        s[1],
-                        stage.seq_before_buf,
-                        stage.accept_len_buf,
-                        s[2],
-                        s[3],
-                        s[4],
-                        s[5],
-                        s[6],
-                        s[7],
-                        s[8],
-                        s[9],
-                        s[10],
-                        s[11],
-                        s[12],
-                        s[13],
-                        live_bs,
-                        v_w,
-                        s[14],
-                        s[15],
-                        s[16],
-                        s[17],
-                        BLOCK_SIZE=block_sz,
-                        num_warps=4,
-                    )
+            if batched_meta is None:
                 fallback_recs.extend(s[0] for s in write_specs)
+
+        self._launch_tx_kernels(
+            stage,
+            live_bs,
+            v_w,
+            lazy_meta_groups if lazy_specs else None,
+            batched_meta,
+            prep_specs,
+        )
+        if not torch.cuda.is_current_stream_capturing() and not non_triton_entries:
+            stage._prepared_plan = (
+                bt_key,
+                tuple(undo_records),
+                lazy_meta_groups if lazy_specs else None,
+                batched_meta,
+                prep_specs,
+                list(fallback_recs),
+            )
 
         self._batched_undo_meta = (
             {"meta": batched_meta, "live_bs": live_bs, "fallback_recs": fallback_recs}
@@ -7049,19 +7547,7 @@ class _Qwen4_5OpaqueTxManager:
                 lbs = self._batched_undo_meta["live_bs"]
                 block_sz = int(self._batched_undo_meta["meta"]["block_sz"])
                 if wm["num_tiles"] > 0:
-                    _write_opaque_rows_batched_triton[(wm["num_tiles"], 2 * lbs)](
-                        wm["tile_e"],
-                        wm["tile_blk"],
-                        wm["ptrs_base"],
-                        wm["ptrs_commit"],
-                        wm["ptrs_phys"],
-                        wm["base_sb"],
-                        wm["commit_sb"],
-                        wm["num_blocks"],
-                        wm["n_elems"],
-                        BLOCK_SIZE=block_sz,
-                        num_warps=4,
-                    )
+                    self._launch_write_batched(wm, "ptrs_commit", lbs, block_sz)
                 for rec in self._batched_undo_meta["fallback_recs"]:
                     _write_opaque_rows_raw_gpu(
                         rec.cache.kv_cache_base, rec.phys_ids, rec.commit_u8, rec.tag, rec.layer_idx
@@ -7079,19 +7565,7 @@ class _Qwen4_5OpaqueTxManager:
                     lbs = self._batched_undo_meta["live_bs"]
                     block_sz = int(self._batched_undo_meta["meta"]["block_sz"])
                     if wm["num_tiles"] > 0:
-                        _write_opaque_rows_batched_triton[(wm["num_tiles"], 2 * lbs)](
-                            wm["tile_e"],
-                            wm["tile_blk"],
-                            wm["ptrs_base"],
-                            wm["ptrs_undo"],
-                            wm["ptrs_phys"],
-                            wm["base_sb"],
-                            wm["undo_sb"],
-                            wm["num_blocks"],
-                            wm["n_elems"],
-                            BLOCK_SIZE=block_sz,
-                            num_warps=4,
-                        )
+                        self._launch_write_batched(wm, "ptrs_undo", lbs, block_sz)
                     for rec in self._batched_undo_meta["fallback_recs"]:
                         _write_opaque_rows_raw_gpu(
                             rec.cache.kv_cache_base, rec.phys_ids, rec.undo_u8, rec.tag, rec.layer_idx

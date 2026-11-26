@@ -54,6 +54,8 @@ def _bind_fp8_bf16_alias(fp8_mod: SM100FP8Linear, w_tensor: torch.Tensor) -> Non
     """Bind BF16 weight view as a non-persistent buffer alias (zero duplicate BF16/state_dict)."""
     fp8_mod._parameters.pop("weight", None)
     fp8_mod.register_buffer("weight", w_tensor.data, persistent=False)
+    if hasattr(fp8_mod, "_refresh_fast_dispatch"):
+        fp8_mod._refresh_fast_dispatch()
 
 
 def _wrap_moe_fp8_linear(
@@ -551,23 +553,18 @@ class Qwen4_5DenseMLP(nn.Module):
             or os.environ.get("QWEN4_5_DENSE_LINEAR_MODE", "bf16").strip().lower()
         )
         if eff_mode != "bf16" and self.gate_proj.weight.is_cuda:
-            # SiTU-GLU multiplies two noisy inputs; keep gate/up BF16 in auto while enabling
-            # Prefill deepgemm_fp8 (or mxfp8 fallback) on down_proj (DenseMLP & SharedExpert).
-            dev_idx = int(self.gate_proj.weight.device.index or 0)
+            # SiTU-GLU amplifies activation kurtosis; keep gate/up and down_proj BF16 under
+            # auto/fp8 (zero w_dg_fp8/w_mxfp8 memory & zero GDN/Dense FP8 drift), while
+            # preserving w4a8 and explicit deepgemm_fp8 / mxfp8 / allow_mxfp8 opt-ins.
             use_mxfp8 = bool(allow_mxfp8 or eff_mode == "mxfp8")
+            down_use_dg = bool(allow_mxfp8 or eff_mode == "deepgemm_fp8")
             lin_kw = dict(
                 mode=eff_mode,
                 prepare_trtllm_ll=False,
                 prepare_mxfp8=use_mxfp8,
-                prepare_deepgemm_fp8=bool(allow_mxfp8 or eff_mode == "deepgemm_fp8"),
+                prepare_deepgemm_fp8=down_use_dg,
                 prepare_w4a8=(eff_mode == "w4a8"),
                 allow_decode_scaled_mm=False,
-            )
-            down_use_dg = bool(allow_mxfp8 or eff_mode in ("auto", "fp8", "deepgemm_fp8"))
-            down_kw = dict(
-                lin_kw,
-                prepare_mxfp8=bool(use_mxfp8 or (eff_mode in ("auto", "fp8") and not has_deepgemm_fp8(dev_idx))),
-                prepare_deepgemm_fp8=down_use_dg,
             )
             if self._gate_up_weight is not None:
                 self._fp8_gate_up = _wrap_moe_fp8_linear(
@@ -587,7 +584,7 @@ class Qwen4_5DenseMLP(nn.Module):
                     self.hidden_size, self.local_intermediate_size, self.up_proj.weight, **lin_kw
                 )
             self._fp8_down = _wrap_moe_fp8_linear(
-                self.local_intermediate_size, self.hidden_size, self.down_proj.weight, **down_kw
+                self.local_intermediate_size, self.hidden_size, self.down_proj.weight, **lin_kw
             )
         else:
             self._fp8_gate_up = None
@@ -688,6 +685,7 @@ class LatentMoETBOContext:
     combine_handle: Optional[Any] = None
     shared: Optional[torch.Tensor] = None
     shared_gate_up: Optional[torch.Tensor] = None
+    gates: Optional[torch.Tensor] = None
     early_return: Optional[torch.Tensor] = None
 
 
@@ -796,9 +794,19 @@ class Qwen4_5LatentMoE(nn.Module):
         )
         self.register_buffer("_latent_down_gate_weight", None, persistent=False)
         self.register_buffer("_latent_down_gate_shared_gu_weight", None, persistent=False)
+        self.register_buffer("_w3x_and_gates_weight", None, persistent=False)
         self.register_buffer("_latent_shared_gates_weight", None, persistent=False)
         self.register_buffer("_latent_shared_gates_pad8", None, persistent=False)
         self.register_buffer("_latent_scale_gate_pad8", None, persistent=False)
+        self._w3x_and_gates_fast: Optional[torch.Tensor] = None
+        self._w3x_gates_cols: int = 0
+        self._w3x_base_g: int = 2 * self.latent_dim + 2 * self.shared_expert_intermediate_size
+        self._pre_moe_ln_w_c: Optional[torch.Tensor] = None
+        self._pre_moe_ln_w_ptr: int = -1
+        self._router_e_pad: int = triton.next_power_of_2(self.num_experts)
+        self._router_topk_pad: int = triton.next_power_of_2(max(self.top_k, 2))
+        self._latent_ln_block_k: int = min(512, triton.next_power_of_2(max(self.latent_dim, 64)))
+        self._combine_block_h: int = min(1024, triton.next_power_of_2(max(self.hidden_size, 64)))
         self._fp8_latent_down_gate: Optional[SM100FP8Linear] = None
         self._fp8_latent_down: Optional[SM100FP8Linear] = None
         self._fp8_latent_gate: Optional[SM100FP8Linear] = None
@@ -1062,22 +1070,44 @@ class Qwen4_5LatentMoE(nn.Module):
             dense_linear_mode=eff_mode,
             allow_mxfp8=False,
         )
+        ln_w = self.pre_moe_latent_layernorm.weight.data
+        self._pre_moe_ln_w_c = ln_w if ln_w.is_contiguous() else ln_w.contiguous()
+        self._pre_moe_ln_w_ptr = int(ln_w.data_ptr())
         if (
             fuse_latent_down_gate
             and fuse_shared_gate_up
             and self.shared_expert._gate_up_weight is not None
         ):
-            w_3x = torch.cat(
+            # Fuse W_3x + [latent_scale_gate, (shared_expert_gate)] + zero-pad(8) into one
+            # contiguous [2*L + 2*S + 8, H] GEMM weight: zero extra memory vs separate pad8
+            # and eliminates 1 kernel launch + 1 HBM read of x per MoE layer.
+            gates_parts = [self.latent_scale_gate.weight.data]
+            if self.shared_expert_gate is not None:
+                gates_parts.append(self.shared_expert_gate.weight.data)
+            gates_c = len(gates_parts)
+            pad_tail = torch.zeros(
+                (8 - gates_c, self.hidden_size),
+                dtype=self.latent_scale_gate.weight.dtype,
+                device=self.latent_scale_gate.weight.device,
+            )
+            w_full = torch.cat(
                 [
                     self.latent_down_proj.weight.data,
                     self.latent_gate_proj.weight.data,
                     self.shared_expert._gate_up_weight,
+                    *gates_parts,
+                    pad_tail,
                 ],
                 dim=0,
             ).contiguous()
-            self._latent_down_gate_shared_gu_weight = w_3x
-            self._latent_down_gate_weight = w_3x[: 2 * self.latent_dim]
-            self.shared_expert._gate_up_weight = w_3x[2 * self.latent_dim :]
+            base_g = 2 * self.latent_dim + 2 * self.shared_expert_intermediate_size
+            self._w3x_base_g = base_g
+            self._w3x_gates_cols = gates_c
+            self._w3x_and_gates_weight = w_full
+            self._w3x_and_gates_fast = w_full
+            self._latent_down_gate_shared_gu_weight = w_full[:base_g]
+            self._latent_down_gate_weight = w_full[: 2 * self.latent_dim]
+            self.shared_expert._gate_up_weight = w_full[2 * self.latent_dim : base_g]
             if (
                 self.shared_expert._fp8_gate_up is not None
                 and self.shared_expert._fp8_gate_up.weight is not None
@@ -1085,33 +1115,43 @@ class Qwen4_5LatentMoE(nn.Module):
                 _bind_fp8_bf16_alias(
                     self.shared_expert._fp8_gate_up, self.shared_expert._gate_up_weight
                 )
-        elif fuse_latent_down_gate:
-            self._latent_down_gate_shared_gu_weight = None
-            self._latent_down_gate_weight = torch.cat(
-                [self.latent_down_proj.weight.data, self.latent_gate_proj.weight.data], dim=0
-            ).contiguous()
+            if gates_c == 2:
+                self._latent_shared_gates_weight = w_full[base_g : base_g + 2]
+                self._latent_shared_gates_pad8 = w_full[base_g : base_g + 8]
+                self._latent_scale_gate_pad8 = None
+            else:
+                self._latent_shared_gates_weight = None
+                self._latent_shared_gates_pad8 = None
+                self._latent_scale_gate_pad8 = w_full[base_g : base_g + 8]
         else:
+            self._w3x_and_gates_weight = None
+            self._w3x_and_gates_fast = None
+            self._w3x_gates_cols = 0
             self._latent_down_gate_shared_gu_weight = None
-            self._latent_down_gate_weight = None
-
-        if self.shared_expert_gate is not None:
-            gates_w = torch.cat(
-                [self.latent_scale_gate.weight.data, self.shared_expert_gate.weight.data], dim=0
-            ).contiguous()
-            self._latent_shared_gates_weight = gates_w
-            pad8 = torch.zeros(
-                (8, self.hidden_size), dtype=gates_w.dtype, device=gates_w.device
-            )
-            pad8[:2].copy_(gates_w)
-            self._latent_shared_gates_pad8 = pad8
-            self._latent_scale_gate_pad8 = None
-        else:
-            self._latent_shared_gates_weight = None
-            self._latent_shared_gates_pad8 = None
-            sw = self.latent_scale_gate.weight.data
-            pad8_s = torch.zeros((8, self.hidden_size), dtype=sw.dtype, device=sw.device)
-            pad8_s[:1].copy_(sw)
-            self._latent_scale_gate_pad8 = pad8_s
+            if fuse_latent_down_gate:
+                self._latent_down_gate_weight = torch.cat(
+                    [self.latent_down_proj.weight.data, self.latent_gate_proj.weight.data], dim=0
+                ).contiguous()
+            else:
+                self._latent_down_gate_weight = None
+            if self.shared_expert_gate is not None:
+                gates_w = torch.cat(
+                    [self.latent_scale_gate.weight.data, self.shared_expert_gate.weight.data], dim=0
+                ).contiguous()
+                self._latent_shared_gates_weight = gates_w
+                pad8 = torch.zeros(
+                    (8, self.hidden_size), dtype=gates_w.dtype, device=gates_w.device
+                )
+                pad8[:2].copy_(gates_w)
+                self._latent_shared_gates_pad8 = pad8
+                self._latent_scale_gate_pad8 = None
+            else:
+                self._latent_shared_gates_weight = None
+                self._latent_shared_gates_pad8 = None
+                sw = self.latent_scale_gate.weight.data
+                pad8_s = torch.zeros((8, self.hidden_size), dtype=sw.dtype, device=sw.device)
+                pad8_s[:1].copy_(sw)
+                self._latent_scale_gate_pad8 = pad8_s
 
         if eff_mode != "bf16" and self.latent_down_proj.weight.is_cuda:
             # Keep pre-router/pre-SiTU-GLU latent inputs in BF16 under auto so zero router flips
@@ -1225,8 +1265,6 @@ class Qwen4_5LatentMoE(nn.Module):
             if M == 0:
                 return topk_ids, topk_weights
             bias_t = self.expert_bias if self.expert_bias is not None else logits
-            E_PAD = triton.next_power_of_2(self.num_experts)
-            TOP_K_PAD = triton.next_power_of_2(max(self.top_k, 2))
             with _cuda_device_ctx(logits.device):
                 _qwen45_sigmoid_topk_router_kernel[(M,)](
                     logits,
@@ -1235,9 +1273,9 @@ class Qwen4_5LatentMoE(nn.Module):
                     topk_weights,
                     self.num_experts,
                     logits.stride(0),
-                    E_PAD=E_PAD,
+                    E_PAD=self._router_e_pad,
                     TOP_K=self.top_k,
-                    TOP_K_PAD=TOP_K_PAD,
+                    TOP_K_PAD=self._router_topk_pad,
                     HAS_BIAS=(self.expert_bias is not None),
                     NORMALIZE=self.normalize_topk_scores,
                     ROUND_BF16=(routed.dtype == torch.bfloat16),
@@ -1268,18 +1306,24 @@ class Qwen4_5LatentMoE(nn.Module):
             M_dg = int(dg_2d.shape[0])
             routed = torch.empty((M_dg, self.latent_dim), dtype=dg_2d.dtype, device=dg_2d.device)
             if M_dg > 0:
-                block_k = min(512, triton.next_power_of_2(max(self.latent_dim, 64)))
+                ln_w_raw = self.pre_moe_latent_layernorm.weight.data
+                ptr = int(ln_w_raw.data_ptr())
+                ln_w = self._pre_moe_ln_w_c
+                if ln_w is None or self._pre_moe_ln_w_ptr != ptr:
+                    ln_w = ln_w_raw if ln_w_raw.is_contiguous() else ln_w_raw.contiguous()
+                    self._pre_moe_ln_w_c = ln_w
+                    self._pre_moe_ln_w_ptr = ptr
                 with _cuda_device_ctx(dg_2d.device):
                     _latent_norm_mul_sigmoid_kernel[(M_dg,)](
                         dg_2d,
-                        self.pre_moe_latent_layernorm.weight.contiguous(),
+                        ln_w,
                         routed,
                         M_dg,
                         self.latent_dim,
                         dg_2d.stride(0),
-                        routed.stride(0),
-                        eps=float(self.rms_norm_eps),
-                        BLOCK_K=block_k,
+                        self.latent_dim,
+                        eps=self.rms_norm_eps,
+                        BLOCK_K=self._latent_ln_block_k,
                         num_warps=4,
                     )
             return routed
@@ -1505,6 +1549,26 @@ class Qwen4_5LatentMoE(nn.Module):
         routed_norm = self._run_latent_norm_mul_sigmoid(dg, run_triton=run_triton)
         return x, routed_norm, sgu
 
+    def _forward_w3x_latent_sgu_and_gates(
+        self, x: torch.Tensor, *, run_triton: bool
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+        """Run fused W_3x+gates projection [M, H] -> (x, routed_norm, shared_gate_up, gates)."""
+        if not x.is_contiguous():
+            x = x.contiguous()
+        w_fused = self._w3x_and_gates_fast
+        if w_fused is None:
+            w_fused = self._w3x_and_gates_weight
+        if w_fused is not None and self._w3x_gates_cols > 0 and w_fused.device == x.device:
+            all_up = F.linear(x, w_fused)
+            base_g = self._w3x_base_g
+            dg = all_up[:, : 2 * self.latent_dim]
+            sgu = all_up[:, 2 * self.latent_dim : base_g]
+            gates = all_up[:, base_g : base_g + self._w3x_gates_cols]
+            routed_norm = self._run_latent_norm_mul_sigmoid(dg, run_triton=run_triton)
+            return x, routed_norm, sgu, gates
+        x_c, routed_norm, sgu = self._forward_w3x_latent_and_sgu(x, run_triton=run_triton)
+        return x_c, routed_norm, sgu, None
+
     def _should_use_w3x_bf16(self, M: int, device: torch.device) -> bool:
         if (
             self._latent_down_gate_shared_gu_weight is None
@@ -1512,7 +1576,8 @@ class Qwen4_5LatentMoE(nn.Module):
             or device.type != "cuda"
         ):
             return False
-        env_mode = os.environ.get("QWEN4_5_DENSE_LINEAR_MODE", "").strip().lower()
+        env_raw = os.environ.get("QWEN4_5_DENSE_LINEAR_MODE", "")
+        env_mode = env_raw.strip().lower() if env_raw else ""
         if (
             not env_mode
             and self.dense_linear_mode in ("bf16", "auto")
@@ -1551,12 +1616,15 @@ class Qwen4_5LatentMoE(nn.Module):
         shared: torch.Tensor,
         *,
         run_triton: bool,
+        precomputed_gates: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         M = int(x.shape[0])
         if M == 0:
             return routed_up + shared
         has_sg = self.shared_expert_gate is not None
-        if has_sg:
+        if precomputed_gates is not None:
+            gates = precomputed_gates
+        elif has_sg:
             if self._latent_shared_gates_weight is not None:
                 gates = self._project_gate_no_cutlass80(
                     x,
@@ -1588,7 +1656,7 @@ class Qwen4_5LatentMoE(nn.Module):
             s_2d = shared if shared.stride(-1) == 1 else shared.contiguous()
             g_2d = gates if gates.stride(-1) == 1 else gates.contiguous()
             out = torch.empty((M, self.hidden_size), dtype=r_2d.dtype, device=r_2d.device)
-            block_h = min(1024, triton.next_power_of_2(max(self.hidden_size, 64)))
+            block_h = self._combine_block_h
             with _cuda_device_ctx(r_2d.device):
                 _combine_latent_shared_out_kernel[(M, triton.cdiv(self.hidden_size, block_h))](
                     r_2d,
@@ -1598,7 +1666,7 @@ class Qwen4_5LatentMoE(nn.Module):
                     r_2d.stride(0),
                     s_2d.stride(0),
                     g_2d.stride(0),
-                    out.stride(0),
+                    self.hidden_size,
                     H=self.hidden_size,
                     HAS_SHARED_GATE=has_sg,
                     IS_BF16=(
@@ -1711,7 +1779,9 @@ class Qwen4_5LatentMoE(nn.Module):
         M = int(x.shape[0])
 
         if self._should_use_w3x_bf16(M, x.device):
-            x, routed_norm, sgu = self._forward_w3x_latent_and_sgu(x, run_triton=run_triton)
+            x, routed_norm, sgu, pre_gates = self._forward_w3x_latent_sgu_and_gates(
+                x, run_triton=run_triton
+            )
             capturing = torch.cuda.is_current_stream_capturing() if use_overlap else False
             if use_overlap and (capturing or M >= 1024):
                 routed_up, shared = self._run_with_shared_stream(
@@ -1741,7 +1811,11 @@ class Qwen4_5LatentMoE(nn.Module):
                     sgu, use_triton=run_triton, skip_allreduce=True
                 )
             return self._combine_latent_and_shared(
-                x, routed_up, shared, run_triton=run_triton
+                x,
+                routed_up,
+                shared,
+                run_triton=run_triton,
+                precomputed_gates=pre_gates,
             ).reshape(orig_shape)
 
         if use_overlap:
@@ -1818,8 +1892,11 @@ class Qwen4_5LatentMoE(nn.Module):
                 early_return=torch.empty_like(hidden_states),
             )
         shared_gate_up = None
+        pre_gates = None
         if self._should_use_w3x_bf16(int(x.shape[0]), x.device):
-            x, routed, shared_gate_up = self._forward_w3x_latent_and_sgu(x, run_triton=run_triton)
+            x, routed, shared_gate_up, pre_gates = self._forward_w3x_latent_sgu_and_gates(
+                x, run_triton=run_triton
+            )
             topk_ids, topk_weights = self.route(routed, use_triton=run_triton)
         else:
             routed, topk_ids, topk_weights = self._compute_latent_and_route(x, run_triton=run_triton)
@@ -1865,6 +1942,7 @@ class Qwen4_5LatentMoE(nn.Module):
             routed=routed,
             dispatch_handle=dispatch_handle,
             shared_gate_up=shared_gate_up,
+            gates=pre_gates,
         )
 
     def forward_routed_compute_and_combine(
@@ -1979,5 +2057,5 @@ class Qwen4_5LatentMoE(nn.Module):
             else self._forward_shared(ctx.x, run_triton=ctx.run_triton, apply_gate=False)
         )
         return self._combine_latent_and_shared(
-            ctx.x, routed, shared, run_triton=ctx.run_triton
+            ctx.x, routed, shared, run_triton=ctx.run_triton, precomputed_gates=ctx.gates
         ).reshape(ctx.orig_shape)

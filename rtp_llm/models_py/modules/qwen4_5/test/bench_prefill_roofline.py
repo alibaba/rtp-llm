@@ -541,13 +541,14 @@ def _kineto_forward_scopes(rtp_model: Any):
             lin = getattr(lyr, "linear_attn", None)
             if lin is not None:
                 _wrap_method(lin, "forward_packed_prefill", "gdn_core")
-                for sub_attr in ("in_proj_qkvz", "in_proj_ba", "out_proj"):
+                for sub_attr in ("in_proj_qkvz", "in_proj_ba", "in_proj_qkvz_ba", "out_proj"):
                     _hook_mod(getattr(lin, sub_attr, None), "gdn_proj")
 
             sa = getattr(lyr, "self_attn", None)
             if sa is not None:
-                for sub_attr in ("q_proj", "k_proj", "v_proj", "o_proj"):
+                for sub_attr in ("q_proj", "k_proj", "v_proj", "qkv_idx_proj", "o_proj"):
                     _hook_mod(getattr(sa, sub_attr, None), "full_attn_proj")
+                _wrap_method(sa, "project_qkv_and_indexer", "full_attn_proj")
                 idx_mod = getattr(sa, "indexer", None)
                 _wrap_method(idx_mod, "project", "full_attn_proj")
 
@@ -595,22 +596,37 @@ def _classify_prefill_kernel(
         return "comm_alltoall"
     if any(k in nl for k in ("nccl", "allreduce", "allgather", "oneshot", "twoshot", "lamport")):
         return "comm_allreduce"
-    if any(
-        k in nl
-        for k in (
-            "_mxfp4_",
-            "fp8_fp4",
-            "deep_gemm",
-            "m_grouped",
-            "group_gemm",
-            "groupproblemshape",
-            "_situ_glu",
-            "_situ_and_mul",
-            "_scatter_fp8",
-            "_gather_slot",
-            "sigmoid_topk",
-            "sbtopk",
-            "radixsortkv",
+    # DeepGEMM FP8xFP8 (1x128) dense linear ops also instantiate the
+    # `sm100_fp8_fp4_gemm_1d1d_impl` template with `(float_e4m3_t, float_e4m3_t)`
+    # and `128u, 128u, 128u` (without `m_grouped` or `e2m1`); exclude those so
+    # `rf_bucket` attributes them to `gdn_proj`/`full_attn_proj`/`dense_mlp`/`moe_latent_shared`.
+    is_dg_fp8_dense = (
+        "deep_gemm" in nl
+        and "m_grouped" not in nl
+        and "e2m1" not in nl
+        and (
+            "float_e4m3_t, cutlass::float_e4m3_t" in nl
+            or ("128u, 128u, 128u" in nl and "32u, 32u, 32u" not in nl)
+        )
+    )
+    if (
+        not is_dg_fp8_dense
+        and any(
+            k in nl
+            for k in (
+                "_mxfp4_",
+                "fp8_fp4",
+                "m_grouped",
+                "group_gemm",
+                "groupproblemshape",
+                "_situ_glu",
+                "_situ_and_mul",
+                "_scatter_fp8",
+                "_gather_slot",
+                "sigmoid_topk",
+                "sbtopk",
+                "radixsortkv",
+            )
         )
     ):
         return "moe_routed"
@@ -619,7 +635,7 @@ def _classify_prefill_kernel(
         return rf_bucket
 
     # Fallback heuristic attribution when unannotated
-    if any(k in nl for k in ("nvjet", "cutlass", "cublas", "sgemm", "gemm")):
+    if any(k in nl for k in ("nvjet", "cutlass", "cublas", "sgemm", "gemm", "deep_gemm")):
         flat_dims = [int(x) for sub in input_shapes if isinstance(sub, (list, tuple)) for x in sub if isinstance(x, int)]
         n_dim = flat_dims[-1] if len(flat_dims) >= 4 else 0
         k_dim = flat_dims[1] if len(flat_dims) >= 2 else 0
@@ -884,12 +900,44 @@ def _temporary_stabilized_router(
 
 @contextlib.contextmanager
 def _temporary_mxfp4_ref_backend(rtp_model: Qwen4_5RTPModel):
-    """Temporarily switch all MoE layers on `rtp_model` to PyTorch MXFP4/FP32 ref backend."""
+    """Temporarily switch MoE and weight-backed dense FP8 layers on ``rtp_model`` to BF16/ref."""
     model = getattr(rtp_model, "model", None)
     prev_env = os.environ.get("QWEN4_5_MXFP4_BACKEND")
+    prev_dense_env = os.environ.get("QWEN4_5_DENSE_LINEAR_MODE")
     saved_mlp: List[Tuple[Any, bool, Any, Any]] = []
+    saved_fp8: List[Tuple[Any, Any]] = []
+    saved_dense_attr: List[Tuple[Any, Any]] = []
+    set_dense_env = False
     try:
         os.environ["QWEN4_5_MXFP4_BACKEND"] = "ref"
+        all_mods: List[Any] = []
+        seen_ids = set()
+        for root in (rtp_model, model):
+            if root is None or not hasattr(root, "modules"):
+                continue
+            for m in root.modules():
+                if id(m) not in seen_ids:
+                    seen_ids.add(id(m))
+                    all_mods.append(m)
+
+        has_weightless_fp8 = False
+        for m in all_mods:
+            if hasattr(m, "mode") and hasattr(m, "_refresh_fast_dispatch"):
+                if getattr(m, "weight", None) is not None:
+                    saved_fp8.append((m, m.mode))
+                    m.mode = "bf16"
+                    m._refresh_fast_dispatch()
+                else:
+                    has_weightless_fp8 = True
+
+        if not has_weightless_fp8:
+            os.environ["QWEN4_5_DENSE_LINEAR_MODE"] = "bf16"
+            set_dense_env = True
+            for m in all_mods:
+                if hasattr(m, "dense_linear_mode"):
+                    saved_dense_attr.append((m, m.dense_linear_mode))
+                    m.dense_linear_mode = "bf16"
+
         for layer in getattr(model, "layers", ()):
             mlp = getattr(layer, "mlp", None)
             if mlp is None:
@@ -913,6 +961,16 @@ def _temporary_mxfp4_ref_backend(rtp_model: Qwen4_5RTPModel):
             os.environ.pop("QWEN4_5_MXFP4_BACKEND", None)
         else:
             os.environ["QWEN4_5_MXFP4_BACKEND"] = prev_env
+        if set_dense_env:
+            if prev_dense_env is None:
+                os.environ.pop("QWEN4_5_DENSE_LINEAR_MODE", None)
+            else:
+                os.environ["QWEN4_5_DENSE_LINEAR_MODE"] = prev_dense_env
+        for m, orig_dlm in saved_dense_attr:
+            m.dense_linear_mode = orig_dlm
+        for m, orig_mode in saved_fp8:
+            m.mode = orig_mode
+            m._refresh_fast_dispatch()
         for mlp, orig_m, se, orig_se in saved_mlp:
             if hasattr(mlp, "use_triton_mxfp4"):
                 mlp.use_triton_mxfp4 = orig_m

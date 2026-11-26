@@ -658,6 +658,39 @@ class TestQwen4_5E2E(unittest.TestCase):
         self.assertEqual(w_lm._resolve_backend(128, device), "scaled_mm")
         self.assertEqual(w_lm._resolve_backend(512, device), "scaled_mm")
 
+        # R6-fix2: GDN in_proj_qkvz / out_proj stay BF16 (no w_dg_fp8/w_mxfp8) under auto, while QSA o_proj / lm_head retain w_dg_fp8
+        from rtp_llm.models_py.modules.qwen4_5.fp8_linear import has_deepgemm_fp8
+
+        self.assertIsNone(la1.in_proj_qkvz.w_dg_fp8)
+        self.assertIsNone(la1.in_proj_qkvz.w_dg_sc)
+        self.assertIsNone(la1.in_proj_qkvz.w_mxfp8)
+        self.assertIsNone(la1.out_proj.w_dg_fp8)
+        self.assertIsNone(la1.out_proj.w_dg_sc)
+        self.assertIsNone(la1.out_proj.w_mxfp8)
+        if has_deepgemm_fp8(0):
+            self.assertIsNotNone(sa3.o_proj.w_dg_fp8)
+            self.assertIsNotNone(m_auto.lm_head.w_dg_fp8)
+            # Also verify 128-aligned QSA qkv_idx_proj shape retains w_dg_fp8 when explicitly wrapped without GDN opt-out
+            w_qsa_like = _wrap_linear_with_sm100_fp8(
+                torch.nn.Linear(5120, 5760, bias=False, dtype=torch.bfloat16, device=device), "auto"
+            )
+            self.assertIsNotNone(w_qsa_like.w_dg_fp8)
+            # Explicit deepgemm_fp8 prepares GDN w_dg_fp8, and switching back to auto releases it cleanly
+            m_auto.prepare_weights(dense_linear_mode="deepgemm_fp8")
+            self.assertIsNotNone(la1.in_proj_qkvz.w_dg_fp8)
+            self.assertIsNotNone(la1.out_proj.w_dg_fp8)
+            m_auto.prepare_weights(dense_linear_mode="auto")
+            self.assertIsNone(la1.in_proj_qkvz.w_dg_fp8)
+            self.assertIsNone(la1.in_proj_qkvz.w_dg_sc)
+            self.assertIsNone(la1.out_proj.w_dg_fp8)
+            self.assertIsNone(la1.out_proj.w_dg_sc)
+        m_auto.prepare_weights(dense_linear_mode="w4a8")
+        self.assertIsNotNone(la1.in_proj_qkvz.w_fp4_i8)
+        self.assertIsNotNone(la1.out_proj.w_fp4_i8)
+        m_auto.prepare_weights(dense_linear_mode="bf16")
+        self.assertIsNone(la1.in_proj_qkvz.w_dg_fp8)
+        self.assertIsNone(la1.out_proj.w_dg_fp8)
+
     @torch.no_grad()
     def test_09_dp4_ep4_shared_host_ple_pss_cleanup_and_parity(self) -> None:
         """Verify 4-rank DP4+EP4 shared host PLE occupies 1 physical copy (Pss), cleans up, captures CG, and matches bitwise."""

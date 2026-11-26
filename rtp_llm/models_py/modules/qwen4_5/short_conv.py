@@ -21,6 +21,84 @@ from .contracts import PLELayerState, ShortConvState
 
 ConvStateLike = Union[ShortConvState, PLELayerState, torch.Tensor]
 
+_SC_TRITON_CACHE: dict = {}
+
+
+def _triton_int_spec(v: int) -> int:
+    """Encode Triton integer specialization bucket: 0 for 1, 1 for %16==0, 2 otherwise."""
+    if v == 1:
+        return 0
+    return 1 if (v & 15) == 0 else 2
+
+
+def _has_active_hooks(hook: Any) -> bool:
+    if hook is None:
+        return False
+    calls = getattr(hook, "calls", None)
+    return bool(calls) if calls is not None else True
+
+
+def triton_fast_launch(
+    cache: dict,
+    key: Any,
+    jit_fn: Any,
+    gx: int,
+    gy: int,
+    gz: int,
+    ptr_or: int,
+    runtime_args: Tuple[Any, ...],
+    constexpr_kwargs: dict,
+    *,
+    num_warps: int = 4,
+    num_stages: Optional[int] = None,
+) -> None:
+    """Bypass Triton Python JIT binder/specialize overhead via cached CompiledKernel.run."""
+    knobs = triton.knobs.runtime
+    if (
+        knobs.debug
+        or _has_active_hooks(knobs.launch_enter_hook)
+        or _has_active_hooks(knobs.launch_exit_hook)
+        or (ptr_or & 15) != 0
+    ):
+        kw = dict(constexpr_kwargs)
+        kw["num_warps"] = num_warps
+        if num_stages is not None:
+            kw["num_stages"] = num_stages
+        jit_fn[(gx, gy, gz)](*runtime_args, **kw)
+        return
+
+    entry = cache.get(key)
+    if entry is None:
+        kw = dict(constexpr_kwargs)
+        kw["num_warps"] = num_warps
+        if num_stages is not None:
+            kw["num_stages"] = num_stages
+        ck = jit_fn[(gx, gy, gz)](*runtime_args, **kw)
+        run_obj = getattr(ck, "run", None)
+        meta = getattr(ck, "metadata", None)
+        if (
+            run_obj is not None
+            and getattr(meta, "global_scratch_size", 0) == 0
+            and getattr(meta, "profile_scratch_size", 0) == 0
+            and getattr(run_obj, "global_scratch_size", 0) == 0
+            and getattr(run_obj, "profile_scratch_size", 0) == 0
+        ):
+            params = jit_fn.params
+            n_rt = len(runtime_args)
+            if len(params) >= n_rt and all(p.is_constexpr for p in params[n_rt:]):
+                tail_vals = tuple(
+                    constexpr_kwargs[p.name] if p.name in constexpr_kwargs else p.default
+                    for p in params[n_rt:]
+                )
+                get_stream = triton.runtime.driver.active.get_current_stream
+                dev_idx = key[0]
+                cache[key] = (run_obj, ck.function, ck.packed_metadata, get_stream, dev_idx, tail_vals)
+        return
+
+    run_obj, fn, pm, get_stream, dev_idx, tail_vals = entry
+    run_obj(gx, gy, gz, get_stream(dev_idx), fn, pm, None, None, None, *runtime_args, *tail_vals)
+
+
 
 # ---------------------------------------------------------------------------
 # Triton Kernels
@@ -187,6 +265,94 @@ def _causal_dwconv1d_decode_k4_kernel(
     tl.store(STATE_PTR + s_base + 2, x0_raw, mask=c_mask)
 
 
+@triton.jit(do_not_specialize=["TPB", "MAX_BLOCKS", "NUM_BLOCKS"])
+def _causal_dwconv1d_decode_opaque_k4_kernel(
+    X_PTR,
+    W_PTR,
+    POOL_PTR,
+    OUT_PTR,
+    BT_PTR,
+    SEQ_BEFORE_PTR,
+    stride_xb: tl.int64,
+    stride_pb: tl.int64,
+    stride_bt_b: tl.int64,
+    stride_bt_p: tl.int64,
+    TPB,
+    MAX_BLOCKS,
+    NUM_BLOCKS,
+    POOL_COL_OFF: tl.int64,
+    C: tl.constexpr,
+    RESIDUAL: tl.constexpr,
+    USE_SILU: tl.constexpr,
+    ROUND_PRE_ACT: tl.constexpr,
+    HAS_CLAMP: tl.constexpr,
+    CLAMP_VAL: tl.constexpr,
+    BLOCK_C: tl.constexpr,
+):
+    """Single-launch T=1 K=4 conv1d reading & writing paged opaque pool directly."""
+    batch = tl.program_id(0).to(tl.int64)
+    c_offs = tl.program_id(1).to(tl.int64) * BLOCK_C + tl.arange(0, BLOCK_C).to(tl.int64)
+    c_mask = c_offs < C
+
+    seq_b = tl.load(SEQ_BEFORE_PTR + batch).to(tl.int32)
+    has_pfx = seq_b > 0
+    in_blk = tl.where(has_pfx, (seq_b - 1) // TPB, 0)
+    ok_in_blk = has_pfx & (in_blk < MAX_BLOCKS)
+    in_phys = tl.load(
+        BT_PTR + batch * stride_bt_b + tl.minimum(in_blk, MAX_BLOCKS - 1) * stride_bt_p,
+        mask=ok_in_blk,
+        other=0,
+    ).to(tl.int64)
+    ok_in = ok_in_blk & (in_phys > 0) & (in_phys < NUM_BLOCKS)
+    in_base = POOL_PTR + in_phys * stride_pb + POOL_COL_OFF + c_offs * 3
+    m_in = ok_in & c_mask
+    s0_raw = tl.load(in_base + 0, mask=m_in, other=0.0)
+    s1_raw = tl.load(in_base + 1, mask=m_in, other=0.0)
+    s2_raw = tl.load(in_base + 2, mask=m_in, other=0.0)
+
+    x0_raw = tl.load(X_PTR + batch * stride_xb + c_offs, mask=c_mask, other=0.0)
+
+    w_base = c_offs * 4
+    w0 = tl.load(W_PTR + w_base + 0, mask=c_mask, other=0.0).to(tl.float32)
+    w1 = tl.load(W_PTR + w_base + 1, mask=c_mask, other=0.0).to(tl.float32)
+    w2 = tl.load(W_PTR + w_base + 2, mask=c_mask, other=0.0).to(tl.float32)
+    w3 = tl.load(W_PTR + w_base + 3, mask=c_mask, other=0.0).to(tl.float32)
+
+    x0_f = x0_raw.to(tl.float32)
+    acc = (
+        s0_raw.to(tl.float32) * w0
+        + s1_raw.to(tl.float32) * w1
+        + s2_raw.to(tl.float32) * w2
+        + x0_f * w3
+    )
+
+    if ROUND_PRE_ACT:
+        acc = acc.to(OUT_PTR.dtype.element_ty).to(tl.float32)
+    if USE_SILU:
+        acc = acc * tl.sigmoid(acc)
+    if RESIDUAL:
+        acc = x0_f + acc
+    if HAS_CLAMP:
+        acc = acc.to(OUT_PTR.dtype.element_ty).to(tl.float32)
+        acc = tl.minimum(tl.maximum(acc, -CLAMP_VAL), CLAMP_VAL)
+
+    tl.store(OUT_PTR + batch * C + c_offs, acc, mask=c_mask)
+
+    out_blk = seq_b // TPB
+    ok_out_blk = (seq_b >= 0) & (out_blk < MAX_BLOCKS)
+    out_phys = tl.load(
+        BT_PTR + batch * stride_bt_b + tl.minimum(tl.maximum(out_blk, 0), MAX_BLOCKS - 1) * stride_bt_p,
+        mask=ok_out_blk,
+        other=0,
+    ).to(tl.int64)
+    ok_out = ok_out_blk & (out_phys > 0) & (out_phys < NUM_BLOCKS)
+    out_base = POOL_PTR + out_phys * stride_pb + POOL_COL_OFF + c_offs * 3
+    m_out = ok_out & c_mask
+    tl.store(out_base + 0, s1_raw, mask=m_out)
+    tl.store(out_base + 1, s2_raw, mask=m_out)
+    tl.store(out_base + 2, x0_raw, mask=m_out)
+
+
 @triton.jit
 def _causal_dwconv1d_verify_k4_kernel(
     X_PTR,
@@ -314,6 +480,13 @@ def _causal_dwconv1d_ragged_prefill_k4_kernel(
     stride_ib: tl.int64,
     stride_ic: tl.int64,
     stride_ik: tl.int64,
+    REQ_SNAP_START_PTR,
+    SNAP_ENDS_PTR,
+    SNAP_DST_PTR,
+    DST_PTR,
+    dst_stride_row: tl.int64,
+    dst_col_offset: tl.int64,
+    dst_rows: tl.int64,
     C: tl.constexpr,
     CONTIG_C: tl.constexpr,
     HAS_INIT: tl.constexpr,
@@ -325,6 +498,7 @@ def _causal_dwconv1d_ragged_prefill_k4_kernel(
     SUB_T: tl.constexpr,
     SUB_NUM: tl.constexpr,
     BLOCK_C: tl.constexpr,
+    FUSED_SNAP: tl.constexpr = False,
 ):
     """Fast 1D register sliding-window K=4 causal dwconv1d ragged prefill kernel."""
     pid0 = tl.program_id(0).to(tl.int64)
@@ -410,6 +584,29 @@ def _causal_dwconv1d_ragged_prefill_k4_kernel(
         s2 = xf
         x_ptr += stride_xn
         o_ptr += stride_on
+
+    if FUSED_SNAP:
+        tile_end = t_start + tile_len
+        rs = tl.load(REQ_SNAP_START_PTR + b).to(tl.int64)
+        re = tl.load(REQ_SNAP_START_PTR + b + 1).to(tl.int64)
+        lo = rs
+        hi = re
+        while lo < hi:
+            mid = (lo + hi) >> 1
+            v_end = tl.load(SNAP_ENDS_PTR + mid).to(tl.int64)
+            if v_end < tile_end:
+                lo = mid + 1
+            else:
+                hi = mid
+        if lo < re:
+            if tl.load(SNAP_ENDS_PTR + lo).to(tl.int64) == tile_end:
+                dst_idx = tl.load(SNAP_DST_PTR + lo).to(tl.int64)
+                if (dst_idx > 0) & (dst_idx < dst_rows):
+                    dst_ty = DST_PTR.dtype.element_ty
+                    dst_base = DST_PTR + dst_idx * dst_stride_row + dst_col_offset + c_offs.to(tl.int64) * 3
+                    tl.store(dst_base + 0, s0.to(dst_ty), mask=c_mask)
+                    tl.store(dst_base + 1, s1.to(dst_ty), mask=c_mask)
+                    tl.store(dst_base + 2, s2.to(dst_ty), mask=c_mask)
 
 
 @triton.jit
@@ -752,19 +949,135 @@ def causal_dwconv1d_decode_triton(
 
     block_c = 256 if C <= 512 else 512
     num_warps = 4 if block_c <= 256 else 8
-    _causal_dwconv1d_decode_k4_kernel[(B, triton.cdiv(C, block_c))](
-        x_c,
-        w_c,
-        conv_state,
-        out,
-        int(x_c.stride(0)),
-        C=C,
-        RESIDUAL=residual,
-        USE_SILU=use_activation,
-        ROUND_PRE_ACT=round_pre_act,
-        HAS_CLAMP=clamp_val is not None,
-        CLAMP_VAL=float(clamp_val) if clamp_val is not None else 0.0,
-        BLOCK_C=block_c,
+    sxb = int(x_c.stride(0))
+    has_c = clamp_val is not None
+    cval = float(clamp_val) if has_c else 0.0
+    ckey = (
+        x_c.device.index,
+        0,
+        x_c.dtype,
+        w_c.dtype,
+        conv_state.dtype,
+        _triton_int_spec(sxb),
+        C,
+        residual,
+        use_activation,
+        round_pre_act,
+        has_c,
+        cval,
+        block_c,
+        num_warps,
+    )
+    triton_fast_launch(
+        _SC_TRITON_CACHE,
+        ckey,
+        _causal_dwconv1d_decode_k4_kernel,
+        B,
+        triton.cdiv(C, block_c),
+        1,
+        x_c.data_ptr() | w_c.data_ptr() | conv_state.data_ptr() | out.data_ptr(),
+        (x_c, w_c, conv_state, out, sxb),
+        {
+            "C": C,
+            "RESIDUAL": residual,
+            "USE_SILU": use_activation,
+            "ROUND_PRE_ACT": round_pre_act,
+            "HAS_CLAMP": has_c,
+            "CLAMP_VAL": cval,
+            "BLOCK_C": block_c,
+        },
+        num_warps=num_warps,
+    )
+    return out
+
+
+def causal_dwconv1d_decode_opaque_triton(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    pool_2d: torch.Tensor,
+    block_table: torch.Tensor,
+    seq_before: torch.Tensor,
+    *,
+    page_size: int,
+    pool_col_offset: int = 0,
+    residual: bool = False,
+    use_activation: bool = False,
+    round_pre_act: bool = False,
+    clamp_val: Optional[float] = None,
+) -> torch.Tensor:
+    """Single-launch K=4 T=1 decode conv1d reading & updating paged opaque pool directly."""
+    B, T, C = int(x.shape[0]), int(x.shape[1]), int(x.shape[2])
+    if T != 1:
+        raise ValueError(f"causal_dwconv1d_decode_opaque_triton expects T=1, got T={T}")
+    x_c = x if x.stride(-1) == 1 else x.contiguous()
+    w_c = weight if weight.is_contiguous() else weight.contiguous()
+    out = torch.empty((B, 1, C), dtype=x_c.dtype, device=x_c.device)
+    if B == 0:
+        return out
+    block_c = 256 if C <= 512 else 512
+    num_warps = 4 if block_c <= 256 else 8
+    sxb = int(x_c.stride(0))
+    spb = int(pool_2d.stride(0))
+    sbt0 = int(block_table.stride(0))
+    sbt1 = int(block_table.stride(1))
+    pco = int(pool_col_offset)
+    has_c = clamp_val is not None
+    cval = float(clamp_val) if has_c else 0.0
+    ckey = (
+        x_c.device.index,
+        1,
+        x_c.dtype,
+        w_c.dtype,
+        pool_2d.dtype,
+        block_table.dtype,
+        seq_before.dtype,
+        _triton_int_spec(sxb),
+        _triton_int_spec(spb),
+        _triton_int_spec(sbt0),
+        _triton_int_spec(sbt1),
+        _triton_int_spec(pco),
+        C,
+        residual,
+        use_activation,
+        round_pre_act,
+        has_c,
+        cval,
+        block_c,
+        num_warps,
+    )
+    triton_fast_launch(
+        _SC_TRITON_CACHE,
+        ckey,
+        _causal_dwconv1d_decode_opaque_k4_kernel,
+        B,
+        triton.cdiv(C, block_c),
+        1,
+        x_c.data_ptr() | w_c.data_ptr() | pool_2d.data_ptr() | out.data_ptr() | block_table.data_ptr() | seq_before.data_ptr(),
+        (
+            x_c,
+            w_c,
+            pool_2d,
+            out,
+            block_table,
+            seq_before,
+            sxb,
+            spb,
+            sbt0,
+            sbt1,
+            int(page_size),
+            int(block_table.shape[1]),
+            int(pool_2d.shape[0]),
+            pco,
+        ),
+        {
+            "C": C,
+            "RESIDUAL": residual,
+            "USE_SILU": use_activation,
+            "ROUND_PRE_ACT": round_pre_act,
+            "HAS_CLAMP": has_c,
+            "CLAMP_VAL": cval,
+            "BLOCK_C": block_c,
+        },
         num_warps=num_warps,
     )
     return out
@@ -868,7 +1181,7 @@ def _launch_verify_k4_kernel(
     bt_ptr = block_table if block_table is not None else x
     seq_ptr = seq_before if seq_before is not None else x
     block_c = 128 if C > 512 else 256
-    _causal_dwconv1d_verify_k4_kernel[(B, triton.cdiv(C, block_c))](
+    rt_args = (
         x,
         w_c,
         init_or_pool,
@@ -895,17 +1208,63 @@ def _launch_verify_k4_kernel(
         int(block_table.shape[1]) if block_table is not None and block_table.ndim >= 2 else 0,
         int(init_or_pool.shape[0]) if is_opaque_init else 0,
         int(pool_col_offset),
-        C=C,
-        V=V,
-        RESIDUAL=residual,
-        USE_SILU=use_activation,
-        ROUND_PRE_ACT=round_pre_act,
-        HAS_STAGE=has_stage,
-        UPDATE_INIT=update_init_inplace,
-        HAS_CLAMP=clamp_val is not None,
-        CLAMP_VAL=float(clamp_val) if clamp_val is not None else 0.0,
-        BLOCK_C=block_c,
-        IS_OPAQUE_INIT=is_opaque_init,
+    )
+    has_c = clamp_val is not None
+    cval = float(clamp_val) if has_c else 0.0
+    ckey = (
+        x.device.index,
+        2,
+        x.dtype,
+        w_c.dtype,
+        init_or_pool.dtype,
+        st_ptr.dtype,
+        out.dtype,
+        bt_ptr.dtype,
+        seq_ptr.dtype,
+        tuple(_triton_int_spec(v) for v in rt_args[7:]),
+        C,
+        V,
+        residual,
+        use_activation,
+        round_pre_act,
+        has_stage,
+        update_init_inplace,
+        has_c,
+        cval,
+        block_c,
+        is_opaque_init,
+    )
+    ptr_or = (
+        x.data_ptr()
+        | w_c.data_ptr()
+        | init_or_pool.data_ptr()
+        | st_ptr.data_ptr()
+        | out.data_ptr()
+        | bt_ptr.data_ptr()
+        | seq_ptr.data_ptr()
+    )
+    triton_fast_launch(
+        _SC_TRITON_CACHE,
+        ckey,
+        _causal_dwconv1d_verify_k4_kernel,
+        B,
+        triton.cdiv(C, block_c),
+        1,
+        ptr_or,
+        rt_args,
+        {
+            "C": C,
+            "V": V,
+            "RESIDUAL": residual,
+            "USE_SILU": use_activation,
+            "ROUND_PRE_ACT": round_pre_act,
+            "HAS_STAGE": has_stage,
+            "UPDATE_INIT": update_init_inplace,
+            "HAS_CLAMP": has_c,
+            "CLAMP_VAL": cval,
+            "BLOCK_C": block_c,
+            "IS_OPAQUE_INIT": is_opaque_init,
+        },
         num_warps=4,
     )
     return out
@@ -989,6 +1348,9 @@ def causal_dwconv1d_ragged_prefill_with_snapshots_triton(
     round_pre_act: bool = False,
     clamp_val: Optional[float] = None,
     block_t: int = 32,
+    req_snap_start: Optional[torch.Tensor] = None,
+    snap_local_ends: Optional[torch.Tensor] = None,
+    snap_aligned: bool = False,
 ) -> torch.Tensor:
     """Packed ragged causal depthwise conv1d prefill with optional boundary state snapshots.
 
@@ -1059,6 +1421,7 @@ def causal_dwconv1d_ragged_prefill_with_snapshots_triton(
 
     w_c = weight.contiguous()
     num_tiles = int(tile_req.numel())
+    fused_snap = False
     if num_tiles > 0:
         has_init = init_state is not None and state_len > 0
         init_arg = init_state if has_init else out
@@ -1072,7 +1435,24 @@ def causal_dwconv1d_ragged_prefill_with_snapshots_triton(
                 sub_num = 1
             sub_t = block_t // sub_num
             contig_c = int(x.stride(1)) == 1 and int(out.stride(1)) == 1
-            _causal_dwconv1d_ragged_prefill_k4_kernel[(num_tiles * sub_num, triton.cdiv(C, block_c))](
+            fused_snap = bool(
+                snap_aligned
+                and skip_invalid_phys
+                and snap_dst_idx is not None
+                and dst_pool is not None
+                and req_snap_start is not None
+                and snap_local_ends is not None
+                and int(snap_dst_idx.numel()) > 0
+                and int(dst_pool.stride(-1)) == 1
+            )
+            r_ss_arg = req_snap_start if fused_snap else out
+            s_end_arg = snap_local_ends if fused_snap else out
+            s_dst_arg = snap_dst_idx if fused_snap else out
+            d_pool_arg = dst_pool if fused_snap else out
+            d_row_st = (int(dst_stride_row) if dst_stride_row > 0 else int(dst_pool.stride(0))) if fused_snap else 0
+            d_col_off = int(dst_col_offset) if fused_snap else 0
+            d_rows = int(dst_pool.shape[0]) if fused_snap else 0
+            rt_args = (
                 x,
                 w_c,
                 init_arg,
@@ -1087,17 +1467,79 @@ def causal_dwconv1d_ragged_prefill_with_snapshots_triton(
                 int(init_state.stride(0)) if has_init else 0,
                 int(init_state.stride(1)) if has_init else 0,
                 int(init_state.stride(2)) if has_init else 0,
-                C=C,
-                CONTIG_C=contig_c,
-                HAS_INIT=has_init,
-                RESIDUAL=residual,
-                USE_SILU=use_activation,
-                ROUND_PRE_ACT=round_pre_act,
-                HAS_CLAMP=clamp_val is not None,
-                CLAMP_VAL=float(clamp_val) if clamp_val is not None else 0.0,
-                SUB_T=sub_t,
-                SUB_NUM=sub_num,
-                BLOCK_C=block_c,
+                r_ss_arg,
+                s_end_arg,
+                s_dst_arg,
+                d_pool_arg,
+                d_row_st,
+                d_col_off,
+                d_rows,
+            )
+            has_c = clamp_val is not None
+            cval = float(clamp_val) if has_c else 0.0
+            ckey = (
+                x.device.index,
+                3,
+                x.dtype,
+                w_c.dtype,
+                init_arg.dtype,
+                cu_seqlens.dtype,
+                tile_req.dtype,
+                tile_t0.dtype,
+                r_ss_arg.dtype,
+                s_end_arg.dtype,
+                d_pool_arg.dtype,
+                s_dst_arg.dtype,
+                tuple(_triton_int_spec(v) for v in (rt_args[7:14] + rt_args[18:])),
+                C,
+                contig_c,
+                has_init,
+                residual,
+                use_activation,
+                round_pre_act,
+                has_c,
+                cval,
+                sub_t,
+                sub_num,
+                block_c,
+                fused_snap,
+            )
+            ptr_or = (
+                x.data_ptr()
+                | w_c.data_ptr()
+                | init_arg.data_ptr()
+                | out.data_ptr()
+                | cu_seqlens.data_ptr()
+                | tile_req.data_ptr()
+                | tile_t0.data_ptr()
+                | r_ss_arg.data_ptr()
+                | s_end_arg.data_ptr()
+                | s_dst_arg.data_ptr()
+                | d_pool_arg.data_ptr()
+            )
+            triton_fast_launch(
+                _SC_TRITON_CACHE,
+                ckey,
+                _causal_dwconv1d_ragged_prefill_k4_kernel,
+                num_tiles * sub_num,
+                triton.cdiv(C, block_c),
+                1,
+                ptr_or,
+                rt_args,
+                {
+                    "C": C,
+                    "CONTIG_C": contig_c,
+                    "HAS_INIT": has_init,
+                    "RESIDUAL": residual,
+                    "USE_SILU": use_activation,
+                    "ROUND_PRE_ACT": round_pre_act,
+                    "HAS_CLAMP": has_c,
+                    "CLAMP_VAL": cval,
+                    "SUB_T": sub_t,
+                    "SUB_NUM": sub_num,
+                    "BLOCK_C": block_c,
+                    "FUSED_SNAP": fused_snap,
+                },
                 num_warps=4,
             )
         else:
@@ -1130,6 +1572,9 @@ def causal_dwconv1d_ragged_prefill_with_snapshots_triton(
                 BLOCK_C=block_c,
                 num_warps=4,
             )
+
+    if kernel_size == 4 and num_tiles > 0 and fused_snap:
+        return out
 
     if (
         snap_tok_idx is not None
