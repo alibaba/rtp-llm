@@ -875,7 +875,8 @@ double NonLinearPrefillModelR::getNonlinearScale() const
 bool NonLinearPrefillModelR::fitHistory(const std::deque<NaviSchedLatencySample> &history,
                                         size_t fitBatchSize, size_t epochCount,
                                         const std::vector<double> &currentParameters,
-                                        std::vector<double> &newParameters) const
+                                        std::vector<double> &newParameters,
+                                        const std::vector<double> *parameterLearningRateScales) const
 {
     if (history.empty() || fitBatchSize == 0 || epochCount == 0 ||
         !validateConfiguredParameters(currentParameters)) {
@@ -890,14 +891,16 @@ bool NonLinearPrefillModelR::fitHistory(const std::deque<NaviSchedLatencySample>
             if (batch.size() != fitBatchSize) {
                 continue;
             }
-            if (!fit(batch, parameters, newParameters, 1.0, 1.0)) {
+            if (!fit(batch, parameters, newParameters, 1.0, 1.0,
+                     parameterLearningRateScales)) {
                 return false;
             }
             parameters = std::move(newParameters);
             batch.clear();
         }
     }
-    if (!batch.empty() && !fit(batch, parameters, newParameters, 1.0, 1.0)) {
+    if (!batch.empty() &&
+        !fit(batch, parameters, newParameters, 1.0, 1.0, parameterLearningRateScales)) {
         return false;
     }
     if (batch.empty()) {

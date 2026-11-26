@@ -208,7 +208,8 @@ public:
     bool fitHistory(const std::deque<NaviSchedLatencySample> &history,
                     size_t fitBatchSize, size_t epochCount,
                     const std::vector<double> &currentParameters,
-                    std::vector<double> &newParameters) const;
+                    std::vector<double> &newParameters,
+                    const std::vector<double> *parameterLearningRateScales = nullptr) const;
     static double predict(const NaviSchedLatencyFeatures &features,
                           const std::vector<double> &parameters);
     static double predictForVersion(const NaviSchedLatencyFeatures &features,
