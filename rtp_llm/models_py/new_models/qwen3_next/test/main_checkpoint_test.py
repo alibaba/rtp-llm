@@ -2,11 +2,12 @@ import os
 import tempfile
 import types
 import unittest
+from dataclasses import replace
 import torch
 from safetensors.torch import save_file
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers
-from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
+from rtp_llm.models_py.model_loader import NewLoaderConfig, NewLoaderLoadMethod, NewModelLoader
 from rtp_llm.models_py.new_models.qwen3_next.language import Qwen35DenseMTPForCausalLM
 from rtp_llm.models_py.new_models.qwen3_next.language import Qwen3NextMoEBlock
 from rtp_llm.models_py.quant_methods.base import QuantizationConfig
@@ -309,7 +310,7 @@ class Qwen3NextLoadTest(unittest.TestCase):
         self.assertTrue(torch.equal(block(hidden), expected_partial))
         self.assertEqual(calls, [("routed", False), ("shared", False), "merge"])
 
-    def test_dense_mtp_real_checkpoint_load_uses_dense_mlp(self):
+    def _dense_mtp_checkpoint(self):
         config = _mtp_config("qwen35_dense_mtp")
         config.moe_layer_index = []
         config.expert_num = 0
@@ -330,6 +331,41 @@ class Qwen3NextLoadTest(unittest.TestCase):
                 "mtp.fc.weight": torch.arange(32, dtype=torch.float32).reshape(4, 8),
             }
         )
+        return config, weights
+
+    def test_mtp_vocab_sources_and_draft_norm(self):
+        embed = "model.language_model.embed_tokens.weight"
+        for method in checkpoint_readers("scratch", "fastsafetensors"):
+            for tied, missing in ((False, None), (True, None), (False, embed), (False, "lm_head.weight")):
+                with self.subTest(method=method, tied=tied, missing=missing), tempfile.TemporaryDirectory() as root:
+                    config, weights = self._dense_mtp_checkpoint()
+                    config.tie_word_embeddings = tied
+                    # A shared target/draft file also contains the target norm.
+                    weights["model.language_model.norm.weight"] = torch.full((4,), -30.)
+                    weights["mtp.norm.weight"] = torch.arange(4.)
+                    if tied:
+                        del weights["lm_head.weight"]
+                    # Deliberately non-release keys: they must never become
+                    # alternate sources for the shared vocabulary.
+                    weights["mtp.embed_tokens.weight"] = torch.full((8, 4), -17.)
+                    weights["mtp.lm_head.weight"] = torch.full((8, 4), -19.)
+                    if missing:
+                        del weights[missing]
+                    save_file(weights, os.path.join(root, "model.safetensors"))
+                    cfg = replace(_load_config(), load_method=NewLoaderLoadMethod(method))
+                    loader = NewModelLoader(config, cfg, root)
+                    if missing:
+                        with self.assertRaisesRegex(RuntimeError, "missing required"):
+                            loader.load()
+                        continue
+                    model = loader.load()
+                    self.assertEqual(loader.loaded_method.value, method)
+                    torch.testing.assert_close(model.embed_tokens.weight, weights[embed])
+                    torch.testing.assert_close(model.lm_head.weight, weights[embed if tied else "lm_head.weight"])
+                    torch.testing.assert_close(model.norm.weight, weights["mtp.norm.weight"] + 1)
+
+    def test_dense_mtp_real_checkpoint_load_uses_dense_mlp(self):
+        config, weights = self._dense_mtp_checkpoint()
         with tempfile.TemporaryDirectory() as directory:
             save_file(weights, os.path.join(directory, "model.safetensors"))
             loader = NewModelLoader(config, _load_config(), directory)

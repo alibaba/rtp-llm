@@ -103,9 +103,14 @@ def _two_rank_round_trip(rank, root):
 
 
 class MlaFtRoundTrip(unittest.TestCase):
-    def round_trip(self, tag, service_cls, *, sparse=False, direct=False):
+    def round_trip(self, tag, service_cls, *, sparse=False, direct=False, cropped_draft=False):
         draft = service_cls in (_Draft, GlmDraft)
-        cfg, data, draft_prefix = fixture(not draft)
+        cfg, data, draft_prefix = fixture(not draft or cropped_draft)
+        if cropped_draft:
+            data = {
+                key.replace(draft_prefix, "model.layers.78.", 1) if key.startswith(draft_prefix) else key: val
+                for key, val in data.items()
+            }
         if not draft:
             cfg["num_nextn_predict_layers"] = 0
             data = {k: v for k, v in data.items() if not k.startswith(draft_prefix)}
@@ -120,7 +125,7 @@ class MlaFtRoundTrip(unittest.TestCase):
                 )
         if sparse:
             cfg.update(index_topk=4, index_n_heads=2, index_head_dim=128)
-            for i in range(cfg["num_hidden_layers"]):
+            for i in ([78] if cropped_draft else range(cfg["num_hidden_layers"])):
                 for key, shape in (
                     ("wq_b.weight", (256, 32)),
                     ("wk.weight", (128, 32)),
@@ -169,6 +174,9 @@ class MlaFtRoundTrip(unittest.TestCase):
                             atol=0,
                             rtol=0,
                         )
+
+    def test_cropped_glm_draft_ft_keeps_shared_vocab_and_physical_draft_layer(self):
+        self.round_trip("glm_5_mtp", GlmDraft, sparse=True, cropped_draft=True)
 
     def test_score_aliases(self):
         for tag in (

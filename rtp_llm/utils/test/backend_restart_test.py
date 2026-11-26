@@ -552,6 +552,19 @@ class RowConnectTest(unittest.TestCase):
         self.assertIsNone(follower._store)
         self.assertIsNone(follower._hb_thread)
 
+    def test_leader_retries_local_client_timeout_before_spending_restart_budget(self):
+        from torch.distributed import DistNetworkError
+
+        raw = unittest.mock.MagicMock()
+        factory = unittest.mock.Mock(side_effect=[
+            DistNetworkError("The client socket has timed out after 2000ms while trying to connect"),
+            raw,
+        ])
+        leader = RowCoordinator(2, 0, "127.0.0.1", self.port, store_factory=factory)
+        self.assertIs(leader._connect(lambda: False), raw)
+        self.assertEqual(factory.call_count, 2)
+        self.assertTrue(all(call.args[2] for call in factory.call_args_list))
+
     def test_part0_that_cannot_host_fails_at_once(self):
         holder = self.row(0)
         holder.start()  # takes the port

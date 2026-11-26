@@ -13,7 +13,7 @@ import torch
 from safetensors.torch import save_file
 
 from rtp_llm.model_factory_register import ModelDict
-from rtp_llm.models.glm5 import Glm5Mtp
+from rtp_llm.models.glm5 import Glm5, Glm5Mtp
 from rtp_llm.models_py.new_models.deepseek_v3.test.test_nextn_route import (
     _CpuCheckpoint,
     fixture,
@@ -30,6 +30,10 @@ from rtp_llm.models_py.weight_mapper import WeightsMapper
 
 
 class _Draft(_CpuCheckpoint, Glm5Mtp):
+    pass
+
+
+class _Score(_CpuCheckpoint, Glm5):
     pass
 
 
@@ -54,8 +58,16 @@ class _DraftServiceFixture:
             {"architectures": ["GlmMoeDsaMtpForCausalLM"]}
         )
         self.assertIs(get_model_class(tag), Glm5MTPForCausalLM)
-        for combined in (True, False):
+        for combined, draft_layer in ((True, 2), (False, 0), (True, 78)):
             cfg, data, prefix = fixture(combined)
+            if draft_layer == 78:
+                # Cropped score, original draft layer number retained on disk.
+                original = prefix
+                prefix = f"model.layers.{draft_layer}."
+                data = {
+                    key.replace(original, prefix, 1) if key.startswith(original) else key: value
+                    for key, value in data.items()
+                }
             cfg.update(
                 model_type="glm_moe_dsa",
                 index_topk=4,
@@ -74,6 +86,9 @@ class _DraftServiceFixture:
                 ("weights_proj.weight", (2, 32)),
             ):
                 data[prefix + "self_attn.indexer." + key] = torch.ones(shape)
+                if draft_layer == 78:
+                    for i in range(cfg["num_hidden_layers"]):
+                        data[f"model.layers.{i}.self_attn.indexer." + key] = torch.ones(shape)
             embed_src = (
                 "model.embed_tokens.weight"
                 if combined
@@ -85,14 +100,27 @@ class _DraftServiceFixture:
             with tempfile.TemporaryDirectory() as root:
                 (Path(root) / "config.json").write_text(json.dumps(cfg))
                 save_file(data, str(Path(root) / "model.safetensors"))
+                if draft_layer == 78:
+                    (Path(root) / "model.safetensors.index.json").write_text(
+                        json.dumps({"weight_map": dict.fromkeys(data, "model.safetensors")})
+                    )
                 for method in _READERS:
-                    with self.subTest(combined=combined, method=method):
+                    with self.subTest(combined=combined, draft_layer=draft_layer, method=method):
                         service = load_service(root, method, cls=_Draft, tag=tag)
                         model = service.py_model
                         self.assertEqual(
                             service.model_weights_loader.loaded_method.value, method
                         )
-                        self.assertEqual(model._checkpoint_layer, 2 if combined else 0)
+                        self.assertEqual(model._checkpoint_layer, draft_layer)
+                        if draft_layer == 78:
+                            target = load_service(root, method, cls=_Score, tag="glm_5").py_model
+                            owns = target.checkpoint_weight_name_filter()
+                            self.assertFalse(owns(prefix + "self_attn.q_a_proj.weight"))
+                            # A stray, undeclared layer must still reach strict dispatch.
+                            self.assertTrue(owns("model.layers.79.mlp.bad.weight"))
+                            torch.testing.assert_close(
+                                target.norm.weight, data["model.norm.weight"].to(target.norm.weight)
+                            )
                         self.assertEqual(len(model.layers), 1)
                         self.assertIsNotNone(model.layers[0].indexer)
                         torch.testing.assert_close(

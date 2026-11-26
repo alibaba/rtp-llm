@@ -28,7 +28,6 @@ from functools import partial
 import torch.nn as nn
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
-from rtp_llm.ops.compute_ops import rtp_llm_ops
 from rtp_llm.models_py.modules.dsv4.cp import (
     _CP_ROLE_INDEXER,
     _CP_ROLE_MAIN,

@@ -220,8 +220,9 @@ class Qwen4Nvfp4ExpertTest(unittest.TestCase):
                     else:
                         expected = output
                     manager.finalize()
-                    model.close()
-                    del model, manager
+                    del model
+                    manager.release_attach()
+                    del manager
             finally:
                 store.stop_store(name)
 

@@ -69,7 +69,7 @@ class CutlassNvfp4ExecutorTest(unittest.TestCase):
 
         from rtp_llm.device.device_impl import GpuImpl
 
-        def initialize(device):
+        def initialize(device, *, engine_args=None):
             device.py_env_configs = SimpleNamespace(moe_config=moe)
 
         with (

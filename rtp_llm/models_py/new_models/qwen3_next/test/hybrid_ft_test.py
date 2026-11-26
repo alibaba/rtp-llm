@@ -149,6 +149,12 @@ class HybridFTRoundTrip(unittest.TestCase):
                     NewModelLoader._validate_loaded_weights(owner)
         else:
             reference = NewModelLoader(config, _load_config(), str(source)).load()
+            if config.model_type in ("qwen3_next_mtp", "qwen35_dense_mtp", "qwen35_moe_mtp"):
+                embed = ("model.embed_tokens.weight" if config.model_type == "qwen3_next_mtp"
+                         else "model.language_model.embed_tokens.weight")
+                torch.testing.assert_close(reference.embed_tokens.weight, weights[embed])
+                torch.testing.assert_close(reference.lm_head.weight, weights["lm_head.weight"])
+                torch.testing.assert_close(reference.norm.weight, weights["mtp.norm.weight"] + 1)
             config.ckpt_path = str(ft)
             restored = NewModelLoader(config, _load_config(), str(ft)).load()
 

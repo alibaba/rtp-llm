@@ -81,9 +81,9 @@ def _rank_filter_worker(rank, directory, invalid):
             ),
             model_path=directory,
         )
-        if invalid and rank == 1:
+        if invalid:
             with unittest.TestCase().assertRaisesRegex(
-                (ValueError, RuntimeError), "[Ss]hape"
+                RuntimeError, r"distributed prerequisite failure: rank 1: ValueError: Shape mismatch for _RankNamed\.mixed_1"
             ):
                 model.load()
         else:

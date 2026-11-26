@@ -46,6 +46,7 @@ from rtp_llm.models_py.new_models.deepseek_v3.language import (
     read_config_json,
 )
 from rtp_llm.models_py.weight_mapper import WeightsMapper
+from rtp_llm.utils.nextn_checkpoint import nextn_layer_from_names
 
 from .mtp_block import MTPBlock
 
@@ -70,6 +71,27 @@ _KEY_REMAP = {
 
 _EH_PROJ_KEY = "eh_proj.weight"
 _EH_PROJ_MAPPED = "mtp_block.fc.weight"
+
+
+def checkpoint_draft_layer_marker(ckpt_path: str) -> int | None:
+    """Return the layer owning the unique NextN input fusion, using metadata only."""
+    from rtp_llm.models_py.weight_mapper import checkpoint_catalog, discover_ckpt_files
+
+    catalog = checkpoint_catalog(ckpt_path)
+    if catalog is not None:
+        return nextn_layer_from_names(name for name, _ in catalog.entries)
+
+    def unindexed_names():
+        from safetensors import safe_open
+
+        for filename in discover_ckpt_files(ckpt_path):
+            if filename.endswith(".safetensors"):
+                with safe_open(filename, framework="pt", device="cpu") as handle:
+                    yield from handle.keys()
+            else:
+                yield from torch.load(filename, map_location="meta", weights_only=True)
+
+    return nextn_layer_from_names(unindexed_names())
 
 
 def _draft_checkpoint_layer(config_json: Dict[str, Any], ckpt_path: str) -> int:
@@ -99,36 +121,9 @@ def _draft_checkpoint_layer(config_json: Dict[str, Any], ckpt_path: str) -> int:
     if depth == 1 and nextn_layers == 0:
         return 0
     if depth == 1 and nextn_layers == 1:
-        from rtp_llm.models_py.weight_mapper import (
-            discover_ckpt_files,
-            safetensor_index_entries,
-        )
-
-        def markers(names):
-            return {i for i in (0, 1) if f"model.layers.{i}.eh_proj.weight" in names}
-
-        entries = safetensor_index_entries(ckpt_path)
-        if entries is not None:
-            found = markers({name for name, _ in entries})
-        else:
-            from safetensors import safe_open
-
-            found = set()
-            for filename in discover_ckpt_files(ckpt_path):
-                if filename.endswith(".safetensors"):
-                    with safe_open(filename, framework="pt", device="cpu") as handle:
-                        found.update(markers(set(handle.keys())))
-                else:
-                    # OldLoader's one-layer unindexed PyTorch draft is at
-                    # layer 0. Inspect metadata on meta to also distinguish a
-                    # one-layer score bundled with its draft, without a CPU
-                    # allocation of the actual weights.
-                    state = torch.load(filename, map_location="meta", weights_only=True)
-                    found.update(markers(state))
-        if len(found) > 1:
-            raise ValueError("ambiguous NextN checkpoint contains two EH projections")
-        if found:
-            return found.pop()
+        marker = checkpoint_draft_layer_marker(ckpt_path)
+        if marker is not None:
+            return marker
     if nextn_layers != 1:
         raise ValueError(
             "DeepSeek full-model checkpoints must contain exactly one "

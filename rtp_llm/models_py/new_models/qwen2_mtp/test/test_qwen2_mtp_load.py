@@ -70,6 +70,9 @@ def _load_tp_pair(rank, root):
             )
             torch.testing.assert_close(draft.lm_head.weight, draft.embed_tokens.weight)
             torch.testing.assert_close(
+                draft.norm.weight, source["model.layers.0.final_head.norm.weight"]
+            )
+            torch.testing.assert_close(
                 draft.mtp_block.fc.weight, source["model.layers.0.eh_proj.weight"]
             )
     finally:
@@ -254,10 +257,18 @@ class Qwen2MTPLoadTest(_MTPCheckpointFixture):
 
     def test_actual_two_rank_checkpoint_transport(self):
         with tempfile.TemporaryDirectory() as root:
-            save_file(self.weights(), os.path.join(root, "model.safetensors"))
+            weights = self.weights()
+            weights["model.norm.weight"] = torch.full((4,), -17.0)
+            save_file(weights, os.path.join(root, "model.safetensors"))
             torch.multiprocessing.start_processes(
                 _load_tp_pair, args=(root,), nprocs=2, join=True, start_method="fork"
             )
+
+    def test_target_norm_does_not_replace_a_missing_draft_norm(self):
+        weights = self.weights()
+        weights["model.norm.weight"] = weights.pop("model.layers.0.final_head.norm.weight")
+        with self.assertRaisesRegex(RuntimeError, "missing required"):
+            self.load(weights)
 
     def test_registry_and_real_safetensors_tp_rank_loading(self):
         self.assertIs(get_model_class("qwen_2-mtp"), Qwen2MTPForCausalLM)

@@ -33,8 +33,8 @@ TEST(PpuKVPoolZeroTest, ClearsOnlyTheWarmupViewOnTheCurrentStream) {
     cfg.dtype                    = TYPE_FP16;
     cfg.kv_block_stride_bytes    = bytes / (cfg.layer_num * cfg.block_num);
     cfg.kv_block_pool_size_bytes = bytes;
-    for (bool mla : {false, true}) {
-        cfg.use_mla            = mla;
+    for (auto type : {KVCacheSpecType::MultiHeadAttention, KVCacheSpecType::MultiHeadLatentAttention}) {
+        cfg.cache_type         = type;
         cfg.seq_size_per_block = 8;
         C10_CUDA_CHECK(cudaMemsetAsync(backing.data_ptr(), 0xa5, backing.nbytes(), stream.stream()));
         MemoryLayoutStrategy strategy;

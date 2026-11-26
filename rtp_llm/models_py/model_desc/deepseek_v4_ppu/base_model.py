@@ -13,7 +13,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
 import torch
 from rtp_llm.config.cuda_graph import (
     CudaGraphSelectionMode,
@@ -34,7 +34,6 @@ from rtp_llm.models_py.modules.dsv4.ppu.decode.forward import (
     forward_decode,
 )
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import primary_attention_inputs
-from rtp_llm.models_py.modules.dsv4.ppu.prefill.forward import forward_prefill
 from rtp_llm.models_py.modules.dsv4.ppu.transformer import V4Transformer
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
     cp_padded_tokens_per_rank_bound,
@@ -42,8 +41,10 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer imp
 )
 from rtp_llm.ops import RoleType
 from rtp_llm.utils.warmup import model_warm_up_enabled
-from rtp_llm.ops.compute_ops import PyModelInitResources, PyModelInputs, PyModelOutputs
 from rtp_llm.models_py.model_desc.deepseek_v4_model import DeepSeekV4Model as _BaseDeepSeekV4Model
+
+if TYPE_CHECKING:
+    from rtp_llm.ops.compute_ops import PyModelInitResources, PyModelInputs, PyModelOutputs
 
 
 def _env_flag_enabled(name: str, default: bool = True) -> bool:
@@ -848,6 +849,8 @@ class DeepSeekV4Model(_BaseDeepSeekV4Model):
         if self.kv_cache is None:
             # Warmup-only PyWrappedModel: NormalExecutor builds it with
             # cache_manager==nullptr, so init_resources carries no kv_cache.
+            from rtp_llm.ops.compute_ops import PyModelOutputs
+
             logging.warning(
                 "[DeepSeekV4Model] forward() with kv_cache=None — warmup only"
             )
@@ -899,6 +902,8 @@ class DeepSeekV4Model(_BaseDeepSeekV4Model):
                 prepare_hidden_fn=prep_decode,
             )
         elif attn.is_prefill:
+            from rtp_llm.models_py.modules.dsv4.ppu.prefill.forward import forward_prefill
+
             with _profiler.moe_record_function_scope():
                 capture = self.capture_context(inputs.capture_hidden_states)
             return forward_prefill(

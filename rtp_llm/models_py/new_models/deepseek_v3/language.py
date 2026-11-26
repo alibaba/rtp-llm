@@ -636,6 +636,7 @@ class DeepSeekV32ForCausalLM(ResidentDecoderOwner, DecoderHandlerOwner, MlaRunti
 
     WEIGHTS_MAPPER = WeightsMapper(prefix_mapping={"model.": ""})
     decoder_layer_cls = DeepSeekV32DecoderLayer
+    score_appended_layer_marker = None
 
     @classmethod
     def from_ft_checkpoint_header(cls, model_config, load_config, checkpoint):
@@ -759,10 +760,12 @@ class DeepSeekV32ForCausalLM(ResidentDecoderOwner, DecoderHandlerOwner, MlaRunti
             )
 
         cfg = extract_config_values(model_config, load_config, config_json)
+        marker = self.score_appended_layer_marker
         self._score_name_filter = score_name_filter(
             cfg["num_layers"],
             config_json.get("num_hidden_layers", cfg["num_layers"]),
             config_json.get("num_nextn_predict_layers", 0),
+            resolve_appended=(lambda: marker(ckpt_path)) if marker is not None else None,
         )
         self.tie_word_embeddings = cfg["tie_word_embeddings"]
 

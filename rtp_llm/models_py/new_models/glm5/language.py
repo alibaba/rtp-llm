@@ -33,6 +33,7 @@ from rtp_llm.models_py.new_models.deepseek_v3.model import DeepSeekV32DecoderLay
 from rtp_llm.models_py.new_models.deepseek_v3.moe import DeepSeekV32MoEBlock
 from rtp_llm.models_py.new_models.deepseek_v3_mtp.language import (
     DeepSeekV32MTPForCausalLM,
+    checkpoint_draft_layer_marker,
 )
 from rtp_llm.models_py.new_models.glm5.packed_experts import Glm5PackedExpertMethod
 from rtp_llm.models_py.read_spec import unwrap_checkpoint_tensor
@@ -444,6 +445,8 @@ def _legacy_packed_checkpoint(path):
 class Glm5ForCausalLM(_OwnedGlm5, DeepSeekV32ForCausalLM, Glm5MoeModel):
     """Load HF score parameters directly; execute the GLM score/CP/CMP loop."""
 
+    score_appended_layer_marker = staticmethod(checkpoint_draft_layer_marker)
+
 
 class Glm5MTPForCausalLM(_OwnedGlm5, DeepSeekV32MTPForCausalLM, GenericMoeMTPModel):
     """Load one draft layer; run GLM masking, seed/reuse and CP capture."""
@@ -458,6 +461,13 @@ class Glm5MTPForCausalLM(_OwnedGlm5, DeepSeekV32MTPForCausalLM, GenericMoeMTPMod
         if count > 1:
             raise ValueError("GLM-5 MTP requires a single draft layer")
         depth = positive_int(config["num_hidden_layers"], "num_hidden_layers")
+        # Cropped GLM bundles may retain the original draft layer number.
+        # Rank-local FT has no HF EH key; keep its declared constructor layout.
+        marker = checkpoint_draft_layer_marker(ckpt_path)
+        if marker is not None:
+            if depth > 1 and marker < depth:
+                raise ValueError(f"GLM-5 draft layer {marker} overlaps score depth {depth}")
+            return marker
         return depth if depth > 1 else 0
 
     def _vocab_mapping(self, prefix):

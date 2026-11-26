@@ -48,7 +48,7 @@ from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.compressor import (
     _CompressorPending,
 )
 from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
-from rtp_llm.ops.compute_ops import rtp_llm_ops
+from rtp_llm.models_py.modules.dsv4 import native_ops as rtp_llm_ops
 from rtp_llm.models_py.modules.dsv4.fp8.indexer import _IndexerFP8PrefillMeta as _Base_IndexerFP8PrefillMeta
 from rtp_llm.models_py.modules.dsv4.fp8.indexer import IndexerFP8 as _BaseIndexerFP8
 

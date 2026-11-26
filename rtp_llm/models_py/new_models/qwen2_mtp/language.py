@@ -55,6 +55,14 @@ class Qwen2MTPForCausalLM(Qwen2ForCausalLM):
         },
     )
 
+    def checkpoint_weight_name_filter(self):
+        inherited = super().checkpoint_weight_name_filter()
+        # The draft uses layer zero's final_head.norm. Some releases also
+        # contain the target's model.norm, which is not a draft parameter.
+        return lambda name: name != "model.norm.weight" and (
+            inherited is None or inherited(name)
+        )
+
     def __init__(self, model_config: Any, load_config: Any):
         super().__init__(model_config, load_config)
         cfg = self._dense_config(model_config, load_config)
