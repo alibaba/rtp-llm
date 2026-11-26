@@ -419,6 +419,11 @@ class QuantizationConfig(ABC):
         }
         if quant_config.get("scale_fmt") is not None:
             normalized_config["scale_fmt"] = quant_config["scale_fmt"]
+        if quant_method in ("awq", "gptq"):
+            for key in ("modules_to_not_convert", "exclude", "exclude_modules"):
+                if key in quant_config:
+                    normalized_config[key] = quant_config[key]
+            return cls.from_config(normalized_config)
         result = cls.from_config(normalized_config)
         if quant_config and "exclude" in quant_config:
             result.exclude_modules = set(quant_config["exclude"])
@@ -793,9 +798,26 @@ class Int8PerTensorQuantConfig(QuantizationConfig):
         return Int8PerTensorQuantConfig()
 
 
+def _groupwise_exclusions(config: Dict[str, Any]) -> set:
+    # HF and RTP exporters use different field names for projections kept
+    # floating point. Losing one makes the loader expect packed INT tensors.
+    result = set()
+    for name in ("modules_to_not_convert", "exclude", "exclude_modules"):
+        entries = config.get(name)
+        if entries is None:
+            continue
+        if not isinstance(entries, (list, tuple, set)) or not all(
+            isinstance(entry, str) and entry.strip() for entry in entries
+        ):
+            raise ValueError(f"{name} must be a collection of non-empty module names")
+        result.update(entry.strip() for entry in entries)
+    return result
+
+
 class AWQConfig(QuantizationConfig):
     def __init__(self, bits: int, group_size: int, is_quanted: bool, **kwargs: Any):
         super().__init__(bits=bits, group_size=group_size, is_quanted=is_quanted)
+        self.exclude_modules = _groupwise_exclusions(kwargs)
 
     @classmethod
     def get_method(cls) -> str:
@@ -819,6 +841,7 @@ class AWQConfig(QuantizationConfig):
 class GPTQConfig(QuantizationConfig):
     def __init__(self, bits: int, group_size: int, is_quanted: bool, **kwargs: Any):
         super().__init__(bits=bits, group_size=group_size, is_quanted=is_quanted)
+        self.exclude_modules = _groupwise_exclusions(kwargs)
 
     @classmethod
     def get_method(cls) -> str:

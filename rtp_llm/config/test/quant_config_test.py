@@ -13,6 +13,41 @@ from rtp_llm.config.quant_config import (
 
 
 class QuantConfigTest(unittest.TestCase):
+    def test_groupwise_preserves_all_floating_module_exclusions(self):
+        for method in ("awq", "gptq"):
+            quant = {
+                "quant_method": method,
+                "bits": 4,
+                "group_size": 128,
+                "modules_to_not_convert": ["linear_attn", "lm_head"],
+                "exclude": ["lm_head"],
+                "exclude_modules": ["layers.0.mlp"],
+            }
+            for config in (
+                {"quantization_config": quant},
+                {"text_config": {"quantization_config": quant}},
+            ):
+                with self.subTest(method=method, config=config):
+                    parsed = self._load_config(config)
+                    self.assertEqual(
+                        parsed.exclude_modules, {"linear_attn", "lm_head", "layers.0.mlp"}
+                    )
+                    self.assertEqual(parsed.get_method(), method)
+
+    def test_groupwise_rejects_malformed_exclusions(self):
+        for value in ("linear_attn", {"linear_attn": False}, [None], [""]):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                ValueError, "modules_to_not_convert"
+            ):
+                self._load_config(
+                    {"quantization_config": {
+                        "quant_method": "awq",
+                        "bits": 4,
+                        "group_size": 128,
+                        "modules_to_not_convert": value,
+                    }}
+                )
+
     def test_weight_only_int8_rejects_fp32_compute_at_configuration(self):
         config = WeightOnlyInt8PerChannelQuantConfig()
         for dtype in (torch.float16, torch.bfloat16):
