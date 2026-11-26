@@ -511,10 +511,10 @@ void StorageBackend::read(StorageRequest request, std::shared_ptr<StorageBackend
                             } catch (const StorageDeadlineExceeded& exception) {
                                 error = ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, exception.what());
                             } catch (const StorageOperationTimeout& exception) {
-                                freeze_pins = exception.localTargetProtection() == StorageLocalTargetProtection::LEGACY;
+                                freeze_pins = exception.localTargetProtection() == StorageTargetProtection::FREEZE_REQUEST_BLOCKS;
                                 error       = ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, exception.what());
                             } catch (const StorageOperationCompletionUnknown& exception) {
-                                freeze_pins = exception.localTargetProtection() == StorageLocalTargetProtection::LEGACY;
+                                freeze_pins = exception.localTargetProtection() == StorageTargetProtection::FREEZE_REQUEST_BLOCKS;
                                 error       = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, exception.what());
                             } catch (const StorageOperationBufferSafeFailure& exception) {
                                 error =
@@ -630,10 +630,10 @@ bool StorageBackend::write(StorageWriteTask task) {
                                 result(on_worker);
                             success = !state->request.transfer_task->expired();
                         } catch (const StorageOperationTimeout& error) {
-                            freeze_pins = error.localTargetProtection() == StorageLocalTargetProtection::LEGACY;
+                            freeze_pins = error.localTargetProtection() == StorageTargetProtection::FREEZE_REQUEST_BLOCKS;
                             RTP_LLM_LOG_WARNING("StorageBackend write timed out: %s", error.what());
                         } catch (const StorageOperationCompletionUnknown& error) {
-                            freeze_pins = error.localTargetProtection() == StorageLocalTargetProtection::LEGACY;
+                            freeze_pins = error.localTargetProtection() == StorageTargetProtection::FREEZE_REQUEST_BLOCKS;
                             RTP_LLM_LOG_WARNING("StorageBackend write completion is unknown: %s", error.what());
                         } catch (const StorageOperationBufferSafeFailure& error) {
                             RTP_LLM_LOG_WARNING("StorageBackend payload-safe write failure: %s", error.what());

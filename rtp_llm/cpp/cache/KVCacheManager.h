@@ -4,6 +4,7 @@
 #include <cassert>
 #include <condition_variable>
 #include <functional>
+#include <map>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -14,9 +15,10 @@
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
+#include "rtp_llm/cpp/cache/LinearReplayPool.h"
+#include "rtp_llm/models_py/bindings/LinearReplay.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorResourceStore.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferCompletionQuery.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "kmonitor/client/MetricsReporter.h"
@@ -33,8 +35,6 @@ class KVCacheAllocationWaitState;
 class P2PConnector;
 class Meta;
 class KVCacheEventReporter;
-class FrozenTaskRecovery;
-class TransferCompletionCleanup;
 
 class KVCacheManager {
 public:
@@ -131,6 +131,20 @@ public:
     // for mtp module
     GroupedCacheLayerLayout getMTPModuleGroupedCacheLayerLayout(int mtp_module_id) const;
 
+    const std::map<std::string, std::vector<std::optional<torch_ext::LinearReplayLayerCache>>>&
+    linearReplayByTag() const {
+        return linear_replay_by_tag_;
+    }
+    std::shared_ptr<LinearReplayLease> acquireLinearReplaySlot();
+    // A nonnegative token position retains exactly its canonical state block
+    // per group; -1 retains the complete active tail.
+    std::shared_ptr<LinearReplayBlockHold> holdLinearReplayBlocks(const BatchKVCacheResourcePtr& resource,
+                                                                  int state_token_position = -1);
+    bool makeLinearReplayTailsPrivate(const BatchKVCacheResourcePtr& resource,
+                                      int                            min_processed_length                      = -1,
+                                      const std::vector<std::shared_ptr<LinearReplayBlockHold>>& request_holds = {});
+    void markLinearReplayStarted(const BatchKVCacheResourcePtr& resource, int processed_length);
+
     // 资源统计和信息查询
     size_t      freeBlocksNum() const;
     size_t      availableBlocksNum() const;
@@ -142,6 +156,7 @@ public:
 
     // 系统资源管理
     void regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr);
+    void stopP2PConnector();
     void stopMetricsReporter();
 
     // CacheStore ownership, read during model forward
@@ -192,17 +207,6 @@ public:
                        int64_t                              deadline_ms,
                        int64_t                              deadline_clock_offset_ms,
                        int                                  chunk_id = 0);
-    // One observation of the original execution; does not release frozen references.
-    TransferCompletionQueryResult queryTransferCompletion(const FrozenTask::ExecutionInfo& execution,
-                                                          int                              timeout_ms) const;
-
-    TransferCompletionForgetResult forgetTransferCompletion(const TransferCompletionTarget&            target,
-                                                            const std::vector<TransferExecutionTrace>& traces,
-                                                            int timeout_ms) const;
-
-    // Snapshot both existing owners; taking a snapshot does not transfer custody.
-    std::vector<std::shared_ptr<FrozenTask>> frozenTasks() const;
-
     BlockTreeCachePtr blockTreeCache() const {
         return block_tree_cache_;
     }
@@ -219,21 +223,18 @@ public:
     }
 
 private:
+    void                              initLinearReplayPool();
     std::function<void()>             allocationChangeCallback() const;
     void                              reportMetricsLoop();
-    void                              missingCleanupLoop();
-    void                              stopMissingCleanup();
     void                              reportPrefillCacheHitMetrics(const MallocInfo& malloc_info, bool is_first_malloc);
     bool                              initP2PConnector();
     std::shared_ptr<BroadcastManager> createMultiRankBlockTransferManager() const;
-    TransferTaskRegistry::State       localTransferCompletion(const TransferExecutionTrace& trace_id) const;
-    TransferTaskRegistry::ForgetResult localForgetTransferCompletion(const TransferExecutionTrace& trace_id) const;
-    bool                               startFrozenTaskRecovery();
-    void                               stopFrozenTaskRecovery() noexcept;
-
     // 成员变量
     CacheConfig                config_;
     CoordinatorCacheManagerPtr coordinator_manager_;
+    std::map<std::string, std::vector<std::optional<torch_ext::LinearReplayLayerCache>>> linear_replay_by_tag_;
+    std::shared_ptr<LinearReplaySlotPool>        linear_replay_slots_;
+    std::shared_ptr<LinearReplayRetirementQueue> linear_replay_retirement_;
 
     const kmonitor::MetricsReporterPtr metrics_reporter_;
     const KVCacheConfig                kv_cache_config_;
@@ -255,15 +256,8 @@ private:
     std::atomic<bool> stop_{false};
     std::thread       metrics_reporter_thread_;
 
-    std::mutex              missing_cleanup_mutex_;
-    std::condition_variable missing_cleanup_cv_;
-    bool                    missing_cleanup_stopped_{false};
-    std::thread             missing_cleanup_thread_;
 
     BlockTreeCachePtr                           block_tree_cache_;
-    std::shared_ptr<BroadcastManager>           transfer_broadcast_manager_;
-    std::unique_ptr<FrozenTaskRecovery>         frozen_task_recovery_;
-    std::shared_ptr<TransferCompletionCleanup>  completion_cleanup_;
     std::shared_ptr<KVCacheAllocationWaitState> allocation_wait_state_;
 
     mutable std::mutex                 cache_status_snapshot_mutex_;

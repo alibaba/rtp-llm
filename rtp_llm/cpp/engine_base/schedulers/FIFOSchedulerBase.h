@@ -38,6 +38,7 @@ public:
     // with real group-queue semantics.
     std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
                  enqueueGroup(const std::vector<GenerateStreamPtr>& streams) override;
+    absl::Status requestStop() override;
     absl::Status stop() override;
     bool         empty() override;
     int64_t      lastScheduleTime() override;

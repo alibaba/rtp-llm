@@ -89,16 +89,14 @@ class WorkerDirectoryTest {
     @Test
     void should_close_filtered_pins_when_no_group_matches() {
         WorkerStatus status = status(RoleType.VIT, "group1", 8080);
-        RunnerTestSupport.publishEndpoint(
-                registry, RoleType.VIT, status.getLogicalIpPort(), status);
+        RunnerTestSupport.publishEndpoint(registry, RoleType.VIT, status.getIpPort(), status);
 
         List<WorkerEndpoint.GenerationPin> result =
                 workerDirectory.captureEndpoints(RoleType.VIT, "nonExistentGroup");
 
         assertTrue(result.isEmpty());
         assertEquals(
-                List.of(status.getLogicalIpPort()),
-                workerDirectory.endpointAddresses(RoleType.VIT, null));
+                List.of(status.getIpPort()), workerDirectory.endpointAddresses(RoleType.VIT, null));
     }
 
     @Test
@@ -217,8 +215,7 @@ class WorkerDirectoryTest {
         discover(status);
 
         assertEquals(
-                Map.of(status.getLogicalIpPort(), status),
-                workerDirectory.statusSnapshot(RoleType.VIT));
+                Map.of(status.getIpPort(), status), workerDirectory.statusSnapshot(RoleType.VIT));
         assertThrows(
                 UnsupportedOperationException.class,
                 () -> workerDirectory.statusSnapshot(RoleType.VIT).clear());
@@ -243,8 +240,7 @@ class WorkerDirectoryTest {
     private void assertRoleEndpoint(RoleType role, int port) {
         WorkerStatus status = status(role, null, port);
         WorkerEndpoint registered =
-                RunnerTestSupport.publishEndpoint(
-                        registry, role, status.getLogicalIpPort(), status);
+                RunnerTestSupport.publishEndpoint(registry, role, status.routingAddress(), status);
 
         List<WorkerEndpoint.GenerationPin> selected = workerDirectory.captureEndpoints(role, null);
         try {
@@ -269,6 +265,6 @@ class WorkerDirectoryTest {
         assertSame(
                 status,
                 workerDirectory.currentOrDiscover(
-                        status.getRole(), status.getLogicalIpPort(), () -> status));
+                        status.getRole(), status.routingAddress(), () -> status));
     }
 }

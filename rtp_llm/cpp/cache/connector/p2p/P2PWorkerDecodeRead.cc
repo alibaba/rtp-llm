@@ -93,10 +93,9 @@ ErrorInfo P2PWorkerDecodeRead::buildRecvTasks(const P2PWorkerRoutePlan&         
             return fail_registration("read: route=" + std::to_string(route.route_id) + " tag=" + route.cache_tag
                                      + " has no layer buffers, unique_key=" + unique_key);
         }
+        const auto*  spec = config_.topology ? config_.topology->group(route.cache_tag).spec.get() : nullptr;
         const size_t payload_bytes =
-            route.slice_payload_bytes != 0 ?
-                route.slice_payload_bytes :
-                (config_.topology ? config_.topology->group(route.cache_tag).spec->k_block_payload_bytes() : 0);
+            route.slice_payload_bytes != 0 ? route.slice_payload_bytes : (spec ? spec->k_block_payload_bytes() : 0);
 
         for (const auto& layer_cache_buffer : route.layer_buffers) {
             if (!layer_cache_buffer) {
@@ -116,12 +115,18 @@ ErrorInfo P2PWorkerDecodeRead::buildRecvTasks(const P2PWorkerRoutePlan&         
             }
 
             // partition / slice 均来自 route（本侧那一半），worker 不再自行推导。
-            auto key_block_infos = LayerCacheBufferUtil::buildKeyBlockInfosSliced(layer_block_converter_,
-                                                                                  layer_cache_buffer,
-                                                                                  route.partition.count,
-                                                                                  route.partition.id,
-                                                                                  route.slice,
-                                                                                  payload_bytes);
+            auto key_block_infos = route.linear_qkv_segments ?
+                                       LayerCacheBufferUtil::buildKeyBlockInfosLinearQkv(
+                                           layer_block_converter_,
+                                           layer_cache_buffer,
+                                           route.partition,
+                                           config_.linearSpecForLayer(layer_id, route.cache_tag)) :
+                                       LayerCacheBufferUtil::buildKeyBlockInfosSliced(layer_block_converter_,
+                                                                                      layer_cache_buffer,
+                                                                                      route.partition.count,
+                                                                                      route.partition.id,
+                                                                                      route.slice,
+                                                                                      payload_bytes);
             if (!key_block_infos.ok() || key_block_infos.value().empty()
                 || key_block_infos.value().size() != layer_cache_buffer->blockIdMap().size()) {
                 const std::string conversion_message =

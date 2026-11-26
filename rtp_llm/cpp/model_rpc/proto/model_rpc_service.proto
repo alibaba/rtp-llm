@@ -769,8 +769,6 @@ message MemoryOperationRequestPB {
     repeated CopyItem copy_items = 1;
     CopyDirection copy_direction = 2;
     int64 timeout_ms = 3;
-    // Per-execution trace shared by all ranks; absent (zero) on older peers.
-    // Zero cannot identify an operation for recovery. Never used for allocation or routing.
     uint64 transfer_trace_id = 4;
     int64 transfer_request_id = 5;
     bool has_transfer_request_id = 6;
@@ -794,8 +792,6 @@ message MemoryOperationResponsePB {
     repeated Code block_errors = 2;
     // The worker's error code and all failure messages, including transfer stage and descriptor context.
     ErrorDetailsPB error_info = 3;
-    // True only when this worker's transfer can no longer access any of its buffers.
-    // Independent of transfer success; absent/false supplies no safety proof.
     bool buffer_safe = 4;
 }
 
@@ -854,6 +850,9 @@ message TransferRoutePB {
     // Prefill's stage-local layers for this PP route. Empty for the TP-only path.
     repeated uint32 prefill_layer_ids = 10;
     uint64 slice_payload_bytes = 11;
+    bool linear_qkv_segments = 12;
+    // Prefill direction: exact keys requested on a PageRR fan-out route.
+    repeated int64 prefill_cache_keys = 13;
 }
 
 message P2PShardLayoutPB {
@@ -870,6 +869,10 @@ message P2PShardLayoutPB {
         uint64 seq_size_per_block = 10;
         bool pre_sliced = 11;
         uint32 global_kv_heads = 12;
+        uint64 linear_q_row_bytes = 13;
+        uint64 linear_k_row_bytes = 14;
+        uint64 linear_v_row_bytes = 15;
+        uint32 linear_history_rows = 16;
     }
     int32 tp_size = 1;
     int32 cp_method = 2;
@@ -879,6 +882,8 @@ message P2PShardLayoutPB {
     bool use_group_cache_transfer_policy = 6;
     bool use_mla = 7;
     repeated Group groups = 8;
+    bool local_full_page_rr = 9;
+    bool preserve_tp_layout = 10;
 }
 
 message P2PPipelineLayoutPB {
@@ -972,6 +977,11 @@ message LeaseStatusResponsePB {
     bool stopped = 4;      // sealed && started_ops == finished_ops
 }
 
+message PrefillRouteKeysPB {
+    int32 route_id = 1;
+    repeated int64 cache_keys = 2;
+}
+
 message P2PConnectorStartLoadRequestPB {
     string unique_key = 1;
     repeated TPWorkerInfoPB workers = 2;
@@ -997,6 +1007,7 @@ message P2PConnectorStartLoadRequestPB {
     // Decode TP width. The worker list can also include other pipeline stages.
     int32 decode_tp_size = 9;
     bytes decode_pipeline_layout = 10;  // Serialized P2PPipelineLayoutPB.
+    repeated PrefillRouteKeysPB prefill_route_keys = 11;
 }
 
 // Side-channel tensor blob: carries named tensor data between prefill and decode
@@ -1065,12 +1076,12 @@ message RemoteBlockMaskPB {
 }
 
 // Query existing worker evidence without admitting, cancelling or replaying I/O.
-// Numeric transfer traces and KVCM READ string traces are separate namespaces.
 message TransferCompletionKeyPB {
     oneof trace {
         uint64 transfer_trace_id = 1;
         string kvcm_trace_id = 2;
     }
+    string trace_id = 3;
 }
 
 enum TransferCompletionStatePB {
@@ -1086,8 +1097,6 @@ message TransferCompletionQueryRequestPB {
 message TransferCompletionEntryPB {
     TransferCompletionKeyPB key = 1;
     TransferCompletionStatePB state = 2;
-    // UNKNOWN is safe only when the worker atomically banned this missing trace.
-    // The ban must survive cleanup so arbitrarily late requests cannot execute.
     bool admission_closed = 3;
 }
 
@@ -1107,6 +1116,9 @@ enum TransferCompletionForgetStatusPB {
 
 message TransferCompletionForgetRequestPB {
     repeated TransferCompletionKeyPB keys = 1;
+    // The coordinator has released the FrozenTask holds for these KVCM reads.
+    bool kvcm_read_released = 2;
+    bool transfer_released = 3;
 }
 
 message TransferCompletionForgetEntryPB {

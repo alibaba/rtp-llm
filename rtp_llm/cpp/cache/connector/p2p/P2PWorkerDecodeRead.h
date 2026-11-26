@@ -29,6 +29,12 @@ public:
     ~P2PWorkerDecodeRead();
 
 public:
+    void stopMetricsReporter() {
+        if (receiver_) {
+            receiver_->stopMetricsReporter();
+        }
+    }
+
     bool initialized() const {
         return receiver_ != nullptr;
     }

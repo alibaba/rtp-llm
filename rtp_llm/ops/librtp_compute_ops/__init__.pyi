@@ -12,6 +12,8 @@ __all__: list[str] = [
     "CacheGroupType",
     "CacheStoreWriter",
     "LayerKVCache",
+    "LinearReplayInputs",
+    "LinearReplayLayerCache",
     "KVCache",
     "ParamsBase",
     "PyAttentionInputs",
@@ -119,6 +121,24 @@ class CacheGroupType:
     @property
     def value(self) -> int: ...
 
+class LinearReplayInputs:
+    def __init__(self) -> None: ...
+    slot_ids: torch.Tensor
+    active_block_ids: torch.Tensor
+    prev_accept_lengths: torch.Tensor
+    history_valid_lengths: torch.Tensor
+    history_log_banks: torch.Tensor
+    init_kinds: torch.Tensor
+    state_read_block_ids: torch.Tensor
+    anchor_processed_lengths: torch.Tensor
+
+class LinearReplayLayerCache:
+    def __init__(self) -> None: ...
+    k: torch.Tensor
+    u: torch.Tensor
+    g: torch.Tensor
+    conv_inputs: torch.Tensor
+
 class LayerKVCache:
     """Per-layer KV cache view. Returned by KVCache.get_layer_cache()."""
 
@@ -149,6 +169,11 @@ class LayerKVCache:
 
     @kv_scale_base.setter
     def kv_scale_base(self, arg0: torch.Tensor) -> None: ...
+    linear_replay: LinearReplayLayerCache | None
+    @property
+    def group_id(self) -> int:
+        """Physical cache group index, or -1 for a standalone view."""
+
     @property
     def layer_id(self) -> int:
         """
@@ -239,6 +264,7 @@ class PyAttentionInputs:
     is_target_verify: bool
     is_draft_extend: bool
     mtp_indexer_seed_rows: torch.Tensor
+    linear_replay: LinearReplayInputs | None
     padding_offset: torch.Tensor
     prefill_cuda_graph_copy_params: PyPrefillCudaGaphCopyParams | None
     prefix_lengths: torch.Tensor

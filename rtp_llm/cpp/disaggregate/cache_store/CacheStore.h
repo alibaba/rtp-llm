@@ -54,6 +54,10 @@ public:
     virtual const std::shared_ptr<MemoryUtil>& getMemoryUtil() const = 0;
 
     virtual void debugInfo() = 0;
+
+    // Call after request submissions have quiesced. Registered memory remains
+    // available for cache/tensor owners that release their buffers later.
+    virtual void stop() {}
 };
 
 }  // namespace rtp_llm

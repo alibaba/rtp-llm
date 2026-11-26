@@ -110,17 +110,6 @@ TEST(KVCMLocalTest, ManagerKeepsRemoteControlIndependentOfHbmPublicationSettings
                                                             false,
                                                             nullptr,
                                                             client);
-        ASSERT_FALSE(backend->controlConfig().has_value());
-        ASSERT_TRUE(initSingleRank(*backend, environment));
-        ASSERT_TRUE(backend->controlConfig().has_value());
-        const auto control = *backend->controlConfig();
-        EXPECT_EQ(control.register_instance_request, expected_registration);
-        if (mode == 3) {
-            EXPECT_EQ(control.instance_group, "custom-group");
-            EXPECT_EQ(control.instance_id, "custom-remote");
-            EXPECT_EQ(control.addresses, (std::vector<std::string>{"rpc-a", "rpc-b"}));
-        }
-
         auto manager_config = environment.cache_config;
         if (mode == 5) {
             auto groups                               = manager_config.topology().groups();
@@ -134,7 +123,18 @@ TEST(KVCMLocalTest, ManagerKeepsRemoteControlIndependentOfHbmPublicationSettings
         full->initialize(0, manager_config.topologyPtr(), {"default"});
         manager.block_tree_cache_                   = block_tree_cache_test::makeBlockTreeCacheForTest({full});
         manager.block_tree_cache_->storage_backend_ = backend;
-        auto reporter                               = std::make_shared<ControlOnlyReporter>();
+        backend->setReclaimer(manager.block_tree_cache_->reclaimer_);
+        ASSERT_FALSE(backend->controlConfig().has_value());
+        ASSERT_TRUE(initSingleRank(*backend, environment));
+        ASSERT_TRUE(backend->controlConfig().has_value());
+        const auto control = *backend->controlConfig();
+        EXPECT_EQ(control.register_instance_request, expected_registration);
+        if (mode == 3) {
+            EXPECT_EQ(control.instance_group, "custom-group");
+            EXPECT_EQ(control.instance_id, "custom-remote");
+            EXPECT_EQ(control.addresses, (std::vector<std::string>{"rpc-a", "rpc-b"}));
+        }
+        auto reporter = std::make_shared<ControlOnlyReporter>();
         manager.initCacheEventPublisher(reporter);
         ASSERT_NE(manager.cache_event_publisher_, nullptr);
         ASSERT_TRUE(reporter->waitFor("EVENT_NODE_REGISTER"));
@@ -238,6 +238,16 @@ TEST(KVCMLocalTest, Dsv41PublisherUsesEffectiveBackendFullSpecMerge) {
                                                                 false,
                                                                 nullptr,
                                                                 client);
+            KVCacheManager manager(environment.cache_config, false, nullptr, config, singleRankConfig(), runtime);
+            std::vector<DeviceBlockPoolPtr> pools;
+            for (const auto& tag : tags) {
+                pools.push_back(environment.pools_by_tag.at(tag));
+            }
+            auto full = std::make_shared<FullGroupSet>(std::move(pools), nullptr, nullptr);
+            full->initialize(0, environment.cache_config.topologyPtr(), tags);
+            manager.block_tree_cache_                   = block_tree_cache_test::makeBlockTreeCacheForTest({full});
+            manager.block_tree_cache_->storage_backend_ = backend;
+            backend->setReclaimer(manager.block_tree_cache_->reclaimer_);
             ASSERT_TRUE(initSingleRank(*backend, environment));
             ASSERT_TRUE(backend->controlConfig().has_value());
             EXPECT_EQ(backend->controlConfig()->merge_full_specs, tair_backend);
@@ -248,17 +258,7 @@ TEST(KVCMLocalTest, Dsv41PublisherUsesEffectiveBackendFullSpecMerge) {
             }
             std::set<std::string> expected_payload{"F0_TP0", "F1_TP0", "F2_TP0"};
             EXPECT_EQ(payload_names, tair_backend ? std::set<std::string>{"F_TP0"} : expected_payload);
-
-            KVCacheManager manager(environment.cache_config, false, nullptr, config, singleRankConfig(), runtime);
-            std::vector<DeviceBlockPoolPtr> pools;
-            for (const auto& tag : tags) {
-                pools.push_back(environment.pools_by_tag.at(tag));
-            }
-            auto full = std::make_shared<FullGroupSet>(std::move(pools), nullptr, nullptr);
-            full->initialize(0, environment.cache_config.topologyPtr(), tags);
-            manager.block_tree_cache_                   = block_tree_cache_test::makeBlockTreeCacheForTest({full});
-            manager.block_tree_cache_->storage_backend_ = backend;
-            auto reporter                               = std::make_shared<ControlOnlyReporter>();
+            auto reporter = std::make_shared<ControlOnlyReporter>();
             reporter->enabled.store(true);
             manager.initCacheEventPublisher(reporter);
             ASSERT_NE(manager.cache_event_publisher_, nullptr);

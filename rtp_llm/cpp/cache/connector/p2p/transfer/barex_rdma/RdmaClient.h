@@ -10,6 +10,10 @@
 #include <string>
 #include <shared_mutex>
 
+namespace accl::barex {
+class AcclMetricReporter;
+}
+
 namespace rtp_llm {
 namespace transfer {
 namespace barex_rdma {
@@ -23,6 +27,8 @@ public:
     ~RdmaClient();
 
 public:
+    void stopMetricsReporter() override;
+
     /// @brief 初始化 XClientTransport 及底层 RDMA mempool
     bool init(int io_thread_count, int worker_thread_count);
 
@@ -43,6 +49,7 @@ private:
     // RDMA 基础设施
     std::shared_ptr<arpc::RdmaMempool>               rdma_mempool_;
     std::shared_ptr<::accl::barex::XClientTransport> client_;
+    std::weak_ptr<::accl::barex::AcclMetricReporter> barex_metrics_reporter_;
 
     // 连接管理（每个 host:port 对应一个连接池）
     mutable std::shared_mutex                                      host_connections_mutex_;

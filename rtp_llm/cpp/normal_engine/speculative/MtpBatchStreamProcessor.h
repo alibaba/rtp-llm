@@ -61,6 +61,11 @@ public:
 
     absl::StatusOr<GptModelInputs> gatherDecodeModelInput(const StreamGroups& stream_groups,
                                                           TensorHolder&       host_holder) const;
+    absl::Status                   gatherLinearReplayInputs(const StreamGroups&                             stream_groups,
+                                                            const CacheConfig&                              cache_config,
+                                                            GptModelInputs&                                 model_input,
+                                                            TensorHolder&                                   host_holder,
+                                                            std::vector<GenerateStream::LinearReplayRound>& rounds) const;
 
     // Produce the next round's immutable page table by applying the exact
     // linear-cache permutation used by GenerateStream::specUpdate.  FULL/SWA
@@ -71,6 +76,11 @@ public:
                                                       const torch::Tensor&               accept_lengths,
                                                       const std::vector<CacheGroupType>& group_types,
                                                       int64_t                            seq_size_per_block);
+    static torch::Tensor advanceLinearCacheBlockTable(const torch::Tensor&               current_table,
+                                                      const torch::Tensor&               previous_seq_lengths,
+                                                      const torch::Tensor&               accept_lengths,
+                                                      const std::vector<CacheGroupType>& group_types,
+                                                      const std::vector<int64_t>&        group_spans);
 
     absl::StatusOr<SamplerInputs> gatherSpecSamplerInput(const StreamGroups&                         stream_groups,
                                                          const GptModelOutputs&                      model_output,

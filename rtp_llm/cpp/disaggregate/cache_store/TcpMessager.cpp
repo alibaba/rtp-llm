@@ -7,6 +7,14 @@
 
 namespace rtp_llm {
 
+TcpMessager::~TcpMessager() {
+    // ANet keeps a raw service pointer. Join its workers before releasing it.
+    tcp_server_.reset();
+    tcp_client_.reset();
+    service_.reset();
+    timer_manager_.reset();
+}
+
 bool TcpMessager::init(MessagerInitParams params) {
     init_params_ = params;
 

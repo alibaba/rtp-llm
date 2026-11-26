@@ -32,7 +32,7 @@ public:
     // One copy direction per request; the receiving PerRank engines own batching.
     std::shared_ptr<TransferAsyncContext> execute(TransferTask task, const char* completion_operation = nullptr) const;
 
-    const std::vector<std::string>& participantAddresses() const;
+    size_t workerCount() const;
     const std::vector<GroupSetPtr>& groupSets() const noexcept {
         return group_sets_;
     }
