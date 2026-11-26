@@ -71,16 +71,24 @@ protected:
         DeviceTestBase::TearDown();
     }
 
-    std::shared_ptr<FIFOScheduler> createScheduler(size_t max_generate_batch_size     = 100,
-                                                   size_t max_inited_kv_cache_streams = 0) {
+    std::shared_ptr<FIFOScheduler> createScheduler(size_t   max_generate_batch_size     = 100,
+                                                   size_t   max_inited_kv_cache_streams = 0,
+                                                   bool     async_cache_prepare         = false,
+                                                   RoleType role                        = RoleType::PDFUSION,
+                                                   int64_t  chunk_size                  = 0,
+                                                   int64_t  tp_rank                     = 0) {
         ModelConfig model_config;
         model_config.max_seq_len = 8192;
         RuntimeConfig runtime_config;
         runtime_config.max_generate_batch_size                           = max_generate_batch_size;
         runtime_config.fifo_scheduler_config.max_batch_tokens_size       = 8192;
         runtime_config.fifo_scheduler_config.max_inited_kv_cache_streams = max_inited_kv_cache_streams;
-        PDSepConfig       pd_sep_config;
+        runtime_config.fifo_scheduler_config.async_cache_prepare         = async_cache_prepare;
+        runtime_config.fifo_scheduler_config.prefill_chunk_size          = chunk_size;
+        PDSepConfig pd_sep_config;
+        pd_sep_config.role_type = role;
         ParallelismConfig parallelism_config;
+        parallelism_config.tp_rank = tp_rank;
         return std::make_shared<FIFOScheduler>(
             runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager_);
     }
@@ -196,6 +204,232 @@ protected:
     size_t                                                          free_calls_{0};
     size_t                                                          insert_calls_{0};
 };
+
+TEST_F(FIFOSchedulerAsyncCacheTest, testBackgroundPreparationPreservesAdmissionAndAllocation) {
+    auto scheduler = createScheduler(/*max_generate_batch_size=*/1);
+    // Drive preparation deterministically to separate it from execution admission.
+    scheduler->async_cache_prepare_enabled_ = true;
+    installReadinessAllocator([](const MallocInfo&) { return nullptr; });
+    auto first  = createStream();
+    auto second = createStream();
+    ASSERT_TRUE(scheduler->enqueue(first).ok());
+    ASSERT_TRUE(scheduler->enqueue(second).ok());
+    {
+        std::lock_guard<std::mutex> lock(scheduler->lock_);
+        EXPECT_TRUE(scheduler->prepareWaitingCache());
+    }
+    EXPECT_EQ(initial_malloc_calls_, 2);
+    for (const auto& stream : {first, second}) {
+        EXPECT_EQ(stream->getStatus(), StreamState::WAITING);
+        EXPECT_TRUE(stream->hasEvent(StreamEvents::CachePrepared));
+        EXPECT_FALSE(stream->hasEvent(StreamEvents::CanRun));
+    }
+    auto output = scheduler->schedule();
+    ASSERT_TRUE(output.ok());
+    ASSERT_EQ(output.value().streams.size(), 1);
+    EXPECT_EQ(output.value().streams.front(), first);
+    EXPECT_EQ(second->getStatus(), StreamState::WAITING);
+    EXPECT_EQ(initial_malloc_calls_, 2);
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, testBackgroundPendingTransactionRemainsUnadmittedUntilCommit) {
+    auto scheduler                          = createScheduler();
+    scheduler->async_cache_prepare_enabled_ = true;
+    auto context                            = makeControlledAllocatorContext();
+    installReadinessAllocator([context](const MallocInfo&) { return context; });
+    auto stream = createStream({1, 2, 3}, true);
+    ASSERT_TRUE(scheduler->enqueue(stream).ok());
+    {
+        std::lock_guard<std::mutex> lock(scheduler->lock_);
+        EXPECT_FALSE(scheduler->prepareWaitingCache());
+    }
+    EXPECT_EQ(initial_malloc_calls_, 1);
+    EXPECT_FALSE(stream->hasEvent(StreamEvents::CachePrepared));
+    EXPECT_EQ(stream->getStatus(), StreamState::WAITING);
+    EXPECT_FALSE(stream->hasEvent(StreamEvents::CanRun));
+    auto pending = scheduler->schedule();
+    ASSERT_TRUE(pending.ok());
+    EXPECT_TRUE(pending.value().streams.empty());
+    EXPECT_TRUE(context->completeTransfers(1, true));
+    {
+        std::lock_guard<std::mutex> lock(scheduler->lock_);
+        EXPECT_TRUE(scheduler->prepareWaitingCache());
+    }
+    auto ready = scheduler->schedule();
+    ASSERT_TRUE(ready.ok());
+    ASSERT_EQ(ready.value().streams.size(), 1);
+    EXPECT_EQ(ready.value().streams.front(), stream);
+    EXPECT_EQ(initial_malloc_calls_, 1);
+    EXPECT_EQ(stream->streamCacheResource().allocator_load_context_, nullptr);
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, testBackgroundRetryableShortageDoesNotAdmitOrFailStream) {
+    auto scheduler                          = createScheduler();
+    scheduler->async_cache_prepare_enabled_ = true;
+    auto stream                             = createStream();
+    ASSERT_TRUE(scheduler->enqueue(stream).ok());
+    // This minimal mock implements allocation only, not enqueue validation.
+    installRetryableAllocator();
+    {
+        std::lock_guard<std::mutex> lock(scheduler->lock_);
+        EXPECT_FALSE(scheduler->prepareWaitingCache());
+    }
+    EXPECT_EQ(initial_malloc_calls_, 1);
+    EXPECT_FALSE(stream->hasError());
+    EXPECT_FALSE(stream->hasEvent(StreamEvents::LoadInitiated));
+    EXPECT_FALSE(stream->hasEvent(StreamEvents::CachePrepared));
+    auto output = scheduler->schedule();
+    ASSERT_TRUE(output.ok());
+    EXPECT_TRUE(output.value().streams.empty());
+    EXPECT_EQ(initial_malloc_calls_, 1);
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, testBackgroundCancellationAbortsPendingTransactionOnce) {
+    auto scheduler                          = createScheduler();
+    scheduler->async_cache_prepare_enabled_ = true;
+    auto context                            = makeControlledAllocatorContext();
+    installReadinessAllocator([context](const MallocInfo&) { return context; });
+    auto stream = createStream({1, 2, 3}, true);
+    ASSERT_TRUE(scheduler->enqueue(stream).ok());
+    {
+        std::lock_guard<std::mutex> lock(scheduler->lock_);
+        EXPECT_FALSE(scheduler->prepareWaitingCache());
+    }
+    stream->reportError(ErrorCode::CANCELLED, "cancelled while preparing cache");
+    auto output = scheduler->schedule();
+    ASSERT_TRUE(output.ok());
+    EXPECT_TRUE(output.value().streams.empty());
+    EXPECT_EQ(stream->getStatus(), StreamState::FINISHED);
+    EXPECT_EQ(stream->curBlocksNum(), 0);
+    EXPECT_EQ(stream->streamCacheResource().allocator_load_context_, nullptr);
+    EXPECT_EQ(free_calls_, 1);
+    EXPECT_EQ(insert_calls_, 0);
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, testBackgroundInitialCacheLimitIncludesPreparedWaiters) {
+    auto scheduler = createScheduler(/*max_generate_batch_size=*/2, /*max_inited_kv_cache_streams=*/1);
+    scheduler->async_cache_prepare_enabled_ = true;
+    installReadinessAllocator([](const MallocInfo&) { return nullptr; });
+    auto first  = createStream();
+    auto second = createStream();
+    ASSERT_TRUE(scheduler->enqueue(first).ok());
+    ASSERT_TRUE(scheduler->enqueue(second).ok());
+    {
+        std::lock_guard<std::mutex> lock(scheduler->lock_);
+        EXPECT_TRUE(scheduler->prepareWaitingCache());
+    }
+    EXPECT_TRUE(first->hasEvent(StreamEvents::CachePrepared));
+    EXPECT_FALSE(second->hasEvent(StreamEvents::CachePrepared));
+    EXPECT_EQ(second->curBlocksNum(), 0);
+    auto output = scheduler->schedule();
+    ASSERT_TRUE(output.ok());
+    ASSERT_EQ(output.value().streams.size(), 1);
+    first->reportEvent(StreamEvents::GenerateDone);
+    ASSERT_TRUE(scheduler->schedule().ok());
+    {
+        std::lock_guard<std::mutex> lock(scheduler->lock_);
+        EXPECT_TRUE(scheduler->prepareWaitingCache());
+    }
+    auto next = scheduler->schedule();
+    ASSERT_TRUE(next.ok());
+    ASSERT_EQ(next.value().streams.size(), 1);
+    EXPECT_EQ(next.value().streams.front(), second);
+    EXPECT_EQ(initial_malloc_calls_, 2);
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, testBackgroundGroupWaitsForPreparedOrdinaryCapacityToDrain) {
+    auto scheduler                          = createScheduler(2, 1);
+    scheduler->async_cache_prepare_enabled_ = true;
+    scheduler->prefer_group_next_           = true;
+    installReadinessAllocator([](const MallocInfo&) { return nullptr; });
+    auto ordinary = createStream();
+    auto grouped  = createStream();
+    ASSERT_TRUE(scheduler->enqueue(ordinary).ok());
+    ASSERT_EQ(scheduler->enqueueGroup({grouped}).first, std::vector<bool>({true}));
+    {
+        std::lock_guard<std::mutex> lock(scheduler->lock_);
+        EXPECT_TRUE(scheduler->prepareWaitingCache());
+    }
+    EXPECT_TRUE(ordinary->hasEvent(StreamEvents::CachePrepared));
+    EXPECT_FALSE(grouped->hasEvent(StreamEvents::CachePrepared));
+    auto first = scheduler->schedule();
+    ASSERT_TRUE(first.ok());
+    ASSERT_EQ(first.value().streams.size(), 1);
+    EXPECT_EQ(first.value().streams.front(), ordinary);
+    ordinary->reportEvent(StreamEvents::GenerateDone);
+    ASSERT_TRUE(scheduler->schedule().ok());
+    {
+        std::lock_guard<std::mutex> lock(scheduler->lock_);
+        EXPECT_TRUE(scheduler->prepareWaitingCache());
+    }
+    auto second = scheduler->schedule();
+    ASSERT_TRUE(second.ok());
+    ASSERT_EQ(second.value().streams.size(), 1);
+    EXPECT_EQ(second.value().streams.front(), grouped);
+    EXPECT_EQ(initial_malloc_calls_, 2);
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, testBackgroundPrefillLoadFailureRetainsNativeRecomputeFallback) {
+    auto scheduler                          = createScheduler(1, 0, false, RoleType::PREFILL);
+    scheduler->async_cache_prepare_enabled_ = true;
+    auto context                            = makeControlledAllocatorContext();
+    installReadinessAllocator([context](const MallocInfo&) { return context; });
+    auto stream = createStream({1, 2, 3}, true, false, 1, {}, RoleType::PREFILL);
+    ASSERT_TRUE(scheduler->enqueue(stream).ok());
+    {
+        std::lock_guard<std::mutex> lock(scheduler->lock_);
+        EXPECT_FALSE(scheduler->prepareWaitingCache());
+    }
+    ASSERT_TRUE(context->completeTransfers(1, false));
+    {
+        std::lock_guard<std::mutex> lock(scheduler->lock_);
+        EXPECT_TRUE(scheduler->prepareWaitingCache());
+    }
+    auto output = scheduler->schedule();
+    ASSERT_TRUE(output.ok());
+    ASSERT_EQ(output.value().streams.size(), 1);
+    EXPECT_EQ(output.value().streams.front(), stream);
+    EXPECT_FALSE(stream->hasError());
+    EXPECT_GT(stream->curBlocksNum(), 0);
+    EXPECT_EQ(stream->streamCacheResource().allocator_load_context_, nullptr);
+    EXPECT_EQ(free_calls_, 0);
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, testBackgroundWorkerPreparesWithoutSchedulerAndJoinsOnStop) {
+    std::promise<void> allocated;
+    auto               observed = allocated.get_future();
+    installReadinessAllocator([&allocated](const MallocInfo&) {
+        allocated.set_value();
+        return nullptr;
+    });
+    auto scheduler = createScheduler(1, 1, /*async_cache_prepare=*/true);
+    auto stream    = createStream();
+    ASSERT_TRUE(scheduler->async_cache_prepare_enabled_);
+    ASSERT_TRUE(scheduler->enqueue(stream).ok());
+    ASSERT_EQ(observed.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    {
+        std::lock_guard<std::mutex> lock(scheduler->lock_);
+        EXPECT_TRUE(stream->hasEvent(StreamEvents::CachePrepared));
+        EXPECT_EQ(stream->getStatus(), StreamState::WAITING);
+        EXPECT_FALSE(stream->hasEvent(StreamEvents::CanRun));
+    }
+    auto output = scheduler->schedule();
+    ASSERT_TRUE(output.ok());
+    ASSERT_EQ(output.value().streams.size(), 1);
+    EXPECT_EQ(initial_malloc_calls_, 1);
+    EXPECT_TRUE(scheduler->stop().ok());
+    EXPECT_FALSE(scheduler->cache_prepare_thread_.joinable());
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, testBackgroundPolicyKeepsDecodeOtherRanksAndChunkPath) {
+    for (auto scheduler : {createScheduler(1, 0, false, RoleType::PREFILL),
+                           createScheduler(1, 0, true, RoleType::DECODE),
+                           createScheduler(1, 0, true, RoleType::PREFILL, 0, 1),
+                           createScheduler(1, 0, true, RoleType::PREFILL, 128)}) {
+        EXPECT_FALSE(scheduler->async_cache_prepare_enabled_);
+        EXPECT_FALSE(scheduler->cache_prepare_thread_.joinable());
+    }
+}
 
 namespace {
 

@@ -146,7 +146,7 @@ class EnvArgumentGroup:
 
         Args:
             *args: 标准 argparse add_argument 参数
-            env_name: 环境变量名称（保留用于兼容，但不再自动更新到 os.environ）
+            env_name: 环境变量名称。None 时自动推导，空字符串表示仅接受命令行参数。
             bind_to: 配置绑定目标，可以是 (config_obj, 'attr_name')、
                 'path.to.attr' 字符串或这些目标的列表
             **kwargs: 其他 argparse add_argument 参数
@@ -166,7 +166,8 @@ class EnvArgumentGroup:
             self._parser._register_config_binding(action, bind_to)
 
         # 保留 env 映射（用于兼容和日志）
-        self._parser._register_env_mapping(action, args, env_name)
+        if env_name != "":
+            self._parser._register_env_mapping(action, args, env_name)
         return action
 
     def __getattr__(self, name):

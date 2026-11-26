@@ -94,6 +94,13 @@ def init_fifo_scheduler_group_args(parser, fifo_scheduler_config):
         help="FIFO 中已初始化 KV cache block 的 stream 数上限，0 表示不限制。",
     )
     fifo_scheduler_group.add_argument(
+        "--async_cache_prepare",
+        env_name="",
+        bind_to=[(fifo_scheduler_config, "async_cache_prepare")],
+        action="store_true",
+        help="为非分块 prefill 提前准备 KV cache，仅适用于默认 FIFO 调度器。",
+    )
+    fifo_scheduler_group.add_argument(
         "--prefill_chunk_size",
         env_name="PREFILL_CHUNK_SIZE",
         bind_to=[(fifo_scheduler_config, "prefill_chunk_size")],

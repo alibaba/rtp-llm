@@ -13,7 +13,13 @@ from unittest.mock import patch
 from rtp_llm.config.collective_config import CollectiveConfig
 from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.test.kv_cache_event_test_values import KV_CACHE_EVENT_ENV_CASES
-from rtp_llm.ops import CPAllGatherImpl, HWKernelConfig, RoleType, RuntimeConfig, TaskType
+from rtp_llm.ops import (
+    CPAllGatherImpl,
+    HWKernelConfig,
+    RoleType,
+    RuntimeConfig,
+    TaskType,
+)
 from rtp_llm.server.server_args.util import str2_cp_all_gather_impl
 from rtp_llm.utils import backend_registry
 from rtp_llm.utils.backend_registry import register_backend_hook
@@ -219,6 +225,29 @@ class PipelinePartitionArgumentsTest(TestCase):
             ):
                 with self.assertRaises(SystemExit):
                     server_args.setup_args(["--tp_size", "1"])
+
+
+class AsyncCachePrepareArgumentsTest(TestCase):
+    def test_cli_enables_background_preparation(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {"ASYNC_CACHE_PREPARE": "1"}, clear=True):
+            with patch.object(sys, "argv", ["rtp-llm"]):
+                default_config = server_args.setup_args().runtime_config
+            self.assertFalse(default_config.fifo_scheduler_config.async_cache_prepare)
+
+            config = server_args.setup_args(["--async_cache_prepare"]).runtime_config
+            restored = pickle.loads(pickle.dumps(config.fifo_scheduler_config))
+            self.assertTrue(restored.async_cache_prepare)
+
+    def test_legacy_pickle_defaults_to_synchronous_preparation(self):
+        from rtp_llm.ops import FIFOSchedulerConfig
+
+        current = FIFOSchedulerConfig()
+        current.async_cache_prepare = True
+        restored = FIFOSchedulerConfig.__new__(FIFOSchedulerConfig)
+        restored.__setstate__(current.__getstate__()[:-1])
+        self.assertFalse(restored.async_cache_prepare)
 
 
 class PrefillMultimodalRetryArgumentsTest(TestCase):
