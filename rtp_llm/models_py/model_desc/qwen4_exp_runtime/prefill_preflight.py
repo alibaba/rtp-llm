@@ -183,6 +183,29 @@ def main_geometry_preflight(entries, host_values=None):
             impl._model_prefill_geometry = None
 
 
+def _has_local_forward_hooks(model):
+    # Walk sibling groups directly to avoid building qualified module names.
+    # Read the live children so hook and submodule changes take effect.
+    pending = [(model,)]
+    expanded = set()
+    while pending:
+        for module in pending.pop():
+            if module is None:
+                continue
+            state = module.__dict__
+            if (
+                state["_forward_hooks"]
+                or state["_forward_pre_hooks"]
+                or "forward" in state
+            ):
+                return True
+            children = state["_modules"]
+            if children and module not in expanded:
+                expanded.add(module)
+                pending.append(children.values())
+    return False
+
+
 def prefill_geometry_scope(model, inputs, fmha_impl):
     if model.kv_cache is None:
         return nullcontext(True)
@@ -194,18 +217,16 @@ def prefill_geometry_scope(model, inputs, fmha_impl):
     ):
         return nullcontext(True)
     config = model.config
-    if type(config) is Qwen4ModelConfig and not config.enable_qwen4_qsa:
+    # The MTP draft has one layer and needs no cross-layer Prefill metadata.
+    if type(config) is Qwen4ModelConfig and (
+        config.is_mtp or not config.enable_qwen4_qsa
+    ):
         return nullcontext(False)
     if (
         hot_hook_runtime().enabled
         or torch.nn.modules.module._global_forward_hooks
         or torch.nn.modules.module._global_forward_pre_hooks
-        or any(
-            module._forward_hooks
-            or module._forward_pre_hooks
-            or "forward" in module.__dict__
-            for module in model.modules()
-        )
+        or _has_local_forward_hooks(model)
     ):
         # Hooks can update inference tensors without a version counter. Read
         # QSA input metadata afresh in each layer when Python can change it.

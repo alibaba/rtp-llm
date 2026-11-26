@@ -75,6 +75,8 @@ class Qwen4ExpQSARuntimeContext:
         # This cache belongs to one forward invocation, never a graph buffer's
         # address across steps. Keep the tensor owner alongside the host values.
         cache = self.metadata_cache
+        if cache is None:
+            return tensor.tolist()
         key = (
             tensor.data_ptr(),
             tensor.shape,
@@ -82,8 +84,6 @@ class Qwen4ExpQSARuntimeContext:
             tensor.dtype,
             tensor.device,
         )
-        if cache is None:
-            return tensor.tolist()
         if key not in cache:
             cache[key] = (tensor, tensor.tolist())
         return cache[key][1]
