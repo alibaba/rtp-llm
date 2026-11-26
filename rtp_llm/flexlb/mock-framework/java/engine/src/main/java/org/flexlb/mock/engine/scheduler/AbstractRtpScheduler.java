@@ -285,7 +285,7 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
                 if (admitted.size() >= config.maxGenerateBatchSize() || config.forceSinglePrefill() && !admitted.isEmpty()) break;
                 if (uncachedLimit > 0 && uncached >= uncachedLimit) continue;
                 if (stream.lease == null && capped && initialized >= config.maxInitedKvStreams()) continue;
-                if (workTokens(stream) <= 0 || !fitsPrefill(admitted, stream)) continue;
+                if (workTokens(stream) <= 0 || !fitsPrefill(admitted, stream, uncached)) continue;
                 if (!reserve(stream)) continue;
                 admitted.add(stream);
                 queue.remove(stream); running.add(stream); selected.add(stream);
@@ -314,13 +314,7 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         return active.get(stream.input.identity()) == stream && stream.lease != null;
     }
 
-    private long uncachedTokens(GenerateStream stream) {
-        long tokens = stream.input.tokens() - stream.reused;
-        long alignment = 2L * config.cpSize();
-        return config.cpSize() > 1 ? (tokens + alignment - 1) / alignment * alignment : tokens;
-    }
-
-    private boolean fitsPrefill(List<GenerateStream> selected, GenerateStream candidate) {
+    private boolean fitsPrefill(List<GenerateStream> selected, GenerateStream candidate, long admittedUncachedTokens) {
         if (selected.isEmpty()) return candidate.input.tokens() < config.maxSeqLen();
         long sum = candidate.input.tokens(), longest = candidate.input.tokens();
         for (var stream : selected) {
@@ -328,7 +322,18 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         }
         // Native prefill-only means max_new_tokens == 0; this Mock currently accepts positive output lengths only.
         long budget = (long) config.maxBatchTokens() - 1;
+        if (config.maxBatchKvLen() > 0) {
+            // The candidate has not reserved KV yet. Like RTP's first admission check, charge
+            // its full input until reuse is known. Previously admitted streams charge their actual misses.
+            return sum < config.maxBatchKvLen() && admittedUncachedTokens + uncachedTokens(candidate) <= budget;
+        }
         return sum <= budget && longest * (selected.size() + 1L) <= budget;
+    }
+
+    private long uncachedTokens(GenerateStream stream) {
+        long tokens = stream.input.tokens() - stream.reused;
+        long alignment = 2L * config.cpSize();
+        return config.cpSize() > 1 ? (tokens + alignment - 1) / alignment * alignment : tokens;
     }
 
     private int workTokens(GenerateStream stream) {

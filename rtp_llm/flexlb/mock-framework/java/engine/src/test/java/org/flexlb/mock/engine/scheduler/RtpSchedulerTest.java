@@ -642,6 +642,33 @@ class RtpSchedulerTest {
         }
     }
 
+    @Test void prefillCanBatchLongPromptsOnlyWhenBothKvAndComputeBudgetsFit() throws Exception {
+        for (int[] limits : new int[][] {{100, 160}, {100, 120}, {62, 160}}) {
+            var json = new ObjectMapper();
+            ObjectNode root = json.valueToTree(LLMMockEngineTest.configuration("prefill"));
+            ((ObjectNode) root.path("component").path("config"))
+                .put("seq_size_per_block", 2).put("concurrency_limit", 4).put("reuse_cache", true)
+                .put("max_batch_tokens_size", limits[0]).put("max_batch_kv_len", limits[1]);
+            var path = directory.resolve("prefill-dual-budget.json");
+            json.writeValue(path.toFile(), root);
+            var config = RtpConfig.load(path);
+            var warm = new EngineScheduler.Input("1", 1, 0, 60, 3, 0, System.nanoTime(), Long.MAX_VALUE,
+                new PromptCacheKeys(2, Collections.nCopies(60, 0), List.of()), true, false, 0, false);
+            try (var cache = new KvCacheManager(2, 100, 0);
+                 var scheduler = RtpTestMetrics.fifo(new Object(), config, cache)) {
+                var prepared = (KvCacheManager.Ready) cache.prepare(warm.tokens(), List.of());
+                try (var lease = prepared.lease()) {
+                    assertTrue(lease.publish(warm.keys(), warm.tokens()));
+                }
+                scheduler.enqueue(warm, new Listener());
+                scheduler.enqueue(sized(2, 60), new Listener());
+                var work = scheduler.schedule();
+                assertEquals(58, work.batch().requests().getFirst().hitCacheTokens());
+                assertEquals(limits[0] == 100 && limits[1] == 160 ? List.of(1L, 2L) : List.of(1L), ids(work));
+            }
+        }
+    }
+
     @Test void rejectedAndCancelledGroupMembersDoNotCancelOtherMembers() throws Exception {
         var config = config("prefill", "1", 4, 100);
         try (var cache = new KvCacheManager(2, 20, 0);

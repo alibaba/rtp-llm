@@ -16,6 +16,18 @@ class RtpConfigTest {
 
     @TempDir Path directory;
 
+    @Test void prefillKvBudgetLoadsFromWhaleEnvironment() throws Exception {
+        var baseline = load(root());
+        assertEquals(0, baseline.maxBatchKvLen());
+        var environment = environmentOf(baseline.business());
+        environment.put("MAX_BATCH_KV_LEN", "3145728");
+        var configured = RtpConfig.fromEnvironment(baseline.id(), baseline.role(), environment);
+        assertEquals(3145728, configured.effective().path("max_batch_kv_len").asInt());
+        environment.put("MAX_BATCH_KV_LEN", "-1");
+        assertThrows(IllegalArgumentException.class, () ->
+            RtpConfig.fromEnvironment(baseline.id(), baseline.role(), environment));
+    }
+
     @Test void prefillOverheadIsOptionalAndValidated() throws Exception {
         var root = root();
         var values = (ObjectNode) root.path("component").path("config");

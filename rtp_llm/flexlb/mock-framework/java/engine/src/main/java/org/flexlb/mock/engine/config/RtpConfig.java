@@ -15,7 +15,7 @@ import org.flexlb.mock.engine.forward.ComputeModel;
  */
 public record RtpConfig(String id, Role role, int physicalBlockSize, int deviceBlocks, int totalCacheBlocks, int reserveBlocks,
                         boolean reuseCache, boolean deviceCache, boolean disableDecodeFirstReuse, int maxSeqLen, int maxBatchTokens,
-                        int maxGenerateBatchSize, int maxInitedKvStreams, int maxUncachedBatchTokens, int cpSize,
+                        int maxGenerateBatchSize, int maxInitedKvStreams, int maxUncachedBatchTokens, int maxBatchKvLen, int cpSize,
                         JsonNode business, ComputeModel compute, int imageToken, long cacheKeySeed, long maxRpcTimeoutMs) {
     private static final String PREFILL_OVERHEAD_MS = "mock.engine.prefill.overhead.ms";
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -34,7 +34,8 @@ public record RtpConfig(String id, Role role, int physicalBlockSize, int deviceB
     public RtpConfig {
         if (id == null || id.isBlank() || (role != Role.prefill && role != Role.decode)
                 || physicalBlockSize < 1 || deviceBlocks < 1 || totalCacheBlocks < deviceBlocks || reserveBlocks < 0 || reserveBlocks > deviceBlocks
-                || maxSeqLen < 1 || maxBatchTokens < 0 || maxGenerateBatchSize < 1 || maxInitedKvStreams < 0 || maxUncachedBatchTokens < 0 || cpSize < 1)
+                || maxSeqLen < 1 || maxBatchTokens < 0 || maxGenerateBatchSize < 1 || maxInitedKvStreams < 0
+                || maxUncachedBatchTokens < 0 || maxBatchKvLen < 0 || cpSize < 1)
             throw new IllegalArgumentException("Invalid RTP node configuration");
         business = business.deepCopy();
         Objects.requireNonNull(compute);
@@ -104,6 +105,7 @@ public record RtpConfig(String id, Role role, int physicalBlockSize, int deviceB
             nativeInt(config, "concurrency_limit", 32, 1, Integer.MAX_VALUE),
             nativeInt(config, "max_inited_kv_cache_streams", 0, 0, Integer.MAX_VALUE),
             nativeInt(config, "max_batch_tokens_without_cache", 0, 0, Integer.MAX_VALUE),
+            nativeInt(config, "max_batch_kv_len", 0, 0, Integer.MAX_VALUE),
             cpSize,
             config, compute, nativeInt(config, "image_token_id", org.flexlb.mock.protocol.MultimodalProtocol.IMAGE_TOKEN, 0, Integer.MAX_VALUE),
             ConfigInput.signedLong(config, "cache_key_hash_seed", 0),
@@ -144,7 +146,9 @@ public record RtpConfig(String id, Role role, int physicalBlockSize, int deviceB
             .put("prefill_cp_size", cpSize)
             .put("cache_key_block_size", tokensPerCacheKey());
         if (role == Role.prefill) {
-            result.put("max_inited_kv_cache_streams", maxInitedKvStreams).put("max_batch_tokens_without_cache", maxUncachedBatchTokens); }
+            result.put("max_inited_kv_cache_streams", maxInitedKvStreams)
+                .put("max_batch_tokens_without_cache", maxUncachedBatchTokens).put("max_batch_kv_len", maxBatchKvLen);
+        }
         if (business.has("image_token_id")) result.put("image_token_id", imageToken);
         result.put("concurrency_limit", maxGenerateBatchSize).put("cache_key_hash_seed", cacheKeySeed);
         String events = business.path("kv_cache_event_publisher_type").asText("none");
@@ -195,7 +199,7 @@ public record RtpConfig(String id, Role role, int physicalBlockSize, int deviceB
     static Set<String> nativeNames(Role role) {
         var names = new HashSet<>(COMMON);
         if (role == Role.prefill)
-            names.addAll(Set.of("max_batch_tokens_without_cache", "max_inited_kv_cache_streams", "max_rpc_timeout_ms"));
+            names.addAll(Set.of("max_batch_tokens_without_cache", "max_batch_kv_len", "max_inited_kv_cache_streams", "max_rpc_timeout_ms"));
         return Set.copyOf(names);
     }
 
