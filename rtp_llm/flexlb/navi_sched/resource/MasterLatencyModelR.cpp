@@ -1068,6 +1068,9 @@ bool MasterLatencyModelR::loadLocked()
                 return false;
             }
             const auto supportedParameterCount =
+                (NonLinearPrefillModelR::usesNativePP4ForVersion(key.binaryVersion) &&
+                 key.parameterCount ==
+                     NonLinearPrefillModelR::NATIVE_PP4_PARAMETER_COUNT) ||
                 key.parameterCount == NonLinearPrefillModelR::PARAMETER_COUNT ||
                 key.parameterCount ==
                     NonLinearPrefillModelR::CAPACITY_SPLIT_PARAMETER_COUNT ||

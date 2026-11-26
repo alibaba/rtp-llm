@@ -1,4 +1,5 @@
 #include "aios/navi_sched/resource/NonLinearPrefillModelR.h"
+#include "aios/navi_sched/common/TPUPrefillPP4Timing.h"
 #include "aios/navi_sched/data/SummaryUtil.h"
 #include "kmonitor/client/MetricsReporter.h"
 #include <algorithm>
@@ -12,6 +13,26 @@ constexpr double COEFFICIENT_3 = 320.0;
 constexpr double BETA_1 = 0.9;
 constexpr double BETA_2 = 0.95;
 constexpr double EPSILON = 1e-20;
+
+template <typename Values>
+void applyAdamGradient(Values &weights, Values &adamMoment1, Values &adamMoment2,
+                       const Values &gradient, size_t parameterCount, double correction,
+                       const std::vector<double> *parameterLearningRateScales)
+{
+    for (size_t index = 0; index < parameterCount; ++index) {
+        adamMoment1[index] =
+            BETA_1 * adamMoment1[index] + (1.0 - BETA_1) * gradient[index];
+        adamMoment2[index] = BETA_2 * adamMoment2[index] +
+                             (1.0 - BETA_2) * gradient[index] * gradient[index];
+        const auto parameterScale =
+            parameterLearningRateScales && index < parameterLearningRateScales->size()
+                ? (*parameterLearningRateScales)[index]
+                : 1.0;
+        const auto update = correction * parameterScale * adamMoment1[index] /
+                            std::sqrt(adamMoment2[index] + EPSILON);
+        weights[index] -= update;
+    }
+}
 
 void reportOptimizerStep(
     const kmonitor::MetricsReporterPtr &reporter,
@@ -94,6 +115,8 @@ void NonLinearPrefillModelR::def(navi::ResourceDefBuilder &builder) const
 
 bool NonLinearPrefillModelR::config(navi::ResourceConfigContext &ctx)
 {
+    NAVI_JSONIZE(ctx, "native_prefill_pipeline_stages", _nativePrefillPipelineStages,
+                 _nativePrefillPipelineStages);
     NAVI_JSONIZE(ctx, "pd_separated", _pdSeparated, _pdSeparated);
     NAVI_JSONIZE(ctx, "execution_geometry_enabled", _executionGeometryEnabled,
                  _executionGeometryEnabled);
@@ -111,9 +134,16 @@ bool NonLinearPrefillModelR::config(navi::ResourceConfigContext &ctx)
                  _useCapacitySplitFeature);
     // Preserve the uncapped projected-model updates; V6D profiles retain clipping.
     const double defaultErrorClipMs =
-        usesProjectedExecutionGeometry() && !usesExecutionCacheSource() ? 0.0 : 5000.0;
+        usesNativePP4Timing() ||
+                (usesProjectedExecutionGeometry() && !usesExecutionCacheSource())
+            ? 0.0
+            : 5000.0;
     NAVI_JSONIZE(ctx, "error_clip_ms", _errorClipMs, defaultErrorClipMs);
-    return (!_executionCacheSourceEnabled || usesExecutionGeometry()) &&
+    return (_nativePrefillPipelineStages == 0 ||
+            (_nativePrefillPipelineStages == 4 && _pdSeparated &&
+             _useCapacitySplitFeature && !_executionGeometryEnabled &&
+             !_executionCacheSourceEnabled)) &&
+           (!_executionCacheSourceEnabled || usesExecutionGeometry()) &&
            std::isfinite(_learningRate) && _learningRate > 0.0 &&
            std::isfinite(_nonlinearScale) && _nonlinearScale > 0.0 &&
            std::isfinite(_errorClipMs) && _errorClipMs >= 0.0 &&
@@ -137,6 +167,7 @@ bool NonLinearPrefillModelR::usesPdCoordinates() const
 
 int64_t NonLinearPrefillModelR::getBinaryVersion() const
 {
+    if (usesNativePP4Timing()) return NATIVE_PP4_BINARY_VERSION;
     if (usesExecutionCacheSource()) {
         return usesProjectedExecutionGeometry() ? CACHE_SOURCE_BINARY_VERSION
                                                 : MEASURED_CACHE_SOURCE_BINARY_VERSION;
@@ -157,13 +188,14 @@ NonLinearPrefillModelR::getConfiguredParameterScales() const
 
 bool NonLinearPrefillModelR::supportsBinaryVersion(int64_t version)
 {
-    return version == BINARY_VERSION || version == PD_BINARY_VERSION ||
-           usesGeometryForVersion(version);
+    return usesNativePP4ForVersion(version) || version == BINARY_VERSION ||
+           version == PD_BINARY_VERSION || usesGeometryForVersion(version);
 }
 
 std::vector<double> NonLinearPrefillModelR::parametersForLegacyPrediction(
     const std::vector<double> &parameters, int64_t version)
 {
+    if (usesNativePP4ForVersion(version)) return {};
     if (!supportsBinaryVersion(version) ||
         (version == BINARY_VERSION &&
          parameters.size() == CACHE_SOURCE_PARAMETER_COUNT) ||
@@ -185,6 +217,11 @@ std::vector<double> NonLinearPrefillModelR::parametersForLegacyPrediction(
 bool NonLinearPrefillModelR::validateParametersForVersion(
     const std::vector<double> &parameters, int64_t version)
 {
+    if (usesNativePP4ForVersion(version))
+        return parameters.size() == NATIVE_PP4_PARAMETER_COUNT &&
+               std::all_of(parameters.begin(), parameters.end(), [](double value) {
+                   return std::isfinite(value) && value >= 0.0;
+               });
     if (!supportsBinaryVersion(version)) {
         return false;
     }
@@ -214,6 +251,8 @@ bool NonLinearPrefillModelR::validateConfiguredParameters(
 
 std::vector<double> NonLinearPrefillModelR::getInitialParameters() const
 {
+    if (usesNativePP4Timing())
+        return std::vector<double>(NATIVE_PP4_PARAMETER_COUNT, 0.0);
     std::vector<double> parameters =
         _useCapacitySplitFeature
             ? std::vector<double>(CAPACITY_SPLIT_INITIAL_PARAMETERS.begin(),
@@ -297,9 +336,135 @@ bool NonLinearPrefillModelR::fit(const std::vector<NaviSchedLatencySample> &samp
                                  const std::vector<double> *parameterLearningRateScales,
                                  bool rejectNonPositiveWaitingCandidate) const
 {
+    if (usesNativePP4Timing())
+        return fitNativePP4Timing(samples, currentParameters, newParameters,
+                                  learningRateScale, currentSampleWeight,
+                                  parameterLearningRateScales);
+    if (std::any_of(samples.begin(), samples.end(),
+                    [](const auto &sample) { return bool(sample.nativePP4Timing); }))
+        return false;
     return fitImpl(samples, currentParameters, newParameters, learningRateScale,
                    currentSampleWeight, parameterLearningRateScales, nullptr,
                    rejectNonPositiveWaitingCandidate);
+}
+
+double NonLinearPrefillModelR::predictSampleConfigured(
+    const NaviSchedLatencySample &sample, const std::vector<double> &parameters) const
+{
+    if (!usesNativePP4Timing())
+        return sample.nativePP4Timing ? std::numeric_limits<double>::quiet_NaN()
+                                      : predictConfigured(sample.features, parameters);
+    if (!sample.nativePP4Timing || !validateConfiguredParameters(parameters))
+        return std::numeric_limits<double>::quiet_NaN();
+    TPUPrefillPP4Timing::Parameters values;
+    std::copy(parameters.begin(), parameters.end(), values.begin());
+    try {
+        return sample.nativePP4Timing->predictLatencyMs(values);
+    } catch (const std::exception &) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+}
+
+bool NonLinearPrefillModelR::fitNativePP4Timing(
+    const std::vector<NaviSchedLatencySample> &samples,
+    const std::vector<double> &currentParameters, std::vector<double> &newParameters,
+    double learningRateScale, double currentSampleWeight,
+    const std::vector<double> *parameterLearningRateScales) const
+{
+    constexpr double RAW_LATENCY_SCALE_MS = 1000.0;
+    // Fixed physical feature units. Adam operates in seconds of contribution,
+    // keeping token/context products on comparable coordinates.
+    const TPUPrefillPP4Timing::Parameters units{1.,   1.,  8., 8.,  4096.,
+                                                512., 64., 8., 512.};
+    if (samples.empty() || !validateConfiguredParameters(currentParameters) ||
+        !std::isfinite(learningRateScale) || learningRateScale <= 0.0 ||
+        !std::isfinite(currentSampleWeight) || currentSampleWeight <= 0.0 ||
+        (parameterLearningRateScales &&
+         (parameterLearningRateScales->size() != NATIVE_PP4_PARAMETER_COUNT ||
+          std::any_of(
+              parameterLearningRateScales->begin(), parameterLearningRateScales->end(),
+              [](double value) { return !std::isfinite(value) || value <= 0.0; }))))
+        return false;
+    autil::ScopedLock lock(_lock);
+    Values weights{}, gradient{};
+    TPUPrefillPP4Timing::Parameters physical;
+    std::copy(currentParameters.begin(), currentParameters.end(), physical.begin());
+    for (size_t index = 0; index < NATIVE_PP4_PARAMETER_COUNT; ++index)
+        weights[index] = physical[index] * units[index] / RAW_LATENCY_SCALE_MS;
+    double totalWeight = 0.0;
+    for (size_t sampleIndex = 0; sampleIndex < samples.size(); ++sampleIndex) {
+        const auto &sample = samples[sampleIndex];
+        if (!sample.nativePP4Timing ||
+            !sample.nativePP4Timing->validLatencyMs(sample.latencyMs))
+            return false;
+        TPUPrefillPP4Timing::Parameters derivative{};
+        double prediction;
+        try {
+            prediction = sample.nativePP4Timing->predictLatencyMs(physical, &derivative);
+        } catch (const std::exception &) {
+            return false;
+        }
+        if (!std::isfinite(prediction) || prediction < 0.0) return false;
+        double difference =
+            (std::log1p(prediction) - std::log1p(sample.latencyMs)) / (1.0 + prediction);
+        const double absoluteError = std::abs(prediction - sample.latencyMs);
+        if (_errorClipMs > 0.0 && absoluteError > _errorClipMs)
+            difference *= _errorClipMs / absoluteError;
+        const double sampleWeight =
+            sampleIndex + 1 == samples.size() ? currentSampleWeight : 1.0;
+        totalWeight += sampleWeight;
+        for (size_t index = 0; index < NATIVE_PP4_PARAMETER_COUNT; ++index)
+            gradient[index] += sampleWeight * difference * derivative[index] *
+                               RAW_LATENCY_SCALE_MS / units[index];
+    }
+    for (size_t index = 0; index < NATIVE_PP4_PARAMETER_COUNT; ++index)
+        gradient[index] /= totalWeight;
+    auto moment1 = _adamMoment1, moment2 = _adamMoment2;
+    const auto previous = weights;
+    const double correction = _learningRate * learningRateScale *
+                              std::sqrt(1.0 - std::pow(BETA_2, _step)) /
+                              (1.0 - std::pow(BETA_1, _step));
+    applyAdamGradient(weights, moment1, moment2, gradient, NATIVE_PP4_PARAMETER_COUNT,
+                      correction, parameterLearningRateScales);
+    std::vector<double> result(NATIVE_PP4_PARAMETER_COUNT);
+    for (size_t index = 0; index < NATIVE_PP4_PARAMETER_COUNT; ++index) {
+        weights[index] = std::max(0.0, weights[index]);
+        result[index] = weights[index] * RAW_LATENCY_SCALE_MS / units[index];
+    }
+    if (!validateConfiguredParameters(result)) return false;
+    // Check numerical validity without changing the fixed Adam step or its loss.
+    for (const auto &sample : samples)
+        if (!std::isfinite(predictSampleConfigured(sample, result))) return false;
+    OptimizerStepDiagnostics diagnostics;
+    diagnostics.parameterCount = NATIVE_PP4_PARAMETER_COUNT;
+    diagnostics.step = _step;
+    diagnostics.rawGradient = gradient;
+    diagnostics.adamMoment1 = moment1;
+    diagnostics.adamMoment2 = moment2;
+    for (size_t index = 0; index < NATIVE_PP4_PARAMETER_COUNT; ++index) {
+        diagnostics.normalizedGradient[index] =
+            moment1[index] / std::sqrt(moment2[index] + EPSILON);
+        diagnostics.candidateUpdate[index] =
+            correction *
+            (parameterLearningRateScales ? (*parameterLearningRateScales)[index] : 1.0) *
+            diagnostics.normalizedGradient[index];
+        diagnostics.actualUpdate[index] = previous[index] - weights[index];
+        if (_metricsReporterR && _metricsReporterR->getReporter()) {
+            auto coordinate = currentParameters;
+            coordinate[index] = result[index];
+            diagnostics.predictionShiftMs[index] =
+                predictSampleConfigured(samples.back(), coordinate) -
+                predictSampleConfigured(samples.back(), currentParameters);
+        }
+    }
+    _adamMoment1 = moment1;
+    _adamMoment2 = moment2;
+    _optimizerStepDiagnostics = diagnostics;
+    ++_step;
+    newParameters = std::move(result);
+    if (_metricsReporterR)
+        reportOptimizerStep(_metricsReporterR->getReporter(), diagnostics);
+    return true;
 }
 
 bool NonLinearPrefillModelR::fitStepCompositionForReplay(
@@ -475,19 +640,8 @@ bool NonLinearPrefillModelR::fitImpl(
     const auto previousWeights = weights;
     const auto previousMoment1 = adamMoment1;
     const auto previousMoment2 = adamMoment2;
-    for (size_t index = 0; index < parameterCount; ++index) {
-        adamMoment1[index] =
-            BETA_1 * adamMoment1[index] + (1.0 - BETA_1) * gradient[index];
-        adamMoment2[index] = BETA_2 * adamMoment2[index] +
-                             (1.0 - BETA_2) * gradient[index] * gradient[index];
-        const auto parameterScale =
-            parameterLearningRateScales && index < parameterLearningRateScales->size()
-                ? (*parameterLearningRateScales)[index]
-                : 1.0;
-        const auto update = correction * parameterScale * adamMoment1[index] /
-                            std::sqrt(adamMoment2[index] + EPSILON);
-        weights[index] -= update;
-    }
+    applyAdamGradient(weights, adamMoment1, adamMoment2, gradient, parameterCount,
+                      correction, parameterLearningRateScales);
     std::array<bool, WAITING_PARAMETER_COUNT> retainedWaitingParameters{};
     bool rejectedWaitingCandidate = false;
     if (rejectNonPositiveWaitingCandidate && _useCapacitySplitFeature) {
@@ -767,6 +921,8 @@ double NonLinearPrefillModelR::predictForVersion(const NaviSchedLatencyFeatures 
                                                  const std::vector<double> &parameters,
                                                  int64_t binaryVersion)
 {
+    if (usesNativePP4ForVersion(binaryVersion))
+        return std::numeric_limits<double>::quiet_NaN();
     const bool geometry = usesGeometryForVersion(binaryVersion);
     if (!validateParametersForVersion(parameters, binaryVersion) ||
         features.usesCapacitySplit() != usesCapacitySplitParameters(parameters) ||
@@ -863,6 +1019,10 @@ double NonLinearPrefillModelR::calculateZeroPoint(const std::vector<double> &par
         }
         return 0.0;
     }
+    if (usesNativePP4ForVersion(binaryVersion)) {
+        if (gradient) gradient->assign(parameters.size(), 0.0);
+        return 0.0;
+    }
     const auto &scales =
         (binaryVersion == PD_BINARY_VERSION || usesGeometryForVersion(binaryVersion))
             ? PD_PARAMETER_SCALES
@@ -901,6 +1061,7 @@ bool NonLinearPrefillModelR::checkGradientConfigured(
 double NonLinearPrefillModelR::predictConfigured(
     const NaviSchedLatencyFeatures &features, const std::vector<double> &parameters) const
 {
+    if (usesNativePP4Timing()) return std::numeric_limits<double>::quiet_NaN();
     if ((usesExecutionGeometry() && !features.hasExecutionGeometry()) ||
         (usesExecutionCacheSource() && !features.hasExecutionCacheSource())) {
         return std::numeric_limits<double>::quiet_NaN();
@@ -1189,6 +1350,7 @@ bool NonLinearPrefillModelR::validateOptimizerState(const OptimizerState &state,
                                                     size_t parameterCount)
 {
     if ((parameterCount != PARAMETER_COUNT &&
+         parameterCount != NATIVE_PP4_PARAMETER_COUNT &&
          parameterCount != CAPACITY_SPLIT_PARAMETER_COUNT &&
          parameterCount != CACHE_SOURCE_PARAMETER_COUNT) ||
         state.step <= 0) {
@@ -1230,6 +1392,7 @@ bool NonLinearPrefillModelR::makeOptimizerState(
 {
     if (!data.valid(data.adamMoment1.size()) ||
         (data.adamMoment1.size() != PARAMETER_COUNT &&
+         data.adamMoment1.size() != NATIVE_PP4_PARAMETER_COUNT &&
          data.adamMoment1.size() != CAPACITY_SPLIT_PARAMETER_COUNT &&
          data.adamMoment1.size() != CACHE_SOURCE_PARAMETER_COUNT)) {
         return false;

@@ -39,6 +39,7 @@ struct NaviSchedDecision {
     int64_t batchId = 0;
     int64_t expectedBatchSize = 0;
     int64_t predictedCacheHitTokenCount = 0;
+    std::optional<bool> executionLoadIncluded;
     double predictedQueueLatencyMs = 0.0;
     double predictedExecutionLatencyMs = 0.0;
     NaviSchedLatencyPredictionConstPtr latencyPrediction;
@@ -185,6 +186,9 @@ struct NaviSchedNodeInfo {
     bool executionGeometryEnabled = false;
     bool projectedExecutionGeometryEnabled = false;
     bool peerCacheEnabled = false;
+    // Connection configuration; runtime only, never repeated in request/replay wire data.
+    std::shared_ptr<const NaviSchedTairKvcmConfig> tairKvcmConfig;
+    int32_t nativePrefillPipelineStages = 0;
     // Live Master diagnostics; intentionally excluded from persisted model/replay wire
     // data.
     bool peerCacheReadAvailable = false;
@@ -218,6 +222,8 @@ struct NaviSchedScheduleRequest {
     int64_t timeoutMs = 0;
     std::string forwardPayload;
     bool routeOnly = false;
+    NativePPPrefillSlotRelease nativePrefillSlotRelease =
+        NativePPPrefillSlotRelease::UNKNOWN;
 
     void serialize(autil::DataBuffer &dataBuffer) const;
     void deserialize(autil::DataBuffer &dataBuffer);

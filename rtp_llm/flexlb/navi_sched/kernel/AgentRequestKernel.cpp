@@ -64,6 +64,7 @@ NaviSchedForwardRequest AgentRequestKernel::makeForwardRequest(
     scheduleRequest.promptTokenCount = request.promptTokenCount;
     scheduleRequest.explicitCacheCheckpointPosition =
         request.explicitCacheCheckpointPosition;
+    scheduleRequest.nativePrefillSlotRelease = request.nativePrefillSlotRelease;
     scheduleRequest.blockSize = request.blockSize;
     scheduleRequest.blockHashes = request.blockHashes;
     scheduleRequest.timeoutMs = request.timeoutMs;
@@ -78,6 +79,7 @@ NaviSchedForwardRequest AgentRequestKernel::makeForwardRequest(
     forwardRequest.decision.reason = decision.reason;
     forwardRequest.decision.batchId = decision.batchId;
     forwardRequest.decision.expectedBatchSize = decision.expectedBatchSize;
+    forwardRequest.decision.executionLoadIncluded = decision.executionLoadIncluded;
     forwardRequest.decision.predictedQueueLatencyMs = decision.predictedQueueLatencyMs;
     forwardRequest.decision.predictedCacheHitTokenCount =
         decision.predictedCacheHitTokenCount;

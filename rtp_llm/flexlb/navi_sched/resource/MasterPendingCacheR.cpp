@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <type_traits>
 #include "autil/TimeUtility.h"
 #include "autil/legacy/jsonizable.h"
 
@@ -519,7 +520,11 @@ uint64_t MasterPendingCacheR::getMatchedBlockCounts(
     NaviSchedCacheKeyType cacheKeyType, int64_t *fullMatchedBlockCounts,
     int64_t *effectiveFullMatchedBlockCounts, const int64_t *startBlocks,
     const size_t *matchableBlockCounts, size_t alignmentBlocks, bool includePending, BatchMatchTiming *timing,
-    const std::vector<size_t> *commonPrefixes) const
+    const std::vector<size_t> *commonPrefixes,
+    int64_t *readyOnlyMatchedBlockCounts,
+    const PhysicalBlockSet *additionalFullReady,
+    const PhysicalBlockSet *additionalTailReady,
+    int64_t *withoutAdditionalReady) const
 {
     if (timing) {
         *timing = {};
@@ -534,14 +539,19 @@ uint64_t MasterPendingCacheR::getMatchedBlockCounts(
     if (timing) {
         timing->nodeLookupUs = lookupEndUs - lookupBeginUs;
     }
-    auto matchRequests = [&](const NodeCache *nodeCache) {
+    auto matchRequests = [&](const NodeCache *nodeCache, auto collectReady) {
+        constexpr bool wantReady = decltype(collectReady)::value;
         uint64_t mismatchCount = 0;
         const NaviSchedBlockHashes *previousHashes = nullptr;
         size_t previousFullMatchCount = 0;
+        [[maybe_unused]] size_t previousReadyFullMatchCount = 0;
+        [[maybe_unused]] size_t previousReadyEffectiveFullMatchCount = 0;
         size_t previousStartBlock = 0;
         for (size_t requestIndex = 0; requestIndex < requests.size(); ++requestIndex) {
             const auto &request = requests[requestIndex].request;
             matchedBlockCounts[requestIndex] = 0;
+            if (withoutAdditionalReady) withoutAdditionalReady[requestIndex] = 0;
+            if constexpr (wantReady) readyOnlyMatchedBlockCounts[requestIndex] = 0;
             if (fullMatchedBlockCounts) {
                 fullMatchedBlockCounts[requestIndex] = 0;
             }
@@ -553,12 +563,14 @@ uint64_t MasterPendingCacheR::getMatchedBlockCounts(
                 ++mismatchCount;
                 previousHashes = nullptr;
                 previousFullMatchCount = 0;
+                previousReadyFullMatchCount = 0;
                 continue;
             }
             const auto startBlock = startBlocks ? startBlocks[requestIndex] : 0;
             if (startBlock < 0 || startBlock % alignmentBlocks != 0) {
                 previousHashes = nullptr;
                 previousFullMatchCount = 0;
+                previousReadyFullMatchCount = 0;
                 continue;
             }
             static const NaviSchedBlockHashes empty;
@@ -591,9 +603,59 @@ uint64_t MasterPendingCacheR::getMatchedBlockCounts(
                 0, fullAttentionQueryDropBlockCount, static_cast<size_t>(startBlock),
                 alignmentBlocks, &rawFullMatchCount,
                 effectiveFullMatchedBlockCounts ? effectiveFullMatchedBlockCounts + requestIndex : nullptr,
-                initialMatchCount);
+                initialMatchCount, nullptr, additionalFullReady, additionalTailReady);
+            if (withoutAdditionalReady) {
+                // Never seed the baseline from an augmented prefix. Both reads
+                // share the caller's physical lock and this batch's pending lock.
+                withoutAdditionalReady[requestIndex] = getMatchedBlockCountLocked(
+                    nodeCache, blockHashes, cachedBlockHashes, fullReadyBlockHashes,
+                    tailReadyBlockHashes, hybridTailRequired, matchableBlockCount,
+                    0, fullAttentionQueryDropBlockCount, static_cast<size_t>(startBlock),
+                    alignmentBlocks, nullptr, nullptr, 0, nullptr, nullptr, nullptr);
+            }
             previousFullMatchCount = static_cast<size_t>(rawFullMatchCount);
             if (fullMatchedBlockCounts) fullMatchedBlockCounts[requestIndex] = rawFullMatchCount;
+            if constexpr (wantReady) {
+                if (!nodeCache) {
+                    // This batch already excludes pending state. Reuse its result.
+                    readyOnlyMatchedBlockCounts[requestIndex] = matchedBlockCounts[requestIndex];
+                    previousReadyFullMatchCount = static_cast<size_t>(rawFullMatchCount);
+                } else {
+                    // Current physical residency and future pending reuse are
+                    // different inputs. Match both under the caller's same
+                    // physical lock and this same pending lock. Static prefix
+                    // reuse has its own boundary: a pending match cannot extend it.
+                    size_t initialReadyCount = 0;
+                    if (previousHashes && previousStartBlock == static_cast<size_t>(startBlock)) {
+                        const auto limit = std::min(blockHashes.size(), matchableBlockCount);
+                        const auto suffixLimit = limit > previousStartBlock ? limit - previousStartBlock : 0;
+                        const auto sharedLimit = std::min(previousReadyFullMatchCount, suffixLimit);
+                        if (commonPrefixes && commonPrefixes->size() == requests.size()) {
+                            const auto shared = (*commonPrefixes)[requestIndex];
+                            initialReadyCount = std::min(sharedLimit, shared > previousStartBlock ? shared - previousStartBlock : 0);
+                        } else if (previousHashes == &blockHashes) {
+                            initialReadyCount = sharedLimit;
+                        } else {
+                            while (initialReadyCount < sharedLimit &&
+                                   (*previousHashes)[previousStartBlock + initialReadyCount] ==
+                                   blockHashes[previousStartBlock + initialReadyCount]) ++initialReadyCount;
+                        }
+                    }
+                    int64_t rawReadyCount = 0, effectiveReadyCount = 0;
+                    const BatchTailReuse tailReuse{
+                        initialReadyCount, previousReadyEffectiveFullMatchCount,
+                        requestIndex ? readyOnlyMatchedBlockCounts[requestIndex - 1] : 0};
+                    readyOnlyMatchedBlockCounts[requestIndex] = getMatchedBlockCountLocked(
+                        nullptr, blockHashes, cachedBlockHashes, fullReadyBlockHashes,
+                        tailReadyBlockHashes, hybridTailRequired, matchableBlockCount,
+                        0, fullAttentionQueryDropBlockCount, static_cast<size_t>(startBlock),
+                        alignmentBlocks, &rawReadyCount, &effectiveReadyCount, initialReadyCount,
+                        previousHashes && previousStartBlock == static_cast<size_t>(startBlock)
+                            ? &tailReuse : nullptr, additionalFullReady, additionalTailReady);
+                    previousReadyFullMatchCount = static_cast<size_t>(rawReadyCount);
+                    previousReadyEffectiveFullMatchCount = static_cast<size_t>(effectiveReadyCount);
+                }
+            }
             if (timing) {
                 timing->reusedFullPrefixBlockCount += initialMatchCount;
                 const auto limit = std::min(blockHashes.size(), matchableBlockCount);
@@ -614,7 +676,9 @@ uint64_t MasterPendingCacheR::getMatchedBlockCounts(
         return mismatchCount;
     };
     if (!cache) {
-        const auto result = matchRequests(nullptr);
+        const auto result = readyOnlyMatchedBlockCounts
+            ? matchRequests(nullptr, std::true_type{})
+            : matchRequests(nullptr, std::false_type{});
         if (timing) {
             timing->matchUs = autil::TimeUtility::monotonicTimeUs() - lookupEndUs;
         }
@@ -622,7 +686,9 @@ uint64_t MasterPendingCacheR::getMatchedBlockCounts(
     }
     autil::ScopedReadLock lock(cache->lock);
     const auto lockAcquiredUs = timing ? autil::TimeUtility::monotonicTimeUs() : 0;
-    const auto result = matchRequests(cache.get());
+    const auto result = readyOnlyMatchedBlockCounts
+        ? matchRequests(cache.get(), std::true_type{})
+        : matchRequests(cache.get(), std::false_type{});
     if (timing) {
         timing->lockWaitUs = lockAcquiredUs - lookupEndUs;
         timing->matchUs = autil::TimeUtility::monotonicTimeUs() - lockAcquiredUs;
@@ -656,7 +722,10 @@ int64_t MasterPendingCacheR::getMatchedBlockCountLocked(
     const PhysicalBlockSet &tailReadyBlockHashes, bool hybridTailRequired,
     size_t matchableBlockCount, int64_t excludedScheduleBatchId,
     int64_t fullAttentionQueryDropBlockCount, size_t startBlock, size_t alignmentBlocks,
-    int64_t *fullMatchedBlockCount, int64_t *effectiveFullMatchedBlockCount, size_t initialMatchedBlockCount)
+    int64_t *fullMatchedBlockCount, int64_t *effectiveFullMatchedBlockCount,
+    size_t initialMatchedBlockCount, const BatchTailReuse *tailReuse,
+    const PhysicalBlockSet *additionalFullReady,
+    const PhysicalBlockSet *additionalTailReady)
 {
     auto pendingFullContains = [cache, excludedScheduleBatchId](uint64_t blockHash) {
         if (!cache) {
@@ -692,6 +761,7 @@ int64_t MasterPendingCacheR::getMatchedBlockCountLocked(
     for (size_t blockIndex = startBlock + static_cast<size_t>(matchedBlockCount); blockIndex < limit; ++blockIndex) {
         const auto blockHash = blockHashes[blockIndex];
         if (prefixHashes.end() == prefixHashes.find(blockHash) &&
+            !(additionalFullReady && additionalFullReady->count(blockHash)) &&
             !pendingFullContains(blockHash)) {
             break;
         }
@@ -708,10 +778,18 @@ int64_t MasterPendingCacheR::getMatchedBlockCountLocked(
         *effectiveFullMatchedBlockCount = matchedBlockCount;
     }
     if (hybridTailRequired) {
+        // Only skip tail probes already proven absent for this exact prefix in
+        // the same immutable batch view. A new suffix or larger Full boundary
+        // must perform its own probes; pending readiness never enters this hint.
+        if (tailReuse && static_cast<size_t>(matchedBlockCount) <= tailReuse->sharedPrefixBlocks &&
+            static_cast<size_t>(matchedBlockCount) <= tailReuse->effectiveFullPrefixBlocks) {
+            matchedBlockCount = std::min(matchedBlockCount, tailReuse->matchedBlocks);
+        }
         while (matchedBlockCount > 0) {
             auto blockHash =
                 blockHashes[startBlock + static_cast<size_t>(matchedBlockCount - 1)];
             if (tailReadyBlockHashes.end() != tailReadyBlockHashes.find(blockHash) ||
+                (additionalTailReady && additionalTailReady->count(blockHash)) ||
                 pendingTailContains(blockHash)) {
                 break;
             }

@@ -34,7 +34,13 @@ autil::legacy::json::JsonMap MasterBatchReservation::makeReplayState() const
         request["block_size"] = ToJson(entry.request.blockSize);
         request["cache_hit_token_count"] =
             ToJson(entry.request.predictedCacheHitTokenCount);
+        if (entry.request.executionLoadIncluded)
+            request["execution_load_included"] = ToJson(*entry.request.executionLoadIncluded);
         request["predicted_latency_ms"] = ToJson(entry.request.predictedLatencyMs);
+        request["explicit_cache_checkpoint_position"] =
+            ToJson(entry.request.explicitCacheCheckpointPosition);
+        request["native_prefill_slot_release"] =
+            ToJson(int32_t(entry.request.nativePrefillSlotRelease));
         request["has_block_hashes"] = ToJson(bool(entry.request.blockHashes));
         request["block_hashes"] =
             ToJson(entry.request.blockHashes ? *entry.request.blockHashes
@@ -79,7 +85,22 @@ bool MasterBatchReservation::restoreReplayState(const autil::legacy::json::JsonM
             FromJson(request.blockSize, record.at("block_size"));
             FromJson(request.predictedCacheHitTokenCount,
                      record.at("cache_hit_token_count"));
+            const auto load = record.find("execution_load_included");
+            if (load != record.end()) {
+                bool included; FromJson(included, load->second);
+                request.executionLoadIncluded = included;
+            }
             FromJson(request.predictedLatencyMs, record.at("predicted_latency_ms"));
+            const auto checkpoint = record.find("explicit_cache_checkpoint_position");
+            if (checkpoint != record.end())
+                FromJson(request.explicitCacheCheckpointPosition, checkpoint->second);
+            const auto release = record.find("native_prefill_slot_release");
+            if (release != record.end()) {
+                int32_t value = 0;
+                FromJson(value, release->second);
+                request.nativePrefillSlotRelease =
+                    static_cast<NativePPPrefillSlotRelease>(value);
+            }
             FromJson(hasHashes, record.at("has_block_hashes"));
             if (hasHashes) {
                 auto hashes = std::make_shared<NaviSchedBlockHashes>();
@@ -178,7 +199,9 @@ bool MasterBatchReservation::init(int64_t batchId, int64_t scheduleTimeUs,
     bool cacheTrackable = cachePolicy != nullptr;
     for (const auto &request : requests) {
         if (request.requestId == 0 || request.totalTokenCount < 0 ||
-            request.blockSize <= 0 || request.explicitCacheCheckpointPosition < 0 ||
+            request.blockSize <= 0 ||
+            !validNativePrefillSlotRelease(request.nativePrefillSlotRelease) ||
+            request.explicitCacheCheckpointPosition < 0 ||
             request.explicitCacheCheckpointPosition > request.totalTokenCount ||
             request.predictedCacheHitTokenCount < 0 ||
             request.predictedCacheHitTokenCount > request.totalTokenCount ||
@@ -619,7 +642,7 @@ bool MasterBatchReservation::recomputeWaitingFeatures(const CacheMatch &cacheMat
 
 bool MasterBatchReservation::appendWaitingCapacityFeatures(
     NaviSchedLatencyFeatures &features, int32_t maxRunningRequestCount,
-    int32_t &runningCapacitySlotCount) const
+    int32_t &runningCapacitySlotCount, bool executionOnly) const
 {
     if (maxRunningRequestCount < 0 || runningCapacitySlotCount < 0 ||
         runningCapacitySlotCount > maxRunningRequestCount) {
@@ -632,11 +655,13 @@ bool MasterBatchReservation::appendWaitingCapacityFeatures(
     NaviSchedLatencyFeatures waiting;
     auto updatedRunningCapacitySlotCount = runningCapacitySlotCount;
     const bool reuseWaitingFeatures =
-        runningCapacitySlotCount == maxRunningRequestCount &&
+        !executionOnly && runningCapacitySlotCount == maxRunningRequestCount &&
         _waitingRequestCount == _requests.size();
     if (!reuseWaitingFeatures) {
         for (const auto &entry : _requests) {
-            if (RequestState::WAITING != entry.state) {
+            if (RequestState::WAITING != entry.state) continue;
+            if (executionOnly && !entry.request.executionLoadIncluded.has_value()) return false;
+            if (executionOnly && !*entry.request.executionLoadIncluded) {
                 continue;
             }
             const auto hit = std::min(entry.request.totalTokenCount,
@@ -731,8 +756,10 @@ bool MasterBatchReservation::sameDefinition(const MasterBatchReservation &other)
         if (lhs.requestId != rhs.requestId ||
             lhs.totalTokenCount != rhs.totalTokenCount ||
             lhs.explicitCacheCheckpointPosition != rhs.explicitCacheCheckpointPosition ||
+            lhs.nativePrefillSlotRelease != rhs.nativePrefillSlotRelease ||
             lhs.blockSize != rhs.blockSize ||
             lhs.predictedCacheHitTokenCount != rhs.predictedCacheHitTokenCount ||
+            lhs.executionLoadIncluded != rhs.executionLoadIncluded ||
             lhs.predictedLatencyMs != rhs.predictedLatencyMs ||
             ((!lhs.blockHashes || lhs.blockHashes->empty()) !=
              (!rhs.blockHashes || rhs.blockHashes->empty())) ||
@@ -1201,6 +1228,23 @@ void MasterBatchReservation::resetTransition(Transition &transition) const
 } // namespace navi_sched
 
 namespace navi_sched {
+void MasterBatchReservation::appendUnfinishedRequests(
+    std::vector<UnfinishedRequest> &requests) const
+{
+    const auto begin = requests.size();
+    for (const auto &entry : _requests) {
+        if (entry.state == RequestState::WAITING ||
+            entry.state == RequestState::DISPATCHED) {
+            requests.push_back({entry.request, entry.state});
+        }
+    }
+    // Keep preceding batches in reservation-list order; sort only this batch.
+    std::sort(requests.begin() + begin, requests.end(),
+              [](const auto &left, const auto &right) {
+                  return left.request.requestId < right.request.requestId;
+              });
+}
+
 std::vector<MasterBatchReservation::Request> MasterBatchReservation::getWaitingRequests()
     const
 {

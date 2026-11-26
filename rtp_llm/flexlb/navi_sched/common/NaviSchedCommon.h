@@ -1,4 +1,7 @@
 #pragma once
+#include "aios/navi_sched/data/NaviSchedNativeCacheQuery.h"
+#include "aios/navi_sched/data/NaviSchedKVPreparation.h"
+#include "aios/navi_sched/data/NaviSchedNativePPState.h"
 
 #include "aios/navi_sched/common/NaviSchedConstants.h"
 #include "aios/navi_sched/common/TPUPrefillExecutionPolicy.h"
@@ -15,6 +18,7 @@
 #include <map>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 #include "navi/pybind/NaviRuntimeConfig.h"
@@ -25,7 +29,7 @@ class DataBuffer;
 
 namespace navi_sched {
 
-static const int32_t NAVI_SCHED_DATA_VERSION = 20;
+static const int32_t NAVI_SCHED_DATA_VERSION = 27;
 static const int32_t NAVI_SCHED_LATENCY_RESIDUAL_VERSION = 2;
 static const size_t NAVI_SCHED_LATENCY_RESIDUAL_PARAMETER_COUNT = 19;
 NAVI_SCHED_API int64_t getNaviSchedRpcTimeoutMs(int64_t entryTimeoutMs);
@@ -102,6 +106,7 @@ struct NaviSchedBatchRequest {
         NaviSchedLatencyTrainingPhase::NORMAL;
     // Local chunk observation only; execution features still use totalTokenCount.
     int64_t cachePublicationTokenCount = -1;
+    std::optional<bool> executionLoadIncluded;
 };
 
 struct NaviSchedRequestStats {
@@ -123,6 +128,7 @@ struct NaviSchedRequestStats {
     int64_t hybridFlatMatchedBlockCount = -1;
     int64_t hybridMinFullReuseBlockCount = -1;
     int64_t hybridSelectedReuseBlockCount = -1;
+    std::optional<bool> executionLoadIncluded;
 };
 
 struct NaviSchedLatencyQuery {
@@ -195,6 +201,7 @@ struct NaviSchedForwardedRequest {
     int64_t predictedCacheHitTokenCount = 0;
     double predictedQueueLatencyMs = 0.0;
     double predictedExecutionLatencyMs = 0.0;
+    std::optional<bool> executionLoadIncluded;
 };
 
 struct NaviSchedWorkloadSnapshot {
@@ -203,6 +210,10 @@ struct NaviSchedWorkloadSnapshot {
     void serialize(autil::DataBuffer &dataBuffer) const;
     void deserialize(autil::DataBuffer &dataBuffer);
 
+    // Raw accounting below remains complete, including KV preparation.
+    // Only these typed per-request states select execution predecessors.
+    bool executionLoadTracked = false;
+    std::vector<NaviSchedKVPreparation> executionLoadRequests;
     uint64_t revision = 0;
     int64_t eventTimeUs = 0;
     int32_t batchCount = 0;
@@ -241,6 +252,13 @@ struct NaviSchedWorkloadSnapshot {
     int64_t totalPromptTokenCount = 0;
     int64_t inFlightScheduledTokenCount = 0;
     NaviSchedLocalBatchInfo admittedBatch;
+    // Native PP prefill query observations, sorted by requestId. Prepared
+    // requests not yet registered with Native are absent, rather than guessed.
+    std::vector<NaviSchedNativeCacheQuery> nativeCacheQueries;
+    // Immutable rank0 observation. Reporting a prepared admission must preserve
+    // its capture boundary; age is measured again at that later report.
+    std::shared_ptr<const NaviSchedNativePPState> nativePPState;
+    int64_t nativePPObservationAgeUs = -1;
 };
 
 using NaviSchedWorkloadSnapshotPtr = std::shared_ptr<NaviSchedWorkloadSnapshot>;
@@ -339,11 +357,37 @@ struct NaviSchedMasterConfig {
     int64_t queueOverloadFullCycleMultiplier = 0;
     std::string schedulerName = "cost";
     std::string schedulerConfig;
+    std::string tairKvcmConfig;
     double timeCompression = 1.0;
     std::string latencyModelPoolStateFile;
     int64_t latencyModelPoolSourceMinRevision = 1024;
     size_t latencyModelPoolMaxCandidates = 4;
     int64_t latencyModelPoolPersistIntervalMs = 10000;
+};
+
+struct NaviSchedTairKvcmGroupConfig {
+    int32_t groupId = 0;
+    int64_t hashBlockScale = 1;
+    bool tail = false;
+    int64_t objectSizeBytes = 0;
+    // Registered V6D spec names in physical node order.
+    std::vector<std::string> locationSpecNames;
+    void serialize(autil::DataBuffer &buffer) const;
+    void deserialize(autil::DataBuffer &buffer);
+};
+
+struct NaviSchedTairKvcmConfig {
+    // Empty when Native V6D has no remote cache-transfer backend enabled.
+    std::string managerEndpoint;
+    std::string instanceId;
+    int64_t hashBlockSize = 0;
+    int32_t nodeCount = 0;
+    int64_t discoveryRefreshIntervalUs = 30000000;
+    std::vector<NaviSchedTairKvcmGroupConfig> groups;
+    bool configured() const { return !managerEndpoint.empty(); }
+    bool valid() const;
+    void serialize(autil::DataBuffer &buffer) const;
+    void deserialize(autil::DataBuffer &buffer);
 };
 
 struct NaviSchedAgentConfig {
@@ -364,6 +408,10 @@ struct NaviSchedAgentConfig {
     bool projectedExecutionGeometryEnabled = false;
     bool executionCacheSourceEnabled = false;
     bool peerCacheEnabled = false;
+    NaviSchedTairKvcmConfig tairKvcmConfig;
+    int32_t nativePrefillPipelineStages = 0;
+    // Local model choice; topology/policy still use the existing handshake.
+    bool nativePrefillObservationOnly = false;
     TPUPrefillExecutionPolicyConfig prefillExecutionPolicy;
 };
 

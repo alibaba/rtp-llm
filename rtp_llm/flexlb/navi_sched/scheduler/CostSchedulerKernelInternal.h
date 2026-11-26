@@ -13,6 +13,8 @@ namespace navi_sched {
 class CostSchedulerKernelInternal {
 public:
     static constexpr size_t PROJECTION_REQUEST_TILE_SIZE = 16;
+    static bool initializeNativeContinuousReference(NaviSchedNativeContinuousInput &input,
+                                                    size_t requestCount);
     static constexpr size_t MAX_DISCRETE_REFINEMENT_EVALUATIONS = 4096;
     static constexpr int64_t MAX_DISCRETE_REFINEMENT_US = 2000;
 
@@ -34,6 +36,7 @@ public:
         size_t externalReadMaximumRequest = std::numeric_limits<size_t>::max();
         double runningCapacity = 0.0;
         bool capacitySplit = false;
+        std::vector<double> nativeRequestGradients;
     };
 
     struct PreparationTiming {

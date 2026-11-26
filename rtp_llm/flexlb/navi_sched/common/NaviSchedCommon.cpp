@@ -9,6 +9,67 @@
 
 namespace navi_sched {
 
+void NaviSchedTairKvcmGroupConfig::serialize(autil::DataBuffer &buffer) const
+{
+    buffer.write(groupId);
+    buffer.write(hashBlockScale);
+    buffer.write(tail);
+    buffer.write(objectSizeBytes);
+    buffer.write(locationSpecNames);
+}
+
+void NaviSchedTairKvcmGroupConfig::deserialize(autil::DataBuffer &buffer)
+{
+    buffer.read(groupId);
+    buffer.read(hashBlockScale);
+    buffer.read(tail);
+    buffer.read(objectSizeBytes);
+    buffer.read(locationSpecNames);
+}
+
+bool NaviSchedTairKvcmConfig::valid() const
+{
+    if (!configured())
+        return instanceId.empty() && hashBlockSize == 0 && nodeCount == 0 && groups.empty();
+    if (instanceId.empty() || hashBlockSize <= 0 || nodeCount <= 0 ||
+        discoveryRefreshIntervalUs <= 0 || groups.empty()) return false;
+    std::unordered_set<int32_t> groupIds;
+    std::unordered_set<std::string> specNames;
+    bool hasFull = false;
+    for (const auto &group : groups) {
+        if (group.groupId < 0 || group.hashBlockScale <= 0 || group.objectSizeBytes <= 0 ||
+            group.locationSpecNames.size() != static_cast<size_t>(nodeCount) ||
+            !groupIds.insert(group.groupId).second) return false;
+        hasFull = hasFull || !group.tail;
+        for (const auto &name : group.locationSpecNames)
+            if (name.empty() || !specNames.insert(name).second) return false;
+    }
+    return hasFull;
+}
+
+void NaviSchedTairKvcmConfig::serialize(autil::DataBuffer &buffer) const
+{
+    buffer.write(managerEndpoint);
+    if (!configured()) return;
+    buffer.write(instanceId);
+    buffer.write(hashBlockSize);
+    buffer.write(nodeCount);
+    buffer.write(discoveryRefreshIntervalUs);
+    buffer.write(groups);
+}
+
+void NaviSchedTairKvcmConfig::deserialize(autil::DataBuffer &buffer)
+{
+    *this = {};
+    buffer.read(managerEndpoint);
+    if (!configured()) return;
+    buffer.read(instanceId);
+    buffer.read(hashBlockSize);
+    buffer.read(nodeCount);
+    buffer.read(discoveryRefreshIntervalUs);
+    buffer.read(groups);
+}
+
 int64_t getNaviSchedRpcTimeoutMs(int64_t entryTimeoutMs)
 {
     if (entryTimeoutMs <= 1) {
@@ -137,6 +198,37 @@ void NaviSchedLocalBatchInfo::deserialize(autil::DataBuffer &dataBuffer)
 
 bool NaviSchedWorkloadSnapshot::valid() const
 {
+    if (executionLoadTracked) {
+        if (!prefillCapacitySplit || requestCount < 0 ||
+            executionLoadRequests.size() != static_cast<size_t>(requestCount))
+            return false;
+        uint64_t previous = 0;
+        for (const auto &request : executionLoadRequests) {
+            if (!request.valid() || request.requestId <= previous) return false;
+            previous = request.requestId;
+        }
+    } else if (!executionLoadRequests.empty()) {
+        return false;
+    }
+    if (nativePPState
+            ? (!prefillCapacitySplit || nativePPObservationAgeUs < 0 ||
+               !nativePPState->valid() ||
+               nativePPState->occupiedRequestSlotCount > maxRunningRequestCount ||
+               nativePPState->requests.size() >
+                   static_cast<size_t>(std::max(0, requestCount)))
+            : nativePPObservationAgeUs != -1)
+        return false;
+    if (!nativeCacheQueries.empty()) {
+        if (!prefillCapacitySplit ||
+            nativeCacheQueries.size() >
+                static_cast<size_t>(std::max(0, remainingPrefillRequestCount)))
+            return false;
+        uint64_t previousRequestId = 0;
+        for (const auto &query : nativeCacheQueries) {
+            if (!query.valid() || query.requestId <= previousRequestId) return false;
+            previousRequestId = query.requestId;
+        }
+    }
     const bool capacitySplitValid =
         prefillCapacitySplit
             ? (maxRunningRequestCount >= 0 && runningCapacitySlotCount >= 0 &&
@@ -224,7 +316,9 @@ bool NaviSchedWorkloadSnapshot::valid() const
 
 bool NaviSchedWorkloadSnapshot::sameWorkload(const NaviSchedWorkloadSnapshot &other) const
 {
-    return batchCount == other.batchCount && requestCount == other.requestCount &&
+    return executionLoadTracked == other.executionLoadTracked &&
+           executionLoadRequests == other.executionLoadRequests &&
+           batchCount == other.batchCount && requestCount == other.requestCount &&
            remainingPrefillRequestCount == other.remainingPrefillRequestCount &&
            runningRequestCount == other.runningRequestCount &&
            runningElapsedTimeMs == other.runningElapsedTimeMs &&
@@ -265,11 +359,18 @@ bool NaviSchedWorkloadSnapshot::sameWorkload(const NaviSchedWorkloadSnapshot &ot
            contextRemainingTotalTokenProductSum ==
                other.contextRemainingTotalTokenProductSum &&
            totalPromptTokenCount == other.totalPromptTokenCount &&
-           inFlightScheduledTokenCount == other.inFlightScheduledTokenCount;
+           inFlightScheduledTokenCount == other.inFlightScheduledTokenCount &&
+           nativeCacheQueries == other.nativeCacheQueries &&
+           nativePPObservationAgeUs == other.nativePPObservationAgeUs &&
+           (nativePPState == other.nativePPState ||
+            (nativePPState && other.nativePPState &&
+             *nativePPState == *other.nativePPState));
 }
 
 void NaviSchedWorkloadSnapshot::serialize(autil::DataBuffer &dataBuffer) const
 {
+    dataBuffer.write(executionLoadTracked);
+    if (executionLoadTracked) dataBuffer.write(executionLoadRequests);
     dataBuffer.write(revision);
     dataBuffer.write(eventTimeUs);
     dataBuffer.write(batchCount);
@@ -306,10 +407,19 @@ void NaviSchedWorkloadSnapshot::serialize(autil::DataBuffer &dataBuffer) const
     dataBuffer.write(totalPromptTokenCount);
     dataBuffer.write(inFlightScheduledTokenCount);
     dataBuffer.write(admittedBatch);
+    dataBuffer.write(nativeCacheQueries);
+    dataBuffer.write(bool(nativePPState));
+    if (nativePPState) {
+        dataBuffer.write(nativePPObservationAgeUs);
+        nativePPState->serialize(dataBuffer);
+    }
 }
 
 void NaviSchedWorkloadSnapshot::deserialize(autil::DataBuffer &dataBuffer)
 {
+    dataBuffer.read(executionLoadTracked);
+    executionLoadRequests.clear();
+    if (executionLoadTracked) dataBuffer.read(executionLoadRequests);
     dataBuffer.read(revision);
     dataBuffer.read(eventTimeUs);
     dataBuffer.read(batchCount);
@@ -346,6 +456,17 @@ void NaviSchedWorkloadSnapshot::deserialize(autil::DataBuffer &dataBuffer)
     dataBuffer.read(totalPromptTokenCount);
     dataBuffer.read(inFlightScheduledTokenCount);
     dataBuffer.read(admittedBatch);
+    dataBuffer.read(nativeCacheQueries);
+    bool hasNativePPState;
+    dataBuffer.read(hasNativePPState);
+    nativePPState.reset();
+    nativePPObservationAgeUs = -1;
+    if (hasNativePPState) {
+        dataBuffer.read(nativePPObservationAgeUs);
+        auto observed = std::make_shared<NaviSchedNativePPState>();
+        observed->deserialize(dataBuffer);
+        nativePPState = std::move(observed);
+    }
 }
 
 bool NaviSchedServerInfo::valid() const { return port > 0 && port <= 65535; }
@@ -401,6 +522,8 @@ void NaviSchedDecision::serialize(autil::DataBuffer &dataBuffer) const
     dataBuffer.write(reason);
     dataBuffer.write(batchId);
     dataBuffer.write(expectedBatchSize);
+    dataBuffer.write(executionLoadIncluded.has_value());
+    if (executionLoadIncluded) dataBuffer.write(*executionLoadIncluded);
     dataBuffer.write(predictedCacheHitTokenCount);
     dataBuffer.write(predictedQueueLatencyMs);
     dataBuffer.write(predictedExecutionLatencyMs);
@@ -423,6 +546,12 @@ void NaviSchedDecision::deserialize(autil::DataBuffer &dataBuffer)
     dataBuffer.read(reason);
     dataBuffer.read(batchId);
     dataBuffer.read(expectedBatchSize);
+    bool hasExecutionLoadIncluded;
+    dataBuffer.read(hasExecutionLoadIncluded);
+    executionLoadIncluded.reset();
+    if (hasExecutionLoadIncluded) {
+        bool included; dataBuffer.read(included); executionLoadIncluded = included;
+    }
     dataBuffer.read(predictedCacheHitTokenCount);
     dataBuffer.read(predictedQueueLatencyMs);
     dataBuffer.read(predictedExecutionLatencyMs);
@@ -628,6 +757,11 @@ void NaviSchedNodeInfo::serialize(autil::DataBuffer &dataBuffer) const
     dataBuffer.write(schedulerConfigJson);
     dataBuffer.write(latencyValidation);
     dataBuffer.write(peerCacheEnabled);
+    dataBuffer.write(nativePrefillPipelineStages);
+    if (nativePrefillPipelineStages > 0) {
+        dataBuffer.write(pdUnifiedCapacitySplit);
+        dataBuffer.write(prefillExecutionPolicy);
+    }
 }
 
 void NaviSchedNodeInfo::deserialize(autil::DataBuffer &dataBuffer)
@@ -685,13 +819,20 @@ void NaviSchedNodeInfo::deserialize(autil::DataBuffer &dataBuffer)
     dataBuffer.read(schedulerConfigHash);
     dataBuffer.read(schedulerConfigJson);
     dataBuffer.read(latencyValidation);
+    tairKvcmConfig.reset();
     dataBuffer.read(peerCacheEnabled);
+    dataBuffer.read(nativePrefillPipelineStages);
+    if (nativePrefillPipelineStages > 0) {
+        dataBuffer.read(pdUnifiedCapacitySplit);
+        dataBuffer.read(prefillExecutionPolicy);
+    }
 }
 
 bool NaviSchedScheduleRequest::valid() const
 {
     return version == NAVI_SCHED_DATA_VERSION && requestId != 0 && !bizName.empty() &&
-           timeoutMs > 0 && explicitCacheCheckpointPosition >= 0 &&
+           timeoutMs > 0 && validNativePrefillSlotRelease(nativePrefillSlotRelease) &&
+           explicitCacheCheckpointPosition >= 0 &&
            explicitCacheCheckpointPosition <= promptTokenCount &&
            BlockHashUtil::validTokenBlocks(promptTokenCount, blockSize, blockHashes);
 }
@@ -707,6 +848,7 @@ void NaviSchedScheduleRequest::serialize(autil::DataBuffer &dataBuffer) const
     BlockHashUtil::write(dataBuffer, blockHashes);
     dataBuffer.write(timeoutMs);
     dataBuffer.write(routeOnly);
+    dataBuffer.write(int32_t(nativePrefillSlotRelease));
 }
 
 void NaviSchedScheduleRequest::deserialize(autil::DataBuffer &dataBuffer)
@@ -723,6 +865,9 @@ void NaviSchedScheduleRequest::deserialize(autil::DataBuffer &dataBuffer)
     BlockHashUtil::read(dataBuffer, blockHashes);
     dataBuffer.read(timeoutMs);
     dataBuffer.read(routeOnly);
+    int32_t release = 0;
+    dataBuffer.read(release);
+    nativePrefillSlotRelease = static_cast<NativePPPrefillSlotRelease>(release);
 }
 
 void NaviSchedScheduleItem::serialize(autil::DataBuffer &dataBuffer) const

@@ -154,10 +154,11 @@ navi::ErrorCode ClientForwardKernel::compute(navi::KernelComputeContext &ctx)
         NAVI_KERNEL_LOG(INFO,
                         "[navi-request-stage] stage=client_forward_begin request_id=%lu "
                         "schedule_batch_id=%ld expected_batch_size=%ld event_time_us=%ld "
-                        "payload_bytes=%zu agent=%s",
+                        "payload_bytes=%zu agent=%s execution_load_included=%d",
                         request->requestId, decision->batchId, decision->expectedBatchSize,
                         forwardBeginTimeUs, request->forwardPayload.size(),
-                        decision->target.agentAddress.c_str());
+                        decision->target.agentAddress.c_str(),
+                        decision->executionLoadIncluded ? (*decision->executionLoadIncluded ? 1 : 0) : -1);
     }
     std::shared_ptr<V6dCacheTouchData> touchRequest;
     if (!decision->cacheTouchTargets.empty() && request->blockHashes &&

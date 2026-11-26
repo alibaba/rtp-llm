@@ -11,7 +11,9 @@ void AgentControlToMasterData::serialize(autil::DataBuffer &dataBuffer) const
     dataBuffer.write(executionGeometryEnabled);
     dataBuffer.write(projectedExecutionGeometryEnabled);
     dataBuffer.write(peerCacheEnabled);
-    if (executionGeometryEnabled) {
+    dataBuffer.write(tairKvcmConfig);
+    dataBuffer.write(nativePrefillPipelineStages);
+    if (executionGeometryEnabled || nativePrefillPipelineStages > 0) {
         dataBuffer.write(prefillExecutionPolicy);
     }
 }
@@ -25,8 +27,10 @@ void AgentControlToMasterData::deserialize(autil::DataBuffer &dataBuffer)
     dataBuffer.read(executionGeometryEnabled);
     dataBuffer.read(projectedExecutionGeometryEnabled);
     dataBuffer.read(peerCacheEnabled);
+    dataBuffer.read(tairKvcmConfig);
+    dataBuffer.read(nativePrefillPipelineStages);
     prefillExecutionPolicy = {};
-    if (executionGeometryEnabled) {
+    if (executionGeometryEnabled || nativePrefillPipelineStages > 0) {
         dataBuffer.read(prefillExecutionPolicy);
     }
 }

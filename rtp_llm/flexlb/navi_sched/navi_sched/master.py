@@ -1,7 +1,9 @@
+import json
 import os
 from typing import Optional
 
 from .alog import configureNaviSchedAlog
+from .tair_kvcm_config import make_tair_kvcm_resource_config
 from .util import (
     DEFAULT_MASTER_RUNTIME_NAME,
     DEFAULT_MASTER_SNAPSHOT_DIR,
@@ -32,6 +34,7 @@ class NaviSchedMaster(RoleFacade):
         name: str = DEFAULT_MASTER_RUNTIME_NAME,
         collector_thread_num: int = 0,
         collector_queue_count: int = 0,
+        tair_kvcm_config=None,
         **options,
     ):
         configureNaviSchedAlog()
@@ -64,6 +67,9 @@ class NaviSchedMaster(RoleFacade):
         )
         config.scheduler_name = str(scheduler_name)
         config.scheduler_config = str(scheduler_config)
+        config.tair_kvcm_config = json.dumps(
+            make_tair_kvcm_resource_config(tair_kvcm_config), separators=(",", ":")
+        )
         config.time_compression = float(time_compression)
         config.latency_model_pool_state_file = str(latency_model_pool_state_file)
         config.latency_model_pool_source_min_revision = int(

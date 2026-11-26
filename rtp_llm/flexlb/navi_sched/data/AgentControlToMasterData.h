@@ -19,6 +19,9 @@ public:
     bool executionGeometryEnabled = false;
     bool projectedExecutionGeometryEnabled = false;
     bool peerCacheEnabled = false;
+    NaviSchedTairKvcmConfig tairKvcmConfig;
+    // Actual supported Native PP topology, reported once per connection.
+    int32_t nativePrefillPipelineStages = 0;
     TPUPrefillExecutionPolicyConfig prefillExecutionPolicy;
 };
 

@@ -154,6 +154,7 @@ NaviSchedDecision NaviSchedClient::makeDecision(const MasterResponseToClientData
     decision.reason = input.reason;
     decision.batchId = input.batchId;
     decision.expectedBatchSize = input.expectedBatchSize;
+    decision.executionLoadIncluded = input.executionLoadIncluded;
     decision.predictedCacheHitTokenCount = input.predictedCacheHitTokenCount;
     decision.predictedQueueLatencyMs = input.predictedQueueLatencyMs;
     decision.predictedExecutionLatencyMs = input.predictedExecutionLatencyMs;
@@ -410,6 +411,7 @@ bool NaviSchedClient::init()
         replay->timeoutMs = request.timeoutMs;
         replay->promptTokenCount = request.promptTokenCount;
         replay->explicitCacheCheckpointPosition = request.explicitCacheCheckpointPosition;
+        replay->nativePrefillSlotRelease = request.nativePrefillSlotRelease;
         replay->blockSize = request.blockSize;
         replay->blockHashes = request.blockHashes;
         replay->forwardPayload = request.forwardPayload;
@@ -588,6 +590,7 @@ NaviSchedScheduleResult NaviSchedClient::scheduleImpl(
     request->bizName = input.bizName;
     request->promptTokenCount = input.promptTokenCount;
     request->explicitCacheCheckpointPosition = input.explicitCacheCheckpointPosition;
+    request->nativePrefillSlotRelease = input.nativePrefillSlotRelease;
     request->blockSize = input.blockSize;
     request->blockHashes = input.blockHashes;
     request->timeoutMs = input.timeoutMs;

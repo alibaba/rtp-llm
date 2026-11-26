@@ -118,7 +118,8 @@ std::string NaviSchedConfigBuilder::build(
     bool createGigClient, const NamedConfigs &kernelConfigs,
     const NamedConfigs &bizResourceConfigs,
     const std::vector<std::string> &bizResourceList, size_t grpcClientIoThreadNum,
-    const std::map<std::string, size_t> &extraTaskQueueThreads)
+    const std::map<std::string, size_t> &extraTaskQueueThreads,
+    const std::vector<std::string> &kernelBlacklist, size_t grpcUnaryIoThreadNum)
 {
     if (config.bizName.empty()) {
         return "";
@@ -154,6 +155,7 @@ std::string NaviSchedConfigBuilder::build(
         kernels.emplace_back(kernel);
     }
     biz["kernel_list"] = std::move(kernels);
+    if (!kernelBlacklist.empty()) biz["kernel_blacklist"] = makeStringArray(kernelBlacklist);
     biz["kernel_config"] = makeNamedConfigArray(kernelConfigs);
     biz["resource_config"] = makeNamedConfigArray(bizResourceConfigs);
     biz["resource_list"] = makeStringArray(bizResourceList);
@@ -164,11 +166,18 @@ std::string NaviSchedConfigBuilder::build(
     if (createGigClient) {
         autil::legacy::json::JsonMap initConfig;
         initConfig["subscribe_config"] = makeSubscribeConfig(config);
-        if (grpcClientIoThreadNum > 0) {
-            autil::legacy::json::JsonMap streamConfig;
-            streamConfig["thread_num"] = grpcClientIoThreadNum;
+        if (grpcClientIoThreadNum > 0 || grpcUnaryIoThreadNum > 0) {
             autil::legacy::json::JsonMap connectionConfig;
-            connectionConfig["grpc_stream"] = std::move(streamConfig);
+            if (grpcClientIoThreadNum > 0) {
+                autil::legacy::json::JsonMap streamConfig;
+                streamConfig["thread_num"] = grpcClientIoThreadNum;
+                connectionConfig["grpc_stream"] = std::move(streamConfig);
+            }
+            if (grpcUnaryIoThreadNum > 0) {
+                autil::legacy::json::JsonMap unaryConfig;
+                unaryConfig["thread_num"] = grpcUnaryIoThreadNum;
+                connectionConfig["grpc"] = std::move(unaryConfig);
+            }
             initConfig["connection_config"] = std::move(connectionConfig);
         }
         autil::legacy::json::JsonMap gigConfig;

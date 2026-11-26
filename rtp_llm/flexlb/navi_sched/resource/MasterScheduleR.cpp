@@ -21,6 +21,7 @@ ClientRequestToMasterDataConstPtr makeCanonicalRequest(
     output->timeoutMs = request.timeoutMs;
     output->promptTokenCount = request.promptTokenCount;
     output->explicitCacheCheckpointPosition = request.explicitCacheCheckpointPosition;
+    output->nativePrefillSlotRelease = request.nativePrefillSlotRelease;
     output->blockSize = request.blockSize;
     output->requestId = requestId;
     output->collectReplay = request.collectReplay;

@@ -27,7 +27,8 @@ public:
                         const std::string &masterBizName,
                         const std::string &contextKernelConfig,
                         const std::string &schedulerKernelId,
-                        const std::string &schedulerKernelConfig, bool enableVis = false);
+                        const std::string &schedulerKernelConfig, bool enableVis = false,
+                        bool enableTairQuery = false);
     ~MasterScheduleGraph();
 
 public:
@@ -43,7 +44,7 @@ private:
         const std::string &masterBizName, const std::string &contextKernelConfig,
         const std::string &schedulerKernelId,
         const std::string &schedulerKernelConfig,
-        uint64_t requestPipeGeneration);
+        uint64_t requestPipeGeneration, bool enableTairQuery = false);
     class Impl;
     std::unique_ptr<Impl> _impl;
 

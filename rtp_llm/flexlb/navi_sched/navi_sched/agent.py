@@ -27,7 +27,9 @@ class NaviSchedAgent(_navi_sched.NaviSchedAgent):
         projected_execution_geometry_enabled: bool = False,
         execution_cache_source_enabled: bool = False,
         prefill_execution_policy=None,
+        native_prefill_pipeline_stages: int = 0,
         peer_cache_enabled: bool = False,
+        tair_kvcm_config=None,
         mamba_replay_stop_shift: bool = False,
         full_attention_query_drop_tokens: int = 0,
         mamba_retention_interval: int = -1,
@@ -80,6 +82,22 @@ class NaviSchedAgent(_navi_sched.NaviSchedAgent):
             )
         if execution_geometry_enabled and prefill_execution_policy is None:
             raise ValueError("execution geometry requires a typed execution policy")
+        if type(
+            native_prefill_pipeline_stages
+        ) is not int or native_prefill_pipeline_stages not in (0, 4):
+            raise ValueError(
+                "Native PP observation requires the supported four-stage topology"
+            )
+        if native_prefill_pipeline_stages and (
+            not pd_separated
+            or latency_prediction_mode != "unified"
+            or not pd_unified_capacity_split
+            or execution_geometry_enabled
+            or prefill_execution_policy is None
+        ):
+            raise ValueError(
+                "Native PP observation requires PD unified capacity prediction and a typed policy"
+            )
         if not math.isfinite(time_compression) or time_compression <= 0:
             raise ValueError("time_compression must be positive and finite")
         navi_sched = naviSchedModule()
@@ -92,6 +110,10 @@ class NaviSchedAgent(_navi_sched.NaviSchedAgent):
         agent_config.service = makeServiceConfig(navi_sched, name, options)
         agent_config.pd_separated = bool(pd_separated)
         agent_config.peer_cache_enabled = bool(peer_cache_enabled)
+        if tair_kvcm_config is not None:
+            if not isinstance(tair_kvcm_config, navi_sched.NaviSchedTairKvcmConfig) or not tair_kvcm_config.valid():
+                raise ValueError("Tair KVCM requires valid typed Native V6D configuration")
+            agent_config.tair_kvcm_config = tair_kvcm_config
         agent_config.execution_geometry_enabled = bool(execution_geometry_enabled)
         agent_config.projected_execution_geometry_enabled = bool(
             projected_execution_geometry_enabled
@@ -99,6 +121,7 @@ class NaviSchedAgent(_navi_sched.NaviSchedAgent):
         agent_config.execution_cache_source_enabled = bool(
             execution_cache_source_enabled
         )
+        agent_config.native_prefill_pipeline_stages = native_prefill_pipeline_stages
         if prefill_execution_policy is not None:
             agent_config.prefill_execution_policy = prefill_execution_policy
         agent_config.mamba_replay_stop_shift = bool(mamba_replay_stop_shift)

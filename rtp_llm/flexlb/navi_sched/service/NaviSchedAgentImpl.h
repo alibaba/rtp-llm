@@ -1,4 +1,7 @@
 #pragma once
+#include <atomic>
+#include <optional>
+#include <utility>
 
 #include "aios/navi_sched/service/AbortMetrics.h"
 
@@ -10,6 +13,8 @@
 #include "navi/engine/AsyncPipe.h"
 
 namespace navi_sched {
+
+struct TPUPrefillPP4TimingObservation;
 
 class AgentGraph;
 class AgentLatencyInputR;
@@ -42,6 +47,9 @@ public:
     bool recordAbortEvent(const std::string &stage, uint64_t count) const;
     void setV6dCacheTouchHandler(const std::function<bool(uint64_t, const NaviSchedBlockHashes &)> &handler) const;
     bool enableObservedExecutionWindowTraining() const;
+    bool recordNativePP4TimingSample(
+        std::shared_ptr<const TPUPrefillPP4TimingObservation> observation,
+        double latencyMs, int64_t eventTimeUs) const;
     bool recordObservedExecutionSample(const std::vector<NaviSchedRequestStats> &requests,
                                        double latencyMs, int64_t executionStepCount,
                                        int64_t globalPaddedTokens,
@@ -61,7 +69,7 @@ public:
     bool beginObservedBackendExecution(int64_t eventTimeUs = 0, int32_t requestCount = 0) const;
     bool endObservedBackendExecution(int64_t eventTimeUs = 0) const;
     bool reportObservedExecutionStep(double elapsedMs, int64_t prefillTokens,
-                                     int64_t decodeTokens) const;
+                                     int64_t decodeTokens, int64_t firstStartOvertakeCount = 0) const;
     bool reportObservedCoreStep(double elapsedMs, bool futureWait) const;
     void reportCacheInserted(
         const NaviSchedBlockHashesConstPtr &blockHashes,
@@ -80,6 +88,13 @@ public:
         int8_t hybridTailRequired, int64_t eventTimeUs, int64_t rtpCachedBlockCount = -1,
         NaviSchedCacheKeyType cacheKeyType = NaviSchedCacheKeyType::BLOCK_POOL,
         const NaviSchedCachePolicy *typedPolicy = nullptr) const;
+    // In-process EngineCore observations only; no shard communication.
+    std::optional<std::pair<uint64_t, uint64_t>> beginKVPreparation(
+        uint64_t requestId, int64_t preparingStartMonoNs = 0) const;
+    bool completeKVPreparation(uint64_t session, uint64_t requestId, uint64_t generation,
+                               bool success, int64_t observedMonoNs = 0) const;
+    bool cancelKVPreparation(uint64_t session, uint64_t requestId, uint64_t generation) const;
+    bool retireKVPreparation(uint64_t session, uint64_t requestId, uint64_t generation) const;
     int32_t getGrpcPort() const;
     const std::shared_ptr<navi::Navi> &getRuntimeNavi() const;
     const std::string &getRuntimeBizName() const;
@@ -133,6 +148,7 @@ private:
     bool _pdSeparated = true;
     bool _pdUnifiedCapacitySplit = false;
     bool _unifiedLatencyPrediction = false;
+    bool _nativePrefillObservationOnly = false;
     bool _executionGeometryEnabled = false;
     bool _executionCacheSourceEnabled = false;
     bool _projectedExecutionGeometryEnabled = false;
@@ -150,6 +166,7 @@ private:
     mutable int64_t _lastBackendExecutionBusyTimeUs = 0;
     mutable int64_t _lastBackendExecutionBusyReportTimeUs = 0;
     std::shared_ptr<AbortMetrics> _abortMetrics = std::make_shared<AbortMetrics>();
+    mutable std::atomic<uint64_t> _firstStartOvertakeCount{0};
     bool _stoppingReported = false;
 };
 

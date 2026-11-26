@@ -234,6 +234,53 @@ def project_tpu_streaming_step(
     if not configured:
         raise ValueError("TPU platform compile sizes are unavailable")
     paddings = sorted(int(size) for size in configured)
+    return _project_tpu_streaming_step(
+        pcp_size,
+        interleave_size,
+        paddings,
+        int(configured[-1]),
+        scheduled_tokens,
+        dp_target_bucket,
+    )
+
+
+class TPUStreamingStepProjector:
+    """Reuse the connection's resolved padding policy for Native PP observations."""
+
+    def __init__(self, execution_policy):
+        self.pcp_size = execution_policy.pcp_size
+        self.interleave_size = execution_policy.interleave_size
+        self.paddings = tuple(execution_policy.compile_sizes)
+        if (
+            self.pcp_size <= 1
+            or self.interleave_size <= 0
+            or not self.paddings
+            or self.paddings[0] <= 0
+            or any(a >= b for a, b in zip(self.paddings, self.paddings[1:]))
+        ):
+            raise ValueError("invalid resolved streaming-PCP padding policy")
+
+    def project(self, scheduled_tokens):
+        if scheduled_tokens <= 0:
+            raise ValueError("TPU projection requires positive work")
+        return _project_tpu_streaming_step(
+            self.pcp_size,
+            self.interleave_size,
+            self.paddings,
+            self.paddings[-1],
+            scheduled_tokens,
+            None,
+        )
+
+
+def _project_tpu_streaming_step(
+    pcp_size,
+    interleave_size,
+    paddings,
+    token_buffer_size,
+    scheduled_tokens,
+    dp_target_bucket,
+):
     cycles, remaining = divmod(scheduled_tokens, pcp_size * interleave_size)
     required = cycles * interleave_size + min(remaining, interleave_size)
     index = bisect.bisect_left(paddings, required)
@@ -243,7 +290,7 @@ def project_tpu_streaming_step(
     if dp_target_bucket is not None and dp_target_bucket > padded:
         padded = int(dp_target_bucket)
     # The runner allocates its token buffer from the final configured bucket.
-    if padded > int(configured[-1]):
+    if padded > token_buffer_size:
         raise ValueError("PCP local padding exceeds the runner token buffer")
     return TPUStepGeometry(
         scheduled_tokens,

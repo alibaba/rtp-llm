@@ -2,6 +2,8 @@
 
 #include "aios/navi_sched/scheduler/ScheduleContext.h"
 #include "navi/engine/Data.h"
+#include "aios/navi_sched/resource/SchedulerConfigR.h"
+#include "aios/navi_sched/scheduler/TairKvcmQuery.h"
 
 namespace navi_sched {
 
@@ -15,6 +17,11 @@ public:
 
 public:
     NaviSchedScheduleContextPtr context;
+    std::shared_ptr<const SchedulerConfigR::Snapshot> schedulerConfig;
+    std::vector<TairKvcmQueryInput> tairKvcmQueries;
+    std::vector<TairKvcmQueryResult> tairKvcmResults;
+    std::vector<std::vector<size_t>> tairKvcmNodeIndexes;
+    int64_t tairKvcmPrepareUs = 0;
 };
 
 NAVI_TYPEDEF_PTR(MasterScheduleContextData);

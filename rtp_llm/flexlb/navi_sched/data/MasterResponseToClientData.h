@@ -33,6 +33,7 @@ public:
     int64_t batchId = 0;
     int64_t expectedBatchSize = 0;
     int64_t predictedCacheHitTokenCount = 0;
+    std::optional<bool> executionLoadIncluded;
     double predictedQueueLatencyMs = 0.0;
     double predictedExecutionLatencyMs = 0.0;
     NaviSchedLatencyPredictionConstPtr latencyPrediction;

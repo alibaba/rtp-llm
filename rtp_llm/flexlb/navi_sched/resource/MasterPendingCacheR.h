@@ -160,7 +160,13 @@ public:
         const int64_t *startBlocks = nullptr,
         const size_t *matchableBlockCounts = nullptr, size_t alignmentBlocks = 1,
         bool includePending = true, BatchMatchTiming *timing = nullptr,
-        const std::vector<size_t> *commonPrefixes = nullptr) const;
+        const std::vector<size_t> *commonPrefixes = nullptr,
+        int64_t *readyOnlyMatchedBlockCounts = nullptr,
+        // Remote lookup observations supplement this batch only; they are not
+        // inserted into the node's resident or pending cache state.
+        const PhysicalBlockSet *additionalFullReady = nullptr,
+        const PhysicalBlockSet *additionalTailReady = nullptr,
+        int64_t *withoutAdditionalReady = nullptr) const;
     Stats getStats(uint64_t agentIdHash, NaviSchedCacheKeyType cacheKeyType =
                                              NaviSchedCacheKeyType::BLOCK_POOL) const;
     uint64_t getMatchedBlockCounts(
@@ -179,6 +185,11 @@ public:
     static const std::string RESOURCE_ID;
 
 private:
+    struct BatchTailReuse {
+        size_t sharedPrefixBlocks = 0;
+        size_t effectiveFullPrefixBlocks = 0;
+        int64_t matchedBlocks = 0;
+    };
     struct NodeCache {
         mutable autil::ReadWriteLock lock;
         PendingCacheState scheduled;
@@ -208,7 +219,10 @@ private:
         int64_t fullAttentionQueryDropBlockCount = 0, size_t startBlock = 0,
         size_t alignmentBlocks = 1, int64_t *fullMatchedBlockCount = nullptr,
         int64_t *effectiveFullMatchedBlockCount = nullptr,
-        size_t initialMatchedBlockCount = 0);
+        size_t initialMatchedBlockCount = 0,
+        const BatchTailReuse *tailReuse = nullptr,
+        const PhysicalBlockSet *additionalFullReady = nullptr,
+        const PhysicalBlockSet *additionalTailReady = nullptr);
     static int64_t getPendingSourceBatchIdLocked(const NodeCache &cache,
                                                  uint64_t blockHash, bool tailReady);
 

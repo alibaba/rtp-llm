@@ -9,6 +9,8 @@ import tempfile
 import threading
 import time
 import unittest
+from collections import deque
+from concurrent.futures import Future
 import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,6 +18,10 @@ from types import SimpleNamespace
 from navi_sched.adapters.vllm.VLLMBlockHash import block_hash_to_uint64
 from navi_sched.adapters.vllm.VLLMCachePolicy import VLLMCachePolicy, VLLMCacheState
 from navi_sched.adapters.vllm.VLLMEngineObserver import VLLMEngineObserver
+from navi_sched.adapters.vllm.VLLMNativePipelineState import (
+    NativePipelineSpan,
+    NativePipelineState,
+)
 
 from navi_sched import NaviSchedAgent, NaviSchedClient, NaviSchedMaster
 from navi_sched import _navi_sched_core as core
@@ -84,12 +90,17 @@ class SnapshotChanges:
 def empty_workload_report():
     return dict(
         event_time_us=time.time_ns() // 1000,
-        batch_count=0, request_count=0, remaining_prefill_request_count=0,
-        running_request_count=0, waiting_request_count=0,
-        remaining_prefill_context_token_count=0, remaining_prefill_token_count=0,
+        batch_count=0,
+        request_count=0,
+        remaining_prefill_request_count=0,
+        running_request_count=0,
+        waiting_request_count=0,
+        remaining_prefill_context_token_count=0,
+        remaining_prefill_token_count=0,
         remaining_prefill_token_square_sum=0.0,
         context_remaining_prefill_token_product_sum=0.0,
-        max_running_request_count=64, running_capacity_slot_count=0,
+        max_running_request_count=64,
+        running_capacity_slot_count=0,
         running_capacity_prefill_request_count=0,
         running_capacity_prefill_context_token_count=0,
         running_capacity_prefill_token_count=0,
@@ -100,27 +111,39 @@ def empty_workload_report():
         waiting_capacity_prefill_token_count=0,
         waiting_capacity_prefill_token_square_sum=0.0,
         waiting_capacity_context_remaining_prefill_token_product_sum=0.0,
-        remaining_total_context_token_count=0, remaining_total_token_count=0,
+        remaining_total_context_token_count=0,
+        remaining_total_token_count=0,
         remaining_total_token_square_sum=0.0,
         context_remaining_total_token_product_sum=0.0,
-        total_prompt_token_count=0, in_flight_scheduled_token_count=0,
-        admitted_schedule_batch_id=0, admitted_local_batch_id=0,
-        admitted_request_count=0, admitted_pending_cache_tracked=False,
-        admitted_request_ids=[], running_elapsed_time_ms=0.0,
+        total_prompt_token_count=0,
+        in_flight_scheduled_token_count=0,
+        admitted_schedule_batch_id=0,
+        admitted_local_batch_id=0,
+        admitted_request_count=0,
+        admitted_pending_cache_tracked=False,
+        admitted_request_ids=[],
+        running_elapsed_time_ms=0.0,
         running_elapsed_request_count=0,
-        running_decode_request_count=0, running_decode_generated_token_count=0,
+        running_decode_request_count=0,
+        running_decode_generated_token_count=0,
         running_decode_remaining_token_budget=0,
     )
 
 
 class VLLMV6DWireIntegrationTest(unittest.TestCase):
-    def test_pp_unified_capacity_model_reaches_master(self):
+    def test_pp_native_timing_model_reaches_master(self):
         original_dir = os.getcwd()
         with tempfile.TemporaryDirectory(prefix="navi-pp-capacity-") as directory:
             os.chdir(directory)
             notifications = SnapshotChanges(Path(directory))
             agent = master = None
             try:
+                pp_policy = core.TPUPrefillExecutionPolicyConfig()
+                pp_policy.pcp_size = 8
+                pp_policy.interleave_size = 256
+                pp_policy.compile_sizes = [256, 512, 1024]
+                pp_policy.max_scheduled_tokens = 8192
+                pp_policy.hash_block_size = pp_policy.scheduler_block_size = 16
                 agent = NaviSchedAgent(
                     "pp_capacity_prefill",
                     server_ip="127.0.0.1",
@@ -132,6 +155,8 @@ class VLLMV6DWireIntegrationTest(unittest.TestCase):
                     pd_separated=True,
                     latency_prediction_mode="unified",
                     pd_unified_capacity_split=True,
+                    native_prefill_pipeline_stages=4,
+                    prefill_execution_policy=pp_policy,
                     runtime_config={"thread_num": 2},
                     name="pp_capacity_agent",
                     enable_kmon=False,
@@ -159,25 +184,51 @@ class VLLMV6DWireIntegrationTest(unittest.TestCase):
                     wait_no_query=False,
                 ).init()
                 legacy_bridge = core._VLLMAgentBridge(agent, pd_separated=True)
-                self.assertFalse(legacy_bridge.report_workload(**empty_workload_report()))
+                self.assertFalse(
+                    legacy_bridge.report_workload(**empty_workload_report())
+                )
                 bridge = core._VLLMAgentBridge(
                     agent, pd_separated=True, prefill_capacity_split=True
                 )
                 self.assertTrue(bridge.report_workload(**empty_workload_report()))
                 snapshot = notifications.wait(
-                    lambda text: "parameter_count=19" in text
+                    lambda text: "parameter_count=9" in text
                     and "capacity_split=true" in text
                     and "    online: true\n" in text
                     and "running_capacity_slots=0/64" in text
                 )
                 self.assertIn("    pd_separated: true\n", snapshot)
-                self.assertIn("binary_version=24", snapshot)
+                self.assertIn("binary_version=36", snapshot)
                 self.assertIn("running_capacity_slots=0/64", snapshot)
+                self.assertEqual(1, core.VLLM_NATIVE_PP4_TIMING_SAMPLES_VERSION)
+                timing_slots = [
+                    (0, 0.0, [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+                    (1, 0.0, [0.0] * 8),
+                    (2, 0.0, [0.0] * 8),
+                ]
+                for _ in range(64):
+                    self.assertTrue(
+                        bridge.record_native_pp4_timing_sample(
+                            0, timing_slots, 42.0, time.time_ns() // 1000
+                        )
+                    )
+
+                def has_trained_native_model(text):
+                    match = re.search(
+                        r"latency_model:.*binary_version=36, revision=(\d+)", text
+                    )
+                    return bool(match and int(match.group(1)) > 1)
+
+                notifications.wait(has_trained_native_model)
                 active = empty_workload_report()
                 active.update(
-                    batch_count=1, request_count=32, remaining_prefill_request_count=32,
-                    running_request_count=1, waiting_request_count=31,
-                    running_elapsed_time_ms=125.0, running_elapsed_request_count=1,
+                    batch_count=1,
+                    request_count=32,
+                    remaining_prefill_request_count=32,
+                    running_request_count=1,
+                    waiting_request_count=31,
+                    running_elapsed_time_ms=125.0,
+                    running_elapsed_request_count=1,
                     remaining_prefill_token_count=4096,
                     remaining_prefill_token_square_sum=524288.0,
                     running_capacity_slot_count=32,
@@ -185,14 +236,19 @@ class VLLMV6DWireIntegrationTest(unittest.TestCase):
                     running_capacity_prefill_token_count=4096,
                     running_capacity_prefill_token_square_sum=524288.0,
                     remaining_total_token_count=4096,
-                    remaining_total_token_square_sum=524288.0, total_prompt_token_count=4096,
+                    remaining_total_token_square_sum=524288.0,
+                    total_prompt_token_count=4096,
                 )
-                self.assertFalse(bridge.report_workload(
-                    **dict(active, running_elapsed_request_count=-1)
-                ))
-                self.assertFalse(bridge.report_workload(
-                    **dict(active, running_elapsed_request_count=0)
-                ))
+                self.assertFalse(
+                    bridge.report_workload(
+                        **dict(active, running_elapsed_request_count=-1)
+                    )
+                )
+                self.assertFalse(
+                    bridge.report_workload(
+                        **dict(active, running_elapsed_request_count=0)
+                    )
+                )
                 missing_clock_count = dict(active)
                 missing_clock_count.pop("running_elapsed_request_count")
                 self.assertFalse(bridge.report_workload(**missing_clock_count))
@@ -202,6 +258,425 @@ class VLLMV6DWireIntegrationTest(unittest.TestCase):
                     and "running_capacity_prefill_requests=32" in text
                     and "running_elapsed_request_count=1" in text
                 )
+                self.assertEqual(
+                    {
+                        "agent_update_protocol": 39,
+                        "agent_update_batch_protocol": 40,
+                        "request_data": 26,
+                    },
+                    core.native_wire_versions(),
+                )
+                span = core._VLLMNativePPSpan(301, 0, 128)
+                slot = core._VLLMNativePPSlot(
+                    0,
+                    500,
+                    0.25,
+                    -1,
+                    [1.0, 0.125, 2.0, 0.0, 0.0, 0.015625, 1.0, 0.0],
+                    [span],
+                )
+                pp_requests = [
+                    core._VLLMNativePPRequest(
+                        301 + i,
+                        0 if i == 0 else 2,
+                        0 if i == 0 else i - 1,
+                        1 if i == 0 else 10,
+                        128,
+                        128 if i == 0 else 0,
+                        0 if i == 0 else -1,
+                        0,
+                        -1,
+                        -1,
+                        1,
+                    )
+                    for i in range(32)
+                ]
+                query_observer = VLLMEngineObserver.__new__(VLLMEngineObserver)
+                query_observer._pp_capacity_unified = True
+                query_observer._native_pipeline_state = SimpleNamespace(failed=False)
+                query_signature = (32, ("native-wire-key",))
+                query_future = Future()
+                query_outcome = SimpleNamespace(
+                    generation=1,
+                    match_signature=query_signature,
+                    hit_length=32,
+                    fetch_failed=False,
+                    lookup_results={"owned": object()},
+                )
+                query_future.set_result(query_outcome)
+                query_state = SimpleNamespace(
+                    match_generation=1,
+                    match_signature=query_signature,
+                    match_future=query_future,
+                    resolved_match=None,
+                )
+                query_request = SimpleNamespace(
+                    request_id="303",
+                    num_prompt_tokens=128,
+                    num_cached_tokens=-1,
+                    prefill_stats=SimpleNamespace(
+                        num_prompt_tokens=0,
+                        num_local_cached_tokens=0,
+                        num_external_cached_tokens=0,
+                    ),
+                )
+                query_observer._v6d_scheduler = SimpleNamespace(
+                    _request_states={"303": query_state}
+                )
+                query_facts = query_observer._native_v6d_request_audit(query_request)
+                known_prefix = query_observer._native_pp_cache_hit_tokens(
+                    query_request, query_facts
+                )
+                self.assertEqual(64, known_prefix)
+                self.assertIsNone(query_state.resolved_match)
+                self.assertIs(query_outcome, query_future.result())
+                pp_requests[2] = core._VLLMNativePPRequest(
+                    303, 2, 1, 6, 128, 0, known_prefix, 0, 100, -1, 1
+                )
+                native = core._VLLMNativePPState(
+                    771,
+                    1,
+                    True,
+                    0,
+                    0.25,
+                    [slot],
+                    [
+                        core._VLLMNativePPResult(100, 500, 0, False, False),
+                        core._VLLMNativePPResult(101, 400, -1, False, False, [302]),
+                    ],
+                    pp_requests,
+                    None,
+                    1,
+                )
+                with self.assertRaises(AttributeError):
+                    native.observation_id = 999
+                with self.assertRaises(AttributeError):
+                    native.occupied_request_slot_count = 9
+                with self.assertRaises(AttributeError):
+                    span.computed_tokens = 9
+                observed = dict(
+                    active,
+                    native_pp_state=native,
+                    native_pp_observation_age_us=123456,
+                    native_cache_queries=[
+                        core._VLLMNativeCacheQuery(303, 1, 32, 1, 2, 1, 1)
+                    ],
+                )
+                self.assertTrue(bridge.report_workload(**observed))
+                notifications.wait(
+                    lambda text: "native_pp_state: observation_id=771, observation_age_us=123456"
+                    in text
+                    and "occupied_request_slots=1" in text
+                    and "output_id=101, slot=-1, execute_reply_ready=0, result_ready=0, load_request_ids=[302], load_request_count=1"
+                    in text
+                    and "pp_request_id=302, queue=2, queue_index=0, phase=10, computed_tokens=0, cache_hit_tokens=-1"
+                    in text
+                    and "pp_request_id=303, queue=2, queue_index=1, phase=6, computed_tokens=0, cache_hit_tokens=64"
+                    in text
+                    and "request_id=303, generation=1, local_prefix_tokens=32, input_source=1, future_state=2, load_state=1, receive_state=1"
+                    in text
+                )
+                self.assertFalse(
+                    bridge.report_workload(
+                        **dict(observed, native_pp_observation_age_us=-1)
+                    )
+                )
+                self.assertFalse(
+                    bridge.report_workload(
+                        **dict(active, native_pp_observation_age_us=0)
+                    )
+                )
+                # Only a reply flag changes; aggregate workload remains fixed.
+                observed["native_pp_state"] = core._VLLMNativePPState(
+                    772,
+                    1,
+                    True,
+                    0,
+                    0.25,
+                    [slot],
+                    [
+                        core._VLLMNativePPResult(100, 500, 0, True, False),
+                        core._VLLMNativePPResult(101, 400, -1, False, False),
+                    ],
+                    pp_requests,
+                    None,
+                    1,
+                )
+                self.assertTrue(bridge.report_workload(**observed))
+                notifications.wait(
+                    lambda text: "native_pp_state: observation_id=772" in text
+                    and "output_id=100, slot=0, execute_reply_ready=1, result_ready=0"
+                    in text
+                )
+                # Occupancy alone must pass through the real Agent/Master stream.
+                observed["native_pp_state"] = core._VLLMNativePPState(
+                    772,
+                    1,
+                    True,
+                    0,
+                    0.25,
+                    [slot],
+                    [
+                        core._VLLMNativePPResult(100, 500, 0, True, False),
+                        core._VLLMNativePPResult(101, 400, -1, False, False),
+                    ],
+                    pp_requests,
+                    None,
+                    3,
+                )
+                self.assertTrue(bridge.report_workload(**observed))
+                notifications.wait(
+                    lambda text: "native_pp_state: observation_id=772" in text
+                    and "occupied_request_slots=3" in text
+                )
+                owner = SimpleNamespace(
+                    stages=4,
+                    wave=SimpleNamespace(open=False),
+                    in_flight=deque(),
+                    slots=[],
+                    first_slot=0,
+                    last_real=-1,
+                    measured=0.00025,
+                    core=SimpleNamespace(
+                        scheduler=SimpleNamespace(
+                            running=[object()], num_waiting_for_streaming_input=0
+                        )
+                    ),
+                )
+                reader = NativePipelineState(owner, pp_policy)
+                dispatched = time.monotonic() - 0.001
+                native_slot = SimpleNamespace(
+                    dispatched=dispatched, expected=0.00025, started_last=None
+                )
+                compute_output, metadata_output = object(), object()
+                owner.wave.open = True
+                owner.slots = [native_slot]
+                owner.last_real = 0
+                owner.in_flight.append(
+                    SimpleNamespace(
+                        scheduler_output=compute_output,
+                        dispatched=dispatched,
+                        slot=native_slot,
+                        exec_future=Future(),
+                        future=Future(),
+                    )
+                )
+                spans = (NativePipelineSpan(301, 0, 128),)
+                reader.record_dispatch(reader.step_features(spans), spans)
+                metadata_future = Future()
+                owner.in_flight.append(
+                    SimpleNamespace(
+                        scheduler_output=metadata_output,
+                        dispatched=dispatched,
+                        slot=None,
+                        exec_future=metadata_future,
+                        future=metadata_future,
+                    )
+                )
+                entries = [
+                    SimpleNamespace(
+                        queue="running" if i == 0 else "waiting",
+                        queue_index=0 if i == 0 else i - 1,
+                        navi_request_id=301 + i,
+                        phase=(
+                            "native_running"
+                            if i == 0
+                            else "waiting_cache_state_unknown"
+                        ),
+                        native_prompt_tokens=128,
+                        native_computed_tokens=128 if i == 0 else 0,
+                        native_cache_hit_tokens=0 if i == 0 else -1,
+                        native_shared_prefix_boundary=0,
+                        native_prefill_slot_release=2 if i == 0 else 1,
+                        lookup_first_poll_mono_ns=None,
+                        load_started_mono_ns=None,
+                    )
+                    for i in range(32)
+                ]
+                generated, observed_ns = reader.make_report(core, entries)
+                self.assertGreater(observed_ns, 0)
+                self.assertEqual(1, generated.observation_id)
+                self.assertEqual(2, generated.requests[0].prefill_slot_release)
+                self.assertEqual(128, generated.slots[0].spans[0].scheduled_tokens)
+                self.assertEqual(2.0, generated.slots[0].features[2])
+                prepared = core._VLLMNativePPRequest(
+                    999,
+                    4,
+                    0,
+                    11,
+                    256,
+                    0,
+                    -1,
+                    0,
+                    -1,
+                    -1,
+                    0,
+                )
+                merged = generated.with_prepared_requests([prepared])
+                self.assertEqual(32, len(generated.requests))
+                self.assertEqual(33, len(merged.requests))
+                self.assertEqual(generated.observation_id, merged.observation_id)
+                self.assertEqual(-1, merged.requests[-1].cache_hit_tokens)
+                self.assertEqual(0, merged.requests[-1].prefill_slot_release)
+                with self.assertRaises(ValueError):
+                    generated.with_prepared_requests(
+                        [
+                            core._VLLMNativePPRequest(
+                                301,
+                                4,
+                                0,
+                                11,
+                                128,
+                                0,
+                                -1,
+                                0,
+                                -1,
+                                -1,
+                                0,
+                            )
+                        ]
+                    )
+                with self.assertRaises(ValueError):
+                    generated.with_prepared_requests(
+                        [
+                            core._VLLMNativePPRequest(
+                                999,
+                                2,
+                                0,
+                                11,
+                                128,
+                                0,
+                                -1,
+                                0,
+                                -1,
+                                -1,
+                                0,
+                            )
+                        ]
+                    )
+                self.assertTrue(
+                    bridge.report_workload(
+                        **dict(
+                            active,
+                            native_pp_state=generated,
+                            native_pp_observation_age_us=654321,
+                        )
+                    )
+                )
+                notifications.wait(
+                    lambda text: "native_pp_state: observation_id=1, observation_age_us=654321"
+                    in text
+                    and "pp_request_id=301, queue=0, queue_index=0, phase=1, computed_tokens=128, cache_hit_tokens=0, prefill_slot_release=2"
+                    in text
+                    and f"output_id={id(metadata_output)}, slot=-1, execute_reply_ready=0, result_ready=0"
+                    in text
+                    and "pp_request_id=302, queue=2, queue_index=0, phase=10, computed_tokens=0, cache_hit_tokens=-1"
+                    in text
+                )
+                # The query/prepare timer predates this Native load call.
+                # Verify the actual dispatch age survives the real wire unchanged.
+                load_entry = entries[1]
+                load_entry.phase = "kv_loading"
+                load_entry.query_generation = 17
+                load_entry.native_prompt_tokens = 16384
+                load_entry.native_cache_hit_tokens = 8192
+                old_query_ns = time.monotonic_ns() - 10_000_000_000
+                load_entry.lookup_first_poll_mono_ns = old_query_ns
+                load_entry.load_started_mono_ns = old_query_ns
+                reader.make_report(core, entries)
+                load_output, load_future = object(), Future()
+                load_dispatched = time.monotonic()
+                owner.in_flight.append(
+                    SimpleNamespace(
+                        scheduler_output=load_output,
+                        dispatched=load_dispatched,
+                        slot=None,
+                        exec_future=load_future,
+                        future=load_future,
+                    )
+                )
+                reader.record_dispatch(None, load_request_ids=(302,))
+                timed, timed_ns = reader.make_report(core, entries)
+                load_request = timed.requests[1]
+                self.assertEqual(
+                    (timed_ns - round(load_dispatched * 1e9)) // 1000,
+                    load_request.load_age_us,
+                )
+                self.assertGreaterEqual(load_request.query_age_us, 10_000_000)
+                self.assertFalse(load_future.done())
+                self.assertTrue(
+                    bridge.report_workload(
+                        **dict(
+                            active,
+                            native_pp_state=timed,
+                            native_pp_observation_age_us=654322,
+                        )
+                    )
+                )
+                notifications.wait(
+                    lambda text: f"native_pp_state: observation_id={timed.observation_id}, observation_age_us=654322"
+                    in text
+                    and re.search(
+                        rf"pp_request_id=302,.*query_age_us={load_request.query_age_us}, load_age_us={load_request.load_age_us}(?:\n|$)",
+                        text,
+                    )
+                )
+                self.assertTrue(bridge.report_workload(**active))
+                notifications.wait(lambda text: "native_pp_state:" not in text)
+                query_type = core._VLLMNativeCacheQuery
+                pending = query_type(301, 3, 4096, 1, 1, 1, 1)
+                prequery = query_type(302, 4, -1, 2, 1, 1, 1)
+                loading = query_type(303, 5, 0, 3, 0, 2, 1)
+                received = query_type(304, 6, 4096, 3, 0, 1, 2)
+                active["native_cache_queries"] = [received, prequery, loading, pending]
+                self.assertTrue(bridge.report_workload(**active))
+                snapshot = notifications.wait(
+                    lambda text: "native_cache_queries: count=4, shown=4" in text
+                    and "request_id=301, generation=3, local_prefix_tokens=4096, input_source=1, future_state=1"
+                    in text
+                    and "request_id=302, generation=4, local_prefix_tokens=-1, input_source=2"
+                    in text
+                    and "request_id=303, generation=5, local_prefix_tokens=0, input_source=3"
+                    in text
+                    and "request_id=304, generation=6, local_prefix_tokens=4096, input_source=3, future_state=0, load_state=1, receive_state=2"
+                    in text
+                )
+                self.assertLess(
+                    snapshot.index("request_id=301,"), snapshot.index("request_id=304,")
+                )
+                # Only the asynchronous query changes; counts/moments stay fixed.
+                active["native_cache_queries"] = [query_type(301, 3, 4096, 1, 2, 1, 1)]
+                self.assertTrue(bridge.report_workload(**active))
+                notifications.wait(
+                    lambda text: "native_cache_queries: count=1, shown=1" in text
+                    and "request_id=301, generation=3, local_prefix_tokens=4096, input_source=1, future_state=2"
+                    in text
+                )
+                # Native clears the signature after allocating its load blocks.
+                # The Agent retains the actual input, not a guessed cache prefix.
+                raw_loading = query_type(301, 3, -1, 0, 0, 2, 1)
+                active["native_cache_queries"] = [raw_loading]
+                self.assertTrue(bridge.report_workload(**active))
+                notifications.wait(
+                    lambda text: "request_id=301, generation=3, local_prefix_tokens=4096, input_source=3, future_state=0, load_state=2, receive_state=1"
+                    in text
+                )
+                self.assertEqual(-1, raw_loading.local_prefix_tokens)
+                # A new generation must not inherit the older query's input.
+                active["native_cache_queries"] = [query_type(301, 4, -1, 0, 0, 2, 1)]
+                self.assertTrue(bridge.report_workload(**active))
+                notifications.wait(
+                    lambda text: "request_id=301, generation=4, local_prefix_tokens=-1, input_source=0, future_state=0, load_state=2, receive_state=1"
+                    in text
+                )
+                invalid = dict(
+                    active, native_cache_queries=[query_type(301, 0, 4096, 1, 1, 1, 1)]
+                )
+                self.assertFalse(bridge.report_workload(**invalid))
+                self.assertFalse(legacy_bridge.report_workload(**active))
+                active["native_cache_queries"] = []
+                self.assertTrue(bridge.report_workload(**active))
+                notifications.wait(lambda text: "native_cache_queries:" not in text)
             finally:
                 if master is not None:
                     master.stop()
@@ -217,19 +692,29 @@ class VLLMV6DWireIntegrationTest(unittest.TestCase):
             try:
                 for pd_separated in (True, False):
                     agent = NaviSchedAgent(
-                        "workload_defaults", server_ip="127.0.0.1", server_port=17300,
-                        total_blocks=100, block_size=16, linear_step=1,
-                        hybrid_tail_required=False, pd_separated=pd_separated,
+                        "workload_defaults",
+                        server_ip="127.0.0.1",
+                        server_port=17300,
+                        total_blocks=100,
+                        block_size=16,
+                        linear_step=1,
+                        hybrid_tail_required=False,
+                        pd_separated=pd_separated,
                         latency_prediction_mode="unified",
-                        runtime_config={"thread_num": 2}, name="workload_default_agent",
-                        enable_kmon=False, enable_snapshot=False, wait_no_query=False,
+                        runtime_config={"thread_num": 2},
+                        name="workload_default_agent",
+                        enable_kmon=False,
+                        enable_snapshot=False,
+                        wait_no_query=False,
                     ).init()
                     try:
                         bridge = core._VLLMAgentBridge(agent, pd_separated=pd_separated)
                         unmeasured = empty_workload_report()
                         unmeasured.pop("running_elapsed_request_count")
                         self.assertTrue(bridge.report_workload(**unmeasured))
-                        self.assertTrue(bridge.report_workload(**empty_workload_report()))
+                        self.assertTrue(
+                            bridge.report_workload(**empty_workload_report())
+                        )
                     finally:
                         agent.stop()
             finally:

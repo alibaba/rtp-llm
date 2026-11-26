@@ -65,6 +65,13 @@ struct TPUPrefillCacheObservationBatch {
     std::optional<TPUPrefillCacheObservation> pool = std::nullopt;
     // Includes pending-cache forecast, before query drop/tail intersection.
     std::vector<int64_t> fullPrefixBlocksBeforeQueryDrop;
+    // Engage before the existing batch read to request current physical HBM
+    // counts for Native query prediction. Pending and V6D hits never enter this
+    // output. An unavailable physical mirror yields -1, never a false zero hit.
+    std::optional<std::vector<int64_t>> readyOnlyHbmBlockCounts;
+    // Diagnostic counterfactual, under the same physical/pending locks as the
+    // consumed prediction, excluding only this round's Tair query observations.
+    std::optional<std::vector<int64_t>> beforeTairBlockCounts;
 };
 
 struct TPUPrefillRequestInput {
@@ -140,6 +147,14 @@ public:
 
     static bool validate(const TPUPrefillExecutionPolicyConfig &config,
                          std::string *error = nullptr);
+
+    // One continuous-prefill request's share of the remaining step budget.
+    // The caller supplies a validated immutable policy; this performs the same
+    // block clipping as projectCacheResolvedBatch, without planning a new batch.
+    static bool clipStreamingPrefillChunk(const TPUPrefillRequestInput &request,
+                                          int64_t remainingStepBudget,
+                                          const TPUPrefillExecutionPolicyConfig &config,
+                                          int64_t &tokens, std::string *error = nullptr);
 
     // Model features only: async lookup-eligible requests form independent
     // groups; requests without a lookup share one group. This is a forecast,

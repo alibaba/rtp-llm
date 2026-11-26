@@ -1,4 +1,5 @@
 #include "aios/navi_sched/scheduler/MasterScheduleContextKernel.h"
+#include "aios/navi_sched/scheduler/MasterSchedulePrepareKernel.h"
 
 #include "aios/navi_sched/scheduler/CostSchedulerColdStartStrategy.h"
 #include "aios/navi_sched/scheduler/CostSchedulerKernel.h"
@@ -26,11 +27,7 @@ const std::string MasterScheduleContextKernel::KERNEL_ID =
 const std::string MasterScheduleResultKernel::KERNEL_ID =
     "navi_sched.master_schedule_result_k";
 
-MasterScheduleContextKernel::MasterScheduleContextKernel()
-    : _randomGenerator(autil::TimeUtility::currentTimeInMicroSeconds())
-{
-    (void)_randomGenerator.get();
-}
+MasterScheduleContextKernel::MasterScheduleContextKernel() = default;
 
 void MasterScheduleContextKernel::def(navi::KernelDefBuilder &builder) const
 {
@@ -39,10 +36,6 @@ void MasterScheduleContextKernel::def(navi::KernelDefBuilder &builder) const
 
 bool MasterScheduleContextKernel::config(navi::KernelConfigContext &ctx)
 {
-    const auto graphAttrs = ctx.getBinaryAttrs();
-    const auto scheduler = graphAttrs.find("scheduler_kernel_id");
-    _schedulerKernelId =
-        scheduler == graphAttrs.end() ? std::string() : scheduler->second;
     NAVI_JSONIZE(ctx, "max_wait_schedule_count", _maxWaitScheduleCount,
                  _maxWaitScheduleCount);
     NAVI_JSONIZE(ctx, "max_wait_schedule_time_ms", _maxWaitScheduleTimeMs,
@@ -87,23 +80,12 @@ navi::ErrorCode MasterScheduleContextKernel::compute(navi::KernelComputeContext 
     }
     if (_schedulerConfigR) {
         const auto schedulerConfig = _schedulerConfigR->get();
-        _executionUtilizationLimitEnabled =
-            schedulerConfig.config.overloadControlStrategy == "execution_utilization";
-        _useMinimumBacklogForAdmission =
-            schedulerConfig.config.overloadControlStrategy == "min_latency";
-        _useSelectedQueueForAdmission =
-            schedulerConfig.config.overloadControlStrategy == "post_cost_latency";
-        if (_executionUtilizationConfig.globalScaling !=
-            schedulerConfig.config.executionUtilization.globalScaling) {
-            _executionUtilizationController.reset();
-        }
-        _executionUtilizationConfig = schedulerConfig.config.executionUtilization;
+        if (!_schedulerConfigSnapshot ||
+            _schedulerConfigSnapshot->generation != schedulerConfig.generation)
+            _schedulerConfigSnapshot =
+                std::make_shared<const SchedulerConfigR::Snapshot>(schedulerConfig);
         _maxWaitScheduleCount = schedulerConfig.config.maxWaitScheduleCount;
         _maxWaitScheduleTimeMs = schedulerConfig.config.maxWaitScheduleTimeMs;
-        _queueOverloadStartCycleMultiplier =
-            schedulerConfig.config.queueOverloadStartCycleMultiplier;
-        _queueOverloadFullCycleMultiplier =
-            schedulerConfig.config.queueOverloadFullCycleMultiplier;
         _timeCompression = schedulerConfig.config.agent.timeCompression;
         _peerCacheEnabled = schedulerConfig.config.peerCacheEnabled;
         _cacheTouchEnabled = schedulerConfig.config.cacheTouchEnabled;
@@ -350,366 +332,11 @@ void MasterScheduleContextKernel::buildReadyContexts(int64_t activationTimeUs)
         const auto snapshotBeginUs = autil::TimeUtility::monotonicTimeUs();
         _masterStateR->snapshotScheduleNodes(bizName, *context->context);
         const auto snapshotEndUs = autil::TimeUtility::monotonicTimeUs();
-        for (const auto &request : context->context->_responseRequests) {
-            if (request && request->request && request->request->collectReplay) {
-                const auto replayBeginUs = autil::TimeUtility::monotonicTimeUs();
-                context->context->setReplay(
-                    _masterStateR->makeScheduleReplay(*context->context));
-                context->context->_replayPrepareUs =
-                    autil::TimeUtility::monotonicTimeUs() - replayBeginUs;
-                context->context->addReplayCollectionTimeUs(
-                    context->context->_replayPrepareUs);
-                break;
-            }
-        }
-        const auto admissionBeginUs = autil::TimeUtility::monotonicTimeUs();
-        const auto accepted = prepareAdmission(context);
-        const auto admissionEndUs = autil::TimeUtility::monotonicTimeUs();
         context->context->_snapshotPrepareUs = snapshotEndUs - snapshotBeginUs;
-        context->context->_admissionPrepareUs =
-            admissionEndUs - admissionBeginUs - context->context->_contextPrepareUs;
-        if (!accepted) {
-            context->context->_scheduleLatencyUs = std::max<int64_t>(
-                0, autil::TimeUtility::monotonicTimeUs() - activationTimeUs);
-            MasterScheduleResultKernel::recordReplayAdmission(*context->context);
-            if (!context->context->finish()) {
-                NAVI_KERNEL_LOG(ERROR,
-                                "finish fully rate-limited schedule round failed, "
-                                "scheduleId [%lu]",
-                                context->context->_scheduleId);
-            }
-            if (context->context->_replay) {
-                NAVI_KERNEL_LOG(
-                    DEBUG, "[navi-sched-replay] schedule_id=%lu json=%s",
-                    context->context->_scheduleId,
-                    NaviSchedScheduleReplayJson::toJsonString(*context->context->_replay)
-                        .c_str());
-            }
-            continue;
-        }
-        _masterStateR->recordScheduleRound(scheduleRoundRequestCount(*context->context));
-        if (!context->context->_prepared && !context->context->prepare()) {
-            context->context->fail("scheduler_error");
-        }
-        const auto preparedUs = autil::TimeUtility::monotonicTimeUs();
-        context->context->_contextPrepareUs += preparedUs - admissionEndUs;
-        context->context->_masterPrepareUs = preparedUs - activationTimeUs;
-        if (context->context->_scheduleId < 10 ||
-            context->context->_scheduleId % 100 == 0) {
-            NAVI_KERNEL_LOG(
-                INFO,
-                "[navi-master-prepare-timing] schedule_id=%lu requests=%lu "
-                "candidates=%lu activation_to_snapshot_us=%ld snapshot_us=%ld "
-                "replay_setup_us=%ld admission_us=%ld context_prepare_us=%ld "
-                "activation_to_output_us=%ld snapshot_runtime_lock_wait_us=%ld "
-                "snapshot_runtime_lock_hold_us=%ld",
-                context->context->_scheduleId, context->context->requestCount(),
-                context->context->nodeCount(), snapshotBeginUs - activationTimeUs,
-                snapshotEndUs - snapshotBeginUs, context->context->_replayPrepareUs,
-                context->context->_admissionPrepareUs,
-                context->context->_contextPrepareUs, preparedUs - activationTimeUs,
-                context->context->_snapshotRuntimeLockWaitUs,
-                context->context->_snapshotRuntimeLockHoldUs);
-        }
+        context->schedulerConfig = _schedulerConfigSnapshot;
         context->context->_scheduleRoundCompletion = completion;
         _readyContexts.emplace_back(std::move(context));
     }
-}
-
-double MasterScheduleContextKernel::calculateQueueOverloadDropProbability(
-    double averagePredictedLatencyMs, int64_t scheduleCycleMs,
-    int64_t startCycleMultiplier, int64_t fullCycleMultiplier)
-{
-    if (!std::isfinite(averagePredictedLatencyMs) || averagePredictedLatencyMs <= 0.0 ||
-        scheduleCycleMs < 10 || startCycleMultiplier == 0 || fullCycleMultiplier == 0 ||
-        startCycleMultiplier < 0 || fullCycleMultiplier <= startCycleMultiplier) {
-        return 0.0;
-    }
-    const auto startLatencyMs =
-        static_cast<double>(scheduleCycleMs) * startCycleMultiplier;
-    const auto fullLatencyMs = static_cast<double>(scheduleCycleMs) * fullCycleMultiplier;
-    if (averagePredictedLatencyMs <= startLatencyMs) {
-        return 0.0;
-    }
-    if (averagePredictedLatencyMs >= fullLatencyMs) {
-        return 1.0;
-    }
-    return (averagePredictedLatencyMs - startLatencyMs) /
-           (fullLatencyMs - startLatencyMs);
-}
-
-bool MasterScheduleContextKernel::shouldDropRequest(
-    double dropProbability, uint64_t *sample, const std::function<uint64_t()> &randomDraw)
-{
-    if (sample) {
-        *sample = 0;
-    }
-    if (dropProbability <= 0.0) {
-        return false;
-    }
-    if (dropProbability >= 1.0) {
-        return true;
-    }
-    const auto randomValue = randomDraw ? randomDraw() : _randomGenerator.get();
-    if (sample) {
-        *sample = randomValue;
-    }
-    const auto randomSample =
-        static_cast<double>(randomValue) / std::numeric_limits<uint64_t>::max();
-    return randomSample < dropProbability;
-}
-
-size_t MasterScheduleContextKernel::scheduleRoundRequestCount(
-    const NaviSchedScheduleContext &context)
-{
-    const auto &coldStart = context._coldStartRoutingStats;
-    // All-cold admission already removed rejected requests before routing.
-    const auto rejectedAfterRouting = context._allColdUtilizationAdmission
-                                          ? 0
-                                          : context._queueOverloadRejectedRequestCount;
-    return coldStart.evaluated
-               ? context._requests.size() - coldStart.rejectedRequestCount -
-                     rejectedAfterRouting
-               : context.requestCount();
-}
-
-bool MasterScheduleContextKernel::prepareAdmission(
-    const MasterScheduleContextDataPtr &contextData,
-    const std::function<uint64_t()> &randomDraw)
-{
-    auto &context = *contextData->context;
-    context._contextPrepareUs = 0;
-    if (_schedulerKernelId == CostSchedulerKernel::KERNEL_ID && context.nodeCount() > 0) {
-        const auto beginUs = autil::TimeUtility::monotonicTimeUs();
-        const auto prepared = context.prepare();
-        context._contextPrepareUs = autil::TimeUtility::monotonicTimeUs() - beginUs;
-        if (!prepared) {
-            context.fail("scheduler_error");
-            return false;
-        }
-        const bool allCold = !CostSchedulerColdStartStrategy::hasTrustedNode(context);
-        context._allColdUtilizationAdmission = allCold;
-        if (allCold) {
-            const bool accepted = applyQueueOverloadLimit(contextData, randomDraw, true);
-            // Admission compacts requests before any routing decisions exist.
-            context._decisions.resize(context.requestCount());
-            context._selectedNodeIndexes.resize(context.requestCount());
-            if (!accepted) {
-                return false;
-            }
-        }
-        CostSchedulerColdStartStrategy::Result result;
-        if (!CostSchedulerColdStartStrategy::apply(context, _randomGenerator, result,
-                                                   randomDraw, !allCold)) {
-            context.fail("scheduler_error");
-            return false;
-        }
-        if (allCold) {
-            return true;
-        }
-        if (_useSelectedQueueForAdmission) {
-            updateExecutionUtilization(context, false);
-            context._queueOverloadAfterCost = true;
-            context._queueOverloadScheduleCycleMs = _maxWaitScheduleTimeMs;
-            context._queueOverloadStartCycleMultiplier = _queueOverloadStartCycleMultiplier;
-            context._queueOverloadFullCycleMultiplier = _queueOverloadFullCycleMultiplier;
-            return true;
-        }
-    }
-    return applyQueueOverloadLimit(contextData, randomDraw);
-}
-
-void MasterScheduleContextKernel::updateExecutionUtilization(
-    const NaviSchedScheduleContext &context, bool enabled)
-{
-    long double sum = 0.0;
-    ClusterExecutionUtilization cluster;
-    autil::legacy::json::JsonArray utilizationNodes;
-    _executionUtilizationReportingNodes = 0;
-    // Admission observes all ready nodes, including cold-start routes.
-    for (const auto &node : context._scheduleNodes) {
-        const auto busy = node.getExecutionBusyUtilization();
-        if (node.getWorkloadRevision() > 0) {
-            cluster.add(busy, node.getExecutionRunningRequests(),
-                        node.getExecutionWaitingRequests());
-        }
-        const auto value = node.getExecutionUtilization();
-        if (context._replay) {
-            autil::legacy::json::JsonMap sample;
-            sample["effective"] = value;
-            sample["busy"] = busy;
-            utilizationNodes.emplace_back(std::move(sample));
-        }
-        if (value >= 0.0) {
-            sum += value;
-            ++_executionUtilizationReportingNodes;
-        }
-    }
-    if (context._replay) {
-        context._replay->schedulerInfo["admission_utilization_nodes"] =
-            std::move(utilizationNodes);
-    }
-    _averageExecutionUtilization =
-        _executionUtilizationReportingNodes > 0
-            ? static_cast<double>(sum / _executionUtilizationReportingNodes)
-            : 0.0;
-    _clusterExecutionUtilization = cluster;
-    if (_executionUtilizationConfig.globalScaling) {
-        _averageExecutionUtilization = cluster.effective();
-        _executionUtilizationReportingNodes = cluster.nodes;
-    }
-    if (enabled) {
-        _executionUtilizationController.update(
-            _executionUtilizationConfig, _averageExecutionUtilization,
-            _executionUtilizationReportingNodes, autil::TimeUtility::monotonicTimeUs());
-    } else {
-        _executionUtilizationController.reset();
-    }
-    _masterScheduleR->recordExecutionUtilization(
-        _averageExecutionUtilization, _executionUtilizationController.integral(),
-        _executionUtilizationReportingNodes, enabled,
-        _clusterExecutionUtilization.average(), _clusterExecutionUtilization.running,
-        _clusterExecutionUtilization.waiting, _executionUtilizationConfig.globalScaling);
-}
-
-bool MasterScheduleContextKernel::applyQueueOverloadLimit(
-    const MasterScheduleContextDataPtr &contextData,
-    const std::function<uint64_t()> &randomDraw, bool forceExecutionUtilization)
-{
-    auto &context = *contextData->context;
-    const bool executionUtilizationMode =
-        forceExecutionUtilization || _executionUtilizationLimitEnabled;
-    context._executionUtilizationAdmission = executionUtilizationMode;
-    updateExecutionUtilization(context, executionUtilizationMode);
-    context._queueOverloadRandomDecisions.clear();
-    context._queueOverloadEvaluated = false;
-    context._queueOverloadAveragePredictedLatencyMs = 0.0;
-    context._queueOverloadAdmissionPredictedLatencyMs = 0.0;
-    context._queueOverloadDropProbability = 0.0;
-    context._queueOverloadScheduleCycleMs = _maxWaitScheduleTimeMs;
-    context._queueOverloadStartCycleMultiplier = _queueOverloadStartCycleMultiplier;
-    context._queueOverloadFullCycleMultiplier = _queueOverloadFullCycleMultiplier;
-    const auto routed = context._coldStartRoutingStats.evaluated;
-    context._queueOverloadRequestCount =
-        routed && !context._scheduleViewActive ? 0 : context.requestCount();
-    context._queueOverloadRejectedRequestCount = 0;
-    if (routed && !context._scheduleViewActive) {
-        return true;
-    }
-    if (0 == context.requestCount() || 0 == context.nodeCount()) {
-        return context.requestCount() > 0;
-    }
-    const auto coldStartAnalysis = executionUtilizationMode
-                                       ? CostSchedulerColdStartStrategy::Analysis()
-                                       : CostSchedulerColdStartStrategy::analyze(context);
-    const auto averagePredictedLatencyMs =
-        coldStartAnalysis.trustedBacklogInflight > 0
-            ? static_cast<double>(coldStartAnalysis.trustedBacklogLatencyWeightedSumMs /
-                                  coldStartAnalysis.trustedBacklogInflight)
-            : 0.0;
-    const auto minimumPredictedLatencyMs = coldStartAnalysis.minimumTrustedBacklogLatencyMs;
-    const auto admissionPredictedLatencyMs =
-        _useMinimumBacklogForAdmission && std::isfinite(minimumPredictedLatencyMs)
-            ? minimumPredictedLatencyMs
-            : averagePredictedLatencyMs;
-    auto dropProbability =
-        executionUtilizationMode
-            ? 0.0
-            : calculateQueueOverloadDropProbability(
-                  admissionPredictedLatencyMs, _maxWaitScheduleTimeMs,
-                  _queueOverloadStartCycleMultiplier, _queueOverloadFullCycleMultiplier);
-    if (executionUtilizationMode) {
-        dropProbability = _executionUtilizationController.probability();
-        if (dropProbability < 0.001) dropProbability = 0.0;
-    }
-    context._queueOverloadEvaluated = true;
-    context._queueOverloadAveragePredictedLatencyMs = averagePredictedLatencyMs;
-    context._queueOverloadAdmissionPredictedLatencyMs = admissionPredictedLatencyMs;
-    if (context._replay && _useMinimumBacklogForAdmission && !executionUtilizationMode) {
-        context._replay->schedulerInfo["queue_overload_minimum_latency"] = true;
-    }
-    context._queueOverloadDropProbability = dropProbability;
-    const auto requestCount = context.requestCount();
-    if (dropProbability <= 0.0) {
-        _masterScheduleR->recordQueueOverload(requestCount, 0, averagePredictedLatencyMs,
-                                              dropProbability);
-        return true;
-    }
-
-    std::vector<NaviSchedScheduleItem> acceptedRequests;
-    std::vector<MasterScheduleRequestDataPtr> acceptedResponseRequests;
-    std::vector<size_t> acceptedIndexes;
-    if (routed) {
-        acceptedIndexes.reserve(requestCount);
-    } else {
-        acceptedRequests.reserve(requestCount);
-        acceptedResponseRequests.reserve(requestCount);
-    }
-    size_t rejectedRequestCount = 0;
-    for (size_t requestIndex = 0; requestIndex < requestCount; ++requestIndex) {
-        const auto storageIndex = context.resolveRequestIndex(requestIndex);
-        auto &request = context._requests[storageIndex];
-        auto &responseRequest = context._responseRequests[storageIndex];
-        uint64_t randomSample = 0;
-        const auto dropped =
-            shouldDropRequest(dropProbability, &randomSample, randomDraw);
-        if (context.isCollectingReplay() && dropProbability > 0.0 &&
-            dropProbability < 1.0) {
-            context._queueOverloadRandomDecisions.push_back(
-                {storageIndex, randomSample, dropProbability, !dropped});
-        }
-        if (!dropped) {
-            if (routed) {
-                acceptedIndexes.emplace_back(storageIndex);
-            } else {
-                acceptedRequests.emplace_back(std::move(request));
-                acceptedResponseRequests.emplace_back(std::move(responseRequest));
-            }
-            continue;
-        }
-        ++rejectedRequestCount;
-        if (routed) {
-            if (!context.reject(requestIndex, "rate_limited")) {
-                context.fail("scheduler_error");
-                return false;
-            }
-            context._decisions[storageIndex].predictedQueueLatencyMs =
-                admissionPredictedLatencyMs;
-            continue;
-        }
-        NaviSchedScheduleContext::DeferredResponse deferred;
-        deferred.request = std::move(responseRequest);
-        deferred.decision.requestId = request.request.requestId;
-        deferred.decision.scheduleId = context._scheduleId;
-        deferred.decision.scheduleTimeUs = context._scheduleTimeUs;
-        deferred.decision.reason = "rate_limited";
-        deferred.decision.predictedQueueLatencyMs = admissionPredictedLatencyMs;
-        context._deferredResponses.emplace_back(std::move(deferred));
-    }
-    if (routed) {
-        // Preserve cold-start selections and original response ownership. Only
-        // shrink the trusted view consumed by Cost, including an empty remainder.
-        auto nodeIndexes = context._scheduleViewNodeIndexes;
-        context.clearScheduleView();
-        if (!acceptedIndexes.empty() &&
-            !context.activateScheduleView(acceptedIndexes, nodeIndexes)) {
-            context.fail("scheduler_error");
-            return false;
-        }
-    } else {
-        context._requests.swap(acceptedRequests);
-        context._responseRequests.swap(acceptedResponseRequests);
-    }
-    _masterScheduleR->recordQueueOverload(requestCount, rejectedRequestCount,
-                                          averagePredictedLatencyMs, dropProbability);
-    context._queueOverloadRejectedRequestCount = rejectedRequestCount;
-    NAVI_KERNEL_LOG(DEBUG,
-                    "overload limit evaluated, executionUtilizationMode [%d], "
-                    "averagePredictedLatencyMs [%.3f], admissionPredictedLatencyMs [%.3f], dropProbability [%.6f], "
-                    "requests [%lu], rejected [%lu]",
-                    static_cast<int>(executionUtilizationMode), averagePredictedLatencyMs,
-                    admissionPredictedLatencyMs, dropProbability, requestCount, rejectedRequestCount);
-    return routed || !context._requests.empty();
 }
 
 bool MasterScheduleContextKernel::activate(navi::KernelComputeContext &ctx)
@@ -747,29 +374,43 @@ MasterScheduleResultKernel::getAdmissionPredictionAudit(
     }
     const auto nodeIndex = context._selectedNodeIndexes[requestIndex];
     const auto &decision = context._decisions[requestIndex];
-    if (nodeIndex >= context._scheduleNodes.size() || !decision.latencyPrediction) {
+    if (nodeIndex >= context._scheduleNodes.size()) {
         return audit;
     }
     const auto &node = context._scheduleNodes[nodeIndex];
-    const auto &prediction = *decision.latencyPrediction;
-    const auto &parameters = node.getLatencyParameters();
-    if (!prediction.valid() || !NonLinearPrefillModelR::validateParameters(parameters)) {
-        return audit;
-    }
+    if (NonLinearPrefillModelR::usesNativePP4ForVersion(node.getLatencyBinaryVersion())) {
+        audit.nativePrediction = std::atomic_load(&node._nativeFinalPrediction);
+        if (!audit.nativePrediction ||
+            audit.nativePrediction->predictionTimeUs != context._queuePredictionTimeUs) {
+            return audit;
+        }
+        audit.withWorkloadBaseMs = audit.nativePrediction->baseExecutionMs;
+        audit.withWorkloadFinalMs = audit.nativePrediction->finalExecutionMs;
+        audit.baseExecutionMs = audit.withWorkloadBaseMs;
+        audit.finalExecutionMs = audit.withWorkloadFinalMs;
+    } else {
+        if (!decision.latencyPrediction) return audit;
+        const auto &prediction = *decision.latencyPrediction;
+        const auto &parameters = node.getLatencyParameters();
+        if (!prediction.valid() ||
+            !NonLinearPrefillModelR::validateParameters(parameters)) {
+            return audit;
+        }
 
-    audit.withWorkloadBaseMs = node.predictBaseLatency(prediction.features);
-    audit.withWorkloadFinalMs = node.applyLatencyResidual(audit.withWorkloadBaseMs);
-    audit.baseExecutionMs = audit.withWorkloadBaseMs;
-    audit.finalExecutionMs = audit.withWorkloadFinalMs;
-    if (node.usesUnifiedLatencyPrediction() && prediction.hasFloor) {
-        audit.floorBaseMs = node.predictBaseLatency(prediction.floorFeatures);
-        audit.floorFinalMs = node.applyLatencyResidual(audit.floorBaseMs);
-        const auto executionFixedLatencyMs =
-            prediction.fixedLatencyMs - decision.predictedQueueLatencyMs;
-        audit.baseExecutionMs = std::max(
-            audit.withWorkloadBaseMs + executionFixedLatencyMs, audit.floorBaseMs);
-        audit.finalExecutionMs = std::max(
-            audit.withWorkloadFinalMs + executionFixedLatencyMs, audit.floorFinalMs);
+        audit.withWorkloadBaseMs = node.predictBaseLatency(prediction.features);
+        audit.withWorkloadFinalMs = node.applyLatencyResidual(audit.withWorkloadBaseMs);
+        audit.baseExecutionMs = audit.withWorkloadBaseMs;
+        audit.finalExecutionMs = audit.withWorkloadFinalMs;
+        if (node.usesUnifiedLatencyPrediction() && prediction.hasFloor) {
+            audit.floorBaseMs = node.predictBaseLatency(prediction.floorFeatures);
+            audit.floorFinalMs = node.applyLatencyResidual(audit.floorBaseMs);
+            const auto executionFixedLatencyMs =
+                prediction.fixedLatencyMs - decision.predictedQueueLatencyMs;
+            audit.baseExecutionMs = std::max(
+                audit.withWorkloadBaseMs + executionFixedLatencyMs, audit.floorBaseMs);
+            audit.finalExecutionMs = std::max(
+                audit.withWorkloadFinalMs + executionFixedLatencyMs, audit.floorFinalMs);
+        }
     }
     audit.correctionMs = audit.finalExecutionMs - audit.baseExecutionMs;
     audit.valid = std::isfinite(audit.baseExecutionMs) &&
@@ -791,7 +432,18 @@ MasterScheduleResultKernel::getAdmissionPredictionAudit(
                         inputs->observation.fullPrefixBlocksBeforeQueryDrop;
                     audit.frozenExecutionInputs.push_back(
                         {context._decisions[member].requestId, inputs->inputs[storage],
-                         storage < prefixes.size() ? prefixes[storage] : -1});
+                         storage < prefixes.size() ? prefixes[storage] : -1,
+                         inputs->observation.beforeTairBlockCounts &&
+                                 storage < inputs->observation.beforeTairBlockCounts->size()
+                             ? inputs->observation.beforeTairBlockCounts->at(storage) *
+                                   context._requests[member].request.blockSize
+                             : inputs->inputs[storage].computedTokens,
+                         inputs->observation.readyOnlyHbmBlockCounts &&
+                                 storage < inputs->observation.readyOnlyHbmBlockCounts->size() &&
+                                 inputs->observation.readyOnlyHbmBlockCounts->at(storage) >= 0
+                             ? inputs->observation.readyOnlyHbmBlockCounts->at(storage) *
+                                   context._requests[storage].request.blockSize
+                             : -1});
                 }
             }
         }
@@ -811,7 +463,7 @@ void MasterScheduleResultKernel::logAdmissionPredictions(
             continue;
         }
         const auto nodeIndex = context._selectedNodeIndexes[requestIndex];
-        if (nodeIndex >= context._scheduleNodes.size() || !decision.latencyPrediction) {
+        if (nodeIndex >= context._scheduleNodes.size()) {
             continue;
         }
         const auto audit = getAdmissionPredictionAudit(context, requestIndex, true);
@@ -839,7 +491,9 @@ void MasterScheduleResultKernel::logAdmissionPredictions(
                 "block_pool_cached_blocks=%lu block_pool_full_ready_blocks=%lu "
                 "block_pool_tail_ready_blocks=%lu block_pool_cached_checksum=%lu "
                 "block_pool_full_ready_checksum=%lu block_pool_tail_ready_checksum=%lu "
-                "full_prefix_before_query_drop_blocks=%ld",
+                "full_prefix_before_query_drop_blocks=%ld "
+                "tair_query_status=%s before_tair_hit_tokens=%ld after_tair_hit_tokens=%ld "
+                "ready_only_hbm_hit_tokens=%ld",
                 admissionPhase, context.getScheduleTimeUs(), decision.scheduleId, decision.batchId,
                 entry.requestId, node.getAgentId().c_str(),
                 node.getLatencyModelRevision(), input.promptTokens, input.computedTokens,
@@ -848,7 +502,10 @@ void MasterScheduleResultKernel::logAdmissionPredictions(
                 int(observation.stateReady), observation.cachedBlocks,
                 observation.fullReadyBlocks, observation.tailReadyBlocks,
                 observation.cachedChecksum, observation.fullReadyChecksum,
-                observation.tailReadyChecksum, entry.fullPrefixBlocksBeforeQueryDrop);
+                observation.tailReadyChecksum, entry.fullPrefixBlocksBeforeQueryDrop,
+                nodeIndex < context._tairKvcmQueryStatuses.size()
+                    ? context._tairKvcmQueryStatuses[nodeIndex].c_str() : "NOT_CONFIGURED",
+                entry.beforeTairTokens, input.computedTokens, entry.readyOnlyHbmTokens);
         }
         const auto localCache = std::atomic_load(&node._localCacheBlockCounts);
         const auto localHitTokens =
@@ -857,6 +514,32 @@ void MasterScheduleResultKernel::logAdmissionPredictions(
                        : decision.predictedCacheHitTokenCount;
         const auto peerExtraTokens =
             std::max<int64_t>(0, decision.predictedCacheHitTokenCount - localHitTokens);
+        if (audit.nativePrediction) {
+            const auto &native = *audit.nativePrediction;
+            NAVI_KERNEL_LOG(
+                INFO,
+                "[navi-master-native-admission-prediction] admission_phase=%s "
+                "schedule_time_us=%ld queue_prediction_time_us=%ld schedule_id=%lu "
+                "schedule_batch_id=%ld request_id=%lu agent=%s model_binary_version=%d "
+                "model_revision=%ld base_execution_ms=%.9f residual_correction_ms=%.9f "
+                "final_execution_ms=%.9f decision_execution_ms=%.9f "
+                "queue_prediction_ms=%.9f "
+                "observation_now_ms=%.9f incoming_delay_ms=%.9f request_count=%lu "
+                "result_count=%lu slot_count=%lu max_running_requests=%ld "
+                "max_transitions=%lu local_hit_tokens=%ld peer_extra_hit_tokens=%ld "
+                "total_hit_tokens=%ld",
+                admissionPhase, context.getScheduleTimeUs(), native.predictionTimeUs,
+                decision.scheduleId, decision.batchId, decision.requestId,
+                node.getAgentId().c_str(), node.getLatencyBinaryVersion(),
+                node.getLatencyModelRevision(), audit.baseExecutionMs, audit.correctionMs,
+                audit.finalExecutionMs, decision.predictedExecutionLatencyMs,
+                decision.predictedQueueLatencyMs, native.input.state.nowMs,
+                native.arrivalDelayMs, native.input.requests.size(),
+                native.input.state.results.size(), native.input.state.slots.size(),
+                native.input.state.maxRunningRequestCount, native.maxTransitions,
+                localHitTokens, peerExtraTokens, decision.predictedCacheHitTokenCount);
+            continue;
+        }
         const auto &prediction = *decision.latencyPrediction;
         const auto &features = prediction.features;
         const auto &floor = prediction.floorFeatures;
@@ -1279,7 +962,7 @@ void MasterScheduleResultKernel::applySelectedQueueAdmission(
         const auto queueMs = decision.predictedQueueLatencyMs;
         auto &admission = admissionByNode[nodeIndex];
         if (!admission) {
-            const auto probability = MasterScheduleContextKernel::calculateQueueOverloadDropProbability(
+            const auto probability = MasterSchedulePrepareKernel::calculateQueueOverloadDropProbability(
                 queueMs, context._queueOverloadScheduleCycleMs,
                 context._queueOverloadStartCycleMultiplier, context._queueOverloadFullCycleMultiplier);
             uint64_t sample = 0;
@@ -1451,6 +1134,78 @@ void MasterScheduleResultKernel::recordReplayAdmission(NaviSchedScheduleContext 
             runtime["residual_update_error_ratio"] = residualConfig.updateErrorRatio;
             runtime["residual_idle_decay_start_us"] = residualConfig.idleDecayStartUs;
             runtime["residual_idle_decay_end_us"] = residualConfig.idleDecayEndUs;
+            if (NonLinearPrefillModelR::usesNativePP4ForVersion(
+                    node.getLatencyBinaryVersion())) {
+                autil::legacy::json::JsonArray requests;
+                for (const auto &entry : node.getNativePrefillReservations()) {
+                    const auto &r = entry.request;
+                    requests.emplace_back(autil::legacy::json::JsonMap{
+                        {"request_id", r.requestId},
+                        {"total_token_count", r.totalTokenCount},
+                        {"block_size", r.blockSize},
+                        {"cache_hit_token_count", r.predictedCacheHitTokenCount},
+                        {"predicted_latency_ms", r.predictedLatencyMs},
+                        {"explicit_cache_checkpoint_position",
+                         r.explicitCacheCheckpointPosition},
+                        {"native_prefill_slot_release",
+                         int32_t(r.nativePrefillSlotRelease)},
+                        {"has_block_hashes", bool(r.blockHashes)},
+                        {"block_hashes",
+                         autil::legacy::ToJson(r.blockHashes ? *r.blockHashes
+                                                             : NaviSchedBlockHashes())},
+                        {"state", int32_t(entry.state)}});
+                }
+                runtime["native_prefill_requests"] = std::move(requests);
+                const auto cache = nodeIndex < context._replayNativeCacheInputs.size()
+                                       ? context._replayNativeCacheInputs[nodeIndex]
+                                       : nullptr;
+                runtime["native_cache_inputs_present"] = bool(cache);
+                if (cache) {
+                    autil::legacy::json::JsonArray inputs;
+                    for (size_t i = 0; i < cache->inputs.size(); ++i) {
+                        const auto &r = cache->inputs[i];
+                        inputs.emplace_back(autil::legacy::json::JsonMap{
+                            {"request_id",
+                             context._replay->requests[i].request.requestId},
+                            {"prompt_tokens", r.promptTokens},
+                            {"computed_tokens", r.computedTokens},
+                            {"shared_prefix_boundary", r.sharedPrefixBoundary},
+                            {"external_read_tokens", r.externalReadTokens},
+                            {"prefill_end_tokens", r.prefillEndTokens},
+                            {"num_tokens", r.numTokens}});
+                    }
+                    runtime["native_cache_inputs"] = std::move(inputs);
+                    runtime["native_full_prefix_blocks_before_query_drop"] =
+                        autil::legacy::ToJson(
+                            cache->observation.fullPrefixBlocksBeforeQueryDrop);
+                    runtime["native_ready_hbm_counts_present"] =
+                        bool(cache->observation.readyOnlyHbmBlockCounts);
+                    if (cache->observation.readyOnlyHbmBlockCounts)
+                        runtime["native_ready_hbm_block_counts"] = autil::legacy::ToJson(
+                            *cache->observation.readyOnlyHbmBlockCounts);
+                    runtime["native_cache_pool_present"] = bool(cache->observation.pool);
+                    if (cache->observation.pool) {
+                        const auto &p = *cache->observation.pool;
+                        runtime["native_cache_pool"] = autil::legacy::json::JsonMap{
+                            {"revision", p.revision},
+                            {"state_ready", p.stateReady},
+                            {"cached_blocks", p.cachedBlocks},
+                            {"full_ready_blocks", p.fullReadyBlocks},
+                            {"tail_ready_blocks", p.tailReadyBlocks},
+                            {"cached_checksum", p.cachedChecksum},
+                            {"full_ready_checksum", p.fullReadyChecksum},
+                            {"tail_ready_checksum", p.tailReadyChecksum}};
+                    }
+                    const auto local =
+                        nodeIndex < context._replayNativeLocalCacheCounts.size()
+                            ? context._replayNativeLocalCacheCounts[nodeIndex]
+                            : nullptr;
+                    runtime["native_local_cache_counts_present"] = bool(local);
+                    if (local)
+                        runtime["native_local_cache_counts"] =
+                            autil::legacy::ToJson(*local);
+                }
+            }
             nodeRuntime.emplace_back(std::move(runtime));
         }
         schedulerInfo["replay_node_runtime"] = std::move(nodeRuntime);

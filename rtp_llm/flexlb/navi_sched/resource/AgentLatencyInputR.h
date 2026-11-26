@@ -21,6 +21,7 @@ enum class AgentLatencyInputType {
     BATCH_REQUESTS_ABORTED,
     OBSERVED_BATCH_FINISHED,
     OBSERVED_EXECUTION_SAMPLE,
+    NATIVE_PP4_TIMING_SAMPLE,
     EXECUTION_LOAD,
 };
 
@@ -66,6 +67,7 @@ struct AgentLatencyInput {
     int64_t projectedExecutionStepCount = 0;
     int64_t projectedGlobalPaddedTokens = 0;
     int32_t geometryFeatureOriginVersion = 0;
+    std::shared_ptr<const TPUPrefillPP4TimingObservation> nativePP4Timing;
 };
 
 class AgentLatencyInputR : public navi::ExternalResource {
@@ -159,6 +161,8 @@ public:
     }
     bool shouldTrainInput(AgentLatencyInputType type) const
     {
+        if (_nativePP4TimingTraining.load(std::memory_order_acquire))
+            return type == AgentLatencyInputType::NATIVE_PP4_TIMING_SAMPLE;
         const bool physical = type == AgentLatencyInputType::OBSERVED_EXECUTION_SAMPLE;
         const bool windowTraining =
             _observedExecutionWindowTraining.load(std::memory_order_acquire);
@@ -170,6 +174,13 @@ public:
     bool submitObservedExecutionSample(const std::vector<NaviSchedRequestStats> &requests,
                                        double latencyMs, int64_t executionStepCount,
                                        int64_t globalPaddedTokens, int64_t eventTimeUs);
+    void enableNativePP4TimingTraining()
+    {
+        _nativePP4TimingTraining.store(true, std::memory_order_release);
+    }
+    bool submitNativePP4TimingSample(
+        std::shared_ptr<const TPUPrefillPP4TimingObservation> observation,
+        double latencyMs, int64_t eventTimeUs);
     bool submitObservedBatchFinished(const std::vector<NaviSchedRequestStats> &requests,
                                      double latencyMs, int32_t inflightRequests,
                                      int64_t eventTimeUs);
@@ -218,6 +229,7 @@ private:
     bool _finishRequested = false;
     std::atomic<uint64_t> _inputPipeGeneration{0};
     std::atomic<bool> _observedExecutionWindowTraining{false};
+    std::atomic<bool> _nativePP4TimingTraining{false};
     std::atomic<uint64_t> _submittedInputCount{0};
     std::atomic<uint64_t> _rejectedInputCount{0};
     std::atomic<uint64_t> _processedInputCount{0};

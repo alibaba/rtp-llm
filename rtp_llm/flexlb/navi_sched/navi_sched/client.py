@@ -64,6 +64,7 @@ class NaviSchedClient(RoleFacade):
         master_address: str = "",
         route_only: bool = False,
         explicit_cache_checkpoint_position: int = 0,
+        native_prefill_slot_release: int = 0,
     ) -> NaviSchedDecision:
         native_request, effective_master_biz_name = self._make_native_request(
             request,
@@ -76,6 +77,7 @@ class NaviSchedClient(RoleFacade):
             forward_payload,
             route_only,
             explicit_cache_checkpoint_position,
+            native_prefill_slot_release,
         )
         arguments = (native_request, effective_master_biz_name, bool(collect_replay))
         if master_address:
@@ -95,6 +97,7 @@ class NaviSchedClient(RoleFacade):
         forward_payload=b"",
         route_only=False,
         explicit_cache_checkpoint_position=0,
+        native_prefill_slot_release=0,
     ):
         effective_master_biz_name = str(master_biz_name) or self._master_biz_name
         if not target_biz_name:
@@ -109,6 +112,7 @@ class NaviSchedClient(RoleFacade):
                 block_size=block_size,
                 forward_payload=forward_payload,
                 explicit_cache_checkpoint_position=explicit_cache_checkpoint_position,
+                native_prefill_slot_release=native_prefill_slot_release,
             )
         elif not 0 < int(request.request_id) < (1 << 64):
             raise ValueError("request.request_id must be a nonzero uint64")
@@ -128,6 +132,10 @@ class NaviSchedClient(RoleFacade):
             raise ValueError(
                 "explicit cache checkpoint position must be within the prompt"
             )
+        if type(
+            request.native_prefill_slot_release
+        ) is not int or request.native_prefill_slot_release not in (0, 1, 2):
+            raise ValueError("invalid Native prefill slot release")
         native_request = _navi_sched.NaviSchedScheduleRequest()
         native_request.request_id = int(request.request_id)
         native_request.biz_name = str(target_biz_name)
@@ -140,6 +148,7 @@ class NaviSchedClient(RoleFacade):
         native_request.timeout_ms = int(timeout_ms)
         native_request.forward_payload = request.forward_payload
         native_request.route_only = bool(route_only)
+        native_request.native_prefill_slot_release = request.native_prefill_slot_release
         return native_request, effective_master_biz_name
 
     def submit_schedule(self, request, target_biz_name, timeout_ms=1000):
@@ -157,10 +166,20 @@ class NaviSchedClient(RoleFacade):
     def notification_fd(self):
         return int(self._service.notification_fd())
 
-    def schedule_flexlb(self, request_id: int, address: str, payload: bytes, timeout_ms: int,
-                        metadata=()):
+    def schedule_flexlb(
+        self,
+        request_id: int,
+        address: str,
+        payload: bytes,
+        timeout_ms: int,
+        metadata=(),
+    ):
         status, response, details = self._service.schedule_flexlb(
-            int(request_id), str(address), bytes(payload), int(timeout_ms), list(metadata)
+            int(request_id),
+            str(address),
+            bytes(payload),
+            int(timeout_ms),
+            list(metadata),
         )
         if status:
             raise FlexlbScheduleRpcError(status, details)

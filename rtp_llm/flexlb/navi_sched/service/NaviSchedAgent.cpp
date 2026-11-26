@@ -369,7 +369,8 @@ struct NaviSchedBatchFinishReporter::State {
     bool finish(const std::vector<NaviSchedRequestStats> &requests,
                 const AgentBatchR::BackendBatchExecutionSample *backendExecutionSample,
                 const NaviSchedLatencyFeatures *precedingFeatures = nullptr,
-                double unifiedLatencyMs = -1.0, double nativePreparationMs = 0.0)
+                double unifiedLatencyMs = -1.0, double nativePreparationMs = 0.0,
+                bool completedFeaturesValid = true)
     {
         std::lock_guard<std::mutex> publicationLock(publicationMutex);
         auto batchR = agentBatchR.lock();
@@ -459,6 +460,10 @@ struct NaviSchedBatchFinishReporter::State {
         const bool hasProjectedGeometry =
             backendExecutionSample &&
             backendExecutionSample->projectedExecutionStepCount > 0;
+        // Missing measured execution facts invalidate only the learning sample.
+        // Cache publication, inflight removal and completion above still run.
+        executionState.latencySampleValid &= completedFeaturesValid;
+        executionState.latencyValidationValid &= completedFeaturesValid;
         const bool latencySubmitted =
             hasProjectedGeometry
                 ? latencyInputR->submitBatchFinishedWithProjectedExecutionGeometry(
@@ -778,7 +783,8 @@ bool NaviSchedBatchFinishReporter::finishBatch(
     int64_t decodeRequestStepCount, int64_t decodeTokenCount,
     double admissionToFirstExecutionMs, double nativePreparationMs,
     int64_t executionFinishTimeUs,
-    const NaviSchedLatencyFeatures *completedCapacityFeatures)
+    const NaviSchedLatencyFeatures *completedCapacityFeatures,
+    bool completedFeaturesValid)
 {
     if (completedCapacityFeatures && !completedCapacityFeatures->usesCapacitySplit()) {
         return false;
@@ -802,7 +808,8 @@ bool NaviSchedBatchFinishReporter::finishBatch(
             static_cast<int64_t>(admissionToFirstExecutionMs * 1000.0);
     }
     return _state &&
-           _state->finish(requests, &sample, completedCapacityFeatures, -1.0, nativePreparationMs);
+           _state->finish(requests, &sample, completedCapacityFeatures, -1.0,
+                          nativePreparationMs, completedFeaturesValid);
 }
 
 bool NaviSchedBatchFinishReporter::finishBatch(
@@ -972,6 +979,7 @@ NaviSchedAgentImpl::NaviSchedAgentImpl(const NaviSchedAgentConfig &agentConfig,
     , _pdSeparated(agentConfig.pdSeparated)
     , _pdUnifiedCapacitySplit(agentConfig.pdUnifiedCapacitySplit)
     , _unifiedLatencyPrediction(agentConfig.unifiedLatencyPrediction)
+    , _nativePrefillObservationOnly(agentConfig.nativePrefillObservationOnly)
     , _executionGeometryEnabled(agentConfig.executionGeometryEnabled)
     , _executionCacheSourceEnabled(agentConfig.executionCacheSourceEnabled)
     , _projectedExecutionGeometryEnabled(agentConfig.projectedExecutionGeometryEnabled)
@@ -989,6 +997,8 @@ NaviSchedAgentImpl::NaviSchedAgentImpl(const NaviSchedAgentConfig &agentConfig,
         agentConfig.projectedExecutionGeometryEnabled;
     control.prefillExecutionPolicy = agentConfig.prefillExecutionPolicy;
     control.peerCacheEnabled = agentConfig.peerCacheEnabled;
+    control.tairKvcmConfig = agentConfig.tairKvcmConfig;
+    control.nativePrefillPipelineStages = agentConfig.nativePrefillPipelineStages;
     _agentReportBridgeR->setControlConfig(control);
 }
 
@@ -1009,6 +1019,15 @@ bool NaviSchedAgentImpl::applyConfig(const std::string &configStr)
 
 bool NaviSchedAgentImpl::init()
 {
+    const auto nativeStages =
+        _agentReportBridgeR->getControlConfig().nativePrefillPipelineStages;
+    if (_nativePrefillObservationOnly && nativeStages != 4) return false;
+    if (nativeStages != 0 &&
+        (nativeStages != 4 || !_pdSeparated || !_unifiedLatencyPrediction ||
+         !_pdUnifiedCapacitySplit || _executionGeometryEnabled ||
+         !TPUPrefillExecutionPolicy::validate(
+             _agentReportBridgeR->getControlConfig().prefillExecutionPolicy)))
+        return false;
     if ((_executionGeometryEnabled &&
          (!_pdSeparated || _unifiedLatencyPrediction ||
           !TPUPrefillExecutionPolicy::validate(
@@ -1082,6 +1101,9 @@ bool NaviSchedAgentImpl::init()
         autil::legacy::ToJsonString(reportConfig, true);
     autil::legacy::json::JsonMap nonLinearPrefillModelConfig;
     nonLinearPrefillModelConfig["learning_rate"] = getConfig().latencyLearningRate;
+    const auto timingStages = _nativePrefillObservationOnly ? 0 : nativeStages;
+    nonLinearPrefillModelConfig["native_prefill_pipeline_stages"] = timingStages;
+    if (timingStages == 4) _agentLatencyInputR->enableNativePP4TimingTraining();
     nonLinearPrefillModelConfig["check_gradient"] = getConfig().latencyCheckGradient;
     nonLinearPrefillModelConfig["zero_anchor_max_ms"] =
         getConfig().latencyZeroAnchorMaxMs;
@@ -1380,12 +1402,13 @@ bool NaviSchedAgentImpl::submitForwardRequest(const NaviSchedForwardRequest &req
                   "schedule_batch_id=%ld event_time_us=%ld submit_begin_us=%ld "
                   "response_register_us=%ld request_clone_us=%ld state_lock_wait_us=%ld "
                   "state_copy_us=%ld "
-                  "registered=%d",
+                  "registered=%d execution_load_included=%d",
                   request.request.requestId, request.decision.batchId, nowTimeUs,
                   arrivalTimeUs, responseRegisteredTimeUs - arrivalTimeUs,
                   lockBeginTimeUs - responseRegisteredTimeUs,
                   lockAcquiredTimeUs - lockBeginTimeUs, nowTimeUs - lockAcquiredTimeUs,
-                  registered);
+                  registered, request.decision.executionLoadIncluded
+                      ? (*request.decision.executionLoadIncluded ? 1 : 0) : -1);
     }
     if (!registered) {
         _agentResponseR->fail(request.request.requestId,
@@ -1399,6 +1422,7 @@ bool NaviSchedAgentImpl::submitForwardRequest(const NaviSchedForwardRequest &req
     batchRequest.totalTokenCount = request.request.promptTokenCount;
     batchRequest.blockSize = request.request.blockSize;
     batchRequest.blockHashes = request.request.blockHashes;
+    batchRequest.executionLoadIncluded = request.decision.executionLoadIncluded;
     batchRequest.predictedCacheHitTokenCount =
         request.decision.predictedCacheHitTokenCount;
     batchRequest.predictedQueueLatencyMs = request.decision.predictedQueueLatencyMs;
@@ -1538,6 +1562,7 @@ void NaviSchedAgentImpl::handleForwardBatch(const NaviSchedBatchPtr &batch)
             value.callbackDispatchTimeUs = batch->callbackDispatchTimeUs;
             value.readyAcceptedCallbackTimeUs = batch->readyAcceptedCallbackTimeUs;
             value.forwardHandlerStartTimeUs = forwardHandlerStartTimeUs;
+            value.executionLoadIncluded = request.decision.executionLoadIncluded;
             value.predictedCacheHitTokenCount =
                 request.decision.predictedCacheHitTokenCount;
             value.predictedQueueLatencyMs = request.decision.predictedQueueLatencyMs;
@@ -1666,6 +1691,16 @@ bool NaviSchedAgentImpl::enableObservedExecutionWindowTraining() const
     return true;
 }
 
+bool NaviSchedAgentImpl::recordNativePP4TimingSample(
+    std::shared_ptr<const TPUPrefillPP4TimingObservation> observation, double latencyMs,
+    int64_t eventTimeUs) const
+{
+    return _agentLatencyInputR && !_nativePrefillObservationOnly &&
+           _agentReportBridgeR->getControlConfig().nativePrefillPipelineStages == 4 &&
+           _agentLatencyInputR->submitNativePP4TimingSample(std::move(observation),
+                                                            latencyMs, eventTimeUs);
+}
+
 bool NaviSchedAgentImpl::recordObservedExecutionSample(
     const std::vector<NaviSchedRequestStats> &requests, double latencyMs,
     int64_t executionStepCount, int64_t globalPaddedTokens, int64_t eventTimeUs) const
@@ -1759,13 +1794,15 @@ bool NaviSchedAgentImpl::endObservedBackendExecution(int64_t eventTimeUs) const
 
 bool NaviSchedAgentImpl::reportObservedExecutionStep(double elapsedMs,
                                                      int64_t prefillTokens,
-                                                     int64_t decodeTokens) const
+                                                     int64_t decodeTokens, int64_t firstStartOvertakeCount) const
 {
     if (!_agentBatchR || !std::isfinite(elapsedMs) || elapsedMs < 0.0 ||
         elapsedMs > std::numeric_limits<int64_t>::max() / 1000.0 || prefillTokens < 0 ||
-        decodeTokens < 0) {
+        decodeTokens < 0 || firstStartOvertakeCount < 0) {
         return false;
     }
+    _firstStartOvertakeCount.fetch_add(static_cast<uint64_t>(firstStartOvertakeCount),
+                                      std::memory_order_relaxed);
     _agentBatchR->recordBackendExecutionStep(
         {static_cast<int64_t>(std::llround(elapsedMs * 1000.0)),
          prefillTokens == 0 && decodeTokens > 0});
@@ -2190,6 +2227,10 @@ void NaviSchedAgentImpl::reportMetrics() const
             reportSampleMetric(prefix + "_qps", 0.0);
         }
     }
+    if (reportCounterQpsMetric("agent.request_start_overtake_qps",
+                              _firstStartOvertakeCount.load(std::memory_order_relaxed)) == 0) {
+        reportSampleMetric("agent.request_start_overtake_qps", 0.0);
+    }
     reportMetric("agent.pd_separated", _pdSeparated ? 1 : 0);
     reportMetric("agent.collector_count",
                  _agentReportR ? _agentReportR->getSubscriberCount() : 0);
@@ -2552,6 +2593,17 @@ void NaviSchedAgentImpl::reportMetrics() const
                      reportStats.suppressedLatencyValidationBatchCount);
         reportCounterQpsMetric("agent.workload_update_qps",
                                reportStats.publishedWorkloadUpdateCount);
+        const auto kvLoadStats = _agentReportR->takeKVLoadLatencyWindowStats();
+        reportMetric("agent.kv_load_tracked_request_count",
+                     _agentReportR->getActiveKVPreparationCount());
+        reportSampleMetric("agent.kv_load_completed_count", kvLoadStats.readyCount);
+        reportSampleMetric("agent.kv_load_failed_count", kvLoadStats.failedCount);
+        if (kvLoadStats.readyCount > 0) {
+            reportSampleMetric("agent.kv_load_ready_latency_mean_ms",
+                double(kvLoadStats.totalPreparationNs / kvLoadStats.readyCount / 1e6L));
+            reportSampleMetric("agent.kv_load_ready_latency_max_ms",
+                kvLoadStats.maxPreparationNs / 1e6);
+        }
         const auto workload = _agentReportR->getWorkloadSnapshot();
         const auto workloadPublishStats = _agentReportR->takeWorkloadPublishWindowStats();
         if (workloadPublishStats.sampleCount > 0) {
@@ -2816,6 +2868,36 @@ const std::shared_ptr<navi::Navi> &NaviSchedAgentImpl::getRuntimeNavi() const
 
 const std::string &NaviSchedAgentImpl::getRuntimeBizName() const { return _agentBizName; }
 
+std::optional<std::pair<uint64_t, uint64_t>> NaviSchedAgentImpl::beginKVPreparation(
+    uint64_t requestId, int64_t preparingStartMonoNs) const
+{
+    if (!_agentReportR) return std::nullopt;
+    const auto load = _agentReportR->beginKVPreparation(requestId, preparingStartMonoNs);
+    if (!load) return std::nullopt;
+    return std::make_pair(load->key.agentSession, load->key.generation);
+}
+bool NaviSchedAgentImpl::completeKVPreparation(
+    uint64_t session, uint64_t requestId, uint64_t generation,
+    bool success, int64_t observedMonoNs) const
+{
+    if (!_agentReportR) return false;
+    const auto result = _agentReportR->completeKVPreparation(
+        {session, requestId, generation}, success, observedMonoNs);
+    using Update = AgentKVLoadTracker::Update;
+    return result.update != Update::INVALID && result.update != Update::STALE &&
+           result.update != Update::CONFLICT;
+}
+bool NaviSchedAgentImpl::cancelKVPreparation(
+    uint64_t session, uint64_t requestId, uint64_t generation) const
+{
+    return _agentReportR && _agentReportR->cancelKVPreparation({session, requestId, generation});
+}
+bool NaviSchedAgentImpl::retireKVPreparation(
+    uint64_t session, uint64_t requestId, uint64_t generation) const
+{
+    return _agentReportR && _agentReportR->retireKVPreparation({session, requestId, generation});
+}
+
 int32_t NaviSchedAgentImpl::getGrpcPort() const { return NaviSchedRole::getGrpcPort(); }
 
 NaviSchedAgent::NaviSchedAgent(const NaviSchedAgentConfig &agentConfig,
@@ -2887,6 +2969,14 @@ bool NaviSchedAgent::enableObservedExecutionWindowTraining() const
     return _impl && _impl->enableObservedExecutionWindowTraining();
 }
 
+bool NaviSchedAgent::recordNativePP4TimingSample(
+    std::shared_ptr<const TPUPrefillPP4TimingObservation> observation, double latencyMs,
+    int64_t eventTimeUs) const
+{
+    return _impl && _impl->recordNativePP4TimingSample(std::move(observation), latencyMs,
+                                                       eventTimeUs);
+}
+
 bool NaviSchedAgent::recordObservedExecutionSample(
     const std::vector<NaviSchedRequestStats> &requests, double latencyMs,
     int64_t executionStepCount, int64_t globalPaddedTokens, int64_t eventTimeUs) const
@@ -2956,10 +3046,10 @@ bool NaviSchedAgent::endObservedBackendExecution(int64_t eventTimeUs) const
 }
 
 bool NaviSchedAgent::reportObservedExecutionStep(double elapsedMs, int64_t prefillTokens,
-                                                 int64_t decodeTokens) const
+                                                 int64_t decodeTokens, int64_t firstStartOvertakeCount) const
 {
     return _impl &&
-           _impl->reportObservedExecutionStep(elapsedMs, prefillTokens, decodeTokens);
+           _impl->reportObservedExecutionStep(elapsedMs, prefillTokens, decodeTokens, firstStartOvertakeCount);
 }
 
 bool NaviSchedAgent::reportObservedCoreStep(double elapsedMs, bool futureWait) const
@@ -3013,3 +3103,25 @@ void NaviSchedAgent::stop()
 int32_t NaviSchedAgent::getGrpcPort() const { return _impl ? _impl->getGrpcPort() : -1; }
 
 }
+
+namespace navi_sched {
+std::optional<std::pair<uint64_t, uint64_t>> NaviSchedAgent::beginKVPreparation(
+    uint64_t requestId, int64_t preparingStartMonoNs) const
+{
+    return _impl ? _impl->beginKVPreparation(requestId, preparingStartMonoNs) : std::nullopt;
+}
+bool NaviSchedAgent::completeKVPreparation(
+    uint64_t session, uint64_t requestId, uint64_t generation,
+    bool success, int64_t observedMonoNs) const
+{
+    return _impl && _impl->completeKVPreparation(session, requestId, generation, success, observedMonoNs);
+}
+bool NaviSchedAgent::cancelKVPreparation(uint64_t session, uint64_t requestId, uint64_t generation) const
+{
+    return _impl && _impl->cancelKVPreparation(session, requestId, generation);
+}
+bool NaviSchedAgent::retireKVPreparation(uint64_t session, uint64_t requestId, uint64_t generation) const
+{
+    return _impl && _impl->retireKVPreparation(session, requestId, generation);
+}
+} // namespace navi_sched

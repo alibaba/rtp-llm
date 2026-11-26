@@ -336,6 +336,32 @@ bool TPUPrefillExecutionPolicy::planNextPrefillChunk(
     return true;
 }
 
+bool TPUPrefillExecutionPolicy::clipStreamingPrefillChunk(
+    const TPUPrefillRequestInput &request, int64_t remainingStepBudget,
+    const TPUPrefillExecutionPolicyConfig &config, int64_t &tokens, std::string *error)
+{
+    tokens = 0;
+    if (config.fixedPrefillChunkPlan || config.schedulerBlockSize <= 0 ||
+        config.hashBlockSize <= 0 || remainingStepBudget < 0 ||
+        remainingStepBudget > config.maxScheduledTokens || request.promptTokens <= 0 ||
+        request.prefillEndTokens < 0 || request.numTokens < 0 ||
+        request.prefillEnd() < request.promptTokens ||
+        request.tokenEnd() < request.prefillEnd() || request.computedTokens < 0 ||
+        request.computedTokens > request.prefillEnd() ||
+        request.sharedPrefixBoundary < 0 ||
+        request.sharedPrefixBoundary > request.prefillEnd()) {
+        return fail(error, "invalid continuous prefill chunk input");
+    }
+    auto limit =
+        std::min(remainingStepBudget, request.prefillEnd() - request.computedTokens);
+    if (config.longPrefillTokenThreshold > 0) {
+        limit = std::min(limit, config.longPrefillTokenThreshold);
+    }
+    tokens =
+        config.mambaBlockAlignedSplit ? clipPrefillChunk(request, limit, config) : limit;
+    return true;
+}
+
 bool TPUPrefillExecutionPolicy::projectStepGeometry(
     const std::vector<int64_t> &requestScheduledTokens,
     const TPUPrefillExecutionPolicyConfig &config, TPUPrefillStepGeometry &output,

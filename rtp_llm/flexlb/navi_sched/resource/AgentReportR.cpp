@@ -40,6 +40,36 @@ AgentLatencyToMasterDataPtr makeLatencyModelData(
     return latency;
 }
 
+// Native drops its query signature after allocating load blocks. Keep only
+// an already observed input from this same generation while its load is active.
+// The previous immutable report is the history; no request map or RPC is added.
+void retainLoadingQueryInputs(std::vector<NaviSchedNativeCacheQuery> &queries,
+                              const std::vector<NaviSchedNativeCacheQuery> &previous)
+{
+    auto prior = previous.begin();
+    for (auto &query : queries) {
+        if (query.inputSource != NativeCacheQueryInputSource::UNOBSERVED ||
+            query.localPrefixTokenCount != -1 || query.generation == 0 ||
+            query.futureState != NativeCacheQueryFutureState::UNOBSERVED ||
+            query.loadState != NativeCacheLoadState::IN_FLIGHT ||
+            query.receiveState != NativeCacheReceiveState::NOT_REPORTED)
+            continue;
+        while (prior != previous.end() && prior->requestId < query.requestId) ++prior;
+        if (prior == previous.end()) break;
+        if (prior->requestId != query.requestId ||
+            prior->generation != query.generation || prior->localPrefixTokenCount < 0 ||
+            (prior->inputSource != NativeCacheQueryInputSource::ACTIVE_QUERY &&
+             prior->inputSource != NativeCacheQueryInputSource::RESOLVED_QUERY) ||
+            prior->futureState == NativeCacheQueryFutureState::FAILED ||
+            prior->loadState == NativeCacheLoadState::FAILED ||
+            prior->receiveState == NativeCacheReceiveState::FAILED ||
+            prior->receiveState == NativeCacheReceiveState::RECEIVED)
+            continue;
+        query.localPrefixTokenCount = prior->localPrefixTokenCount;
+        query.inputSource = NativeCacheQueryInputSource::RESOLVED_QUERY;
+    }
+}
+
 } // namespace
 
 const std::string AgentReportBridgeR::RESOURCE_ID = "navi_sched.agent_report_bridge_r";
@@ -116,6 +146,7 @@ navi::ErrorCode AgentReportR::init(navi::ResourceInitContext &)
     initLogger(_logger, "AgentReportR");
     _controlConfig = _agentReportBridgeR->getControlConfig();
     _agentStartTimeUs = autil::TimeUtility::currentTime();
+    _kvLoadTracker = std::make_unique<AgentKVLoadTracker>(uint64_t(_agentStartTimeUs));
     if (_unifiedLatencyPrediction) {
         NaviSchedWorkloadSnapshot workload;
         workload.revision = 1;
@@ -278,6 +309,7 @@ AgentReportR::QueuedPublishPtr AgentReportR::enqueueWorkloadLocked(
     NaviSchedWorkloadSnapshot &snapshot, AgentUpdateToMasterDataPtr update,
     std::vector<AgentUpdateToMasterDataPtr> trailingUpdates)
 {
+    overlayKVPreparationStatesLocked(snapshot);
     const auto publishTrailing = [&]() -> QueuedPublishPtr {
         if (trailingUpdates.empty()) return nullptr;
         std::vector<SubscriberPtr> subscribers;
@@ -333,6 +365,42 @@ void AgentReportR::finishWorkloadPublish(const QueuedPublishPtr &task) const
     }
 }
 
+void AgentReportR::overlayKVPreparationStatesLocked(NaviSchedWorkloadSnapshot &snapshot) const
+{
+    if (!snapshot.executionLoadTracked || snapshot.executionLoadRequests.empty() || !_kvLoadTracker) return;
+    std::vector<AgentKVLoadTracker::Key> keys;
+    keys.reserve(snapshot.executionLoadRequests.size());
+    for (const auto &request : snapshot.executionLoadRequests)
+        keys.push_back({uint64_t(_agentStartTimeUs), request.requestId, request.loadGeneration});
+    const auto loads = _kvLoadTracker->snapshots(keys);
+    for (size_t i=0; i<loads.size(); ++i) {
+        auto &request = snapshot.executionLoadRequests[i];
+        if (!loads[i] || request.state == NativeKVExecutionState::EXECUTING) continue;
+        if (loads[i]->state == AgentKVLoadTracker::State::FAILED ||
+            loads[i]->state == AgentKVLoadTracker::State::CANCELED)
+            request.state = NativeKVExecutionState::FAILED;
+        else if (loads[i]->state == AgentKVLoadTracker::State::READY &&
+                 request.state == NativeKVExecutionState::PREPARING)
+            request.state = NativeKVExecutionState::READY;
+    }
+}
+
+void AgentReportR::publishKVPreparationStateChange()
+{
+    QueuedPublishPtr task;
+    {
+        autil::ScopedLock lock(_mutex);
+        if (!_stopping && usesObservedUnifiedWorkload() && _observedWorkload.executionLoadTracked) {
+            NaviSchedWorkloadSnapshot combined;
+            if (_nativeWorkload.combine(observedWorkloadLocked(), combined))
+                task = enqueueWorkloadLocked(combined);
+            else NAVI_KERNEL_LOG(ERROR, "[navi-kv-load-publish-error] reason=workload_combine");
+        }
+    }
+    // The existing ordered Agent -> Master stream, with no Native step wait.
+    finishWorkloadPublish(task);
+}
+
 NaviSchedWorkloadSnapshot AgentReportR::observedWorkloadLocked() const
 {
     auto snapshot = _observedWorkload;
@@ -370,7 +438,15 @@ uint64_t AgentReportR::reportWorkloadUpdated(
     {
         autil::ScopedLock lock(_mutex);
         if (_stopping) return 0;
-        if (usesObservedUnifiedWorkload()) {
+        const bool usesObserved = usesObservedUnifiedWorkload();
+        if (!observed.nativeCacheQueries.empty()) {
+            const auto previous = getWorkloadSnapshot();
+            if (previous && !previous->nativeCacheQueries.empty())
+                retainLoadingQueryInputs(
+                    usesObserved ? observed.nativeCacheQueries : published.nativeCacheQueries,
+                    previous->nativeCacheQueries);
+        }
+        if (usesObserved) {
             // Preview the complete replacement before changing either owner's state.
             if (!_nativeWorkload.combine(observed, published, covered) ||
                 !_nativeWorkload.handoff(covered, retired))
@@ -1787,4 +1863,75 @@ bool AgentReportR::removeSubscriber(const SubscriberPtr &subscriber) const
 REGISTER_RESOURCE(AgentReportR);
 REGISTER_RESOURCE(AgentReportBridgeR);
 
+} // namespace navi_sched
+
+namespace navi_sched {
+std::optional<AgentKVLoadTracker::Snapshot> AgentReportR::beginKVPreparation(
+    uint64_t requestId, int64_t preparingStartMonoNs)
+{
+    const auto nowNs = autil::TimeUtility::monotonicTimeNs();
+    if (preparingStartMonoNs <= 0) preparingStartMonoNs = nowNs;
+    if (preparingStartMonoNs > nowNs) return std::nullopt;
+    autil::ScopedLock lock(_mutex);
+    if (_stopping || !_kvLoadTracker ||
+        _nextKVLoadGeneration == std::numeric_limits<uint64_t>::max()) return std::nullopt;
+    auto load = _kvLoadTracker->begin(
+        {uint64_t(_agentStartTimeUs), requestId, ++_nextKVLoadGeneration},
+        preparingStartMonoNs);
+    if (load) {
+        NAVI_KERNEL_LOG(INFO, "[navi-kv-load-state] state=preparing request_id=%lu "
+                        "agent_session=%lu load_generation=%lu source=enginecore_aggregate "
+                        "preparing_start_mono_ns=%ld", requestId, load->key.agentSession,
+                        load->key.generation, preparingStartMonoNs);
+    }
+    return load;
+}
+
+AgentKVLoadTracker::Result AgentReportR::completeKVPreparation(
+    AgentKVLoadTracker::Key key, bool success,
+    int64_t observedAgentMonoNs)
+{
+    if (!_kvLoadTracker) return {};
+    // This timestamp is taken on the receiving Agent. Never subtract a worker's
+    // monotonic clock from the Agent's clock.
+    if (observedAgentMonoNs <= 0)
+        observedAgentMonoNs = autil::TimeUtility::monotonicTimeNs();
+    auto result = _kvLoadTracker->complete(key, success, observedAgentMonoNs);
+    if (result.terminalChanged && result.snapshot) {
+        const auto &load = *result.snapshot;
+        const bool ready = load.state == AgentKVLoadTracker::State::READY;
+        const double elapsedMs = ready ? (load.readyObservedNs-load.registeredNs)/1e6 : -1;
+        NAVI_KERNEL_LOG(INFO, "[navi-kv-load-state] state=%s request_id=%lu "
+                        "agent_session=%lu load_generation=%lu source=enginecore_aggregate "
+                        "preparing_start_mono_ns=%ld "
+                        "ready_observed_mono_ns=%ld kv_load_ready_latency_ms=%.6f",
+                        ready ? "ready" : "failed", key.requestId, key.agentSession,
+                        key.generation, load.registeredNs, load.readyObservedNs, elapsedMs);
+        publishKVPreparationStateChange();
+    }
+    return result;
+}
+
+bool AgentReportR::cancelKVPreparation(AgentKVLoadTracker::Key key)
+{
+    const bool canceled = _kvLoadTracker && _kvLoadTracker->cancel(key);
+    if (canceled) publishKVPreparationStateChange();
+    return canceled;
+}
+
+bool AgentReportR::retireKVPreparation(AgentKVLoadTracker::Key key)
+{
+    return _kvLoadTracker && _kvLoadTracker->retire(key);
+}
+
+AgentKVLoadTracker::LatencyWindowStats AgentReportR::takeKVLoadLatencyWindowStats()
+{
+    return _kvLoadTracker ? _kvLoadTracker->takeLatencyWindowStats()
+                          : AgentKVLoadTracker::LatencyWindowStats{};
+}
+
+size_t AgentReportR::getActiveKVPreparationCount() const
+{
+    return _kvLoadTracker ? _kvLoadTracker->activeCount() : 0;
+}
 } // namespace navi_sched

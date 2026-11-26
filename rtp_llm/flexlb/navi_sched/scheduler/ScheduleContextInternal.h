@@ -4,7 +4,9 @@
 #include "aios/navi_sched/common/TPUPrefillExecutionPolicy.h"
 #include "aios/navi_sched/data/NaviSchedLatencySample.h"
 #include "aios/navi_sched/resource/LatencyResidualModel.h"
+#include "aios/navi_sched/resource/MasterBatchReservation.h"
 
+#include "absl/container/flat_hash_set.h"
 #include <memory>
 #include <optional>
 #include <string>
@@ -55,6 +57,8 @@ struct NaviSchedNodeSnapshot {
     LatencyResidualModel::RuntimeConfig residualRuntimeConfig;
     NaviSchedNodeLoad load;
     NaviSchedWorkloadSnapshot workload;
+    // Captured under the same runtime lock as workload, only for Native PP4.
+    std::vector<MasterBatchReservation::UnfinishedRequest> nativePrefillReservations;
     NaviSchedLatencyFeatures workloadFeatures;
     NaviSchedLatencyFeatures reportedWorkloadFeatures;
     NaviSchedLatencyFeatures reservedWorkloadFeatures;
@@ -64,6 +68,13 @@ struct NaviSchedNodeSnapshot {
     bool unifiedLatencyPrediction = false;
     int64_t workloadReportReceiveTimeUs = 0;
     int64_t agentStartTimeUs = 0;
+};
+
+// READY observations returned by an external lookup for this schedule round.
+// These objects never become resident or pending entries in a node's cache.
+struct NaviSchedExternalCacheReadyBlocks {
+    absl::flat_hash_set<uint64_t> full;
+    absl::flat_hash_set<uint64_t> tail;
 };
 
 // One immutable READY-only lookup per compatible peer group and schedule round.
@@ -126,7 +137,25 @@ public:
         const std::vector<NaviSchedScheduleItem> &requests,
         std::vector<TPUPrefillRequestInput> &inputs,
         int64_t *externalSuffixBlockCounts = nullptr,
-        ::navi_sched::TPUPrefillCacheObservationBatch *observation = nullptr) const = 0;
+        ::navi_sched::TPUPrefillCacheObservationBatch *observation = nullptr,
+        const NaviSchedExternalCacheReadyBlocks *remoteReady = nullptr,
+        // Cache-only callers do not consume execution checkpoint boundaries.
+        // Geometry/Native callers retain the strict typed-policy requirement.
+        bool resolveExplicitCheckpointBoundary = true) const = 0;
+    // Reuse the context's common prefixes in the same rich batch observation.
+    // Node implementations with their own matcher may retain the original API.
+    virtual bool getExecutionCacheInputs(
+        const std::vector<NaviSchedScheduleItem> &requests,
+        std::vector<TPUPrefillRequestInput> &inputs,
+        int64_t *externalSuffixBlockCounts,
+        ::navi_sched::TPUPrefillCacheObservationBatch *observation,
+        const NaviSchedExternalCacheReadyBlocks *remoteReady,
+        bool resolveExplicitCheckpointBoundary,
+        const std::vector<size_t> *commonPrefixes) const
+    {
+        return getExecutionCacheInputs(requests, inputs, externalSuffixBlockCounts,
+                                       observation, remoteReady, resolveExplicitCheckpointBoundary);
+    }
     virtual void getMatchedBlockCounts(const std::vector<NaviSchedScheduleItem> &requests,
                                        int64_t *matchedBlockCounts,
                                        const std::vector<size_t> &commonPrefixes) const

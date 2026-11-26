@@ -35,6 +35,16 @@ public:
         NaviSchedBlockHashesConstPtr blockHashes;
         double predictedLatencyMs = 0.0;
         int64_t explicitCacheCheckpointPosition = 0;
+        NativePPPrefillSlotRelease nativePrefillSlotRelease =
+            NativePPPrefillSlotRelease::UNKNOWN;
+        std::optional<bool> executionLoadIncluded;
+    };
+
+    // Request metadata remains needed after accepted-workload handoff. Native
+    // queue positions, rather than this reservation state, define execution order.
+    struct UnfinishedRequest {
+        Request request;
+        RequestState state = RequestState::WAITING;
     };
 
     struct Transition {
@@ -69,7 +79,8 @@ public:
     bool recomputeWaitingFeatures(const CacheMatch &cacheMatch);
     bool appendWaitingCapacityFeatures(NaviSchedLatencyFeatures &features,
                                        int32_t maxRunningRequestCount,
-                                       int32_t &runningCapacitySlotCount) const;
+                                       int32_t &runningCapacitySlotCount,
+                                       bool executionOnly = false) const;
     bool setPredictedLatencyMs(double predictedLatencyMs);
     bool sameDefinition(const MasterBatchReservation &other) const;
 
@@ -98,6 +109,8 @@ public:
     RequestState getRequestState(uint64_t requestId) const;
     const NaviSchedLatencyFeatures &getWaitingFeatures() const;
     std::vector<Request> getWaitingRequests() const;
+    // Append one batch in the same request-ID order used for forwarding.
+    void appendUnfinishedRequests(std::vector<UnfinishedRequest> &requests) const;
     const NaviSchedPendingCacheReservation &getPendingCacheReservation() const;
     RequestLatencyTracker::Snapshot getUnreportedInflightStats() const;
     autil::legacy::json::JsonMap makeReplayState() const;

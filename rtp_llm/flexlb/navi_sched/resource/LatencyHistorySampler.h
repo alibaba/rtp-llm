@@ -56,6 +56,8 @@ public:
 
     bool serializeWithExecutionCacheSource(autil::DataBuffer &dataBuffer) const;
     bool deserializeWithExecutionCacheSource(autil::DataBuffer &dataBuffer);
+    bool serializeWithNativePP4Timing(autil::DataBuffer &dataBuffer) const;
+    bool deserializeWithNativePP4Timing(autil::DataBuffer &dataBuffer);
 
     static int32_t getBucketIndex(double latencyMs);
 
@@ -74,17 +76,17 @@ private:
                             const NaviSchedLatencySample &sample);
     static void readSample(autil::DataBuffer &dataBuffer, NaviSchedLatencySample &sample);
     bool serializeImpl(autil::DataBuffer &dataBuffer, bool geometry,
-                       bool cacheSource = false) const;
+                       bool cacheSource = false, bool nativePP4 = false) const;
     bool deserializeImpl(autil::DataBuffer &dataBuffer, bool geometry,
-                         bool cacheSource = false);
+                         bool cacheSource = false, bool nativePP4 = false);
     bool deserializeUnchecked(autil::DataBuffer &dataBuffer, bool geometry,
-                              bool cacheSource = false);
+                              bool cacheSource = false, bool nativePP4 = false);
     static void writeSampleImpl(autil::DataBuffer &dataBuffer,
                                 const NaviSchedLatencySample &sample, bool geometry,
-                                bool cacheSource = false);
+                                bool cacheSource = false, bool nativePP4 = false);
     static bool readSampleImpl(autil::DataBuffer &dataBuffer,
                                NaviSchedLatencySample &sample, bool geometry,
-                               bool cacheSource = false);
+                               bool cacheSource = false, bool nativePP4 = false);
 
 private:
     HistoryPtr _history = std::make_shared<History>();

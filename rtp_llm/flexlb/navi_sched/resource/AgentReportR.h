@@ -7,6 +7,7 @@
 #include "aios/navi_sched/resource/RequestLatencyTracker.h"
 #include "aios/navi_sched/resource/AgentSchedulerConfigR.h"
 #include "aios/navi_sched/resource/AgentWorkloadOwnership.h"
+#include "aios/navi_sched/resource/AgentKVLoadTracker.h"
 #include "autil/LockFreeQueue.h"
 #include "navi/engine/AsyncPipe.h"
 #include "navi/engine/Resource.h"
@@ -217,6 +218,15 @@ public:
     LatencyValidationDiagnostics getLatencyValidationDiagnostics() const;
     NaviSchedWorkloadSnapshotConstPtr getWorkloadSnapshot() const;
     WorkloadPublishWindowStats takeWorkloadPublishWindowStats() const;
+    std::optional<AgentKVLoadTracker::Snapshot> beginKVPreparation(
+        uint64_t requestId, int64_t preparingStartMonoNs = 0);
+    AgentKVLoadTracker::Result completeKVPreparation(
+        AgentKVLoadTracker::Key key, bool success,
+        int64_t observedAgentMonoNs = 0);
+    bool cancelKVPreparation(AgentKVLoadTracker::Key key);
+    bool retireKVPreparation(AgentKVLoadTracker::Key key);
+    AgentKVLoadTracker::LatencyWindowStats takeKVLoadLatencyWindowStats();
+    size_t getActiveKVPreparationCount() const;
     size_t getCachedBlockCount(
         NaviSchedCacheKeyType cacheKeyType = NaviSchedCacheKeyType::BLOCK_POOL) const;
     bool hasCacheKeyType(NaviSchedCacheKeyType cacheKeyType) const;
@@ -257,6 +267,8 @@ private:
         NaviSchedWorkloadSnapshot &snapshot, AgentUpdateToMasterDataPtr update = {},
         std::vector<AgentUpdateToMasterDataPtr> trailingUpdates = {});
     void finishWorkloadPublish(const QueuedPublishPtr &task) const;
+    void overlayKVPreparationStatesLocked(NaviSchedWorkloadSnapshot &snapshot) const;
+    void publishKVPreparationStateChange();
     NaviSchedWorkloadSnapshot observedWorkloadLocked() const;
     bool retirePendingCacheLocked(
         int64_t localBatchId, QueuedPublishPtr *publishTask = nullptr,
@@ -300,6 +312,8 @@ private:
     NaviSchedWorkloadSnapshotConstPtr _workloadSnapshot;
     NaviSchedWorkloadSnapshot _observedWorkload;
     AgentWorkloadOwnership _nativeWorkload;
+    std::unique_ptr<AgentKVLoadTracker> _kvLoadTracker;
+    uint64_t _nextKVLoadGeneration = 0;
     mutable autil::ReadWriteLock _latencyValidationStatsLock;
     mutable NaviSchedLatencyValidationStats _latencyValidationStats;
     mutable int64_t _latencyValidationLastUpdateTimeUs = 0;
