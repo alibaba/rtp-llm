@@ -29,17 +29,14 @@ def is_gfx950(arch_fallback: Optional[str] = None) -> bool:
 
 
 class CpuImpl(DeviceBase):
-    def __init__(self):
-        super().__init__()
-
     def _get_mem_info(self) -> MemInfo:
         vmem = psutil.virtual_memory()
         return MemInfo(vmem.used, vmem.free)
 
 
 class ArmCpuImpl(CpuImpl):
-    def __init__(self):
-        super().__init__()
+    def __init__(self, *, engine_args=None):
+        super().__init__(engine_args=engine_args)
         self.gemm_rewrite_list = [
             W.attn_qkv_w,
             W.attn_o_w,
@@ -130,9 +127,6 @@ class ArmCpuImpl(CpuImpl):
 
 
 class GpuImpl(DeviceBase):
-    def __init__(self):
-        super().__init__()
-
     def get_device_id(self) -> int:
         return torch.cuda.current_device()
 
@@ -333,8 +327,8 @@ class GpuImpl(DeviceBase):
 
 
 class CudaImpl(GpuImpl):
-    def __init__(self):
-        super().__init__()
+    def __init__(self, *, engine_args=None):
+        super().__init__(engine_args=engine_args)
         try:
             import pynvml
 
@@ -722,8 +716,8 @@ class PpuImpl(CudaImpl):
 
 
 class RocmImpl(GpuImpl):
-    def __init__(self):
-        super().__init__()
+    def __init__(self, *, engine_args=None):
+        super().__init__(engine_args=engine_args)
         # arch / mem-info paths read self.rocml unconditionally, so the
         # attribute must exist even when pyrsmi is missing or smi_initialize
         # fails. Keep it None on failure; callers already null-check.

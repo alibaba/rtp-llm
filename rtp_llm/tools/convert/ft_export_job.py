@@ -1,5 +1,33 @@
 """Build an FT-format writer, without constructing or loading a serving model."""
 
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Callable
+
+from rtp_llm.model_loader.load_config import LoadMethod
+
+if TYPE_CHECKING:
+    from rtp_llm.config.model_config import ModelConfig
+    from rtp_llm.ops import HWKernelConfig, KVCacheConfig, ParallelismConfig
+
+
+@dataclass(frozen=True)
+class DraftFTDescriptor:
+    """Offline language draft: the target owns tokenizer/task metadata."""
+
+    model_config: "ModelConfig"
+    parallelism_config: "ParallelismConfig"
+    hw_kernel_config: "HWKernelConfig"
+    kv_cache_config: "KVCacheConfig"
+    get_weight_cls: Callable[[], type]
+    load_method: LoadMethod = LoadMethod.AUTO
+    merge_lora: bool = False
+    force_cpu_load_weights: bool = False
+    loader_recycle_handles: bool = False
+    moe_pure_tp_preshard: bool = False
+
+    def _init_custom_module(self):
+        return None
+
 
 def create_ft_export_job(model):
     """Use tokenizer/vocab/task metadata from an *unloaded* model descriptor.

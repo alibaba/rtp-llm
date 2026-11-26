@@ -22,7 +22,13 @@ py_test(
     name = "ft_draft_contract_test",
     srcs = ["ft_draft_contract_test.py"],
     env = {"CUDA_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"},
-    deps = [":convert", "//rtp_llm/models_py:new_weight_loader"],
+    deps = [
+        ":convert",
+        "//rtp_llm:safetensors_torch",
+        "//rtp_llm:transformers",
+        "//rtp_llm/models_py:new_weight_loader",
+        "//rtp_llm/models_py/new_models/qwen3_moe_eagle3:draft_body",
+    ],
 )
 
 py_test(

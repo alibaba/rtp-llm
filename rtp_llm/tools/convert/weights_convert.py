@@ -27,12 +27,10 @@ from rtp_llm.ops import (
     MoeConfig,
     ParallelismConfig,
     ProfilingDebugLoggingConfig,
+    TaskType,
 )
-from rtp_llm.tools.api.model_basic_info_analyzer import (
-    parse_ft_model_type,
-    parse_model_basic_info,
-)
-from rtp_llm.tools.convert.ft_export_job import create_ft_export_job
+from rtp_llm.tools.api.hf_model_helper import HfStyleModelInfo
+from rtp_llm.tools.convert.ft_export_job import DraftFTDescriptor, create_ft_export_job
 from rtp_llm.tools.convert.ft_export_metadata import generate_ft_index
 from rtp_llm.tools.convert.weights_convert_utils import (
     apply_layer_override_and_post_build,
@@ -48,24 +46,27 @@ class WeightConverter:
     def __init__(
         self, model_path: str, model_type: Optional[str], env_params: Dict[str, str]
     ) -> None:
-        self.model_basic_info = parse_model_basic_info(model_path, {})
-        if self.model_basic_info is not None and not model_type:
-            self.model_type = self.model_basic_info.ft_model_type
-        elif model_type:
-            self.model_type = model_type
-        else:
-            logging.error(
-                f"not set model_type and cannot get model_type from {model_path}"
-            )
-            raise RuntimeError("model_type is None")
-
-        self.model_path: str | None = fetch_remote_file_to_local(model_path)
+        self.model_path = os.path.abspath(fetch_remote_file_to_local(model_path))
         self.env_params = env_params
-
-        assert self.model_path
+        # The worker budget needs checkpoint bytes, not a serving model's
+        # runtime/KV cache size. Read the mounted checkpoint's own metadata.
+        checkpoint = HfStyleModelInfo(self.model_path)
+        self.checkpoint_size = checkpoint.total_size
         if not model_type:
-            model_type = parse_ft_model_type(self.model_path).get("ft_model_type", None)
-            assert model_type
+            model_type = checkpoint.ft_model_type
+            if not model_type:
+                raw = checkpoint.model_config
+                if raw.get("architectures") == ["LlamaForCausalLMEagle3"]:
+                    # This architecture also labels incompatible reduced-vocab
+                    # drafts. Accept only the serving adapter's exact contract.
+                    from rtp_llm.models_py.new_models.qwen3_moe_eagle3.proposal import (
+                        Eagle3FullVocabularyDraft,
+                    )
+
+                    Eagle3FullVocabularyDraft.capture_ids(raw)
+                    model_type = "qwen_3_moe_eagle3"
+            if not model_type:
+                raise ValueError("Cannot infer FT model type; specify --model_type")
         self.model_type = model_type
         self.model_cls = ModelFactory.get_model_cls(self.model_type)
 
@@ -131,46 +132,20 @@ class WeightConverter:
     def _estimate_max_convert_parallel_num(self):
         # Get converter_num_per_gpu from environment variable, default to 4
         converter_num_per_gpu = int(os.environ.get("CONVERTER_NUM_PER_GPU", "4"))
-        try:
-            cuda_count = torch.cuda.device_count()
-            assert cuda_count >= 1
+        cuda_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
+        if cuda_count:
             return cuda_count * converter_num_per_gpu
-        except Exception as _:
-            logging.info("no cuda device convert by cpu")
-            free_mb = self.get_free_mem_MB() * 0.8
-            dump_buffer_size_mb = 10 * 1024  # 10G dump once
-            if self.model_basic_info.model_size:
-                model_size_mb = self.model_basic_info.model_size / ONE_MB
-
-                env_params = copy.deepcopy(self.env_params)
-                # Get quantization from env_params (compatibility logic)
-                quantization = env_params.get("QUANTIZATION", "")
-                if not quantization:
-                    int8_mode = env_params.get("INT8_MODE", "0")
-                    weight_type = env_params.get("WEIGHT_TYPE", "").upper()
-                    if int(int8_mode) == 1 or weight_type == "INT8":
-                        quantization = "INT8"
-                config: ModelConfig = self.model_cls._create_config(self.model_path)
-                # Apply settings from env_params
-                config.model_type = self.model_type
-                config.ckpt_path = self.model_path
-                config.tokenizer_path = self.model_path
-                config.act_type = env_params.get("ACT_TYPE", "")
-                config.quantization = quantization
-                config.max_seq_len = 0
-
-                one_layer_model_size_mb = model_size_mb / config.num_layers
-                if model_size_mb < dump_buffer_size_mb:
-                    need_size_mb = model_size_mb
-                else:
-                    need_size_mb = dump_buffer_size_mb + one_layer_model_size_mb
-                if free_mb // need_size_mb > self.tp_size:
-                    return int(free_mb // need_size_mb)
-                else:
-                    return int(
-                        free_mb // need_size_mb if free_mb // need_size_mb > 1 else 1
-                    )
+        logging.info("no CUDA device; converting on CPU")
+        model_size = self.checkpoint_size
+        if not model_size:
             return 1
+        model_size_mb = model_size / ONE_MB
+        dump_buffer_mb = 10 * 1024
+        need_mb = model_size_mb
+        if model_size_mb >= dump_buffer_mb:
+            config = self.model_cls._create_config(self.model_path)
+            need_mb = dump_buffer_mb + model_size_mb / max(1, config.num_layers)
+        return max(1, int(self.get_free_mem_MB() * 0.8 // need_mb))
 
     def _build_parallelism_config(self) -> ParallelismConfig:
         """Build parallelism_config by reading env vars directly (TP_SIZE, WORLD_SIZE, etc.)."""
@@ -282,29 +257,40 @@ class WeightConverter:
 
         parallelism_config = self._build_parallelism_config()
 
-        # Create other required configs
         hw_kernel_config = HWKernelConfig()
-        fmha_config = FMHAConfig()
-        moe_config = MoeConfig()
-        vit_config = VitConfig()
-
-        # Construct only the config/tokenizer wrapper. from_config() loads the
-        # entire serving model, which the external FT writer neither consumes
-        # nor needs, and can require a GPU just to convert an artifact.
-        model = self.model_cls(
-            model_config=model_config,
-            parallelism_config=parallelism_config,
-            hw_kernel_config=hw_kernel_config,
-            kv_cache_config=kv_cache_config,
-            fmha_config=fmha_config,
-            moe_config=moe_config,
-            load_method=LoadMethod.AUTO,
-            max_generate_batch_size=0,
-            vit_config=vit_config,
-            merge_lora=False,
-        )
+        if (
+            self.model_type in (
+                "qwen_3_moe_eagle3", "qwen_3_dflash", "qwen_2-mtp", "qwen_3_dspark"
+            )
+            and model_config.task_type == TaskType.LANGUAGE_MODEL
+            and not model_config.enable_output_vocab_pruning
+        ):
+            model = DraftFTDescriptor(
+                model_config=model_config,
+                parallelism_config=parallelism_config,
+                hw_kernel_config=hw_kernel_config,
+                kv_cache_config=kv_cache_config,
+                get_weight_cls=self.model_cls.get_weight_cls,
+            )
+        else:
+            # Ordinary models still need their tokenizer's task/vocab metadata.
+            # Construct the unloaded descriptor, not a serving model.
+            model = self.model_cls(
+                model_config=model_config,
+                parallelism_config=parallelism_config,
+                hw_kernel_config=hw_kernel_config,
+                kv_cache_config=kv_cache_config,
+                fmha_config=FMHAConfig(),
+                moe_config=MoeConfig(),
+                load_method=LoadMethod.AUTO,
+                max_generate_batch_size=0,
+                vit_config=VitConfig(),
+                merge_lora=False,
+            )
         writer = create_ft_export_job(model)
-        device_str = f"cuda:{parallelism_config.local_rank}"
+        device_str = (
+            f"cuda:{parallelism_config.local_rank}" if torch.cuda.is_available() else "cpu"
+        )
         max_retry_times = 3
         for i in range(max_retry_times):
             try:

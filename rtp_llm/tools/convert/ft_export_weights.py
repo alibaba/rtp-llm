@@ -5,7 +5,7 @@ match NewLoader parameter names or owning devices. This adapter never creates a
 serving model, chooses a loading backend, or installs weights into a model.
 """
 
-from rtp_llm.device import get_current_device
+from rtp_llm.device import get_device_cls, get_device_type
 from rtp_llm.model_loader.load_config import LoadConfig
 from rtp_llm.model_loader.tensor_source import DatabaseTensorSource
 from rtp_llm.ops import TaskType
@@ -65,7 +65,9 @@ class FTExportWeights:
             compute_dtype=model_config.compute_dtype,
             database=database,
             phy2log=placement,
-            exported_device=get_current_device(),
+            # Keep rank-specific env settings but never interpret converter flags
+            # (or the embedding process's argv) as inference-server arguments.
+            exported_device=get_device_cls(get_device_type())(engine_args=()),
             force_cpu_load_weights=force_cpu_load_weights or quantize_on_cpu,
             moe_pure_tp_preshard=moe_pure_tp_preshard,
         )
