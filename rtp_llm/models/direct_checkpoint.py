@@ -165,7 +165,15 @@ def load_owned_model(service, *, publish_runtime=True):
         return aliases, prepared
 
     def load(**resident_options):
-        return loader.load(startup_lora=merged_adapter, prepare_loans=prepare_loans, **resident_options)
+        # _load_with_residency has already agreed on a hit with this loader's
+        # checkpoint group, including owners whose checkpoint reads are isolated.
+        if resident_options.get("restored") is not None:
+            resident_options["coordinated_resident_replay"] = True
+        return loader.load(
+            startup_lora=merged_adapter,
+            prepare_loans=prepare_loans,
+            **resident_options,
+        )
 
     residency = getattr(service, "resident_weights_config", None)
     module = (

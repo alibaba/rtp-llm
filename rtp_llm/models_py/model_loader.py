@@ -2099,13 +2099,18 @@ class NewModelLoader:
         return f"distributed prerequisite failure: {'; '.join(sample)}{suffix}"
 
     @contextmanager
-    def _checkpoint_preflight(self, model, requested, *, isolated=False):
-        # Scratch and isolated owners do not participate in the FST vote.
-        if (
+    def _checkpoint_preflight(
+        self, model, requested, *, isolated=False, coordinated_replay=False
+    ):
+        # Scratch and isolated owners need no reader vote. A coordinated warm
+        # restart, however, can enter a stage collective in its runtime hooks.
+        independent_reader = (
             requested == NewLoaderLoadMethod.SCRATCH
             or isolated
             or getattr(model, "fastsafetensors_load_isolated", False)
-            or not torch.distributed.is_initialized()
+        )
+        if not torch.distributed.is_initialized() or (
+            independent_reader and not coordinated_replay
         ):
             yield
             return
@@ -2609,7 +2614,11 @@ class NewModelLoader:
                 hook()
 
     @torch.inference_mode()
-    def load(self, *, startup_lora: Optional[Tuple[str, str]] = None, prepare_loans=None, resident=None, restored=None) -> nn.Module:
+    def load(
+        self, *, startup_lora: Optional[Tuple[str, str]] = None,
+        prepare_loans=None, resident=None, restored=None,
+        coordinated_resident_replay: bool = False,
+    ) -> nn.Module:
         # Only a complete load publishes a backend, including on retry.
         self._selected_load_method = None
         self._eplb_ft_checkpoint = None
@@ -2634,7 +2643,11 @@ class NewModelLoader:
                 lookup_error = exc
             else:
                 isolated = isolated or getattr(owner, "fastsafetensors_load_isolated", False)
-        with self._checkpoint_preflight(owner, requested_method, isolated=isolated):
+        warm_replay = resident is not None and restored is not None
+        with self._checkpoint_preflight(
+            owner, requested_method, isolated=isolated,
+            coordinated_replay=warm_replay and coordinated_resident_replay,
+        ):
             if lookup_error is not None:
                 raise lookup_error
             if prepare_loans is not None:
@@ -2644,11 +2657,10 @@ class NewModelLoader:
                                            prepared_runtime_loan=prepared)
             if restored is None:
                 checkpoint_files, expert_filter, meta_checkpoint, ft_checkpoint = self._prepare_checkpoint(requested_method, startup_lora)
-        if resident is not None and restored is not None:
-            from rtp_llm.models_py import resident_checkpoint as rc
-            from rtp_llm.resident_weights import GLOBAL_SCOPE
+            if warm_replay:
+                from rtp_llm.models_py import resident_checkpoint as rc
+                from rtp_llm.resident_weights import GLOBAL_SCOPE
 
-            with self._checkpoint_preflight(owner, requested_method, isolated=isolated):
                 self.load_config = replace(self.load_config, resident_construction=json.loads(
                     resident.init_scalar(GLOBAL_SCOPE, "native.constructor", rc._replay_only)
                 ))
@@ -2675,6 +2687,11 @@ class NewModelLoader:
                            construction=self.load_config.resident_construction)
                 model.to(self.load_config.device)
                 self._validate_loaded_weights(model)
+                validate_borrowed_parameters(model)
+        if warm_replay:
+            # No peer may enter a collective executor constructor while another
+            # is still rejecting a rank-local resident tensor or resolving a loan.
+            with self._checkpoint_preflight(owner, requested_method, isolated=isolated):
                 if hasattr(model, "prepare_resident_weights"):
                     self._bind_resident_runtime(model)
                 if not getattr(model, "resident_after_post_load", False):

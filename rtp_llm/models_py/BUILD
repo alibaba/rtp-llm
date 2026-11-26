@@ -425,6 +425,13 @@ py_test(
 )
 
 py_test(
+    name = "resident_replay_collective_test",
+    srcs = ["resident_replay_collective_test.py"],
+    env = {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"},
+    deps = [":new_loader_core", "//rtp_llm/resident_weights"],
+)
+
+py_test(
     name = "native_resident_restart_test",
     srcs = ["native_resident_restart_test.py"],
     deps = [":new_loader_core", "//rtp_llm:fastsafetensors", "//rtp_llm/resident_weights"],
