@@ -2100,17 +2100,17 @@ class NewModelLoader:
 
     @contextmanager
     def _checkpoint_preflight(
-        self, model, requested, *, isolated=False, coordinated_replay=False
+        self, model, requested, *, isolated=False, coordinated_resident=False
     ):
-        # Scratch and isolated owners need no reader vote. A coordinated warm
-        # restart, however, can enter a stage collective in its runtime hooks.
+        # Scratch and isolated owners need no reader vote. A coordinated
+        # resident startup can still enter a stage collective in its runtime hooks.
         independent_reader = (
             requested == NewLoaderLoadMethod.SCRATCH
             or isolated
             or getattr(model, "fastsafetensors_load_isolated", False)
         )
         if not torch.distributed.is_initialized() or (
-            independent_reader and not coordinated_replay
+            independent_reader and not coordinated_resident
         ):
             yield
             return
@@ -2573,38 +2573,37 @@ class NewModelLoader:
         resident.init_scalar(GLOBAL_SCOPE, "native.format", lambda: format_route)
         resident.init_scalar(GLOBAL_SCOPE, "native.constructor", lambda: constructor)
 
-    def _finish_checkpoint(self, model, resident, method, startup_lora, finish_lora, route="hf"):
+    def _finish_checkpoint(
+        self, model, resident, method, startup_lora, finish_lora, route="hf", *, defer_runtime=False
+    ):
         prepare = getattr(model, "prepare_resident_weights", None)
-        if resident is None:
-            self._run_post_load_hooks(model)
+        snapshot_after = resident is not None and prepare is None and getattr(
+            model, "resident_after_post_load", False
+        )
+        if resident is not None and not snapshot_after:
+            # Publish final parameter bytes before collective executor construction.
             if finish_lora is not None:
-                finish_lora()
-        elif prepare is not None:
-            # Snapshot final bytes, including startup adapters, but create live
-            # kernel views only after their backing allocations stop moving.
-            if finish_lora is not None:
-                # On CUDA the remaining floating adapters target the canonical
-                # Parameters. Derived fused views must see the merged bytes.
-                finish_lora()
-            prepare()
-            self._record_resident_owner(model, resident, method, startup_lora, format_route=route)
-            self._bind_resident_runtime(model)
-            self._run_post_load_hooks(model)
-        else:
-            after = getattr(model, "resident_after_post_load", False)
-            if not after and finish_lora is not None:
-                # The pre-executor owner snapshots CUDA checkpoint projections.
-                # Floating factors use checkpoint orientation here; staged INT8
-                # leaves already consumed their factors during conversion.
                 finish_lora()
                 finish_lora = None
-            if not after:
-                self._record_resident_owner(model, resident, method, startup_lora, format_route=route)
+            if prepare is not None:
+                prepare()
+            self._record_resident_owner(model, resident, method, startup_lora, format_route=route)
+            if prepare is not None:
+                self._bind_resident_runtime(model)
+
+        def activate():
             self._run_post_load_hooks(model)
             if finish_lora is not None:
                 finish_lora()
-            if after:
+            if snapshot_after:
                 self._record_resident_owner(model, resident, method, startup_lora, format_route=route)
+            validate_borrowed_parameters(model, self.load_config.device if route != "hf" else None)
+            model.eval()
+
+        if defer_runtime:
+            return activate
+        activate()
+        return None
 
     @staticmethod
     def _bind_resident_runtime(model):
@@ -2617,10 +2616,41 @@ class NewModelLoader:
     def load(
         self, *, startup_lora: Optional[Tuple[str, str]] = None,
         prepare_loans=None, resident=None, restored=None,
-        coordinated_resident_replay: bool = False,
+        coordinated_resident_load: bool = False,
     ) -> nn.Module:
         # Only a complete load publishes a backend, including on retry.
         self._selected_load_method = None
+        distributed_cold = (
+            resident is not None and restored is None and torch.distributed.is_initialized()
+        )
+        # FST already checks prerequisites at each stage. Scratch/isolated
+        # readers can fail at any earlier local step (even opening the shard);
+        # when the service agreed on residency they need one vote covering the
+        # entire local phase, not one nested inside another loader's collective.
+        independent = distributed_cold and (
+            self.load_config.load_method == NewLoaderLoadMethod.SCRATCH
+            or uses_isolated_checkpoint_load(self._model_type())
+        )
+        coordinated_cold = distributed_cold and (coordinated_resident_load or not independent)
+        guard = (
+            self._checkpoint_preflight(None, self.load_config.load_method, coordinated_resident=True)
+            if independent and coordinated_cold else nullcontext()
+        )
+        with guard:
+            model, method, activate = self._load_owner(
+                startup_lora, prepare_loans, resident, restored, coordinated_resident_load, coordinated_cold
+            )
+        if activate is not None:
+            with self._checkpoint_preflight(model, self.load_config.load_method):
+                activate()
+        self._selected_load_method = method
+        return model
+
+    def _load_owner(
+        self, startup_lora, prepare_loans, resident, restored,
+        coordinated_resident_load: bool, defer_runtime: bool,
+    ) -> Tuple[nn.Module, NewLoaderLoadMethod, Optional[Callable[[], None]]]:
+        """Build the parameter owner, optionally leaving collective startup to the caller."""
         self._eplb_ft_checkpoint = None
         self._w8a8_source = None
         if self.load_config.resident_construction is not None:
@@ -2646,7 +2676,7 @@ class NewModelLoader:
         warm_replay = resident is not None and restored is not None
         with self._checkpoint_preflight(
             owner, requested_method, isolated=isolated,
-            coordinated_replay=warm_replay and coordinated_resident_replay,
+            coordinated_resident=warm_replay and coordinated_resident_load,
         ):
             if lookup_error is not None:
                 raise lookup_error
@@ -2699,8 +2729,7 @@ class NewModelLoader:
                     self._run_post_load_hooks(model)
                 validate_borrowed_parameters(model)
                 model.eval()
-            self._selected_load_method = method
-            return model
+            return model, method, None
         if distributed_load and not isolated:
             route = ("meta" if meta_checkpoint is not None else "ft" if ft_checkpoint is not None
                      else "w8a8" if self._w8a8_source is not None else "hf")
@@ -2817,17 +2846,16 @@ class NewModelLoader:
                     self._finalize_host_staged_modules(model, defer_executor=resident is not None)
                 model.to(self.load_config.device)
                 self._validate_loaded_weights(model)
-                self._finish_checkpoint(
+                activate = self._finish_checkpoint(
                     model, resident, NewLoaderLoadMethod(ft_checkpoint.read_backend),
                     startup_lora, finish_format_lora, "meta" if meta_checkpoint else "ft",
+                    defer_runtime=defer_runtime,
                 )
-                validate_borrowed_parameters(model, self.load_config.device)
-                model.eval()
             if ft_rebalance:
                 # Keep the stage's immutable catalog, not a second model.
                 # Keep it even in STATS: an install-capable stage can switch modes.
                 self._eplb_ft_checkpoint = ft_checkpoint
-            self._selected_load_method = (
+            method = (
                 NewLoaderLoadMethod.FASTSAFETENSORS
                 if ft_checkpoint.read_backend == "fastsafetensors"
                 else NewLoaderLoadMethod.SCRATCH
@@ -2840,7 +2868,7 @@ class NewModelLoader:
                 ft_checkpoint.read_backend,
                 self.load_config.device,
             )
-            return model
+            return model, method, activate
         with self._checkpoint_preflight(model, requested_method):
             # A draft's owner can disagree on just one rank. Bind inside the
             # existing participant vote, before any peer selects an FST backend.
@@ -3069,8 +3097,7 @@ class NewModelLoader:
             validate_borrowed_parameters(model, self.load_config.device)
             model.to(self.load_config.device)
             self._validate_loaded_weights(model)
-            self._finish_checkpoint(model, resident, method, startup_lora, finish_lora)
-            validate_borrowed_parameters(model)
-            model.eval()
-        self._selected_load_method = method
-        return model
+            activate = self._finish_checkpoint(
+                model, resident, method, startup_lora, finish_lora, defer_runtime=defer_runtime
+            )
+        return model, method, activate

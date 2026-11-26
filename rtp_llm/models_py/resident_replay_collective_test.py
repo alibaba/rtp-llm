@@ -3,12 +3,14 @@
 import datetime
 import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
+from safetensors.torch import save_file
 
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.module_base import RtpModule
@@ -43,6 +45,15 @@ class _IsolatedOwner(_Owner):
     fastsafetensors_load_isolated = True
 
 
+@register_model("_resident_collective_cold")
+class _ColdOwner(_Owner):
+    def prepare_resident_weights(self):
+        pass
+
+    def resident_constructor_state(self):
+        return {}
+
+
 class _Record:
     def __init__(self, method):
         self.method = method
@@ -59,6 +70,46 @@ class _Record:
 
     def bind(self, bank):
         self.bank = bank
+
+
+class _ColdRecord:
+    def __init__(self, reject):
+        self.reject = reject
+
+    def move_to_vmm(self, bank):
+        # Exercise the real schema/record path; only CUDA VMM is replaced.
+        if self.reject:
+            raise RuntimeError("rank-local resident publication failed")
+
+    def init_scalar(self, scope, key, build):
+        return build()
+
+
+def _check_cold(rank, stage, parallel, root, method, fault):
+    config = SimpleNamespace(
+        model_type="_resident_collective_cold", stage=stage, is_mtp=True,
+        hooks=[], reject_binding=False, reject_constructor=False,
+    )
+    loader = NewModelLoader(
+        config,
+        NewLoaderConfig(
+            device="cpu", load_method=method, parallelism_config=parallel,
+            tp_size=2, tp_rank=rank - 2,
+        ),
+        model_path=str(root / "missing") if rank == 3 and fault == "source" else str(root),
+    )
+    cold = _ColdRecord(reject=rank == 3 and fault == "publish")
+    with patch.object(loader, "_runtime_checkpoint_group", return_value=stage):
+        if fault:
+            expected = "rank-local resident publication" if fault == "publish" else "missing"
+            with unittest.TestCase().assertRaisesRegex(RuntimeError, expected):
+                loader.load(resident=cold, coordinated_resident_load=True)
+            assert loader.loaded_method is None
+            assert config.hooks == []
+        else:
+            model = loader.load(resident=cold, coordinated_resident_load=True)
+            assert config.hooks == ["entered"]
+            torch.testing.assert_close(model.weight, torch.arange(2).float())
 
 
 def _check_replay(rank, stage, parallel, method, owner, fault, expected):
@@ -88,7 +139,7 @@ def _check_replay(rank, stage, parallel, method, owner, fault, expected):
         resident=_Record(method),
         restored=[RestoredTensor(GLOBAL_SCOPE, "weight", weight)],
         prepare_loans=loans,
-        coordinated_resident_replay=True,
+        coordinated_resident_load=True,
     )
     with patch.object(loader, "_runtime_checkpoint_group", return_value=stage):
         if fault:
@@ -126,6 +177,11 @@ def _worker(rank, rendezvous):
                     (None, None),
                 ):
                     _check_replay(rank, stage, parallel, method, owner, fault, expected)
+            # The same barrier exists on a cold restart after local checkpoint
+            # dispatch and publication. Use a real HF shard on each stage rank.
+            for method in ("scratch", "auto"):
+                for fault in ("publish", "source", None):
+                    _check_cold(rank, stage, parallel, Path(rendezvous).parent, method, fault)
         # The first PP stage never calls the draft loader.
         dist.barrier()
     finally:
@@ -135,6 +191,7 @@ def _worker(rank, rendezvous):
 class ResidentReplayCollectiveTest(unittest.TestCase):
     def test_local_replay_agrees_before_executor_stage_barrier(self):
         with tempfile.TemporaryDirectory() as tmp:
+            save_file({"weight": torch.arange(2).float()}, str(Path(tmp) / "model.safetensors"))
             mp.start_processes(
                 _worker, args=(tmp + "/gloo",), nprocs=4, start_method="fork"
             )

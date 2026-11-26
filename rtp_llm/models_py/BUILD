@@ -428,7 +428,7 @@ py_test(
     name = "resident_replay_collective_test",
     srcs = ["resident_replay_collective_test.py"],
     env = {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"},
-    deps = [":new_loader_core", "//rtp_llm/resident_weights"],
+    deps = [":new_loader_core", "//rtp_llm:safetensors_torch", "//rtp_llm/resident_weights"],
 )
 
 py_test(
