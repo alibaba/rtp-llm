@@ -11,6 +11,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 
+from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import MoeWorkspace
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.layer import (
     Fp8Fp4MoeLayer,
 )
@@ -18,7 +19,6 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.layer import (
 DEFAULT_MOE_CHUNK_TOKENS = 16384
 Observer = Callable[[str, torch.Tensor], None]
 ObserverFactory = Callable[[Optional[torch.Tensor]], Optional[Observer]]
-_FINAL_OUT_CACHE: dict[tuple, torch.Tensor] = {}
 _CHUNKED_MOE_LOGGED = False
 _SYNCHRONIZED_CHUNK_TOKENS: ContextVar[Optional[int]] = ContextVar(
     "moe_synchronized_chunk_tokens", default=None
@@ -239,20 +239,6 @@ def resolve_moe_max_tokens_per_rank(
     return max(min(budget, chunk_tokens) if chunking_enabled else budget, 1)
 
 
-def _get_or_create_final_out(
-    capacity: int,
-    dim: int,
-    dtype: torch.dtype,
-    device: torch.device,
-) -> torch.Tensor:
-    key = (device, dim, dtype)
-    cached = _FINAL_OUT_CACHE.get(key)
-    if cached is None or cached.size(0) < capacity:
-        cached = torch.empty((max(capacity, 1), dim), dtype=dtype, device=device)
-        _FINAL_OUT_CACHE[key] = cached
-    return cached
-
-
 @contextmanager
 def synchronized_moe_chunk_plan(
     layers: Iterable[nn.Module],
@@ -336,6 +322,13 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
         has_shared_expert_gate: bool = False,
         observer_factory: Optional[ObserverFactory] = None,
         record_function_scope: Callable[[], ContextManager] = nullcontext,
+        moe_cp_enabled: bool = False,
+        moe_cp_size: int = 1,
+        moe_tp_size: int = 1,
+        moe_tp_rank: int = 0,
+        attn_tp_size: int = 1,
+        moe_workspace=None,
+        sm120_moe_eligible: bool = False,
     ) -> None:
         super().__init__()
         if layer_weights is None:
@@ -347,6 +340,9 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
         self.chunking_enabled = chunking_enabled
         self._observer_factory = observer_factory
         self._record_function_scope = record_function_scope
+        self._moe_workspace = (
+            moe_workspace if moe_workspace is not None else MoeWorkspace()
+        )
         self._moe = Fp8Fp4MoeLayer(
             layer_id=layer_id,
             dim=dim,
@@ -372,6 +368,13 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
             has_shared_expert_gate=has_shared_expert_gate,
             physical_expert_num=n_physical_experts,
             is_decode_role=is_decode_role,
+            moe_cp_enabled=moe_cp_enabled,
+            moe_cp_size=moe_cp_size,
+            moe_tp_size=moe_tp_size,
+            moe_tp_rank=moe_tp_rank,
+            attn_tp_size=attn_tp_size,
+            moe_workspace=self._moe_workspace,
+            sm120_moe_eligible=sm120_moe_eligible,
         )
         self.strategy_name = self._moe.strategy_name
 
@@ -428,6 +431,26 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
             return tokens
         return synchronize_moe_chunk_tokens(tokens, device)
 
+    def _get_or_create_final_out(
+        self,
+        capacity: int,
+        dim: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> torch.Tensor:
+        workspace = getattr(self, "_moe_workspace", None)
+        if workspace is None:
+            workspace = MoeWorkspace()
+            self._moe_workspace = workspace
+        bucket = workspace.cache("fp8_fp4_final_out", device)
+        key = (dim, dtype)
+        cached = bucket.get(key)
+        if cached is None or cached.size(0) < capacity:
+            workspace.retire_if_graph(device, cached)
+            cached = torch.empty((max(capacity, 1), dim), dtype=dtype, device=device)
+            bucket[key] = cached
+        return cached
+
     def _observer(self, positions: Optional[torch.Tensor]):
         return self._observer_factory(positions) if self._observer_factory else None
 
@@ -473,7 +496,7 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
             max(flat_x.size(0), synchronized_tokens),
             is_decode_forward=is_decode_forward,
         )
-        output = _get_or_create_final_out(
+        output = self._get_or_create_final_out(
             max(flat_x.size(0), self.max_tokens_per_rank),
             self.dim,
             flat_x.dtype,

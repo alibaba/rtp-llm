@@ -221,10 +221,23 @@ class Sm120IndexerHardwareTest(unittest.TestCase):
                 )
 
     def test_oom_recovery_uses_resolved_defrag_flag(self) -> None:
-        for retry in (True, False):
-            with self.subTest(oom_defrag_retry=retry), mock.patch.object(
-                torch.cuda, "empty_cache"
-            ) as empty_cache:
+        from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
+            FusedMoeExpertExecutor,
+        )
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.sm120_decode import (
+            Sm120DecodeExecutor,
+        )
+
+        self.assertIs(Sm120DecodeExecutor.requires_oom_defrag_retry, True)
+        self.assertIs(Sm120DecodeExecutor.defrag_on_large_prefill, True)
+        self.assertIs(FusedMoeExpertExecutor.requires_oom_defrag_retry, False)
+        self.assertIs(FusedMoeExpertExecutor.defrag_on_large_prefill, False)
+
+        for executor_cls in (Sm120DecodeExecutor, FusedMoeExpertExecutor):
+            retry = bool(getattr(executor_cls, "requires_oom_defrag_retry", False))
+            with self.subTest(
+                executor=executor_cls.__name__, oom_defrag_retry=retry
+            ), mock.patch.object(torch.cuda, "empty_cache") as empty_cache:
                 output = torch.zeros(1, 8, device=self.device)
                 forward = mock.Mock(
                     side_effect=[torch.OutOfMemoryError("injected"), output]

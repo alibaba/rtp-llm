@@ -99,6 +99,10 @@ class Block(nn.Module):
         ep_rank: int = 0,
         world_size: Optional[int] = None,
         world_rank: Optional[int] = None,
+        moe_tp_size: int = 1,
+        moe_tp_rank: int = 0,
+        moe_cp_enabled: bool = False,
+        moe_cp_size: int = 1,
         max_tokens_per_rank: int = 8192,
         is_decode_role: bool = False,
         moe_strategy: str = "auto",
@@ -106,6 +110,7 @@ class Block(nn.Module):
         commit_only: bool = False,
         n_physical_experts: Optional[int] = None,
         attn_workspace: Optional[object] = None,
+        moe_workspace: Optional[object] = None,
     ):
         super().__init__()
         self.layer_id = layer_id
@@ -180,6 +185,24 @@ class Block(nn.Module):
             model_type="deepseek_v4",
             moe_w1_layout="gate_up",
             record_function_scope=_profiler.moe_record_function_scope,
+            moe_cp_enabled=moe_cp_enabled,
+            moe_cp_size=moe_cp_size,
+            moe_tp_size=moe_tp_size,
+            moe_tp_rank=moe_tp_rank,
+            attn_tp_size=tp_size,
+            moe_workspace=moe_workspace,
+            sm120_moe_eligible=True,
+        )
+        executor = getattr(
+            getattr(getattr(self.ffn, "_moe", None), "fused_moe", None),
+            "fused_experts",
+            None,
+        )
+        self.attn.oom_defrag_retry = bool(
+            getattr(executor, "requires_oom_defrag_retry", False)
+        )
+        self.defrag_on_large_prefill = bool(
+            getattr(executor, "defrag_on_large_prefill", False)
         )
         # Framework loader already casts norms to bf16 (compute_dtype) and
         # hc_* tensors to fp32 (descriptor data_type); pass refs straight

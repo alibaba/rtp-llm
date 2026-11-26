@@ -1469,6 +1469,71 @@ class ShardedEmbeddingAndWorkspaceTest(unittest.TestCase):
         for layer in v4.layers:
             self.assertIs(layer.attn._sparse_mla_workspace, v4._attn_workspace)
 
+    def test_v4_transformer_build_block_shares_moe_workspace_and_binds_defrag_traits(
+        self,
+    ):
+        from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
+            MoeWorkspace,
+        )
+        from rtp_llm.models_py.modules.factory.fused_moe.utils.sm120.workspace import (
+            Sm120MoeWorkspace,
+            workspace_for,
+        )
+        from rtp_llm.utils.model_weight import W
+
+        args = self._minimal_v4_args(n_layers=2, dim=8, tp_size=1, commit_only=True)
+        layer_w = {
+            W.v4_attn_wkv_w: torch.zeros(1),
+            W.v4_attn_wkv_s: torch.zeros(1),
+            W.v4_attn_kv_norm: torch.zeros(8),
+        }
+        mw = SimpleNamespace(
+            global_weights=self._minimal_global_weights(dim=8, embed_width=8),
+            weights=[dict(layer_w), dict(layer_w)],
+        )
+        observed_moe_workspaces = []
+        real_block_cls = Block
+
+        def spy_block(*b_args, **b_kwargs):
+            observed_moe_workspaces.append(b_kwargs.get("moe_workspace"))
+            blk = real_block_cls(*b_args, **b_kwargs)
+            blk.defrag_on_large_prefill = b_kwargs.get("layer_id") == 1
+            return blk
+
+        with (
+            patch.object(transformer_module, "Block", side_effect=spy_block),
+            patch(
+                "rtp_llm.models_py.modules.dsv4.fp8.attention._v4_fp8_linear",
+                side_effect=lambda w, s: nn.Identity(),
+            ),
+        ):
+            v4 = V4Transformer(args, mw)
+
+        self.assertIsInstance(v4._moe_workspace, MoeWorkspace)
+        self.assertEqual(len(observed_moe_workspaces), 2)
+        self.assertIs(observed_moe_workspaces[0], v4._moe_workspace)
+        self.assertIs(observed_moe_workspaces[1], v4._moe_workspace)
+        sm120_0 = workspace_for(SimpleNamespace(moe_workspace=observed_moe_workspaces[0]))
+        sm120_1 = workspace_for(SimpleNamespace(moe_workspace=observed_moe_workspaces[1]))
+        self.assertIsInstance(sm120_0, Sm120MoeWorkspace)
+        self.assertIs(sm120_0, sm120_1)
+        self.assertTrue(v4._defrag_before_large_prefill)
+
+        def spy_block_no_defrag(*b_args, **b_kwargs):
+            blk = real_block_cls(*b_args, **b_kwargs)
+            blk.defrag_on_large_prefill = False
+            return blk
+
+        with (
+            patch.object(transformer_module, "Block", side_effect=spy_block_no_defrag),
+            patch(
+                "rtp_llm.models_py.modules.dsv4.fp8.attention._v4_fp8_linear",
+                side_effect=lambda w, s: nn.Identity(),
+            ),
+        ):
+            v4_no_defrag = V4Transformer(args, mw)
+        self.assertFalse(v4_no_defrag._defrag_before_large_prefill)
+
 
 if __name__ == "__main__":
     unittest.main()

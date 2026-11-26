@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 import torch
 import torch.nn as nn
 
+from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import MoeWorkspace
 from rtp_llm.models_py.modules.factory.fused_moe.utils.config import (
     strict_fused_moe_enabled,
 )
@@ -46,9 +47,6 @@ class _SharedExpertWorkspace:
     views: dict[int, _SharedExpertWorkspaceViews] = field(default_factory=dict)
 
 
-_SHARED_EXPERT_WORKSPACE_CACHE: dict[tuple, _SharedExpertWorkspace] = {}
-
-
 class W13SharedExpert(nn.Module):
     """Merged shared experts with a combined gate/up projection.
 
@@ -74,7 +72,10 @@ class W13SharedExpert(nn.Module):
                 f"got {tuple(w13_w.shape)}, expected {(2 * inter_dim, dim)}"
             )
         self.w13 = create_fp8_linear(w13_w, w13_s)
-        self.w2 = create_fp8_linear(expert_weights["w2_w"], expert_weights["w2_s"])
+        self.w2 = create_fp8_linear(
+            expert_weights["w2_w"],
+            expert_weights["w2_s"],
+        )
         self.swiglu_limit = swiglu_limit
 
     def _apply_layer(self, layer: nn.Module, x: torch.Tensor) -> torch.Tensor:
@@ -151,12 +152,15 @@ class FusedSharedExpertFastPath:
         dim: int | None = None,
         inter_dim: int | None = None,
         swiglu_limit: float = 0.0,
+        moe_workspace: MoeWorkspace | None = None,
     ) -> None:
         self.max_tokens_per_rank = max_tokens_per_rank
         self.dim = dim
         self.inter_dim = inter_dim
         self.swiglu_limit = swiglu_limit
-        self._workspace: _SharedExpertWorkspace | None = None
+        self._moe_workspace = (
+            moe_workspace if moe_workspace is not None else MoeWorkspace()
+        )
         self._prepared_shared_experts: nn.Module | None = None
         self._w13_parts: tuple[torch.Tensor, torch.Tensor] | None = None
         self._w2_parts: tuple[torch.Tensor, torch.Tensor] | None = None
@@ -171,15 +175,39 @@ class FusedSharedExpertFastPath:
 
     @staticmethod
     def can_run(shared_experts: nn.Module, x: torch.Tensor) -> bool:
-        if not (x.is_cuda and x.dtype == torch.bfloat16 and x.dim() == 2):
+        if not (
+            x.is_cuda
+            and x.is_contiguous()
+            and x.dtype == torch.bfloat16
+            and x.dim() == 2
+        ):
             return False
         if not all(hasattr(shared_experts, name) for name in ("w13", "w2")):
             return False
         # The workspace quantizes with block-128 scales; MXFP8 checkpoints need
         # group-32 scales and run W13SharedExpert.forward's fused path instead.
-        return not any(
+        if any(
             isinstance(layer, Mxfp8Linear)
             for layer in (shared_experts.w13, shared_experts.w2)
+        ):
+            return False
+        w13_w = getattr(shared_experts.w13, "weight", None)
+        w13_s = getattr(shared_experts.w13, "weight_scales", None)
+        w2_w = getattr(shared_experts.w2, "weight", None)
+        w2_s = getattr(shared_experts.w2, "weight_scales", None)
+        if any(t is None for t in (w13_w, w13_s, w2_w, w2_s)):
+            return False
+        return (
+            w13_w.device == x.device
+            and w13_s.device == x.device
+            and w2_w.device == x.device
+            and w2_s.device == x.device
+            and w13_w.dim() == 2
+            and w13_w.shape[1] == x.shape[1]
+            and w13_w.dtype == torch.float8_e4m3fn
+            and w2_w.dtype == torch.float8_e4m3fn
+            and w13_s.dtype == torch.int32
+            and w2_s.dtype == torch.int32
         )
 
     @classmethod
@@ -201,19 +229,69 @@ class FusedSharedExpertFastPath:
         else:
             shared_experts.register_buffer(name, value, persistent=False)
 
+    @staticmethod
+    def _validate_tma_packed_scale(
+        name: str, scale: torch.Tensor, rows: int, packed_k: int
+    ) -> None:
+        if scale.dim() != 2:
+            raise RuntimeError(f"shared {name} scale must be 2D, got {scale.dim()}D")
+        if scale.dtype != torch.int32:
+            raise RuntimeError(
+                f"shared {name} scale must have dtype int32, got {scale.dtype}"
+            )
+        if tuple(scale.shape) != (rows, packed_k):
+            raise RuntimeError(
+                f"shared {name} scale shape mismatch: expected {(rows, packed_k)}, "
+                f"got {tuple(scale.shape)}"
+            )
+        if scale.stride(0) != 1 or scale.stride(1) < rows or scale.stride(1) % 4 != 0:
+            raise RuntimeError(
+                f"shared {name} scale must be MN-major 16-byte TMA-aligned, "
+                f"got strides={scale.stride()} for shape={(rows, packed_k)}"
+            )
+
     def prepare(self, shared_experts: nn.Module) -> None:
-        """Validate the loader-prepared merged w13; no runtime concatenation."""
-        if not hasattr(shared_experts, "w13"):
-            raise RuntimeError("shared expert requires loader-prepared w13")
+        """Validate the loader-prepared merged w13/w2; no runtime concatenation."""
+        if not hasattr(shared_experts, "w13") or not hasattr(shared_experts, "w2"):
+            raise RuntimeError("shared expert requires loader-prepared w13 and w2")
         w13_w, w13_s = self._linear_parts(shared_experts.w13)
         w2_w, w2_s = self._linear_parts(shared_experts.w2)
-        if w13_w.dim() != 2:
-            raise RuntimeError(f"shared w13 weight must be 2D, got {w13_w.dim()}D")
-        if w13_s.dim() != 2:
-            raise RuntimeError(f"shared w13 scale must be 2D, got {w13_s.dim()}D")
+        if not (w13_w.device == w13_s.device == w2_w.device == w2_s.device):
+            raise RuntimeError("shared w13/w2 weights and scales must share device")
+        if w13_w.dtype != torch.float8_e4m3fn or w2_w.dtype != torch.float8_e4m3fn:
+            raise RuntimeError(
+                "shared w13/w2 weights must have dtype float8_e4m3fn, "
+                f"got {w13_w.dtype}/{w2_w.dtype}"
+            )
+        if w13_w.dim() != 2 or w2_w.dim() != 2:
+            raise RuntimeError(
+                f"shared w13/w2 weights must be 2D, got {w13_w.dim()}D/{w2_w.dim()}D"
+            )
         if w13_w.shape[0] % 2 != 0:
             raise RuntimeError(f"shared w13 rows must be even, got {w13_w.shape[0]}")
         inferred_inter_dim = int(w13_w.shape[0]) // 2
+        inferred_dim = int(w13_w.shape[1])
+        if inferred_dim <= 0 or inferred_inter_dim <= 0:
+            raise RuntimeError(
+                f"shared expert dimensions must be positive, got D={inferred_dim}, I={inferred_inter_dim}"
+            )
+        if inferred_dim % 128 != 0 or inferred_inter_dim % 128 != 0:
+            raise RuntimeError(
+                "shared expert fused path requires D/inter divisible by 128, "
+                f"got {inferred_dim}/{inferred_inter_dim}"
+            )
+        if tuple(w2_w.shape) != (inferred_dim, inferred_inter_dim):
+            raise RuntimeError(
+                f"shared w2 weight shape mismatch: expected {(inferred_dim, inferred_inter_dim)}, "
+                f"got {tuple(w2_w.shape)}"
+            )
+        self._validate_tma_packed_scale(
+            "w13", w13_s, 2 * inferred_inter_dim, (inferred_dim // 128 + 3) // 4
+        )
+        self._validate_tma_packed_scale(
+            "w2", w2_s, inferred_dim, (inferred_inter_dim // 128 + 3) // 4
+        )
+        self.dim = inferred_dim
         self.inter_dim = inferred_inter_dim
         self._prepared_shared_experts = shared_experts
         self._w13_parts = (w13_w, w13_s)
@@ -263,22 +341,14 @@ class FusedSharedExpertFastPath:
         inter = self.inter_dim
         assert inter is not None
         capacity = max(T, self.max_tokens_per_rank or 0, 1)
-        workspace = self._workspace
-        if (
-            workspace is not None
-            and workspace.device == x.device
-            and workspace.capacity >= capacity
-            and workspace.hidden_fp8.size(1) == inter
-        ):
-            return workspace
         if D % 128 != 0 or inter % 128 != 0:
             raise RuntimeError(
                 f"shared expert fused path requires D/inter divisible by 128, got {D}/{inter}"
             )
-        key = (x.device, D, inter)
-        workspace = _SHARED_EXPERT_WORKSPACE_CACHE.get(key)
+        bucket = self._moe_workspace.cache("fp8_fp4_shared_expert", x.device)
+        key = (D, inter)
+        workspace = bucket.get(key)
         if workspace is not None and workspace.capacity >= capacity:
-            self._workspace = workspace
             return workspace
 
         x_fp8 = torch.empty(
@@ -307,9 +377,10 @@ class FusedSharedExpertFastPath:
             dtype=torch.bfloat16,
             device=x.device,
         )
-        # Replace the cache entry as one versioned unit. Executors or captured
-        # graphs that still reference the prior workspace keep its buffers
-        # alive; each executor adopts this version when it next needs capacity.
+        # Replace the bucket entry as one versioned unit and keep superseded
+        # graph buffers alive in the owning MoeWorkspace.
+        prev_workspace = bucket.get(key)
+        self._moe_workspace.retire_if_graph(x.device, prev_workspace)
         workspace = _SharedExpertWorkspace(
             capacity=capacity,
             device=x.device,
@@ -320,8 +391,7 @@ class FusedSharedExpertFastPath:
             hidden_scale_storage=hidden_scale_storage,
             out_bf16=out_bf16,
         )
-        _SHARED_EXPERT_WORKSPACE_CACHE[key] = workspace
-        self._workspace = workspace
+        bucket[key] = workspace
         return workspace
 
     def _workspace_views(
@@ -428,6 +498,28 @@ class SharedExpertExecutor(ABC):
         raise NotImplementedError
 
 
+def _is_fp32_block_w13_shared_expert(shared_experts: nn.Module) -> bool:
+    """Return whether ``shared_experts`` is a valid FP32 block-scaled ``W13SharedExpert``."""
+    if not isinstance(shared_experts, W13SharedExpert):
+        return False
+    w13 = getattr(shared_experts, "w13", None)
+    w2 = getattr(shared_experts, "w2", None)
+    w13_w = getattr(w13, "weight", None)
+    w13_s = getattr(w13, "weight_scales", None)
+    w2_w = getattr(w2, "weight", None)
+    w2_s = getattr(w2, "weight_scales", None)
+    return (
+        isinstance(w13_w, torch.Tensor)
+        and isinstance(w13_s, torch.Tensor)
+        and isinstance(w2_w, torch.Tensor)
+        and isinstance(w2_s, torch.Tensor)
+        and w13_w.dtype == torch.float8_e4m3fn
+        and w2_w.dtype == torch.float8_e4m3fn
+        and w13_s.dtype == torch.float32
+        and w2_s.dtype == torch.float32
+    )
+
+
 class SequentialSharedExpertExecutor(SharedExpertExecutor):
     name = "sequential"
 
@@ -439,8 +531,16 @@ class SequentialSharedExpertExecutor(SharedExpertExecutor):
         self._fast_path = fast_path
 
     def prepare(self, shared_experts: nn.Module) -> None:
+        if _is_fp32_block_w13_shared_expert(shared_experts):
+            # W13SharedExpert already bound create_fp8_linear (supporting FP32
+            # block scales on SM90/SM100); execute via shared_experts.forward.
+            return
         if self._fast_path is not None:
-            self._fast_path.prepare(shared_experts)
+            try:
+                self._fast_path.prepare(shared_experts)
+            except (RuntimeError, ValueError):
+                if strict_fused_moe_enabled():
+                    raise
 
     def start(self, shared_experts: nn.Module, x: torch.Tensor) -> None:
         with record_function_range("moe.shared_expert"):
@@ -478,6 +578,8 @@ def _run_shared_expert(
     x: torch.Tensor,
     fast_path: FusedSharedExpertFastPath | None,
 ) -> torch.Tensor:
+    if _is_fp32_block_w13_shared_expert(shared_experts):
+        return shared_experts(x).float()
     if fast_path is not None and fast_path.can_run(shared_experts, x):
         try:
             return fast_path._run_prepared(shared_experts, x)
@@ -498,6 +600,7 @@ def get_shared_expert_executor(
     inter_dim: int | None = None,
     swiglu_limit: float = 0.0,
     native_mxfp8: bool = False,
+    moe_workspace: MoeWorkspace | None = None,
 ) -> SharedExpertExecutor:
     if native_mxfp8:
         return MXFP8SharedExpertExecutor()
@@ -506,6 +609,7 @@ def get_shared_expert_executor(
         dim=dim,
         inter_dim=inter_dim,
         swiglu_limit=swiglu_limit,
+        moe_workspace=moe_workspace,
     )
     return SequentialSharedExpertExecutor(fast_path)
 

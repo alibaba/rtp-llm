@@ -369,7 +369,15 @@ class BackendContractsTest(unittest.TestCase):
         "get_paged_mqa_logits_metadata",
     )
 
-    def _provider_modules(self, deep_gemm=True, sparse_mla=True, missing_symbol=None):
+    def _provider_modules(
+        self,
+        deep_gemm=True,
+        sparse_mla=True,
+        eager_fp4=True,
+        graph_fp4=True,
+        decode_moe=True,
+        missing_symbol=None,
+    ):
         deep_gemm_mod = None
         if deep_gemm:
             deep_gemm_mod = types.ModuleType("deep_gemm")
@@ -380,15 +388,34 @@ class BackendContractsTest(unittest.TestCase):
             "rtp_llm.models_py.modules.dsv4.fp8.sm120_sparse_mla"
         )
         sparse_mla_mod.sparse_mla_available = Mock(return_value=sparse_mla)
+        grouped_fp4_mod = types.ModuleType(
+            "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.sm120_grouped_fp4"
+        )
+        grouped_fp4_mod.sm120_eager_fp4_available = Mock(return_value=eager_fp4)
+        grouped_fp4_mod.sm120_graph_fp4_available = Mock(return_value=graph_fp4)
+        decode_mod = types.ModuleType(
+            "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.sm120_decode"
+        )
+        decode_mod._has_sm120_grouped_fp8_fp4_kernel = Mock(return_value=decode_moe)
         stubs = {
             "deep_gemm": deep_gemm_mod,
             sparse_mla_mod.__name__: sparse_mla_mod,
+            grouped_fp4_mod.__name__: grouped_fp4_mod,
+            decode_mod.__name__: decode_mod,
         }
-        return stubs, (deep_gemm_mod, sparse_mla_mod)
+        return stubs, (
+            deep_gemm_mod,
+            sparse_mla_mod,
+            grouped_fp4_mod,
+            decode_mod,
+        )
 
     def test_non_sm120_device_imports_and_probes_no_provider(self):
         stubs, modules = self._provider_modules()
-        modules[1].sparse_mla_available.side_effect = AssertionError("provider probed")
+        for module in modules[1:]:
+            for probe in vars(module).values():
+                if isinstance(probe, Mock):
+                    probe.side_effect = AssertionError("provider probed")
         with (
             patch.object(backend_selection, "is_cuda", return_value=True),
             patch.object(backend_selection, "is_sm120", return_value=False),
@@ -412,11 +439,17 @@ class BackendContractsTest(unittest.TestCase):
             self.assertIsNone(backend_selection.require_sm120_providers(device))
             self.assertIsNone(backend_selection.require_sm120_providers(device))
         modules[1].sparse_mla_available.assert_called_once_with()
+        modules[2].sm120_eager_fp4_available.assert_called_once_with(device)
+        modules[2].sm120_graph_fp4_available.assert_called_once_with(device)
+        modules[3]._has_sm120_grouped_fp8_fp4_kernel.assert_called_once_with(device)
 
     def test_each_missing_provider_names_only_itself(self):
         names = (
             "the SM120 DeepGEMM operations",
             "the SM120 sparse MLA operation",
+            "the FlashInfer eager grouped FP4 operations",
+            "the SM120 graph MoE operation and workspace API",
+            "the SM120 grouped FP8×FP4 decode operation",
         )
         for missing in range(len(names)):
             with self.subTest(missing=names[missing]):
@@ -460,7 +493,7 @@ class BackendContractsTest(unittest.TestCase):
                 self.assertNotIn("the SM120 sparse MLA operation", str(raised.exception))
 
     def test_all_missing_operations_are_named(self):
-        stubs, _ = self._provider_modules(False, False)
+        stubs, _ = self._provider_modules(False, False, False, False, False)
         with (
             patch.object(backend_selection, "is_cuda", return_value=True),
             patch.object(backend_selection, "is_sm120", return_value=True),
@@ -472,6 +505,9 @@ class BackendContractsTest(unittest.TestCase):
         for name in (
             "the SM120 DeepGEMM operations",
             "the SM120 sparse MLA operation",
+            "the FlashInfer eager grouped FP4 operations",
+            "the SM120 graph MoE operation and workspace API",
+            "the SM120 grouped FP8×FP4 decode operation",
         ):
             self.assertIn(name, message)
 

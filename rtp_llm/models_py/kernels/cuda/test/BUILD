@@ -159,3 +159,16 @@ dsv4_sm120_py_test(
     }),
     timeout = "long",
 )
+
+dsv4_sm120_py_test(
+    name = "test_sm120_moe_bindings",
+    src = "test_sm120_moe_bindings.py",
+    deps = py_test_deps + select({
+        "@//:using_cuda13_x86": [
+            "//rtp_llm:deep_gemm",
+            "//rtp_llm:flashinfer-python",
+        ],
+        "//conditions:default": [],
+    }),
+    timeout = "long",
+)

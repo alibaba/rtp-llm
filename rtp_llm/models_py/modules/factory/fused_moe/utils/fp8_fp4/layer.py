@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 
 from rtp_llm.models_py.kernels.cuda.quant_layouts import FP8_BLOCK
+from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import MoeWorkspace
 from rtp_llm.models_py.modules.factory.fused_moe.factory import FusedMoeFactory
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.gate import Gate
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.quantized_linear import (
@@ -19,6 +20,9 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.shared_expert imp
     W13SharedExpert,
     combine_routed_and_shared,
     get_shared_expert_executor,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.utils.sm120.workspace import (
+    stream_is_capturing,
 )
 from rtp_llm.models_py.utils.profiler import record_function_range
 from rtp_llm.resident_weights import resident_init_scalar
@@ -60,12 +64,23 @@ class Fp8Fp4MoeRuntimeConfig:
         physical_expert_num: Optional[int] = None,
         shared_fp8_block_size: int = FP8_BLOCK,
         is_decode_role: bool = False,
+        moe_cp_enabled: bool = False,
+        moe_cp_size: int = 1,
+        moe_tp_size: int = 1,
+        moe_tp_rank: int = 0,
+        attn_tp_size: int = 1,
+        moe_workspace: Optional[MoeWorkspace] = None,
+        sm120_moe_eligible: bool = False,
     ) -> None:
         if expert_num % max(ep_size, 1) != 0:
             raise ValueError(
                 f"expert_num={expert_num} must be divisible by ep_size={ep_size}"
             )
         self.layer_id = int(layer_id)
+        self.moe_workspace = (
+            moe_workspace if moe_workspace is not None else MoeWorkspace()
+        )
+        self.sm120_moe_eligible = bool(sm120_moe_eligible)
         self.hidden_size = int(hidden_size)
         self.dim = self.hidden_size
         self.moe_inter_dim = int(moe_inter_dim)
@@ -116,6 +131,13 @@ class Fp8Fp4MoeRuntimeConfig:
         self.moe_strategy = str(moe_strategy or "auto")
         self.world_size = int(ep_size if world_size is None else world_size)
         self.world_rank = int(ep_rank if world_rank is None else world_rank)
+        # Physical MoE topology for executors that own their communication.
+        # ``tp_size`` below stays 1: the routed experts are EP-sharded.
+        self.moe_cp_enabled = bool(moe_cp_enabled)
+        self.moe_cp_size = int(moe_cp_size)
+        self.moe_tp_size = int(moe_tp_size)
+        self.moe_tp_rank = int(moe_tp_rank)
+        self.attn_tp_size = int(attn_tp_size)
 
         self.tp_size = 1
         self.tp_rank = 0
@@ -179,6 +201,13 @@ class Fp8Fp4MoeLayer(nn.Module):
         moe_w1_layout: str = "up_gate",
         physical_expert_num: Optional[int] = None,
         is_decode_role: bool = False,
+        moe_cp_enabled: bool = False,
+        moe_cp_size: int = 1,
+        moe_tp_size: int = 1,
+        moe_tp_rank: int = 0,
+        attn_tp_size: int = 1,
+        moe_workspace: Optional[MoeWorkspace] = None,
+        sm120_moe_eligible: bool = False,
     ) -> None:
         super().__init__()
         if n_shared_experts < 0:
@@ -189,6 +218,9 @@ class Fp8Fp4MoeLayer(nn.Module):
         self.dim = int(dim)
         self.max_tokens_per_rank = int(max_tokens_per_rank)
         self.n_shared_experts = int(n_shared_experts)
+        self.moe_workspace = (
+            moe_workspace if moe_workspace is not None else MoeWorkspace()
+        )
         # A fused executor may consume the shared weights; a resident restart reuses this size.
         shared_fp8_block_size = resident_init_scalar(
             layer_weights,
@@ -205,6 +237,7 @@ class Fp8Fp4MoeLayer(nn.Module):
             n_hash_layers,
             vocab_size,
             layer_weights=layer_weights,
+            sm120_dsv4_numerics=sm120_moe_eligible,
         )
         runtime_config = Fp8Fp4MoeRuntimeConfig(
             layer_id=layer_id,
@@ -228,11 +261,21 @@ class Fp8Fp4MoeLayer(nn.Module):
             physical_expert_num=physical_expert_num,
             shared_fp8_block_size=shared_fp8_block_size,
             is_decode_role=is_decode_role,
+            moe_cp_enabled=moe_cp_enabled,
+            moe_cp_size=moe_cp_size,
+            moe_tp_size=moe_tp_size,
+            moe_tp_rank=moe_tp_rank,
+            attn_tp_size=attn_tp_size,
+            moe_workspace=self.moe_workspace,
+            sm120_moe_eligible=sm120_moe_eligible,
         )
         self.fused_moe = FusedMoeFactory().create_fused_moe(
             runtime_config, layer_weights
         )
         self.strategy_name = self.fused_moe.strategy_name
+        self.gate.batch_invariant_scores = (
+            self.strategy_name == "sm120_fused_moe" and moe_cp_enabled
+        )
         # MegaMoE formerly fused hash routing with input packing. Preserve its
         # BF16-score/Triton epilogue numerics while keeping routing in the
         # common fused-MoE layer.
@@ -263,6 +306,7 @@ class Fp8Fp4MoeLayer(nn.Module):
                 inter_dim=shared_inter_dim,
                 swiglu_limit=swiglu_limit,
                 native_mxfp8=shared_fp8_block_size == MXFP8_BLOCK,
+                moe_workspace=self.moe_workspace,
             )
             self._shared_executor.prepare(self.shared_experts)
 
@@ -305,6 +349,16 @@ class Fp8Fp4MoeLayer(nn.Module):
             and self.fused_moe.supports_gate_pack
             and self.gate.can_prepare_gate_payload(x, flat_ids)
         )
+        executor = getattr(self.fused_moe, "fused_experts", None)
+        local_chunk_limit = int(getattr(self, "max_tokens_per_rank", 0) or 0)
+        capturing = stream_is_capturing(x.device)
+        chunk_local = (
+            getattr(executor, "single_round_dispatch", False) is True
+            and local_chunk_limit > 0
+            and x.size(0) > local_chunk_limit
+            and not capturing
+            and not use_gate_pack
+        )
 
         def prepare_routes() -> None:
             nonlocal gate_payload, topk_weights, topk_ids
@@ -315,6 +369,25 @@ class Fp8Fp4MoeLayer(nn.Module):
                         raise RuntimeError(
                             "fused gate packing became unavailable after selection"
                         )
+                elif chunk_local:
+                    tokens = x.size(0)
+                    for begin in range(0, tokens, local_chunk_limit):
+                        end = min(begin + local_chunk_limit, tokens)
+                        chunk_ids = None if flat_ids is None else flat_ids[begin:end]
+                        w_chunk, id_chunk = self.gate(x[begin:end], chunk_ids)
+                        if topk_weights is None:
+                            topk_weights = torch.empty(
+                                (tokens, *w_chunk.shape[1:]),
+                                dtype=w_chunk.dtype,
+                                device=w_chunk.device,
+                            )
+                            topk_ids = torch.empty(
+                                (tokens, *id_chunk.shape[1:]),
+                                dtype=id_chunk.dtype,
+                                device=id_chunk.device,
+                            )
+                        topk_weights[begin:end] = w_chunk
+                        topk_ids[begin:end] = id_chunk
                 else:
                     topk_weights, topk_ids = self.gate(x, flat_ids)
             if observer is not None and not use_gate_pack:
@@ -323,6 +396,7 @@ class Fp8Fp4MoeLayer(nn.Module):
                 observer("topk_indices", topk_ids)
 
         def run_routed_experts() -> torch.Tensor:
+            # Executors may return FP32 routed sums to defer rounding until shared-expert addition.
             if gate_payload is not None:
                 return self.fused_moe.forward_gate_pack(
                     hidden_states=x,
@@ -349,6 +423,44 @@ class Fp8Fp4MoeLayer(nn.Module):
                     out_flat.copy_(output)
                     output = out_flat
                 output = output.view(shape)
+            if observer is not None:
+                observer("final_y", output.reshape(-1, self.dim))
+            return output
+
+        if chunk_local:
+            # Keep single-round A2A transport unchunked so ranks synchronize once,
+            # while bounding rank-local routing and shared-expert activation memory
+            # after peers have completed the collective.
+            prepare_routes()
+            with record_function_range("moe.routed_experts"):
+                routed = run_routed_experts()
+            if observer is not None:
+                observer("routed_y", routed)
+            output = torch.empty_like(x) if out_flat is None else out_flat
+            shared_full = None
+            for begin in range(0, x.size(0), local_chunk_limit):
+                end = min(begin + local_chunk_limit, x.size(0))
+                with record_function_range("moe.shared_expert_start"):
+                    self._shared_executor.start(self.shared_experts, x[begin:end])
+                with record_function_range("moe.shared_expert_finish"):
+                    shared_chunk = self._shared_executor.finish()
+                if observer is not None:
+                    if shared_full is None:
+                        shared_full = torch.empty(
+                            (x.size(0), self.dim),
+                            dtype=shared_chunk.dtype,
+                            device=shared_chunk.device,
+                        )
+                    shared_full[begin:end] = shared_chunk
+                with record_function_range("moe.add_shared"):
+                    combine_routed_and_shared(
+                        routed[begin:end], shared_chunk, x.dtype, out=output[begin:end]
+                    )
+                del shared_chunk
+            if observer is not None:
+                assert shared_full is not None
+                observer("shared_y", shared_full)
+            output = output.view(shape)
             if observer is not None:
                 observer("final_y", output.reshape(-1, self.dim))
             return output

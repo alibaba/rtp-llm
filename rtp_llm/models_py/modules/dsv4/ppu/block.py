@@ -1,6 +1,7 @@
 """PPU overrides; unchanged behavior is inherited from the shared DSV4 implementation."""
 
 from __future__ import annotations
+import functools
 from rtp_llm.models_py.modules.dsv4.block import (
     _PrefillFastHCImpls,
     _MOE_WEIGHT_NAMES,
@@ -154,6 +155,7 @@ class Block(_BaseBlock):
         platform_provider: object = None,
         commit_only: bool = False,
         n_physical_experts: Optional[int] = None,
+        moe_workspace: Optional[object] = None,
     ):
         super(_BaseBlock, self).__init__()
         self.layer_id = layer_id
@@ -230,10 +232,10 @@ class Block(_BaseBlock):
             n_physical_experts=n_physical_experts,
             record_function_scope=_profiler.moe_record_function_scope,
         )
-        self.ffn = (
-            platform_provider.build_moe(
-                build_baseline_moe, tp_rank=tp_rank, **moe_kwargs
-            )
+        self.ffn = platform_provider.build_moe(
+            functools.partial(build_baseline_moe, moe_workspace=moe_workspace),
+            tp_rank=tp_rank,
+            **moe_kwargs,
         )
 
         # Framework loader already casts norms to bf16 (compute_dtype) and

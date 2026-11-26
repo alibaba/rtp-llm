@@ -366,6 +366,17 @@ def forward_layers(
     owned KV regions are registered with the PD-disagg cache_store immediately
     after that layer's forward.
     """
+    # Defragment cached blocks on large prefills before allocating the
+    # multi-GiB PrefillWorkspace, skipping while CUDA graph capture is active.
+    if (
+        getattr(v4, "_defrag_before_large_prefill", False)
+        and int(input_ids.size(0)) > 8192
+        and input_ids.is_cuda
+    ):
+        with torch.cuda.device(input_ids.device):
+            if not torch.cuda.is_current_stream_capturing():
+                torch.cuda.empty_cache()
+
     # Allocate the max-sized workspace before CP metadata, embedding, or any
     # other forward-local CUDA tensor. If embedding lands in the cached block
     # first, it can split the only contiguous region large enough for this
@@ -379,10 +390,10 @@ def forward_layers(
         )
         ws = PrefillWorkspace(
             input_ids.device,
-            q_rows=v4._prefill_ws_q_rows,
+            q_rows=int(v4._prefill_ws_q_rows),
             q_dim=v4._prefill_ws_q_dim,
             reserve_cp=reserve_cp,
-            cp_rows=v4._prefill_ws_full_rows,
+            cp_rows=int(v4._prefill_ws_full_rows),
             main_w=v4._prefill_ws_main_w,
             idx_w=v4._prefill_ws_idx_w,
         )

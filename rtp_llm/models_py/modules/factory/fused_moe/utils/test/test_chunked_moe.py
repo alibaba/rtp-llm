@@ -9,11 +9,11 @@ from unittest import mock
 import torch
 import torch.nn as nn
 
+from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import MoeWorkspace
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe import (
     _mega_output_capacity,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
-    _FINAL_OUT_CACHE,
     DEFAULT_MOE_CHUNK_TOKENS,
     ChunkedFp8Fp4MoeLayer,
     cp_padded_tokens_per_rank_bound,
@@ -22,6 +22,9 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer imp
     resolve_moe_max_tokens_per_rank,
     run_moe_chunks,
     synchronized_moe_chunk_plan,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.utils.sm120.workspace import (
+    Sm120MoeWorkspace,
 )
 from rtp_llm.models_py.utils.profiler import (
     disable_record_function_ranges,
@@ -120,7 +123,7 @@ class _FakeMoe(nn.Module):
         return result
 
 
-def _fake_layer(dim=4, capacity=5, is_decode_role=False):
+def _fake_layer(dim=4, capacity=5, is_decode_role=False, moe_workspace=None):
     layer = ChunkedFp8Fp4MoeLayer.__new__(ChunkedFp8Fp4MoeLayer)
     nn.Module.__init__(layer)
     layer.layer_id = 0
@@ -130,6 +133,9 @@ def _fake_layer(dim=4, capacity=5, is_decode_role=False):
     layer.chunking_enabled = True
     layer._observer_factory = None
     layer._record_function_scope = nullcontext
+    layer._moe_workspace = (
+        moe_workspace if moe_workspace is not None else MoeWorkspace()
+    )
     layer._moe = _FakeMoe(capacity)
     layer.strategy_name = "local_loop"
     return layer
@@ -279,28 +285,48 @@ class ChunkedMoeTest(unittest.TestCase):
         )
 
     def test_nonchunked_forward_reuses_final_output_storage(self):
-        _FINAL_OUT_CACHE.clear()
-        self.addCleanup(_FINAL_OUT_CACHE.clear)
-        layer = _fake_layer(dim=3, capacity=5)
+        shared_ws = MoeWorkspace()
+        draft_ws = MoeWorkspace()
+        sm120_ws = shared_ws.get_or_create(Sm120MoeWorkspace)
+        layer = _fake_layer(dim=3, capacity=5, moe_workspace=shared_ws)
+        layer2 = _fake_layer(dim=3, capacity=5, moe_workspace=shared_ws)
+        draft_layer = _fake_layer(dim=3, capacity=5, moe_workspace=draft_ws)
         x = torch.arange(4 * 3, dtype=torch.float32).view(4, 3)
 
         first = layer(x)
-        cache_key = (x.device, layer.dim, x.dtype)
-        self.assertEqual(_FINAL_OUT_CACHE[cache_key].size(0), layer.max_tokens_per_rank)
-        second = layer(x + 1)
+        bucket = shared_ws.cache("fp8_fp4_final_out", x.device)
+        self.assertEqual(bucket[(3, x.dtype)].size(0), layer.max_tokens_per_rank)
+        second = layer2(x + 1)
+        draft_out = draft_layer(x + 5)
 
         self.assertTrue(torch.equal(second, (x + 1) * 3))
-        self.assertEqual(len(layer._moe.output_buffers), 2)
+        self.assertTrue(torch.equal(draft_out, (x + 5) * 3))
         self.assertEqual(
             first.untyped_storage().data_ptr(),
             second.untyped_storage().data_ptr(),
         )
+        # Distinct model owners isolate final outputs so draft never clobbers target.
+        self.assertNotEqual(
+            draft_out.untyped_storage().data_ptr(),
+            second.untyped_storage().data_ptr(),
+        )
+        # Upgrading MoeWorkspace preserves keyed Sm120MoeWorkspace coexistence.
+        self.assertIs(shared_ws.get_or_create(Sm120MoeWorkspace), sm120_ws)
         self.assertTrue(
             all(
                 buf.untyped_storage().data_ptr() == second.untyped_storage().data_ptr()
-                for buf in layer._moe.output_buffers
+                for buf in layer._moe.output_buffers + layer2._moe.output_buffers
             )
         )
+
+        # Graph-context buffers stay separate from eager buckets and retired buffers
+        # are retained on graph growth so earlier captured raw pointers stay valid.
+        with mock.patch.object(shared_ws, "is_graph_context", return_value=True):
+            graph_small = layer._get_or_create_final_out(2, 3, x.dtype, x.device)
+            graph_large = layer._get_or_create_final_out(9, 3, x.dtype, x.device)
+        self.assertIsNot(graph_small, graph_large)
+        self.assertIn(graph_small, shared_ws._retired_graph_buffers)
+        self.assertEqual(graph_small.untyped_storage().data_ptr(), shared_ws._retired_graph_buffers[-1].untyped_storage().data_ptr())
 
     def test_speculative_decode_budget_accounts_for_generated_tokens(self):
         self.assertEqual(

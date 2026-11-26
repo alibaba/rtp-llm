@@ -710,6 +710,17 @@ class DeepSeekV4Model(GptModelBase):
         self._is_decode_role = bool(init_resource.is_decode_role)
         self._max_context_batch_size = init_resource.max_context_batch_size
         self._v4_args.is_decode_role = self._is_decode_role
+
+        # CP repurposes the physical TP group for sequence parallelism, so
+        # ``V4Args.tp_size`` is attention-facing (1 under CP) while MoE
+        # executors that own their communication need the physical topology.
+        physical_tp_size = int(getattr(self.parallelism_config, "tp_size", 1) or 1)
+        physical_tp_rank = int(getattr(self.parallelism_config, "tp_rank", 0) or 0)
+        moe_cp_enabled = self._prefill_cp_size > 1 and not self._is_decode_role
+        self._v4_args.moe_tp_size = physical_tp_size
+        self._v4_args.moe_tp_rank = physical_tp_rank
+        self._v4_args.moe_cp_enabled = moe_cp_enabled
+        self._v4_args.moe_cp_size = physical_tp_size if moe_cp_enabled else 1
         runtime_resolved_max_tokens_per_rank = resolve_moe_max_tokens_per_rank(
             max_seq_len=int(self._v4_args.max_seq_len),
             current_max_tokens_per_rank=int(self._v4_args.max_tokens_per_rank),

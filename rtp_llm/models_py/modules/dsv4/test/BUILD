@@ -227,6 +227,28 @@ dsv4_sm120_py_test(
     deps = _MODEL_TEST_DEPS,
 )
 
+dsv4_sm120_py_test(
+    name = "test_sm120_small_batch_projections",
+    deps = _MODEL_TEST_DEPS,
+)
+
+dsv4_sm120_py_test(
+    name = "test_sm120_ordered_reduce_scatter",
+    gpu_count = 8,
+    args = ["-k", "test_producer_and_subgroup_reduction_8rank"],
+    tags = ["manual", "multi_device"],
+    deps = _MODEL_TEST_DEPS + ["//rtp_llm/models_py/triton_kernels:moe"],
+)
+
+dsv4_sm120_py_test(
+    name = "test_sm120_ordered_reduce_scatter_4rank",
+    src = "test_sm120_ordered_reduce_scatter.py",
+    gpu_count = 4,
+    args = ["-k", "test_producer_and_subgroup_reduction_4rank"],
+    tags = ["multi_device"],
+    deps = _MODEL_TEST_DEPS + ["//rtp_llm/models_py/triton_kernels:moe"],
+)
+
 test_suite(
     name = "dsv4_cuda13_unit",
     tests = [":" + name for name in _CP_HELPER_TESTS + _MODEL_CONTRACT_TESTS + _GPU_TESTS] + _MOVED_CONTRACT_TESTS + _PAIRED_GPU_TESTS,

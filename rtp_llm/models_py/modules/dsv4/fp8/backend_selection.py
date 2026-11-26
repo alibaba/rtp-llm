@@ -42,8 +42,15 @@ def require_sm120_providers(device: torch.device) -> None:
 def _require_sm120_providers(index: int) -> None:
     # Imported here: provider modules load only on SM120 workers.
     from rtp_llm.models_py.modules.dsv4.fp8.sm120_sparse_mla import sparse_mla_available
+    from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.sm120_decode import (
+        _has_sm120_grouped_fp8_fp4_kernel,
+    )
+    from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.sm120_grouped_fp4 import (
+        sm120_eager_fp4_available,
+        sm120_graph_fp4_available,
+    )
 
-    del index
+    device = torch.device("cuda", index)
     try:
         import deep_gemm
     except (ImportError, AttributeError, OSError, RuntimeError):
@@ -68,6 +75,18 @@ def _require_sm120_providers(index: int) -> None:
                 ),
             ),
             ("the SM120 sparse MLA operation", sparse_mla_available()),
+            (
+                "the FlashInfer eager grouped FP4 operations",
+                sm120_eager_fp4_available(device),
+            ),
+            (
+                "the SM120 graph MoE operation and workspace API",
+                sm120_graph_fp4_available(device),
+            ),
+            (
+                "the SM120 grouped FP8×FP4 decode operation",
+                _has_sm120_grouped_fp8_fp4_kernel(device),
+            ),
         )
         if not available
     ]

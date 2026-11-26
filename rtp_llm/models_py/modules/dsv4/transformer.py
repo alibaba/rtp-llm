@@ -25,6 +25,7 @@ from rtp_llm.models_py.modules.dsv4.fp8.attention_backend import (
     SparseAttentionWorkspace,
 )
 from rtp_llm.models_py.modules.dsv4.hc import build_hc_head
+from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import MoeWorkspace
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
     synchronized_moe_chunk_plan,
 )
@@ -114,6 +115,13 @@ class V4Args:
     dp_rank: int = 0
     world_size: int = 1
     world_rank: int = 0
+    # Physical MoE topology. CP repurposes the TP group for sequence
+    # parallelism, so ``tp_size`` above is attention-facing (1 under CP) while
+    # executors that own their communication need the physical group.
+    moe_tp_size: int = 1
+    moe_tp_rank: int = 0
+    moe_cp_enabled: bool = False
+    moe_cp_size: int = 1
     is_decode_role: bool = False
     # Dedicated DSpARK prefill workers only project target features into the
     # draft SWA pools; they do not construct proposal, FFN, or mHC modules.
@@ -183,6 +191,10 @@ def _block_kwargs(
         ep_rank=args.ep_rank,
         world_size=args.world_size,
         world_rank=args.world_rank,
+        moe_tp_size=args.moe_tp_size,
+        moe_tp_rank=args.moe_tp_rank,
+        moe_cp_enabled=args.moe_cp_enabled,
+        moe_cp_size=args.moe_cp_size,
         max_tokens_per_rank=args.max_tokens_per_rank,
         is_decode_role=args.is_decode_role,
         fp8_kv_cache=args.fp8_kv_cache,
@@ -250,10 +262,12 @@ def _build_block(
     layer_weights: Optional[Dict[str, torch.Tensor]] = None,
     commit_only: bool = False,
     attn_workspace: Optional[SparseAttentionWorkspace] = None,
+    moe_workspace: Optional[MoeWorkspace] = None,
 ) -> Block:
     return Block(
         **_block_kwargs(layer_id, args, layer_weights, commit_only=commit_only),
         attn_workspace=attn_workspace,
+        moe_workspace=moe_workspace,
     )
 
 
@@ -317,6 +331,7 @@ class V4Transformer(nn.Module):
                     )
 
         self._attn_workspace = SparseAttentionWorkspace()
+        self._moe_workspace = MoeWorkspace()
         self.layers = nn.ModuleList(
             [
                 _build_block(
@@ -325,9 +340,13 @@ class V4Transformer(nn.Module):
                     layer_weights=mw.weights[i],
                     commit_only=self.commit_only,
                     attn_workspace=self._attn_workspace,
+                    moe_workspace=self._moe_workspace,
                 )
                 for i in range(args.n_layers)
             ]
+        )
+        self._defrag_before_large_prefill = any(
+            getattr(layer, "defrag_on_large_prefill", False) for layer in self.layers
         )
 
         # MTP draft is a separate model (``DeepSeekV4MtpModel``) that
