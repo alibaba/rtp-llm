@@ -145,6 +145,25 @@ class GroupwiseLinearMethod(QuantizeMethodBase):
             sources[""] = (source, dim, tp, rank, 0)
         layer._groupwise_sources = sources
 
+    def configure_checkpoint_shards(self, layer, projections, dim, tp, rank):
+        """Declare model-specific HF projections that feed an already local GEMM."""
+        layout = layer._groupwise_checkpoint_layout
+        sources = {}
+        offset = 0
+        for name, global_n in projections.items():
+            source = GroupwiseCheckpointLayout(
+                self.method, self.bits, self.group_size,
+                layout.input_size * tp if dim == 0 else layout.input_size, global_n,
+            )
+            local = source.local_layout(dim, tp, rank)
+            if local.input_size != layout.input_size:
+                raise ValueError("Grouped projection has incompatible input width")
+            sources[name] = (source, dim, tp, rank, offset)
+            offset += local.output_size
+        if offset != layout.output_size:
+            raise ValueError("Grouped projection widths do not fill the destination")
+        layer._groupwise_sources = sources
+
     def _role(self, layer, name):
         parts = name.split(".")
         parameter = parts[-1]

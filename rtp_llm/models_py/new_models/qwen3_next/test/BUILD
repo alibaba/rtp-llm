@@ -57,6 +57,13 @@ py_test(
 )
 
 py_test(
+    name = "gdn_groupwise_test",
+    srcs = ["gdn_groupwise_test.py"],
+    env = {"CUDA_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"},
+    deps = ["//rtp_llm/models_py:new_weight_loader", "//rtp_llm:safetensors_torch"],
+)
+
+py_test(
     name = "main_checkpoint_test",
     env = checkpoint_reader_test_env({}),
     srcs = ["main_checkpoint_test.py"],

@@ -127,12 +127,25 @@ class Qwen3NextGdnParameters(RtpModule):
         # These projections are already rank-local after the model-specific
         # Q/K/V/Z transform. The common Linear layer still owns quantization,
         # completeness validation, backend preflight and the post-load hook.
+        qkvz_config = quant_config
+        if quant_config is not None and quant_config.quant_type in ("awq", "gptq"):
+            split_ignored = [
+                quant_config.is_layer_ignored(f"{prefix}.in_proj_{part}")
+                for part in ("qkv", "z")
+            ]
+            if not quant_config.is_layer_ignored(f"{prefix}.in_proj_qkvz"):
+                if all(split_ignored):
+                    qkvz_config = None
+                elif any(split_ignored):
+                    raise ValueError(
+                        "Partially excluded GDN QKV/Z cannot share one grouped projection"
+                    )
         self.in_proj_qkvz = ColumnParallelLinear(
             input_size=hidden_size,
             output_size=self.qkvz_size,
             tp_size=1,
             tp_rank=0,
-            quant_config=quant_config,
+            quant_config=qkvz_config,
             prefix=f"{prefix}.in_proj_qkvz",
             bias=False,
             params_dtype=params_dtype,
@@ -171,6 +184,19 @@ class Qwen3NextGdnParameters(RtpModule):
         self._ba_layout: Optional[str] = None
         self._ba_split_parts: Set[str] = set()
         self._input_projection_packed = False
+        # The GEMM sees only rank-local activations; the serialized projections
+        # still have full widths and must be split using their physical layout.
+        self._gdn_widths = {
+            "q": num_k_heads * self.head_k_dim, "k": num_k_heads * self.head_k_dim,
+            "v": num_v_heads * self.head_v_dim, "z": num_v_heads * self.head_v_dim,
+        }
+        for child, projections, dim in (
+            (self.in_proj_qkvz, self._gdn_widths, 1),
+            (self.out_proj, {"": hidden_size}, 0),
+        ):
+            declare = getattr(child.quant_method, "configure_checkpoint_shards", None)
+            if declare is not None:
+                declare(child, projections, dim, attn_tp_size, attn_tp_rank)
 
     def _packed_input_weight(self):
         """Return the live [QKVZ+BA,K] view, never a cached copy of a parameter."""
@@ -544,6 +570,54 @@ class Qwen3NextGdnParameters(RtpModule):
             return tensor
         raise ValueError(f"Unsupported GDN projection parameter {parameter!r}")
 
+    def _load_grouped_input(self, component, parameter, value):
+        """Turn global HF QKV/Z into the Q,K,V,Z streams of the physical GEMM."""
+        child = self.in_proj_qkvz
+        names = tuple(component)
+        if parameter == "g_idx":
+            # Each input projection addresses the same K axis. Let QuantMethod
+            # validate the original identity map separately for each projection.
+            pieces = [value] * len(names)
+        else:
+            source = child._groupwise_checkpoint_layout
+            if parameter not in ("qweight", "qzeros", "scales", "bias"):
+                raise ValueError(f"Unsupported grouped GDN input parameter {parameter}")
+            packed_n = parameter == "qzeros" or (parameter == "qweight" and source.method == "awq")
+            pack = source.pack_factor if packed_n else 1
+            widths = [self._gdn_widths[n] // pack for n in names]
+            if value.ndim != (1 if parameter == "bias" else 2) or value.shape[-1] != sum(widths):
+                raise ValueError(f"Invalid grouped GDN {component}.{parameter} shape: {tuple(value.shape)}")
+            if component == "qkvz":
+                # Fused Next exports group Q,K,V,Z by key head. Restrict the
+                # head interval before any contiguous copy; never unpack codes.
+                heads = self.linear_attn_config.linear_num_key_heads
+                if (source.method == "awq" and self.head_k_dim % 8) or self.head_k_dim % pack:
+                    raise ValueError("GDN head boundary splits a quantizer packing group")
+                if parameter == "bias" and torch.count_nonzero(value).item():
+                    raise ValueError("GPTQ checkpoint bias for GDN must be all zero")
+                grouped = value.unflatten(-1, (heads, sum(widths) // heads))
+                grouped = grouped.narrow(-2, self.attn_tp_rank * self.local_num_k_heads, self.local_num_k_heads)
+                blocks = grouped.split([w // heads for w in widths], dim=-1)
+                pieces = []
+                for name, width, block in zip(names, widths, blocks):
+                    shape = (*value.shape[:-1], width)
+                    key = f"{name}.{parameter}"
+                    spec = child.quant_method.checkpoint_read_spec(child, key, shape)
+                    # Validation-only GPTQ bias requires the full source buffer;
+                    # it has already been checked above across all heads.
+                    if parameter == "bias":
+                        pieces.append(value[:width])
+                    else:
+                        pieces.append(spec.wrap_sharded_tensor(block.flatten(-2)))
+            else:
+                # Qwen3.5 exports Q,K,V contiguously and Z separately. Delegate
+                # TP selection, scale checks and completeness to the common leaf.
+                pieces = value.split(widths, dim=-1)
+        self._claim_layout(self._qkvz_layouts, parameter, "fused" if component == "qkvz" else "split")
+        self._load_child_weights(child, {
+            f"{name}.{parameter}": piece for name, piece in zip(names, pieces)
+        })
+
     def prepare_child_weight_updates(self, module, incoming):
         local = {
             name: self._projection_tensor(module, name, tensor)
@@ -553,6 +627,15 @@ class Qwen3NextGdnParameters(RtpModule):
 
     def load_weights(self, weights: Dict[str, torch.Tensor]) -> None:
         for name, tensor in weights.items():
+            projection, _, parameter = name.partition(".")
+            if projection in ("in_proj_qkvz", "in_proj_qkv", "in_proj_z") and hasattr(
+                self.in_proj_qkvz.quant_method, "configure_checkpoint_shards"
+            ):
+                self._load_grouped_input(projection.removeprefix("in_proj_"), parameter, tensor)
+                continue
+            if projection == "out_proj" and hasattr(self.out_proj.quant_method, "configure_checkpoint_shards"):
+                self._load_child_weights(self.out_proj, {parameter: tensor})
+                continue
             if name.startswith(("in_proj_qkvz.", "out_proj.")):
                 projection, parameter = name.split(".", 1)
                 module = getattr(self, projection)
