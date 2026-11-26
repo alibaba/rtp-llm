@@ -172,7 +172,6 @@ def _silu_mul_fp8_quant_packed_split_kernel(
     offs_m = tl.arange(0, BLOCK_M).to(tl.int64)
     offs_n = tl.arange(0, GROUP_SIZE)
     row_mask = (m_offset + offs_m) < M
-
     gate_base = (m_offset + offs_m[:, None]) * gate_stride_m
     up_base = (m_offset + offs_m[:, None]) * up_stride_m
     out_base = (m_offset + offs_m[:, None]) * output_q_stride_m
@@ -317,12 +316,9 @@ def silu_mul_fp8_quant_packed_from_parts(
     output_q: Optional[torch.Tensor] = None,
     output_scale: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Same fused activation+quant path as :func:`silu_mul_fp8_quant_packed`,
-    but reads gate/up from two contiguous BF16 GEMM outputs.
-    """
     assert gate.dim() == 2 and up.dim() == 2
     assert gate.shape == up.shape, f"gate/up shape mismatch: {gate.shape} vs {up.shape}"
-    assert gate.is_contiguous() and up.is_contiguous(), "gate/up must be contiguous"
+    assert gate.stride(1) == 1 and up.stride(1) == 1, "gate/up columns must be dense"
     assert gate.dtype == torch.bfloat16 and up.dtype == torch.bfloat16
 
     M, N_2 = gate.shape

@@ -10,9 +10,12 @@ from flashinfer.autotuner import AutoTuner
 
 from rtp_llm.config.quant_config import init_quant_config
 from rtp_llm.device.device_impl import CudaImpl
+from rtp_llm.models_py.modules.factory.linear import LinearFactory
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp4_linear import (
     CudaFp4GEMMLinear,
+    fp4_backend_available,
 )
+from rtp_llm.models_py.utils.arch import is_sm10x, is_sm120
 from rtp_llm.test.utils.numeric_util import calc_diff
 
 
@@ -38,6 +41,7 @@ class CudaFp4GEMMLinearAutotuneTest(unittest.TestCase):
             with (
                 self.subTest(backend=expected_backend),
                 mock.patch.dict(os.environ),
+                mock.patch(f"{module}.is_sm12x", return_value=False),
                 mock.patch(f"{module}.fp4_quantize", new=quantize),
                 mock.patch(
                     f"{module}.mm_fp4",
@@ -116,8 +120,9 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
 
     def setUp(self):
         """Setup test environment"""
+        default_backend = "cute-dsl" if is_sm10x() else "cutlass"
         backend_env = mock.patch.dict(
-            os.environ, {"RTP_LLM_FP4_GEMM_BACKEND": "cute-dsl"}
+            os.environ, {"RTP_LLM_FP4_GEMM_BACKEND": default_backend}
         )
         backend_env.start()
         self.addCleanup(backend_env.stop)
@@ -183,19 +188,20 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
         self.assertIsNotNone(fp4_linear.input_scale)
         self.assertIsNotNone(fp4_linear.bias)
 
-        os.environ["RTP_LLM_FP4_GEMM_BACKEND"] = "trtllm"
-        fp4_linear_no_bias = self._create_fp4_linear(with_bias=False)
-        self.assertEqual(fp4_linear_no_bias.backend, "trtllm")
-        self.assertEqual(fp4_linear_no_bias.hidden_size, self.hidden_size)
-        self.assertEqual(fp4_linear_no_bias.output_size, self.output_size)
-        self.assertIsNone(fp4_linear_no_bias.bias)
+        if is_sm10x():
+            os.environ["RTP_LLM_FP4_GEMM_BACKEND"] = "trtllm"
+            fp4_linear_no_bias = self._create_fp4_linear(with_bias=False)
+            self.assertEqual(fp4_linear_no_bias.backend, "trtllm")
+            self.assertEqual(fp4_linear_no_bias.hidden_size, self.hidden_size)
+            self.assertEqual(fp4_linear_no_bias.output_size, self.output_size)
+            self.assertIsNone(fp4_linear_no_bias.bias)
 
-        os.environ["RTP_LLM_FP4_GEMM_BACKEND"] = "sgl_cutlass"
-        fp4_linear_sgl_cutlass = self._create_fp4_linear(with_bias=False)
-        self.assertEqual(fp4_linear_sgl_cutlass.backend, "sgl_cutlass")
-        self.assertEqual(fp4_linear_sgl_cutlass.hidden_size, self.hidden_size)
-        self.assertEqual(fp4_linear_sgl_cutlass.output_size, self.output_size)
-        self.assertIsNone(fp4_linear_sgl_cutlass.bias)
+            os.environ["RTP_LLM_FP4_GEMM_BACKEND"] = "sgl_cutlass"
+            fp4_linear_sgl_cutlass = self._create_fp4_linear(with_bias=False)
+            self.assertEqual(fp4_linear_sgl_cutlass.backend, "sgl_cutlass")
+            self.assertEqual(fp4_linear_sgl_cutlass.hidden_size, self.hidden_size)
+            self.assertEqual(fp4_linear_sgl_cutlass.output_size, self.output_size)
+            self.assertIsNone(fp4_linear_sgl_cutlass.bias)
 
     def test_dependency_availability(self):
         """Test dependency availability check"""
@@ -205,9 +211,7 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
     def test_input_dtype_validation(self):
         """Test input dtype validation - bfloat16 and float16 are accepted"""
 
-        os.environ["RTP_LLM_FP4_GEMM_BACKEND"] = "trtllm"
         fp4_linear = self._create_fp4_linear(with_bias=False)
-        self.assertEqual(fp4_linear.backend, "trtllm")
 
         # Test with bfloat16 input (should work)
         input_bf16 = torch.randn(
@@ -229,17 +233,22 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
         )
         self.assertIn("torch.float32", str(context.exception))
 
-        # Test with float16 input and backend:trtllm (should raise ValueError)
-        input_fp16 = torch.randn(
-            32, self.hidden_size, dtype=torch.float16, device=self.device
-        )
-        with self.assertRaises(ValueError) as context:
-            fp4_linear(input_fp16)
-        self.assertIn(
-            "CudaFp4GEMMLinear with trtllm backend only supoorts bfloat16 input",
-            str(context.exception),
-        )
-        self.assertIn("torch.float16", str(context.exception))
+        if is_sm10x():
+            os.environ["RTP_LLM_FP4_GEMM_BACKEND"] = "trtllm"
+            fp4_linear_trtllm = self._create_fp4_linear(with_bias=False)
+            self.assertEqual(fp4_linear_trtllm.backend, "trtllm")
+
+            # Test with float16 input and backend:trtllm (should raise ValueError)
+            input_fp16 = torch.randn(
+                32, self.hidden_size, dtype=torch.float16, device=self.device
+            )
+            with self.assertRaises(ValueError) as context:
+                fp4_linear_trtllm(input_fp16)
+            self.assertIn(
+                "CudaFp4GEMMLinear with trtllm backend only supoorts bfloat16 input",
+                str(context.exception),
+            )
+            self.assertIn("torch.float16", str(context.exception))
 
     def test_forward_pass_with_dependencies(self):
         """Test forward pass when dependencies are available"""
@@ -336,17 +345,18 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
         torch.testing.assert_close(output1, output2, rtol=1e-5, atol=1e-5)
 
         # trtllm backend
-        os.environ["RTP_LLM_FP4_GEMM_BACKEND"] = "trtllm"
-        fp4_linear = self._create_fp4_linear(with_bias=True)
+        if is_sm10x():
+            os.environ["RTP_LLM_FP4_GEMM_BACKEND"] = "trtllm"
+            fp4_linear = self._create_fp4_linear(with_bias=True)
 
-        torch.manual_seed(42)
-        input_tensor = torch.randn(
-            64, self.hidden_size, dtype=torch.bfloat16, device=self.device
-        )
+            torch.manual_seed(42)
+            input_tensor = torch.randn(
+                64, self.hidden_size, dtype=torch.bfloat16, device=self.device
+            )
 
-        output1 = fp4_linear(input_tensor)
-        output2 = fp4_linear(input_tensor)
-        torch.testing.assert_close(output1, output2, rtol=1e-5, atol=1e-5)
+            output1 = fp4_linear(input_tensor)
+            output2 = fp4_linear(input_tensor)
+            torch.testing.assert_close(output1, output2, rtol=1e-5, atol=1e-5)
 
     def test_error_handling(self):
         """Test error handling"""
@@ -370,11 +380,13 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
 
     def test_fp4_vs_bf16_accuracy(self):
         """Test accuracy comparison between FP4 linear and BF16 linear"""
-        self._test_fp4_vs_bf16_accuracy_backend("cute-dsl")
+        if is_sm10x():
+            self._test_fp4_vs_bf16_accuracy_backend("cute-dsl")
         # Create FP4 linear layer, cutlass backend
         self._test_fp4_vs_bf16_accuracy_backend("cutlass")
-        self._test_fp4_vs_bf16_accuracy_backend("trtllm")
-        self._test_fp4_vs_bf16_accuracy_backend("sgl_cutlass")
+        if is_sm10x():
+            self._test_fp4_vs_bf16_accuracy_backend("trtllm")
+            self._test_fp4_vs_bf16_accuracy_backend("sgl_cutlass")
 
     def _test_fp4_vs_bf16_accuracy_backend(self, backend):
         """Test accuracy comparison between FP4 linear and BF16 linear with different backends"""
@@ -420,9 +432,11 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
 
     def test_fp4_vs_fp16_accuracy(self):
         """Test accuracy comparison between FP4 linear and BF16 linear"""
-        self._test_fp4_vs_fp16_accuracy_backend("cute-dsl")
+        if is_sm10x():
+            self._test_fp4_vs_fp16_accuracy_backend("cute-dsl")
         self._test_fp4_vs_fp16_accuracy_backend("cutlass")
-        self._test_fp4_vs_fp16_accuracy_backend("sgl_cutlass")
+        if is_sm10x():
+            self._test_fp4_vs_fp16_accuracy_backend("sgl_cutlass")
 
     def _test_fp4_vs_fp16_accuracy_backend(self, backend):
         """Test accuracy comparison between FP4 linear and BF16 linear with different backends"""
@@ -465,6 +479,72 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
                 self.assertFalse(torch.isnan(fp4_output).any())
                 self.assertFalse(torch.isinf(fp4_output).any())
 
+    def test_explicit_legacy_backend_fails_during_construction_when_unavailable(self):
+        with (
+            mock.patch.dict(
+                os.environ,
+                {"RTP_LLM_FP4_GEMM_BACKEND": "sgl_cutlass"},
+            ),
+            mock.patch(
+                "rtp_llm.models_py.modules.factory.linear.impl.cuda.fp4_linear."
+                "is_legacy_cutlass_fp4_available",
+                return_value=False,
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "rtp_kernel.nvfp4 CUDA provider"):
+                self._create_fp4_linear(with_bias=False)
+
+    def test_modelopt_fp4_rejects_missing_flashinfer_api(self):
+        with (
+            mock.patch(
+                "rtp_llm.models_py.modules.factory.linear.impl.cuda.fp4_linear.mm_fp4",
+                None,
+            ),
+            mock.patch(
+                "rtp_llm.models_py.modules.factory.linear.impl.cuda.fp4_linear."
+                "is_blackwell",
+                return_value=True,
+            ),
+        ):
+            self.assertFalse(fp4_backend_available(self.weight.device))
+
+    def test_modelopt_fp4_rejects_non_blackwell_device(self):
+        with mock.patch(
+            "rtp_llm.models_py.modules.factory.linear.impl.cuda.fp4_linear."
+            "is_blackwell",
+            return_value=False,
+        ):
+            self.assertFalse(fp4_backend_available(self.weight.device))
+
+    def test_modelopt_fp4_strategy_is_registered_on_cuda(self):
+        self.assertIn(CudaFp4GEMMLinear, LinearFactory._strategies)
+
+    @unittest.skipUnless(
+        torch.cuda.is_available() and is_sm120(),
+        "SM120 only",
+    )
+    def test_default_cuda_quantizer_and_cutlass_gemm_on_sm120(self):
+        self.assertTrue(is_sm120(self.weight.device))
+        with mock.patch.dict(os.environ):
+            os.environ.pop("RTP_LLM_FP4_GEMM_BACKEND", None)
+            linear = self._create_fp4_linear(with_bias=False)
+        self.assertEqual(linear.backend, "cutlass")
+        self.assertEqual(linear._quantize_kwargs, {})
+        x = torch.ones((8, self.hidden_size), dtype=torch.bfloat16, device=self.device)
+        y = linear(x)
+        self.assertEqual(y.shape, (8, self.output_size))
+        self.assertTrue(torch.isfinite(y).all())
+
 
 if __name__ == "__main__":
+    if os.environ.get("RTP_LLM_REQUIRE_SM120") == "1":
+        cuda_version = torch.version.cuda
+        if not cuda_version or cuda_version.split(".", 1)[0] != "13":
+            raise RuntimeError(f"CUDA 13 runtime required, got {cuda_version}")
+        if not torch.cuda.is_available() or not is_sm120():
+            raise RuntimeError("SM120 CUDA 13 runtime required for FP4 GEMM linear test")
+        result = unittest.main(exit=False).result
+        if result.testsRun == len(result.skipped):
+            raise RuntimeError("No FP4 GEMM linear test ran")
+        raise SystemExit(int(not result.wasSuccessful()))
     unittest.main()

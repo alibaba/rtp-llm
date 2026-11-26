@@ -14,6 +14,7 @@ import torch
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.device import get_current_device
+from rtp_llm.device.device_type import DeviceType
 from rtp_llm.eplb.eplb import rebalance_experts
 from rtp_llm.model_loader.load_config import LoadConfig
 from rtp_llm.model_loader.model_weight_info import (
@@ -76,13 +77,18 @@ class ExpertBalancer:
             self._weights_info.create_model_weight_info(database)
         )
 
+        exported_device = get_current_device()
         self._load_config: LoadConfig = self._weights_info.create_load_config(
             compute_dtype=compute_dtype,
             database=database,
             phy2log=phy2log,
-            exported_device=get_current_device(),
+            exported_device=exported_device,
             force_cpu_load_weights=False,  # Default to False for EPBalancer
         )
+        if exported_device.get_device_type() == DeviceType.Cuda:
+            self._load_config = self._load_config.with_target_device(
+                f"cuda:{exported_device.get_device_id()}"
+            )
         self.num_layers = self._load_config.num_layers
         self.num_replicas = self._load_config.phy_exp_num
         self.num_groups = self._load_config.moe_n_group

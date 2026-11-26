@@ -19,6 +19,12 @@ import torch
 FP4_BLOCK = 32
 FP8_BLOCK = 128
 
+
+def is_e8m0_scale(tensor: torch.Tensor) -> bool:
+    """Return whether ``tensor`` uses PyTorch's native float8 UE8M0 dtype."""
+    e8m0_dtype = getattr(torch, "float8_e8m0fnu", None)
+    return e8m0_dtype is not None and tensor.dtype == e8m0_dtype
+
 # FP4 E2M1 lookup: raw nibble -> fp32 value.
 _FP4_LUT = torch.tensor(
     [
@@ -282,6 +288,7 @@ def per_token_cast_to_fp8_packed_ue8m0(
 __all__ = [
     "FP4_BLOCK",
     "FP8_BLOCK",
+    "is_e8m0_scale",
     "convert_fp8_moe_to_fp4_ue8m0",
     "quantize_moe_weight_to_fp4_ue8m0",
     "dequantize_fp4_weight",

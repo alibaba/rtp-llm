@@ -16,6 +16,7 @@ from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
     per_block_cast_to_fp8,
     quant_weight_ue8m0_packed,
     requant_weight_ue8m0,
+    sgl_per_token_group_quant_fp8,
 )
 from rtp_llm.models_py.kernels.cuda.fp8_kernel.fp8_kernel import block_quant_dequant
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_deepgemm_linear import (
@@ -68,6 +69,7 @@ class OnlineFp8LoaderTestBase(CudaFp8GEMMLinearTestBase):
             ).contiguous()
 
         loader = object.__new__(LoadQuantPerBlockFp8Weight)
+        loader.quant_config = Fp8BlockWiseQuantConfig(is_quanted=False)
         loader.group_size = 128
         loader.kernel = Mock(name="kernel")
         loader.kernel.name = "test_dense_weight"
@@ -143,6 +145,7 @@ class OnlineFp8LoaderTestBase(CudaFp8GEMMLinearTestBase):
         source_weight = torch.randn((256, 384), dtype=torch.float32)
 
         loader = object.__new__(LoadQuantPerBlockFp8Weight)
+        loader.quant_config = Fp8BlockWiseQuantConfig(is_quanted=False)
         loader.group_size = 128
         loader.kernel = Mock()
         loader.kernel.name = "test_dense_weight"
@@ -169,6 +172,7 @@ class OnlineFp8LoaderTestBase(CudaFp8GEMMLinearTestBase):
 
     def test_online_loader_rejects_non_128_group_size(self):
         loader = object.__new__(LoadQuantPerBlockFp8Weight)
+        loader.quant_config = Fp8BlockWiseQuantConfig(is_quanted=False)
         loader.group_size = 64
         loader.kernel = Mock()
         loader.kernel.name = "test_dense_weight"
@@ -381,6 +385,105 @@ class CudaFp8DeepGEMMLinearSM120Test(OnlineFp8LoaderTestBase, unittest.TestCase)
         self.assertTrue(is_sm12x())
         self.assertTrue(has_deep_gemm())
         self.assertTrue(is_deep_gemm_e8m0_used())
+
+    def test_sm120_deepgemm_eager_out_bias_and_cuda_graph_changed_input(self):
+        if not torch.cuda.is_available() or not is_sm12x():
+            self.skipTest("SM120 hardware gate requires an SM12x GPU")
+        if not is_deep_gemm_e8m0_used():
+            self.skipTest("DeepGEMM E8M0 must be active for packed SM120 FP8 test")
+        from rtp_llm.models_py.modules.factory.linear import LinearFactory
+
+        quant_config = init_quant_config("FP8_PER_BLOCK")
+        for n, k in ((384, 256), (576, 256)):
+            with self.subTest(n=n, k=k):
+                raw_w = torch.randn((n, k), dtype=torch.bfloat16, device="cuda") * 0.05
+                w_fp8, w_scale = quant_weight_ue8m0_packed(raw_w)
+                bias = torch.randn(n, dtype=torch.bfloat16, device="cuda")
+                linear = LinearFactory.create_linear(w_fp8, bias, w_scale, quant_config)
+                self.assertIsInstance(linear, CudaFp8GEMMLinear)
+                self.assertIsInstance(linear._deepgemm_linear, CudaFp8DeepGEMMLinear)
+                for rows in (1, 3, 64, 65, 256):
+                    with self.subTest(rows=rows):
+                        activation = torch.randn(
+                            (rows, k), dtype=torch.bfloat16, device="cuda"
+                        )
+                        out_buf = torch.empty(
+                            (rows, n), dtype=torch.bfloat16, device="cuda"
+                        )
+                        eager = linear(activation, out=out_buf)
+                        self.assertIs(eager, out_buf)
+                        reference = activation.float() @ raw_w.float().t() + bias.float()
+                        rel_l2 = (
+                            (eager.float() - reference).norm()
+                            / reference.norm().clamp_min(1e-10)
+                        ).item()
+                        self.assertLess(rel_l2, 0.06)
+
+                        graph = torch.cuda.CUDAGraph()
+                        with torch.cuda.graph(graph):
+                            captured = linear(activation)
+                        activation.copy_(torch.randn_like(activation))
+                        graph.replay()
+                        torch.cuda.synchronize()
+                        torch.testing.assert_close(captured, linear(activation))
+
+    def test_sm120_deepgemm_rejects_unaligned_int32_n_and_k(self):
+        if not torch.cuda.is_available() or not is_sm12x():
+            self.skipTest("SM120 hardware gate requires an SM12x GPU")
+        if not is_deep_gemm_e8m0_used():
+            self.skipTest("DeepGEMM E8M0 must be active for packed SM120 FP8 test")
+        for n, k, pattern in (
+            (130, 256, "N divisible by 8"),
+            (128, 192, "K divisible by 128"),
+            (128, 193, "K divisible by 128"),
+        ):
+            with self.subTest(n=n, k=k):
+                w_fp8 = torch.zeros((n, k), dtype=torch.float8_e4m3fn, device="cuda")
+                w_scale = torch.ones(
+                    (n, (k + 511) // 512), dtype=torch.int32, device="cuda"
+                )
+                with self.assertRaisesRegex(ValueError, pattern):
+                    CudaFp8DeepGEMMLinear(w_fp8, w_scale)
+
+    def test_sm120_offset_bf16_input_view_eager_and_cuda_graph(self):
+        if not torch.cuda.is_available() or not is_sm12x():
+            self.skipTest("SM120 hardware gate requires an SM12x GPU")
+        if not is_deep_gemm_e8m0_used():
+            self.skipTest("DeepGEMM E8M0 must be active for packed SM120 FP8 test")
+        raw_w = torch.randn((256, 1024), dtype=torch.bfloat16, device="cuda") * 0.05
+        w_fp8, w_scale = quant_weight_ue8m0_packed(raw_w)
+        linear = CudaFp8DeepGEMMLinear(w_fp8, w_scale)
+
+        raw = torch.randn((4096 * 1024 + 1,), dtype=torch.bfloat16, device="cuda")
+        offset_input = raw[1:].view(4096, 1024)
+        self.assertTrue(offset_input.is_contiguous())
+        self.assertNotEqual(offset_input.data_ptr() % 16, 0)
+
+        with self.assertRaisesRegex(RuntimeError, "16-byte aligned"):
+            sgl_per_token_group_quant_fp8(
+                offset_input,
+                group_size=128,
+                eps=1e-4,
+                column_major_scales=True,
+                scale_tma_aligned=True,
+                scale_ue8m0=True,
+                enable_v2=True,
+            )
+
+        eager = linear(offset_input)
+        reference = offset_input.float() @ raw_w.float().t()
+        rel_l2 = (
+            (eager.float() - reference).norm() / reference.norm().clamp_min(1e-10)
+        ).item()
+        self.assertLess(rel_l2, 0.06)
+
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured = linear(offset_input)
+        offset_input.copy_(torch.randn_like(offset_input))
+        graph.replay()
+        torch.cuda.synchronize()
+        torch.testing.assert_close(captured, linear(offset_input))
 
 
 class OnlineLinearAttentionTPTest(unittest.TestCase):

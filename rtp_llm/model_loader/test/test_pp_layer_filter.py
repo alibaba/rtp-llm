@@ -5,6 +5,7 @@ from unittest.mock import ANY, MagicMock, patch
 
 import torch
 
+from rtp_llm.device.device_type import DeviceType
 from rtp_llm.model_loader.ffn_weight import MoeAtomicWeight, MoeConfig
 from rtp_llm.model_loader.load_config import LoadConfig
 from rtp_llm.model_loader.loader import ModelLoader
@@ -86,6 +87,8 @@ def make_eplb_loader(
     enabled=True,
     eplb_mode=EplbMode.EPLB,
     phy_exp_num=4,
+    device_type=DeviceType.Cpu,
+    device_id=0,
 ):
     """Exercise the real loader and balancer with small metadata and no device I/O."""
     cfg.moe_layer_index = moe_layers
@@ -124,7 +127,11 @@ def make_eplb_loader(
         return cfg
 
     weights_info.create_load_config.side_effect = load_config
-    device = SimpleNamespace(support_dio_load=False)
+    device = SimpleNamespace(
+        support_dio_load=False,
+        get_device_type=lambda: device_type,
+        get_device_id=lambda: device_id,
+    )
     with patch(
         "rtp_llm.model_loader.loader.CkptDatabase", return_value=cfg.database
     ), patch("rtp_llm.device.get_current_device", return_value=device), patch(
@@ -218,6 +225,19 @@ class PPEplbLoadingTest(unittest.TestCase):
                 )
                 self.assertEqual(loader._py_eplb.num_nodes, num_nodes)
                 self.assertEqual(loader._py_eplb.num_gpu, ep_size)
+
+    def test_balancer_propagates_target_device_by_device_type(self):
+        cuda_cfg = make_load_config(8, range(4, 8))
+        cuda_loader = make_eplb_loader(
+            cuda_cfg, [1, 3, 5, 7], device_type=DeviceType.Cuda, device_id=3
+        )
+        self.assertEqual(cuda_loader._py_eplb._load_config.target_device, "cuda:3")
+
+        cpu_cfg = make_load_config(8, range(4, 8))
+        cpu_loader = make_eplb_loader(
+            cpu_cfg, [1, 3, 5, 7], device_type=DeviceType.Cpu, device_id=0
+        )
+        self.assertIsNone(cpu_loader._py_eplb._load_config.target_device)
 
     def test_hierarchical_layout_guard_is_mode_scoped(self):
         for eplb_mode, num_groups, should_reject in (

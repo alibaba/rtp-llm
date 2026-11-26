@@ -96,7 +96,11 @@ py_library(
 
 py_library(
     name = "triton_kernels",
-    srcs = ["legacy_fp8_indexer_score.py", "linear_replay.py"],
+    srcs = [
+        "legacy_fp8_indexer_score.py",
+        "linear_replay.py",
+        "sm120_batch_invariant_linear.py",
+    ],
     deps = [
         ":attention",
         ":autotune_cache",

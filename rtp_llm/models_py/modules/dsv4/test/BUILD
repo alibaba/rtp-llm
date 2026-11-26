@@ -1,4 +1,4 @@
-load(":defs.bzl", "dsv4_py_test", "dsv4_sm100_py_test")
+load(":defs.bzl", "dsv4_py_test", "dsv4_sm100_py_test", "dsv4_sm120_py_test")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -196,4 +196,25 @@ test_suite(
 dsv4_sm100_py_test(
     name = "test_mega_inv_rope_fp8_quant",
     deps = _DSV4_TEST_DEPS,
+)
+
+dsv4_sm120_py_test(
+    name = "test_sm120_batch_invariant_linear",
+    args = [
+        "-k",
+        "not(test_nondefault_device_and_stream)",
+    ],
+    deps = _MODEL_TEST_DEPS,
+)
+
+dsv4_sm120_py_test(
+    name = "test_sm120_batch_invariant_linear_multi_gpu",
+    src = "test_sm120_batch_invariant_linear.py",
+    gpu_count = 2,
+    args = [
+        "-k",
+        "test_nondefault_device_and_stream",
+    ],
+    tags = ["multi_device"],
+    deps = _MODEL_TEST_DEPS,
 )

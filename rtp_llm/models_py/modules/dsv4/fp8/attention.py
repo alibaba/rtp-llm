@@ -30,7 +30,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
+from rtp_llm.models_py.modules.dsv4.utils import (  # noqa: F401
+    _V4_FP8_BLOCK_CFG,
+    _repack_v4_fp8_scale_to_int32,
+    _v4_fp8_linear,
+    _v4_fp8_linear_from_dict,
+)
 from rtp_llm.models_py.modules.dsv4._fused_inv_rope_fp8_quant_triton import (
     fused_inv_rope_fp8_quant,
 )
@@ -73,7 +78,6 @@ from rtp_llm.models_py.modules.dsv4.fp8.compressor import CompressorFP8, Compres
 from rtp_llm.models_py.modules.dsv4.fp8.indexer import IndexerFP8
 from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
 from rtp_llm.models_py.modules.dsv4.rope import precompute_freqs_cis
-from rtp_llm.models_py.modules.factory.linear import LinearFactory
 from rtp_llm.models_py.utils.memory import dispose_tensor
 
 
@@ -266,8 +270,6 @@ def _build_suffix_cp_sliced_slot_mapping(
     return torch.where(valid, slot, torch.full_like(slot, -1)).contiguous()
 
 
-_V4_FP8_BLOCK_CFG = Fp8BlockWiseQuantConfig()
-
 _DSV4_FP8_KV_ENTRY_BYTES = 584
 
 # Call sites whose first byte-sliced (CP-RR) SWA cache write has been logged.
@@ -316,23 +318,6 @@ if _FLASH_MLA_SPARSE_Q_CHUNK <= 0:
     )
 
 
-def _repack_v4_fp8_scale_to_int32(scale: torch.Tensor) -> torch.Tensor:
-    """V4 ckpt UE8M0 ``[N/128, K/128]`` → DeepGEMM ``[N, K/128]`` UE8M0
-    int32-packed TMA-aligned scale.  Row-repeats by 128 along N so each
-    weight row gets its own scale row, then hands off to DeepGEMM's
-    ``get_mn_major_tma_aligned_packed_ue8m0_tensor`` (column-major,
-    int32-packed).  Must be called on-device (DeepGEMM helper is CUDA)."""
-    assert scale.dtype == torch.float8_e8m0fnu, f"unexpected scale dtype {scale.dtype}"
-    assert scale.dim() == 2, f"unexpected scale dim {scale.dim()}"
-    from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
-
-    N_blk, _ = scale.shape
-    N = N_blk * 128
-    idx = torch.arange(N, device=scale.device) // 128
-    scale_rep = scale.float().index_select(-2, idx)
-    return get_mn_major_tma_aligned_packed_ue8m0_tensor(scale_rep)
-
-
 def _prepare_wo_a_stacked(
     weight_fp8: torch.Tensor,
     scale_raw: torch.Tensor,
@@ -361,39 +346,6 @@ def _prepare_wo_a_stacked(
     scale_rep = scale_fp32.index_select(-2, idx).contiguous()  # [G, R, K/128]
     s_stk = get_mn_major_tma_aligned_packed_ue8m0_tensor(scale_rep)
     return w_stk, s_stk
-
-
-def _v4_fp8_linear(w: torch.Tensor, s: torch.Tensor):
-    """Build a CudaFp8DeepGEMMLinear from raw V4 FP8 weight + scale tensors.
-
-    Repacks the UE8M0 ``float8_e8m0fnu`` scale into DeepGEMM's int32
-    TMA-aligned packed layout when needed. Framework descriptor path may
-    deliver the scale already packed (dtype int32) — we no-op then."""
-    assert s is not None, "expected non-null FP8 scale"
-    if s.dtype == torch.float8_e8m0fnu:
-        s = _repack_v4_fp8_scale_to_int32(s)
-    # LinearFactory.create_linear_from_weights consumes a (weights_dict,
-    # weight_key, scale_key) triple — feed it a one-shot dict so the
-    # factory plumbing is unchanged.
-    local = {"_w": w, "_s": s}
-    return LinearFactory.create_linear_from_weights(
-        local,
-        "_w",
-        "_s",
-        quant_config=_V4_FP8_BLOCK_CFG,
-    )
-
-
-def _v4_fp8_linear_from_dict(weights: dict, weight_key: str, scale_key: str):
-    """Backwards-compat bridge over ``_v4_fp8_linear`` for callers that
-    still pass a flat dict + keys.  Mutates ``weights[scale_key]`` to the
-    packed form so subsequent callers don't repack."""
-    w = weights[weight_key]
-    s = weights[scale_key]
-    if s.dtype == torch.float8_e8m0fnu:
-        s = _repack_v4_fp8_scale_to_int32(s)
-        weights[scale_key] = s
-    return _v4_fp8_linear(w, s)
 
 
 def _get_window_topk_idxs(

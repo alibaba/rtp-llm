@@ -4,27 +4,40 @@ from unittest.mock import patch
 
 import torch
 
+from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
+from rtp_llm.device.device_type import DeviceType
+from rtp_llm.model_loader.per_block_fp8_quant_weight import PerBlockFp8Weight
+from rtp_llm.model_loader.weight_module import CompositeWeight
 from rtp_llm.models_py.kernels.cuda.fp8_kernel.fp8_kernel import _transform_scale_ue8m0
+from rtp_llm.utils.model_weight import W
 
 
 class NativeUe8m0ScaleTest(unittest.TestCase):
+    def _loader(self, weight_name="weight"):
+        loader = object.__new__(PerBlockFp8Weight)
+        loader.kernel = SimpleNamespace(name=weight_name)
+        loader.scale = SimpleNamespace(name="scale")
+        loader.quant_config = Fp8BlockWiseQuantConfig(scale_fmt="ue8m0")
+        return loader
+
+    def _config(self, device_type, moe_strategy="auto"):
+        return SimpleNamespace(
+            exported_device=SimpleNamespace(
+                get_device_type=lambda: device_type,
+                get_device_id=lambda: 0,
+                maybe_rewrite_weight_by_key=lambda key, value, **kwargs: value,
+            ),
+            use_swizzleA=False,
+            moe_strategy=moe_strategy,
+        )
+
     def test_native_scales_load_into_non_packed_linear(self):
-        from rtp_llm.model_loader.per_block_fp8_quant_weight import PerBlockFp8Weight
-        from rtp_llm.model_loader.weight_module import CompositeWeight
         from rtp_llm.models_py.modules.factory.linear.impl.cuda import (
             fp8_deepgemm_linear,
         )
 
-        loader = object.__new__(PerBlockFp8Weight)
-        loader.kernel = SimpleNamespace(name="weight")
-        loader.scale = SimpleNamespace(name="scale")
-        config = SimpleNamespace(
-            exported_device=SimpleNamespace(
-                maybe_rewrite_weight_by_key=lambda key, value, **kwargs: value
-            ),
-            use_swizzleA=False,
-            moe_strategy="auto",
-        )
+        loader = self._loader()
+        config = self._config(DeviceType.Cpu)
         weight = torch.ones((256, 384)).to(torch.float8_e4m3fn)
         scales = torch.exp2(torch.arange(6, dtype=torch.float32).reshape(2, 3) - 3)
         for dtype, missing_native_dtype in (
@@ -57,6 +70,43 @@ class NativeUe8m0ScaleTest(unittest.TestCase):
                 torch.testing.assert_close(
                     linear.weight.view(torch.uint8), weight.view(torch.uint8)
                 )
+
+    def test_postprocess_preserves_or_packs_native_ue8m0_for_the_consumer(self):
+        for weight_name, strategy, expect_pack in (
+            (W.attn_o_w, "auto", True),
+            (W.moe_w1, "auto", True),
+            (W.moe_w1, "mega_moe_fp8", False),
+            (W.moe_w2, "mega_moe_fp8_se", False),
+        ):
+            with self.subTest(weight=weight_name, strategy=strategy):
+                weight = torch.ones((256, 384), device="cuda").to(torch.float8_e4m3fn)
+                scales = torch.full((2, 3), 0.125, device="cuda").to(
+                    torch.float8_e8m0fnu
+                )
+                if weight_name in (W.moe_w1, W.moe_w2):
+                    weight = weight.unsqueeze(0)
+                    scales = scales.unsqueeze(0)
+                loader = self._loader(weight_name)
+                config = self._config(DeviceType.Cuda, strategy)
+                with (
+                    patch.object(
+                        CompositeWeight,
+                        "_postprocess",
+                        return_value={weight_name: weight, "scale": scales},
+                    ),
+                    patch(
+                        "rtp_llm.models_py.kernels.cuda.deepgemm_wrapper.is_deep_gemm_e8m0_used",
+                        return_value=True,
+                    ),
+                ):
+                    result = loader._postprocess({}, "cuda", config)
+                self.assertIs(result[weight_name], weight)
+                if expect_pack:
+                    packed = _transform_scale_ue8m0(scales.float(), mn=256)
+                    self.assertEqual(result["scale"].dtype, torch.int32)
+                    torch.testing.assert_close(result["scale"], packed, rtol=0, atol=0)
+                else:
+                    self.assertIs(result["scale"], scales)
 
     def test_checkpoint_scales_pack_identically_to_float_scales(self):
         self.assertTrue(torch.cuda.is_available())

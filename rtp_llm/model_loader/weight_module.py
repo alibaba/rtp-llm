@@ -180,20 +180,37 @@ class WeightModule(ABC):
         # Resolve placement before materializing tensors and use it through the
         # final flattening step, so offloaded tables never stage on the GPU.
         device = self.resident_device or device
+        effective_load_config = load_config
+        if isinstance(load_config, LoadConfig):
+            if self.resident_device is not None:
+                effective_load_config = load_config.with_target_device(
+                    self.resident_device
+                )
+            elif self.resident_output_devices:
+                unique_devices = set(self.resident_output_devices.values())
+                if len(unique_devices) == 1:
+                    effective_load_config = load_config.with_target_device(
+                        next(iter(unique_devices))
+                    )
         raw_tensors = self._load_raw_tensor(
-            tensor_source, layer_id, device, load_config
+            tensor_source, layer_id, device, effective_load_config
         )
 
-        if load_config.merge_lora:
+        if effective_load_config.merge_lora:
             merged_tensors = self._merge_lora(
-                raw_tensors, tensor_source.get_database(), layer_id, load_config
+                raw_tensors,
+                tensor_source.get_database(),
+                layer_id,
+                effective_load_config,
             )
         else:
             merged_tensors = raw_tensors
 
-        split_tensors = self._split(merged_tensors, load_config)
+        split_tensors = self._split(merged_tensors, effective_load_config)
 
-        processed_tensors = self._postprocess(split_tensors, device, load_config)
+        processed_tensors = self._postprocess(
+            split_tensors, device, effective_load_config
+        )
         flat_res = {}
 
         def __extract_tensor(tensors):
@@ -213,8 +230,22 @@ class WeightModule(ABC):
         self, tensor: torch.Tensor, device: str, load_config: LoadConfig, **kwargs
     ):
         device = self.resident_device or device
-        split_tensors = self._split(tensor, load_config)
-        processed_tensors = self._postprocess(split_tensors, device, load_config)
+        effective_load_config = load_config
+        if isinstance(load_config, LoadConfig):
+            if self.resident_device is not None:
+                effective_load_config = load_config.with_target_device(
+                    self.resident_device
+                )
+            elif self.resident_output_devices:
+                unique_devices = set(self.resident_output_devices.values())
+                if len(unique_devices) == 1:
+                    effective_load_config = load_config.with_target_device(
+                        next(iter(unique_devices))
+                    )
+        split_tensors = self._split(tensor, effective_load_config)
+        processed_tensors = self._postprocess(
+            split_tensors, device, effective_load_config
+        )
         flat_res = {}
 
         def __extract_tensor(tensors):

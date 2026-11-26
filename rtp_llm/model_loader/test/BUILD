@@ -85,11 +85,19 @@ py_test(
 py_test(
     name = "test_inline_fp8_quant",
     srcs = ["test_inline_fp8_quant.py"],
-    deps = py_test_deps,
+    deps = py_test_deps + ["//rtp_llm/models_py/standalone:auto_model"],
     tags = ["rocm"],
     exec_properties = {
         'gpu': 'MI308X-ROCM7',
     },
+)
+
+py_test(
+    name = "test_inline_fp8_quant_cpu",
+    srcs = ["test_inline_fp8_quant.py"],
+    main = "test_inline_fp8_quant.py",
+    args = ["-k", "TestPerBlockOnlineSm120Layout"],
+    deps = py_test_deps + ["//rtp_llm/models_py/standalone:auto_model"],
 )
 
 py_test(

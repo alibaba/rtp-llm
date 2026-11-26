@@ -245,7 +245,9 @@ class ModelLoader:
                 part_idx += 1
                 current_size = 0
 
-        for layer_id, name, tensor in self.prepare_weights(device):
+        for layer_id, name, tensor in self.prepare_weights(
+            device, target_device=device
+        ):
             if layer_id is not None:
                 tensor_name = f"{weights.layer_weight_prefix(tp_rank, dp_rank, ep_rank)}{layer_id}.{name}"
             else:
@@ -574,12 +576,14 @@ class ModelLoader:
         collector_delivery_count = 0
         materialized_count = 0
 
+        load_config = self._load_config.with_target_device(device)
+
         def materialize(weight_info, tensor_source):
             tensors = weight_info.weight.load(
                 tensor_source=tensor_source,
                 layer_id=weight_info.layer_id,
                 device=device,
-                load_config=self._load_config,
+                load_config=load_config,
             )
             for name, tensor in tensors.items():
                 if weight_info.layer_id is not None:
@@ -640,10 +644,25 @@ class ModelLoader:
         )
         return model_weights
 
-    def prepare_weights(self, device: str):
+    def prepare_weights(
+        self,
+        device: str,
+        target_device: Optional[str] = None,
+        *,
+        load_config: Optional[LoadConfig] = None,
+    ):
+        effective_load_config = (
+            load_config
+            if load_config is not None
+            else self._load_config.with_target_device(
+                target_device if target_device is not None else device
+            )
+        )
         if not self._is_attn_model:
-            for id in self._load_config.layer_range:
-                results = self._load_layer_weights(id, device)
+            for id in effective_load_config.layer_range:
+                results = self._load_layer_weights(
+                    id, device, load_config=effective_load_config
+                )
                 for name, tensor in results.items():
                     yield (id, name, tensor)
                 del results
@@ -652,20 +671,20 @@ class ModelLoader:
             if self._maybe_skip_weight(weight):
                 continue
             weights = weight.load(
-                DatabaseTensorSource(self._load_config.database),
+                DatabaseTensorSource(effective_load_config.database),
                 None,
                 device,
-                self._load_config,
+                effective_load_config,
             )
             for name, tensor in weights.items():
                 yield (None, name, tensor)
 
         for weight in self._misc_weights_info:
             weights = weight.load(
-                DatabaseTensorSource(self._load_config.database),
+                DatabaseTensorSource(effective_load_config.database),
                 None,
                 device,
-                self._load_config,
+                effective_load_config,
             )
             for name, tensor in weights.items():
                 yield (None, name, tensor)
@@ -860,7 +879,9 @@ class ModelLoader:
         logging.info(f"load weight by device: {convert_device}")
         resident_devices = self._resident_weight_devices()
 
-        for layer_id, name, tensor in self.prepare_weights(convert_device):
+        for layer_id, name, tensor in self.prepare_weights(
+            convert_device, target_device=device
+        ):
             if convert_device != device:
                 # .to(device) returns a new tensor object and silently drops
                 # python tensor attributes (e.g. AITER's is_shuffled marker
@@ -890,7 +911,18 @@ class ModelLoader:
             )
         return weights
 
-    def _load_layer_weights(self, layer_id: int, device: str):
+    def _load_layer_weights(
+        self,
+        layer_id: int,
+        device: str,
+        *,
+        load_config: Optional[LoadConfig] = None,
+    ):
+        effective_load_config = (
+            load_config
+            if load_config is not None
+            else self._load_config.with_target_device(device)
+        )
         if self._model_weights_info.layer_weights == []:
             return {}
         assert isinstance(self._model_weights_info.layer_weights[0], list)
@@ -898,10 +930,10 @@ class ModelLoader:
         weights = {}
         for weight in layer_weights:
             res = weight.load(
-                DatabaseTensorSource(self._load_config.database),
+                DatabaseTensorSource(effective_load_config.database),
                 layer_id,
                 device,
-                self._load_config,
+                effective_load_config,
             )
             weights.update(res)
         return weights

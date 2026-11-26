@@ -1,3 +1,5 @@
+load("//rtp_llm/test/utils:cuda13_sm120_test.bzl", "cuda13_sm120_py_test")
+
 py_test_deps = [
     "//rtp_llm/models_py/standalone:py_standalone_testlib",
 ]
@@ -58,4 +60,20 @@ py_test(
     deps = py_test_deps,
     tags = ["SM100_ARM_CU13"],
     exec_properties = {"gpu": "SM100_ARM_CU13"},
+)
+
+py_test(
+    name = "fp8_linear_factory_sm120_test",
+    srcs = ["fp8_linear_factory_sm120_test.py"],
+    deps = py_test_deps,
+)
+
+cuda13_sm120_py_test(
+    name = "fp4_gemm_linear_sm120_test",
+    srcs = ["fp4_gemm_linear_test.py"],
+    main = "fp4_gemm_linear_test.py",
+    args = ["-v"],
+    deps = py_test_deps,
+    env = {"RTP_LLM_REQUIRE_SM120": "1"},
+    legacy_create_init = 0,
 )
