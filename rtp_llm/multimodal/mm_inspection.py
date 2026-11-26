@@ -17,7 +17,11 @@ from typing import Any, List, Optional, Tuple
 from weakref import WeakValueDictionary
 
 from rtp_llm.config.exceptions import FtRuntimeException
-from rtp_llm.multimodal.greennet_hook import GreenNetVerdict
+from rtp_llm.multimodal.greennet_hook import (
+    GreenNetVerdict,
+    inspection_fields,
+    verdict_scope,
+)
 from rtp_llm.multimodal.mm_embedding_cache import MMEmbeddingCacheEntry
 from rtp_llm.multimodal.mm_inspection_tickets import InspectionTickets
 from rtp_llm.multimodal.mm_work_item import _input_has_url
@@ -156,9 +160,21 @@ class MMInspectionCoordinator:
         return self._greennet_provider.is_enabled()
 
     def _request_scoped_inspection(self) -> bool:
-        return self._greennet_enabled() and getattr(
-            self.mm_part, "inspection_verdict_is_request_scoped", False
+        return self._greennet_enabled() and (
+            inspection_fields.get() is not None
+            or getattr(self.mm_part, "inspection_verdict_is_request_scoped", False)
         )
+
+    def routing_approved(self, key):
+        if getattr(self.mm_part, "inspection_verdict_is_request_scoped", False):
+            return False
+        fields = inspection_fields.get()
+        if fields is None:
+            return self._hash_key_cache.greennet_passed(key)
+        return self._greennet_provider.routing_approval(key, fields)
+
+    def remember_routing_approval(self, media, fields):
+        self._greennet_provider.remember_routing_approval(media, fields)
 
     def _approve_cached_entries(self, entries, verdict: GreenNetVerdict) -> None:
         if not verdict.passed or self._request_scoped_inspection():
@@ -171,9 +187,13 @@ class MMInspectionCoordinator:
         # Producer-backed entries already have a decision future. An unchecked
         # cache hit needs its own asynchronous submission, shared across waiters.
         with self._cached_inspection_lock:
-            if entry.expects_greennet or entry.greennet_passed:
+            fields = getattr(request, "inspection_headers", {})
+            policy = verdict_scope(fields)
+            if getattr(
+                entry, "inspection_scope", None if fields else b""
+            ) == policy and (entry.expects_greennet or entry.greennet_passed):
                 return entry.inspection_decision()
-            scope = (request.user_id, request.service_name)
+            scope = (request.user_id, request.service_name, policy)
             native_key = None
             if getattr(entry, "_native_cell", None) is not None:
                 native_key = (entry.generation, scope)
@@ -275,14 +295,14 @@ class MMInspectionCoordinator:
                 vit_media.input_index(item, getattr(entry, "upload_input_index", index))
                 for index, item in enumerate(mm_inputs)
             ),
-            model_name="",
+            model_name=(inspection_fields.get() or {}).get("model", ""),
+            inspection_headers=inspection_fields.get() or {},
             user_id=user_id,
             service_name=service_name,
             greennet_passed=(
-                not self._request_scoped_inspection()
-                and len(mm_inputs) == 1
+                len(mm_inputs) == 1
                 and _input_has_url(mm_inputs[0])
-                and self._hash_key_cache.greennet_passed(mm_inputs[0].cache_key())
+                and self.routing_approved(mm_inputs[0].cache_key())
             ),
         )
         if upload_urls is not None:
@@ -298,7 +318,7 @@ class MMInspectionCoordinator:
         if (
             worker_sources
             and self.mm_part.supports_inspection_sources
-            and not self._request_scoped_inspection()
+            and not getattr(self.mm_part, "inspection_verdict_is_request_scoped", False)
         ):
             if req.greennet_passed:
                 if entry is not None:
@@ -312,7 +332,7 @@ class MMInspectionCoordinator:
         reuse_cached = (
             cached_embedding
             and self.mm_part.supports_inspection_sources
-            and not self._request_scoped_inspection()
+            and not getattr(self.mm_part, "inspection_verdict_is_request_scoped", False)
         )
 
         async def prepare():
@@ -338,6 +358,9 @@ class MMInspectionCoordinator:
                         req, mm_inputs
                     )
                 else:
+                    req.cache_image_verdicts = source_inputs is None and not getattr(
+                        self.mm_part, "inspection_verdict_is_request_scoped", False
+                    )
                     handle = await self._greennet_provider.preprocess_and_submit(
                         req, source_inputs if source_inputs is not None else mm_inputs
                     )
@@ -439,7 +462,10 @@ class MMInspectionCoordinator:
                         cached_inputs,
                         cached_request,
                     ) in cached_entries:
-                        if cached.greennet_passed:
+                        if (
+                            cached.greennet_passed
+                            and not self._request_scoped_inspection()
+                        ):
                             continue
                         if not cached_inputs:
                             raise RuntimeError(
@@ -493,9 +519,20 @@ class MMInspectionCoordinator:
                         vit_media.record_verdict(verdict)
                         return verdict
 
-                return await asyncio.wait_for(
+                verdict = await asyncio.wait_for(
                     run(), timeout=max(0.0, deadline - time.monotonic())
                 )
+                fields = inspection_fields.get()
+                if verdict.passed and fields is not None:
+                    # The shared verdict cache can do I/O. Publish before resolving
+                    # the ticket, outside the event loop and embedding entry lock.
+                    def publish_approvals():
+                        for media in mm_inputs:
+                            if _input_has_url(media):
+                                self.remember_routing_approval(media, fields)
+
+                    await asyncio.to_thread(publish_approvals)
+                return verdict
             except asyncio.TimeoutError as error:
                 raise InspectionTimeoutError("GreenNet deadline exceeded") from error
             finally:

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "rtp_llm/cpp/model_rpc/MultimodalPbConverter.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalError.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalProcessor.h"
 
@@ -10,11 +11,34 @@ public:
     using MultimodalProcessor::MultimodalProcessor;
 
 private:
+    ErrorResult<MultimodalOutput> MultimodalEmbeddingFromRpc(const MultimodalInputsPB& inputs,
+                                                             const std::string&,
+                                                             int64_t              request_id,
+                                                             grpc::ServerContext* context,
+                                                             DeferredMMRpc* = nullptr) override {
+        std::optional<bool> inspect;
+        if (inputs.has_input_inspection_enabled())
+            inspect = inputs.input_inspection_enabled().value();
+        return embedLocal(MultimodalPbConverter::mediaReferencesFromPb(inputs),
+                          request_id,
+                          context,
+                          inspect,
+                          &inputs.inspection_headers());
+    }
+
     ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<MultimodalInput>& mm_inputs,
                                                       const std::string&,
                                                       int64_t              request_id,
                                                       grpc::ServerContext* server_context,
                                                       std::optional<bool>  input_inspection_enabled) override {
+        return embedLocal(mm_inputs, request_id, server_context, input_inspection_enabled, nullptr);
+    }
+
+    ErrorResult<MultimodalOutput> embedLocal(const std::vector<MultimodalInput>& mm_inputs,
+                                             int64_t                             request_id,
+                                             grpc::ServerContext*                server_context,
+                                             std::optional<bool>                 input_inspection_enabled,
+                                             const google::protobuf::Map<std::string, std::string>* headers) {
         if (mm_inputs.size() == 0) {
             return MultimodalOutput();
         } else if (!mm_process_engine_.is_none()) {
@@ -49,6 +73,11 @@ private:
                     mm_preprocess_configs.push_back(mm_preprocess_config);
                 }
 
+                py::dict inspection_headers;
+                if (headers) {
+                    for (const auto& item : *headers)
+                        inspection_headers[py::str(item.first)] = item.second;
+                }
                 auto res = mm_process_engine_.attr("mm_embedding_cpp")(
                     urls,
                     types,
@@ -58,7 +87,8 @@ private:
                     dashScopeMetadata(server_context, "x-dashscope-uid"),
                     dashScopeMetadata(server_context, "x-dashscope-service"),
                     dashScopeMetadata(server_context, "x-dashscope-request-id"),
-                    input_inspection_enabled.has_value() ? py::cast(*input_inspection_enabled) : py::none());
+                    input_inspection_enabled.has_value() ? py::cast(*input_inspection_enabled) : py::none(),
+                    inspection_headers);
                 auto mm_embedding_vec = convertPyObjectToVec(res.attr("embeddings"));
 
                 MultimodalOutput           mm_embedding_res;

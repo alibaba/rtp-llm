@@ -23,7 +23,13 @@ from rtp_llm.config.py_config_modules import ProfilingDebugLoggingConfig, VitCon
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.multimodal import mm_work_item as work_item_ops
-from rtp_llm.multimodal.greennet_hook import GreenNetVerdict, get_greennet_provider
+from rtp_llm.multimodal.greennet_hook import (
+    GreenNetVerdict,
+    get_greennet_provider,
+    inspection_context,
+    inspection_fields,
+    verdict_scope,
+)
 from rtp_llm.multimodal.media_network import MediaNetwork, SourceBatch, current_network
 from rtp_llm.multimodal.mm_async_result import continue_after
 from rtp_llm.multimodal.mm_embedding_cache import (
@@ -531,7 +537,7 @@ class MMProcessEngine:
         return (
             self._greennet_enabled()
             and self.mm_part.supports_inspection_sources
-            and not self._request_scoped_inspection()
+            and not getattr(self.mm_part, "inspection_verdict_is_request_scoped", False)
         )
 
     def _request_scoped_inspection(self):
@@ -554,7 +560,7 @@ class MMProcessEngine:
             timeout_ms=max(1, int(timeout_ms)),
             trace_id=trace_id,
             entry=entry,
-            restore_approval=restore_approval,
+            restore_approval=restore_approval and not self._request_scoped_inspection(),
         )
         return _RemoteLookup(key, trace_id, value)
 
@@ -960,10 +966,7 @@ class MMProcessEngine:
                 mm_input
                 for mm_input in mm_inputs
                 if _input_has_url(mm_input)
-                and (
-                    self._request_scoped_inspection()
-                    or not self._hash_key_cache.greennet_passed(mm_input.cache_key())
-                )
+                and not self._inspection.routing_approved(mm_input.cache_key())
             ]
             self._raise_if_async_request_cancelled(request_id, cancellation_event)
             if time.monotonic() >= deadline:
@@ -1043,6 +1046,7 @@ class MMProcessEngine:
         service_name: str = "",
         external_request_id: str = "",
         input_inspection_enabled: Optional[bool] = None,
+        inspection_headers: Optional[Dict[str, str]] = None,
     ) -> MMEmbeddingRes:
         """Process multimodal inputs from C++ interface."""
         try:
@@ -1060,14 +1064,15 @@ class MMProcessEngine:
         if self._remote_embedding_cache is not None:
             for item in mm_inputs:
                 self._remote_embedding_cache.normalize_cpp_url_input(item)
-        res = self._embed_with_greennet_sync(
-            mm_inputs,
-            request_id=request_id,
-            user_id=user_id,
-            service_name=service_name,
-            external_request_id=external_request_id,
-            input_inspection_enabled=input_inspection_enabled,
-        )
+        with inspection_context(inspection_headers):
+            res = self._embed_with_greennet_sync(
+                mm_inputs,
+                request_id=request_id,
+                user_id=user_id,
+                service_name=service_name,
+                external_request_id=external_request_id,
+                input_inspection_enabled=input_inspection_enabled,
+            )
         try:
             with cuda_graph_gate.operation():
                 res.position_ids = [pos.cpu() for pos in res.position_ids]
@@ -1672,7 +1677,8 @@ class MMProcessEngine:
                     id=external_request_id or str(request_id),
                     user_id=user_id,
                     service_name=service_name,
-                    model_name="",
+                    model_name=(inspection_fields.get() or {}).get("model", ""),
+                    inspection_headers=inspection_fields.get() or {},
                 )
                 for index, (media, (key, entry)) in enumerate(zip(mm_inputs, claims)):
                     media_request = SimpleNamespace(
@@ -1872,6 +1878,7 @@ class MMProcessEngine:
         # Match the override the async worker will use, including a disabled producer.
         with _input_inspection_scope(input_inspection_enabled):
             producer_inspects = self._greennet_enabled()
+        caller_scope = verdict_scope(inspection_fields.get())
         try:
             for input_index, (mm_input, cache_key) in enumerate(inputs):
                 with self._async_task_lock:
@@ -1894,9 +1901,20 @@ class MMProcessEngine:
                     vit_media.claim(media_inputs[input_index], entry, state)
                     claims.append((cache_key, entry))
                     if state != "miss" and cached_inspection_inputs is not None:
-                        if self._request_scoped_inspection() or (
-                            not entry.greennet_passed
-                            and not (state == "in_progress" and entry.expects_greennet)
+                        same_policy = (
+                            getattr(
+                                entry,
+                                "inspection_scope",
+                                None if inspection_fields.get() is not None else b"",
+                            )
+                            == caller_scope
+                        )
+                        reusable = same_policy and (
+                            entry.greennet_passed
+                            or (state == "in_progress" and entry.expects_greennet)
+                        )
+                        if not reusable or getattr(
+                            self.mm_part, "inspection_verdict_is_request_scoped", False
                         ):
                             cached_inspection_inputs.append(mm_input)
                             if cached_inspection_entries is not None:
@@ -1906,6 +1924,7 @@ class MMProcessEngine:
                             entry.upload_input_index = vit_media.input_index(
                                 mm_input, input_index
                             )
+                        entry.inspection_scope = caller_scope
                         entry.expects_greennet = producer_inspects
                         task = _AsyncComputeTask(cache_key, entry)
                         self._async_tasks[entry] = task
@@ -2200,6 +2219,7 @@ class MMProcessEngine:
         external_request_id: str = "",
         region: Optional[str] = None,
         input_inspection_enabled: Optional[bool] = None,
+        fields: Optional[Dict[str, str]] = None,
     ) -> Optional[concurrent.futures.Future]:
         if time.monotonic() >= deadline:
             error = FtRuntimeException(
@@ -2210,18 +2230,19 @@ class MMProcessEngine:
             self._fail_async_compute(cache_key, entry, error)
             return
         vit_media.end_compute_queue(entry)
-        return self._async_compute(
-            mm_inputs,
-            cache_key,
-            entry,
-            request_id,
-            deadline=deadline,
-            user_id=user_id,
-            service_name=service_name,
-            external_request_id=external_request_id,
-            region=region,
-            input_inspection_enabled=input_inspection_enabled,
-        )
+        with inspection_context(fields):
+            return self._async_compute(
+                mm_inputs,
+                cache_key,
+                entry,
+                request_id,
+                deadline=deadline,
+                user_id=user_id,
+                service_name=service_name,
+                external_request_id=external_request_id,
+                region=region,
+                input_inspection_enabled=input_inspection_enabled,
+            )
 
     def _submit_async_compute_batch(
         self,
@@ -2289,6 +2310,7 @@ class MMProcessEngine:
                         external_request_id,
                         region,
                         input_inspection_enabled,
+                        inspection_fields.get(),
                     )
                     self._async_tasks[entry].future = future
                     future.add_done_callback(

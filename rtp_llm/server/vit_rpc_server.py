@@ -2,6 +2,7 @@ import concurrent.futures
 import logging
 import threading
 import time
+from functools import wraps
 
 import grpc
 
@@ -28,6 +29,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
 )
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
+from rtp_llm.multimodal.greennet_hook import inspection_context
 from rtp_llm.multimodal.mm_error_messages import format_mm_rpc_error
 from rtp_llm.multimodal.mm_process_engine import MMEmbeddingRes, MMProcessEngine
 from rtp_llm.multimodal.mm_scheduler import (
@@ -54,9 +56,26 @@ from rtp_llm.server.mm_cache_metadata import (
 from rtp_llm.server.request_headers import (
     extract_correlation_request_id,
     extract_request_headers,
+    greennet_request_fields,
 )
 from rtp_llm.server.vit_rpc_constants import VIT_ERROR_REPORTED_METADATA_KEY
 from rtp_llm.server.vit_rpc_control import create_vit_rpc_server
+
+
+def _with_inspection_fields(method):
+    @wraps(method)
+    def wrapped(self, request, context):
+        inputs = request
+        if isinstance(request, MultimodalHashRequestPB) and request.HasField("inputs"):
+            inputs = request.inputs
+        fields = dict(inputs.inspection_headers)
+        if not fields:
+            # Older senders carry only user identity and correlation in metadata.
+            fields = greennet_request_fields(dict(context.invocation_metadata() or ()))
+        with inspection_context(fields):
+            return method(self, request, context)
+
+    return wrapped
 
 
 def _now_us() -> int:
@@ -191,6 +210,7 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
             rpc_done.set()
         return rpc_done
 
+    @_with_inspection_fields
     def GetMultimodalHashes(self, request: MultimodalHashRequestPB, context):
         try:
             inputs = request.inputs if request.HasField("inputs") else None
@@ -259,6 +279,7 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
             _abort_unexpected(context, error)
         return MultimodalHashResponsePB()
 
+    @_with_inspection_fields
     def AsyncSubmitEmbedding(self, multimodal_inputs: MultimodalInputsPB, context):
         try:
             converted_inputs = trans_mm_input(multimodal_inputs)
@@ -314,6 +335,7 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
             _abort_ft_runtime(context, error)
         return EmptyPB()
 
+    @_with_inspection_fields
     def WaitGreenNetVerdict(self, multimodal_inputs: MultimodalInputsPB, context):
         """Start missing work and block until GreenNet decides for all inputs."""
         verdict = None
@@ -376,6 +398,7 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
             return EmptyPB()
         return EmptyPB()
 
+    @_with_inspection_fields
     def RemoteMultimodalEmbedding(self, multimodal_inputs: MultimodalInputsPB, context):
         tags = {"source": "vit_server"}
         start_us = _now_us()

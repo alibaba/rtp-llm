@@ -1294,7 +1294,14 @@ class DashScGrpcRequestTest(TestCase):
             }
         )
         controls = parse_request_controls(req)
-        self.assertEqual(controls.request_headers, {"region": "cn-beijing"})
+        self.assertEqual(
+            controls.request_headers,
+            {
+                "region": "cn-beijing",
+                "x-dashscope-inner-workspace-meta": meta,
+                "x-dashscope-workspace": "ws-example",
+            },
+        )
         generate_input = _make_generate_input(
             request_id=1,
             input_ids_list=[1],
@@ -1302,11 +1309,45 @@ class DashScGrpcRequestTest(TestCase):
             invocation_metadata=(),
             request_headers=controls.request_headers,
         )
-        self.assertEqual(generate_input.headers, {"region": "cn-beijing"})
+        self.assertEqual(generate_input.headers, controls.request_headers)
         self.assertNotIn(
             "region",
             parse_request_controls(self._tpm_request({})).request_headers,
         )
+
+    def test_gateway_inspection_policy_reaches_vit(self):
+        from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import MultimodalInputsPB
+        from rtp_llm.server.request_headers import write_inspection_context
+
+        for policy, expected in (
+            ({"input": "disable", "gateway_check": False}, False),
+            ({"input": "high", "gateway_check": False}, True),
+            ({"input": "cip", "gateway_check": True}, False),
+        ):
+            req = self._tpm_request(
+                {
+                    "model": "gateway-model",
+                    "X-DashScope-Service": "gateway-service",
+                    "Authorization": "private",
+                    "X-DashScope-Inner-Gateway-DataInspection": policy,
+                    "X-DashScope-DataInspection": '{"input":"disable"}',
+                }
+            )
+            req.model_name = "different-top-level-model"
+            wire = MultimodalInputsPB()
+            write_inspection_context(wire, parse_request_controls(req).request_headers)
+            self.assertEqual(wire.input_inspection_enabled.value, expected)
+            self.assertEqual(wire.inspection_headers["model"], "gateway-model")
+            self.assertEqual(
+                wire.inspection_headers["x-dashscope-service"], "gateway-service"
+            )
+            self.assertNotIn("authorization", wire.inspection_headers)
+            self.assertEqual(
+                json.loads(
+                    wire.inspection_headers["x-dashscope-inner-gateway-datainspection"]
+                ),
+                policy,
+            )
 
     def test_parse_workspace_region_ignores_other_sources(self) -> None:
         meta = json.dumps({"region": "cn-beijing"})
@@ -1341,7 +1382,11 @@ class DashScGrpcRequestTest(TestCase):
                     self._tpm_request({"x-dashscope-inner-workspace-meta": value})
                 )
                 self.assertNotIn("region", controls.request_headers)
-                self.assertEqual(controls.request_headers, {})
+                self.assertEqual(
+                    set(controls.request_headers)
+                    - {"x-dashscope-inner-workspace-meta"},
+                    set(),
+                )
 
     def test_parse_enable_estimated_usage(self) -> None:
         for value, expected in (

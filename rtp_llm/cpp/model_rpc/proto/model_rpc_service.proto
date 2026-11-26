@@ -214,6 +214,8 @@ message MultimodalInputsPB {
     string inspection_ticket = 8;
     // The frontend obtained clearance for these exact keys on the routed ViT.
     bool frontend_inspection_verified = 9;
+    // Gateway inspection headers and the gateway model name (key "model").
+    map<string, string> inspection_headers = 10;
 }
 
 enum TensorDataTypePB {
@@ -1270,6 +1272,7 @@ message MultimodalHashRequestPB {
     bool defer_inspection = 4;
     google.protobuf.BoolValue input_inspection_enabled = 5;
     int64 request_id = 6;
+    map<string, string> inspection_headers = 7;
 }
 
 message MultimodalHashEntryPB {

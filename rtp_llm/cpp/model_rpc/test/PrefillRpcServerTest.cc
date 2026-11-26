@@ -12,6 +12,7 @@
 #include "gtest/gtest.h"
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
+#include "rtp_llm/cpp/multimodal_processor/RemoteMultimodalProcessor.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 
@@ -105,7 +106,7 @@ public:
         return call_count_;
     }
 
-    std::optional<bool> input_inspection_enabled;
+    std::optional<bool>      input_inspection_enabled;
     std::vector<std::string> requested_urls;
     bool                     return_test_hashes = false;
 
@@ -548,6 +549,46 @@ TEST_F(PrefillRpcServerTest, bareWireZeroRoutesToLocalLegacyPrefill) {
     ASSERT_TRUE(error_details.ParseFromString(status.error_details()));
     EXPECT_EQ(error_details.error_code(), static_cast<int>(ErrorCode::MM_WRONG_FORMAT_ERROR));
     EXPECT_NE(error_details.error_message().find("multimodal test error"), std::string::npos);
+}
+
+TEST_F(PrefillRpcServerTest, forwardsInspectionHeadersToRemoteVit) {
+    class Vit final: public MultimodalRpcService::Service {
+    public:
+        grpc::Status RemoteMultimodalEmbedding(grpc::ServerContext*,
+                                               const MultimodalInputsPB* request,
+                                               MultimodalOutputPB*) override {
+            seen = *request;
+            return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "end of transport test");
+        }
+        MultimodalInputsPB seen;
+    } vit;
+    grpc::ServerBuilder builder;
+    int                 port = 0;
+    builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port);
+    builder.RegisterService(&vit);
+    auto endpoint = builder.BuildAndStart();
+    ASSERT_NE(endpoint, nullptr);
+
+    GenerateInputPB request;
+    request.set_request_id(42);
+    auto* media = request.mutable_multimodal_inputs();
+    media->add_multimodal_inputs()->set_multimodal_url("image");
+    (*media->mutable_inspection_headers())["model"]                                    = "gateway-model";
+    (*media->mutable_inspection_headers())["x-dashscope-inner-gateway-datainspection"] = R"({"input":"high"})";
+    media->mutable_input_inspection_enabled()->set_value(true);
+    auto context            = makeContext(&request);
+    context->generate_input = makeMultimodalInput();
+    context->generate_input->generate_config->role_addrs.emplace_back(RoleType::VIT, "127.0.0.1", 0, port);
+    TestPrefillRpcServer server;
+    server.mm_processor_ = std::make_shared<RemoteMultimodalProcessor>(MMModelConfig{true, {{1}}, false}, 100);
+    server.multimodalProcess(*context);
+    endpoint->Shutdown();
+    endpoint->Wait();
+    ASSERT_EQ(vit.seen.inspection_headers_size(), media->inspection_headers_size());
+    for (const auto& item : media->inspection_headers()) {
+        EXPECT_EQ(vit.seen.inspection_headers().at(item.first), item.second);
+    }
+    EXPECT_TRUE(vit.seen.input_inspection_enabled().value());
 }
 
 TEST_F(PrefillRpcServerTest, flaggedWireZeroRoutesToLocalPrefillOnly) {

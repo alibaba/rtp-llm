@@ -37,6 +37,7 @@ from rtp_llm.dash_sc.structural_tag import (
 from rtp_llm.server.request_headers import (
     extract_request_headers,
     extract_workspace_region,
+    greennet_request_fields,
 )
 from rtp_llm.utils.base_model_datatypes import (
     GenerateOutput,
@@ -1461,7 +1462,10 @@ def parse_request_controls(
             ds_attrs.get("x-dashscope-inner-request-priority")
         )
 
-    request_headers: dict[str, str] = {}
+    request_headers = greennet_request_fields(ds_attrs)
+    request_headers.pop(
+        "x-dashscope-requestid", None
+    )  # canonicalized below with request.id fallback
     for header_name in (
         "user_id",
         "x-dashscope-uid",

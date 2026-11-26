@@ -10,7 +10,6 @@ from typing import Any, Dict, List, Optional
 import grpc
 import grpc.aio
 from google.protobuf.message import DecodeError
-from google.protobuf.wrappers_pb2 import BoolValue
 
 from rtp_llm.config.exceptions import (
     AdmissionRejectReason,
@@ -46,8 +45,8 @@ from rtp_llm.server.host_service import HostService
 from rtp_llm.server.mm_cache_metadata import MAX_METADATA_BYTES, metadata_from_proto
 from rtp_llm.server.request_headers import (
     dashscope_greennet_metadata,
-    extract_input_inspection_enabled,
     extract_qos_priority,
+    write_inspection_context,
 )
 from rtp_llm.server.worker_status import _coerce_role_type
 from rtp_llm.telemetry import attributes as trace_attrs
@@ -630,12 +629,10 @@ class MasterClient:
         probe = MultimodalHashRequestPB(keys=unique_keys)
         probe_timeout = DEFAULT_REQUEST_TIMEOUT_SEC
         if input is not None:
-            inspection_enabled = extract_input_inspection_enabled(input.headers)
+            inspection_enabled = write_inspection_context(probe, input.headers)
             probe.request_id = input.request_id
             probe.timeout_ms = max(0, input.generate_config.timeout_ms or 0)
             probe.defer_inspection = inspection_enabled is not False
-            if inspection_enabled is not None:
-                probe.input_inspection_enabled.value = inspection_enabled
             # The first hash probe carries only keys, even on a warm hit.
             check_download_urls(item.url for item in input.mm_inputs)
             input.greennet_verified_vit = None
@@ -725,11 +722,7 @@ class MasterClient:
             if region:
                 # Request-level: one value for every multimodal input submitted below.
                 inputs.region = region
-            input_inspection_enabled = extract_input_inspection_enabled(input.headers)
-            if input_inspection_enabled is not None:
-                inputs.input_inspection_enabled.CopyFrom(
-                    BoolValue(value=input_inspection_enabled)
-                )
+            write_inspection_context(inputs, input.headers)
             submitted = set()
             for key, item in zip(
                 keys, iter_multimodal_inputs(input, input.generate_config)

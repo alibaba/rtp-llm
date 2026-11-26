@@ -21,8 +21,35 @@ Lifetime contract:
 
 from __future__ import annotations
 
+import hashlib
+import json
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Callable, List, Optional
+
+# Bound at RPC entry; worker processes receive an ordinary dictionary in the
+# inspection request and never depend on inheriting the caller's context.
+inspection_fields: ContextVar[Optional[dict]] = ContextVar(
+    "inspection_fields", default=None
+)
+
+
+@contextmanager
+def inspection_context(fields):
+    token = inspection_fields.set(fields)
+    try:
+        yield
+    finally:
+        inspection_fields.reset(token)
+
+
+def verdict_scope(fields):
+    policy = {k: v for k, v in (fields or {}).items() if k != "x-dashscope-requestid"}
+    if not policy:
+        return b""
+    # Cache entries keep only a digest, never the gateway header values.
+    return hashlib.sha256(json.dumps(policy, sort_keys=True).encode()).digest()
 
 
 @dataclass(frozen=True)
@@ -67,6 +94,13 @@ class GreenNetHandle:
 
 
 class GreenNetProvider:
+
+    def routing_approval(self, key, fields):
+        return False
+
+    def remember_routing_approval(self, media, fields):
+        pass
+
     def share_verdict_cache(self) -> Optional[str]:
         """Return a cache handle for ViT child processes when supported."""
         return None

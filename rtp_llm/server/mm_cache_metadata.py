@@ -8,6 +8,7 @@ from typing import Optional, Sequence
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.mm_download_domains import check_download_urls
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import MultimodalHashResponsePB
+from rtp_llm.multimodal.greennet_hook import inspection_fields
 from rtp_llm.telemetry import vit_media
 
 MAX_METADATA_KEYS = 256
@@ -133,6 +134,22 @@ def get_mm_cache_metadata(
     )
     if not inspection_enabled:
         metadata["input_inspection_disabled"] = True
+    fields = inspection_fields.get()
+    policy_cache = (
+        inspection_enabled
+        and fields is not None
+        and not getattr(
+            getattr(engine, "mm_part", None),
+            "inspection_verdict_is_request_scoped",
+            False,
+        )
+        and hasattr(engine, "_inspection")
+    )
+    if policy_cache:
+        for entry in metadata["entries"]:
+            entry["greennet_passed"] = bool(
+                entry["hash_hit"] and engine._inspection.routing_approved(entry["key"])
+            )
     ticket = inputs.inspection_ticket if inputs is not None else ""
     if (
         defer_inspection
@@ -158,7 +175,7 @@ def get_mm_cache_metadata(
                     inputs.request_id if inputs is not None else inspection_request_id,
                 )
     elif inspection_enabled:
-        request_scoped = engine._request_scoped_inspection()
+        request_scoped = engine._request_scoped_inspection() and not policy_cache
         for entry in metadata["entries"]:
             # A scoped verdict can only authorize the call that obtained it.
             if request_scoped or not entry.get("greennet_passed", False):
@@ -228,6 +245,8 @@ def get_mm_cache_metadata(
         total_rows += sum(sizes)
         if total_rows > MAX_METADATA_ROWS:
             raise OverflowError("multimodal metadata response exceeds row limit")
+        if policy_cache and not ticket:
+            engine._inspection.remember_routing_approval(by_key[key], fields)
         completed[key] = {
             "key": key,
             "hit": True,

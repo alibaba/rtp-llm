@@ -1,6 +1,29 @@
 import json
 from typing import Any, Dict, Mapping, Optional
 
+# These fields come from DashSC gateway attributes. Keep them separate from the
+# public HTTP ingress allowlist: only the gateway attests to gateway_check.
+GREENNET_FIELDS = (
+    "model",
+    "x-real-ip",
+    "x-dashscope-service",
+    "x-dashscope-uid",
+    "x-dashscope-subuid",
+    "x-dashscope-workspaceid",
+    "x-dashscope-workspace",
+    "x-dashscope-loggingconsent",
+    "x-dashscope-inner-loggingconsent",
+    "x-dashscope-inner-batch-req",
+    "x-dashscope-inner-streammode",
+    "x-dashscope-inner-source",
+    "x-dashscope-inner-workspace-meta",
+    "x-dashscope-inner-gateway-datainspection",
+    "x-dashscope-inner-datainspection",
+    "x-dashscope-datainspection",
+    "x-dashscope-datainspection-cipservice",
+    "x-dashscope-apikeyid",
+)
+
 REQUEST_HEADER_NAMES = (
     "user_id",
     "x-dashscope-uid",
@@ -53,6 +76,8 @@ def extract_request_headers(
         for key, value in headers.items():
             name = str(key).lower()
             if name in REQUEST_HEADER_NAMES:
+                if name == "x-dashscope-datainspection" and isinstance(value, dict):
+                    value = json.dumps(value, separators=(",", ":"))
                 normalized = _normalize_header_value(value)
                 if normalized is not None:
                     lookup[name] = normalized
@@ -103,6 +128,31 @@ def dashscope_greennet_metadata(headers: Optional[Mapping[str, Any]]) -> tuple:
     return metadata
 
 
+def greennet_request_fields(headers: Optional[Mapping[str, Any]]) -> Dict[str, str]:
+    fields = {}
+    if not headers:
+        return fields
+    normalized = {str(k).lower(): v for k, v in headers.items()}
+    for name in GREENNET_FIELDS:
+        value = normalized.get(name)
+        if isinstance(value, dict):
+            value = json.dumps(value, ensure_ascii=True, separators=(",", ":"))
+        if isinstance(value, str) and value.strip():
+            fields[name] = value.strip()
+    request_id = extract_correlation_request_id(headers)
+    if request_id:
+        fields["x-dashscope-requestid"] = request_id
+    return fields
+
+
+def write_inspection_context(message, headers) -> Optional[bool]:
+    message.inspection_headers.update(greennet_request_fields(headers))
+    enabled = extract_input_inspection_enabled(headers)
+    if enabled is not None:
+        message.input_inspection_enabled.value = enabled
+    return enabled
+
+
 def extract_workspace_region(ds_attrs: Optional[Mapping[str, Any]]) -> Optional[str]:
     """Extract only region from workspace metadata in decoded ds_header_attributes.
 
@@ -143,42 +193,31 @@ _INSPECTION_ENABLED_VALUES = frozenset(
 def extract_input_inspection_enabled(
     headers: Optional[Mapping[str, Any]],
 ) -> Optional[bool]:
-    """Parse the request-scoped input-inspection override.
-
-    ``x-dashscope-datainspection`` carries a JSON object such as
-    ``{"input": "disable", "output": "disable"}``; only ``input`` is
-    consumed. An absent, empty, malformed, or key-less header follows the
-    process configuration (``None``). ``disable`` forces inspection off
-    regardless of configuration; ``enable`` still requires the provider to
-    be enabled.
-    """
+    """Use the gateway decision first, then the internal and user policies."""
     if not headers:
         return None
-    raw = None
-    try:
-        for key, value in headers.items():
-            if str(key).lower() == _DATA_INSPECTION_HEADER:
-                raw = value
-                break
-    except Exception:
+    normalized = {str(key).lower(): value for key, value in headers.items()}
+    gateway = "x-dashscope-inner-gateway-datainspection"
+    for name in (gateway, "x-dashscope-inner-datainspection", _DATA_INSPECTION_HEADER):
+        raw = normalized.get(name)
+        if raw is None or raw == "":
+            continue
+        try:
+            payload = raw if isinstance(raw, dict) else json.loads(raw)
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        if name == gateway and payload.get("gateway_check") is True:
+            return False
+        directive = payload.get("input")
+        if isinstance(directive, str):
+            directive = directive.strip().lower()
+            if directive in _INSPECTION_DISABLED_VALUES:
+                return False
+            if directive in _INSPECTION_ENABLED_VALUES or directive in ("high", "cip"):
+                return True
         return None
-    raw = _normalize_header_value(raw)
-    if raw is None:
-        return None
-    try:
-        payload = json.loads(raw)
-    except (TypeError, ValueError):
-        return None
-    if not isinstance(payload, dict):
-        return None
-    directive = payload.get("input")
-    if not isinstance(directive, str):
-        return None
-    directive = directive.strip().lower()
-    if directive in _INSPECTION_DISABLED_VALUES:
-        return False
-    if directive in _INSPECTION_ENABLED_VALUES:
-        return True
     return None
 
 

@@ -9,7 +9,7 @@ from typing import Any, AsyncGenerator, Dict, Optional, Union
 
 import grpc
 import torch
-from google.protobuf.wrappers_pb2 import BoolValue, StringValue
+from google.protobuf.wrappers_pb2 import StringValue
 from grpc import StatusCode
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
@@ -37,6 +37,7 @@ from rtp_llm.server.request_headers import (
     extract_input_inspection_enabled,
     extract_qos_priority,
     extract_trace_id,
+    write_inspection_context,
 )
 from rtp_llm.telemetry import CURRENT_TRACE_STATE
 from rtp_llm.telemetry import attributes as trace_attrs
@@ -795,11 +796,7 @@ def trans_multimodal_input(
     region = input_py.headers.get("region")
     if region:
         multimodal.region = region
-    inspection_enabled = extract_input_inspection_enabled(input_py.headers)
-    if inspection_enabled is not None:
-        multimodal.input_inspection_enabled.CopyFrom(
-            BoolValue(value=inspection_enabled)
-        )
+    write_inspection_context(multimodal, input_py.headers)
 
 
 def iter_multimodal_inputs(input_py: GenerateInput, generate_config: GenerateConfig):
