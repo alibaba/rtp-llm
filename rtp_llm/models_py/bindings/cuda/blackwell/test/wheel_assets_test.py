@@ -58,7 +58,10 @@ def check_wheel(wheel):
             raise ValueError("Wheel still includes the old FP8 MQA runtime")
 
         adapter = archive.read(ROOT + "fp8_mqa_adapter.py")
-        legacy_metadata = object()
+
+        def legacy_metadata(context_lens, block_kv, num_sms, indices=None):
+            return context_lens, block_kv, num_sms, indices
+
         deep_gemm = SimpleNamespace(
             fp8_mqa_logits=object(),
             fp8_paged_mqa_logits=object(),
@@ -69,7 +72,12 @@ def check_wheel(wheel):
         exports = {}
         with patch.dict(sys.modules, {"deep_gemm": deep_gemm}):
             exec(compile(adapter, "fp8_mqa_adapter.py", "exec"), exports)
-        if exports["get_paged_mqa_logits_metadata"] is not legacy_metadata:
+        get_metadata = exports["get_paged_mqa_logits_metadata"]
+        lengths, indices = object(), object()
+        metadata_args = (lengths, 64, 148)
+        if get_metadata(*metadata_args) != (*metadata_args, None) or get_metadata(
+            *metadata_args, indices=indices
+        ) != (*metadata_args, indices):
             raise ValueError("FP32-scale FP8 MQA must use the legacy schedule")
 
         for name in [MANIFEST, *files]:
