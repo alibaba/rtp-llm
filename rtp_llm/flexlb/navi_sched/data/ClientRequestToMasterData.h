@@ -41,6 +41,8 @@ public:
     uint64_t requestId = 0;
     bool collectReplay = false;
     bool routeOnly = false;
+    NativePPPrefillSlotRelease nativePrefillSlotRelease =
+        NativePPPrefillSlotRelease::UNKNOWN;
     NaviSchedBlockHashesConstPtr blockHashes;
     std::string forwardPayload;
     int64_t deserializeBeginTimeUs = 0;

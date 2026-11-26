@@ -392,7 +392,8 @@ public:
         const std::vector<NaviSchedScheduleItem> &requests,
         std::vector<TPUPrefillRequestInput> &inputs,
         int64_t *externalSuffixBlockCounts = nullptr,
-        ::navi_sched::TPUPrefillCacheObservationBatch * = nullptr) const override
+        ::navi_sched::TPUPrefillCacheObservationBatch * = nullptr,
+        const ::navi_sched::NaviSchedExternalCacheReadyBlocks *remoteReady = nullptr, bool = true) const override
     {
         inputs.resize(requests.size());
         for (size_t i = 0; i < requests.size(); ++i) {
@@ -3407,7 +3408,8 @@ TEST_F(GeometryIntegrationTest,
             bool getExecutionCacheInputs(
                 const std::vector<NaviSchedScheduleItem> &requests,
                 std::vector<TPUPrefillRequestInput> &inputs, int64_t *suffix = nullptr,
-                ::navi_sched::TPUPrefillCacheObservationBatch * = nullptr) const override
+                ::navi_sched::TPUPrefillCacheObservationBatch * = nullptr,
+        const ::navi_sched::NaviSchedExternalCacheReadyBlocks *remoteReady = nullptr, bool = true) const override
             {
                 ++calls;
                 inputs.clear();
@@ -3546,12 +3548,16 @@ TEST_F(GeometryIntegrationTest,
                 const std::vector<NaviSchedScheduleItem> &requests,
                 std::vector<TPUPrefillRequestInput> &inputs, int64_t *suffix = nullptr,
                 ::navi_sched::TPUPrefillCacheObservationBatch *observation =
-                    nullptr) const override
+                    nullptr,
+        const ::navi_sched::NaviSchedExternalCacheReadyBlocks *remoteReady = nullptr, bool = true) const override
             {
                 ++calls;
                 if (observation) {
                     observation->pool = TPUPrefillCacheObservation{};
                     observation->pool->revision = cacheRevision;
+                    // Match the production provider's optional-output contract.
+                    if (observation->readyOnlyHbmBlockCounts)
+                        *observation->readyOnlyHbmBlockCounts = hbmBlocks;
                     observation->fullPrefixBlocksBeforeQueryDrop.assign(requests.size(),
                                                                         8);
                 }
@@ -3570,6 +3576,7 @@ TEST_F(GeometryIntegrationTest,
             mutable int calls = 0;
             int64_t sharedBoundary = 0;
             uint64_t cacheRevision = 489;
+            std::vector<int64_t> hbmBlocks = {768, 1024};
             bool _external;
         };
         auto fixedPolicy = typedRuntimePolicy();
@@ -3696,6 +3703,7 @@ TEST_F(GeometryIntegrationTest,
         external->sharedBoundary = 6144;
         external->_external = false;
         external->cacheRevision = 506;
+        external->hbmBlocks = {0, 0};
         const auto audit =
             MasterScheduleResultKernel::getAdmissionPredictionAudit(context, 0, true);
         ASSERT_TRUE(audit.valid);
@@ -3711,6 +3719,43 @@ TEST_F(GeometryIntegrationTest,
         EXPECT_EQ(2u, audit.frozenExecutionInputs[1].requestId);
         EXPECT_EQ(86016, audit.frozenExecutionInputs[1].input.computedTokens);
         EXPECT_EQ(24576, audit.frozenExecutionInputs[1].input.externalReadTokens);
+        EXPECT_EQ(24576, audit.frozenExecutionInputs[0].readyOnlyHbmTokens);
+        EXPECT_EQ(32768, audit.frozenExecutionInputs[1].readyOnlyHbmTokens);
+        // Missing or unknown physical HBM knowledge must remain unknown;
+        // total cache hits include V6D/Tair and are not an HBM substitute.
+        const auto captured = std::atomic_load(&context._scheduleNodes[0]._executionCacheInputs);
+        ASSERT_TRUE(captured);
+        for (const auto &blocks : {std::vector<int64_t>{}, std::vector<int64_t>{0},
+                                  std::vector<int64_t>{-1, 0}}) {
+            auto modified = std::make_shared<NaviSchedExecutionCacheInputCapture>(*captured);
+            modified->observation.readyOnlyHbmBlockCounts =
+                blocks;
+            std::shared_ptr<const NaviSchedExecutionCacheInputCapture> published = modified;
+            std::atomic_store(&context._scheduleNodes[0]._executionCacheInputs, published);
+            const auto changed =
+                MasterScheduleResultKernel::getAdmissionPredictionAudit(context, 0, true);
+            ASSERT_TRUE(changed.valid);
+            ASSERT_EQ(2u, changed.frozenExecutionInputs.size());
+            for (size_t i = 0; i < 2; ++i) {
+                const int64_t expected = i < blocks.size() && blocks[i] >= 0
+                                             ? blocks[i] * 32 : -1;
+                EXPECT_EQ(expected, changed.frozenExecutionInputs[i].readyOnlyHbmTokens);
+                EXPECT_EQ(audit.frozenExecutionInputs[i].input.computedTokens,
+                          changed.frozenExecutionInputs[i].input.computedTokens);
+            }
+        }
+        auto missing = std::make_shared<NaviSchedExecutionCacheInputCapture>(*captured);
+        missing->observation.readyOnlyHbmBlockCounts.reset();
+        std::shared_ptr<const NaviSchedExecutionCacheInputCapture> published = missing;
+        std::atomic_store(&context._scheduleNodes[0]._executionCacheInputs, published);
+        const auto unknown =
+            MasterScheduleResultKernel::getAdmissionPredictionAudit(context, 0, true);
+        ASSERT_EQ(2u, unknown.frozenExecutionInputs.size());
+        EXPECT_EQ(-1, unknown.frozenExecutionInputs[0].readyOnlyHbmTokens);
+        EXPECT_EQ(-1, unknown.frozenExecutionInputs[1].readyOnlyHbmTokens);
+        EXPECT_EQ(24576, audit.frozenExecutionInputs[0].readyOnlyHbmTokens);
+        EXPECT_EQ(32768, audit.frozenExecutionInputs[1].readyOnlyHbmTokens);
+        std::atomic_store(&context._scheduleNodes[0]._executionCacheInputs, captured);
         EXPECT_EQ(1, external->calls);
         EXPECT_TRUE(MasterScheduleResultKernel::getAdmissionPredictionAudit(context, 0)
                         .frozenExecutionInputs.empty());
@@ -3982,7 +4027,8 @@ TEST_F(GeometryIntegrationTest, testLiveOrderWitnessUsesCanonicalFrozenGeometry)
         bool getExecutionCacheInputs(
             const std::vector<NaviSchedScheduleItem> &requests,
             std::vector<TPUPrefillRequestInput> &inputs, int64_t *suffix = nullptr,
-            TPUPrefillCacheObservationBatch * = nullptr) const override
+            TPUPrefillCacheObservationBatch * = nullptr,
+        const ::navi_sched::NaviSchedExternalCacheReadyBlocks *remoteReady = nullptr, bool = true) const override
         {
             inputs.clear();
             for (size_t i = 0; i < requests.size(); ++i) {

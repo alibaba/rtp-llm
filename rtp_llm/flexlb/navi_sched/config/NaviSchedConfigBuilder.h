@@ -18,7 +18,9 @@ public:
                              const NamedConfigs &resourceConfigs = {},
                              const std::vector<std::string> &bizResourceList = {},
                              size_t grpcClientIoThreadNum = 0,
-                             const std::map<std::string, size_t> &extraTaskQueueThreads = {});
+                             const std::map<std::string, size_t> &extraTaskQueueThreads = {},
+                             const std::vector<std::string> &kernelBlacklist = {},
+                             size_t grpcUnaryIoThreadNum = 0);
 
 private:
     static autil::legacy::json::JsonArray makeStringArray(

@@ -32,7 +32,8 @@ ClientRequestToMasterData::ClientRequestToMasterData()
 bool ClientRequestToMasterData::valid() const
 {
     return version == NAVI_SCHED_DATA_VERSION && requestId != 0 && !bizName.empty() &&
-           timeoutMs > 0 && explicitCacheCheckpointPosition >= 0 &&
+           timeoutMs > 0 && validNativePrefillSlotRelease(nativePrefillSlotRelease) &&
+           explicitCacheCheckpointPosition >= 0 &&
            explicitCacheCheckpointPosition <= promptTokenCount &&
            BlockHashUtil::validTokenBlocks(promptTokenCount, blockSize, blockHashes);
 }
@@ -52,6 +53,8 @@ navi::SummaryErrorCode ClientRequestToMasterData::getSummary(
     TABLE_ADD_COLUMN_VALUE(table, "block_hash_count", BlockHashUtil::size(blockHashes));
     TABLE_ADD_COLUMN_VALUE(table, "forward_payload_size", forwardPayload.size());
     TABLE_ADD_COLUMN_VALUE(table, "route_only", routeOnly);
+    TABLE_ADD_COLUMN_VALUE(table, "native_prefill_slot_release",
+                           int32_t(nativePrefillSlotRelease));
     auto level = SummaryUtil::getSummaryLevel(query);
     if (level >= 1) {
         TABLE_ADD_COLUMN_VALUE(table, "collect_replay", collectReplay);
@@ -78,6 +81,7 @@ void ClientRequestToMasterData::serialize(autil::DataBuffer &dataBuffer) const
     BlockHashUtil::write(dataBuffer, blockHashes);
     dataBuffer.write(forwardPayload);
     dataBuffer.write(routeOnly);
+    dataBuffer.write(int32_t(nativePrefillSlotRelease));
 }
 
 void ClientRequestToMasterData::deserialize(autil::DataBuffer &dataBuffer)
@@ -96,6 +100,9 @@ void ClientRequestToMasterData::deserialize(autil::DataBuffer &dataBuffer)
     BlockHashUtil::read(dataBuffer, blockHashes);
     dataBuffer.read(forwardPayload);
     dataBuffer.read(routeOnly);
+    int32_t release = 0;
+    dataBuffer.read(release);
+    nativePrefillSlotRelease = static_cast<NativePPPrefillSlotRelease>(release);
 }
 
 class ClientRequestToMasterType : public navi::Type {

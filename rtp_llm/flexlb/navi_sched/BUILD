@@ -34,6 +34,7 @@ cc_library(
         "data/*.h",
     ]),
     deps = [
+        ":tpu_prefill_pp4_timing",
         ":tpu_prefill_execution_policy",
         "//aios/navi:navi",
         "//aios/navi:navi_runtime_config",
@@ -237,6 +238,7 @@ cc_library(
     alwayslink = True,
     deps = [
         ":tpu_prefill_execution_policy",
+        ":tpu_prefill_pp4_observation",
         ":navi_sched_agent_header",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/container:flat_hash_set",
@@ -831,6 +833,7 @@ pybind_extension(
     additional_linker_inputs = ["scripts/navi_sched_pybind.lds"],
     srcs = [
         "bindings/NaviSchedBindings.h",
+        "bindings/ForwardAdmissionClock.h",
         "bindings/Pybindings.cpp",
         "test/simulator/SimulatedPybindings.cpp",
     ],
@@ -1849,5 +1852,160 @@ py_test(
     name = "vllm_file_logging_test",
     srcs = ["test/vllm/VLLMLoggingTest.py", "adapters/vllm/VLLMLogging.py"],
     main = "test/vllm/VLLMLoggingTest.py",
+    python_version = "PY3",
+)
+
+py_test(
+    name = "navi_sched_r78_publication_test",
+    srcs = ["test/vllm/VLLMR78PublicationTest.py"],
+    main = "test/vllm/VLLMR78PublicationTest.py",
+    data = [
+        "packaging/dashllm_r78/runtime_overlay/kvs_connector/v6d_object_connector.py",
+        "packaging/dashllm_r78/runtime_overlay/vllm_torchtpu/core/pp_lazy_step.py",
+    ],
+    python_version = "PY3",
+    deps = [":py_sched_lib"],
+)
+
+py_test(
+    name = "navi_sched_r78_lookup_test",
+    srcs = ["test/vllm/VLLMR78LookupTest.py", "test/vllm/VLLMV6DLookupAuditTest.py"],
+    main = "test/vllm/VLLMR78LookupTest.py",
+    data = [
+        "packaging/dashllm_r78/runtime_overlay/kvs_connector/v6d_object_connector.py",
+        "packaging/dashllm_r50/runtime_overlay/v6d/server/peers/tiered_vineyard/peer.py",
+        "packaging/dashllm_r50/runtime_overlay/v6d/client/client.py",
+    ],
+    python_version = "PY3",
+)
+
+py_test(
+    name = "navi_sched_vllm_execution_window_test",
+    srcs = ["test/vllm/VLLMExecutionWindowTest.py"],
+    main = "test/vllm/VLLMExecutionWindowTest.py",
+    python_version = "PY3",
+    deps = [":py_sched_lib"],
+)
+
+py_test(
+    name = "navi_sched_vllm_execution_sample_test",
+    srcs = ["test/vllm/VLLMExecutionSampleTest.py"],
+    main = "test/vllm/VLLMExecutionSampleTest.py",
+    python_version = "PY3",
+    deps = [":py_sched_lib"],
+)
+
+# Pure PP4 timing arithmetic. Native request and KV state remain caller-owned.
+cc_library(
+    name = "tpu_prefill_pp4_timing",
+    srcs = ["common/TPUPrefillPP4Timing.cpp"],
+    hdrs = ["common/TPUPrefillPP4Timing.h"],
+)
+
+cc_test(
+    name = "tpu_prefill_pp4_timing_test",
+    srcs = ["test/TPUPrefillPP4TimingTest.cpp"],
+    deps = [":tpu_prefill_pp4_timing", "//aios/unittest_framework"],
+)
+
+pybind_extension(
+    name = "test/_navi_sched_pp4_timing_test",
+    testonly = True,
+    srcs = ["test/TPUPrefillPP4TimingBindings.cpp"],
+    deps = [":tpu_prefill_pp4_timing"],
+    features = [
+        "static_link_cpp_runtimes",
+        "static_libgcc",
+        "static_libcxx",
+    ],
+    copts = ["-fvisibility=hidden", "-fPIC"] + select({
+        ":python312_wheel": ["-I/usr/local/include/python3.12"],
+        "//conditions:default": ["-I/usr/local/include/python3"],
+    }),
+)
+
+cc_library(
+    name = "tpu_prefill_pp4_forecast",
+    srcs = ["common/TPUPrefillPP4Forecast.cpp"],
+    hdrs = ["common/TPUPrefillPP4Forecast.h"],
+    deps = [":tpu_prefill_pp4_timing", ":tpu_prefill_execution_policy"],
+)
+
+cc_test(
+    name = "tpu_prefill_pp4_forecast_test",
+    srcs = ["test/TPUPrefillPP4ForecastTest.cpp"],
+    deps = [":tpu_prefill_pp4_forecast", "//aios/unittest_framework"],
+)
+
+pybind_extension(
+    name = "test/_navi_sched_pp4_forecast_test",
+    testonly = True,
+    srcs = ["test/TPUPrefillPP4ForecastBindings.cpp", "test/TPUPrefillPP4Baseline.cpp", "test/TPUPrefillPP4Baseline.h"],
+    deps = [":tpu_prefill_pp4_forecast"],
+    features = ["static_link_cpp_runtimes", "static_libgcc", "static_libcxx"],
+    copts = ["-fvisibility=hidden", "-fPIC"] + select({
+        ":python312_wheel": ["-I/usr/local/include/python3.12"],
+        "//conditions:default": ["-I/usr/local/include/python3"],
+    }),
+)
+
+cc_test(
+    name = "native_pp_state_test",
+    srcs = ["test/NaviSchedNativePPStateTest.cpp"],
+    deps = [":navi_sched_data_lib", ":navi_sched_replay_debug_lib", "//aios/unittest_framework"],
+)
+
+cc_library(
+    name = "tpu_prefill_pp4_observation",
+    srcs = ["common/TPUPrefillPP4Observation.cpp"],
+    hdrs = ["common/TPUPrefillPP4Observation.h"],
+    deps = [":tpu_prefill_pp4_forecast", ":navi_sched_data_lib"],
+)
+
+cc_test(
+    name = "tpu_prefill_pp4_observation_test",
+    srcs = ["test/TPUPrefillPP4ObservationTest.cpp"],
+    deps = [":tpu_prefill_pp4_observation", "//aios/unittest_framework"],
+)
+
+cc_test(
+    name = "native_pp4_training_integration_test",
+    srcs = ["test/NativePP4TrainingIntegrationTest.cpp"],
+    copts = ["-fno-access-control"],
+    deps = ["//aios/navi:navi_ops_testlib", ":navi_sched_role_lib", "//aios/unittest_framework"],
+)
+
+cc_test(
+    name = "tair_kvcm_query_test",
+    srcs = ["resource/TairKvcmQueryTest.cpp"],
+    copts = ["-fno-access-control"],
+    deps = [
+        ":navi_sched_role_lib",
+        "//aios/navi:navi_ops_testlib",
+        "//aios/unittest_framework",
+    ],
+)
+
+py_test(
+    name = "navi_sched_v6d_query_config_test",
+    srcs = ["test/vllm/VLLMV6DQueryConfigTest.py"],
+    main = "test/vllm/VLLMV6DQueryConfigTest.py",
+    data = ["packaging/dashllm_r50/runtime_overlay/v6d/server/peers/tiered_vineyard/peer.py"],
+    python_version = "PY3",
+)
+
+cc_test(
+    name = "tair_kvcm_handshake_test",
+    srcs = ["resource/TairKvcmHandshakeTest.cpp"],
+    deps = [":navi_sched_data_lib", "//aios/unittest_framework"],
+)
+
+py_test(
+    name = "navi_sched_vllm_tair_kvcm_config_test",
+    srcs = [
+        "navi_sched/adapters/vllm/VLLMTairKvcmConfig.py",
+        "navi_sched/adapters/vllm/test_tair_kvcm_config.py",
+    ],
+    main = "navi_sched/adapters/vllm/test_tair_kvcm_config.py",
     python_version = "PY3",
 )

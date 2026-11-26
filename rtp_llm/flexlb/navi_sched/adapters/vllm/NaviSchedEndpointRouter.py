@@ -80,6 +80,7 @@ class NaviSchedEndpointRouter:
         block_hash_request=None,
         route_only: bool = False,
         explicit_cache_checkpoint_position: int = 0,
+        native_prefill_slot_release: int = 0,
     ):
         effective_timeout_ms = (
             self._timeout_ms if timeout_ms is None else int(timeout_ms)
@@ -93,6 +94,8 @@ class NaviSchedEndpointRouter:
         }
         if route_only:
             options["route_only"] = True
+        if native_prefill_slot_release:
+            options["native_prefill_slot_release"] = native_prefill_slot_release
         if explicit_cache_checkpoint_position:
             options["explicit_cache_checkpoint_position"] = (
                 explicit_cache_checkpoint_position
@@ -174,9 +177,7 @@ class NaviSchedEndpointRouter:
                 return naviSchedModule().hash_vllm_plain_text_blocks(
                     packed_tokens, self._block_size
                 )
-        return _hash_normalized_token_ids(
-            token_ids, self._block_size, request=request
-        )
+        return _hash_normalized_token_ids(token_ids, self._block_size, request=request)
 
     @staticmethod
     def _log_replay(decision) -> None:

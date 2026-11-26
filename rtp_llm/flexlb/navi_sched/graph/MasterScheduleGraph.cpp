@@ -5,6 +5,8 @@
 #include "aios/navi_sched/scheduler/CostSchedulerGraph.h"
 #include "aios/navi_sched/scheduler/CostSchedulerKernel.h"
 #include "aios/navi_sched/scheduler/MasterScheduleContextKernel.h"
+#include "aios/navi_sched/scheduler/MasterSchedulePrepareKernel.h"
+#include "aios/navi_sched/kernel/MasterTairQueryKernel.h"
 #include "aios/navi_sched/scheduler/MasterScheduleResultGraph.h"
 #include "aios/navi_sched/kernel/SchedulerConfigSyncKernel.h"
 #include "autil/Lock.h"
@@ -113,7 +115,7 @@ std::unique_ptr<navi::GraphDef> MasterScheduleGraph::buildGraph(
     const std::string &masterBizName, const std::string &contextKernelConfig,
     const std::string &schedulerKernelId,
     const std::string &schedulerKernelConfig,
-    uint64_t requestPipeGeneration)
+    uint64_t requestPipeGeneration, bool enableTairQuery)
 {
     auto graphDef = std::make_unique<navi::GraphDef>();
     navi::GraphBuilder builder(graphDef.get());
@@ -122,9 +124,22 @@ std::unique_ptr<navi::GraphDef> MasterScheduleGraph::buildGraph(
     auto context = builder.node("navi_sched_master_schedule_context")
                        .kernel(MasterScheduleContextKernel::KERNEL_ID)
                        .jsonAttrs(contextKernelConfig)
-                       .attr("scheduler_kernel_id", schedulerKernelId)
                        .integerAttr("request_pipe_generation",
                                     static_cast<int64_t>(requestPipeGeneration));
+    auto prepare = builder.node("navi_sched_master_schedule_prepare")
+                       .kernel(MasterSchedulePrepareKernel::KERNEL_ID)
+                       .jsonAttrs(contextKernelConfig)
+                       .attr("scheduler_kernel_id", schedulerKernelId);
+    if (enableTairQuery) {
+        auto query = builder.node("navi_sched_master_tair_query")
+                         .kernel(MasterTairQueryKernel::KERNEL_ID);
+        context.out("context").to(query.in("context")).require(true);
+        query.out("queried_context").to(prepare.in("queried_context")).require(true);
+    } else {
+        // Both branches carry the same MasterScheduleContextData. The common
+        // prepare/cost/result path accepts empty optional query observations.
+        context.out("context").to(prepare.in("queried_context")).require(true);
+    }
     auto result = builder.node("navi_sched_master_schedule_result")
                       .kernel(MasterScheduleResultKernel::KERNEL_ID);
     CostSchedulerConfig costConfig;
@@ -164,7 +179,7 @@ std::unique_ptr<navi::GraphDef> MasterScheduleGraph::buildGraph(
         builder.node("navi_sched_scheduler_config_sync")
             .kernel(SchedulerConfigSyncKernel::KERNEL_ID);
     if (!MasterScheduleGraphBuilder::addSchedulePath(
-            builder, context, resultPrepare, schedulerKernelId,
+            builder, prepare, resultPrepare, schedulerKernelId,
             schedulerKernelConfig)) {
         return nullptr;
     }
@@ -196,7 +211,7 @@ public:
         }
         auto graphDef = MasterScheduleGraph::buildGraph(
             masterBizName, contextKernelConfig, schedulerKernelId,
-            schedulerKernelConfig, requestPipeGeneration);
+            schedulerKernelConfig, requestPipeGeneration, enableTairQuery);
         if (!graphDef) {
             masterScheduleR->clearRequestPipe(requestPipeGeneration);
             return false;
@@ -398,6 +413,7 @@ public:
     std::string schedulerKernelId;
     std::string schedulerKernelConfig;
     bool enableVis = false;
+    bool enableTairQuery = false;
     navi::NaviUserResultPtr userResult;
     ScheduleGraphClosurePtr closure;
     mutable autil::ThreadCond condition;
@@ -418,7 +434,7 @@ MasterScheduleGraph::MasterScheduleGraph(const navi::NaviPtr &navi,
                                          const std::string &contextKernelConfig,
                                          const std::string &schedulerKernelId,
                                          const std::string &schedulerKernelConfig,
-                                         bool enableVis)
+                                         bool enableVis, bool enableTairQuery)
     : _impl(std::make_unique<Impl>())
 {
     _impl->navi = navi;
@@ -429,6 +445,7 @@ MasterScheduleGraph::MasterScheduleGraph(const navi::NaviPtr &navi,
     _impl->schedulerKernelId = schedulerKernelId;
     _impl->schedulerKernelConfig = schedulerKernelConfig;
     _impl->enableVis = enableVis;
+    _impl->enableTairQuery = enableTairQuery;
 }
 
 MasterScheduleGraph::~MasterScheduleGraph() { stop(); }

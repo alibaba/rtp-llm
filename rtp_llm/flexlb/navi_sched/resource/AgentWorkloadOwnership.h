@@ -58,6 +58,8 @@ private:
     struct RequestContribution {
         int64_t cacheHitTokens;
         int64_t cacheMissTokens;
+        uint64_t requestId;
+        std::optional<bool> executionLoadIncluded;
     };
     using RequestList = std::list<RequestContribution>;
     using BatchRequests = std::unordered_map<uint64_t, RequestList::iterator>;

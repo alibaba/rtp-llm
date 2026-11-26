@@ -1,4 +1,5 @@
 #include "aios/navi_sched/resource/LatencyModelR.h"
+#include "aios/navi_sched/common/TPUPrefillPP4Timing.h"
 #include "autil/TimeUtility.h"
 #include <algorithm>
 #include <cmath>
@@ -136,7 +137,10 @@ bool LatencyModelR::recordSample(
 {
     updatedSnapshot.reset();
     saveNeeded = false;
-    if (!std::isfinite(sample.latencyMs) || sample.latencyMs < 0.0 ||
+    if (_nonLinearPrefillModelR->usesNativePP4Timing() != bool(sample.nativePP4Timing) ||
+        (sample.nativePP4Timing &&
+         !sample.nativePP4Timing->validLatencyMs(sample.latencyMs)) ||
+        !std::isfinite(sample.latencyMs) || sample.latencyMs < 0.0 ||
         !validLatencyTrainingPhase(trainingPhase) ||
         (_nonLinearPrefillModelR->usesExecutionCacheSource() &&
          !sample.features.hasExecutionCacheSource()) ||
@@ -175,9 +179,10 @@ bool LatencyModelR::recordSample(
     }
     const auto current = getSnapshot();
     const auto initialPpHistoryFit =
-        _initialPpHistoryFitPending && current && !current->warmStarted &&
-        _agentBatchR && _agentBatchR->getBackendExecutionPipelineStages() > 1 &&
-        _nonLinearPrefillModelR->usesExecutionGeometry();
+        _initialPpHistoryFitPending && current && !current->warmStarted && _agentBatchR &&
+        _agentBatchR->getBackendExecutionPipelineStages() > 1 &&
+        (_nonLinearPrefillModelR->usesExecutionGeometry() ||
+         _nonLinearPrefillModelR->usesNativePP4Timing());
     if (appended && !appendResult.trainingDeferred && initialPpHistoryFit) {
         // Ordinary online updates barely move a fresh PP seed. Reuse the bounded
         // history fitting recipe before switching to the normal online cadence.
@@ -652,6 +657,8 @@ bool LatencyModelR::fitParameters(const std::vector<NaviSchedLatencySample> &sam
                                   const std::vector<double> *parameterLearningRateScales,
                                   bool rejectNonPositiveWaitingCandidate)
 {
+    if (_nonLinearPrefillModelR->usesNativePP4Timing())
+        parameterLearningRateScales = nullptr;
     return _nonLinearPrefillModelR->validateConfiguredParameters(initialParameters) &&
            _nonLinearPrefillModelR->fit(samples, initialParameters, updatedParameters,
                                         learningRateScale, currentSampleWeight,
@@ -772,8 +779,8 @@ bool LatencyModelR::fitOnlineBatch(const std::vector<NaviSchedLatencySample> &sa
     }
     auto nextResidualParameters = initialResidualParameters;
     auto nextResidualLastUpdateTimeUs = initialResidualLastUpdateTimeUs;
-    const auto basePrediction = _nonLinearPrefillModelR->predictConfigured(
-        currentSample.features, nextParameters);
+    const auto basePrediction =
+        _nonLinearPrefillModelR->predictSampleConfigured(currentSample, nextParameters);
     if (!std::isfinite(basePrediction) || basePrediction < 0.0 ||
         basePrediction > NonLinearPrefillModelR::MAX_FIT_PREDICTION_MS) {
         NAVI_KERNEL_LOG(WARN, "reject latency fit with invalid base prediction [%f]",
@@ -807,7 +814,7 @@ bool LatencyModelR::calculateAbsoluteError(const AgentHistoryR::History &history
     }
     for (const auto &sample : history) {
         const auto basePrediction =
-            _nonLinearPrefillModelR->predictConfigured(sample.features, parameters);
+            _nonLinearPrefillModelR->predictSampleConfigured(sample, parameters);
         const auto prediction =
             LatencyResidualModel::evaluate(basePrediction, residualParameters, 0, 0,
                                            getResidualRuntimeConfig())

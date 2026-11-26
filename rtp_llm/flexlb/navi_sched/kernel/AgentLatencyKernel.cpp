@@ -1124,6 +1124,20 @@ navi::ErrorCode AgentLatencyKernel::compute(navi::KernelComputeContext &ctx)
     _agentLatencyInputR->take(inputs);
     bool saveNeeded = false;
     for (auto input : inputs) {
+        if (input.type == AgentLatencyInputType::NATIVE_PP4_TIMING_SAMPLE) {
+            const auto sample = input.makeLatencySample();
+            std::shared_ptr<const NaviSchedLatencyModelSnapshot> updated;
+            bool currentSaveNeeded = false;
+            if (!_latencyModelR->recordSample(sample, updated, currentSaveNeeded)) {
+                NAVI_KERNEL_LOG(WARN,
+                                "invalid Native PP4 timing sample, eventTimeUs [%ld]",
+                                input.eventTimeUs);
+                continue;
+            }
+            saveNeeded = saveNeeded || currentSaveNeeded;
+            if (updated) _agentReportR->reportLatencyModelUpdated(updated);
+            continue;
+        }
         const bool executionSample =
             input.type == AgentLatencyInputType::OBSERVED_EXECUTION_SAMPLE;
         const auto featureSnapshot = _latencyModelR->getSnapshot();

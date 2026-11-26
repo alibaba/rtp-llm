@@ -1,5 +1,6 @@
 #include "aios/navi_sched/scheduler/ScheduleContext.h"
 #include "aios/navi_sched/scheduler/ScheduleContextInternal.h"
+#include "aios/navi_sched/scheduler/CostSchedulerKernelInternal.h"
 
 #include "aios/navi_sched/data/BlockHashUtil.h"
 #include "aios/navi_sched/data/MasterScheduleRequestData.h"
@@ -10,6 +11,9 @@
 #include "autil/HashUtil.h"
 
 #include <cmath>
+#include <stdexcept>
+#include <cstdio>
+#include <algorithm>
 
 namespace navi_sched {
 
@@ -46,6 +50,7 @@ NaviSchedScheduleNode::NaviSchedScheduleNode(NaviSchedNodeConstPtr node,
     , _timeCompression(timeCompression)
     , _unifiedLatencyPrediction(snapshot.unifiedLatencyPrediction)
     , _workload(std::move(snapshot.workload))
+    , _nativePrefillReservations(std::move(snapshot.nativePrefillReservations))
     , _workloadFeatures(std::move(snapshot.workloadFeatures))
     , _reportedWorkloadFeatures(std::move(snapshot.reportedWorkloadFeatures))
     , _reservedWorkloadFeatures(std::move(snapshot.reservedWorkloadFeatures))
@@ -83,6 +88,181 @@ NaviSchedScheduleNode::NaviSchedScheduleNode(NaviSchedNodeConstPtr node,
             }
         }
     }
+}
+
+namespace {
+
+void supplyNativeRelease(TPUPrefillPP4RequestPrediction &prediction,
+                         NativePPPrefillSlotRelease release)
+{
+    if (release == NativePPPrefillSlotRelease::UNKNOWN) return;
+    if (!validNativePrefillSlotRelease(release))
+        throw std::invalid_argument("invalid reserved Native completion condition");
+    const bool afterPrefill = release == NativePPPrefillSlotRelease::AFTER_PREFILL_RESULT;
+    if (prediction.releaseSlotAfterPrefill &&
+        *prediction.releaseSlotAfterPrefill != afterPrefill)
+        throw std::invalid_argument("Native completion prediction contradicts request");
+    prediction.releaseSlotAfterPrefill = afterPrefill;
+}
+
+void supplyNoAsyncQueryPrediction(TPUPrefillPP4RequestPrediction &prediction,
+                                  NativePPRequestPhase phase, int64_t prompt,
+                                  const TPUPrefillExecutionPolicyConfig &policy,
+                                  std::optional<int64_t> hbmPrefix = std::nullopt)
+{
+    // A pending query, issued load or host call needs its own service estimate.
+    // The absence of async lookup is sufficient only before a query is issued.
+    if (TPUPrefillExecutionPolicy::hasAsyncLookupOpportunity(prompt, policy)) {
+        // Full HBM hash blocks leave no external suffix to query.
+        const bool completeHBMPrefix =
+            hbmPrefix && *hbmPrefix >= 0 && *hbmPrefix < prompt &&
+            policy.schedulerBlockSize > 0 && policy.asyncKVLookupHashBlockSize > 0 &&
+            *hbmPrefix % policy.schedulerBlockSize == 0 &&
+            *hbmPrefix >= (prompt - (policy.asyncKVLookupUsesEagle ? 1 : 0)) /
+                              policy.asyncKVLookupHashBlockSize *
+                              policy.asyncKVLookupHashBlockSize;
+        if (!completeHBMPrefix) return;
+    }
+    if (phase != NativePPRequestPhase::NOT_REGISTERED &&
+        phase != NativePPRequestPhase::QUERY_NOT_STARTED &&
+        phase != NativePPRequestPhase::CACHE_UNKNOWN &&
+        phase != NativePPRequestPhase::PREEMPTED &&
+        phase != NativePPRequestPhase::UNKNOWN)
+        return;
+    if (!prediction.needsFirstQuery) prediction.needsFirstQuery = false;
+    if (!prediction.readyAfterObservationMs) prediction.readyAfterObservationMs = 0.0;
+}
+
+TPUPrefillPP4Request unobservedNativeRequest(
+    uint64_t id, int64_t prompt, int64_t checkpoint, NativePPPrefillSlotRelease release,
+    int64_t expectedHit, bool owned, const TPUPrefillExecutionPolicyConfig &policy,
+    TPUPrefillPP4RequestPrediction prediction,
+    std::optional<int64_t> hbmPrefix = std::nullopt)
+{
+    supplyNativeRelease(prediction, release);
+    supplyNoAsyncQueryPrediction(prediction, NativePPRequestPhase::NOT_REGISTERED, prompt,
+                                 policy, hbmPrefix);
+    if (prompt <= 0 || !prediction.releaseSlotAfterPrefill ||
+        !prediction.needsFirstQuery || !prediction.readyAfterObservationMs ||
+        prediction.receiveSchedulerOutputId || prediction.queryReadyAfterObservationMs ||
+        (prediction.nativePromptTokens && *prediction.nativePromptTokens != prompt))
+        throw std::invalid_argument(
+            "unobserved Native request needs explicit prediction inputs");
+    const auto hit = prediction.cacheHitTokens.value_or(expectedHit);
+    if (hit < 0 || hit > prompt || checkpoint < 0 || checkpoint > prompt)
+        throw std::invalid_argument("invalid unobserved Native cache prediction");
+    TPUPrefillPP4Request value;
+    value.requestId = id;
+    value.contextTokens = std::min(prompt - 1, hit);
+    value.remainingTokens = prompt - value.contextTokens;
+    value.owned = owned;
+    value.releaseSlotAfterPrefill = prediction.releaseSlotAfterPrefill;
+    value.needsFirstQuery = *prediction.needsFirstQuery;
+    value.readyTimeMs = *prediction.readyAfterObservationMs;
+    value.receiveDependency = prediction.receiveDependency;
+    value.metadataOnlyLoad = prediction.metadataOnlyLoad;
+    value.firstQueryServiceMs = prediction.firstQueryServiceMs;
+    value.queryBlockCount = prediction.queryBlockCount;
+    if (checkpoint > 0)
+        value.sharedPrefixBoundary =
+            checkpoint / policy.schedulerBlockSize * policy.schedulerBlockSize;
+    return value;
+}
+
+} // namespace
+
+TPUPrefillPP4ObservationInput NaviSchedScheduleNode::prepareNativePrefillObservation(
+    TPUPrefillPP4ObservationPredictions predictions) const
+{
+    if (!NonLinearPrefillModelR::usesNativePP4ForVersion(getLatencyBinaryVersion()) ||
+        !_prefillExecutionPolicy || _prefillExecutionPolicy->schedulerBlockSize <= 0 ||
+        !_workload.nativePPState || !_workload.valid())
+        throw std::invalid_argument(
+            "Native Master prediction requires its typed observation and policy");
+    std::unordered_map<uint64_t, const NaviSchedNativePPRequest *> observed;
+    for (const auto &request : _workload.nativePPState->requests)
+        observed.emplace(request.requestId, &request);
+    std::unordered_set<uint64_t> reservations;
+    std::unordered_map<uint64_t, int64_t> preparedCheckpoints;
+    std::vector<TPUPrefillPP4Request> prior;
+    for (const auto &entry : _nativePrefillReservations) {
+        const auto &request = entry.request;
+        if (!reservations.insert(request.requestId).second)
+            throw std::invalid_argument("duplicate Native Master reservation");
+        const auto found = observed.find(request.requestId);
+        if (found == observed.end()) {
+            // DISPATCHED can outlive Prefill, including paused streaming sessions.
+            // Only an unreported WAITING request adds work absent from Native.
+            if (entry.state != MasterBatchReservation::RequestState::WAITING) continue;
+            auto prediction = predictions.requests.extract(request.requestId);
+            prior.push_back(unobservedNativeRequest(
+                request.requestId, request.totalTokenCount,
+                request.explicitCacheCheckpointPosition, request.nativePrefillSlotRelease,
+                request.predictedCacheHitTokenCount, false, *_prefillExecutionPolicy,
+                prediction.empty() ? TPUPrefillPP4RequestPrediction()
+                                   : std::move(prediction.mapped())));
+            continue;
+        }
+        auto &prediction = predictions.requests[request.requestId];
+        const auto &native = *found->second;
+        if (native.queue == NativePPQueue::PREPARED) {
+            if (prediction.nativePromptTokens &&
+                *prediction.nativePromptTokens != request.totalTokenCount)
+                throw std::invalid_argument("conflicting normalized Native prompt");
+            prediction.nativePromptTokens = request.totalTokenCount;
+            if (request.explicitCacheCheckpointPosition > 0) {
+                if (request.explicitCacheCheckpointPosition > request.totalTokenCount)
+                    throw std::invalid_argument(
+                        "prepared checkpoint exceeds Native prompt");
+                preparedCheckpoints.emplace(
+                    request.requestId, request.explicitCacheCheckpointPosition /
+                                           _prefillExecutionPolicy->schedulerBlockSize *
+                                           _prefillExecutionPolicy->schedulerBlockSize);
+            }
+            if (!prediction.cacheHitTokens)
+                prediction.cacheHitTokens = request.predictedCacheHitTokenCount;
+            supplyNoAsyncQueryPrediction(prediction, native.phase,
+                                         request.totalTokenCount,
+                                         *_prefillExecutionPolicy);
+        } else {
+            if (native.promptTokens != request.totalTokenCount)
+                throw std::invalid_argument(
+                    "registered Native prompt differs from Master request");
+            if (!prediction.cacheHitTokens)
+                prediction.cacheHitTokens = request.predictedCacheHitTokenCount;
+            supplyNoAsyncQueryPrediction(prediction, native.phase,
+                                         request.totalTokenCount,
+                                         *_prefillExecutionPolicy);
+        }
+        supplyNativeRelease(prediction, request.nativePrefillSlotRelease);
+    }
+    prior.insert(prior.end(), predictions.incoming.begin(), predictions.incoming.end());
+    predictions.incoming = std::move(prior);
+    auto workload = _workload;
+    const long double age = workload.nativePPObservationAgeUs +
+                            static_cast<long double>(getWorkloadReportAgeMs()) * 1000.0L;
+    if (age < 0 || age > std::numeric_limits<int64_t>::max())
+        throw std::overflow_error("Native observation age exceeds representable range");
+    workload.nativePPObservationAgeUs = static_cast<int64_t>(age);
+    auto result = TPUPrefillPP4Observation::prepare(workload, predictions);
+    for (auto &request : result.requests) {
+        const auto checkpoint = preparedCheckpoints.find(request.requestId);
+        if (checkpoint != preparedCheckpoints.end() && checkpoint->second > 0)
+            request.sharedPrefixBoundary = checkpoint->second;
+    }
+    return result;
+}
+
+std::shared_ptr<const TPUPrefillPP4ObservationInput>
+NaviSchedScheduleNode::getNativePrefillObservation() const
+{
+    auto published = std::atomic_load(&_nativePrefillObservation);
+    if (published) return published;
+    std::shared_ptr<const TPUPrefillPP4ObservationInput> prepared =
+        std::make_shared<const TPUPrefillPP4ObservationInput>(
+            prepareNativePrefillObservation({}));
+    std::atomic_compare_exchange_strong(&_nativePrefillObservation, &published, prepared);
+    return published ? published : prepared;
 }
 
 void NaviSchedScheduleNode::refreshExistingUnifiedLatency()
@@ -482,6 +662,7 @@ bool NaviSchedScheduleContext::prepare()
         node.refreshExistingUnifiedLatency();
     }
     preparePeerCacheCounts();
+    if (!finishNativePeerCacheInputs()) return false;
     _decisions.assign(requestCount(), NaviSchedDecision());
     _selectedNodeIndexes.assign(requestCount(), INVALID_NODE_INDEX);
     _prepared = true;
@@ -552,6 +733,82 @@ NaviSchedPeerCacheSuffixLookup::build(const std::vector<NaviSchedScheduleItem> &
         }
     }
     return result;
+}
+
+bool NaviSchedScheduleContext::finishNativePeerCacheInputs()
+{
+    // Preparation is single threaded. Publish the final peer suffix before Cost
+    // reads the cache matrix or Native forecast memos in parallel.
+    for (size_t n = 0; n < _scheduleNodes.size(); ++n) {
+        auto &node = _scheduleNodes[n];
+        if (!node._peerCacheSuffixLookup ||
+            !NonLinearPrefillModelR::usesNativePP4ForVersion(
+                node.getLatencyBinaryVersion()))
+            continue;
+        const auto before = std::atomic_load(&node._executionCacheInputs);
+        const auto inputs = getExecutionCacheInputs(n);
+        if (!inputs) return false;
+        const auto final = std::atomic_load(&node._executionCacheInputs);
+        auto counts = std::make_shared<std::vector<int64_t>>();
+        counts->reserve(inputs->size());
+        for (size_t i = 0; i < inputs->size(); ++i)
+            counts->push_back((*inputs)[i].computedTokens /
+                              _requests[i].request.blockSize);
+        std::shared_ptr<const std::vector<int64_t>> immutableCounts = std::move(counts);
+        std::atomic_store(&node._matchedBlockCounts, immutableCounts);
+        if (before != final) {
+            std::atomic_store(&node._nativeContinuousInput,
+                              std::shared_ptr<const NaviSchedNativeContinuousInput>());
+            std::atomic_store(&node._nativeFinalPrediction,
+                              std::shared_ptr<const NaviSchedNativeFinalPrediction>());
+        }
+        if (!_replay || n >= _replayNativeCacheInputs.size() ||
+            !_replayNativeCacheInputs[n] || _replayMatchRequestIndexes.empty())
+            continue;
+        const auto local = std::atomic_load(&node._localCacheBlockCounts);
+        // Admission may already have compacted the live arrays. Keep the replay's
+        // original rows and update consumed rows by stable request ID.
+        auto recorded = std::make_shared<NaviSchedExecutionCacheInputCapture>(
+            *_replayNativeCacheInputs[n]);
+        if (final->observation.readyOnlyHbmBlockCounts &&
+            (!recorded->observation.readyOnlyHbmBlockCounts ||
+             recorded->observation.readyOnlyHbmBlockCounts->size() != recorded->inputs.size()))
+            return false;
+        if (final->observation.beforeTairBlockCounts &&
+            (!recorded->observation.beforeTairBlockCounts ||
+             recorded->observation.beforeTairBlockCounts->size() != recorded->inputs.size()))
+            return false;
+        auto recordedLocal = std::make_shared<std::vector<int64_t>>();
+        const auto previousLocal = _replayNativeLocalCacheCounts[n];
+        if (previousLocal) {
+            *recordedLocal = *previousLocal;
+        } else {
+            recordedLocal->reserve(recorded->inputs.size());
+            for (size_t i = 0; i < recorded->inputs.size(); ++i)
+                recordedLocal->push_back(recorded->inputs[i].computedTokens /
+                                         _replay->requests[i].request.blockSize);
+        }
+        for (size_t i = 0; i < _requests.size(); ++i) {
+            const auto row =
+                _replayMatchRequestIndexes.at(_requests[i].request.requestId);
+            recorded->inputs.at(row) = (*inputs)[i];
+            if (!final->observation.fullPrefixBlocksBeforeQueryDrop.empty())
+                recorded->observation.fullPrefixBlocksBeforeQueryDrop.at(row) =
+                    final->observation.fullPrefixBlocksBeforeQueryDrop[i];
+            if (final->observation.readyOnlyHbmBlockCounts)
+                recorded->observation.readyOnlyHbmBlockCounts->at(row) =
+                    final->observation.readyOnlyHbmBlockCounts->at(i);
+            if (final->observation.beforeTairBlockCounts)
+                recorded->observation.beforeTairBlockCounts->at(row) =
+                    final->observation.beforeTairBlockCounts->at(i);
+            if (local) recordedLocal->at(row) = (*local)[i];
+            _replay->nodeMatches[row][n].matchedBlockCount = (*immutableCounts)[i];
+        }
+        recorded->peerCacheMerged = true;
+        _replayNativeCacheInputs[n] = std::move(recorded);
+        if (local) _replayNativeLocalCacheCounts[n] = std::move(recordedLocal);
+    }
+    return true;
 }
 
 void NaviSchedScheduleContext::preparePeerCacheCounts()
@@ -723,6 +980,26 @@ const NaviSchedScheduleNode &NaviSchedScheduleContext::getNode(size_t nodeIndex)
     return _scheduleNodes[resolveNodeIndex(nodeIndex)];
 }
 
+std::shared_ptr<const NaviSchedTairKvcmConfig>
+NaviSchedScheduleNode::getTairKvcmConfig() const
+{
+    return _info && _info->online ? _info->tairKvcmConfig : nullptr;
+}
+
+bool NaviSchedScheduleContext::setRemoteCacheReadyBlocks(
+    size_t nodeIndex, std::shared_ptr<const NaviSchedExternalCacheReadyBlocks> blocks)
+{
+    if (_prepared || _scheduleViewActive || nodeIndex >= _scheduleNodes.size())
+        return false;
+    auto &node = _scheduleNodes[nodeIndex];
+    if (std::atomic_load(&node._executionCacheInputs) ||
+        std::atomic_load(&node._matchedBlockCounts)) return false;
+    if (blocks && (!node._info || !node._info->online || !node._info->tairKvcmConfig))
+        return false;
+    node._remoteCacheReadyBlocks = std::move(blocks);
+    return true;
+}
+
 std::shared_ptr<const std::vector<int64_t>>
 NaviSchedScheduleContext::getCacheHitBlockCountsSnapshot(size_t nodeIndex) const
 {
@@ -745,7 +1022,9 @@ NaviSchedScheduleContext::getCacheHitBlockCountsSnapshot(size_t nodeIndex) const
         std::atomic_compare_exchange_strong(&node._matchedBlockCounts, &published, immutable);
         return published ? published : immutable;
     }
-    if (NonLinearPrefillModelR::usesGeometryForVersion(node.getLatencyBinaryVersion())) {
+    if (node._remoteCacheReadyBlocks || node._workload.executionLoadTracked ||
+        NonLinearPrefillModelR::usesGeometryForVersion(node.getLatencyBinaryVersion()) ||
+        NonLinearPrefillModelR::usesNativePP4ForVersion(node.getLatencyBinaryVersion())) {
         const auto inputs = getExecutionCacheInputs(storageNode);
         if (!inputs) {
             return nullptr;
@@ -767,8 +1046,11 @@ NaviSchedScheduleContext::getCacheHitBlockCountsSnapshot(size_t nodeIndex) const
             node._node->getMatchedBlockCounts(_requests, counts->data());
         }
     }
-    if (node._peerCacheSuffixLookup &&
-        !NonLinearPrefillModelR::usesGeometryForVersion(node.getLatencyBinaryVersion())) {
+    if (node._peerCacheSuffixLookup && !node._workload.executionLoadTracked &&
+        !(NonLinearPrefillModelR::usesGeometryForVersion(
+                                             node.getLatencyBinaryVersion()) ||
+                                         NonLinearPrefillModelR::usesNativePP4ForVersion(
+                                             node.getLatencyBinaryVersion()))) {
         std::shared_ptr<const std::vector<int64_t>> local =
             std::make_shared<const std::vector<int64_t>>(*counts);
         std::atomic_store(&node._localCacheBlockCounts, local);
@@ -840,7 +1122,7 @@ bool NaviSchedScheduleContext::getCacheHitBlockCounts(
         }
     }
     const auto &node = _scheduleNodes[storageNodeIndex];
-    if (std::atomic_load(&node._matchedBlockCounts) ||
+    if (std::atomic_load(&node._matchedBlockCounts) || node._workload.executionLoadTracked ||
         NonLinearPrefillModelR::usesGeometryForVersion(node.getLatencyBinaryVersion()) ||
         node._peerCacheSuffixLookup) {
         const auto counts = getCacheHitBlockCountsSnapshot(nodeIndex);
@@ -914,35 +1196,68 @@ bool NaviSchedScheduleContext::setScheduleLoss(double loss)
 std::shared_ptr<const std::vector<TPUPrefillRequestInput>>
 NaviSchedScheduleContext::getExecutionCacheInputs(size_t storageNodeIndex) const
 {
+    const auto inputFailure = [this, storageNodeIndex](const char *reason)
+        -> std::shared_ptr<const std::vector<TPUPrefillRequestInput>> {
+        if (_scheduleId < 10 || _scheduleId % 100 == 0)
+            std::fprintf(stderr, "[navi-master-cache-input-failure] schedule_id=%lu node=%lu reason=%s requests=%lu\n",
+                         _scheduleId, storageNodeIndex, reason, _requests.size());
+        return nullptr;
+    };
     const auto &node = _scheduleNodes[storageNodeIndex];
     auto published = std::atomic_load(&node._executionCacheInputs);
-    if (published) {
+    const bool nativePP4 =
+        NonLinearPrefillModelR::usesNativePP4ForVersion(node.getLatencyBinaryVersion());
+    const bool tracksKVLoad = node._workload.executionLoadTracked;
+    if (published &&
+        (!(nativePP4 || tracksKVLoad) || published->peerCacheMerged || !node._peerCacheSuffixLookup)) {
         return {published, &published->inputs};
     }
-    auto capture = std::make_shared<NaviSchedExecutionCacheInputCapture>();
+    // Extend the original local observation once; replay collection must not
+    // cause a second physical lookup at a different point in time.
+    auto capture = published
+                       ? std::make_shared<NaviSchedExecutionCacheInputCapture>(*published)
+                       : std::make_shared<NaviSchedExecutionCacheInputCapture>();
     auto inputs =
         std::shared_ptr<std::vector<TPUPrefillRequestInput>>(capture, &capture->inputs);
-    if (!_requests.empty() && !node._node->getExecutionCacheInputs(
-                                  _requests, *inputs, nullptr, &capture->observation)) {
-        return nullptr;
+    // Retain physical HBM separately from merged V6D/Tair hits in every
+    // captured cache match, including unified prediction diagnostics.
+    if (!published)
+        capture->observation.readyOnlyHbmBlockCounts.emplace();
+    if (!published && node._remoteCacheReadyBlocks)
+        capture->observation.beforeTairBlockCounts.emplace();
+    if (!published && !_requests.empty() &&
+        !node._node->getExecutionCacheInputs(_requests, *inputs, nullptr,
+                                             &capture->observation, node._remoteCacheReadyBlocks.get(),
+                                             nativePP4 || NonLinearPrefillModelR::usesGeometryForVersion(
+                                                 node.getLatencyBinaryVersion()),
+                                             (!_scheduleViewActive || _scheduleViewUsesAllRequests) &&
+                                                     _cacheMatchCommonPrefixes.size() == _requests.size()
+                                                 ? &_cacheMatchCommonPrefixes : nullptr)) {
+        return inputFailure("node_cache_lookup");
     }
     if (inputs->size() != _requests.size()) {
-        return nullptr;
+        return inputFailure("input_size");
     }
     if (node._peerCacheSuffixLookup) {
         auto local = std::make_shared<std::vector<int64_t>>(_requests.size());
         for (size_t i = 0; i < inputs->size(); ++i) {
             const auto block = _requests[i].request.blockSize;
             if (block <= 0 || (*inputs)[i].computedTokens < 0 ||
-                (*inputs)[i].computedTokens >= (*inputs)[i].promptTokens ||
+                ((*inputs)[i].computedTokens > (*inputs)[i].promptTokens ||
+                 (!(nativePP4 || tracksKVLoad) &&
+                  (*inputs)[i].computedTokens == (*inputs)[i].promptTokens)) ||
                 (*inputs)[i].computedTokens % block != 0) {
-                return nullptr;
+                return inputFailure("peer_input_validation");
             }
             const auto resident =
                 (*inputs)[i].externalReadTokens >= 0
                     ? (*inputs)[i].computedTokens - (*inputs)[i].externalReadTokens
                     : -1;
             (*local)[i] = (*inputs)[i].computedTokens / block;
+            if (capture->observation.beforeTairBlockCounts) {
+                auto &before = capture->observation.beforeTairBlockCounts->at(i);
+                before = node._peerCacheSuffixLookup->extend(i, before);
+            }
             (*inputs)[i].computedTokens =
                 node._peerCacheSuffixLookup->extend(i, (*local)[i]) * block;
             if (resident >= 0) {
@@ -951,13 +1266,15 @@ NaviSchedScheduleContext::getExecutionCacheInputs(size_t storageNodeIndex) const
         }
         std::shared_ptr<const std::vector<int64_t>> immutableLocal = local;
         std::atomic_store(&node._localCacheBlockCounts, immutableLocal);
+        capture->peerCacheMerged = true;
     }
     for (size_t i = 0; i < _requests.size(); ++i) {
         const auto &request = _requests[i].request;
         const auto &input = (*inputs)[i];
         if (request.blockSize <= 0 || input.promptTokens <= 0 ||
             input.promptTokens != request.promptTokenCount || input.computedTokens < 0 ||
-            input.computedTokens >= input.promptTokens ||
+            (input.computedTokens > input.promptTokens ||
+             (!(nativePP4 || tracksKVLoad) && input.computedTokens == input.promptTokens)) ||
             input.computedTokens % request.blockSize != 0 ||
             (NonLinearPrefillModelR::usesCacheSourceForVersion(
                  node.getLatencyBinaryVersion()) &&
@@ -965,14 +1282,14 @@ NaviSchedScheduleContext::getExecutionCacheInputs(size_t storageNodeIndex) const
               input.externalReadTokens > input.computedTokens)) ||
             input.sharedPrefixBoundary < 0 ||
             input.sharedPrefixBoundary > input.promptTokens) {
-            return nullptr;
+            return inputFailure("final_input_validation");
         }
     }
     std::shared_ptr<const NaviSchedExecutionCacheInputCapture> immutable = capture;
     // Publish the observation and inputs as one immutable object.
-    std::atomic_compare_exchange_strong(&node._executionCacheInputs, &published,
-                                        immutable);
-    const auto winner = published ? published : immutable;
+    const bool installed = std::atomic_compare_exchange_strong(
+        &node._executionCacheInputs, &published, immutable);
+    const auto winner = installed ? immutable : published;
     return {winner, &winner->inputs};
 }
 
@@ -1179,6 +1496,195 @@ bool NaviSchedScheduleContext::buildExecutionGeometryFeatures(
     return true;
 }
 
+namespace {
+size_t nativeTransitionLimit(const TPUPrefillPP4ObservationInput &input)
+{
+    size_t units = input.requests.size() + input.state.results.size() + 1;
+    for (const auto &request : input.requests) {
+        if (request.remainingTokens < 0 || uint64_t(request.remainingTokens) >
+                                               std::numeric_limits<size_t>::max() - units)
+            throw std::overflow_error("Native forecast size exceeds representable bound");
+        units += static_cast<size_t>(request.remainingTokens);
+    }
+    if (units > std::numeric_limits<size_t>::max() / 8)
+        throw std::overflow_error("Native transition bound exceeds representable range");
+    return units * 8;
+}
+}
+
+TPUPrefillPP4ObservationInput NaviSchedScheduleContext::prepareNativeForecastInput(
+    size_t nodeIndex, const std::vector<size_t> &requestIndexes,
+    double arrivalDelayMs) const
+{
+    if (nodeIndex >= nodeCount())
+        throw std::invalid_argument("invalid Native node index");
+    const auto storageNode = resolveNodeIndex(nodeIndex);
+    const auto &node = _scheduleNodes[storageNode];
+    const auto base = node.getNativePrefillObservation();
+    const auto inputs = getExecutionCacheInputs(storageNode);
+    if (!inputs || !node.getPrefillExecutionPolicy())
+        throw std::invalid_argument("missing Native execution inputs");
+    const auto capture = std::atomic_load(&node._executionCacheInputs);
+    if (!capture || !capture->observation.readyOnlyHbmBlockCounts ||
+        capture->observation.readyOnlyHbmBlockCounts->size() != inputs->size())
+        throw std::invalid_argument("missing Native physical HBM observation");
+    auto result = *base;
+    std::vector<TPUPrefillPP4Request> incoming;
+    for (const auto index : requestIndexes) {
+        if (index >= requestCount())
+            throw std::invalid_argument("invalid Native request index");
+        const auto storage = resolveRequestIndex(index);
+        const auto &request = _requests[storage].request;
+        const auto &input = (*inputs)[storage];
+        const auto readyHbmBlocks = (*capture->observation.readyOnlyHbmBlockCounts)[storage];
+        if (readyHbmBlocks < -1 || request.blockSize <= 0 ||
+            readyHbmBlocks > input.promptTokens / request.blockSize)
+            throw std::invalid_argument("invalid Native physical HBM observation");
+        auto value = unobservedNativeRequest(
+            request.requestId, input.promptTokens,
+            request.explicitCacheCheckpointPosition, request.nativePrefillSlotRelease,
+            input.computedTokens, true, *node.getPrefillExecutionPolicy(), {},
+            readyHbmBlocks >= 0
+                ? std::optional<int64_t>(readyHbmBlocks * request.blockSize)
+                : std::nullopt);
+        if (request.explicitCacheCheckpointPosition <= 0)
+            value.sharedPrefixBoundary = input.sharedPrefixBoundary;
+        value.readyTimeMs = base->state.nowMs + arrivalDelayMs;
+        incoming.push_back(std::move(value));
+    }
+    std::sort(incoming.begin(), incoming.end(), [](const auto &left, const auto &right) {
+        return left.requestId < right.requestId;
+    });
+    result.requests.insert(result.requests.end(), incoming.begin(), incoming.end());
+    return result;
+}
+
+std::shared_ptr<const NaviSchedNativeContinuousInput>
+NaviSchedScheduleContext::getNativeContinuousInput(size_t nodeIndex) const
+{
+    if (nodeIndex >= nodeCount() || requestCount() == 0) return nullptr;
+    const auto &node = _scheduleNodes[resolveNodeIndex(nodeIndex)];
+    auto published = std::atomic_load(&node._nativeContinuousInput);
+    if (published) return published;
+    try {
+        if (!node.hasValidLatencyModel() ||
+            !NonLinearPrefillModelR::usesNativePP4ForVersion(
+                node.getLatencyBinaryVersion()))
+            return nullptr;
+        std::vector<size_t> indexes;
+        std::unordered_map<uint64_t, size_t> requestIndexes;
+        for (size_t index = 0; index < requestCount(); ++index) {
+            indexes.push_back(index);
+            requestIndexes.emplace(getRequest(index).request.requestId, index);
+        }
+        const auto input = prepareNativeForecastInput(nodeIndex, indexes);
+        auto prepared = std::make_shared<NaviSchedNativeContinuousInput>();
+        prepared->state = input.state;
+        prepared->slots = input.state.slots;
+        std::copy(node.getLatencyParameters().begin(), node.getLatencyParameters().end(),
+                  prepared->parameters.begin());
+        const auto &parameters = prepared->parameters;
+        const auto &policy = *node.getPrefillExecutionPolicy();
+        const auto fixedCost = [&](const std::array<double, 8> &features) {
+            long double sum = 0.0L;
+            for (size_t i = 0; i < 8; ++i) sum += features[i] * parameters[i + 1];
+            return static_cast<double>(sum);
+        };
+        for (const auto &slot : prepared->slots) {
+            NaviSchedNativeContinuousSlot cost;
+            cost.fixed = true;
+            cost.fixedCostMs = fixedCost(slot.features);
+            prepared->costs.push_back(std::move(cost));
+        }
+        if (input.state.pendingDispatch && !input.state.pendingDispatch->spans.empty()) {
+            const auto &pending = *input.state.pendingDispatch;
+            TPUPrefillPipelineSlot slot;
+            slot.ordinal =
+                prepared->slots.empty() ? 0 : prepared->slots.back().ordinal + 1;
+            slot.dispatchTimeMs = pending.dispatchTimeMs;
+            slot.features = pending.features;
+            prepared->slots.push_back(slot);
+            NaviSchedNativeContinuousSlot cost;
+            cost.fixed = true;
+            cost.fixedCostMs = fixedCost(slot.features);
+            prepared->costs.push_back(cost);
+        }
+        const auto forecast = TPUPrefillPP4Forecast::predict(
+            input.state, input.requests, policy, parameters, nativeTransitionLimit(input),
+            true);
+        prepared->referenceTotalMs = forecast.totalMs;
+        const double minimumPadding =
+            double(policy.pcpSize) * policy.compileSizes.front();
+        for (const auto &dispatch : forecast.dispatches) {
+            TPUPrefillPipelineSlot slot;
+            slot.ordinal = dispatch.ordinal;
+            slot.dispatchTimeMs = dispatch.timeMs;
+            NaviSchedNativeContinuousSlot cost;
+            if (!dispatch.real)
+                cost.fixed = true;
+            else {
+                std::vector<int64_t> counts;
+                int64_t scheduled = 0;
+                for (const auto &span : dispatch.spans) {
+                    counts.push_back(span.scheduledTokens);
+                    scheduled += span.scheduledTokens;
+                }
+                TPUPrefillStepGeometry geometry;
+                if (!TPUPrefillExecutionPolicy::projectStepGeometry(counts, policy,
+                                                                    geometry))
+                    return nullptr;
+                const double extraPadding = geometry.globalPaddedTokens - minimumPadding;
+                if (scheduled <= 0 || extraPadding < 0) return nullptr;
+                cost.sharedStepCostMs =
+                    parameters[1] + parameters[3] * minimumPadding / 1024.0;
+                for (const auto &span : dispatch.spans) {
+                    const auto found = requestIndexes.find(span.requestId);
+                    NaviSchedNativeContinuousSpan contribution;
+                    if (found == requestIndexes.end())
+                        cost.hasFixedRequest = true;
+                    else {
+                        contribution.requestIndex = found->second;
+                        prepared->targetOrdinal = dispatch.ordinal;
+                    }
+                    const double c = span.computedTokens, q = span.scheduledTokens;
+                    contribution.contextKTokens = c / 1024.0;
+                    contribution.linearCostMs =
+                        parameters[2] * q / 1024.0 +
+                        parameters[3] * extraPadding * q / scheduled / 1024.0 +
+                        parameters[4] * c * q / 1048576.0 + parameters[5] * c / 1024.0 +
+                        parameters[6] * q * q / 1048576.0 + parameters[7];
+                    cost.spans.push_back(contribution);
+                }
+            }
+            prepared->slots.push_back(slot);
+            prepared->costs.push_back(std::move(cost));
+        }
+        if (prepared->targetOrdinal < 0 ||
+            prepared->slots.size() != prepared->costs.size())
+            return nullptr;
+        if (!CostSchedulerKernelInternal::initializeNativeContinuousReference(
+                *prepared, requestCount()))
+            return nullptr;
+        std::shared_ptr<const NaviSchedNativeContinuousInput> immutable = prepared;
+        std::atomic_compare_exchange_strong(&node._nativeContinuousInput, &published,
+                                            immutable);
+        return published ? published : immutable;
+    } catch (const std::logic_error &) {
+        return nullptr;
+    } catch (const std::runtime_error &) {
+        return nullptr;
+    }
+}
+
+double NaviSchedNativeFinalPrediction::recomputeBaseLatencyMs(
+    const TPUPrefillPP4Timing::Parameters &weights) const
+{
+    return TPUPrefillPP4Forecast::predict(input.state, input.requests, policy, weights,
+                                          maxTransitions, false)
+               .totalMs -
+           arrivalDelayMs;
+}
+
 double NaviSchedScheduleContext::estimateBatchExecutionLatencyMs(
     size_t nodeIndex, const std::vector<size_t> &requestIndexes,
     NaviSchedLatencyPrediction *latencyPrediction) const
@@ -1190,7 +1696,7 @@ double NaviSchedScheduleContext::estimateBatchExecutionLatencyMs(
 double NaviSchedScheduleContext::estimateBatchExecutionLatencyMs(
     size_t nodeIndex, const std::vector<size_t> &requestIndexes,
     NaviSchedLatencyPrediction *latencyPrediction,
-    const std::vector<int64_t> *matchedBlockCounts) const
+    const std::vector<int64_t> *matchedBlockCounts, int64_t predictionTimeUs) const
 {
     if (latencyPrediction) {
         *latencyPrediction = NaviSchedLatencyPrediction();
@@ -1200,6 +1706,63 @@ double NaviSchedScheduleContext::estimateBatchExecutionLatencyMs(
     }
     const auto storageNodeIndex = resolveNodeIndex(nodeIndex);
     const auto &node = _scheduleNodes[storageNodeIndex];
+    if (NonLinearPrefillModelR::usesNativePP4ForVersion(node.getLatencyBinaryVersion())) {
+        if (latencyPrediction) {
+            std::atomic_store(&node._nativeFinalPrediction,
+                              std::shared_ptr<const NaviSchedNativeFinalPrediction>());
+        }
+        if (!node.hasValidLatencyModel()) return 0.0;
+        try {
+            // Keep observed replies and unfinished bounds on their original
+            // clock. New work is constructed at result preparation's later time.
+            const double arrivalDelayMs =
+                predictionTimeUs > 0 && predictionTimeUs > _scheduleTimeUs
+                    ? static_cast<double>(
+                          (static_cast<long double>(predictionTimeUs) - _scheduleTimeUs) /
+                          1000.0L)
+                    : 0.0;
+            auto input =
+                prepareNativeForecastInput(nodeIndex, requestIndexes, arrivalDelayMs);
+            const double arrivalTimeMs = input.state.nowMs + arrivalDelayMs;
+            TPUPrefillPP4Timing::Parameters parameters;
+            std::copy(node.getLatencyParameters().begin(),
+                      node.getLatencyParameters().end(), parameters.begin());
+            const auto maxTransitions = nativeTransitionLimit(input);
+            const auto forecast = TPUPrefillPP4Forecast::predict(
+                input.state, input.requests, *node.getPrefillExecutionPolicy(),
+                parameters, maxTransitions, false);
+            const double remainingMs =
+                forecast.totalMs - (arrivalTimeMs - input.state.nowMs);
+            const double finalMs = node.applyLatencyResidual(remainingMs);
+            if (latencyPrediction) {
+                auto captured = std::make_shared<NaviSchedNativeFinalPrediction>();
+                captured->input = std::move(input);
+                captured->policy = *node.getPrefillExecutionPolicy();
+                captured->parameters = parameters;
+                captured->maxTransitions = maxTransitions;
+                captured->predictionTimeUs =
+                    predictionTimeUs > 0 ? std::max(_scheduleTimeUs, predictionTimeUs)
+                                         : _scheduleTimeUs;
+                captured->arrivalDelayMs = arrivalDelayMs;
+                captured->baseExecutionMs = remainingMs;
+                captured->finalExecutionMs = finalMs;
+                std::shared_ptr<const NaviSchedNativeFinalPrediction> immutable =
+                    std::move(captured);
+                std::atomic_store(&node._nativeFinalPrediction, std::move(immutable));
+            }
+            return finalMs;
+        } catch (const std::logic_error &failure) {
+            if (_scheduleId < 10 || _scheduleId % 100 == 0)
+                std::fprintf(stderr, "[navi-master-native-forecast-failure] schedule_id=%lu node=%lu error=%s\n",
+                             _scheduleId, nodeIndex, failure.what());
+            return std::numeric_limits<double>::quiet_NaN();
+        } catch (const std::runtime_error &failure) {
+            if (_scheduleId < 10 || _scheduleId % 100 == 0)
+                std::fprintf(stderr, "[navi-master-native-forecast-failure] schedule_id=%lu node=%lu error=%s\n",
+                             _scheduleId, nodeIndex, failure.what());
+            return std::numeric_limits<double>::quiet_NaN();
+        }
+    }
     if (NonLinearPrefillModelR::usesGeometryForVersion(node.getLatencyBinaryVersion())) {
         NaviSchedLatencyFeatures geometryFeatures;
         if (!buildExecutionGeometryFeatures(nodeIndex, requestIndexes,
@@ -1384,12 +1947,18 @@ bool NaviSchedScheduleContext::activateScheduleView(
         }
     }
     _scheduleViewActive = true;
+    for (auto &node : _scheduleNodes)
+        std::atomic_store(&node._nativeContinuousInput,
+                          std::shared_ptr<const NaviSchedNativeContinuousInput>());
     _cacheMatchCommonPrefixes.clear();
     return true;
 }
 
 void NaviSchedScheduleContext::clearScheduleView()
 {
+    for (auto &node : _scheduleNodes)
+        std::atomic_store(&node._nativeContinuousInput,
+                          std::shared_ptr<const NaviSchedNativeContinuousInput>());
     _cacheMatchCommonPrefixes.clear();
     _scheduleViewRequestIndexes.clear();
     _scheduleViewNodeIndexes.clear();
@@ -1412,6 +1981,8 @@ void NaviSchedScheduleContext::setReplay(
     const std::shared_ptr<NaviSchedScheduleReplay> &replay)
 {
     _replay = replay;
+    _replayNativeCacheInputs.clear();
+    _replayNativeLocalCacheCounts.clear();
     _replayMatchRequestIndexes.clear();
     if (!replay || replay->nodes.size() != _scheduleNodes.size() ||
         replay->requests.size() != replay->nodeMatches.size()) {
@@ -1431,6 +2002,84 @@ void NaviSchedScheduleContext::setReplay(
             _replayMatchRequestIndexes.clear();
             return;
         }
+    }
+    if (replay->requests.size() != _requests.size()) return;
+    for (size_t i = 0; i < _requests.size(); ++i)
+        if (replay->requests[i].request.requestId != _requests[i].request.requestId)
+            return;
+    for (size_t i = 0; i < _scheduleNodes.size(); ++i) {
+        const auto &node = _scheduleNodes[i];
+        if (!NonLinearPrefillModelR::usesNativePP4ForVersion(
+                node.getLatencyBinaryVersion()))
+            continue;
+        if (_replayNativeCacheInputs.empty()) {
+            _replayNativeCacheInputs.resize(_scheduleNodes.size());
+            _replayNativeLocalCacheCounts.resize(_scheduleNodes.size());
+        }
+        _replayNativeCacheInputs[i] = std::atomic_load(&node._executionCacheInputs);
+        _replayNativeLocalCacheCounts[i] = std::atomic_load(&node._localCacheBlockCounts);
+    }
+}
+
+void NaviSchedScheduleContext::retainNativeCacheInputs(
+    const std::vector<size_t> &requestIndexes)
+{
+    const auto select =
+        [&requestIndexes](const std::shared_ptr<const std::vector<int64_t>> &values) {
+            if (!values) return values;
+            std::vector<int64_t> selected;
+            selected.reserve(requestIndexes.size());
+            for (const auto index : requestIndexes) selected.push_back(values->at(index));
+            return std::make_shared<const std::vector<int64_t>>(std::move(selected));
+        };
+    for (size_t i = 0; i < _scheduleNodes.size(); ++i) {
+        auto &node = _scheduleNodes[i];
+        if (!NonLinearPrefillModelR::usesNativePP4ForVersion(
+                node.getLatencyBinaryVersion()))
+            continue;
+        // Resolve once while all original request identities are still available.
+        // Later scoring reuses the selected rows instead of reading cache again.
+        getExecutionCacheInputs(i);
+        const auto cache = std::atomic_load(&node._executionCacheInputs);
+        if (cache) {
+            auto selected = std::make_shared<NaviSchedExecutionCacheInputCapture>();
+            selected->observation.pool = cache->observation.pool;
+            if (cache->observation.readyOnlyHbmBlockCounts)
+                selected->observation.readyOnlyHbmBlockCounts.emplace();
+            if (cache->observation.beforeTairBlockCounts)
+                selected->observation.beforeTairBlockCounts.emplace();
+            selected->peerCacheMerged = cache->peerCacheMerged;
+            for (const auto index : requestIndexes) {
+                selected->inputs.push_back(cache->inputs.at(index));
+                if (cache->observation.beforeTairBlockCounts)
+                    selected->observation.beforeTairBlockCounts->push_back(
+                        cache->observation.beforeTairBlockCounts->at(index));
+                if (!cache->observation.fullPrefixBlocksBeforeQueryDrop.empty())
+                    selected->observation.fullPrefixBlocksBeforeQueryDrop.push_back(
+                        cache->observation.fullPrefixBlocksBeforeQueryDrop.at(index));
+                if (cache->observation.readyOnlyHbmBlockCounts)
+                    selected->observation.readyOnlyHbmBlockCounts->push_back(
+                        cache->observation.readyOnlyHbmBlockCounts->at(index));
+            }
+            std::shared_ptr<const NaviSchedExecutionCacheInputCapture> immutable =
+                std::move(selected);
+            std::atomic_store(&node._executionCacheInputs, std::move(immutable));
+        }
+        std::atomic_store(&node._matchedBlockCounts,
+                          select(std::atomic_load(&node._matchedBlockCounts)));
+        std::atomic_store(&node._localCacheBlockCounts,
+                          select(std::atomic_load(&node._localCacheBlockCounts)));
+        std::atomic_store(&node._nativeContinuousInput,
+                          std::shared_ptr<const NaviSchedNativeContinuousInput>());
+        std::atomic_store(&node._nativeFinalPrediction,
+                          std::shared_ptr<const NaviSchedNativeFinalPrediction>());
+    }
+    if (!_peerCacheRequestKeyIndexes.empty()) {
+        decltype(_peerCacheRequestKeyIndexes) selected;
+        selected.reserve(requestIndexes.size());
+        for (const auto index : requestIndexes)
+            selected.push_back(_peerCacheRequestKeyIndexes.at(index));
+        _peerCacheRequestKeyIndexes = std::move(selected);
     }
 }
 
@@ -1457,11 +2106,17 @@ bool NaviSchedScheduleContext::prepareResult(int64_t queuePredictionTimeUs)
     if (_resultPrepared) {
         return true;
     }
+    const auto preparationFailure = [this](const char *reason) {
+        if (_scheduleId < 10 || _scheduleId % 100 == 0)
+            std::fprintf(stderr, "[navi-master-prepare-result-failure] schedule_id=%lu reason=%s requests=%lu nodes=%lu decisions=%lu selections=%lu\n",
+                         _scheduleId, reason, requestCount(), nodeCount(), _decisions.size(), _selectedNodeIndexes.size());
+        return false;
+    };
     _queuePredictionTimeUs = std::max(_scheduleTimeUs, queuePredictionTimeUs);
     const auto requestSize = requestCount();
     const auto nodeSize = nodeCount();
     if (_decisions.size() != requestSize || _selectedNodeIndexes.size() != requestSize) {
-        return false;
+        return preparationFailure("decision_size");
     }
     struct NodeBatchState {
         size_t requestCount = 0;
@@ -1471,6 +2126,7 @@ bool NaviSchedScheduleContext::prepareResult(int64_t queuePredictionTimeUs)
         double predictedQueueLatencyMs = 0.0;
         double predictedExecutionLatencyMs = 0.0;
         NaviSchedLatencyPredictionConstPtr latencyPrediction;
+        std::shared_ptr<const NaviSchedExecutionCacheInputCapture> cacheCapture;
     };
     std::vector<NodeBatchState> nodeBatchStates(nodeSize);
     std::vector<size_t> selectedRequestCounts(nodeSize, 0);
@@ -1481,7 +2137,7 @@ bool NaviSchedScheduleContext::prepareResult(int64_t queuePredictionTimeUs)
             continue;
         }
         if (nodeIndex >= nodeSize) {
-            return false;
+            return preparationFailure("node_index");
         }
         const auto inflightRequests =
             std::max<int32_t>(0, _scheduleNodes[nodeIndex]._inflightRequests);
@@ -1516,8 +2172,10 @@ bool NaviSchedScheduleContext::prepareResult(int64_t queuePredictionTimeUs)
         }
         const auto cacheCounts = getCacheHitBlockCountsSnapshot(nodeIndex);
         if (!cacheCounts) {
-            return false;
+            return preparationFailure("cache_inputs");
         }
+        if (_scheduleNodes[nodeIndex]._workload.executionLoadTracked)
+            batchState.cacheCapture = std::atomic_load(&_scheduleNodes[nodeIndex]._executionCacheInputs);
         for (const auto requestIndex : batchState.requestIndexes) {
             matchedBlockCounts[requestIndex] = getCacheHitBlockCount(*cacheCounts, requestIndex);
         }
@@ -1533,11 +2191,14 @@ bool NaviSchedScheduleContext::prepareResult(int64_t queuePredictionTimeUs)
                 lookupMembers);
         auto latencyPrediction = std::make_shared<NaviSchedLatencyPrediction>();
         batchState.predictedExecutionLatencyMs = estimateBatchExecutionLatencyMs(
-            nodeIndex, batchState.requestIndexes, latencyPrediction.get(), &matchedBlockCounts);
-        if (NonLinearPrefillModelR::usesGeometryForVersion(
-                _scheduleNodes[nodeIndex].getLatencyBinaryVersion()) &&
+            nodeIndex, batchState.requestIndexes, latencyPrediction.get(),
+            &matchedBlockCounts, _queuePredictionTimeUs);
+        if ((NonLinearPrefillModelR::usesGeometryForVersion(
+                 _scheduleNodes[nodeIndex].getLatencyBinaryVersion()) ||
+             NonLinearPrefillModelR::usesNativePP4ForVersion(
+                 _scheduleNodes[nodeIndex].getLatencyBinaryVersion())) &&
             !std::isfinite(batchState.predictedExecutionLatencyMs)) {
-            return false;
+            return preparationFailure("nonfinite_execution_prediction");
         }
         latencyPrediction->fixedLatencyMs += batchState.predictedQueueLatencyMs;
         if (latencyPrediction->valid()) {
@@ -1560,7 +2221,7 @@ bool NaviSchedScheduleContext::prepareResult(int64_t queuePredictionTimeUs)
         }
         const auto &node = _scheduleNodes[nodeIndex]._info;
         if (!node) {
-            return false;
+            return preparationFailure("missing_node_info");
         }
         decision.target.bizName = node->bizName;
         decision.target.address = node->serverAddress;
@@ -1573,6 +2234,24 @@ bool NaviSchedScheduleContext::prepareResult(int64_t queuePredictionTimeUs)
         decision.expectedBatchSize = batchState.requestCount;
         decision.predictedCacheHitTokenCount =
             matchedBlockCounts[requestIndex] * _requests[requestIndex].request.blockSize;
+        decision.executionLoadIncluded.reset();
+        if (_scheduleNodes[nodeIndex]._workload.executionLoadTracked) {
+            if (decision.predictedCacheHitTokenCount == 0) {
+                decision.executionLoadIncluded = true;
+            } else {
+                const auto &capture = batchState.cacheCapture;
+                const auto storage = resolveRequestIndex(requestIndex);
+                if (!capture || !capture->observation.readyOnlyHbmBlockCounts ||
+                    storage >= capture->observation.readyOnlyHbmBlockCounts->size() ||
+                    capture->observation.readyOnlyHbmBlockCounts->at(storage) < 0)
+                    return preparationFailure("missing_hbm_load_classification");
+                const auto hbmBlocks = capture->observation.readyOnlyHbmBlockCounts->at(storage);
+                // Compare blocks to avoid overflow, retaining the same frozen
+                // physical HBM observation that produced the selected hit.
+                decision.executionLoadIncluded =
+                    matchedBlockCounts[requestIndex] <= hbmBlocks;
+            }
+        }
         decision.predictedQueueLatencyMs = batchState.predictedQueueLatencyMs;
         decision.predictedExecutionLatencyMs = batchState.predictedExecutionLatencyMs;
         decision.latencyPrediction = batchState.latencyPrediction;
@@ -1720,6 +2399,7 @@ MasterResponseToClientDataPtr NaviSchedScheduleContext::makeResponse(
     response->reason = decision.reason.empty() ? "not_scheduled" : decision.reason;
     response->batchId = decision.batchId;
     response->expectedBatchSize = decision.expectedBatchSize;
+    response->executionLoadIncluded = decision.executionLoadIncluded;
     response->predictedCacheHitTokenCount = decision.predictedCacheHitTokenCount;
     response->predictedQueueLatencyMs = decision.predictedQueueLatencyMs;
     response->predictedExecutionLatencyMs = decision.predictedExecutionLatencyMs;

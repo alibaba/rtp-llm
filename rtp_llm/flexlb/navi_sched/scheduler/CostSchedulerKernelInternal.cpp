@@ -578,6 +578,13 @@ bool CostSchedulerKernelInternal::fillCostsForNodeRange(
         }
         auto costRow = costs + nodeIndex * requestCount;
         auto waitingCostRow = costRow + matrixSize;
+        if (NonLinearPrefillModelR::usesNativePP4ForVersion(
+                node.getLatencyBinaryVersion())) {
+            if (!context.getNativeContinuousInput(nodeIndex)) return false;
+            std::fill(costRow, costRow + requestCount, 0.0f);
+            std::fill(waitingCostRow, waitingCostRow + requestCount, 0.0f);
+            continue;
+        }
         if (NonLinearPrefillModelR::usesGeometryForVersion(
                 node.getLatencyBinaryVersion())) {
             if (!context.getGeometryOptimizationInputs(nodeIndex)) {
@@ -825,6 +832,163 @@ bool forwardContinuousGeometry(const NaviSchedScheduleContext &context, size_t n
 }
 } // namespace
 
+namespace {
+template <class Scalar, class Parameter, class ValueOf>
+Scalar nativeContinuousReady(const NaviSchedNativeContinuousInput &input, size_t count,
+                             Parameter parameter, ValueOf valueOf)
+{
+    const auto maximum = [&](const Scalar &left, const Scalar &right) {
+        return valueOf(right) > valueOf(left) ? right : left;
+    };
+    const auto validate = [&](const Scalar &value) {
+        if (!std::isfinite(valueOf(value)) || valueOf(value) < 0.0)
+            throw std::overflow_error("invalid Native continuous time");
+        return value;
+    };
+    std::vector<Scalar> weights;
+    for (size_t i = 0; i < count; ++i) weights.push_back(parameter(i));
+    const auto first = input.slots.front().ordinal, last = input.slots.back().ordinal;
+    std::vector<Scalar> costs, dispatches;
+    Scalar prefixChange(0.0), previous(input.state.nowMs);
+    for (size_t index = 0; index < input.slots.size(); ++index) {
+        const auto &slot = input.slots[index];
+        const auto &coordinates = input.costs[index];
+        Scalar cost(coordinates.fixedCostMs);
+        double reference = coordinates.fixedCostMs;
+        if (!coordinates.fixed) {
+            Scalar absent(coordinates.hasFixedRequest ? 0.0 : 1.0), linear(0.0),
+                context(0.0);
+            double unitLinear = 0.0, unitContext = 0.0;
+            for (const auto &span : coordinates.spans) {
+                const bool fixed =
+                    span.requestIndex == std::numeric_limits<size_t>::max();
+                if (!fixed && span.requestIndex >= count)
+                    throw std::invalid_argument("stale Native continuous view");
+                const Scalar weight = fixed ? Scalar(1.0) : weights[span.requestIndex];
+                if (!fixed) absent = absent * (1.0 - weight);
+                linear = linear + weight * span.linearCostMs;
+                context = maximum(context, weight * span.contextKTokens);
+                unitLinear += span.linearCostMs;
+                unitContext = std::max(unitContext, span.contextKTokens);
+            }
+            const Scalar activation = 1.0 - absent;
+            cost = activation * coordinates.sharedStepCostMs + linear +
+                   input.parameters[8] * context;
+            reference = coordinates.sharedStepCostMs + unitLinear +
+                        input.parameters[8] * unitContext;
+        }
+        costs.push_back(validate(cost));
+        if (index < input.state.slots.size())
+            dispatches.push_back(Scalar(slot.dispatchTimeMs));
+        else {
+            // A continuous service-work correction lets earlier weighted steps
+            // move later arrivals. Packing/FIFO topology remains the reference
+            // topology; final discrete scoring recomputes the Native simulation.
+            const auto when =
+                maximum(Scalar(input.state.nowMs),
+                        maximum(previous, Scalar(slot.dispatchTimeMs) + prefixChange));
+            dispatches.push_back(when);
+            previous = when;
+        }
+        prefixChange = prefixChange + cost - reference;
+    }
+    const auto at = [&](int64_t ordinal) -> size_t {
+        if (ordinal < first || ordinal > last)
+            throw std::out_of_range("missing Native continuous slot");
+        return static_cast<size_t>(ordinal - first);
+    };
+    std::map<int64_t, Scalar> cache;
+    const auto reply = TPUPrefillPP4Timing::lastStageReplyFromCosts<Scalar>(
+        input.targetOrdinal, first, last, input.state.observedReplies,
+        input.state.replyLowerBounds, cache,
+        [&](int64_t ordinal) { return dispatches[at(ordinal)]; },
+        [&](int64_t ordinal) { return ordinal < 0 ? Scalar(0.0) : costs[at(ordinal)]; },
+        maximum, validate);
+    return validate(reply + costs[at(input.targetOrdinal)] + input.parameters[0]);
+}
+
+bool forwardContinuousNative(const NaviSchedScheduleContext &context, size_t nodeIndex,
+                             const double *weights, const double *inverseTokens,
+                             double firstScale, double secondScale, double concavity,
+                             double &firstTerm, double &secondTerm,
+                             CostSchedulerKernelInternal::NodeGradient *gradient)
+{
+    const auto plan = context.getNativeContinuousInput(nodeIndex);
+    if (!plan) return false;
+    const auto &node = context.getNode(nodeIndex);
+    const auto count = context.requestCount();
+    try {
+        const auto value = [](double x) { return x; };
+        const double zero = plan->zeroReadyMs, fixed = plan->fixedLatencyMs;
+        double latency = 0.0, weightSum = 0.0, inverseSum = 0.0;
+        for (size_t i = 0; i < count; ++i) {
+            weightSum += weights[i];
+            inverseSum += weights[i] * inverseTokens[i];
+        }
+        if (gradient) {
+            AutoGradTape tape(count, count * 8 + plan->slots.size() * 12);
+            std::vector<AutoGradTape::Value> variables;
+            for (size_t i = 0; i < count; ++i)
+                variables.push_back(tape.parameter(weights[i], i));
+            using V = AutoGradTape::Value;
+            V absent(1.0);
+            for (const auto &w : variables) absent = absent * (1.0 - w);
+            const auto ready = nativeContinuousReady<V>(
+                *plan, count, [&](size_t i) { return variables[i]; },
+                [](const V &v) { return v.value(); });
+            const auto predicted = (1.0 - absent) * fixed + ready - zero;
+            latency = predicted.value();
+            if (!tape.backward(predicted, gradient->nativeRequestGradients)) return false;
+        } else {
+            double absent = 1.0;
+            for (size_t i = 0; i < count; ++i) absent *= 1.0 - weights[i];
+            latency = (1.0 - absent) * fixed +
+                      nativeContinuousReady<double>(
+                          *plan, count, [&](size_t i) { return weights[i]; }, value) -
+                      zero;
+        }
+        double residual = 1.0;
+        latency = node.applyLatencyResidual(latency, &residual);
+        const double logScale = concavity > 0.0 ? std::log(concavity) : 1.0;
+        const double latencyWeight =
+            concavity > 0.0 ? std::log1p(concavity * inverseSum) / logScale : inverseSum;
+        firstTerm = node.usesUnifiedLatencyPrediction() ? latency : latency * weightSum;
+        secondTerm = latency * latencyWeight;
+        if (!std::isfinite(firstTerm) || !std::isfinite(secondTerm)) return false;
+        if (gradient) {
+            const double scale =
+                residual *
+                (firstScale * (node.usesUnifiedLatencyPrediction() ? 1.0 : weightSum) +
+                 secondScale * latencyWeight);
+            for (auto &entry : gradient->nativeRequestGradients) entry *= scale;
+            gradient->weight =
+                node.usesUnifiedLatencyPrediction() ? 0.0 : firstScale * latency;
+            gradient->inverseToken =
+                secondScale * latency *
+                (concavity > 0.0 ? concavity / ((1.0 + concavity * inverseSum) * logScale)
+                                 : 1.0);
+        }
+        return true;
+    } catch (const std::logic_error &) {
+        return false;
+    } catch (const std::runtime_error &) {
+        return false;
+    }
+}
+}
+
+bool CostSchedulerKernelInternal::initializeNativeContinuousReference(
+    NaviSchedNativeContinuousInput &input, size_t requestCount)
+{
+    const auto value = [](double x) { return x; };
+    input.zeroReadyMs = nativeContinuousReady<double>(
+        input, requestCount, [](size_t) { return 0.0; }, value);
+    const double unit = nativeContinuousReady<double>(
+        input, requestCount, [](size_t) { return 1.0; }, value);
+    input.fixedLatencyMs = input.referenceTotalMs - (unit - input.zeroReadyMs);
+    return std::isfinite(input.zeroReadyMs) && std::isfinite(input.fixedLatencyMs);
+}
+
 double CostSchedulerKernelInternal::forwardNodeRange(
     const NaviSchedScheduleContext &context, const float *costs, const double *weights,
     const int64_t *requestTokenCounts, const double *inverseRequestTokenCounts,
@@ -842,6 +1006,20 @@ double CostSchedulerKernelInternal::forwardNodeRange(
         auto rowOffset = nodeIndex * requestCount;
         if (nodeGradients) {
             nodeGradients[nodeIndex - nodeBegin] = NodeGradient();
+        }
+        if (NonLinearPrefillModelR::usesNativePP4ForVersion(
+                context.getNode(nodeIndex).getLatencyBinaryVersion())) {
+            double first = 0.0, second = 0.0;
+            if (!forwardContinuousNative(
+                    context, nodeIndex, weights + rowOffset, inverseRequestTokenCounts,
+                    firstScale, secondScale, latencyWeightConcavity, first, second,
+                    nodeGradients ? nodeGradients + nodeIndex - nodeBegin : nullptr))
+                return std::numeric_limits<double>::infinity();
+            if (firstTerms) firstTerms[nodeIndex] = first;
+            if (secondTerms) secondTerms[nodeIndex] = second;
+            sum1 += first;
+            sum2 += second;
+            continue;
         }
         if (NonLinearPrefillModelR::usesGeometryForVersion(
                 context.getNode(nodeIndex).getLatencyBinaryVersion())) {
@@ -1124,6 +1302,9 @@ double CostSchedulerKernelInternal::forwardDiscreteImpl(
         const auto &node = context.getNode(nodeIndex);
         const auto &parameters = node.getLatencyParameters();
         baseline.loaded = true;
+        if (NonLinearPrefillModelR::usesNativePP4ForVersion(
+                node.getLatencyBinaryVersion()))
+            return baseline;
         baseline.capacitySplit =
             NonLinearPrefillModelR::usesCapacitySplitParameters(parameters);
         baseline.workloadSlots = node.getWorkloadRunningCapacitySlotCount();
@@ -1186,7 +1367,10 @@ double CostSchedulerKernelInternal::forwardDiscreteImpl(
     }
     const auto accumulateRequest = [&](size_t nodeIndex, size_t requestIndex) -> bool {
         const auto &node = context.getNode(nodeIndex);
-        if (NonLinearPrefillModelR::usesGeometryForVersion(node.getLatencyBinaryVersion()))
+        if ((NonLinearPrefillModelR::usesGeometryForVersion(
+                 node.getLatencyBinaryVersion()) ||
+             NonLinearPrefillModelR::usesNativePP4ForVersion(
+                 node.getLatencyBinaryVersion())))
             geometryRequests[nodeIndex].emplace_back(requestIndex);
 
         ++workspace.nodeCapacityLoads;
@@ -1200,11 +1384,14 @@ double CostSchedulerKernelInternal::forwardDiscreteImpl(
         const auto usesReservedRunningCapacity =
             !baseline.capacitySplit ||
             baseline.reservedSlots + assignedRequestCount < baseline.maxRunning;
-        if (!NonLinearPrefillModelR::usesGeometryForVersion(node.getLatencyBinaryVersion())) {
-        workspace.requestCostSums[nodeIndex] +=
-            costs[usesRunningCapacity ? costIndex : waitingCostIndex];
-        workspace.requestCostSumsWithoutReportedWorkload[nodeIndex] +=
-            costs[usesReservedRunningCapacity ? costIndex : waitingCostIndex];
+        if (!(NonLinearPrefillModelR::usesGeometryForVersion(
+                  node.getLatencyBinaryVersion()) ||
+              NonLinearPrefillModelR::usesNativePP4ForVersion(
+                  node.getLatencyBinaryVersion()))) {
+            workspace.requestCostSums[nodeIndex] +=
+                costs[usesRunningCapacity ? costIndex : waitingCostIndex];
+            workspace.requestCostSumsWithoutReportedWorkload[nodeIndex] +=
+                costs[usesReservedRunningCapacity ? costIndex : waitingCostIndex];
         }
         workspace.totalPromptTokenSums[nodeIndex] += requestTokenCounts[requestIndex];
         workspace.requestWeightSums[nodeIndex] += 1.0;
@@ -1231,7 +1418,10 @@ double CostSchedulerKernelInternal::forwardDiscreteImpl(
         // This preserves running-slot promotion and floating-point sum order.
         const auto accumulateNode = [&](size_t nodeIndex, bool source) -> bool {
             const auto &node = context.getNode(nodeIndex);
-            const bool geometry = NonLinearPrefillModelR::usesGeometryForVersion(node.getLatencyBinaryVersion());
+            const bool geometry = (NonLinearPrefillModelR::usesGeometryForVersion(
+                                       node.getLatencyBinaryVersion()) ||
+                                   NonLinearPrefillModelR::usesNativePP4ForVersion(
+                                       node.getLatencyBinaryVersion()));
             auto &cacheCounts = workspace.cacheCountSnapshots[nodeIndex];
             if (node.usesCacheMemberQueuePrediction() && !cacheCounts) cacheCounts = context.getCacheHitBlockCountsSnapshot(nodeIndex);
             if (node.usesCacheMemberQueuePrediction() && !cacheCounts) return false;
@@ -1326,6 +1516,8 @@ double CostSchedulerKernelInternal::forwardDiscreteImpl(
         double existingNodeCost = 0.0;
         const auto &baseline = baselineFor(nodeIndex);
         if (NonLinearPrefillModelR::usesGeometryForVersion(
+                node.getLatencyBinaryVersion()) ||
+            NonLinearPrefillModelR::usesNativePP4ForVersion(
                 node.getLatencyBinaryVersion())) {
             nodeCost = context.estimateBatchExecutionLatencyMs(
                 nodeIndex, geometryRequests[nodeIndex]);
@@ -1522,6 +1714,19 @@ void CostSchedulerKernelInternal::backwardNodeRange(
         auto costRow = costs + rowOffset;
         auto gradientRow = gradients + localNodeIndex * requestCount;
         const auto &node = context.getNode(nodeIndex);
+        if (NonLinearPrefillModelR::usesNativePP4ForVersion(
+                node.getLatencyBinaryVersion())) {
+            if (nodeGradient.nativeRequestGradients.size() != requestCount) {
+                std::fill(gradientRow, gradientRow + requestCount,
+                          std::numeric_limits<double>::quiet_NaN());
+                continue;
+            }
+            for (size_t i = 0; i < requestCount; ++i)
+                gradientRow[i] = nodeGradient.nativeRequestGradients[i] +
+                                 nodeGradient.weight +
+                                 nodeGradient.inverseToken * inverseRequestTokenCounts[i];
+            continue;
+        }
         const auto geometry = NonLinearPrefillModelR::usesGeometryForVersion(
             node.getLatencyBinaryVersion());
         const bool projectedLookup =

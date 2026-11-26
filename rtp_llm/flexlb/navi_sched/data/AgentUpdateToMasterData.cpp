@@ -39,6 +39,9 @@ navi::SummaryErrorCode AgentUpdateToMasterData::getSummary(
     TABLE_ADD_COLUMN_VALUE(table, "has_pending_cache", pendingCache != nullptr);
     TABLE_ADD_COLUMN_VALUE(table, "has_latency", latency != nullptr);
     TABLE_ADD_COLUMN_VALUE(table, "has_workload", workload != nullptr);
+    TABLE_ADD_COLUMN_VALUE(table, "execution_load_tracked", workload && workload->executionLoadTracked);
+    TABLE_ADD_COLUMN_VALUE(table, "execution_load_state_count",
+                           workload ? workload->executionLoadRequests.size() : size_t(0));
     TABLE_ADD_COLUMN_VALUE(table, "latency_model_fingerprint", latencyModelFingerprint);
     TABLE_ADD_COLUMN_VALUE(table, "latency_model_trusted", latencyModelTrusted);
     TABLE_ADD_COLUMN_VALUE(table, "latency_model_warm_started", latencyModelWarmStarted);
@@ -490,6 +493,10 @@ bool AgentUpdateToMasterData::valid() const
         (control && control->executionGeometryEnabled &&
          (!control->pdSeparated || control->unifiedLatencyPrediction ||
           !TPUPrefillExecutionPolicy::validate(control->prefillExecutionPolicy))) ||
+        (control && control->nativePrefillPipelineStages != 0 &&
+         (control->nativePrefillPipelineStages != 4 || !control->pdSeparated ||
+          !control->unifiedLatencyPrediction || control->executionGeometryEnabled ||
+          !TPUPrefillExecutionPolicy::validate(control->prefillExecutionPolicy))) ||
         fullAttentionQueryDropTokens < 0 ||
         (cache && !validCacheKeyType(cache->cacheKeyType)) ||
         (pendingCache && !validCacheKeyType(pendingCache->cacheKeyType))) {
@@ -508,7 +515,7 @@ bool AgentUpdateToMasterData::valid() const
     };
     switch (event) {
         case NaviSchedAgentEvent::AGENT_HANDSHAKE:
-            return control && control->agentStartTimeUs > 0 &&
+            return control && control->agentStartTimeUs > 0 && control->tairKvcmConfig.valid() &&
                    (control->pdSeparated || control->unifiedLatencyPrediction) &&
                    validInflightStats(requestEvent) && !cache && !pendingCache &&
                    (!workload || workload->valid()) &&

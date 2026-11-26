@@ -40,6 +40,8 @@ public:
     // Same physical coordinates and cache-source terms, with observed runner
     // geometry for training. Dispatch still forecasts geometry before execution.
     static constexpr int64_t MEASURED_CACHE_SOURCE_BINARY_VERSION = 35;
+    static constexpr int64_t NATIVE_PP4_BINARY_VERSION = 36;
+    static constexpr size_t NATIVE_PP4_PARAMETER_COUNT = 9;
     static bool usesCacheSourceForVersion(int64_t version)
     {
         return version == CACHE_SOURCE_BINARY_VERSION ||
@@ -153,6 +155,7 @@ public:
     std::vector<double> getInitialParameters() const;
     size_t getParameterCount() const
     {
+        if (usesNativePP4Timing()) return NATIVE_PP4_PARAMETER_COUNT;
         return usesExecutionCacheSource()
                    ? CACHE_SOURCE_PARAMETER_COUNT
                    : (_useCapacitySplitFeature ? CAPACITY_SPLIT_PARAMETER_COUNT
@@ -161,6 +164,13 @@ public:
     static double getParameterScale(size_t index);
     const ParameterScales &getConfiguredParameterScales() const;
     bool usesPdCoordinates() const;
+    bool usesNativePP4Timing() const { return _nativePrefillPipelineStages == 4; }
+    static bool usesNativePP4ForVersion(int64_t version)
+    {
+        return version == NATIVE_PP4_BINARY_VERSION;
+    }
+    double predictSampleConfigured(const NaviSchedLatencySample &sample,
+                                   const std::vector<double> &parameters) const;
     bool validateConfiguredParameters(const std::vector<double> &parameters) const;
     static bool supportsBinaryVersion(int64_t binaryVersion);
     // Coordinate conversion only. For version 26, callers must additionally
@@ -305,6 +315,11 @@ private:
                  const std::vector<double> *parameterLearningRateScales,
                  const std::vector<std::vector<Input>> *stepInputs,
                  bool rejectNonPositiveWaitingCandidate = false) const;
+    bool fitNativePP4Timing(const std::vector<NaviSchedLatencySample> &samples,
+                            const std::vector<double> &currentParameters,
+                            std::vector<double> &newParameters, double learningRateScale,
+                            double currentSampleWeight,
+                            const std::vector<double> *parameterLearningRateScales) const;
     static bool checkStepCompositionGradient(const Input &global,
                                              const std::vector<Input> &steps,
                                              const Values &weights, size_t parameterCount,
@@ -366,6 +381,7 @@ private:
     double _zeroAnchorMaxMs = DEFAULT_ZERO_ANCHOR_MAX_MS;
     bool _checkGradient = false;
     bool _pdSeparated = false;
+    int32_t _nativePrefillPipelineStages = 0;
     bool _executionGeometryEnabled = false;
     bool _projectedExecutionGeometryEnabled = false;
     bool _executionCacheSourceEnabled = false;

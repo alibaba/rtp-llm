@@ -2,10 +2,12 @@
 
 #include "aios/navi_sched/common/NaviSchedScheduleData.h"
 #include "aios/navi_sched/common/TPUPrefillExecutionPolicy.h"
+#include "aios/navi_sched/common/TPUPrefillPP4Observation.h"
 #include "aios/navi_sched/data/LatencyModelGlobalData.h"
 #include "aios/navi_sched/data/MasterDispatchHandle.h"
 #include "aios/navi_sched/data/NaviSchedLatencySample.h"
 #include "aios/navi_sched/resource/LatencyResidualModel.h"
+#include "aios/navi_sched/resource/MasterBatchReservation.h"
 #include <limits>
 #include <memory>
 #include <optional>
@@ -42,7 +44,46 @@ class NaviSchedNode;
 class SchedulerBaseKernel;
 struct NaviSchedLatencyModel;
 struct NaviSchedPeerCacheSuffixLookup;
+struct NaviSchedExternalCacheReadyBlocks;
 
+// Optimization coordinates for one shared Native reference schedule. This is
+// never an engine dispatch plan; final integer assignments are simulated again.
+struct NaviSchedNativeContinuousSpan {
+    size_t requestIndex = std::numeric_limits<size_t>::max();
+    double linearCostMs = 0.0;
+    double contextKTokens = 0.0;
+};
+struct NaviSchedNativeContinuousSlot {
+    double fixedCostMs = 0.0;
+    double sharedStepCostMs = 0.0;
+    bool fixed = false;
+    bool hasFixedRequest = false;
+    std::vector<NaviSchedNativeContinuousSpan> spans;
+};
+struct NaviSchedNativeContinuousInput {
+    TPUPrefillPP4State state;
+    std::vector<TPUPrefillPipelineSlot> slots;
+    std::vector<NaviSchedNativeContinuousSlot> costs;
+    TPUPrefillPP4Timing::Parameters parameters{};
+    int64_t targetOrdinal = -1;
+    double referenceTotalMs = 0.0;
+    double zeroReadyMs = 0.0;
+    double fixedLatencyMs = 0.0;
+};
+// One final result's immutable Master-local inputs. This is not a wire payload
+// or a Native engine plan; audit reuses the already evaluated result.
+struct NaviSchedNativeFinalPrediction {
+    TPUPrefillPP4ObservationInput input;
+    TPUPrefillExecutionPolicyConfig policy;
+    TPUPrefillPP4Timing::Parameters parameters{};
+    size_t maxTransitions = 0;
+    int64_t predictionTimeUs = 0;
+    double arrivalDelayMs = 0.0;
+    double baseExecutionMs = 0.0;
+    double finalExecutionMs = 0.0;
+
+    double recomputeBaseLatencyMs(const TPUPrefillPP4Timing::Parameters &weights) const;
+};
 struct NaviSchedColdStartRoutingStats {
     struct TargetRandomDecision {
         size_t nodeIndex = 0;
@@ -88,6 +129,8 @@ using NaviSchedNodeConstPtr = std::shared_ptr<const NaviSchedNode>;
 struct NaviSchedExecutionCacheInputCapture {
     std::vector<TPUPrefillRequestInput> inputs;
     TPUPrefillCacheObservationBatch observation;
+    // Runtime memo only: a local observation may precede peer preparation.
+    bool peerCacheMerged = false;
 };
 
 class NaviSchedScheduleNode {
@@ -98,6 +141,7 @@ public:
     int32_t getExecutionWaitingRequests() const;
     uint64_t getAgentIdHash() const;
     const std::string &getAgentId() const;
+    std::shared_ptr<const NaviSchedTairKvcmConfig> getTairKvcmConfig() const;
     int64_t getTotalBlocks() const;
     int32_t getInflightRequests() const;
     double getInflightPredictedLatencySumMs() const;
@@ -145,7 +189,16 @@ public:
     const std::optional<TPUPrefillExecutionPolicyConfig> &getPrefillExecutionPolicy()
         const;
     const NaviSchedLatencyFeatures &getWorkloadFeatures() const;
+    const std::vector<MasterBatchReservation::UnfinishedRequest> &
+    getNativePrefillReservations() const
+    {
+        return _nativePrefillReservations;
+    }
     const NaviSchedLatencyFeatures &getReportedWorkloadFeatures() const;
+    TPUPrefillPP4ObservationInput prepareNativePrefillObservation(
+        TPUPrefillPP4ObservationPredictions predictions) const;
+    std::shared_ptr<const TPUPrefillPP4ObservationInput> getNativePrefillObservation()
+        const;
     const NaviSchedLatencyFeatures &getReservedWorkloadFeatures() const;
     bool getUnifiedDecayFloorFeatures(NaviSchedLatencyFeatures &features) const;
     int32_t getMaxRunningRequestCount() const;
@@ -181,6 +234,7 @@ private:
         _executionCacheInputs;
     mutable std::shared_ptr<const std::vector<int64_t>> _localCacheBlockCounts;
     std::shared_ptr<const NaviSchedPeerCacheSuffixLookup> _peerCacheSuffixLookup;
+    std::shared_ptr<const NaviSchedExternalCacheReadyBlocks> _remoteCacheReadyBlocks;
     bool _peerCacheReadAvailable = false;
     uint64_t _peerCacheReadRevision = 0;
     mutable std::shared_ptr<const std::vector<int64_t>> _matchedBlockCounts;
@@ -206,6 +260,11 @@ private:
     double _timeCompression = 1.0;
     bool _unifiedLatencyPrediction = false;
     NaviSchedWorkloadSnapshot _workload;
+    std::vector<MasterBatchReservation::UnfinishedRequest> _nativePrefillReservations;
+    mutable std::shared_ptr<const TPUPrefillPP4ObservationInput>
+        _nativePrefillObservation;
+    mutable std::shared_ptr<const NaviSchedNativeContinuousInput> _nativeContinuousInput;
+    mutable std::shared_ptr<const NaviSchedNativeFinalPrediction> _nativeFinalPrediction;
     NaviSchedLatencyFeatures _workloadFeatures;
     NaviSchedLatencyFeatures _reportedWorkloadFeatures;
     NaviSchedLatencyFeatures _reservedWorkloadFeatures;
@@ -293,6 +352,8 @@ public:
     double estimateBatchExecutionLatencyMs(
         size_t nodeIndex, const std::vector<size_t> &requestIndexes,
         NaviSchedLatencyPrediction *latencyPrediction = nullptr) const;
+    std::shared_ptr<const NaviSchedNativeContinuousInput> getNativeContinuousInput(
+        size_t nodeIndex) const;
     const NaviSchedGeometryOptimizationInput *getGeometryOptimizationInput(
         size_t nodeIndex, size_t requestIndex) const;
     std::shared_ptr<const std::vector<NaviSchedGeometryOptimizationInput>>
@@ -306,14 +367,23 @@ public:
     bool reject(size_t requestIndex, const std::string &reason);
 
 private:
-    double estimateBatchExecutionLatencyMs(
+    TPUPrefillPP4ObservationInput prepareNativeForecastInput(
         size_t nodeIndex, const std::vector<size_t> &requestIndexes,
-        NaviSchedLatencyPrediction *latencyPrediction,
-        const std::vector<int64_t> *matchedBlockCounts) const;
+        double arrivalDelayMs = 0.0) const;
+    double estimateBatchExecutionLatencyMs(size_t nodeIndex,
+                                           const std::vector<size_t> &requestIndexes,
+                                           NaviSchedLatencyPrediction *latencyPrediction,
+                                           const std::vector<int64_t> *matchedBlockCounts,
+                                           int64_t predictionTimeUs = 0) const;
 
+    // Install before replay/cache preparation freezes this round's inputs.
+    bool setRemoteCacheReadyBlocks(
+        size_t nodeIndex, std::shared_ptr<const NaviSchedExternalCacheReadyBlocks> blocks);
     std::shared_ptr<const std::vector<TPUPrefillRequestInput>> getExecutionCacheInputs(
         size_t storageNodeIndex) const;
     friend class MasterScheduleContextKernel;
+    friend class MasterSchedulePrepareKernel;
+    friend class MasterTairQueryKernel;
     friend class MasterScheduleResultKernel;
     friend class MasterScheduleResultPrepareKernel;
     friend class MasterScheduleResultState;
@@ -329,8 +399,10 @@ private:
     void setNodes(std::vector<NaviSchedNodeConstPtr> nodes,
                   std::vector<NaviSchedNodeSnapshot> nodeSnapshots);
     void setReplay(const std::shared_ptr<NaviSchedScheduleReplay> &replay);
+    void retainNativeCacheInputs(const std::vector<size_t> &requestIndexes);
     bool prepare();
     void preparePeerCacheCounts();
+    bool finishNativePeerCacheInputs();
     std::vector<NaviSchedTarget> getCacheTouchTargets(size_t requestIndex,
                                                     int64_t hitTokenCount) const;
     bool activateScheduleView(const std::vector<size_t> &requestIndexes,
@@ -409,8 +481,15 @@ private:
     mutable int64_t _costGradientIterationMaxUs = 0;
     std::vector<NaviSchedScheduleItem> _requests;
     std::vector<NaviSchedScheduleNode> _scheduleNodes;
+    std::vector<std::string> _tairKvcmQueryStatuses;
     std::vector<MasterScheduleRequestDataPtr> _responseRequests;
     std::shared_ptr<NaviSchedScheduleReplay> _replay;
+    // Preserve the consumed input before admission compacts live request arrays.
+    // These are context-local references, not model or wire fields.
+    std::vector<std::shared_ptr<const NaviSchedExecutionCacheInputCapture>>
+        _replayNativeCacheInputs;
+    std::vector<std::shared_ptr<const std::vector<int64_t>>>
+        _replayNativeLocalCacheCounts;
     std::unordered_map<uint64_t, size_t> _replayMatchRequestIndexes;
     std::vector<NaviSchedDecision> _decisions;
     std::vector<MasterDispatchHandle> _dispatchHandles;

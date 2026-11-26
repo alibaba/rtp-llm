@@ -1,3 +1,4 @@
+#include "aios/navi_sched/common/TPUPrefillPP4Timing.h"
 #include <array>
 #include <iterator>
 #include <set>
@@ -9,6 +10,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include "aios/navi_sched/bindings/NaviSchedBindings.h"
+#include "aios/navi_sched/bindings/ForwardAdmissionClock.h"
 #include "aios/navi_sched/common/NaviSchedScheduleData.h"
 #include "aios/navi_sched/data/BlockHashUtil.h"
 #include "aios/navi_sched/data/AgentLatencyToMasterData.h"
@@ -413,9 +415,11 @@ public:
         bool pendingCacheTracked = false;
         int64_t readyTimeNs = 0;
         int64_t readyTimeUs = 0;
+        std::shared_ptr<ForwardAdmissionClock::Ticket> admissionClockTicket;
         std::vector<uint64_t> requestIds;
         std::vector<std::string> payloads;
         std::vector<int64_t> predictedCacheHitTokenCounts;
+        std::vector<std::optional<bool>> executionLoadIncluded;
         std::unordered_map<uint64_t, NaviSchedBlockHashesConstPtr> requestBlockHashes;
         std::vector<std::shared_ptr<ForwardRequestTouch>> touches;
         std::mutex reporterMutex;
@@ -423,12 +427,16 @@ public:
     };
 
     explicit VLLMAgentBridge(const std::shared_ptr<NaviSchedAgent> &agent,
-                             bool pdSeparated = false, bool prefillCapacitySplit = false)
+                             bool pdSeparated = false, bool prefillCapacitySplit = false,
+                             bool trackNativeWork = false)
         : _agent(agent)
         , _pdSeparated(pdSeparated)
         , _prefillCapacitySplit(!pdSeparated || prefillCapacitySplit)
         , _forwardState(std::make_shared<ForwardState>())
     {
+        if (trackNativeWork) {
+            _forwardState->admissionClock = std::make_unique<ForwardAdmissionClock>();
+        }
     }
 
     bool enableForwarding()
@@ -479,14 +487,20 @@ public:
                 batch->scheduleBatchSize = requests.front().scheduleBatchSize;
                 batch->pendingCacheTracked = requests.front().pendingCacheTracked;
                 batch->readyTimeUs = requests.front().batchReadyTimeUs;
-                batch->readyTimeNs =
-                    std::chrono::duration_cast<std::chrono::nanoseconds>(
-                        std::chrono::steady_clock::now().time_since_epoch())
-                        .count();
+                if (state->admissionClock) {
+                    batch->admissionClockTicket = state->admissionClock->open();
+                    batch->readyTimeNs = batch->admissionClockTicket->readyTimeNs();
+                } else {
+                    batch->readyTimeNs =
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch())
+                            .count();
+                }
                 batch->reporter = reporter;
                 batch->requestIds.reserve(requests.size());
                 batch->payloads.reserve(requests.size());
                 batch->predictedCacheHitTokenCounts.reserve(requests.size());
+                batch->executionLoadIncluded.reserve(requests.size());
                 std::unordered_set<uint64_t> uniqueRequestIds;
                 for (const auto &request : requests) {
                     if (request.requestId == 0 || request.payload.empty() ||
@@ -506,6 +520,7 @@ public:
                     batch->payloads.emplace_back(request.payload);
                     batch->predictedCacheHitTokenCounts.emplace_back(
                         request.predictedCacheHitTokenCount);
+                    batch->executionLoadIncluded.emplace_back(request.executionLoadIncluded);
                 }
                 std::lock_guard<std::mutex> lock(state->mutex);
                 if (!state->enabled) {
@@ -753,7 +768,8 @@ public:
         std::lock_guard<std::mutex> lock(batch->reporterMutex);
         if (!batch->reporter || requestIds.size() >= batch->requestIds.size() ||
             batch->requestIds.size() != batch->payloads.size() ||
-            batch->requestIds.size() != batch->predictedCacheHitTokenCounts.size()) {
+            batch->requestIds.size() != batch->predictedCacheHitTokenCounts.size() ||
+            batch->requestIds.size() != batch->executionLoadIncluded.size()) {
             return false;
         }
         std::unordered_set<uint64_t> abortedIds;
@@ -768,10 +784,12 @@ public:
         std::vector<uint64_t> remainingRequestIds;
         std::vector<std::string> remainingPayloads;
         std::vector<int64_t> remainingPredictedCacheHits;
+        std::vector<std::optional<bool>> remainingExecutionLoadIncluded;
         const auto remainingSize = batch->requestIds.size() - abortedIds.size();
         remainingRequestIds.reserve(remainingSize);
         remainingPayloads.reserve(remainingSize);
         remainingPredictedCacheHits.reserve(remainingSize);
+        remainingExecutionLoadIncluded.reserve(remainingSize);
         for (size_t index = 0; index < batch->requestIds.size(); ++index) {
             if (abortedIds.count(batch->requestIds[index]) != 0) {
                 continue;
@@ -780,6 +798,7 @@ public:
             remainingPayloads.emplace_back(batch->payloads[index]);
             remainingPredictedCacheHits.emplace_back(
                 batch->predictedCacheHitTokenCounts[index]);
+            remainingExecutionLoadIncluded.emplace_back(batch->executionLoadIncluded[index]);
         }
         if (!batch->reporter->abortRequests(requestIds)) {
             return false;
@@ -787,15 +806,42 @@ public:
         batch->requestIds.swap(remainingRequestIds);
         batch->payloads.swap(remainingPayloads);
         batch->predictedCacheHitTokenCounts.swap(remainingPredictedCacheHits);
+        batch->executionLoadIncluded.swap(remainingExecutionLoadIncluded);
         return true;
     }
 
     static void releaseForwardBatch(const std::shared_ptr<ForwardBatch> &batch)
     {
+        acknowledgeForwardAdmission(batch);
         if (batch) {
             std::lock_guard<std::mutex> lock(batch->reporterMutex);
             batch->reporter.reset();
         }
+    }
+
+    // A taken batch retains its clock until Python has frozen the corresponding
+    // Native completion prefix. This is a local adapter operation, not an RPC.
+    static bool acknowledgeForwardAdmission(const std::shared_ptr<ForwardBatch> &batch)
+    {
+        if (!batch) {
+            return false;
+        }
+        std::shared_ptr<ForwardAdmissionClock::Ticket> ticket;
+        {
+            std::lock_guard<std::mutex> lock(batch->reporterMutex);
+            ticket.swap(batch->admissionClockTicket);
+        }
+        if (!ticket) {
+            return false;
+        }
+        ticket->release();
+        return true;
+    }
+
+    int64_t forwardAdmissionWatermarkNs() const
+    {
+        const auto &clock = _forwardState->admissionClock;
+        return clock ? clock->watermark() : 0;
     }
 
     NaviSchedBatchFinishReporterPtr startBatch(
@@ -876,6 +922,20 @@ public:
         return reporter->finishBatch(requests);
     }
 
+    bool recordNativePP4TimingSample(
+        int64_t targetOrdinal,
+        const std::vector<std::tuple<int64_t, double, std::array<double, 8>>> &slots,
+        double latencyMs, int64_t eventTimeUs)
+    {
+        if (slots.empty() || slots.size() > 6) return false;
+        auto observation = std::make_shared<TPUPrefillPP4TimingObservation>();
+        observation->targetOrdinal = targetOrdinal;
+        for (const auto &[ordinal, dispatchTimeMs, features] : slots)
+            observation->slots.push_back({ordinal, dispatchTimeMs, features});
+        return _agent->recordNativePP4TimingSample(std::move(observation), latencyMs,
+                                                   eventTimeUs);
+    }
+
     bool enableObservedExecutionWindowTraining()
     {
         return _agent->enableObservedExecutionWindowTraining();
@@ -914,7 +974,7 @@ public:
         int64_t runningDecodeGeneratedTokenCount,
         int64_t runningDecodeRemainingTokenBudget, double admissionToFirstExecutionMs,
         double nativePreparationMs, int64_t executionFinishTimeUs,
-        bool useCompletedCapacityFeatures = false)
+        bool useCompletedCapacityFeatures = false, bool completedFeaturesValid = true)
     {
         if (!reporter || values.empty() ||
             (useCompletedCapacityFeatures && unifiedLatencyMs != -1.0)) {
@@ -928,6 +988,13 @@ public:
             request.totalTokenCount = std::get<1>(value);
             request.cacheHitTokenCount = std::get<2>(value);
             requests.emplace_back(request);
+        }
+        if (!completedFeaturesValid) {
+            return reporter->finishBatch(
+                requests, wallTimeMs, executeModelTimeMs, executionStepCount,
+                prefillTokenCount, decodeRequestStepCount, decodeTokenCount,
+                admissionToFirstExecutionMs, nativePreparationMs, executionFinishTimeUs,
+                nullptr, false);
         }
         if (unifiedLatencyMs < 0.0 && !useCompletedCapacityFeatures) {
             return reporter->finishBatch(
@@ -1181,10 +1248,10 @@ public:
     }
 
     bool reportExecutionStep(double elapsedMs, int64_t prefillTokens,
-                             int64_t decodeTokens) const
+                             int64_t decodeTokens, int64_t firstStartOvertakeCount = 0) const
     {
         return _agent && _agent->reportObservedExecutionStep(elapsedMs, prefillTokens,
-                                                             decodeTokens);
+                                                             decodeTokens, firstStartOvertakeCount);
     }
 
     bool reportCoreStep(double elapsedMs, bool futureWait) const
@@ -1222,8 +1289,12 @@ public:
         int32_t runningDecodeRequestCount, int64_t runningDecodeGeneratedTokenCount,
         int64_t runningDecodeRemainingTokenBudget,
         const std::vector<int64_t> &coveredNativeBatchIds,
-        const std::optional<std::vector<uint64_t>> &waitingRequestIds,
-        bool recordTiming, int32_t runningElapsedRequestCount) const
+        const std::optional<std::vector<uint64_t>> &waitingRequestIds, bool recordTiming,
+        int32_t runningElapsedRequestCount,
+        const std::vector<NaviSchedNativeCacheQuery> &nativeCacheQueries,
+        const std::shared_ptr<NaviSchedNativePPState> &nativePPState,
+        int64_t nativePPObservationAgeUs, bool executionLoadTracked,
+        const std::vector<NaviSchedKVPreparation> &executionLoadRequests) const
     {
         const WorkloadReportTimer timer(recordTiming);
         if (runningElapsedRequestCount < -1 ||
@@ -1283,6 +1354,23 @@ public:
         snapshot.admittedBatch.requestCount = admittedRequestCount;
         snapshot.admittedBatch.pendingCacheTracked = admittedPendingCacheTracked;
         snapshot.admittedBatch.requestIds = admittedRequestIds;
+        if (!nativeCacheQueries.empty() && (!_pdSeparated || !_prefillCapacitySplit))
+            return false;
+        if (nativePPState ? (!_pdSeparated || !_prefillCapacitySplit ||
+                             nativePPObservationAgeUs < 0)
+                          : nativePPObservationAgeUs != -1)
+            return false;
+        snapshot.executionLoadTracked = executionLoadTracked;
+        snapshot.executionLoadRequests = executionLoadRequests;
+        std::sort(snapshot.executionLoadRequests.begin(), snapshot.executionLoadRequests.end(),
+                  [](const auto &a, const auto &b) { return a.requestId < b.requestId; });
+        snapshot.nativePPState = nativePPState;
+        snapshot.nativePPObservationAgeUs = nativePPObservationAgeUs;
+        snapshot.nativeCacheQueries = nativeCacheQueries;
+        std::sort(snapshot.nativeCacheQueries.begin(), snapshot.nativeCacheQueries.end(),
+                  [](const auto &left, const auto &right) {
+                      return left.requestId < right.requestId;
+                  });
         return (!_pdSeparated || (runningDecodeRequestCount == 0 &&
                                   runningDecodeGeneratedTokenCount == 0 &&
                                   runningDecodeRemainingTokenBudget == 0)) &&
@@ -1379,6 +1467,7 @@ private:
         std::deque<uint64_t> cancelledRequests;
         std::unordered_set<uint64_t> queuedForwardRequestIds;
         std::unordered_set<uint64_t> queuedTouchRequestIds;
+        std::unique_ptr<ForwardAdmissionClock> admissionClock;
         bool enabled = false;
     };
 
@@ -1405,9 +1494,224 @@ NaviSchedBlockHashesConstPtr blockHashesFromPython(const py::iterable &values)
 
 void bindNaviSchedData(py::module_ &m)
 {
+    m.attr("VLLM_NATIVE_PP_STATE_INPUT_VERSION") = 4;
+    m.attr("VLLM_NATIVE_PP_OBSERVATION_ONLY_VERSION") = 1;
+    m.attr("VLLM_NATIVE_PP4_TIMING_SAMPLES_VERSION") = 1;
+    py::class_<NaviSchedNativePPSpan>(m, "_VLLMNativePPSpan")
+        .def(py::init(
+                 [](uint64_t requestId, int64_t computedTokens, int64_t scheduledTokens) {
+                     NaviSchedNativePPSpan value;
+                     value.requestId = requestId;
+                     value.computedTokens = computedTokens;
+                     value.scheduledTokens = scheduledTokens;
+                     return value;
+                 }),
+             py::arg("request_id"), py::arg("computed_tokens"),
+             py::arg("scheduled_tokens"))
+        .def_readonly("request_id", &NaviSchedNativePPSpan::requestId)
+        .def_readonly("computed_tokens", &NaviSchedNativePPSpan::computedTokens)
+        .def_readonly("scheduled_tokens", &NaviSchedNativePPSpan::scheduledTokens);
+    py::class_<NaviSchedNativePPSlot>(m, "_VLLMNativePPSlot")
+        .def(py::init([](int64_t ordinal, int64_t dispatchAgeUs, double expectedForwardMs,
+                         int64_t lastStageReplyAgeUs, std::array<double, 8> features,
+                         std::vector<NaviSchedNativePPSpan> spans) {
+                 NaviSchedNativePPSlot value;
+                 value.ordinal = ordinal;
+                 value.dispatchAgeUs = dispatchAgeUs;
+                 value.expectedForwardMs = expectedForwardMs;
+                 value.lastStageReplyAgeUs = lastStageReplyAgeUs;
+                 value.features = std::move(features);
+                 value.spans = std::move(spans);
+                 return value;
+             }),
+             py::arg("ordinal"), py::arg("dispatch_age_us"),
+             py::arg("expected_forward_ms"), py::arg("last_stage_reply_age_us"),
+             py::arg("features"), py::arg("spans"))
+        .def_readonly("ordinal", &NaviSchedNativePPSlot::ordinal)
+        .def_readonly("dispatch_age_us", &NaviSchedNativePPSlot::dispatchAgeUs)
+        .def_readonly("expected_forward_ms", &NaviSchedNativePPSlot::expectedForwardMs)
+        .def_readonly("last_stage_reply_age_us",
+                      &NaviSchedNativePPSlot::lastStageReplyAgeUs)
+        .def_readonly("features", &NaviSchedNativePPSlot::features)
+        .def_readonly("spans", &NaviSchedNativePPSlot::spans);
+    py::class_<NaviSchedNativePPResult>(m, "_VLLMNativePPResult")
+        .def(py::init([](uint64_t schedulerOutputId, int64_t dispatchAgeUs,
+                         int64_t slotOrdinal, bool executeReplyReady, bool resultReady,
+                         std::vector<uint64_t> loadRequestIds) {
+                 NaviSchedNativePPResult value;
+                 value.schedulerOutputId = schedulerOutputId;
+                 value.dispatchAgeUs = dispatchAgeUs;
+                 value.slotOrdinal = slotOrdinal;
+                 value.executeReplyReady = executeReplyReady;
+                 value.resultReady = resultReady;
+                 value.loadRequestIds = std::move(loadRequestIds);
+                 return value;
+             }),
+             py::arg("scheduler_output_id"), py::arg("dispatch_age_us"),
+             py::arg("slot_ordinal"), py::arg("execute_reply_ready"),
+             py::arg("result_ready"),
+             py::arg("load_request_ids") = std::vector<uint64_t>{})
+        .def_readonly("scheduler_output_id", &NaviSchedNativePPResult::schedulerOutputId)
+        .def_readonly("dispatch_age_us", &NaviSchedNativePPResult::dispatchAgeUs)
+        .def_readonly("slot_ordinal", &NaviSchedNativePPResult::slotOrdinal)
+        .def_readonly("execute_reply_ready", &NaviSchedNativePPResult::executeReplyReady)
+        .def_readonly("result_ready", &NaviSchedNativePPResult::resultReady)
+        .def_readonly("load_request_ids", &NaviSchedNativePPResult::loadRequestIds);
+    py::class_<NaviSchedNativePPRequest>(m, "_VLLMNativePPRequest")
+        .def(py::init([](uint64_t requestId, int32_t queue, int64_t queueIndex,
+                         int32_t phase, int64_t promptTokens, int64_t computedTokens,
+                         int64_t cacheHitTokens, int64_t sharedPrefixBoundary,
+                         int64_t queryAgeUs, int64_t loadAgeUs,
+                         int32_t prefillSlotRelease) {
+                 NaviSchedNativePPRequest value;
+                 value.requestId = requestId;
+                 value.queue = static_cast<NativePPQueue>(queue);
+                 value.queueIndex = queueIndex;
+                 value.phase = static_cast<NativePPRequestPhase>(phase);
+                 value.promptTokens = promptTokens;
+                 value.computedTokens = computedTokens;
+                 value.cacheHitTokens = cacheHitTokens;
+                 value.sharedPrefixBoundary = sharedPrefixBoundary;
+                 value.queryAgeUs = queryAgeUs;
+                 value.loadAgeUs = loadAgeUs;
+                 value.prefillSlotRelease =
+                     static_cast<NativePPPrefillSlotRelease>(prefillSlotRelease);
+                 return value;
+             }),
+             py::arg("request_id"), py::arg("queue"), py::arg("queue_index"),
+             py::arg("phase"), py::arg("prompt_tokens"), py::arg("computed_tokens"),
+             py::arg("cache_hit_tokens"), py::arg("shared_prefix_boundary"),
+             py::arg("query_age_us"), py::arg("load_age_us"),
+             py::arg("prefill_slot_release"))
+        .def_readonly("request_id", &NaviSchedNativePPRequest::requestId)
+        .def_property_readonly(
+            "queue", [](const NaviSchedNativePPRequest &v) { return int32_t(v.queue); })
+        .def_readonly("queue_index", &NaviSchedNativePPRequest::queueIndex)
+        .def_property_readonly(
+            "phase", [](const NaviSchedNativePPRequest &v) { return int32_t(v.phase); })
+        .def_readonly("prompt_tokens", &NaviSchedNativePPRequest::promptTokens)
+        .def_readonly("computed_tokens", &NaviSchedNativePPRequest::computedTokens)
+        .def_readonly("cache_hit_tokens", &NaviSchedNativePPRequest::cacheHitTokens)
+        .def_readonly("shared_prefix_boundary",
+                      &NaviSchedNativePPRequest::sharedPrefixBoundary)
+        .def_readonly("query_age_us", &NaviSchedNativePPRequest::queryAgeUs)
+        .def_readonly("load_age_us", &NaviSchedNativePPRequest::loadAgeUs)
+        .def_property_readonly("prefill_slot_release",
+                               [](const NaviSchedNativePPRequest &v) {
+                                   return int32_t(v.prefillSlotRelease);
+                               });
+    py::class_<NaviSchedNativePPDecision>(m, "_VLLMNativePPDecision")
+        .def(py::init([](uint64_t schedulerOutputId, std::array<double, 8> features,
+                         std::vector<NaviSchedNativePPSpan> spans,
+                         std::vector<uint64_t> loadRequestIds) {
+                 NaviSchedNativePPDecision value;
+                 value.schedulerOutputId = schedulerOutputId;
+                 value.features = std::move(features);
+                 value.spans = std::move(spans);
+                 value.loadRequestIds = std::move(loadRequestIds);
+                 return value;
+             }),
+             py::arg("scheduler_output_id"), py::arg("features"), py::arg("spans"),
+             py::arg("load_request_ids") = std::vector<uint64_t>{})
+        .def_readonly("scheduler_output_id",
+                      &NaviSchedNativePPDecision::schedulerOutputId)
+        .def_readonly("features", &NaviSchedNativePPDecision::features)
+        .def_readonly("spans", &NaviSchedNativePPDecision::spans)
+        .def_readonly("load_request_ids", &NaviSchedNativePPDecision::loadRequestIds);
+    py::class_<NaviSchedNativePPState, std::shared_ptr<NaviSchedNativePPState>>(
+        m, "_VLLMNativePPState")
+        .def(py::init([](uint64_t observationId, uint64_t burst, bool waveOpen,
+                         int64_t lastRealOrdinal, double measuredForwardMs,
+                         std::vector<NaviSchedNativePPSlot> slots,
+                         std::vector<NaviSchedNativePPResult> results,
+                         std::vector<NaviSchedNativePPRequest> requests,
+                         std::optional<NaviSchedNativePPDecision> pendingDecision,
+                         int64_t occupiedRequestSlotCount) {
+                 auto value = std::make_shared<NaviSchedNativePPState>();
+                 value->observationId = observationId;
+                 value->burst = burst;
+                 value->waveOpen = waveOpen;
+                 value->lastRealOrdinal = lastRealOrdinal;
+                 value->measuredForwardMs = measuredForwardMs;
+                 value->slots = std::move(slots);
+                 value->results = std::move(results);
+                 value->requests = std::move(requests);
+                 value->pendingDecision = std::move(pendingDecision);
+                 value->occupiedRequestSlotCount = occupiedRequestSlotCount;
+                 return value;
+             }),
+             py::arg("observation_id"), py::arg("burst"), py::arg("wave_open"),
+             py::arg("last_real_ordinal"), py::arg("measured_forward_ms"),
+             py::arg("slots"), py::arg("results"), py::arg("requests"),
+             py::arg("pending_decision"), py::arg("occupied_request_slot_count"))
+        .def_readonly("occupied_request_slot_count",
+                      &NaviSchedNativePPState::occupiedRequestSlotCount)
+        .def_readonly("observation_id", &NaviSchedNativePPState::observationId)
+        .def_readonly("burst", &NaviSchedNativePPState::burst)
+        .def_readonly("wave_open", &NaviSchedNativePPState::waveOpen)
+        .def_readonly("last_real_ordinal", &NaviSchedNativePPState::lastRealOrdinal)
+        .def_readonly("measured_forward_ms", &NaviSchedNativePPState::measuredForwardMs)
+        .def_readonly("slots", &NaviSchedNativePPState::slots)
+        .def_readonly("results", &NaviSchedNativePPState::results)
+        .def_readonly("requests", &NaviSchedNativePPState::requests)
+        .def_readonly("pending_decision", &NaviSchedNativePPState::pendingDecision)
+        .def(
+            "with_prepared_requests",
+            [](const NaviSchedNativePPState &observed,
+               std::vector<NaviSchedNativePPRequest> prepared) {
+                auto value = std::make_shared<NaviSchedNativePPState>(observed);
+                for (auto &request : prepared) {
+                    if (request.queue != NativePPQueue::PREPARED ||
+                        request.phase != NativePPRequestPhase::NOT_REGISTERED ||
+                        request.computedTokens != 0 || request.cacheHitTokens != -1 ||
+                        request.sharedPrefixBoundary != 0 || request.queryAgeUs != -1 ||
+                        request.loadAgeUs != -1)
+                        throw std::invalid_argument("invalid prepared Native PP request");
+                    value->requests.push_back(std::move(request));
+                }
+                if (!value->valid())
+                    throw std::invalid_argument("invalid merged Native PP observation");
+                return value;
+            },
+            py::arg("prepared"), py::call_guard<py::gil_scoped_release>());
     m.attr("VLLM_WAITING_REQUEST_IDS_VERSION") = 1;
     m.attr("VLLM_SHARED_EXECUTION_SAMPLES_VERSION") = 1;
     m.attr("VLLM_NATIVE_CAPACITY_COMPLETION_FEATURES_VERSION") = 1;
+    m.attr("VLLM_NATIVE_CACHE_QUERY_INPUT_VERSION") = 1;
+    py::class_<NaviSchedNativeCacheQuery>(m, "_VLLMNativeCacheQuery")
+        .def(
+            py::init([](uint64_t requestId, uint64_t generation,
+                        int64_t localPrefixTokens, int32_t inputSource,
+                        int32_t futureState, int32_t loadState, int32_t receiveState) {
+                NaviSchedNativeCacheQuery query;
+                query.requestId = requestId;
+                query.generation = generation;
+                query.localPrefixTokenCount = localPrefixTokens;
+                query.inputSource = static_cast<NativeCacheQueryInputSource>(inputSource);
+                query.futureState = static_cast<NativeCacheQueryFutureState>(futureState);
+                query.loadState = static_cast<NativeCacheLoadState>(loadState);
+                query.receiveState = static_cast<NativeCacheReceiveState>(receiveState);
+                return query;
+            }),
+            py::arg("request_id"), py::arg("generation"), py::arg("local_prefix_tokens"),
+            py::arg("input_source"), py::arg("future_state"), py::arg("load_state"),
+            py::arg("receive_state"))
+        .def_readonly("request_id", &NaviSchedNativeCacheQuery::requestId)
+        .def_readonly("generation", &NaviSchedNativeCacheQuery::generation)
+        .def_readonly("local_prefix_tokens",
+                      &NaviSchedNativeCacheQuery::localPrefixTokenCount)
+        .def_property_readonly(
+            "input_source",
+            [](const NaviSchedNativeCacheQuery &q) { return int32_t(q.inputSource); })
+        .def_property_readonly(
+            "future_state",
+            [](const NaviSchedNativeCacheQuery &q) { return int32_t(q.futureState); })
+        .def_property_readonly(
+            "load_state",
+            [](const NaviSchedNativeCacheQuery &q) { return int32_t(q.loadState); })
+        .def_property_readonly("receive_state", [](const NaviSchedNativeCacheQuery &q) {
+            return int32_t(q.receiveState);
+        });
     m.def("native_wire_versions", []() {
         py::dict versions;
         versions["agent_update_protocol"] = NAVI_SCHED_AGENT_UPDATE_VERSION;
@@ -1430,6 +1734,8 @@ void bindNaviSchedData(py::module_ &m)
         .def_readonly("touches", &VLLMAgentBridge::ForwardBatch::touches)
         .def_readonly("predicted_cache_hit_token_counts",
                       &VLLMAgentBridge::ForwardBatch::predictedCacheHitTokenCounts)
+        .def_readonly("execution_load_included",
+                      &VLLMAgentBridge::ForwardBatch::executionLoadIncluded)
         .def("get_request_block_hashes",
              [](const VLLMAgentBridge::ForwardBatch &self,
                 uint64_t requestId) -> const NaviSchedBlockHashes & {
@@ -1479,9 +1785,16 @@ void bindNaviSchedData(py::module_ &m)
                  });
              });
     py::class_<VLLMAgentBridge>(m, "_VLLMAgentBridge")
-        .def(py::init<const std::shared_ptr<NaviSchedAgent> &, bool, bool>(),
+        .def(py::init<const std::shared_ptr<NaviSchedAgent> &, bool, bool, bool>(),
              py::arg("agent"), py::arg("pd_separated") = false,
-             py::arg("prefill_capacity_split") = false)
+             py::arg("prefill_capacity_split") = false,
+             py::arg("track_native_work") = false)
+        .def("forward_admission_watermark_ns",
+             &VLLMAgentBridge::forwardAdmissionWatermarkNs,
+             py::call_guard<py::gil_scoped_release>())
+        .def_static("acknowledge_forward_admission",
+                    &VLLMAgentBridge::acknowledgeForwardAdmission,
+                    py::arg("batch"), py::call_guard<py::gil_scoped_release>())
         .def("start_batch", &VLLMAgentBridge::startBatch, py::arg("batch_id"),
              py::arg("requests"),
              py::arg("prefix_cache_prompt_tokens") = std::map<uint64_t, int64_t>(),
@@ -1541,7 +1854,12 @@ void bindNaviSchedData(py::module_ &m)
             py::arg("native_preparation_ms") = 0.0,
             py::arg("execution_finish_time_us") = 0,
             py::arg("use_completed_capacity_features") = false,
+            py::arg("completed_features_valid") = true,
             py::call_guard<py::gil_scoped_release>())
+        .def("record_native_pp4_timing_sample",
+             &VLLMAgentBridge::recordNativePP4TimingSample, py::arg("target_ordinal"),
+             py::arg("slots"), py::arg("latency_ms"), py::arg("event_time_us"),
+             py::call_guard<py::gil_scoped_release>())
         .def("enable_observed_execution_window_training",
              &VLLMAgentBridge::enableObservedExecutionWindowTraining,
              py::call_guard<py::gil_scoped_release>())
@@ -1653,6 +1971,11 @@ void bindNaviSchedData(py::module_ &m)
              py::arg("waiting_request_ids") = py::none(),
              py::arg("record_timing") = false, py::kw_only(),
              py::arg("running_elapsed_request_count") = -1,
+             py::arg("native_cache_queries") = std::vector<NaviSchedNativeCacheQuery>(),
+             py::arg("native_pp_state") = py::none(),
+             py::arg("native_pp_observation_age_us") = -1,
+             py::arg("execution_load_tracked") = false,
+             py::arg("execution_load_requests") = std::vector<NaviSchedKVPreparation>(),
              py::call_guard<py::gil_scoped_release>())
         .def("last_workload_report_duration_ns",
              [](const VLLMAgentBridge &) { return lastWorkloadReportDurationNs; })
@@ -1674,6 +1997,7 @@ void bindNaviSchedData(py::module_ &m)
              py::call_guard<py::gil_scoped_release>())
         .def("report_execution_step", &VLLMAgentBridge::reportExecutionStep,
              py::arg("elapsed_ms"), py::arg("prefill_tokens"), py::arg("decode_tokens"),
+             py::arg("first_start_overtake_count") = 0,
              py::call_guard<py::gil_scoped_release>())
         .def("report_core_step", &VLLMAgentBridge::reportCoreStep, py::arg("elapsed_ms"),
              py::arg("future_wait"), py::call_guard<py::gil_scoped_release>())
@@ -1705,6 +2029,17 @@ void bindNaviSchedData(py::module_ &m)
         .def_readwrite("timeout_ms", &NaviSchedScheduleRequest::timeoutMs)
         .def_readwrite("route_only", &NaviSchedScheduleRequest::routeOnly)
         .def_property(
+            "native_prefill_slot_release",
+            [](const NaviSchedScheduleRequest &request) {
+                return int32_t(request.nativePrefillSlotRelease);
+            },
+            [](NaviSchedScheduleRequest &request, int32_t value) {
+                const auto release = static_cast<NativePPPrefillSlotRelease>(value);
+                if (!validNativePrefillSlotRelease(release))
+                    throw std::invalid_argument("invalid Native prefill slot release");
+                request.nativePrefillSlotRelease = release;
+            })
+        .def_property(
             "forward_payload",
             [](const NaviSchedScheduleRequest &self) {
                 return py::bytes(self.forwardPayload);
@@ -1722,6 +2057,21 @@ void bindNaviSchedData(py::module_ &m)
                       &NaviSchedReplayNodeMatch::matchedBlockCount);
     m.def("get_latency_formula_name", &getNaviSchedLatencyFormulaName,
           py::arg("formula"));
+    py::enum_<NativeKVExecutionState>(m, "NativeKVExecutionState")
+        .value("UNKNOWN", NativeKVExecutionState::UNKNOWN)
+        .value("PREPARING", NativeKVExecutionState::PREPARING)
+        .value("READY", NativeKVExecutionState::READY)
+        .value("EXECUTING", NativeKVExecutionState::EXECUTING)
+        .value("FAILED", NativeKVExecutionState::FAILED);
+    py::class_<NaviSchedKVPreparation>(m, "NaviSchedKVPreparation")
+        .def(py::init<>())
+        .def_readwrite("request_id", &NaviSchedKVPreparation::requestId)
+        .def_readwrite("local_batch_id", &NaviSchedKVPreparation::localBatchId)
+        .def_readwrite("load_generation", &NaviSchedKVPreparation::loadGeneration)
+        .def_readwrite("context_tokens", &NaviSchedKVPreparation::contextTokens)
+        .def_readwrite("compute_tokens", &NaviSchedKVPreparation::computeTokens)
+        .def_readwrite("running_capacity", &NaviSchedKVPreparation::runningCapacity)
+        .def_readwrite("state", &NaviSchedKVPreparation::state);
     py::class_<NaviSchedRequestStats>(m, "NaviSchedRequestStats")
         .def(py::init<>())
         .def_readwrite("total_token_count", &NaviSchedRequestStats::totalTokenCount)
@@ -1731,6 +2081,7 @@ void bindNaviSchedData(py::module_ &m)
                        &NaviSchedRequestStats::executionExternalReadTokens)
         .def_readwrite("predicted_cache_hit_token_count",
                        &NaviSchedRequestStats::predictedCacheHitTokenCount)
+        .def_readwrite("execution_load_included", &NaviSchedRequestStats::executionLoadIncluded)
         .def_readwrite("request_id", &NaviSchedRequestStats::requestId);
     py::class_<NaviSchedBatch, std::shared_ptr<NaviSchedBatch>>(m, "NaviSchedBatch")
         .def_readonly("batch_id", &NaviSchedBatch::batchId)
@@ -1754,6 +2105,7 @@ void bindNaviSchedData(py::module_ &m)
                       &NaviSchedDecision::predictedQueueLatencyMs)
         .def_readonly("predicted_execution_latency_ms",
                       &NaviSchedDecision::predictedExecutionLatencyMs)
+        .def_readonly("execution_load_included", &NaviSchedDecision::executionLoadIncluded)
         .def_readonly("reason", &NaviSchedDecision::reason);
 
     py::class_<NaviSchedRequestTiming>(m, "NaviSchedRequestTiming")
@@ -1944,6 +2296,23 @@ void bindNaviSchedData(py::module_ &m)
         .def_readwrite("draft_slots_per_request",
                        &TPUPrefillExecutionPolicyConfig::draftSlotsPerRequest);
 
+    py::class_<NaviSchedTairKvcmGroupConfig>(m, "NaviSchedTairKvcmGroupConfig")
+        .def(py::init<>())
+        .def_readwrite("group_id", &NaviSchedTairKvcmGroupConfig::groupId)
+        .def_readwrite("hash_block_scale", &NaviSchedTairKvcmGroupConfig::hashBlockScale)
+        .def_readwrite("tail", &NaviSchedTairKvcmGroupConfig::tail)
+        .def_readwrite("object_size_bytes", &NaviSchedTairKvcmGroupConfig::objectSizeBytes)
+        .def_readwrite("location_spec_names", &NaviSchedTairKvcmGroupConfig::locationSpecNames);
+    py::class_<NaviSchedTairKvcmConfig>(m, "NaviSchedTairKvcmConfig")
+        .def(py::init<>())
+        .def_readwrite("manager_endpoint", &NaviSchedTairKvcmConfig::managerEndpoint)
+        .def_readwrite("instance_id", &NaviSchedTairKvcmConfig::instanceId)
+        .def_readwrite("hash_block_size", &NaviSchedTairKvcmConfig::hashBlockSize)
+        .def_readwrite("node_count", &NaviSchedTairKvcmConfig::nodeCount)
+        .def_readwrite("discovery_refresh_interval_us", &NaviSchedTairKvcmConfig::discoveryRefreshIntervalUs)
+        .def_readwrite("groups", &NaviSchedTairKvcmConfig::groups)
+        .def("valid", &NaviSchedTairKvcmConfig::valid);
+
     py::class_<NaviSchedAgentConfig>(m, "NaviSchedAgentConfig")
         .def(py::init<>())
         .def_readwrite("service", &NaviSchedAgentConfig::service)
@@ -1956,8 +2325,13 @@ void bindNaviSchedData(py::module_ &m)
         .def_readwrite("execution_cache_source_enabled",
                        &NaviSchedAgentConfig::executionCacheSourceEnabled)
         .def_readwrite("peer_cache_enabled", &NaviSchedAgentConfig::peerCacheEnabled)
+        .def_readwrite("tair_kvcm_config", &NaviSchedAgentConfig::tairKvcmConfig)
         .def_readwrite("prefill_execution_policy",
                        &NaviSchedAgentConfig::prefillExecutionPolicy)
+        .def_readwrite("native_prefill_pipeline_stages",
+                       &NaviSchedAgentConfig::nativePrefillPipelineStages)
+        .def_readwrite("native_prefill_observation_only",
+                       &NaviSchedAgentConfig::nativePrefillObservationOnly)
         .def_readwrite("unified_latency_prediction",
                        &NaviSchedAgentConfig::unifiedLatencyPrediction)
         .def_readwrite("pd_unified_capacity_split",
@@ -2003,6 +2377,7 @@ void bindNaviSchedData(py::module_ &m)
                        &NaviSchedMasterConfig::queueOverloadFullCycleMultiplier)
         .def_readwrite("scheduler_name", &NaviSchedMasterConfig::schedulerName)
         .def_readwrite("scheduler_config", &NaviSchedMasterConfig::schedulerConfig)
+        .def_readwrite("tair_kvcm_config", &NaviSchedMasterConfig::tairKvcmConfig)
         .def_readwrite("time_compression", &NaviSchedMasterConfig::timeCompression)
         .def_readwrite("latency_model_pool_state_file",
                        &NaviSchedMasterConfig::latencyModelPoolStateFile)
@@ -2115,6 +2490,25 @@ void bindNaviSchedData(py::module_ &m)
             py::arg("mamba_replay_stop_shift") = py::none(),
             py::arg("mamba_retention_interval") = py::none(),
             py::arg("mamba_align") = py::none(), py::call_guard<py::gil_scoped_release>())
+        .def("begin_kv_preparation", &NaviSchedAgent::beginKVPreparation,
+             py::arg("request_id"), py::arg("preparing_start_mono_ns") = 0,
+             py::call_guard<py::gil_scoped_release>())
+        .def("complete_kv_preparation",
+             [](const NaviSchedAgent &self, uint64_t session, uint64_t requestId,
+                uint64_t generation, const py::object &success, int64_t observedNs) {
+                 if (!py::isinstance<py::bool_>(success))
+                     throw py::type_error("success must be an explicit bool");
+                 const bool value = success.cast<bool>();
+                 py::gil_scoped_release release;
+                 return self.completeKVPreparation(session, requestId, generation, value, observedNs);
+             }, py::arg("agent_session"), py::arg("request_id"), py::arg("generation"),
+             py::arg("success"), py::arg("observed_mono_ns") = 0)
+        .def("cancel_kv_preparation", &NaviSchedAgent::cancelKVPreparation,
+             py::arg("agent_session"), py::arg("request_id"), py::arg("generation"),
+             py::call_guard<py::gil_scoped_release>())
+        .def("retire_kv_preparation", &NaviSchedAgent::retireKVPreparation,
+             py::arg("agent_session"), py::arg("request_id"), py::arg("generation"),
+             py::call_guard<py::gil_scoped_release>())
         .def("get_grpc_port", &NaviSchedAgent::getGrpcPort);
 }
 

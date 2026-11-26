@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <memory>
 
 namespace autil {
 class DataBuffer;
@@ -10,6 +11,7 @@ namespace navi_sched {
 
 class NonLinearPrefillModelR;
 struct NaviSchedWorkloadSnapshot;
+struct TPUPrefillPP4TimingObservation;
 
 class NaviSchedLatencyFeatures {
 public:
@@ -116,6 +118,9 @@ struct NaviSchedLatencySample {
     int64_t eventTimeUs = 0;
     int64_t localBatchId = 0;
     int64_t latestAllocatedLocalBatchId = 0;
+    // Actual bounded PP support is shared across history/bucket copies. Legacy
+    // request features and their wire layout remain independent of this label.
+    std::shared_ptr<const TPUPrefillPP4TimingObservation> nativePP4Timing;
 };
 
 }

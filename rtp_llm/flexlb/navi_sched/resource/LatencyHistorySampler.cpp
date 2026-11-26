@@ -1,4 +1,5 @@
 #include "aios/navi_sched/resource/LatencyHistorySampler.h"
+#include "aios/navi_sched/common/TPUPrefillPP4Timing.h"
 
 #include "autil/DataBuffer.h"
 #include "navi/log/NaviLogger.h"
@@ -27,7 +28,9 @@ bool validAggregate(int64_t batchSize, int64_t cacheHitTokenCount,
 bool validSample(const NaviSchedLatencySample &sample)
 {
     const auto &features = sample.features;
-    return std::isfinite(sample.latencyMs) && sample.latencyMs >= 0.0 &&
+    return (!sample.nativePP4Timing ||
+            sample.nativePP4Timing->validLatencyMs(sample.latencyMs)) &&
+           std::isfinite(sample.latencyMs) && sample.latencyMs >= 0.0 &&
            features.getBatchCount() >= 0 && features.getPrecedingRequestCount() >= 0 &&
            validAggregate(features.getRunningBatchSize(),
                           features.getRunningCacheHitTokenCount(),
@@ -360,8 +363,17 @@ bool LatencyHistorySampler::deserializeWithExecutionCacheSource(autil::DataBuffe
 }
 
 bool LatencyHistorySampler::serializeImpl(autil::DataBuffer &dataBuffer, bool geometry,
-                                          bool cacheSource) const
+                                          bool cacheSource, bool nativePP4) const
 {
+    const auto compatible = [nativePP4](const auto &sample) {
+        return nativePP4 ? sample.nativePP4Timing && validSample(sample)
+                         : !sample.nativePP4Timing;
+    };
+    for (const auto &sample : *_history)
+        if (!compatible(sample)) return false;
+    for (const auto &[unused, bucket] : _buckets)
+        for (const auto &entry : bucket)
+            if (!compatible(entry.sample)) return false;
     if (geometry) {
         for (const auto &sample : *_history) {
             if (!sample.features.hasExecutionGeometry() ||
@@ -382,7 +394,7 @@ bool LatencyHistorySampler::serializeImpl(autil::DataBuffer &dataBuffer, bool ge
     dataBuffer.write(uint32_t(_history->size()));
     for (size_t index = 0; index < _history->size(); ++index) {
         dataBuffer.write(_historySequences[index]);
-        writeSampleImpl(dataBuffer, (*_history)[index], geometry, cacheSource);
+        writeSampleImpl(dataBuffer, (*_history)[index], geometry, cacheSource, nativePP4);
     }
     dataBuffer.write(uint32_t(_buckets.size()));
     for (const auto &[bucketIndex, bucket] : _buckets) {
@@ -390,7 +402,7 @@ bool LatencyHistorySampler::serializeImpl(autil::DataBuffer &dataBuffer, bool ge
         dataBuffer.write(uint32_t(bucket.size()));
         for (const auto &entry : bucket) {
             dataBuffer.write(entry.sequence);
-            writeSampleImpl(dataBuffer, entry.sample, geometry, cacheSource);
+            writeSampleImpl(dataBuffer, entry.sample, geometry, cacheSource, nativePP4);
         }
     }
     return true;
@@ -408,17 +420,18 @@ bool LatencyHistorySampler::deserializeWithExecutionGeometry(
 }
 
 bool LatencyHistorySampler::deserializeImpl(autil::DataBuffer &dataBuffer, bool geometry,
-                                            bool cacheSource)
+                                            bool cacheSource, bool nativePP4)
 {
     try {
-        return deserializeUnchecked(dataBuffer, geometry, cacheSource);
+        return deserializeUnchecked(dataBuffer, geometry, cacheSource, nativePP4);
     } catch (const autil::DataBufferCorruptedException &) {
         return false;
     }
 }
 
 bool LatencyHistorySampler::deserializeUnchecked(autil::DataBuffer &dataBuffer,
-                                                 bool geometry, bool cacheSource)
+                                                 bool geometry, bool cacheSource,
+                                                 bool nativePP4)
 {
     uint64_t nextSequence = 0;
     uint32_t historySize = 0;
@@ -436,7 +449,7 @@ bool LatencyHistorySampler::deserializeUnchecked(autil::DataBuffer &dataBuffer,
         uint64_t sequence = 0;
         NaviSchedLatencySample sample;
         dataBuffer.read(sequence);
-        if (!readSampleImpl(dataBuffer, sample, geometry, cacheSource)) {
+        if (!readSampleImpl(dataBuffer, sample, geometry, cacheSource, nativePP4)) {
             return false;
         }
         if (sequence <= previousHistorySequence || !validSample(sample)) {
@@ -474,7 +487,8 @@ bool LatencyHistorySampler::deserializeUnchecked(autil::DataBuffer &dataBuffer,
         for (uint32_t entryNumber = 0; entryNumber < entryCount; ++entryNumber) {
             Entry entry;
             dataBuffer.read(entry.sequence);
-            if (!readSampleImpl(dataBuffer, entry.sample, geometry, cacheSource)) {
+            if (!readSampleImpl(dataBuffer, entry.sample, geometry, cacheSource,
+                                nativePP4)) {
                 return false;
             }
             if (entry.sequence <= previousBucketSequence || !validSample(entry.sample) ||
@@ -532,9 +546,19 @@ void LatencyHistorySampler::readSample(autil::DataBuffer &dataBuffer,
 
 void LatencyHistorySampler::writeSampleImpl(autil::DataBuffer &dataBuffer,
                                             const NaviSchedLatencySample &sample,
-                                            bool geometry, bool cacheSource)
+                                            bool geometry, bool cacheSource,
+                                            bool nativePP4)
 {
-    if (cacheSource) {
+    if (nativePP4) {
+        const auto &observation = *sample.nativePP4Timing;
+        dataBuffer.write(observation.targetOrdinal);
+        dataBuffer.write(uint32_t(observation.slots.size()));
+        for (const auto &slot : observation.slots) {
+            dataBuffer.write(slot.ordinal);
+            dataBuffer.write(slot.dispatchTimeMs);
+            for (double feature : slot.features) dataBuffer.write(feature);
+        }
+    } else if (cacheSource) {
         sample.features.serializeWithExecutionCacheSource(dataBuffer);
     } else if (geometry) {
         sample.features.serializeWithExecutionGeometry(dataBuffer);
@@ -547,9 +571,24 @@ void LatencyHistorySampler::writeSampleImpl(autil::DataBuffer &dataBuffer,
 
 bool LatencyHistorySampler::readSampleImpl(autil::DataBuffer &dataBuffer,
                                            NaviSchedLatencySample &sample, bool geometry,
-                                           bool cacheSource)
+                                           bool cacheSource, bool nativePP4)
 {
-    if (cacheSource) {
+    sample.nativePP4Timing.reset();
+    if (nativePP4) {
+        auto observation = std::make_shared<TPUPrefillPP4TimingObservation>();
+        uint32_t count = 0;
+        dataBuffer.read(observation->targetOrdinal);
+        dataBuffer.read(count);
+        if (count == 0 || count > 6) return false;
+        observation->slots.resize(count);
+        for (auto &slot : observation->slots) {
+            dataBuffer.read(slot.ordinal);
+            dataBuffer.read(slot.dispatchTimeMs);
+            for (auto &feature : slot.features) dataBuffer.read(feature);
+        }
+        if (!observation->valid()) return false;
+        sample.nativePP4Timing = std::move(observation);
+    } else if (cacheSource) {
         if (!sample.features.deserializeWithExecutionCacheSource(dataBuffer) ||
             !sample.features.hasExecutionGeometry() ||
             !sample.features.hasExecutionCacheSource()) {
@@ -566,6 +605,16 @@ bool LatencyHistorySampler::readSampleImpl(autil::DataBuffer &dataBuffer,
     dataBuffer.read(sample.latencyMs);
     dataBuffer.read(sample.eventTimeUs);
     return true;
+}
+
+bool LatencyHistorySampler::serializeWithNativePP4Timing(autil::DataBuffer &buffer) const
+{
+    return serializeImpl(buffer, false, false, true);
+}
+
+bool LatencyHistorySampler::deserializeWithNativePP4Timing(autil::DataBuffer &buffer)
+{
+    return deserializeImpl(buffer, false, false, true);
 }
 
 }

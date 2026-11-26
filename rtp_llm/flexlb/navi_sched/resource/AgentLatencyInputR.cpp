@@ -1,4 +1,5 @@
 #include "aios/navi_sched/resource/AgentLatencyInputR.h"
+#include "aios/navi_sched/common/TPUPrefillPP4Timing.h"
 #include "aios/navi_sched/resource/AgentBatchR.h"
 #include "aios/navi_sched/resource/NonLinearPrefillModelR.h"
 #include "autil/TimeUtility.h"
@@ -22,6 +23,13 @@ void AgentLatencyInput::appendFeatures(NaviSchedLatencyFeatures &features,
 
 NaviSchedLatencySample AgentLatencyInput::makeLatencySample() const
 {
+    if (type == AgentLatencyInputType::NATIVE_PP4_TIMING_SAMPLE) {
+        NaviSchedLatencySample sample;
+        sample.nativePP4Timing = nativePP4Timing;
+        sample.latencyMs = latencyMs;
+        sample.eventTimeUs = eventTimeUs;
+        return sample;
+    }
     NaviSchedLatencySample sample;
     if (unifiedLatencySample && precedingFeatures.usesCapacitySplit()) {
         sample.features = precedingFeatures;
@@ -383,6 +391,21 @@ bool AgentLatencyInputR::submitBatchRequestsAborted(
     input.queuedBatchRequests = queuedBatchRequests;
     input.runningRequests = runningRequests;
     input.completedRequestCount = static_cast<int32_t>(requests.size());
+    input.eventTimeUs = eventTimeUs;
+    return submit(std::move(input));
+}
+
+bool AgentLatencyInputR::submitNativePP4TimingSample(
+    std::shared_ptr<const TPUPrefillPP4TimingObservation> observation, double latencyMs,
+    int64_t eventTimeUs)
+{
+    if (!shouldTrainInput(AgentLatencyInputType::NATIVE_PP4_TIMING_SAMPLE) ||
+        !observation || !observation->validLatencyMs(latencyMs) || eventTimeUs <= 0)
+        return false;
+    AgentLatencyInput input;
+    input.type = AgentLatencyInputType::NATIVE_PP4_TIMING_SAMPLE;
+    input.nativePP4Timing = std::move(observation);
+    input.latencyMs = latencyMs;
     input.eventTimeUs = eventTimeUs;
     return submit(std::move(input));
 }

@@ -10,6 +10,7 @@
 #include "navi/rpc_server/ArpcRegistryParam.h"
 
 #include <limits>
+#include <cmath>
 #include <algorithm>
 #include <set>
 #include <vector>
@@ -119,6 +120,8 @@ void SchedulerConfigR::Config::Jsonize(JsonWrapper &json)
     cost.Jsonize(json);
     json.Jsonize("peer_cache_enabled", peerCacheEnabled, peerCacheEnabled);
     json.Jsonize("cache_touch_enabled", cacheTouchEnabled, cacheTouchEnabled);
+    json.Jsonize("tair_query_max_objects", tairQueryMaxObjects, tairQueryMaxObjects);
+    json.Jsonize("tair_query_max_http_bytes", tairQueryMaxHttpBytes, tairQueryMaxHttpBytes);
     json.Jsonize("peer_cache_ready_agents", peerCacheReadyAgents, peerCacheReadyAgents);
     json.Jsonize("max_wait_schedule_count", maxWaitScheduleCount, maxWaitScheduleCount);
     json.Jsonize("max_wait_schedule_time_ms", maxWaitScheduleTimeMs,
@@ -148,6 +151,7 @@ bool SchedulerConfigR::Config::valid() const
          overloadControlStrategy != "min_latency" &&
          overloadControlStrategy != "post_cost_latency" &&
          overloadControlStrategy != "execution_utilization") ||
+        tairQueryMaxObjects == 0 || tairQueryMaxHttpBytes == 0 ||
         !executionUtilization.valid() || !cost.valid() || maxWaitScheduleCount == 0 ||
         maxWaitScheduleTimeMs < 10 ||
         maxWaitScheduleTimeMs > std::numeric_limits<int64_t>::max() / 1000 ||
@@ -952,6 +956,8 @@ bool SchedulerConfigR::applyPatch(const Config &current, const std::string &conf
         "optimization_time_budget_us",
         "peer_cache_enabled",
         "cache_touch_enabled",
+        "tair_query_max_objects",
+        "tair_query_max_http_bytes",
         "peer_cache_ready_agents",
         "parallelism",
         "latency_weight_concavity",

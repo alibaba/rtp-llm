@@ -44,21 +44,6 @@ private:
     bool updateScheduleTimer(navi::KernelComputeContext &ctx, int64_t currentTimeUs);
     std::shared_ptr<void> beginScheduleRound();
     void buildReadyContexts(int64_t activationTimeUs);
-    static size_t scheduleRoundRequestCount(const NaviSchedScheduleContext &context);
-    bool prepareAdmission(const std::shared_ptr<MasterScheduleContextData> &context,
-                          const std::function<uint64_t()> &randomDraw = {});
-    bool applyQueueOverloadLimit(
-        const std::shared_ptr<MasterScheduleContextData> &context,
-        const std::function<uint64_t()> &randomDraw = {},
-        bool forceExecutionUtilization = false);
-    void updateExecutionUtilization(const NaviSchedScheduleContext &context,
-                                    bool enabled);
-    static double calculateQueueOverloadDropProbability(double averagePredictedLatencyMs,
-                                                        int64_t scheduleCycleMs,
-                                                        int64_t startCycleMultiplier,
-                                                        int64_t fullCycleMultiplier);
-    bool shouldDropRequest(double dropProbability, uint64_t *sample = nullptr,
-                           const std::function<uint64_t()> &randomDraw = {});
     bool activate(navi::KernelComputeContext &ctx);
 
 private:
@@ -68,14 +53,6 @@ private:
     KERNEL_DEPEND_ON_FALSE(SchedulerConfigR, _schedulerConfigR);
 
 private:
-    ClusterExecutionUtilization _clusterExecutionUtilization;
-    ExecutionUtilizationController _executionUtilizationController;
-    bool _executionUtilizationLimitEnabled = false;
-    bool _useMinimumBacklogForAdmission = false;
-    bool _useSelectedQueueForAdmission = false;
-    ExecutionUtilizationController::Config _executionUtilizationConfig;
-    double _averageExecutionUtilization = 0.0;
-    size_t _executionUtilizationReportingNodes = 0;
     navi::AsyncPipePtr _requestPipe;
     navi::AsyncPipePtr _roundCompletionPipe;
     std::shared_ptr<std::atomic<bool>> _roundInFlight =
@@ -84,18 +61,15 @@ private:
     std::deque<std::shared_ptr<MasterScheduleContextData>> _readyContexts;
     size_t _maxWaitScheduleCount = 30;
     int64_t _maxWaitScheduleTimeMs = 10;
-    int64_t _queueOverloadStartCycleMultiplier = 10;
-    int64_t _queueOverloadFullCycleMultiplier = 30;
     double _timeCompression = 1.0;
     bool _peerCacheEnabled = false;
     bool _cacheTouchEnabled = true;
     uint64_t _peerCacheReadyConfigGeneration = 0;
     std::shared_ptr<const std::unordered_set<std::string>> _peerCacheReadyAgents;
     int64_t _requestPipeGeneration = 0;
-    multi_call::RandomGenerator _randomGenerator;
     uint64_t _nextScheduleId = 1;
-    std::string _schedulerKernelId;
     bool _requestEof = false;
+    std::shared_ptr<const SchedulerConfigR::Snapshot> _schedulerConfigSnapshot;
 };
 
 class MasterScheduleResultKernel : public navi::Kernel {
@@ -117,9 +91,12 @@ protected:
         uint64_t requestId = 0;
         TPUPrefillRequestInput input;
         int64_t fullPrefixBlocksBeforeQueryDrop = -1;
+        int64_t beforeTairTokens = -1;
+        int64_t readyOnlyHbmTokens = -1;
     };
 
     struct AdmissionPredictionAudit {
+        std::shared_ptr<const NaviSchedNativeFinalPrediction> nativePrediction;
         std::vector<FrozenExecutionInputAudit> frozenExecutionInputs;
         std::optional<TPUPrefillCacheObservation> cacheObservation = std::nullopt;
         double withWorkloadBaseMs = 0.0;

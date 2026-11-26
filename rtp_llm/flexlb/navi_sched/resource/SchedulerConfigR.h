@@ -54,6 +54,8 @@ public:
         CostSchedulerConfig cost;
         bool peerCacheEnabled = false;
         bool cacheTouchEnabled = true;
+        size_t tairQueryMaxObjects = 32768;
+        size_t tairQueryMaxHttpBytes = 4 * 1024 * 1024;
         std::vector<std::string> peerCacheReadyAgents;
         size_t maxWaitScheduleCount = 30;
         int64_t maxWaitScheduleTimeMs = 30;

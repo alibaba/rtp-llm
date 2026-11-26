@@ -63,6 +63,8 @@ private:
     int64_t _configuredQueueOverloadFullCycleMultiplier = 30;
     std::string _configuredSchedulerName;
     std::string _configuredSchedulerConfig;
+    std::string _configuredTairKvcmConfig;
+    bool _tairQueryEnabled = false;
     double _configuredTimeCompression = 1.0;
     std::string _configuredLatencyModelPoolStateFile;
     int64_t _configuredLatencyModelPoolSourceMinRevision = 128;

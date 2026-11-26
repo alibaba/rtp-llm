@@ -1,6 +1,7 @@
 #include "aios/navi_sched/service/NaviSchedMasterSummary.h"
 #include "aios/navi_sched/data/AgentLatencyToMasterData.h"
 
+#include <algorithm>
 #include <iomanip>
 #include <sstream>
 
@@ -425,6 +426,73 @@ std::string NaviSchedMasterNodeSummary::format() const
            << ", mape_pct=" << latencyValidation.totalMapePct << "\n"
            << "    last_event: " << lastEventType << ", event_time_us=" << lastEventTimeUs
            << ", receive_time_us=" << lastReceiveTimeUs;
+    if (workload.nativePPState) {
+        const auto &native = *workload.nativePPState;
+        output << "\n    native_pp_state: observation_id=" << native.observationId
+               << ", observation_age_us=" << workload.nativePPObservationAgeUs
+               << ", burst=" << native.burst << ", wave_open=" << native.waveOpen
+               << ", last_real_ordinal=" << native.lastRealOrdinal
+               << ", occupied_request_slots=" << native.occupiedRequestSlotCount
+               << ", slots=" << native.slots.size()
+               << ", results=" << native.results.size()
+               << ", requests=" << native.requests.size() << ", pending_output="
+               << (native.pendingDecision ? native.pendingDecision->schedulerOutputId
+                                          : 0);
+        for (const auto &slot : native.slots) {
+            output << "\n      slot=" << slot.ordinal
+                   << ", dispatch_age_us=" << slot.dispatchAgeUs
+                   << ", reply_age_us=" << slot.lastStageReplyAgeUs
+                   << ", expected_forward_ms=" << slot.expectedForwardMs
+                   << ", spans=" << slot.spans.size();
+        }
+        const auto showLoads = [&](const std::vector<uint64_t> &loads) {
+            if (loads.empty()) return;
+            output << ", load_request_ids=[";
+            for (size_t index = 0; index < std::min<size_t>(8, loads.size()); ++index)
+                output << (index ? "," : "") << loads[index];
+            output << "], load_request_count=" << loads.size();
+        };
+        for (const auto &result : native.results) {
+            output << "\n      output_id=" << result.schedulerOutputId
+                   << ", slot=" << result.slotOrdinal
+                   << ", execute_reply_ready=" << result.executeReplyReady
+                   << ", result_ready=" << result.resultReady;
+            showLoads(result.loadRequestIds);
+        }
+        if (native.pendingDecision && !native.pendingDecision->loadRequestIds.empty()) {
+            output << "\n      pending_output_id="
+                   << native.pendingDecision->schedulerOutputId;
+            showLoads(native.pendingDecision->loadRequestIds);
+        }
+        for (size_t index = 0; index < std::min<size_t>(8, native.requests.size());
+             ++index) {
+            const auto &request = native.requests[index];
+            output << "\n      pp_request_id=" << request.requestId
+                   << ", queue=" << int32_t(request.queue)
+                   << ", queue_index=" << request.queueIndex
+                   << ", phase=" << int32_t(request.phase)
+                   << ", computed_tokens=" << request.computedTokens
+                   << ", cache_hit_tokens=" << request.cacheHitTokens
+                   << ", prefill_slot_release=" << int32_t(request.prefillSlotRelease)
+                   << ", query_age_us=" << request.queryAgeUs
+                   << ", load_age_us=" << request.loadAgeUs;
+        }
+    }
+    if (!workload.nativeCacheQueries.empty()) {
+        const auto shown = std::min<size_t>(8, workload.nativeCacheQueries.size());
+        output << "\n    native_cache_queries: count="
+               << workload.nativeCacheQueries.size() << ", shown=" << shown;
+        for (size_t index = 0; index < shown; ++index) {
+            const auto &query = workload.nativeCacheQueries[index];
+            output << "\n      request_id=" << query.requestId
+                   << ", generation=" << query.generation
+                   << ", local_prefix_tokens=" << query.localPrefixTokenCount
+                   << ", input_source=" << int32_t(query.inputSource)
+                   << ", future_state=" << int32_t(query.futureState)
+                   << ", load_state=" << int32_t(query.loadState)
+                   << ", receive_state=" << int32_t(query.receiveState);
+        }
+    }
     return output.str();
 }
 

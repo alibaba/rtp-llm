@@ -61,7 +61,8 @@ AgentWorkloadOwnership::PreparedBatch AgentWorkloadOwnership::prepareRequests(
             return nullptr;
         }
         const auto miss = request.totalTokenCount - request.cacheHitTokenCount;
-        batch->requests.push_back({request.cacheHitTokenCount, miss});
+        batch->requests.push_back({request.cacheHitTokenCount, miss,
+                                   request.requestId, request.executionLoadIncluded});
         batch->byRequestId.emplace(request.requestId, std::prev(batch->requests.end()));
         batch->promptTokens += request.totalTokenCount;
         if (miss > 0) batch->prefillFeatures.appendRequest(request.cacheHitTokenCount, miss);
@@ -279,13 +280,22 @@ bool AgentWorkloadOwnership::combine(
     auto slots = std::max(0, observed.maxRunningRequestCount - observed.runningCapacitySlotCount);
     for (const auto &batch : _batchOrder) {
         if (batch->localBatchId > 0 && covered.count(batch->localBatchId)) continue;
-        if (slots <= 0) {
-            break;
-        }
+        if (slots <= 0 && !observed.executionLoadTracked) break;
         for (const auto &request : batch->requests) {
-            if (slots-- <= 0) {
-                break;
+            const bool runningCapacity = slots > 0;
+            if (observed.executionLoadTracked) {
+                if (!request.executionLoadIncluded.has_value()) return false;
+                combined.executionLoadRequests.push_back({
+                    request.requestId, batch->localBatchId, 0,
+                    request.cacheHitTokens, request.cacheMissTokens, runningCapacity,
+                    *request.executionLoadIncluded ? NativeKVExecutionState::READY
+                                                  : NativeKVExecutionState::PREPARING});
             }
+            if (!runningCapacity) {
+                if (!observed.executionLoadTracked) break;
+                continue;
+            }
+            --slots;
             ++combined.runningCapacitySlotCount;
             if (runningRequestCountForBatch && batch->localBatchId == trackedLocalBatchId) {
                 ++trackedRunningRequests;
@@ -327,6 +337,9 @@ bool AgentWorkloadOwnership::combine(
     combined.remainingTotalTokenCount += prefillFeatures.getCacheMissTokenCount();
     combined.remainingTotalTokenSquareSum += prefillFeatures.getCacheMissTokenSquareSum();
     combined.contextRemainingTotalTokenProductSum += prefillFeatures.getCacheHitMissTokenProductSum();
+    if (combined.executionLoadTracked)
+        std::sort(combined.executionLoadRequests.begin(), combined.executionLoadRequests.end(),
+                  [](const auto &a, const auto &b) { return a.requestId < b.requestId; });
     if (!combined.valid()) return false;
     if (runningRequestCountForBatch) {
         *runningRequestCountForBatch = trackedRunningRequests;

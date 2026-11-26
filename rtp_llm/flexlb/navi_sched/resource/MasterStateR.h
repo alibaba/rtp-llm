@@ -170,7 +170,16 @@ public:
                                      std::vector<TPUPrefillRequestInput> &inputs,
                                      int64_t *externalSuffixBlockCounts = nullptr,
                                      ::navi_sched::TPUPrefillCacheObservationBatch
-                                         *observation = nullptr) const override;
+                                         *observation = nullptr,
+                                     const NaviSchedExternalCacheReadyBlocks *remoteReady = nullptr, bool resolveExplicitCheckpointBoundary = true) const override;
+        bool getExecutionCacheInputs(
+            const std::vector<NaviSchedScheduleItem> &requests,
+            std::vector<TPUPrefillRequestInput> &inputs,
+            int64_t *externalSuffixBlockCounts,
+            ::navi_sched::TPUPrefillCacheObservationBatch *observation,
+            const NaviSchedExternalCacheReadyBlocks *remoteReady,
+            bool resolveExplicitCheckpointBoundary,
+            const std::vector<size_t> *commonPrefixes) const override;
         void getMatchedBlockCounts(
             const std::vector<NaviSchedScheduleItem> &requests,
             int64_t *matchedBlockCounts,
@@ -332,7 +341,10 @@ public:
                              int64_t *externalSuffixBlockCounts = nullptr,
                              TPUPrefillCacheObservation *observation = nullptr,
                              int64_t *fullPrefixBlockCounts = nullptr,
-                             const std::vector<size_t> *commonPrefixes = nullptr) const;
+                             const std::vector<size_t> *commonPrefixes = nullptr,
+                             int64_t *readyOnlyHbmBlockCounts = nullptr,
+                             const NaviSchedExternalCacheReadyBlocks *remoteReady = nullptr,
+                             int64_t *beforeTairBlockCounts = nullptr) const;
         int64_t matchExternalSuffix(
             const NaviSchedBlockHashes &blockHashes, int64_t promptTokens,
             int64_t blockSize, int64_t localBlocks, int64_t excludedScheduleBatchId = 0,

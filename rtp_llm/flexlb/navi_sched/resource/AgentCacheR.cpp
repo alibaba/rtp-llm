@@ -75,6 +75,7 @@ AgentCacheR::RequestAudit AgentCacheR::makeRequestAudit(
     stats.requestId = request.requestId;
     stats.totalTokenCount = request.totalTokenCount;
     stats.blockSize = request.blockSize;
+    stats.executionLoadIncluded = request.executionLoadIncluded;
     stats.predictedCacheHitTokenCount = request.predictedCacheHitTokenCount;
     stats.predictedQueueLatencyMs = request.predictedQueueLatencyMs;
     stats.predictedExecutionLatencyMs = request.predictedExecutionLatencyMs;

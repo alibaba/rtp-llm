@@ -16,6 +16,7 @@ constexpr int32_t GEOMETRY_LATENCY_STATE_VERSION = 7;
 constexpr size_t ONLINE_RECENT_HISTORY_SAMPLES = 8;
 int32_t stateVersionForBinary(int64_t binaryVersion)
 {
+    if (NonLinearPrefillModelR::usesNativePP4ForVersion(binaryVersion)) return 12;
     if (NonLinearPrefillModelR::usesCacheSourceForVersion(binaryVersion)) {
         return 11;
     }
@@ -185,8 +186,11 @@ bool AgentHistoryR::load(NonLinearPrefillModelR &model,
         if (sameHistory && sameBinary) {
             if (adamMoment1.size() != loaded->parameters.size() ||
                 adamMoment2.size() != loaded->parameters.size() ||
-                !(NonLinearPrefillModelR::usesCacheSourceForVersion(
+                !(NonLinearPrefillModelR::usesNativePP4ForVersion(
                       model.getBinaryVersion())
+                      ? _sampler.deserializeWithNativePP4Timing(stateBuffer)
+                  : NonLinearPrefillModelR::usesCacheSourceForVersion(
+                        model.getBinaryVersion())
                       ? _sampler.deserializeWithExecutionCacheSource(stateBuffer)
                   : NonLinearPrefillModelR::usesGeometryForVersion(
                         model.getBinaryVersion())
@@ -435,7 +439,10 @@ bool AgentHistoryR::makeSavePayload(
     payloadBuffer.write(snapshot->residualLastUpdateTimeUs);
     {
         autil::ScopedLock lock(_lock);
-        if (NonLinearPrefillModelR::usesCacheSourceForVersion(snapshot->binaryVersion)) {
+        if (NonLinearPrefillModelR::usesNativePP4ForVersion(snapshot->binaryVersion)) {
+            if (!_sampler.serializeWithNativePP4Timing(payloadBuffer)) return false;
+        } else if (NonLinearPrefillModelR::usesCacheSourceForVersion(
+                       snapshot->binaryVersion)) {
             if (!_sampler.serializeWithExecutionCacheSource(payloadBuffer)) {
                 return false;
             }

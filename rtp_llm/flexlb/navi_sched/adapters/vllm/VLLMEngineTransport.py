@@ -180,6 +180,22 @@ class VLLMEngineTransport:
                     )
                 self._initialize_client(int(block_size))
 
+    def _routing_prefill_slot_release(self, request: Any) -> int:
+        if self._prefill_routing_policy is None:
+            return 0
+        from .VLLMNativePipelineState import native_prefill_slot_release
+
+        sampling = getattr(request, "sampling_params", None)
+        max_tokens = (
+            1
+            if getattr(request, "pooling_params", None) is not None
+            else getattr(sampling, "max_tokens", None)
+        )
+        resumable = getattr(request, "resumable", None)
+        if max_tokens is None or resumable is None:
+            return 0
+        return native_prefill_slot_release(max_tokens, resumable)
+
     def _routing_prompt_token_ids(self, request: Any):
         token_ids = request.prompt_token_ids
         policy = self._prefill_routing_policy
@@ -257,6 +273,9 @@ class VLLMEngineTransport:
         route_options = (
             {"explicit_cache_checkpoint_position": checkpoint} if checkpoint else {}
         )
+        slot_release = self._routing_prefill_slot_release(request)
+        if slot_release:
+            route_options["native_prefill_slot_release"] = slot_release
         route_task = asyncio.create_task(
             self._client.route_async(
                 routing_token_ids,

@@ -1,3 +1,5 @@
+#include <algorithm>
+#include <stdexcept>
 #include "aios/navi_sched/debug/NaviSchedScheduleReplayJson.h"
 #include "aios/navi_sched/data/BlockHashUtil.h"
 #include <autil/legacy/jsonizable.h>
@@ -31,6 +33,224 @@ struct ReplayTargetJson : public autil::legacy::Jsonizable {
     }
 };
 
+struct ReplayNativeCacheQueryJson : public autil::legacy::Jsonizable {
+    NaviSchedNativeCacheQuery value;
+    ReplayNativeCacheQueryJson() = default;
+    explicit ReplayNativeCacheQueryJson(const NaviSchedNativeCacheQuery &input)
+        : value(input)
+    {
+    }
+    void Jsonize(JsonWrapper &json) override
+    {
+        auto source = int32_t(value.inputSource);
+        auto future = int32_t(value.futureState);
+        auto load = int32_t(value.loadState);
+        auto receive = int32_t(value.receiveState);
+        json.Jsonize("request_id", value.requestId);
+        json.Jsonize("generation", value.generation);
+        json.Jsonize("local_prefix_tokens", value.localPrefixTokenCount);
+        json.Jsonize("input_source", source);
+        json.Jsonize("future_state", future);
+        json.Jsonize("load_state", load);
+        json.Jsonize("receive_state", receive);
+        if (json.GetMode() != JsonMode::TO_JSON) {
+            value.inputSource = static_cast<NativeCacheQueryInputSource>(source);
+            value.futureState = static_cast<NativeCacheQueryFutureState>(future);
+            value.loadState = static_cast<NativeCacheLoadState>(load);
+            value.receiveState = static_cast<NativeCacheReceiveState>(receive);
+        }
+    }
+};
+
+struct ReplayNativePPSpanJson : public autil::legacy::Jsonizable {
+    NaviSchedNativePPSpan value;
+    ReplayNativePPSpanJson() = default;
+    explicit ReplayNativePPSpanJson(const NaviSchedNativePPSpan &input) : value(input) {}
+    void Jsonize(JsonWrapper &json) override
+    {
+        json.Jsonize("request_id", value.requestId, value.requestId);
+        json.Jsonize("computed_tokens", value.computedTokens, value.computedTokens);
+        json.Jsonize("scheduled_tokens", value.scheduledTokens, value.scheduledTokens);
+    }
+};
+
+struct ReplayNativePPSlotJson : public autil::legacy::Jsonizable {
+    NaviSchedNativePPSlot value;
+    ReplayNativePPSlotJson() = default;
+    explicit ReplayNativePPSlotJson(const NaviSchedNativePPSlot &input) : value(input) {}
+    void Jsonize(JsonWrapper &json) override
+    {
+        json.Jsonize("ordinal", value.ordinal, value.ordinal);
+        json.Jsonize("dispatch_age_us", value.dispatchAgeUs, value.dispatchAgeUs);
+        json.Jsonize("expected_forward_ms", value.expectedForwardMs,
+                     value.expectedForwardMs);
+        json.Jsonize("last_stage_reply_age_us", value.lastStageReplyAgeUs,
+                     value.lastStageReplyAgeUs);
+        std::vector<double> features(value.features.begin(), value.features.end());
+        json.Jsonize("features", features, features);
+        if (json.GetMode() != JsonMode::TO_JSON) {
+            if (features.size() != 8)
+                throw std::invalid_argument("PP stage geometry requires eight features");
+            std::copy(features.begin(), features.end(), value.features.begin());
+        }
+        std::vector<ReplayNativePPSpanJson> spans;
+        for (const auto &item : value.spans) spans.emplace_back(item);
+        json.Jsonize("spans", spans, spans);
+        if (json.GetMode() != JsonMode::TO_JSON) {
+            value.spans.clear();
+            for (const auto &item : spans) value.spans.emplace_back(item.value);
+        }
+    }
+};
+
+struct ReplayNativePPResultJson : public autil::legacy::Jsonizable {
+    NaviSchedNativePPResult value;
+    ReplayNativePPResultJson() = default;
+    explicit ReplayNativePPResultJson(const NaviSchedNativePPResult &input) : value(input)
+    {
+    }
+    void Jsonize(JsonWrapper &json) override
+    {
+        json.Jsonize("scheduler_output_id", value.schedulerOutputId,
+                     value.schedulerOutputId);
+        json.Jsonize("load_request_ids", value.loadRequestIds);
+        json.Jsonize("dispatch_age_us", value.dispatchAgeUs, value.dispatchAgeUs);
+        json.Jsonize("slot_ordinal", value.slotOrdinal, value.slotOrdinal);
+        json.Jsonize("execute_reply_ready", value.executeReplyReady,
+                     value.executeReplyReady);
+        json.Jsonize("result_ready", value.resultReady, value.resultReady);
+    }
+};
+
+struct ReplayNativePPRequestJson : public autil::legacy::Jsonizable {
+    NaviSchedNativePPRequest value;
+    ReplayNativePPRequestJson() = default;
+    explicit ReplayNativePPRequestJson(const NaviSchedNativePPRequest &input)
+        : value(input)
+    {
+    }
+    void Jsonize(JsonWrapper &json) override
+    {
+        json.Jsonize("request_id", value.requestId, value.requestId);
+        auto queue = int32_t(value.queue);
+        json.Jsonize("queue", queue, queue);
+        if (json.GetMode() != JsonMode::TO_JSON)
+            value.queue = static_cast<NativePPQueue>(queue);
+        json.Jsonize("queue_index", value.queueIndex, value.queueIndex);
+        auto phase = int32_t(value.phase);
+        json.Jsonize("phase", phase, phase);
+        if (json.GetMode() != JsonMode::TO_JSON)
+            value.phase = static_cast<NativePPRequestPhase>(phase);
+        json.Jsonize("prompt_tokens", value.promptTokens, value.promptTokens);
+        json.Jsonize("computed_tokens", value.computedTokens, value.computedTokens);
+        json.Jsonize("cache_hit_tokens", value.cacheHitTokens, value.cacheHitTokens);
+        json.Jsonize("shared_prefix_boundary", value.sharedPrefixBoundary,
+                     value.sharedPrefixBoundary);
+        json.Jsonize("query_age_us", value.queryAgeUs, value.queryAgeUs);
+        json.Jsonize("load_age_us", value.loadAgeUs, value.loadAgeUs);
+        auto release = int32_t(value.prefillSlotRelease);
+        json.Jsonize("prefill_slot_release", release);
+        if (json.GetMode() != JsonMode::TO_JSON)
+            value.prefillSlotRelease = static_cast<NativePPPrefillSlotRelease>(release);
+    }
+};
+
+struct ReplayNativePPDecisionJson : public autil::legacy::Jsonizable {
+    NaviSchedNativePPDecision value;
+    ReplayNativePPDecisionJson() = default;
+    explicit ReplayNativePPDecisionJson(const NaviSchedNativePPDecision &input)
+        : value(input)
+    {
+    }
+    void Jsonize(JsonWrapper &json) override
+    {
+        json.Jsonize("scheduler_output_id", value.schedulerOutputId,
+                     value.schedulerOutputId);
+        json.Jsonize("load_request_ids", value.loadRequestIds);
+        std::vector<double> features(value.features.begin(), value.features.end());
+        json.Jsonize("features", features, features);
+        if (json.GetMode() != JsonMode::TO_JSON) {
+            if (features.size() != 8)
+                throw std::invalid_argument("PP stage geometry requires eight features");
+            std::copy(features.begin(), features.end(), value.features.begin());
+        }
+        std::vector<ReplayNativePPSpanJson> spans;
+        for (const auto &item : value.spans) spans.emplace_back(item);
+        json.Jsonize("spans", spans, spans);
+        if (json.GetMode() != JsonMode::TO_JSON) {
+            value.spans.clear();
+            for (const auto &item : spans) value.spans.emplace_back(item.value);
+        }
+    }
+};
+
+struct ReplayNativePPStateJson : public autil::legacy::Jsonizable {
+    NaviSchedNativePPState value;
+    ReplayNativePPStateJson() = default;
+    explicit ReplayNativePPStateJson(const NaviSchedNativePPState &input) : value(input)
+    {
+    }
+    void Jsonize(JsonWrapper &json) override
+    {
+        json.Jsonize("occupied_request_slot_count", value.occupiedRequestSlotCount);
+        json.Jsonize("observation_id", value.observationId, value.observationId);
+        json.Jsonize("burst", value.burst, value.burst);
+        json.Jsonize("wave_open", value.waveOpen, value.waveOpen);
+        json.Jsonize("last_real_ordinal", value.lastRealOrdinal, value.lastRealOrdinal);
+        json.Jsonize("measured_forward_ms", value.measuredForwardMs,
+                     value.measuredForwardMs);
+        std::vector<ReplayNativePPSlotJson> slots;
+        for (const auto &item : value.slots) slots.emplace_back(item);
+        json.Jsonize("slots", slots, slots);
+        if (json.GetMode() != JsonMode::TO_JSON) {
+            value.slots.clear();
+            for (const auto &item : slots) value.slots.emplace_back(item.value);
+        }
+        std::vector<ReplayNativePPResultJson> results;
+        for (const auto &item : value.results) results.emplace_back(item);
+        json.Jsonize("results", results, results);
+        if (json.GetMode() != JsonMode::TO_JSON) {
+            value.results.clear();
+            for (const auto &item : results) value.results.emplace_back(item.value);
+        }
+        std::vector<ReplayNativePPRequestJson> requests;
+        for (const auto &item : value.requests) requests.emplace_back(item);
+        json.Jsonize("requests", requests, requests);
+        if (json.GetMode() != JsonMode::TO_JSON) {
+            value.requests.clear();
+            for (const auto &item : requests) value.requests.emplace_back(item.value);
+        }
+        bool hasDecision =
+            json.GetMode() == JsonMode::TO_JSON && bool(value.pendingDecision);
+        json.Jsonize("pending_decision_present", hasDecision, hasDecision);
+        if (hasDecision) {
+            ReplayNativePPDecisionJson decision;
+            if (value.pendingDecision) decision.value = *value.pendingDecision;
+            json.Jsonize("pending_decision", decision);
+            if (json.GetMode() != JsonMode::TO_JSON)
+                value.pendingDecision = std::move(decision.value);
+        } else if (json.GetMode() != JsonMode::TO_JSON)
+            value.pendingDecision.reset();
+    }
+};
+
+struct ReplayKVPreparationJson : public autil::legacy::Jsonizable {
+    NaviSchedKVPreparation value;
+    ReplayKVPreparationJson() = default;
+    explicit ReplayKVPreparationJson(const NaviSchedKVPreparation &input) : value(input) {}
+    void Jsonize(JsonWrapper &json) override {
+        json.Jsonize("request_id", value.requestId);
+        json.Jsonize("local_batch_id", value.localBatchId);
+        json.Jsonize("load_generation", value.loadGeneration);
+        json.Jsonize("context_tokens", value.contextTokens);
+        json.Jsonize("compute_tokens", value.computeTokens);
+        json.Jsonize("running_capacity", value.runningCapacity);
+        int32_t state = int32_t(value.state);
+        json.Jsonize("state", state);
+        if (json.GetMode() != JsonMode::TO_JSON) value.state = NativeKVExecutionState(state);
+    }
+};
+
 struct ReplayWorkloadJson : public autil::legacy::Jsonizable {
     NaviSchedWorkloadSnapshot value;
     ReplayWorkloadJson() = default;
@@ -38,6 +258,14 @@ struct ReplayWorkloadJson : public autil::legacy::Jsonizable {
     void Jsonize(JsonWrapper &json) override
     {
         json.Jsonize("revision", value.revision);
+        json.Jsonize("execution_load_tracked", value.executionLoadTracked, value.executionLoadTracked);
+        std::vector<ReplayKVPreparationJson> executionLoads;
+        for (const auto &load : value.executionLoadRequests) executionLoads.emplace_back(load);
+        json.Jsonize("execution_load_requests", executionLoads, executionLoads);
+        if (json.GetMode() != JsonMode::TO_JSON) {
+            value.executionLoadRequests.clear();
+            for (const auto &load : executionLoads) value.executionLoadRequests.push_back(load.value);
+        }
         json.Jsonize("event_time_us", value.eventTimeUs);
         json.Jsonize("batch_count", value.batchCount);
         json.Jsonize("request_count", value.requestCount);
@@ -108,6 +336,21 @@ struct ReplayWorkloadJson : public autil::legacy::Jsonizable {
         json.Jsonize("total_prompt_token_count", value.totalPromptTokenCount);
         json.Jsonize("in_flight_scheduled_token_count",
                      value.inFlightScheduledTokenCount);
+        bool hasNativePP =
+            json.GetMode() == JsonMode::TO_JSON && bool(value.nativePPState);
+        json.Jsonize("native_pp_state_present", hasNativePP, hasNativePP);
+        if (hasNativePP) {
+            ReplayNativePPStateJson observed;
+            if (value.nativePPState) observed.value = *value.nativePPState;
+            json.Jsonize("native_pp_state", observed);
+            json.Jsonize("native_pp_observation_age_us", value.nativePPObservationAgeUs);
+            if (json.GetMode() != JsonMode::TO_JSON)
+                value.nativePPState = std::make_shared<const NaviSchedNativePPState>(
+                    std::move(observed.value));
+        } else if (json.GetMode() != JsonMode::TO_JSON) {
+            value.nativePPState.reset();
+            value.nativePPObservationAgeUs = -1;
+        }
         auto admittedScheduleBatchId = value.admittedBatch.scheduleBatchId;
         auto admittedLocalBatchId = value.admittedBatch.localBatchId;
         auto admittedRequestCount = value.admittedBatch.requestCount;
@@ -116,6 +359,17 @@ struct ReplayWorkloadJson : public autil::legacy::Jsonizable {
         json.Jsonize("admitted_local_batch_id", admittedLocalBatchId);
         json.Jsonize("admitted_request_count", admittedRequestCount);
         json.Jsonize("admitted_request_ids", admittedRequestIds);
+        if (json.GetMode() != JsonMode::TO_JSON || !value.nativeCacheQueries.empty()) {
+            std::vector<ReplayNativeCacheQueryJson> queries;
+            for (const auto &query : value.nativeCacheQueries)
+                queries.emplace_back(query);
+            json.Jsonize("native_cache_queries", queries, queries);
+            if (json.GetMode() != JsonMode::TO_JSON) {
+                value.nativeCacheQueries.clear();
+                for (const auto &query : queries)
+                    value.nativeCacheQueries.emplace_back(query.value);
+            }
+        }
     }
 };
 
@@ -282,6 +536,13 @@ struct ReplayDecisionJson : public autil::legacy::Jsonizable {
         json.Jsonize("version", value.version);
         json.Jsonize("request_id", value.requestId);
         json.Jsonize("schedule_id", value.scheduleId);
+        int32_t included = value.executionLoadIncluded ? (*value.executionLoadIncluded ? 1 : 0) : -1;
+        json.Jsonize("execution_load_included", included, included);
+        if (json.GetMode() != JsonMode::TO_JSON) {
+            if (included < -1 || included > 1) throw std::invalid_argument("invalid execution load inclusion");
+            value.executionLoadIncluded.reset();
+            if (included >= 0) value.executionLoadIncluded = included != 0;
+        }
         json.Jsonize("schedule_loss", value.scheduleLoss);
         json.Jsonize("schedule_latency_us", value.scheduleLatencyUs,
                      value.scheduleLatencyUs);
@@ -322,6 +583,48 @@ struct ReplayDecisionJson : public autil::legacy::Jsonizable {
     }
 };
 
+struct ReplayNativePPPolicyJson : public autil::legacy::Jsonizable {
+    TPUPrefillExecutionPolicyConfig value;
+    void Jsonize(JsonWrapper &json) override
+    {
+        json.Jsonize("pcp_size", value.pcpSize, value.pcpSize);
+        json.Jsonize("interleave_size", value.interleaveSize, value.interleaveSize);
+        json.Jsonize("compile_sizes", value.compileSizes, value.compileSizes);
+        json.Jsonize("max_scheduled_tokens", value.maxScheduledTokens,
+                     value.maxScheduledTokens);
+        json.Jsonize("long_prefill_token_threshold", value.longPrefillTokenThreshold,
+                     value.longPrefillTokenThreshold);
+        json.Jsonize("hash_block_size", value.hashBlockSize, value.hashBlockSize);
+        json.Jsonize("scheduler_block_size", value.schedulerBlockSize,
+                     value.schedulerBlockSize);
+        json.Jsonize("use_eagle", value.useEagle, value.useEagle);
+        json.Jsonize("mamba_has_prefill_checkpoint_blocks",
+                     value.mambaHasPrefillCheckpointBlocks,
+                     value.mambaHasPrefillCheckpointBlocks);
+        json.Jsonize("mamba_partial_cache_hit", value.mambaPartialCacheHit,
+                     value.mambaPartialCacheHit);
+        json.Jsonize("async_kv_lookup_enabled", value.asyncKVLookupEnabled,
+                     value.asyncKVLookupEnabled);
+        json.Jsonize("async_kv_lookup_hash_block_size", value.asyncKVLookupHashBlockSize,
+                     value.asyncKVLookupHashBlockSize);
+        json.Jsonize("async_kv_lookup_uses_eagle", value.asyncKVLookupUsesEagle,
+                     value.asyncKVLookupUsesEagle);
+        json.Jsonize("fixed_prefill_chunk_plan", value.fixedPrefillChunkPlan,
+                     value.fixedPrefillChunkPlan);
+        json.Jsonize("mamba_block_aligned_split", value.mambaBlockAlignedSplit,
+                     value.mambaBlockAlignedSplit);
+        json.Jsonize("attention_schedule_capacity", value.attentionScheduleCapacity,
+                     value.attentionScheduleCapacity);
+        json.Jsonize("attention_query_tile", value.attentionQueryTile,
+                     value.attentionQueryTile);
+        json.Jsonize("attention_kv_tile", value.attentionKvTile, value.attentionKvTile);
+        json.Jsonize("prefill_lookahead", value.prefillLookahead, value.prefillLookahead);
+        json.Jsonize("max_input_tokens", value.maxInputTokens, value.maxInputTokens);
+        json.Jsonize("draft_slots_per_request", value.draftSlotsPerRequest,
+                     value.draftSlotsPerRequest);
+    }
+};
+
 struct ReplayNodeInfoJson : public autil::legacy::Jsonizable {
     NaviSchedNodeInfo value;
     ReplayNodeInfoJson() = default;
@@ -345,6 +648,16 @@ struct ReplayNodeInfoJson : public autil::legacy::Jsonizable {
         json.Jsonize("running_requests", value.runningRequests);
         json.Jsonize("pd_separated", value.pdSeparated);
         json.Jsonize("unified_latency_prediction", value.unifiedLatencyPrediction);
+        json.Jsonize("native_prefill_pipeline_stages", value.nativePrefillPipelineStages,
+                     value.nativePrefillPipelineStages);
+        if (value.nativePrefillPipelineStages > 0) {
+            json.Jsonize("pd_unified_capacity_split", value.pdUnifiedCapacitySplit);
+            ReplayNativePPPolicyJson policy;
+            policy.value = value.prefillExecutionPolicy;
+            json.Jsonize("native_prefill_pipeline_policy", policy);
+            if (json.GetMode() != JsonMode::TO_JSON)
+                value.prefillExecutionPolicy = std::move(policy.value);
+        }
         ReplayWorkloadJson workload(value.workload);
         json.Jsonize("workload", workload);
         if (json.GetMode() != JsonMode::TO_JSON) value.workload = workload.value;
@@ -438,6 +751,11 @@ struct ReplayScheduleRequestJson : public autil::legacy::Jsonizable {
         json.Jsonize("prompt_token_count", value.promptTokenCount);
         json.Jsonize("explicit_cache_checkpoint_position",
                      value.explicitCacheCheckpointPosition);
+        auto release = int32_t(value.nativePrefillSlotRelease);
+        json.Jsonize("native_prefill_slot_release", release, release);
+        if (json.GetMode() != JsonMode::TO_JSON)
+            value.nativePrefillSlotRelease =
+                static_cast<NativePPPrefillSlotRelease>(release);
         json.Jsonize("block_size", value.blockSize);
         auto blockHashes = BlockHashUtil::get(value.blockHashes);
         json.Jsonize("block_hashes", blockHashes);

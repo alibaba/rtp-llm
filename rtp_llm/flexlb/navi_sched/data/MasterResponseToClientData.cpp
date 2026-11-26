@@ -21,6 +21,7 @@ MasterResponseToClientDataPtr MasterResponseToClientData::makeCopy() const
     output->reason = reason;
     output->batchId = batchId;
     output->expectedBatchSize = expectedBatchSize;
+    output->executionLoadIncluded = executionLoadIncluded;
     output->predictedCacheHitTokenCount = predictedCacheHitTokenCount;
     output->predictedQueueLatencyMs = predictedQueueLatencyMs;
     output->predictedExecutionLatencyMs = predictedExecutionLatencyMs;
@@ -56,6 +57,8 @@ navi::SummaryErrorCode MasterResponseToClientData::getSummary(
     TABLE_ADD_COLUMN_VALUE(table, "schedule_latency_us", scheduleLatencyUs);
     TABLE_ADD_COLUMN_VALUE(table, "schedule_time_us", scheduleTimeUs);
     TABLE_ADD_COLUMN_VALUE(table, "batch_id", batchId);
+    TABLE_ADD_COLUMN_VALUE(table, "execution_load_included",
+                           executionLoadIncluded ? (*executionLoadIncluded ? 1 : 0) : -1);
     TABLE_ADD_COLUMN_VALUE(table, "expected_batch_size", expectedBatchSize);
     TABLE_ADD_COLUMN_VALUE(table, "predicted_cache_hit_tokens",
                            predictedCacheHitTokenCount);
@@ -102,6 +105,7 @@ void MasterResponseToClientData::serialize(autil::DataBuffer &dataBuffer) const
     decision.reason = reason;
     decision.batchId = batchId;
     decision.expectedBatchSize = expectedBatchSize;
+    decision.executionLoadIncluded = executionLoadIncluded;
     decision.predictedCacheHitTokenCount = predictedCacheHitTokenCount;
     decision.predictedQueueLatencyMs = predictedQueueLatencyMs;
     decision.predictedExecutionLatencyMs = predictedExecutionLatencyMs;
@@ -135,6 +139,7 @@ void MasterResponseToClientData::deserialize(autil::DataBuffer &dataBuffer)
     reason = std::move(decision.reason);
     batchId = decision.batchId;
     expectedBatchSize = decision.expectedBatchSize;
+    executionLoadIncluded = decision.executionLoadIncluded;
     predictedCacheHitTokenCount = decision.predictedCacheHitTokenCount;
     predictedQueueLatencyMs = decision.predictedQueueLatencyMs;
     predictedExecutionLatencyMs = decision.predictedExecutionLatencyMs;

@@ -1,4 +1,5 @@
 #include "aios/navi_sched/resource/MasterStateR.h"
+#include "aios/navi_sched/resource/MasterKVReadyWorkload.h"
 
 #include <algorithm>
 #include <atomic>
@@ -333,6 +334,7 @@ NaviSchedScheduleRequest MasterStateR::makeScheduleRequest(
     output.bizName = request.bizName;
     output.promptTokenCount = request.promptTokenCount;
     output.explicitCacheCheckpointPosition = request.explicitCacheCheckpointPosition;
+    output.nativePrefillSlotRelease = request.nativePrefillSlotRelease;
     output.blockSize = request.blockSize;
     output.blockHashes = request.blockHashes;
     output.timeoutMs = request.timeoutMs;
@@ -395,11 +397,21 @@ void applyLatencyModelInfo(
 }
 
 bool latencyModelMatchesPdMode(const AgentLatencyToMasterDataPtr &latency,
-                               bool pdSeparated, bool pdUnifiedCapacitySplit)
+                               bool pdSeparated, bool pdUnifiedCapacitySplit,
+                               int32_t nativeStages)
 {
     if (!latency || latency->modelRevision <= 0) {
         return true;
     }
+    const auto nativeModel =
+        NonLinearPrefillModelR::usesNativePP4ForVersion(latency->binaryVersion);
+    if (nativeModel)
+        return nativeStages == 4 && pdSeparated && pdUnifiedCapacitySplit;
+    // PP topology also supports observation with the existing capacity model.
+    if (nativeStages == 4)
+        return pdSeparated && pdUnifiedCapacitySplit &&
+               latency->binaryVersion == NonLinearPrefillModelR::BINARY_VERSION &&
+               NonLinearPrefillModelR::usesCapacitySplitParameters(latency->parameters);
     return NonLinearPrefillModelR::usesCapacitySplitParameters(latency->parameters) ==
            (!pdSeparated || pdUnifiedCapacitySplit);
 }
@@ -432,6 +444,7 @@ NaviSchedNodeInfo MasterStateR::NodeState::getInfo() const
 bool MasterStateR::NodeState::getScheduleSnapshot(const std::string &bizName,
                                                   NaviSchedNodeSnapshot &snapshot) const
 {
+    snapshot.nativePrefillReservations.clear();
     snapshot.runtimeLockWaitUs = 0;
     snapshot.runtimeLockHoldUs = 0;
     auto published =
@@ -475,6 +488,11 @@ bool MasterStateR::NodeState::getScheduleSnapshot(const std::string &bizName,
         }
         for (const auto &reservationPtr : _pendingBatchReservations) {
             const auto &reservation = *reservationPtr;
+            if (snapshot.latencyModel && NonLinearPrefillModelR::usesNativePP4ForVersion(
+                                             snapshot.latencyModel->binaryVersion)) {
+                reservation.batch.appendUnfinishedRequests(
+                    snapshot.nativePrefillReservations);
+            }
             snapshot.load.queueModel.setBaseMs(
                 snapshot.load.queueModel.baseMs(snapshot.load.queueTotalPredictedLatencyMs) +
                     reservation.batch.getPredictedLatencyMs(),
@@ -501,10 +519,11 @@ bool MasterStateR::NodeState::getScheduleSnapshot(const std::string &bizName,
             if (!snapshot.workload.valid()) {
                 return false;
             }
-            if (!snapshot.reportedWorkloadFeatures.appendPrefillWorkload(
-                    _runtimeState.workload)) {
-                return false;
-            }
+            const auto execution = MasterKVReadyWorkload::project(
+                snapshot.workload, snapshot.workload.executionLoadRequests,
+                snapshot.workload.executionLoadTracked);
+            if (!execution) return false;
+            snapshot.reportedWorkloadFeatures = *execution;
             if (_runtimeState.workload.prefillCapacitySplit) {
                 snapshot.maxRunningRequestCount =
                     _runtimeState.workload.maxRunningRequestCount;
@@ -518,10 +537,11 @@ bool MasterStateR::NodeState::getScheduleSnapshot(const std::string &bizName,
                     const auto &reservation = *reservationPtr;
                     if (!reservation.batch.appendWaitingCapacityFeatures(
                             snapshot.workloadFeatures, snapshot.maxRunningRequestCount,
-                            workloadSlots) ||
+                            workloadSlots, snapshot.workload.executionLoadTracked) ||
                         !reservation.batch.appendWaitingCapacityFeatures(
                             snapshot.reservedWorkloadFeatures,
-                            snapshot.maxRunningRequestCount, reservedSlots)) {
+                            snapshot.maxRunningRequestCount, reservedSlots,
+                            snapshot.workload.executionLoadTracked)) {
                         return false;
                     }
                 }
@@ -557,6 +577,10 @@ void MasterStateR::NodeState::rebuildInfoSnapshot()
     auto published = std::make_shared<PublishedSnapshot>();
     published->info = info;
     published->latencyModel = std::move(latencyModel);
+    if (info->nativePrefillPipelineStages == 4 && info->pdSeparated &&
+        info->unifiedLatencyPrediction && info->pdUnifiedCapacitySplit) {
+        published->prefillExecutionPolicy = info->prefillExecutionPolicy;
+    }
     if (published->latencyModel) {
         const auto version = published->latencyModel->binaryVersion;
         const auto geometry = NonLinearPrefillModelR::usesGeometryForVersion(version);
@@ -1403,11 +1427,28 @@ bool MasterStateR::NodeState::getExecutionCacheInputs(
 bool MasterStateR::NodeState::getExecutionCacheInputs(
     const std::vector<NaviSchedScheduleItem> &requests,
     std::vector<TPUPrefillRequestInput> &inputs, int64_t *externalSuffixBlockCounts,
-    TPUPrefillCacheObservationBatch *observation) const
+    TPUPrefillCacheObservationBatch *observation,
+    const NaviSchedExternalCacheReadyBlocks *remoteReady,
+    bool resolveExplicitCheckpointBoundary) const
+{
+    return getExecutionCacheInputs(requests, inputs, externalSuffixBlockCounts,
+                                   observation, remoteReady, resolveExplicitCheckpointBoundary,
+                                   nullptr);
+}
+
+bool MasterStateR::NodeState::getExecutionCacheInputs(
+    const std::vector<NaviSchedScheduleItem> &requests,
+    std::vector<TPUPrefillRequestInput> &inputs, int64_t *externalSuffixBlockCounts,
+    TPUPrefillCacheObservationBatch *observation,
+    const NaviSchedExternalCacheReadyBlocks *remoteReady,
+    bool resolveExplicitCheckpointBoundary,
+    const std::vector<size_t> *commonPrefixes) const
 {
     if (observation) {
         observation->pool.reset();
         observation->fullPrefixBlocksBeforeQueryDrop.clear();
+        if (observation->readyOnlyHbmBlockCounts)
+            observation->readyOnlyHbmBlockCounts->clear();
     }
     if (requests.empty()) {
         inputs.clear();
@@ -1417,14 +1458,19 @@ bool MasterStateR::NodeState::getExecutionCacheInputs(
         inputs.clear();
         return false;
     }
-    const auto publishedPolicy =
-        std::atomic_load_explicit(&_publishedSnapshot, std::memory_order_acquire);
+    const auto publishedPolicy = resolveExplicitCheckpointBoundary
+        ? std::atomic_load_explicit(&_publishedSnapshot, std::memory_order_acquire)
+        : std::shared_ptr<const PublishedSnapshot>();
     const auto count = requests.size();
     std::unique_ptr<int64_t[]> counts(new int64_t[count * 2]);
     auto *boundaries = counts.get() + count;
     TPUPrefillCacheObservation poolObservation;
     if (observation) {
         observation->fullPrefixBlocksBeforeQueryDrop.resize(count);
+        if (observation->readyOnlyHbmBlockCounts)
+            observation->readyOnlyHbmBlockCounts->resize(count, -1);
+        if (observation->beforeTairBlockCounts)
+            observation->beforeTairBlockCounts->assign(count, -1);
     }
     std::vector<int64_t> ownedExternal(count, 0);
     auto *external =
@@ -1432,9 +1478,15 @@ bool MasterStateR::NodeState::getExecutionCacheInputs(
     if (!matchCacheBatch(requests, counts.get(), boundaries, external,
                          observation ? &poolObservation : nullptr,
                          observation ? observation->fullPrefixBlocksBeforeQueryDrop.data()
-                                     : nullptr)) {
+                                     : nullptr, commonPrefixes,
+                         observation && observation->readyOnlyHbmBlockCounts
+                             ? observation->readyOnlyHbmBlockCounts->data() : nullptr, remoteReady,
+                         observation && observation->beforeTairBlockCounts
+                             ? observation->beforeTairBlockCounts->data() : nullptr)) {
         if (observation) {
             observation->fullPrefixBlocksBeforeQueryDrop.clear();
+            if (observation->readyOnlyHbmBlockCounts)
+                observation->readyOnlyHbmBlockCounts->clear();
         }
         inputs.clear();
         return false;
@@ -1444,6 +1496,8 @@ bool MasterStateR::NodeState::getExecutionCacheInputs(
         if (requests[i].request.promptTokenCount <= 0) {
             if (observation) {
                 observation->fullPrefixBlocksBeforeQueryDrop.clear();
+                if (observation->readyOnlyHbmBlockCounts)
+                    observation->readyOnlyHbmBlockCounts->clear();
             }
             inputs.clear();
             return false;
@@ -1456,7 +1510,7 @@ bool MasterStateR::NodeState::getExecutionCacheInputs(
             inputs.clear();
             return false;
         }
-        if (position > 0) {
+        if (position > 0 && resolveExplicitCheckpointBoundary) {
             if (!publishedPolicy || !publishedPolicy->prefillExecutionPolicy ||
                 publishedPolicy->prefillExecutionPolicy->schedulerBlockSize <= 0) {
                 inputs.clear();
@@ -1589,7 +1643,10 @@ bool MasterStateR::NodeState::matchCacheBatch(
     const std::vector<NaviSchedScheduleItem> &requests, int64_t *matchedBlockCounts,
     int64_t *sharedPrefixBoundaries, int64_t *externalSuffixBlockCounts,
     TPUPrefillCacheObservation *observation, int64_t *fullPrefixBlockCounts,
-    const std::vector<size_t> *commonPrefixes) const
+    const std::vector<size_t> *commonPrefixes,
+    int64_t *readyOnlyHbmBlockCounts,
+    const NaviSchedExternalCacheReadyBlocks *remoteReady,
+    int64_t *beforeTairBlockCounts) const
 {
     const auto beginUs = autil::TimeUtility::monotonicTimeUs();
     int64_t cacheAcquiredUs = beginUs;
@@ -1659,7 +1716,9 @@ bool MasterStateR::NodeState::matchCacheBatch(
         ready ? _cachePolicy.fullAttentionQueryDropTokens / _cachePolicy.blockSize : 0,
         NaviSchedCacheKeyType::BLOCK_POOL, fullPrefixBlockCounts,
         _hybridTailRequired ? sharedPrefixBoundaries : nullptr,
-        nullptr, nullptr, 1, true, &timing, commonPrefixes);
+        nullptr, nullptr, 1, true, &timing, commonPrefixes, readyOnlyHbmBlockCounts);
+    if (readyOnlyHbmBlockCounts && !_cacheStateReady.load(std::memory_order_relaxed))
+        std::fill(readyOnlyHbmBlockCounts, readyOnlyHbmBlockCounts + count, -1);
     if (mismatchCount > 0) {
         if (sharedPrefixBoundaries) {
             return false;
@@ -1680,6 +1739,8 @@ bool MasterStateR::NodeState::matchCacheBatch(
                 full > matchedBlockCounts[i] ? full * request.blockSize : 0;
         }
     }
+    if (beforeTairBlockCounts)
+        std::copy(matchedBlockCounts, matchedBlockCounts + count, beforeTairBlockCounts);
     const auto &external = _v6dCacheState;
     {
         autil::ScopedReadLock externalLock(external._cacheLock);
@@ -1700,14 +1761,19 @@ bool MasterStateR::NodeState::matchCacheBatch(
                                              policy.fullAttentionQueryDropTokens) /
                     policy.blockSize);
             }
+            std::vector<int64_t> baselineSuffix(beforeTairBlockCounts ? count : 0);
             _pendingCacheR->getMatchedBlockCounts(
                 _info.agentIdHash, requests, policy.blockSize,
                 external._cachedBlockHashes, external._fullReadyBlockHashes,
                 external._tailReadyBlockHashes, external._hybridTailRequired, suffix, 0,
                 NaviSchedCacheKeyType::V6D, nullptr, nullptr, matchedBlockCounts,
-                limits.data(), static_cast<size_t>(policy.linearStep));
+                limits.data(), static_cast<size_t>(policy.linearStep), true, nullptr,
+                nullptr, nullptr, remoteReady ? &remoteReady->full : nullptr,
+                remoteReady ? &remoteReady->tail : nullptr,
+                beforeTairBlockCounts ? baselineSuffix.data() : nullptr);
             for (size_t i = 0; i < count; ++i) {
                 matchedBlockCounts[i] += suffix[i];
+                if (beforeTairBlockCounts) beforeTairBlockCounts[i] += baselineSuffix[i];
             }
         }
     }
@@ -2233,7 +2299,11 @@ bool MasterStateR::reportAgent(const NodeStatePtr &state,
                                                   update->workload &&
                                                   update->workload->prefillCapacitySplit
                                             : infoSnapshot->pdUnifiedCapacitySplit;
-    if (!latencyModelMatchesPdMode(update->latency, pdSeparated, pdUnifiedCapacitySplit)) {
+    const auto nativeStages = update->control
+                                  ? update->control->nativePrefillPipelineStages
+                                  : infoSnapshot->nativePrefillPipelineStages;
+    if (!latencyModelMatchesPdMode(update->latency, pdSeparated, pdUnifiedCapacitySplit,
+                                   nativeStages)) {
         NAVI_KERNEL_LOG(ERROR,
                         "reject latency model incompatible with PD mode, "
                         "agentId [%s], pdSeparated [%d], parameterCount [%lu]",
@@ -2246,6 +2316,13 @@ bool MasterStateR::reportAgent(const NodeStatePtr &state,
                         "pdSeparated [%d], prefillCapacitySplit [%d]",
                         agentId.c_str(), pdSeparated,
                         update->workload->prefillCapacitySplit);
+        return false;
+    }
+    if (update->workload && update->workload->nativePPState && nativeStages != 4) {
+        NAVI_KERNEL_LOG(
+            ERROR,
+            "reject Native PP state without matching connection policy, agentId [%s]",
+            agentId.c_str());
         return false;
     }
     MasterLatencyModelR::RecordResult localLatencyRecordResult;
@@ -2397,6 +2474,12 @@ bool MasterStateR::reportAgent(const NodeStatePtr &state,
     auto &pendingCacheState = state->cacheForType(
         pendingCache ? pendingCache->cacheKeyType : NaviSchedCacheKeyType::BLOCK_POOL);
     const auto &workload = update->workload;
+    if (workload && workload->executionLoadTracked &&
+        !MasterKVReadyWorkload::project(*workload, workload->executionLoadRequests, true)) {
+        NAVI_KERNEL_LOG(ERROR, "invalid execution-load report agent=%s revision=%lu",
+                        agentId.c_str(), workload->revision);
+        return false;
+    }
     bool stateDiverged = false;
     bool cachePolicyInitialized = false;
     std::optional<NaviSchedCachePolicy> incomingCachePolicy;
@@ -3058,6 +3141,11 @@ bool MasterStateR::reportAgent(const NodeStatePtr &state,
                 update->control->projectedExecutionGeometryEnabled;
             node.prefillExecutionPolicy = update->control->prefillExecutionPolicy;
             node.peerCacheEnabled = update->control->peerCacheEnabled;
+            node.tairKvcmConfig = update->control->tairKvcmConfig.configured()
+                ? std::make_shared<const NaviSchedTairKvcmConfig>(update->control->tairKvcmConfig)
+                : nullptr;
+            node.nativePrefillPipelineStages =
+                update->control->nativePrefillPipelineStages;
             rebuildInfo = true;
         } else if (NaviSchedAgentEvent::SCHEDULER_CONFIG_UPDATED == event) {
             node.schedulerConfigGeneration = update->schedulerConfigGeneration;
@@ -3568,7 +3656,20 @@ std::shared_ptr<NaviSchedScheduleReplay> MasterStateR::makeScheduleReplay(
         const auto &scheduleNode = context._scheduleNodes[nodeIndex];
         const auto &node = scheduleNode._node;
         bool capturedMatches = false;
-        if (const auto state = std::dynamic_pointer_cast<const NodeState>(node)) {
+        if (NonLinearPrefillModelR::usesNativePP4ForVersion(
+                scheduleNode.getLatencyBinaryVersion())) {
+            // Native scoring consumes this memoized observation, including its
+            // external suffix and Full/Mamba boundary, rather than a later key scan.
+            const auto inputs = context.getExecutionCacheInputs(nodeIndex);
+            if (!inputs || inputs->size() != context._requests.size()) return nullptr;
+            for (size_t i = 0; i < inputs->size(); ++i) {
+                const auto block = context._requests[i].request.blockSize;
+                if (block <= 0) return nullptr;
+                matchedBlockCounts[i] = (*inputs)[i].computedTokens / block;
+            }
+            pendingStates.emplace_back();
+            capturedMatches = true;
+        } else if (const auto state = std::dynamic_pointer_cast<const NodeState>(node)) {
             const auto snapshot = state->capturePendingReplaySnapshot();
             pendingStates.emplace_back(snapshot.toJson());
             MasterPendingCacheR frozenPending;
@@ -3799,7 +3900,8 @@ void MasterStateR::reserveScheduleNodeBatch(NaviSchedScheduleContext &context,
              request.blockHashes,
              context._decisions[requestIndex].predictedQueueLatencyMs +
                  context._decisions[requestIndex].predictedExecutionLatencyMs,
-             request.explicitCacheCheckpointPosition});
+             request.explicitCacheCheckpointPosition, request.nativePrefillSlotRelease,
+             context._decisions[requestIndex].executionLoadIncluded});
     }
     const auto &decision = context._decisions[requestIndexes.front()];
     auto state =

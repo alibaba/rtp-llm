@@ -1,3 +1,4 @@
+#include "aios/navi_sched/common/TPUPrefillPP4Timing.h"
 #include "aios/navi_sched/resource/NonLinearPrefillModelR.h"
 #include "aios/navi_sched/resource/LatencyModelR.h"
 #include "aios/navi_sched/resource/MasterLatencyModelR.h"
@@ -2110,4 +2111,83 @@ TEST_F(NonLinearPrefillModelRTest, testPpCapacityKeepsOriginalAdamMomentumUpdate
     }
     ASSERT_EQ(2u, waitingUpdates.size());
     EXPECT_DOUBLE_EQ(waitingUpdates[0], waitingUpdates[1]);
+}
+
+TEST_F(NonLinearPrefillModelRTest, testNativePP4UsesDistinctColdModelCoordinates)
+{
+    navi::NaviResourceHelper helper;
+    ASSERT_TRUE(helper.config(
+        NonLinearPrefillModelR::RESOURCE_ID,
+        R"({"pd_separated":true,"use_capacity_split_feature":true,"native_prefill_pipeline_stages":4})"));
+    auto model = helper.getOrCreateResPtr<NonLinearPrefillModelR>();
+    ASSERT_TRUE(model);
+    EXPECT_EQ(36, model->getBinaryVersion());
+    EXPECT_EQ(std::vector<double>(9, 0.0), model->getInitialParameters());
+}
+
+namespace {
+NaviSchedLatencySample nativeTimingSample(double latency = 42.0)
+{
+    auto observation = std::make_shared<TPUPrefillPP4TimingObservation>();
+    observation->targetOrdinal = 0;
+    for (int64_t ordinal = 0; ordinal < 3; ++ordinal) {
+        TPUPrefillPipelineSlot slot;
+        slot.ordinal = ordinal;
+        slot.features[0] = ordinal == 0 ? 1.0 : 0.0;
+        observation->slots.push_back(slot);
+    }
+    NaviSchedLatencySample sample;
+    sample.nativePP4Timing = observation;
+    sample.latencyMs = latency;
+    sample.eventTimeUs = 1000;
+    return sample;
+}
+}
+
+TEST_F(NonLinearPrefillModelRTest, testNativePP4ColdTrainingUsesCompleteSupport)
+{
+    NonLinearPrefillModelR model;
+    model._nativePrefillPipelineStages = 4;
+    model._learningRate = 0.0005;
+    model._errorClipMs = 0.0;
+    const auto sample = nativeTimingSample();
+    auto parameters = model.getInitialParameters();
+    ASSERT_EQ(std::vector<double>(9, 0.0), parameters);
+    EXPECT_DOUBLE_EQ(0.0, model.predictSampleConfigured(sample, parameters));
+    for (size_t step = 0; step < 2000; ++step) {
+        std::vector<double> updated;
+        ASSERT_TRUE(model.fit({sample}, parameters, updated));
+        parameters = std::move(updated);
+    }
+    EXPECT_NEAR(42.0, model.predictSampleConfigured(sample, parameters), 0.1);
+    EXPECT_EQ(2001, model.getOptimizerState().step);
+    EXPECT_FALSE(model.fit({NaviSchedLatencySample()}, parameters, parameters));
+    NonLinearPrefillModelR legacy;
+    std::vector<double> unused;
+    EXPECT_FALSE(legacy.fit({sample}, legacy.getInitialParameters(), unused));
+}
+
+TEST_F(NonLinearPrefillModelRTest, testNativePP4SharesOriginalAdamMomentumEquation)
+{
+    NonLinearPrefillModelR model;
+    model._nativePrefillPipelineStages = 4;
+    model._learningRate = 0.001;
+    auto parameters = std::vector<double>(9, 0.0);
+    parameters[0] = 2.0;
+    parameters[1] = 10.0;
+    auto sample = nativeTimingSample();
+    sample.latencyMs = model.predictSampleConfigured(sample, parameters);
+    auto optimizer = model.getOptimizerState();
+    optimizer.adamMoment1[1] = -1.0;
+    optimizer.adamMoment2[1] = 1.0;
+    ASSERT_TRUE(model.restoreOptimizerState(optimizer));
+    std::vector<double> updated;
+    ASSERT_TRUE(model.fit({sample}, parameters, updated));
+    const auto after = model.getOptimizerState();
+    EXPECT_NEAR(-0.9, after.adamMoment1[1], 1e-12);
+    EXPECT_NEAR(0.95, after.adamMoment2[1], 1e-12);
+    const double correction = 0.001 * std::sqrt(1.0 - 0.95) / (1.0 - 0.9);
+    EXPECT_NEAR(10.0 + 1000.0 * correction * 0.9 / std::sqrt(0.95 + 1e-20), updated[1],
+                1e-10);
+    EXPECT_EQ(optimizer.step + 1, after.step);
 }

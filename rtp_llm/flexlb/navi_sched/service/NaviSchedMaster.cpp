@@ -2,6 +2,7 @@
 #include "aios/navi_sched/graph/MasterCollectorManager.h"
 #include "aios/navi_sched/graph/MasterScheduleGraph.h"
 #include "aios/navi_sched/kernel/SchedulerConfigSyncKernel.h"
+#include "aios/navi_sched/kernel/MasterTairQueryKernel.h"
 #include "aios/navi_sched/kernel/ReplayControlSyncKernel.h"
 #include "aios/navi_sched/kernel/ReplayMasterControlKernel.h"
 #include "aios/navi_sched/kernel/ReplayMasterHistoryKernel.h"
@@ -17,6 +18,7 @@
 #include "aios/navi_sched/scheduler/MasterScheduleContextKernel.h"
 #include "aios/navi_sched/scheduler/MasterScheduleResultGraph.h"
 #include "aios/navi_sched/config/NaviSchedConfigBuilder.h"
+#include "aios/navi_sched/resource/TairKvcmGrpcClientR.h"
 #include "aios/navi_sched/service/NaviSchedMasterSummary.h"
 #include "autil/legacy/jsonizable.h"
 #include "autil/legacy/fast_jsonizable_dec.h"
@@ -264,6 +266,7 @@ NaviSchedMaster::NaviSchedMaster(const NaviSchedMasterConfig &config)
     , _configuredQueueOverloadFullCycleMultiplier(config.queueOverloadFullCycleMultiplier)
     , _configuredSchedulerName(config.schedulerName)
     , _configuredSchedulerConfig(config.schedulerConfig)
+    , _configuredTairKvcmConfig(config.tairKvcmConfig)
     , _configuredTimeCompression(config.timeCompression)
     , _configuredLatencyModelPoolStateFile(config.latencyModelPoolStateFile)
     , _configuredLatencyModelPoolSourceMinRevision(
@@ -325,7 +328,15 @@ bool NaviSchedMaster::init()
     }
     _schedulerKernelId = "navi_sched." + _configuredSchedulerName + "_scheduler_k";
     autil::legacy::json::JsonMap schedulerConfig;
+    size_t tairQueryThreads = 0;
     try {
+        TairKvcmGrpcClientR::Topology queryTopology;
+        if (!_configuredTairKvcmConfig.empty()) {
+            autil::legacy::FastFromJsonString(queryTopology, _configuredTairKvcmConfig);
+            if (!queryTopology.valid()) { stop(); return false; }
+        }
+        _tairQueryEnabled = queryTopology.configured();
+        if (_tairQueryEnabled) tairQueryThreads = queryTopology.threadNum;
         if (!_configuredSchedulerConfig.empty()) {
             schedulerConfig = autil::legacy::AnyCast<autil::legacy::json::JsonMap>(
                 autil::legacy::json::ParseJson(_configuredSchedulerConfig));
@@ -420,20 +431,26 @@ bool NaviSchedMaster::init()
     latencyModelPoolConfig["max_candidates"] = _configuredLatencyModelPoolMaxCandidates;
     latencyModelPoolConfig["persist_interval_ms"] =
         _configuredLatencyModelPoolPersistIntervalMs;
+    NaviSchedConfigBuilder::NamedConfigs resourceConfigs = {
+        {SchedulerConfigR::RESOURCE_ID, autil::legacy::ToJsonString(dynamicResourceConfig, true)},
+        {ReplayControlR::RESOURCE_ID, "{}"},
+        {MasterLatencyModelR::RESOURCE_ID, autil::legacy::ToJsonString(latencyModelPoolConfig, true)},
+    };
+    if (_tairQueryEnabled)
+        resourceConfigs.emplace(TairKvcmGrpcClientR::RESOURCE_ID, _configuredTairKvcmConfig);
     auto configStr = NaviSchedConfigBuilder::build(
         runtimeConfig, kernels, true,
         {
             {MasterScheduleContextKernel::KERNEL_ID, _contextKernelConfig},
             {_schedulerKernelId, _schedulerKernelConfig},
         },
-        {{SchedulerConfigR::RESOURCE_ID,
-          autil::legacy::ToJsonString(dynamicResourceConfig, true)},
-         {ReplayControlR::RESOURCE_ID, "{}"},
-         {MasterLatencyModelR::RESOURCE_ID,
-          autil::legacy::ToJsonString(latencyModelPoolConfig, true)}},
+        resourceConfigs,
         {RouteModeR::RESOURCE_ID, SchedulerConfigR::RESOURCE_ID,
          ReplayControlR::RESOURCE_ID, MasterLatencyModelR::RESOURCE_ID},
-        getConfig().gig.grpcIoThreadNum, collectorTaskQueues);
+        getConfig().gig.grpcIoThreadNum, collectorTaskQueues,
+        _tairQueryEnabled ? std::vector<std::string>{}
+                          : std::vector<std::string>{MasterTairQueryKernel::KERNEL_ID},
+        tairQueryThreads);
     if (!configStr.empty() && update(configStr, std::make_shared<navi::ResourceMap>())) {
         return true;
     }
@@ -555,7 +572,7 @@ bool NaviSchedMaster::onUpdated()
     }
     _scheduleGraph = std::make_shared<MasterScheduleGraph>(
         navi, _masterScheduleR, _schedulerConfigR, _masterBizName, _contextKernelConfig,
-        _schedulerKernelId, _schedulerKernelConfig, getConfig().enableVis);
+        _schedulerKernelId, _schedulerKernelConfig, getConfig().enableVis, _tairQueryEnabled);
     if (!_scheduleGraph->start()) {
         _scheduleGraph.reset();
         return false;

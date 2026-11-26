@@ -16,6 +16,7 @@ class NaviSchedRequest:
     block_size: int = 256
     forward_payload: bytes = b""
     explicit_cache_checkpoint_position: int = 0
+    native_prefill_slot_release: int = 0
 
 
 @dataclass
@@ -94,6 +95,7 @@ def makeRequest(
     block_size: int = 256,
     forward_payload: bytes = b"",
     explicit_cache_checkpoint_position: int = 0,
+    native_prefill_slot_release: int = 0,
 ) -> NaviSchedRequest:
     if request_id is None or not 0 < int(request_id) < (1 << 64):
         raise ValueError("request_id must be a nonzero uint64")
@@ -109,6 +111,10 @@ def makeRequest(
         prompt_token_count
     ):
         raise ValueError("explicit cache checkpoint position must be within the prompt")
+    if type(
+        native_prefill_slot_release
+    ) is not int or native_prefill_slot_release not in (0, 1, 2):
+        raise ValueError("invalid Native prefill slot release")
     return NaviSchedRequest(
         prompt_token_count=int(prompt_token_count),
         block_hashes=block_hashes,
@@ -116,4 +122,5 @@ def makeRequest(
         block_size=int(block_size),
         forward_payload=bytes(forward_payload),
         explicit_cache_checkpoint_position=explicit_cache_checkpoint_position,
+        native_prefill_slot_release=native_prefill_slot_release,
     )
