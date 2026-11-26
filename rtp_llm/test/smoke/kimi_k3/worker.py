@@ -154,6 +154,16 @@ class Worker:
         self.runtime_tmp_dir = None
         self.runtime_tmp_identity = None
 
+    @staticmethod
+    def _reject_endpoint_overrides(config):
+        for endpoint in ("prefill", "decode"):
+            for key in ("prefill_chunk_size", "torchspec_env"):
+                if key in config[endpoint]:
+                    raise ValueError(
+                        f"{endpoint}.{key} is supported only by server_launcher / SSH two-host; "
+                        "native Worker does not support these endpoint overrides"
+                    )
+
     def prepare_native(self, config, role, run_id):
         """Prepare a Bazel remote role without a checkout, SSH or a container."""
         if self.config is not None or os.geteuid() == 0:
@@ -161,6 +171,7 @@ class Worker:
         if role not in ("prefill", "decode"):
             raise ValueError("Invalid worker role")
         config = validate_config(config, local_role=role)
+        self._reject_endpoint_overrides(config)
         return self._prepare_runtime(config, role, run_id)
 
     def _prepare_runtime(self, config, role, run_id):
@@ -414,6 +425,7 @@ class Worker:
     def start(self):
         if self.config is None or self.service is not None:
             raise ValueError("Prepare exactly once before starting a role")
+        self._reject_endpoint_overrides(self.config)
         if self.socket_dir is None:
             raise ValueError(
                 "Prepare the private CPU TP socket directory before starting"

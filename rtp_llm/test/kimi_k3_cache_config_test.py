@@ -6,16 +6,17 @@ from pathlib import Path
 from unittest.mock import patch
 
 from rtp_llm.models.kimi_k3.kimi_k3 import KimiK3, KimiK3ModelConfig, KimiK3Mtp
-from rtp_llm.models.kimi_k3.kimi_k31 import KimiK31, KimiK31Mtp
 from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3MtpWeight
+from rtp_llm.models.kimi_k3.kimi_k31 import KimiK31, KimiK31Mtp
 from rtp_llm.ops import (
+    CPRotateMethod,
     DataType,
     HybridAttentionType,
     KVCacheConfig,
     KvCacheDataType,
     KVCacheSpecType,
     ParallelismConfig,
-    CPRotateMethod,
+    RoleType,
 )
 from rtp_llm.utils.model_weight import W
 
@@ -30,21 +31,28 @@ class KimiK3MainCacheConfigTest(unittest.TestCase):
         )
         KimiK3._post_build_model_config(config)
 
-        self.assertEqual(config.hybrid_attention_config.hybrid_attention_types, [
-            HybridAttentionType.LINEAR,
-            HybridAttentionType.LINEAR,
-            HybridAttentionType.LINEAR,
-            HybridAttentionType.NONE,
-        ])
-        self.assertEqual([descs[0].tag for descs in config.kv_cache_spec_descs], [
-            "linear", "linear", "linear", "full"
-        ])
-        self.assertEqual([descs[0].cache_type for descs in config.kv_cache_spec_descs], [
-            KVCacheSpecType.LINEAR,
-            KVCacheSpecType.LINEAR,
-            KVCacheSpecType.LINEAR,
-            KVCacheSpecType.MLA,
-        ])
+        self.assertEqual(
+            config.hybrid_attention_config.hybrid_attention_types,
+            [
+                HybridAttentionType.LINEAR,
+                HybridAttentionType.LINEAR,
+                HybridAttentionType.LINEAR,
+                HybridAttentionType.NONE,
+            ],
+        )
+        self.assertEqual(
+            [descs[0].tag for descs in config.kv_cache_spec_descs],
+            ["linear", "linear", "linear", "full"],
+        )
+        self.assertEqual(
+            [descs[0].cache_type for descs in config.kv_cache_spec_descs],
+            [
+                KVCacheSpecType.LINEAR,
+                KVCacheSpecType.LINEAR,
+                KVCacheSpecType.LINEAR,
+                KVCacheSpecType.MLA,
+            ],
+        )
         self.assertEqual(
             [descs[0].head_sharded_transfer for descs in config.kv_cache_spec_descs],
             [True, True, True, False],
@@ -189,9 +197,13 @@ class KimiK3MtpMediaTokenConfigTest(unittest.TestCase):
                         )
                         if is_mtp:
                             self.assertFalse(config.attn_config.is_sparse)
-                            self.assertIsNone(getattr(config.k3_runtime_config, "dsa", None))
+                            self.assertIsNone(
+                                getattr(config.k3_runtime_config, "dsa", None)
+                            )
                         else:
-                            self.assertTrue(config.k3_runtime_config.dsa.indexer_use_fp8)
+                            self.assertTrue(
+                                config.k3_runtime_config.dsa.indexer_use_fp8
+                            )
 
     def test_media_token_is_retained_without_configuring_vit(self):
         for media_token_id in (0, 17, 127):
@@ -414,25 +426,75 @@ class KimiK31NativeMtpContractTest(unittest.TestCase):
         self.assertEqual(config.attn_config.kv_cache_dtype, KvCacheDataType.BASE)
         self.assertEqual([d.tag for d in config.kv_cache_spec_descs[0]], ["full"])
         self.assertIs(KimiK31Mtp.get_weight_cls(), KimiK3MtpWeight)
-        names = list(KimiK31Mtp.get_weight_cls().expected_checkpoint_tensor_names(config))
+        names = list(
+            KimiK31Mtp.get_weight_cls().expected_checkpoint_tensor_names(config)
+        )
         self.assertTrue(names)
         self.assertTrue(all("layers.93." in name for name in names))
         self.assertFalse(any("indexer" in name for name in names))
 
     def test_independent_parallelism_preserves_device_and_kv_ownership(self):
-        target = ParallelismConfig()
-        target.tp_size, target.ep_size, target.world_size = 8, 8, 8
-        target.local_rank, target.tp_rank, target.world_rank = 7, 7, 7
-        cp = target.prefill_cp_config
-        cp.method = CPRotateMethod.ALL_GATHER
-        cp.kv_cache_sharded, cp.prefill_cp_size, cp.preserve_tp_layout = True, 8, True
-        draft = KimiK31Mtp.speculative_parallelism_config(target)
-        self.assertTrue(target.prefill_cp_config.is_enabled())
-        self.assertFalse(draft.prefill_cp_config.is_enabled())
-        self.assertTrue(draft.prefill_cp_config.kv_cache_sharded)
-        self.assertEqual(draft.prefill_cp_config.prefill_cp_size, 8)
-        self.assertEqual((draft.local_rank, draft.tp_rank, draft.world_rank), (7, 7, 7))
-        self.assertEqual((draft.tp_size, draft.ep_size, draft.world_size), (8, 8, 8))
+        for role, tp_size, dp_size, query_cp in (
+            (RoleType.PREFILL, 8, 1, True),
+            (RoleType.PDFUSION, 8, 1, True),
+            (RoleType.DECODE, 4, 2, False),
+        ):
+            with self.subTest(role=role, tp_size=tp_size, dp_size=dp_size):
+                target = ParallelismConfig()
+                preserved = {
+                    "role_type": role,
+                    "tp_size": tp_size,
+                    "dp_size": dp_size,
+                    "ep_size": 8,
+                    "world_size": 8,
+                    "local_world_size": 8,
+                    "local_rank": 7,
+                    "tp_rank": 7 % tp_size,
+                    "dp_rank": 7 // tp_size,
+                    "ep_rank": 7,
+                    "world_rank": 7,
+                }
+                for field, value in preserved.items():
+                    setattr(target, field, value)
+                cp = target.prefill_cp_config
+                cp.method = (
+                    CPRotateMethod.ALL_GATHER if query_cp else CPRotateMethod.DISABLED
+                )
+                cp.kv_cache_sharded, cp.prefill_cp_size, cp.preserve_tp_layout = (
+                    True,
+                    8,
+                    query_cp,
+                )
+                original_cp = {
+                    field: getattr(cp, field)
+                    for field in (
+                        "method",
+                        "kv_cache_sharded",
+                        "prefill_cp_size",
+                        "preserve_tp_layout",
+                        "comm_buffer_size",
+                    )
+                }
+
+                draft = KimiK31Mtp.speculative_parallelism_config(target)
+
+                self.assertIsNot(draft, target)
+                self.assertIsNot(draft.prefill_cp_config, cp)
+                for field, value in preserved.items():
+                    self.assertEqual(getattr(draft, field), value, field)
+                    self.assertEqual(getattr(target, field), value, field)
+                self.assertEqual(
+                    draft.prefill_cp_config.method, CPRotateMethod.DISABLED
+                )
+                self.assertFalse(draft.prefill_cp_config.is_enabled())
+                self.assertFalse(draft.prefill_cp_config.preserve_tp_layout)
+                self.assertTrue(draft.prefill_cp_config.kv_cache_sharded)
+                self.assertEqual(draft.prefill_cp_config.prefill_cp_size, 8)
+                for field, value in original_cp.items():
+                    self.assertEqual(
+                        getattr(target.prefill_cp_config, field), value, field
+                    )
+                self.assertEqual(target.prefill_cp_config.is_enabled(), query_cp)
 
     def test_trained_embedding_and_head_never_alias_target(self):
         target = object.__new__(KimiK31)
@@ -456,7 +518,9 @@ class KimiK31NativeMtpContractTest(unittest.TestCase):
         for fixture in ({"synthetic": True}, {"trained": False}):
             checkpoint = KimiK3MtpMediaTokenConfigTest._checkpoint_config()
             checkpoint["rtp_llm_fixture"] = fixture
-            with self.subTest(fixture=fixture), self.assertRaisesRegex(ValueError, "trained native K3 MLA"):
+            with self.subTest(fixture=fixture), self.assertRaisesRegex(
+                ValueError, "trained native K3 MLA"
+            ):
                 KimiK31Mtp._from_config_json(checkpoint)
 
     def test_native_entry_preserves_nope_and_bf16_precision_guards(self):

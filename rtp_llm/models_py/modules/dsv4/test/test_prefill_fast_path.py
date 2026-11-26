@@ -291,12 +291,7 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
                         if outer_disabled
                         else nullcontext()
                     ):
-                        with (
-                            self.assertRaisesRegex(RuntimeError, "capture failure")
-                            if fail_capture
-                            else nullcontext()
-                        ):
-                            result = model.forward(inputs)
+                        result = model.forward(inputs)
                     self.assertTrue(moe_profiler.record_function_ranges_enabled())
                 events = [
                     e
@@ -315,10 +310,17 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
                 self.assertTrue(all(not e.is_user_annotation for e in events))
                 self.assertTrue(hook_gates)
                 self.assertFalse(any(hook_gates))
-                if not fail_capture:
-                    embedded = v4.embed(torch.tensor([3, 4]))
+                embedded = v4.embed(torch.tensor([3, 4]))
+                torch.testing.assert_close(result.hidden_states, embedded + 103)
+                if fail_capture:
+                    self.assertEqual(
+                        result.capture_error, "RuntimeError: capture failure"
+                    )
+                    self.assertIsNone(result.captured_hidden_states)
+                else:
+                    self.assertIsNone(result.capture_error)
                     torch.testing.assert_close(
-                        result,
+                        result.captured_hidden_states,
                         torch.cat([embedded + 3, embedded + 1, embedded + 103], dim=-1),
                     )
 
@@ -811,6 +813,17 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
                     capture_context,
                 )
                 self.assertIs(forward_layers.call_args.args[4], host_cu_seqlens)
+            for error in (None, "ValueError: snapshot"):
+                output = prefill_forward.PyModelOutputs(torch.zeros(2, 2))
+                output.capture_error = error
+                if error is None:
+                    output.captured_hidden_states = torch.ones(2, 6)
+                forward_layers.return_value = output
+                actual = prefill_forward.forward_prefill(
+                    v4, None, None, inputs, capture_context=object()
+                )
+                self.assertIs(actual, output)
+                self.assertEqual(actual.capture_error, error)
 
     def test_forward_prefill_falls_back_to_device_cu_seqlens(self):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -972,9 +985,12 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
                 self.assertEqual(canonical_final.call_count, int(enabled))
                 if enabled:
                     torch.testing.assert_close(
-                        out, torch.cat((expected, expected + 100), dim=-1)
+                        out.captured_hidden_states,
+                        torch.cat((expected, expected + 100), dim=-1),
                     )
-                    self.assertEqual(tuple(out.shape), (2, 4))
+                    torch.testing.assert_close(out.hidden_states, expected + 100)
+                    self.assertIsNone(out.capture_error)
+                    self.assertEqual(tuple(out.hidden_states.shape), (2, 2))
                 else:
                     torch.testing.assert_close(out, expected + 100)
                     self.assertEqual(tuple(out.shape), (2, 2))
@@ -1048,8 +1064,12 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
                 )
                 norm.assert_called_once()
                 torch.testing.assert_close(
-                    out, expected if enabled else expected[:, -2:]
+                    out.captured_hidden_states if enabled else out,
+                    expected if enabled else expected[:, -2:],
                 )
+                if enabled:
+                    torch.testing.assert_close(out.hidden_states, expected[:, -2:])
+                    self.assertIsNone(out.capture_error)
                 self.assertIs(v4._mtp_hidden_buffer, aux_buffer)
                 torch.testing.assert_close(aux_buffer[:2], expected[:, 2:4])
                 self.assertTrue(torch.isnan(aux_buffer[2:]).all())

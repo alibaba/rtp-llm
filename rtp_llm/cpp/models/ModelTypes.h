@@ -7,9 +7,13 @@
 #include "rtp_llm/cpp/cache/BufferTypes.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
 #include "rtp_llm/models_py/bindings/core/TensorHolder.h"
+#include "rtp_llm/cpp/utils/ServingDeviceHealth.h"
 #include <array>
+#include <functional>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -76,7 +80,12 @@ struct GptModelInitParams {
     int64_t kernel_block_table_width = 0;
 
     std::vector<int64_t>    hidden_state_capture_layer_ids;
-    HiddenStateCaptureDtype hidden_state_capture_dtype = HiddenStateCaptureDtype::BF16;
+    HiddenStateCaptureDtype hidden_state_capture_dtype                = HiddenStateCaptureDtype::BF16;
+    int64_t                 hidden_state_capture_max_inflight_samples = 64;
+    int64_t                 hidden_state_capture_max_inflight_bytes   = 1073741824;
+    int64_t                 hidden_state_capture_max_inflight_tokens  = 131072;
+    int64_t                 hidden_state_capture_max_pending_batches  = 8;
+    int64_t                 hidden_state_capture_poll_interval_ms     = 1000;
 };
 
 enum GptModelInputIndex : size_t {
@@ -203,14 +212,61 @@ struct TokenSliceInfo {
     size_t count  = 0;
 };
 
+struct HiddenStateCaptureFatalState {
+    bool        failed{false};
+    std::string message;
+    // Includes unassignable Get/Set/Restore failures; not service-health evidence.
+    std::optional<ServingDeviceFault> runtime_fault;
+};
+
+// Shared by stream copies, but never owns an Executor/model. The cancellation
+// callback must be noexcept and may only release an unsubmitted reservation.
+class HiddenStateCaptureReservation final {
+public:
+    explicit HiddenStateCaptureReservation(std::function<void()> cancel_callback):
+        cancel_callback_(std::move(cancel_callback)) {}
+
+    ~HiddenStateCaptureReservation() {
+        cancel();
+    }
+
+    bool active() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return static_cast<bool>(cancel_callback_);
+    }
+
+    void cancel() noexcept {
+        std::function<void()> callback;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            callback.swap(cancel_callback_);
+        }
+        if (callback) {
+            callback();
+        }
+    }
+
+private:
+    mutable std::mutex    mutex_;
+    std::function<void()> cancel_callback_;
+};
+
+using HiddenStateCaptureReservationPtr = std::shared_ptr<HiddenStateCaptureReservation>;
+// Success must carry an active reservation; failures never represent an admitted request.
+using HiddenStateCaptureAdmissionResult = ErrorResult<HiddenStateCaptureReservationPtr>;
+
 class ModelBase {
 public:
-    virtual ~ModelBase()                                                     = default;
-    virtual GptModelOutputs            forward(const GptModelInputs& inputs) = 0;
-    virtual void                       releaseBuffers() {}
-    virtual void                       prepareAttentionInputs(const GptModelInputs& inputs) {}
-    virtual std::optional<std::string> takeDeferredHiddenStateCaptureError() {
-        return std::nullopt;
+    virtual ~ModelBase()                                                 = default;
+    virtual GptModelOutputs        forward(const GptModelInputs& inputs) = 0;
+    virtual ServingDeviceHealthPtr servingDeviceHealth() const {
+        return {};
+    }
+    virtual void                              releaseBuffers() {}
+    virtual void                              prepareAttentionInputs(const GptModelInputs& inputs) {}
+    virtual HiddenStateCaptureAdmissionResult tryReserveHiddenStateCapture(int64_t /*request_id*/,
+                                                                           int64_t /*valid_tokens*/) {
+        return {ErrorCode::EXECUTION_EXCEPTION, "model does not support hidden-state capture"};
     }
 
     // Refresh only kv_cache_kernel_block_id-dependent state on a previously-
@@ -255,8 +311,7 @@ public:
         return false;
     }
 
-    virtual torch::Tensor restoreMtpPrefillHiddenStates(torch::Tensor /*hidden*/,
-                                                       const GptModelInputs& /*inputs*/) {
+    virtual torch::Tensor restoreMtpPrefillHiddenStates(torch::Tensor /*hidden*/, const GptModelInputs& /*inputs*/) {
         throw std::runtime_error("model cannot restore CP MTP prefill hidden states");
     }
 

@@ -1,4 +1,4 @@
-"""Prepare KV-only DSA plans and reusable phase buffers before execution."""
+"""Prepare DSA phase plans under full-live and independent Prefill KV budgets."""
 
 from dataclasses import dataclass
 
@@ -11,6 +11,7 @@ from rtp_llm.models_py.modules.dsv4.indexer_topk import (
 
 from ..mla_prefill_plan import prefill_kv_workspace_budget_bytes
 from .dsa_kv_chunk_plan import (
+    DsaKVCapacityError,
     indexer_selection_scratch_bytes,
     plan_dsa_kv_chunks,
     prefill_indexer_score_bytes,
@@ -61,6 +62,46 @@ def _prefill_block_layout(block, request_count, device):
     )
 
 
+def _tp_prefill_layout_extra_bytes(tokens, rows, heads, shards, query_dim, value_dim):
+    """Additional BF16 backing storage beyond the existing SFA layout allowance."""
+    if (
+        min(tokens, rows) < 0
+        or min(heads, shards, query_dim, value_dim) <= 0
+        or heads % shards
+        or tokens != rows * shards
+    ):
+        raise ValueError(
+            "DSA TP Prefill requires matching global/local rows and head shards"
+        )
+    kernel_heads = 64 if heads <= 64 else 128
+    if heads > kernel_heads:
+        raise ValueError("DSA TP Prefill supports at most 128 heads")
+    source_q = tokens * (heads // shards) * query_dim
+    compact_q = rows * heads * query_dim
+    padded_q = rows * kernel_heads * query_dim
+    local_o = rows * heads * value_dim
+    restored_o = tokens * (heads // shards) * value_dim
+    if shards > 1:
+        gathered_q = tokens * heads * query_dim
+        gathered_o = tokens * heads * value_dim
+        # The contiguous send dies before narrow(...).clone() creates compact Q.
+        gather_peak = source_q + gathered_q + max(source_q, compact_q)
+    else:
+        gathered_o = 0
+        # TP=1 now borrows the already-owned Q. Retain the old conservative
+        # allowance (its extra charge remains zero), including empty rows.
+        gather_peak = source_q + compact_q
+    layout_peak = max(
+        gather_peak,
+        source_q + compact_q + padded_q,
+        source_q + padded_q + local_o + gathered_o + restored_o,
+    )
+    # Keep the old conservative allowance, including local O even when there
+    # is no history/workspace. Count whole gather allocations, not their views.
+    existing = rows * (3 * heads + kernel_heads) * query_dim + 2 * local_o
+    return 2 * max(0, layout_peak - existing)
+
+
 class DsaKVExecution:
     @staticmethod
     def planning_key(params, name):
@@ -90,7 +131,8 @@ class DsaKVExecution:
             params.kernel_page_size,
             tuple(params.block_table.shape),
             lengths,
-            prefill_kv_workspace_budget_bytes() if prefill else owner.budgets[name],
+            owner.budgets[name],
+            prefill_kv_workspace_budget_bytes() if prefill else None,
             owner.other_resident_bytes(phase),
             owner.native_exact_topk,
             owner.indexer_use_fp8,
@@ -101,6 +143,11 @@ class DsaKVExecution:
             owner.route_capacity,
             owner.route_chunk_rows,
             owner.route_allocation_granularity,
+            getattr(params, "query_cp", False),
+            owner.heads,
+            owner.latent_dim,
+            owner.suffix_dim,
+            owner.value_dim,
         )
 
     def __init__(self, params, name):
@@ -126,22 +173,34 @@ class DsaKVExecution:
         graph_key = (self.batch, self.queries) if self.graph else None
         self.workspace = owner.phase(name, graph_key=graph_key)
         graph_decode = self.graph and not self.prefill
-        capacity_batch = max(owner.graph_max_requests, self.batch) if graph_decode else self.batch
+        capacity_batch = (
+            max(owner.graph_max_requests, self.batch) if graph_decode else self.batch
+        )
         capacity_queries = owner.graph_max_queries if graph_decode else self.queries
         if self.queries > capacity_queries:
-            raise ValueError("DSA Graph query width exceeds its initialized speculative capacity")
+            raise ValueError(
+                "DSA Graph query width exceeds its initialized speculative capacity"
+            )
         capacity_rows = capacity_batch * capacity_queries if graph_decode else self.rows
         capacity_selection_rows = (
             (capacity_rows + self.shards - 1) // self.shards
-            if graph_decode else self.selection_rows
+            if graph_decode
+            else self.selection_rows
         )
         frozen = self.workspace.graph_capacity if self.graph else None
-        geometry = (tuple(params.block_table.shape[1:]), params.page_size,
-                    params.kernel_page_size, self.shards, params.shard_rank)
+        geometry = (
+            tuple(params.block_table.shape[1:]),
+            params.page_size,
+            params.kernel_page_size,
+            self.shards,
+            params.shard_rank,
+        )
         if frozen is not None and (
             capacity_batch > frozen["batch"] or geometry != frozen["geometry"]
         ):
-            raise ValueError("DSA Graph scratch must capture its largest bucket first with fixed KV geometry")
+            raise ValueError(
+                "DSA Graph scratch must capture its largest bucket first with fixed KV geometry"
+            )
         self.blocks = []
         lengths = (
             params.kv_lens_host
@@ -172,8 +231,12 @@ class DsaKVExecution:
                     external += capacity_rows * owner.index_heads * (owner.index_dim + 16)
                 if not self.prefill:
                     if params.kernel_page_size % 64 or params.page_size % 64:
-                        raise ValueError("FP8 paged Indexer needs whole native64 subpages")
-                    from rtp_llm.models_py.modules.base.cuda.fp8_indexer_score import NativeFp8IndexerScore
+                        raise ValueError(
+                            "FP8 paged Indexer needs whole native64 subpages"
+                        )
+                    from rtp_llm.models_py.modules.base.cuda.fp8_indexer_score import (
+                        NativeFp8IndexerScore,
+                    )
 
                     if owner.indexer_score is None:
                         owner.indexer_score = NativeFp8IndexerScore()
@@ -194,13 +257,23 @@ class DsaKVExecution:
                 + capacity_rows * owner.heads * owner.value_dim * 4
                 + capacity_rows * owner.topk * 4
             )
+            if self.prefill and not getattr(params, "query_cp", False):
+                external += _tp_prefill_layout_extra_bytes(
+                    tokens,
+                    self.rows,
+                    owner.heads,
+                    self.shards,
+                    owner.latent_dim + owner.suffix_dim,
+                    owner.value_dim,
+                )
         # Page descriptors, global positions/request IDs, staged block tables,
         # per-block mapping metadata and small kernel/BLAS alignment scratch.
         # This reserve is checked against observed allocator peaks in tests.
         external += (
             64 * 1024 * 1024 + sum(lengths) * 16 + params.block_table.numel() * 16
         )
-        external += owner.other_resident_bytes(self.workspace)
+        other_resident = owner.other_resident_bytes(self.workspace)
+        external += other_resident
 
         def specifications(block):
             width = block.tokens
@@ -228,9 +301,17 @@ class DsaKVExecution:
                     )
             elif name == "indexer":
                 if self.fp8_indexer:
-                    add("cache.native64", (1 + capacity_batch * (width // 64), 64, 1, 132), torch.uint8)
+                    add(
+                        "cache.native64",
+                        (1 + capacity_batch * (width // 64), 64, 1, 132),
+                        torch.uint8,
+                    )
                 else:
-                    add("cache.restore", (capacity_batch, width, features), torch.bfloat16)
+                    add(
+                        "cache.restore",
+                        (capacity_batch, width, features),
+                        torch.bfloat16,
+                    )
             if self.graph and not self.prefill:
                 # Immutable owner/global positions are shared by all batch
                 # buckets. Mutable block IDs and native schedules are not.
@@ -263,12 +344,18 @@ class DsaKVExecution:
                                 add("decode.positions." + str(block.starts[0]), (select_width,), torch.int32)
                     add("gathered_indices", (padded, k), torch.int32)
                 for prefix, columns in (("block", select_width), ("merge", 2 * k)):
-                    s.update(indexer_candidate_workspace_shapes(
-                        q, columns, k, prefix=prefix, native=owner.native_exact_topk,
-                        # The first block writes directly to running. A second
-                        # candidate pair is needed only by later KV blocks.
-                        needs_block_output=block.tokens < total_history,
-                    ))
+                    s.update(
+                        indexer_candidate_workspace_shapes(
+                            q,
+                            columns,
+                            k,
+                            prefix=prefix,
+                            native=owner.native_exact_topk,
+                            # The first block writes directly to running. A second
+                            # candidate pair is needed only by later KV blocks.
+                            needs_block_output=block.tokens < total_history,
+                        )
+                    )
                 add("running.scores", (q, k), torch.float32)
                 add("running.positions", (q, k), torch.int32)
                 add("merge.input_scores", (q, 2 * k), torch.float32)
@@ -336,10 +423,15 @@ class DsaKVExecution:
             # Native selection and tie repair use only the declared buffers
             # plus CTA shared memory; no hidden Torch select/sort allocation.
             selection = max(
-                0 if owner.native_exact_topk and native_candidate_selection_supported(
-                    width, owner.topk, prefix=prefix
-                ) else indexer_selection_scratch_bytes(
-                    capacity_selection_rows, width, owner.topk
+                (
+                    0
+                    if owner.native_exact_topk
+                    and native_candidate_selection_supported(
+                        width, owner.topk, prefix=prefix
+                    )
+                    else indexer_selection_scratch_bytes(
+                        capacity_selection_rows, width, owner.topk
+                    )
                 )
                 for prefix, width in (("block", columns), ("merge", 2 * owner.topk))
             )
@@ -353,9 +445,9 @@ class DsaKVExecution:
                     native = prefill_indexer_score_bytes(capacity_rows, block.tokens)
             return selection + native
 
-        def metadata_bytes(plan):
+        def metadata_bytes(blocks):
             if self.fp8_sfa and self.prefill:
-                return len(plan.blocks) * 3 * 4
+                return len(blocks) * 3 * 4
             if self.graph and not self.prefill:
                 # All capture buckets/cache groups remain live. Reserve their
                 # mutable metadata up front, not just the current bucket.
@@ -365,22 +457,31 @@ class DsaKVExecution:
                 groups = owner.graph_cache_groups
                 summed_batches = requests * (requests + 1) // 2
                 query_widths = capacity_queries
-                total = groups * query_widths * summed_batches * params.block_table.shape[1] * 8
+                total = (
+                    groups
+                    * query_widths
+                    * summed_batches
+                    * params.block_table.shape[1]
+                    * 8
+                )
                 if self.fp8_indexer:
                     total += groups * sum(
                         query_widths * summed_batches * (block.tokens // 64) * 4
                         + summed_batches * query_widths * (query_widths + 1) // 2 * 4
                         + query_widths * requests * self.native_schedule_bytes
-                        for block in plan.blocks
+                        for block in blocks
                     )
                 return total
             if not self.fp8_indexer:
                 return 0
             if self.prefill:
-                return len(plan.blocks) * self.rows * 8
-            return sum(self.batch * (block.tokens // 64) * 4
-                       + self.rows * 4 + self.native_schedule_bytes
-                       for block in plan.blocks)
+                return len(blocks) * self.rows * 8
+            return sum(
+                self.batch * (block.tokens // 64) * 4
+                + self.rows * 4
+                + self.native_schedule_bytes
+                for block in blocks
+            )
 
         def temporary(block):
             specs = specifications(block)
@@ -398,69 +499,105 @@ class DsaKVExecution:
                 if key.startswith("cache.") or key in ("score", "block.keys")
             )
 
-        def temporary_kv(block):
-            specs = specifications(block)
-            return kv_workspace_bytes(specs[0] if staged_sfa else specs) + scratch(block)
+        def workspace_requirements(blocks):
+            stages = [{}, {}] if staged_sfa else [{}]
+            for block in blocks:
+                specs = specifications(block)
+                for shapes, spec in zip(stages, specs if staged_sfa else (specs,)):
+                    for n, (shape, dtype) in spec.items():
+                        if n not in shapes or _bytes(shape, dtype) > _bytes(*shapes[n]):
+                            shapes[n] = (shape, dtype)
+            shapes = {n: value for stage in stages for n, value in stage.items()}
+            required = (
+                self.workspace.required_staged_bytes(stages)
+                if staged_sfa
+                else self.workspace.required_bytes(shapes)
+            )
+            required += max((scratch(b) for b in blocks), default=0)
+            required += metadata_bytes(blocks)
+            return stages, shapes, required
 
-        budget = owner.budgets[name] if kv_budget is None else kv_budget
+        def kv_requirements(blocks):
+            _, shapes, _ = workspace_requirements(blocks)
+            return kv_workspace_bytes(shapes) + max((scratch(b) for b in blocks), default=0)
 
-        def plan_within_budget():
-            planning_budget = budget
-            page_limit = frozen["pages"] if frozen is not None else None
-            while True:
-                plan = plan_dsa_kv_chunks(
-                    lengths,
-                    page_tokens=params.page_size,
-                    budget_bytes=planning_budget,
-                    fixed_bytes=external if kv_budget is None else 0,
-                    temporary_bytes=temporary if kv_budget is None else temporary_kv,
-                    max_page_capacity=page_limit,
+        budget = owner.budgets[name]
+        # MegaTopk needs full-history logits. Fall back to bounded DCP before
+        # capture, but never change the selected algorithm for a captured arena.
+        modes = (True, False) if mega_topk else (False,)
+        if frozen is not None:
+            modes = (frozen["mega_topk"],)
+        try:
+            for mega_topk in modes:
+                try:
+                    plan = plan_dsa_kv_chunks(
+                        lengths,
+                        page_tokens=params.page_size,
+                        budget_bytes=budget,
+                        fixed_bytes=external,
+                        temporary_bytes=temporary,
+                        max_page_capacity=frozen["pages"] if frozen is not None else None,
+                        plan_temporary_bytes=lambda blocks: workspace_requirements(blocks)[2],
+                        kv_budget_bytes=kv_budget,
+                        kv_temporary_bytes=kv_requirements if kv_budget is not None else None,
+                    )
+                    break
+                except DsaKVCapacityError:
+                    if not mega_topk or frozen is not None:
+                        raise
+        except DsaKVCapacityError as error:
+            mode = "prefill" if self.prefill else "decode"
+            budget_env = (
+                "DSA_SFA_WORKSPACE_MB" if name == "sfa" else "DSA_INDEXER_WORKSPACE_MB"
+            )
+            if error.budget_scope == "prefill_kv":
+                budget_env = "RTP_PREFILL_KV_WORKSPACE_BUDGET_GIB"
+            if error.min_required_bytes is None:
+                budget_advice = (
+                    f"re-evaluate {budget_env} with full KV/workspace accounting; "
+                    "the fixed-only lower bound is not a sufficient budget."
                 )
-                stages = [{}, {}] if staged_sfa else [{}]
-                for block in plan.blocks:
-                    specs = specifications(block)
-                    for shapes, spec in zip(stages, specs if staged_sfa else (specs,)):
-                        for n, (shape, dtype) in spec.items():
-                            if n not in shapes or _bytes(shape, dtype) > _bytes(*shapes[n]):
-                                shapes[n] = (shape, dtype)
-                shapes = {n: value for stage in stages for n, value in stage.items()}
-                required = external + (
-                    self.workspace.required_staged_bytes(stages)
-                    if staged_sfa
-                    else self.workspace.required_bytes(shapes)
+            else:
+                minimum_mib = (error.min_required_bytes + 1024 * 1024 - 1) // (
+                    1024 * 1024
                 )
-                scratch_bytes = max((scratch(b) for b in plan.blocks), default=0)
-                required += scratch_bytes + metadata_bytes(plan)
-                # Different ragged blocks can maximize different named buffers.
-                # Account for the union of capacities, not only the largest block.
-                if kv_budget is not None:
-                    if kv_workspace_bytes(shapes) + scratch_bytes <= kv_budget:
-                        return plan, stages, shapes, required
-                    page_limit = plan.page_capacity - 1
-                    if page_limit <= 0:
-                        raise ValueError("Prefill KV workspace budget cannot fit the ragged arena")
-                else:
-                    if required <= budget:
-                        return plan, stages, shapes, required
-                    planning_budget -= required - budget
-
-        # MegaTopk needs the whole local history's logits at once. When the budget left beside the
-        # resident Graph arenas cannot hold them (eager steps), select with the chunked DCP path.
-        for mega_topk in (True, False) if mega_topk else (False,):
-            try:
-                plan, stages, shapes, required = plan_within_budget()
-                break
-            except ValueError:
-                if not mega_topk:
-                    raise
+                budget_advice = (
+                    f"provision {budget_env}>={minimum_mib} MiB for this geometry."
+                    if error.budget_scope == "phase"
+                    else f"provision {budget_env}>={minimum_mib / 1024} GiB for this geometry "
+                    "and recheck the independent full phase budget."
+                )
+            raise ValueError(
+                f"{error}; phase={name}/{mode}, query_cp={getattr(params, 'query_cp', False)}, "
+                f"total_physical_query_tokens={params.positions_d.numel()}, "
+                f"projection_capacity_tokens={tokens}, local_query_rows={self.rows}, "
+                f"capacity_rows={capacity_rows}, tp_size={owner.tp_size}, kv_shards={self.shards}, "
+                f"history_tokens={total_history}, history_requests={len(lengths)}, "
+                f"table_entries={params.block_table.numel()}, kernel_page_tokens={params.kernel_page_size}, "
+                f"heads={owner.heads}, latent_dim={owner.latent_dim}, suffix_dim={owner.suffix_dim}, "
+                f"value_dim={owner.value_dim}, hidden_dim={owner.hidden_dim}, q_rank={owner.q_rank}, "
+                f"nope_dim={owner.nope_dim}, topk={owner.topk}, attn_res_blocks={owner.attn_res_blocks}, "
+                f"layout_bytes={owner.layout_bytes}, other_resident_bytes={other_resident}, "
+                f"phase_resident_bytes={self.workspace.resident_bytes}; "
+                f"budget_scope={error.budget_scope}, prefill_kv_budget_bytes={kv_budget}; "
+                f"reduce total physical query batch (including padding), history or resident capacity, "
+                f"or {budget_advice} "
+                "This capacity diagnostic is not a GPU-memory guarantee or a "
+                "per-sequence token limit; shrinking KV chunks cannot remove fixed live data."
+            ) from error
+        stages, shapes, temporary_required = workspace_requirements(plan.blocks)
         self.mega_topk = mega_topk
-        # Keep the original chunk geometry and graph phase budget.
+        # Keep the conservative planning charge when direct kernels avoid these allocations.
         planning_reserve = 0
         if self.fp8_indexer and not self.prefill and "score" in shapes:
             planning_reserve += _bytes(*shapes.pop("score"))
         if self.direct_native_page_size is not None and "cache.native64" in shapes:
             planning_reserve += _bytes(*shapes.pop("cache.native64"))
-        self.plan, self.shapes, self.required_bytes = plan, shapes, required
+        self.plan, self.shapes, self.required_bytes = (
+            plan,
+            shapes,
+            external + temporary_required,
+        )
         self.stages = stages if staged_sfa else None
         if frozen is not None and plan.page_capacity != frozen["pages"]:
             raise ValueError("DSA Graph KV chunk capacity cannot change after capture")
@@ -472,11 +609,13 @@ class DsaKVExecution:
                 self.workspace.reserve_stages(self.stages, forbid_realloc=forbid)
             if frozen is None:
                 self.workspace.graph_capacity = {
-                    "batch": capacity_batch, "geometry": geometry,
+                    "batch": capacity_batch,
+                    "geometry": geometry,
                     "pages": plan.page_capacity,
+                    "mega_topk": mega_topk,
                 }
             self.workspace.metadata_budget_bytes = max(
-                self.workspace.metadata_budget_bytes, metadata_bytes(plan) + planning_reserve
+                self.workspace.metadata_budget_bytes, metadata_bytes(plan.blocks) + planning_reserve
             )
         self.block_ids = None
         if not self.prefill:
@@ -514,7 +653,11 @@ class DsaKVExecution:
             else:
                 start, width = block.starts[0], block.lengths[0]
                 geometry_key = (start, width, geometry)
-                cached = self.workspace.graph_geometry.get(geometry_key) if self.graph else None
+                cached = (
+                    self.workspace.graph_geometry.get(geometry_key)
+                    if self.graph
+                    else None
+                )
                 if cached is None:
                     local = torch.arange(
                         start, start + width, dtype=torch.int32, device=device
@@ -523,20 +666,30 @@ class DsaKVExecution:
                     positions = (
                         (local // page) * self.shards + params.shard_rank
                     ) * page + local % page
-                    owners = torch.arange(self.shards, dtype=torch.int32, device=device)[:, None]
+                    owners = torch.arange(
+                        self.shards, dtype=torch.int32, device=device
+                    )[:, None]
                     gathered_positions = (
                         ((local // page)[None, :] * self.shards + owners) * page
                         + local[None, :] % page
                     ).reshape(-1)
                     if self.graph:
-                        destination = self.workspace("positions." + str(start), (width,), torch.int32)
+                        destination = self.workspace(
+                            "positions." + str(start), (width,), torch.int32
+                        )
                         destination.copy_(positions)
                         positions = destination
-                        destination = self.workspace("dcp_positions." + str(start),
-                                                     (self.shards * width,), torch.int32)
+                        destination = self.workspace(
+                            "dcp_positions." + str(start),
+                            (self.shards * width,),
+                            torch.int32,
+                        )
                         destination.copy_(gathered_positions)
                         gathered_positions = destination
-                        self.workspace.graph_geometry[geometry_key] = (positions, gathered_positions)
+                        self.workspace.graph_geometry[geometry_key] = (
+                            positions,
+                            gathered_positions,
+                        )
                 else:
                     positions, gathered_positions = cached
                 prepared = DsaPreparedKVBlock(
@@ -582,17 +735,30 @@ class DsaKVExecution:
             if self.prefill:
                 info = block.slices.index_select(0, params.query_requests.long())
                 start, end, offset = info.unbind(1)
-                stop = offset + (torch.minimum(params.query_positions + 1, end) - start).clamp_min(0)
+                stop = offset + (
+                    torch.minimum(params.query_positions + 1, end) - start
+                ).clamp_min(0)
                 valid = params.query_positions >= 0
                 block.indexer_starts = torch.where(valid, offset, 0).int().contiguous()
                 block.indexer_ends = torch.where(valid, stop, 0).int().contiguous()
             else:
-                context = (params.decode.local_causal_lens - block.start).clamp(0, block.width)
-                context = torch.where(params.positions_d.view(self.batch, self.queries) >= 0,
-                                      context, 0).int().contiguous()
+                context = (params.decode.local_causal_lens - block.start).clamp(
+                    0, block.width
+                )
+                context = (
+                    torch.where(
+                        params.positions_d.view(self.batch, self.queries) >= 0,
+                        context,
+                        0,
+                    )
+                    .int()
+                    .contiguous()
+                )
                 if block.native_context is None:
                     if params.forbid_realloc:
-                        raise ValueError("FP8 Indexer native metadata must exist before Graph replay")
+                        raise ValueError(
+                            "FP8 Indexer native metadata must exist before Graph replay"
+                        )
                     block.native_context = context
                     if self.direct_native_page_size is None:
                         block.native_table = torch.arange(
@@ -619,8 +785,13 @@ class DsaKVExecution:
                 if block.native_schedule is None:
                     block.native_schedule = schedule
                 else:
-                    if schedule.shape != block.native_schedule.shape or schedule.dtype != block.native_schedule.dtype:
-                        raise ValueError("FP8 MQA scheduling capacity changed after prepare")
+                    if (
+                        schedule.shape != block.native_schedule.shape
+                        or schedule.dtype != block.native_schedule.dtype
+                    ):
+                        raise ValueError(
+                            "FP8 MQA scheduling capacity changed after prepare"
+                        )
                     block.native_schedule.copy_(schedule)
         if self.metadata_ready is not None:
             stream = torch.cuda.current_stream(self.owner.device)

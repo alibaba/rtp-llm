@@ -21,6 +21,38 @@ private:
     std::shared_ptr<HealthService>                       health_service_;
 };
 
+TEST_F(HealthServiceTest, EngineHealthCallbackPreservesResponsesAndStopPrecedence) {
+    for (const bool root : {false, true}) {
+        SCOPED_TRACE(root);
+        bool                     healthy = true;
+        int                      calls   = 0;
+        HealthService            service([&] {
+            ++calls;
+            return healthy;
+        });
+        http_server::HttpRequest request;
+        const auto               invoke = [&](const std::string& expected, int status) {
+            auto  mock = std::make_unique<http_server::MockHttpResponseWriter>();
+            auto* raw  = mock.get();
+            EXPECT_CALL(*raw, Write(expected)).WillOnce(Return(true));
+            std::unique_ptr<http_server::HttpResponseWriter> writer(std::move(mock));
+            if (root) {
+                service.healthCheck2(writer, request);
+            } else {
+                service.healthCheck(writer, request);
+            }
+            EXPECT_EQ(raw->_statusCode, status);
+        };
+        invoke(root ? R"({"status":"home"})" : R"("ok")", 200);
+        healthy = false;
+        invoke(R"({"detail":"inference service is unhealthy"})", 503);
+        EXPECT_EQ(calls, 2);
+        service.stop();
+        invoke(R"({"detail":"this server has been shutdown"})", 503);
+        EXPECT_EQ(calls, 2) << "stopped health must not invoke the engine";
+    }
+}
+
 TEST_F(HealthServiceTest, HealthCheck_ServerNotStopped) {
     EXPECT_CALL(*mock_writer_, Write).WillOnce(Invoke([](const std::string& data) {
         EXPECT_EQ(data, R"("ok")");

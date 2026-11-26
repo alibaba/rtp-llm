@@ -14,6 +14,18 @@ load("//rtp_llm/test/utils:cuda13_sm100_test.bzl", "cuda13_sm100_py_test")
     for tp in [2, 8]
 ]
 
+# CPU tensors and mocked transports; no CUDA kernels or NCCL are executed.
+py_test(
+    name = "flashmla_sparse_page_rr_layout_test",
+    srcs = ["flashmla_sparse_page_rr_layout_test.py"],
+    deps = [
+        "//rtp_llm:torch",
+        "//rtp_llm:triton",
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+)
+
 # only can run in cu129 so mark as manual
 py_test(
     name = "sparse_mla_op_test",

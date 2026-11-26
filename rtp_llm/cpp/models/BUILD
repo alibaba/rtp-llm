@@ -167,6 +167,7 @@ cc_library(
     ], exclude = ["ModelInputsLogger.cc"]),
     deps = [
         ":model_inputs_logger",
+        "//rtp_llm/cpp/utils:serving_device_health",
         ":sample_infos",
         ":logits_processor",
         ":dfa_utils",
@@ -181,6 +182,7 @@ cc_library(
         "//rtp_llm/cpp/metrics",
         "//rtp_llm/models_py/bindings/core:cache_store_async_writer",
         "//rtp_llm/cpp/utils:debug_utils",
+        "//rtp_llm/cpp/utils:error_code",
         "//rtp_llm/cpp/utils:profiling_scope",
         "//rtp_llm/cpp/utils:tensor_debug_utils",
         "//rtp_llm/cpp/cuda_graph:cuda_graph_impl",
@@ -196,9 +198,15 @@ cc_library(
             "//rtp_llm/models_py/bindings/cuda/kernels:cuda_graph_prepare",
             "//rtp_llm/models_py/bindings/cuda:bf16_gemm_op",
             "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
+            "@local_config_cuda//cuda:cuda_headers",
+            "@local_config_cuda//cuda:cudart",
+        ],
+        "@//:using_rocm": [
+            "@local_config_rocm//rocm:rocm_headers",
+            "@local_config_rocm//rocm:rocm",
         ],
         "//conditions:default": [],
-    }),
+    }) + torch_deps(),
     visibility = ["//visibility:public"],
 )
 

@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
+#include "rtp_llm/cpp/normal_engine/HiddenStateCapturePolicy.h"
 
 #include <algorithm>
 #include <unordered_set>
@@ -167,6 +168,12 @@ NormalBatchStreamProcessor::NormalBatchStreamProcessor(
     bool                               warm_up,
     int                                async_worker_count) {
     model_input_gatherer_config_ = std::move(model_input_gatherer_config);
+    model_input_gatherer_config_.enable_hidden_state_capture =
+        !selectHiddenStateCaptureLayerIds(HiddenStateCaptureModelRole::TARGET,
+                                          pd_sep_config.role_type,
+                                          warm_up,
+                                          model_config.hidden_state_capture_layer_ids)
+             .empty();
 
     model_input_gatherer_   = std::make_unique<NormalModelInputGatherer>(model_input_gatherer_config_);
     sampler_input_gatherer_ = std::make_unique<NormalSamplerInputGatherer>();

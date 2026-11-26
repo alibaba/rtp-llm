@@ -404,9 +404,10 @@ void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_s
     // queues. group_id/group_size on a stream in waiting_streams are status metadata;
     // they must not delay or isolate ordinary FIFO admission.
 
-    GenerateStreamPtr execution_mode_stream;
-    const auto        capture_execution_mode = [&](const list<GenerateStreamPtr>& streams) {
-        if (execution_mode_stream) {
+    bool                has_execution_mode = false;
+    StreamExecutionMode execution_mode;
+    const auto capture_execution_mode = [&](const list<GenerateStreamPtr>& streams) {
+        if (has_execution_mode) {
             return;
         }
         const auto it = std::find_if(streams.begin(), streams.end(), [continuous_prefill](const auto& stream) {
@@ -417,7 +418,8 @@ void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_s
                                || (stream->hasEvent(StreamEvents::LoadInitiated) && stream->curBlocksNum() > 0))));
         });
         if (it != streams.end()) {
-            execution_mode_stream = *it;
+            has_execution_mode = true;
+            execution_mode     = streamExecutionMode(*it);
         }
     };
     capture_execution_mode(running_streams_);
@@ -498,8 +500,8 @@ void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_s
         if (prepared_only && !already_reserved) {
             continue;
         }
-        const bool mode_mismatch =
-            execution_mode_stream && isPrefillOnly(execution_mode_stream) != isPrefillOnly(stream);
+        const auto mode          = streamExecutionMode(stream);
+        const bool mode_mismatch = has_execution_mode && execution_mode != mode;
         const bool compute_quota_reached =
             max_batch_tokens_without_cache_ > 0
             && schedule_runtime.admitted_prefill_token_size_without_cache >= max_batch_tokens_without_cache_;
@@ -549,9 +551,10 @@ void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_s
                                          || (new_state == StreamState::WAITING && (kv_initialized || load_initiated));
 
         if (scheduling_progress) {
-            // A failed KV allocation must not pin the execution mode.
-            if (!execution_mode_stream) {
-                execution_mode_stream = stream;
+            // A failed KV allocation owns no work this round and must not pin its execution mode.
+            if (!has_execution_mode) {
+                has_execution_mode = true;
+                execution_mode     = mode;
             }
             if (!already_reserved) {
                 account_reservation(stream);
