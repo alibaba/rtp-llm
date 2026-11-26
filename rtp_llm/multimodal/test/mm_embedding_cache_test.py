@@ -1769,6 +1769,81 @@ class CacheLockIsolationTest(unittest.TestCase):
         self.assertEqual(seen, [("a", None, [3.0, 4.0])])
 
 
+class HashProbeResidencyTest(unittest.TestCase):
+    def check_eviction(self, hashes, native):
+        from rtp_llm.server.mm_cache_metadata import (
+            get_mm_cache_keys,
+            get_mm_cache_metadata,
+        )
+
+        devices = ("cpu", "cuda") if torch.cuda.is_available() else ("cpu",)
+        for device in devices:
+            with (
+                self.subTest(device=device),
+                patch.dict(
+                    "os.environ",
+                    {
+                        "MM_EMB_NATIVE_LOCAL_CACHE": str(int(native)),
+                        "MM_EMB_NATIVE_LOCAL_CACHE_HOSTS": cache_module.socket.gethostname(),
+                    },
+                ),
+            ):
+                cache = cache_module.ShardedMMEmbeddingCache(
+                    2048 if device == "cuda" else 0,
+                    2048 if device == "cpu" else 0,
+                    shards=1,
+                )
+                self.addCleanup(cache.close)
+                self.assertEqual(cache.uses_native_index, native)
+                engine = SimpleNamespace(
+                    is_proxy_mode=False, _embedding_cache=cache, _hash_key_cache=hashes
+                )
+                tensor = torch.ones(256, device=device)
+                for key in ("a", "b"):
+                    cache.try_acquire(key)[1].complete(tensor)
+                cache.try_acquire("pending")
+                for key in ("a", "hash-only", "pending"):
+                    hashes.put(key, [torch.tensor([1])])
+                before = cache.stats()
+                keys = ["a", "b", "hash-only", "pending", "absent"]
+                entries = get_mm_cache_metadata(engine, keys)["entries"]
+                self.assertEqual(
+                    [(e["hash_hit"], e["embedding_hit"]) for e in entries],
+                    [
+                        (True, True),
+                        (False, True),
+                        (True, False),
+                        (True, False),
+                        (False, False),
+                    ],
+                )
+                get_mm_cache_keys(engine)
+                after = cache.stats()
+                for metric in (
+                    "hit",
+                    "miss",
+                    "inflight_dedup",
+                    "promotion",
+                    "pending_entries",
+                ):
+                    self.assertEqual(after[metric], before[metric])
+                cache.try_acquire("c")[1].complete(tensor)
+                tier = "gpu" if device == "cuda" else "cpu"
+                self.assertEqual(cache.resident_tiers(), {"a": tier, "c": tier})
+
+    def test_python_embedding_lru(self):
+        self.check_eviction(MMHashKeyCache(8192), native=False)
+
+    def test_native_embedding_lru(self):
+        try:
+            from librtp_compute_ops import EmbLocalHashCache
+        except ImportError:
+            self.skipTest("native EMB hash index is unavailable")
+        from rtp_llm.multimodal.mm_embedding_native_cache import NativeMMHashKeyCache
+
+        self.check_eviction(NativeMMHashKeyCache(8192), native=True)
+
+
 class ShardedEmbeddingCacheTest(unittest.TestCase):
     def test_native_host_scope_matches_exactly_and_respects_disable(self):
         host = "node-17"
@@ -1870,6 +1945,7 @@ operations = (
     lambda core, cell: core.claim("other"),
     lambda core, cell: core.peek("other"),
     lambda core, cell: core.is_current("live", cell),
+    lambda core, cell: core.resident_tier("live", True),
     lambda core, cell: core.resident_tiers(["live"], 1),
     lambda core, cell: core.resident_tiers(None, 1),
     lambda core, cell: core.resident_charge(),

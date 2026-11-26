@@ -285,6 +285,16 @@ void registerEmbLocalCache(pybind11::module& m) {
                  return py::make_tuple(
                      decode(*record->tree, leaves), promoted, mutations.evicted, mutations.demoted, promotion_failed);
              })
+        .def(
+            "resident_tier",
+            [](Shard& shard, const std::string& key, bool touch) -> const char* {
+                const auto record = shard.lookup(key, touch).resident;
+                if (!record) {
+                    return nullptr;
+                }
+                return record->tier == Tier::Gpu ? "gpu" : "cpu";
+            },
+            py::call_guard<py::gil_scoped_release>())
         .def("resident_tiers",
              [](Shard& shard, const std::optional<std::vector<std::string>>& keys, int64_t limit) {
                  py::dict result;

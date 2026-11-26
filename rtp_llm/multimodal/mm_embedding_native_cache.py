@@ -384,6 +384,9 @@ class NativeMMEmbeddingCache(MMEmbeddingCache):
             return None
         return self._core.with_current(cache_key, cell, action)
 
+    def resident_tier(self, key, *, touch=False):
+        return self._core.resident_tier(key, touch)
+
     def resident_tiers(self, keys=None, limit=None):
         return self._core.resident_tiers(keys, -1 if limit is None else max(0, limit))
 

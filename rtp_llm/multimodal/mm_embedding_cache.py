@@ -1188,20 +1188,21 @@ class MMHashKeyCache:
     ) -> Dict[str, Any]:
         results = []
         total_rows = 0
-        tiers = embedding_cache.resident_tiers(keys)
         for key, value in self._metadata_snapshots(keys):
             hash_hit = (
                 value is not None
                 and bool(value[0])
                 and all(tensor.numel() > 0 for tensor in value[0])
             )
+            # Prefill may fetch this embedding after routing with the returned hashes.
+            tier = embedding_cache.resident_tier(key, touch=hash_hit)
             result = {
                 "key": key,
                 "hit": hash_hit,
                 "hash_hit": hash_hit,
                 "greennet_passed": bool(hash_hit and value[2]),
-                "embedding_hit": key in tiers,
-                "embedding_tier": tiers.get(key),
+                "embedding_hit": tier is not None,
+                "embedding_tier": tier,
             }
             results.append(result)
             if not hash_hit:
@@ -2009,6 +2010,20 @@ class MMEmbeddingCache:
                 return action()
         return None
 
+    def _resident_tier_locked(self, key: str, touch: bool) -> Optional[str]:
+        entry = self._entries.get(key)
+        if entry is None or not entry.is_done or entry.error is not None:
+            return None
+        tier = entry.tier
+        if touch and tier is not None:
+            lru = self._gpu_lru if tier == "gpu" else self._cpu_lru
+            lru.move_to_end(key)
+        return tier
+
+    def resident_tier(self, key: str, *, touch: bool = False) -> Optional[str]:
+        with self._lock:
+            return self._resident_tier_locked(key, touch)
+
     def resident_tiers(
         self, keys: Optional[List[str]] = None, limit: Optional[int] = None
     ) -> Dict[str, str]:
@@ -2023,14 +2038,9 @@ class MMEmbeddingCache:
             )
             tiers = {}
             for key in candidates:
-                entry = self._entries.get(key)
-                if (
-                    entry is not None
-                    and entry.is_done
-                    and entry.error is None
-                    and entry.tier in ("gpu", "cpu")
-                ):
-                    tiers[key] = entry.tier
+                tier = self._resident_tier_locked(key, touch=False)
+                if tier is not None:
+                    tiers[key] = tier
                     if limit is not None and len(tiers) >= limit:
                         break
             return tiers
@@ -2306,6 +2316,9 @@ class ShardedMMEmbeddingCache:
     def _with_current_entry(self, cache_key, expected, action):
         return self._shard(cache_key)._with_current_entry(cache_key, expected, action)
 
+    def resident_tier(self, key: str, *, touch: bool = False) -> Optional[str]:
+        return self._shard(key).resident_tier(key, touch=touch)
+
     def resident_tiers(
         self, keys: Optional[List[str]] = None, limit: Optional[int] = None
     ) -> Dict[str, str]:
@@ -2314,7 +2327,7 @@ class ShardedMMEmbeddingCache:
         if keys is not None:
             tiers: Dict[str, str] = {}
             for key in keys:
-                tier = self._shard(key).resident_tiers([key]).get(key)
+                tier = self.resident_tier(key)
                 if tier is not None:
                     tiers[key] = tier
                     if limit is not None and len(tiers) >= limit:
