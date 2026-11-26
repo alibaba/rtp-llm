@@ -5,7 +5,7 @@ import threading
 import unittest
 from concurrent import futures
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, Mock, call, patch
 
 import grpc
 import torch
@@ -27,6 +27,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
     MultimodalRpcServiceStub,
     add_MultimodalRpcServiceServicer_to_server,
 )
+from rtp_llm.metrics import AccMetrics
 from rtp_llm.multimodal.mm_embedding_cache import MMEmbeddingCache, MMHashKeyCache
 from rtp_llm.multimodal.mm_process_engine import MMEmbeddingRes
 from rtp_llm.ops import (
@@ -113,6 +114,25 @@ class MMHashRpcTest(unittest.IsolatedAsyncioTestCase):
         )
         return MultimodalHashRequestPB(
             keys=keys or self.keys, inputs=inputs, timeout_ms=2000
+        )
+
+    async def test_hash_key_metrics_count_distinct_probe_keys_before_inspection(self):
+        self.engine._greennet_enabled.return_value = True
+        self.engine._hash_key_cache.put("hot", self.hashes)
+        with patch("rtp_llm.server.mm_cache_metadata.report_vit_phase") as report:
+            probe = await self.stub.GetMultimodalHashes(
+                MultimodalHashRequestPB(keys=["hot", "hot", *self.keys, "other-cold"])
+            )
+            # The hash is present even though the caller still needs inspection.
+            self.assertFalse(probe.entries[0].hash_hit)
+            await self.stub.GetMultimodalHashes(self.wire_request())
+            await self.stub.GetMultimodalHashes(MultimodalHashRequestPB())
+        self.assertEqual(
+            report.call_args_list,
+            [
+                call(AccMetrics.VIT_HASH_KEY_CACHE_HIT_QPS_METRIC, 1, {}),
+                call(AccMetrics.VIT_HASH_KEY_CACHE_MISS_QPS_METRIC, 2, {}),
+            ],
         )
 
     async def test_status_poll_does_not_snapshot_keys(self):
@@ -233,7 +253,9 @@ class MMHashRpcTest(unittest.IsolatedAsyncioTestCase):
         from rtp_llm.multimodal.mm_inspection_tickets import InspectionTickets
 
         tickets = InspectionTickets(ttl=30)
-        self.engine._inspection = SimpleNamespace(tickets=tickets)
+        self.engine._inspection = SimpleNamespace(
+            tickets=tickets, routing_approved=Mock(return_value=False)
+        )
         self.engine._greennet_enabled.return_value = True
         self.engine.supports_deferred_inspection = lambda: True
         self.engine._hash_key_cache.put(self.keys[0], self.hashes)
@@ -250,8 +272,12 @@ class MMHashRpcTest(unittest.IsolatedAsyncioTestCase):
             return [MMEmbeddingRes([], feature_hashes=self.hashes)]
 
         self.engine.get_embedding_result.side_effect = fill
-        metadata = await self.client.get_vit_cache_metadata(
-            self.address, self.keys, self.request
+        with patch("rtp_llm.server.mm_cache_metadata.report_vit_phase") as report:
+            metadata = await self.client.get_vit_cache_metadata(
+                self.address, self.keys, self.request
+            )
+        report.assert_called_once_with(
+            AccMetrics.VIT_HASH_KEY_CACHE_HIT_QPS_METRIC, 1, {}
         )
         self.assertTrue(metadata["entries"][0]["hash_hit"])
         self.assertFalse(metadata["entries"][0]["greennet_passed"])
