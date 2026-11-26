@@ -634,10 +634,12 @@ def _register_process_groups_to_cpp():
             target.copy_(tensor)
         device_id = torch.cuda.current_device()
         gpu_t, was_cpu = _ensure_cuda(target, device_id)
-        all_reduce_comm = _get_all_reduce_module().get_all_reduce()
-        if (
-            op == 0
-            and mode == _CPP_PARALLEL_MODE_TP
+        tp_sum = op == 0 and mode == _CPP_PARALLEL_MODE_TP
+        reduce_sum = get_batch_invariant_sum(gpu_t) if tp_sum else None
+        if reduce_sum is not None:
+            reduce_sum(gpu_t, pg, inplace=True)
+        elif (
+            tp_sum
             and not was_cpu
             and _canonical_p2p is not None
             and pg is _canonical_p2p.group
@@ -645,8 +647,7 @@ def _register_process_groups_to_cpp():
         ):
             _canonical_p2p.all_reduce(gpu_t)
         elif (
-            op == 0
-            and mode == _CPP_PARALLEL_MODE_TP
+            tp_sum
             and not was_cpu
             and all_reduce_comm is not None
             and pg is all_reduce_comm.group
@@ -1100,7 +1101,9 @@ def all_gather(tensor: torch.Tensor, group: Group) -> torch.Tensor:
     # return torch.cat(tensor_list, dim=0)
 
 
-def reduce_scatter(input_tensor: torch.Tensor, group: Group) -> torch.Tensor:
+def reduce_scatter(
+    input_tensor: torch.Tensor, group: Group, *, batch_invariant: bool = False
+) -> torch.Tensor:
     """Reduce-scatter a tensor across all ranks in the group.
 
     Reduces (sums) the input tensor across all ranks and scatters the result
@@ -1110,6 +1113,7 @@ def reduce_scatter(input_tensor: torch.Tensor, group: Group) -> torch.Tensor:
         input_tensor: Full-size tensor to reduce-scatter
             (shape: [world_size * chunk_size] + remaining_dims)
         group: Process group to use
+        batch_invariant: Sum BF16 expert outputs in ascending group-rank order.
 
     Returns:
         Scattered chunk of the reduced tensor for this rank
@@ -1127,6 +1131,14 @@ def reduce_scatter(input_tensor: torch.Tensor, group: Group) -> torch.Tensor:
         device=input_tensor.device,
         dtype=input_tensor.dtype,
     )
+    if batch_invariant and input_tensor.dtype == torch.bfloat16:
+        from rtp_llm.models_py.determinism.batch_invariant import (
+            reduce_scatter_batch_invariant,
+        )
+
+        return reduce_scatter_batch_invariant(
+            input_tensor, process_group, output_tensor
+        )
     torch.distributed.reduce_scatter_tensor(
         output_tensor,
         input_tensor,

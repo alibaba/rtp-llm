@@ -99,7 +99,7 @@ class DecodePlanTest(unittest.TestCase):
             self.model.configure_dynamic_decode(False)
         self.assertFalse(self.model._dynamic_decode_enabled)
 
-    def test_disabled_decode_graph_keeps_mainline_routing(self):
+    def test_explicit_or_batch_invariant_disable_keeps_static_graph_routing(self):
         module = "rtp_llm.models_py.modules.factory.attention.dispatch.backend_selector"
         with patch(
             "rtp_llm.models_py.model_desc.module_base.AttnImplFactory.get_fmha_impl",
@@ -107,9 +107,18 @@ class DecodePlanTest(unittest.TestCase):
         ) as static, patch(module + ".select_decode_backend") as select, patch(
             module + ".instantiate_decode_backend"
         ) as instantiate:
-            for explicit_disable in (False, True):
-                if explicit_disable:
-                    self.model.configure_dynamic_decode(False)
+            for dynamic_decode, batch_invariant in (
+                (None, False),
+                (False, False),
+                (True, True),
+            ):
+                self.model.py_hw_kernel_config = SimpleNamespace(
+                    batch_invariant=batch_invariant
+                )
+                if batch_invariant:
+                    self.model.set_decode_backend_gate(None)
+                if dynamic_decode is not None:
+                    self.model.configure_dynamic_decode(dynamic_decode)
                 self.assertEqual(
                     self.model.prepare_fmha_impl(
                         SimpleNamespace(attention_inputs=self.inputs),
@@ -118,7 +127,7 @@ class DecodePlanTest(unittest.TestCase):
                     ),
                     "static",
                 )
-        self.assertEqual(static.call_count, 2)
+        self.assertEqual(static.call_count, 3)
         select.assert_not_called()
         instantiate.assert_not_called()
         self.assertFalse(self.model.decode_backend_plan)

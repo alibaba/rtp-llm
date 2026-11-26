@@ -539,6 +539,21 @@ class StrategyRegistryDiagnosticsTest(unittest.TestCase):
         self.assertNotIn(None, public_names)
         self.assertTrue(public_names.issubset(MOE_STRATEGY_CHOICES))
 
+    def test_bf16_pure_dp_strategy_requires_batch_invariant_selection(self):
+        strategy = cuda_strategies.CudaNoQuantPureDPStrategy()
+        self.assertNotIn(strategy.strategy_name, MOE_STRATEGY_CHOICES)
+        for enabled, requested in (
+            (False, "auto"),
+            (False, strategy.strategy_name),
+            (True, "auto"),
+        ):
+            with self.subTest(enabled=enabled, requested=requested):
+                config = _config(requested)
+                config.batch_invariant = enabled
+                with patch.object(strategy, "get_attributes") as get_attributes:
+                    self.assertFalse(strategy.can_handle(config))
+                    get_attributes.assert_not_called()
+
     def test_factory_uses_class_name_when_strategy_name_is_empty(self):
         class UnnamedStrategy:
             strategy_name = None

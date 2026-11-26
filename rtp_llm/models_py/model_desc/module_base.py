@@ -87,6 +87,8 @@ class GptModelBase(nn.Module):
         self._decode_gate = frozenset(registry[name] for name in names)
 
     def configure_dynamic_decode(self, enabled: bool) -> None:
+        if getattr(self.py_hw_kernel_config, "batch_invariant", False) is True:
+            enabled = False
         if enabled and not self._decode_gate:
             raise RuntimeError(
                 "dynamic decode cannot start before precision qualification"

@@ -1,11 +1,25 @@
 # Qwen3 batch-invariant inference
 
-Set `RTP_BATCH_INVARIANT=1` for Qwen3-8B Dense or Qwen3-30B-A3B with unquantized BF16
-weights on one node with 1, 2 or 4 SM103 CUDA GPUs. The mode uses eager text
-generation, a BF16 KV cache with 64-token pages, and the regular scheduler, including
-dynamic batching and chunked prefill. Leave CUDA Graph, speculative
-decoding and prefix reuse disabled. An unset switch or `0` selects the
-regular execution path.
+Set `RTP_BATCH_INVARIANT=1` for text generation on one SM103 CUDA node.
+Use a BF16 checkpoint, BF16 activations, a BF16 KV cache with 64-token pages,
+and the regular scheduler with dynamic batching and chunked prefill.
+Leave speculative decoding and prefix reuse disabled. An unset switch or `0`
+selects the regular execution path.
+
+| Checkpoint | Model type | TP / DP / EP | Weight format | Execution |
+| --- | --- | --- | --- | --- |
+| Qwen3-8B Dense | `qwen_3` | 1/1/1, 2/1/1, 4/1/1 | BF16 | Eager |
+| Qwen3-30B-A3B | `qwen_3_moe` | 1/1/1, 2/1/1, 4/1/1 | BF16 | Eager |
+| Qwen3.6-35B-A3B | `qwen35_moe` | 1/1/1, 1/4/4 | BF16, `FP8_PER_BLOCK` | Eager or decode CUDA Graph |
+| Qwen3.5-397B-A17B | `qwen35_moe` | 4/1/1, 4/1/4 | BF16, `FP8_PER_BLOCK` | Eager or decode CUDA Graph |
+
+The two `qwen35_moe` models use the text weights and rotary position
+configuration from the multimodal checkpoint and keep Gated DeltaNet state in
+FP32. Leave `--moe_strategy` at `auto`. For block FP8, add
+`--quantization FP8_PER_BLOCK` to quantize the checkpoint at load time.
+With `ENABLE_CUDA_GRAPH=1`, pure decode can replay a captured batch size.
+Prefill and mixed steps run eagerly. On DP4 all workers agree on the same
+decode bucket or fall back to eager together.
 
 With tensor parallelism, each rank computes the existing BF16 projections on
 its weight shards. Attention and MLP output projections use an all-gather and
@@ -67,6 +81,29 @@ The test checks real prefill and decode co-batching,
 target row placement and prefill grants. It compares the token IDs,
 full-vocabulary FP32 logits, sampled-token softmax probabilities and token
 logprobs returned by gRPC bit for bit. Regenerate older reference files with `--save`.
+
+For the hybrid models, use the same service comparison with `model_type=qwen35_moe`
+and the topology from the table. Set `WORLD_SIZE=LOCAL_WORLD_SIZE=TP_SIZE*DP_SIZE`
+and `PP_SIZE=1`. Use a fresh reference for each checkpoint, weight format and
+topology. To compare eager and graph execution, save the unchunked reference
+with `ENABLE_CUDA_GRAPH=0`, then restart with `ENABLE_CUDA_GRAPH=1` for the
+chunked comparison. For DP4, add `--peer-address HOST:PORT` to compare the same
+target on a second worker while the first worker serves a long request.
+
+The hybrid operator tests cover both GDN head layouts, block FP8 projections
+and four-rank expert routing. Run the four-rank checks with four visible GPUs.
+
+```bash
+tests="$repo/rtp_llm/test/batch_invariant"
+python3 "$tests/gdn_test.py"
+python3 "$tests/gdn_test.py" --tp4-397b
+python3 "$tests/fp8_block_test.py"
+python3 "$tests/fp8_block_test.py" --tp4-397b
+for topology in "" "--tp"; do
+    torchrun --standalone --nproc-per-node=4 "$tests/ep_test.py" $topology
+    torchrun --standalone --nproc-per-node=4 "$tests/ep_test.py" $topology --fp8
+done
+```
 
 The Linear and Attention factories select the fixed-order implementations
 using the same separation between model code and backend selection as vLLM.

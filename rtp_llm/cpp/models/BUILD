@@ -159,14 +159,21 @@ cc_library(
 )
 
 cc_library(
+    name = "batch_invariant_decode_graph",
+    hdrs = ["BatchInvariantDecodeGraph.h"],
+    visibility = ["//rtp_llm/cpp/models/test:__pkg__"],
+)
+
+cc_library(
     name = "models",
     hdrs = glob([
         "*.h",
-    ], exclude = ["ModelInputsLogger.h"]),
+    ], exclude = ["BatchInvariantDecodeGraph.h", "ModelInputsLogger.h"]),
     srcs = glob([
         "*.cc",
     ], exclude = ["ModelInputsLogger.cc"]),
     deps = [
+        ":batch_invariant_decode_graph",
         ":model_inputs_logger",
         ":sample_infos",
         ":logits_processor",

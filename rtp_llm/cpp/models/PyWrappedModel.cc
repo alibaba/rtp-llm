@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
+#include "rtp_llm/cpp/models/BatchInvariantDecodeGraph.h"
 #include "rtp_llm/cpp/cuda_graph/prepared_attention_inputs_guard.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/models/context_parallel/ZigzagTokenLayout.h"
@@ -950,7 +951,9 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool s
                                            torch_ext::BertEmbeddingInputs()});
     auto* runner          = selectGraphRunner(attention_inputs_);
     auto& state           = selectGraphState(attention_inputs_);
-    if (moe_forward_allows_graph_ && enable_cuda_graph_ && runner != nullptr
+    // BI prepares graph-owned buffers in forward, after checking that this is
+    // a pure decode step and selecting the same bucket on all DP/EP ranks.
+    if (!batch_invariant_decode_graph_ && moe_forward_allows_graph_ && enable_cuda_graph_ && runner != nullptr
         && runner->canRun(py_model_inputs, state, CudaGraphCheckMode::PREPARE)) {
         RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs(cuda_graph_prepare)");
         runner->prepareAttentionInputs(py_model_inputs, state, skip_forward_event_sync);
@@ -968,7 +971,7 @@ void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& inputs) {
     attention_inputs_by_tag_ = setupKVCacheForAttentionInputs(attention_inputs_, inputs);
     fusedCopy(d2d_copies_);
 
-    if (enable_cuda_graph_) {
+    if (enable_cuda_graph_ && !batch_invariant_decode_graph_) {
         auto  empty           = torch::Tensor();
         auto  py_model_inputs = PyModelInputs({empty,
                                                empty,
@@ -1099,8 +1102,24 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             && generation_prefill_graph_runner_ != nullptr && !is_generation_prefill_runner) {
             generation_prefill_cuda_graph_status = GenerationPrefillCudaGraphStatus::MIXED_PREFILL_DECODE_NOT_SUPPORTED;
         }
-        const bool can_run_graph = moe_forward_allows_graph_ && !capture_hidden_states && enable_cuda_graph_
-                                   && graph_runner != nullptr && graph_runner->canRun(py_model_inputs, graph_state);
+        bool can_run_graph = moe_forward_allows_graph_ && !capture_hidden_states && enable_cuda_graph_
+                             && graph_runner != nullptr && graph_runner->canRun(py_model_inputs, graph_state);
+        if (batch_invariant_decode_graph_) {
+            int bucket = batchInvariantDecodeGraphVote(can_run_graph ? graph_state.current_real_graph_bs : 0,
+                                                       has_context_request,
+                                                       token_ids.dim(),
+                                                       token_ids.numel(),
+                                                       inputs.sequence_lengths.size(0));
+            if (synchronize_decode_graph_bucket_) {
+                // Fake-stream ranks participate in the same EP collectives as active ranks.
+                auto local = torch::full({1}, bucket, token_ids.options().dtype(torch::kInt32));
+                bucket     = execAllReduce({local, ReduceOp::Max, ParallelMode::DP}).buffer.item<int>();
+            }
+            can_run_graph = bucket != kBatchInvariantEagerVote;
+            if (can_run_graph) {
+                graph_state.current_real_graph_bs = bucket;
+            }
+        }
         // The eager Python instance retains this wrapper's SEED/REUSE role and
         // shares its request-local TopK buffer with the graph clones. Batches
         // outside the captured buckets must use that same role eagerly.

@@ -68,8 +68,6 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
         self.inter_size = self.N // 2
         self._batch_invariant = getattr(config, "batch_invariant", False) is True
         if self._batch_invariant:
-            if not MoeConfigResolver.is_pure_tp_mode(config):
-                raise ValueError("batch-invariant experts require pure TP")
             capabilities = DecodeCapabilities(
                 alignment=False, tuned_tiles=False, small_gemv=False
             )
@@ -104,20 +102,6 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
         assert topk_ids is not None
         assert topk_weights is not None
 
-        if self._batch_invariant:
-            if activation not in ("silu", "SiGLU") or apply_router_weight_on_input:
-                raise ValueError(
-                    "batch-invariant experts require SwiGLU and output weighting"
-                )
-            if expert_map is not None or a2_scale is not None or extra_expert_args:
-                raise ValueError(
-                    "batch-invariant experts require unquantized pure-TP inputs"
-                )
-            output = self._batch_invariant_experts(
-                hidden_states, topk_ids, topk_weights
-            )
-            return CombineForwardPayload(fused_expert_output=output)
-
         if (
             self._small_moe_gemv
             and activation in ("silu", "SiGLU")
@@ -141,6 +125,20 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
             local_mask = (local_ids >= 0) & (local_ids < self.num_experts_per_partition)
             topk_ids = local_ids.clamp(min=0, max=self.num_experts_per_partition - 1)
             topk_weights = topk_weights * local_mask
+
+        if self._batch_invariant:
+            if activation not in ("silu", "SiGLU") or apply_router_weight_on_input:
+                raise ValueError(
+                    "batch-invariant experts require SwiGLU and output weighting"
+                )
+            if expert_map is not None or a2_scale is not None or extra_expert_args:
+                raise ValueError(
+                    "batch-invariant experts require unquantized inputs without expert remapping"
+                )
+            output = self._batch_invariant_experts(
+                hidden_states, topk_ids, topk_weights
+            )
+            return CombineForwardPayload(fused_expert_output=output)
 
         M, K = hidden_states.shape
         top_k = topk_ids.size(1)
@@ -180,7 +178,12 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
         )
 
         tile, chunk_size = batch_invariant_moe_plan(
-            hidden_states, self.w1, self.w2, topk_ids, topk_weights
+            hidden_states,
+            self.w1,
+            self.w2,
+            topk_ids,
+            topk_weights,
+            ep_size=self.ep_size,
         )
         output = hidden_states.new_empty(hidden_states.shape)
         with torch.cuda.device_of(hidden_states):

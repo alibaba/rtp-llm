@@ -32,6 +32,12 @@ test_deps = [
 ] + torch_deps() + cuda13_torch_link_deps
 
 cc_test(
+    name = "batch_invariant_decode_graph_test",
+    srcs = ["BatchInvariantDecodeGraphTest.cc"],
+    deps = ["//rtp_llm/cpp/models:batch_invariant_decode_graph"],
+)
+
+cc_test(
     name = "model_data_test",
     srcs = [
         "ModelDataTest.cc",

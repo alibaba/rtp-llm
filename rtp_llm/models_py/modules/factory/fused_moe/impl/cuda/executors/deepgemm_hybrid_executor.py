@@ -201,7 +201,11 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
         checker.check(resolver.is_bf16(config))
         checker.check(has_deep_gemm())
         checker.check(get_sm()[0] >= 9)
-        checker.check(not config.enable_cuda_graph or get_sm()[0] == 12)
+        checker.check(
+            not config.enable_cuda_graph
+            or get_sm()[0] == 12
+            or (config.batch_invariant and get_sm() == (10, 3))
+        )
 
     def __init__(
         self,
@@ -228,6 +232,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
 
         self.masked_max_token_num = config.masked_max_token_num
         self.enable_cuda_graph = config.enable_cuda_graph
+        self._batch_invariant = config.batch_invariant
         self.is_sm120 = get_sm()[0] == 12
         if self.is_sm120 and self.enable_cuda_graph and self.ep_size == 1:
             self.sm120_triton_max_tokens = _get_sm120_triton_max_tokens()
@@ -310,7 +315,13 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
         # all routing metadata work on GPU, so it is safe to capture/replay.
         # It avoids the E * padded_M masked layout that dominates small decode
         # batches on SM120.
-        if token_num <= self.masked_max_token_num and not self.enable_cuda_graph:
+        # The masked and contiguous paths round the SwiGLU output differently
+        # before quantizing the input to the down projection.
+        if (
+            not self._batch_invariant
+            and token_num <= self.masked_max_token_num
+            and not self.enable_cuda_graph
+        ):
             return self.execute_masked(
                 payload,
                 activation,
@@ -694,29 +705,36 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                     dtype=torch.bfloat16,
                 )
             )
+        expert_alignment = self.EXPERT_ALIGNMENT
         if self.is_sm120:
             expert_alignment = min(
-                self.EXPERT_ALIGNMENT,
+                expert_alignment,
                 get_theoretical_mk_alignment_for_contiguous_layout(
                     routed_tokens, num_experts_local
                 ),
             )
-            max_active_experts = min(routed_tokens, num_experts_local)
-            all_tokens = align_up_math(
-                routed_tokens + max_active_experts * (expert_alignment - 1),
-                expert_alignment,
-            )
-        else:
-            # Preserve the pre-upgrade SM9x/SM100x layout: fixed 128-token
-            # expert alignment and CPU-padded metadata.
-            expert_alignment = self.EXPERT_ALIGNMENT
-            max_active_experts = min(routed_tokens, num_experts_local)
-            all_tokens = align_up_math(
-                routed_tokens + max_active_experts * (expert_alignment - 1),
-                expert_alignment,
-            )
 
-        if not self.enable_cuda_graph:
+        scatter_num_tokens_per_expert = num_recv_tokens_per_expert
+        scatter_alignment = expert_alignment
+        static_layout = self.enable_cuda_graph and (
+            not self._batch_invariant or _is_cuda_graph_warmup_or_capture()
+        )
+        if static_layout:
+            max_active_experts = min(routed_tokens, num_experts_local)
+            all_tokens = align_up_math(
+                routed_tokens + max_active_experts * (expert_alignment - 1),
+                expert_alignment,
+            )
+            if not self.is_sm120:
+                # The SM103 grouped GEMM requires valid IDs even in padding.
+                # Build aligned expert ranges on device during graph capture.
+                scatter_num_tokens_per_expert = (
+                    (num_recv_tokens_per_expert + expert_alignment - 1)
+                    // expert_alignment
+                    * expert_alignment
+                )
+                scatter_alignment = 1
+        else:
             num_recv_tokens_per_expert_cpu = (
                 payload.expert_tokens_meta.expert_num_tokens_cpu
             )
@@ -726,11 +744,11 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                 )
             elif isinstance(num_recv_tokens_per_expert_cpu, torch.Tensor):
                 num_recv_tokens_per_expert_cpu = num_recv_tokens_per_expert_cpu.tolist()
-            actual_aligned = sum(
+            padded_counts = [
                 align_up_math(int(x), expert_alignment)
                 for x in num_recv_tokens_per_expert_cpu
-            )
-            all_tokens = actual_aligned
+            ]
+            all_tokens = sum(padded_counts)
             if all_tokens == 0:
                 return CombineForwardPayload(
                     fused_expert_output=torch.zeros(
@@ -739,6 +757,12 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                         dtype=torch.bfloat16,
                     )
                 )
+            if not self.is_sm120:
+                # Eager scatter fills the padded rows with valid expert IDs.
+                scatter_num_tokens_per_expert = torch.tensor(
+                    padded_counts, dtype=torch.int32, pin_memory=True, device="cpu"
+                ).cuda(non_blocking=True)
+                scatter_alignment = 1
         _, K = hidden_states_fp8.size()
         N = self.w13_weight.size(1)
         hidden_states_fp8_shape = hidden_states_fp8.shape
@@ -763,28 +787,15 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                 )
             ),
         ]
-        # DeepGEMM's SM120 grouped kernel skips tiles whose group ID is -1;
-        # keep unused graph workspace tiles inactive instead of routing to 0.
-        # This relies on the pinned SM120 wheel (8bcfcab); non-SM120 scatter
-        # below fills all padded rows with valid expert IDs for older wheels.
+        # SM120 skips inactive tiles. SM103 needs a valid group ID through
+        # the end of the workspace. The gather ignores the spare rows.
         m_indices = torch.full(
-            (all_tokens,), -1, device=hidden_states_fp8.device, dtype=torch.int32
+            (all_tokens,),
+            -1 if self.is_sm120 else num_experts_local - 1,
+            device=hidden_states_fp8.device,
+            dtype=torch.int32,
         )
         output_index = torch.full_like(topk_idx, -1)
-        scatter_num_tokens_per_expert = num_recv_tokens_per_expert
-        scatter_alignment = expert_alignment
-        if not self.is_sm120 and not self.enable_cuda_graph:
-            padded_num_tokens_per_expert = [
-                align_up_math(int(x), expert_alignment)
-                for x in num_recv_tokens_per_expert_cpu
-            ]
-            scatter_num_tokens_per_expert = torch.tensor(
-                padded_num_tokens_per_expert,
-                dtype=torch.int32,
-                pin_memory=True,
-                device="cpu",
-            ).cuda(non_blocking=True)
-            scatter_alignment = 1
         expert_start_loc = torch.empty_like(scatter_num_tokens_per_expert)
         ep_scatter(
             hidden_states_fp8,
@@ -798,10 +809,10 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
             output_index,
             scale_ue8m0=is_deep_gemm_e8m0_used(),
             align_m=scatter_alignment,
-            derive_counts_from_topk=self.is_sm120 and self.enable_cuda_graph,
+            derive_counts_from_topk=self.is_sm120 and static_layout,
         )
         # Preserve the eager input lifetime without invalidating graph buffers.
-        if not self.enable_cuda_graph:
+        if not static_layout:
             dispose_tensor(hidden_states_fp8)
         gateup_output = torch.empty(
             (all_tokens, N),

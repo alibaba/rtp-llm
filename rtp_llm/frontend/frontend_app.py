@@ -27,6 +27,7 @@ from typing_extensions import override
 from uvicorn import Config, Server
 from uvicorn.loops.auto import auto_loop_setup
 
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.uvicorn_config import get_uvicorn_logging_config
 from rtp_llm.distribute.distributed_server import (
@@ -40,6 +41,7 @@ from rtp_llm.metrics import kmonitor
 from rtp_llm.openai.api_datatype import (
     BatchChatCompletionRequest,
     ChatCompletionRequest,
+    ContentPartTypeEnum,
 )
 from rtp_llm.server.misc import format_exception
 from rtp_llm.telemetry import init_telemetry, shutdown_telemetry
@@ -892,26 +894,45 @@ class FrontendApp(object):
 
             return await track_business_request(call)
 
+        async def track_chat_request(chats, call):
+            async def validate_and_call():
+                if self.py_env_configs.py_hw_kernel_config.batch_invariant and any(
+                    part.type != ContentPartTypeEnum.text
+                    for chat in chats
+                    for message in chat.messages
+                    if isinstance(message.content, list)
+                    for part in message.content
+                ):
+                    error = FtRuntimeException(
+                        ExceptionType.MM_WRONG_FORMAT_ERROR,
+                        "RTP_BATCH_INVARIANT=1 supports text-only requests",
+                    )
+                    logging.warning("%s", error)
+                    return ORJSONResponse(format_exception(error), status_code=400)
+                return await call()
+
+            return await track_business_request(validate_and_call)
+
         @app.post("/chat/completions")
         @app.post("/v1/chat/completions")
         async def chat_completion(
             request: ChatCompletionRequest, raw_request: RawRequest
         ):
-            async def call():
-                return await self.frontend_server.chat_completion(request, raw_request)
-
-            return await track_business_request(call)
+            return await track_chat_request(
+                (request,),
+                lambda: self.frontend_server.chat_completion(request, raw_request),
+            )
 
         @app.post("/v1/batch/chat/completions")
         async def batch_chat_completion(
             request: BatchChatCompletionRequest, raw_request: RawRequest
         ):
-            async def call():
-                return await self.frontend_server.batch_chat_completion(
+            return await track_chat_request(
+                request.requests,
+                lambda: self.frontend_server.batch_chat_completion(
                     request, raw_request
-                )
-
-            return await track_business_request(call)
+                ),
+            )
 
         @app.post("/batch_infer")
         async def batch_infer(req: Union[str, Dict[Any, Any]], raw_request: RawRequest):

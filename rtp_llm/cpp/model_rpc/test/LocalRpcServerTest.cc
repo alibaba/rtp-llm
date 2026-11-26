@@ -63,6 +63,10 @@ public:
         maga_init_params_.model_config_.model_type = model_type;
     }
 
+    void setBatchInvariant(bool enabled) {
+        maga_init_params_.hw_kernel_config.batch_invariant = enabled;
+    }
+
     ErrorInfo prepare(const GenerateInputPB& input, std::shared_ptr<GenerateInput>& output) {
         return prepareInput(input, output);
     }
@@ -984,6 +988,42 @@ TEST(LocalRpcServerTest, AllowsQwen4MediaPastAdmission) {
         ASSERT_NE(output, nullptr);
         ASSERT_TRUE(output->multimodal_inputs.has_value());
         EXPECT_EQ(output->multimodal_inputs->size(), 1);
+    }
+}
+
+TEST(LocalRpcServerTest, BatchInvariantQwenAcceptsOnlyTextRequests) {
+    TestLocalRpcServer server;
+    server.setModelType("qwen35_moe");
+    GenerateInputPB text;
+    text.add_token_ids(1);
+    text.mutable_generate_config()->set_max_new_tokens(1);
+    auto media = text;
+    media.add_multimodal_inputs()->set_multimodal_url("image.png");
+    auto  v41   = text;
+    auto* typed = v41.mutable_v41_inputs();
+    typed->set_schema_version(1);
+    typed->add_token_types(-1);
+    typed->add_image_mask(false);
+    auto layout = text;
+    layout.mutable_multimodal_token_layout()->add_spans()->set_length(1);
+
+    std::shared_ptr<GenerateInput> output;
+    for (const bool enabled : {false, true}) {
+        SCOPED_TRACE(::testing::Message() << "batch_invariant=" << enabled);
+        server.setBatchInvariant(enabled);
+        EXPECT_TRUE(server.prepare(text, output).ok());
+        for (const auto* request : {&media, &v41, &layout}) {
+            SCOPED_TRACE(request->ShortDebugString());
+            const auto status = server.prepare(*request, output);
+            if (enabled) {
+                EXPECT_EQ(status.code(), ErrorCode::MM_WRONG_FORMAT_ERROR);
+                EXPECT_THAT(status.ToString(), HasSubstr("text-only"));
+                EXPECT_EQ(transErrorCodeToGrpc(status.code()), grpc::StatusCode::INVALID_ARGUMENT);
+                EXPECT_EQ(output, nullptr);
+            } else {
+                EXPECT_TRUE(status.ok()) << status.ToString();
+            }
+        }
     }
 }
 

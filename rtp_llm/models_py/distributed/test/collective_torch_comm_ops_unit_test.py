@@ -153,6 +153,34 @@ class CollectiveTorchCommOpsUnitTest(unittest.TestCase):
                 allgather([recv], mode, [send], False)
                 torch.testing.assert_close(recv, send.reshape_as(recv))
 
+    def test_cpp_batch_invariant_tp_sum_uses_destination(self):
+        group = MagicMock()
+        group.size.return_value = 2
+        config = SimpleNamespace(
+            tp_size=2,
+            dp_size=1,
+            pp_size=1,
+            world_size=2,
+            local_world_size=2,
+            world_rank=0,
+            tp_rank=0,
+        )
+        allreduce = self._registered_callbacks(config, group)[1]
+        source, dest = MagicMock(spec=torch.Tensor), MagicMock(spec=torch.Tensor)
+        source.is_cuda = dest.is_cuda = True
+        source.dtype = dest.dtype = torch.bfloat16
+        with (
+            patch.object(torch.cuda, "current_device", return_value=0),
+            patch.object(collective, "get_batch_invariant_sum") as policy,
+            patch.object(torch.distributed, "all_reduce") as nccl,
+        ):
+            result = allreduce(source, 0, collective._CPP_PARALLEL_MODE_TP, dest)
+            self.assertIs(result, dest)
+            dest.copy_.assert_called_once_with(source)
+            policy.assert_called_once_with(dest)
+            policy.return_value.assert_called_once_with(dest, group, inplace=True)
+            nccl.assert_not_called()
+
     def test_allreduce_uses_registered_stage_and_world_groups(self):
         world_group = MagicMock()
         world_group.size.return_value = 4

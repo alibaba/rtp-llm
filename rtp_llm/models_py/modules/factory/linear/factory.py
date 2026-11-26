@@ -102,16 +102,30 @@ class LinearFactory:
         input_scale: Optional[torch.Tensor] = None,
     ):
         if getattr(hw_kernel_config, "batch_invariant", False) is True:
-            if weight.dtype != torch.bfloat16 or any(
-                scale is not None
-                for scale in (weight_scales, weight_scale_2, input_scale)
+            if (
+                weight.dtype == torch.bfloat16
+                and weight_scales is None
+                and weight_scale_2 is None
+                and input_scale is None
+            ):
+                from .impl.cuda.batch_invariant import BatchInvariantLinear
+
+                return BatchInvariantLinear(weight, bias=bias)
+            if not (
+                quant_config is not None
+                and quant_config.get_method() == "FP8_PER_BLOCK"
+                and quant_config.group_size() == 128
+                and weight.dtype == torch.float8_e4m3fn
+                and weight_scales is not None
+                and weight_scales.dtype == torch.int32
+                and weight_scale_2 is None
+                and input_scale is None
             ):
                 raise ValueError(
-                    "batch-invariant linear requires unscaled BF16 weights"
+                    "batch-invariant linear requires unscaled BF16 or E4M3 "
+                    "FP8_PER_BLOCK weights with packed UE8M0 scales"
                 )
-            from .impl.cuda.batch_invariant import BatchInvariantLinear
-
-            return BatchInvariantLinear(weight, bias=bias)
+            # On SM103 the registered block-FP8 backend uses DeepGEMM at every M.
 
         candidates = [
             strategy_class

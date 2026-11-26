@@ -571,6 +571,11 @@ ErrorInfo LocalRpcServer::prepareInput(const GenerateInputPB&                   
                                        const opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>& parent_span,
                                        grpc::ServerContext* server_context) {
     output.reset();
+    if (maga_init_params_.hw_kernel_config.batch_invariant
+        && (input_pb.multimodal_inputs_size() != 0 || input_pb.has_v41_inputs()
+            || input_pb.has_multimodal_token_layout())) {
+        return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "RTP_BATCH_INVARIANT=1 supports text-only requests");
+    }
     try {
         output                 = QueryConverter::transQuery(&input_pb);
         const auto& model_type = maga_init_params_.model_config_.model_type;

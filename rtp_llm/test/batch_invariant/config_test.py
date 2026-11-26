@@ -2,9 +2,19 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
+from rtp_llm.config.server_config_setup import setup_default_args
 from rtp_llm.model_factory import configure_batch_invariant_model
 from rtp_llm.models_py.determinism import batch_invariant_config as bi
-from rtp_llm.ops import DataType, KvCacheDataType, RoleType, SpeculativeType, TaskType
+from rtp_llm.ops import (
+    DataType,
+    KvCacheDataType,
+    RoleType,
+    SpeculativeType,
+    TaskType,
+    VitSeparation,
+)
 
 
 class BatchInvariantConfigTest(unittest.TestCase):
@@ -246,6 +256,97 @@ class BatchInvariantConfigTest(unittest.TestCase):
             self.assertIn(reason, str(raised.exception))
         self.assertTrue(self.hw.enable_dynamic_decode_backend)
         self.assertTrue(self.model.enable_fp32_lm_head)
+
+    def _set_hybrid(self, tp):
+        self._set_qwen3_moe()
+        model = self.model
+        model.model_type = "qwen35_moe"
+        model.ckpt_path = "/test/checkpoint"
+        model.num_layers, model.hidden_size = (40, 2048) if tp == 1 else (60, 4096)
+        model.expert_num, model.moe_k = (256, 8) if tp == 1 else (512, 10)
+        model.inter_size = model.moe_inter_size = 512 if tp == 1 else 1024
+        model.attn_config.head_num = 16 if tp == 1 else 32
+        model.attn_config.kv_head_num = 2
+        model.attn_config.size_per_head = 256
+        model.mm_model_config = SimpleNamespace(is_multimodal=True)
+        model.vit_separation = VitSeparation.VIT_SEPARATION_LOCAL
+        model.linear_attention_config = SimpleNamespace(
+            ssm_state_dtype=DataType.TYPE_FP32
+        )
+        self._set_tp_size(tp)
+
+    def test_hybrid_activation_default_is_opt_in(self):
+        for enabled, model_type, explicit, expected in (
+            (True, "qwen35_moe", None, "bf16"),
+            (True, "qwen35_moe", "fp16", "fp16"),
+            (False, "qwen35_moe", None, None),
+            (True, "qwen_3", None, None),
+        ):
+            with self.subTest(
+                enabled=enabled, model_type=model_type, explicit=explicit
+            ):
+                config = PyEnvConfigs()
+                config.py_hw_kernel_config.batch_invariant = enabled
+                config.model_args.model_type = model_type
+                config.model_args.act_type = explicit
+                with patch("torch.cuda.is_available", return_value=False):
+                    setup_default_args(config)
+                self.assertEqual(config.model_args.act_type, expected)
+
+    @patch.object(
+        bi, "get_config_from_path", return_value={"text_config": {"dtype": "bfloat16"}}
+    )
+    def test_hybrid_precision_and_expert_layouts(self, read_config):
+        for tp in (1, 4):
+            for ep in (1, 4):
+                for fp8 in (False, True):
+                    with self.subTest(tp=tp, ep=ep, fp8=fp8):
+                        self._set_hybrid(tp)
+                        self.parallel.ep_size = ep
+                        dp = ep if tp == 1 else 1
+                        self.parallel.dp_size = dp
+                        self.parallel.world_size = self.parallel.local_world_size = (
+                            tp * dp
+                        )
+                        moe = self.engine.moe_config
+                        moe.use_all_gather = dp == 1
+                        moe.use_deepep_moe = dp > 1
+                        self.hw.enable_cuda_graph = True
+                        self.model.quant_config = (
+                            Fp8BlockWiseQuantConfig() if fp8 else None
+                        )
+                        self.model.config_dtype = None
+                        configure_batch_invariant_model(self.engine, self.model)
+                        if dp > 1:
+                            strategy = (
+                                "fp8_per_block_pure_dp" if fp8 else "no_quant_pure_dp"
+                            )
+                        else:
+                            strategy = "fp8_per_block_no_dp" if fp8 else "no_quant_cpp"
+                        self.assertEqual(moe.moe_strategy, strategy)
+                        self.assertTrue(moe.use_all_gather)
+                        self.assertFalse(moe.use_deepep_moe)
+                        self.assertTrue(self.hw.enable_cuda_graph)
+                        self.assertFalse(self.model.mm_model_config.is_multimodal)
+                        self.assertFalse(self.model.enable_fp32_lm_head)
+        read_config.assert_called_with(self.model.ckpt_path)
+
+    @patch.object(bi, "get_config_from_path")
+    def test_hybrid_rejects_incompatible_checkpoint_state_or_layout(self, read_config):
+        self._set_hybrid(4)
+        read_config.return_value = {
+            "dtype": "bfloat16",
+            "text_config": {"dtype": "float16"},
+        }
+        self.model.quant_config = Fp8BlockWiseQuantConfig(group_size=64)
+        self.model.linear_attention_config.ssm_state_dtype = DataType.TYPE_BF16
+        self._set_tp_size(1)
+        with self.assertRaises(ValueError) as error:
+            configure_batch_invariant_model(self.engine, self.model)
+        for reason in ("BF16 text checkpoint", "128x128", "FP32 SSM", "TP/DP/EP"):
+            self.assertIn(reason, str(error.exception))
+        self.assertEqual(self.engine.moe_config.moe_strategy, "auto")
+        self.assertTrue(self.model.mm_model_config.is_multimodal)
 
 
 if __name__ == "__main__":

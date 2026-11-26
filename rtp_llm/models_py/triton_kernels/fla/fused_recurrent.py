@@ -53,15 +53,15 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     V: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    stride_qb: tl.constexpr,  # q stride for batch/token dimension
-    stride_qs: tl.constexpr,  # q stride for head dimension
-    stride_qh: tl.constexpr,  # q stride for K dimension
-    stride_kb: tl.constexpr,  # k stride for batch/token dimension
-    stride_ks: tl.constexpr,  # k stride for head dimension
-    stride_kh: tl.constexpr,  # k stride for K dimension
-    stride_vb: tl.constexpr,  # v stride for batch/token dimension
-    stride_vs: tl.constexpr,  # v stride for head dimension
-    stride_vh: tl.constexpr,  # v stride for V dimension
+    stride_qb: tl.constexpr,  # Q/K/V strides in batch, sequence, head order
+    stride_qs: tl.constexpr,
+    stride_qh: tl.constexpr,
+    stride_kb: tl.constexpr,
+    stride_ks: tl.constexpr,
+    stride_kh: tl.constexpr,
+    stride_vb: tl.constexpr,
+    stride_vs: tl.constexpr,
+    stride_vh: tl.constexpr,
     stride_init_state_token: tl.constexpr,
     stride_final_state_token: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,  # whether to use initial state
@@ -81,9 +81,16 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
         ).to(tl.int64)
         all = T
         T = eos - bos
+        q += bos * stride_qs
+        k += bos * stride_ks
+        v += bos * stride_vs
     else:
-        bos, eos = i_n * T, i_n * T + T
+        bos = i_n * T
         all = B * T
+        # A one-token decode view can have an arbitrary sequence stride.
+        q += i_n * stride_qb
+        k += i_n * stride_kb
+        v += i_n * stride_vb
 
     # Skipped graph rows still feed normalization, routing and MoE. Initialize
     # their output deterministically without touching any cache state.
@@ -107,11 +114,10 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
         return
 
     o_k = i_k * BK + tl.arange(0, BK)
-    o_v = i_v * BV + tl.arange(0, BV)
 
-    p_q = q + bos * stride_qs + i_h * stride_qh + o_k
-    p_k = k + bos * stride_ks + i_h * stride_kh + o_k
-    p_v = v + bos * stride_vs + i_hv * stride_vh + o_v
+    p_q = q + i_h * stride_qh + o_k
+    p_k = k + i_h * stride_kh + o_k
+    p_v = v + i_hv * stride_vh + o_v
     if IS_BETA_HEADWISE:
         p_beta = beta + (bos * HV + i_hv) * V + o_v
     else:

@@ -2,7 +2,7 @@
 
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch, sentinel
+from unittest.mock import Mock, patch, sentinel
 
 import torch
 
@@ -27,6 +27,9 @@ def select_attention(config, inputs, enabled=True, **kwargs):
 
 class BatchInvariantAttentionTest(unittest.TestCase):
     def test_factory_requires_explicit_opt_in_and_propagates_failures(self):
+        from rtp_llm.config.cuda_graph import (
+            GenerationPrefillCudaGraphUnsupportedBackend,
+        )
         from rtp_llm.device.device_type import DeviceType
         from rtp_llm.models_py.modules.factory.attention import AttnImplFactory
         from rtp_llm.ops import AttentionConfigs, KvCacheDataType
@@ -63,7 +66,6 @@ class BatchInvariantAttentionTest(unittest.TestCase):
                         select_attention(config, inputs, decode_cascade_max_requests=2)
             device_type.return_value = DeviceType.Cuda
             for graph, mode in (
-                (True, None),
                 (True, "eager"),
                 (False, "decode_graph"),
                 (False, "generation_prefill_graph"),
@@ -71,7 +73,7 @@ class BatchInvariantAttentionTest(unittest.TestCase):
             ):
                 with (
                     self.subTest(graph=graph, mode=mode),
-                    self.assertRaisesRegex(ValueError, "requires eager"),
+                    self.assertRaisesRegex(ValueError, "selection mode"),
                 ):
                     select_attention(
                         config,
@@ -79,17 +81,57 @@ class BatchInvariantAttentionTest(unittest.TestCase):
                         is_cuda_graph=graph,
                         cuda_graph_selection_mode=mode,
                     )
+            inputs.is_prefill = True
+            with self.assertRaises(GenerationPrefillCudaGraphUnsupportedBackend):
+                select_attention(
+                    config,
+                    inputs,
+                    is_cuda_graph=True,
+                    cuda_graph_selection_mode="generation_prefill_graph",
+                )
+            with self.assertRaisesRegex(ValueError, "requires pure decode"):
+                select_attention(config, inputs, is_cuda_graph=True)
             inputs.is_target_verify = True
-            with self.assertRaisesRegex(ValueError, "requires eager"):
+            with self.assertRaisesRegex(ValueError, "requires causal BF16 GQA"):
                 select_attention(config, inputs)
 
+            inputs.is_prefill = False
             inputs.is_target_verify = False
-            inputs.is_cuda_graph = True
             init.assert_not_called()
+            for mode in (None, "decode_graph"):
+                with self.assertRaisesRegex(RuntimeError, "failed to prepare KV"):
+                    select_attention(
+                        config,
+                        inputs,
+                        is_cuda_graph=True,
+                        cuda_graph_selection_mode=mode,
+                    )
+                self.assertTrue(inputs.is_cuda_graph)
             with self.assertRaisesRegex(RuntimeError, "failed to prepare KV"):
                 select_attention(config, inputs, decode_cascade_max_requests=2)
-            init.assert_called_once()
             self.assertFalse(inputs.is_cuda_graph)
+
+    def test_decode_graph_refreshes_captured_rope_offsets(self):
+        from rtp_llm.models_py.modules.factory.attention.cuda_impl.batch_invariant import (
+            BatchInvariantAttention,
+        )
+
+        captured = torch.zeros(2, 3, dtype=torch.int32)
+        new_offsets = torch.tensor([[7, 1, 2], [4, 5, 3]], dtype=torch.int32)
+        impl = object.__new__(BatchInvariantAttention)
+        impl.is_prefill = False
+        impl.rope_params = SimpleNamespace(kv_cache_offset=captured)
+        impl.rope = Mock()
+        impl.rope.prepare.return_value = SimpleNamespace(kv_cache_offset=new_offsets)
+        self.assertTrue(impl.support_cuda_graph())
+        impl.prepare_cuda_graph(sentinel.inputs)
+        impl.rope.prepare.assert_called_once_with(
+            sentinel.inputs, forbid_reallocation=True
+        )
+        self.assertIs(impl.rope_params.kv_cache_offset, captured)
+        torch.testing.assert_close(captured, new_offsets)
+        impl.is_prefill = True
+        self.assertFalse(impl.support_cuda_graph())
 
     @unittest.skipUnless(
         torch.version.cuda is not None
@@ -99,10 +141,15 @@ class BatchInvariantAttentionTest(unittest.TestCase):
     )
     @torch.inference_mode()
     def test_prefill_across_reordered_kv_pages_with_prefix(self):
+        # Per-rank heads for Qwen3-8B TP1, Qwen3.6-35B TP1 and Qwen3.5-397B TP4.
+        for q_heads, kv_heads, dim in ((32, 8, 128), (16, 2, 256), (8, 1, 256)):
+            with self.subTest(q_heads=q_heads, kv_heads=kv_heads, dim=dim):
+                self._check_paged_prefill(q_heads, kv_heads, dim)
+
+    def _check_paged_prefill(self, q_heads, kv_heads, dim):
         from rtp_llm.ops import AttentionConfigs, KvCacheDataType, RopeStyle
         from rtp_llm.ops.compute_ops import LayerKVCache, get_typemeta
 
-        q_heads, kv_heads, dim = 32, 8, 128
         page_size, prefix_len, q_len = 64, 126, 7
         total_len = prefix_len + q_len
         pages = [4, 1, 6]

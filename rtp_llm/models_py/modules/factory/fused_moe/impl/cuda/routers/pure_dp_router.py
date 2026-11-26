@@ -79,11 +79,8 @@ class PureDpRouterBase(FusedMoeDataRouter):
         checker.check(config.dp_size > 1)
         checker.check(config.ep_size == config.dp_size)
         checker.check(resolver.use_all_gather(config))
-        # CUDA Graph capture/replay freezes shapes; PureDP _pad_to_max derives
-        # max_n via runtime all_gather + .item(), which is graph-unsafe (D2H
-        # sync mid-capture, dynamic pad shape on replay). Force fallback to
-        # DeepEP when CUDA Graph is on.
-        checker.check(not config.enable_cuda_graph)
+        # BI agrees on a common decode bucket across the stage before replay.
+        checker.check(not config.enable_cuda_graph or config.batch_invariant)
 
     def __init__(
         self,
@@ -98,6 +95,9 @@ class PureDpRouterBase(FusedMoeDataRouter):
         self.expert_num = config.expert_num
         self.expert_num_per_rank = self.expert_num // self.ep_size
         self.expert_start_id = self.ep_rank * self.expert_num_per_rank
+        self._graph_inputs_are_padded = (
+            config.batch_invariant and config.enable_cuda_graph
+        )
 
     @abstractmethod
     def _do_quant(
@@ -107,18 +107,16 @@ class PureDpRouterBase(FusedMoeDataRouter):
 
     def _pad_to_max(
         self, a1: torch.Tensor, topk_weights: torch.Tensor, topk_ids: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
-        """Pad tensors to the max batch size across all EP ranks.
-
-        Returns the padded tensors plus the max batch size. The local (unpadded)
-        batch size is recovered in finalize() from extra_finalize_args
-        ("original_num_tokens"), so this method holds no instance state.
-        """
-        local_n = a1.shape[0]
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Pad inputs to a common batch size for the stage allgathers."""
+        # The graph runner already selected the same decode bucket on every rank.
+        if self._graph_inputs_are_padded and torch.cuda.is_current_stream_capturing():
+            return a1, topk_weights, topk_ids
 
         # TODO(perf): .item() forces a D2H sync on every MoE layer's hot path.
         # Plan to lift max_n to step-level host metadata (computed once before
         # entering the MoE stack) in a follow-up PR. Tracked on PR #968 review.
+        local_n = a1.shape[0]
         n_tensor = torch.tensor([local_n], device=a1.device, dtype=torch.int64)
         all_n = all_gather(n_tensor, group=Group.STAGE)
         max_n = int(all_n.max().item())
@@ -129,7 +127,14 @@ class PureDpRouterBase(FusedMoeDataRouter):
             topk_weights = F.pad(topk_weights, (0, 0, 0, pad_n))
             topk_ids = F.pad(topk_ids, (0, 0, 0, pad_n), value=-1)
 
-        return a1, topk_weights, topk_ids, max_n
+        return a1, topk_weights, topk_ids
+
+    def _prepare_expert_ids(
+        self, topk_ids: torch.Tensor
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        return recompute_topk_ids_sum_expert_count(
+            topk_ids, self.expert_start_id, self.expert_num_per_rank
+        )
 
     def prepare(
         self,
@@ -141,7 +146,7 @@ class PureDpRouterBase(FusedMoeDataRouter):
     ) -> ExpertForwardPayload:
         assert a1_scale is None and a2_scale is None, "not support quanted moe"
 
-        a1, topk_weights, topk_ids, _ = self._pad_to_max(a1, topk_weights, topk_ids)
+        a1, topk_weights, topk_ids = self._pad_to_max(a1, topk_weights, topk_ids)
 
         a1_full = all_gather(a1, group=Group.STAGE)
         topk_weights_full = all_gather(topk_weights, group=Group.STAGE)
@@ -149,10 +154,8 @@ class PureDpRouterBase(FusedMoeDataRouter):
 
         expert_x, expert_x_scale = self._do_quant(a1_full)
 
-        adjusted_topk_ids, num_recv_tokens_per_expert = (
-            recompute_topk_ids_sum_expert_count(
-                topk_ids_full, self.expert_start_id, self.expert_num_per_rank
-            )
+        adjusted_topk_ids, num_recv_tokens_per_expert = self._prepare_expert_ids(
+            topk_ids_full
         )
 
         return ExpertForwardPayload(
@@ -181,10 +184,24 @@ class PureDpRouterBase(FusedMoeDataRouter):
         ), "PureDpRouter.finalize requires extra_finalize_args['original_num_tokens']"
         local_batch_size: int = extra_finalize_args["original_num_tokens"]
 
-        output = reduce_scatter(payload.fused_expert_output, group=Group.STAGE)
+        output = reduce_scatter(
+            payload.fused_expert_output,
+            group=Group.STAGE,
+            batch_invariant=self.config.batch_invariant,
+        )
         if output.shape[0] > local_batch_size:
             output = output[:local_batch_size]
         return output
+
+
+class PureDpRouterNoQuant(PureDpRouterBase):
+    """Gather BF16 activations and let the Triton executor map global IDs."""
+
+    def _do_quant(self, a1: torch.Tensor) -> Tuple[torch.Tensor, None]:
+        return a1, None
+
+    def _prepare_expert_ids(self, topk_ids: torch.Tensor) -> Tuple[torch.Tensor, None]:
+        return topk_ids, None
 
 
 class PureDpRouterFp8PerBlock(PureDpRouterBase):

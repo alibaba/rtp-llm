@@ -23,7 +23,7 @@ BLOCKER_STEPS = 64
 def read_vocab_size(checkpoint):
     with (checkpoint / "config.json").open(encoding="utf-8") as config_file:
         config = json.load(config_file)
-    vocab_size = config.get("vocab_size")
+    vocab_size = (config.get("text_config") or config).get("vocab_size")
     assert isinstance(vocab_size, int) and vocab_size > 0, (checkpoint, vocab_size)
     return vocab_size
 
@@ -221,6 +221,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--address", default="127.0.0.1:19481")
+    parser.add_argument(
+        "--peer-address",
+        help="Also compare the target on a second DP worker while the first decodes",
+    )
     parser.add_argument("--log-dir", type=Path, default=Path("logs"))
     budget = parser.add_mutually_exclusive_group(required=True)
     budget.add_argument("--save", type=Path, help="Save the unchunked solo reference")
@@ -228,6 +232,8 @@ def main():
         "--reference", type=Path, help="Compare budget 192 to this file"
     )
     args = parser.parse_args()
+    if args.peer_address == args.address:
+        parser.error("--peer-address must point to another DP worker")
     chunked = args.reference is not None
     tokenizer = Tokenizer.from_file(str(args.checkpoint / "tokenizer.json"))
     vocab_size = read_vocab_size(args.checkpoint)
@@ -266,6 +272,21 @@ def main():
             result = run_mixed(stub, blocker, order, target, len(fixed), vocab_size)
             verify_execution(args.log_dir, offsets, neighbors, target_first, chunked)
             compare(baseline, result, f"target {'first' if target_first else 'last'}")
+
+        if args.peer_address:
+            with grpc.insecure_channel(args.peer_address) as peer:
+                grpc.channel_ready_future(peer).result(timeout=600)
+                load = start_request(stub, long, 512)
+                try:
+                    next(load)
+                    target_call = start_request(
+                        RpcServiceStub(peer), target, len(fixed), measure=True
+                    )
+                    result = collect(target_call, len(fixed), vocab_size)
+                    assert load.is_active(), "peer load completed before the comparison"
+                    compare(baseline, result, "target on second DP worker")
+                finally:
+                    load.cancel()
 
 
 if __name__ == "__main__":

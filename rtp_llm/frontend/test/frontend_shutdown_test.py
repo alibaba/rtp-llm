@@ -72,6 +72,66 @@ class FakeGrpcClient:
         return self.response
 
 
+class BatchInvariantChatRouteTest(unittest.TestCase):
+    def setUp(self):
+        self.owner = FrontendApp.__new__(FrontendApp)
+        self.owner.frontend_server = FakeFrontendServer()
+        self.owner.frontend_server.chat_completion = AsyncMock(
+            return_value={"ok": True}
+        )
+        self.owner.frontend_server.batch_chat_completion = AsyncMock(
+            return_value={"ok": True}
+        )
+        self.owner.shutdown_manager = FrontendShutdownManager()
+        self.owner.server_config = SimpleNamespace()
+        self.hw_config = SimpleNamespace(batch_invariant=True)
+        self.owner.py_env_configs = SimpleNamespace(py_hw_kernel_config=self.hw_config)
+        self.client = TestClient(self.owner.create_app())
+        self.addCleanup(self.client.close)
+        self.image_message = {
+            "role": "user",
+            "content": [{"type": "image_url", "image_url": {"url": "image://test"}}],
+        }
+
+    def test_media_is_rejected_before_single_or_batch_generation(self):
+        media = {"messages": [self.image_message]}
+        text = {"messages": [{"role": "user", "content": "hello"}]}
+        for route, payload in (
+            ("/v1/chat/completions", {**media, "stream": False}),
+            (
+                "/chat/completions",
+                {**media, "stream": True, "user_template": "{{ messages }}"},
+            ),
+            ("/v1/batch/chat/completions", {"requests": [text, media]}),
+        ):
+            with self.subTest(route=route):
+                response = self.client.post(route, json=payload)
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(
+                    response.json(),
+                    {
+                        "error_code": 902,
+                        "error_code_str": "902_MM_WRONG_FORMAT_ERROR",
+                        "message": "RTP_BATCH_INVARIANT=1 supports text-only requests",
+                    },
+                )
+                self.assertEqual(self.owner.shutdown_manager.active_request_count(), 0)
+        self.owner.frontend_server.chat_completion.assert_not_awaited()
+        self.owner.frontend_server.batch_chat_completion.assert_not_awaited()
+
+    def test_text_and_regular_multimodal_requests_reach_generation(self):
+        content = [{"type": "text", "text": "hello"}]
+        chat = {"messages": [{"role": "user", "content": content}]}
+        response = self.client.post("/v1/chat/completions", json=chat)
+        self.assertEqual(response.json(), {"ok": True})
+        self.hw_config.batch_invariant = False
+        batch = {"requests": [{"messages": [self.image_message]}]}
+        response = self.client.post("/v1/batch/chat/completions", json=batch)
+        self.assertEqual(response.json(), {"ok": True})
+        self.owner.frontend_server.chat_completion.assert_awaited_once()
+        self.owner.frontend_server.batch_chat_completion.assert_awaited_once()
+
+
 class FrontendShutdownManagerTest(unittest.TestCase):
     _DUMP_TOKEN = "unit-test-dump-secret"
     _DUMP_HEADER = "X-Test-Allocator-Dump-Token"

@@ -404,6 +404,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         output_final_state: bool,
         cu_seqlens: Optional[torch.LongTensor] = None,
         use_qk_l2norm_in_kernel: bool = False,
+        batch_invariant: bool = False,
     ):
         q_orig = q
         k_orig = k
@@ -414,8 +415,8 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             else:
                 # NOTE: fused_l2norm_qk is only validated on AMD/ROCm backend.
                 # On CUDA, fall back to l2norm_fwd until the fused kernel is verified.
-                q = l2norm_fwd(q)
-                k = l2norm_fwd(k)
+                q = l2norm_fwd(q, batch_invariant=batch_invariant)
+                k = l2norm_fwd(k, batch_invariant=batch_invariant)
 
         g, o, A, final_state, w, h, v_new = chunk_gated_delta_rule_fwd(
             q=q,
@@ -444,6 +445,7 @@ def chunk_gated_delta_rule(
     cu_seqlens: Optional[torch.LongTensor] = None,
     head_first: bool = False,
     use_qk_l2norm_in_kernel: bool = False,
+    batch_invariant: bool = False,
 ):
     r"""
     Args:
@@ -579,6 +581,7 @@ def chunk_gated_delta_rule(
         output_final_state,
         cu_seqlens,
         use_qk_l2norm_in_kernel,
+        batch_invariant,
     )
     if head_first:
         o = rearrange(o, "b t h ... -> b h t ...")

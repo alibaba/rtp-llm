@@ -489,8 +489,11 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         linear_attn_config: LinearAttentionConfig,
         parallelism_config: ParallelismConfig,
         weights: Dict[str, torch.Tensor],
+        *,
+        batch_invariant: bool = False,
     ):
         super().__init__(linear_attn_config, parallelism_config, weights)
+        self.batch_invariant = batch_invariant
 
     def _conv1d(
         self,
@@ -662,6 +665,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
                 output_final_state=True,
                 cu_seqlens=cu_seqlens_without_padding,
                 use_qk_l2norm_in_kernel=True,
+                batch_invariant=self.batch_invariant,
             )
         if ssm_states is not None and not use_flydsl_chunk_gdn:
             store_ssm_state_to_block_map(
@@ -1123,7 +1127,10 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             self.in_proj_fused = None
 
         self.prefill_gdn = Qwen3NextGatedDeltaNetPrefill(
-            linear_attn_config, parallelism_config, weights
+            linear_attn_config,
+            parallelism_config,
+            weights,
+            batch_invariant=getattr(hw_kernel_config, "batch_invariant", False) is True,
         )
         self.decode_gdn = Qwen3NextGatedDeltaNetDecode(
             linear_attn_config, parallelism_config, weights

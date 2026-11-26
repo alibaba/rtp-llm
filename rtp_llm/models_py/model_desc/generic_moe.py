@@ -116,7 +116,7 @@ class GenericMoeLayer(nn.Module):
                 # For ROCm devices shared_expert_gate is not pre-swizzled during weight
                 # loading and its single output column does not satisfy the SwizzleA
                 # layout. Keep this scalar projection on the no-swizzle backend.
-                hw_kernel_config=None,
+                hw_kernel_config=hw_kernel_config if self.batch_invariant else None,
             )
             self.sigmoid_gate_scale_add = SigmoidGateScaleAdd()
         else:

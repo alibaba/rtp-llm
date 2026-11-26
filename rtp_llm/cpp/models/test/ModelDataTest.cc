@@ -596,6 +596,11 @@ TEST_F(ModelDataTest, testGenerationPrefillCudaGraphRunnerOwnershipIsLimitedToNo
     // prefill runner in the first implementation.
     EXPECT_FALSE(shouldCreateGenerationPrefillCudaGraph(config, true, true, RoleType::PDFUSION, SP_TYPE_NONE));
 
+    config.batch_invariant = true;
+    EXPECT_FALSE(isGenerationPrefillCudaGraphRequested(config, RoleType::PDFUSION));
+    EXPECT_FALSE(shouldCreateGenerationPrefillCudaGraph(config, true, false, RoleType::PDFUSION, SP_TYPE_NONE));
+    config.batch_invariant = false;
+
     config.enable_cuda_graph = false;
     EXPECT_FALSE(isGenerationPrefillCudaGraphRequested(config, RoleType::PDFUSION));
     EXPECT_FALSE(shouldCreateGenerationPrefillCudaGraph(config, true, false, RoleType::PDFUSION, SP_TYPE_NONE));

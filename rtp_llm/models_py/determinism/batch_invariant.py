@@ -17,11 +17,11 @@ _ALL_REDUCE_WORKSPACE_BYTES = 16 * 1024 * 1024
 def _fixed_rank_sum(
     gathered, output, count, WORLD_SIZE: tl.constexpr, BLOCK: tl.constexpr
 ):
-    offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    offsets = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
     live = offsets < count
     acc = tl.full((BLOCK,), 0, tl.float32)
     for rank in tl.static_range(WORLD_SIZE):
-        values = tl.load(gathered + rank * count + offsets, live, other=0)
+        values = tl.load(gathered + rank * count.to(tl.int64) + offsets, live, other=0)
         acc += values.to(tl.float32)
     tl.store(output + offsets, acc, live)
 
@@ -96,6 +96,26 @@ def all_reduce_batch_invariant(
             )
             if not dest.is_contiguous():
                 dest.copy_(result.view_as(dest))
+    return output
+
+
+def reduce_scatter_batch_invariant(
+    tensor: torch.Tensor, group: dist.ProcessGroup, output: torch.Tensor
+) -> torch.Tensor:
+    """Exchange EP shards, then sum each destination's BF16 values in rank order."""
+    world_size = dist.get_world_size(group)
+    if world_size == 1:
+        return output.copy_(tensor)
+    count = output.numel()
+    if count:
+        with torch.cuda.device_of(tensor):
+            contributions = torch.empty_like(
+                tensor, memory_format=torch.contiguous_format
+            )
+            dist.all_to_all_single(contributions, tensor.contiguous(), group=group)
+            _fixed_rank_sum[(triton.cdiv(count, 256),)](
+                contributions, output, count, WORLD_SIZE=world_size, BLOCK=256
+            )
     return output
 
 
@@ -333,6 +353,8 @@ def batch_invariant_moe_plan(
     w2: torch.Tensor,
     topk_ids: torch.Tensor,
     topk_weights: torch.Tensor,
+    *,
+    ep_size: int = 1,
 ) -> tuple[dict[str, int], int]:
     """Return the fixed GEMM tile and the maximum token count per projection chunk."""
     rows, hidden = hidden_states.shape
@@ -350,7 +372,7 @@ def batch_invariant_moe_plan(
         topk_ids.ndim != 2
         or topk_ids.shape != topk_weights.shape
         or topk_ids.size(0) != rows
-        or not 0 < topk_ids.size(1) <= experts
+        or not 0 < topk_ids.size(1) <= experts * ep_size
         or topk_ids.dtype not in (torch.int32, torch.int64)
         or topk_weights.dtype != torch.float32
         or any(
