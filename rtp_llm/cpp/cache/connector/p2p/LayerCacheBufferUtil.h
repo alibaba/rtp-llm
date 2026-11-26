@@ -78,6 +78,13 @@ public:
                        int                                         partition_count = 1,
                        int                                         partition_id    = 0);
 
+    // Repartition LINEAR state and each Q/K/V history row into matching subspans.
+    [[nodiscard]] static ErrorResult<transfer::KeyBlockInfoMap>
+    buildKeyBlockInfosLinearQkv(const std::shared_ptr<LayerBlockConverter>& converter,
+                                const std::shared_ptr<LayerCacheBuffer>&    layer_cache_buffer,
+                                const PartitionSpec&                        partition,
+                                const KVCacheSpec*                          spec);
+
     /// @brief 带 CP 字节切分的版本。切分语义与 CPSlotMapper::sliceBlockForPeer 保持一致：
     ///   EQUAL_BYTES   -> 分母是 block.size_bytes（整个 stride）
     ///   PAYLOAD_BYTES -> 分母是 k_block_payload_bytes，只覆盖 payload 区间，

@@ -24,6 +24,7 @@ FastTopKSamplerOutput FastTopKSampler::forward(const torch::Tensor& logits, int 
 
     int batch_size = output.token_ids.size(0);
     execMappingDraft2Target({output.token_ids, d2t_map_, batch_size, 0, 1});
+    output.token_ids = output.token_ids.to(torch::kInt32);
 
     return output;
 }

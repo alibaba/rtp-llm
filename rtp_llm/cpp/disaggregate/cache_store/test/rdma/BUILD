@@ -99,3 +99,26 @@ cc_test(
         "//conditions:default": [],
     }),
 )
+
+cc_test(
+    name = "rdma_metrics_shutdown_test",
+    srcs = select({
+        "//:using_rdma": ["RdmaMetricsShutdownTest.cpp"],
+        "//conditions:default": [],
+    }),
+    copts = ["-fno-access-control"],
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["manual", "L20_CU13"],
+    deps = [
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ] + device_impl_target() + cuda13_torch_link_deps + select({
+        "//:using_rdma": [
+            "//rtp_llm/cpp/disaggregate/cache_store/rdma:cache_store_rdma_impl",
+            "//rtp_llm/cpp/disaggregate/cache_store",
+            "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
+        ],
+        "//conditions:default": [],
+    }),
+)

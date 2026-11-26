@@ -2283,6 +2283,21 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkCommitOnlyPrefillDispatch) {
     EXPECT_FALSE(stream->getSPOutputBuffer()->propose_tokens_gpu.defined());
 }
 
+TEST_F(MtpBatchStreamProcessorTest, ReplaySnapshotsDoNotRequirePerProposalPages) {
+    // Replay/FULL tables contain canonical pages only. A legacy permutation
+    // would gather proposal slot 7 from this one-page table even if no group
+    // subsequently used the permutation.
+    auto table = torch::tensor({11, 21}, torch::kInt32).reshape({2, 1, 1}).to(torch::kCUDA);
+    auto actual =
+        MtpBatchStreamProcessor::advanceLinearCacheBlockTable(table,
+                                                              torch::tensor({2}, torch::kInt32).to(torch::kCUDA),
+                                                              torch::tensor({8}, torch::kInt32).to(torch::kCUDA),
+                                                              {false, false},
+                                                              /*group_spans=*/{0, 0});
+    EXPECT_TRUE(torch::equal(actual.cpu(), table.cpu()));
+    EXPECT_NE(actual.data_ptr(), table.data_ptr());
+}
+
 TEST_F(MtpBatchStreamProcessorTest, testAdvanceLinearCacheBlockTableMatchesHostCommitSemantics) {
     const std::vector<int32_t> previous_lengths = {1, 63, 64, 65, 127, 128, 129, 191};
     const std::vector<int32_t> accept_lengths   = {1, 2, 3, 4, 5, 6, 7, 8};
@@ -2570,6 +2585,70 @@ TEST_F(MtpBatchStreamProcessorTest, testCacheSnapshotOverlayKeepsPhysicalKernelP
     too_narrow                          = model_input;
     too_narrow.kv_cache_kernel_block_id = torch::zeros({1, 2, 3}, pinned_i32);
     EXPECT_ANY_THROW(processor.overlayMtpCacheSnapshots(StreamGroups({steady, fresh}), too_narrow, holder));
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testCacheSnapshotOverlayRestoresReplayPagesInMixedGroups) {
+    ModelConfig model_config;
+    model_config.max_seq_len = 2048;
+    model_config.vocab_size  = 8;
+    model_config.num_layers  = 2;
+    RuntimeConfig              runtime_config;
+    SpeculativeExecutionConfig sp_config;
+    sp_config.gen_num_per_cycle = 3;
+    CacheConfig cache_config;
+    cache_config.layer_num = model_config.num_layers;
+    cache_config.fromGroupedSpecs(
+        {test::makeLinearSpec("linear", 1, TYPE_FP16, 1, 1), test::makeMhaSpec("full", 1, TYPE_FP16, 1, 1)},
+        {{0}, {1}},
+        {CacheGroupType::LINEAR, CacheGroupType::FULL},
+        {"linear", "full"});
+    cache_config.linear_replay.group_ids = {0};
+    TestableMtpBatchStreamProcessor processor(model_config, {}, {}, cache_config, sp_config, false);
+
+    auto steady = createContextStream(model_config, runtime_config, {}, {1}, 1);
+    auto fresh  = createContextStream(model_config, runtime_config, {}, {2}, 2);
+    steady->setIsContextStream(false);
+    fresh->setIsContextStream(false);
+    const auto                          cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    GenerateStream::MtpAsyncDeviceState state;
+    state.next_kv_cache_block_id_gpu =
+        torch::tensor({11, 12, 13, 31, 32, 33}, torch::kInt32).reshape({2, 1, 3}).to(cuda_i32);
+    state.next_kv_cache_kernel_block_id_gpu =
+        torch::tensor({101, 102, 103, 104, 301, 302, 303, 304}, torch::kInt32).reshape({2, 1, 4}).to(cuda_i32);
+    steady->setMtpAsyncDeviceState(state);
+    // The steady row is owned by the immutable GPU snapshot, even if its
+    // mutable host resource is unavailable while bookkeeping runs.
+    steady->setKVCache(BatchKVCacheResource{});
+
+    const auto expected_physical =
+        torch::tensor({11, 12, 13, 0, 0, 21, 22, 23, 24, 25, 31, 32, 33, 0, 0, 41, 42, 43, 44, 45}, torch::kInt32)
+            .reshape({2, 2, 5});
+    const auto expected_kernel = torch::tensor({101, 102, 103, 104, 0, 0, 0, 201, 202, 203, 204, 205, 206, 207,
+                                                301, 302, 303, 304, 0, 0, 0, 401, 402, 403, 404, 405, 406, 407},
+                                               torch::kInt32)
+                                     .reshape({2, 2, 7});
+    for (bool device_tables : {false, true}) {
+        SCOPED_TRACE(device_tables);
+        GptModelInputs inputs;
+        inputs.kv_cache_block_id        = expected_physical.pin_memory();
+        inputs.kv_cache_kernel_block_id = expected_kernel.pin_memory();
+        // This is the gather contract for snapshot-backed streams: both
+        // tables are zero until overlay, for every cache group.
+        inputs.kv_cache_block_id.select(1, 0).zero_();
+        inputs.kv_cache_kernel_block_id.select(1, 0).zero_();
+        if (device_tables) {
+            inputs.kv_cache_block_id        = inputs.kv_cache_block_id.to(cuda_i32);
+            inputs.kv_cache_kernel_block_id = inputs.kv_cache_kernel_block_id.to(cuda_i32);
+        }
+        TensorHolder holder;
+        processor.overlayMtpCacheSnapshots(StreamGroups({steady, fresh}), inputs, holder);
+        EXPECT_TRUE(torch::equal(inputs.kv_cache_block_id.cpu(), expected_physical));
+        EXPECT_TRUE(torch::equal(inputs.kv_cache_kernel_block_id.cpu(), expected_kernel));
+        EXPECT_TRUE(
+            torch::equal(state.next_kv_cache_block_id_gpu.cpu(), expected_physical.narrow(1, 0, 1).narrow(2, 0, 3)));
+        EXPECT_TRUE(torch::equal(state.next_kv_cache_kernel_block_id_gpu.cpu(),
+                                 expected_kernel.narrow(1, 0, 1).narrow(2, 0, 4)));
+    }
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testPrefillShiftsMultimodalMaskAndPackedLocations) {

@@ -2,6 +2,7 @@
 
 #include "aios/network/accl-barex/include/accl/barex/highlevel/xclient_transport.h"
 #include "aios/network/rdma/accl/RdmaMempool.h"
+#include "aios/network/accl-barex/metric/AcclMetricReporter.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/MemoryUtil.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/rdma/RdmaConnection.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/rdma/RdmaClientHostConnections.h"
@@ -17,6 +18,7 @@ public:
 
 public:
     bool                            init(uint32_t io_thread_count, uint32_t worker_thread_count);
+    void                            stopMetricsReporter();
     std::shared_ptr<RdmaConnection> getConnection(const std::string& ip, uint32_t port);
     void                            recycleConnection(const std::shared_ptr<RdmaConnection>& connection);
     void                            destroyConnection(const std::shared_ptr<RdmaConnection>& connection);
@@ -35,6 +37,7 @@ private:
 
     std::shared_ptr<arpc::RdmaMempool>                                mempool_;
     std::shared_ptr<::accl::barex::XClientTransport>                  client_;
+    std::weak_ptr<::accl::barex::AcclMetricReporter>                  metrics_reporter_;
     mutable std::shared_mutex                                         host_connections_mutex_;
     std::map<std::string, std::shared_ptr<RdmaClientHostConnections>> host_connections_;
 };

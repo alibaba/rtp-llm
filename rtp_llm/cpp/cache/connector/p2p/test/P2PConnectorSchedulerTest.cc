@@ -1098,6 +1098,46 @@ TEST_F(P2PConnectorSchedulerTest, AsymmetricPipelineProjectsSharedBlocksAndExact
     EXPECT_EQ(endpoints.size(), received_layers.size());
 }
 
+TEST_F(P2PConnectorSchedulerTest, PageRRFanoutCarriesOnlyDecodeMissingKeysToPrefill) {
+    auto cfg                                                  = P2PConnectorSchedulerConfig{};
+    cfg.topology                                              = test::makeTestCacheTopology(1, 2, {{0}, {0}});
+    cfg.parallelism_config.tp_size                            = 8;
+    cfg.parallelism_config.role_type                          = RoleType::DECODE;
+    cfg.parallelism_config.prefill_cp_config.kv_cache_sharded = true;
+    cfg.local_full_page_rr                                    = true;
+    P2PSchedulerDecodeRead  decode(cfg, nullptr, nullptr);
+    P2PSchedulerPrefillRead prefill(cfg, nullptr, nullptr);
+
+    KVCacheResource resource;
+    resource.initGroups(cfg.topology);
+    for (int i = 0; i < 17; ++i) {
+        resource.cacheKeys().push_back(100 + i);
+    }
+    resource.mutableBlockIds("group0").assign({10, 11, 12});
+
+    TransferPlan plan;
+    auto&        route        = plan.routes.emplace_back();
+    route.route_id            = 42;
+    route.cache_tag           = "group0";
+    route.src_keys.modulus    = 8;
+    route.filter_prefill_keys = true;
+    route.layers              = {{0, 0, 0}, {1, 1, 1}};
+
+    std::vector<PrefillRouteKeysPB> filters;
+    const auto                      reads = decode.buildDecodeRankRoutes(plan, resource, {1, 16}, 8, filters);
+    ASSERT_TRUE(reads.ok()) << reads.status().ToString();
+    ASSERT_EQ(filters.size(), 1u);
+    EXPECT_EQ(filters.front().route_id(), 42);
+    const std::vector<int64_t> keys{filters.front().cache_keys().begin(), filters.front().cache_keys().end()};
+    EXPECT_EQ(keys, (std::vector<int64_t>{108, 116}));
+    ASSERT_EQ(reads.value().at(0).size(), 1u);
+    ASSERT_EQ(reads.value().at(0).front().layer_blocks_size(), 2);
+    const auto writes = prefill.buildPrefillRankRoutes(plan, 4, {42}, {{42, keys}});
+    ASSERT_EQ(writes.at(0).size(), 1u);
+    const auto& wire_keys = writes.at(0).front().prefill_cache_keys();
+    EXPECT_EQ(std::vector<int64_t>(wire_keys.begin(), wire_keys.end()), keys);
+}
+
 TEST_F(P2PConnectorSchedulerTest, DecodeCompactStateProjectsUsingPrefillCpSize) {
     P2PConnectorSchedulerConfig cfg;
     cfg.topology                   = test::makeTestCacheTopology(1, 1, {{0}}, 4, {CacheGroupType::SWA});
@@ -1118,8 +1158,10 @@ TEST_F(P2PConnectorSchedulerTest, DecodeCompactStateProjectsUsingPrefillCpSize) 
     route.src_keys.include_final_key = true;
     route.src_keys.tail_count = 2;
     plan.routes.push_back(route);
-    auto result = scheduler.buildDecodeRankRoutes(plan, resource, {0, -1}, 1);
+    std::vector<PrefillRouteKeysPB> filters;
+    auto                            result = scheduler.buildDecodeRankRoutes(plan, resource, {0, -1}, 1, filters);
     ASSERT_TRUE(result.ok()) << result.status().ToString();
+    EXPECT_TRUE(filters.empty());
     const auto& ranks = result.value();
     ASSERT_EQ(ranks.size(), 1u);
     ASSERT_EQ(ranks[0].size(), 1u);

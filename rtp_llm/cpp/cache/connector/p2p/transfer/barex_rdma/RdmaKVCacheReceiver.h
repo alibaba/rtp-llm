@@ -20,6 +20,12 @@ public:
     ~RdmaKVCacheReceiver();
 
 public:
+    void stopMetricsReporter() override {
+        if (rdma_client_) {
+            rdma_client_->stopMetricsReporter();
+        }
+    }
+
     /// @brief 启动 TCP server 注册 RDMA 传输服务，并创建 RDMA client 用于主动读取
     bool init(uint32_t listen_port,
               int tcp_io_thread_count,

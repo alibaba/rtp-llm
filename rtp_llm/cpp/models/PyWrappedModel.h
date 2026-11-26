@@ -363,6 +363,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     if (params.kv_cache_layer_layout.has_value()) {
         // The layout carries the published per-group specs, including page geometry.
         init_resources.kv_cache.emplace(params.kv_cache_layer_layout.value());
+        if (cache_manager_ && !params.mtp_cache_config_index.has_value()) {
+            init_resources.kv_cache->setLinearReplayByTag(cache_manager_->linearReplayByTag());
+        }
     }
     init_resources.is_speculative         = (params.sp_config.type != SP_TYPE_NONE);
     init_resources.is_decode_role         = (params.parallelism_config.role_type == RoleType::DECODE);
@@ -449,6 +452,11 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         if (params.kv_cache_layer_layout.has_value()) {
             RTP_LLM_CHECK_WITH_INFO(cache_manager_ != nullptr, "cache-backed CUDA graph requires a cache manager");
             graph_params.kv_cache_group_tags = params.kv_cache_layer_layout->topology().groupTags();
+        }
+        if (cache_manager_ && cache_manager_->cacheConfig().linear_replay.enabled()) {
+            graph_params.linear_replay_group_count = static_cast<int>(graph_params.kv_cache_group_tags.size());
+            RTP_LLM_CHECK_WITH_INFO(graph_params.linear_replay_group_count > 0,
+                                    "LINEAR replay CUDA graph requires cache group tags");
         }
         // Most models transport explicit positions only for MRoPE. A model
         // that consumes those positions with Base RoPE (Qwen4 MTP's indexer)

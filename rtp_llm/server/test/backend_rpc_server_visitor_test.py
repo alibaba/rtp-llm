@@ -99,6 +99,33 @@ class _FakeInput:
         self.prompt_length = prompt_length
 
 
+class BackendRPCServerVisitorSpeculativeTest(unittest.TestCase):
+    def _check_request(self, **overrides):
+        visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor.sp_config = SimpleNamespace(model_type="draft")
+        request = _FakeInput(generate_config=GenerateConfig(**overrides))
+        visitor.check_sp_supported(request)
+
+    def test_speculative_execution_rejects_multiple_sequences_and_beams(self):
+        for options in (
+            {"num_return_sequences": 2},
+            {"num_beams": 2},
+            {"num_beams": 1, "variable_num_beams": [2, 1]},
+        ):
+            with (
+                self.subTest(options=options),
+                self.assertRaises(FtRuntimeException) as caught,
+            ):
+                self._check_request(**options)
+            self.assertEqual(
+                caught.exception.exception_type, ExceptionType.UNSUPPORTED_OPERATION
+            )
+
+    def test_single_width_schedule_and_non_speculative_request(self):
+        self._check_request(num_beams=1, variable_num_beams=[1, 1])
+        self._check_request(variable_num_beams=[2, 1], force_disable_sp_run=True)
+
+
 class _FakeRouteTokenIds:
     shape = (3,)
 

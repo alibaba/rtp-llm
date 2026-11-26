@@ -3,9 +3,11 @@
 namespace rtp_llm {
 
 enum KVCacheSpecType {
-    MultiHeadAttention,
-    MultiHeadLatentAttention,
-    LinearAttention,
+    MultiHeadAttention,        // Per-head K/V pages
+    MultiHeadLatentAttention,  // Compressed latent token pages
+    LinearAttention,           // Recurrent / convolution state checkpoints
+    OpaqueKV,                  // Byte-addressed opaque paged KV pool
+    OpaqueState,               // Fixed-allocation opaque state cache
 };
 
 inline const char* KVCacheSpecTypeToString(KVCacheSpecType t) {
@@ -16,6 +18,10 @@ inline const char* KVCacheSpecTypeToString(KVCacheSpecType t) {
             return "MultiHeadLatentAttention";
         case KVCacheSpecType::LinearAttention:
             return "LinearAttention";
+        case KVCacheSpecType::OpaqueKV:
+            return "OpaqueKV";
+        case KVCacheSpecType::OpaqueState:
+            return "OpaqueState";
         default:
             return "Unknown";
     }

@@ -636,6 +636,12 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     {
         RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs(fused_fill)");
         CudaGraphPrepareFillParams fill_params;
+        if (py_model_inputs_.attention_inputs.linear_replay) {
+            auto& replay = *py_model_inputs_.attention_inputs.linear_replay;
+            // The replay metadata copy below overwrites the live request slots.
+            addCudaGraphPrepareFillRegion(
+                fill_params, replay.slot_ids, state.current_batch_size, replay.slot_ids.numel(), -1);
+        }
         if (!has_tagged_cache) {
             addCudaGraphPrepareFillRegion(fill_params,
                                           py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device,
@@ -803,6 +809,28 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
         // Strided 2D D2D copy for the flat kernel block table.
         tryAddStridedD2DCopy(inputs.attention_inputs.kv_cache_kernel_block_id_device,
                              py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device);
+    }
+
+    if (inputs.attention_inputs.linear_replay) {
+        const auto& source              = *inputs.attention_inputs.linear_replay;
+        auto source_tensors      = source.tensors();
+        auto destination_tensors = py_model_inputs_.attention_inputs.linear_replay->tensors();
+        RTP_LLM_CHECK_WITH_INFO(source.slot_ids.numel() == state.current_batch_size,
+                                "LINEAR replay request count does not match CUDA graph batch");
+        for (size_t i = 0; i < source_tensors.size(); ++i) {
+            const auto& src = *source_tensors[i];
+            auto&       dst = *destination_tensors[i];
+            RTP_LLM_CHECK_WITH_INFO(src.defined() && src.is_cuda() && src.scalar_type() == dst.scalar_type()
+                                        && src.dim() == dst.dim() && src.stride(src.dim() - 1) == 1,
+                                    "LINEAR replay graph input has invalid dtype, device or stride");
+            if (src.dim() == 2) {
+                RTP_LLM_CHECK_WITH_INFO(src.size(0) == dst.size(0) && src.size(1) <= dst.size(1),
+                                        "LINEAR replay group table exceeds graph capacity");
+            } else {
+                RTP_LLM_CHECK_WITH_INFO(src.numel() <= dst.numel(), "LINEAR replay input exceeds graph capacity");
+            }
+            tryAddStridedD2DCopy(src, dst);
+        }
     }
 
     if (position_id_len_factor_ > 0) {
@@ -1460,6 +1488,10 @@ bool CudaGraphRunner::canReplaySelectedGraph(const PyModelInputs&  inputs,
         return false;
     }
     const auto& captured_inputs = graph_it->second.mem_hold_.py_model_inputs_;
+    if (inputs.attention_inputs.linear_replay.has_value()
+        != captured_inputs.attention_inputs.linear_replay.has_value()) {
+        return false;
+    }
     if (isGenerationPrefillCudaGraph()) {
         const auto table_fits = [](const PyAttentionInputs& source, const PyAttentionInputs& destination) {
             return source.kv_cache_kernel_block_id.defined() && destination.kv_cache_kernel_block_id.defined()
@@ -1718,6 +1750,11 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     // Set the mode here so refreshTaggedAttentionInputs propagates it to every
     // region before the first warmup forward and all subsequent graph copies.
     inputs.attention_inputs.is_cuda_graph = true;
+    if (is_target_verify_ && linear_replay_group_count_ > 0) {
+        // Capture against the real pools without touching a request's state.
+        inputs.attention_inputs.linear_replay =
+            LinearReplayInputs::allocateInactive(max_bs_, linear_replay_group_count_);
+    }
 
     // input_lengths [batch_size, int32] (decode only)
     inputs.attention_inputs.input_lengths         = torch::full({int(max_bs_)}, num_tokens_per_bs_, options_cpu_int32_);
@@ -2202,6 +2239,10 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
         capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths.slice(0, 0, batch_size);
     inputs.attention_inputs.mtp_indexer_seed_rows =
         capture_mem_hold_.py_model_inputs_.attention_inputs.mtp_indexer_seed_rows.slice(0, 0, batch_size);
+    if (capture_mem_hold_.py_model_inputs_.attention_inputs.linear_replay) {
+        inputs.attention_inputs.linear_replay =
+            capture_mem_hold_.py_model_inputs_.attention_inputs.linear_replay->slice(0, batch_size);
+    }
     inputs.attention_inputs.input_lengths_device =
         capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths_device.slice(0, 0, batch_size);
     inputs.attention_inputs.padding_offset =

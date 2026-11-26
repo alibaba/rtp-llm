@@ -4,6 +4,7 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <vector>
 
 #include "rtp_llm/cpp/cache/KVCacheSpecBase.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
@@ -47,7 +48,7 @@ struct LinearKVCacheSpec: public KVCacheSpec {
                                 linear.linear_key_head_dim,
                                 linear.linear_value_head_dim);
 
-        const auto     seq         = ctx.seq_size_per_block == 0 ? 1 : ctx.seq_size_per_block;
+        uint32_t       seq         = ctx.seq_size_per_block == 0 ? 1 : ctx.seq_size_per_block;
         const auto     kernel      = SpecBuilder::kernelSeqSizePerBlock(desc, ctx, seq);
         const auto     attn_tp     = std::max<int64_t>(1, ctx.parallelism_config->get_attn_tp_size());
         const uint32_t tp          = static_cast<uint32_t>(attn_tp);
@@ -101,15 +102,16 @@ struct LinearKVCacheSpec: public KVCacheSpec {
         RTP_LLM_CHECK_WITH_INFO(spec->conv_state_dtype != DataType::TYPE_INVALID,
                                 "LINEAR KVCacheSpecDesc tag=%s requires valid conv_state_dtype",
                                 desc.tag.c_str());
+        const auto item_size = getTypeSize(spec->conv_state_dtype);
+        TpCacheTransferLayout layout;
+        layout.key_heads     = local_k_heads;
+        layout.value_heads   = local_v_heads;
+        layout.q_row_bytes   = qk_row_elems * item_size;
+        layout.k_row_bytes   = layout.q_row_bytes;
+        layout.v_row_bytes   = v_row_elems * item_size;
+        layout.history_rows  = history_rows;
         if (desc.tp_transfer_mode == TpCacheTransferMode::LINEAR_QKV) {
-            const auto item_size = getTypeSize(spec->conv_state_dtype);
-            auto&      layout    = spec->tp_transfer;
-            layout.key_heads     = local_k_heads;
-            layout.value_heads   = local_v_heads;
-            layout.q_row_bytes   = qk_row_elems * item_size;
-            layout.k_row_bytes   = layout.q_row_bytes;
-            layout.v_row_bytes   = v_row_elems * item_size;
-            layout.history_rows  = history_rows;
+            spec->tp_transfer = layout;
         }
         return spec;
     }

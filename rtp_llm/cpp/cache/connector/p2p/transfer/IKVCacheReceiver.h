@@ -67,6 +67,7 @@ using RecvRequestPtr = std::shared_ptr<RecvRequest>;
 class IKVCacheReceiver {
 public:
     virtual ~IKVCacheReceiver() = default;
+    virtual void stopMetricsReporter() {}
 
     /// @brief 注册内存到 RDMA MR（建议在 recv 之前对所有 buffer 调用）
     virtual bool regMem(const BlockInfo& block_info, uint64_t aligned_size = 0) = 0;

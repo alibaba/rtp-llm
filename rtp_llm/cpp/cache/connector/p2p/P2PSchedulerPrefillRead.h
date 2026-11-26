@@ -25,10 +25,13 @@ public:
     ~P2PSchedulerPrefillRead() = default;
 
 public:
+    using PrefillRouteKeys = std::map<int, std::vector<int64_t>>;
+
     struct PreparedPlan {
         std::shared_ptr<const TransferPlan> plan;
         uint64_t                            digest = 0;
         std::set<int>                       active_route_ids;
+        PrefillRouteKeys                    prefill_route_keys;
     };
 
     // A null prepared plan is a result-only handoff.
@@ -47,18 +50,21 @@ public:
     planFor(int decode_tp_size, const std::string& unique_key, const std::string& decode_pipeline_layout = {});
 
     /// Retain the validated plan across the StartLoad resource wait.
-    ErrorResult<PreparedPlan> preparePlan(int                decode_tp_size,
-                                          uint64_t           decode_plan_digest,
-                                          const std::string& unique_key,
-                                          size_t             decode_worker_count,
-                                          std::set<int>      active_route_ids,
-                                          const std::string& decode_pipeline_layout = {});
+    ErrorResult<PreparedPlan>
+    preparePlan(int                                                           decode_tp_size,
+                uint64_t                                                      decode_plan_digest,
+                const std::string&                                            unique_key,
+                size_t                                                        decode_worker_count,
+                std::set<int>                                                 active_route_ids,
+                const std::string&                                            decode_pipeline_layout = {},
+                const google::protobuf::RepeatedPtrField<PrefillRouteKeysPB>& prefill_route_keys     = {});
 
     /// @brief 把 plan 投影成每个 prefill worker 的 route 列表。
     /// Prefill routes name the destination worker and, for PP, the local layers to send.
-    P2PBroadcastClient::RankRoutes buildPrefillRankRoutes(const TransferPlan&  plan,
-                                                          size_t               worker_num,
-                                                          const std::set<int>& active_route_ids = {}) const;
+    P2PBroadcastClient::RankRoutes buildPrefillRankRoutes(const TransferPlan&     plan,
+                                                          size_t                  worker_num,
+                                                          const std::set<int>&    active_route_ids   = {},
+                                                          const PrefillRouteKeys& prefill_route_keys = {}) const;
 
 private:
     /// 轮询 result->done()；is_cancelled 或当前时间超过 deadline_ms 时发 CANCEL_HANDLE_READ。

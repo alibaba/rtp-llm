@@ -45,6 +45,13 @@ py_library(
 py_library(
     name = "causal_conv1d",
     srcs = glob(["causal_conv1d/*.py"]),
+    deps = [
+        "//rtp_llm:numpy",
+        "//rtp_llm:torch",
+    ] + triton_deps(["triton"]) + select({
+        "@//:using_cuda": ["//rtp_llm:triton"],
+        "//conditions:default": [],
+    }),
     visibility = ["//visibility:public"]
 )
 
@@ -89,7 +96,7 @@ py_library(
 
 py_library(
     name = "triton_kernels",
-    srcs = ["legacy_fp8_indexer_score.py"],
+    srcs = ["legacy_fp8_indexer_score.py", "linear_replay.py"],
     deps = [
         ":attention",
         ":autotune_cache",

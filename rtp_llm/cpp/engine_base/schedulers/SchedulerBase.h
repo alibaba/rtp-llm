@@ -36,6 +36,10 @@ public:
     virtual absl::StatusOr<ScheduleOutput> scheduleConservative(int /*propose_step*/) {
         return schedule();
     }
+    // Wake the engine loop while its current step may still own resources.
+    virtual absl::Status requestStop() {
+        return stop();
+    }
     virtual absl::Status stop() = 0;
 
     // Complete requests cancelled by stop() after the executor has drained.
@@ -56,7 +60,9 @@ public:
     virtual std::vector<EngineScheduleInfo::TaskInfo> runningTaskList() {
         return {};
     }
-    virtual void updateSchedulerInfo(const std::string& scheduler_info) {}
+    virtual absl::Status updateSchedulerInfo(const std::string& scheduler_info) {
+        return absl::OkStatus();
+    }
 };
 
 }  // namespace rtp_llm

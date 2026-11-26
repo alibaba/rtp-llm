@@ -7,6 +7,7 @@ from unittest.mock import Mock
 
 from PIL import Image, UnidentifiedImageError
 
+from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.multimodal.mm_process_engine import MultiprocessPreprocessExecutor
 
 
@@ -169,9 +170,11 @@ class MultiprocessPreprocessExecutorTest(TestCase):
         self.assertEqual(executor._pending_preprocess_tasks, set())
 
     def test_invalid_image_keeps_pool_and_other_queued_request(self):
+        vit_config = VitConfig()
+        vit_config.mm_preprocess_max_workers = 1
         executor = MultiprocessPreprocessExecutor(
             multiprocessing.get_context("spawn"),
-            SimpleNamespace(mm_preprocess_max_workers=1),
+            vit_config,
             {},
             preprocess_image,
         )
