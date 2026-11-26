@@ -46,6 +46,12 @@ class ServerConfig:
     """Port layout: base = start_port + rank_id * worker_info_port_num."""
 
     def __init__(self):
+        self.prefill_stall_thresholds: str = ""
+        self.prefill_core_dir: str = "/tmp/rtp_llm_prefill_cores"
+        self.grpc_keepalive_time_ms: int = 10000
+        self.grpc_keepalive_timeout_ms: int = 5000
+        self.prefill_core_timeout_s: float = 10.0
+        self.prefill_gpu_core: bool = False
         self.frontend_metrics_enable = False
         self.frontend_server_count = 4
         self.vit_server_count = 1
@@ -770,12 +776,14 @@ class MasterConfig:
 
 class JITConfig:
     def __init__(self):
+        self.local_jit_dir: str = ""
         self.remote_jit_dir: str = ""
         self.jit_cache_setup_timeout_s: int = 180
         self.manage_jit_cache: bool = True
 
     def to_string(self):
         return (
+            f"local_jit_dir: {self.local_jit_dir}\n"
             f"remote_jit_dir: {self.remote_jit_dir}\n"
             f"jit_cache_setup_timeout_s: {self.jit_cache_setup_timeout_s}\n"
             f"manage_jit_cache: {self.manage_jit_cache}"
@@ -854,7 +862,7 @@ class GrammarAdmissionConfig:
     queue_timeout_s: float = 30.0
     compile_timeout_s: float = 30.0
     sandbox_pool_size: int = 0
-    sandbox_process_memory_limit_mb: int = 1024
+    sandbox_process_memory_limit_mb: int = 8192
     compiler_cache_bytes: int = 1024 * 1024 * 1024
     result_cache_max_entries: int = 2048
 

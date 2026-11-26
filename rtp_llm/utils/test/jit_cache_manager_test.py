@@ -829,13 +829,23 @@ class ScopeTest(JitCacheTestBase):
 
     def test_setup_env_redirects_and_respects_presets(self):
         os.environ["TRITON_CACHE_DIR"] = str(self.root / "preset")
+        configured = self.root / "configured"
         with _fake_probes():
-            scope = jit.setup_jit_cache_env()
+            scope = jit.setup_jit_cache_env(str(configured))
+        self.assertEqual(scope.root, configured / jit.RTP_JIT_VERSION / scope.scope_id)
         self.assertNotIn("triton", {item.name for item in scope.components})
         self.assertEqual(os.environ["TRITON_CACHE_DIR"], str(self.root / "preset"))
         torch_ext = next(x for x in scope.components if x.name == "torch_extensions")
         self.assertEqual(os.environ["TORCH_EXTENSIONS_DIR"], str(torch_ext.local_dir))
         self.assertIn(scope.scope_id, os.environ["TORCH_EXTENSIONS_DIR"])
+
+    def test_explicit_local_root_rejects_relative_paths(self):
+        with self.assertRaises(cache_env.LocalJitDirectoryError):
+            jit.setup_jit_cache_env("relative")
+
+    def test_explicit_local_root_fails_open_without_a_supported_scope(self):
+        with mock.patch.object(jit, "resolve_scope", return_value=None):
+            self.assertIsNone(jit.setup_jit_cache_env(str(self.root)))
 
     def test_setup_env_manages_blank_component_variable(self):
         os.environ["TRITON_CACHE_DIR"] = ""
@@ -1017,6 +1027,8 @@ class ScopeTest(JitCacheTestBase):
             jit.setup_jit_cache_env.cache_clear()
             with self.assertLogs(level="WARNING") as logs:
                 self.assertIsNone(jit.setup_jit_cache_env())
+            with self.assertRaises(cache_env.LocalJitDirectoryError):
+                jit.setup_jit_cache_env(str(self.root))
             scope.root.chmod(0o700)
         self.assertIn("not shared by its owner", "\n".join(logs.output))
 
@@ -1495,6 +1507,7 @@ class ManagerTest(JitCacheTestBase):
 class BackendTest(JitCacheTestBase):
     def make_configs(self, remote="", world_size=1):
         configs = mock.Mock()
+        configs.jit_config.local_jit_dir = ""
         configs.jit_config.remote_jit_dir = remote
         configs.jit_config.jit_cache_setup_timeout_s = 5
         configs.jit_config.manage_jit_cache = True
@@ -1672,7 +1685,8 @@ class BackendTest(JitCacheTestBase):
                 )
             )
             stack.enter_context(mock.patch.object(backend, "_send_pipe_status", status))
-            backend.local_rank_start(None, configs, pipe_writer=object())
+            backend.local_rank_start(None, configs, pipe_writer=object(), prefill_progress_slot="/tmp/rank0.slot")
+        self.assertEqual(configs.runtime_config.prefill_progress_slot, "/tmp/rank0.slot")
         self.assertEqual(status.call_args[0][1], "success")
         self.assertEqual(events, ["device", "tuning", "backend"])
         self.assertEqual(status.call_args.kwargs["max_seq_len"], 4096)
@@ -1700,7 +1714,9 @@ class BackendTest(JitCacheTestBase):
 
     @staticmethod
     def _fake_create(proc):
-        def fake(_gc, _cfg, _ctx, processes, readers, service_draining=None):
+        def fake(
+            _gc, _cfg, _ctx, processes, readers, service_draining=None, prefill_watchdog=None
+        ):
             processes.append(proc)
             readers.append(mock.Mock())
 

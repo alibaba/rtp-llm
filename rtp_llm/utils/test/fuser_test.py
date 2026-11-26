@@ -1,12 +1,16 @@
+import errno
+import hashlib
 import logging
+import tempfile
 import time
 import unittest
-from unittest.mock import MagicMock, Mock, patch
+from pathlib import Path
+from unittest.mock import MagicMock, Mock, mock_open, patch
 
 import requests
 
 import rtp_llm.utils.fuser as fuser
-from rtp_llm.utils.fuser import Fuser, _redact_uri, retry_with_timeout
+from rtp_llm.utils.fuser import Fuser, MountRwMode, _redact_uri, retry_with_timeout
 
 
 class TestFuser(unittest.TestCase):
@@ -17,6 +21,65 @@ class TestFuser(unittest.TestCase):
 
     def tearDown(self):
         self.fuser._mount_src_map = {}
+
+    def external_mount_path(self, uri: str) -> Path:
+        root = tempfile.TemporaryDirectory()
+        self.addCleanup(root.cleanup)
+        self.fuser._fuse_path_prefix = root.name
+        path = Path(root.name) / hashlib.md5(uri.encode()).hexdigest()
+        path.mkdir()
+        return path
+
+    def test_visible_mount_determines_fuse_access(self):
+        mounts = (
+            "1 0 8:1 / / rw - ext4 /dev/root rw\n"
+            "2 1 0:2 / /models ro - fuse.ossfs oss ro\n"
+            "3 2 0:3 / /models/local rw - tmpfs tmpfs rw\n"
+        )
+        with patch("builtins.open", mock_open(read_data=mounts)):
+            self.assertEqual(fuser._fuse_mount_options("/models/weights"), {"ro"})
+            self.assertIsNone(fuser._fuse_mount_options("/models/local/weights"))
+
+    @patch("requests.post")
+    def test_borrowed_mount_is_not_released(self, post):
+        uri = "oss://bucket/model"
+        path = self.external_mount_path(uri)
+        with patch.object(fuser, "_fuse_mount_options", return_value={"ro"}):
+            self.assertEqual(self.fuser.mount_or_reuse_dir(uri), str(path))
+            self.fuser.umount_fuse_dir(str(path), force=True)
+        self.assertTrue(path.is_dir())
+        post.assert_not_called()
+
+    @patch("requests.post")
+    def test_readonly_mount_rejects_write(self, post):
+        uri = "oss://bucket/model"
+        self.external_mount_path(uri)
+        with patch.object(
+            fuser, "_fuse_mount_options", return_value={"ro"}
+        ), self.assertRaises(PermissionError) as error:
+            self.fuser.mount_or_reuse_dir(uri, MountRwMode.RWMODE_RW)
+        self.assertEqual(error.exception.errno, errno.EROFS)
+        post.assert_not_called()
+
+    @patch("requests.post")
+    def test_managed_mount_lasts_until_last_release(self, post):
+        uri = "oss://bucket/model"
+        post.return_value = self.mock_response
+        with patch.object(fuser, "_fuse_mount_options", return_value=None) as options:
+            path = self.fuser.mount_or_reuse_dir(uri)
+            options.return_value = {"ro"}
+            self.assertEqual(
+                self.fuser.mount_or_reuse_dir(uri, MountRwMode.RWMODE_RW), path
+            )
+        post.reset_mock()
+        self.fuser.umount_fuse_dir(path)
+        post.assert_not_called()
+        self.fuser.umount_fuse_dir(path)
+        post.assert_called_once_with(
+            f"{self.fuser._fuse_uri}/FuseService/umount",
+            json={"mountDir": path},
+            timeout=600,
+        )
 
     @patch("requests.post")
     def test_mount_dir_success(self, mock_post):

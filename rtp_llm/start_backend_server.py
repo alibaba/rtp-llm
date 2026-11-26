@@ -30,6 +30,7 @@ from rtp_llm.utils.concurrency_controller import (
     ConcurrencyController,
     set_global_controller,
 )
+from rtp_llm.utils.jit_cache_env import LocalJitDirectoryError
 from rtp_llm.utils.oom_diag import install_oom_dump
 from rtp_llm.utils.process_lifecycle import arm_parent_death_sigkill
 from rtp_llm.utils.process_manager import ProcessManager
@@ -493,6 +494,8 @@ def start_backend_server(
             from rtp_llm.utils.jit_cache_manager import start_from_config
 
             manager = start_from_config(py_env_configs.jit_config)
+        except LocalJitDirectoryError:
+            raise
         except Exception:  # cold start; a signal instead unwinds to the finally
             logging.exception("JIT_CACHE_FAIL_OPEN: setup failed; cold start")
         if torch.cuda.device_count() > 1 and pc.world_size > 1:

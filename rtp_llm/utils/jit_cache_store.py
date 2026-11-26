@@ -20,6 +20,7 @@ from rtp_llm.utils.jit_cache_deep_gemm import (
     SNAPSHOT_MANIFEST,
     validate_deepjit_snapshot,
 )
+from rtp_llm.utils.fuser import _fuse_mount_options
 
 SNAPSHOT_SUFFIX, MTIME_MANIFEST = ".jit_snapshot.tar.zst", ".jit_mtime_ns.json"
 SNAPSHOT_KEEP, STALE_REMOTE_TMP_S, STALE_BATON_S = 20, 1800.0, 7200.0
@@ -183,7 +184,15 @@ class RemoteSnapshotStore:
                 remote_tmp = self.remote_root / f"{name}.tmp"
                 try:
                     shutil.copyfile(archive, remote_tmp)
-                    remote_tmp.chmod(0o644)
+                    # _mounted tracks cleanup ownership, not filesystem type:
+                    # an externally mounted FUSE directory has no owned mount.
+                    # Recheck the visible mount after restore; FUSE may expose
+                    # new objects only after upload and may not support chmod.
+                    if (
+                        not self._mounted
+                        and _fuse_mount_options(str(self.remote_root)) is None
+                    ):
+                        remote_tmp.chmod(0o644)
                     os.rename(remote_tmp, self.remote_root / name)
                 finally:
                     with suppress(OSError):

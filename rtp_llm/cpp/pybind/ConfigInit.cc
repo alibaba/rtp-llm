@@ -430,6 +430,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("use_asm_pa", &FMHAConfig::use_asm_pa)
         .def_readwrite("use_triton_pa", &FMHAConfig::use_triton_pa)
         .def_readwrite("deterministic_gemm", &FMHAConfig::deterministic_gemm)
+        .def_readwrite("indexer_native_mtp", &FMHAConfig::indexer_native_mtp)
         .def_readwrite("absorb_opt_len", &FMHAConfig::absorb_opt_len)
         .def("to_string", &FMHAConfig::to_string)
         .def(py::pickle(
@@ -445,11 +446,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.absorb_opt_len,
                                       self.enable_flashinfer_trtllm_gen,
                                       self.disable_flashinfer_hybrid_prefill,
-                                      self.deterministic_gemm);
+                                      self.deterministic_gemm,
+                                      self.indexer_native_mtp);
             },
             [](py::tuple t) {
-                if (t.size() != 11 && t.size() != 12)
-                    throw std::runtime_error("FMHAConfig: expected 11- or 12-element state, got "
+                if (t.size() < 11 || t.size() > 13)
+                    throw std::runtime_error("FMHAConfig: expected 11- to 13-element state, got "
                                              + std::to_string(t.size()));
                 FMHAConfig c;
                 try {
@@ -464,8 +466,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.absorb_opt_len                      = t[8].cast<int64_t>();
                     c.enable_flashinfer_trtllm_gen        = t[9].cast<bool>();
                     c.disable_flashinfer_hybrid_prefill   = t[10].cast<bool>();
-                    if (t.size() == 12)
+                    if (t.size() >= 12)
                         c.deterministic_gemm = t[11].cast<bool>();
+                    if (t.size() == 13)
+                        c.indexer_native_mtp = t[12].cast<bool>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("FMHAConfig unpickle error: ") + e.what());
                 }
@@ -978,7 +982,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.record_decode_sample_rate);
             },
             [](py::tuple t) {
-                if (t.size() != 12 && t.size() != 13 && t.size() != 15 && t.size() != 16 && t.size() != 19)
+                if (t.size() != 12 && t.size() != 13 && t.size() != 15 && t.size() != 16 && t.size() != 19
+                    && t.size() != 20)
                     throw std::runtime_error("Invalid state!");
 
                 ProfilingDebugLoggingConfig c;
@@ -1052,6 +1057,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("disable_dpc_random", &HWKernelConfig::disable_dpc_random)
         .def_readwrite("rocm_disable_custom_ag", &HWKernelConfig::rocm_disable_custom_ag)
         .def_readwrite("enable_fuse_kernels", &HWKernelConfig::enable_fuse_kernels)
+        .def_readwrite("indexer_fused_topk", &HWKernelConfig::indexer_fused_topk)
+        .def_readwrite("glm5_eh_fusion", &HWKernelConfig::glm5_eh_fusion)
+        .def_readwrite("glm5_cmp_moe_dual_stream", &HWKernelConfig::glm5_cmp_moe_dual_stream)
+        .def_readwrite("glm5_cp_defer_padded_scatter", &HWKernelConfig::glm5_cp_defer_padded_scatter)
+        .def_readwrite("fused_router_pad", &HWKernelConfig::fused_router_pad)
         .def_readwrite("glm5_cp_opt", &HWKernelConfig::glm5_cp_opt)
         .def_readwrite("enable_glm5_cmp", &HWKernelConfig::enable_glm5_cmp)
         .def("to_string", &HWKernelConfig::to_string)
@@ -1071,11 +1081,17 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.dyn_decode_gate_thresholds,
                                       self.enable_fuse_kernels,
                                       self.glm5_cp_opt,
-                                      self.enable_glm5_cmp);
+                                      self.enable_glm5_cmp,
+                                      self.indexer_fused_topk,
+                                      self.glm5_eh_fusion,
+                                      self.glm5_cmp_moe_dual_stream,
+                                      self.fused_router_pad,
+                                      self.glm5_cp_defer_padded_scatter);
             },
             [](py::tuple t) {
                 if (t.size() != 5 && t.size() != 7 && t.size() != 8 && t.size() != 9 && t.size() != 10 && t.size() != 11
-                    && t.size() != 12 && t.size() != 13 && t.size() != 15)
+                    && t.size() != 12 && t.size() != 13 && t.size() != 15 && t.size() != 16 && t.size() != 19
+                    && t.size() != 20)
                     throw std::runtime_error("Invalid state!");
                 HWKernelConfig c;
                 try {
@@ -1105,13 +1121,24 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                             c.glm5_cp_opt     = t[11].cast<bool>();
                             c.enable_glm5_cmp = t[12].cast<bool>();
                         }
-                    } else if (t.size() == 12 || t.size() == 15) {
+                    } else if (t.size() == 12 || t.size() >= 15) {
                         c.enable_dynamic_decode_backend = t[10].cast<bool>();
                         c.dyn_decode_gate_thresholds    = t[11].cast<std::optional<std::string>>();
-                        if (t.size() == 15) {
+                        if (t.size() >= 15) {
                             c.enable_fuse_kernels = t[12].cast<bool>();
                             c.glm5_cp_opt         = t[13].cast<bool>();
                             c.enable_glm5_cmp     = t[14].cast<bool>();
+                        }
+                        if (t.size() == 20) {
+                            c.glm5_cp_defer_padded_scatter = t[19].cast<bool>();
+                        }
+                        if (t.size() >= 19) {
+                            c.glm5_eh_fusion = t[16].cast<bool>();
+                            c.glm5_cmp_moe_dual_stream = t[17].cast<bool>();
+                            c.fused_router_pad = t[18].cast<bool>();
+                        }
+                        if (t.size() >= 16) {
+                            c.indexer_fused_topk = t[15].cast<bool>();
                         }
                     }
                 } catch (const std::exception& e) {
@@ -1742,6 +1769,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     // Register RuntimeConfig - only expose its own members, not sub-config members
     py::class_<RuntimeConfig> runtime_config(m, "RuntimeConfig");
     runtime_config.def(py::init<>())
+        .def_readwrite("prefill_progress_slot", &RuntimeConfig::prefill_progress_slot)
+        .def_readwrite("torch_cuda_pool_prealloc_mb", &RuntimeConfig::torch_cuda_pool_prealloc_mb)
+        .def_readwrite("torch_cuda_pool_prealloc_safety_mb", &RuntimeConfig::torch_cuda_pool_prealloc_safety_mb)
         .def_readwrite("max_generate_batch_size", &RuntimeConfig::max_generate_batch_size)
         .def_readwrite("max_block_size_per_item", &RuntimeConfig::max_block_size_per_item)
         .def_readwrite("reserve_runtime_mem_mb", &RuntimeConfig::reserve_runtime_mem_mb)
@@ -1781,10 +1811,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.specify_gpu_arch,
                                       self.model_warm_up,
                                       self.output_dispatcher_worker_count,
+                                      self.torch_cuda_pool_prealloc_mb,
+                                      self.torch_cuda_pool_prealloc_safety_mb,
                                       self.enable_linear_replay);
             },
             [](py::tuple t) {
-                if (t.size() != 12 && t.size() != 13 && t.size() != 14 && t.size() != 15)
+                if (t.size() < 12 || t.size() > 17)
                     throw std::runtime_error("Invalid state!");
                 RuntimeConfig c;
                 try {
@@ -1806,8 +1838,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     if (t.size() >= 14) {
                         c.output_dispatcher_worker_count = t[13].cast<int>();
                     }
-                    if (t.size() >= 15) {
-                        c.enable_linear_replay = t[14].cast<bool>();
+                    if (t.size() == 15 || t.size() == 17) {
+                        c.enable_linear_replay = t[t.size() - 1].cast<bool>();
+                    }
+                    if (t.size() >= 16) {
+                        c.torch_cuda_pool_prealloc_mb        = t[14].cast<int64_t>();
+                        c.torch_cuda_pool_prealloc_safety_mb = t[15].cast<int64_t>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("RuntimeConfig unpickle error: ") + e.what());

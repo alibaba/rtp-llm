@@ -114,6 +114,30 @@ def validate_hw_kernel_group_args(
 def init_hw_kernel_group_args(parser, hw_kernel_config):
     hw_kernel_group = parser.add_argument_group("硬件/Kernel 特定优化")
     hw_kernel_group.add_argument(
+        "--glm5_eh_fusion",
+        env_name="RTP_LLM_GLM5_EH_FUSION",
+        bind_to=(hw_kernel_config, "glm5_eh_fusion"),
+        type=str2bool,
+        default=True,
+        help="Fuse the eligible GLM5 TP1 MTP EH projection.",
+    )
+    hw_kernel_group.add_argument(
+        "--glm5_cmp_moe_dual_stream",
+        env_name="RTP_LLM_GLM5_CMP_MOE_DUAL_STREAM",
+        bind_to=(hw_kernel_config, "glm5_cmp_moe_dual_stream"),
+        type=str2bool,
+        default=True,
+        help="Overlap shared and routed GLM5 CMP experts when supported.",
+    )
+    hw_kernel_group.add_argument(
+        "--fused_router_pad",
+        env_name="RTP_LLM_FUSED_ROUTER_PAD",
+        bind_to=(hw_kernel_config, "fused_router_pad"),
+        type=str2bool,
+        default=True,
+        help="Fuse padding into supported router projections.",
+    )
+    hw_kernel_group.add_argument(
         "--enable_dynamic_decode_backend",
         env_name="ENABLE_DYNAMIC_DECODE_BACKEND",
         bind_to=(hw_kernel_config, "enable_dynamic_decode_backend"),
@@ -257,6 +281,22 @@ def init_hw_kernel_group_args(parser, hw_kernel_config):
         ),
     )
 
+    hw_kernel_group.add_argument(
+        "--indexer_fused_topk",
+        env_name="RTP_INDEXER_FUSED_TOPK",
+        bind_to=(hw_kernel_config, "indexer_fused_topk"),
+        type=str2bool,
+        default=False,
+        help="Fuse the sparse Indexer prefill Top-K output write on supported CUDA inputs.",
+    )
+    hw_kernel_group.add_argument(
+        "--glm5_cp_defer_padded_scatter",
+        env_name="RTP_LLM_CP_DEFER_PADDED_SCATTER",
+        bind_to=(hw_kernel_config, "glm5_cp_defer_padded_scatter"),
+        type=str2bool,
+        default=False,
+        help="With GLM5 CP optimization, scatter large padded BF16 batches after V projection.",
+    )
     hw_kernel_group.add_argument(
         "--glm5_cp_opt",
         env_name="GLM5_CP_OPT",

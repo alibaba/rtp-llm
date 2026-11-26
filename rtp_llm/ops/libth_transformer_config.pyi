@@ -462,6 +462,7 @@ class GrammarConfig:
 class FMHAConfig:
     absorb_opt_len: int
     deterministic_gemm: bool
+    indexer_native_mtp: bool
     disable_flashinfer_hybrid_prefill: bool
     disable_flashinfer_native: bool
     enable_flashinfer_trtllm_gen: bool
@@ -626,9 +627,14 @@ class HWKernelConfig:
     deterministic_attn: bool
     enable_cuda_graph: bool
     enable_cuda_graph_debug_mode: bool
+    indexer_fused_topk: bool
+    glm5_eh_fusion: bool
+    glm5_cmp_moe_dual_stream: bool
+    fused_router_pad: bool
     enable_fuse_kernels: bool
     enable_glm5_cmp: bool
     enable_stable_scatter_add: bool
+    glm5_cp_defer_padded_scatter: bool
     glm5_cp_opt: bool
     prefill_capture_seq_lens: list[int]
     generation_prefill_capture_token_buckets: list[int]
@@ -1634,6 +1640,9 @@ class RuntimeConfig:
     max_block_size_per_item: int
     max_generate_batch_size: int
     model_name: str
+    prefill_progress_slot: str
+    torch_cuda_pool_prealloc_mb: int
+    torch_cuda_pool_prealloc_safety_mb: int
     reserve_runtime_mem_mb: int
     specify_gpu_arch: str
     use_batch_decode_scheduler: bool
