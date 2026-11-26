@@ -1014,8 +1014,10 @@ struct TopKRegister: TopKRadixBase<12> {
 struct TopKStreaming: TopKRegister<2> {
 public:
     static constexpr uint32_t kMaxSeqLen = std::numeric_limits<uint32_t>::max();
+    template<unsigned Words>
+    static constexpr uint32_t kLongMaskMaxSeqLen = kBlockSize * 32 * Words;
 
-    template<bool kUsePDL, bool kAlignedInput, typename Score>
+    template<bool kUsePDL, bool kAlignedInput, unsigned kLongMaskWords = 0, typename Score>
     SGL_DEVICE static void forward(const TopKProblemT<Score> problem, void* _smem) {
         const auto tx   = threadIdx.x;
         const auto smem = static_cast<Smem*>(_smem);
