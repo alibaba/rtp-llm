@@ -37,6 +37,7 @@ using AccT = float;
 static constexpr int BITS_PER_PASS = 11;
 static constexpr int NUM_BUCKETS = 1 << BITS_PER_PASS;
 static constexpr int BLOCK_SIZE = 512;
+static constexpr int WARP_SZ = 32;
 using WideT = float4;
 
 template <typename T>
@@ -181,23 +182,29 @@ __device__ inline float calcFloatValue(uint32_t count, uint32_t exponent, uint64
   return reinterpret_cast<float&>(bitFloat);
 }
 
-template <bool IsDeterministic, typename T, typename HisT_>
-__device__ constexpr void histAtomicAdd(HisT_* dst, T value) {
-  if constexpr (IsDeterministic) {
-    uint32_t m = calcMantissa(value);
-    atomicAdd(reinterpret_cast<unsigned long long*>(dst), static_cast<uint64_t>(m));
-  } else {
-    atomicAdd(dst, static_cast<float>(value));
-  }
-}
-
 // ======================== Vectorized process ========================
 
+// Visits exactly the same (element, thread) pairs as a plain grid-stride vectorized scan,
+// but in warp-synchronous rounds: each round every lane of a warp holds at most one
+// element, and the callback runs for ALL lanes of the warp (`valid` marks live elements)
+// so it may issue warp-collective operations (ballot/match/shfl). Round trip counts are
+// warp-uniform: lane 0's loop condition bounds every lane of the warp because a lane's
+// k-th index grows monotonically with its lane id, so invalid high lanes simply drop out
+// of the ballot inside the callback.
 template <typename T, typename Func>
-__device__ void vectorizedProcess(size_t threadRank, size_t numThreads, T const* in, IdxT len,
-                                  Func f) {
+__device__ void warpUniformProcess(size_t threadRank, size_t numThreads, T const* in, IdxT len,
+                                   Func f) {
+  static_assert(BLOCK_SIZE % WARP_SZ == 0, "BLOCK_SIZE must be a multiple of WARP_SZ");
+  // Derive hardware lane from threadIdx.x so warpFirst matches warpMembers even
+  // if a caller ever invokes with a non-warp-aligned blockDim.x.
+  int const lane = static_cast<int>(threadIdx.x & (WARP_SZ - 1));
+  IdxT const warpFirst = static_cast<IdxT>(threadRank) - lane;
   if constexpr (sizeof(T) >= sizeof(WideT)) {
-    for (IdxT i = threadRank; i < len; i += numThreads) f(in[i], i);
+    for (IdxT i0 = warpFirst; i0 < len; i0 += numThreads) {
+      IdxT const i = i0 + lane;
+      bool const valid = i < len;
+      f(valid ? in[i] : T{}, valid);
+    }
   } else {
     static_assert(sizeof(WideT) % sizeof(T) == 0);
     constexpr int itemsPerScalar = sizeof(WideT) / sizeof(T);
@@ -211,15 +218,81 @@ __device__ void vectorizedProcess(size_t threadRank, size_t numThreads, T const*
     if (skipCnt > len) skipCnt = len;
     WideT const* inCast = reinterpret_cast<decltype(inCast)>(in + skipCnt);
     IdxT const lenCast = (len - skipCnt) / itemsPerScalar;
-    for (IdxT i = threadRank; i < lenCast; i += numThreads) {
-      wide.scalar = inCast[i];
-      IdxT const real_i = skipCnt + i * itemsPerScalar;
+    // Unaligned head: a single round; only the first skipCnt global threads hold an element.
+    bool const headValid = static_cast<IdxT>(threadRank) < skipCnt;
+    f(headValid ? in[threadRank] : T{}, headValid);
+    // Wide body: each round loads one WideT per live lane, then visits itemsPerScalar
+    // element slots per lane, one callback round per slot.
+    for (IdxT i0 = warpFirst; i0 < lenCast; i0 += numThreads) {
+      IdxT const i = i0 + lane;
+      bool const valid = i < lenCast;
+      if (valid) {
+        wide.scalar = inCast[i];
+      } else {
 #pragma unroll
-      for (int j = 0; j < itemsPerScalar; ++j) f(wide.array[j], real_i + j);
+        for (int j = 0; j < itemsPerScalar; ++j) wide.array[j] = T{};
+      }
+#pragma unroll
+      for (int j = 0; j < itemsPerScalar; ++j) f(wide.array[j], valid);
     }
-    if (static_cast<IdxT>(threadRank) < skipCnt) f(in[threadRank], static_cast<IdxT>(threadRank));
+    // Tail: a single round; at most one element per lane.
     IdxT const remain_i = skipCnt + lenCast * itemsPerScalar + threadRank;
-    if (remain_i < len) f(in[remain_i], remain_i);
+    bool const tailValid = remain_i < len;
+    f(tailValid ? in[remain_i] : T{}, tailValid);
+  }
+}
+
+// ======================== Warp-aggregated histogram ========================
+
+template <bool IsDeterministic, typename T, typename HisT_>
+__device__ __forceinline__ void atomicAddHist(HisT_* dst, HisT_ value) {
+  if constexpr (IsDeterministic) {
+    if constexpr (sizeof(HisT_) == sizeof(unsigned long long)) {
+      atomicAdd(reinterpret_cast<unsigned long long*>(dst),
+                static_cast<unsigned long long>(value));
+    } else {
+      atomicAdd(reinterpret_cast<unsigned int*>(dst),
+                static_cast<unsigned int>(value));
+    }
+  } else {
+    atomicAdd(dst, static_cast<float>(value));
+  }
+}
+
+// Warp-aggregated histogram update for one element round. Singleton lanes commit
+// directly without intra-warp shuffles; multi-lane peer groups reduce within a
+// cg::labeled_partition so atomic traffic stays bounded while avoiding an O(32)
+// serial shuffle loop.
+template <bool IsDeterministic, typename T, typename HisT_>
+__device__ __forceinline__ void warpAggregateHistUpdate(unsigned warpMembers, bool active,
+                                                        int bucket, T value, HisT_* histogramSmem,
+                                                        IdxT* countHistogramSmem) {
+  unsigned const act = __ballot_sync(warpMembers, active);
+  if (!active) return;
+  unsigned const peers = __match_any_sync(act, bucket);
+  using SumT = std::conditional_t<
+      IsDeterministic,
+      std::conditional_t<sizeof(HisT_) == sizeof(unsigned long long), unsigned long long,
+                         unsigned int>,
+      float>;
+  SumT contrib = static_cast<SumT>(0);
+  if constexpr (IsDeterministic) {
+    contrib = static_cast<SumT>(calcMantissa(static_cast<float>(value)));
+  } else {
+    contrib = static_cast<SumT>(value);
+  }
+  if ((peers & (peers - 1u)) == 0u) {
+    atomicAddHist<IsDeterministic, T>(histogramSmem + bucket, static_cast<HisT_>(contrib));
+    atomicAdd(countHistogramSmem + bucket, static_cast<IdxT>(1));
+    return;
+  }
+  namespace cg = cooperative_groups;
+  auto activeGrp = cg::coalesced_threads();
+  auto peerGrp = cg::labeled_partition(activeGrp, bucket);
+  SumT groupSum = cg::reduce(peerGrp, contrib, cg::plus<SumT>());
+  if (peerGrp.thread_rank() == 0) {
+    atomicAddHist<IsDeterministic, T>(histogramSmem + bucket, static_cast<HisT_>(groupSum));
+    atomicAdd(countHistogramSmem + bucket, static_cast<IdxT>(peerGrp.size()));
   }
 }
 
@@ -235,44 +308,53 @@ __device__ __forceinline__ void filterAndHistogram(T const* inBuf, T* outBuf, in
     countHistogramSmem[i] = 0;
   }
   __syncthreads();
+  // Lanes belonging to this warp: 0xffffffff for full warps, a prefix mask for a trailing
+  // partial warp. BLOCK_SIZE is a multiple of the warp size, so every warp is full in
+  // practice.
+  int const lane = threadIdx.x & (WARP_SZ - 1);
+  int const warpBase = static_cast<int>(threadIdx.x) - lane;
+  unsigned warpMembers = 0xffffffffu;
+  if (warpBase + WARP_SZ > static_cast<int>(blockDim.x)) {
+    warpMembers = (1u << (static_cast<int>(blockDim.x) - warpBase)) - 1u;
+  }
+  size_t const threadRank = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  size_t const numThreads = static_cast<size_t>(blockDim.x) * gridDim.x;
   int const startBit = calcStartBit<T>(pass);
   uint32_t const mask = calcMask<T>(pass);
   if (pass == 0) {
-    auto f = [startBit, mask, histogramSmem, countHistogramSmem](T value, IdxT) {
-      int bucket = calcBucket<T>(value, startBit, mask);
-      histAtomicAdd<IsDeterministic, T>(histogramSmem + bucket, value);
-      atomicAdd(countHistogramSmem + bucket, static_cast<IdxT>(1));
+    auto f = [warpMembers, startBit, mask, histogramSmem, countHistogramSmem](T value, bool valid) {
+      int const bucket = calcBucket<T>(value, startBit, mask);
+      warpAggregateHistUpdate<IsDeterministic, T>(warpMembers, valid, bucket, value, histogramSmem,
+                                                  countHistogramSmem);
     };
-    vectorizedProcess<T>(static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x,
-                         static_cast<size_t>(blockDim.x) * gridDim.x, inBuf, previousLen, f);
+    warpUniformProcess<T>(threadRank, numThreads, inBuf, previousLen, f);
   } else {
     IdxT* pFilterCnt = &counter->filterCnt;
     auto const kthValueBits = counter->kthValueBits;
     int const previousStartBit = calcStartBit<T>(pass - 1);
-    auto f = [outBuf, startBit, mask, previousStartBit, kthValueBits, pFilterCnt, histogramSmem,
-              countHistogramSmem](T value, IdxT) {
-      auto const previousBits = (twiddleIn(value, false) >> previousStartBit) << previousStartBit;
-      if (previousBits == kthValueBits) {
-        if (outBuf) {
-          IdxT pos = atomicAdd(pFilterCnt, static_cast<IdxT>(1));
-          outBuf[pos] = value;
+    auto f = [warpMembers, outBuf, startBit, mask, previousStartBit, kthValueBits, pFilterCnt,
+              histogramSmem, countHistogramSmem](T value, bool valid) {
+      bool matched = false;
+      if (valid) {
+        auto const previousBits = (twiddleIn(value, false) >> previousStartBit) << previousStartBit;
+        if (previousBits == kthValueBits) {
+          matched = true;
+          if (outBuf) {
+            IdxT pos = atomicAdd(pFilterCnt, static_cast<IdxT>(1));
+            outBuf[pos] = value;
+          }
         }
-        int bucket = calcBucket<T>(value, startBit, mask);
-        histAtomicAdd<IsDeterministic, T>(histogramSmem + bucket, value);
-        atomicAdd(countHistogramSmem + bucket, static_cast<IdxT>(1));
       }
+      int const bucket = calcBucket<T>(value, startBit, mask);
+      warpAggregateHistUpdate<IsDeterministic, T>(warpMembers, matched, bucket, value,
+                                                  histogramSmem, countHistogramSmem);
     };
-    vectorizedProcess<T>(static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x,
-                         static_cast<size_t>(blockDim.x) * gridDim.x, inBuf, previousLen, f);
+    warpUniformProcess<T>(threadRank, numThreads, inBuf, previousLen, f);
   }
   __syncthreads();
   for (int i = threadIdx.x; i < NUM_BUCKETS; i += blockDim.x) {
     if (histogramSmem[i] != 0) {
-      if constexpr (IsDeterministic)
-        atomicAdd(reinterpret_cast<unsigned long long*>(histogram + i),
-                  static_cast<unsigned long long>(histogramSmem[i]));
-      else
-        atomicAdd(histogram + i, histogramSmem[i]);
+      atomicAddHist<IsDeterministic, T>(histogram + i, histogramSmem[i]);
     }
     if (countHistogramSmem[i] != 0) atomicAdd(countHistogram + i, countHistogramSmem[i]);
   }
