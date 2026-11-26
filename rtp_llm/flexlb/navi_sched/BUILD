@@ -2009,3 +2009,50 @@ py_test(
     main = "navi_sched/adapters/vllm/test_tair_kvcm_config.py",
     python_version = "PY3",
 )
+
+py_test(
+    name = "navi_sched_vllm_native_work_test",
+    srcs = [
+        "test/vllm/VLLMNativeWorkTest.py",
+    ],
+    main = "test/vllm/VLLMNativeWorkTest.py",
+    imports = ["test/vllm"],
+    python_version = "PY3",
+    deps = [":py_sched_lib"],
+)
+
+py_test(
+    name = "navi_sched_vllm_native_work_elapsed_test",
+    srcs = [
+        "test/vllm/VLLMNativeWorkElapsedTest.py",
+    ],
+    main = "test/vllm/VLLMNativeWorkElapsedTest.py",
+    imports = ["test/vllm"],
+    python_version = "PY3",
+    deps = [":py_sched_lib"],
+)
+
+py_test(
+    name = "navi_sched_vllm_native_work_observer_test",
+    srcs = [
+        "test/vllm/VLLMNativeWorkObserverTest.py",
+        "test/vllm/VLLMEngineObserverTest.py",
+    ],
+    main = "test/vllm/VLLMNativeWorkObserverTest.py",
+    imports = ["test/vllm"],
+    python_version = "PY3",
+    deps = [":py_sched_lib"],
+)
+
+py_test(
+    name = "navi_sched_vllm_native_work_elapsed_integration_test",
+    srcs = [
+        "test/vllm/VLLMNativeWorkElapsedIntegrationTest.py",
+        "test/vllm/VLLMNativeWorkObserverTest.py",
+        "test/vllm/VLLMEngineObserverTest.py",
+    ],
+    main = "test/vllm/VLLMNativeWorkElapsedIntegrationTest.py",
+    imports = ["test/vllm"],
+    python_version = "PY3",
+    deps = [":py_sched_lib"],
+)

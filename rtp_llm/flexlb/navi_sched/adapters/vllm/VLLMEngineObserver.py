@@ -660,6 +660,7 @@ def _native_pd_latency_model_fingerprint(
         if not (unified_latency_prediction and capacity_split_prediction):
             raise ValueError("Native measured work requires PP capacity19")
         values["unified_capacity_training_scope"] = "completed_native_work_window_v1"
+        values["unified_capacity_elapsed_scope"] = "cpp_ready_workload_history_v1"
         values["unified_capacity_batch_count_unit"] = "native_positive_prefill_step_v1"
     values["cache_prediction_version"] = 1
     values["execution_completion_boundary"] = "scheduler_update_complete_v1"
@@ -5330,6 +5331,25 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
             " ".join(f"{key}={value}" for key, value in details.items()),
         )
 
+    def _record_native_work_elapsed(self, workload):
+        if not getattr(self, "_pp_native_work_training", False):
+            return
+        try:
+            with self._execution_lock:
+                try:
+                    self._native_work_history.record_elapsed(
+                        workload.observed_time_ns,
+                        workload.running_elapsed_time_ms,
+                        workload.scheduler_running_prefill.request_count,
+                    )
+                except (TypeError, ValueError):
+                    self._native_work_history.clear_elapsed()
+                    raise
+        except Exception:
+            # Preserve Native scheduling. An absent checkpoint is explicitly
+            # invalid for training, never substituted with a zero/latest value.
+            logger.exception("invalid measured Native admission elapsed checkpoint")
+
     def _synchronize_workload_locked(self, scheduler, request_ids):
         (
             changed_request_ids,
@@ -5343,6 +5363,8 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
             scheduler, inflight_scheduled_tokens, active_scheduled_tokens
         )
         if workload.valid():
+            if getattr(self, "_pp_native_work_training", False):
+                self._record_native_work_elapsed(workload)
             self._current_workload = workload
             return workload
 
@@ -5359,6 +5381,8 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
             scheduler, inflight_scheduled_tokens, active_scheduled_tokens
         )
         if workload.valid():
+            if getattr(self, "_pp_native_work_training", False):
+                self._record_native_work_elapsed(workload)
             self._current_workload = workload
             return workload
         logger.error(
@@ -7165,6 +7189,7 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
             ) = self._scheduler_sample_features(admission_state, request_stats)
             sample_batch_count = training_preceding_batch_count + 1
             measured_work_valid = True
+            sample_running_elapsed_time_ms = preceding.running_elapsed_time_ms
             if getattr(self, "_pp_native_work_training", False):
                 work = None
                 snapshot = admission_state.native_work_window
@@ -7173,6 +7198,9 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
                     if snapshot is None or terminal is None or snapshot[0] != terminal[0] or state.cancelled_request_ids:
                         raise ValueError("missing or invalid Native work window")
                     work = snapshot[1].project(terminal[1])
+                    if snapshot[1].admission_elapsed_time_ms is None:
+                        raise ValueError("missing Native admission elapsed checkpoint")
+                    sample_running_elapsed_time_ms = snapshot[1].admission_elapsed_time_ms
                     if work.step_count <= 0 or work.request_count < len(request_stats):
                         raise ValueError("Native work window lacks own prefill")
                     sample_running_capacity = _PrefillWorkloadSlice(
@@ -7194,6 +7222,8 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
                     "begin_step": snapshot[1].begin.step_count if snapshot else None,
                     "end_step": terminal[1].step_count if terminal else None,
                     "work": asdict(work) if work is not None else None,
+                    "admission_elapsed_time_ms": snapshot[1].admission_elapsed_time_ms if snapshot else None,
+                    "admission_elapsed_observed_perf_ns": snapshot[1].admission_elapsed_observed_ns if snapshot else None,
                 })
             sample_total_prompt_tokens = (
                 sample_running_capacity.context_tokens
@@ -7390,7 +7420,7 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
                 sample_waiting_capacity.compute_tokens,
                 sample_waiting_capacity.compute_token_square_sum,
                 sample_waiting_capacity.context_compute_token_product_sum,
-                preceding.running_elapsed_time_ms,
+                sample_running_elapsed_time_ms,
                 preceding.running_decode_request_count,
                 preceding.running_decode_generated_tokens,
                 preceding.running_decode_remaining_token_budget,
