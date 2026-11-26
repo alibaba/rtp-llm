@@ -21,7 +21,6 @@ AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheOperationMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCachePoolMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheTransferMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheEvictionMetrics);
-AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheInsertMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheInvariantMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheReuseMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMExecutorMetrics);
@@ -914,15 +913,6 @@ void RtpLLMCacheEvictionMetrics::report(const kmonitor::MetricsTags*            
     auto not_selected_tags = selection_tags;
     not_selected_tags.AddTag("selected", "false");
     reportKmonMetric(choose_victim_qps_metric, &not_selected_tags, collector->calls - collector->selected);
-}
-
-bool RtpLLMCacheInsertMetrics::init(kmonitor::MetricsGroupManager* manager) {
-    REGISTER_QPS_MUTABLE_METRIC(insert_hard_stop_qps_metric, "rtp_llm_kv_cache_insert_hard_stop_qps");
-    return true;
-}
-
-void RtpLLMCacheInsertMetrics::report(const kmonitor::MetricsTags* tags) {
-    reportKmonMetric(insert_hard_stop_qps_metric, tags, 1);
 }
 
 bool RtpLLMCacheInvariantMetrics::init(kmonitor::MetricsGroupManager* manager) {

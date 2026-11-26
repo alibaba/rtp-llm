@@ -1485,7 +1485,7 @@ TEST(BlockTreeLoaderTest, SwaBatchCorruptionPreservesDescendantsBeyondWindow) {
 
 class BlockTreeLoaderCorruptionTest: public ::testing::TestWithParam<size_t> {};
 
-TEST_P(BlockTreeLoaderCorruptionTest, FullCorruptionBlocksPendingKeyUntilDescendantSettles) {
+TEST_P(BlockTreeLoaderCorruptionTest, LateCorruptionOnDetachedDescendantPreservesReinsertedPath) {
     if (!cudaAvailable())
         GTEST_SKIP() << "CUDA not available";
     FullSWAEnvironmentOptions options;
@@ -1526,7 +1526,7 @@ TEST_P(BlockTreeLoaderCorruptionTest, FullCorruptionBlocksPendingKeyUntilDescend
     EXPECT_EQ(env->cache->tree_->size(), 0u);
     EXPECT_TRUE(env->cache->tree_->findNode(env->keys).empty());
     ASSERT_EQ(env->cache->tree_->pending_node_pool_.size(), 1u);
-    EXPECT_EQ(env->cache->tree_->pending_node_pool_.at(env->keys.back()).get(), old_leaf);
+    EXPECT_EQ(env->cache->tree_->pending_node_pool_.count(old_leaf), 1u);
     EXPECT_EQ(old_leaf->parent, nullptr);
     const auto after_drop = env->cache->getKeySnapshot();
     EXPECT_TRUE(after_drop.keys.empty());
@@ -1549,12 +1549,12 @@ TEST_P(BlockTreeLoaderCorruptionTest, FullCorruptionBlocksPendingKeyUntilDescend
         replacement_resources.push_back(std::move(resources));
     }
     env->cache->insert(env->keys, replacement_resources, Tier::DEVICE);
-    // Reinsert the prefix, but stop before the key still owned by the pending leaf.
-    const auto replacement_prefix = env->cache->tree_->findNode(env->keys);
-    ASSERT_EQ(replacement_prefix.size(), env->keys.size() - 1);
-    EXPECT_EQ(env->cache->tree_->pending_node_pool_.at(env->keys.back()).get(), old_leaf);
+    const auto replacement_path = env->cache->tree_->findNode(env->keys);
+    ASSERT_EQ(replacement_path.size(), env->keys.size());
+    EXPECT_NE(replacement_path.back(), old_leaf);
+    EXPECT_EQ(env->cache->tree_->pending_node_pool_.count(old_leaf), 1u);
     const auto replacement_snapshot = env->cache->getKeySnapshot();
-    EXPECT_EQ(replacement_snapshot.keys, (CacheKeysType{env->keys[0], env->keys[1]}));
+    EXPECT_EQ(replacement_snapshot.keys, env->keys);
     for (const auto& resource : old_leaf->group_set_resources) {
         EXPECT_TRUE(resource.transfer_detached);
         EXPECT_TRUE(resource.hasTier(Tier::HOST));
@@ -1564,7 +1564,7 @@ TEST_P(BlockTreeLoaderCorruptionTest, FullCorruptionBlocksPendingKeyUntilDescend
         const auto& pools = env->groups[group]->devicePools();
         for (size_t i = 0; i < env->keys.size(); ++i) {
             for (size_t member = 0; member < pools.size(); ++member) {
-                EXPECT_EQ(pools[member]->refCount(replacement_blocks[group][i][member]), i < 2 ? 2u : 1u);
+                EXPECT_EQ(pools[member]->refCount(replacement_blocks[group][i][member]), 2u);
             }
         }
     }
@@ -1572,17 +1572,13 @@ TEST_P(BlockTreeLoaderCorruptionTest, FullCorruptionBlocksPendingKeyUntilDescend
     engine->complete(2, 4, GetParam());
     child->waitDone();
     EXPECT_FALSE(child->success());
-    EXPECT_EQ(env->cache->tree_->findNode(env->keys), replacement_prefix);
+    EXPECT_EQ(env->cache->tree_->findNode(env->keys), replacement_path);
     EXPECT_TRUE(env->cache->tree_->pending_node_pool_.empty());
     EXPECT_EQ(env->cache->getKeySnapshot().keys, replacement_snapshot.keys);
     EXPECT_EQ(env->cache->getKeySnapshot().version, replacement_snapshot.version);
     for (const auto& pool : env->host_pools) {
         EXPECT_EQ(pool->usedBlocksNum(), 0u);
     }
-    env->cache->insert(env->keys, replacement_resources, Tier::DEVICE);
-    const auto replacement = env->cache->tree_->findNode(env->keys);
-    ASSERT_EQ(replacement.size(), env->keys.size());
-    EXPECT_TRUE(std::equal(replacement_prefix.begin(), replacement_prefix.end(), replacement.begin()));
     auto matched = env->cache->match(env->keys);
     EXPECT_EQ(matched.matched_device_blocks, env->keys.size());
     env->releaseMatch(matched);
@@ -1717,6 +1713,8 @@ TEST(BlockTreeLoaderTest, FullPendingCommitRejectsCorruptSubtreeAndReclaimsItsNo
     ASSERT_NE(pending, nullptr);
     auto pending_refs = bindTargets(*env, pending);
 
+    const auto original_path = env->cache->tree_->findNode(env->keys);
+    ASSERT_EQ(original_path.size(), env->keys.size());
     engine->complete(0, 2, 0, /*whole_batch=*/true);
     owner->waitDone();
     env->cache->task_pool_->waitForIdle();
@@ -1727,7 +1725,8 @@ TEST(BlockTreeLoaderTest, FullPendingCommitRejectsCorruptSubtreeAndReclaimsItsNo
     ASSERT_EQ(env->cache->tree_->pending_node_pool_.size(), 1u);
     const auto after_drop = env->cache->getKeySnapshot();
     EXPECT_TRUE(after_drop.keys.empty());
-    for (const auto& resource : env->cache->tree_->pending_node_pool_.at(env->keys.back())->group_set_resources) {
+    ASSERT_EQ(env->cache->tree_->pending_node_pool_.count(original_path.back()), 1u);
+    for (const auto& resource : original_path.back()->group_set_resources) {
         EXPECT_TRUE(resource.transfer_detached);
         EXPECT_EQ(resource.transfer_state, GroupSetTransferState::LOAD_PENDING);
     }
@@ -1819,6 +1818,8 @@ TEST(BlockTreeLoaderTest, ConcurrentFullAndSwaCorruptionPreservesSwaPathAndRecla
     auto first_pending_refs  = bindTargets(*env, first_pending);
     auto second_pending_refs = bindTargets(*env, second_pending);
 
+    const auto original_path = env->cache->tree_->findNode(env->keys);
+    ASSERT_EQ(original_path.size(), env->keys.size());
     std::promise<void> start;
     auto               ready       = start.get_future().share();
     auto               fail_first  = std::async(std::launch::async, [engine, ready] {
@@ -1844,7 +1845,8 @@ TEST(BlockTreeLoaderTest, ConcurrentFullAndSwaCorruptionPreservesSwaPathAndRecla
     ASSERT_EQ(env->cache->tree_->pending_node_pool_.size(), 1u);
     const auto after_drop = env->cache->getKeySnapshot();
     EXPECT_EQ(after_drop.keys.size(), other_keys.size());
-    for (const auto& resource : env->cache->tree_->pending_node_pool_.at(env->keys.back())->group_set_resources) {
+    ASSERT_EQ(env->cache->tree_->pending_node_pool_.count(original_path.back()), 1u);
+    for (const auto& resource : original_path.back()->group_set_resources) {
         EXPECT_TRUE(resource.transfer_detached);
         EXPECT_EQ(resource.transfer_state, GroupSetTransferState::LOAD_PENDING);
     }
@@ -2349,7 +2351,7 @@ TEST(BlockTreeLoaderTest, NonOwnerLoadKeepsRemovedNodesPendingUntilLastUserFinis
                 EXPECT_FALSE(desc.initial_owner);
                 EXPECT_EQ(desc.node->parent, nullptr);
                 EXPECT_GE(desc.node->non_owner_transfer_ref_count, 2u);
-                EXPECT_EQ(env->cache->tree_->pending_node_pool_.at(desc.node->cache_key).get(), desc.node);
+                EXPECT_EQ(env->cache->tree_->pending_node_pool_.count(desc.node), 1u);
                 const auto& group = env->groups[desc.group_set_id];
                 IBlockPool* pool  = source == Tier::HOST ? static_cast<IBlockPool*>(group->hostPool().get()) :
                                                            static_cast<IBlockPool*>(group->diskPool().get());
@@ -2359,7 +2361,8 @@ TEST(BlockTreeLoaderTest, NonOwnerLoadKeepsRemovedNodesPendingUntilLastUserFinis
             EXPECT_EQ(env->cache->tree_->pending_node_pool_.size(), options.path_length);
             env->request_blocks.clear();
             env->insertRequestPath();
-            EXPECT_TRUE(env->cache->tree_->findNode(env->keys).empty());
+            const auto replacement = env->cache->tree_->findNode(env->keys);
+            ASSERT_EQ(replacement.size(), options.path_length);
             if (completion == 0) {
                 EXPECT_TRUE(non_owner->abortPending());
             } else {
@@ -2368,15 +2371,7 @@ TEST(BlockTreeLoaderTest, NonOwnerLoadKeepsRemovedNodesPendingUntilLastUserFinis
                 EXPECT_EQ(non_owner->success(), completion == 1);
             }
             EXPECT_TRUE(env->cache->tree_->pending_node_pool_.empty());
-            std::vector<std::vector<GroupSetResource>> replacement(options.path_length,
-                                                                   std::vector<GroupSetResource>(env->groups.size()));
-            for (size_t i = 0; i < options.path_length; ++i) {
-                for (size_t group = 0; group < env->groups.size(); ++group) {
-                    replacement[i][group].device_blocks = env->request_blocks[group][i];
-                }
-            }
-            env->cache->insert(env->keys, replacement, Tier::DEVICE);
-            EXPECT_EQ(env->cache->tree_->findNode(env->keys).size(), options.path_length);
+            EXPECT_EQ(env->cache->tree_->findNode(env->keys), replacement);
             env->releaseRequestRefs();
             releaseTargets(refs);
             env->reclaimAll();
@@ -2527,6 +2522,8 @@ TEST(BlockTreeLoaderTest, NonOwnerFullCrcPrunesBusySubtreeAndRestoresParentCandi
                     ASSERT_TRUE(owner->commit());
                     ASSERT_TRUE(engine->waitForBatches(2));
                 }
+                const auto original_path = env->cache->tree_->findNode(env->keys);
+                ASSERT_EQ(original_path.size(), path_length);
                 const size_t first_batch = engine->batchCount();
                 ASSERT_TRUE(non_owner->commit());
                 ASSERT_TRUE(engine->waitForBatches(first_batch + 2));
@@ -2540,7 +2537,8 @@ TEST(BlockTreeLoaderTest, NonOwnerFullCrcPrunesBusySubtreeAndRestoresParentCandi
                 EXPECT_TRUE(path.front()->children.empty());
                 ASSERT_EQ(env->cache->tree_->pending_node_pool_.size(), path_length - 1);
                 for (size_t index = 1; index < path_length; ++index) {
-                    const auto* node = env->cache->tree_->pending_node_pool_.at(env->keys[index]).get();
+                    auto* node = original_path[index];
+                    ASSERT_EQ(env->cache->tree_->pending_node_pool_.count(node), 1u);
                     EXPECT_EQ(node->parent, nullptr);
                     for (const auto& resource : node->group_set_resources) {
                         EXPECT_TRUE(resource.transfer_detached);

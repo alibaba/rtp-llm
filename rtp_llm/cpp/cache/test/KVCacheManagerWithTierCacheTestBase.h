@@ -1714,6 +1714,8 @@ protected:
             ASSERT_EQ(pool->write(bad_block, record.data(), pool->strideBytes()), BlockIOStatus::OK);
         }
 
+        const auto original_path = cache->tree()->findNode(seed.cache_keys);
+        ASSERT_EQ(original_path.size(), seed.cache_keys.size());
         if (pending_child) {
             ASSERT_TRUE(engine->armPause());
         }
@@ -1747,10 +1749,10 @@ protected:
             EXPECT_TRUE(cache->tree()->findNode(seed.cache_keys).empty());
             EXPECT_EQ(cache->tree()->pending_node_pool_.size(), pending_child ? 1u : 0u);
             if (pending_child) {
-                const auto pending_node = cache->tree()->pending_node_pool_.find(seed.cache_keys.back());
-                ASSERT_NE(pending_node, cache->tree()->pending_node_pool_.end());
-                EXPECT_EQ(pending_node->second->parent, nullptr);
-                for (const auto& resource : pending_node->second->group_set_resources) {
+                auto* child = original_path.back();
+                ASSERT_EQ(cache->tree()->pending_node_pool_.count(child), 1u);
+                EXPECT_EQ(child->parent, nullptr);
+                for (const auto& resource : child->group_set_resources) {
                     EXPECT_TRUE(resource.transfer_detached);
                     EXPECT_EQ(resource.transfer_state, GroupSetTransferState::LOAD_PENDING);
                 }

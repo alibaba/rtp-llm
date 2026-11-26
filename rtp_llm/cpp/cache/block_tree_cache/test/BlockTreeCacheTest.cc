@@ -871,56 +871,7 @@ TEST_F(BlockTreeCacheMetricsTest, PoolIOMetricsOnlyReportPopulatedValues) {
     EXPECT_DOUBLE_EQ(snapshotQps(metrics->write_bandwidth_bytes_per_sec_metric, tags), 0);
 }
 
-TEST_F(BlockTreeCacheMetricsTest, PendingNodeHardStopPreservesCommonTags) {
-    kmonitor::MetricsTags         common_tags("dp_rank", "7");
-    auto                          metrics_reporter = std::make_shared<kmonitor::MetricsReporter>("", "", common_tags);
-    BlockTreeCacheMetricsReporter reporter(metrics_reporter);
-    BlockTreeCacheMetricsReporter disabled(nullptr);
-    disabled.reportInsertHardStop();
-
-    auto* metric = metrics_reporter->getMetricsGroup<RtpLLMCacheInsertMetrics>()->insert_hard_stop_qps_metric;
-    EXPECT_EQ(metric->GetMetricType(), kmonitor::QPS);
-    EXPECT_EQ(metricSeriesCount(metric), 0u);
-    reporter.reportInsertHardStop();
-    reporter.reportInsertHardStop();
-    EXPECT_DOUBLE_EQ(snapshotQps(metric, common_tags, "rtp_llm_kv_cache_insert_hard_stop_qps"), 2);
-    EXPECT_EQ(metricSeriesCount(metric), 1u);
-    EXPECT_EQ(metrics_reporter->getTags().FindTag("dp_rank"), "7");
-    EXPECT_TRUE(metrics_reporter->getTags().FindTag("reason").empty());
-    EXPECT_TRUE(metrics_reporter->getTags().FindTag("tier").empty());
-    EXPECT_TRUE(metrics_reporter->getTags().FindTag("operation").empty());
-}
-
-TEST_F(BlockTreeCacheTest, PendingNodeHardStopReportsOnceAndAllowsInsertAfterRelease) {
-    block_tree_cache_test::ScopedServingMetrics serving_metrics;
-    auto metrics_reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
-    auto group =
-        std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{makeStructuralDevicePool(0)}, nullptr, nullptr);
-    cache_ = makeBlockTreeCacheForTest({group}, BlockTreeCacheConfig{}, nullptr, nullptr, metrics_reporter);
-    auto* tree = cache_->tree();
-    auto* node = tree->insertNode({100}, {{GroupSetResource{}}}, true, false).path.front();
-    tree->referenceNodeForNonOwnerTransfer(node);
-    tree->removeNodeAndEmptyAncestors(node);
-
-    GroupSetResource device;
-    device.device_blocks = {42};
-    cache_->insert({100, 200}, {{device}, {device}}, Tier::DEVICE);
-
-    auto* metric = metrics_reporter->getMetricsGroup<RtpLLMCacheInsertMetrics>()->insert_hard_stop_qps_metric;
-    kmonitor::MetricsTags tags;
-    EXPECT_EQ(metricSeriesCount(metric), 1u);
-    EXPECT_DOUBLE_EQ(snapshotQps(metric, tags), 1);
-    EXPECT_TRUE(tree->findNode({100, 200}).empty());
-
-    tree->removePendingNodes({{node, 1}});
-    cache_->insert({100, 200}, {{device}, {device}}, Tier::DEVICE);
-    EXPECT_EQ(tree->findNode({100, 200}).size(), 2u);
-    EXPECT_EQ(metricSeriesCount(metric), 1u);
-    EXPECT_DOUBLE_EQ(snapshotQps(metric, tags), 0);
-}
-
 TEST_F(BlockTreeCacheTest, InsertReplacesIdleLowerTierFullRefillsSwaAndRefreshesCandidates) {
-    block_tree_cache_test::ScopedServingMetrics serving_metrics;
     for (Tier tier : {Tier::HOST, Tier::DISK}) {
         SCOPED_TRACE(tierName(tier));
         auto full = std::make_shared<FullGroupSet>(
@@ -929,11 +880,10 @@ TEST_F(BlockTreeCacheTest, InsertReplacesIdleLowerTierFullRefillsSwaAndRefreshes
             block_tree_cache_test::makeDiskPool(1, 4, std::make_unique<block_tree_cache_test::MemoryDiskBlockIO>()));
         auto swa = std::make_shared<SWAGroupSet>(
             128, 64, std::vector<DeviceBlockPoolPtr>{makeStructuralDevicePool(1)}, nullptr, nullptr);
-        auto                 reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
         BlockTreeCacheConfig config;
         config.enable_host_cache = true;
         config.enable_disk_cache = true;
-        auto        cache        = makeBlockTreeCacheForTest({full, swa}, config, nullptr, nullptr, reporter);
+        auto        cache        = makeBlockTreeCacheForTest({full, swa}, config);
         IBlockPool* pool         = tier == Tier::HOST ? static_cast<IBlockPool*>(full->hostPool().get()) :
                                                         static_cast<IBlockPool*>(full->diskPool().get());
         const auto  old_blocks   = full->allocateBlocks(2, tier, BlockTreeRefType::EVICT);
@@ -975,8 +925,6 @@ TEST_F(BlockTreeCacheTest, InsertReplacesIdleLowerTierFullRefillsSwaAndRefreshes
         EXPECT_EQ(cache->evictor_.candidateCount(0, Tier::DEVICE), 1u);
         EXPECT_EQ(cache->evictor_.candidateCount(1, Tier::DEVICE), 3u);
         EXPECT_GT(path[0]->group_set_resources[0].candidate_meta.tier_enter_time_us, 1);
-        EXPECT_EQ(metricSeriesCount(reporter->getMetricsGroup<RtpLLMCacheInsertMetrics>()->insert_hard_stop_qps_metric),
-                  0u);
         EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 1, tier), 0);
 
         auto after = cache->match({100, 200, 300});
@@ -4621,7 +4569,7 @@ public:
     PublishResult             result{PublishResult::ACCEPTED};
 };
 
-TEST_F(BlockTreeCacheTest, PendingNodeBlocksInsertUntilLoadAbortWithoutAffectingNewParent) {
+TEST_F(BlockTreeCacheTest, AbortingDetachedLoadPreservesReinsertedPathAndPublication) {
     auto device_pool = makeStructuralDevicePool(0);
     auto host_pool   = makeHostPool(/*payload_bytes=*/1, /*usable_count=*/4);
     auto full        = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{device_pool}, host_pool, nullptr);
@@ -4649,33 +4597,22 @@ TEST_F(BlockTreeCacheTest, PendingNodeBlocksInsertUntilLoadAbortWithoutAffecting
     resources[1][0]               = GroupSetResource{};
     resources[1][0].device_blocks = {12};
     cache->insert({100, 200}, resources, Tier::DEVICE);
-    EXPECT_EQ(cache->getKeySnapshot().keys, (CacheKeysType{100}));
-    EXPECT_EQ(cache->logicalCacheSnapshot().block_groups, (std::map<int64_t, std::vector<size_t>>{{100, {0}}}));
+    EXPECT_EQ(cache->getKeySnapshot().keys, (CacheKeysType{100, 200}));
+    EXPECT_EQ(cache->logicalCacheSnapshot().block_groups,
+              (std::map<int64_t, std::vector<size_t>>{{100, {0}}, {200, {0}}}));
     const auto version             = cache->getKeySnapshot().version;
     const auto publication_version = cache->logicalCacheSnapshot().version;
     const auto event_count         = publisher->events.size();
 
-    // The pending key also blocks lower-tier insertion.
-    const BlockIdxType replacement = full->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
-    ASSERT_FALSE(isNullBlockIdx(replacement));
-    std::vector<std::vector<GroupSetResource>> host_resources(2, std::vector<GroupSetResource>(1));
-    host_resources[1][0].host_block = replacement;
-    EXPECT_FALSE(insertGroupSetResources(*cache, {100, 200}, host_resources));
-    EXPECT_FALSE(host_pool->isAllocated(replacement));
-
     ASSERT_TRUE(cache->abortPendingLoad(context));
     EXPECT_FALSE(host_pool->isAllocated(host_source));
     EXPECT_TRUE(cache->tree()->pending_node_pool_.empty());
-    EXPECT_EQ(cache->getKeySnapshot().keys, (CacheKeysType{100}));
-    EXPECT_EQ(cache->getKeySnapshot().version, version);
-    EXPECT_EQ(cache->logicalCacheSnapshot().block_groups, (std::map<int64_t, std::vector<size_t>>{{100, {0}}}));
-    EXPECT_EQ(cache->logicalCacheSnapshot().version, publication_version);
-    EXPECT_EQ(publisher->events.size(), event_count);
-
-    cache->insert({100, 200}, resources, Tier::DEVICE);
     EXPECT_EQ(cache->getKeySnapshot().keys, (CacheKeysType{100, 200}));
+    EXPECT_EQ(cache->getKeySnapshot().version, version);
     EXPECT_EQ(cache->logicalCacheSnapshot().block_groups,
               (std::map<int64_t, std::vector<size_t>>{{100, {0}}, {200, {0}}}));
+    EXPECT_EQ(cache->logicalCacheSnapshot().version, publication_version);
+    EXPECT_EQ(publisher->events.size(), event_count);
 }
 
 TEST_F(BlockTreeCacheTest, EventPublicationAddsOnlyAfterHostLoadCompletes) {

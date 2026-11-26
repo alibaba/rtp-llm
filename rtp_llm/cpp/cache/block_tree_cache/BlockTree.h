@@ -45,7 +45,6 @@ struct BlockTreeInsertResult {
     // Number of logical GroupSetResources the tree took BLOCK_CACHE ownership of.
     size_t accepted_resource_count{0};
     size_t resident_prefix_length{0};
-    bool hard_stop{false};
 };
 
 struct BlockTreeNodeRangeResult {
@@ -128,7 +127,7 @@ private:
     ReusableGroupLocations                reusable_group_locations_;
     std::unique_ptr<TreeNode>             root_;
     std::deque<std::unique_ptr<TreeNode>> node_pool_;
-    std::unordered_map<CacheKeyType, std::unique_ptr<TreeNode>> pending_node_pool_;
+    std::unordered_map<TreeNode*, std::unique_ptr<TreeNode>> pending_node_pool_;
     // Indexed together with node_pool_ for contiguous snapshot copies.
     CacheKeysType cache_keys_;
     int64_t       key_version_{-1};

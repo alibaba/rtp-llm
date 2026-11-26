@@ -1470,7 +1470,7 @@ TEST(BlockTreeEvictorAsyncTest, ForceDropDetachesTwoGroupSetsBeforeLateCompletio
     EXPECT_TRUE(environment.tree_->findNode({100, 200}).empty());
     EXPECT_EQ(environment.tree_->size(), 0u);
     ASSERT_EQ(environment.tree_->pending_node_pool_.size(), 1u);
-    EXPECT_EQ(environment.tree_->pending_node_pool_.at(200).get(), child);
+    EXPECT_EQ(environment.tree_->pending_node_pool_.count(child), 1u);
     EXPECT_TRUE(child->group_set_resources[0].transfer_detached);
     EXPECT_TRUE(child->group_set_resources[1].transfer_detached);
     EXPECT_EQ(environment.settledEvents(), (std::vector<bool>{false}));
@@ -1518,7 +1518,7 @@ void verifyLoadCorruptionWhileAnotherGroupIsEvicting(size_t corrupt_group, bool 
             EXPECT_EQ(environment.tree_->findNode({100, 200}), (std::vector<TreeNode*>{path[0]}));
             EXPECT_EQ(path[1]->parent, nullptr);
             ASSERT_EQ(environment.tree_->pending_node_pool_.size(), 1u);
-            EXPECT_EQ(environment.tree_->pending_node_pool_.at(200).get(), path[1]);
+            EXPECT_EQ(environment.tree_->pending_node_pool_.count(path[1]), 1u);
             EXPECT_EQ(environment.tree_->cacheKeys(), (CacheKeysType{100}));
         } else {
             EXPECT_EQ(environment.tree_->findNode({100, 200}), path);
@@ -4903,7 +4903,7 @@ TEST_F(BlockTreeEvictorTest, InvalidationDetachesBusyDescendantAndReclaimsAfterD
     EXPECT_EQ(tree_->keyVersion(), key_version + 3);
     EXPECT_EQ(busy_child->parent, nullptr);
     ASSERT_EQ(tree_->pending_node_pool_.size(), 1u);
-    EXPECT_EQ(tree_->pending_node_pool_.at(300).get(), busy_child);
+    EXPECT_EQ(tree_->pending_node_pool_.count(busy_child), 1u);
     EXPECT_TRUE(busy_child->group_set_resources[0].transfer_detached);
     EXPECT_FALSE(host_pool->isAllocated((*blocks)[0]));
     EXPECT_FALSE(host_pool->isAllocated((*blocks)[1]));
@@ -4912,40 +4912,28 @@ TEST_F(BlockTreeEvictorTest, InvalidationDetachesBusyDescendantAndReclaimsAfterD
     EXPECT_EQ(tree_->pending_node_pool_.size(), 1u);
     EXPECT_EQ(tree_->keyVersion(), key_version + 3);
 
-    // Healthy ancestors can be reinserted, but the busy key remains reserved until its transfer settles.
     const auto replacement_blocks = group_->allocateBlocks(3, Tier::HOST, BlockTreeRefType::CACHE);
     ASSERT_TRUE(replacement_blocks.has_value());
     const auto replacement = insert({100, 200, 300},
                                     {{makeResource(Tier::HOST, (*replacement_blocks)[0])},
                                      {makeResource(Tier::HOST, (*replacement_blocks)[1])},
                                      {makeResource(Tier::HOST, (*replacement_blocks)[2])}});
-    ASSERT_EQ(replacement.inserted_nodes.size(), 2u);
+    ASSERT_EQ(replacement.inserted_nodes.size(), 3u);
+    EXPECT_NE(replacement.inserted_nodes.back(), busy_child);
     EXPECT_EQ(tree_->findNode({100, 200, 300}), replacement.inserted_nodes);
-    EXPECT_EQ(tree_->cacheKeys(), (CacheKeysType{100, 200}));
-    EXPECT_FALSE(host_pool->isAllocated((*replacement_blocks)[2]));
+    EXPECT_EQ(tree_->cacheKeys(), (CacheKeysType{100, 200, 300}));
+    EXPECT_TRUE(host_pool->isAllocated((*replacement_blocks)[2]));
     const int64_t replacement_version = tree_->keyVersion();
 
-    // Duplicate settlement entries reclaim the old node once without touching the new ancestors.
     EXPECT_EQ(evictor_->heaps_[0].pending_timings.erase({busy_child, child_transfer.generation}), 1u);
     evictor_->discardDetachedTransfer({child_transfer});
     evictor_->heaps_[0].pending_timings.erase({busy_child, child_transfer.generation});
     evictor_->settleEviction({child_transfer, child_transfer});
     EXPECT_TRUE(tree_->pending_node_pool_.empty());
     EXPECT_EQ(tree_->findNode({100, 200, 300}), replacement.inserted_nodes);
-    EXPECT_EQ(tree_->cacheKeys(), (CacheKeysType{100, 200}));
+    EXPECT_EQ(tree_->cacheKeys(), (CacheKeysType{100, 200, 300}));
     EXPECT_EQ(tree_->keyVersion(), replacement_version);
     EXPECT_FALSE(host_pool->isAllocated((*blocks)[2]));
-    EXPECT_EQ(host_pool->usedBlocksNum(), 2u);
-
-    const BlockIdxType replacement_child = group_->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
-    ASSERT_FALSE(isNullBlockIdx(replacement_child));
-    std::vector<std::vector<GroupSetResource>> resources(3, std::vector<GroupSetResource>(1));
-    resources[2][0].host_block = replacement_child;
-    const auto restored        = insert({100, 200, 300}, resources);
-    ASSERT_EQ(restored.inserted_nodes.size(), 1u);
-    EXPECT_EQ(tree_->findNode({100, 200, 300}).size(), 3u);
-    EXPECT_EQ(tree_->cacheKeys(), (CacheKeysType{100, 200, 300}));
-    EXPECT_EQ(tree_->keyVersion(), replacement_version + 1);
     EXPECT_EQ(host_pool->usedBlocksNum(), 3u);
 
     evictor_->invalidateSources({{{100}, 0, Tier::HOST}});
@@ -4977,8 +4965,7 @@ TEST_F(BlockTreeEvictorTest, InsertSupersedesEvictionWithoutBlockingNextEviction
             const auto old_seq     = node->group_set_resources[0].candidate_meta.last_access_seq;
             const auto replacement = device_pool_->malloc().value();
             device_pool_->incRef(replacement);
-            const auto inserted = insert({100}, {{makeResource(Tier::DEVICE, replacement)}});
-            EXPECT_FALSE(inserted.hard_stop);
+            insert({100}, {{makeResource(Tier::DEVICE, replacement)}});
             auto& resource = node->group_set_resources[0];
             EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
             EXPECT_GT(resource.candidate_meta.last_access_seq, old_seq);
