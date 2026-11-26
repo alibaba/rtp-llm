@@ -67,6 +67,16 @@ TOKEN_DATA_SIZE = NOPE_BYTES + ROPE_BYTES  # 576
 SCALE_BYTES_PER_TOKEN = 8  # 7 real + 1 padding
 ENTRY_BYTES = TOKEN_DATA_SIZE + SCALE_BYTES_PER_TOKEN  # 584
 FP8_MAX = 448.0
+# Token-tile dequant: each program handles TILE_T contiguous gathered tokens
+# (distinct from TILE_SIZE, the 64-element UE8M0 quant group). The fp8 row is
+# padded to a power of two so one wide 2D load covers it; the padded lanes
+# stay masked out of every load and store.
+TILE_T = 4
+FP8_DIM_POW2 = triton.next_power_of_2(NOPE_DIM)
+N_SCALE_GROUPS = FP8_DIM_POW2 // TILE_SIZE
+# Minimum cache row slice (bytes) that guarantees at most one CP-rank crossing
+# across either the padded FP8 NoPE row or the BF16 RoPE segment.
+_MIN_SINGLE_CARRY_SLICE_BYTES = max(FP8_DIM_POW2, ROPE_BYTES)
 _DIRECT_TRITON_SUPPORTED_CC_MAJORS = frozenset((9, 10))
 
 
@@ -109,12 +119,19 @@ def _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS: tl.constexpr) -> None:
 
 
 def _select_dequant_num_workers(num_reqs: int, max_tokens_hint: int = 0) -> int:
-    """Scale CTA grid along dim-1 for small-batch SM occupancy without specialization."""
+    """Scale CTA grid dim-1 for small-batch SM occupancy without empty CTAs.
+
+    The returned count is the number of TILE_T-token tile programs per request:
+    2048 total tiles across the batch (e.g. 1024 CTAs x 4 tokens for B=2)
+    covers large SMs while ``max_tokens_hint`` avoids spawning workers with no
+    tiles to process on short prefills.
+    """
     if num_reqs <= 0:
         return 128
     target = max(128, (2048 + num_reqs - 1) // num_reqs)
     if max_tokens_hint > 0:
-        target = min(target, max(128, int(max_tokens_hint)))
+        tile_hint = max(1, (int(max_tokens_hint) + TILE_T - 1) // TILE_T)
+        target = min(target, tile_hint)
     return min(1024, target)
 
 
@@ -140,11 +157,16 @@ def _dequantize_and_gather_k_kernel(
     output_dim: tl.constexpr,
     fp8_max: tl.constexpr,
     n_quant_blocks: tl.constexpr,
+    fp8_dim_pow2: tl.constexpr,
+    n_scale_groups: tl.constexpr,
+    TILE_T: tl.constexpr,
     TRAP_INVALID_KV_ACCESS: tl.constexpr,
 ):
-    """One program per (request, worker); workers stripe across the gathered
-    tokens in the request. Mirrors vLLM's kernel exactly — see the V4 paper
-    or vLLM's cache_utils.py for the math."""
+    """One program per (request, tile worker); each loop iteration dequantizes
+    TILE_T contiguous gathered tokens with one wide 2D fp8 load, one
+    (TILE_T, n_scale_groups) scale load, and one wide RoPE transaction.
+    Mirrors vLLM's per-token math exactly — see the V4 paper or vLLM's
+    cache_utils.py."""
     batch_idx = tl.program_id(0)
     worker_id = tl.program_id(1)
     num_workers = tl.num_programs(1)
@@ -156,83 +178,108 @@ def _dequantize_and_gather_k_kernel(
         gather_len = seq_len
     start_pos = seq_len - gather_len
 
-    for i in range(worker_id, gather_len, num_workers):
-        pos = start_pos + i
+    num_tiles = (gather_len + TILE_T - 1) // TILE_T
+    for tile in range(worker_id, num_tiles, num_workers):
+        i_vec = tile * TILE_T + tl.arange(0, TILE_T)
+        # Rows past gather_len are never read downstream: their loads and
+        # stores are masked and their token position is clamped to 0.
+        row_valid = i_vec < gather_len
+        pos_vec = start_pos + i_vec
+        pos = tl.where(row_valid, pos_vec, 0)
         block_in_seq = pos // cache_block_size
         pos_in_block = pos % cache_block_size
 
-        if pos < 0:
+        # TRAP_INVALID_KV_ACCESS bounds checks (valid rows only, before the
+        # cache loads) — the same traps as the previous per-token kernel.
+        bad_pos = row_valid & (pos_vec < 0)
+        if tl.max(bad_pos.to(tl.int32), axis=0) > 0:
             _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
-        if block_in_seq >= max_blocks_per_seq:
+        bad_block = row_valid & (block_in_seq >= max_blocks_per_seq)
+        if tl.max(bad_block.to(tl.int32), axis=0) > 0:
             _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
 
         block_table_row_ptr = block_table_ptr + batch_idx * max_blocks_per_seq
-        physical_block_idx = tl.load(block_table_row_ptr + block_in_seq)
-        if physical_block_idx < 0:
+        physical_block_idx = tl.load(
+            block_table_row_ptr + block_in_seq, mask=row_valid, other=0
+        )
+        bad_phys_neg = row_valid & (physical_block_idx < 0)
+        if tl.max(bad_phys_neg.to(tl.int32), axis=0) > 0:
             _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
-        if physical_block_idx >= num_cache_blocks:
+        bad_phys = row_valid & (physical_block_idx >= num_cache_blocks)
+        if tl.max(bad_phys.to(tl.int32), axis=0) > 0:
             _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
 
         # int64: physical_block_idx * block_stride can exceed 2^31 with many
         # KV-cache blocks. Match vLLM.
-        cache_block_ptr = k_cache_ptr + physical_block_idx.to(tl.int64) * block_stride
-
-        token_data_ptr = cache_block_ptr + pos_in_block * token_data_size
-        token_scale_ptr = (
-            cache_block_ptr
+        physical_block_idx = physical_block_idx.to(tl.int64)
+        pos_in_block = pos_in_block.to(tl.int64)
+        token_data_off = (
+            physical_block_idx * block_stride + pos_in_block * token_data_size
+        )
+        token_scale_off = (
+            physical_block_idx * block_stride
             + cache_block_size * token_data_size
             + pos_in_block * scale_dim
         )
-        token_fp8_ptr = token_data_ptr
-        token_bf16_ptr = token_data_ptr + fp8_dim
 
         # Keep the row offset in int64. Production prefill workspaces can have
         # very large per-request strides, so batch_idx * out_stride0 may exceed
         # signed int32 even though the underlying tensor allocation is valid.
-        output_row = offset.to(tl.int64) + i.to(tl.int64)
-        output_row_ptr = (
-            out_ptr
-            + batch_idx.to(tl.int64) * out_stride0.to(tl.int64)
-            + output_row * out_stride1.to(tl.int64)
-        )
+        output_row = offset.to(tl.int64) + i_vec.to(tl.int64)
+        batch_off = batch_idx.to(tl.int64) * out_stride0.to(tl.int64)
+        output_row_off = batch_off + output_row * out_stride1.to(tl.int64)
 
-        # NoPE dequant (7 tiles × 64 elements, UE8M0 scale per tile)
-        for qblock_idx in tl.static_range(n_quant_blocks):
-            qblock_start = qblock_idx * quant_block
-            if qblock_start < fp8_dim:
-                offsets = qblock_start + tl.arange(0, quant_block)
-                if fp8_dim % quant_block == 0:
-                    x_uint8 = tl.load(token_fp8_ptr + offsets)
-                else:
-                    mask = offsets < fp8_dim
-                    x_uint8 = tl.load(token_fp8_ptr + offsets, mask=mask, other=0)
-                x_fp8 = x_uint8.to(tl.float8e4nv, bitcast=True)
-                x_float = x_fp8.to(tl.float32)
+        # NoPE dequant: one 2D fp8 load over the padded [TILE_T, fp8_dim_pow2]
+        # tile plus one (TILE_T, n_scale_groups) scale load. Reshaping to
+        # (TILE_T, n_scale_groups, quant_block) broadcasts each token's
+        # per-group scale exactly like the previous 7-tile loop.
+        fp8_cols = tl.arange(0, fp8_dim_pow2)
+        fp8_mask = row_valid[:, None] & (fp8_cols < fp8_dim)[None, :]
+        fp8_off = token_data_off[:, None] + fp8_cols[None, :]
+        x_uint8 = tl.load(k_cache_ptr + fp8_off, mask=fp8_mask, other=0)
+        x_fp8 = x_uint8.to(tl.float8e4nv, bitcast=True)
+        x_float = x_fp8.to(tl.float32)
 
-                encoded_scale = tl.load(token_scale_ptr + qblock_idx)
-                exponent = encoded_scale.to(tl.float32) - 127.0
-                scale = tl.exp2(exponent)
+        scale_cols = tl.arange(0, n_scale_groups)
+        scale_mask = row_valid[:, None] & (scale_cols < n_quant_blocks)[None, :]
+        scale_off = token_scale_off[:, None] + scale_cols[None, :]
+        encoded_scale = tl.load(k_cache_ptr + scale_off, mask=scale_mask, other=0)
+        exponent = encoded_scale.to(tl.float32) - 127.0
+        scale = tl.exp2(exponent)
+        x_groups = tl.reshape(x_float, (TILE_T, n_scale_groups, quant_block))
+        x_dequant = x_groups * scale[:, :, None]
+        x_out = tl.reshape(x_dequant, (TILE_T, fp8_dim_pow2)).to(tl.bfloat16)
+        fp8_store_off = output_row_off[:, None] + fp8_cols[None, :]
+        tl.store(out_ptr + fp8_store_off, x_out, mask=fp8_mask)
 
-                x_dequant = x_float * scale
-                if fp8_dim % quant_block == 0:
-                    tl.store(output_row_ptr + offsets, x_dequant.to(tl.bfloat16))
-                else:
-                    tl.store(
-                        output_row_ptr + offsets, x_dequant.to(tl.bfloat16), mask=mask
-                    )
-
-        # RoPE: bf16 passthrough (single vectorized 64-elem transaction when bf16_dim==64)
+        # RoPE: bf16 passthrough (single vectorized 64-elem transaction when
+        # bf16_dim == 64; byte offsets on the uint8 pointer, then one cast).
         bf16_output_offset = fp8_dim
-        bf16_cache_ptr = token_bf16_ptr.to(tl.pointer_type(tl.bfloat16))
         if bf16_dim == 64:
             rope_offsets = tl.arange(0, 64)
-            bf16_vals = tl.load(bf16_cache_ptr + rope_offsets)
-            tl.store(output_row_ptr + bf16_output_offset + rope_offsets, bf16_vals)
+            rope_mask = row_valid[:, None]
+            rope_off = token_data_off[:, None] + fp8_dim + rope_offsets[None, :] * 2
+            rope_ptrs = (k_cache_ptr + rope_off).to(tl.pointer_type(tl.bfloat16))
+            bf16_vals = tl.load(rope_ptrs, mask=rope_mask, other=0)
+            rope_store_off = (
+                output_row_off[:, None] + bf16_output_offset + rope_offsets[None, :]
+            )
+            tl.store(out_ptr + rope_store_off, bf16_vals, mask=rope_mask)
         else:
             for j in tl.static_range(bf16_dim // 16):
                 chunk_offsets = j * 16 + tl.arange(0, 16)
-                bf16_vals = tl.load(bf16_cache_ptr + chunk_offsets)
-                tl.store(output_row_ptr + bf16_output_offset + chunk_offsets, bf16_vals)
+                chunk_mask = row_valid[:, None]
+                chunk_off = (
+                    token_data_off[:, None] + fp8_dim + chunk_offsets[None, :] * 2
+                )
+                chunk_ptrs = (k_cache_ptr + chunk_off).to(tl.pointer_type(tl.bfloat16))
+                bf16_vals = tl.load(chunk_ptrs, mask=chunk_mask, other=0)
+                chunk_store_off = (
+                    output_row_off[:, None]
+                    + bf16_output_offset
+                    + chunk_offsets[None, :]
+                )
+                tl.store(out_ptr + chunk_store_off, bf16_vals, mask=chunk_mask)
 
 
 def dequantize_and_gather_k_cache(
@@ -309,26 +356,50 @@ def dequantize_and_gather_k_cache(
         output_dim=HEAD_DIM,
         fp8_max=FP8_MAX,
         n_quant_blocks=NOPE_TILES,
+        fp8_dim_pow2=FP8_DIM_POW2,
+        n_scale_groups=N_SCALE_GROUPS,
+        TILE_T=TILE_T,
         TRAP_INVALID_KV_ACCESS=True,
-        num_warps=2,
+        num_warps=4,
     )
 
 
 @triton.jit
-def _packed_slot_byte_ptr(
+def _packed_slot_byte_ptrs_2d(
     k_cache_ptr,
     physical_block_idx,
-    full_byte_offset,
+    row_byte_offset,
+    col_offsets,
     block_stride,
     num_cache_blocks,
     CP_RANK_MAJOR_RAW: tl.constexpr,
+    SLICE_GE_TILE_COLS: tl.constexpr,
 ):
+    """2D (rows, len(col_offsets)) byte-pointer tensor for one token tile.
+
+    Tile-shaped extension of the previous per-element packed-slot translation.
+    The CP rank-major raw layout stays exact for every byte: a token's data
+    span can cross rank (block_stride) boundaries, so each element's rank is
+    the per-row rank plus at most one carry comparison when slices are wider
+    than the column span (SLICE_GE_TILE_COLS), or a full per-element division
+    otherwise.
+    """
     if CP_RANK_MAJOR_RAW:
-        byte_rank = full_byte_offset // block_stride
-        byte_in_rank = full_byte_offset - byte_rank * block_stride
-        rank_major_row = byte_rank * num_cache_blocks + physical_block_idx
-        return k_cache_ptr + rank_major_row * block_stride + byte_in_rank
-    return k_cache_ptr + physical_block_idx * block_stride + full_byte_offset
+        byte_rank = row_byte_offset // block_stride
+        byte_in_rank = row_byte_offset - byte_rank * block_stride
+        rel = byte_in_rank[:, None] + col_offsets.to(tl.int64)[None, :]
+        if SLICE_GE_TILE_COLS:
+            carry = (rel >= block_stride).to(tl.int64)
+        else:
+            carry = rel // block_stride
+        rank = byte_rank[:, None] + carry
+        in_rank = rel - carry * block_stride
+        rank_major_row = rank * num_cache_blocks + physical_block_idx[:, None]
+        full_off = rank_major_row * block_stride + in_rank
+        return k_cache_ptr + full_off
+    linear_off = physical_block_idx * block_stride + row_byte_offset
+    full_off = linear_off[:, None] + col_offsets[None, :]
+    return k_cache_ptr + full_off
 
 
 @triton.jit(
@@ -362,13 +433,21 @@ def _dequantize_and_gather_k_slots_kernel(
     num_cache_blocks,
     fp8_max: tl.constexpr,
     n_quant_blocks: tl.constexpr,
+    fp8_dim_pow2: tl.constexpr,
+    n_scale_groups: tl.constexpr,
+    TILE_T: tl.constexpr,
     TRAP_INVALID_KV_ACCESS: tl.constexpr,
     CP_RANK_MAJOR_RAW: tl.constexpr,
+    SLICE_GE_TILE_COLS: tl.constexpr,
 ):
-    """Gather/dequant using pre-translated flat global slot ids.
+    """Gather/dequant using pre-translated flat global slot ids, TILE_T
+    contiguous gathered tokens per loop iteration.
 
     ``slot < 0`` is the sentinel used by writers and metadata builders; it
-    zero-fills the output row and never touches the cache pointer.
+    zero-fills the output row (the masked loads return zeros that are still
+    stored) and never touches the cache pointer. Rows past each request's
+    gather length are never stored: workspace writers rely on the per-request
+    range disjointness of this kernel.
     """
     batch_idx = tl.program_id(0)
     worker_id = tl.program_id(1)
@@ -381,105 +460,113 @@ def _dequantize_and_gather_k_slots_kernel(
 
     slot_row_ptr = slot_mapping_ptr + batch_idx.to(tl.int64) * slot_mapping_stride0
 
-    for i in range(worker_id, gather_len, num_workers):
-        slot = tl.load(slot_row_ptr + i).to(tl.int64)
-        output_row = offset.to(tl.int64) + i.to(tl.int64)
-        output_row_ptr = (
-            out_ptr
-            + batch_idx.to(tl.int64) * out_stride0.to(tl.int64)
-            + output_row * out_stride1.to(tl.int64)
+    num_tiles = (gather_len + TILE_T - 1) // TILE_T
+    for tile in range(worker_id, num_tiles, num_workers):
+        i_vec = tile * TILE_T + tl.arange(0, TILE_T)
+        row_valid = i_vec < gather_len
+        # Sentinel -1 for rows past gather_len: those rows are never stored.
+        slots = tl.load(slot_row_ptr + i_vec, mask=row_valid, other=-1).to(tl.int64)
+        slot_valid = slots >= 0
+        row_mask = row_valid[:, None] & slot_valid[:, None]
+
+        output_row = offset.to(tl.int64) + i_vec.to(tl.int64)
+        batch_off = batch_idx.to(tl.int64) * out_stride0.to(tl.int64)
+        output_row_off = batch_off + output_row * out_stride1.to(tl.int64)
+
+        physical_block_idx = slots // cache_block_size
+        pos_in_block = slots % cache_block_size
+
+        bad_phys = slot_valid & (physical_block_idx >= num_cache_blocks.to(tl.int64))
+        if tl.max(bad_phys.to(tl.int32), axis=0) > 0:
+            _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
+
+        # Sentinel rows address a clamped (block 0, entry 0) base; every cache
+        # load below is masked off for them, so nothing is dereferenced.
+        phys64 = tl.where(slot_valid, physical_block_idx, 0)
+        pos64 = tl.where(slot_valid, pos_in_block, 0)
+        token_data_off = pos64 * token_data_size
+        token_scale_off = cache_block_size * token_data_size + pos64 * scale_dim
+
+        fp8_cols = tl.arange(0, fp8_dim_pow2)
+        fp8_mask = row_mask & (fp8_cols < fp8_dim)[None, :]
+        fp8_ptrs = _packed_slot_byte_ptrs_2d(
+            k_cache_ptr,
+            phys64,
+            token_data_off,
+            fp8_cols,
+            block_stride,
+            num_cache_blocks,
+            CP_RANK_MAJOR_RAW,
+            SLICE_GE_TILE_COLS,
         )
+        x_uint8 = tl.load(fp8_ptrs, mask=fp8_mask, other=0)
+        x_fp8 = x_uint8.to(tl.float8e4nv, bitcast=True)
+        x_float = x_fp8.to(tl.float32)
 
-        if slot < 0:
-            for j in tl.static_range((fp8_dim + bf16_dim) // 16):
-                chunk_offsets = j * 16 + tl.arange(0, 16)
-                zero_vec = tl.zeros((16,), dtype=tl.bfloat16)
-                tl.store(output_row_ptr + chunk_offsets, zero_vec)
-        else:
-            physical_block_idx = slot // cache_block_size
-            pos_in_block = slot % cache_block_size
+        scale_cols = tl.arange(0, n_scale_groups)
+        scale_mask = row_mask & (scale_cols < n_quant_blocks)[None, :]
+        scale_ptrs = _packed_slot_byte_ptrs_2d(
+            k_cache_ptr,
+            phys64,
+            token_scale_off,
+            scale_cols,
+            block_stride,
+            num_cache_blocks,
+            CP_RANK_MAJOR_RAW,
+            SLICE_GE_TILE_COLS,
+        )
+        encoded_scale = tl.load(scale_ptrs, mask=scale_mask, other=0)
+        exponent = encoded_scale.to(tl.float32) - 127.0
+        scale = tl.exp2(exponent)
+        x_groups = tl.reshape(x_float, (TILE_T, n_scale_groups, quant_block))
+        x_dequant = x_groups * scale[:, :, None]
+        x_out = tl.reshape(x_dequant, (TILE_T, fp8_dim_pow2)).to(tl.bfloat16)
+        # Sentinel rows still store zeros (the masked loads returned zeros);
+        # rows past gather_len are masked out of the stores entirely.
+        fp8_store_mask = row_valid[:, None] & (fp8_cols < fp8_dim)[None, :]
+        fp8_store_off = output_row_off[:, None] + fp8_cols[None, :]
+        tl.store(out_ptr + fp8_store_off, x_out, mask=fp8_store_mask)
 
-            if physical_block_idx >= num_cache_blocks.to(tl.int64):
-                _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
-
-            token_data_offset = pos_in_block * token_data_size
-            token_scale_offset = (
-                cache_block_size * token_data_size + pos_in_block * scale_dim
+        # RoPE: bf16 passthrough (single vectorized 64-elem transaction when
+        # bf16_dim == 64).
+        bf16_output_offset = fp8_dim
+        if bf16_dim == 64:
+            rope_offsets = tl.arange(0, 64)
+            rope_ptrs = _packed_slot_byte_ptrs_2d(
+                k_cache_ptr,
+                phys64,
+                token_data_off + fp8_dim,
+                rope_offsets * 2,
+                block_stride,
+                num_cache_blocks,
+                CP_RANK_MAJOR_RAW,
+                SLICE_GE_TILE_COLS,
+            ).to(tl.pointer_type(tl.bfloat16))
+            bf16_vals = tl.load(rope_ptrs, mask=row_mask, other=0)
+            rope_store_off = (
+                output_row_off[:, None] + bf16_output_offset + rope_offsets[None, :]
             )
-
-            for qblock_idx in tl.static_range(n_quant_blocks):
-                qblock_start = qblock_idx * quant_block
-                if qblock_start < fp8_dim:
-                    offsets = qblock_start + tl.arange(0, quant_block)
-
-                    token_fp8_ptr = _packed_slot_byte_ptr(
-                        k_cache_ptr,
-                        physical_block_idx,
-                        token_data_offset + offsets,
-                        block_stride,
-                        num_cache_blocks,
-                        CP_RANK_MAJOR_RAW,
-                    )
-                    if fp8_dim % quant_block == 0:
-                        x_uint8 = tl.load(token_fp8_ptr)
-                    else:
-                        mask = offsets < fp8_dim
-                        x_uint8 = tl.load(token_fp8_ptr, mask=mask, other=0)
-                    x_fp8 = x_uint8.to(tl.float8e4nv, bitcast=True)
-                    x_float = x_fp8.to(tl.float32)
-
-                    token_scale_ptr = _packed_slot_byte_ptr(
-                        k_cache_ptr,
-                        physical_block_idx,
-                        token_scale_offset + qblock_idx,
-                        block_stride,
-                        num_cache_blocks,
-                        CP_RANK_MAJOR_RAW,
-                    )
-                    encoded_scale = tl.load(token_scale_ptr)
-                    exponent = encoded_scale.to(tl.float32) - 127.0
-                    scale = tl.exp2(exponent)
-
-                    x_dequant = x_float * scale
-                    if fp8_dim % quant_block == 0:
-                        tl.store(output_row_ptr + offsets, x_dequant.to(tl.bfloat16))
-                    else:
-                        tl.store(
-                            output_row_ptr + offsets,
-                            x_dequant.to(tl.bfloat16),
-                            mask=mask,
-                        )
-
-            bf16_output_offset = fp8_dim
-            if bf16_dim == 64:
-                rope_offsets = tl.arange(0, 64)
-                bf16_byte_offsets = token_data_offset + fp8_dim + rope_offsets * 2
-                bf16_cache_ptr = _packed_slot_byte_ptr(
+            tl.store(out_ptr + rope_store_off, bf16_vals, mask=row_valid[:, None])
+        else:
+            for j in tl.static_range(bf16_dim // 16):
+                chunk_offsets = j * 16 + tl.arange(0, 16)
+                chunk_ptrs = _packed_slot_byte_ptrs_2d(
                     k_cache_ptr,
-                    physical_block_idx,
-                    bf16_byte_offsets,
+                    phys64,
+                    token_data_off + fp8_dim,
+                    chunk_offsets * 2,
                     block_stride,
                     num_cache_blocks,
                     CP_RANK_MAJOR_RAW,
+                    SLICE_GE_TILE_COLS,
                 ).to(tl.pointer_type(tl.bfloat16))
-                bf16_vals = tl.load(bf16_cache_ptr)
-                tl.store(output_row_ptr + bf16_output_offset + rope_offsets, bf16_vals)
-            else:
-                for j in tl.static_range(bf16_dim // 16):
-                    chunk_offsets = j * 16 + tl.arange(0, 16)
-                    bf16_byte_offsets = token_data_offset + fp8_dim + chunk_offsets * 2
-                    bf16_cache_ptr = _packed_slot_byte_ptr(
-                        k_cache_ptr,
-                        physical_block_idx,
-                        bf16_byte_offsets,
-                        block_stride,
-                        num_cache_blocks,
-                        CP_RANK_MAJOR_RAW,
-                    ).to(tl.pointer_type(tl.bfloat16))
-                    bf16_vals = tl.load(bf16_cache_ptr)
-                    tl.store(
-                        output_row_ptr + bf16_output_offset + chunk_offsets, bf16_vals
-                    )
+                bf16_vals = tl.load(chunk_ptrs, mask=row_mask, other=0)
+                chunk_store_off = (
+                    output_row_off[:, None]
+                    + bf16_output_offset
+                    + chunk_offsets[None, :]
+                )
+                tl.store(out_ptr + chunk_store_off, bf16_vals, mask=row_valid[:, None])
 
 
 def _launch_dequantize_and_gather_k_slots_unchecked(
@@ -523,9 +610,16 @@ def _launch_dequantize_and_gather_k_slots_unchecked(
         num_cache_blocks=int(num_cache_blocks),
         fp8_max=FP8_MAX,
         n_quant_blocks=NOPE_TILES,
+        fp8_dim_pow2=FP8_DIM_POW2,
+        n_scale_groups=N_SCALE_GROUPS,
+        TILE_T=TILE_T,
         TRAP_INVALID_KV_ACCESS=True,
         CP_RANK_MAJOR_RAW=bool(cp_rank_major_raw),
-        num_warps=2,
+        # Rank slices wider than the 512-wide tile columns allow the exact
+        # carry-based rank translation (at most one boundary crossing per
+        # element); narrower slices fall back to per-element division.
+        SLICE_GE_TILE_COLS=int(block_stride) >= _MIN_SINGLE_CARRY_SLICE_BYTES,
+        num_warps=4,
     )
 
 
