@@ -1286,15 +1286,16 @@ class Qwen3NextMTPForCausalLM(Qwen3NextForCausalLM):
     _expects_mtp = True
     _expected_moe_layer_index = (0,)
     WEIGHTS_MAPPER = _LanguageMapper(prefix_mapping={"mtp.": ""})
-    _checkpoint_embedding = "model.embed_tokens.weight"
 
     @classmethod
     def _is_mtp_checkpoint_weight(cls, name: str) -> bool:
         # The draft owns its decoder, fusion and final norm. Its vocabulary
         # comes from the text checkpoint, not from an MTP-local copy.
-        if name in (cls._checkpoint_embedding, "lm_head.weight"):
-            return True
         text = cls.WEIGHTS_MAPPER.text_name(name)
+        if name == "lm_head.weight" or (
+            name.startswith("model.") and text == "embed_tokens.weight"
+        ):
+            return True
         if not text.startswith("mtp."):
             return False
         local = text[len("mtp."):]
@@ -1346,11 +1347,8 @@ class Qwen3NextMTPForCausalLM(Qwen3NextForCausalLM):
 class Qwen35MoeMTPForCausalLM(Qwen3NextMTPForCausalLM):
     """Qwen3.5 MoE MTP alias with the same runtime layout."""
 
-    _checkpoint_embedding = "model.language_model.embed_tokens.weight"
-
 
 class Qwen35DenseMTPForCausalLM(Qwen3NextMTPForCausalLM):
     """Qwen3.5 dense draft: full attention and dense MLP, never routed experts."""
 
     _expected_moe_layer_index = ()
-    _checkpoint_embedding = "model.language_model.embed_tokens.weight"

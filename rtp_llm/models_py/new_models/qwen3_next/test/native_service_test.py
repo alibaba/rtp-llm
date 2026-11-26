@@ -88,6 +88,12 @@ def shared_checkpoint(kind):
     result["mtp.pre_fc_norm_hidden.weight"] = torch.ones(4)
     result["mtp.fc.weight"] = torch.arange(32, dtype=torch.float32).reshape(4, 8)
     if kind.startswith("qwen35_"):
+        # Distinguishable draft-local copies must not replace the shared text
+        # embedding or output head, even when all are in the same file.
+        result["mtp.embed_tokens.weight"] = torch.full_like(
+            weights["model.embed_tokens.weight"], -17
+        )
+        result["mtp.lm_head.weight"] = torch.full_like(weights["lm_head.weight"], -19)
         # A supported exporter nests vision next to the text layers. Both
         # readers must leave it for the independent visual owner.
         result["model.language_model.visual.patch_embed.proj.weight"] = torch.ones(3, 4)
@@ -96,6 +102,7 @@ def shared_checkpoint(kind):
 
 class NativeServiceTest(unittest.TestCase):
     def test_public_target_and_draft_scratch_and_fst(self):
+        expected_vocab = _dense_weights(include_lm_head=True)
         for kind, target, target_owner, draft, draft_owner in (
             ("qwen3_next", Qwen3Next, Qwen3NextForCausalLM, Qwen3NextMTP, Qwen3NextMTPForCausalLM),
             ("qwen35_dense", Qwen35Dense, Qwen3NextForCausalLM, Qwen35DenseMTP, Qwen35DenseMTPForCausalLM),
@@ -175,6 +182,18 @@ class NativeServiceTest(unittest.TestCase):
                             self.assertIs(
                                 model.py_model.lm_head.weight,
                                 model.weight.get_global_weight("lm_head"),
+                            )
+                            torch.testing.assert_close(
+                                model.py_model.embed_tokens.weight,
+                                expected_vocab["model.embed_tokens.weight"],
+                                rtol=0,
+                                atol=0,
+                            )
+                            torch.testing.assert_close(
+                                model.py_model.lm_head.weight,
+                                expected_vocab["lm_head.weight"],
+                                rtol=0,
+                                atol=0,
                             )
                             torch.testing.assert_close(
                                 model.py_model.norm.weight,
