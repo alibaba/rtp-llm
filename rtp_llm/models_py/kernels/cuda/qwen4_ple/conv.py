@@ -321,7 +321,13 @@ def try_ple_conv(
     capability = torch.cuda.get_device_capability(gated.device)
     warps = 4
     if batch_invariant:
-        if capability != (10, 3) or width != 32768 or return_state:
+        # _ple_conv assigns a fixed BLOCK of (length x width) positions to each
+        # CTA and reads only this row's dilated history, so it is position-local
+        # and invariant at any supported width. 10240 is Qwen3.8-Flash-Next
+        # (hc_count 4 x hidden 2560); 32768 is Qwen4-Max M11.
+        if capability not in ((10, 0), (10, 3)) or width not in (10240, 32768):
+            return None
+        if return_state:
             return None
         block = 1024
     elif capability == (12, 0) and width == 10240 and not return_state:

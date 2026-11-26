@@ -101,9 +101,18 @@ def try_ple_gate(
     if not (
         (capability == (12, 0) and width == 10240)
         or (capability in ((10, 0), (10, 3)) and width == 32768 and not projected)
+        or (batch_invariant and capability in ((10, 0), (10, 3)) and width == 10240)
     ):
         return None
-    if batch_invariant and (capability != (10, 3) or width != 32768):
+    # _ple_gate owns one (row, branch) pair per CTA and reduces only inside that
+    # pair, with BLOCK and num_warps derived from the width. It is therefore
+    # row-local, and invariant at any width the kernel supports. Qwen3.8-Flash-Next
+    # is hc_count 4 x hidden 2560 = 10240; Qwen4-Max M11 is 4 x 8192 = 32768.
+    # The gluon m11_gate below is the path that is genuinely not invariant: it
+    # picks BLOCK_X from the row count.
+    if batch_invariant and (
+        capability not in ((10, 0), (10, 3)) or width not in (10240, 32768) or projected
+    ):
         return None
     group_size = width // 4
     if projected and not (
