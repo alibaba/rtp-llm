@@ -51,6 +51,13 @@ if TYPE_CHECKING:
     from .flashinfer_qtoken import PagedQTokenG8
 
 
+# The batch-invariant paged path pins the grouped kernel to eight K splits.
+_BI_SPLITS = 8
+# Peak FP32 partial storage allowed for one batch-invariant paged launch.
+# 384 rows at M11's 64 heads and 1280 rows at Qwen3.8-Flash-Next's 24 heads.
+_BI_PARTIAL_BUDGET_BYTES = 256 << 20
+
+
 class SparseGqaFmhaImpl(FMHAImplBase):
     """Block-sparse GQA attention for qwen4 prefill and paged decode."""
 
@@ -969,6 +976,20 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         )
         return output.transpose(1, 2).reshape(tokens, self.q_width)
 
+    def _batch_invariant_rows_per_launch(self) -> int:
+        """Rows per BI paged launch, from a fixed partial-storage budget.
+
+        The grouped split kernel allocates
+        ``[1, head_num, rows, 8, head_dim + 2]`` FP32 partials. Derive the row
+        count from the head geometry alone so it is a per-layer constant: it must
+        not vary with the batch, or the launch boundaries would move with the
+        input. They are numerically free either way, but a constant keeps the
+        peak allocation and the launch count predictable.
+        """
+        per_row = self.head_num * _BI_SPLITS * (self.head_dim + 2) * 4
+        rows = (_BI_PARTIAL_BUDGET_BYTES // per_row) // 128 * 128
+        return max(128, rows)
+
     def _forward_ragged_paged(
         self,
         q: torch.Tensor,
@@ -995,13 +1016,18 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         requests = plan.requests
         lengths = plan.lengths_host
         if self.batch_invariant:
-            # The grouped kernel writes eight FP32 partials per query/head.
-            # Limit temporary storage independently of scheduler grant size.
+            # The grouped kernel writes eight FP32 partials per query and head,
+            # so a whole 4096-row grant would need 812 MiB for 24 heads. Chunk
+            # on a fixed byte budget instead of a fixed row count: the chunk
+            # only decides which launch owns a row, never the order of that
+            # row's reduction, so every chunk size yields bit-identical output.
+            rows_per_launch = self._batch_invariant_rows_per_launch()
             outputs = []
             for index, request in enumerate(requests):
                 start, end = int(request.start), int(request.end)
-                for row in range(start, end, 128):
-                    stop = min(row + 128, end)
+                request_table = block_table[index : index + 1].contiguous()
+                for row in range(start, end, rows_per_launch):
+                    stop = min(row + rows_per_launch, end)
                     query = q[row:stop].view(
                         1, stop - row, self.head_num, self.head_dim
                     )
@@ -1009,7 +1035,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
                     output = sparse_paged_gqa_attn(
                         query.transpose(1, 2).contiguous(),
                         kv_cache.kv_cache_base,
-                        block_table[index : index + 1].contiguous(),
+                        request_table,
                         request.kv_lens[:, columns],
                         request.selected_indices[:, columns],
                         page_size=page_size,
