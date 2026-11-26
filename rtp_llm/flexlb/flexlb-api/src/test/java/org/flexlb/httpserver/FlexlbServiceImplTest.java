@@ -10,6 +10,7 @@ import io.grpc.stub.ServerCallStreamObserver;
 import io.grpc.stub.StreamObserver;
 import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.DeliveryClaimKind;
+import org.flexlb.balance.scheduler.RequestScheduler;
 import org.flexlb.balance.scheduler.RequestState;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.DispatcherConfig;
@@ -27,6 +28,7 @@ import org.flexlb.dao.route.ServiceRoute;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.service.RouteService;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
@@ -126,32 +128,85 @@ class FlexlbServiceImplTest {
     }
 
     @Test
-    void batchGenerationRejectsMissingOrMalformedInputBeforeRouting() {
+    void batchGenerationRequestsMissingInputBeforeSubmittingTheResentRequest() {
         FlexlbConfig config = routingConfig();
         config.setDispatcher(new DispatcherConfig());
         when(configService.loadBalanceConfig()).thenReturn(config);
+        var scheduler = mock(RequestScheduler.class);
+        when(scheduler.submit(any()))
+                .thenReturn(
+                        CompletableFuture.completedFuture(
+                                Response.buildSuccessResponse(new Response(), true)));
+        var batchService =
+                new FlexlbServiceImpl(
+                        new RouteService(scheduler, mock(TheoryCacheHitReporter.class)),
+                        lbStatusConsistencyService,
+                        engineHealthReporter,
+                        grpcForwarder,
+                        configService,
+                        batchSchedulerReporter,
+                        serverLatencyRecorder,
+                        mock(RequestSchedulerReporter.class));
+        var request = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder().setRequestId(7L);
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> first =
+                mock(StreamObserver.class);
+        batchService.schedule(request.build(), first);
+        var rejection =
+                ArgumentCaptor.forClass(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
+        verify(first).onNext(rejection.capture());
+        verify(first).onCompleted();
+        assertEquals(
+                StrategyErrorType.GENERATE_INPUT_REQUIRED.getErrorCode(),
+                rejection.getValue().getCode());
+        assertFalse(rejection.getValue().getSuccess());
+        assertFalse(rejection.getValue().getEnqueuedByMaster());
+        assertFalse(rejection.getValue().hasLifecycle());
+        assertEquals(0, rejection.getValue().getServerStatusCount());
+        verifyNoInteractions(scheduler, grpcForwarder);
 
-        for (ByteString input :
-                List.of(ByteString.EMPTY, ByteString.copyFrom(new byte[] {(byte) 0x80}))) {
-            StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer =
-                    mock(StreamObserver.class);
-            service.schedule(
-                    FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                            .setRequestIdStr("7")
-                            .setGenerateInput(input)
-                            .build(),
-                    observer);
+        var input =
+                EngineRpcService.GenerateInputPB.newBuilder()
+                        .setRequestId(7L)
+                        .build()
+                        .toByteString();
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> resend =
+                mock(StreamObserver.class);
+        batchService.schedule(request.setGenerateInput(input).build(), resend);
 
-            ArgumentCaptor<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> response =
-                    ArgumentCaptor.forClass(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
-            verify(observer).onNext(response.capture());
-            verify(observer).onCompleted();
-            assertFalse(response.getValue().getSuccess());
-            assertEquals(
-                    StrategyErrorType.INVALID_REQUEST.getErrorCode(),
-                    response.getValue().getCode());
-            assertTrue(response.getValue().getErrorMessage().contains("generate_input"));
-        }
+        var submitted = ArgumentCaptor.forClass(BalanceContext.class);
+        verify(scheduler).submit(submitted.capture());
+        assertEquals("7", submitted.getValue().getRequestId());
+        assertEquals(input, submitted.getValue().getGenerateInputPb());
+        verify(resend)
+                .onNext(
+                        argThat(
+                                response ->
+                                        response.getSuccess() && response.getEnqueuedByMaster()));
+        verify(resend).onCompleted();
+    }
+
+    @Test
+    void batchGenerationRejectsMalformedInputBeforeRouting() {
+        FlexlbConfig config = routingConfig();
+        config.setDispatcher(new DispatcherConfig());
+        when(configService.loadBalanceConfig()).thenReturn(config);
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer =
+                mock(StreamObserver.class);
+        service.schedule(
+                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                        .setRequestIdStr("7")
+                        .setGenerateInput(ByteString.copyFrom(new byte[] {(byte) 0x80}))
+                        .build(),
+                observer);
+
+        var response =
+                ArgumentCaptor.forClass(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
+        verify(observer).onNext(response.capture());
+        verify(observer).onCompleted();
+        assertFalse(response.getValue().getSuccess());
+        assertEquals(
+                StrategyErrorType.INVALID_REQUEST.getErrorCode(), response.getValue().getCode());
+        assertTrue(response.getValue().getErrorMessage().contains("generate_input"));
         verifyNoInteractions(routeService, grpcForwarder);
     }
 

@@ -1085,12 +1085,12 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                     StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(),
                     "request scheduling deadline exceeded");
         }
-        if (cause instanceof InvalidScheduleRequestException) {
+        if (cause instanceof InvalidScheduleRequestException invalidRequest) {
             return buildErrorResponse(
-                    StrategyErrorType.INVALID_REQUEST.getErrorCode(),
-                    cause.getMessage() != null
-                            ? cause.getMessage()
-                            : StrategyErrorType.INVALID_REQUEST.getErrorMsg());
+                    invalidRequest.errorType.getErrorCode(),
+                    invalidRequest.getMessage() != null
+                            ? invalidRequest.getMessage()
+                            : invalidRequest.errorType.getErrorMsg());
         }
         return buildErrorResponse(
                 StrategyErrorType.DISPATCH_FAILED.getErrorCode(),
@@ -1359,13 +1359,19 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         }
 
         if (config.isBatchDispatch() && ctx.getRequestPhase() != RequestPhase.ENCODER) {
+            var generateInput = pb.getGenerateInput();
+            if (generateInput.isEmpty()) {
+                throw new InvalidScheduleRequestException(
+                        StrategyErrorType.GENERATE_INPUT_REQUIRED,
+                        "generate_input is required for BATCH generation");
+            }
             try {
-                RequestId.requireMatchingGenerateInput(requestId, pb.getGenerateInput());
+                RequestId.requireMatchingGenerateInput(requestId, generateInput);
             } catch (IllegalArgumentException error) {
                 throw new InvalidScheduleRequestException(error.getMessage(), error);
             }
             if (!pb.getVitRouteOnly()) {
-                ctx.setGenerateInputPb(pb.getGenerateInput());
+                ctx.setGenerateInputPb(generateInput);
             }
         }
 
@@ -1499,12 +1505,20 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
      * Signals an invalid scheduling payload before it enters request admission.
      */
     private static final class InvalidScheduleRequestException extends IllegalArgumentException {
+        private final StrategyErrorType errorType;
+
         private InvalidScheduleRequestException(String message) {
-            super(message);
+            this(StrategyErrorType.INVALID_REQUEST, message);
         }
 
         private InvalidScheduleRequestException(String message, Throwable cause) {
             super(message, cause);
+            this.errorType = StrategyErrorType.INVALID_REQUEST;
+        }
+
+        private InvalidScheduleRequestException(StrategyErrorType errorType, String message) {
+            super(message);
+            this.errorType = errorType;
         }
     }
 
