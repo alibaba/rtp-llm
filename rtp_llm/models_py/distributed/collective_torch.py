@@ -86,7 +86,7 @@ def log_comm_backend_summary(*, tp2_ar_hc=None, head_ipc=None) -> None:
         f"ready(max_rows={tp2_ar_hc.max_rows},"
         f"lamport_rows={getattr(tp2_ar_hc, 'max_lamport_rows', 0)})"
         if tp2_ar_hc is not None
-        else f"disabled(RTP_QWEN4_DISABLE_TP2_AR_HC_FUSED={os.getenv('RTP_QWEN4_DISABLE_TP2_AR_HC_FUSED', '1')!r})"
+        else "disabled"
     )
     head_status = (
         f"ready(max_rows={head_ipc.max_rows})" if head_ipc is not None else "disabled"

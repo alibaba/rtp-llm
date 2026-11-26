@@ -1,12 +1,12 @@
-"""Opt-in TP2 P2P AllReduce + Hyper-Connection Residual Injection & Norm.
+"""TP2 P2P AllReduce + Hyper-Connection Residual Injection & Norm.
 
 Stages TP-partial sublayer outputs (single-branch Attention/GDN `[rows, 2560]`
 or packed dual-branch MoE `[2 * rows, 2560]`) and fuses cross-GPU BF16 reduction
 directly into Hyper-Connection residual writeback, grouped RMSNorm, and per-tensor
 FP8 scale generation. Decode and medium batches use a 3-slot Lamport one-way
 NVLink push; large prefills use a 2-slot one-way push with release/acquire flags.
-Disabled by default (standalone FlashInfer AllReduce); enable explicitly with
-``RTP_QWEN4_DISABLE_TP2_AR_HC_FUSED=0``.
+Enabled by default on SM90 TP2 when custom AllReduce is enabled; falls back to
+standalone FlashInfer/NCCL AllReduce when prerequisites are not met.
 """
 
 from contextvars import ContextVar
@@ -421,15 +421,6 @@ def _tp2_peers_can_access(group, device: torch.device) -> bool:
 
 def prepare_tp2_ar_hc_workspace(config, parallelism, device: Optional[torch.device] = None):
     logger = logging.getLogger(__name__)
-    # Prefer the verified standalone FlashInfer path by default.
-    # Setting RTP_QWEN4_DISABLE_TP2_AR_HC_FUSED=0 explicitly opts into fused AR+HC.
-    raw_disable = os.getenv("RTP_QWEN4_DISABLE_TP2_AR_HC_FUSED", "1").strip().lower()
-    if raw_disable not in ("0", "false", "off", "no"):
-        logger.info(
-            "Qwen4 fused TP2 AllReduce + HC skipped: RTP_QWEN4_DISABLE_TP2_AR_HC_FUSED=%r (default FlashInfer)",
-            os.getenv("RTP_QWEN4_DISABLE_TP2_AR_HC_FUSED", "1"),
-        )
-        return None
     if not collective_torch.custom_all_reduce_enabled():
         logger.info(
             "Qwen4 fused TP2 AllReduce + HC disabled by custom AR switch "

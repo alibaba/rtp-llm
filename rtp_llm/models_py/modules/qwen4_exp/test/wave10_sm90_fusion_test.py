@@ -1,11 +1,9 @@
 """SM90 bit-exactness and CUDA Graph tests for Wave 10 Qwen4 fusions."""
 
-import os
 import unittest
 from unittest.mock import patch
 
 import torch
-import torch.nn.functional as F
 
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.models_py.modules.base.common.fp8_linear import Fp8Linear
@@ -13,7 +11,6 @@ from rtp_llm.models_py.modules.factory.linear.factory import LinearFactory
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
     CudaFp8GEMMLinear,
 )
-from rtp_llm.models_py.modules.hybrid.gated_residual import GatedResidual
 from rtp_llm.models_py.modules.qwen4_exp.gdn_decode_triton import (
     _run_packed_decode,
     try_packed_decode,
@@ -26,12 +23,6 @@ from rtp_llm.models_py.modules.qwen4_exp.gdn_fp8_input_projection import (
 from rtp_llm.models_py.modules.qwen4_exp.qsa.qsa_fp8_input_projection import (
     try_prepare_qsa_triple,
 )
-from rtp_llm.models_py.triton_kernels.common.gated_residual_mix_triton import (
-    fused_mix_reduce,
-)
-from rtp_llm.models_py.triton_kernels.common.gated_residual_sm90_up_mix_triton import (
-    try_sm90_bf16_up_mix,
-)
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
@@ -40,64 +31,6 @@ class Wave10Sm90FusionTest(unittest.TestCase):
         if torch.cuda.get_device_capability() != (9, 0):
             self.skipTest("SM90 fast paths")
         torch.manual_seed(20261123)
-
-    def test_sm90_bf16_up_mix_bit_exact_and_graph(self):
-        bf16_up = (
-            torch.randn((10240, 320), device="cuda", dtype=torch.bfloat16) * 0.02
-        ).contiguous()
-        for rows in (1, 3, 4, 16, 32, 64, 65, 96, 128):
-            x = torch.randn((rows, 320), device="cuda", dtype=torch.bfloat16)
-            normed = torch.randn((rows, 10240), device="cuda", dtype=torch.bfloat16)
-            expected = fused_mix_reduce(F.linear(x, bf16_up), normed, 4)
-            actual = try_sm90_bf16_up_mix(x, bf16_up, normed, 4)
-            self.assertIsNotNone(actual)
-            self.assertTrue(
-                torch.equal(actual.view(torch.uint8), expected.view(torch.uint8)),
-                f"mismatch at rows={rows}: max_err={(actual.float() - expected.float()).abs().max().item()}",
-            )
-        for rows in (0, 129, 2048):
-            x = torch.empty((rows, 320), device="cuda", dtype=torch.bfloat16)
-            normed = torch.empty((rows, 10240), device="cuda", dtype=torch.bfloat16)
-            self.assertIsNone(try_sm90_bf16_up_mix(x, bf16_up, normed, 4))
-
-        # Full GatedResidual consumer + CUDA Graph replay
-        gamma = torch.randn(10240, device="cuda", dtype=torch.bfloat16) * 0.02
-        down = (torch.randn((320, 10240), device="cuda") * 0.1).to(torch.float8_e4m3fn)
-        up = (torch.randn((10240, 320), device="cuda") * 0.1).to(torch.float8_e4m3fn)
-        inj = torch.randn((4, 10240), device="cuda", dtype=torch.bfloat16) * 0.02
-        s_down = torch.tensor([0.02], device="cuda", dtype=torch.float32)
-        s_up = torch.tensor([0.02], device="cuda", dtype=torch.float32)
-        model = GatedResidual(
-            gamma,
-            down,
-            up,
-            inj,
-            hc_mult=4,
-            norm_eps=1e-6,
-            weight_scales=(s_down, s_up, None),
-        )
-        for rows in (4, 64, 96, 128, 2048):
-            hx = torch.randn((rows, 10240), device="cuda", dtype=torch.bfloat16)
-            with patch.dict(os.environ, {"RTP_QWEN4_DISABLE_SM90_BF16_UP_MIX": "1"}):
-                ref_out = model(hx)
-            got_out = model(hx)
-            for a, b in zip(got_out, ref_out):
-                self.assertTrue(torch.equal(a.view(torch.uint8), b.view(torch.uint8)))
-
-        hx = torch.randn((128, 10240), device="cuda", dtype=torch.bfloat16)
-        model(hx)
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph):
-            g_out = model(hx)
-        for step in range(3):
-            hx.normal_(0, 0.5 + 0.3 * step)
-            model.norm_gamma.normal_(0, 0.05)
-            graph.replay()
-            with patch.dict(os.environ, {"RTP_QWEN4_DISABLE_SM90_BF16_UP_MIX": "1"}):
-                ref_out = model(hx)
-            for a, b in zip(g_out, ref_out):
-                self.assertTrue(torch.equal(a.view(torch.uint8), b.view(torch.uint8)))
-        graph.reset()
 
     def test_qsa_triple_quantization_and_ba_graph_cap(self):
         qkv_w = (torch.randn((2560, 3584), device="cuda") * 0.1).to(

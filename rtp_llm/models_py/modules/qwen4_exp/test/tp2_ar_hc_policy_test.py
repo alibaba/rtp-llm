@@ -18,26 +18,17 @@ class Tp2ArHcPolicyTest(unittest.TestCase):
         self.config = SimpleNamespace(hc_mult=4, hidden_size=2560)
         self.parallelism = SimpleNamespace(tp_size=2, dp_size=1, local_world_size=2)
 
-    def test_default_preserves_standalone_allreduce(self):
+    def test_default_enabled_reaches_device_validation(self):
         for env in ({}, {"FT_DISABLE_CUSTOM_AR": "0"}):
             with self.subTest(env=env), patch.dict(os.environ, env, clear=True):
-                with patch("torch.cuda.is_available") as available:
+                with patch("torch.cuda.is_available", return_value=False) as available:
                     self.assertIsNone(
                         prepare_tp2_ar_hc_workspace(self.config, self.parallelism)
                     )
-                    available.assert_not_called()
+                    available.assert_called_once_with()
 
-    def test_explicit_opt_in_reaches_device_validation(self):
-        env = {"FT_DISABLE_CUSTOM_AR": "0", "RTP_QWEN4_DISABLE_TP2_AR_HC_FUSED": "0"}
-        with patch.dict(os.environ, env, clear=True):
-            with patch("torch.cuda.is_available", return_value=False) as available:
-                self.assertIsNone(
-                    prepare_tp2_ar_hc_workspace(self.config, self.parallelism)
-                )
-                available.assert_called_once_with()
-
-    def test_custom_allreduce_disable_overrides_opt_in(self):
-        env = {"FT_DISABLE_CUSTOM_AR": "1", "RTP_QWEN4_DISABLE_TP2_AR_HC_FUSED": "0"}
+    def test_custom_allreduce_disable_skips_fused_ar_hc(self):
+        env = {"FT_DISABLE_CUSTOM_AR": "1"}
         with patch.dict(os.environ, env, clear=True):
             with patch("torch.cuda.is_available") as available:
                 self.assertIsNone(
@@ -70,7 +61,7 @@ class Tp2ArHcPolicyTest(unittest.TestCase):
         torch.testing.assert_close(out_single, torch.full((4, 8), 2.0, dtype=torch.bfloat16))
 
     def test_workspace_init_failure_falls_back_cleanly_to_flashinfer(self):
-        env = {"FT_DISABLE_CUSTOM_AR": "0", "RTP_QWEN4_DISABLE_TP2_AR_HC_FUSED": "0"}
+        env = {"FT_DISABLE_CUSTOM_AR": "0"}
         fake_group = object()
         fake_dev = torch.device("cuda", 0)
         votes = []
