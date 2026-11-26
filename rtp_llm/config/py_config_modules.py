@@ -460,6 +460,7 @@ class VitConfig:
         self.trt_cache_enabled: int = 0
         self.trt_cache_path: Optional[str] = None
         self.download_headers: str = ""
+        self.enable_oss_internal_endpoint_rewrite: bool = True
         self.mm_image_max_file_size_kb: int = (
             VitConfig.DEFAULT_MM_IMAGE_MAX_FILE_SIZE_KB
         )
@@ -554,6 +555,8 @@ class VitConfig:
             f"trt_cache_enabled: {self.trt_cache_enabled}\n"
             f"trt_cache_path: {self.trt_cache_path}\n"
             f"download_headers: {self.download_headers}\n"
+            "enable_oss_internal_endpoint_rewrite: "
+            f"{self.enable_oss_internal_endpoint_rewrite}\n"
             f"mm_image_max_file_size_kb: {self.mm_image_max_file_size_kb}\n"
             f"mm_video_max_file_size_kb: {self.mm_video_max_file_size_kb}\n"
             f"mm_video_max_frames: {self.mm_video_max_frames}\n"

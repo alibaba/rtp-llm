@@ -70,7 +70,8 @@ P2PSchedulerPrefillRead::preparePlan(int                decode_tp_size,
                                      const std::string& unique_key,
                                      size_t             decode_worker_count,
                                      std::set<int>      active_route_ids,
-                                     const std::string& decode_pipeline_layout) {
+                                     const std::string& decode_pipeline_layout,
+                                     const google::protobuf::RepeatedPtrField<PrefillRouteKeysPB>& prefill_route_keys) {
     const bool pipeline = config_.parallelism_config.pp_size > 1 || !decode_pipeline_layout.empty();
     P2PPipelineLayoutPB decode_layout;
     if (decode_tp_size < 0 || static_cast<size_t>(decode_tp_size) > decode_worker_count
@@ -104,6 +105,11 @@ P2PSchedulerPrefillRead::preparePlan(int                decode_tp_size,
         return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
                          "Prefill worker list does not match PP and TP sizes");
     }
+    PrefillRouteKeys keys_by_route;
+    for (const auto& filter : prefill_route_keys) {
+        keys_by_route.emplace(filter.route_id(),
+                              std::vector<int64_t>(filter.cache_keys().begin(), filter.cache_keys().end()));
+    }
     std::set<int> unmatched_route_ids = active_route_ids;
     for (const auto& route : plan->plan.routes) {
         if (route.src_rank < 0 || static_cast<size_t>(route.src_rank) >= worker_num || route.dst_rank < 0
@@ -118,14 +124,17 @@ P2PSchedulerPrefillRead::preparePlan(int                decode_tp_size,
                          "StartLoad: active route id " + std::to_string(*unmatched_route_ids.begin())
                              + " is absent from transfer plan");
     }
-    return PreparedPlan{
-        std::shared_ptr<const TransferPlan>(plan, &plan->plan), prefill_plan_digest, std::move(active_route_ids)};
+    return PreparedPlan{std::shared_ptr<const TransferPlan>(plan, &plan->plan),
+                        prefill_plan_digest,
+                        std::move(active_route_ids),
+                        std::move(keys_by_route)};
 }
 
 P2PBroadcastClient::RankRoutes
-P2PSchedulerPrefillRead::buildPrefillRankRoutes(const TransferPlan&  plan,
-                                                     size_t               worker_num,
-                                                     const std::set<int>& active_route_ids) const {
+P2PSchedulerPrefillRead::buildPrefillRankRoutes(const TransferPlan&     plan,
+                                                size_t                  worker_num,
+                                                const std::set<int>&    active_route_ids,
+                                                const PrefillRouteKeys& prefill_route_keys) const {
     P2PBroadcastClient::RankRoutes rank_routes(worker_num);
     for (size_t worker_rank = 0; worker_rank < worker_num; ++worker_rank) {
         for (const auto* route : plan.forPrefillRank(static_cast<int>(worker_rank))) {
@@ -135,6 +144,12 @@ P2PSchedulerPrefillRead::buildPrefillRankRoutes(const TransferPlan&  plan,
             TransferRoutePB pb;
             // peer_index 是 decode_transfer_servers 的下标，与 route->dst_rank 同一命名空间。
             RouteCodec::encodeForPrefill(*route, route->dst_rank, &pb);
+            if (route->filter_prefill_keys) {
+                const auto& keys = prefill_route_keys.at(route->route_id);
+                for (const auto key : keys) {
+                    pb.add_prefill_cache_keys(key);
+                }
+            }
             rank_routes[worker_rank].push_back(std::move(pb));
         }
     }
@@ -174,8 +189,10 @@ P2PSchedulerPrefillRead::sendKVCache(const std::string&                         
     if (prepared_plan) {
         const auto plan_start_us = currentTimeUs();
         plan_digest              = prepared_plan->digest;
-        rank_routes              = buildPrefillRankRoutes(
-            *prepared_plan->plan, config_.worker_grpc_addrs.size(), prepared_plan->active_route_ids);
+        rank_routes                                    = buildPrefillRankRoutes(*prepared_plan->plan,
+                                             config_.worker_grpc_addrs.size(),
+                                             prepared_plan->active_route_ids,
+                                             prepared_plan->prefill_route_keys);
         collector->prefill_scheduler_plan_cost_time_us = currentTimeUs() - plan_start_us;
     }
 

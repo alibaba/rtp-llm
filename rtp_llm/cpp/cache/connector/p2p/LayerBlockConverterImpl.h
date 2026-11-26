@@ -25,12 +25,6 @@ public:
             coordinator_manager_->convertIndexToBuffer(layer_id, tag, block_id, partition_count, partition_id));
     }
 
-    std::vector<BlockInfo> convertLinearStatePartition(
-        int layer_id, const std::string& tag, int block_id, int partition_count, int partition_id) const override {
-        return coordinator_manager_->convertLinearStatePartition(
-            layer_id, tag, block_id, partition_count, partition_id);
-    }
-
     std::vector<std::pair<BlockInfo, size_t>> getAllBuffers() const override {
         const auto  layout = coordinator_manager_->allLayerCacheBase();
         const auto& pools  = coordinator_manager_->groupBlockPools();

@@ -62,7 +62,7 @@ public:
                                         && layout.layer_num <= (std::numeric_limits<size_t>::max() - bytes) / payload,
                                     "shared cache payload overflows byte addressing");
             bytes += layout.layer_num * payload;
-            if (layout.use_mla) {
+            if (layout.cache_type == KVCacheSpecType::MultiHeadLatentAttention) {
                 RTP_LLM_CHECK_WITH_INFO(layout.seq_size_per_block > 0
                                             && layout.kv_block_stride_bytes % layout.seq_size_per_block == 0,
                                         "shared MLA cache requires packed token rows");
@@ -135,16 +135,7 @@ public:
             RTP_LLM_CHECK_WITH_INFO(layer_num > 0, "group tag=%s layout has no layers", group.tag.c_str());
             RTP_LLM_CHECK_WITH_INFO(
                 source_group.spec != nullptr, "cache spec for group tag=%s is null", source_group.tag.c_str());
-            auto layout                  = createMemoryLayoutConfig(false,
-                                                   layer_num,
-                                                   source_group.kvBlockStrideBytes(),
-                                                   source_group.kvScaleStrideBytes(),
-                                                   source_group.spec,
-                                                   cache_config,
-                                                   group.block_num,
-                                                   source_group.localKvHeadNum(),
-                                                   source_group.seqSizePerBlock(),
-                                                   source_group.kernelBlocksPerKvBlock());
+            auto layout                  = createMemoryLayoutConfig(source_group, layer_num, group.block_num);
             layout.kv_cache_offset_bytes = current_offset;
             current_offset += layout.kv_block_pool_size_bytes;
             layout.kv_scale_offset_bytes = current_offset;
@@ -183,41 +174,25 @@ public:
     }
 
 private:
-    static MemoryLayoutConfig createMemoryLayoutConfig(bool                               enable_hybrid_attention,
-                                                       uint32_t                           layer_num,
-                                                       size_t                             kv_block_stride_bytes,
-                                                       size_t                             kv_scale_stride_bytes,
-                                                       std::shared_ptr<const KVCacheSpec> spec,
-                                                       const CacheConfig&                 cache_config,
-                                                       uint32_t                           physical_block_count,
-                                                       uint32_t                           local_kv_head_num,
-                                                       size_t                             seq_size_per_block,
-                                                       size_t                             kernel_blocks_per_kv_block) {
+    static MemoryLayoutConfig
+    createMemoryLayoutConfig(const GroupBase& group, uint32_t layer_num, uint32_t physical_block_count) {
+        const auto&        spec = group.spec;
         MemoryLayoutConfig cfg;
         cfg.layer_num             = layer_num;
         cfg.block_num             = physical_block_count;
-        cfg.kv_block_stride_bytes = kv_block_stride_bytes;
+        cfg.kv_block_stride_bytes = group.kvBlockStrideBytes();
         cfg.k_block_stride_bytes  = spec->k_block_size_bytes();
         cfg.v_block_stride_bytes  = spec->v_block_size_bytes();
-        cfg.kv_scale_stride_bytes = kv_scale_stride_bytes;
+        cfg.kv_scale_stride_bytes = group.kvScaleStrideBytes();
         cfg.k_scale_stride_bytes  = spec->k_scale_block_size_bytes();
         cfg.v_scale_stride_bytes  = spec->v_scale_block_size_bytes();
 
         cfg.enable_kv_scale         = cfg.kv_scale_stride_bytes > 0;
         cfg.dtype                   = spec->memoryLayoutDType();
-        cfg.local_head_num_kv       = local_kv_head_num;
-        cfg.enable_hybrid_attention = enable_hybrid_attention;
-        // Sparse GQA still owns ordinary MHA K/V and FP32 per-token/head scales.
-        // Byte-packed scales belong to MLA/indexer regions, not the model-wide sparse flag.
-        cfg.is_mla =
-            spec->type != KVCacheSpecType::MultiHeadAttention && (cache_config.use_mla || cache_config.is_sparse);
-        // Attention groups retain MLA's replicated transfer contract. Opaque
-        // indexer and recurrent state keep their physical block layout.
-        cfg.use_mla = cache_config.use_mla
-                      && (spec->type == KVCacheSpecType::MultiHeadLatentAttention
-                          || spec->type == KVCacheSpecType::MultiHeadAttention);
-        cfg.seq_size_per_block         = seq_size_per_block;
-        cfg.kernel_blocks_per_kv_block = kernel_blocks_per_kv_block;
+        cfg.cache_type                 = spec->type;
+        cfg.local_head_num_kv          = group.localKvHeadNum();
+        cfg.seq_size_per_block         = group.seqSizePerBlock();
+        cfg.kernel_blocks_per_kv_block = group.kernelBlocksPerKvBlock();
 
         cfg.kv_block_pool_size_bytes =
             static_cast<size_t>(layer_num) * static_cast<size_t>(cfg.block_num) * cfg.kv_block_stride_bytes;

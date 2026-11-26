@@ -11,6 +11,9 @@
 #include "rtp_llm/cpp/multimodal_processor/MultimodalTokenUtils.h"
 #include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalProcessor.h"
+#if USING_CUDA
+#include <c10/cuda/CUDAStream.h>
+#endif
 
 namespace py = pybind11;
 
@@ -42,10 +45,16 @@ ErrorInfo pinMultimodalTensors(std::vector<torch::Tensor>& tensors, const char* 
                 continue;
             }
             if (tensor.is_cuda()) {
-                auto options =
-                    torch::TensorOptions().dtype(tensor.scalar_type()).device(torch::kCPU).pinned_memory(true);
-                // Downstream TP serialization can read the host tensor immediately.
-                tensor = tensor.to(options, /*non_blocking=*/false);
+                const auto memory_format = tensor.is_non_overlapping_and_dense() ? torch::MemoryFormat::Preserve :
+                                                                                  torch::MemoryFormat::Contiguous;
+                // ATen's nonblocking CUDA-to-CPU copy selects pinned storage.
+                // Wait before publishing it to host readers, including hashes.
+                auto cpu = tensor.to(torch::TensorOptions().device(torch::kCPU),
+                                     /*non_blocking=*/true,
+                                     /*copy=*/false,
+                                     memory_format);
+                c10::cuda::getCurrentCUDAStream(tensor.get_device()).synchronize();
+                tensor = std::move(cpu);
             } else {
                 tensor = tensor.pin_memory();
             }

@@ -24,11 +24,13 @@ public:
     static ShardLayout fromTopology(const CacheTopology&     topology,
                                     const ParallelismConfig& pc,
                                     RoleType                 role,
-                                    size_t                   cache_key_tokens_per_block) {
+                                    size_t                   cache_key_tokens_per_block,
+                                    bool                     local_full_page_rr = false) {
         ShardLayout layout;
         layout.pc = pc;
         layout.pc.role_type = role;
         layout.cache_key_tokens_per_block = cache_key_tokens_per_block;
+        layout.local_full_page_rr         = local_full_page_rr;
 
         for (const auto& group : topology.groups()) {
             ShardLayout::GroupLayout g;
@@ -39,6 +41,13 @@ public:
             if (group.spec) {
                 g.spec_type             = group.spec->type;
                 g.k_block_payload_bytes = group.spec->k_block_payload_bytes();
+                const auto& transfer    = group.spec->tp_transfer;
+                if (transfer.mode == TpCacheTransferMode::LINEAR_QKV) {
+                    g.linear_q_row_bytes  = transfer.q_row_bytes;
+                    g.linear_k_row_bytes  = transfer.k_row_bytes;
+                    g.linear_v_row_bytes  = transfer.v_row_bytes;
+                    g.linear_history_rows = transfer.history_rows;
+                }
             }
             if (auto mha_spec = std::dynamic_pointer_cast<const MHAKVCacheSpec>(group.spec)) {
                 g.global_kv_heads = mha_spec->globalKvHeads();

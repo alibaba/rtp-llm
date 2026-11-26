@@ -45,7 +45,16 @@ RdmaServer::RdmaServer(const std::shared_ptr<IRdmaMemoryManager>& memory_manager
     memory_manager_(memory_manager) {}
 
 RdmaServer::~RdmaServer() {
-    // RdmaMempoolFactory 的 Shutdown 会在全局析构时调用，这里不需要手动调用
+    stop();
+}
+
+void RdmaServer::stop() {
+    if (auto reporter = barex_metrics_reporter_.lock()) {
+        reporter->release();
+    }
+    // The transport joins its listener and RDMA progress threads before the
+    // process-wide device manager or our registered memory can be destroyed.
+    server_.reset();
 }
 
 bool RdmaServer::init(uint32_t listen_port, int io_thread_count, int worker_thread_count) {
@@ -76,6 +85,7 @@ bool RdmaServer::init(uint32_t listen_port, int io_thread_count, int worker_thre
         RTP_LLM_LOG_ERROR("rdma server init failed, metrics reporter init failed");
         return false;
     }
+    barex_metrics_reporter_ = metrics_reporter;
 
     // 创建 XServerTransport
     ::accl::barex::XServerTransportConfig config(io_thread_count, worker_thread_count, xmempool, metrics_reporter);

@@ -25,6 +25,7 @@ import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.LongAdder;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
 /**
@@ -168,10 +169,10 @@ public class EngineSyncRunner implements Runnable {
             }
 
             // Remove if not in latest engine list
+            Function<WorkerHost, String> routingAddress =
+                    roleType == RoleType.VIT ? WorkerHost::getIpPort : WorkerHost::getLogicalIpPort;
             Set<String> latestValidIpPorts =
-                    latestEngineWorkerList.stream()
-                            .map(WorkerHost::getLogicalIpPort)
-                            .collect(Collectors.toSet());
+                    latestEngineWorkerList.stream().map(routingAddress).collect(Collectors.toSet());
             logger.debug(
                     "Current cached worker size: {}, latest worker list size: {}",
                     cachedWorkerStatuses.size(),
@@ -196,7 +197,7 @@ public class EngineSyncRunner implements Runnable {
             logger.debug(
                     "Submitting status check tasks for {} workers", latestEngineWorkerList.size());
             for (WorkerHost host : latestEngineWorkerList) {
-                String workerIpPort = host.getLogicalIpPort();
+                String workerIpPort = routingAddress.apply(host);
                 String site = host.getSite();
 
                 WorkerStatus workerStatus =

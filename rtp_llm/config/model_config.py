@@ -216,6 +216,7 @@ class ModelConfig(CppModelConfig):
     # Known C++ ModelConfig members (from ModelConfig.h)
     # These may not be explicitly exposed via pybind11 but exist in C++
     _cpp_members = {
+        "use_page_rr_kv_cache",
         "num_layers",
         "max_seq_len",
         "vocab_size",

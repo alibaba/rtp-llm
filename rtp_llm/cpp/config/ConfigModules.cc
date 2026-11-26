@@ -48,7 +48,8 @@ std::string PrefillCPConfig::to_string() const {
     oss << "\n all_gather_impl: " << (all_gather_impl == CPAllGatherImpl::FUSED ? "FUSED" : "LEGACY") << "\n"
         << " comm_buffer_size: " << comm_buffer_size << "\n"
         << " kv_cache_sharded: " << kv_cache_sharded << "\n"
-        << " prefill_cp_size: " << prefill_cp_size << "\n";
+        << " prefill_cp_size: " << prefill_cp_size << "\n"
+        << " preserve_tp_layout: " << preserve_tp_layout << "\n";
     return oss.str();
 }
 
@@ -216,7 +217,8 @@ std::string LinearAttentionConfig::to_string() const {
         << "linear_value_head_dim: " << linear_value_head_dim << "\n"
         << "ssm_state_dtype: " << getDataTypeStr(ssm_state_dtype) << "\n"
         << "conv_state_dtype: " << getDataTypeStr(conv_state_dtype) << "\n"
-        << "supports_history_state_reclaim: " << supports_history_state_reclaim;
+        << "supports_history_state_reclaim: " << supports_history_state_reclaim << "\n"
+        << "replay_vector_gate: " << replay_vector_gate;
     return oss.str();
 }
 // HybridAttentionConfig
@@ -455,6 +457,7 @@ std::string RuntimeConfig::to_string() const {
         << "warm_up: " << warm_up << "\n"
         << "warm_up_with_loss: " << warm_up_with_loss << "\n"
         << "model_warm_up: " << model_warm_up << "\n"
+        << "enable_linear_replay: " << enable_linear_replay << "\n"
         << "output_dispatcher_worker_count: " << output_dispatcher_worker_count << "\n"
         << "use_batch_decode_scheduler: " << use_batch_decode_scheduler << "\n"
         << "batch_decode_scheduler_config: {\n"

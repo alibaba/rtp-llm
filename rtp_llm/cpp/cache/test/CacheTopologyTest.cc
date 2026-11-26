@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/CacheTopology.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/MLAKVCacheSpec.h"
 
 namespace rtp_llm {
@@ -104,6 +105,9 @@ TEST(CacheTopologyTest, ResolvesLinearTransferFromLocalGeometryAndPreservesItOnC
     EXPECT_EQ(clone->fingerprint(), spec->fingerprint());
     clone->tp_transfer.mode = TpCacheTransferMode::LEGACY;
     EXPECT_NE(clone->fingerprint(), spec->fingerprint());
+    desc.tp_transfer_mode = TpCacheTransferMode::LEGACY;
+    const auto legacy     = SpecBuilder::build(desc, context);
+    EXPECT_EQ(legacy->tp_transfer.q_row_bytes, 0u);
     desc.tp_transfer_mode = TpCacheTransferMode::MHA_HEADS;
     EXPECT_ANY_THROW(SpecBuilder::build(desc, context));
     desc.tp_transfer_mode = TpCacheTransferMode::REPLICATED;
@@ -145,14 +149,16 @@ TEST(CacheTopologyTest, GroupPropertiesAndLayerMembershipUseCanonicalIdentity) {
     EXPECT_EQ(&topology->groupForLayer(0, "linear"), &topology->group("linear"));
 }
 
-TEST(CacheTopologyTest, TagIdentityDoesNotDependOnNumericGroupOrder) {
+TEST(CacheTopologyTest, GroupOrderIsCanonicalRegardlessOfConstructionOrder) {
     auto first    = CacheTopology::create({makeGroup("full"), makeGroup("linear", CacheGroupType::LINEAR)},
                                           {{0, {"full", "linear"}}});
     auto reversed = CacheTopology::create({makeGroup("linear", CacheGroupType::LINEAR), makeGroup("full")},
                                           {{0, {"full", "linear"}}});
 
     EXPECT_EQ(first->groupTags(), (std::vector<std::string>{"full", "linear"}));
-    EXPECT_EQ(reversed->groupTags(), (std::vector<std::string>{"linear", "full"}));
+    EXPECT_EQ(reversed->groupTags(), first->groupTags());
+    EXPECT_EQ(reversed->groupIdForTag("full"), 0u);
+    EXPECT_EQ(reversed->groupIdForTag("linear"), 1u);
     EXPECT_ANY_THROW(first->group("missing"));
     EXPECT_EQ(first->group("full").policy.group_type, reversed->group("full").policy.group_type);
     EXPECT_EQ(first->group("linear").policy.group_type, reversed->group("linear").policy.group_type);
@@ -215,16 +221,38 @@ TEST(CacheTopologyTest, PhysicalGroupResolvesMultipleMtpModuleLayerRanges) {
     EXPECT_ANY_THROW((void)config.physicalGroupForLayer(5, "full"));
 }
 
-TEST(CacheTopologyTest, GroupTagsKeepConstructionOrderAndStableStorage) {
-    auto        topology = CacheTopology::create({makeGroup("zeta"), makeGroup("alpha")}, {{0, {"alpha", "zeta"}}});
+TEST(CacheTopologyTest, GroupTagsUseCanonicalOrderAndStableStorage) {
+    auto        topology = CacheTopology::create({makeGroup("zeta"), makeGroup("alpha")}, {{0, {"zeta", "alpha"}}});
     const auto& tags     = topology->groupTags();
-    EXPECT_EQ(tags, (std::vector<std::string>{"zeta", "alpha"}));
+    EXPECT_EQ(tags, (std::vector<std::string>{"alpha", "zeta"}));
+    EXPECT_EQ(topology->layer(0).group_tags, (std::vector<std::string>{"zeta", "alpha"}));
     EXPECT_EQ(&tags, &topology->groupTags());
     EXPECT_EQ(tags.data(), topology->groupTags().data());
     for (size_t row = 0; row < tags.size(); ++row) {
         EXPECT_EQ(tags[row], topology->groups()[row].tag);
     }
     EXPECT_ANY_THROW(CacheTopology::create({makeGroup("alpha"), makeGroup("alpha")}, {{0, {"alpha"}}}));
+}
+
+TEST(CacheTopologyTest, GroupedSpecsKeepGeometryPoliciesAndMembershipWithCanonicalTags) {
+    const auto  zeta  = makeLayoutGroup("zeta", 2);
+    const auto  alpha = makeLayoutGroup("alpha", 3);
+    CacheConfig config;
+    config.layer_num = 2;
+    config.fromGroupedSpecs({zeta.spec->clone(), alpha.spec->clone()},
+                            {{1}, {0}},
+                            {CacheGroupType::SWA, CacheGroupType::FULL},
+                            {"zeta", "alpha"});
+
+    EXPECT_EQ(config.groupTags(), (std::vector<std::string>{"alpha", "zeta"}));
+    EXPECT_EQ(config.topology().groupIdForTag("alpha"), 0u);
+    EXPECT_EQ(config.topology().groupIdForTag("zeta"), 1u);
+    EXPECT_EQ(config.group("alpha").policy.group_type, CacheGroupType::FULL);
+    EXPECT_EQ(config.group("zeta").policy.group_type, CacheGroupType::SWA);
+    EXPECT_EQ(config.group("alpha").kvBlockStrideBytes(), alpha.kvBlockStrideBytes());
+    EXPECT_EQ(config.group("zeta").kvBlockStrideBytes(), zeta.kvBlockStrideBytes());
+    EXPECT_EQ(config.groupForLayer(0, "alpha").tag, "alpha");
+    EXPECT_EQ(config.groupForLayer(1, "zeta").tag, "zeta");
 }
 
 TEST(CacheTopologyTest, TaggedLayoutPreservesOrderAndRetainedTopology) {
@@ -237,16 +265,16 @@ TEST(CacheTopologyTest, TaggedLayoutPreservesOrderAndRetainedTopology) {
     const auto& retained_tags = retained->groupTags();
     EXPECT_EQ(&config.groupTags(), &retained_tags);
 
-    config.setGroupBlockLayout({"alpha", "zeta"},
-                               {23, 31},
-                               {second.kvBlockStrideBytes(), first.kvBlockStrideBytes()},
-                               {second.kvScaleStrideBytes(), first.kvScaleStrideBytes()});
-    EXPECT_EQ(config.groupTags(), (std::vector<std::string>{"zeta", "alpha"}));
+    config.setGroupBlockLayout({"zeta", "alpha"},
+                               {31, 23},
+                               {first.kvBlockStrideBytes(), second.kvBlockStrideBytes()},
+                               {first.kvScaleStrideBytes(), second.kvScaleStrideBytes()});
+    EXPECT_EQ(config.groupTags(), (std::vector<std::string>{"alpha", "zeta"}));
     EXPECT_EQ(config.group("alpha").block_num, 23u);
     EXPECT_EQ(config.group("zeta").block_num, 31u);
     EXPECT_EQ(config.group("alpha").kvBlockStrideBytes(), second.kvBlockStrideBytes());
     EXPECT_EQ(retained->group("alpha").block_num, 16u);
-    EXPECT_EQ(retained_tags, (std::vector<std::string>{"zeta", "alpha"}));
+    EXPECT_EQ(retained_tags, (std::vector<std::string>{"alpha", "zeta"}));
     EXPECT_EQ(&retained_tags, &retained->groupTags());
     EXPECT_NE(config.topologyPtr(), retained);
 }

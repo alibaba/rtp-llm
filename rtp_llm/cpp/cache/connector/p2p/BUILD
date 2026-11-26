@@ -30,6 +30,7 @@ cc_library(
         "//rtp_llm/cpp/cache:cp_slot_mapper",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
+        "//rtp_llm/cpp/cache:tp_cache_transfer_layout",
         "//rtp_llm/cpp/cache/connector/p2p/plan:transfer_plan",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
         "@havenask//aios/autil:thread",
@@ -68,6 +69,18 @@ cc_library(
         "//rtp_llm/cpp/metrics:metrics",
         "//rtp_llm/cpp/utils:time_util",
     ]
+)
+
+cc_library(
+    name = "asymmetric_tp_util",
+    srcs = ["AsymmetricTpUtil.cc"],
+    hdrs = ["AsymmetricTpUtil.h"],
+    copts = copts(),
+    deps = ["//rtp_llm/cpp/utils:core_utils"],
+    visibility = [
+        "//rtp_llm/cpp/cache/connector/p2p/test:__pkg__",
+        "//rtp_llm/cpp/model_rpc:__pkg__",
+    ],
 )
 
 cc_library(

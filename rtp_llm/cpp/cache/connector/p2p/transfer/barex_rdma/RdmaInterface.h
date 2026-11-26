@@ -56,12 +56,14 @@ public:
 class IRdmaClient {
 public:
     virtual ~IRdmaClient() = default;
+    virtual void                             stopMetricsReporter() {}
     virtual std::shared_ptr<IRdmaConnection> getConnection(const std::string& ip, uint32_t port) = 0;
 };
 
 class IRdmaServer {
 public:
     virtual ~IRdmaServer() = default;
+    virtual void     stop() {}
     virtual uint32_t getListenPort() const = 0;
 };
 

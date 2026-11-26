@@ -3,7 +3,6 @@
 #include "rtp_llm/cpp/cache/BlockInfo.h"
 #include <string>
 #include <cstddef>
-#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -20,10 +19,6 @@ public:
                                                         int                partition_id    = 0) const = 0;
 
     virtual std::vector<std::pair<BlockInfo, size_t>> getAllBuffers() const = 0;
-
-    virtual std::vector<BlockInfo> convertLinearStatePartition(int, const std::string&, int, int, int) const {
-        throw std::logic_error("linear state partitioning requires a cache topology");
-    }
 };
 
 }  // namespace rtp_llm

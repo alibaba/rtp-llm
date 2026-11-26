@@ -43,6 +43,7 @@ from rtp_llm.ops import (
     MoeConfig,
     OpaqueBlockEntryCountMode,
     ParallelismConfig,
+    TpCacheTransferMode,
 )
 from rtp_llm.utils.database import BaseDatabase
 from rtp_llm.utils.model_weight import (
@@ -655,6 +656,9 @@ class Glm53Flash(BaseModel):
             model_config.hybrid_attention_config.hybrid_attention_types,
             KVCacheSpecType.MLA,
         )
+        for (desc,) in descs:
+            if desc.cache_type == KVCacheSpecType.LINEAR:
+                desc.tp_transfer_mode = TpCacheTransferMode.LINEAR_QKV
         if attn.indexer_head_dim != 128:
             raise ValueError(
                 "GLM-5.3-Flash KPool requires 128-dimensional indexer heads"

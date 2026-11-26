@@ -30,11 +30,14 @@ from rtp_llm.dash_sc.structural_tag import (
     structural_tag_from_response_format,
     validate_structural_tag_shape,
 )
-from rtp_llm.utils.base_model_datatypes import GenerateOutput, GenerateOutputs
+from rtp_llm.utils.base_model_datatypes import (
+    GenerateOutput,
+    GenerateOutputs,
+    MMUrlType,
+)
 
 if TYPE_CHECKING:
     from rtp_llm.config.generate_config import GenerateConfig
-    from rtp_llm.utils.base_model_datatypes import MMUrlType
 
 _INT32_MIN = -2_147_483_648
 _DEFAULT_MAX_NEW_TOKENS = 32000
@@ -778,10 +781,12 @@ class SamplingParams:
 
         structural_tag = self.structural_tag
         if self.response_format is not None:
-            # Preserve Dash precedence at its protocol boundary: an explicit
-            # response_format wins over the direct structural_tag control.
             response_format = parse_response_format(self.response_format)
-            structural_tag = None
+            # Dash sends text as a default alongside forced tool-call constraints.
+            if response_format is not None and response_format.type == "text":
+                response_format = None
+            else:
+                structural_tag = None
         elif self.json_format and structural_tag is None:
             response_format = parse_response_format({"type": "json_object"})
         else:
@@ -1176,8 +1181,6 @@ def parse_dash_sc_grpc_request(
 def _multimodal_type_maps() -> (
     tuple[dict[str, tuple[str, MMUrlType]], dict[str, MMUrlType]]
 ):
-    from rtp_llm.utils.base_model_datatypes import MMUrlType
-
     return (
         {
             "image_url": ("image_url", MMUrlType.IMAGE),
@@ -1747,6 +1750,13 @@ class StreamResponseBuilder:
             else LLMFinishReason.STOP if finished else LLMFinishReason.STREAMING
         )
         aux_info = getattr(out_py, "aux_info", None)
+        if self._image_tokens is None and aux_info is not None:
+            self._image_tokens = aux_info.multimodal_lengths.get(MMUrlType.IMAGE)
+            if self._image_tokens is not None and self._template is not None:
+                # A heartbeat can precede the request's image usage.
+                self._template.infer_response.parameters["image_tokens"].int64_param = (
+                    self._image_tokens
+                )
         prompt_tokens = (
             int(aux_info.input_len)
             if aux_info is not None

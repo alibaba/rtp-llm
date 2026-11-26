@@ -48,6 +48,7 @@ public:
 
     static std::shared_ptr<const CacheTopology> create(std::vector<GroupBase> groups, std::vector<LayerBase> layers);
 
+    // Groups and their numeric IDs follow lexicographic tag order.
     const std::vector<GroupBase>& groups() const {
         return groups_;
     }
@@ -67,6 +68,7 @@ public:
     // MLA group, not an earlier FULL indexer or a target-owned placeholder.
     // Legacy topologies without an MLA spec retain the first owned FULL group.
     const GroupBase& initialMlaBlockTableGroup() const;
+    size_t groupIdForTag(std::string_view tag) const;
     const LayerBase& layer(int layer_id) const;
     GroupRefs        groupsForLayer(int layer_id) const;
     const GroupBase& groupForLayer(int layer_id, std::string_view tag) const;
@@ -90,7 +92,6 @@ public:
     }
 
 private:
-    size_t           groupIdForTag(std::string_view tag) const;
     const GroupBase& groupById(size_t group_id) const;
 
     CacheTopology(std::vector<GroupBase> groups, std::vector<LayerBase> layers);

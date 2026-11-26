@@ -70,14 +70,16 @@ void MemoryLayoutStrategy::initializeSharedViews(const torch::Tensor& backing) {
         }
         return views;
     };
-    layer_kv_tensors_ = make_views(
-        config_.kv_cache_offset_bytes, config_.kv_block_stride_bytes, dataTypeToTorchType(data_type_), config_.use_mla);
+    const bool token_major_kv = config_.cache_type == KVCacheSpecType::MultiHeadLatentAttention;
+    layer_kv_tensors_         = make_views(
+        config_.kv_cache_offset_bytes, config_.kv_block_stride_bytes, dataTypeToTorchType(data_type_), token_major_kv);
     layer_kv_scale_tensors_.clear();
     if (config_.hasScale()) {
-        layer_kv_scale_tensors_ = make_views(config_.kv_scale_offset_bytes,
+        const bool packed_scales = config_.cache_type != KVCacheSpecType::MultiHeadAttention;
+        layer_kv_scale_tensors_  = make_views(config_.kv_scale_offset_bytes,
                                              config_.kv_scale_stride_bytes,
-                                             config_.is_mla ? torch::kUInt8 : torch::kFloat32,
-                                             config_.is_mla);
+                                             packed_scales ? torch::kUInt8 : torch::kFloat32,
+                                             packed_scales);
     }
     // The common owner initializes backing once, before allocation begins.
     // Clearing each overlapping group view here would corrupt its neighbours.
@@ -130,10 +132,11 @@ void MemoryLayoutStrategy::processKVTensor(torch::Tensor& kv_cache_tensor) {
     layer_kv_tensors_.clear();
     layer_kv_tensors_.reserve(config_.layer_num);
 
-    if (config_.use_mla && config_.seq_size_per_block > 0) {
-        // MLA: concat_and_cache_mla expects [num_blocks, block_size, stride] per layer
+    if (config_.cache_type == KVCacheSpecType::MultiHeadLatentAttention) {
+        RTP_LLM_CHECK_WITH_INFO(config_.seq_size_per_block > 0, "token-major KV requires positive tokens per block");
+        // Token-major consumers expect [num_blocks, tokens_per_block, elements_per_token].
         RTP_LLM_CHECK_WITH_INFO(kv_block_stride_elems % config_.seq_size_per_block == 0,
-                                "kv_block_stride_elems=%zu must be divisible by seq_size_per_block=%zu for MLA",
+                                "kv_block_stride_elems=%zu must be divisible by seq_size_per_block=%zu for token-major KV",
                                 kv_block_stride_elems,
                                 config_.seq_size_per_block);
         const size_t  stride_elems    = kv_block_stride_elems / config_.seq_size_per_block;
@@ -144,7 +147,7 @@ void MemoryLayoutStrategy::processKVTensor(torch::Tensor& kv_cache_tensor) {
         clearKVTensor(reshaped_tensor);
         for (uint32_t layer_id = 0; layer_id < config_.layer_num; ++layer_id) {
             layer_kv_tensors_.push_back(reshaped_tensor[layer_id]);
-            RTP_LLM_LOG_DEBUG("Layer %d KV tensor shape: [%s] (MLA 3D)",
+            RTP_LLM_LOG_DEBUG("Layer %d KV tensor shape: [%s] (token-major)",
                               layer_id,
                               torch::str(layer_kv_tensors_[layer_id].sizes()).c_str());
         }
@@ -179,9 +182,10 @@ bool MemoryLayoutStrategy::processScaleTensor(torch::Tensor& kv_scale_tensor) {
                             static_cast<size_t>(kv_scale_tensor.nbytes()),
                             config_.kv_scale_pool_size_bytes);
 
-    if (config_.is_mla) {
-        // MLA: scale is byte-packed (UINT8), shape [layer_num, block_num, seq_size_per_block, bytes_per_token]
-        RTP_LLM_CHECK_WITH_INFO(config_.seq_size_per_block > 0, "seq_size_per_block must be > 0 for MLA scale");
+    if (config_.cache_type != KVCacheSpecType::MultiHeadAttention) {
+        // MHA owns FP32 K/V scales; separate latent/indexer scale regions are byte-packed.
+        RTP_LLM_CHECK_WITH_INFO(config_.seq_size_per_block > 0,
+                                "seq_size_per_block must be > 0 for packed token scales");
         RTP_LLM_CHECK_WITH_INFO(config_.kv_scale_stride_bytes % config_.seq_size_per_block == 0,
                                 "kv_scale_stride_bytes=%zu must be divisible by seq_size_per_block=%zu",
                                 config_.kv_scale_stride_bytes,
@@ -203,13 +207,13 @@ bool MemoryLayoutStrategy::processScaleTensor(torch::Tensor& kv_scale_tensor) {
         for (uint32_t layer_id = 0; layer_id < config_.layer_num; ++layer_id) {
             layer_kv_scale_tensors_.push_back(reshaped_scale_tensor[layer_id]);
 
-            RTP_LLM_LOG_DEBUG("Layer %d scale tensor shape: [%s], elements: %ld (MLA)",
+            RTP_LLM_LOG_DEBUG("Layer %d scale tensor shape: [%s], elements: %ld (packed token bytes)",
                               layer_id,
                               torch::str(layer_kv_scale_tensors_[layer_id].sizes()).c_str(),
                               layer_kv_scale_tensors_[layer_id].numel());
         }
     } else {
-        // MHA: scale is FP32, shape [layer_num, block_num, scale_stride_elems] for kernel/model
+        // FP32 scales expose one flat row per physical block.
         RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(kv_scale_tensor.numel()) % sizeof(float) == 0,
                                 "kv_scale_tensor bytes must be divisible by sizeof(float): bytes=%ld",
                                 kv_scale_tensor.numel());
@@ -262,15 +266,11 @@ std::vector<BlockInfo> MemoryLayoutStrategy::convertIndexToBuffer(int layer_id, 
 
 std::vector<BlockInfo>
 MemoryLayoutStrategy::convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const {
-    // Hybrid attention models are not support asymmetric TP, thus transfer the whole kvache blocks
-    if (config_.is_mla || config_.use_mla || config_.enable_hybrid_attention) {
-        // For MLA models and hybrid attention models, use the same logic as the simpler convertIndexToBuffer function
+    if (config_.cache_type != KVCacheSpecType::MultiHeadAttention) {
+        // Typed transfer plans handle layouts that cannot use ordinary K/V head slicing.
         return createBasicBlockInfo(layer_id, block_id);
     }
 
-    // TODO(xinfei.sxf) deal with linear attention
-
-    // For non-MLA models with partitioning
     return createPartitionedBlockInfo(layer_id, block_id, partition_count, partition_id);
 }
 

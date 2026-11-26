@@ -66,12 +66,13 @@ private:
                         int64_t                                              transfer_deadline_ms,
                         const std::shared_ptr<P2PConnectorMetricsCollector>& collector,
                         P2PConnectorAsyncReadContext&                        context,
-                        int                                                  prefill_tp_size  = 0,
-                        bool                                                 no_transfer      = false,
-                        P2PBroadcastClient::RankRoutes                       rank_routes      = {},
-                        std::vector<int>                                     active_route_ids = {},
-                        uint64_t                                             plan_digest      = 0,
-                        bool                                                 pipeline         = false);
+                        int                                                  prefill_tp_size    = 0,
+                        bool                                                 no_transfer        = false,
+                        P2PBroadcastClient::RankRoutes                       rank_routes        = {},
+                        std::vector<int>                                     active_route_ids   = {},
+                        uint64_t                                             plan_digest        = 0,
+                        bool                                                 pipeline           = false,
+                        const std::vector<PrefillRouteKeysPB>&               prefill_route_keys = {});
 
     /// @brief 按两侧布局和有界副本偏移缓存计划，避免跨 Decode DP 固定选中同一源。
     std::shared_ptr<const PlanResult> planFor(int                prefill_tp_size,
@@ -85,10 +86,12 @@ private:
     /// logical_count 恒取全序列 cache_keys 数量；block_range 只作为额外的窗口裁剪叠加在
     /// resolveKeys 结果之上 —— prefill 侧不知道 block_range，若两侧用不同的 count，
     /// include_final_key 与 tail_count 会算出不同的键。
-    ErrorResult<P2PBroadcastClient::RankRoutes> buildDecodeRankRoutes(const TransferPlan&        plan,
-                                                                      KVCacheResource&           resource,
-                                                                      const std::pair<int, int>& block_range,
-                                                                      size_t                     worker_num) const;
+    ErrorResult<P2PBroadcastClient::RankRoutes>
+    buildDecodeRankRoutes(const TransferPlan&              plan,
+                          KVCacheResource&                 resource,
+                          const std::pair<int, int>&       block_range,
+                          size_t                           worker_num,
+                          std::vector<PrefillRouteKeysPB>& prefill_route_keys) const;
 
 private:
     const P2PConnectorSchedulerConfig                    config_;

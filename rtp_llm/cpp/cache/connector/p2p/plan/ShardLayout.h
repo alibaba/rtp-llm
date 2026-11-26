@@ -36,18 +36,26 @@ struct ShardLayout {
         // MHA may replicate KV heads across adjacent attention ranks.
         uint32_t global_kv_heads  = 0;
         int      head_shard_count = 1;
+
+        // Local convolution history geometry for models that opt in to LINEAR_QKV.
+        // The SSM bytes are carried in k_block_payload_bytes.
+        size_t linear_q_row_bytes  = 0;
+        size_t linear_k_row_bytes  = 0;
+        size_t linear_v_row_bytes  = 0;
+        size_t linear_history_rows = 0;
     };
 
     ParallelismConfig                  pc;
     size_t                             cache_key_tokens_per_block      = 1;
     bool                               use_group_cache_transfer_policy = false;
     bool                               use_mla                         = false;
+    bool                               local_full_page_rr              = false;
     std::map<std::string, GroupLayout> groups;
 
     // ---- rank 坐标：CP 轴与 head 轴相互独立，不做除法分解（设计文档 §3.3）----
 
     int cpSize() const {
-        return static_cast<int>(pc.kvCacheCpSize());
+        return local_full_page_rr ? static_cast<int>(pc.tp_size) : static_cast<int>(pc.kvCacheCpSize());
     }
 
     // Compact state pages retain Prefill's token geometry on Decode, without
@@ -64,6 +72,19 @@ struct ShardLayout {
     int cpRank(int rank) const {
         const int n = cpSize();
         return n > 1 ? rank % n : 0;
+    }
+
+    int routeCpSize(const std::string& tag) const {
+        const auto& layout = group(tag);
+        // Head-only LINEAR state has no page ownership axis under local PageRR.
+        const bool head_only_linear = local_full_page_rr && layout.spec_type == KVCacheSpecType::LinearAttention
+                                      && effectiveMapping(tag) == CpBlockMappingMode::NONE
+                                      && effectiveSlice(tag) == CpBlockSliceMode::NONE;
+        return layout.linear_history_rows != 0 || head_only_linear ? 1 : cpSize();
+    }
+
+    int routeCpRank(int rank, const std::string& tag) const {
+        return rank % std::max(1, routeCpSize(tag));
     }
 
     int rankCount() const {

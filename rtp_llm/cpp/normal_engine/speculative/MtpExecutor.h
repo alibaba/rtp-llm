@@ -100,6 +100,13 @@ public:
                                                              bool cache_snapshot_ready = false);
     static int               selectMtpPreviousSeqLenUpperBound(bool pending, int previous_next_bound, int host_seq_len);
 
+    static bool              hasLinearCacheSnapshotCapacity(const std::list<GenerateStreamPtr>& streams,
+                                                            const CacheConfig&                  cache_config,
+                                                            const std::vector<CacheGroupType>&  group_types,
+                                                            int64_t                             physical_width,
+                                                            int64_t                             kernel_width,
+                                                            int64_t                             max_accept_length);
+
 protected:
     static bool speculativePrefillCPRoleIsValid(const PrefillCPConfig& prefill_cp_config, RoleType role_type);
     static bool dsparkDraftGraphAllowed(bool is_dspark, RoleType role_type);
@@ -192,6 +199,8 @@ protected:
                                       const torch::Tensor&                         kv_cache_kernel_block_id,
                                       GptModelOutputs                              draft_prefill_model_output,
                                       SamplerOutput                                draft_prefill_sampler_output,
+                                      const std::optional<LinearReplayInputs>&     linear_replay,
+                                      const std::vector<GenerateStream::LinearReplayRound>& replay_rounds,
                                       std::shared_ptr<torch::Event>                rejection_event,
                                       std::shared_ptr<torch::Event>                draft_event,
                                       std::shared_ptr<RecordedBatch>               recorded_batch,
@@ -232,6 +241,11 @@ protected:
     bool useAsyncDeviceState() const;
 
     bool useAsyncPrepare() const;
+    void recordLinearReplayLastUse(const std::vector<GenerateStream::LinearReplayRound>& rounds);
+    void publishLinearReplayWindows(const StreamGroups&                                   stream_groups,
+                                    const LinearReplayInputs&                             replay,
+                                    const std::vector<GenerateStream::LinearReplayRound>& rounds,
+                                    const torch::Tensor&                                  accept_lengths);
 
     // Opt-in gate for the post-rejection draft-prefill prepare fork. The
     // forked input is final (post-commit), so the hooks-mode restriction of
@@ -254,6 +268,8 @@ protected:
                                      const torch::Tensor&                         kv_cache_block_id,
                                      const torch::Tensor&                         kv_cache_kernel_block_id,
                                      MergedOutput                                 draft_prefill_output,
+                                     const std::optional<LinearReplayInputs>&              linear_replay,
+                                     const std::vector<GenerateStream::LinearReplayRound>& replay_rounds,
                                      std::shared_ptr<torch::Event>                rejection_event,
                                      std::shared_ptr<torch::Event>                draft_event,
                                      MtpTargetLogprobs                            target_logprobs);
