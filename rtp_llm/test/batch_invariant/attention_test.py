@@ -1,10 +1,23 @@
-"""Check batch-invariant attention routing and compare chunked prefill with dense GQA."""
+"""Check batch-invariant attention routing, decode graph replay and chunked prefill."""
 
 import unittest
+from copy import copy
 from types import SimpleNamespace
 from unittest.mock import Mock, patch, sentinel
 
 import torch
+
+
+def qwen3_attention_config(max_seq_len):
+    from rtp_llm.ops import AttentionConfigs, KvCacheDataType
+
+    config = AttentionConfigs()
+    config.head_num, config.kv_head_num, config.size_per_head = 32, 8, 128
+    config.tokens_per_block = config.kernel_tokens_per_block = 64
+    config.max_seq_len = max_seq_len
+    config.is_causal = config.need_rope_kv_cache = True
+    config.kv_cache_dtype = KvCacheDataType.BASE
+    return config
 
 
 def select_attention(config, inputs, enabled=True, **kwargs):
@@ -43,13 +56,13 @@ class BatchInvariantAttentionTest(unittest.TestCase):
             self.assertEqual(sparse.call_args.kwargs, {"batch_invariant": True})
 
     def test_factory_requires_explicit_opt_in_and_propagates_failures(self):
+        from rtp_llm.config.cuda_graph import (
+            GenerationPrefillCudaGraphUnsupportedBackend,
+        )
         from rtp_llm.device.device_type import DeviceType
         from rtp_llm.models_py.modules.factory.attention import AttnImplFactory
-        from rtp_llm.ops import AttentionConfigs, KvCacheDataType
 
-        config = AttentionConfigs()
-        config.is_causal = config.need_rope_kv_cache = True
-        config.kv_cache_dtype = KvCacheDataType.BASE
+        config = qwen3_attention_config(128)
         inputs = SimpleNamespace(is_prefill=False, is_target_verify=False)
         backend = (
             "rtp_llm.models_py.modules.factory.attention.cuda_impl.batch_invariant"
@@ -79,7 +92,6 @@ class BatchInvariantAttentionTest(unittest.TestCase):
                         select_attention(config, inputs, decode_cascade_max_requests=2)
             device_type.return_value = DeviceType.Cuda
             for graph, mode in (
-                (True, None),
                 (True, "eager"),
                 (False, "decode_graph"),
                 (False, "generation_prefill_graph"),
@@ -87,7 +99,7 @@ class BatchInvariantAttentionTest(unittest.TestCase):
             ):
                 with (
                     self.subTest(graph=graph, mode=mode),
-                    self.assertRaisesRegex(ValueError, "requires eager"),
+                    self.assertRaisesRegex(ValueError, "selection mode"),
                 ):
                     select_attention(
                         config,
@@ -95,16 +107,34 @@ class BatchInvariantAttentionTest(unittest.TestCase):
                         is_cuda_graph=graph,
                         cuda_graph_selection_mode=mode,
                     )
+            inputs.is_prefill = True
+            with self.assertRaises(GenerationPrefillCudaGraphUnsupportedBackend):
+                select_attention(
+                    config,
+                    inputs,
+                    is_cuda_graph=True,
+                    cuda_graph_selection_mode="generation_prefill_graph",
+                )
+            with self.assertRaisesRegex(ValueError, "requires pure decode"):
+                select_attention(config, inputs, is_cuda_graph=True)
             inputs.is_target_verify = True
-            with self.assertRaisesRegex(ValueError, "requires eager"):
+            with self.assertRaisesRegex(ValueError, "requires causal BF16 GQA"):
                 select_attention(config, inputs)
 
+            inputs.is_prefill = False
             inputs.is_target_verify = False
-            inputs.is_cuda_graph = True
             init.assert_not_called()
+            for mode in (None, "decode_graph"):
+                with self.assertRaisesRegex(RuntimeError, "failed to prepare KV"):
+                    select_attention(
+                        config,
+                        inputs,
+                        is_cuda_graph=True,
+                        cuda_graph_selection_mode=mode,
+                    )
+                self.assertTrue(inputs.is_cuda_graph)
             with self.assertRaisesRegex(RuntimeError, "failed to prepare KV"):
                 select_attention(config, inputs, decode_cascade_max_requests=2)
-            init.assert_called_once()
             self.assertFalse(inputs.is_cuda_graph)
 
     @unittest.skipUnless(
@@ -114,13 +144,98 @@ class BatchInvariantAttentionTest(unittest.TestCase):
         "requires an SM103 CUDA GPU",
     )
     @torch.inference_mode()
+    def test_decode_graph_refreshes_kv_pages_and_sequence_lengths(self):
+        from rtp_llm.ops import RopeStyle
+        from rtp_llm.ops.compute_ops import (
+            LayerKVCache,
+            PyAttentionInputs,
+            get_typemeta,
+        )
+
+        config = qwen3_attention_config(128)
+        config.rope_config.style = RopeStyle.Base
+        config.rope_config.dim = config.size_per_head
+        device_int = {"device": "cuda", "dtype": torch.int32}
+        generator = torch.Generator(device="cuda").manual_seed(604)
+
+        def values(*shape):
+            return torch.randn(
+                shape, device="cuda", dtype=torch.bfloat16, generator=generator
+            )
+
+        qkv = values(
+            2, (config.head_num + 2 * config.kv_head_num) * config.size_per_head
+        )
+        cache = LayerKVCache()
+        cache.kv_cache_base = values(5, 2, config.kv_head_num, 64, config.size_per_head)
+        lengths = torch.tensor([0, 63], dtype=torch.int32, pin_memory=True)
+        inputs = PyAttentionInputs()
+        inputs.is_prefill = False
+        inputs.dtype = get_typemeta(qkv)
+        inputs.sequence_lengths = lengths
+        inputs.sequence_lengths_plus_1_device = lengths.cuda() + 1
+        inputs.decode_cu_seqlens_device = torch.arange(3, **device_int)
+        inputs.kv_cache_kernel_block_id_device = torch.tensor(
+            [[1, 2], [3, 4]], **device_int
+        )
+        impl = select_attention(config, inputs, is_cuda_graph=True)
+        self.assertTrue(impl.support_cuda_graph())
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            impl.forward(qkv, cache)
+        torch.cuda.current_stream().wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured = impl.forward(qkv, cache)
+
+        # Cross a page boundary, then send the unused second row to block zero
+        # as the runner does when a two-row capture serves one real request.
+        for positions, pages in (
+            ([64, 65], [[4, 2], [1, 3]]),
+            ([63, 0], [[3, 1], [0, 0]]),
+        ):
+            lengths.copy_(torch.tensor(positions, dtype=torch.int32))
+            inputs.sequence_lengths_plus_1_device.copy_(lengths + 1)
+            inputs.kv_cache_kernel_block_id_device.copy_(
+                torch.tensor(pages, **device_int)
+            )
+            qkv.copy_(values(*qkv.shape))
+            eager_cache = LayerKVCache()
+            eager_cache.kv_cache_base = cache.kv_cache_base.clone()
+            expected = select_attention(config, copy(inputs)).forward(
+                qkv.clone(), eager_cache
+            )
+            impl.prepare_cuda_graph(inputs)
+            graph.replay()
+            torch.testing.assert_close(
+                captured.view(torch.int16), expected.view(torch.int16), rtol=0, atol=0
+            )
+            torch.testing.assert_close(
+                cache.kv_cache_base.view(torch.int16),
+                eager_cache.kv_cache_base.view(torch.int16),
+                rtol=0,
+                atol=0,
+            )
+
+    @unittest.skipUnless(
+        torch.version.cuda is not None
+        and torch.cuda.is_available()
+        and torch.cuda.get_device_capability() == (10, 3),
+        "requires an SM103 CUDA GPU",
+    )
+    @torch.inference_mode()
     def test_prefill_across_reordered_kv_pages_with_prefix(self):
-        from rtp_llm.ops import AttentionConfigs, KvCacheDataType, RopeStyle
+        from rtp_llm.ops import RopeStyle
         from rtp_llm.ops.compute_ops import LayerKVCache, get_typemeta
 
-        q_heads, kv_heads, dim = 32, 8, 128
         page_size, prefix_len, q_len = 64, 126, 7
         total_len = prefix_len + q_len
+        config = qwen3_attention_config(total_len)
+        config.rope_config.style = RopeStyle.No
+        q_heads = config.head_num
+        kv_heads = config.kv_head_num
+        dim = config.size_per_head
         pages = [4, 1, 6]
         generator = torch.Generator(device="cuda").manual_seed(157)
 
@@ -140,16 +255,6 @@ class BatchInvariantAttentionTest(unittest.TestCase):
             block = prefix[:, :, start : start + page_size]
             cache[physical, :, :, : block.size(-2)].copy_(block)
         kv_cache.kv_cache_base = cache
-
-        config = AttentionConfigs()
-        config.head_num = q_heads
-        config.kv_head_num = kv_heads
-        config.size_per_head = dim
-        config.tokens_per_block = config.kernel_tokens_per_block = page_size
-        config.max_seq_len = total_len
-        config.is_causal = config.need_rope_kv_cache = True
-        config.kv_cache_dtype = KvCacheDataType.BASE
-        config.rope_config.style = RopeStyle.No
 
         qkv = torch.cat(
             (q.flatten(1), k[prefix_len:].flatten(1), v[prefix_len:].flatten(1)), dim=1

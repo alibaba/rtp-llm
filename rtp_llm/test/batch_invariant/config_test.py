@@ -20,6 +20,7 @@ class BatchInvariantConfigTest(unittest.TestCase):
         self.hw = SimpleNamespace(
             batch_invariant=True,
             enable_cuda_graph=False,
+            generation_prefill_capture_token_buckets=[],
             enable_decode_cascade_attention=True,
         )
         self.parallel = SimpleNamespace(
@@ -198,7 +199,8 @@ class BatchInvariantConfigTest(unittest.TestCase):
             (self.parallel, "ep_size", 4, "DP8/EP8"),
             (self.parallel, "tp_size", 2, "TP1"),
             (self.engine.moe_config, "moe_strategy", "auto", "mega_moe"),
-            (self.engine.sp_config, "type", SpeculativeType.MTP, "eager"),
+            (self.hw, "enable_cuda_graph", True, "M11 requires eager"),
+            (self.engine.sp_config, "type", SpeculativeType.MTP, "speculative decoding"),
             (self.cache, "reuse_cache", True, "prefix reuse"),
         ):
             with self.subTest(key=key), patch.object(obj, key, value):
@@ -255,6 +257,33 @@ class BatchInvariantConfigTest(unittest.TestCase):
                 self.assertFalse(self.model.enable_fp32_lm_head)
                 self.assertFalse(self.hw.enable_decode_cascade_attention)
 
+    def test_decode_cuda_graph_for_supported_models_and_tp_sizes(self):
+        self.hw.enable_cuda_graph = True
+        for model_type in ("qwen_3", "qwen_3_moe"):
+            if model_type == "qwen_3_moe":
+                self._set_qwen3_moe()
+            for size in (1, 2, 4):
+                with self.subTest(model_type=model_type, tp_size=size):
+                    self._set_tp_size(size)
+                    configure_batch_invariant_model(self.engine, self.model)
+                    self.assertTrue(self.hw.enable_cuda_graph)
+
+    def test_prefill_capture_buckets_require_cuda_graph_to_be_disabled(self):
+        self.hw.generation_prefill_capture_token_buckets = [64]
+        configure_batch_invariant_model(self.engine, self.model)
+        self.hw.enable_cuda_graph = True
+        with self.assertRaisesRegex(ValueError, "GENERATION_PREFILL_CAPTURE_CONFIG"):
+            configure_batch_invariant_model(self.engine, self.model)
+
+    def test_decode_graph_rejects_speculation_and_batch_decode_scheduler(self):
+        self.hw.enable_cuda_graph = True
+        with patch.object(self.engine.sp_config, "type", SpeculativeType.MTP):
+            with self.assertRaisesRegex(ValueError, "speculative decoding"):
+                configure_batch_invariant_model(self.engine, self.model)
+        self.engine.runtime_config.use_batch_decode_scheduler = True
+        with self.assertRaisesRegex(ValueError, "USE_BATCH_DECODE_SCHEDULER"):
+            configure_batch_invariant_model(self.engine, self.model)
+
     def test_unsupported_tp_sizes_are_rejected(self):
         for size in (3, 8):
             with self.subTest(size=size):
@@ -302,7 +331,6 @@ class BatchInvariantConfigTest(unittest.TestCase):
                 with self.assertRaises(ValueError) as raised:
                     configure_batch_invariant_model(self.engine, self.model)
                 self.assertIn("requires unquantized BF16", str(raised.exception))
-                self.assertIn("requires eager execution", str(raised.exception))
 
     def test_headwise_checkpoint_is_rejected(self):
         self.model.headwise_config = {"sliding_window": 128}
@@ -311,6 +339,7 @@ class BatchInvariantConfigTest(unittest.TestCase):
 
     def test_conflicts_are_reported_before_applying_overrides(self):
         self.hw.enable_cuda_graph = True
+        self.hw.generation_prefill_capture_token_buckets = [64]
         self.parallel.tp_size = 2
         self.model.quant_config = object()
         self.cache.reuse_cache = True
@@ -321,7 +350,7 @@ class BatchInvariantConfigTest(unittest.TestCase):
             "SM103",
             "single-node PDFUSION",
             "unquantized BF16",
-            "eager",
+            "GENERATION_PREFILL_CAPTURE_CONFIG",
             "prefix reuse",
         ):
             self.assertIn(reason, str(raised.exception))

@@ -1026,13 +1026,19 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             if (is_generation_prefill_runner) {
                 generation_prefill_cuda_graph_status = GenerationPrefillCudaGraphStatus::REPLAYED;
             }
-            RTP_LLM_LOG_DEBUG("[PyWrappedModel] CUDA graph forward completed");
+            RTP_LLM_LOG_DEBUG(
+                "[PyWrappedModel] CUDA graph forward completed, is_prefill=%d, batch_size=%ld, graph_bs=%d, exec_id=%ld",
+                py_model_inputs.attention_inputs.is_prefill,
+                inputs.input_lengths.size(0),
+                graph_state.current_real_graph_bs,
+                inputs.record_execution_id);
         } else {
             py::gil_scoped_acquire gil;
             RTP_LLM_PROFILE_SCOPE("py_model.forward(normal)");
-            RTP_LLM_LOG_DEBUG("[PyWrappedModel] using normal forward, is_target_verify=%d, is_prefill=%d",
+            RTP_LLM_LOG_DEBUG("[PyWrappedModel] using normal forward, is_target_verify=%d, is_prefill=%d, exec_id=%ld",
                               py_model_inputs.attention_inputs.is_target_verify,
-                              py_model_inputs.attention_inputs.is_prefill);
+                              py_model_inputs.attention_inputs.is_prefill,
+                              inputs.record_execution_id);
             held_attn_pyobj_ = py_model_.attr("prepare_fmha_impl")(py_model_inputs, false);
             auto outputs     = py_forward_method_(py_model_inputs, held_attn_pyobj_);
             py_model_outputs = outputs.cast<PyModelOutputs>();

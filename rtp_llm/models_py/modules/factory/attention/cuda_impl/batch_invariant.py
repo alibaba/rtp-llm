@@ -2,9 +2,15 @@ from typing import Optional
 
 import torch
 
-from rtp_llm.config.cuda_graph import CudaGraphSelectionMode
+from rtp_llm.config.cuda_graph import (
+    CudaGraphSelectionMode,
+    GenerationPrefillCudaGraphUnsupportedBackend,
+)
 from rtp_llm.device.device_type import DeviceType, get_device_type
-from rtp_llm.models_py.modules.factory.attention.common import reshape_paged_kv_cache
+from rtp_llm.models_py.modules.factory.attention.common import (
+    copy_kv_cache_offset,
+    reshape_paged_kv_cache,
+)
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.ops import AttentionConfigs, KvCacheDataType
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
@@ -24,6 +30,7 @@ class BatchInvariantAttention(FMHAImplBase):
 
         self.paged_attention = batch_invariant_paged_attention
         self.config = config
+        self.is_prefill = inputs.is_prefill
         self.block_table = inputs.kv_cache_kernel_block_id_device
         if inputs.is_prefill:
             device = self.block_table.device
@@ -57,6 +64,15 @@ class BatchInvariantAttention(FMHAImplBase):
             and not inputs.is_target_verify
         )
 
+    def support_cuda_graph(self) -> bool:
+        return not self.is_prefill
+
+    def prepare_cuda_graph(self, inputs: PyAttentionInputs) -> None:
+        # The runner refreshes the page table and KV lengths in place. RoPE
+        # also owns a position buffer and derives a separate KV offset table.
+        params = self.rope.prepare(inputs, forbid_reallocation=True)
+        copy_kv_cache_offset(self.rope_params.kv_cache_offset, params.kv_cache_offset)
+
     def forward(
         self, qkv: torch.Tensor, kv_cache: Optional[LayerKVCache], layer_idx: int = 0
     ) -> torch.Tensor:
@@ -89,11 +105,23 @@ def create_batch_invariant_impl(
 ) -> BatchInvariantAttention:
     if get_device_type() != DeviceType.Cuda:
         raise ValueError("batch-invariant attention requires a CUDA backend")
+    if not BatchInvariantAttention.support(attn_configs, attn_inputs):
+        raise ValueError("batch-invariant attention requires causal BF16 GQA")
     if (
         is_cuda_graph
-        or cuda_graph_selection_mode not in (None, CudaGraphSelectionMode.EAGER)
-        or not BatchInvariantAttention.support(attn_configs, attn_inputs)
+        and cuda_graph_selection_mode == CudaGraphSelectionMode.GENERATION_PREFILL_GRAPH
     ):
-        raise ValueError("batch-invariant attention requires eager causal BF16 GQA")
-    attn_inputs.is_cuda_graph = False
+        raise GenerationPrefillCudaGraphUnsupportedBackend(
+            "batch-invariant attention supports pure decode CUDA Graphs"
+        )
+    expected_mode = (
+        CudaGraphSelectionMode.DECODE_GRAPH
+        if is_cuda_graph
+        else CudaGraphSelectionMode.EAGER
+    )
+    if cuda_graph_selection_mode not in (None, expected_mode):
+        raise ValueError("inconsistent batch-invariant CUDA graph selection mode")
+    if is_cuda_graph and attn_inputs.is_prefill:
+        raise ValueError("batch-invariant CUDA graph requires pure decode")
+    attn_inputs.is_cuda_graph = is_cuda_graph
     return BatchInvariantAttention(attn_configs, attn_inputs)

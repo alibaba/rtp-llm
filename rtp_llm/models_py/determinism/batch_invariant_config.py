@@ -44,6 +44,8 @@ def _check_m11(engine: "EngineConfig", model: "ModelConfig", conflicts: list) ->
         conflicts.append("M11 requires FP32 SSM state")
     if model.vit_separation != VitSeparation.VIT_SEPARATION_REMOTE:
         conflicts.append("M11 requires a text worker with vit_separation=2")
+    if engine.hw_kernel_config.enable_cuda_graph:
+        conflicts.append("M11 requires eager execution with CUDA Graph disabled")
     moe = engine.moe_config
     if moe.moe_strategy != "mega_moe" or moe.use_deepep_moe or moe.use_mori_ep:
         conflicts.append("M11 requires native mega_moe with DeepEP and MoriEP disabled")
@@ -127,13 +129,17 @@ def apply_batch_invariant_config(engine: "EngineConfig", model: "ModelConfig") -
     if getattr(model, "headwise_config", None):
         conflicts.append("does not support HeadWise attention (headwise_config)")
     if (
-        hw.enable_cuda_graph
-        or engine.sp_config.type != SpeculativeType.NONE
-        or engine.runtime_config.use_batch_decode_scheduler
+        not is_m11
+        and hw.enable_cuda_graph
+        and hw.generation_prefill_capture_token_buckets
     ):
         conflicts.append(
-            "requires eager execution without speculative decoding or USE_BATCH_DECODE_SCHEDULER"
+            "supports decode CUDA Graph only. Leave GENERATION_PREFILL_CAPTURE_CONFIG empty"
         )
+    if engine.sp_config.type != SpeculativeType.NONE:
+        conflicts.append("requires speculative decoding to be disabled")
+    if engine.runtime_config.use_batch_decode_scheduler:
+        conflicts.append("requires USE_BATCH_DECODE_SCHEDULER to be disabled")
     page_sizes = (attn.tokens_per_block, attn.kernel_tokens_per_block)
     page_size = 128 if is_m11 else 64
     if attn.kv_cache_dtype != KvCacheDataType.BASE or page_sizes != (

@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import re
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -142,8 +143,11 @@ def compare(reference, actual, name):
     assert not first_differences, f"{name}: {differences}"
 
 
-def record_offsets(log_dir):
-    return {path: path.stat().st_size for path in log_dir.glob("batch_schedule.*.log")}
+def record_offsets(log_dir, check_graph=False):
+    paths = list(log_dir.glob("batch_schedule.*.log"))
+    if check_graph:
+        paths.append(log_dir / "engine.log")
+    return {path: path.stat().st_size for path in paths}
 
 
 def read_records(log_dir, offsets):
@@ -160,7 +164,45 @@ def real_rows(batch):
     return [row for row in batch["requests"] if not row.get("is_fake")]
 
 
-def verify_execution(log_dir, offsets, neighbors=(), target_first=True, chunked=False):
+def verify_decode_graph(path, offset, records, neighbors):
+    eager, replayed = set(), {}
+    eager_prefill = "using normal forward, is_target_verify=0, is_prefill=1, exec_id="
+    with path.open(encoding="utf-8") as log:
+        log.seek(offset)
+        for line in log:
+            if "[RANK 0]" not in line or "[PyWrappedModel]" not in line:
+                continue
+            if eager_prefill in line:
+                eager.add(line.rstrip().split(eager_prefill, 1)[1])
+            match = re.search(
+                r"CUDA graph forward completed, is_prefill=0, batch_size=(\d+), "
+                r"graph_bs=(\d+), exec_id=(\d+)",
+                line,
+            )
+            if match:
+                real, captured, exec_id = match.groups()
+                replayed[exec_id] = (int(real), int(captured))
+
+    witnessed = set()
+    for _, rows, exec_id in records:
+        if any(row["phase"] == "prefill" for row in rows):
+            assert exec_id in eager, f"missing eager prefill for {exec_id=} in {path}"
+            continue
+        size = len(rows)
+        bucket = 1 if size == 1 else 4
+        assert replayed.get(exec_id) == (size, bucket), (
+            f"expected decode replay {size=} {bucket=} for {exec_id=} in {path}, "
+            f"saw {replayed.get(exec_id)}. Use LOG_LEVEL=DEBUG and capture buckets 1,4"
+        )
+        if set(neighbors) <= {row["input_len"] for row in rows}:
+            witnessed.add(size)
+    assert len(neighbors) + 1 in witnessed, (neighbors, witnessed)
+    print(f"Verified eager prefill and target decode replay for batches {witnessed}")
+
+
+def verify_execution(
+    log_dir, offsets, neighbors=(), target_first=True, chunked=False, *, decode_steps=0
+):
     # Require the full prefill history so an async log flush from the previous
     # request cannot satisfy the check.
     deadline = time.monotonic() + 10
@@ -170,12 +212,12 @@ def verify_execution(log_dir, offsets, neighbors=(), target_first=True, chunked=
             rows = real_rows(batch)
             for i, row in enumerate(rows):
                 if row["input_len"] == TARGET_LENGTH:
-                    targets[row["request_id"]].append((i, rows))
+                    targets[row["request_id"]].append((i, rows, batch["exec_id"]))
 
         for records in targets.values():
             prefill = []
             mixed_phases = set()
-            for i, rows in records:
+            for i, rows, _ in records:
                 row = rows[i]
                 phase = row["phase"]
                 if phase == "prefill":
@@ -193,8 +235,13 @@ def verify_execution(log_dir, offsets, neighbors=(), target_first=True, chunked=
             if neighbors:
                 if mixed_phases != {"prefill", "decode"}:
                     continue
-            elif not all(len(rows) == 1 for _, rows in records):
+            elif not all(len(rows) == 1 for _, rows, _ in records):
                 continue
+            engine_log = log_dir / "engine.log"
+            if engine_log in offsets:
+                if len(records) < len(grants) + decode_steps:
+                    continue
+                verify_decode_graph(engine_log, offsets[engine_log], records, neighbors)
             print(
                 f"target prefill grants {grants}, mixed phases {sorted(mixed_phases)}"
             )
@@ -254,10 +301,17 @@ def main():
     budget = parser.add_mutually_exclusive_group(required=True)
     budget.add_argument("--save", type=Path, help="Save the unchunked solo reference")
     budget.add_argument(
-        "--reference", type=Path, help="Compare budget 192 to this file"
+        "--reference", type=Path, help="Compare with a saved unchunked solo reference"
+    )
+    parser.add_argument(
+        "--decode-graph",
+        choices=("unchunked", "chunked"),
+        help="Check graph replay against --reference with prefill chunk size 0 or 192",
     )
     args = parser.parse_args()
-    chunked = args.reference is not None
+    if args.decode_graph and not args.reference:
+        parser.error("--decode-graph requires an eager --reference at the same TP size")
+    chunked = args.reference is not None and args.decode_graph != "unchunked"
     tokenizer = Tokenizer.from_file(str(args.checkpoint / "tokenizer.json"))
     vocab_size = read_vocab_size(args.checkpoint)
 
@@ -272,32 +326,44 @@ def main():
     with grpc.insecure_channel(args.address) as channel:
         grpc.channel_ready_future(channel).result(timeout=600)
         stub = RpcServiceStub(channel)
-        offsets = record_offsets(args.log_dir)
+        offsets = record_offsets(args.log_dir, args.decode_graph)
         solo = collect(
             start_request(stub, target, len(fixed), measure=True),
             len(fixed),
             vocab_size,
         )
-        verify_execution(args.log_dir, offsets, chunked=chunked)
+        decode_steps = len(fixed) - 1
+        verify_execution(
+            args.log_dir, offsets, chunked=chunked, decode_steps=decode_steps
+        )
         np.testing.assert_array_equal(solo["tokens"], fixed)
         baseline = solo
-        if chunked:
+        if args.reference:
             with np.load(args.reference) as saved:
                 if not solo.keys() <= set(saved.files):
                     parser.error("Regenerate the unchunked reference with --save")
                 baseline = {field: saved[field] for field in solo}
-            compare(baseline, solo, "chunked solo")
+            compare(baseline, solo, "chunked solo" if chunked else "unchunked solo")
+        else:
+            np.savez(args.save, **solo)
+        if chunked:
             cases = ((target, short), (short, target))
             neighbors = (SHORT_LENGTH,)
         else:
-            np.savez(args.save, **solo)
             cases = ((target, short, long), (long, short, target))
             neighbors = (SHORT_LENGTH, LONG_LENGTH)
         for order in cases:
             target_first = order[0] is target
-            offsets = record_offsets(args.log_dir)
+            offsets = record_offsets(args.log_dir, args.decode_graph)
             result = run_mixed(stub, blocker, order, target, len(fixed), vocab_size)
-            verify_execution(args.log_dir, offsets, neighbors, target_first, chunked)
+            verify_execution(
+                args.log_dir,
+                offsets,
+                neighbors,
+                target_first,
+                chunked,
+                decode_steps=decode_steps,
+            )
             compare(baseline, result, f"target {'first' if target_first else 'last'}")
 
 

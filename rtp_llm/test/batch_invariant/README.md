@@ -4,7 +4,8 @@
 
 The native MXFP4 text path runs on one eight-GPU SM103 CUDA 13 host with
 TP1, DP8, EP8, BF16 dense projections and KV, FP32 SSM state and 128-token
-cache pages. Set `RTP_BATCH_INVARIANT=1` and use the native `mega_moe` backend.
+cache pages. Set `RTP_BATCH_INVARIANT=1` and use the native `mega_moe` backend
+with `--enable_cuda_graph 0`.
 The M11 service test sets these options, runs budgets 0 and 256 in sequence,
 and records every decode step. It compares generated IDs, full-vocabulary
 FP32 logits and sampled probabilities bit for bit across target row positions,
@@ -26,11 +27,15 @@ reference to `budget-0/solo.npz` in the Bazel test outputs.
 ## Qwen3
 
 Set `RTP_BATCH_INVARIANT=1` for Qwen3-8B Dense or Qwen3-30B-A3B with unquantized BF16
-weights on one node with 1, 2 or 4 SM103 CUDA GPUs. The mode uses eager text
-generation, a BF16 KV cache with 64-token pages, and the regular scheduler, including
-dynamic batching and chunked prefill. Leave CUDA Graph, speculative
-decoding and prefix reuse disabled. An unset switch or `0` selects the
-regular execution path.
+weights on one node with 1, 2 or 4 SM103 CUDA GPUs. The mode uses a BF16 KV cache
+with 64-token pages and the regular scheduler, including dynamic batching and
+chunked prefill. Leave speculative decoding and prefix reuse disabled.
+An unset switch or `0` selects the regular execution path.
+
+Add `--enable_cuda_graph 1` to capture pure decode batches. The runner pads
+each batch to the smallest captured batch size that fits. Larger batches and
+all prefill steps run eagerly. Use `--decode_capture_config` to select the
+decode batch sizes and leave `--generation_prefill_capture_config` unset.
 
 With tensor parallelism, each rank computes the existing BF16 projections on
 its weight shards. Attention and MLP output projections use an all-gather and
@@ -49,6 +54,7 @@ checkout so Python imports the installed package. Set `repo` and `checkpoint`
 to absolute paths before running the commands.
 
 ```bash
+set -e
 # TP2 example. For TP4, select four devices and set TP_SIZE=4.
 # For a single-GPU regression, select one device and set TP_SIZE=1.
 export CUDA_VISIBLE_DEVICES=0,1 TP_SIZE=2
@@ -61,38 +67,42 @@ model_type=qwen_3_moe  # Use qwen_3 with the Qwen3-8B checkpoint.
 python3 "$repo/rtp_llm/test/batch_invariant/attention_test.py"
 python3 "$repo/rtp_llm/test/batch_invariant/moe_test.py"
 
-serve() (
-    LOG_PATH="$1" exec python3 -m rtp_llm.start_server \
+run_dir=$(mktemp -d "${TMPDIR:-/tmp}/qwen3-bi-tp${TP_SIZE}.XXXXXX")
+check_service() (
+    run="$run_dir/$1" port=$2 chunk=$3 graph=$4
+    shift 4
+    mkdir -p "$run/logs"
+    cd "$run"
+    if [ "$graph" = 1 ]; then export LOG_LEVEL=DEBUG; fi
+    LOG_PATH="$run/logs" python3 -m rtp_llm.start_server \
         --checkpoint_path "$checkpoint" --tokenizer_path "$checkpoint" \
         --model_type "$model_type" --act_type bf16 --max_seq_len 1024 \
         --max_context_batch_size 4 --max_batch_tokens_size 8192 --concurrency_limit 12 \
-        --kv_cache_mem_mb 4096 --start_port "$2" --prefill_chunk_size "$3"
+        --kv_cache_mem_mb 4096 --start_port "$port" --prefill_chunk_size "$chunk" \
+        --enable_cuda_graph "$graph" --decode_capture_config 1,4 >server.log 2>&1 &
+    server=$!
+    trap 'kill "$server" 2>/dev/null || true; wait "$server" || true' EXIT
+    python3 "$repo/rtp_llm/test/batch_invariant/service_test.py" \
+        --checkpoint "$checkpoint" --address "127.0.0.1:$((port + 1))" \
+        --log-dir "$run/logs" "$@"
 )
 
-run_dir=$(mktemp -d "${TMPDIR:-/tmp}/qwen3-bi-tp${TP_SIZE}.XXXXXX")
-serve "$run_dir/unchunked" 19480 0 &
-server=$!
-python3 "$repo/rtp_llm/test/batch_invariant/service_test.py" \
-    --checkpoint "$checkpoint" --log-dir "$run_dir/unchunked" --save "$run_dir/solo.npz"
-kill "$server"
-wait "$server" || true
-
-serve "$run_dir/chunked" 19580 192 &
-server=$!
-python3 "$repo/rtp_llm/test/batch_invariant/service_test.py" \
-    --checkpoint "$checkpoint" --address 127.0.0.1:19581 \
-    --log-dir "$run_dir/chunked" --reference "$run_dir/solo.npz"
-kill "$server"
-wait "$server" || true
+reference="$run_dir/solo.npz"
+check_service eager          19480   0 0 --save "$reference"
+check_service eager-chunked  19580 192 0 --reference "$reference"
+check_service graph          19680   0 1 --reference "$reference" --decode-graph unchunked
+check_service graph-chunked  19780 192 1 --reference "$reference" --decode-graph chunked
 ```
 
-Repeat the two service runs for each TP size. For TP2 and TP4 check that
+Repeat the service runs for each model and TP size. For TP2 and TP4 check that
 the worker startup logs show all expected ranks and the requested world size.
 The test checks real prefill and decode co-batching,
 target row placement and prefill grants. It compares the token IDs,
 full-vocabulary FP32 logits and sampled-token softmax probabilities returned
 by gRPC bit for bit. With an RPC schema that exposes token logprobs, it also
-compares those values. Regenerate older reference files with `--save`.
+compares those values. Graph runs match the target request's batch records to
+completed decode replays, including batches of two or three requests replayed
+in bucket four. Regenerate older reference files with `--save`.
 
 The Linear and Attention factories select the fixed-order implementations
 using the same separation between model code and backend selection as vLLM.
