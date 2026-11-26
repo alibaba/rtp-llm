@@ -33,12 +33,25 @@ from rtp_llm.models_py.modules.dsv41.ppu.quant_mode import (
 
 GIB = 1024**3
 SDK_VERSION = "2.2.0-663c22"
+FLASHMLA_SOURCE_PIN = "a7cc971df379292a603d0c36de10dd0185b0a627"
+PUBLISHED_FLASHMLA_VERSION = "2.1.0.dev8+v1.0.0.ppu2.2.0.ga7cc971"
+PUBLISHED_FLASHMLA_SHA256 = "26f074fd4af1ecb059e3544a169bb67bd617cdfea82b5aef2d36b8f06243b173"
+LEGACY_FLASHMLA_VERSION = "2.0.0+v0.2.0.ppu2.2.0"
+# The original 2.1 development wheel shares this version. Check installed bytes.
+PUBLISHED_FLASHMLA_FILES = {
+    "flash_mla/__init__.py": "f238efb6d4c5df35f9aa58496b9363571e5388fb78a16b006bd1ae71044eb9e2",
+    "flash_mla/flash_mla_interface.py": "8861f77da7d7900ffeb60cb2f652176d4342c947d516fbcc0928eba81e952d43",
+    "flash_mla/fused_norm_rope_attn_rope_cast.py": "3baacd8be6adce2e14accb7b1d5d17009b415d6e996b5fa89e0127d61ab63624",
+    "flash_mla_cuda.cpython-312-x86_64-linux-gnu.so": (
+        "f04337965954d554405647b12294e933d124c37efa286a5a04e92e4e90bf4c15"
+    ),
+}
 WHEELS = {
     "torch": "2.11.0+v0.2.0.ppu2.2.0",
     "triton": "3.7.0+v0.1.0.ppu2.2.0",
     "deep-gemm": "1.0.0+v0.4.0.ppu2.2.0",
     "deep-ep": "2.2.1+v0.1.0.ppu2.2.0",
-    "flash-mla": "2.0.0+v0.2.0.ppu2.2.0",
+    "flash-mla": PUBLISHED_FLASHMLA_VERSION,
     "flash-attn": "2.8.2+v0.2.0.ppu2.2.0",
     "flash-attn-3": "2.8.2+v0.2.0.ppu2.2.0",
     "flashinfer-python": "0.6.8.post1+v0.2.0.ppu2.2.0",
@@ -52,41 +65,42 @@ def sha256(path):
 
 
 def flashmla_build_identity(dist, receipt_path):
-    """Admit an explicit private MegaAttention build by installed-file identity.
-
-    This records provenance only; it does not qualify numerical behavior.
-    The historical release version remains the default without this receipt.
-    """
-    if not receipt_path:
-        raise ValueError("new FlashMLA requires RTP_V41_PPU_FLASHMLA_BUILD_RECEIPT")
-    receipt = json.loads(Path(receipt_path).read_text())
+    """Check installed files against the published A40 pin or an explicit build receipt."""
     root = Path(dist.locate_file("")).resolve()
-    if (
-        receipt.get("source_pin") != "a7cc971df379292a603d0c36de10dd0185b0a627"
-        or receipt.get("evidence") != "BUILT_WHEEL_FILE_INSPECTION_ONLY_NO_KERNEL_EXECUTION"
-        or Path(receipt["installed"]).resolve() != root
-    ):
-        raise ValueError("FlashMLA build receipt identity differs")
-    files = receipt["files"]
+    identity = {"source_pin": FLASHMLA_SOURCE_PIN, "evidence": "INSTALLED_BUILD_IDENTITY_ONLY"}
+    if receipt_path:
+        receipt = json.loads(Path(receipt_path).read_text())
+        if (
+            receipt.get("source_pin") != FLASHMLA_SOURCE_PIN
+            or receipt.get("evidence") != "BUILT_WHEEL_FILE_INSPECTION_ONLY_NO_KERNEL_EXECUTION"
+            or Path(receipt["installed"]).resolve() != root
+        ):
+            raise ValueError("FlashMLA build receipt identity differs")
+        files = receipt["files"]
+        identity["receipt"] = str(receipt_path)
+    else:
+        if dist.version != PUBLISHED_FLASHMLA_VERSION:
+            raise ValueError("custom FlashMLA requires RTP_V41_PPU_FLASHMLA_BUILD_RECEIPT")
+        files = PUBLISHED_FLASHMLA_FILES
+        identity["wheel_sha256"] = PUBLISHED_FLASHMLA_SHA256
     required = {"flash_mla/__init__.py", "flash_mla/fused_norm_rope_attn_rope_cast.py"}
     native = importlib.import_module("flash_mla_cuda")
     native_path = Path(native.__file__).resolve()
     required.add(str(native_path.relative_to(root)))
     if not required.issubset(files):
-        raise ValueError("FlashMLA build receipt omits required installed files")
+        raise ValueError("FlashMLA build identity omits required installed files")
     for name, expected in files.items():
         relative = Path(name)
         if relative.is_absolute() or ".." in relative.parts:
-            raise ValueError("invalid FlashMLA receipt path")
+            raise ValueError("invalid FlashMLA build identity path")
         if sha256(root / relative) != expected:
             raise ValueError(f"FlashMLA installed hash differs: {name}")
     fused = importlib.import_module("flash_mla.fused_norm_rope_attn_rope_cast")
     if Path(fused.__file__).resolve() != root / "flash_mla/fused_norm_rope_attn_rope_cast.py":
-        raise ValueError("FlashMLA fused module loaded outside the private build")
+        raise ValueError("FlashMLA fused module loaded outside the identified build")
     if not all(callable(getattr(fused, name, None)) for name in ("prefill", "decode")):
         raise ValueError("FlashMLA fused attention entry points are missing")
-    return {"source_pin": receipt["source_pin"], "receipt": str(receipt_path),
-            "evidence": "INSTALLED_BUILD_IDENTITY_ONLY"}
+    return identity
 
 
 def checkpoint_metadata(path, expected=None):
@@ -404,10 +418,11 @@ def collect_report(env=None, *, probe_allocations=False, require_backend=False):
             # actual imported symbols below and retain package provenance;
             # the original release wheel is still accepted for W4A4.
             build_identity = None
-            if name == "flash-mla" and dist.version != version:
-                build_identity = flashmla_build_identity(
-                    dist, env.get("RTP_V41_PPU_FLASHMLA_BUILD_RECEIPT")
-                )
+            if name == "flash-mla":
+                if dist.version != LEGACY_FLASHMLA_VERSION:
+                    build_identity = flashmla_build_identity(
+                        dist, env.get("RTP_V41_PPU_FLASHMLA_BUILD_RECEIPT")
+                    )
             elif name != "deep-gemm":
                 require(dist.version == version, f"{name}: {dist.version} != {version}")
             return {

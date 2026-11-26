@@ -107,8 +107,6 @@ def _readonly_prefill_binding(module, operation, *, name="prefill", entry_name="
     ):
         return None
     receipt = os.environ.get("RTP_V41_PPU_FLASHMLA_BUILD_RECEIPT")
-    if not receipt:
-        return None
     try:
         from importlib.metadata import distribution
         from pathlib import Path
