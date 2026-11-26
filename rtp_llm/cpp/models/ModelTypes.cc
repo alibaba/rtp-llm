@@ -255,8 +255,8 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
 
 torch::Tensor makeModelInputShapeHintsTensor(const GptModelInputs& inputs) {
     const auto shape_hints = getModelInputShapeHints(inputs);
-    auto tensor =
-        torch::empty({static_cast<int64_t>(shape_hints.size())}, torch::TensorOptions(torch::kInt64).pinned_memory(true));
+    auto       tensor      = torch::empty({static_cast<int64_t>(shape_hints.size())},
+                               torch::TensorOptions(torch::kInt64).pinned_memory(true));
     std::copy(shape_hints.begin(), shape_hints.end(), tensor.data_ptr<int64_t>());
     return tensor;
 }
@@ -333,8 +333,8 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     // skips the init and falls back to NCCL automatically inside execBroadcastCpu.
 
     // first sync stage: shape hints
-    auto shape_hints_t   = makeModelInputShapeHintsTensor(inputs);
-    auto shape_hints_ptr = shape_hints_t.data_ptr<int64_t>();
+    auto shape_hints_t                                     = makeModelInputShapeHintsTensor(inputs);
+    auto shape_hints_ptr                                   = shape_hints_t.data_ptr<int64_t>();
     shape_hints_ptr[GptModelInputIndex::recordExecutionId] = inputs.record_execution_id;
 
     // CPU broadcast: routed through CpuTpBroadcaster (UDS) when intra-node;
@@ -400,8 +400,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     const auto engram_width    = checkedHint(GptModelInputIndex::engramTokenWindowWidth, "engramTokenWindowWidth");
     const auto mm_features_num = checkedHint(GptModelInputIndex::mmFeaturesNum, "mmFeaturesNum");
     if (mm_features_num) {
-        mm_features_shape_t =
-            torch::empty({mm_features_num}, torch::TensorOptions(torch::kInt64).pinned_memory(true));
+        mm_features_shape_t = torch::empty({mm_features_num}, torch::TensorOptions(torch::kInt64).pinned_memory(true));
         mm_features_shape_ptr = mm_features_shape_t.data_ptr<int64_t>();
         for (int64_t i = 0; i < mm_features_num; ++i) {
             mm_features_shape_ptr[i] =
@@ -524,13 +523,13 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         inputs.prefix_lengths       = allocBuf(rtp_llm::DataType::TYPE_INT32,
                                                {context_batch_size},
                                          pickAlloc(GptModelInputDeviceBit::kDeviceBitPrefixLengths));
-        const auto publish_count = checkedHint(GptModelInputIndex::cacheStorePublishStartTokens,
-                                               "cacheStorePublishStartTokens");
-        inputs.cache_store_publish_start_tokens = publish_count ?
-            allocBuf(rtp_llm::DataType::TYPE_INT32, {publish_count}) :
-            torch::Tensor();
+        const auto publish_count =
+            checkedHint(GptModelInputIndex::cacheStorePublishStartTokens, "cacheStorePublishStartTokens");
+        inputs.cache_store_publish_start_tokens =
+            publish_count ? allocBuf(rtp_llm::DataType::TYPE_INT32, {publish_count}) : torch::Tensor();
         const auto final_count = checkedHint(GptModelInputIndex::p2pFinalPrefill, "p2pFinalPrefill");
-        inputs.p2p_final_prefill = final_count ? allocBuf(rtp_llm::DataType::TYPE_BOOL, {final_count}) : torch::Tensor();
+        inputs.p2p_final_prefill =
+            final_count ? allocBuf(rtp_llm::DataType::TYPE_BOOL, {final_count}) : torch::Tensor();
         if (max_kernel_blocks != 0) {
             // kv_cache_kernel_block_id residency follows the producer (rank 0): device only when
             // RTP_LLM_DEVICE_INPUT publishes it to CUDA. Follow the root bitmap so the packed-buffer
@@ -587,10 +586,13 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         inputs.lm_output_indexes     = allocBuf(rtp_llm::DataType::TYPE_INT32,
                                                 {checkedHint(GptModelInputIndex::lmOutputIndexes, "lmOutputIndexes")},
                                             pickAlloc(GptModelInputDeviceBit::kDeviceBitLmOutputIndexes));
-        const auto deadline_length = checkedHint(GptModelInputIndex::requestDeadlineMsLength, "requestDeadlineMsLength");
+        const auto deadline_length =
+            checkedHint(GptModelInputIndex::requestDeadlineMsLength, "requestDeadlineMsLength");
         inputs.request_deadline_ms = deadline_length ?
-            allocBuf(rtp_llm::DataType::TYPE_INT64, {deadline_length},
-                     pickAlloc(GptModelInputDeviceBit::kDeviceBitRequestDeadlineMs)) : torch::Tensor();
+                                         allocBuf(rtp_llm::DataType::TYPE_INT64,
+                                                  {deadline_length},
+                                                  pickAlloc(GptModelInputDeviceBit::kDeviceBitRequestDeadlineMs)) :
+                                         torch::Tensor();
         if (combo_position_ids_size) {
             inputs.combo_position_ids = allocBuf(rtp_llm::DataType::TYPE_INT32,
                                                  {combo_position_ids_size},

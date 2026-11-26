@@ -37,6 +37,7 @@ struct P2PSideChannelPayload {
     std::vector<int>     propose_tokens;
     TensorPB             propose_probs;
     TensorPB             propose_hidden;
+    std::optional<TensorPB>             mtp_indexer_topk;
     std::vector<int32_t> position_ids;
     std::map<std::string, TensorPB> first_token_tensors;
     std::optional<PromptLogitsOutputPB> prompt_logits;

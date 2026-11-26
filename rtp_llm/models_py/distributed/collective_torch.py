@@ -21,6 +21,7 @@ _CPP_PARALLEL_MODE_DP = 1
 _CPP_PARALLEL_MODE_WORLD = 2
 _CPP_PARALLEL_MODE_STAGE = 6
 _CPP_PARALLEL_MODE_PP = 7
+_CPP_PARALLEL_MODE_WORLD_CPU = 8
 # Local ProcessGroup aliases matching PPTransport.h.
 _PP_DEVICE_GROUP_NAME = "pp.device"
 _PP_CPU_GROUP_NAME = "pp.cpu"
@@ -37,6 +38,15 @@ _rocm_rccl = None
 _symm_mem = None
 _all_reduce_module = None
 _canonical_p2p = None
+
+
+def _get_cpu_world_group() -> torch.distributed.ProcessGroup:
+    """Create the host control communicator on its first collective across all ranks."""
+    if "world.cpu" not in _group_map:
+        _group_map["world.cpu"] = torch.distributed.new_group(
+            backend="gloo", timeout=timedelta(minutes=5)
+        )
+    return _group_map["world.cpu"]
 
 
 def _get_rocm_rccl():
@@ -602,6 +612,21 @@ def _register_process_groups_to_cpp():
         Returns:
             The reduced tensor (dest if provided, otherwise tensor).
         """
+        if mode == _CPP_PARALLEL_MODE_WORLD_CPU:
+            if not tensor.is_cpu or (dest is not None and not dest.is_cpu):
+                raise ValueError("WORLD_CPU all-reduce requires CPU tensors")
+            if torch.distributed.is_gloo_available():
+                target = dest if dest is not None else tensor
+                if dest is not None:
+                    target.copy_(tensor)
+                torch.distributed.all_reduce(
+                    target,
+                    op=_REDUCE_OPS.get(op, torch.distributed.ReduceOp.SUM),
+                    group=_get_cpu_world_group(),
+                )
+                return target
+            # Builds without Gloo can stage this control value through the existing world group.
+            mode = _CPP_PARALLEL_MODE_WORLD
         pg = mode_to_group.get(mode)
         if pg is None or pg.size() < 2:
             if dest is None:

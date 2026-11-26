@@ -201,6 +201,7 @@ class ModelConfig(CppModelConfig):
         "moe_inter_size",
         "moe_w1_layout",
         "moe_prefill_max_tokens_per_rank",
+        "index_share_for_mtp_iteration",
         "n_shared_experts",
         "generate_env_config",
         "render_config",
