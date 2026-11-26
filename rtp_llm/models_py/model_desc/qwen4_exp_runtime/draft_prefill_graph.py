@@ -9,6 +9,19 @@ from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import INDEXER_STATE_TAG
 from .state_cache_inputs import prepare_state_cache_inputs
 
 
+def _validated_common_pages(
+    table, live_rows, token_end, pool_size, page_size, compressed
+):
+    entries = token_end // 4 if compressed else token_end
+    columns = (entries + page_size - 1) // page_size
+    if 0 < columns <= table.shape[1]:
+        shared = table[:live_rows, :columns]
+        if int(shared.min()) > 0 and int(shared.max()) < pool_size:
+            return columns
+    # Let the row scan report the first coverage or page error in request order.
+    return 0
+
+
 def draft_graph_lanes(inputs, token_capacity):
     batch = inputs.input_lengths_device.numel()
     if not batch or token_capacity % batch or not 1 <= token_capacity // batch <= 4:
@@ -306,9 +319,23 @@ class DraftPrefillGraphReplay(Mapping):
                 raise RuntimeError(
                     "QSA draft graph requires positive live prefixes and lengths within request capacity followed by padding"
                 )
+        live_rows = lengths.index(0) if padding_started else len(lengths)
+        # Amortize the NumPy reductions across enough live requests.
+        common_end = (
+            min(prefixes[row] + lengths[row] for row in range(live_rows))
+            if live_rows >= 8
+            else 0
+        )
         for tag, pool_size, page_size, compressed in self.bounds:
             values = workspace.host_table(
                 tag, groups[tag].kv_cache_kernel_block_id, len(lengths)
+            )
+            start = (
+                _validated_common_pages(
+                    values, live_rows, common_end, pool_size, page_size, compressed
+                )
+                if common_end
+                else 0
             )
             for row, (length, prefix) in enumerate(zip(lengths, prefixes)):
                 if not length:
@@ -321,15 +348,12 @@ class DraftPrefillGraphReplay(Mapping):
                     raise RuntimeError(
                         "QSA draft graph block table does not cover the visible tail"
                     )
-                # Check this replay's visible pages in native array code. The
-                # graph-owned table may change in place between prepares.
-                visible = values[row, :end]
-                if end <= 64:
-                    # Small rows avoid allocating NumPy comparison masks.
+                if end == start:
+                    continue
+                visible = values[row, start:end]
+                if end - start <= 64:
                     pages = visible.tolist()
-                    invalid = bool(pages) and (
-                        min(pages) <= 0 or max(pages) >= pool_size
-                    )
+                    invalid = min(pages) <= 0 or max(pages) >= pool_size
                 else:
                     invalid = int(visible.min()) <= 0 or int(visible.max()) >= pool_size
                 if invalid:

@@ -1,4 +1,5 @@
 import unittest
+from itertools import product
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -64,20 +65,25 @@ class DraftPrefillGraphTest(unittest.TestCase):
             hook.prepare_cuda_graph(groups)
         delegate.prepare_cuda_graph.assert_not_called()
 
-    def _replay(self, *, device="cpu", state_page_size=128):
-        lengths = torch.tensor([1, 4, 0], dtype=torch.int32)
-        prefixes = torch.tensor([7, 127, 0], dtype=torch.int32)
-        cu = torch.tensor([0, 1, 5, 5], dtype=torch.int32)
+    def _replay(self, *, device="cpu", state_page_size=128, batch_size=3):
+        full_rows = batch_size - 2  # One short request and one padding row.
+        lengths = torch.tensor([1] + [4] * full_rows + [0], dtype=torch.int32)
+        prefixes = torch.tensor([7] + [127] * full_rows + [0], dtype=torch.int32)
+        cu = torch.nn.functional.pad(lengths.cumsum(0, dtype=torch.int32), (1, 0))
         positions = (
             torch.tensor(
-                [7, 127, 128, 129, 130] + [0] * 7, device=device, dtype=torch.int32
+                [7] + [127, 128, 129, 130] * full_rows + [0] * 7,
+                device=device,
+                dtype=torch.int32,
             )
             .unsqueeze(1)
             .expand(-1, 3)
             .contiguous()
             .flatten()
         )
-        tables = torch.tensor([[1, 2], [3, 4], [0, 0]], dtype=torch.int32)
+        tables = torch.tensor(
+            [[1, 2]] + [[3, 4]] * full_rows + [[0, 0]], dtype=torch.int32
+        )
         groups = {}
         for tag in ("full", INDEXER_KV_TAG, INDEXER_STATE_TAG):
             groups[tag] = SimpleNamespace(
@@ -104,7 +110,7 @@ class DraftPrefillGraphTest(unittest.TestCase):
                 (INDEXER_STATE_TAG, 12, state_page_size, False),
             ],
             3,
-            12,
+            4 * groups["full"].input_lengths.numel(),
             capture_groups=groups,
         )
 
@@ -153,9 +159,9 @@ class DraftPrefillGraphTest(unittest.TestCase):
 
     def test_replay_revalidates_visible_pages_changed_in_place(self):
         for tag, column in (("full", 1), (INDEXER_KV_TAG, 0)):
-            for invalid in (0, -1, 12, 13):
-                with self.subTest(tag=tag, invalid=invalid):
-                    hook, groups, delegate = self._replay()
+            for invalid, batch in product((0, -1, 12, 13), (3, 9)):
+                with self.subTest(tag=tag, invalid=invalid, batch=batch):
+                    hook, groups, delegate = self._replay(batch_size=batch)
                     table = groups[tag].kv_cache_kernel_block_id
                     storage = table.data_ptr()
                     hook.prepare_cuda_graph(groups)
@@ -192,26 +198,33 @@ class DraftPrefillGraphTest(unittest.TestCase):
 
     def test_replay_visible_tail_checks_short_and_long_strided_rows(self):
         for tag in ("full", INDEXER_KV_TAG):
-            for pages in (0, 1, 64, 65, 256):
+            for pages, batch in product((0, 1, 64, 65, 256), (3, 9)):
                 if tag == "full" and pages == 0:
                     continue
-                with self.subTest(tag=tag, pages=pages):
-                    hook, groups, delegate = self._replay()
+                with self.subTest(tag=tag, pages=pages, batch=batch):
+                    hook, groups, delegate = self._replay(batch_size=batch)
                     width = pages + 2
                     for name in ("full", INDEXER_KV_TAG):
-                        storage = torch.ones(3, 2 * width, dtype=torch.int32)
+                        storage = torch.ones(batch, 2 * width, dtype=torch.int32)
                         table = storage[:, ::2]
-                        table[2].fill_(-1)  # Inactive rows are outside visibility.
+                        table[-1].fill_(-1)  # Inactive rows are outside visibility.
                         groups[name].kv_cache_kernel_block_id = table
                     groups[INDEXER_STATE_TAG].kv_cache_block_id_device = torch.ones(
-                        3, width, dtype=torch.int32
+                        batch, width, dtype=torch.int32
                     )
                     groups[tag].kv_cache_kernel_block_id[0, pages] = 0
                     prefix = pages * 128 - 1 if tag == "full" else pages * 128 + 2
-                    groups["full"].prefix_lengths[0] = prefix
+                    groups["full"].prefix_lengths[:-1] = prefix
                     hook.prepare_cuda_graph(groups)
                     delegate.prepare_cuda_graph.assert_called_once()
                     delegate.reset_mock()
+                    if pages >= 3:
+                        table = groups[tag].kv_cache_kernel_block_id
+                        table[-2, pages // 2] = 12
+                        with self.assertRaisesRegex(RuntimeError, "physical block"):
+                            hook.prepare_cuda_graph(groups)
+                        delegate.prepare_cuda_graph.assert_not_called()
+                        table[-2, pages // 2] = 1
                     groups["full"].prefix_lengths[0] += 1
                     with self.assertRaisesRegex(RuntimeError, "physical block"):
                         hook.prepare_cuda_graph(groups)
