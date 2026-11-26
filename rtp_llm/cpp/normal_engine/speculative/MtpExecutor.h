@@ -39,8 +39,16 @@ struct MtpMetricsCollector {
     bool not_skip = false;
 };
 
+struct MtpStreamFilterResult {
+    bool dropped_prefill = false;
+    bool dropped_decode  = false;
+};
+
 class MtpExecutor: public Executor {
 public:
+    static bool                  isPrefillPhaseStream(const GenerateStreamPtr& stream);
+    static MtpStreamFilterResult validateAndFilterStreams(std::list<GenerateStreamPtr>& streams, RoleType role_type);
+
     explicit MtpExecutor(const EngineInitParams&                        params,
                          std::unique_ptr<ProposeModelEngineInitParams>& propose_params,
                          const std::shared_ptr<KVCacheManager>&         cache_manager,

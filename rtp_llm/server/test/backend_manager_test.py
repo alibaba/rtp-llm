@@ -84,6 +84,52 @@ class BackendManagerStartupTest(unittest.TestCase):
             timeout=configs.distribute_config.dist_comm_timeout,
         )
 
+    def test_moe_ep_consistency_failure_blocks_deepep_and_unsupported_raises(self):
+        configs = PyEnvConfigs()
+        configs.parallelism_config.tp_size = 1
+        configs.parallelism_config.dp_size = 4
+        configs.parallelism_config.ep_size = 4
+        configs.parallelism_config.world_size = 4
+        configs.parallelism_config.local_world_size = 2
+        set_parallelism_config(configs.parallelism_config)
+        configs.moe_config.use_deepep_moe = True
+
+        server = MagicMock()
+        server.validate_moe_ep_consistency.side_effect = ValueError("EP mismatch")
+        model_config = SimpleNamespace(expert_num=256, task_type=None)
+
+        with (
+            patch.object(backend_manager, "AccessLogger"),
+            patch.object(backend_manager, "DistributedServer", return_value=server),
+            patch.object(backend_manager.kmonitor, "init"),
+            patch.object(backend_manager, "init_distributed_environment"),
+            patch.object(backend_manager, "get_world_info"),
+            patch.object(
+                backend_manager.ModelFactory,
+                "create_model_config",
+                return_value=model_config,
+            ),
+            patch.object(
+                backend_manager.ModelFactory, "update_engine_config_from_model_config"
+            ),
+            patch(
+                "rtp_llm.models_py.distributed.deepep_wrapper.init_deepep_wrapper"
+            ) as init_deepep,
+        ):
+            manager = BackendManager(configs)
+            with self.assertRaisesRegex(ValueError, "EP mismatch"):
+                manager.start()
+        server.validate_moe_ep_consistency.assert_called_once()
+        init_deepep.assert_not_called()
+
+        from rtp_llm.models_py.distributed import deepep_wrapper
+
+        with patch.object(
+            deepep_wrapper.DeepEPWrapper, "supported", return_value=False
+        ):
+            with self.assertRaisesRegex(RuntimeError, "not supported"):
+                deepep_wrapper.init_deepep_wrapper(MagicMock(), model_config)
+
 
 class BackendManagerStopTest(unittest.TestCase):
     def setUp(self):

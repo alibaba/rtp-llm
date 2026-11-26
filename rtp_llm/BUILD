@@ -274,9 +274,26 @@ py_library(
 )
 
 py_library(
-    name = "device",
-    srcs = glob(["device/**/*.py"], exclude = ["device/device_type.py"]),
+    name = "cuda_capability",
+    srcs = ["device/cuda_capability.py"],
+    visibility = ["//visibility:public"],
     deps = [
+        ":device_type",
+        ":torch",
+    ],
+)
+
+py_library(
+    name = "device",
+    srcs = glob(
+        ["device/**/*.py"],
+        exclude = [
+            "device/cuda_capability.py",
+            "device/device_type.py",
+        ],
+    ),
+    deps = [
+        ":cuda_capability",
         ":device_type",
         ":torch",
         ":psutil",
@@ -419,6 +436,8 @@ py_library(
         "config/**/*.py",
     ]),
     deps = [
+        ":cuda_capability",
+        ":device_type",
         "//rtp_llm/distribute:distribute",
         "//rtp_llm/models_py/distributed:rank_layout",
         ":multimodal"

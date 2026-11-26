@@ -249,6 +249,13 @@ def _is_prefill_only_role(parallelism_config) -> bool:
     )
 
 
+def resolve_moe_cp_size(
+    prefill_cp_size: int, tp_size: int, *, is_decode_role: bool
+) -> int:
+    """Return physical MoE context-parallel size (disabled on decode-only roles)."""
+    return int(tp_size) if (int(prefill_cp_size) > 1 and not is_decode_role) else 1
+
+
 def _apply_parallelism_to_v4_args(args: V4Args, parallelism_config) -> None:
     """Apply runtime parallelism fields (incl. CP attention TP=1) onto V4Args."""
     if parallelism_config is None:
@@ -716,11 +723,15 @@ class DeepSeekV4Model(GptModelBase):
         # executors that own their communication need the physical topology.
         physical_tp_size = int(getattr(self.parallelism_config, "tp_size", 1) or 1)
         physical_tp_rank = int(getattr(self.parallelism_config, "tp_rank", 0) or 0)
-        moe_cp_enabled = self._prefill_cp_size > 1 and not self._is_decode_role
+        moe_cp_size = resolve_moe_cp_size(
+            self._prefill_cp_size,
+            physical_tp_size,
+            is_decode_role=self._is_decode_role,
+        )
         self._v4_args.moe_tp_size = physical_tp_size
         self._v4_args.moe_tp_rank = physical_tp_rank
-        self._v4_args.moe_cp_enabled = moe_cp_enabled
-        self._v4_args.moe_cp_size = physical_tp_size if moe_cp_enabled else 1
+        self._v4_args.moe_cp_enabled = moe_cp_size > 1
+        self._v4_args.moe_cp_size = moe_cp_size
         runtime_resolved_max_tokens_per_rank = resolve_moe_max_tokens_per_rank(
             max_seq_len=int(self._v4_args.max_seq_len),
             current_max_tokens_per_rank=int(self._v4_args.max_tokens_per_rank),

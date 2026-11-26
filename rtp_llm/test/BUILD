@@ -286,6 +286,7 @@ py_test(
     deps = [
         "//rtp_llm:sdk",
         "//rtp_llm:testlib",
+        "//rtp_llm:utils",
     ],
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],
@@ -299,6 +300,21 @@ py_test(
     deps = [
         "//rtp_llm:sdk",
         "//rtp_llm:testlib",
+        "//rtp_llm:utils",
+    ],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+py_test(
+    name = "server_sm120_dsv4_profile_test",
+    srcs = [
+        "server_sm120_dsv4_profile_test.py",
+    ],
+    deps = [
+        "//rtp_llm:sdk",
+        "//rtp_llm:testlib",
+        "//rtp_llm:utils",
     ],
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],

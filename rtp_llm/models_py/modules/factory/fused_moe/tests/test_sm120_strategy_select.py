@@ -1,5 +1,6 @@
 import os
 import unittest
+from contextlib import ExitStack
 from types import SimpleNamespace
 from unittest import mock
 from unittest.mock import patch
@@ -678,6 +679,54 @@ class Sm120ExecutorContractTest(unittest.TestCase):
             checker = ConditionChecker("test")
             Sm120DecodeExecutor.check_conditions(checker, cfg)
             self.assertFalse(checker.all_passed())
+
+    def test_production_factory_registry_includes_sm120_strategies_in_order(self):
+        import importlib
+
+        import rtp_llm.models_py.modules.factory.fused_moe as fused_moe_pkg
+        from rtp_llm.models_py.modules.factory.fused_moe.factory import FusedMoeFactory
+
+        saved = FusedMoeFactory._registry
+        try:
+            with (
+                patch("rtp_llm.models_py.utils.arch.is_cuda", return_value=True),
+                patch("rtp_llm.models_py.utils.arch.get_sm", return_value=(12, 0)),
+                patch("torch.cuda.is_available", return_value=True),
+                patch(
+                    "rtp_llm.models_py.modules.factory.fused_moe.is_cuda",
+                    return_value=True,
+                ),
+                patch(
+                    "rtp_llm.models_py.modules.factory.fused_moe.get_sm",
+                    return_value=(12, 0),
+                ),
+            ):
+                importlib.reload(fused_moe_pkg)
+                reg = FusedMoeFactory._registry
+            assert reg is not None
+            with _Sm120Runtime():
+                self.assertIsInstance(
+                    reg.get_strategy(
+                        _config(ep_size=4, attn_tp_size=4, is_decode_role=False)
+                    ),
+                    CudaSm120FusedMoeStrategy,
+                )
+                self.assertIsInstance(
+                    reg.get_strategy(
+                        _config(
+                            ep_size=4,
+                            strategy="sm120_a2a_decode",
+                            is_decode_role=True,
+                        )
+                    ),
+                    CudaSm120DecodeStrategy,
+                )
+                self.assertIsInstance(
+                    reg.get_strategy(_config(ep_size=1)),
+                    CudaSm120GroupedFp4Strategy,
+                )
+        finally:
+            FusedMoeFactory.set_registry(saved)
 
     def test_return_precision_preserves_fp32_partials_before_transport(self):
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.sm120_decode import (

@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/normal_engine/accuracy/AccuracyChecker.h"
 #include "rtp_llm/cpp/normal_engine/accuracy/AttentionAccuracyCheckResourceRelease.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
+#include "rtp_llm/cpp/normal_engine/Sm120MoeStrategyPolicy.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/PPScheduler.h"
@@ -20,6 +21,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
 #include "rtp_llm/cpp/models/GenerationPrefillCudaGraphEligibility.h"
+#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/DevicePin.h"
@@ -49,6 +51,7 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 
 #include "c10/cuda/CUDAGuard.h"
+#include <cuda_runtime.h>
 #endif
 
 #ifdef __linux__
@@ -233,6 +236,52 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
             "remove the generation-prefill configuration when using speculative execution on PDFUSION (type=%s)",
             SpeculativeExecutionConfig::to_string(sp_config.type).c_str());
     }
+    const auto resolved_moe_strategy = normalizeMoeStrategy(params.moe_config.moe_strategy);
+    // Check phase-padding requirement before the CUDA-graph check for a clearer error.
+    RTP_LLM_CHECK_WITH_INFO(
+        !sm120DecodeNonMtpFusedProfileUnsupported(model_config_.model_type,
+                                                  resolved_moe_strategy.c_str(),
+                                                  pd_sep_config.role_type,
+                                                  parallelism_config.pp_size,
+                                                  parallelism_config.tp_size,
+                                                  parallelism_config.dp_size,
+                                                  parallelism_config.ep_size,
+                                                  parallelism_config.world_size,
+                                                  NormalEngine::isMTPEagle(),
+                                                  parallelism_config.prefill_cp_config.is_enabled()),
+        "sm120_a2a_decode PDFUSION with PP1/TP1 and DP=EP=world>1 requires MTP, EAGLE, DSPARK or DFLASH "
+        "speculation, which pads missing prefill/decode phases; use one of them or separate PREFILL/DECODE roles");
+    RTP_LLM_CHECK_WITH_INFO(
+        !sm120DecodeRequiresEagerExecution(resolved_moe_strategy.c_str(), params.hw_kernel_config.enable_cuda_graph),
+        "sm120_a2a_decode requires eager execution: CUDA graphs are unsupported for the SM120 DSv4 DECODE and "
+        "PDFUSION(DP>1) collective protocol; set enable_cuda_graph=false");
+    RTP_LLM_CHECK_WITH_INFO(
+        !sm120FusedMoeDpDecodeMisaligned(resolved_moe_strategy.c_str(), parallelism_config.dp_size),
+        "sm120_fused_moe with DP>1 issues mismatched WORLD collectives across prefill/decode phases, and "
+        "PREFILL roles also decode requests that bypass the PD split; use sm120_a2a_decode or a DP1 profile");
+    bool is_sm120_device = false;
+#if USING_CUDA
+    int cuda_dev = -1;
+    if (cudaGetDevice(&cuda_dev) == cudaSuccess && cuda_dev >= 0) {
+        cudaDeviceProp dev_prop{};
+        if (cudaGetDeviceProperties(&dev_prop, cuda_dev) == cudaSuccess) {
+            is_sm120_device = (dev_prop.major == 12 && dev_prop.minor == 0);
+        }
+    }
+#endif
+    RTP_LLM_CHECK_WITH_INFO(
+        !sm120CpPrefillRequiresEagerExecution(resolved_moe_strategy.c_str(),
+                                              model_config_.model_type,
+                                              pd_sep_config.role_type,
+                                              parallelism_config.pp_size,
+                                              parallelism_config.tp_size,
+                                              parallelism_config.ep_size,
+                                              parallelism_config.prefill_cp_config.is_enabled(),
+                                              params.hw_kernel_config.enable_cuda_graph,
+                                              is_sm120_device),
+        "sm120_fused_moe CP%lld prefill requires eager execution: CUDA graphs are unsupported for the SM120 DSv4 "
+        "pure context-parallel MoE path; set enable_cuda_graph=false",
+        static_cast<long long>(parallelism_config.tp_size));
     if (!model_config_.output_vocab_ids.empty()) {
         RTP_LLM_CHECK_WITH_INFO(sp_config.type == SP_TYPE_NONE,
                                 "output vocabulary pruning does not support speculative, MTP, or EAGLE engines");
@@ -1187,6 +1236,10 @@ absl::Status NormalEngine::trySaveStepError() const {
     return absl::UnimplementedError("can not save yet!");
 }
 
+static bool isMtpEagleSpecType(SpeculativeType type) {
+    return type == SP_TYPE_MTP || type == SP_TYPE_EAGLE || isBlockDraftType(type);
+}
+
 bool NormalEngine::validateStreamForScheduling(const GenerateStreamPtr& stream) const {
     if (stream->hasError()) {
         return false;
@@ -1201,11 +1254,20 @@ bool NormalEngine::validateStreamForScheduling(const GenerateStreamPtr& stream) 
                             "speculative decoding does not support num_return_sequences > 1 or num_beams > 1");
         return false;
     }
-    if (pd_sep_config.role_type != RoleType::DECODE || !stream->generateConfig()->isPrefillOnly()) {
-        return true;
+    const bool is_prefill_only = stream->generateConfig()->isPrefillOnly();
+    if (pd_sep_config.role_type == RoleType::DECODE && is_prefill_only) {
+        stream->reportError(ErrorCode::INVALID_PARAMS, kDecodeRolePrefillOnlyError);
+        return false;
     }
-    stream->reportError(ErrorCode::INVALID_PARAMS, kDecodeRolePrefillOnlyError);
-    return false;
+    if (parallelism_config.pp_size <= 1 && isMtpEagleSpecType(sp_config.type) && !stream->generateInput()->fake_query
+        && !is_prefill_only) {
+        if (auto error = LogitsProcessorFactory::validateMtpCompatibility(stream->getAllLogitsProcessorPtr());
+            error.has_value()) {
+            stream->reportError(error->code(), error->ToString());
+            return false;
+        }
+    }
+    return true;
 }
 
 std::shared_ptr<GenerateStream> NormalEngine::createStream(const std::shared_ptr<GenerateInput>& input) {
@@ -1327,10 +1389,18 @@ NormalEngine::enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>&
 }
 
 std::vector<GenerateStreamPtr> NormalEngine::batchEnqueue(const std::vector<GenerateStreamPtr>& streams) {
+    std::vector<GenerateStreamPtr> valid_streams;
+    valid_streams.reserve(streams.size());
     for (const auto& stream : streams) {
-        stream->setReserveStep(reserve_step_);
+        stream->setReserveStep(reserveStepForStream(stream->generateConfig()->isPrefillOnly()));
+        if (validateStreamForScheduling(stream)) {
+            valid_streams.push_back(stream);
+        } else {
+            stream->finishWithoutGenerate();
+        }
     }
-    return scheduler_->enqueueGroup(streams).second;
+    (void)scheduler_->enqueueGroup(valid_streams);
+    return streams;
 }
 
 absl::Status NormalEngine::step() try {
@@ -1348,9 +1418,14 @@ absl::Status NormalEngine::step() try {
             RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.schedule(reserve_step=%d)", reserve_step_);
             CHECK_AND_ASSIGN(schedule_output, scheduler_->schedule());
         }
+        bool dropped_prefill = false;
+        if (parallelism_config.pp_size == 1 && isMTPEagle()) {
+            const auto filter_res = MtpExecutor::validateAndFilterStreams(streams, pd_sep_config.role_type);
+            dropped_prefill       = filter_res.dropped_prefill;
+        }
         if (parallelism_config.dp_size > 1) {
             RTP_LLM_PROFILE_SCOPE("engine.normal.may_add_fake_stream_work");
-            mayAddFakeStream(streams);
+            mayAddFakeStream(streams, dropped_prefill);
         }
         // TP collectives require empty batches to enter process().
         if (shouldEarlyReturnEmptyBatch(streams.empty(), parallelism_config.tp_size)) {
@@ -1488,7 +1563,7 @@ bool NormalEngine::isMTPEagle() {
     // draft ownership (EngineBase contract): a PP decode instance admits
     // requests on its first stage, where no local draft model exists, so they
     // must read the global sp_config instead of propose_params_.
-    return sp_config.type == SP_TYPE_MTP || sp_config.type == SP_TYPE_EAGLE || isBlockDraftType(sp_config.type);
+    return isMtpEagleSpecType(sp_config.type);
 }
 
 bool NormalEngine::isEagle() {
@@ -1514,7 +1589,7 @@ bool NormalEngine::shouldAddMtpFakePrefill(bool has_prefill, bool use_batch_deco
     return !has_prefill && (!use_batch_decode_scheduler || dp_size > 1);
 }
 
-void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
+void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams, bool dropped_prefill) {
     if (parallelism_config.pp_size > 1) {
         /** PP executes one scheduled phase, so only an empty batch needs a placeholder. */
         if (!streams.empty()) {
@@ -1545,14 +1620,15 @@ void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
                 bool has_prefill = false;
                 bool has_decode  = false;
                 for (const auto& stream : streams) {
-                    if (stream->isContextStream()) {
+                    if (MtpExecutor::isPrefillPhaseStream(stream)) {
                         has_prefill = true;
                     } else {
                         has_decode = true;
                     }
                 }
                 need_prefill = shouldAddMtpFakePrefill(
-                    has_prefill, runtime_config.use_batch_decode_scheduler, parallelism_config.dp_size);
+                                   has_prefill, runtime_config.use_batch_decode_scheduler, parallelism_config.dp_size)
+                               || (dropped_prefill && !has_prefill);
                 need_decode = !has_decode;
                 break;
             }

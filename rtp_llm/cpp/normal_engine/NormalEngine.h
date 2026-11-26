@@ -91,7 +91,7 @@ private:
     static size_t warmUpReservedBlockCount(size_t seq_len, size_t reserve_tokens, size_t tokens_per_block);
     static bool   shouldEarlyReturnEmptyBatch(bool streams_empty, int64_t tp_size);
     static bool   shouldAddMtpFakePrefill(bool has_prefill, bool use_batch_decode_scheduler, int64_t dp_size);
-    void          mayAddFakeStream(std::list<GenerateStreamPtr>& streams);
+    void          mayAddFakeStream(std::list<GenerateStreamPtr>& streams, bool dropped_prefill = false);
 
     void initExecutor(const EngineInitParams& params);
 

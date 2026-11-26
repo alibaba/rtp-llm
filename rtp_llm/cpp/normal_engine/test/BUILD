@@ -192,3 +192,14 @@ cc_test(
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],
 )
+
+cc_test(
+    name = "sm120_moe_strategy_policy_test",
+    srcs = ["Sm120MoeStrategyPolicyTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/normal_engine:sm120_moe_strategy_policy",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)

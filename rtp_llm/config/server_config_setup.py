@@ -8,6 +8,11 @@ from typing import Optional
 import torch
 
 from rtp_llm.config.py_config_modules import PyEnvConfigs, resolve_max_generate_batch_size
+from rtp_llm.config.sm120_dsv4_policy import validate_sm120_dsv4_worker_profile
+from rtp_llm.device.cuda_capability import (
+    participating_cuda_capabilities,
+    participating_sm120_state,
+)
 from rtp_llm.model_factory_register import ModelDict
 from rtp_llm.models_py.distributed.rank_layout import Group, RankLayout
 from rtp_llm.ops import (
@@ -15,6 +20,7 @@ from rtp_llm.ops import (
     PrefillCPConfig,
     RoleType,
     SpeculativeType,
+    VitSeparation,
 )
 from rtp_llm.utils.fuser import fetch_remote_file_to_local
 
@@ -54,6 +60,7 @@ def auto_configure_deepep(
     parallelism_config: ParallelismConfig,
     role_type: RoleType,
     ll_num_max_token: int = 0,
+    model_type: str = "",
 ):
     """
     Automatically configure DeepEP settings based on deployment scenario.
@@ -155,11 +162,50 @@ def auto_configure_deepep(
         and deep_ep_config.use_mori_ep is None
     ):
         # All are None, use auto configuration
-        _apply_auto_deepep_config(
-            moe_config=moe_config,
-            parallelism_config=parallelism_config,
-            role_type=role_type,
-        )
+        is_model_worker = role_type in {
+            RoleType.PREFILL,
+            RoleType.DECODE,
+            RoleType.PDFUSION,
+        }
+        if (
+            is_model_worker
+            and model_type == "deepseek_v4"
+            and parallelism_config.pp_size == 1
+            and parallelism_config.ep_size > 1
+        ):
+            sm120_state = participating_sm120_state(
+                parallelism_config.local_world_size
+            )
+            if sm120_state == "mixed":
+                caps = participating_cuda_capabilities(
+                    parallelism_config.local_world_size
+                )
+                raise ValueError(
+                    "Unsupported mixed SM120 and non-SM120 participating GPUs for "
+                    f"DeepSeek-V4 worker: local_world_size={parallelism_config.local_world_size}, "
+                    f"capabilities={caps}. Restrict CUDA_VISIBLE_DEVICES to homogeneous GPUs."
+                )
+            if sm120_state == "all":
+                moe_config.use_deepep_moe = False
+                moe_config.use_deepep_low_latency = False
+                moe_config.use_deepep_internode = False
+                logging.info(
+                    "Automatic DeepEP selection is disabled on the participating "
+                    "GPU architecture; a concrete MoE backend will validate any "
+                    "required fallback after the model configuration is loaded"
+                )
+            else:
+                _apply_auto_deepep_config(
+                    moe_config=moe_config,
+                    parallelism_config=parallelism_config,
+                    role_type=role_type,
+                )
+        else:
+            _apply_auto_deepep_config(
+                moe_config=moe_config,
+                parallelism_config=parallelism_config,
+                role_type=role_type,
+            )
     else:
         # User has set at least one value, copy them to moe_config
         if deep_ep_config.use_deepep_moe is not None:
@@ -282,6 +328,11 @@ def _apply_auto_deepep_config(
         f"  USE_DEEPEP_LOW_LATENCY: {use_deepep_low_latency}\n"
         f"  USE_DEEPEP_INTERNODE: {use_deepep_internode}"
     )
+
+
+def _validate_sm120_dsv4_worker_profile(py_env_configs) -> None:
+    """Delegate SM120 DeepSeek-V4 worker profile checks to ``sm120_dsv4_policy``."""
+    validate_sm120_dsv4_worker_profile(py_env_configs)
 
 
 def set_parallelism_config(
@@ -675,6 +726,18 @@ def setup_and_configure_server(py_env_configs: PyEnvConfigs):
         py_env_configs: PyEnvConfigs object to configure
     """
     setup_default_args(py_env_configs)
+    # Resolve legacy VIT_SEPARATION=ROLE + PDFUSION before auto_configure_deepep
+    # and _validate_sm120_dsv4_worker_profile inspect role_type.
+    if (
+        py_env_configs.vit_config.vit_separation == VitSeparation.VIT_SEPARATION_ROLE
+        and py_env_configs.role_config.role_type == RoleType.PDFUSION
+    ):
+        logging.warning(
+            "VIT_SEPARATION=ROLE detected without ROLE_TYPE=VIT. "
+            "Auto-setting ROLE_TYPE=VIT for backward compatibility. "
+            "Please migrate to ROLE_TYPE=VIT explicitly."
+        )
+        py_env_configs.role_config.role_type = RoleType.VIT
     fetch_model_files_to_local(py_env_configs)
     # DeepEP's wrapper init derives ll_num_max_token from
     # runtime_config.max_generate_batch_size while the low-latency router
@@ -694,8 +757,19 @@ def setup_and_configure_server(py_env_configs: PyEnvConfigs):
         parallelism_config=py_env_configs.parallelism_config,
         role_type=py_env_configs.role_config.role_type,
         ll_num_max_token=ll_num_max_token,
+        model_type=py_env_configs.model_args.model_type,
     )
 
     # Set local ip if not already set (e.g. for world_info / distributed_server)
     if not py_env_configs.server_config.ip:
         py_env_configs.server_config.ip = socket.gethostbyname(socket.gethostname())
+
+    # Skip model-specific checks on frontend or non-DeepSeek-V4 workers.
+    if (
+        py_env_configs.role_config.role_type == RoleType.FRONTEND
+        or py_env_configs.model_args.model_type != "deepseek_v4"
+    ):
+        return
+
+    # Validate SM120 DeepSeek-V4 topology before backend initialization.
+    _validate_sm120_dsv4_worker_profile(py_env_configs)
