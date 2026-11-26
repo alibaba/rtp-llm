@@ -7,6 +7,7 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.config.RoutingConfig.HotspotReleaseConfig;
 import org.flexlb.dao.route.RoleType;
 
+import java.util.ArrayDeque;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -22,6 +23,7 @@ import static com.google.common.math.LongMath.saturatedAdd;
 /** Samples outstanding load within the exact role and group used by a placement. */
 final class PrefillHotspots {
     private static final long SAMPLE_NANOS = TimeUnit.MILLISECONDS.toNanos(100);
+    private static final long LOAD_WINDOW_NANOS = TimeUnit.SECONDS.toNanos(1);
     private static final long SOURCE_WINDOW_NANOS = TimeUnit.SECONDS.toNanos(1);
     private static final long STALE_NANOS = TimeUnit.SECONDS.toNanos(1);
 
@@ -38,14 +40,19 @@ final class PrefillHotspots {
 
     Snapshot sample(RoleType role, String group, List<PrefillRoutingEntry> candidates,
                     HotspotReleaseConfig config) {
+        Scope scope = new Scope(role, group);
         if (candidates.isEmpty()) {
+            pools.invalidate(scope);
             return Snapshot.EMPTY;
         }
-        Pool pool = pools.get(new Scope(role, group), ignored -> new Pool());
+        Pool pool = pools.get(scope, ignored -> new Pool());
         return pool.sample(candidates, config, nanoTime.getAsLong());
     }
 
     private record Load(long requests, long compute) { }
+
+    /** Strict majorities of same-pool comparisons over recent distinct samples. */
+    private record LoadPosition(boolean highRequests, boolean highCompute, boolean lowRequests, boolean lowCompute) { }
 
     /** Integer loads strictly below the mean are exactly those below its ceiling. */
     private record Signal(long outlierLimit, long meanCeiling) {
@@ -77,16 +84,19 @@ final class PrefillHotspots {
     /** Read-only view shared by every decision within one pool sampling interval. */
     static final class Snapshot {
         private static final Signal NONE = new Signal(Long.MAX_VALUE, 0L);
-        static final Snapshot EMPTY = new Snapshot(Map.of(), Map.of(), NONE, NONE);
+        static final Snapshot EMPTY = new Snapshot(Map.of(), Map.of(), Map.of(), NONE, NONE);
 
         private final Map<PrefillEndpoint, Load> loads;
+        private final Map<PrefillEndpoint, LoadPosition> positions;
         private final Map<PrefillEndpoint, HotspotRole> hotspots;
         private final Signal requests;
         private final Signal compute;
 
-        private Snapshot(Map<PrefillEndpoint, Load> loads, Map<PrefillEndpoint, HotspotRole> hotspots,
+        private Snapshot(Map<PrefillEndpoint, Load> loads, Map<PrefillEndpoint, LoadPosition> positions,
+                         Map<PrefillEndpoint, HotspotRole> hotspots,
                          Signal requests, Signal compute) {
             this.loads = Map.copyOf(loads);
+            this.positions = Map.copyOf(positions);
             this.hotspots = Map.copyOf(hotspots);
             this.requests = requests;
             this.compute = compute;
@@ -126,7 +136,9 @@ final class PrefillHotspots {
             if (!isRedirectSource(source) || isHot(target)) {
                 return false;
             }
-            if (!loads.containsKey(target)) { return false; }
+            LoadPosition to = positions.get(target);
+            if (to == null) { return false; }
+            LoadPosition sourcePosition = positions.get(source);
             long targetRequests = saturatedAdd(
                     current.observedRequests(), current.plannedRequests());
             long targetCompute = saturatedAdd(
@@ -134,14 +146,17 @@ final class PrefillHotspots {
             if (targetRequests > requests.outlierLimit() || targetCompute > compute.outlierLimit()) {
                 return false;
             }
-            return requests.allows(from.requests(), targetRequests) || compute.allows(from.compute(), targetCompute);
+            return (sourcePosition.highRequests() && to.lowRequests() && requests.allows(from.requests(), targetRequests))
+                    || (sourcePosition.highCompute() && to.lowCompute() && compute.allows(from.compute(), targetCompute));
         }
     }
 
     private static final class Pool {
         private record Sample(long at, Snapshot snapshot) { }
+        private record Reading(long at, Map<PrefillEndpoint, Load> loads, Signal requests, Signal compute) { }
 
         private Map<PrefillEndpoint, Long> aboveSince = Map.of();
+        private final ArrayDeque<Reading> history = new ArrayDeque<>();
         private volatile Sample last;
         private Set<PrefillEndpoint> windowSources = Set.of();
         private long windowStart;
@@ -170,21 +185,30 @@ final class PrefillHotspots {
             }
             Signal requestSignal = Signal.measure(requests, config.getSetpointFloor(), config.getOutlierFactor());
             Signal computeSignal = Signal.measure(compute, config.getComputeTokenFloor(), config.getOutlierFactor());
+            while (!history.isEmpty() && now - history.getFirst().at() >= LOAD_WINDOW_NANOS) {
+                history.removeFirst();
+            }
+            history.addLast(new Reading(now, loads, requestSignal, computeSignal));
             long duration = TimeUnit.MILLISECONDS.toNanos(config.getSustainedPressureMs());
             boolean fresh = last != null && now - last.at() < STALE_NANOS;
             Map<PrefillEndpoint, Long> continuing = new HashMap<>();
             int topK = config.getSourceTopK();
             HotspotRole defaultRole = topK == 0 ? HotspotRole.REDIRECT_SOURCE : HotspotRole.HOT;
             Map<PrefillEndpoint, HotspotRole> hotspots = new HashMap<>();
+            Map<PrefillEndpoint, LoadPosition> positions = new HashMap<>();
             for (var entry : loads.entrySet()) {
+                PrefillEndpoint endpoint = entry.getKey();
+                LoadPosition position = windowPosition(endpoint);
+                positions.put(endpoint, position);
                 Load load = entry.getValue();
                 if (load.requests() <= requestSignal.outlierLimit() && load.compute() <= computeSignal.outlierLimit()) {
                     continue;
                 }
-                PrefillEndpoint endpoint = entry.getKey();
                 long since = fresh ? aboveSince.getOrDefault(endpoint, now) : now;
                 continuing.put(endpoint, since);
-                if (now - since >= duration) {
+                boolean highNowAndInWindow = (position.highRequests() && load.requests() > requestSignal.outlierLimit())
+                        || (position.highCompute() && load.compute() > computeSignal.outlierLimit());
+                if (highNowAndInWindow && now - since >= duration) {
                     hotspots.put(endpoint, defaultRole);
                 }
             }
@@ -196,9 +220,30 @@ final class PrefillHotspots {
                 }
             }
             Snapshot snapshot = hotspots.isEmpty() ? Snapshot.EMPTY
-                    : new Snapshot(loads, hotspots, requestSignal, computeSignal);
+                    : new Snapshot(loads, positions, hotspots, requestSignal, computeSignal);
             last = new Sample(now, snapshot);
             return snapshot;
+        }
+
+        private LoadPosition windowPosition(PrefillEndpoint endpoint) {
+            int samples = 0;
+            int highRequests = 0;
+            int highCompute = 0;
+            int lowRequests = 0;
+            int lowCompute = 0;
+            for (var it = history.descendingIterator(); it.hasNext();) {
+                Reading reading = it.next();
+                Load load = reading.loads().get(endpoint);
+                if (load == null) { break; } // A new or rejoined endpoint starts its own history.
+                samples++;
+                if (load.requests() > reading.requests().outlierLimit()) { highRequests++; }
+                if (load.compute() > reading.compute().outlierLimit()) { highCompute++; }
+                if (load.requests() < reading.requests().meanCeiling()) { lowRequests++; }
+                if (load.compute() < reading.compute().meanCeiling()) { lowCompute++; }
+            }
+            int required = Math.max(2, samples / 2 + 1);
+            return new LoadPosition(highRequests >= required, highCompute >= required,
+                    lowRequests >= required, lowCompute >= required);
         }
 
         private record Source(PrefillEndpoint endpoint, String address, long tokens, long requests) { }

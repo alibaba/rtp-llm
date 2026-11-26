@@ -21,6 +21,53 @@ class PrefillHotspotsTest {
     private final HotspotReleaseConfig config = new HotspotReleaseConfig();
 
     @Test
+    void anEmptyPoolDiscardsEarlierEvidenceEvenIfTheSameWorkersReturn() {
+        var source = entry("source", 100, 0);
+        var pool = List.of(source, entry("peer", 0, 0));
+        assertTrue(sampleSteadyLoad(pool, null).isHot(source.endpoint()));
+        sample(List.of(), null, 100);
+        assertFalse(sample(pool, null, 200).isHot(source.endpoint()));
+        assertFalse(sample(pool, null, 250).isHot(source.endpoint()));
+        assertTrue(sample(pool, null, 300).isHot(source.endpoint()));
+    }
+
+    @Test
+    void sourceMustBeHotInMostRecentSamplesAndStillHotNow() {
+        var source = entry("source", 0, 0);
+        var pool = List.of(source, entry("peer", 0, 0), entry("other", 0, 0));
+        for (int ms = 0; ms < 1000; ms += 100) {
+            assertFalse(sample(pool, null, ms).isHot(source.endpoint()));
+        }
+        when(source.endpoint().observedRequestCount()).thenReturn(100L);
+        for (int ms = 1000; ms < 1500; ms += 10) {
+            assertFalse(sample(pool, null, ms).isHot(source.endpoint()), "same tick cannot cast another vote");
+        }
+        assertTrue(sample(pool, null, 1500).isRedirectSource(source.endpoint()));
+        when(source.endpoint().observedRequestCount()).thenReturn(0L);
+        assertFalse(sample(pool, null, 1600).isHot(source.endpoint()));
+    }
+
+    @Test
+    void receiverNeedsSpareCapacityInTheSameDimensionThroughoutMostOfTheWindow() {
+        config.setOutlierFactor(3);
+        var source = entry("source", 100, 0);
+        var receiver = entry("receiver", 40, 0);
+        var pool = List.of(source, receiver, entry("a", 20, 0), entry("b", 20, 0), entry("c", 20, 0));
+        for (int ms = 0; ms < 1000; ms += 100) {
+            sample(pool, null, ms);
+        }
+        when(receiver.endpoint().observedRequestCount()).thenReturn(1L);
+        when(receiver.endpoint().tokenWorkloadSnapshot()).thenReturn(new PrefillTokenWorkload.Snapshot(0, 0, 0, 0, 1));
+        for (int ms = 1000; ms < 1500; ms += 100) {
+            assertFalse(mayRedirect(sample(pool, null, ms), source, receiver));
+        }
+        var ready = sample(pool, null, 1500);
+        assertTrue(mayRedirect(ready, source, receiver));
+        var newlyReserved = new PrefillTokenWorkload.Snapshot(0, 0, 40, 0, 1);
+        assertFalse(ready.mayRedirect(source.endpoint(), receiver.endpoint(), newlyReserved));
+    }
+
+    @Test
     void thresholdUsesEachSignalsOwnMedianAndFloor() {
         config.setOutlierFactor(2);
         var requestOutlier = entry("requests", 27, 1000);
@@ -28,7 +75,7 @@ class PrefillHotspotsTest {
         var pool = List.of(requestOutlier, computeOutlier, entry("median", 13, 2000),
                 entry("on-threshold", 18, 4000), entry("idle", 0, 0));
         // The medians are 13 requests and 2000 uncached tokens.
-        var snapshot = sample(pool, null, 0);
+        var snapshot = sampleSteadyLoad(pool, null);
         assertTrue(snapshot.isHot(requestOutlier.endpoint()));
         assertTrue(snapshot.isHot(computeOutlier.endpoint()));
         assertFalse(snapshot.isHot(pool.get(2).endpoint()));
@@ -46,6 +93,8 @@ class PrefillHotspotsTest {
         var idle = entry("idle", 0, 0);
         var group = List.of(leader, idle);
         var fleet = List.of(leader, idle, entry("busy", 30, 0), entry("also-busy", 30, 0));
+        sample(group, "a", -100);
+        sample(fleet, null, -100);
         assertTrue(sample(group, "a", 0).isHot(leader.endpoint()));
         assertFalse(sample(fleet, null, 0).isHot(leader.endpoint()));
         assertTrue(sample(group, "a", 1).isHot(leader.endpoint()));
@@ -79,7 +128,7 @@ class PrefillHotspotsTest {
         var peer = entry("peer", 0, 300);
         var remaining = entry("remaining", 20, 2000);
         var pool = List.of(requestHot, computeHot, requestLight, computeLight, atBothMeans, peer, remaining);
-        var snapshot = sample(pool, null, 0);
+        var snapshot = sampleSteadyLoad(pool, null);
         assertTrue(mayRedirect(snapshot, requestHot, requestLight));
         assertTrue(mayRedirect(snapshot, computeHot, computeLight));
         assertFalse(mayRedirect(snapshot, requestHot, computeLight));
@@ -94,8 +143,8 @@ class PrefillHotspotsTest {
     void workerAtTheIntegerPartOfAFractionalMeanCanReceiveWork() {
         var source = entry("source", 30, 0);
         var target = entry("target", 16, 0);
-        var snapshot = sample(List.of(source, target, entry("a", 11, 0),
-                entry("b", 12, 0), entry("c", 12, 0)), null, 0);
+        var snapshot = sampleSteadyLoad(List.of(source, target, entry("a", 11, 0),
+                entry("b", 12, 0), entry("c", 12, 0)), null);
         assertTrue(mayRedirect(snapshot, source, target), "16 is below 16.2");
     }
 
@@ -104,7 +153,7 @@ class PrefillHotspotsTest {
         var hot = entry("hot", 100, 300);
         var lighter = entry("still-running", 15, 200);
         when(lighter.endpoint().getInflightBatchCount()).thenReturn(2);
-        var snapshot = sample(List.of(hot, lighter), null, 0);
+        var snapshot = sampleSteadyLoad(List.of(hot, lighter), null);
         assertTrue(snapshot.isHot(hot.endpoint()));
         assertTrue(mayRedirect(snapshot, hot, lighter));
     }
@@ -124,7 +173,7 @@ class PrefillHotspotsTest {
         config.setOutlierFactor(1.0);
         var source = entry("hot", 30, 5000);
         var target = entry("light", 10, 3000);
-        var sampled = sample(List.of(source, target), null, 0);
+        var sampled = sampleSteadyLoad(List.of(source, target), null);
         assertTrue(mayRedirect(sampled, source, target));
 
         var withPlans = new PrefillTokenWorkload.Snapshot(3000, 1000, 10, 100, 10);
@@ -139,7 +188,7 @@ class PrefillHotspotsTest {
         var computeHot = entry("compute-hot", 1, 6000);
         var target = entry("target", 1, 100);
         var pool = List.of(requestHot, computeHot, target, entry("d", 1, 100), entry("e", 1, 100));
-        var snapshot = sample(pool, null, 0);
+        var snapshot = sampleSteadyLoad(pool, null);
         assertTrue(mayRedirect(snapshot, requestHot, target));
         assertTrue(mayRedirect(snapshot, computeHot, target));
 
@@ -166,7 +215,7 @@ class PrefillHotspotsTest {
         when(first.endpoint().queuedComputeTokens()).thenReturn(OptionalLong.of(5000));
         when(second.endpoint().queuedComputeTokens()).thenReturn(OptionalLong.empty()); // falls back to 6000
         when(third.endpoint().queuedComputeTokens()).thenReturn(OptionalLong.of(4500));
-        var initial = sample(pool, null, 0);
+        var initial = sampleSteadyLoad(pool, null);
         assertTrue(mayRedirect(initial, first, idle));
         assertTrue(mayRedirect(initial, second, idle));
         assertFalse(mayRedirect(initial, third, idle));
@@ -192,6 +241,8 @@ class PrefillHotspotsTest {
         var b = entry("b", 30, 5000);
         var idle = entry("idle", 0, 0);
         var pool = List.of(b, a, idle, entry("d", 0, 0), entry("e", 0, 0));
+        sample(pool, "g1", -100);
+        sample(List.of(b, idle), "g2", -100);
         assertTrue(sample(pool, "g1", 0).isRedirectSource(a.endpoint()));
         assertTrue(sample(List.of(b, idle), "g2", 10).isRedirectSource(b.endpoint()));
         var replacement = entry("a", 30, 5000);
@@ -203,6 +254,11 @@ class PrefillHotspotsTest {
     private static boolean mayRedirect(PrefillHotspots.Snapshot sample, PrefillRoutingEntry source,
                                        PrefillRoutingEntry target) {
         return sample.mayRedirect(source.endpoint(), target.endpoint(), target.endpoint().tokenWorkloadSnapshot());
+    }
+
+    private PrefillHotspots.Snapshot sampleSteadyLoad(List<PrefillRoutingEntry> pool, String group) {
+        sample(pool, group, -100);
+        return sample(pool, group, 0);
     }
 
     private PrefillHotspots.Snapshot sample(List<PrefillRoutingEntry> pool, String group, long atMs) {

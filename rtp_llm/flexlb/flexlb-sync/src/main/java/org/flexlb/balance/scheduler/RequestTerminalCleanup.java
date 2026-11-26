@@ -59,8 +59,14 @@ final class RequestTerminalCleanup {
         DeferredTerminal event = action.event();
         Throwable failure = null;
         if (delivery == DeliveryClaimKind.NONE && exact.prefillEp() != null && action.queuedItem() != null) {
+            PrefillQueueFlow.Event queueEvent = switch (action.transition().phase()) {
+                case TIMED_OUT -> PrefillQueueFlow.Event.EXPIRED;
+                case CANCELLED -> PrefillQueueFlow.Event.CANCELLED;
+                case FAILED -> PrefillQueueFlow.Event.FAILED;
+                default -> PrefillQueueFlow.Event.REMOVED;
+            };
             failure = runStep(failure,
-                    () -> exact.prefillEp().removeQueued(action.queuedItem(), "TERMINAL_RELEASE"));
+                    () -> exact.prefillEp().removeQueued(action.queuedItem(), "TERMINAL_RELEASE", queueEvent));
         }
         if (event != null && event.kind() == DeferredTerminal.Kind.INACTIVITY_EXPIRED) {
             // Expiry ends exact local tracking even when delivery is uncertain or Engine-owned.
@@ -96,7 +102,8 @@ final class RequestTerminalCleanup {
     void settlePrefill(RequestExecution exact, ScheduledRequest queuedInput, boolean expired) {
         if (exact.prefillEp() == null) { return; }
         if (queuedInput != null) {
-            exact.prefillEp().removeQueued(queuedInput, expired ? "REQUEST_INACTIVE" : "DELIVERY_FAILED");
+            exact.prefillEp().removeQueued(queuedInput, expired ? "REQUEST_INACTIVE" : "DELIVERY_FAILED",
+                    expired ? PrefillQueueFlow.Event.EXPIRED : PrefillQueueFlow.Event.FAILED);
         }
         if (expired) {
             exact.prefillEp().expireCommittedItem(exact);

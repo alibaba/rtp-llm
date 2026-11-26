@@ -120,7 +120,9 @@ public final class PrefillState {
     public record Retirement(
             List<RequestExecution> ownedItems,
             List<BatchCompletion> batchCompletions,
-            Throwable invariantFailure) {
+            Throwable invariantFailure,
+            int retiredWaitingRequests,
+            long retiredWaitingComputeTokens) {
         public Retirement {
             ownedItems = List.copyOf(ownedItems);
             batchCompletions = List.copyOf(batchCompletions);
@@ -664,31 +666,85 @@ public final class PrefillState {
         return tokenWorkload.pendingTokens();
     }
 
+    /** Three waiting stages and the legacy aggregate, sampled together under the ownership lock. */
+    public record QueuedComputeSnapshot(
+            OptionalLong masterQueuedTokens,
+            OptionalLong inTransitTokens,
+            OptionalLong workerWaitingTokens,
+            OptionalLong totalTokens) { }
+
     /** Estimated uncached tokens still waiting, including local handoffs awaiting Engine feedback. */
     public OptionalLong queuedComputeTokens() {
+        return sampleQueuedCompute(null);
+    }
+
+    /** Take one ownership snapshot. Missing Worker detail does not invalidate the local queue. */
+    public QueuedComputeSnapshot queuedComputeSnapshot() {
+        QueuedComputeStages stages = new QueuedComputeStages();
+        OptionalLong total = sampleQueuedCompute(stages);
+        return new QueuedComputeSnapshot(OptionalLong.of(stages.masterQueued),
+                stages.inTransitKnown ? OptionalLong.of(stages.inTransit) : OptionalLong.empty(),
+                stages.workerWaitingKnown ? OptionalLong.of(stages.workerWaiting) : OptionalLong.empty(),
+                total);
+    }
+
+    /** Metrics-only collection. Hotspot selection needs just the legacy aggregate. */
+    private static final class QueuedComputeStages {
+        private long masterQueued;
+        private long inTransit;
+        private long workerWaiting;
+        private boolean inTransitKnown = true;
+        private boolean workerWaitingKnown = true;
+    }
+
+    private OptionalLong sampleQueuedCompute(QueuedComputeStages stages) {
         lock.lock();
         try {
             ActiveObservations activity = latestActivity;
             if (activity == null) {
+                if (stages != null) {
+                    for (RequestEntry entry : requests.values()) {
+                        if (entry.queueMembership == QueueMembership.WAITING) {
+                            stages.masterQueued = saturatedAdd(stages.masterQueued, entry.tokenWork);
+                        }
+                    }
+                    stages.inTransitKnown = false;
+                    stages.workerWaitingKnown = false;
+                }
                 return OptionalLong.empty();
             }
-            long tokens = 0L;
+            long legacyTotal = 0L;
             long detailedWaiting = 0L;
             long detailedRunning = 0L;
-            boolean unidentifiedHandoff = false;
-            for (var task : activity.owned.values()) {
+            boolean detailsKnown = true;
+            boolean unidentifiedLegacyHandoff = false;
+            for (var detail : activity.owned.entrySet()) {
+                var task = detail.getValue();
                 if (task.phase() == null) {
-                    return OptionalLong.empty();
+                    if (stages == null) { return OptionalLong.empty(); }
+                    detailsKnown = false;
                 } else if (task.phase() == TaskPhase.RUNNING) {
                     detailedRunning++;
                 } else {
                     detailedWaiting++;
+                    if (stages != null) {
+                        // A local terminal can remove the owner before the next Worker poll.
+                        RequestEntry local = requests.get(detail.getKey());
+                        if (local == null && hasUsableTokenLengths(task)) {
+                            stages.workerWaiting = saturatedAdd(stages.workerWaiting, task.inputLength() - task.prefixLength());
+                        } else if (local == null || local.lastObservedTask != task || local.isActive()) {
+                            stages.workerWaitingKnown = false;
+                        }
+                    }
                 }
             }
-            for (var task : activity.foreign.values()) {
-                RequestEntry local = requests.get(task.requestId());
+            for (var detail : activity.foreign.entrySet()) {
+                var task = detail.getValue();
+                RequestEntry local = requests.get(detail.getKey());
                 if (task.phase() == null || local != null && !matchesObservedBatch(local, task.batchId())) {
-                    return OptionalLong.empty();
+                    if (stages == null) { return OptionalLong.empty(); }
+                    detailsKnown = false;
+                    continue;
                 }
                 if (task.phase() == TaskPhase.RUNNING) {
                     detailedRunning++;
@@ -696,34 +752,69 @@ public final class PrefillState {
                 }
                 detailedWaiting++;
                 if (local != null) {
+                    if (stages != null && local.isActive()) {
+                        stages.workerWaitingKnown = false;
+                    }
                     continue;
                 }
-                if (task.inputLength() <= 0L || task.prefixLength() < 0L
-                        || task.prefixLength() > task.inputLength()) {
-                    return OptionalLong.empty();
+                if (!hasUsableTokenLengths(task)) {
+                    if (stages == null) { return OptionalLong.empty(); }
+                    detailsKnown = false;
+                    continue;
                 }
-                tokens = saturatedAdd(tokens, task.inputLength() - task.prefixLength());
+                long tokens = task.inputLength() - task.prefixLength();
+                legacyTotal = saturatedAdd(legacyTotal, tokens);
+                if (stages != null) {
+                    stages.workerWaiting = saturatedAdd(stages.workerWaiting, tokens);
+                }
             }
-            if (activity.reportedWaiting > detailedWaiting) {
-                return OptionalLong.empty();
-            }
-            for (RequestEntry entry : requests.values()) {
-                // A local admission may have arrived since the last Engine observation.
-                var previouslyForeign = activity.foreign.get(entry.requestId);
+            boolean missingWaiting = activity.reportedWaiting > detailedWaiting;
+            if (missingWaiting && stages == null) { return OptionalLong.empty(); }
+            for (var ownership : requests.entrySet()) {
+                RequestEntry entry = ownership.getValue();
+                if (stages != null && entry.queueMembership == QueueMembership.WAITING) {
+                    stages.masterQueued = saturatedAdd(stages.masterQueued, entry.tokenWork);
+                }
+                // Keep the historical total's treatment of the last known phase.
+                var previouslyForeign = activity.foreign.get(ownership.getKey());
                 var lastTask = previouslyForeign == null ? entry.lastObservedTask : previouslyForeign;
-                if (lastTask != null && lastTask.phase() == TaskPhase.RUNNING) {
+                boolean running = lastTask != null && lastTask.phase() == TaskPhase.RUNNING;
+                boolean needsLocalObservation = !running && !entry.isActive() && previouslyForeign == null;
+                boolean missingLocalObservation = needsLocalObservation
+                        && (lastTask == null || lastTask != activity.owned.get(ownership.getKey()));
+                if (!running) {
+                    legacyTotal = saturatedAdd(legacyTotal, entry.tokenWork);
+                    unidentifiedLegacyHandoff |= missingLocalObservation;
+                }
+                if (stages == null || entry.isActive()) {
                     continue;
                 }
-                unidentifiedHandoff |= !entry.isActive() && previouslyForeign == null
-                        && (lastTask == null || lastTask != activity.owned.get(entry.requestId));
-                tokens = saturatedAdd(tokens, entry.tokenWork);
+                if (previouslyForeign != null && !matchesObservedBatch(entry, previouslyForeign.batchId())) {
+                    stages.inTransitKnown = false;
+                } else if (lastTask == null) {
+                    stages.inTransit = saturatedAdd(stages.inTransit, entry.tokenWork);
+                } else if (missingLocalObservation) {
+                    // An earlier observation confirms receipt, but cannot prove current waiting.
+                    stages.workerWaitingKnown = false;
+                } else if (!running) {
+                    stages.workerWaiting = saturatedAdd(stages.workerWaiting, entry.tokenWork);
+                }
             }
-            // Scalar-only running tasks matter when they could be one of our assumed in-flight requests.
-            return unidentifiedHandoff && activity.reportedRunning > detailedRunning
-                    ? OptionalLong.empty() : OptionalLong.of(tokens);
+            boolean missingRunning = activity.reportedRunning > detailedRunning;
+            if (stages != null) {
+                // Scalar-only tasks can hide requests attributed to the delivery stage.
+                stages.inTransitKnown &= stages.inTransit == 0L || (!missingWaiting && !missingRunning);
+                stages.workerWaitingKnown &= detailsKnown && !missingWaiting;
+            }
+            boolean legacyKnown = detailsKnown && !missingWaiting && !(unidentifiedLegacyHandoff && missingRunning);
+            return legacyKnown ? OptionalLong.of(legacyTotal) : OptionalLong.empty();
         } finally {
             lock.unlock();
         }
+    }
+
+    private static boolean hasUsableTokenLengths(WorkerStatus.TaskObservation task) {
+        return task.inputLength() > 0L && task.prefixLength() >= 0L && task.prefixLength() <= task.inputLength();
     }
 
     /** Attach the Engine waiting-queue admission gate before the endpoint starts serving. */
@@ -1829,7 +1920,10 @@ public final class PrefillState {
                         invariantFailure,
                         "ACTIVE index size does not match canonical ACTIVE owners");
             }
+            long retiredWaitingComputeTokens = 0L;
             for (ScheduledRequest indexed : activeIndex) {
+                retiredWaitingComputeTokens = saturatedAdd(retiredWaitingComputeTokens,
+                        Math.max(0L, indexed.seqLen() - indexed.hitCache()));
                 if (!canonicalActive.contains(indexed)) {
                     invariantFailure = appendRetirementInvariant(
                             invariantFailure,
@@ -1894,7 +1988,9 @@ public final class PrefillState {
             plannedRetirement = new Retirement(
                     ownedItems,
                     completions,
-                    invariantFailure);
+                    invariantFailure,
+                    activeIndex.size(),
+                    retiredWaitingComputeTokens);
 
             // Canonical retirement commit. Everything which may allocate or
             // validate has completed above this line.

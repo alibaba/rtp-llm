@@ -2,6 +2,7 @@ package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.delivery.DeliveryStrategy;
+import org.flexlb.balance.scheduler.PrefillQueueFlow;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.config.DecisionPolicyConfig;
@@ -81,6 +82,10 @@ class WorkerBatcherRequestCapacityTest {
             assertFalse(endpoint.routeAdmissionAvailability().isAvailable());
             assertEquals(2, endpoint.queuedRequestCount(), "the waiting limit still allows placement");
             assertEquals(0, delivered.availablePermits());
+            var queued = endpoint.queueMetricsSnapshot();
+            assertEquals(2, queued.waitingRequests());
+            assertEquals(List.of(new PrefillQueueFlow.Entry(PrefillQueueFlow.Event.ENQUEUE, 2, 200)),
+                    queued.flow().entries());
 
             // Two Engine-only streams still occupy inflight slots. One has started running, reopening one waiting slot.
             report.setRunningQueryLen(1);
@@ -92,7 +97,10 @@ class WorkerBatcherRequestCapacityTest {
             }
             assertTrue(delivered.tryAcquire(2, TimeUnit.SECONDS), "a status update alone must wake delivery");
             assertFalse(endpoint.routeAdmissionAvailability().isAvailable(), "inflight is now full");
-            assertEquals(1, endpoint.queuedRequestCount());
+            var afterDispatch = endpoint.queueMetricsSnapshot();
+            assertEquals(1, afterDispatch.waitingRequests());
+            assertEquals(List.of(new PrefillQueueFlow.Entry(PrefillQueueFlow.Event.DISPATCH_COMMITTED, 1, 100)),
+                    afterDispatch.flow().entries());
             assertTrue(endpoint.releaseCommittedItem(first.execution()));
             assertTrue(delivered.tryAcquire(2, TimeUnit.SECONDS), "inflight release must wake the remaining request");
             assertEquals(0, endpoint.queuedRequestCount());

@@ -55,6 +55,12 @@ import java.util.function.Supplier;
  */
 public final class WorkerBatcher {
 
+    /** Waiting stock and queue mutations observed at the same ownership snapshot. */
+    public record QueueMetrics(PrefillState.QueuedComputeSnapshot compute,
+            int waitingRequests, PrefillQueueFlow.Snapshot flow) { }
+
+    private final PrefillQueueFlow queueFlow = new PrefillQueueFlow();
+
     /** Immutable queue state materialized under this runtime's queue lock. */
     public record QueueSnapshot(
             String endpointId,
@@ -381,6 +387,11 @@ public final class WorkerBatcher {
     }
 
     public boolean offer(ScheduledRequest exactItem) {
+        return offer(exactItem, PrefillQueueFlow.Event.ENQUEUE);
+    }
+
+    public boolean offer(ScheduledRequest exactItem, PrefillQueueFlow.Event event) {
+        Objects.requireNonNull(event, "queue flow event");
         if (!queueScheduling) {
             throw new IllegalStateException(
                     "DIRECT Prefill generation cannot accept queued work");
@@ -390,17 +401,38 @@ public final class WorkerBatcher {
         if (runtimeState != RuntimeState.RUNNING || stopped) {
             return false;
         }
-        return enqueue(item);
+        return enqueue(item, event);
     }
 
-    private boolean enqueue(ScheduledRequest item) {
+    private boolean enqueue(ScheduledRequest item, PrefillQueueFlow.Event event) {
         queueLock.lock();
         try {
             if (stopped || !publishActiveIndexUnderLock(item)) {
                 return false;
             }
+            queueFlow.record(event, item);
             stateChanged.signal();
             return true;
+        } finally {
+            queueLock.unlock();
+        }
+    }
+
+    public QueueMetrics queueMetricsSnapshot() {
+        queueLock.lock();
+        try {
+            return new QueueMetrics(prefillState.queuedComputeSnapshot(), activeIndex.size(), queueFlow.drain());
+        } finally {
+            queueLock.unlock();
+        }
+    }
+
+    /** Merge any indexed work left for the defensive ownership retirement. */
+    public PrefillQueueFlow.Snapshot drainRetiredQueueFlow(int retiredWaitingRequests, long retiredWaitingComputeTokens) {
+        queueLock.lock();
+        try {
+            queueFlow.record(PrefillQueueFlow.Event.STOPPED, retiredWaitingRequests, retiredWaitingComputeTokens);
+            return queueFlow.drain();
         } finally {
             queueLock.unlock();
         }
@@ -706,6 +738,7 @@ public final class WorkerBatcher {
             if (stopped || runtimeState != RuntimeState.RUNNING || !prefillState.removeWaitingForMigrationUnderLock(item)) {
                 return false;
             }
+            queueFlow.record(PrefillQueueFlow.Event.MIGRATION_OUT, item);
             queueVersion.incrementAndGet();
             stateChanged.signal();
             return true;
@@ -717,6 +750,11 @@ public final class WorkerBatcher {
     public boolean removeQueued(
             ScheduledRequest exactItem,
             String reason) {
+        return removeQueued(exactItem, reason, PrefillQueueFlow.Event.REMOVED);
+    }
+
+    public boolean removeQueued(ScheduledRequest exactItem, String reason, PrefillQueueFlow.Event event) {
+        Objects.requireNonNull(event, "queue flow event");
         ScheduledRequest item = exactItem;
         requireExactEndpoint(item, "queued item");
         boolean removed;
@@ -724,7 +762,7 @@ public final class WorkerBatcher {
         try {
             removed = runtimeState == RuntimeState.RUNNING
                     && !stopped
-                    && removeUnderLock(item);
+                    && removeUnderLock(item, event);
             if (removed) {
                 stateChanged.signal();
             }
@@ -838,6 +876,7 @@ public final class WorkerBatcher {
         ScheduledRequest item =
                 prefillState.detachNextActiveForStopUnderLock();
         if (item != null) {
+            queueFlow.record(PrefillQueueFlow.Event.STOPPED, item);
             queueVersion.incrementAndGet();
         }
         return item;
@@ -850,9 +889,11 @@ public final class WorkerBatcher {
     }
 
     /** Caller holds {@link #queueLock}. */
-    private boolean removeUnderLock(ScheduledRequest item) {
+    private boolean removeUnderLock(ScheduledRequest item, PrefillQueueFlow.Event event) {
+        int waitingBefore = activeIndex.size();
         boolean removed = prefillState.terminalizeActiveUnderLock(item);
         if (removed) {
+            if (activeIndex.size() < waitingBefore) { queueFlow.record(event, item); }
             queueVersion.incrementAndGet();
         }
         return removed;
@@ -1217,13 +1258,16 @@ public final class WorkerBatcher {
                 return null;
             }
             long nowMs = now();
+            long dispatchedComputeTokens = 0L;
             for (ScheduledRequest item : items) {
                 if (!containsIdentity(item)
                         || item.requestExpired(nowMs)) {
                     return null;
                 }
+                dispatchedComputeTokens = PrefillQueueFlow.addComputeTokens(dispatchedComputeTokens, item);
             }
             precedingWork = transaction.commitUnderLock();
+            queueFlow.record(PrefillQueueFlow.Event.DISPATCH_COMMITTED, items.size(), dispatchedComputeTokens);
             try {
                 removedTerminalBoundary = removeSelectionBoundaryUnderLock(
                         transaction.blockedItem(),
@@ -1333,6 +1377,7 @@ public final class WorkerBatcher {
                 || !prefillState.terminalizeActiveUnderLock(blockedItem)) {
             return false;
         }
+        queueFlow.record(PrefillQueueFlow.Event.FAILED, blockedItem);
         return true;
     }
 
@@ -1370,7 +1415,7 @@ public final class WorkerBatcher {
         boolean removed;
         queueLock.lock();
         try {
-            removed = removeUnderLock(head);
+            removed = removeUnderLock(head, PrefillQueueFlow.Event.EXPIRED);
         } finally {
             queueLock.unlock();
         }

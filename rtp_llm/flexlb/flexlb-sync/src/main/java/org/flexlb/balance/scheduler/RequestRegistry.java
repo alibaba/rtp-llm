@@ -208,7 +208,8 @@ public class RequestRegistry {
     private void restoreAfterMigration(RequestSlot slot, AdmissionHandle claim, ScheduledRequest original,
                                        GenerationPin sourcePin) {
         try {
-            if (slot.commitRoute(original, () -> original.prefillEp().offerPinned(sourcePin, original))
+            if (slot.commitRoute(original, () -> original.prefillEp().offerPinned(
+                    sourcePin, original, PrefillQueueFlow.Event.MIGRATION_RESTORED))
                     == PlacementResult.Status.SUCCESS) { return; }
         } catch (RuntimeException publicationFailure) {
             Logger.warn("Could not restore request " + original.requestId() + " to its original Prefill", publicationFailure);

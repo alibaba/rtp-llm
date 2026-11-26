@@ -192,6 +192,8 @@ class PrefillStateSnapshotTest {
         plan.close();
         assertNull(retired.invariantFailure());
         assertEquals(3, retired.ownedItems().size());
+        assertEquals(1, retired.retiredWaitingRequests());
+        assertEquals(100L, retired.retiredWaitingComputeTokens());
         assertTrue(retired.ownedItems().containsAll(List.of(queued.execution(), prepared.execution(), committed.execution())));
         preparedReservation.close();
         committedReservation.close();

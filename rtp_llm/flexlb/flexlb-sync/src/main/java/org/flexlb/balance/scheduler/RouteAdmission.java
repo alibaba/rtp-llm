@@ -170,7 +170,7 @@ public final class RouteAdmission implements AutoCloseable {
     }
 
     boolean offerMigration(ScheduledRequest replacement) {
-        return prefillEndpoint().offerPinned(prefillPin(), replacement);
+        return prefillEndpoint().offerPinned(prefillPin(), replacement, PrefillQueueFlow.Event.MIGRATION_IN);
     }
 
     WorkerEndpoint blockedEndpoint() { return blockedEndpoint; }

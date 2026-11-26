@@ -167,11 +167,21 @@ class WorkerBatcherQueueTest {
         ScheduledRequest canonical = item(21, 50, Long.MAX_VALUE, 1, 128);
         ScheduledRequest lookalike = item(21, 50, Long.MAX_VALUE, 1, 128);
         assertTrue(runtime.offer(canonical));
+        assertFalse(runtime.offer(lookalike));
+        var enqueued = runtime.queueMetricsSnapshot();
+        assertEquals(1, enqueued.waitingRequests());
+        assertEquals(List.of(new PrefillQueueFlow.Entry(PrefillQueueFlow.Event.ENQUEUE, 1, 128)),
+                enqueued.flow().entries());
 
         assertFalse(runtime.removeQueued(lookalike, "stale identity"));
         assertEquals(List.of(canonical),
                 runtime.captureQueueSnapshot().items());
-        assertTrue(runtime.removeQueued(canonical, "canonical identity"));
+        assertTrue(runtime.removeQueued(canonical, "cancellation", PrefillQueueFlow.Event.CANCELLED));
+        var cancelled = runtime.queueMetricsSnapshot();
+        assertEquals(0, cancelled.waitingRequests());
+        assertEquals(List.of(new PrefillQueueFlow.Entry(PrefillQueueFlow.Event.CANCELLED, 1, 128)),
+                cancelled.flow().entries());
+        assertTrue(runtime.queueMetricsSnapshot().flow().entries().isEmpty());
     }
 
     @Test

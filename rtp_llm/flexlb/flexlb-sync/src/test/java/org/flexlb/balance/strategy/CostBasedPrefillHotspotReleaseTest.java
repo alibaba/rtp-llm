@@ -330,6 +330,7 @@ class CostBasedPrefillHotspotReleaseTest {
         when(leader.tokenWorkloadSnapshot()).thenReturn(new PrefillTokenWorkload.Snapshot(800));
         FlexlbConfig config = tokenBalanceConfig(false);
         CostBasedPrefillStrategy strategy = tokenStrategy(leader, other);
+        org.mockito.Mockito.clearInvocations(leader, other); // The fixture pre-samples a steady pool.
 
         try (SelectedRole selected = strategy.select(
                 tokenContext(config), RoleType.PREFILL, "g").value()) {
@@ -619,8 +620,12 @@ class CostBasedPrefillHotspotReleaseTest {
             }
             pool.add(new EndpointRegistry.PrefillRoutingEntry("peer-" + i, endpoint));
         }
-        survivors.setHotspots(new PrefillHotspots(() -> 0L).sample(
-                RoleType.PREFILL, "g", pool, new RoutingConfig.HotspotReleaseConfig()));
+        var clock = new AtomicLong();
+        var hotspots = new PrefillHotspots(clock::get);
+        var config = new RoutingConfig.HotspotReleaseConfig();
+        hotspots.sample(RoleType.PREFILL, "g", pool, config);
+        clock.set(MILLISECONDS.toNanos(100));
+        survivors.setHotspots(hotspots.sample(RoleType.PREFILL, "g", pool, config));
     }
 
     private static FlexlbConfig tokenBalanceConfig(boolean hotspotRelease) {
@@ -659,8 +664,13 @@ class CostBasedPrefillHotspotReleaseTest {
         }
         CacheAwareService cache = mock(CacheAwareService.class);
         when(cache.findMatchingEngines(any(), eq(RoleType.PREFILL), any())).thenReturn(matches);
-        return new CostBasedPrefillStrategy(
-                directory, cache, reporter, budget, new PrefillHotspots(nowNanos::get));
+        var clock = new AtomicLong();
+        var hotspots = new PrefillHotspots(clock::get);
+        var config = new RoutingConfig.HotspotReleaseConfig();
+        hotspots.sample(RoleType.PREFILL, null, fleet, config);
+        hotspots.sample(RoleType.PREFILL, "g", fleet, config);
+        clock.set(MILLISECONDS.toNanos(100));
+        return new CostBasedPrefillStrategy(directory, cache, reporter, budget, hotspots);
     }
 
     private static BalanceContext tokenContext(FlexlbConfig config) {

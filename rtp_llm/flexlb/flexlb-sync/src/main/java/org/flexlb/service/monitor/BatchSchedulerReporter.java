@@ -1,6 +1,7 @@
 package org.flexlb.service.monitor;
 
 import lombok.extern.slf4j.Slf4j;
+import org.flexlb.balance.scheduler.PrefillQueueFlow;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
@@ -30,7 +31,11 @@ import static org.flexlb.constant.MetricConstant.INFLIGHT_BATCH_COUNT;
 import static org.flexlb.constant.MetricConstant.INFLIGHT_MAX_AGE_MS;
 import static org.flexlb.constant.MetricConstant.INFLIGHT_REQUEST_COUNT;
 import static org.flexlb.constant.MetricConstant.INFLIGHT_TTL_EXPIRED_QPS;
+import static org.flexlb.constant.MetricConstant.PREFILL_LOCAL_QUEUE_REQUESTS;
 import static org.flexlb.constant.MetricConstant.PREFILL_QUEUED_COMPUTE_TOKENS;
+import static org.flexlb.constant.MetricConstant.PREFILL_QUEUED_COMPUTE_TOKENS_BY_STAGE;
+import static org.flexlb.constant.MetricConstant.PREFILL_QUEUE_FLOW_COMPUTE_TOKENS;
+import static org.flexlb.constant.MetricConstant.PREFILL_QUEUE_FLOW_REQUESTS;
 import static org.flexlb.constant.MetricConstant.ROUTE_DISPATCH_STAGE_MS;
 import static org.flexlb.constant.MetricConstant.ROUTE_SUBMIT_TIME_MS;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_LENGTH;
@@ -93,6 +98,10 @@ public class BatchSchedulerReporter {
         // Batcher queue size — per-engine pending batch request count (FlexLB batcher queue depth)
         monitor.register(BATCHER_QUEUE_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(PREFILL_QUEUED_COMPUTE_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        monitor.register(PREFILL_QUEUED_COMPUTE_TOKENS_BY_STAGE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        monitor.register(PREFILL_LOCAL_QUEUE_REQUESTS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        monitor.register(PREFILL_QUEUE_FLOW_REQUESTS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        monitor.register(PREFILL_QUEUE_FLOW_COMPUTE_TOKENS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
 
         // Decode total load and inflight KV reserved — per decode worker (FlexLB scheduler view)
         monitor.register(DECODE_TOTAL_LOAD, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
@@ -117,7 +126,7 @@ public class BatchSchedulerReporter {
         // ACK-to-response time — from engine ACK to schedule response sent to client (timer for distribution)
         monitor.register(ACK_TO_RESPONSE_TIME_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
 
-        log.info("BatchSchedulerReporter initialized (20 metrics)");
+        log.info("BatchSchedulerReporter initialized");
     }
 
     // ==================== Queue metrics ====================
@@ -259,6 +268,31 @@ public class BatchSchedulerReporter {
     /** Sum across live endpoints with this role and IP, NaN when the machine sample is unavailable. */
     public void reportPrefillQueuedComputeTokens(RoleType role, String engineIp, double tokens) {
         monitor.report(PREFILL_QUEUED_COMPUTE_TOKENS, FlexMetricTags.ofEngine(engineIp, "role", role.name()), tokens);
+    }
+
+    public void reportPrefillQueuedComputeTokensByStage(RoleType role, String engineIp,
+            double masterQueued, double dispatchedUnobserved, double workerWaiting) {
+        reportPrefillComputeStage(role, engineIp, "MASTER_QUEUED", masterQueued);
+        reportPrefillComputeStage(role, engineIp, "DISPATCHED_UNOBSERVED", dispatchedUnobserved);
+        reportPrefillComputeStage(role, engineIp, "WORKER_WAITING", workerWaiting);
+    }
+
+    private void reportPrefillComputeStage(RoleType role, String engineIp, String stage, double tokens) {
+        var tags = FlexMetricTags.ofEngine(engineIp, "role", role.name(), "stage", stage);
+        monitor.report(PREFILL_QUEUED_COMPUTE_TOKENS_BY_STAGE, tags, tokens);
+    }
+
+    /** Local unsent stock sampled under the same ownership lock as the queue-flow changes. */
+    public void reportPrefillLocalQueueRequests(RoleType role, String engineIp, double requests) {
+        monitor.report(PREFILL_LOCAL_QUEUE_REQUESTS, FlexMetricTags.ofEngine(engineIp, "role", role.name()), requests);
+    }
+
+    public void reportPrefillQueueFlow(RoleType role, String engineIp, PrefillQueueFlow.Snapshot flow) {
+        for (var entry : flow.entries()) {
+            var tags = FlexMetricTags.ofEngine(engineIp, "role", role.name(), "event", entry.event().name());
+            monitor.report(PREFILL_QUEUE_FLOW_REQUESTS, tags, entry.requests());
+            monitor.report(PREFILL_QUEUE_FLOW_COMPUTE_TOKENS, tags, entry.computeTokens());
+        }
     }
 
     /**

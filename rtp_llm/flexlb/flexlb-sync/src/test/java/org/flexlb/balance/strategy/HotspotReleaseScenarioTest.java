@@ -162,6 +162,8 @@ class HotspotReleaseScenarioTest {
         var initial = new ArrayList<PrefillTokenWorkload.Reservation>();
         try (var planners = Executors.newFixedThreadPool(2)) {
             if (migrate) {
+                sampledHotspots();
+                governorTimeMs += 100L;
                 prefill.setCacheAffinity(new RoutingConfig.CacheAffinityConfig());
                 // 30 observed at the source, 0 at target. One more target plan reaches the sampled mean of 15.
                 for (int i = 0; i < 14; i++) { initial.add(idle.planTokenWork(0)); }
