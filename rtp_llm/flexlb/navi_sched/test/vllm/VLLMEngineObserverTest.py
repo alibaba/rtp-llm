@@ -11205,6 +11205,62 @@ class VLLMEngineObserverTest(unittest.TestCase):
         self.assertFalse(hasattr(observer, "_continuous_execution_boundary"))
         self.assertEqual(0, observer._bridge.backend_execution_count)
 
+    def test_native_pp4_scale_default_is_unscaled(self):
+        with mock.patch.dict(os.environ, {"VLLM_NAVI_SCHED_PP_LATENCY_MODE": "native_pp4"}):
+            os.environ.pop("VLLM_NAVI_SCHED_LATENCY_PARAMETER_LEARNING_RATE_SCALES", None)
+            self.assertEqual([], _AgentConfig.from_env().latency_parameter_learning_rate_scales)
+
+    def test_native_pp4_scale_values_reach_agent_options(self):
+        rates = [0.5, 1.3, 2.0, 0.75, 4.0, 0.2, 1.1, 0.3, 5.0]
+        with mock.patch.dict(os.environ, {
+            "VLLM_NAVI_SCHED_PP_LATENCY_MODE": "native_pp4",
+            "VLLM_NAVI_SCHED_NATIVE_INGRESS": "1",
+            "TPU_RAIDEN_JOB_NAME": "prefill",
+            "VLLM_NAVI_SCHED_LATENCY_PARAMETER_LEARNING_RATE_SCALES": json.dumps(rates),
+        }):
+            self.assertEqual(rates, _AgentConfig.from_env().latency_parameter_learning_rate_scales)
+            config = self.make_config(pcp_size=8)
+            config.parallel_config.pipeline_parallel_size = 4
+            config.parallel_config.data_parallel_size = 1
+            observer = VLLMEngineObserver(
+                config, self.make_kv_cache_config(specs=[FullAttentionSpec(128)])
+            )
+            self.assertEqual(rates, observer._agent_options["latency_parameter_learning_rate_scales"])
+
+    def test_native_pp4_scale_rejects_wrong_dimensions_and_invalid_values(self):
+        invalid = [[1.0] * n for n in (1, 8, 10, 17, 19, 21)]
+        for index in range(9):
+            for value in (0.0, -1.0, float("inf"), float("nan"), True, "bad"):
+                rates = [1.0] * 9
+                rates[index] = value
+                invalid.append(rates)
+        for rates in invalid:
+            with self.subTest(rates=rates), mock.patch.dict(os.environ, {
+                "VLLM_NAVI_SCHED_PP_LATENCY_MODE": "native_pp4",
+                "VLLM_NAVI_SCHED_LATENCY_PARAMETER_LEARNING_RATE_SCALES": json.dumps(rates),
+            }):
+                with self.assertRaisesRegex(ValueError, "9 finite positive numbers"):
+                    _AgentConfig.from_env()
+
+    def test_other_latency_modes_keep_their_scale_defaults(self):
+        for mode in ("", "unified19", "native_work19", "split"):
+            with self.subTest(mode=mode), mock.patch.dict(os.environ, {
+                "VLLM_NAVI_SCHED_PP_LATENCY_MODE": mode,
+                "VLLM_NAVI_SCHED_EXECUTION_CACHE_SOURCE_ENABLED": "0",
+            }):
+                os.environ.pop("VLLM_NAVI_SCHED_LATENCY_PARAMETER_LEARNING_RATE_SCALES", None)
+                self.assertEqual(19, len(_AgentConfig.from_env().latency_parameter_learning_rate_scales))
+
+    def test_nine_scales_are_not_accepted_by_other_latency_modes(self):
+        for mode in ("", "unified19", "native_work19", "split"):
+            with self.subTest(mode=mode), mock.patch.dict(os.environ, {
+                "VLLM_NAVI_SCHED_PP_LATENCY_MODE": mode,
+                "VLLM_NAVI_SCHED_EXECUTION_CACHE_SOURCE_ENABLED": "0",
+                "VLLM_NAVI_SCHED_LATENCY_PARAMETER_LEARNING_RATE_SCALES": "[1,1,1,1,1,1,1,1,1]",
+            }):
+                with self.assertRaisesRegex(ValueError, "10, 17, or 19"):
+                    _AgentConfig.from_env()
+
 
 class NaviSchedVLLMPluginTest(unittest.TestCase):
     def setUp(self):

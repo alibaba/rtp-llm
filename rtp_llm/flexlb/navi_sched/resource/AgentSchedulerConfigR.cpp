@@ -89,7 +89,8 @@ std::string AgentSchedulerConfig::validationError() const
         return "latency_error_clip_ms must be finite and nonnegative";
     }
     const auto scaleCount = latencyParameterLearningRateScales.size();
-    if (scaleCount != 0 && scaleCount != NonLinearPrefillModelR::PARAMETER_COUNT &&
+    if (scaleCount != 0 && scaleCount != NonLinearPrefillModelR::NATIVE_PP4_PARAMETER_COUNT &&
+        scaleCount != NonLinearPrefillModelR::PARAMETER_COUNT &&
         scaleCount != NonLinearPrefillModelR::CAPACITY_SPLIT_PARAMETER_COUNT &&
         scaleCount != NonLinearPrefillModelR::CACHE_SOURCE_PARAMETER_COUNT) {
         return "latency_parameter_learning_rate_scales has invalid length";

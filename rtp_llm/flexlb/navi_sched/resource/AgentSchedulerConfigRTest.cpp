@@ -368,3 +368,26 @@ TEST(AgentSchedulerConfigRTest, testCacheSourceLearningRateCoordinateIdentity)
 }
 
 } // namespace navi_sched
+
+namespace navi_sched {
+TEST(AgentSchedulerConfigRTest, testNativePP4ParameterLearningRateScalesRoundTrip)
+{
+    AgentSchedulerConfig config;
+    config.latencyParameterLearningRateScales = {0.5, 1.3, 2., 0.75, 4., 0.2, 1.1, 0.3, 5.};
+    ASSERT_TRUE(config.valid());
+    AgentSchedulerConfig parsed;
+    std::string error;
+    ASSERT_TRUE(AgentSchedulerConfigR::parse(AgentSchedulerConfigR::toJson(config),
+                                             parsed, error));
+    EXPECT_EQ(config.latencyParameterLearningRateScales,
+              parsed.latencyParameterLearningRateScales);
+    for (size_t index = 0; index < 9; ++index) {
+        for (double value : {0.0, -1.0, std::numeric_limits<double>::infinity(),
+                              std::numeric_limits<double>::quiet_NaN()}) {
+            auto invalid = config;
+            invalid.latencyParameterLearningRateScales[index] = value;
+            EXPECT_FALSE(invalid.valid()) << index << " value=" << value;
+        }
+    }
+}
+} // namespace navi_sched

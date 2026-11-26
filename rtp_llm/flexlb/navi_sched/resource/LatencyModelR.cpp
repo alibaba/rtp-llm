@@ -657,8 +657,6 @@ bool LatencyModelR::fitParameters(const std::vector<NaviSchedLatencySample> &sam
                                   const std::vector<double> *parameterLearningRateScales,
                                   bool rejectNonPositiveWaitingCandidate)
 {
-    if (_nonLinearPrefillModelR->usesNativePP4Timing())
-        parameterLearningRateScales = nullptr;
     return _nonLinearPrefillModelR->validateConfiguredParameters(initialParameters) &&
            _nonLinearPrefillModelR->fit(samples, initialParameters, updatedParameters,
                                         learningRateScale, currentSampleWeight,
@@ -683,10 +681,16 @@ bool LatencyModelR::fitHistoryParameters(
     const std::deque<NaviSchedLatencySample> &history,
     const std::vector<double> &initialParameters, std::vector<double> &updatedParameters)
 {
+    std::vector<double> parameterScales;
+    if (_nonLinearPrefillModelR->usesNativePP4Timing() && _agentSchedulerConfigR) {
+        parameterScales =
+            _agentSchedulerConfigR->get().config.latencyParameterLearningRateScales;
+    }
     return _nonLinearPrefillModelR->validateConfiguredParameters(initialParameters) &&
-           _nonLinearPrefillModelR->fitHistory(history, _agentHistoryR->getFitBatchSize(),
-                                               _coldStartFitEpochs, initialParameters,
-                                               updatedParameters) &&
+           _nonLinearPrefillModelR->fitHistory(
+               history, _agentHistoryR->getFitBatchSize(), _coldStartFitEpochs,
+               initialParameters, updatedParameters,
+               parameterScales.empty() ? nullptr : &parameterScales) &&
            _nonLinearPrefillModelR->validateConfiguredParameters(updatedParameters);
 }
 

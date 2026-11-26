@@ -1821,4 +1821,206 @@ TEST_F(NativePP4TrainingIntegrationTest,
     }
 }
 
+namespace {
+std::vector<double> nativePP4FixedScales()
+{
+    return {0.5, 1.3, 2.0, 0.75, 4.0, 0.2, 1.1, 0.3, 5.0};
+}
+
+NaviSchedLatencySample nativePP4ScaleSample(size_t index = 0)
+{
+    NaviSchedLatencySample sample;
+    auto observation = observedPP4Step();
+    for (size_t i = 0; i < observation->slots.size(); ++i) {
+        observation->slots[i].dispatchTimeMs = 10.0 * i;
+        observation->slots[i].features =
+            {1.0, 4.0 + i, 8.0, 16.0 + index, 64.0, 32.0, 2.0, 64.0};
+    }
+    sample.nativePP4Timing = observation;
+    sample.latencyMs = 42.0 + index % 7 * 30.0;
+    sample.eventTimeUs = 1000 + index;
+    return sample;
+}
+
+void expectSameNativeFit(const std::vector<double> &actual,
+                         const std::vector<double> &expected,
+                         const NonLinearPrefillModelR &actualModel,
+                         const NonLinearPrefillModelR &expectedModel)
+{
+    EXPECT_EQ(expected, actual);
+    const auto a = actualModel.getOptimizerState();
+    const auto e = expectedModel.getOptimizerState();
+    EXPECT_EQ(e.step, a.step);
+    EXPECT_EQ(e.adamMoment1, a.adamMoment1);
+    EXPECT_EQ(e.adamMoment2, a.adamMoment2);
+}
+
+bool fitNativeHistoryReference(NonLinearPrefillModelR &model,
+                               const std::deque<NaviSchedLatencySample> &history,
+                               size_t batchSize, size_t epochs,
+                               std::vector<double> &parameters,
+                               const std::vector<double> *scales)
+{
+    std::vector<NaviSchedLatencySample> batch;
+    for (size_t epoch = 0; epoch < epochs; ++epoch) {
+        for (size_t offset = 0; offset < history.size(); ++offset) {
+            batch.push_back(history[(epoch + offset) % history.size()]);
+            if (batch.size() != batchSize) continue;
+            std::vector<double> next;
+            if (!model.fit(batch, parameters, next, 1.0, 1.0, scales)) return false;
+            parameters = std::move(next);
+            batch.clear();
+        }
+    }
+    if (!batch.empty()) {
+        std::vector<double> next;
+        if (!model.fit(batch, parameters, next, 1.0, 1.0, scales)) return false;
+        parameters = std::move(next);
+    }
+    return true;
+}
+} // namespace
+
+TEST_F(NativePP4TrainingIntegrationTest, NativeScaleOnlineWrapperPreservesAllCoordinates)
+{
+    navi::NaviResourceHelper actualHelper, referenceHelper;
+    ASSERT_TRUE(actualHelper.config(NonLinearPrefillModelR::RESOURCE_ID, MODEL_CONFIG));
+    ASSERT_TRUE(referenceHelper.config(NonLinearPrefillModelR::RESOURCE_ID, MODEL_CONFIG));
+    auto actual = actualHelper.getOrCreateResPtr<NonLinearPrefillModelR>();
+    auto reference = referenceHelper.getOrCreateResPtr<NonLinearPrefillModelR>();
+    ASSERT_TRUE(actual && reference);
+    LatencyModelR wrapper;
+    wrapper._nonLinearPrefillModelR__ = actual.get();
+    const auto scales = nativePP4FixedScales();
+    auto a = actual->getInitialParameters();
+    auto e = reference->getInitialParameters();
+    for (size_t i = 0; i < 5; ++i) {
+        std::vector<NaviSchedLatencySample> samples{nativePP4ScaleSample(i)};
+        std::vector<double> nextActual, nextExpected;
+        ASSERT_TRUE(wrapper.fitOnlineParameters(samples, a, nextActual, 1.0, 2.0,
+                                                 &scales));
+        ASSERT_TRUE(reference->fit(samples, e, nextExpected, 1.0, 2.0, &scales));
+        expectSameNativeFit(nextActual, nextExpected, *actual, *reference);
+        a = std::move(nextActual);
+        e = std::move(nextExpected);
+    }
+}
+
+TEST_F(NativePP4TrainingIntegrationTest, NativeScaleHistoryWrapperIncludesTailBatch)
+{
+    navi::NaviResourceHelper actualHelper, referenceHelper;
+    ASSERT_TRUE(actualHelper.config(NonLinearPrefillModelR::RESOURCE_ID, MODEL_CONFIG));
+    ASSERT_TRUE(referenceHelper.config(NonLinearPrefillModelR::RESOURCE_ID, MODEL_CONFIG));
+    ASSERT_TRUE(actualHelper.config(AgentHistoryR::RESOURCE_ID,
+                                     R"({"fit_batch_size":2,"warmup_sample_count":0})"));
+    auto actual = actualHelper.getOrCreateResPtr<NonLinearPrefillModelR>();
+    auto reference = referenceHelper.getOrCreateResPtr<NonLinearPrefillModelR>();
+    auto historyResource = actualHelper.getOrCreateResPtr<AgentHistoryR>();
+    ASSERT_TRUE(actual && reference && historyResource);
+    AgentSchedulerConfigR config;
+    config._snapshot.config.latencyParameterLearningRateScales = nativePP4FixedScales();
+    LatencyModelR wrapper;
+    wrapper._nonLinearPrefillModelR__ = actual.get();
+    wrapper._agentHistoryR__ = historyResource.get();
+    wrapper._agentSchedulerConfigR__ = &config;
+    wrapper._coldStartFitEpochs = 3;
+    std::deque<NaviSchedLatencySample> history;
+    for (size_t i = 0; i < 5; ++i) history.push_back(nativePP4ScaleSample(i));
+    auto expected = reference->getInitialParameters();
+    ASSERT_TRUE(fitNativeHistoryReference(
+        *reference, history, 2, 3, expected,
+        &config._snapshot.config.latencyParameterLearningRateScales));
+    std::vector<double> actualParameters;
+    ASSERT_TRUE(wrapper.fitHistoryParameters(history, actual->getInitialParameters(),
+                                              actualParameters));
+    expectSameNativeFit(actualParameters, expected, *actual, *reference);
+    EXPECT_EQ(9, actual->getOptimizerState().step);
+}
+
+TEST_F(NativePP4TrainingIntegrationTest, NativeScaleDefaultHistoryMatchesUnscaledRecipe)
+{
+    navi::NaviResourceHelper actualHelper, referenceHelper;
+    ASSERT_TRUE(actualHelper.config(NonLinearPrefillModelR::RESOURCE_ID, MODEL_CONFIG));
+    ASSERT_TRUE(referenceHelper.config(NonLinearPrefillModelR::RESOURCE_ID, MODEL_CONFIG));
+    auto actual = actualHelper.getOrCreateResPtr<NonLinearPrefillModelR>();
+    auto reference = referenceHelper.getOrCreateResPtr<NonLinearPrefillModelR>();
+    ASSERT_TRUE(actual && reference);
+    std::deque<NaviSchedLatencySample> history;
+    for (size_t i = 0; i < 5; ++i) history.push_back(nativePP4ScaleSample(i));
+    auto expected = reference->getInitialParameters();
+    ASSERT_TRUE(fitNativeHistoryReference(*reference, history, 2, 3, expected, nullptr));
+    std::vector<double> actualParameters;
+    ASSERT_TRUE(actual->fitHistory(history, 2, 3, actual->getInitialParameters(),
+                                    actualParameters));
+    expectSameNativeFit(actualParameters, expected, *actual, *reference);
+}
+
+TEST_F(NativePP4TrainingIntegrationTest, NativeScalePublicInitialAndOnlineTraining)
+{
+    AgentSchedulerConfig config;
+    config.latencyLearningRate = 0.0005;
+    config.latencyOnlineLearningRateScale = 1.0;
+    config.latencyCurrentSampleWeight = 2.0;
+    config.latencyErrorClipMs = 0.0;
+    config.latencyFitBatchSize = 4;
+    config.latencyWarmupSampleCount = 0;
+    config.latencyColdStartFitEpochs = 3;
+    config.latencyParameterLearningRateScales = nativePP4FixedScales();
+    ASSERT_TRUE(config.valid());
+    navi::NaviResourceHelper helper, referenceHelper;
+    ASSERT_TRUE(helper.config(AgentSchedulerConfigR::RESOURCE_ID,
+        std::string("{\"config_json\":") +
+        autil::legacy::ToJsonString(AgentSchedulerConfigR::toJson(config)) + "}"));
+    auto runtime = helper.getOrCreateResPtr<AgentSchedulerConfigR>();
+    ASSERT_TRUE(runtime);
+    ASSERT_EQ(config.latencyParameterLearningRateScales,
+              runtime->get().config.latencyParameterLearningRateScales);
+    auto batches = std::make_shared<AgentBatchR>();
+    ASSERT_TRUE(batches->setBackendExecutionPipelineStages(4));
+    ASSERT_TRUE(helper.addExternalRes(batches));
+    ASSERT_TRUE(helper.config(NonLinearPrefillModelR::RESOURCE_ID, MODEL_CONFIG));
+    ASSERT_TRUE(helper.config(LatencyModelR::RESOURCE_ID,
+                               R"({"cold_start_fit_epochs":3})"));
+    auto model = helper.getOrCreateResPtr<LatencyModelR>();
+    auto actual = helper.getOrCreateResPtr<NonLinearPrefillModelR>();
+    ASSERT_TRUE(model && actual);
+    ASSERT_EQ(36, model->getSnapshot()->binaryVersion);
+    ASSERT_TRUE(referenceHelper.config(NonLinearPrefillModelR::RESOURCE_ID, MODEL_CONFIG));
+    auto reference = referenceHelper.getOrCreateResPtr<NonLinearPrefillModelR>();
+    ASSERT_TRUE(reference);
+    reference->applyRuntimeConfig(config);
+    LatencyHistorySampler sampler;
+    sampler.configure(2000, 64);
+    std::deque<NaviSchedLatencySample> history;
+    for (size_t i = 0; i < 64; ++i) {
+        const auto sample = nativePP4ScaleSample(i);
+        ASSERT_TRUE(sample.nativePP4Timing->validLatencyMs(sample.latencyMs));
+        history.push_back(sample);
+        sampler.append(sample);
+        std::shared_ptr<const NaviSchedLatencyModelSnapshot> updated;
+        bool save = false;
+        ASSERT_TRUE(model->recordSample(sample, updated, save));
+    }
+    auto expected = reference->getInitialParameters();
+    ASSERT_TRUE(fitNativeHistoryReference(*reference, history, 4, 3, expected,
+                                           &config.latencyParameterLearningRateScales));
+    expectSameNativeFit(model->getSnapshot()->parameters, expected, *actual, *reference);
+    EXPECT_EQ(49, actual->getOptimizerState().step);
+    for (size_t i = 64; i < 68; ++i) {
+        const auto sample = nativePP4ScaleSample(i);
+        sampler.append(sample);
+        std::shared_ptr<const NaviSchedLatencyModelSnapshot> updated;
+        bool save = false;
+        ASSERT_TRUE(model->recordSample(sample, updated, save));
+    }
+    for (const auto &batch : sampler.getRecentUniformFitBatches(4, 8)) {
+        std::vector<double> next;
+        ASSERT_TRUE(reference->fit(batch, expected, next, 1.0, 2.0,
+                                    &config.latencyParameterLearningRateScales));
+        expected = std::move(next);
+    }
+    expectSameNativeFit(model->getSnapshot()->parameters, expected, *actual, *reference);
+    EXPECT_EQ(53, actual->getOptimizerState().step);
+}
+
 } // namespace navi_sched

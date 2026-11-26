@@ -153,8 +153,13 @@ class _AgentConfig:
         cache_source_enabled = _read_bool_env(
             "VLLM_NAVI_SCHED_EXECUTION_CACHE_SOURCE_ENABLED", False
         )
+        native_pp4_rates = (
+            os.environ.get("VLLM_NAVI_SCHED_PP_LATENCY_MODE") == "native_pp4"
+        )
         default_parameter_rates = (
-            () if cache_source_enabled else _LATENCY_PARAMETER_LEARNING_RATE_SCALES
+            ()
+            if cache_source_enabled or native_pp4_rates
+            else _LATENCY_PARAMETER_LEARNING_RATE_SCALES
         )
         config = cls(
             biz_name=os.environ.get("VLLM_NAVI_SCHED_BIZ_NAME", "").strip(),
@@ -300,10 +305,15 @@ class _AgentConfig:
                 "VLLM_NAVI_SCHED_LATENCY_ERROR_CLIP_MS must be nonnegative and finite"
             )
         rates = config.latency_parameter_learning_rate_scales
-        source_rates = config.execution_cache_source_enabled
+        source_rates = config.execution_cache_source_enabled and not native_pp4_rates
+        rate_lengths = (
+            (0, 9)
+            if native_pp4_rates
+            else ((0, 21) if source_rates else (0, 10, 17, 19))
+        )
         if (
             not isinstance(rates, list)
-            or len(rates) not in ((0, 21) if source_rates else (0, 10, 17, 19))
+            or len(rates) not in rate_lengths
             or any(
                 not isinstance(rate, (int, float))
                 or isinstance(rate, bool)
@@ -315,7 +325,9 @@ class _AgentConfig:
             )
         ):
             expected = (
-                "21 finite numbers; inactive entries 10 through 18 must be zero "
+                "9 finite positive numbers"
+                if native_pp4_rates
+                else "21 finite numbers; inactive entries 10 through 18 must be zero "
                 "and active entries must be positive"
                 if source_rates
                 else "10, 17, or 19 finite numbers; only decode-progress entries "
