@@ -1,12 +1,17 @@
+import json
 import os
 import tempfile
 import types
 import unittest
+from dataclasses import replace
+from pathlib import Path
 from unittest.mock import patch
 
 import torch
 from safetensors.torch import save_file
 
+from rtp_llm.config.py_config_modules import ResidentWeightsConfig
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.new_models.qwen2_mtp import Qwen2MTPForCausalLM
 from rtp_llm.models_py.quant_methods import QuantizationConfig
@@ -47,7 +52,7 @@ def _load_tp_pair(rank, root):
             get_ffn_tp_size=lambda: 2,
             get_ffn_tp_rank=lambda: rank,
         )
-        for method in ("scratch", "fastsafetensors"):
+        for method in checkpoint_readers("scratch", "fastsafetensors"):
             cfg = NewLoaderConfig.from_runtime(
                 pc,
                 device="cpu",
@@ -123,12 +128,12 @@ class _MTPCheckpointFixture(unittest.TestCase):
         )
         return weights
 
-    def load(self, weights, *, rank=0, tp=1):
+    def load(self, weights, *, rank=0, tp=1, ep=1):
         parallelism = types.SimpleNamespace(
             tp_size=tp,
             tp_rank=rank,
-            ep_size=1,
-            ep_rank=0,
+            ep_size=ep,
+            ep_rank=rank % ep,
             dp_size=1,
             pp_size=1,
             pp_rank=0,
@@ -138,6 +143,8 @@ class _MTPCheckpointFixture(unittest.TestCase):
         load_config = NewLoaderConfig(
             tp_size=tp,
             tp_rank=rank,
+            ep_size=ep,
+            ep_rank=rank % ep,
             attn_tp_size=tp,
             attn_tp_rank=rank,
             ffn_tp_size=tp,
@@ -160,6 +167,91 @@ class _MTPCheckpointFixture(unittest.TestCase):
 
 
 class Qwen2MTPLoadTest(_MTPCheckpointFixture):
+    def test_dense_mtp_real_config_with_ep(self):
+        from rtp_llm.models.qwen_v2 import QwenV2MTP
+
+        with tempfile.TemporaryDirectory() as directory:
+            raw = dict(num_hidden_layers=1, intermediate_size=4, num_attention_heads=2,
+                       num_key_value_heads=1, hidden_size=4, vocab_size=8)
+            Path(directory, "config.json").write_text(json.dumps(raw))
+            self.config = QwenV2MTP._create_config(directory)
+            self.config.model_type = "qwen_2-mtp"
+            self.config.tie_word_embeddings = True
+            self.assertEqual(list(self.config.moe_layer_index), [0])
+            self.assertEqual(self.config.expert_num, 0)
+            weights = self.weights()
+            for rank in range(2):
+                model = self.load(weights, rank=rank, tp=2, ep=2)
+                torch.testing.assert_close(
+                    model.mtp_block.fc.weight, weights["model.layers.0.eh_proj.weight"]
+                )
+
+    def test_ft_converter_rank_local_round_trip(self):
+        from rtp_llm.models.qwen_v2 import QwenV2MTP
+        from rtp_llm.ops import HWKernelConfig, KVCacheConfig, ParallelismConfig, TaskType
+        from rtp_llm.models_py.model_loader import NewLoaderLoadMethod
+        from rtp_llm.tools.convert.ft_export_job import create_ft_export_job
+        from rtp_llm.tools.convert.ft_export_metadata import generate_ft_index
+
+        with tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as dst:
+            raw = dict(num_hidden_layers=2, intermediate_size=4, num_attention_heads=2,
+                       num_key_value_heads=1, hidden_size=4, vocab_size=8, torch_dtype="float32")
+            for directory in (src, dst):
+                Path(directory, "config.json").write_text(json.dumps(raw))
+            weights = self.weights()
+            for i, (name, value) in enumerate(weights.items()):
+                if ".self_attn." in name or ".mlp." in name:
+                    weights[name] = torch.arange(value.numel()).reshape_as(value).float() + 16 * i
+            weights.update({k.replace("layers.0.", "layers.1."): v + 7
+                            for k, v in weights.items() if "layers.0." in k})
+            weights.update({"lm_head.weight": weights["model.embed_tokens.weight"].flip(0),
+                            "model.d2t": torch.arange(8), "model.t2d": torch.arange(7, -1, -1)})
+            save_file(weights, str(Path(src, "model.safetensors")))
+            cfg = QwenV2MTP.create_config(src)
+            cfg.model_type, cfg.data_type, cfg.task_type = "qwen_2-mtp", "fp32", TaskType.LANGUAGE_MODEL
+            cfg.lora_infos, cfg.phy2log_path = {}, ""
+            cfg.init_precision_config(KVCacheConfig(), "fp32")
+            cfgs = []
+            for rank in range(2):
+                pc = ParallelismConfig()
+                pc.tp_size = pc.ffn_tp_size = pc.world_size = pc.local_world_size = 2
+                pc.tp_rank = pc.ffn_tp_rank = pc.world_rank = pc.local_rank = rank
+                pc.ep_size = 1
+                descriptor = types.SimpleNamespace(
+                    model_config=cfg, parallelism_config=pc, get_weight_cls=QwenV2MTP.get_weight_cls,
+                    hw_kernel_config=HWKernelConfig(), kv_cache_config=KVCacheConfig(),
+                    merge_lora=False, load_method="scratch", force_cpu_load_weights=True,
+                    moe_pure_tp_preshard=False, loader_recycle_handles=False, _init_custom_module=lambda: None,
+                )
+                # The CPU device constructor parses the server CLI, not unittest arguments.
+                with patch("sys.argv", ["weights_convert"]):
+                    create_ft_export_job(descriptor).dump_weight_as_ft_style("cpu", dst)
+                cfgs.append(NewLoaderConfig.from_runtime(
+                    pc, device="cpu", compute_dtype=torch.float32, quant_config=QuantizationConfig("none"),
+                    force_cpu_load_weights=True, load_method="scratch",
+                ))
+            generate_ft_index(dst, {"TP_SIZE": 2, "EP_SIZE": 1, "DP_SIZE": 1})
+            for load in cfgs:
+                original = NewModelLoader(cfg, load, model_path=src).load()
+                for method in checkpoint_readers("scratch", "fastsafetensors"):
+                    loader = NewModelLoader(cfg, replace(load, load_method=NewLoaderLoadMethod(method)), model_path=dst)
+                    restored = loader.load()
+                    self.assertEqual(loader.loaded_method, NewLoaderLoadMethod(method))
+                    self.assertEqual(original.state_dict().keys(), restored.state_dict().keys())
+                    for name, expected in original.state_dict().items():
+                        torch.testing.assert_close(restored.state_dict()[name], expected, atol=0, rtol=0, msg=name)
+                    restored.validate_weights_loaded()
+                    emb = torch.tensor([[2., 4., 1., 3.]])
+                    hidden = emb.flip(-1) + 1
+                    torch.testing.assert_close(restored.mtp_block(emb, hidden), original.mtp_block(emb, hidden))
+
+            index = Path(dst, "model.safetensors.index.json")
+            record = json.loads(index.read_text())
+            del record["weight_map"]["rank_00_00_00.global.multi_tokens_predict_t2d_map"]
+            index.write_text(json.dumps(record))
+            with self.assertRaisesRegex(ValueError, "both d2t and t2d"):
+                NewModelLoader(cfg, cfgs[0], model_path=dst).load()
+
     def test_actual_two_rank_checkpoint_transport(self):
         with tempfile.TemporaryDirectory() as root:
             save_file(self.weights(), os.path.join(root, "model.safetensors"))
@@ -318,7 +410,7 @@ class Qwen2MTPNativeBoundaryTest(_MTPCheckpointFixture):
             cfg.max_seq_len, cfg.gen_num_per_cycle = 32, 3
             return cfg
 
-        for method in ("scratch", "fastsafetensors"):
+        for method in checkpoint_readers("scratch", "fastsafetensors"):
             with self.subTest(
                 method=method
             ), tempfile.TemporaryDirectory() as target_path, tempfile.TemporaryDirectory() as draft_path, patch.object(
@@ -333,6 +425,7 @@ class Qwen2MTPNativeBoundaryTest(_MTPCheckpointFixture):
                     ),
                     sp_config=ns(type=SpeculativeType.EAGLE, gen_num_per_cycle=3),
                     load_config=ns(
+                        resident_weights_config=ResidentWeightsConfig(),
                         load_method=method,
                         force_cpu_load_weights=False,
                         loader_recycle_handles=False,

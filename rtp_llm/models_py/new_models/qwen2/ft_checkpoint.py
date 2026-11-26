@@ -6,7 +6,11 @@ registry or OldLoader/device conversion dependency is introduced here.
 
 import torch
 
-from rtp_llm.models_py.ft_checkpoint import RuntimeTensorBinding, ft_layer_bindings
+from rtp_llm.models_py.ft_checkpoint import (
+    RuntimeTensorBinding,
+    ft_layer_bindings,
+    validate_format_parameter_ownership,
+)
 from rtp_llm.models_py.quant_methods.unquantized import UnquantizedLinearMethod
 
 
@@ -229,6 +233,7 @@ def load_gqa_ffn_ft_checkpoint(
 
     embedding = model.embed_tokens
     head = model.lm_head
+    preserved = validate_format_parameter_ownership(model, ft=True)
     head_source = checkpoint.index_metadata.get("ft_lm_head_source")
     if head_source not in (None, "embedding", "lm_head"):
         raise ValueError("Invalid FT LM-head provenance")
@@ -372,13 +377,13 @@ def load_gqa_ffn_ft_checkpoint(
         return (merged[0] if projection == "down" else torch.cat(merged, dim=0),)
 
     bindings = list(extra_bindings)
-    if embedding is not None:
+    if embedding is not None and "embed_tokens.weight" not in preserved:
         bindings.append(
             RuntimeTensorBinding(
                 ("global.embedding",), "embed_tokens.weight", embedding_rows
             )
         )
-    if head is not None:
+    if head is not None and "lm_head.weight" not in preserved:
         bindings.append(
             RuntimeTensorBinding(("global.lm_head",), "lm_head.weight", head_rows)
         )
@@ -613,7 +618,7 @@ def load_gqa_ffn_ft_checkpoint(
     model._ft_unknown_tied_vocab = tied_config and head_source is None and (
         head is not None or getattr(model, "_pipeline_partitioned", False)
     )
-    if head is not None:
+    if head is not None and "lm_head.weight" not in preserved:
         mirrored = tied_config and head_source == "embedding"
         head._explicit_checkpoint_loaded = not mirrored
         if mirrored:

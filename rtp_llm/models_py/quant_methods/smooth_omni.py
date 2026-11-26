@@ -70,9 +70,12 @@ class SmoothOmniLinearMethod(W8A8Int8LinearMethod):
             and source_field in self.required_checkpoint_parameters
         ):
             return source_field, (), False
-        field = {"qweight": "weight", "scales": "weight_scale", "bias": "bias"}.get(
-            source_field
-        )
+        field = {
+            "qweight": "weight",
+            "qweight_out_in": "weight",
+            "scales": "weight_scale",
+            "bias": "bias",
+        }.get(source_field)
         if field is None:
             raise ValueError(
                 f"Unexpected {self.quant_config.quant_type} checkpoint tensor {name!r}"
@@ -80,7 +83,7 @@ class SmoothOmniLinearMethod(W8A8Int8LinearMethod):
         parts[-1] = field
         canonical = ".".join(parts)
         _, pieces = self._selection(layer, canonical)
-        transposed = field == "weight" and not (
+        transposed = source_field == "qweight" and not (
             self.omni and self.qkv and len(parts) > 1
         )
         return canonical, pieces, transposed
@@ -88,11 +91,12 @@ class SmoothOmniLinearMethod(W8A8Int8LinearMethod):
     def checkpoint_read_spec(self, layer, name, shape):
         canonical, pieces, transposed = self._describe(layer, name)
         if not pieces:
-            if tuple(shape) != (layer.input_size * layer.tp_size,):
+            width = layer.input_size * layer.tp_size
+            if tuple(shape) not in ((width,), (1, width)):
                 raise ValueError(f"{name}: expected one value per input channel")
             if layer.tp_size > 1:
                 return make_sharded_read_spec(
-                    name, shape, 0, layer.tp_size, layer.tp_rank
+                    name, shape, len(shape) - 1, layer.tp_size, layer.tp_rank
                 )
         elif len(pieces) == 1:
             _, total, local, rank, _ = pieces[0]
@@ -101,8 +105,12 @@ class SmoothOmniLinearMethod(W8A8Int8LinearMethod):
                     name, shape, 0 if transposed else 1, layer.tp_size, layer.tp_rank
                 )
             if not self.row and total != local:
+                row_scale = canonical.endswith("weight_scale") and tuple(shape) == (
+                    1,
+                    total,
+                )
                 return make_sharded_read_spec(
-                    name, shape, int(transposed), total // local, rank
+                    name, shape, int(transposed or row_scale), total // local, rank
                 )
         return ReadSpec.full(name, shape)
 
@@ -111,6 +119,8 @@ class SmoothOmniLinearMethod(W8A8Int8LinearMethod):
             canonical, pieces, transposed = self._describe(layer, name)
             tensor, spec = unwrap_checkpoint_tensor(value)
             if not pieces:
+                if tensor.ndim == 2 and tensor.shape[0] == 1:
+                    tensor = tensor.squeeze(0)
                 if tensor.dtype != torch.float32 or tensor.ndim != 1:
                     raise ValueError(f"{name}: expected FP32 input-channel vector")
                 if spec is None and layer.tp_size > 1:
@@ -127,9 +137,31 @@ class SmoothOmniLinearMethod(W8A8Int8LinearMethod):
                 layer._record_parameter_loaded(name)
                 continue
             if transposed:
+                # The Qwen1 SQ exporter groups a fused MHA matrix as [K,3,H]
+                # and its scales as [3,H]. Never flatten packed GPTQ/AWQ.
+                if (
+                    self.qkv
+                    and name == "qweight"
+                    and tensor.ndim == 3
+                    and tensor.shape[1] == 3
+                ):
+                    tensor = tensor.flatten(1)
                 if tensor.ndim != 2:
                     raise ValueError(f"{name}: expected matrix")
                 tensor = tensor.t()
+            elif (
+                self.qkv
+                and name == "scales"
+                and tensor.ndim == 2
+                and tensor.shape[0] == 3
+            ):
+                tensor = tensor.flatten()
+            elif (
+                canonical.endswith("weight_scale")
+                and tensor.ndim == 2
+                and tensor.shape[0] == 1
+            ):
+                tensor = tensor.squeeze(0)
 
             def wrap(t):
                 return t if spec is None else LoadedCheckpointTensor(t, spec)

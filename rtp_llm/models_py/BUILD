@@ -4,6 +4,13 @@ load("//rtp_llm/models_py/test:defs.bzl", "models_py_test")
 load(":checkpoint_service_tests.bzl", "checkpoint_service_tests")
 load(":checkpoint_test_platforms.bzl", "checkpoint_reader_test_env", "ue8m0_test_env", "ue8m0_test_platforms")
 
+py_library(
+    name = "checkpoint_reader_test_support",
+    srcs = ["checkpoint_reader_test_support.py"],
+    testonly = True,
+    visibility = ["//rtp_llm:__subpackages__"],
+)
+
 py_test(
     name = "v4_fst_nogds_test",
     srcs = ["v4_fst_nogds_test.py"],
@@ -787,6 +794,7 @@ py_test(
 
 checkpoint_service_tests(
     name = "qwen3_dspark_native_service_test",
+    env = checkpoint_reader_test_env({}),
     native_name = "qwen3_dspark_native_output_test",
     cpu_case = "PublicDraftLoadingTest",
     native_case = "DraftNativeOutputTest",
@@ -796,7 +804,7 @@ checkpoint_service_tests(
         "serving_route_checkpoint_test.py",
     ],
     main = "qwen3_dspark_native_service_test.py",
-    deps = [":new_weight_loader", "//rtp_llm:async_model", "//rtp_llm:model_factory", "//rtp_llm:models", "//rtp_llm:transformers"],
+    deps = [":checkpoint_reader_test_support", ":new_weight_loader", "//rtp_llm:async_model", "//rtp_llm:model_factory", "//rtp_llm:models", "//rtp_llm:transformers"],
 )
 
 py_test(

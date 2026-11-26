@@ -33,7 +33,7 @@ def validate_attention_lora_checkpoint_target(name: str, model_name: str) -> Non
         )
 
 
-def model_lora_checkpoint_updates(model, loader, path: str) -> list[LoRAUpdate]:
+def model_lora_checkpoint_updates(model, loader, path: str, *, calibrated_ft=False) -> list[LoRAUpdate]:
     """Resolve PEFT factors through the model's existing TP/fusion owners."""
     module_names = {module: name for name, module in model.named_modules()}
     validate_target = getattr(model, "validate_lora_checkpoint_target", None)
@@ -45,9 +45,12 @@ def model_lora_checkpoint_updates(model, loader, path: str) -> list[LoRAUpdate]:
             validate_target(mapped)
         if callable(owns_target) and not owns_target(mapped):
             continue
-        target, _ = model.resolve_checkpoint_load_plan(
-            mapped, (update.b.shape[0], update.a.shape[1])
-        )
+        if calibrated_ft:
+            target = model.resolve_lora_projection(mapped)
+        else:
+            target, _ = model.resolve_checkpoint_load_plan(
+                mapped, (update.b.shape[0], update.a.shape[1])
+            )
         if target is None or not callable(
             getattr(target.module, "prepare_lora_factors", None)
         ):
@@ -58,7 +61,9 @@ def model_lora_checkpoint_updates(model, loader, path: str) -> list[LoRAUpdate]:
             raise ValueError(
                 f"Cannot apply draft LoRA to borrowed parameter {update.target!r}"
             )
-        a, b = target.module.prepare_lora_factors(target.name, update.a, update.b)
+        ft_merge = getattr(getattr(target.module, "quant_method", None), "merge_ft_lora", None)
+        kwargs = {"calibrated_ft": True} if calibrated_ft and callable(ft_merge) else {}
+        a, b = target.module.prepare_lora_factors(target.name, update.a, update.b, **kwargs)
         module_name = module_names[target.module]
         name = f"{module_name}.weight" if module_name else "weight"
         grouped.setdefault(name, []).append((target.name, a, b, update.scale))
@@ -96,7 +101,7 @@ def merge_startup_lora_checkpoint(model, loader, adapter_name: str, path: str) -
 
 
 def prepare_startup_lora_merge(model, loader, adapter_name, path):
-    """Stage factors before FST can finalize its first complete INT8 leaf."""
+    """Stage factors before FST can finalize its first floating-source quantized leaf."""
     if not isinstance(adapter_name, str) or not adapter_name:
         raise ValueError("LoRA adapter name must be non-empty")
     runtime_updates = []
@@ -110,6 +115,24 @@ def prepare_startup_lora_merge(model, loader, adapter_name, path):
     # Unquantized leaves can have a device-specific layout. Retain their
     # existing post-layout transform and atomic merge after loader finalization.
     return lambda: _merge_runtime_updates(model, adapter_name, runtime_updates)
+
+
+def prepare_ft_lora_merge(model, loader, adapter_name, path):
+    """Merge installed FT projection bytes before the backend changes their layout."""
+    if not isinstance(adapter_name, str) or not adapter_name:
+        raise ValueError("LoRA adapter name must be non-empty")
+    floating = []
+    for update in model_lora_checkpoint_updates(model, loader, path, calibrated_ft=True):
+        leaf = model.get_submodule(update.target.rpartition(".")[0])
+        method = getattr(leaf, "quant_method", None)
+        merge = getattr(method, "merge_ft_lora", None)
+        if callable(merge):
+            merge(leaf, update)
+        elif callable(getattr(method, "stage_startup_lora", None)):
+            method.stage_startup_lora(leaf, update)
+        else:
+            floating.append(update)
+    return lambda: _merge_runtime_updates(model, adapter_name, floating)
 
 
 def _merge_runtime_updates(model, adapter_name, updates):

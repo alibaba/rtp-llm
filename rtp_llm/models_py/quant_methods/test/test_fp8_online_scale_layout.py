@@ -14,6 +14,7 @@ from unittest import mock
 import torch
 from safetensors.torch import save_file
 
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers
 from rtp_llm.models_py import weight_mapper
 from rtp_llm.models_py.kernels.cuda import fp8_quant
 from rtp_llm.models_py.layers.linear import (
@@ -99,7 +100,7 @@ class OnlineFp8ScaleLayoutTest(unittest.TestCase):
                 save_file(
                     _checkpoint(kind), os.path.join(directory, "model.safetensors")
                 )
-                for backend in ("scratch", "fastsafetensors"):
+                for backend in checkpoint_readers("scratch", "fastsafetensors"):
                     for tp in (1, 2):
                         for rank in range(tp):
                             with self.subTest(
@@ -240,7 +241,7 @@ class OnlineFp8ScaleLayoutTest(unittest.TestCase):
                 save_file(
                     _checkpoint(kind), os.path.join(directory, "model.safetensors")
                 )
-                for backend in ("scratch", "fastsafetensors"):
+                for backend in checkpoint_readers("scratch", "fastsafetensors"):
                     for tp in (1, 2):
                         for rank in range(tp):
                             with self.subTest(

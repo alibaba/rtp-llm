@@ -186,20 +186,21 @@ class BaseModel(object):
     def support_cuda_graph(self) -> bool:
         return False
 
-    def _load_with_residency(self, device, load):
+    def _load_with_residency(self, device, load, *, group=None):
         """Agree on the source before any loader enters a checkpoint collective."""
         if not self.resident_weights_config.enable:
             return load()
-        self._resident_weights = self._create_resident_weights()
-        # A draft exists only on the last PP stage;
-        # its ranks must never join a WORLD collective that other stages skip.
-        synchronize_ranks = (
-            self.resident_weights_config.role == "target"
-            or self.parallelism_config.pp_size == 1
-        )
-        if synchronize_ranks and not all_ranks_true(
-            self._resident_weights is not None, device
+        if (
+            self.resident_weights_config.role == "draft"
+            and self.parallelism_config.pp_size > 1
+            and torch.distributed.is_initialized()
+            and group is None
         ):
+            raise RuntimeError("A distributed PP draft requires its checkpoint stage group")
+        self._resident_weights = self._create_resident_weights()
+        # Use exactly the loader's participants for *both* decisions. Otherwise
+        # a warm rank may replay its owner while a peer enters FST cold-load collectives.
+        if not all_ranks_true(self._resident_weights is not None, device, group=group):
             if self._resident_weights is not None:
                 # Every rank now loads from the checkpoint. A record this rank published
                 # earlier would otherwise keep its memory alongside the new copy.
@@ -212,27 +213,19 @@ class BaseModel(object):
             self._resident_weights = None
         manager = self._resident_weights
         restored = None if manager is None else manager.acquire_for_load(
-            device, synchronize_ranks=synchronize_ranks
+            device, synchronize_ranks=True, group=group
         )
         owner = load() if manager is None else load(resident=manager, restored=restored)
-        if synchronize_ranks:
-            self._wait_for_loading_ranks()
+        self._wait_for_loading_ranks(group=group)
         return owner
 
-    def _wait_for_loading_ranks(self) -> None:
-        """Let every rank finish loading before any of them enters the C++ engine.
-
-        Resident weights make ``T1`` wildly uneven: one rank attaches a published record in
-        seconds while its neighbour misses and spends ten minutes reading the checkpoint. ``T1``
-        runs under the world group BackendManager.start() built with an infinite timeout, but
-        the C++ ``T2`` after it (RtpLLMOp::init, the cache store handshake) does not, so a fast
-        rank that goes on alone times out there and takes the whole group down.
-        """
+    def _wait_for_loading_ranks(self, *, group=None) -> None:
+        """Finish loading on every participating rank before entering C++ engine initialization."""
         if not torch.distributed.is_initialized():
             return
-        if torch.distributed.get_world_size() <= 1:
+        if torch.distributed.get_world_size(group) <= 1:
             return
-        torch.distributed.barrier()
+        torch.distributed.barrier(group=group)
 
     @property
     def resident_initialize_gpu_growth_bytes(self) -> int:

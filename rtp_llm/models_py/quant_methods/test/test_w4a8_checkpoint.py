@@ -13,6 +13,7 @@ from rtp_llm.config.quant_config import (
     CompressedW4A8Int4PerChannelQuantConfig,
     W4a8Int4PerChannelQuantConfig,
 )
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers, has_native_fst, requires_native_fst
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.quant_methods.base import QuantizationConfig
 from rtp_llm.models_py.quant_methods.test.staged_checkpoint_fixture import (
@@ -123,29 +124,30 @@ class W4A8CheckpointTest(unittest.TestCase):
                         scratch = self.load(
                             values, compressed, rank=rank, ep=ep, redundant=redundant
                         )
-                        fst = self.load(
-                            values,
-                            compressed,
-                            "fastsafetensors",
-                            rank=rank,
-                            ep=ep,
-                            redundant=redundant,
-                        )
-                        if compressed:
-                            names = [
-                                f"_w4a8_{p}_{f}"
-                                for p in ("up", "gate", "down")
-                                for f in ("packed", "scale")
-                            ]
-                        else:
-                            names = ["w13", "w2"]
-                        for name in names:
-                            torch.testing.assert_close(
-                                getattr(scratch, name),
-                                getattr(fst, name),
-                                rtol=0,
-                                atol=0,
+                        if has_native_fst():
+                            fst = self.load(
+                                values,
+                                compressed,
+                                "fastsafetensors",
+                                rank=rank,
+                                ep=ep,
+                                redundant=redundant,
                             )
+                            if compressed:
+                                names = [
+                                    f"_w4a8_{p}_{f}"
+                                    for p in ("up", "gate", "down")
+                                    for f in ("packed", "scale")
+                                ]
+                            else:
+                                names = ["w13", "w2"]
+                            for name in names:
+                                torch.testing.assert_close(
+                                    getattr(scratch, name),
+                                    getattr(fst, name),
+                                    rtol=0,
+                                    atol=0,
+                                )
                         for local, logical in enumerate(
                             scratch._expert_placement.local_physical_to_logical
                         ):
@@ -204,11 +206,12 @@ class W4A8CheckpointTest(unittest.TestCase):
             values["experts.0.gate_proj.weight_scale"][0, 0] = bad
             variants.append(values)
         for values in variants:
-            for method in ("scratch", "fastsafetensors"):
+            for method in checkpoint_readers("scratch", "fastsafetensors"):
                 with self.subTest(method=method):
                     with self.assertRaises((ValueError, RuntimeError, TypeError)):
                         self.load(values, method=method)
 
+    @requires_native_fst
     def test_staged_fst_validates_late_weight_shape(self):
         tensors = self.checkpoint()
         key = "experts.3.down_proj.weight_shape"

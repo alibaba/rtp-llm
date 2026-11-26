@@ -24,6 +24,21 @@ def create_ft_export_job(model):
         raise ValueError(
             f"Invalid FT attention TP: head_num={heads} must be divisible by tp_size={tp}"
         )
+    # These draft formats contain private layers a target's dense adapter
+    # cannot import. Validate the registered *draft* before emitting shards.
+    kind = getattr(config, "model_type", None)
+    writer_factory = None
+    if kind in ("qwen_3_dflash", "qwen_3_moe_eagle3", "qwen_2-mtp"):
+        from rtp_llm.models_py.registry import get_model_class
+
+        owner = get_model_class(kind)
+        if not callable(vars(owner).get("load_ft_checkpoint")):
+            raise ValueError(f"{kind} cannot import its draft FT format; use the original HF draft")
+        if kind != "qwen_2-mtp" and getattr(owner, "preserved_ft_parameter_loans", {}) != {
+            "embed_tokens.weight": "global.embedding", "lm_head.weight": "global.lm_head"
+        }:
+            raise ValueError(f"{kind} lacks its target vocabulary FT loan contract")
+        writer_factory = getattr(owner, "ft_export_writer", None)
     database = CkptDatabase(
         config.ckpt_path,
         config.ptuning_path,
@@ -33,6 +48,9 @@ def create_ft_export_job(model):
         for name, path in config.lora_infos.items():
             database.load_lora(name, path)
         database.dump_lora_info()
+
+    if writer_factory is not None:
+        return writer_factory(config, model.parallelism_config, database)
 
     descriptors = model.get_weight_cls()(
         model_config=config,

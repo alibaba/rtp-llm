@@ -14,6 +14,7 @@ from safetensors.torch import save_file
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.models.direct_checkpoint import RuntimeWeightView
 from rtp_llm.models.kimi_k25.kimi_k25 import KimiK25
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers, has_native_fst
 from rtp_llm.models_py.model_loader import (
     NewLoaderConfig,
     NewLoaderLoadMethod,
@@ -241,7 +242,7 @@ class KimiLanguageTest(unittest.TestCase):
                 torch.float32,
                 "cpu",
                 mm_params,
-                NewLoaderLoadMethod.FASTSAFETENSORS,
+                NewLoaderLoadMethod.FASTSAFETENSORS if has_native_fst() else NewLoaderLoadMethod.SCRATCH,
                 VitConfig(),
                 directory,
             )
@@ -327,7 +328,7 @@ class KimiLanguageTest(unittest.TestCase):
         self.assertEqual(model.layers[0].mlp.intermediate_size, 16)
 
     def test_complete_sharded_vision_language_checkpoint_and_embeddings(self):
-        for method in (
+        for method in checkpoint_readers(
             NewLoaderLoadMethod.SCRATCH,
             NewLoaderLoadMethod.FASTSAFETENSORS,
         ):

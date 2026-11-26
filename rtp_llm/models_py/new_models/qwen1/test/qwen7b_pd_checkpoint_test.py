@@ -14,8 +14,10 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from safetensors.torch import save_file
 
+from rtp_llm.config.py_config_modules import ResidentWeightsConfig
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.models.base_model import BaseModel
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers
 from rtp_llm.models_py.model_loader import (
     NewLoaderConfig,
     NewLoaderLoadMethod,
@@ -111,6 +113,7 @@ def load(root, method, role, tp, rank, device="cpu"):
         fmha_config=None,
         moe_config=None,
         load_config=ns(
+            resident_weights_config=ResidentWeightsConfig(),
             load_method=method,
             force_cpu_load_weights=False,
             loader_recycle_handles=False,
@@ -178,7 +181,7 @@ def worker(rank, root):
         timeout=timedelta(seconds=40),
     )
     try:
-        for method in ("scratch", "fastsafetensors"):
+        for method in checkpoint_readers("scratch", "fastsafetensors"):
             for role in (RoleType.PREFILL, RoleType.DECODE):
                 check(root, method, role, 2, rank)
     finally:
@@ -271,7 +274,7 @@ class Qwen1CheckpointTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as path:
             root = Path(path)
             write(root)
-            for method in ("scratch", "fastsafetensors"):
+            for method in checkpoint_readers("scratch", "fastsafetensors"):
                 for role in (RoleType.PREFILL, RoleType.DECODE):
                     with self.subTest(method=method, role=role):
                         check(root, method, role, 1, 0)
@@ -290,7 +293,7 @@ class Qwen1CheckpointTest(unittest.TestCase):
         ):
             with tempfile.TemporaryDirectory() as path:
                 write(Path(path), missing=key)
-                for method in ("scratch", "fastsafetensors"):
+                for method in checkpoint_readers("scratch", "fastsafetensors"):
                     with self.subTest(key=key, method=method), self.assertRaisesRegex(
                         RuntimeError, "missing|required|Missing"
                     ):

@@ -11,7 +11,7 @@ from rtp_llm.models_py.quant_methods.base import (
 from rtp_llm.models_py.quant_methods.groupwise_export import cuda_groupwise_layout
 from rtp_llm.models_py.quant_methods.int8 import quantize_weight_only_int8
 from rtp_llm.models_py.read_spec import unwrap_checkpoint_tensor
-from rtp_llm.models_py.runtime_weight_update import checked_lora_sum
+from rtp_llm.models_py.quant_methods.startup_lora import FloatingStartupLoRA
 
 
 @lru_cache(maxsize=None)
@@ -100,7 +100,7 @@ def apply_packed_weight_only_int8(x, weight, scale, output_size, bias=None):
 
 
 @register_quant_method("INT8")
-class WeightOnlyInt8LinearMethod(QuantizeMethodBase):
+class WeightOnlyInt8LinearMethod(FloatingStartupLoRA, QuantizeMethodBase):
     # FST and scratch finalize one local projection at a time, after Q/K/V
     # or gate/up fusion and TP selection, just like the old per-column scheme.
     requires_staged_device_postprocess = True
@@ -142,34 +142,15 @@ class WeightOnlyInt8LinearMethod(QuantizeMethodBase):
     def prepare_weights_on_cpu(self, layer):
         self.process_weights_after_loading(layer)
 
-    def can_stage_startup_lora(self, layer):
-        return layer.weight_scale is None and layer.weight.is_floating_point()
-
-    def stage_startup_lora(self, layer, update):
-        if not self.can_stage_startup_lora(layer):
-            raise ValueError("Startup LoRA requires unpacked floating point weights")
-        layer._startup_lora_update = update
-
     def process_weights_after_loading(self, layer):
         if layer.weight_scale is not None:
             return
         # Both the torch SM8 mixed-dtype operator and OldLoader consume these
         # exact unsigned-offset/interleaved bytes in [K,N] storage. Preserve
         # a signed parameter dtype for state inspection; .view(uint8) is free.
-        update = getattr(layer, "_startup_lora_update", None)
-        weight = layer.weight
-        if update is not None:
-            # TP/fused factors are in checkpoint orientation. Match the base
-            # merge: FP32 product, cast the delta, then add before quantization.
-            delta = update.delta().to(weight)
-            if delta.shape != weight.shape:
-                raise ValueError(f"Invalid startup LoRA delta for {update.target!r}")
-            weight = checked_lora_sum(update.target, weight, delta)
-        packed, scale = pack_weight_only_int8(weight)
+        packed, scale = pack_weight_only_int8(self.weight_before_quantization(layer))
         layer.weight = torch.nn.Parameter(packed, requires_grad=False)
         layer.weight_scale = torch.nn.Parameter(scale, requires_grad=False)
-        if update is not None:
-            del layer._startup_lora_update
 
     def apply(self, layer, x, bias=None):
         return apply_packed_weight_only_int8(

@@ -71,3 +71,30 @@ class Qwen2CheckpointMapper(WeightsMapper):
                     raise ValueError("TRT fused QKV weight must be a rank-2 tensor")
                 checkpoint_value = tensor.t().contiguous()
             yield self.map_name(name), checkpoint_value
+
+
+class Qwen2SmoothTrtMapper(Qwen2CheckpointMapper):
+    """TRT SmoothQuant files are not in the floating TRT matrix layout."""
+
+    def map_name(self, name):
+        match = self._LAYER.fullmatch(name)
+        if match is not None:
+            projection, _, field = match[2].rpartition(".")
+            if projection in self._PROJECTIONS:
+                if field == "weight":
+                    # Legacy TrtEngineSmoothQuantWeightInfo takes QKV, O and
+                    # down as-is ([out,in]); W13 consumes transposed fc/gate.
+                    field = (
+                        "qweight"
+                        if projection in ("mlp.fc", "mlp.gate")
+                        else "qweight_out_in"
+                    )
+                elif field == "per_channel_scale":
+                    field = "scales"
+                return f"layers.{match[1]}.{self._PROJECTIONS[projection]}.{field}"
+        return super().map_name(name)
+
+    def apply(self, weights):
+        # The leaf handles the physical axis both for ReadSpec and for loading.
+        # In particular, do not run the floating QKV transpose above.
+        return WeightsMapper.apply(self, weights)

@@ -10,6 +10,7 @@ import torch
 from safetensors.torch import save_file
 
 from rtp_llm.config.quant_config import CompressedW8A8Int8PerChannelQuantConfig
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers, requires_native_fst
 from rtp_llm.models_py.layers.moe_experts import BaseMoEExperts
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.module_base import RtpModule
@@ -155,6 +156,7 @@ class W8A8Int8MoETest(unittest.TestCase):
                 )
                 return model.experts
 
+    @requires_native_fst
     def test_native_fst_cpu_checkpoint_tp_ep_redundant_matches_scratch(self):
         for rank in range(2):
             for redundant in (0, 2):
@@ -188,7 +190,7 @@ class W8A8Int8MoETest(unittest.TestCase):
             stacked[f"experts.down_proj.{field}"] = torch.stack(
                 [separate[f"experts.{expert}.down_proj.{field}"] for expert in range(4)]
             )
-        for method in ("scratch", "fst"):
+        for method in checkpoint_readers("scratch", "fst"):
             for ep, redundant in ((1, 0), (2, 0), (2, 2)):
                 for rank in range(2):
                     with self.subTest(
@@ -210,7 +212,7 @@ class W8A8Int8MoETest(unittest.TestCase):
         invalid["experts.gate_up_proj.weight"] = stacked[
             "experts.gate_up_proj.weight"
         ].float()
-        for method in ("scratch", "fst"):
+        for method in checkpoint_readers("scratch", "fst"):
             with self.assertRaises(TypeError):
                 self.load(invalid, method=method)
 

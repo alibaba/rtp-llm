@@ -98,8 +98,13 @@ class V41VisionNewLoaderTest(unittest.TestCase):
         for method in self.methods():
             with self.subTest(method=method), tempfile.TemporaryDirectory() as root:
                 self.write_checkpoint(root, self.state)
-                owner, loader = load_v41_service_vision(
-                    self.config, root, torch.bfloat16, "cpu", method
+                with self.assertLogs("rtp_llm.models_py.model_loader", level="INFO") as loaded:
+                    owner, loader = load_v41_service_vision(
+                        self.config, root, torch.bfloat16, "cpu", method
+                    )
+                self.assertIn(
+                    f"[checkpoint_owner=deepseek_v41_vision] Streamed checkpoint tensors with {method}",
+                    "\n".join(loaded.output),
                 )
                 self.assertIsInstance(owner, OwnedDeepSeekV41VisionEmbedding)
                 self.assertEqual(loader.loaded_method, method)

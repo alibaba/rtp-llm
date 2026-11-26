@@ -168,7 +168,11 @@ def load_owned_model(service, *, publish_runtime=True):
         return loader.load(startup_lora=merged_adapter, prepare_loans=prepare_loans, **resident_options)
 
     residency = getattr(service, "resident_weights_config", None)
-    module = service._load_with_residency(device, load) if residency and residency.enable else load()
+    module = (
+        service._load_with_residency(device, load, group=loader.checkpoint_group())
+        if residency and residency.enable
+        else load()
+    )
     actual = loader.loaded_method
     requested = load_config.load_method
     if actual is None or (

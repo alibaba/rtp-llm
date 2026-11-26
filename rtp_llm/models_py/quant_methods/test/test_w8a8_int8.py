@@ -10,6 +10,7 @@ import torch
 from safetensors.torch import save_file
 
 from rtp_llm.config.quant_config import CompressedW8A8Int8PerChannelQuantConfig
+from rtp_llm.models_py.checkpoint_reader_test_support import requires_native_fst
 from rtp_llm.models_py.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
@@ -144,6 +145,7 @@ class W8A8Int8Test(unittest.TestCase):
                 )
                 return result
 
+    @requires_native_fst
     def test_native_fst_cpu_real_checkpoint_matches_scratch(self):
         for kind in ("column", "row", "qkv", "merged"):
             for fused in (False, True):

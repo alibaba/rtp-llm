@@ -14,7 +14,7 @@ from tokenizers.models import WordLevel
 from transformers import PreTrainedTokenizerFast
 
 from rtp_llm.config.generate_config import GenerateConfig
-from rtp_llm.config.py_config_modules import GenerateEnvConfig, RenderConfig
+from rtp_llm.config.py_config_modules import GenerateEnvConfig, RenderConfig, ResidentWeightsConfig
 from rtp_llm.cpp.model_rpc.model_rpc_client import StreamState, trans_output
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     GenerateOutputsPB,
@@ -22,6 +22,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
 )
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.models.base_model import BaseModel
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers, requires_native_fst
 from rtp_llm.ops import ParallelismConfig, TaskType
 from rtp_llm.utils.base_model_datatypes import GenerateInput
 
@@ -100,6 +101,7 @@ def load(root, name, method, *, task=None, data_type="fp32"):
         fmha_config=None,
         moe_config=None,
         load_config=ns(
+            resident_weights_config=ResidentWeightsConfig(),
             load_method=method,
             force_cpu_load_weights=False,
             loader_recycle_handles=False,
@@ -123,7 +125,7 @@ class Qwen2ServiceVariantsTest(unittest.TestCase):
             with tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 fixture(root, head=explicit_head, extra_weights=weights, tied=True)
-                for method in ("scratch", "fastsafetensors"):
+                for method in checkpoint_readers("scratch", "fastsafetensors"):
                     for name, dtype in (
                         ("fp16", torch.float16),
                         ("bf16", torch.bfloat16),
@@ -194,7 +196,7 @@ class Qwen2ServiceVariantsTest(unittest.TestCase):
             with patch.object(BaseModel, "_init_custom_module", custom_module):
                 return load(root, "qwen_2", method, task=TaskType.SEQ_CLASSIFICATION)
 
-        for method in ("scratch", "fastsafetensors"):
+        for method in checkpoint_readers("scratch", "fastsafetensors"):
             for head in (DeclaredHead, ExtensionHead, WeightOnly):
                 with self.subTest(
                     method=method, head=head
@@ -244,6 +246,7 @@ class Qwen2ServiceVariantsTest(unittest.TestCase):
                     with self.assertRaisesRegex((ValueError, RuntimeError), error):
                         start(root, method, InvalidHead)
 
+    @requires_native_fst
     def test_smoke_model_owners_accept_parallel_fst_worker_batches(self):
         # A normal CPU FST load uses the range reader, not the installed
         # ParallelLoader worker used by accelerator smoke. Run that actual
@@ -338,7 +341,7 @@ class Qwen2ServiceVariantsTest(unittest.TestCase):
                 )
                 base.append(fields)
             save_file(tensors, str(root / "model.safetensors"))
-            for method in ("scratch", "fastsafetensors"):
+            for method in checkpoint_readers("scratch", "fastsafetensors"):
                 with self.subTest(method=method):
                     load = NewLoaderConfig.from_runtime(
                         ParallelismConfig(),
@@ -437,7 +440,7 @@ class Qwen2ServiceVariantsTest(unittest.TestCase):
             index = json.loads(index_path.read_text())
             index["weight_map"].update(dict.fromkeys(visual, "vision.safetensors"))
             index_path.write_text(json.dumps(index))
-            for method in ("scratch", "fastsafetensors"):
+            for method in checkpoint_readers("scratch", "fastsafetensors"):
                 with self.subTest(method=method):
                     model = load(root, variant, method)
                     owner = model.py_model
@@ -476,7 +479,7 @@ class Qwen2ServiceVariantsTest(unittest.TestCase):
                     torch.testing.assert_close(hidden[1], features[0])
 
     def test_tool_selected_logits_survive_terminal_frame(self):
-        for method in ("scratch", "fastsafetensors"):
+        for method in checkpoint_readers("scratch", "fastsafetensors"):
             with self.subTest(
                 method=method
             ), tempfile.TemporaryDirectory() as directory:
@@ -514,7 +517,7 @@ class Qwen2ServiceVariantsTest(unittest.TestCase):
                 torch.testing.assert_close(output.logits, torch.tensor([[8.0, 16.0]]))
 
     def test_embedding_publishes_noncausal_backbone_and_pooling_not_a_head(self):
-        for method in ("scratch", "fastsafetensors"):
+        for method in checkpoint_readers("scratch", "fastsafetensors"):
             with self.subTest(
                 method=method
             ), tempfile.TemporaryDirectory() as directory:
@@ -540,7 +543,7 @@ class Qwen2ServiceVariantsTest(unittest.TestCase):
         # token even with fully bidirectional attention in the transformer.
         from sentence_transformers.models import Pooling
 
-        for method in ("scratch", "fastsafetensors"):
+        for method in checkpoint_readers("scratch", "fastsafetensors"):
             with self.subTest(
                 method=method
             ), tempfile.TemporaryDirectory() as directory:

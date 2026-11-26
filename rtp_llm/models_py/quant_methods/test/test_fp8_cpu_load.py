@@ -11,6 +11,7 @@ import torch
 from safetensors.torch import save_file
 
 from rtp_llm.config.quant_config import Fp8DynamicPerTensorQuantConfig
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers
 from rtp_llm.models_py.layers.linear import ColumnParallelLinear
 from rtp_llm.models_py.layers.moe_experts import BaseMoEExperts
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
@@ -198,8 +199,9 @@ class CpuFp8LoadTest(unittest.TestCase):
     def stage(self, method, force, rank=0):
         model = None
 
-        def stop_before_runtime(loaded, device):
+        def stop_before_runtime(loaded, device, *, defer_executor=False):
             nonlocal model
+            self.assertFalse(defer_executor)
             model = loaded
             raise CpuPhaseComplete
 
@@ -246,7 +248,7 @@ class CpuFp8LoadTest(unittest.TestCase):
         return model, values
 
     def test_real_scratch_and_native_fst_cpu_stage_matches_main(self):
-        for method in ("scratch", "fastsafetensors"):
+        for method in checkpoint_readers("scratch", "fastsafetensors"):
             for rank in (0, 1):
                 with self.subTest(method=method, ep_rank=rank):
                     model, values = self.stage(method, True, rank)

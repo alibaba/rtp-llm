@@ -12,6 +12,7 @@ from safetensors.torch import save_file
 
 from rtp_llm.config.quant_config import CompressedW4A8Int4PerChannelQuantConfig
 from rtp_llm.config.quant_config import QuantizationConfig as CheckpointQuantConfig
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers
 from rtp_llm.models_py.fst_range_reader import iter_fst_range_tensors
 from rtp_llm.models_py.layers.moe_experts import BaseMoEExperts
 from rtp_llm.models_py.quant_methods.base import QuantizationConfig
@@ -95,7 +96,7 @@ class KimiCompressedExpertsTest(unittest.TestCase):
             parsed = CheckpointQuantConfig.load_from_ckpt(temp)
             self.assertIsInstance(parsed, CompressedW4A8Int4PerChannelQuantConfig)
             for read, (tp, tr, ep, er) in itertools.product(
-                (get_all_weights, iter_fst_range_tensors),
+                checkpoint_readers(get_all_weights, iter_fst_range_tensors),
                 ((1, 0, 1, 0), (2, 0, 1, 0), (2, 1, 1, 0), (1, 0, 2, 1)),
             ):
                 with self.subTest(reader=read.__name__, tp=tp, tr=tr, ep=ep, er=er):

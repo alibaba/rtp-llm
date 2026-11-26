@@ -70,9 +70,41 @@ def split_q_gate(ts: List[torch.Tensor], head_num: int, part: int):
     return t[:, part, :, :].reshape(-1, dim1).contiguous()
 
 
-def _plus_one(tensor: torch.Tensor) -> torch.Tensor:
-    """Add 1 for gemma_rms_norm."""
-    return tensor + 1
+class _CheckpointGammaOffset:
+    """HF gamma is zero-centered. Finalized FT/resident parameters are not."""
+
+    def load_weights(self, weights):
+        # The online checkpoint transaction also calls the leaf loader on
+        # private staging storage. Never mutate the reader or RPC input.
+        super().load_weights(
+            {
+                name: unwrap_checkpoint_tensor(value)[0] + 1 if name == "weight" else value
+                for name, value in weights.items()
+            }
+        )
+
+
+class _QwenNextRMSNorm(_CheckpointGammaOffset, RMSNorm):
+    pass
+
+
+class _QwenNextRMSResNorm(_CheckpointGammaOffset, RMSResNorm):
+    pass
+
+
+class _LanguageMapper(WeightsMapper):
+    """Unwrap only leading HF model/language components, never interior module names."""
+
+    @staticmethod
+    def text_name(name: str) -> str:
+        if name.startswith("model."):
+            name = name.removeprefix("model.")
+            while name.startswith("language_model."):
+                name = name.removeprefix("language_model.")
+        return name
+
+    def map_name(self, name: str) -> str:
+        return super().map_name(self.text_name(name))
 
 
 # ================================================================== #
@@ -355,6 +387,8 @@ class Qwen3NextAttention(Qwen3Attention):
     Q-Gate fusion: the checkpoint q_proj.weight contains both Q and Gate
     interleaved per-head. During load_weights, split_q_gate separates them.
     """
+
+    _qk_norm_type = _QwenNextRMSNorm
 
     def __init__(
         self,
@@ -812,10 +846,10 @@ class Qwen3NextDecoderLayer(RtpModule):
                 prefix=f"{prefix}.mlp",
             )
 
-        self.input_layernorm = RMSResNorm(
+        self.input_layernorm = _QwenNextRMSResNorm(
             hidden_size, eps=rms_eps, params_dtype=cfg["params_dtype"]
         )
-        self.post_attention_layernorm = RMSResNorm(
+        self.post_attention_layernorm = _QwenNextRMSResNorm(
             hidden_size, eps=rms_eps, params_dtype=cfg["params_dtype"]
         )
 
@@ -862,16 +896,18 @@ class Qwen3NextForCausalLM(ResidentDecoderOwner, DecoderHandlerOwner, Qwen3NextM
     def supports_scratch_moe_tp_preshard(self):
         return bool(self.config.moe_layer_index)
 
-    WEIGHTS_MAPPER = WeightsMapper(
-        prefix_mapping={
-            "model.language_model.": "",
-            "model.": "",
-        }
-    )
+    WEIGHTS_MAPPER = _LanguageMapper()
+
+    def online_checkpoint_name(self, name: str) -> str:
+        # Stage filtering sees HF names before leaf resolution. Give the same
+        # physical layer the same PP owner regardless of its export wrappers.
+        if name.startswith("model.language_model."):
+            return "model." + self.WEIGHTS_MAPPER.text_name(name)
+        return name
 
     def _is_core_checkpoint_weight(self, name: str) -> bool:
         if self.config.model_type in ("qwen35_dense", "qwen35_moe"):
-            return not (name.startswith("mtp.") or is_visual_checkpoint_name(name))
+            return not (self.WEIGHTS_MAPPER.text_name(name).startswith("mtp.") or is_visual_checkpoint_name(name))
         return not name.startswith(("mtp.", "model.visual."))
 
     def checkpoint_weight_name_filter(self) -> Optional[Callable[[str], bool]]:
@@ -955,8 +991,6 @@ class Qwen3NextForCausalLM(ResidentDecoderOwner, DecoderHandlerOwner, Qwen3NextM
         def _transform(it):
             cfg = self._cfg
             for name, tensor in it:
-                if self._is_norm_weight(name):
-                    tensor = _plus_one(tensor)
                 if any(
                     name.endswith(f"self_attn.q_proj.{suffix}")
                     for suffix in (
@@ -1011,22 +1045,6 @@ class Qwen3NextForCausalLM(ResidentDecoderOwner, DecoderHandlerOwner, Qwen3NextM
             with torch.no_grad():
                 self.lm_head.weight.copy_(processed)
         self._lm_head_postprocessed = True
-
-    @staticmethod
-    def _is_norm_weight(name: str) -> bool:
-        # Linear Attention norm uses 'identity' (NOT plus_one) in the old loader,
-        # so we must exclude it from the plus_one transform.
-        if "linear_attn" in name:
-            return False
-        # Standard norm weights: input_layernorm, post_attention_layernorm,
-        # q_norm, k_norm, final norm — all use plus_one (gemma_rms_norm).
-        return name.endswith(
-            (
-                "norm.weight",
-                "pre_fc_norm_embedding.weight",
-                "pre_fc_norm_hidden.weight",
-            )
-        )
 
     @staticmethod
     def _split_q_gate_yield(
@@ -1135,7 +1153,7 @@ class Qwen3NextForCausalLM(ResidentDecoderOwner, DecoderHandlerOwner, Qwen3NextM
             else nn.ModuleList(owned.values())
         )
         self.norm = (
-            RMSResNorm(
+            _QwenNextRMSResNorm(
                 cfg["hidden_size"],
                 eps=cfg["rms_norm_eps"],
                 params_dtype=cfg["params_dtype"],
@@ -1237,26 +1255,15 @@ class Qwen3NextMTPForCausalLM(Qwen3NextForCausalLM):
 
     _expects_mtp = True
     _expected_moe_layer_index = (0,)
-    WEIGHTS_MAPPER = WeightsMapper(
-        prefix_mapping={
-            "model.language_model.": "",
-            "model.": "",
-            "mtp.": "",
-        }
-    )
-    _EMBEDDING_WEIGHT_NAMES = frozenset(
-        {
-            "model.embed_tokens.weight",
-            "model.language_model.embed_tokens.weight",
-        }
-    )
+    WEIGHTS_MAPPER = _LanguageMapper(prefix_mapping={"mtp.": ""})
 
     @classmethod
     def _is_mtp_checkpoint_weight(cls, name: str) -> bool:
+        text = cls.WEIGHTS_MAPPER.text_name(name)
         return (
-            (name.startswith("mtp.") and len(name) > len("mtp."))
-            or name == "lm_head.weight"
-            or name in cls._EMBEDDING_WEIGHT_NAMES
+            (text.startswith("mtp.") and len(text) > len("mtp."))
+            or text == "lm_head.weight"
+            or (text == "embed_tokens.weight" and name.startswith("model."))
         )
 
     def checkpoint_weight_name_filter(self) -> Callable[[str], bool]:
@@ -1277,12 +1284,12 @@ class Qwen3NextMTPForCausalLM(Qwen3NextForCausalLM):
                 f"{list(self._expected_moe_layer_index)}"
             )
 
-        self.pre_fc_norm_embedding = RMSNorm(
+        self.pre_fc_norm_embedding = _QwenNextRMSNorm(
             cfg["hidden_size"],
             eps=cfg["rms_norm_eps"],
             params_dtype=cfg["params_dtype"],
         )
-        self.pre_fc_norm_hidden = RMSNorm(
+        self.pre_fc_norm_hidden = _QwenNextRMSNorm(
             cfg["hidden_size"],
             eps=cfg["rms_norm_eps"],
             params_dtype=cfg["params_dtype"],

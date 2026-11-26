@@ -17,6 +17,7 @@ from rtp_llm.models_py.quant_methods.base import (
     QuantizeMethodBase,
     register_quant_method,
 )
+from rtp_llm.models_py.quant_methods.startup_lora import FloatingStartupLoRA, merge_calibrated_projection
 
 
 def _convert_e4m3fn_to_fnuz(
@@ -607,6 +608,9 @@ class Fp8LinearMethod(QuantizeMethodBase):
 
     checkpoint_suffix_family = "fp8_per_tensor"
 
+    def merge_ft_lora(self, layer, update):
+        merge_calibrated_projection(layer, update, per_row=False)
+
     @property
     def required_checkpoint_parameters(self) -> Tuple[str, ...]:
         required = ["weight", "weight_scale"]
@@ -721,7 +725,7 @@ class Fp8LinearMethod(QuantizeMethodBase):
 
 
 @register_quant_method("fp8_online", "FP8_DYNAMIC_PER_TENSOR")
-class Fp8OnlineLinearMethod(QuantizeMethodBase):
+class Fp8OnlineLinearMethod(FloatingStartupLoRA, QuantizeMethodBase):
     """Online FP8 per-tensor quantization.
 
     Loads BF16/FP16 weights from ckpt, quantizes to float8_e4m3fn at load time,
@@ -740,7 +744,7 @@ class Fp8OnlineLinearMethod(QuantizeMethodBase):
             quantize_weight_per_tensor_cpu,
         )
 
-        weight, scale = quantize_weight_per_tensor_cpu(layer.weight.data)
+        weight, scale = quantize_weight_per_tensor_cpu(self.weight_before_quantization(layer))
         layer.weight.data = weight
         layer.weight_scale.data = scale.reshape(1).contiguous()
         layer._fp8_cpu_weight_prepared = True
@@ -771,7 +775,7 @@ class Fp8OnlineLinearMethod(QuantizeMethodBase):
         _select_fp8_runtime_backend(device, "per_tensor")
 
     def process_weights_after_loading(self, layer):
-        weight = layer.weight.data
+        weight = self.weight_before_quantization(layer)
         if weight.ndim != 2:
             raise ValueError(f"expected 2D weight, got {weight.shape}")
 
@@ -832,7 +836,7 @@ class Fp8OnlineLinearMethod(QuantizeMethodBase):
 
 
 @register_quant_method("fp8_per_channel_online")
-class Fp8PerChannelOnlineLinearMethod(_RocmPtpcEpilogueMixin, QuantizeMethodBase):
+class Fp8PerChannelOnlineLinearMethod(_RocmPtpcEpilogueMixin, FloatingStartupLoRA, QuantizeMethodBase):
     """Online FP8 per-channel quantization for the new loader.
 
     Loads BF16/FP16 weights from ckpt, quantizes to float8_e4m3fn at load time
@@ -879,7 +883,7 @@ class Fp8PerChannelOnlineLinearMethod(_RocmPtpcEpilogueMixin, QuantizeMethodBase
         )
 
     def process_weights_after_loading(self, layer):
-        weight = layer.weight.data
+        weight = self.weight_before_quantization(layer)
         if weight.ndim != 2:
             raise ValueError(f"expected 2D weight, got {weight.shape}")
         self._runtime_backend = _select_fp8_runtime_backend(
@@ -1103,7 +1107,7 @@ class Fp8PerChannelLinearMethod(_RocmPtpcEpilogueMixin, QuantizeMethodBase):
 
 
 @register_quant_method("fp8_block_online")
-class Fp8BlockOnlineLinearMethod(QuantizeMethodBase):
+class Fp8BlockOnlineLinearMethod(FloatingStartupLoRA, QuantizeMethodBase):
     """Online FP8 per-block (128x128) quantization for the new loader.
 
     Loads BF16/FP16 weights from ckpt, quantizes to float8_e4m3fn at load time
@@ -1162,7 +1166,7 @@ class Fp8BlockOnlineLinearMethod(QuantizeMethodBase):
         )
 
     def process_weights_after_loading(self, layer):
-        weight = layer.weight.data
+        weight = self.weight_before_quantization(layer)
         self._runtime_backend = _select_fp8_runtime_backend(weight.device, "block")
         self._use_deep_gemm = self._runtime_backend == _CUDA_DEEP_GEMM
         if weight.ndim != 2:

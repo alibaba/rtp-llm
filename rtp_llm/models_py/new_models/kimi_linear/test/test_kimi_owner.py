@@ -12,6 +12,7 @@ from safetensors.torch import save_file
 
 from rtp_llm.models.kimi_linear.kimi_linear import KimiLinear
 from rtp_llm.models.direct_checkpoint import load_owned_model
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewLoaderLoadMethod, NewModelLoader
 from rtp_llm.models_py.new_models.deepseek_v3.moe import DeepSeekV32MoeGate
 from rtp_llm.models_py.model_desc.kimi_linear import KimiLinearModel
@@ -129,7 +130,7 @@ class KimiModelCheckpointTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as root:
             save_file(data, str(Path(root)/"model.safetensors"))
-            for method in (NewLoaderLoadMethod.SCRATCH, NewLoaderLoadMethod.FASTSAFETENSORS):
+            for method in checkpoint_readers(NewLoaderLoadMethod.SCRATCH, NewLoaderLoadMethod.FASTSAFETENSORS):
                 with self.subTest(method=method):
                     loader = GateLoader({"model_type": "kimi_linear"},
                                         NewLoaderConfig(device="cpu", load_method=method), model_path=root)
@@ -158,7 +159,7 @@ class KimiModelCheckpointTest(unittest.TestCase):
             config.data_type, config.lora_infos = "fp32", {}
             config.linear_attention_config.ssm_state_dtype = DataType.TYPE_FP32
             config.linear_attention_config.conv_state_dtype = DataType.TYPE_FP32
-            for method in (NewLoaderLoadMethod.SCRATCH, NewLoaderLoadMethod.FASTSAFETENSORS):
+            for method in checkpoint_readers(NewLoaderLoadMethod.SCRATCH, NewLoaderLoadMethod.FASTSAFETENSORS):
                 with self.subTest(method=method):
                     service = SimpleNamespace(
                         model_config=config, _weight_alias_names=(), _weight_alias_owner=None,

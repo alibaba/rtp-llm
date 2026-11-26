@@ -268,6 +268,32 @@ class Qwen3DFlashModel(DSparkProposerMixin, Qwen3ForCausalLM):
 
     _decoder_layer = _DFlashDecoderLayer
     runtime_parameter_paths = {"embedding": "embed_tokens.weight", "lm_head": "lm_head.weight"}
+    preserved_ft_parameter_loans = {
+        "embed_tokens.weight": "global.embedding",
+        "lm_head.weight": "global.lm_head",
+    }
+
+    def load_ft_checkpoint(self, checkpoint):
+        from rtp_llm.models_py.ft_checkpoint import RuntimeTensorBinding
+        from rtp_llm.models_py.new_models.qwen2.ft_checkpoint import (
+            load_gqa_ffn_ft_checkpoint,
+        )
+
+        extras = (
+            RuntimeTensorBinding(
+                ("global.dspark_fc.weight",), "fc.weight", lambda v: v[0].T
+            ),
+            RuntimeTensorBinding(
+                ("global.dspark_hidden_norm.gamma",), "hidden_norm.weight", lambda v: v[0]
+            ),
+        )
+        for field in extras:
+            if field.sources[0] not in checkpoint.entries:
+                raise ValueError(
+                    f"DFlash FT archive omitted {field.sources[0]}; "
+                    "re-export from the original HF draft"
+                )
+        load_gqa_ffn_ft_checkpoint(self, checkpoint, extra_bindings=extras)
 
     def _decoder_kwargs(self, parallelism_config):
         return dict(layer_types=self.config.dflash_layer_types,

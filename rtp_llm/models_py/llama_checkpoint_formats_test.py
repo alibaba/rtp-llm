@@ -20,7 +20,8 @@ def values(*shape):
 
 
 def load(root, tp=1, rank=0, kv_heads=1, dtype=torch.float32, task_type=None,
-         *, online_quant=None, device="cpu", force_cpu=False):
+         *, online_quant=None, device="cpu", force_cpu=False, startup_lora=None,
+         load_method="scratch"):
     config = SimpleNamespace(
         ckpt_path=str(root), model_type="llama", num_layers=1, vocab_size=8,
         hidden_size=8, inter_size=8, layernorm_eps=1e-6, is_mtp=False,
@@ -43,9 +44,22 @@ def load(root, tp=1, rank=0, kv_heads=1, dtype=torch.float32, task_type=None,
         parallelism_config=parallel, quant_config=QuantizationConfig(
             online_quant or (quant.get_method() if quant else "none"), source_config=quant
         ),
-        load_method="scratch",
+        load_method=load_method,
     )
-    return NewModelLoader(config, options, model_path=str(root)).load()
+    return NewModelLoader(config, options, model_path=str(root)).load(startup_lora=startup_lora)
+
+
+def write_q_adapter(root, gain):
+    from safetensors.torch import save_file
+
+    adapter = root / "adapter"
+    adapter.mkdir()
+    (adapter / "adapter_config.json").write_text(json.dumps({"r": 1, "lora_alpha": 1}))
+    stem = "base_model.model.model.layers.0.self_attn.q_proj"
+    a = torch.ones(1, 8)
+    b = (values(8, 1) - 4) * gain
+    save_file({stem + ".lora_A.weight": a, stem + ".lora_B.weight": b}, str(adapter / "adapter_model.safetensors"))
+    return ("q", str(adapter)), b @ a
 
 
 def write_meta_source(root):
@@ -356,6 +370,7 @@ class LlamaCheckpointFormatsTest(unittest.TestCase):
             generate_ft_index(str(ft), {"TP_SIZE": 2, "DP_SIZE": 1, "EP_SIZE": 1})
             (ft / "config.json").write_bytes((root / "config.json").read_bytes())
             (ft / "pertensorquant.ini").touch()
+            adapter, delta = write_q_adapter(root, gain=256)
             for rank in range(2):
                 model = load(root, 2, rank)
                 restored = load(ft, 2, rank)
@@ -365,6 +380,19 @@ class LlamaCheckpointFormatsTest(unittest.TestCase):
                     self.assertEqual(name, loaded_name)
                     torch.testing.assert_close(original, actual, rtol=0, atol=0)
                 qkv = model.layers[0].self_attn.qkv_proj
+                # A real PEFT file plus the rank-local FT export, including
+                # replicated KV heads. The Q delta exceeds the old INT8 range;
+                # only those output rows may change their weight step.
+                loaded_qkv = load(ft, 2, rank, startup_lora=adapter).layers[0].self_attn.qkv_proj
+                merged = qkv.weight.float() * qkv.weight_scale
+                merged[:4] += delta.chunk(2)[rank]
+                step = torch.maximum(qkv.weight_scale, torch.maximum(
+                    merged.amax(1, keepdim=True) / 127, -merged.amin(1, keepdim=True) / 128
+                ))
+                torch.testing.assert_close(loaded_qkv.weight_scale, step, rtol=0, atol=0)
+                torch.testing.assert_close(loaded_qkv.weight, (merged / step).round().clamp(-128, 127).to(torch.int8))
+                torch.testing.assert_close(loaded_qkv.input_scale, qkv.input_scale, rtol=0, atol=0)
+                torch.testing.assert_close(loaded_qkv.weight[4:], qkv.weight[4:], rtol=0, atol=0)
                 x = (values(3, 8) - 5) / 3
                 outputs = []
                 for proj in ("q_proj", "k_proj", "v_proj"):

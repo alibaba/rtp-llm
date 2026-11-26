@@ -2,8 +2,8 @@ load("//rtp_llm/models_py:checkpoint_test_platforms.bzl", "checkpoint_reader_tes
 
 py_library(
     name = "draft_body",
-    srcs = ["__init__.py", "body.py", "proposal.py", "service.py"],
-    deps = ["//rtp_llm/models_py:new_loader_core", "//rtp_llm:torch"],
+    srcs = ["__init__.py", "body.py", "ft_checkpoint.py", "proposal.py", "service.py"],
+    deps = ["//rtp_llm/models_py:new_loader_core", "//rtp_llm:torch", "//rtp_llm/tools/convert:ft_export_writer"],
     visibility = ["//visibility:public"],
 )
 
@@ -33,10 +33,19 @@ py_test(
         env = checkpoint_reader_test_env({"CUDA_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"}),
         tags = tags,
         exec_properties = properties,
-        deps = [":draft_body", "//rtp_llm:model_factory", "//rtp_llm:models", "//rtp_llm:sdk", "//rtp_llm:transformers", "//rtp_llm/models_py:new_weight_loader", "//rtp_llm:safetensors"],
+        deps = [":draft_body", "//rtp_llm:model_factory", "//rtp_llm:models", "//rtp_llm:sdk", "//rtp_llm:transformers", "//rtp_llm/models_py:new_weight_loader", "//rtp_llm:safetensors", "//rtp_llm/tools/convert:convert"],
     )
     for name, cases, tags, properties in [
-        ("service_test", ["ServiceTest.test_tp2_scratch_shards", "ServiceTest.test_tp2_fst_shards"], [], {}),
+        ("service_test", [
+            "ServiceTest.test_tp2_scratch_shards",
+            "ServiceTest.test_tp2_fst_shards",
+            "ServiceTest.test_tp2_ft_roundtrip",
+            "ServiceTest.test_tp2_complete_descriptor_ft",
+            "ServiceTest.test_tp2_ft_roundtrip_fst",
+            "ServiceTest.test_tp2_ep2_scratch_shards",
+            "ServiceTest.test_tp2_ep2_fst_shards",
+            "ServiceTest.test_zero_experts_fail_for_routed_owners_and_configs",
+        ], [], {}),
         ("native_service_output_test", ["ServiceTest.test_scratch", "ServiceTest.test_native_fst"], ["L20_CU13"], {"gpu": "L20_CU13", "gpu_count": "1"}),
     ]
 ]

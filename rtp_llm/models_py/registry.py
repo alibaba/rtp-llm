@@ -25,6 +25,12 @@ def _class_location(cls: Type[nn.Module]) -> str:
 
 
 _ISOLATED_LAZY_OWNERS = set()
+_EXPERT_CHECKPOINT_REQUIRED = set()
+
+
+def requires_expert_checkpoint(model_type: str) -> bool:
+    """Whether this checkpoint owner always has routed experts (regardless of EP)."""
+    return model_type in _EXPERT_CHECKPOINT_REQUIRED
 
 
 def uses_isolated_checkpoint_load(model_type: str) -> bool:
@@ -34,7 +40,9 @@ def uses_isolated_checkpoint_load(model_type: str) -> bool:
     )
 
 
-def register_lazy_model(model_type: str, module_path: str, class_name: str, *, isolated=False) -> None:
+def register_lazy_model(
+    model_type: str, module_path: str, class_name: str, *, isolated=False, requires_experts=False
+) -> None:
     model_type = _validate_model_type(model_type)
     if not module_path or not class_name:
         raise ValueError("module_path and class_name must be non-empty")
@@ -52,9 +60,11 @@ def register_lazy_model(model_type: str, module_path: str, class_name: str, *, i
     _LAZY_MODEL_REGISTRY[model_type] = candidate
     if isolated:
         _ISOLATED_LAZY_OWNERS.add(model_type)
+    if requires_experts:
+        _EXPERT_CHECKPOINT_REQUIRED.add(model_type)
 
 
-def register_model(model_type: str):
+def register_model(model_type: str, *, requires_experts=False):
     model_type = _validate_model_type(model_type)
 
     def decorator(cls: Type[nn.Module]):
@@ -72,6 +82,8 @@ def register_model(model_type: str):
                 f"Model type {model_type!r} already maps to {lazy[0]}.{lazy[1]}"
             )
         MODEL_REGISTRY[model_type] = cls
+        if requires_experts:
+            _EXPERT_CHECKPOINT_REQUIRED.add(model_type)
         logger.info(
             "Registered newloader model %s -> %s.%s (%s)",
             model_type,
@@ -140,7 +152,7 @@ register_lazy_model(
 
 for _name in ("qwen_3_moe", "qwen3_coder_moe"):
     register_lazy_model(
-        _name, "rtp_llm.models_py.new_models.qwen3_moe.language", "Qwen3MoeForCausalLM"
+        _name, "rtp_llm.models_py.new_models.qwen3_moe.language", "Qwen3MoeForCausalLM", requires_experts=True
     )
 for _name in ("qwen_3", "qwen_3_tool"):
     register_lazy_model(_name, "rtp_llm.models_py.new_models.qwen3", "Qwen3ForCausalLM")
@@ -148,6 +160,7 @@ register_lazy_model(
     "glm4_moe",
     "rtp_llm.models_py.new_models.glm4_moe.language",
     "Glm4MoeForCausalLM",
+    requires_experts=True,
 )
 register_lazy_model(
     "llama",
@@ -182,7 +195,8 @@ for _vl_type, _vl_owner in (
     ("qwen3_vl_moe", "Qwen3VLMoeForCausalLM"),
 ):
     register_lazy_model(
-        _vl_type, "rtp_llm.models_py.new_models.qwen3_vl.language", _vl_owner
+        _vl_type, "rtp_llm.models_py.new_models.qwen3_vl.language", _vl_owner,
+        requires_experts=_vl_type == "qwen3_vl_moe",
     )
 
 # The owner selects direct Q, compressed Q or the sparse indexer from the
@@ -199,6 +213,7 @@ for _model_type in (
         _model_type,
         "rtp_llm.models_py.new_models.deepseek_v3.language",
         "DeepSeekV32ForCausalLM",
+        requires_experts=_model_type == "glm4_moe_lite",
     )
 
 register_lazy_model(
@@ -248,7 +263,8 @@ for _model_type, _owner in (
     ("qwen35_moe_mtp", "Qwen35MoeMTPForCausalLM"),
 ):
     register_lazy_model(
-        _model_type, "rtp_llm.models_py.new_models.qwen3_next.language", _owner
+        _model_type, "rtp_llm.models_py.new_models.qwen3_next.language", _owner,
+        requires_experts=_model_type in ("qwen35_moe", "qwen35_moe_mtp"),
     )
 
 register_lazy_model(

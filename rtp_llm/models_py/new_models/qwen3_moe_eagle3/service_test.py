@@ -14,9 +14,11 @@ from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from transformers import PreTrainedTokenizerFast
 
+from rtp_llm.config.py_config_modules import ResidentWeightsConfig
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.qwen_v3_moe import Qwen3Moe, Qwen3MoeEagle3
+from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.new_models.qwen3_moe_eagle3.body import Eagle3DraftBody
 from rtp_llm.models_py.new_models.qwen3_moe_eagle3.draft_body_test import (
     _CPUAttention,
@@ -25,14 +27,14 @@ from rtp_llm.models_py.new_models.qwen3_moe_eagle3.draft_body_test import (
 from rtp_llm.ops import FMHAConfig, HWKernelConfig, SpeculativeType
 
 
-def topology(size=1, rank=0):
+def topology(size=1, rank=0, ep_size=1):
     return SimpleNamespace(
         tp_size=size,
         tp_rank=rank,
         dp_size=1,
         dp_rank=0,
-        ep_size=1,
-        ep_rank=0,
+        ep_size=ep_size,
+        ep_rank=rank % ep_size,
         pp_size=1,
         pp_rank=0,
         pp_stage_layer_counts=[],
@@ -53,7 +55,7 @@ def topology(size=1, rank=0):
 
 class ServiceTest(unittest.TestCase):
     @torch.inference_mode()
-    def exercise(self, method, size=1, rank=0):
+    def exercise(self, method, size=1, rank=0, ep_size=1, *, ft=False):
         torch.manual_seed(4)
         with tempfile.TemporaryDirectory() as folder:
             t, d = Path(folder) / "target", Path(folder) / "draft"
@@ -103,7 +105,7 @@ class ServiceTest(unittest.TestCase):
                 Qwen3Moe._create_config(str(t)),
                 Qwen3MoeEagle3._create_config(str(d)),
             )
-            pc = topology(size, rank)
+            pc = topology(size, rank, ep_size)
             for cfg, kind in ((target, "qwen_3_moe"), (draft, "qwen_3_moe_eagle3")):
                 cfg.model_type = kind
                 cfg.enable_fp32_lm_head = False
@@ -118,6 +120,44 @@ class ServiceTest(unittest.TestCase):
                 for n, p in Eagle3DraftBody(*g).named_parameters()
             }
             save_file(weights, str(d / "model.safetensors"))
+            if ft:
+                from rtp_llm.tools.convert.ft_export_job import create_ft_export_job
+                from rtp_llm.tools.convert.ft_export_metadata import generate_ft_index
+                from rtp_llm.tools.convert.ft_export_writer import write_ft_shards
+
+                exported = Path(folder) / "ft"
+                for peer in range(size):
+                    if ft == "descriptor":
+                        # Independent old-layout records: legacy kernels are
+                        # [in,out], K/V replicated at TP2 and FFNs separate.
+                        w = weights
+                        a = "midlayer.self_attn."
+                        m = "midlayer.mlp."
+                        qkv = torch.cat((w[a+"q_proj.weight"].chunk(size)[peer],
+                                         w[a+"k_proj.weight"], w[a+"v_proj.weight"]))
+                        layer = {
+                            "eagle3_fc.weight": w["fc.weight"].T,
+                            "eagle3_fc.gamma": w["midlayer.hidden_norm.weight"],
+                            "eagle3_input.gamma": w["midlayer.input_layernorm.weight"],
+                            "pre_layernorm_weights.gamma": w["midlayer.input_layernorm.weight"],
+                            "post_layernorm_weights.gamma": w["midlayer.post_attention_layernorm.weight"],
+                            "self_attention_weights.query_weight.kernel": qkv.T,
+                            "self_attention_weights.attention_output_weight.kernel": w[a+"o_proj.weight"].chunk(size, 1)[peer].T,
+                            "ffn_weights.intermediate_weight.kernel": w[m+"gate_proj.weight"].chunk(size)[peer].T,
+                            "ffn_weights.intermediate_weight3.kernel": w[m+"up_proj.weight"].chunk(size)[peer].T,
+                            "ffn_weights.intermediate_weight2.kernel": w[m+"down_proj.weight"].chunk(size, 1)[peer].T,
+                        }
+                        write_ft_shards([(None, "final_layernorm.gamma", w["norm.weight"]),
+                                         *((0, k, v) for k, v in layer.items())], exported, tp_rank=peer)
+                        continue
+                    job = create_ft_export_job(SimpleNamespace(
+                        model_config=draft, parallelism_config=topology(size, peer),
+                        loader_recycle_handles=False,
+                    ))
+                    job.dump_weight_as_ft_style("cpu", exported)
+                generate_ft_index(exported, {"TP_SIZE": size, "DP_SIZE": 1, "EP_SIZE": 1})
+                draft.ckpt_path = str(exported)
+                (exported / "config.json").write_bytes((d / "config.json").read_bytes())
             target_w = {
                 "model.embed_tokens.weight": torch.randn(24, 8),
                 "lm_head.weight": torch.randn(24, 8),
@@ -179,6 +219,7 @@ class ServiceTest(unittest.TestCase):
                     warm_up=False, model_warm_up=False, max_generate_batch_size=1
                 ),
                 load_config=SimpleNamespace(
+                    resident_weights_config=ResidentWeightsConfig(),
                     load_method=method,
                     loader_recycle_handles=False,
                     moe_pure_tp_preshard=False,
@@ -214,6 +255,37 @@ class ServiceTest(unittest.TestCase):
                     borrower.weight.get_global_weight(key),
                 )
             model = borrower.py_model
+            if ft:
+                # Include FC, final norm, fused QKV and both gate/up halves.
+                from rtp_llm.models_py.ft_checkpoint import CheckpointTopology, FTCheckpoint
+                from rtp_llm.models_py.new_models.qwen3_moe_eagle3.service import build_eagle3_body
+
+                expected = build_eagle3_body(draft, draft.compute_dtype, size, rank, size, rank)
+                expected.load_weights(weights)
+                for name, param in model.body.named_parameters():
+                    torch.testing.assert_close(param, expected.get_parameter(name), rtol=0, atol=0)
+                checkpoint = FTCheckpoint.open(str(exported), CheckpointTopology(tp_size=size, tp_rank=rank))
+                if ft == "descriptor":
+                    q_ln = "layers.0.self_attention_weights.q_layernorm.gamma"
+                    checkpoint.entries[q_ln] = checkpoint.entries["global.final_layernorm.gamma"]
+                    with self.assertRaisesRegex(ValueError, "Q/K normalization"):
+                        model.load_ft_checkpoint(checkpoint)
+                    del checkpoint.entries[q_ln]
+                    qkv = "layers.0.self_attention_weights.query_weight.kernel"
+                    checkpoint.entries[qkv] = checkpoint.entries["layers.0.self_attention_weights.attention_output_weight.kernel"]
+                    with self.assertRaisesRegex(ValueError, "layout mismatch.*qkv_proj"):
+                        model.load_ft_checkpoint(checkpoint)
+                    del checkpoint.entries["global.final_layernorm.gamma"]
+                else:
+                    del checkpoint.entries[next(k for k in checkpoint.entries if k.endswith(".norm.weight"))]
+                with self.assertRaisesRegex(ValueError, "re-export the original EAGLE3"):
+                    model.load_ft_checkpoint(checkpoint)
+            if ep_size > 1:
+                local = owner.py_model.layers[0].mlp.experts
+                key = f"model.layers.0.mlp.experts.{rank}.down_proj.weight"
+                self.assertEqual(local.w2.size(0), 1)
+                torch.testing.assert_close(local.w2[0], target_w[key], rtol=0, atol=0)
+                self.assertIsNone(borrower.model_weights_loader._expert_filter())
             if size > 1:
                 # The release has fewer KV heads than TP ranks. Check that Q is
                 # partitioned but K/V remain replicated; local CPU test only,
@@ -296,6 +368,38 @@ class ServiceTest(unittest.TestCase):
         for rank in range(2):
             self.exercise("scratch", 2, rank)
 
+    def test_tp2_ft_roundtrip(self):
+        for rank in range(2):
+            self.exercise("scratch", 2, rank, ft=True)
+
+    def test_tp2_complete_descriptor_ft(self):
+        for rank in range(2):
+            self.exercise("scratch", 2, rank, ft="descriptor")
+
+    @unittest.skipUnless(
+        os.environ.get("NEWLOADER_TEST_NATIVE_FST") == "1", "native reader required"
+    )
+    def test_tp2_ft_roundtrip_fst(self):
+        for rank in range(2):
+            self.exercise("fastsafetensors", 2, rank, ft=True)
+
+    def test_tp2_ep2_scratch_shards(self):
+        for rank in range(2):
+            with self.subTest(rank=rank):
+                self.exercise("scratch", 2, rank, ep_size=2)
+
+    def test_zero_experts_fail_for_routed_owners_and_configs(self):
+        for cfg in (
+            dict(model_type="qwen_3_moe"),
+            dict(model_type="qwen_3_moe_eagle3", moe_k=1),
+            dict(model_type="qwen_3_moe_eagle3", moe_style=1),
+            dict(model_type="qwen35_moe_mtp", moe_layer_index=[0]),
+        ):
+            with self.subTest(cfg=cfg):
+                loader = NewModelLoader(cfg, NewLoaderConfig(ep_size=2))
+                with self.assertRaisesRegex(ValueError, "reports zero experts"):
+                    loader._expert_filter()
+
     @unittest.skipUnless(
         os.environ.get("NEWLOADER_TEST_NATIVE_FST") == "1", "native reader required"
     )
@@ -308,6 +412,14 @@ class ServiceTest(unittest.TestCase):
     def test_tp2_fst_shards(self):
         for rank in range(2):
             self.exercise("fastsafetensors", 2, rank)
+
+    @unittest.skipUnless(
+        os.environ.get("NEWLOADER_TEST_NATIVE_FST") == "1", "native reader required"
+    )
+    def test_tp2_ep2_fst_shards(self):
+        for rank in range(2):
+            with self.subTest(rank=rank):
+                self.exercise("fastsafetensors", 2, rank, ep_size=2)
 
 
 if __name__ == "__main__":

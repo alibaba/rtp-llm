@@ -31,6 +31,15 @@ _DSV4_FP8_TEST_DEPS = [
     ]
 ]
 
+py_test(
+    name = "dsv4_indexer_resident_test",
+    srcs = ["dsv4_indexer_resident_test.py", "dsv4_indexer_checkpoint_test.py"],
+    main = "dsv4_indexer_resident_test.py",
+    deps = ["//rtp_llm/models_py:new_weight_loader", "//rtp_llm/resident_weights"],
+    exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"},
+    tags = ["L20_CU13"],
+)
+
 # Numerical kernels and the associated metadata/pool boundary regressions.
 _GPU_TESTS = [
     "test_owned_shared_quant_linear",

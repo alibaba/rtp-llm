@@ -244,11 +244,11 @@ class RtpModule(nn.Module):
         return None
 
     def _resolve_checkpoint_load_plan(
-        self, module: nn.Module, name: str, shape: tuple[int, ...], *, skip_local_spec=False
+        self, module: nn.Module, name: str, shape: Optional[tuple[int, ...]], *, skip_local_spec=False
     ) -> Tuple[Optional[CheckpointLoadTarget], Optional[ReadSpec]]:
         """Resolve dispatch destination and ReadSpec in one tree traversal."""
         local_spec = None
-        if not skip_local_spec and isinstance(module, RtpModule):
+        if shape is not None and not skip_local_spec and isinstance(module, RtpModule):
             local_spec = module.checkpoint_read_spec(name, shape)
         if "." not in name:
             return self._direct_checkpoint_target(module, name), local_spec
@@ -260,7 +260,7 @@ class RtpModule(nn.Module):
             if child is not None:
                 child_spec = (
                     child.checkpoint_read_spec(name, shape)
-                    if isinstance(child, RtpModule)
+                    if shape is not None and isinstance(child, RtpModule)
                     else None
                 )
                 return (
@@ -283,7 +283,7 @@ class RtpModule(nn.Module):
             if child_loader is not None and child_loader is not RtpModule.load_weights:
                 child_spec = (
                     target.checkpoint_read_spec(child_name, shape)
-                    if isinstance(target, RtpModule)
+                    if shape is not None and isinstance(target, RtpModule)
                     else None
                 )
                 return (
@@ -301,7 +301,7 @@ class RtpModule(nn.Module):
         if child_loader is not None and child_loader is not RtpModule.load_weights:
             child_spec = (
                 child.checkpoint_read_spec(rest, shape)
-                if isinstance(child, RtpModule)
+                if shape is not None and isinstance(child, RtpModule)
                 else None
             )
             return (
@@ -315,6 +315,11 @@ class RtpModule(nn.Module):
         """For a composite loader that maps its input then dispatches to children."""
         mapped = self.WEIGHTS_MAPPER.map_name(name)
         return self._resolve_checkpoint_load_plan(self, mapped, shape, skip_local_spec=True)[1]
+
+    def resolve_lora_projection(self, mapped_name):
+        # PEFT addresses logical floating projections, not a quantized
+        # checkpoint's qweight/scales. No checkpoint tensor is being read.
+        return self._resolve_checkpoint_load_plan(self, mapped_name, None)[0]
 
     def resolve_checkpoint_load_plan(
         self, name: str, shape: tuple[int, ...]

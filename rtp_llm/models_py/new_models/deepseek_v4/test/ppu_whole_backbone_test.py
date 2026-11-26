@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import torch
 from safetensors.torch import save_file
 
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers
 from rtp_llm.models_py.fst_range_reader import iter_fst_range_tensors
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.modules.dsv4.ppu.ppu_module_provider import PpuModuleProvider
@@ -88,7 +89,7 @@ class PpuWholeBackboneTest(unittest.TestCase):
             path = os.path.join(tmp, "model.safetensors")
             save_file(data, path)
             for rank, reader in itertools.product(
-                range(2), (get_all_weights, iter_fst_range_tensors)
+                range(2), checkpoint_readers(get_all_weights, iter_fst_range_tensors)
             ):
                 with self.subTest(rank=rank, backend=reader.__name__):
                     args = fixture.args(rank)

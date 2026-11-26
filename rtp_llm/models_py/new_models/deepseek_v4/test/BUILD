@@ -67,13 +67,11 @@ py_test(
 py_test(
     name = "ppu_backbone_layout_test",
     srcs = ["ppu_backbone_layout_test.py"],
-    deps = ["//rtp_llm/models_py:new_weight_loader"],
+    deps = ["//rtp_llm/models_py:checkpoint_reader_test_support", "//rtp_llm/models_py:new_weight_loader"],
     data = ["//rtp_llm/models_py:ppu_sources"],
-    env = {"CUDA_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"},
-    target_compatible_with = select({
-        "@//:using_ppu": [],
-        "//conditions:default": ["@platforms//:incompatible"],
-    }),
+    env = ue8m0_test_env(),
+    # Layout only, on CPU: PPU runs scratch, native-reader locks also run FST.
+    target_compatible_with = ue8m0_test_platforms(),
 )
 
 py_test(
@@ -83,14 +81,11 @@ py_test(
         "//rtp_llm/models_py:new_models/deepseek_v4/backbone_test.py",
     ],
     main = "ppu_whole_backbone_test.py",
-    deps = ["//rtp_llm/models_py:new_weight_loader", "//rtp_llm:models"],
+    deps = ["//rtp_llm/models_py:checkpoint_reader_test_support", "//rtp_llm/models_py:new_weight_loader", "//rtp_llm:models"],
     data = ["//rtp_llm/models_py:ppu_sources"],
-    env = {"CUDA_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"},
+    env = ue8m0_test_env(),
     env_inherit = ["PPU_FLASH_RELEASE_PATH"],
-    target_compatible_with = select({
-        "@//:using_ppu": [],
-        "//conditions:default": ["@platforms//:incompatible"],
-    }),
+    target_compatible_with = ue8m0_test_platforms(),
 )
 
 py_test(

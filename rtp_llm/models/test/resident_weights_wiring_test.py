@@ -40,7 +40,7 @@ class _Manager:
         self.load_args = None
         self.finished_with = "not called"
 
-    def acquire_for_load(self, device, *, synchronize_ranks):
+    def acquire_for_load(self, device, *, synchronize_ranks, group=None):
         self.load_args = (device, synchronize_ranks)
         return []
 
@@ -147,7 +147,7 @@ class ResidentWeightsRankBarrierTest(unittest.TestCase):
             "torch.distributed.barrier"
         ) as barrier, patch(
             "rtp_llm.models.base_model.all_ranks_true",
-            side_effect=lambda value, device: value,
+            side_effect=lambda value, device, *, group: value,
         ):
             model._load_with_residency("cuda:0", model.model_weights_loader.load)
         return barrier
@@ -156,7 +156,7 @@ class ResidentWeightsRankBarrierTest(unittest.TestCase):
         barrier = self._load(
             ResidentWeightsConfig(mode="dev"), initialized=True, world_size=4
         )
-        barrier.assert_called_once_with()
+        barrier.assert_called_once_with(group=None)
 
     def test_a_process_without_a_process_group_does_not_wait(self):
         barrier = self._load(
@@ -227,15 +227,21 @@ class ResidentWeightsRegressionTest(unittest.TestCase):
     def test_pp_draft_does_not_enter_world_collectives(self):
         model = _model(ResidentWeightsConfig(mode="dev", role="draft"), _Manager())
         model.parallelism_config.pp_size = 2
+        with patch("torch.distributed.is_initialized", return_value=True), patch.object(
+            BaseModel, "_create_resident_weights", side_effect=AssertionError("touched store")
+        ), self.assertRaisesRegex(RuntimeError, "checkpoint stage group"):
+            model._load_with_residency("cpu", model.model_weights_loader.load)
         with patch.object(
             BaseModel, "_create_resident_weights", return_value=model._created
         ), patch(
-            "rtp_llm.models.base_model.all_ranks_true",
-            side_effect=AssertionError("WORLD"),
-        ), patch.object(
-            BaseModel, "_wait_for_loading_ranks", side_effect=AssertionError("WORLD")
-        ):
-            model._load_with_residency("cuda:0", model.model_weights_loader.load)
+            "rtp_llm.models.base_model.all_ranks_true", return_value=True
+        ) as vote, patch.object(
+            BaseModel, "_wait_for_loading_ranks"
+        ) as barrier:
+            stage = object()
+            model._load_with_residency("cuda:0", model.model_weights_loader.load, group=stage)
+            vote.assert_called_once_with(True, "cuda:0", group=stage)
+            barrier.assert_called_once_with(group=stage)
 
     def _consensus_failure_load(self, manager):
         """Load with manager creation agreed by no one; returns the ordered side effects."""
@@ -392,7 +398,7 @@ class ResidentWeightsRegressionTest(unittest.TestCase):
         )
         seen_states = []
 
-        def fake_consensus(state, _device):
+        def fake_consensus(state, _device, *, group):
             seen_states.append(state)
             return 0  # _ATTACH_RESTORE_FAILED
 
@@ -458,7 +464,7 @@ class ResidentWeightsRegressionTest(unittest.TestCase):
 
         seen_states = []
 
-        def fake_consensus(state, _device):
+        def fake_consensus(state, _device, *, group):
             seen_states.append(state)
             return 0
 
@@ -502,7 +508,7 @@ class ResidentWeightsRegressionTest(unittest.TestCase):
 
         seen_states = []
 
-        def fake_consensus(state, _device):
+        def fake_consensus(state, _device, *, group):
             seen_states.append(state)
             return 0
 
@@ -568,7 +574,7 @@ class ResidentWeightsRegressionTest(unittest.TestCase):
 
         seen_states = []
 
-        def fake_consensus(state, _device):
+        def fake_consensus(state, _device, *, group):
             seen_states.append(state)
             return 0
 
@@ -608,7 +614,7 @@ class ResidentWeightsRegressionTest(unittest.TestCase):
 
         seen_states = []
 
-        def fake_consensus(state, _device):
+        def fake_consensus(state, _device, *, group):
             seen_states.append(state)
             return 0
 

@@ -1,3 +1,5 @@
+load("//rtp_llm/models_py:checkpoint_test_platforms.bzl", "checkpoint_reader_test_env")
+
 # DSV4 python tests target the CUDA13/Blackwell stack (deep_gemm >= 2.6, dsv4
 # kernels, pytest closure). They are skipped as incompatible on other platforms
 # instead of failing on pools that can never satisfy those dependencies.
@@ -62,12 +64,14 @@ py_test(
 py_test(
     name = "test_qwen3_dflash_weights",
     srcs = ["draft_checkpoint_case.py", "test_qwen3_dflash_weights.py"],
+    env = checkpoint_reader_test_env(),
     deps = [
         "//rtp_llm:async_model",
         "//rtp_llm:models",
         "//rtp_llm:safetensors_torch",
         "//rtp_llm/models_py:new_weight_loader",
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
+        "//rtp_llm/tools/convert:convert",
     ],
 )
 

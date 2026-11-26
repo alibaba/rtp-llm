@@ -9,17 +9,16 @@ from rtp_llm.models_py.weight_mapper import WeightsMapper
 class Qwen1CheckpointMapper(WeightsMapper):
     _layer = re.compile(r"^transformer\.h\.(\d+)\.(.+)$")
     _layers = {
-        "ln_1.weight": "input_layernorm.weight",
-        "ln_2.weight": "post_attention_layernorm.weight",
+        "ln_1": "input_layernorm",
+        "ln_2": "post_attention_layernorm",
         # HF stores [Q; K; V] along the output dimension. The QKV leaf takes
         # its shard of each projection, not one slice of their concatenation.
-        "attn.c_attn.weight": "self_attn.qkv_proj.weight",
-        "attn.c_attn.bias": "self_attn.qkv_proj.bias",
-        "attn.c_proj.weight": "self_attn.o_proj.weight",
+        "attn.c_attn": "self_attn.qkv_proj",
+        "attn.c_proj": "self_attn.o_proj",
         # Qwen1 computes silu(w2(x)) * w1(x).
-        "mlp.w2.weight": "mlp.gate_proj.weight",
-        "mlp.w1.weight": "mlp.up_proj.weight",
-        "mlp.c_proj.weight": "mlp.down_proj.weight",
+        "mlp.w2": "mlp.gate_proj",
+        "mlp.w1": "mlp.up_proj",
+        "mlp.c_proj": "mlp.down_proj",
     }
 
     def __init__(self):
@@ -32,8 +31,12 @@ class Qwen1CheckpointMapper(WeightsMapper):
 
     def map_name(self, name):
         match = self._layer.fullmatch(name)
-        if match and match[2] in self._layers:
-            return f"layers.{match[1]}.{self._layers[match[2]]}"
+        if match:
+            owner, _, field = match[2].rpartition(".")
+            if owner in self._layers:
+                # Preserve the actual checkpoint field. The projection's
+                # QuantMethod validates and shards qweight/qzeros/scales etc.
+                return f"layers.{match[1]}.{self._layers[owner]}.{field}"
         return super().map_name(name)
 
 

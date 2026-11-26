@@ -277,6 +277,7 @@ class IndexerFP8(PoolBackedModule, RtpModule):
         # do a single ``F.linear`` (cuBLAS GEMM) without a trailing elementwise
         # mul. New tensor — never mutate ``layer_weights`` in place.
         self._weights_proj_folded = not self._checkpoint_owned
+        self._resident_projection = False
         if self._checkpoint_owned:
             from rtp_llm.models_py.modules.dsv4.fp8.linear_owner import Dsv4FP8Linear
 
@@ -382,14 +383,23 @@ class IndexerFP8(PoolBackedModule, RtpModule):
         if missing:
             raise RuntimeError(f"IndexerFP8 missing score symbols: {missing}")
 
+    def bind_resident_parameters(self, bank, prefix):
+        # Both cold publication and warm attach bind the raw, read-only
+        # checkpoint before post-load. Do not fold into that shared record.
+        self._resident_projection = True
+
     def process_weights_after_loading(self):
         if not self._checkpoint_owned or self._weights_proj_folded:
             return
         self.validate_weights_loaded()
-        # Preserve the Parameter identity/storage used by FST. This is the
-        # same BF16 multiply as the bound-weight path, folded exactly once.
+        scale = self.softmax_scale * self.n_heads**-0.5
         with torch.no_grad():
-            self.weights_proj.mul_(self.softmax_scale * self.n_heads**-0.5)
+            if self._resident_projection:
+                # Keep the registered Parameter identity, but give this
+                # runtime its own folded storage. Other workers see raw bytes.
+                self.weights_proj.set_(self.weights_proj * scale)
+            else:
+                self.weights_proj.mul_(scale)
         self._weights_proj_folded = True
 
     # --------------------------------------------------------------

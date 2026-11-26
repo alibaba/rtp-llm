@@ -4,12 +4,41 @@ from __future__ import annotations
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
-from rtp_llm.models.qwen_v3 import QwenV3
+from rtp_llm.model_loader.weight_module import AtomicWeight
+from rtp_llm.models.qwen_v3 import QwenV3, QWenV3Weight
+from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity, transpose
 from rtp_llm.utils.util import get_config_from_path
+
+
+class Qwen3DFlashFTWeights(QWenV3Weight):
+    """FT writer only: the draft archive owns the feature combiner, not vocabulary."""
+
+    def _get_weight_info(self):
+        info = super()._get_weight_info()
+        info.weights = [
+            w for w in info.weights if w.name not in (W.embedding, W.lm_head)
+        ]
+        info.weights.extend(
+            (
+                AtomicWeight(
+                    W.dspark_fc_w, [CkptWeightInfo("fc.weight", identity)], transpose
+                ),
+                AtomicWeight(
+                    W.dspark_hidden_norm_gamma,
+                    [CkptWeightInfo("hidden_norm.weight", identity)],
+                    identity,
+                ),
+            )
+        )
+        return info
 
 
 class Qwen3DFlash(QwenV3):
     """Dense mixed-mask Qwen3 DFlash draft model."""
+
+    @staticmethod
+    def get_weight_cls():
+        return Qwen3DFlashFTWeights
 
     @classmethod
     def _create_config(cls, ckpt_path: str) -> ModelConfig:

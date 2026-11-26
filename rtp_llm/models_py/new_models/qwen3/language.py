@@ -95,6 +95,8 @@ class Qwen3Attention(RtpModule):
         qkv_proj and fmha_impl. Weight shape is [head_dim].
     """
 
+    _qk_norm_type = RMSNorm
+
     def __init__(
         self,
         hidden_size: int,
@@ -133,8 +135,8 @@ class Qwen3Attention(RtpModule):
         self.num_kv_heads_per_partition = self.qkv_proj.num_kv_heads_per_partition
         self.q_size = self.qkv_proj.q_size
         self.kv_size = self.qkv_proj.kv_size
-        self.q_norm = RMSNorm(head_dim, eps=rms_norm_eps, params_dtype=params_dtype)
-        self.k_norm = RMSNorm(head_dim, eps=rms_norm_eps, params_dtype=params_dtype)
+        self.q_norm = self._qk_norm_type(head_dim, eps=rms_norm_eps, params_dtype=params_dtype)
+        self.k_norm = self._qk_norm_type(head_dim, eps=rms_norm_eps, params_dtype=params_dtype)
         self.o_proj = RowParallelLinear(
             input_size=num_heads * head_dim,
             output_size=hidden_size,

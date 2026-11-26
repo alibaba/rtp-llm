@@ -5,6 +5,7 @@ import unittest
 import torch
 from safetensors.torch import save_file
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.new_models.qwen3_next.language import Qwen35DenseMTPForCausalLM
 from rtp_llm.models_py.new_models.qwen3_next.language import Qwen3NextMoEBlock
@@ -182,6 +183,66 @@ def _mtp_config(model_type="qwen35_moe_mtp"):
 
 
 class Qwen3NextLoadTest(unittest.TestCase):
+    def test_nested_language_checkpoint_keeps_text_and_vision_ownership(self):
+        from rtp_llm.models_py.new_weight_manager import NewLoaderWeightManager
+        from rtp_llm.models_py.new_models.qwen_service_vision import load_service_vision
+
+        cfg = _config(tie=False)
+        cfg.model_type = "qwen35_dense"
+        cfg.expert_num = cfg.moe_k = cfg.moe_inter_size = cfg.moe_style = 0
+        prefix = "model." + "language_model." * 3
+        data = {
+            key.replace("model.", prefix, 1): value
+            for key, value in _dense_weights(include_lm_head=True).items()
+        }
+        visual_key = "model.visual.weight"
+        data[visual_key] = torch.arange(8).reshape(2, 4).float()
+        # Shared target/draft file: target must not consume a nested MTP key.
+        data[prefix + "mtp.pre_fc_norm_hidden.weight"] = torch.zeros(4)
+        with tempfile.TemporaryDirectory() as root:
+            save_file(data, os.path.join(root, "model.safetensors"))
+            loader = NewModelLoader(cfg, _load_config(), root)
+            model = loader.load()
+            vision = load_service_vision(
+                torch.nn.Linear(4, 2, bias=False), root, torch.float32,
+                "cpu", "scratch", prefix=None,
+            )
+        torch.testing.assert_close(model.embed_tokens.weight, data[prefix + "embed_tokens.weight"])
+        torch.testing.assert_close(model.norm.weight, data[prefix + "norm.weight"] + 1)
+        torch.testing.assert_close(vision.weight, data[visual_key])
+        manager = NewLoaderWeightManager(model, loader)
+        raw = torch.tensor([-1.0, 0.0, 1.0, 2.0])
+        manager.update_tensors({prefix + "layers.0.input_layernorm.weight": raw})
+        torch.testing.assert_close(model.layers[0].input_layernorm.weight, raw + 1)
+
+    def test_gemma_norm_checkpoint_updates_match_cold_start(self):
+        from rtp_llm.models_py.new_weight_manager import NewLoaderWeightManager
+
+        cfg = _config(tie=False)
+        data = _dense_weights(include_lm_head=True)
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as updated:
+            save_file(data, os.path.join(root, "model.safetensors"))
+            loader = NewModelLoader(cfg, _load_config(), root)
+            live = loader.load()
+            incoming = {
+                key: torch.arange(value.numel()).reshape_as(value).float() - 2
+                for key, value in data.items() if key.endswith("norm.weight")
+            }
+            save_file({**data, **incoming}, os.path.join(updated, "model.safetensors"))
+            cold = NewModelLoader(cfg, _load_config(), updated).load()
+            manager = NewLoaderWeightManager(live, loader)
+            manager.update_tensors(incoming)
+            for name, raw in incoming.items():
+                local = name.removeprefix("model.")
+                with self.subTest(name=name):
+                    torch.testing.assert_close(cold.get_parameter(local), raw + 1)
+                    torch.testing.assert_close(live.get_parameter(local), cold.get_parameter(local))
+            # Published RPC names alias HF inputs; they are not finalized FT records.
+            published = live.runtime_weight_view()["final_layernorm.gamma"]
+            manager.update_tensors({"final_layernorm.gamma": incoming["model.norm.weight"] + 3})
+            self.assertIs(published, live.norm.weight)
+            torch.testing.assert_close(published, cold.norm.weight + 3)
+
     def test_classifier_and_vocab_handler_own_complete_sources(self):
         from dataclasses import replace
         from rtp_llm.models_py.downstream_heads import handler_weight_mappings
@@ -271,7 +332,8 @@ class Qwen3NextLoadTest(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as directory:
             save_file(weights, os.path.join(directory, "model.safetensors"))
-            model = NewModelLoader(config, _load_config(), directory).load()
+            loader = NewModelLoader(config, _load_config(), directory)
+            model = loader.load()
         self.assertIsInstance(model, Qwen35DenseMTPForCausalLM)
         self.assertEqual(model._cfg["moe_layer_index"], [])
         self.assertFalse(any("experts" in name for name, _ in model.named_parameters()))
@@ -285,6 +347,16 @@ class Qwen3NextLoadTest(unittest.TestCase):
         self.assertIs(
             model.runtime_weight_view()["embedding"], model.embed_tokens.weight
         )
+        from rtp_llm.models_py.new_weight_manager import NewLoaderWeightManager
+
+        manager = NewLoaderWeightManager(model, loader)
+        raw = torch.arange(4).float() - 2
+        manager.update_tensors({
+            "mtp.pre_fc_norm_embedding.weight": raw,
+            "mtp.pre_fc_norm_hidden.weight": raw * 2,
+        })
+        torch.testing.assert_close(model.pre_fc_norm_embedding.weight, raw + 1)
+        torch.testing.assert_close(model.pre_fc_norm_hidden.weight, raw * 2 + 1)
 
     def test_qwen35_dense_safetensors_loads_without_synthetic_moe_config(self):
         config = _config(tie=False)
@@ -301,7 +373,7 @@ class Qwen3NextLoadTest(unittest.TestCase):
             save_file(weights, os.path.join(model_path, "model.safetensors"))
             from rtp_llm.models_py.new_models.qwen_service_vision import load_service_vision
 
-            for method in ("scratch", "fastsafetensors"):
+            for method in checkpoint_readers("scratch", "fastsafetensors"):
                 visual = load_service_vision(
                     torch.nn.Linear(4, 2, bias=False), model_path, torch.float32,
                     "cpu", method, prefix=None,

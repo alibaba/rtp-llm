@@ -11,7 +11,7 @@ from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.ops import ParallelismConfig, TaskType
 
 
-def load_draft(config, tp, rank, roles=()):
+def load_draft(config, tp, rank, roles=(), *, method="scratch"):
     # The service sets the task in build_model_config, after _create_config.
     config.task_type = TaskType.LANGUAGE_MODEL
     parallel = ParallelismConfig()
@@ -19,16 +19,16 @@ def load_draft(config, tp, rank, roles=()):
     parallel.tp_rank = parallel.world_rank = parallel.local_rank = rank
     parallel.ffn_tp_size, parallel.ffn_tp_rank = tp, rank
     load = NewLoaderConfig.from_runtime(
-        parallel, device="cpu", compute_dtype=torch.bfloat16, load_method="scratch"
+        parallel, device="cpu", compute_dtype=torch.bfloat16, load_method=method
     )
     target, aliases = RtpModule(), {}
-    for role in roles:
+    for slot, role in enumerate(roles):
         leaf = torch.nn.Module()
         leaf.tp_size, leaf.tp_rank = tp, rank
         leaf.weight = torch.nn.Parameter(
             torch.full(
                 (config.vocab_size // tp, config.hidden_size),
-                rank + 1,
+                2 * rank + slot + 1,
                 dtype=torch.bfloat16,
             ),
             requires_grad=False,
@@ -51,4 +51,6 @@ def load_draft(config, tp, rank, roles=()):
             config, load, model_path=config.ckpt_path, parameter_aliases=aliases
         )
         model = loader.load()
+        if loader.loaded_method is None or loader.loaded_method.value != method:
+            raise AssertionError(f"requested {method}, got {loader.loaded_method}")
     return model, target, read

@@ -8,6 +8,7 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
 
+from rtp_llm.models_py.checkpoint_reader_test_support import has_native_fst, requires_native_fst
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewLoaderLoadMethod, NewModelLoader
 from rtp_llm.models_py.new_models.kimi_linear.kda_parameters import KimiKDAParameters
 
@@ -68,9 +69,11 @@ class KimiKdaCheckpointTest(unittest.TestCase):
             values[key] = torch.randn(shapes[key], generator=g)
         for r in (0, 1):
             self.check(values, dict(cfg, attn_tp_size=2, attn_tp_rank=r), NewLoaderLoadMethod.SCRATCH)
-        self.check(values, cfg, NewLoaderLoadMethod.FASTSAFETENSORS)
+        if has_native_fst():
+            self.check(values, cfg, NewLoaderLoadMethod.FASTSAFETENSORS)
 
     @unittest.skipUnless(os.environ.get("KIMI_LINEAR_CHECKPOINT"), "release checkpoint not provided")
+    @requires_native_fst
     def test_release_first_kda_layer(self):
         path = Path(os.environ["KIMI_LINEAR_CHECKPOINT"])
         raw = json.loads((path / "config.json").read_text())

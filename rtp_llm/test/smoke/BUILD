@@ -13,6 +13,11 @@ filegroup(
 )
 
 py_test(
+    name = "resident_checkpoint_logs_test",
+    srcs = ["resident_checkpoint_logs.py", "resident_checkpoint_logs_test.py"],
+)
+
+py_test(
     name = "tau2_coverage_test",
     srcs = ["tau2_coverage.py", "test/tau2_coverage_test.py"],
     main = "test/tau2_coverage_test.py",
@@ -263,6 +268,7 @@ custom_smoke_test(
         "deepseek_v41_contract_test.py",
         "deepseek_v41_pd_contract_test.py",
         "deepseek_v41_dspark_contract_test.py",
+        "resident_checkpoint_logs.py",
     ],
     deps = ["//rtp_llm/resident_weights"],
 )

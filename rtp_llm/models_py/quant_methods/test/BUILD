@@ -3,8 +3,8 @@ load("//rtp_llm/models_py:checkpoint_test_platforms.bzl", "checkpoint_reader_tes
 py_test(
     name = "test_fp8_online_scale_layout",
     srcs = ["test_fp8_online_scale_layout.py"],
-    deps = ["//rtp_llm/models_py:new_weight_loader", "//rtp_llm:fastsafetensors"],
-    env = {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"},
+    deps = ["//rtp_llm/models_py:checkpoint_reader_test_support", "//rtp_llm/models_py:new_weight_loader", "//rtp_llm:fastsafetensors"],
+    env = checkpoint_reader_test_env(),
 )
 
 py_library(
@@ -59,8 +59,9 @@ py_test(
 py_test(
     name = "test_fp8_cpu_load",
     srcs = ["test_fp8_cpu_load.py"],
-    env = {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"},
+    env = checkpoint_reader_test_env(),
     deps = [
+        "//rtp_llm/models_py:checkpoint_reader_test_support",
         "//rtp_llm/models_py:new_weight_loader",
         "//rtp_llm:torch",
         "//rtp_llm:safetensors",
@@ -178,8 +179,16 @@ py_test(
 
 py_test(
     name = "test_w8a8_int8",
+    env = checkpoint_reader_test_env({}),
     srcs = ["test_w8a8_int8.py"],
-    deps = ["//rtp_llm/models_py:new_weight_loader", "//rtp_llm:torch", "//rtp_llm:safetensors"],
+    deps = ["//rtp_llm/models_py:checkpoint_reader_test_support", "//rtp_llm/models_py:new_weight_loader", "//rtp_llm:torch", "//rtp_llm:safetensors"],
+)
+
+py_test(
+    name = "qwen_quant_dialects_test",
+    srcs = ["qwen_quant_dialects_test.py"],
+    env = checkpoint_reader_test_env(),
+    deps = ["//rtp_llm/models_py:new_weight_loader", "//rtp_llm:safetensors_torch"],
 )
 
 py_test(
@@ -204,24 +213,26 @@ py_test(
 
 py_test(
     name = "test_w8a8_int8_moe",
+    env = checkpoint_reader_test_env({}),
     srcs = ["test_w8a8_int8_moe.py"],
     data = ["//:rtp_compute_ops", "//:th_transformer_config"],
-    deps = ["//rtp_llm/models_py:new_weight_loader", "//rtp_llm:torch", "//rtp_llm:safetensors"],
+    deps = ["//rtp_llm/models_py:checkpoint_reader_test_support", "//rtp_llm/models_py:new_weight_loader", "//rtp_llm:torch", "//rtp_llm:safetensors"],
 )
 
 py_test(
     name = "test_load_time_w8a8",
     srcs = ["test_load_time_w8a8.py", "test_w8a8_int8_moe.py"],
     main = "test_load_time_w8a8.py",
-    deps = ["//rtp_llm/models_py:new_weight_loader", "//rtp_llm:safetensors", "//rtp_llm:w8a8_int8_quant"],
-    env = {"CUDA_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"},
+    deps = ["//rtp_llm/models_py:checkpoint_reader_test_support", "//rtp_llm/models_py:new_weight_loader", "//rtp_llm:safetensors", "//rtp_llm:w8a8_int8_quant"],
+    env = checkpoint_reader_test_env({"CUDA_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"}),
 )
 
 py_test(
     name = "test_w4a8_checkpoint",
+    env = checkpoint_reader_test_env({}),
     srcs = ["test_w4a8_checkpoint.py", "test_w8a8_int8_moe.py", "staged_checkpoint_fixture.py"],
     main = "test_w4a8_checkpoint.py",
-    deps = ["//rtp_llm/models_py:new_weight_loader", "//rtp_llm:torch", "//rtp_llm:safetensors"],
+    deps = ["//rtp_llm/models_py:checkpoint_reader_test_support", "//rtp_llm/models_py:new_weight_loader", "//rtp_llm:torch", "//rtp_llm:safetensors"],
 )
 
 py_test(

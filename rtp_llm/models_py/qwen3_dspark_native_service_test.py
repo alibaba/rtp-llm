@@ -18,9 +18,11 @@ from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from transformers import PreTrainedTokenizerFast
 
+from rtp_llm.config.py_config_modules import ResidentWeightsConfig
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.model_factory_register import ModelDict
 from rtp_llm.models.base_model import BaseModel
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers
 from rtp_llm.models_py.model_loader import NewLoaderLoadMethod
 from rtp_llm.models_py.new_models.qwen3 import Qwen3ForCausalLM
 from rtp_llm.models_py.new_models.qwen3_dspark import Qwen3DSparkForCausalLM
@@ -100,6 +102,7 @@ def _engine(root, method):
         fmha_config=None,
         moe_config=None,
         load_config=SimpleNamespace(
+            resident_weights_config=ResidentWeightsConfig(),
             load_method=method,
             force_cpu_load_weights=False,
             loader_recycle_handles=False,
@@ -228,7 +231,7 @@ class PublicDraftLoadingTest(unittest.TestCase):
             Qwen3DSpark.speculative_weight_alias_names(target, cfg)
 
     def test_factory_scratch_and_fst_keep_requested_storage(self):
-        for method in ("scratch", "fastsafetensors"):
+        for method in checkpoint_readers("scratch", "fastsafetensors"):
             for vocab, loans in (
                 (4, ()),
                 (4, ("embedding",)),
@@ -306,7 +309,7 @@ class PublicDraftLoadingTest(unittest.TestCase):
                     )
 
     def test_reordered_head_fails_without_modifying_target(self):
-        for method in ("scratch", "fastsafetensors"):
+        for method in checkpoint_readers("scratch", "fastsafetensors"):
             with self.subTest(
                 method=method
             ), tempfile.TemporaryDirectory() as tmp, patch.object(

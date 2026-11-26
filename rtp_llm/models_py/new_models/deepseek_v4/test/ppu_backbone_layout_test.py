@@ -10,6 +10,7 @@ from unittest.mock import patch
 import torch
 from safetensors.torch import save_file
 
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers
 from rtp_llm.models_py.fst_range_reader import iter_fst_range_tensors
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.modules.dsv4.ppu.ppu_module_provider import PpuModuleProvider
@@ -108,7 +109,7 @@ class PpuBackboneLayoutTest(unittest.TestCase):
             path = os.path.join(tmp, "globals.safetensors")
             save_file(data, path)
             for rank, reader in product(
-                range(2), (get_all_weights, iter_fst_range_tensors)
+                range(2), checkpoint_readers(get_all_weights, iter_fst_range_tensors)
             ):
                 with self.subTest(rank=rank, reader=reader.__name__):
                     args = OwnedV4Args(

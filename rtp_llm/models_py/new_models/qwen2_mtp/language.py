@@ -24,6 +24,10 @@ class Qwen2MTPForCausalLM(Qwen2ForCausalLM):
     decoder layers otherwise retain their checkpoint indices.
     """
 
+    def load_ft_checkpoint(self, checkpoint):
+        from rtp_llm.models_py.new_models.qwen2_mtp.ft_checkpoint import load_mtp_ft_checkpoint
+
+        load_mtp_ft_checkpoint(self, checkpoint)
 
     def resident_constructor_state(self):
         state = super().resident_constructor_state()

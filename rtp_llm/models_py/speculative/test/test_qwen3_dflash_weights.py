@@ -2,9 +2,13 @@
 
 import json
 import math
+import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 from safetensors.torch import save_file
@@ -73,6 +77,68 @@ def _raw_config(hidden, layers, ids, window, mask):
 
 
 class Qwen3DFlashWeightTest(unittest.TestCase):
+    def test_rank_local_ft_export_and_reload_preserve_target_loans(self):
+        from rtp_llm.models_py.ft_checkpoint import CheckpointTopology, FTCheckpoint
+        from rtp_llm.ops import HWKernelConfig, KVCacheConfig, ParallelismConfig, TaskType
+        from rtp_llm.tools.convert.ft_export_job import create_ft_export_job
+        from rtp_llm.tools.convert.ft_export_metadata import generate_ft_index
+
+        with tempfile.TemporaryDirectory() as source, tempfile.TemporaryDirectory() as archive:
+            raw = _raw_config(64, 1, [1, 3], 128, 7)
+            raw["vocab_size"] = 32
+            for directory in (source, archive):
+                Path(directory, "config.json").write_text(json.dumps(raw))
+            save_file(_checkpoint(64, 1, 2), str(Path(source, "model.safetensors")))
+            cfg = Qwen3DFlash._create_config(source)
+            cfg.ckpt_path, cfg.phy2log_path = source, ""
+            cfg.model_type, cfg.data_type = "qwen_3_dflash", "bf16"
+            cfg.gen_num_per_cycle, cfg.enable_fp32_lm_head = 3, False
+            cfg.task_type = TaskType.LANGUAGE_MODEL
+            cfg.lora_infos = {}
+            for rank in range(2):
+                pc = ParallelismConfig()
+                pc.tp_size = pc.ffn_tp_size = pc.world_size = pc.local_world_size = 2
+                pc.tp_rank = pc.ffn_tp_rank = pc.world_rank = pc.local_rank = rank
+                pc.ep_size = 1
+                descriptor = SimpleNamespace(
+                    model_config=cfg, parallelism_config=pc, get_weight_cls=Qwen3DFlash.get_weight_cls,
+                    hw_kernel_config=HWKernelConfig(), kv_cache_config=KVCacheConfig(),
+                    merge_lora=False, load_method="scratch", force_cpu_load_weights=True,
+                    moe_pure_tp_preshard=False, loader_recycle_handles=False, _init_custom_module=lambda: None,
+                )
+                with patch.object(sys, "argv", [sys.argv[0]]):
+                    create_ft_export_job(descriptor).dump_weight_as_ft_style("cpu", archive)
+            generate_ft_index(archive, {"TP_SIZE": "2", "EP_SIZE": "1", "DP_SIZE": "1"})
+            index_path = Path(archive, "model.safetensors.index.json")
+            index = json.loads(index_path.read_text())
+            self.assertFalse(any(key.endswith((".global.embedding", ".global.lm_head")) for key in index["weight_map"]))
+            readers = ["scratch"]
+            if os.environ.get("NEWLOADER_TEST_NATIVE_FST") == "1":
+                readers.append("fastsafetensors")
+            for rank in range(2):
+                roles = ("embed_tokens", "lm_head")
+                cfg.ckpt_path = source
+                expected, _, _ = load_draft(cfg, 2, rank, roles)
+                cfg.ckpt_path = archive
+                for method in readers:
+                    with self.subTest(rank=rank, reader=method):
+                        actual, target, _ = load_draft(cfg, 2, rank, roles, method=method)
+                        self.assertIs(actual.embed_tokens.weight, target.embed_tokens.weight)
+                        self.assertIs(actual.lm_head.weight, target.lm_head.weight)
+                        self.assertEqual(actual.state_dict().keys(), expected.state_dict().keys())
+                        for name, tensor in actual.state_dict().items():
+                            torch.testing.assert_close(tensor, expected.state_dict()[name], atol=0, rtol=0, msg=name)
+            del index["weight_map"]["rank_01_00_00.global.dspark_hidden_norm.gamma"]
+            index_path.write_text(json.dumps(index))
+            incomplete = FTCheckpoint.open(archive, CheckpointTopology(tp_size=2, tp_rank=1))
+            loans = [getattr(target, name).weight for name in roles]
+            expected = [weight.detach().clone() for weight in loans]
+            with self.assertRaisesRegex(ValueError, "re-export from the original HF draft"):
+                actual.load_ft_checkpoint(incomplete)
+            for name, original, saved in zip(roles, loans, expected):
+                self.assertIs(getattr(actual, name).weight, original)
+                torch.testing.assert_close(original, saved, atol=0, rtol=0)
+
     def test_real_checkpoint_mapper_and_all_tp_ranks(self):
         for name, hidden, layers, ids, window, mask in _FAMILIES:
             checkpoint = _checkpoint(hidden, layers, len(ids))

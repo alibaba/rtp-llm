@@ -1,8 +1,11 @@
+load("//rtp_llm/models_py:checkpoint_test_platforms.bzl", "checkpoint_reader_test_env")
+
 py_test(
     name = "service_variants_test",
     srcs = ["service_variants_test.py"],
-    env = {"CUDA_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"},
+    env = checkpoint_reader_test_env({"CUDA_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"}),
     deps = [
+        "//rtp_llm/models_py:checkpoint_reader_test_support",
         "//rtp_llm:fastsafetensors",
         "//rtp_llm:model_factory",
         "//rtp_llm:safetensors_torch",

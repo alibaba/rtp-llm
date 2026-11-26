@@ -16,10 +16,12 @@ from rtp_llm.models.qwen3_next.qwen3_next_mtp import (
     Qwen35DenseMTP,
     Qwen35MoeMTP,
 )
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers
 from rtp_llm.models_py.model_loader import NewLoaderLoadMethod
 from rtp_llm.models_py.new_models.qwen3_next.language import (
     Qwen3NextForCausalLM,
     Qwen3NextMTPForCausalLM,
+    Qwen35MoeForCausalLM,
     Qwen35MoeMTPForCausalLM,
     Qwen35DenseMTPForCausalLM,
 )
@@ -67,7 +69,12 @@ def shared_checkpoint(kind):
                     torch.ones(4, 4)
                 )
             weights["model.layers.0.mlp.shared_expert_gate.weight"] = torch.ones(1, 4)
-    prefix = "model." if kind == "qwen3_next" else "model.language_model."
+    prefix = {
+        "qwen3_next": "model.",
+        "qwen35_dense": "model.language_model.",
+        # Converted Qwen3.5-MoE multimodal checkpoints can have nested text owners.
+        "qwen35_moe": "model." + "language_model." * 3,
+    }[kind]
     result = {}
     for key, value in weights.items():
         if not key.startswith("model."):
@@ -89,10 +96,10 @@ def shared_checkpoint(kind):
 
 class NativeServiceTest(unittest.TestCase):
     def test_public_target_and_draft_scratch_and_fst(self):
-        for kind, target, draft, draft_owner in (
-            ("qwen3_next", Qwen3Next, Qwen3NextMTP, Qwen3NextMTPForCausalLM),
-            ("qwen35_dense", Qwen35Dense, Qwen35DenseMTP, Qwen35DenseMTPForCausalLM),
-            ("qwen35_moe", Qwen35Moe, Qwen35MoeMTP, Qwen35MoeMTPForCausalLM),
+        for kind, target, target_owner, draft, draft_owner in (
+            ("qwen3_next", Qwen3Next, Qwen3NextForCausalLM, Qwen3NextMTP, Qwen3NextMTPForCausalLM),
+            ("qwen35_dense", Qwen35Dense, Qwen3NextForCausalLM, Qwen35DenseMTP, Qwen35DenseMTPForCausalLM),
+            ("qwen35_moe", Qwen35Moe, Qwen35MoeForCausalLM, Qwen35MoeMTP, Qwen35MoeMTPForCausalLM),
         ):
             with tempfile.TemporaryDirectory() as root:
                 text = dict(
@@ -132,9 +139,9 @@ class NativeServiceTest(unittest.TestCase):
                 (Path(root) / "config.json").write_text(json.dumps(hf))
                 tensors = shared_checkpoint(kind)
                 save_file(tensors, str(Path(root) / "model.safetensors"))
-                for method in ("scratch", "fastsafetensors"):
+                for method in checkpoint_readers("scratch", "fastsafetensors"):
                     for model_type, cls, owner in (
-                        (kind, target, Qwen3NextForCausalLM),
+                        (kind, target, target_owner),
                         (kind + "_mtp", draft, draft_owner),
                     ):
                         with self.subTest(model_type=model_type, method=method):

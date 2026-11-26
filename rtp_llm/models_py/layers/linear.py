@@ -145,18 +145,32 @@ class LinearBase(RtpModule):
         encode = getattr(self.quant_method, "encode_lora_delta", None)
         return encode(self, name, delta) if callable(encode) else delta
 
-    def _checked_lora_factors(self, a, b, input_size, output_size):
+    def prepare_lora_factors(self, name, a, b, *, calibrated_ft=False):
         from rtp_llm.models_py.quant_methods.unquantized import UnquantizedLinearMethod
 
         # Excluded or mixed-attention leaves still carry the model's quant
         # configuration. The selected method owns the actual physical weight.
         staging = getattr(self.quant_method, "can_stage_startup_lora", None)
-        if not isinstance(self.quant_method, UnquantizedLinearMethod) and not (
-            callable(staging) and staging(self)
+        if not (
+            isinstance(self.quant_method, UnquantizedLinearMethod)
+            or (callable(staging) and staging(self))
+            or (
+                calibrated_ft
+                and callable(getattr(self.quant_method, "merge_ft_lora", None))
+            )
         ):
+            if calibrated_ft:
+                raise ValueError(
+                    f"{name}: {type(self.quant_method).__name__} has no calibrated "
+                    "FT LoRA merge contract; merge the adapter into the floating "
+                    "source before quantizing and exporting the FT checkpoint"
+                )
             raise NotImplementedError(
                 "Quantized LoRA merge requires a quantized update contract"
             )
+        return self._shard_lora_factors(name, a, b)
+
+    def _checked_lora_factors(self, a, b, input_size, output_size):
         return prepare_lora_checkpoint_factors(
             a, b, input_size, output_size, self.prefix
         )
@@ -247,7 +261,7 @@ class ColumnParallelLinear(LinearBase):
 
     shard_names: List[str] = []
 
-    def prepare_lora_factors(self, name, a, b):
+    def _shard_lora_factors(self, name, a, b):
         if name != "weight":
             raise ValueError(f"Unexpected LoRA projection {name!r}")
         a, b = self._checked_lora_factors(
@@ -447,7 +461,7 @@ class RowParallelLinear(LinearBase):
             return self.bias
         return None
 
-    def prepare_lora_factors(self, name, a, b):
+    def _shard_lora_factors(self, name, a, b):
         if name != "weight":
             raise ValueError(f"Unexpected LoRA projection {name!r}")
         a, b = self._checked_lora_factors(
@@ -659,7 +673,7 @@ class RowParallelLinear(LinearBase):
 
 class MergedColumnParallelLinear(ColumnParallelLinear):
 
-    def prepare_lora_factors(self, name, a, b):
+    def _shard_lora_factors(self, name, a, b):
         shard_id = self._get_shard_id(name)
         local_rows = self.output_size_per_partition // len(self.shard_names)
         global_rows = local_rows * self.tp_size
@@ -1141,7 +1155,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
 
 class QKVParallelLinear(ColumnParallelLinear):
 
-    def prepare_lora_factors(self, name, a, b):
+    def _shard_lora_factors(self, name, a, b):
         projection = _projection_name(name, self.shard_names)
         key = {"q_proj": "q", "k_proj": "k", "v_proj": "v"}.get(projection)
         if key is None:

@@ -20,6 +20,7 @@ from transformers import PreTrainedTokenizerFast
 
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.model_factory_register import ModelDict
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewLoaderLoadMethod, NewModelLoader
 from rtp_llm.models_py.new_models.cosyvoice_qwen.language import (
     CosyVoiceQwenForCausalLM,
@@ -228,7 +229,7 @@ class MultimodalLanguageLoadTest(unittest.TestCase):
         weights = language_weights(15, 8)
         with tempfile.TemporaryDirectory() as directory:
             checkpoint(directory, raw, weights)
-            for method in ("scratch", "fastsafetensors"):
+            for method in checkpoint_readers("scratch", "fastsafetensors"):
                 with self.subTest(method=method):
                     loader = NewModelLoader(raw, load_config(method), model_path=directory)
                     model = loader.load()
@@ -293,7 +294,7 @@ class MultimodalLanguageNativeBoundaryTest(unittest.TestCase):
         )
 
     def test_scratch_and_native_fst(self):
-        for method in ("scratch", "fastsafetensors"):
+        for method in checkpoint_readers("scratch", "fastsafetensors"):
             for tied, explicit in ((False, True), (True, False), (True, True)):
                 with self.subTest(method=method, tied=tied, explicit=explicit):
                     self.check_checkpoint(method, tied, explicit)

@@ -8,6 +8,7 @@ from torch.nn import functional as F
 
 from rtp_llm.models_py.module_base import copy_weight_
 from rtp_llm.models_py.quant_methods.base import register_quant_method
+from rtp_llm.models_py.quant_methods.startup_lora import merge_calibrated_projection
 from rtp_llm.models_py.quant_methods.w8a8_int8 import W8A8Int8LinearMethod
 from rtp_llm.models_py.read_spec import (
     LoadedCheckpointTensor,
@@ -50,6 +51,9 @@ class StaticInt8Mapper:
 @register_quant_method("pertensor_quant")
 class PerTensorInt8LinearMethod(W8A8Int8LinearMethod):
     required_checkpoint_parameters = ("weight", "weight_scale", "input_scale")
+
+    def merge_ft_lora(self, layer, update):
+        merge_calibrated_projection(layer, update, per_row=True)
 
     def create_weights(self, layer, input_size, output_size, params_dtype):
         layer.weight = nn.Parameter(

@@ -395,6 +395,21 @@ class Qwen2ForCausalLM(Qwen3ForCausalLM):
     WEIGHTS_MAPPER = Qwen2CheckpointMapper()
     _decoder_layer = Qwen2DecoderLayer
 
+    def __init__(self, model_config, load_config):
+        if (
+            type(self.WEIGHTS_MAPPER) is Qwen2CheckpointMapper
+            and getattr(getattr(load_config, "quant_config", None), "quant_type", None)
+            == "smooth_quant"
+        ):
+            from rtp_llm.models_py.new_models.qwen2.trt_checkpoint import (
+                Qwen2SmoothTrtMapper,
+            )
+
+            self.WEIGHTS_MAPPER = Qwen2SmoothTrtMapper(
+                exact_mapping=self.WEIGHTS_MAPPER.exact_mapping
+            )
+        super().__init__(model_config, load_config)
+
     @staticmethod
     def _dense_config(model_config, load_config):
         return _extract_config_values(

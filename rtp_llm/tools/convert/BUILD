@@ -19,6 +19,13 @@ py_library(
 )
 
 py_test(
+    name = "ft_draft_contract_test",
+    srcs = ["ft_draft_contract_test.py"],
+    env = {"CUDA_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"},
+    deps = [":convert", "//rtp_llm/models_py:new_weight_loader"],
+)
+
+py_test(
     name = "ft_export_metadata_test",
     srcs = ["ft_export_metadata_test.py"],
     deps = [":ft_export_metadata", "//rtp_llm:torch"],

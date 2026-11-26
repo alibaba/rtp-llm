@@ -39,7 +39,12 @@ from rtp_llm.models_py.module_base import (
     validate_hf_checkpoint_storage,
 )
 from rtp_llm.models_py.read_spec import LoadedCheckpointTensor, ReadSpec
-from rtp_llm.models_py.registry import get_model_class, list_models, uses_isolated_checkpoint_load
+from rtp_llm.models_py.registry import (
+    get_model_class,
+    list_models,
+    requires_expert_checkpoint,
+    uses_isolated_checkpoint_load,
+)
 
 logger = logging.getLogger(__name__)
 _CUSTOM_WEIGHT_PREFIX = "__custom__."
@@ -969,20 +974,16 @@ class NewModelLoader:
                     raise ValueError(
                         f"model_config {name} must be non-negative, got {value}"
                     )
-            if "moe" in str(model_type).lower() or moe_top_k > 0 or moe_style > 0:
+            # EP is a service topology, not proof that this owner is sparse:
+            # a routed target may lend its vocabulary to a fully dense draft.
+            # Legacy dense MTP configs can also have a nonempty moe_layer_index.
+            if requires_expert_checkpoint(model_type) or moe_top_k or moe_style:
                 raise ValueError(
                     "EP is configured for a MoE model "
                     f"(model_type={model_type!r}, moe_k={moe_top_k}, "
                     f"moe_style={moe_style}), but "
                     "model_config reports zero experts"
                 )
-            logger.warning(
-                "EP size %d is configured, but model_config reports zero experts; "
-                "model_type=%r and zero moe_k/moe_style markers identify a dense "
-                "model, so expert checkpoint filtering is disabled",
-                self.load_config.ep_size,
-                model_type,
-            )
             return None
         return _ExpertRangeFilter(
             num_experts,
@@ -1989,6 +1990,22 @@ class NewModelLoader:
                 )
         return None
 
+    def checkpoint_group(self):
+        """Participants in checkpoint selection, including resident hit/miss votes."""
+        if not torch.distributed.is_initialized():
+            return None
+        pc = self.load_config.parallelism_config
+        # PP draft models may be loaded by the tail stage only. Never enter a
+        # WORLD collective from that stage; the other stages will not join.
+        is_draft = (
+            self.model_config.get("is_mtp", False)
+            if isinstance(self.model_config, dict)
+            else getattr(self.model_config, "is_mtp", False)
+        )
+        return (
+            self._stage_group() if is_draft and getattr(pc, "pp_size", 1) > 1 else None
+        )
+
     def _synchronize_load_failure(
         self,
         local_reason: Optional[str],
@@ -1998,17 +2015,7 @@ class NewModelLoader:
         """Agree amongst the consumers actually taking part in this load."""
         if not torch.distributed.is_initialized():
             return local_reason
-        pc = self.load_config.parallelism_config
-        # PP draft models may be loaded by the tail stage only. Never enter a
-        # WORLD collective from that stage; the other stages will not join.
-        is_draft = (
-            self.model_config.get("is_mtp", False)
-            if isinstance(self.model_config, dict)
-            else getattr(self.model_config, "is_mtp", False)
-        )
-        group = (
-            self._stage_group() if is_draft and getattr(pc, "pp_size", 1) > 1 else None
-        )
+        group = self.checkpoint_group()
         participants = torch.distributed.get_world_size(group)
         if participants <= 1:
             return local_reason
@@ -2699,11 +2706,19 @@ class NewModelLoader:
                     ),
                 )
                 importer(ft_checkpoint)
-                finish_meta_lora = None
-                if meta_checkpoint is not None and startup_lora is not None:
-                    from rtp_llm.models_py.lora_checkpoint import prepare_startup_lora_merge
+                finish_format_lora = None
+                if startup_lora is not None:
+                    from rtp_llm.models_py.lora_checkpoint import (
+                        prepare_ft_lora_merge,
+                        prepare_startup_lora_merge,
+                    )
 
-                    finish_meta_lora = prepare_startup_lora_merge(model, self, *startup_lora)
+                    prepare = (
+                        prepare_startup_lora_merge
+                        if meta_checkpoint is not None
+                        else prepare_ft_lora_merge
+                    )
+                    finish_format_lora = prepare(model, self, *startup_lora)
                 ft_rebalance = False
                 if isinstance(ft_checkpoint, FTCheckpoint):
                     routed = [
@@ -2737,15 +2752,9 @@ class NewModelLoader:
                     self._finalize_host_staged_modules(model, defer_executor=resident is not None)
                 model.to(self.load_config.device)
                 self._validate_loaded_weights(model)
-                if finish_meta_lora is None and startup_lora is not None:
-                    from rtp_llm.models_py.lora_checkpoint import merge_startup_lora_checkpoint
-
-                    def finish_meta_lora():
-                        merge_startup_lora_checkpoint(model, self, *startup_lora)
-
                 self._finish_checkpoint(
                     model, resident, NewLoaderLoadMethod(ft_checkpoint.read_backend),
-                    startup_lora, finish_meta_lora, "meta" if meta_checkpoint else "ft",
+                    startup_lora, finish_format_lora, "meta" if meta_checkpoint else "ft",
                 )
                 validate_borrowed_parameters(model, self.load_config.device)
                 model.eval()
@@ -2759,8 +2768,9 @@ class NewModelLoader:
                 else NewLoaderLoadMethod.SCRATCH
             )
             logger.info(
-                "NewLoader imported %s checkpoint with %s; "
+                "[checkpoint_owner=%s] NewLoader imported %s checkpoint with %s; "
                 "CPU-owned payload is copied to %s (not direct GPU/GDS)",
+                self._model_type(),
                 "Meta consolidated" if meta_checkpoint else "rank-local FT",
                 ft_checkpoint.read_backend,
                 self.load_config.device,
@@ -2977,7 +2987,8 @@ class NewModelLoader:
                     close_weights()
             self._validate_loaded_weights(model)
         logger.info(
-            "Streamed checkpoint tensors with %s in %.2fs",
+            "[checkpoint_owner=%s] Streamed checkpoint tensors with %s in %.2fs",
+            self._model_type(),
             method.value,
             time.time() - started,
         )

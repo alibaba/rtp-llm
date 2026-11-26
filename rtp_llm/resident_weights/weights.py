@@ -469,7 +469,7 @@ class ResidentWeights:
         return weights
 
     def acquire_for_load(
-        self, device: str, *, synchronize_ranks: bool
+        self, device: str, *, synchronize_ranks: bool, group=None
     ) -> Optional[List[RestoredTensor]]:
         """Decide once for the rank group, before opening any checkpoint tensors.
 
@@ -488,10 +488,10 @@ class ResidentWeights:
             local_state = _ATTACH_HIT
         else:
             local_state = _ATTACH_MISS
-        # fastsafetensors broadcasts on WORLD. All participating ranks must agree on whether to
-        # attach, cold-load, or fail on a host restore error before anyone enters load_weights.
+        # A PP draft participates on its own stage, not WORLD. Every consumer
+        # must agree before any rank enters checkpoint reads or replay.
         state = (
-            all_ranks_min_state(local_state, device)
+            all_ranks_min_state(local_state, device, group=group)
             if synchronize_ranks
             else local_state
         )
@@ -1732,17 +1732,17 @@ def checkpoint_digest(path: str, follow_index: bool = False) -> str:
     return hashlib.sha256("\n".join(sorted(entries)).encode()).hexdigest()
 
 
-def all_ranks_min_state(state: int, device: str) -> int:
-    """Agree on the minimum integer state across participating WORLD ranks."""
+def all_ranks_min_state(state: int, device: str, *, group=None) -> int:
+    """Agree on the minimum state among the consumers of this checkpoint."""
     dist = torch.distributed
-    if not dist.is_initialized() or dist.get_world_size() <= 1:
+    if not dist.is_initialized() or dist.get_world_size(group) <= 1:
         return state
-    tensor_device = device if dist.get_backend() == "nccl" else "cpu"
+    tensor_device = device if dist.get_backend(group) == "nccl" else "cpu"
     flag = torch.tensor(int(state), dtype=torch.int32, device=tensor_device)
-    dist.all_reduce(flag, op=dist.ReduceOp.MIN)
+    dist.all_reduce(flag, op=dist.ReduceOp.MIN, group=group)
     return int(flag.item())
 
 
-def all_ranks_true(value: bool, device: str) -> bool:
-    """Agree before entering or skipping checkpoint-loader WORLD collectives."""
-    return bool(all_ranks_min_state(int(value), device))
+def all_ranks_true(value: bool, device: str, *, group=None) -> bool:
+    """Agree before entering or skipping checkpoint-loader collectives."""
+    return bool(all_ranks_min_state(int(value), device, group=group))

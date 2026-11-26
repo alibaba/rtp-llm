@@ -46,11 +46,39 @@ class _Attention(RtpModule):
         return self.o_proj(attended.reshape(x.shape[0], self.local_width))
 
 
+def build_eagle3_body(config, dtype, attn_size, attn_rank, ffn_size, ffn_rank):
+    """The serving and offline FT paths must agree on replicated KV heads and gated TP shards."""
+    attn = config.attn_config
+    return Eagle3DraftBody(
+        config.hidden_size, config.inter_size, attn.head_num, attn.kv_head_num,
+        attn.size_per_head, config.layernorm_eps, dtype,
+        attention=partial(_Attention, size=attn_size, rank=attn_rank),
+        mlp=lambda h, width, dt: Qwen3MLP(
+            h, width, ffn_size, ffn_rank, params_dtype=dt, prefix="midlayer.mlp"
+        ),
+    )
+
+
 class Qwen3MoeEagle3ForCausalLM(ResidentDecoderOwner, GptModelBase, RtpModule):
     runtime_parameter_paths = {
         "embedding": "embed_tokens.weight",
         "lm_head": "lm_head.weight",
     }
+    preserved_ft_parameter_loans = {
+        "embed_tokens.weight": "global.embedding",
+        "lm_head.weight": "global.lm_head",
+    }
+
+    def load_ft_checkpoint(self, checkpoint):
+        from rtp_llm.models_py.new_models.qwen3_moe_eagle3.ft_checkpoint import load_eagle3_ft
+
+        load_eagle3_ft(self, checkpoint)
+
+    @staticmethod
+    def ft_export_writer(config, parallel, database):
+        from rtp_llm.models_py.new_models.qwen3_moe_eagle3.ft_checkpoint import Eagle3FTExporter
+
+        return Eagle3FTExporter(config, parallel, database)
     WEIGHTS_MAPPER = WeightsMapper(
         exact_mapping={"model.embed_tokens.weight": "embed_tokens.weight"},
         prefix_mapping={key: "body." + key for key in ("fc.", "midlayer.", "norm.")},
@@ -70,33 +98,13 @@ class Qwen3MoeEagle3ForCausalLM(ResidentDecoderOwner, GptModelBase, RtpModule):
                 "Qwen3 EAGLE3 release draft requires unquantized floating weights"
             )
         h, dtype = config.hidden_size, load_config.compute_dtype
-        attn = config.attn_config
         self.capture_ids = tuple(config.capture_aux_hidden_layer_ids)
         ordered = sorted(self.capture_ids)
         self.slot_order = tuple(ordered.index(i) for i in self.capture_ids)
 
-        def make_mlp(hidden, intermediate, dtype):
-            return Qwen3MLP(
-                hidden,
-                intermediate,
-                load_config.ffn_tp_size,
-                load_config.ffn_tp_rank,
-                params_dtype=dtype,
-                prefix="midlayer.mlp",
-            )
-
-        self.body = Eagle3DraftBody(
-            h,
-            config.inter_size,
-            attn.head_num,
-            attn.kv_head_num,
-            attn.size_per_head,
-            config.layernorm_eps,
-            dtype,
-            attention=partial(
-                _Attention, size=load_config.attn_tp_size, rank=load_config.attn_tp_rank
-            ),
-            mlp=make_mlp,
+        self.body = build_eagle3_body(
+            config, dtype, load_config.attn_tp_size, load_config.attn_tp_rank,
+            load_config.ffn_tp_size, load_config.ffn_tp_rank,
         )
         with torch.device("meta"):
             self.embed_tokens = VocabParallelEmbedding(
