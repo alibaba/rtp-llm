@@ -212,6 +212,7 @@ test_suite(
         ":test_indexer_cp_padded_gather_triton_x86",
         ":test_indexer_fp8_score_x86",
         ":test_no_recompile_x86",
+        ":test_owned_shared_quant_linear_x86",
         ":test_prefill_common_metadata_cuda_x86",
         ":test_swa_cp_packed_gather_triton_x86",
         ":test_swa_fp8_kv_roundtrip_x86",
