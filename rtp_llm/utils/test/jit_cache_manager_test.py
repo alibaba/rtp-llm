@@ -827,10 +827,16 @@ class ScopeTest(JitCacheTestBase):
             scope = jit.resolve_scope(self.root)
         self.assertNotIn("aiter", {item.name for item in scope.components})
 
-    def test_setup_env_redirects_and_respects_presets(self):
+    def test_explicit_local_root_redirects_and_respects_presets(self):
         os.environ["TRITON_CACHE_DIR"] = str(self.root / "preset")
+        configured = self.root / "configured"
         with _fake_probes():
-            scope = jit.setup_jit_cache_env()
+            existing = jit.resolve_scope(configured).root
+            existing.mkdir(parents=True)
+            existing.parent.chmod(0o555)
+            self.addCleanup(existing.parent.chmod, 0o700)
+            scope = jit.setup_jit_cache_env(str(configured))
+        self.assertEqual(scope.root, configured / jit.RTP_JIT_VERSION / scope.scope_id)
         self.assertNotIn("triton", {item.name for item in scope.components})
         self.assertEqual(os.environ["TRITON_CACHE_DIR"], str(self.root / "preset"))
         torch_ext = next(x for x in scope.components if x.name == "torch_extensions")
@@ -1017,13 +1023,26 @@ class ScopeTest(JitCacheTestBase):
             jit.setup_jit_cache_env.cache_clear()
             with self.assertLogs(level="WARNING") as logs:
                 self.assertIsNone(jit.setup_jit_cache_env())
-            scope.root.chmod(0o700)
+            for mode in (0o500, 0o600):
+                with (
+                    self.subTest(mode=mode),
+                    self.assertRaises(cache_env.LocalJitDirectoryError),
+                ):
+                    scope.root.chmod(mode)
+                    jit.setup_jit_cache_env(str(self.root))
+            scope.root.rmdir()
+            scope.root.touch()
+            with self.assertRaises(cache_env.LocalJitDirectoryError):
+                jit.setup_jit_cache_env(str(self.root))
         self.assertIn("not shared by its owner", "\n".join(logs.output))
 
     def test_missing_acl_support_fails_open(self):
         os.umask(0o022)
-        with _fake_probes(), mock.patch.object(
-            jit, "_run", side_effect=[OSError("no setfacl"), "user::rwx"]
+        with (
+            _fake_probes(),
+            mock.patch.object(
+                jit, "_run", side_effect=[OSError("no setfacl"), "user::rwx"]
+            ),
         ):
             with self.assertLogs(level="WARNING") as logs:
                 self.assertIsNone(jit.setup_jit_cache_env())
@@ -1580,6 +1599,88 @@ class BackendTest(JitCacheTestBase):
         ):
             self.assertEqual(backend.start_backend_server(None, configs), "served")
         rank_start.assert_called_once()
+
+    def test_explicit_local_root_allows_cold_start_on_environment_failure(self):
+        configs = self.make_configs()
+        configs.jit_config.local_jit_dir = str(self.root)
+        presets = {item.env_name: str(self.root / item.name) for item in jit.COMPONENTS}
+        scenarios = (
+            (
+                "toolkit unavailable",
+                mock.patch.object(jit, "_toolkit_scope", return_value=None),
+            ),
+            ("all opted out", mock.patch.dict(os.environ, presets)),
+            (
+                "ACL tools missing",
+                mock.patch.object(
+                    jit, "_run", side_effect=FileNotFoundError("getfacl")
+                ),
+            ),
+            (
+                "manager unavailable",
+                mock.patch.dict(sys.modules, {"rtp_llm.utils.jit_cache_manager": None}),
+            ),
+        )
+        for name, failure in scenarios:
+            with (
+                self.subTest(name=name),
+                self.patched_backend(),
+                mock.patch.dict(os.environ),
+                _fake_probes(),
+                failure,
+                mock.patch.object(backend, "local_rank_start", return_value="served"),
+                self.assertLogs(level="WARNING") as logs,
+            ):
+                jit.setup_jit_cache_env.cache_clear()
+                before = {key: os.environ.get(key) for key in presets}
+                self.assertEqual(backend.start_backend_server(None, configs), "served")
+                self.assertEqual(before, {key: os.environ.get(key) for key in presets})
+                self.assertIn("JIT_CACHE_FAIL_OPEN", "\n".join(logs.output))
+
+    def test_explicit_invalid_local_root_blocks_rank_start(self):
+        configs = self.make_configs()
+        linked = self.root / "link"
+        linked.symlink_to(self.root)
+        scenarios = (
+            ("relative", "relative", contextlib.nullcontext()),
+            (
+                "symlink ancestor",
+                str(linked / "nested/cache"),
+                contextlib.nullcontext(),
+            ),
+            (
+                "noexec",
+                str(self.root),
+                mock.patch.object(
+                    os,
+                    "statvfs",
+                    return_value=types.SimpleNamespace(f_flag=os.ST_NOEXEC),
+                ),
+            ),
+            (
+                "write denied",
+                str(self.root),
+                mock.patch.object(
+                    tempfile,
+                    "TemporaryFile",
+                    side_effect=PermissionError("probe denied"),
+                ),
+            ),
+        )
+        for name, directory, filesystem in scenarios:
+            with (
+                self.subTest(name=name),
+                self.patched_backend(),
+                mock.patch.dict(os.environ),
+                _fake_probes(),
+                filesystem,
+                mock.patch.object(backend, "local_rank_start") as rank_start,
+            ):
+                jit.setup_jit_cache_env.cache_clear()
+                configs.jit_config.local_jit_dir = directory
+                with self.assertRaises(cache_env.LocalJitDirectoryError):
+                    backend.start_backend_server(None, configs)
+                rank_start.assert_not_called()
 
     def test_multi_rank_start_owns_manager_cleanup(self):
         manager = mock.Mock()

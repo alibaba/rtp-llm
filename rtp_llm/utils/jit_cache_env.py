@@ -12,6 +12,10 @@ from urllib.parse import urlparse
 _AUTOMATIC_CACHE_ENVS = "_RTP_LLM_AUTOMATIC_JIT_CACHE_ENVS"
 
 
+class LocalJitDirectoryError(ValueError):
+    """The explicitly configured local JIT storage cannot be used."""
+
+
 def _automatic_cache_envs(environ: Mapping[str, str]) -> dict[str, str]:
     try:
         values = json.loads(environ.get(_AUTOMATIC_CACHE_ENVS, "{}"))

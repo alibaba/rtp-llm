@@ -30,6 +30,7 @@ from rtp_llm.utils.jit_cache_deep_gemm import (
 )
 from rtp_llm.utils.jit_cache_env import (
     CacheEnvConfig,
+    LocalJitDirectoryError,
     configure_cache_env,
     read_cache_env,
 )
@@ -156,6 +157,7 @@ def resolve_scope(
     from rtp_llm.utils.util import COMPILE_FLAG_ENVS, torch_abi_fingerprint
 
     if not (version := torch.version.hip or torch.version.cuda):
+        logging.warning("JIT_CACHE_FAIL_OPEN: no GPU runtime version for build scope")
         return None
     backend = ROCM if torch.version.hip else CUDA
     accelerator, toolkit = _accelerator_scope(backend, version), _toolkit_scope(backend)
@@ -267,39 +269,66 @@ READ_EVENT_TYPES = frozenset({"opened", "closed_no_write"})
 NOISY_WATCHDOG_LOGGERS = ("watchdog.observers.inotify_buffer",)
 
 
+def _configured_local_root(value: str) -> Path:
+    try:
+        root = Path(value).expanduser()
+        if not root.is_absolute():
+            raise ValueError("expected an absolute local directory")
+        if any(path.is_symlink() for path in (root, *root.parents)):
+            raise ValueError("path contains a symlink")
+        root = Path(os.path.abspath(root))
+        root.mkdir(parents=True, exist_ok=True)
+        if os.statvfs(root).f_flag & os.ST_NOEXEC:
+            raise ValueError("directory is on a noexec mount")
+        # Probe the stable base, never the scope tree being atomically swapped.
+        with tempfile.TemporaryFile(dir=root):
+            pass
+        return root
+    except (OSError, RuntimeError, ValueError) as error:
+        raise LocalJitDirectoryError(
+            f"cannot use LOCAL_JIT_DIR={value!r}: {error}"
+        ) from error
+
+
 @lru_cache(maxsize=1)  # a second call must not read the env this one exports
 def setup_jit_cache_env(local_jit_dir: str = "") -> Scope | None:
     configured = local_jit_dir.strip()
+    # Test-only override: isolated roots intentionally skip the shared parent.
+    override = os.getenv("TEST_JIT_LOCAL_DIR", "").strip()
+    local_root = (
+        _configured_local_root(configured)
+        if configured
+        else Path(override or LOCAL_JIT_ROOT)
+    )
     try:
-        # Test-only override: isolated roots intentionally skip the shared parent.
-        override = os.getenv("TEST_JIT_LOCAL_DIR", "").strip()
-        if configured:
-            local_root = Path(configured).expanduser()
-            if not local_root.is_absolute():
-                raise ValueError(
-                    f"LOCAL_JIT_DIR must be an absolute local directory: {configured!r}"
-                )
-            local_root = Path(os.path.abspath(local_root))
-        else:
-            local_root = Path(override) if override else LOCAL_JIT_ROOT
         if not (scope := resolve_scope(local_root)):
-            if configured:
-                raise RuntimeError(
-                    f"cannot resolve JIT scope for LOCAL_JIT_DIR={local_root}"
-                )
             return None
+        if configured:
+            # A preprovisioned writable scope only needs traversal of its parent.
+            directory = scope.root if scope.root.exists() else scope.root.parent
+            if (
+                scope.root.is_symlink()
+                or scope.root.parent.is_symlink()
+                or (
+                    directory.exists()
+                    and not (
+                        directory.is_dir() and os.access(directory, os.W_OK | os.X_OK)
+                    )
+                )
+            ):
+                raise LocalJitDirectoryError(
+                    f"unusable scope directory for LOCAL_JIT_DIR: {scope.root}"
+                )
         if not override and not configured:
             _make_shared_dir(local_root.parent)
         _prepare_shared_root(local_root)
-        if configured:
-            # Probe the stable base, never the scope tree being atomically swapped.
-            if os.statvfs(local_root).f_flag & os.ST_NOEXEC:
-                raise ValueError(f"LOCAL_JIT_DIR is on a noexec mount: {local_root}")
-            with tempfile.TemporaryFile(dir=local_root):
-                pass
         mode = os.stat(local_root).st_mode & 0o7777
         logging.info("JIT shared root %s mode %o", local_root, mode)
-        if scope.root.exists() and not os.access(scope.root, os.W_OK):
+        if (
+            not configured
+            and scope.root.exists()
+            and not os.access(scope.root, os.W_OK)
+        ):
             raise OSError(f"scope root not shared by its owner: {scope.root}")
         for item in scope.components:
             configure_cache_env(item.env_name, item.local_dir, automatic=False)
@@ -307,9 +336,9 @@ def setup_jit_cache_env(local_jit_dir: str = "") -> Scope | None:
             if item.name in ("torch_extensions", "aiter"):
                 store.reap_stale_batons(item.local_dir)
         return scope
+    except LocalJitDirectoryError:
+        raise
     except Exception:
-        if configured:
-            raise  # an explicit checkpoint-safe path must not silently fall back
         logging.warning("JIT_CACHE_FAIL_OPEN: env setup failed", exc_info=True)
 
 

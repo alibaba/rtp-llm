@@ -38,7 +38,8 @@ def init_jit_group_args(parser, jit_config):
         type=str,
         default="",
         help="统一JIT本地cache根目录（自动追加版本和scope）；为空时使用/tmp/rtp-llm/.jit_cache。"
-        "须可写且允许加载动态库；本地路径参与远端scope，变更后需重新生成缓存",
+        "显式路径须为可写、可加载动态库的绝对目录，路径无效会阻止后端启动。"
+        "构建环境探测或共享 ACL 不可用时允许冷启动。本地路径参与 scope，变更后需重新生成缓存",
     )
     jit_group.add_argument(
         "--remote_jit_dir",
@@ -46,7 +47,7 @@ def init_jit_group_args(parser, jit_config):
         bind_to=(jit_config, "remote_jit_dir"),
         type=_env_expanded_path,
         default="",
-        help="JIT远程v1快照根（绝对路径直接使用），或auto哨兵"
+        help="JIT远程快照根（绝对路径直接使用），或auto哨兵"
         "（由HIPPO_APP_WORKDIR解析出$HIPPO_APP_WORKDIR/main/jit_cache，纯字母可穿透CI命令装配层，"
         "CI 的标准形态）；为空只关远端、仍用--local_jit_dir指定的本地缓存；"
         "完全关闭见--manage_jit_cache；预设组件cache环境变量可退出该组件的jit产物重定向",
