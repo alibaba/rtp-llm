@@ -185,6 +185,9 @@ class DeepSeekV41DSpark(DeepSeekV41, DeepSeekV4DSpark):
         config.moe_layer_index = list(range(layers))
         config.num_hash_layers = 0
         config.is_mtp = True
+        # V4.1 DSpark keeps borrowing the target's BF16 lm_head: the FP8
+        # draft-head path is enabled only for the V4-Flash DSpark layout.
+        config.dspark_share_target_lm_head = True
         text.update(
             kv_source_layer_ids=[], index_source_layer_ids=[], engram_layer_ids=[]
         )

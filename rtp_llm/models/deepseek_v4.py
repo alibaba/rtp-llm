@@ -51,6 +51,7 @@ from rtp_llm.models.dsv4_kv_cache import (
 )
 from rtp_llm.ops import HybridAttentionType, KvCacheDataType, RoleType
 from rtp_llm.utils.model_weight import (
+    FP8_E4M3_MAX,
     CkptWeightInfo,
     W,
     concat_0,
@@ -99,7 +100,10 @@ def detect_fp4_expert_storage(weight_keys) -> "str | None":
     does not declare ``expert_dtype``.
     """
     for key in weight_keys:
-        if key.endswith((".w1.scale", ".w2.scale", ".w3.scale")) and ".ffn.experts." in key:
+        if (
+            key.endswith((".w1.scale", ".w2.scale", ".w3.scale"))
+            and ".ffn.experts." in key
+        ):
             return "fp4"
     return None
 
@@ -718,10 +722,12 @@ class DeepSeekV4(DeepSeekV2):
 
     def create_model_loader(self):
         if _is_ppu_flash(self.model_config):
+            from rtp_llm.models_py.modules.dsv4.ppu.manifest import (
+                validate_cache_config,
+            )
             from rtp_llm.models_py.modules.dsv4.ppu.metadata.cache import (
                 configure_indexer_cache,
             )
-            from rtp_llm.models_py.modules.dsv4.ppu.manifest import validate_cache_config
 
             validate_cache_config(self.kv_cache_config)
             configure_indexer_cache(self.model_config)
@@ -1051,7 +1057,8 @@ class DeepSeekV4MtpWeight(DeepSeekV4Weight, DeepSeekV3MtpWeight):
         if _is_ppu_flash(self.model_config):
             # Quantized projections already own these scale bytes.
             weights = [
-                w for w in weights
+                w
+                for w in weights
                 if w.name not in (W.v4_mtp_e_proj_s, W.v4_mtp_h_proj_s)
             ]
         return ModelWeightInfo(layer_weights=layer_weights, weights=weights)
@@ -1074,7 +1081,9 @@ class DeepSeekV4Mtp(DeepSeekV4, DeepSeekV3Mtp):
                 PpuDeepSeekV4MtpModel as DeepSeekV4MtpModel,
             )
         else:
-            from rtp_llm.models_py.model_desc.deepseek_v4_mtp_model import DeepSeekV4MtpModel
+            from rtp_llm.models_py.model_desc.deepseek_v4_mtp_model import (
+                DeepSeekV4MtpModel,
+            )
 
         self.py_model = DeepSeekV4MtpModel(
             self.model_config,
@@ -1191,11 +1200,30 @@ class DeepSeekV4DSpark(DeepSeekV4):
 
     @classmethod
     def speculative_weight_alias_names(cls, target_model, draft_model_config):
-        """Borrow the two full-vocabulary matrices from the target owner."""
+        """Declare the global weights this draft borrows from the target owner.
+
+        The embedding always comes from the target.  The lm_head is borrowed
+        only when the draft is configured to share the target's head
+        (``dspark_share_target_lm_head``, or an ``enable_fp32_lm_head``
+        request that must not be re-quantized) or when this worker never
+        proposes: commit-only PREFILL workers discard their commit logits, so
+        the shared head keeps their memory footprint unchanged.  Otherwise
+        the draft materializes its own ``head.weight`` and quantizes it to
+        E4M3 at load time, moving proposal logits onto the existing C++ FP8
+        lm_head path (see :meth:`load`).
+        """
         if not isinstance(target_model, DeepSeekV4) or isinstance(
             target_model, DeepSeekV4DSpark
         ):
             raise TypeError("DeepSeek-V4 DSpark requires a DeepSeek-V4 target owner")
+        target_role_type = getattr(
+            getattr(target_model, "parallelism_config", None), "role_type", None
+        )
+        share_target_head = (
+            bool(getattr(draft_model_config, "dspark_share_target_lm_head", False))
+            or bool(getattr(draft_model_config, "enable_fp32_lm_head", False))
+            or _is_prefill_role(target_role_type)
+        )
         target_config = target_model.model_config
         compatible_fields = (
             "vocab_size",
@@ -1218,7 +1246,9 @@ class DeepSeekV4DSpark(DeepSeekV4):
                 "DeepSeek-V4 DSpark cannot alias semantically incompatible "
                 f"target weights: {details}"
             )
-        return (W.embedding, W.lm_head)
+        if share_target_head:
+            return (W.embedding, W.lm_head)
+        return (W.embedding,)
 
     @classmethod
     def _create_config(cls, ckpt_path: str):
@@ -1241,12 +1271,139 @@ class DeepSeekV4DSpark(DeepSeekV4):
         if any(int(ratio) != 0 for ratio in compress_ratios[-num_dspark_layers:]):
             raise ValueError("DeepSeek-V4 DSpARK draft layers must all use SWA")
 
+        # False (default): the draft owns an E4M3 copy of its lm_head —
+        # proposal logits run the C++ FP8 scaled_mm path while the target
+        # head stays BF16.  Checkpoints that must keep borrowing the target's
+        # BF16 head set ``"dspark_share_target_lm_head": true``.
+        config.dspark_share_target_lm_head = bool(
+            config_json.get("dspark_share_target_lm_head", False)
+        )
+
         config.num_layers = num_dspark_layers
         config.attn_config.layer_compress_ratios = [0] * num_dspark_layers
         config.moe_layer_index = list(range(num_dspark_layers))
         config.num_hash_layers = 0
         config.is_mtp = True
         return config
+
+    def load(self, skip_python_model: bool = False) -> None:
+        """Load weights, then hand the draft lm_head to the C++ FP8 path.
+
+        The conversion runs after ``super().load`` so only the C++ FP8 weight
+        lookup consumes the quantized head; ``DeepSeekV4DSparkModel`` sets
+        ``V4Args.skip_python_lm_head=True`` so ``V4Transformer.__init__``
+        neither rejects the E4M3 tensor nor retains the BF16 original.
+        """
+        super().load(skip_python_model=skip_python_model)
+        if self._dspark_draft_fp8_lm_head_enabled():
+            self._quantize_draft_lm_head_fp8()
+
+    def _dspark_draft_fp8_lm_head_enabled(self) -> bool:
+        """Whether this worker quantizes its own DSpARK draft head to E4M3."""
+        if bool(getattr(self.model_config, "dspark_share_target_lm_head", False)):
+            return False
+        if bool(getattr(self.model_config, "enable_fp32_lm_head", False)):
+            # An FP32 head request is honored by sharing the target's head
+            # instead of silently re-quantizing the draft's FP32 copy.
+            return False
+        if _is_prefill_role(getattr(self.parallelism_config, "role_type", None)):
+            return False
+        if (
+            not torch.cuda.is_available()
+            or getattr(torch.version, "hip", None) is not None
+        ):
+            return False
+        kernel = (
+            self.weight.global_weights.get(W.lm_head)
+            if self.weight is not None
+            else None
+        )
+        if kernel is not None and not kernel.is_cuda:
+            return False
+        dev = kernel.device if kernel is not None else torch.cuda.current_device()
+        try:
+            major, minor = torch.cuda.get_device_capability(dev)
+        except Exception:
+            return False
+        return (major, minor) >= (8, 9)
+
+    def _quantize_draft_lm_head_fp8(self) -> None:
+        """Quantize the draft's own lm_head to E4M3 + per-tensor FP32 scale.
+
+        This produces the exact storage contract expected by the C++ FP8
+        ``lm_head`` path (an E4M3 ``lm_head`` tensor plus its per-tensor FP32
+        ``lm_head.weight_only_quant_scale`` scalar on the same device), so
+        ``PyWrappedModel::computeLogits`` dispatches to dynamic per-token FP8
+        activation quantization + ``at::_scaled_mm`` instead of the BF16 GEMM.
+        The target model's ``lm_head`` is untouched: DSpARK proposals are
+        verified by the target, so greedy decode stays target-determined while
+        stochastic draft sampling reflects E4M3 weight quantization.
+        """
+        assert self.weight is not None
+        global_weights = self.weight.global_weights
+        kernel = global_weights.get(W.lm_head)
+        if kernel is None:
+            raise RuntimeError(
+                "DeepSeek-V4 DSpark draft lm_head is missing after load; "
+                "cannot enable the FP8 draft head"
+            )
+        if kernel.dtype == torch.float8_e4m3fn:
+            if global_weights.get(W.lm_head_s) is not None:
+                return
+            raise RuntimeError(
+                "DeepSeek-V4 DSpark draft lm_head is already E4M3 but has no "
+                f"{W.lm_head_s} scale"
+            )
+        if kernel.dtype not in (torch.bfloat16, torch.float16, torch.float32):
+            raise RuntimeError(
+                "DeepSeek-V4 DSpark draft lm_head dtype "
+                f"{kernel.dtype} cannot be FP8-quantized"
+            )
+        if kernel.dim() != 2:
+            raise RuntimeError(
+                "DeepSeek-V4 DSpark draft lm_head must be a 2-D matrix, got "
+                f"shape={tuple(kernel.shape)}"
+            )
+        source_dtype = kernel.dtype
+        # Chunk over rows (8192 rows ~= 134 MB FP32 vs 2.12 GB whole-matrix)
+        # so conversion does not spike peak device memory before KV allocation.
+        chunk_rows = 8192
+        rows = int(kernel.shape[0])
+        amax_val = 0.0
+        for start in range(0, rows, chunk_rows):
+            chunk_max = kernel[start : start + chunk_rows].abs().amax().float()
+            if not bool(torch.isfinite(chunk_max)):
+                raise RuntimeError(
+                    "DeepSeek-V4 DSpark draft lm_head contains non-finite values"
+                )
+            amax_val = max(amax_val, float(chunk_max))
+        # Same per-tensor recipe as Fp8StorageWeight: one FP32 scale of
+        # amax / 448 keeps every value inside the E4M3 domain.
+        scale = torch.tensor(
+            [max(amax_val, 1e-12) / FP8_E4M3_MAX],
+            dtype=torch.float32,
+            device=kernel.device,
+        )
+        fp8_kernel = torch.empty(
+            kernel.shape, dtype=torch.float8_e4m3fn, device=kernel.device
+        )
+        for start in range(0, rows, chunk_rows):
+            end = start + chunk_rows
+            q_chunk = kernel[start:end].float()
+            q_chunk.div_(scale).clamp_(-FP8_E4M3_MAX, FP8_E4M3_MAX)
+            fp8_kernel[start:end].copy_(q_chunk.to(torch.float8_e4m3fn))
+            del q_chunk
+        global_weights[W.lm_head] = fp8_kernel.contiguous()
+        global_weights[W.lm_head_s] = scale.contiguous()
+        del kernel
+        logging.info(
+            "[DeepSeekV4DSpark] draft lm_head stored as E4M3 "
+            "(shape=%s, per-tensor FP32 scale=%.3e): proposal logits now use "
+            "the C++ FP8 scaled_mm path; the target lm_head stays %s",
+            tuple(fp8_kernel.shape),
+            float(scale),
+            source_dtype,
+        )
 
     def _create_python_model(self):
         from rtp_llm.models_py.model_desc.deepseek_v4_dspark_model import (

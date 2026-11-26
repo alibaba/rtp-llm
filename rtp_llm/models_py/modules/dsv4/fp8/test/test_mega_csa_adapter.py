@@ -669,6 +669,40 @@ class MegaCSARuntimeTest(unittest.TestCase):
         metadata.is_cuda_graph = True
         self.assertEqual(_persistent_topk_chunk_bound(metadata, width), 65536)
 
+    def test_skip_python_lm_head_accepts_fp8_weight_and_fails_cleanly(self) -> None:
+        args = V4Args(
+            n_layers=0,
+            n_mtp_layers=0,
+            compress_ratios=[],
+            skip_python_lm_head=True,
+        )
+        embed_w = torch.ones(4, 16, dtype=torch.bfloat16)
+        fp8_head = torch.ones(4, 16, dtype=torch.float8_e4m3fn)
+        global_weights = {
+            W.embedding: embed_w,
+            W.final_ln_gamma: torch.ones(16, dtype=torch.bfloat16),
+            W.lm_head: fp8_head,
+            W.v4_hc_head_fn: torch.zeros(1),
+            W.v4_hc_head_base: torch.zeros(1),
+            W.v4_hc_head_scale: torch.ones(3),
+        }
+        model_weights = SimpleNamespace(global_weights=global_weights, weights=[])
+        with patch(
+            "rtp_llm.models_py.modules.dsv4.transformer.EmbeddingTorch",
+            return_value=SimpleNamespace(weight=embed_w),
+        ), patch(
+            "rtp_llm.models_py.modules.dsv4.transformer.RMSNorm",
+            return_value=torch.nn.Identity(),
+        ), patch(
+            "rtp_llm.models_py.modules.dsv4.transformer.build_hc_head",
+            return_value=torch.nn.Identity(),
+        ):
+            transformer = V4Transformer(args, model_weights)
+
+        self.assertIsNone(transformer.head_weight)
+        with self.assertRaisesRegex(RuntimeError, "unavailable"):
+            transformer.forward(torch.empty(1, 0, dtype=torch.long), apply_lm_head=True)
+
 
 if __name__ == "__main__":
     unittest.main()

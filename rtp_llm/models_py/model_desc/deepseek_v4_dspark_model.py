@@ -118,6 +118,18 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             py_hw_kernel_config=py_hw_kernel_config,
         )
 
+        # The engine applies the draft lm_head on the C++ side
+        # (PyWrappedModel::computeLogits); the Python transformer never runs its
+        # apply_lm_head path for DSpark (forward_propose/commit return hidden
+        # states). Opt out of retaining W.lm_head inside V4Transformer before
+        # initialize() runs so load-time E4M3 quantization neither triggers the
+        # BF16/FP32 check nor pins the original BF16 tensor in Python. Shared or
+        # FP32 heads preserve the V4Transformer reference.
+        share_target_head = bool(
+            getattr(model_config, "dspark_share_target_lm_head", False)
+        ) or bool(getattr(model_config, "enable_fp32_lm_head", False))
+        self._v4_args.skip_python_lm_head = not share_target_head
+
         role_type = getattr(parallelism_config, "role_type", None)
         self._disable_capture_context()
 

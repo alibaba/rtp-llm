@@ -151,13 +151,16 @@ class V4Transformer(_BaseV4Transformer):
                     layer.enable_mega_csa(self._mega_csa_runtime, mw.weights[layer_id])
                     layer.enable_mega_hca(self._mega_csa_runtime, mw.weights[layer_id])
 
-            # LM head — plain weight matrix [vocab_size, dim].  Accept either
-            # BF16 (ckpt-native) or FP32 (legacy path).
-            self.head_weight = gw[W.lm_head]
-            if self.head_weight.dtype not in (torch.float32, torch.bfloat16):
-                raise TypeError(
-                    f"DSV4 lm_head must be FP32 or BF16, got {self.head_weight.dtype}"
-                )
+            if getattr(args, "skip_python_lm_head", False):
+                self.head_weight = None
+            else:
+                # LM head — plain weight matrix [vocab_size, dim].  Accept either
+                # BF16 (ckpt-native) or FP32 (legacy path).
+                self.head_weight = gw[W.lm_head]
+                if self.head_weight.dtype not in (torch.float32, torch.bfloat16):
+                    raise TypeError(
+                        f"DSV4 lm_head must be FP32 or BF16, got {self.head_weight.dtype}"
+                    )
             self.head_hc = build_hc_head(
                 gw[W.v4_hc_head_fn],
                 gw[W.v4_hc_head_base],
@@ -273,6 +276,10 @@ class V4Transformer(_BaseV4Transformer):
             # No nn.Parameter anymore — pull device from a known-bound tensor.
             device = self.embed.weight.device
             if apply_lm_head:
+                if self.head_weight is None:
+                    raise RuntimeError(
+                        "DSV4 lm_head is unavailable when skip_python_lm_head=True or commit_only=True"
+                    )
                 return torch.zeros(
                     (B, self.head_weight.size(0)), dtype=torch.float32, device=device
                 )
@@ -347,6 +354,10 @@ class V4Transformer(_BaseV4Transformer):
         h = self._norm(h.reshape(bsz * seq, dim_)).view(bsz, seq, -1)
 
         if apply_lm_head:
+            if self.head_weight is None:
+                raise RuntimeError(
+                    "DSV4 lm_head is unavailable when skip_python_lm_head=True or commit_only=True"
+                )
             # Match h dtype to head_weight so F.linear works regardless of
             # load-time dtype (bf16 when enable_fp32_lm_head=False, f32
             # otherwise).  Final cast to f32 keeps logits dtype stable for
