@@ -140,10 +140,13 @@ FrozenTask::FrozenTask(PreparedExecution&&                 prepared,
                             "frozen execution diagnostics belong to a different trace");
 }
 
-void FrozenTask::freeze() noexcept {
+void FrozenTask::freeze(TransferCompletionCleanup::Prepared cleanup) noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     if (state_ != State::PREPARED) {
         return;
+    }
+    if (!cleanup.empty()) {
+        cleanup_ = std::move(cleanup);
     }
     for (const auto& target : targets_) {
         for (const auto block : target.blocks) {

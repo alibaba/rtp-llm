@@ -119,7 +119,7 @@ public:
     // Concurrent unfreeze callers do not repeat decrements; RELEASING remains
     // visible until the owner finishes. Notifications run without this mutex.
     // Only the caller completing FROZEN -> RELEASED returns true.
-    void freeze() noexcept;
+    void freeze(TransferCompletionCleanup::Prepared cleanup = {}) noexcept;
     bool unfreeze() noexcept;
 
     // Construct immutable query results before calling this method. Recording

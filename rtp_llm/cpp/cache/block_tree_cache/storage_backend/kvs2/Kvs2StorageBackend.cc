@@ -254,8 +254,11 @@ void Kvs2StorageBackend::writeImpl(const StorageRequest& request) {
                 for (size_t pos = begin; pos < end; ++pos) {
                     start.keys.push_back(key(request.keys->at(indices[pos])));
                 }
+                const auto options = optionsFor(deadline);
+                start.timeout_seconds = std::chrono::ceil<std::chrono::seconds>(
+                    std::chrono::milliseconds(options.timeout_ms)).count();
                 kvs::WriteContext write;
-                checkStatus(kvs::MasterClient(optionsFor(deadline)).StartWrite(start, &write), "KVS2 start write");
+                checkStatus(kvs::MasterClient(options).StartWrite(start, &write), "KVS2 start write");
                 block_tree_cache_detail::ScopeRollback abort([&]() noexcept {
                     try {
                         const auto status = kvs::MasterClient(options_).AbortWrite(write.write_id);
@@ -368,8 +371,10 @@ std::vector<bool> Kvs2StorageBackend::dispatch(const StorageRequest& request, Fu
         descriptor.targets.push_back({devicePool(tag), remote.block_ids(index)});
         execution.descriptors.push_back(std::move(descriptor));
     }
-    auto prepared = FrozenTask::prepare(std::move(execution));
-    std::list<std::shared_ptr<FrozenTask>> frozen_slot(1);
+    std::list<std::shared_ptr<FrozenTask>> frozen_slot;
+    frozen_slot.push_back(std::make_shared<FrozenTask>(
+        FrozenTask::prepare(std::move(execution)),
+        TransferResult(ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "KVS2 rank completion unknown"))));
     if (!cleanup_) {
         throw StorageOperationBufferSafeFailure("KVS2 rank completion cleanup is unavailable");
     }
@@ -385,12 +390,7 @@ std::vector<bool> Kvs2StorageBackend::dispatch(const StorageRequest& request, Fu
             cleanup.submit();
             return;
         }
-        auto frozen = std::make_shared<FrozenTask>(
-            std::move(prepared),
-            TransferResult(ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "KVS2 rank completion unknown")),
-            std::move(cleanup));
-        frozen_slot.front() = frozen;
-        frozen->freeze();
+        frozen_slot.front()->freeze(std::move(cleanup));
         std::lock_guard lock(frozen_mutex_);
         frozen_.splice(frozen_.end(), frozen_slot);
     });

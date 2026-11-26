@@ -30,6 +30,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/KVCMStorageBackend.h"
 #endif
 #ifdef RTP_LLM_USE_KVS2_CACHE
+#include "rtp_llm/cpp/cache/block_tree_cache/metrics/BlockTreeCacheMetricsReporter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvs2/Kvs2StorageBackend.h"
 #endif
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
@@ -389,7 +390,8 @@ bool KVCacheManager::init() {
                                                                   parallelism_config_.tp_size,
                                                                   parallelism_config_.world_rank,
                                                                   broadcast_manager,
-                                                                  metrics_reporter_);
+                                                                  std::make_shared<BlockTreeCacheMetricsReporter>(
+                                                                      metrics_reporter_));
 #else
             RTP_LLM_LOG_ERROR("KVS2 was requested, but this build does not include the KVS2 Client");
             return false;
