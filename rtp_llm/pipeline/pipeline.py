@@ -83,6 +83,7 @@ class Pipeline(object):
         master_config=None,
         parallelism_config=None,
         prefill_cp_config=None,
+        model_config=None,
     ):
         self.pd_sep_config = pd_sep_config
         self.tokenizer = tokenizer
@@ -102,6 +103,7 @@ class Pipeline(object):
             grpc_config=grpc_config,
             vit_separation=vit_separation,
             mm_model_config=mm_model_config,
+            model_config=model_config,
             server_config=server_config,
             master_config=master_config,
             parallelism_config=parallelism_config,
