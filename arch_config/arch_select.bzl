@@ -1,4 +1,3 @@
-load("@rtp_blackwell_config//:pins.bzl", "DEEP_GEMM_WHEEL", "FLASH_MLA_REQUIREMENT", "LINEAR_ATTENTION_REQUIREMENTS")
 load("@pip_arm_torch//:requirements.bzl", requirement_arm = "requirement")
 
 # to wrapper target relate with different system config
@@ -18,7 +17,14 @@ load("@rtp_llm//bazel:defs.bzl", "copy_so")
 #     bucket (rtp_llm/<arch>/); official torch wheels resolve from the
 #     mirrors.aliyun.com pytorch mirror. Both are shared by open and closed
 #     builds alike.
-load("@internal_impls//:impls.bzl", "EMBEDDING_ARPC_IMPL", "SUBSCRIBE_IMPL")
+load(
+    "@internal_impls//:impls.bzl",
+    "DEEP_GEMM_WHEEL",
+    "EMBEDDING_ARPC_IMPL",
+    "FLASH_MLA_REQUIREMENT",
+    "LINEAR_ATTENTION_REQUIREMENTS",
+    "SUBSCRIBE_IMPL",
+)
 
 # RDMA arch-selects live in the main repo's bazel package (see
 # bazel/rdma_arch_select.bzl for why) and are re-exported here for the

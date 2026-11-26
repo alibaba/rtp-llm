@@ -15,6 +15,9 @@ DEEP_GEMM_WHEEL = struct(
     sha256 = "806896fa0e88c5c50f5f02bc1c0c72983506a9bc079bed4d6829b184e7e83957",
 )
 
+FLASH_MLA_REQUIREMENT = None
+LINEAR_ATTENTION_REQUIREMENTS = []
+
 
 def extension_packages():
     return ["rtp_llm"]
