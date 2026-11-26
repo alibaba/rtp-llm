@@ -214,6 +214,70 @@ class Sm90SmallMFp8GemmGpuTest(unittest.TestCase):
             self.assertLess(rel_l2, 1e-3, f"V41MXFP8Linear M={m} rel_l2={rel_l2}")
             self.assertGreater(cos, 0.999999, f"V41MXFP8Linear M={m} cos={cos}")
 
+    def test_row_sliced_mn_major_scales_and_unaligned_slice_fallback(self):
+        import deep_gemm
+
+        # 1) Tail slice [32:64] from a 64-row MN-major buffer (previously OOB if boxDim=stride)
+        #    and [64:69] (M=5) from a 128-row MN-major buffer with NaN-poisoned padding rows [69:72].
+        full_q, full_s, w, w_s = _make_g32_inputs(64, 1792, 5120, seed=301)
+        sub_q, sub_s = full_q[32:64], full_s[32:64]
+        ref = torch.empty((32, 1792), device="cuda", dtype=torch.bfloat16)
+        out = torch.empty((32, 1792), device="cuda", dtype=torch.bfloat16)
+        deep_gemm.fp8_gemm_nt((sub_q, sub_s), (w, w_s), ref, recipe=(1, 32, 32), compiled_dims="")
+        self.assertTrue(sm90_small_m_fp8_gemm_nt((sub_q, sub_s), (w, w_s), out))
+        torch.cuda.synchronize()
+        self.assertLess(((out.float() - ref.float()).norm() / (ref.float().norm() + 1e-12)).item(), 1e-3)
+
+        big_q, big_s, w2, w2_s = _make_g32_inputs(128, 5120, 8192, seed=302)
+        big_s[69:72, :] = float("nan")
+        s5_q, s5_s = big_q[64:69], big_s[64:69]
+        ref5 = torch.empty((5, 5120), device="cuda", dtype=torch.bfloat16)
+        out5 = torch.empty((5, 5120), device="cuda", dtype=torch.bfloat16)
+        # Copy valid 5 rows for reference so DeepGEMM doesn't see NaN in unused rows if it loads wider
+        clean_s5 = torch.empty_strided((5, 8192 // 32), (1, 8), device="cuda", dtype=torch.float32)
+        clean_s5.copy_(s5_s)
+        deep_gemm.fp8_gemm_nt((s5_q, clean_s5), (w2, w2_s), ref5, recipe=(1, 32, 32), compiled_dims="")
+        self.assertTrue(sm90_small_m_fp8_gemm_nt((s5_q, s5_s), (w2, w2_s), out5))
+        torch.cuda.synchronize()
+        self.assertFalse(torch.isnan(out5).any().item())
+        self.assertLess(((out5.float() - ref5.float()).norm() / (ref5.float().norm() + 1e-12)).item(), 1e-3)
+
+        # 2) Unaligned row offset [1:5] (16-byte misaligned SFA pointer) falls back cleanly
+        fb_calls = []
+        handled = sm90_small_m_fp8_gemm_nt(
+            (big_q[1:5], big_s[1:5]),
+            (w2, w2_s),
+            torch.empty((4, 5120), device="cuda", dtype=torch.bfloat16),
+            fallback=lambda *a, **kw: fb_calls.append(True),
+        )
+        self.assertFalse(handled)
+        self.assertEqual(len(fb_calls), 1)
+
+    def test_multi_stream_concurrent_splitk_safety(self):
+        streams = [torch.cuda.Stream() for _ in range(4)]
+        cases = []
+        for idx, m in enumerate((4, 8, 16, 80)):
+            x_q, x_s, w, w_s = _make_g32_inputs(m, 1792, 5120, seed=500 + idx)
+            expected = torch.empty((m, 1792), device="cuda", dtype=torch.bfloat16)
+            self.assertTrue(sm90_small_m_fp8_gemm_nt((x_q, x_s), (w, w_s), expected))
+            cases.append((m, x_q, x_s, w, w_s, expected))
+        torch.cuda.synchronize()
+
+        outputs = [
+            [torch.empty((cases[s][0], 1792), device="cuda", dtype=torch.bfloat16) for _ in range(12)]
+            for s in range(4)
+        ]
+        for step in range(12):
+            for s_idx, st in enumerate(streams):
+                _, x_q, x_s, w, w_s, _ = cases[s_idx]
+                with torch.cuda.stream(st):
+                    self.assertTrue(sm90_small_m_fp8_gemm_nt((x_q, x_s), (w, w_s), outputs[s_idx][step]))
+        torch.cuda.synchronize()
+        for s_idx in range(4):
+            expected = cases[s_idx][5]
+            for step in range(12):
+                self.assertTrue(torch.equal(outputs[s_idx][step], expected))
+
 
 if __name__ == "__main__":
     unittest.main()

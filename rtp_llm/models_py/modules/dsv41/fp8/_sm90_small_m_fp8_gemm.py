@@ -44,10 +44,14 @@ _MAX_DYNAMIC_SMEM_BYTES = 224 * 1024
 _DEFAULT_WS_FLOATS = 4 * 1024 * 1024  # 16 MB reusable FP32 Split-K workspace
 _DEFAULT_COUNTER_ELEMS = 4096         # 16 KB (supports N up to 131,072)
 
+_MAX_CACHED_STREAMS = 32
 _LIB_LOCK = threading.Lock()
 _CACHED_LIB: Optional[ctypes.CDLL] = None
 _LIB_LOAD_FAILED = False
-_DEVICE_BUFFERS: dict[int, Tuple[torch.Tensor, torch.Tensor]] = {}
+_INITIALIZED_DEVICES: set[int] = set()
+_SM90_CAPABLE_DEVICES: dict[int, bool] = {}
+_STREAM_BUFFERS: dict[Tuple[int, int], Tuple[torch.Tensor, torch.Tensor]] = {}
+_CAPTURE_BUFFERS: dict[int, Tuple[torch.Tensor, torch.Tensor]] = {}
 _DEVICE_BUFFERS_LOCK = threading.Lock()
 
 
@@ -647,7 +651,11 @@ sm90_fp8_g32_swap_kernel(
             for (int i = 0; i < kNumAccum / 4; ++i) {
                 int tm0 = i * 8 + token_0_base;
                 if (tm0 + 1 < sfa_box_m) {
-                    sa_reg[sk][i] = *reinterpret_cast<const float2*>(sfa_sub + tm0);
+                    float2 pair = *reinterpret_cast<const float2*>(sfa_sub + tm0);
+                    sa_reg[sk][i] = make_float2(
+                        (tm0 < M) ? pair.x : 0.0f,
+                        (tm0 + 1 < M) ? pair.y : 0.0f
+                    );
                 } else {
                     sa_reg[sk][i] = make_float2(0.0f, 0.0f);
                 }
@@ -772,9 +780,9 @@ static inline CUresult make_tma_2d_fp8(
 }
 
 static inline CUresult make_tma_2d_sfa(
-    CUtensorMap* desc, const void* ptr, int sfa_stride_k, int k_scales, int sfa_box_m
+    CUtensorMap* desc, const void* ptr, int sfa_global_m, int sfa_stride_k, int k_scales, int sfa_box_m
 ) {
-    uint64_t globalDim[2] = { static_cast<uint64_t>(sfa_stride_k), static_cast<uint64_t>(k_scales) };
+    uint64_t globalDim[2] = { static_cast<uint64_t>(sfa_global_m), static_cast<uint64_t>(k_scales) };
     uint64_t globalStrides[1] = { static_cast<uint64_t>(sfa_stride_k) * sizeof(float) };
     uint32_t boxDim[2] = { static_cast<uint32_t>(sfa_box_m), 4u };
     uint32_t elemStrides[2] = { 1, 1 };
@@ -792,7 +800,7 @@ template <int BLOCK_N, int NUM_MATH_WGS, int STAGES, int SPLIT_K, int MIN_BLOCKS
 int launch_ns(
     const void* A, const void* SFA, const void* B, const void* SFB,
     void* D, void* ws, void* counters,
-    int M, int N, int K, int sfa_stride_k, cudaStream_t stream
+    int M, int N, int K, int sfa_global_m, int sfa_stride_k, cudaStream_t stream
 ) {
     constexpr int BLOCK_M = NUM_MATH_WGS * 64;
     constexpr int BLOCK_K = 128;
@@ -806,19 +814,20 @@ int launch_ns(
     int smem_bytes = smem_pipe > smem_epi ? smem_pipe : smem_epi;
     if (smem_bytes > kMaxDynamicSmem) return -2;
 
-    int sfa_box_m = sfa_stride_k;
+    int sfa_box_m = align_up(M, 4);
     int tx_bytes = BLOCK_N * BLOCK_K + M * BLOCK_K + 4 * sfa_box_m * (int)sizeof(float);
 
     CUtensorMap tma_a, tma_b, tma_sfa;
     if (make_tma_2d_fp8(&tma_a, A, M, K, M, BLOCK_K) != CUDA_SUCCESS) return -3;
     if (make_tma_2d_fp8(&tma_b, B, N, K, BLOCK_N, BLOCK_K) != CUDA_SUCCESS) return -4;
-    if (make_tma_2d_sfa(&tma_sfa, SFA, sfa_stride_k, K >> 5, sfa_box_m) != CUDA_SUCCESS) return -5;
+    if (make_tma_2d_sfa(&tma_sfa, SFA, sfa_global_m, sfa_stride_k, K >> 5, sfa_box_m) != CUDA_SUCCESS) return -5;
 
     sm90_fp8_g32_nonswap_kernel<BLOCK_N, NUM_MATH_WGS, STAGES, SPLIT_K, MIN_BLOCKS>
         <<<dim3(N / BLOCK_N, SPLIT_K), dim3(NUM_MATH_WGS * 128 + 128), smem_bytes, stream>>>(
             tma_a, tma_b, tma_sfa, (const float*)SFB, (__nv_bfloat16*)D, (float*)ws, (int*)counters,
             M, N, K, tx_bytes, sfa_box_m
         );
+    if (cudaGetLastError() != cudaSuccess) return -6;
     return 0;
 }
 
@@ -826,7 +835,7 @@ template <int M_TILE, int STAGES, int SPLIT_K, int MIN_BLOCKS>
 int launch_sw(
     const void* A, const void* SFA, const void* B, const void* SFB,
     void* D, void* ws, void* counters,
-    int M, int N, int K, int sfa_stride_k, cudaStream_t stream
+    int M, int N, int K, int sfa_global_m, int sfa_stride_k, cudaStream_t stream
 ) {
     constexpr int BLOCK_N = 64, BLOCK_K = 128;
     constexpr int SMEM_SFA_STAGE = align_up(4 * M_TILE * (int)sizeof(float), 128);
@@ -838,32 +847,34 @@ int launch_sw(
     int smem_bytes = smem_pipe > smem_epi ? smem_pipe : smem_epi;
     if (smem_bytes > kMaxDynamicSmem) return -2;
 
-    int sfa_box_m = sfa_stride_k;
+    int sfa_box_m = align_up(M, 4);
     int tx_bytes = BLOCK_N * BLOCK_K + M * BLOCK_K + 4 * sfa_box_m * (int)sizeof(float);
 
     CUtensorMap tma_a, tma_b, tma_sfa;
     if (make_tma_2d_fp8(&tma_a, A, M, K, M, BLOCK_K) != CUDA_SUCCESS) return -3;
     if (make_tma_2d_fp8(&tma_b, B, N, K, BLOCK_N, BLOCK_K) != CUDA_SUCCESS) return -4;
-    if (make_tma_2d_sfa(&tma_sfa, SFA, sfa_stride_k, K >> 5, sfa_box_m) != CUDA_SUCCESS) return -5;
+    if (make_tma_2d_sfa(&tma_sfa, SFA, sfa_global_m, sfa_stride_k, K >> 5, sfa_box_m) != CUDA_SUCCESS) return -5;
 
     sm90_fp8_g32_swap_kernel<M_TILE, STAGES, SPLIT_K, MIN_BLOCKS>
         <<<dim3(N / BLOCK_N, SPLIT_K), dim3(256), smem_bytes, stream>>>(
             tma_a, tma_b, tma_sfa, (const float*)SFB, (__nv_bfloat16*)D, (float*)ws, (int*)counters,
             M, N, K, tx_bytes, sfa_box_m
         );
+    if (cudaGetLastError() != cudaSuccess) return -6;
     return 0;
 }
 
 template <typename KernelFn>
-static inline void configure_smem(KernelFn fn) {
-    cudaFuncSetAttribute(fn, cudaFuncAttributeMaxDynamicSharedMemorySize, kMaxDynamicSmem);
+static inline bool configure_smem(KernelFn fn) {
+    return cudaFuncSetAttribute(fn, cudaFuncAttributeMaxDynamicSharedMemorySize, kMaxDynamicSmem) == cudaSuccess;
 }
 
 } // namespace
 
-// Must be called once eagerly outside CUDA Graph capture to configure dynamic SMEM limits.
-extern "C" void init_sm90_small_m_fp8_gemm() {
-    #define INIT_SW(MT, ST, SK, MB) configure_smem(sm90_fp8_g32_swap_kernel<MT, ST, SK, MB>);
+// Must be called once per CUDA device outside CUDA Graph capture to configure dynamic SMEM limits.
+extern "C" int init_sm90_small_m_fp8_gemm() {
+    bool ok = true;
+    #define INIT_SW(MT, ST, SK, MB) ok = ok && configure_smem(sm90_fp8_g32_swap_kernel<MT, ST, SK, MB>);
     #define INIT_SW_SET(MT, ST1, ST2) \
         INIT_SW(MT, ST1, 1, 1) INIT_SW(MT, ST1, 3, 1) INIT_SW(MT, ST1, 4, 1) \
         INIT_SW(MT, ST2, 1, 2) INIT_SW(MT, ST2, 4, 2)
@@ -872,33 +883,38 @@ extern "C" void init_sm90_small_m_fp8_gemm() {
     INIT_SW_SET(24, 8, 5)
     INIT_SW_SET(32, 8, 5)
 
-    #define INIT_NS(BN, WGS, ST, SK, MB) configure_smem(sm90_fp8_g32_nonswap_kernel<BN, WGS, ST, SK, MB>);
+    #define INIT_NS(BN, WGS, ST, SK, MB) ok = ok && configure_smem(sm90_fp8_g32_nonswap_kernel<BN, WGS, ST, SK, MB>);
     // NS32 (M <= 64)
     INIT_NS(32, 1, 8, 1, 1) INIT_NS(32, 1, 8, 2, 1)
     INIT_NS(32, 1, 6, 1, 2) INIT_NS(32, 1, 6, 2, 2)
     // NS64 (33 <= M <= 64 wide-N, and Dual-WG 65 <= M <= 128)
     INIT_NS(64, 1, 5, 1, 2)
     INIT_NS(64, 2, 6, 1, 1) INIT_NS(64, 2, 6, 3, 1) INIT_NS(64, 2, 6, 4, 1)
+    if (!ok) {
+        (void)cudaGetLastError();
+        return -1;
+    }
+    return 0;
 }
 
 // mode: 0 = Swap64, 1 = NS32, 2 = NS64
 extern "C" int run_sm90_small_m_fp8_gemm(
     const void* A, const void* SFA, const void* B, const void* SFB,
     void* D, void* ws, void* counters,
-    int M, int N, int K, int sfa_stride_k,
+    int M, int N, int K, int sfa_global_m, int sfa_stride_k,
     int mode, int split_k, int min_blocks,
     void* stream_ptr
 ) {
     cudaStream_t stream = static_cast<cudaStream_t>(stream_ptr);
     #define D_SW(MT, ST, SK, MB) \
         if (split_k == SK && min_blocks == MB) \
-            return launch_sw<MT, ST, SK, MB>(A, SFA, B, SFB, D, ws, counters, M, N, K, sfa_stride_k, stream);
+            return launch_sw<MT, ST, SK, MB>(A, SFA, B, SFB, D, ws, counters, M, N, K, sfa_global_m, sfa_stride_k, stream);
     #define D_SW_SET(MT, ST1, ST2) \
         D_SW(MT, ST1, 1, 1) D_SW(MT, ST1, 3, 1) D_SW(MT, ST1, 4, 1) \
         D_SW(MT, ST2, 1, 2) D_SW(MT, ST2, 4, 2)
     #define D_NS(BN, WGS, ST, SK, MB) \
         if (split_k == SK && min_blocks == MB) \
-            return launch_ns<BN, WGS, ST, SK, MB>(A, SFA, B, SFB, D, ws, counters, M, N, K, sfa_stride_k, stream);
+            return launch_ns<BN, WGS, ST, SK, MB>(A, SFA, B, SFB, D, ws, counters, M, N, K, sfa_global_m, sfa_stride_k, stream);
 
     if (mode == 0) {
         if (M <= 8)       { D_SW_SET(8, 8, 6) }
@@ -1002,7 +1018,7 @@ def _load_library() -> Optional[ctypes.CDLL]:
                                 pass
             lib = ctypes.CDLL(so_path)
             lib.init_sm90_small_m_fp8_gemm.argtypes = []
-            lib.init_sm90_small_m_fp8_gemm.restype = None
+            lib.init_sm90_small_m_fp8_gemm.restype = ctypes.c_int
             lib.run_sm90_small_m_fp8_gemm.argtypes = [
                 ctypes.c_void_p,
                 ctypes.c_void_p,
@@ -1018,10 +1034,10 @@ def _load_library() -> Optional[ctypes.CDLL]:
                 ctypes.c_int,
                 ctypes.c_int,
                 ctypes.c_int,
+                ctypes.c_int,
                 ctypes.c_void_p,
             ]
             lib.run_sm90_small_m_fp8_gemm.restype = ctypes.c_int
-            lib.init_sm90_small_m_fp8_gemm()
             _CACHED_LIB = lib
             return lib
         except Exception as exc:
@@ -1030,21 +1046,62 @@ def _load_library() -> Optional[ctypes.CDLL]:
             return None
 
 
-def _get_device_buffers(device: torch.device, *, allow_alloc: bool = True) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
-    idx = device.index if device.index is not None else torch.cuda.current_device()
-    bufs = _DEVICE_BUFFERS.get(idx)
+def _is_sm90_device(dev_idx: int) -> bool:
+    capable = _SM90_CAPABLE_DEVICES.get(dev_idx)
+    if capable is not None:
+        return capable
+    capable = torch.cuda.is_available() and torch.cuda.get_device_capability(dev_idx) == (9, 0)
+    _SM90_CAPABLE_DEVICES[dev_idx] = capable
+    return capable
+
+
+def _ensure_device_initialized(lib: ctypes.CDLL, dev_idx: int, *, capturing: bool) -> bool:
+    if dev_idx in _INITIALIZED_DEVICES:
+        return True
+    if capturing:
+        return False
+    with _DEVICE_BUFFERS_LOCK:
+        if dev_idx in _INITIALIZED_DEVICES:
+            return True
+        with torch.cuda.device(dev_idx):
+            rc = lib.init_sm90_small_m_fp8_gemm()
+            if rc != 0:
+                logger.warning("SM90 small-M FP8 GEMM cudaFuncSetAttribute failed on cuda:%d (rc=%d)", dev_idx, rc)
+                return False
+            if dev_idx not in _CAPTURE_BUFFERS:
+                dev = torch.device("cuda", dev_idx)
+                _CAPTURE_BUFFERS[dev_idx] = (
+                    torch.empty(_DEFAULT_WS_FLOATS, dtype=torch.float32, device=dev),
+                    torch.zeros(_DEFAULT_COUNTER_ELEMS, dtype=torch.int32, device=dev),
+                )
+        _INITIALIZED_DEVICES.add(dev_idx)
+        return True
+
+
+def _get_stream_buffers(
+    dev_idx: int, stream_ptr: int, *, capturing: bool
+) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
+    key = (dev_idx, stream_ptr)
+    bufs = _STREAM_BUFFERS.get(key)
     if bufs is not None:
         return bufs
-    if not allow_alloc or torch.cuda.is_current_stream_capturing():
-        return None
+    if capturing:
+        return _CAPTURE_BUFFERS.get(dev_idx)
     with _DEVICE_BUFFERS_LOCK:
-        bufs = _DEVICE_BUFFERS.get(idx)
+        bufs = _STREAM_BUFFERS.get(key)
         if bufs is not None:
             return bufs
-        ws = torch.empty(_DEFAULT_WS_FLOATS, dtype=torch.float32, device=device)
-        counters = torch.zeros(_DEFAULT_COUNTER_ELEMS, dtype=torch.int32, device=device)
+        dev = torch.device("cuda", dev_idx)
+        ws = torch.empty(_DEFAULT_WS_FLOATS, dtype=torch.float32, device=dev)
+        counters = torch.zeros(_DEFAULT_COUNTER_ELEMS, dtype=torch.int32, device=dev)
         bufs = (ws, counters)
-        _DEVICE_BUFFERS[idx] = bufs
+        if len(_STREAM_BUFFERS) < _MAX_CACHED_STREAMS:
+            _STREAM_BUFFERS[key] = bufs
+        if dev_idx not in _CAPTURE_BUFFERS:
+            _CAPTURE_BUFFERS[dev_idx] = (
+                torch.empty(_DEFAULT_WS_FLOATS, dtype=torch.float32, device=dev),
+                torch.zeros(_DEFAULT_COUNTER_ELEMS, dtype=torch.int32, device=dev),
+            )
         return bufs
 
 
@@ -1094,17 +1151,23 @@ def select_config(m: int, n: int, k: int) -> Optional[Tuple[int, int, int, int]]
 
 
 def warmup_sm90_small_m_fp8_gemm(device: Optional[torch.device] = None) -> bool:
-    """Eagerly compile/load the kernel library and allocate per-device buffers."""
+    """Eagerly compile/load the kernel library, configure dynamic SMEM, and allocate buffers."""
     if not is_enabled() or not torch.cuda.is_available():
         return False
     dev = torch.device("cuda", torch.cuda.current_device()) if device is None else torch.device(device)
-    if dev.type != "cuda" or torch.cuda.get_device_capability(dev) != (9, 0):
+    if dev.type != "cuda":
+        return False
+    dev_idx = dev.index if dev.index is not None else torch.cuda.current_device()
+    if not _is_sm90_device(dev_idx):
         return False
     lib = _load_library()
     if lib is None:
         return False
-    with torch.cuda.device(dev):
-        bufs = _get_device_buffers(dev, allow_alloc=True)
+    with torch.cuda.device(dev_idx):
+        if not _ensure_device_initialized(lib, dev_idx, capturing=False):
+            return False
+        stream_ptr = torch.cuda.current_stream(dev_idx).cuda_stream
+        bufs = _get_stream_buffers(dev_idx, stream_ptr, capturing=False)
     return bufs is not None
 
 
@@ -1129,9 +1192,20 @@ def sm90_small_m_fp8_gemm_nt(
         m, k = x_q.shape
         n, k_w = weight.shape
         cfg = select_config(m, n, k) if k == k_w else None
+        sfa_box_m = (m + 3) & ~3
+        k_scales = k >> 5
+        dev = x_q.device
+        dev_idx = dev.index if dev.index is not None else (
+            torch.cuda.current_device() if dev.type == "cuda" else -1
+        )
         if (
             cfg is not None
             and x_q.is_cuda
+            and _is_sm90_device(dev_idx)
+            and x_s.device == dev
+            and weight.device == dev
+            and weight_scale.device == dev
+            and out.device == dev
             and x_q.dtype == torch.float8_e4m3fn
             and weight.dtype == torch.float8_e4m3fn
             and x_s.dtype == torch.float32
@@ -1142,44 +1216,90 @@ def sm90_small_m_fp8_gemm_nt(
             and weight_scale.is_contiguous()
             and out.is_contiguous()
             and out.shape == (m, n)
-            and x_s.shape == (m, k >> 5)
-            and weight_scale.shape == (n >> 5, k >> 5)
+            and x_s.shape == (m, k_scales)
+            and weight_scale.shape == (n >> 5, k_scales)
             and x_s.stride(0) == 1
-            and x_s.stride(1) >= m
+            and x_s.stride(1) >= sfa_box_m
             and (x_s.stride(1) & 3) == 0
-            and x_s.stride(1) <= cfg[3]
+            and (x_q.data_ptr() & 15) == 0
+            and (weight.data_ptr() & 15) == 0
+            and (x_s.data_ptr() & 15) == 0
+            and (weight_scale.data_ptr() & 3) == 0
+            and (out.data_ptr() & 15) == 0
         ):
-            mode, split_k, min_blocks, _ = cfg
-            lib = _CACHED_LIB if _CACHED_LIB is not None else (
-                None if torch.cuda.is_current_stream_capturing() else _load_library()
+            sfa_storage_elems = x_s.untyped_storage().nbytes() >> 2
+            sfa_tail_base = x_s.storage_offset() + (k_scales - 1) * x_s.stride(1)
+            sfa_global_m = (
+                sfa_box_m
+                if (sfa_tail_base + sfa_box_m <= sfa_storage_elems)
+                else (m if (sfa_tail_base + m <= sfa_storage_elems) else 0)
             )
-            if lib is not None:
-                bufs = _get_device_buffers(x_q.device, allow_alloc=True)
-                if bufs is not None:
-                    ws, counters = bufs
-                    if split_k == 1 or (
-                        n * m * split_k <= ws.numel() and (n >> 5) <= counters.numel()
-                    ):
-                        stream_ptr = torch.cuda.current_stream(x_q.device).cuda_stream
+            mode, split_k, min_blocks, _ = cfg
+            capturing = torch.cuda.is_current_stream_capturing()
+            lib = (
+                None
+                if sfa_global_m == 0
+                else (
+                    _CACHED_LIB
+                    if _CACHED_LIB is not None
+                    else (None if capturing else _load_library())
+                )
+            )
+            if lib is not None and _ensure_device_initialized(lib, dev_idx, capturing=capturing):
+                stream_ptr = torch.cuda.current_stream(dev_idx).cuda_stream
+                ws_ptr = 0
+                counters_ptr = 0
+                ready = split_k == 1
+                if not ready:
+                    bufs = _get_stream_buffers(dev_idx, stream_ptr, capturing=capturing)
+                    if bufs is not None:
+                        ws, counters = bufs
+                        if n * m * split_k <= ws.numel() and (n >> 5) <= counters.numel():
+                            ws_ptr = ws.data_ptr()
+                            counters_ptr = counters.data_ptr()
+                            ready = True
+                if ready:
+                    if torch.cuda.current_device() != dev_idx:
+                        with torch.cuda.device(dev_idx):
+                            rc = lib.run_sm90_small_m_fp8_gemm(
+                                x_q.data_ptr(),
+                                x_s.data_ptr(),
+                                weight.data_ptr(),
+                                weight_scale.data_ptr(),
+                                out.data_ptr(),
+                                ws_ptr,
+                                counters_ptr,
+                                m,
+                                n,
+                                k,
+                                sfa_global_m,
+                                x_s.stride(1),
+                                mode,
+                                split_k,
+                                min_blocks,
+                                stream_ptr,
+                            )
+                    else:
                         rc = lib.run_sm90_small_m_fp8_gemm(
                             x_q.data_ptr(),
                             x_s.data_ptr(),
                             weight.data_ptr(),
                             weight_scale.data_ptr(),
                             out.data_ptr(),
-                            ws.data_ptr(),
-                            counters.data_ptr(),
+                            ws_ptr,
+                            counters_ptr,
                             m,
                             n,
                             k,
+                            sfa_global_m,
                             x_s.stride(1),
                             mode,
                             split_k,
                             min_blocks,
                             stream_ptr,
                         )
-                        if rc == 0:
-                            return True
+                    if rc == 0:
+                        return True
 
     if fallback is None:
         import deep_gemm

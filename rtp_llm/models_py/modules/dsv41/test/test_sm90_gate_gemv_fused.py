@@ -364,6 +364,49 @@ class Sm90GateGemvFusedCudaTest(unittest.TestCase):
         self.assertTrue(torch.equal(buf.topk_idx, ref.topk_idx))
         self.assertLess((buf.topk_weights - ref.topk_weights).abs().max().item(), 1e-4)
 
+    @torch.no_grad()
+    def test_multi_stream_concurrent_execution(self):
+        """Concurrent launches across multiple non-default streams must not race on partial/flag."""
+        h = 5120
+        configs = [(384, 6, 4), (128, 3, 5), (384, 6, 16), (384, 6, 64)]
+        streams = [torch.cuda.Stream() for _ in configs]
+        cases = []
+        for idx, (e, k, m) in enumerate(configs):
+            g = torch.Generator(device=self.device).manual_seed(8100 + idx)
+            x = torch.randn((m, h), dtype=torch.bfloat16, device=self.device, generator=g)
+            w = torch.randn((e, h), dtype=torch.bfloat16, device=self.device, generator=g) * 0.02
+            bias = torch.randn((e,), dtype=torch.float32, device=self.device, generator=g) * 0.1
+            expected = self._run_fused(x, w, bias, k)
+            cases.append((e, k, m, x, w, bias, expected))
+        torch.cuda.synchronize()
+
+        bufs = [
+            [_FakeBuf(cases[s][2], h, cases[s][1], self.device) for _ in range(10)]
+            for s in range(len(configs))
+        ]
+        for step in range(10):
+            for s_idx, st in enumerate(streams):
+                _, k, _, x, w, bias, _ = cases[s_idx]
+                b = bufs[s_idx][step]
+                with torch.cuda.stream(st):
+                    fused_mod.fused_sm90_gate_gemv_pack(
+                        x, w, bias, b.x, b.x_sf, b.topk_weights, b.topk_idx,
+                        topk=k, route_scale=2.5, norm_eps=1e-12,
+                    )
+        torch.cuda.synchronize()
+        for s_idx in range(len(configs)):
+            expected = cases[s_idx][6]
+            for step in range(10):
+                b = bufs[s_idx][step]
+                self._assert_pack_bitwise_equal(b, expected)
+                self.assertTrue(torch.equal(b.topk_idx, expected.topk_idx))
+                self.assertTrue(
+                    torch.equal(
+                        b.topk_weights.view(torch.int32),
+                        expected.topk_weights.view(torch.int32),
+                    )
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

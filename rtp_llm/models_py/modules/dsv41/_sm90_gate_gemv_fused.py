@@ -272,14 +272,15 @@ __device__ __forceinline__ void run_fp8_pack(
 // ============================================================================
 // Collaborative 3-Warp TopK for E=384, K=6 (partial layout [M, SPLIT_K, 384])
 // ============================================================================
-template <int SPLIT_K, bool USE_CG>
+template <int SPLIT_K, bool USE_CG, bool MULTI_ROW = false>
 __device__ __noinline__ void run_topk_e384_3warp(
     const float* __restrict__ partial, const float* __restrict__ bias,
     float* __restrict__ out_w, int64_t* __restrict__ out_idx,
     int row, int out_w_stride_m, int out_idx_stride_m,
     float route_scale, float norm_eps,
     int sub_w, int lane_id,
-    uint32_t* s_keys, float* s_vals, int* s_eids, int* s_bad, int barrier_id
+    uint32_t* s_keys, float* s_vals, int* s_eids, int* s_bad, int barrier_id,
+    int total_rows = 0
 ) {
     int eb = sub_w * 128 + (lane_id << 2);
     const float* p_row = partial + (int64_t)row * (SPLIT_K * 384) + eb;
@@ -354,6 +355,11 @@ __device__ __noinline__ void run_topk_e384_3warp(
                 out_w[(int64_t)row * out_w_stride_m + k] = row_ok ? (w_sel[k] / ws * route_scale) : fb;
                 out_idx[(int64_t)row * out_idx_stride_m + k] = (int64_t)idx_sel[k];
             }
+        }
+    }
+    if constexpr (MULTI_ROW) {
+        if (row + 4 < total_rows) {
+            asm volatile("bar.sync %0, 96;" :: "r"(barrier_id));
         }
     }
 }
@@ -535,11 +541,11 @@ __global__ void zsmem_small_m_1k(
             __shared__ int s_eids[GROUPS][18];
             __shared__ int s_bad[GROUPS][3];
             for (int row = grp; row < M; row += GROUPS) {
-                run_topk_e384_3warp<SPLIT_K, true>(
+                run_topk_e384_3warp<SPLIT_K, true, true>(
                     partial, bias, out_w, out_idx, row,
                     out_w_stride_m, out_idx_stride_m, route_scale, norm_eps,
                     sub_w, lane_id, s_keys[grp], s_vals[grp], s_eids[grp], s_bad[grp],
-                    grp + 1);
+                    grp + 1, M);
             }
         }
     }
@@ -701,7 +707,7 @@ __global__ void wgmma_pure_k1(
     constexpr int K_ITERS = K_PER_SPLIT / BK;
     int k_split_start = sk * K_PER_SPLIT;
 
-    extern __shared__ __align__(128) uint8_t smem_raw[];
+    extern __shared__ __align__(1024) uint8_t smem_raw[];
     bf16_t* sA_all = reinterpret_cast<bf16_t*>(smem_raw);
     bf16_t* sB_all = sA_all + STAGES * BM * BK;
 
@@ -949,12 +955,16 @@ _HIGH_SMEM_KERNELS = {
     "wg128_128_sk40_s2": _SMEM_WG128_S2,
 }
 
+_MAX_CACHED_STREAMS = 32
 _LOCK = threading.Lock()
 _BINDINGS_PROBED = False
 _CUDA_DRV = None
 _NVRTC = None
 _CUBIN_BYTES: Optional[bytes] = None
-_DEVICE_STATE: Dict[int, Tuple[object, Dict[str, object], torch.Tensor, torch.Tensor]] = {}
+_SM90_CAPABLE_DEVICES: Dict[int, bool] = {}
+_DEVICE_MODULES: Dict[int, Tuple[object, Dict[str, object]]] = {}
+_STREAM_BUFFERS: Dict[Tuple[int, int], Tuple[torch.Tensor, torch.Tensor]] = {}
+_CAPTURE_BUFFERS: Dict[int, Tuple[torch.Tensor, torch.Tensor]] = {}
 
 
 def _probe_bindings() -> bool:
@@ -1017,25 +1027,32 @@ def _compile_cubin() -> bytes:
     return _CUBIN_BYTES
 
 
-def _get_device_state(
-    device: torch.device,
-) -> Tuple[object, Dict[str, object], torch.Tensor, torch.Tensor]:
-    dev_idx = device.index if device.index is not None else torch.cuda.current_device()
-    state = _DEVICE_STATE.get(dev_idx)
-    if state is not None:
-        return state
+def _is_sm90_device(dev_idx: int) -> bool:
+    capable = _SM90_CAPABLE_DEVICES.get(dev_idx)
+    if capable is not None:
+        return capable
+    capable = torch.cuda.is_available() and torch.cuda.get_device_capability(dev_idx) == (9, 0)
+    _SM90_CAPABLE_DEVICES[dev_idx] = capable
+    return capable
+
+
+def _get_device_module(dev_idx: int) -> Tuple[object, Dict[str, object]]:
+    mod_state = _DEVICE_MODULES.get(dev_idx)
+    if mod_state is not None:
+        return mod_state
     with _LOCK:
-        state = _DEVICE_STATE.get(dev_idx)
-        if state is not None:
-            return state
+        mod_state = _DEVICE_MODULES.get(dev_idx)
+        if mod_state is not None:
+            return mod_state
         if not _probe_bindings():
             raise RuntimeError("cuda.bindings.driver/nvrtc unavailable")
         with torch.cuda.device(dev_idx):
-            # Ensure CUDA context is active before cuModuleLoadData.
-            partial = torch.empty(
-                (_WORKSPACE_FLOATS,), dtype=torch.float32, device=f"cuda:{dev_idx}"
-            )
-            flag = torch.zeros((1,), dtype=torch.int32, device=f"cuda:{dev_idx}")
+            # Ensure CUDA context is active before cuModuleLoadData and preallocate capture buffer.
+            if dev_idx not in _CAPTURE_BUFFERS:
+                _CAPTURE_BUFFERS[dev_idx] = (
+                    torch.empty((_WORKSPACE_FLOATS,), dtype=torch.float32, device=f"cuda:{dev_idx}"),
+                    torch.zeros((1,), dtype=torch.int32, device=f"cuda:{dev_idx}"),
+                )
             cubin = _compile_cubin()
             (mod,) = _check_drv(_CUDA_DRV.cuModuleLoadData(cubin))
             fns: Dict[str, object] = {}
@@ -1047,12 +1064,41 @@ def _get_device_state(
                     _CUDA_DRV.cuModuleGetFunction(mod, name.encode("utf-8"))
                 )
                 smem = _HIGH_SMEM_KERNELS.get(name, 0)
-                if smem > 48 * 1024:
+                if smem >= 48 * 1024:
                     _check_drv(_CUDA_DRV.cuFuncSetAttribute(fn, max_smem_attr, smem))
                 fns[name] = fn
-            state = (mod, fns, partial, flag)
-            _DEVICE_STATE[dev_idx] = state
-            return state
+            mod_state = (mod, fns)
+            _DEVICE_MODULES[dev_idx] = mod_state
+            return mod_state
+
+
+def _get_stream_buffers(
+    dev_idx: int, stream_ptr: int, *, capturing: bool
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    key = (dev_idx, stream_ptr)
+    bufs = _STREAM_BUFFERS.get(key)
+    if bufs is not None:
+        return bufs
+    if capturing:
+        cap_bufs = _CAPTURE_BUFFERS.get(dev_idx)
+        if cap_bufs is None:
+            raise RuntimeError(f"SM90 fused gate workspace not warmed before capture on cuda:{dev_idx}")
+        return cap_bufs
+    with _LOCK:
+        bufs = _STREAM_BUFFERS.get(key)
+        if bufs is not None:
+            return bufs
+        partial = torch.empty((_WORKSPACE_FLOATS,), dtype=torch.float32, device=f"cuda:{dev_idx}")
+        flag = torch.zeros((1,), dtype=torch.int32, device=f"cuda:{dev_idx}")
+        bufs = (partial, flag)
+        if len(_STREAM_BUFFERS) < _MAX_CACHED_STREAMS:
+            _STREAM_BUFFERS[key] = bufs
+        if dev_idx not in _CAPTURE_BUFFERS:
+            _CAPTURE_BUFFERS[dev_idx] = (
+                torch.empty((_WORKSPACE_FLOATS,), dtype=torch.float32, device=f"cuda:{dev_idx}"),
+                torch.zeros((1,), dtype=torch.int32, device=f"cuda:{dev_idx}"),
+            )
+        return bufs
 
 
 def warmup_sm90_gate_gemv_pack(device: Optional[torch.device] = None) -> bool:
@@ -1066,9 +1112,15 @@ def warmup_sm90_gate_gemv_pack(device: Optional[torch.device] = None) -> bool:
         if device is None
         else torch.device(device)
     )
-    if dev.type != "cuda" or torch.cuda.get_device_capability(dev) != (9, 0):
+    if dev.type != "cuda":
         return False
-    _get_device_state(dev)
+    dev_idx = dev.index if dev.index is not None else torch.cuda.current_device()
+    if not _is_sm90_device(dev_idx):
+        return False
+    with torch.cuda.device(dev_idx):
+        _get_device_module(dev_idx)
+        stream_ptr = torch.cuda.current_stream(dev_idx).cuda_stream
+        _get_stream_buffers(dev_idx, stream_ptr, capturing=False)
     return True
 
 
@@ -1135,7 +1187,8 @@ def can_use_sm90_gate_gemv_pack(
         or out_indices.device != dev
     ):
         return False
-    if torch.cuda.get_device_capability(dev) != (9, 0):
+    dev_idx = dev.index if dev.index is not None else torch.cuda.current_device()
+    if not _is_sm90_device(dev_idx):
         return False
     # Vectorized 128-bit load / 32-bit pack store alignment checks.
     if (
@@ -1155,9 +1208,12 @@ def can_use_sm90_gate_gemv_pack(
     ):
         return False
     # Never trigger lazy NVRTC compilation / workspace alloc during stream capture.
-    dev_idx = dev.index if dev.index is not None else torch.cuda.current_device()
-    if dev_idx not in _DEVICE_STATE and torch.cuda.is_current_stream_capturing():
-        return False
+    if torch.cuda.is_current_stream_capturing():
+        if dev_idx not in _DEVICE_MODULES or (
+            dev_idx not in _CAPTURE_BUFFERS
+            and (dev_idx, torch.cuda.current_stream(dev_idx).cuda_stream) not in _STREAM_BUFFERS
+        ):
+            return False
     return True
 
 
@@ -1315,10 +1371,44 @@ def fused_sm90_gate_gemv_pack(
             f"bias={tuple(bias.shape)}({bias.dtype}), topk={topk}"
         )
 
-    _, fns, partial, flag = _get_device_state(x.device)
-    stream = torch.cuda.current_stream(x.device).cuda_stream
+    dev_idx = x.device.index if x.device.index is not None else torch.cuda.current_device()
+    _, fns = _get_device_module(dev_idx)
+    stream = torch.cuda.current_stream(dev_idx).cuda_stream
+    capturing = torch.cuda.is_current_stream_capturing()
+    partial, flag = _get_stream_buffers(dev_idx, stream, capturing=capturing)
     rs = float(route_scale)
     eps = float(norm_eps)
+    if torch.cuda.current_device() != dev_idx:
+        with torch.cuda.device(dev_idx):
+            _dispatch_sm90_gate_gemv_pack(
+                fns, stream, e, m, h, x, weight_bf16, bias,
+                out_fp8, out_sf, out_weights, out_indices, partial, flag, rs, eps,
+            )
+        return
+    _dispatch_sm90_gate_gemv_pack(
+        fns, stream, e, m, h, x, weight_bf16, bias,
+        out_fp8, out_sf, out_weights, out_indices, partial, flag, rs, eps,
+    )
+
+
+def _dispatch_sm90_gate_gemv_pack(
+    fns: Dict[str, object],
+    stream: int,
+    e: int,
+    m: int,
+    h: int,
+    x: torch.Tensor,
+    weight_bf16: torch.Tensor,
+    bias: torch.Tensor,
+    out_fp8: torch.Tensor,
+    out_sf: torch.Tensor,
+    out_weights: torch.Tensor,
+    out_indices: torch.Tensor,
+    partial: torch.Tensor,
+    flag: torch.Tensor,
+    rs: float,
+    eps: float,
+) -> None:
 
     if e == 384:
         if m <= 4:
