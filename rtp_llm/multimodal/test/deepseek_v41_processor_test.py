@@ -334,7 +334,9 @@ class V41ImageDownloadTimingTest(unittest.TestCase):
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self.addCleanup(server.shutdown)
         url = f"http://127.0.0.1:{server.server_port}/image.png"
-        network = MediaNetwork(VitConfig())
+        # This size-limit fixture deliberately serves the image on loopback.
+        with patch("rtp_llm.multimodal.media_network._PRIVATE_MEDIA_NETWORKS", ()):
+            network = MediaNetwork(VitConfig())
         self.addCleanup(network.close)
 
         def native_load(url, limit_kb):
@@ -710,6 +712,37 @@ class V41BackendPreprocessContractTest(unittest.TestCase):
                     self.assertEqual(item.resize_tables.target_hw, (546, 546))
                 else:
                     self.assertTrue(torch.equal(item.patches, cpu.patches))
+
+    def test_packed_ipc_preserves_mixed_rgb_and_patches(self):
+        from libth_transformer_config import pack_preprocess_cpu_tensors
+
+        from rtp_llm.multimodal import preprocess_ipc
+
+        rgb = self.media(image_data(28, 28))
+        strip = self.media(image_data(65537, 1))
+        prepare = vision_module.DeepSeekV41VisionEmbedding.preprocess_input
+        options = dict(processor_config=self.config, gpu_preprocess=True)
+        for size in (-1, 512):
+            strip.mm_preprocess_config.width = strip.mm_preprocess_config.height = size
+            with self.subTest(size=size):
+                with patch.object(preprocess_ipc, "_pack_cpu_tensors", None):
+                    expected = prepare([strip, rgb], self.vit_config, **options)
+                with patch.object(
+                    preprocess_ipc, "_pack_cpu_tensors", pack_preprocess_cpu_tensors
+                ):
+                    actual = prepare([strip, rgb], self.vit_config, **options)
+                self.assertEqual(actual[0].n_vit_h, expected[0].n_vit_h)
+                self.assertEqual(actual[0].n_vit_w, expected[0].n_vit_w)
+                torch.testing.assert_close(actual[0].patches, expected[0].patches)
+                torch.testing.assert_close(actual[1].rgb, expected[1].rgb)
+                torch.testing.assert_close(
+                    actual[1].resize_tables.normalization,
+                    expected[1].resize_tables.normalization,
+                )
+                self.assertEqual(
+                    actual[0].patches.untyped_storage().data_ptr(),
+                    actual[1].rgb.untyped_storage().data_ptr(),
+                )
 
     def test_media_hints_leave_model_preprocessing_unchanged(self):
         data = [image_data(3, 5), image_data(5, 3)]

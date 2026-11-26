@@ -77,11 +77,14 @@ class _DecodedImage:
     resize_tables: ResizeTables | None = None
 
 
-def _pack_decoded_images(images):
-    # Flatten only this worker result. The views keep the ordinary model types
-    # and the original RGB and coefficient layouts consumed by the GPU stage.
+def _pack_preprocessed_images(images):
+    # Pack one worker result, then restore the RGB/resize-table or CPU-patch
+    # views in the order expected by the embedding stage.
     tensors = []
     for image in images:
+        if isinstance(image, _RuntimeImage):
+            tensors.append(image.patches)
+            continue
         tables = image.resize_tables
         tensors.append(image.rgb)
         if tables.horizontal is not None:
@@ -93,6 +96,9 @@ def _pack_decoded_images(images):
     packed = iter(pack_preprocess_tensors(tensors))
     results = []
     for image in images:
+        if isinstance(image, _RuntimeImage):
+            results.append(replace(image, patches=next(packed)))
+            continue
         tables = image.resize_tables
         rgb = next(packed)
         horizontal = (
@@ -746,14 +752,11 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
                         grid = plan_image_grid(*grid_size, processor_config)
                         target_hw = grid[2:]
                         patch_size = processor_config.vision_patch_size
-                        # An explicit small grid can exceed the GPU filter's downsampling limit.
-                        if gpu_preprocess and (
-                            grid_size == image.size
-                            or is_supported_shape(
-                                (image.height, image.width),
-                                target_hw,
-                                patch_size=patch_size,
-                            )
+                        # Either grid source can exceed the GPU filter's downsampling limit.
+                        if gpu_preprocess and is_supported_shape(
+                            (image.height, image.width),
+                            target_hw,
+                            patch_size=patch_size,
                         ):
                             rgb = _rgb_tensor(image)
                             tables = prepare_resize_tables(
@@ -782,8 +785,8 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
                 result_bytes,
                 {"representation": "rgb" if gpu_preprocess else "patches"},
             )
-        if gpu_preprocess and packed_preprocess_enabled():
-            results = _pack_decoded_images(results)
+        if results and gpu_preprocess and packed_preprocess_enabled():
+            results = _pack_preprocessed_images(results)
         data = results[0] if len(results) == 1 else results
         return (
             MMPreprocessResult(data, inspection_sources, source_identity)
