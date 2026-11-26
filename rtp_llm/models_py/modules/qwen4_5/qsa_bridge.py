@@ -1662,18 +1662,23 @@ if _HAS_TRITON:
         IS_PAGED: tl.constexpr,
         IS_FP8: tl.constexpr,
         HAS_SCALE: tl.constexpr,
+        G_BLK: tl.constexpr = 8,
+        SUB_G: tl.constexpr = 1,
     ):
         """Q4 deduplicated 4-query GQA TensorCore prefill kernel (dense or paged, BF16 or FP8)."""
         g_s = N_GRP_S - 1 - tl.program_id(0).to(tl.int64)
         b = tl.program_id(1).to(tl.int64)
-        hk = tl.program_id(2).to(tl.int64)
+        pid_hs = tl.program_id(2).to(tl.int64)
+        hk = pid_hs // SUB_G
+        sub_g = pid_hs % SUB_G
         grp = b * N_GRP_S + g_s
 
         r = tl.arange(0, M_ROWS)
-        q_j = r // G
+        q_j = r // G_BLK
         pos = g_s * 4 + q_j
-        live = (r < 4 * G) & (pos < S)
-        h = hk * G + (r % G)
+        q_local = sub_g * G_BLK + (r % G_BLK)
+        live = (r < 4 * G_BLK) & (q_local < G) & (pos < S)
+        h = hk * G + q_local
         d = tl.arange(0, D)
 
         qv = tl.load(
@@ -1822,19 +1827,23 @@ if _HAS_TRITON:
         IS_PAGED: tl.constexpr,
         IS_FP8: tl.constexpr,
         HAS_SCALE: tl.constexpr,
+        SUB_G: tl.constexpr = 1,
     ):
         """Grouped sparse FMHA with empty-block skip and split-BF16 P@V for SM80+/SM103 (dense or paged)."""
         pid_s = tl.num_programs(0).to(tl.int64) - 1 - tl.program_id(0).to(tl.int64)
         pid_b = tl.program_id(1).to(tl.int64)
-        pid_kv = tl.program_id(2).to(tl.int64)
+        pid_g = tl.program_id(2).to(tl.int64)
+        pid_kv = pid_g // SUB_G
+        sub_g = pid_g % SUB_G
 
         rh = tl.arange(0, BLK_H)
         rd = tl.arange(0, D)
-        live_h = rh < q_per_kv
+        q_off = sub_g * BLK_H + rh
+        live_h = q_off < q_per_kv
         q = tl.load(
             q_ptr
             + pid_b * stride_q_b
-            + (pid_kv * q_per_kv + rh[:, None]) * stride_q_h
+            + (pid_kv * q_per_kv + q_off[:, None]) * stride_q_h
             + pid_s * stride_q_s
             + rd[None, :],
             mask=live_h[:, None],
@@ -1887,12 +1896,13 @@ if _HAS_TRITON:
                 if IS_FP8:
                     if HAS_SCALE:
                         sc_v = tl.load(sc_base + stride_sc_kv, mask=valid, other=1.0).to(tl.float32)
-                        w_pv = (weights * sc_v[None, :]).to(tl.bfloat16)
+                        w_f = weights * sc_v[None, :]
                     else:
-                        w_pv = weights.to(tl.bfloat16)
+                        w_f = weights
                     v = v.to(tl.bfloat16)
                 else:
-                    w_pv = weights.to(tl.bfloat16)
+                    w_f = weights
+                w_pv = w_f.to(tl.bfloat16)
                 acc = acc * rescale[:, None]
                 acc = tl.dot(w_pv, v, acc)
                 sum_exp = sum_exp * rescale + tl.sum(weights, axis=1)
@@ -1902,7 +1912,7 @@ if _HAS_TRITON:
         tl.store(
             out_ptr
             + pid_b * stride_out_b
-            + (pid_kv * q_per_kv + rh[:, None]) * stride_out_h
+            + (pid_kv * q_per_kv + q_off[:, None]) * stride_out_h
             + pid_s * stride_out_s
             + rd[None, :],
             out.to(out_ptr.dtype.element_ty),
@@ -1956,18 +1966,22 @@ if _HAS_TRITON:
         WITH_GATE: tl.constexpr,
         IS_FP8: tl.constexpr,
         HAS_SCALE: tl.constexpr,
+        SUB_G: tl.constexpr = 1,
     ):
         """GQA TensorCore paged split-KV kernel for QSA decode/verify (BF16 & FP8)."""
         pid_m = tl.program_id(0).to(tl.int64)
         split = tl.program_id(1).to(tl.int64)
-        hk = pid_m % HK
-        bs = pid_m // HK
+        hk_sub = pid_m % (HK * SUB_G)
+        bs = pid_m // (HK * SUB_G)
+        hk = hk_sub // SUB_G
+        sub_g = hk_sub % SUB_G
         b = bs // S
         s = bs % S
 
         r = tl.arange(0, M_ROWS)
-        live_h = r < G
-        h = hk * G + r
+        q_off = sub_g * M_ROWS + r
+        live_h = q_off < G
+        h = hk * G + q_off
         d = tl.arange(0, D)
 
         qv = tl.load(
@@ -2178,19 +2192,24 @@ def _try_run_q4_prefill(
     T: int,
     page_size: int,
     is_paged: bool,
+    max_sub_g: int = 1,
 ) -> Optional[torch.Tensor]:
     """Attempt Q4 block-dedup sparse prefill; returns None if fallback to Direct is faster/needed."""
     B, H_q, S, D = q_bhtd.shape
     H_kv = int(k_ptr_obj.shape[2] if is_paged else k_ptr_obj.shape[1])
     K = int(sel_c.shape[-1])
     q_per_kv = H_q // max(H_kv, 1)
+    g_blk = min(8, max(1, q_per_kv))
+    sub_g = triton.cdiv(max(1, q_per_kv), g_blk)
+    # When sub_g > 1 (e.g. q_per_kv = 16 or 32), Direct BLK_H=16/32 loads K/V once per query for all Q heads,
+    # whereas Q4 reloads deduplicated quads sub_g times across separate CTAs. Callers may override max_sub_g.
     if (
         not _HAS_TRITON
         or torch.cuda.is_current_stream_capturing()
         or S < 8
         or K < 32
         or T <= 0
-        or q_per_kv > 8
+        or sub_g > max_sub_g
         or (is_paged and (page_size % 4 != 0 or bt_kv is None))
     ):
         return None
@@ -2236,16 +2255,17 @@ def _try_run_q4_prefill(
     has_dup, max_u_seen, sum_u_seen = torch.stack(
         [dup[0].to(torch.int64), u_cnt.max().to(torch.int64), u_cnt.sum(dtype=torch.int64)]
     ).tolist()
-    if has_dup != 0 or max_u_seen > cap_u or sum_u_seen > n_grp * int(K * 0.625):
+    max_avg_u = int(K * (0.625 if sub_g == 1 else 0.42))
+    if has_dup != 0 or max_u_seen > cap_u or sum_u_seen > n_grp * max_avg_u:
         return None
 
     out = torch.empty_like(q_bhtd)
-    m_rows = 16 if q_per_kv <= 4 else 32
+    m_rows = 16 if g_blk <= 4 else 32
     is_fp8 = k_ptr_obj.dtype == torch.float8_e4m3fn
     has_scale = is_fp8 and sc_hnd is not None
     dummy_bt = bt_kv if is_paged and bt_kv is not None else sel_c
     dummy_sc = sc_hnd if has_scale and sc_hnd is not None else k_ptr_obj
-    _qsa_q4_gqa_kernel[(n_grp_s, B, H_kv)](
+    _qsa_q4_gqa_kernel[(n_grp_s, B, H_kv * sub_g)](
         q_bhtd,
         k_ptr_obj,
         v_ptr_obj,
@@ -2289,6 +2309,8 @@ def _try_run_q4_prefill(
         IS_PAGED=is_paged,
         IS_FP8=is_fp8,
         HAS_SCALE=has_scale,
+        G_BLK=g_blk,
+        SUB_G=sub_g,
         num_warps=4,
         num_stages=1 if is_fp8 else 2,
     )
@@ -2406,11 +2428,13 @@ def qsa_sparse_prefill_attention(
             if q4_out is not None:
                 return q4_out
 
-            # 3) Fast direct grouped GQA TensorCore path (BLK_K=32, num_stages=2)
-            if S >= 16 and K >= 32 and 3 <= q_per_kv <= 16:
-                blk_k = 32 if D >= 256 else 64
+            # 3) Fast direct grouped GQA TensorCore path (BLK_H=32 for q_per_kv=32, else BLK_H=16)
+            if S >= 16 and K >= 32 and q_per_kv >= 3:
+                blk_h = 32 if (16 < q_per_kv <= 32) else 16
+                sub_g = triton.cdiv(q_per_kv, blk_h)
+                blk_k = 64 if (blk_h == 32 or D < 256) else 32
                 out = torch.empty_like(q_c)
-                _qsa_sparse_prefill_grouped_fast_kernel[(S, B, H_kv)](
+                _qsa_sparse_prefill_grouped_fast_kernel[(S, B, H_kv * sub_g)](
                     q_c,
                     k_c,
                     v_c,
@@ -2449,12 +2473,13 @@ def qsa_sparse_prefill_attention(
                     PAGE_SIZE=1,
                     MAX_BLKS=triton.cdiv(K, blk_k),
                     BLK_K=blk_k,
-                    BLK_H=16,
+                    BLK_H=blk_h,
                     IS_PAGED=False,
                     IS_FP8=False,
                     HAS_SCALE=False,
+                    SUB_G=sub_g,
                     num_warps=4,
-                    num_stages=2,
+                    num_stages=1 if blk_h == 32 else 2,
                 )
                 return out
 
@@ -2537,8 +2562,9 @@ def qsa_sparse_paged_prefill_attention(
         and selected.dtype == torch.int32
         and kv_block_table.dtype == torch.int32
         and D in (64, 128, 256)
+        and kv_heads > 0
         and H_q % kv_heads == 0
-        and q_per_kv <= 16
+        and (q_per_kv <= 16 or K >= 32)
         and page_size > 0
         and (page_size & (page_size - 1)) == 0
         and torch.cuda.get_device_capability(q_bhtd.device)[0] >= 8
@@ -2559,12 +2585,14 @@ def qsa_sparse_paged_prefill_attention(
         if q4_out is not None:
             return q4_out
 
-        blk_k = 32 if D >= 256 else 64
+        blk_h = 32 if (16 < q_per_kv <= 32) else 16
+        sub_g = triton.cdiv(q_per_kv, blk_h)
+        blk_k = 64 if (blk_h == 32 or D < 256) else 32
         out = torch.empty_like(q_c)
         is_fp8 = kv_hnd.dtype == torch.float8_e4m3fn
         has_scale = is_fp8 and sc_hnd is not None
         dummy_sc = sc_hnd if has_scale and sc_hnd is not None else kv_hnd
-        _qsa_sparse_prefill_grouped_fast_kernel[(S, B, kv_heads)](
+        _qsa_sparse_prefill_grouped_fast_kernel[(S, B, kv_heads * sub_g)](
             q_c,
             kv_hnd,
             kv_hnd,
@@ -2603,27 +2631,31 @@ def qsa_sparse_paged_prefill_attention(
             PAGE_SIZE=page_size,
             MAX_BLKS=triton.cdiv(K, blk_k),
             BLK_K=blk_k,
-            BLK_H=16,
+            BLK_H=blk_h,
             IS_PAGED=True,
             IS_FP8=is_fp8,
             HAS_SCALE=has_scale,
+            SUB_G=sub_g,
             num_warps=4,
-            num_stages=1 if is_fp8 else 2,
+            num_stages=1 if (is_fp8 or blk_h == 32) else 2,
         )
         return out
 
+    from rtp_llm.models_py.kernels.cuda.qsa.sparse_paged_fmha import (
+        sparse_paged_gqa_attn,
+    )
+
     kv_lens_2d = torch.full((B, S), max_ctx_len, dtype=torch.int32, device=q_bhtd.device)
-    return qsa_sparse_paged_decode_attention(
+    return sparse_paged_gqa_attn(
         q_bhtd,
-        kv_cache_base,
+        kv_hnd,
         kv_block_table,
         kv_lens_2d,
         selected,
         page_size=page_size,
-        kv_heads=kv_heads,
-        head_dim=head_dim,
-        kv_scale=kv_scale,
-        is_cuda_graph=False,
+        kv_head_num=kv_heads,
+        kv_scale=sc_hnd,
+        validate_selected=False,
     )
 
 
@@ -2679,7 +2711,7 @@ def qsa_sparse_paged_decode_attention(
         and selected.dtype == torch.int32
         and kv_heads > 0
         and H_q % kv_heads == 0
-        and 1 <= q_per_kv <= 16
+        and q_per_kv >= 1
         and D in (64, 128, 256)
         and page_size > 0
         and (page_size & (page_size - 1)) == 0
@@ -2699,7 +2731,9 @@ def qsa_sparse_paged_decode_attention(
         is_fp8 = kv_hnd.dtype == torch.float8_e4m3fn
         has_scale = is_fp8 and sc_hnd is not None
 
-        m_ctas = B * S * kv_heads
+        m_rows = 32 if (16 < q_per_kv <= 32) else 16
+        sub_g = triton.cdiv(q_per_kv, m_rows)
+        m_ctas = B * S * kv_heads * sub_g
         if not is_fp8:
             if m_ctas <= 16:
                 target_sp, kt, nw, stg = 32, 32, 4, 2
@@ -2719,7 +2753,6 @@ def qsa_sparse_paged_decode_attention(
                 target_sp, kt, nw, stg = 4, 32, 4, 2
 
         splits = min(target_sp, triton.next_power_of_2(triton.cdiv(K, kt)))
-        m_rows = 16
         with_gate = output_gate is not None
         if with_gate:
             out = torch.empty(
@@ -2778,6 +2811,7 @@ def qsa_sparse_paged_decode_attention(
                 WITH_GATE=with_gate,
                 IS_FP8=is_fp8,
                 HAS_SCALE=has_scale,
+                SUB_G=sub_g,
                 num_warps=nw,
                 num_stages=stg,
             )
@@ -2832,6 +2866,7 @@ def qsa_sparse_paged_decode_attention(
             WITH_GATE=False,
             IS_FP8=is_fp8,
             HAS_SCALE=has_scale,
+            SUB_G=sub_g,
             num_warps=nw,
             num_stages=stg,
         )

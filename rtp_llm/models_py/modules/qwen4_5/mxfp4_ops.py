@@ -3220,8 +3220,8 @@ def resolve_moe_backend_for_shape(
     if M <= 64:
         dec_env = os.environ.get("QWEN4_5_MXFP4_DECODE_BACKEND", "triton_splitk")
         if dec_env == "sm100_winner":
-            # Empirical P-001 (4x L20A) Pareto frontier: triton_splitk at M=1..2, deepgemm_masked at M>=3
-            return "deepgemm_masked" if (M >= 3 and dg_masked_ok) else "triton_splitk"
+            # Empirical SM103 CG frontier: triton_splitk at M=1 (54.3us), deepgemm_masked at M>=2 (61.7 vs 158.3us)
+            return "deepgemm_masked" if (M >= 2 and dg_masked_ok) else "triton_splitk"
         if capturing and dec_env in ("deepgemm_contiguous", "flashinfer", "flashinfer_noswap"):
             return "deepgemm_masked" if dg_masked_ok else "triton_splitk"
         if dec_env == "deepgemm_masked" and not dg_masked_ok:
@@ -3237,10 +3237,15 @@ def resolve_moe_backend_for_shape(
         return pref_env
     if capturing:
         return "deepgemm_masked" if dg_masked_ok else "triton"
-    # Empirical SM100/SM103 Pareto: deepgemm_masked for M<=1024 (beats flashinfer & CG-safe),
-    # flashinfer for 1024<M<16384, and FillFunctor-free deepgemm_contiguous for M>=16384.
-    masked_max_m = int(os.environ.get("QWEN4_5_MXFP4_MASKED_MAX_M", "1024"))
-    contig_min_m = int(os.environ.get("QWEN4_5_MXFP4_CONTIG_MIN_M", "16384"))
+    # Empirical SM103 Pareto:
+    #   - EP>=4 (E_local<=256): deepgemm_masked beats flashinfer up to M<=2048 (265 vs 457us),
+    #     and FillFunctor-free deepgemm_contiguous beats flashinfer for M>2048 (731 vs 768us @ 8192).
+    #   - EP=1..2 (E_local>256): deepgemm_masked for M<=1024, flashinfer for 1024<M<16384, contiguous for M>=16384.
+    e_local = weights.num_experts
+    default_masked_max = "2048" if e_local <= 256 else "1024"
+    default_contig_min = "2049" if e_local <= 256 else "16384"
+    masked_max_m = int(os.environ.get("QWEN4_5_MXFP4_MASKED_MAX_M", default_masked_max))
+    contig_min_m = int(os.environ.get("QWEN4_5_MXFP4_CONTIG_MIN_M", default_contig_min))
     if M <= masked_max_m and dg_masked_ok:
         return "deepgemm_masked"
     if M >= contig_min_m and dg_masked_ok:

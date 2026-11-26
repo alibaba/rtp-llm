@@ -1985,6 +1985,62 @@ class TestDFlash2Phase2MHAAndTP4(unittest.TestCase):
                 vr, ir = m_r.vocab_parallel_topk(h_tie_free, k=spec.selector_top_k)
                 tf_v.append(vr)
                 tf_i.append(ir)
+            # R3: verify packed int32 single-all_gather path & CUDA Graph capture/replay parity
+            from unittest import mock
+
+            class _StubPackedAG:
+                def __init__(self, grp, val_dtype: torch.dtype, dev):
+                    self.group = grp
+                    self.calls = 0
+                    self.last_dtype = None
+                    neg_val = torch.full((1,), float("-inf"), dtype=val_dtype, device=dev)
+                    self.neg_val_i32 = (
+                        neg_val.view(torch.int32)[0]
+                        if val_dtype == torch.float32
+                        else neg_val.view(torch.int16).to(torch.int32)[0]
+                    )
+
+                def all_gather(self, x: torch.Tensor, *, dim: int = -1) -> torch.Tensor:
+                    self.calls += 1
+                    self.last_dtype = x.dtype
+                    pad = torch.zeros_like(x)
+                    pad[0].fill_(self.neg_val_i32)
+                    return torch.cat((x, pad, pad, pad), dim=dim)
+
+            sentinel_grp = object()
+            m_cg_topk = rank_models[0]
+            saved_tp_grp, saved_far = m_cg_topk.tp_group, m_cg_topk.fast_all_reduce
+            stub_ar = _StubPackedAG(sentinel_grp, tf_v[0].dtype, device)
+            m_cg_topk.tp_group = sentinel_grp
+            m_cg_topk.fast_all_reduce = stub_ar
+            try:
+                with mock.patch("torch.distributed.is_initialized", return_value=True):
+                    ev_chk_v, ev_chk_i = m_cg_topk.vocab_parallel_topk(h_tie_free, k=spec.selector_top_k)
+                    self.assertEqual(stub_ar.calls, 1)
+                    self.assertEqual(stub_ar.last_dtype, torch.int32)
+                    self.assertTrue(torch.equal(ev_chk_v, tf_v[0]))
+                    # Rank 0 owns 4 distinct positive entries in tie_free_w (indices 10,20,30,40)
+                    self.assertTrue(torch.equal(ev_chk_i[:, :4], tf_i[0][:, :4]))
+                    if torch.cuda.is_available():
+                        h_cg_in = h_tie_free.clone()
+                        for _ in range(2):
+                            _ = m_cg_topk.vocab_parallel_topk(h_cg_in, k=spec.selector_top_k)
+                        torch.cuda.synchronize(device)
+                        g_topk = torch.cuda.CUDAGraph()
+                        stub_ar.calls = 0
+                        with torch.cuda.graph(g_topk):
+                            cg_v, cg_i = m_cg_topk.vocab_parallel_topk(h_cg_in, k=spec.selector_top_k)
+                        self.assertEqual(stub_ar.calls, 1)
+                        h_cg_in.copy_(h_tie_free * 1.5 + 0.01)
+                        ev_v, ev_i = m_cg_topk.vocab_parallel_topk(h_cg_in, k=spec.selector_top_k)
+                        g_topk.replay()
+                        torch.cuda.synchronize(device)
+                        self.assertTrue(torch.equal(cg_v, ev_v))
+                        self.assertTrue(torch.equal(cg_i, ev_i))
+                        del g_topk
+            finally:
+                m_cg_topk.tp_group = saved_tp_grp
+                m_cg_topk.fast_all_reduce = saved_far
             gv, gp = torch.topk(torch.cat(tf_v, dim=-1), spec.selector_top_k, dim=-1)
             gi = torch.gather(torch.cat(tf_i, dim=-1), -1, gp)
             tp_toks, tp_cands, tp_edges = m_full.candidate_selector.select_candidates_from_topk(
@@ -2775,6 +2831,24 @@ def _dflash2_gloo_pmode_worker(rank: int, world_size: int, port: int, pmode: str
             lg_ref = ref_model.compute_logits(out_ref)
             lg_cos = F.cosine_similarity(lg_par.float().reshape(-1), lg_ref.float().reshape(-1), dim=0).item()
             assert lg_cos > 0.995, f"DFlash2 {pmode} logits all_gather rank={rank} cos={lg_cos}"
+
+            # R3: verify 1 packed all_gather in vocab_parallel_topk and DFlash2 forward_propose(enable_tbo=True) parity
+            ag_cnt = [0]
+            orig_tp_ag = model._tp_all_gather_lastdim
+            def _wrap_ag(x, _orig=orig_tp_ag):
+                ag_cnt[0] += 1
+                return _orig(x)
+            model._tp_all_gather_lastdim = _wrap_ag
+            try:
+                vk_vals, vk_ids = model.vocab_parallel_topk(out_par, k=spec.selector_top_k)
+            finally:
+                model._tp_all_gather_lastdim = orig_tp_ag
+            expected_ag = 1 if (model.tp_size > 1 and model.lm_head_sharded) else 0
+            assert ag_cnt[0] == expected_ag, f"DFlash2 {pmode} expected {expected_ag} packed all_gather, got {ag_cnt[0]}"
+            assert vk_vals.shape == (out_par.shape[0], spec.selector_top_k) and vk_ids.shape == vk_vals.shape
+            out_tbo = model.forward_propose(propose_in, fmha_impl=fmha, enable_tbo=True, tbo_equal_tokens=True).hidden_states
+            tbo_cos = F.cosine_similarity(out_tbo.float(), out_par.float(), dim=-1).min().item()
+            assert tbo_cos > 0.999, f"DFlash2 {pmode} enable_tbo=True rank={rank} vs eager cos={tbo_cos}"
 
             # Also verify Triton DFlash2 backend parity under multi-parallel dp2_tp2_ep4
             if pmode == "dp2_tp2_ep4":

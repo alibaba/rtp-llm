@@ -17,6 +17,7 @@ from torch import nn
 from rtp_llm.models_py.model_desc.qwen4_5 import (
     resolve_qwen4_5_all_to_all,
     resolve_qwen4_5_parallel_topology,
+    run_latent_moe_tbo_tokens,
 )
 from rtp_llm.models_py.modules.qwen4_5.fast_comm import (
     get_qwen4_5_fast_all_reduce,
@@ -3265,6 +3266,22 @@ class Qwen4_5DFlash2DecoderLayer(nn.Module):
             dense_linear_mode=eff_mode,
         )
 
+    def forward_mlp_tbo(
+        self,
+        mixed: torch.Tensor,
+        *,
+        use_triton_mxfp4: Optional[bool] = None,
+        equal_tokens: Optional[bool] = None,
+    ) -> torch.Tensor:
+        """Run 3-stage MoE TBO across flattened tokens when EP + dp_attn are active."""
+        use_cuda = mixed.is_cuda if use_triton_mxfp4 is None else bool(use_triton_mxfp4)
+        return run_latent_moe_tbo_tokens(
+            self.mlp,
+            mixed,
+            use_triton_mxfp4=use_cuda,
+            equal_tokens=equal_tokens,
+        )
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -3273,6 +3290,9 @@ class Qwen4_5DFlash2DecoderLayer(nn.Module):
         kv_cache: Optional[LayerKVCache],
         deferred: Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
         latent: Optional[torch.Tensor],
+        *,
+        enable_tbo: bool = False,
+        tbo_equal_tokens: Optional[bool] = None,
     ) -> Tuple[Tuple[torch.Tensor, torch.Tensor, torch.Tensor], Optional[torch.Tensor]]:
         use_cuda = hidden_states.is_cuda
         if deferred is None:
@@ -3316,9 +3336,16 @@ class Qwen4_5DFlash2DecoderLayer(nn.Module):
             )
 
         mixed, mlp_coeff = self.mlp_conv.prepare(mixed)
-        output = self.mlp_conv.finish(
-            self.mlp(mixed, use_triton_mxfp4=use_cuda), mlp_coeff
+        mlp_out = (
+            self.forward_mlp_tbo(
+                mixed,
+                use_triton_mxfp4=use_cuda,
+                equal_tokens=tbo_equal_tokens,
+            )
+            if enable_tbo
+            else self.mlp(mixed, use_triton_mxfp4=use_cuda)
         )
+        output = self.mlp_conv.finish(mlp_out, mlp_coeff)
         if self.clip_mlp_output:
             output = output.clamp(-self.clip_mlp_output, self.clip_mlp_output)
         return (output, residual, inject), latent
@@ -3356,6 +3383,10 @@ class Qwen4_5DSparkModel(DSparkProposerMixin, GptModelBase):
         dp_equal_tokens: Optional[bool] = None,
         use_symm_p2p_combine: Optional[bool] = None,
         dense_linear_mode: Optional[str] = None,
+        fast_all_reduce: Any = None,
+        fast_ar_max_tokens: Optional[int] = None,
+        enable_tbo: bool = False,
+        tbo_equal_tokens: Optional[bool] = None,
     ) -> None:
         super().__init__(
             config,
@@ -3514,19 +3545,28 @@ class Qwen4_5DSparkModel(DSparkProposerMixin, GptModelBase):
         self.ep_rank = eff_ep_rank
         self.ep_group = ep_group
 
-        self.fast_all_reduce = None
+        self.enable_tbo = bool(enable_tbo)
+        self.tbo_equal_tokens = tbo_equal_tokens
+        self._active_tbo_override: Optional[Tuple[bool, Optional[bool]]] = None
+        self.fast_all_reduce = fast_all_reduce
         if (
-            self.tp_size > 1
+            self.fast_all_reduce is None
+            and self.tp_size > 1
             and tp_group is not None
             and device.type == "cuda"
             and dist.is_available()
             and dist.is_initialized()
         ):
+            df_ar_kw: Dict[str, Any] = {
+                "device": device,
+                "dtype": dtype,
+                "hidden_dims": (int(spec.hidden_size), int(spec.routed_expert_hidden_size)),
+            }
+            if fast_ar_max_tokens is not None:
+                df_ar_kw["max_tokens"] = int(fast_ar_max_tokens)
             self.fast_all_reduce = get_qwen4_5_fast_all_reduce(
                 tp_group,
-                device=device,
-                dtype=dtype,
-                hidden_dims=(int(spec.hidden_size), int(spec.routed_expert_hidden_size)),
+                **df_ar_kw,
             )
 
         if all_to_all_comm is None and eff_ep_size > 1 and self.dp_attn and ep_group is not None:
@@ -3868,6 +3908,9 @@ class Qwen4_5DSparkModel(DSparkProposerMixin, GptModelBase):
         active_requests: torch.Tensor,
         inputs: PyModelInputs,
         fmha_impl: Any,
+        *,
+        enable_tbo: Optional[bool] = None,
+        tbo_equal_tokens: Optional[bool] = None,
     ) -> torch.Tensor:
         flat_ids = query_ids.reshape(-1)
         flat_pos = query_positions.reshape(-1)
@@ -3900,6 +3943,13 @@ class Qwen4_5DSparkModel(DSparkProposerMixin, GptModelBase):
             active_fmha.active_requests = active_requests
             active_fmha.query_width = self._dspark_query_width
 
+        if self._active_tbo_override is not None and enable_tbo is None:
+            eff_tbo, ov_eq = self._active_tbo_override
+            eff_eq = ov_eq if tbo_equal_tokens is None else tbo_equal_tokens
+        else:
+            eff_tbo = self.enable_tbo if enable_tbo is None else bool(enable_tbo)
+            eff_eq = self.tbo_equal_tokens if tbo_equal_tokens is None else tbo_equal_tokens
+
         deferred = None
         latent = None
         for layer_idx, layer in enumerate(self.layers):
@@ -3911,6 +3961,8 @@ class Qwen4_5DSparkModel(DSparkProposerMixin, GptModelBase):
                 layer_kv,
                 deferred,
                 latent,
+                enable_tbo=eff_tbo,
+                tbo_equal_tokens=eff_eq,
             )
 
         assert deferred is not None
@@ -3969,13 +4021,13 @@ class Qwen4_5DSparkModel(DSparkProposerMixin, GptModelBase):
     def vocab_parallel_topk(
         self, hidden_states: torch.Tensor, k: Optional[int] = None
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Vocab-parallel distributed Top-K gathering only [T, k] per rank."""
+        """Vocab-parallel distributed Top-K gathering packed [val, id] in 1 collective."""
         top_k = int(k if k is not None else self.candidate_selector.top_k)
         logits_local = self._linear_lm_head_local(hidden_states)
         valid_len = max(0, min(int(logits_local.shape[-1]), self.lm_head_vocab_end - self.lm_head_vocab_start))
         if valid_len < int(logits_local.shape[-1]):
             logits_local = logits_local.clone()
-            logits_local[:, valid_len:] = float("-inf")
+            logits_local[..., valid_len:] = float("-inf")
 
         local_k = min(top_k, int(logits_local.shape[-1]))
         local_vals, local_idx = torch.topk(logits_local, local_k, dim=-1)
@@ -3988,6 +4040,26 @@ class Qwen4_5DSparkModel(DSparkProposerMixin, GptModelBase):
             and dist.is_available()
             and dist.is_initialized()
         ):
+            if (
+                int(self.spec.vocab_size) <= 0x7FFFFFFF
+                and local_vals.dtype in (torch.float32, torch.bfloat16, torch.float16)
+            ):
+                val_i32 = (
+                    local_vals.contiguous().view(torch.int32)
+                    if local_vals.dtype == torch.float32
+                    else local_vals.contiguous().view(torch.int16).to(torch.int32)
+                )
+                packed = torch.stack((val_i32, local_ids.to(torch.int32)), dim=0)
+                gathered = self._tp_all_gather_lastdim(packed)
+                raw_vals = gathered[0]
+                all_vals = (
+                    raw_vals.view(torch.float32)
+                    if local_vals.dtype == torch.float32
+                    else raw_vals.to(torch.int16).view(local_vals.dtype)
+                )
+                top_vals, top_pos = torch.topk(all_vals, top_k, dim=-1)
+                top_ids = torch.gather(gathered[1], -1, top_pos).to(local_ids.dtype)
+                return top_vals, top_ids
             all_vals = self._tp_all_gather_lastdim(local_vals)
             all_ids = self._tp_all_gather_lastdim(local_ids)
             top_vals, top_pos = torch.topk(all_vals, top_k, dim=-1)
@@ -4015,9 +4087,22 @@ class Qwen4_5DSparkModel(DSparkProposerMixin, GptModelBase):
         return self.run_commit_step(inputs, self.embed_weight.device)
 
     def forward_propose(
-        self, inputs: PyModelInputs, fmha_impl: Any = None
+        self,
+        inputs: PyModelInputs,
+        fmha_impl: Any = None,
+        *,
+        enable_tbo: Optional[bool] = None,
+        tbo_equal_tokens: Optional[bool] = None,
     ) -> PyModelOutputs:
-        return self.run_propose_step(inputs, fmha_impl, self.embed_weight.device)
+        if enable_tbo is None and tbo_equal_tokens is None:
+            return self.run_propose_step(inputs, fmha_impl, self.embed_weight.device)
+        prev = self._active_tbo_override
+        eff_tbo = self.enable_tbo if enable_tbo is None else bool(enable_tbo)
+        self._active_tbo_override = (eff_tbo, tbo_equal_tokens)
+        try:
+            return self.run_propose_step(inputs, fmha_impl, self.embed_weight.device)
+        finally:
+            self._active_tbo_override = prev
 
     def forward(
         self, inputs: PyModelInputs, fmha_impl: Any = None

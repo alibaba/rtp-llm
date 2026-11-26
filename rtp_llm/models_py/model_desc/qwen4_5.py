@@ -519,6 +519,55 @@ class Qwen4_5ProfileRecorder:
         return totals
 
 
+def run_latent_moe_tbo_tokens(
+    mlp: nn.Module,
+    hidden: torch.Tensor,
+    *,
+    use_triton_mxfp4: bool = True,
+    equal_tokens: Optional[bool] = None,
+) -> torch.Tensor:
+    """Run 3-stage 2-microbatch MoE TBO across flattened token dim when supported."""
+    last_dim = int(hidden.shape[-1]) if hidden.ndim > 0 else 0
+    total_tokens = (
+        int(hidden.shape[0])
+        if hidden.ndim == 2
+        else (int(hidden.numel() // last_dim) if last_dim > 0 else 0)
+    )
+    if (
+        total_tokens >= 2
+        and hasattr(mlp, "forward_route_and_dispatch")
+        and int(getattr(mlp, "ep_size", 1)) > 1
+        and bool(getattr(mlp, "dp_attn", False))
+        and getattr(mlp, "all_to_all_comm", None) is not None
+    ):
+        flat = hidden if hidden.ndim == 2 else hidden.reshape(total_tokens, last_dim)
+        t0 = total_tokens // 2
+        m0, m1 = flat[:t0], flat[t0:]
+        if not torch.cuda.is_current_stream_capturing() and hasattr(
+            mlp.all_to_all_comm, "_ensure_tbo_resources"
+        ):
+            mlp.all_to_all_comm._ensure_tbo_resources()
+        ctx0 = mlp.forward_route_and_dispatch(
+            m0,
+            use_triton_mxfp4=use_triton_mxfp4,
+            equal_tokens=equal_tokens,
+            slot=0,
+        )
+        ctx1 = mlp.forward_route_and_dispatch(
+            m1,
+            use_triton_mxfp4=use_triton_mxfp4,
+            equal_tokens=equal_tokens,
+            slot=1,
+        )
+        ctx0 = mlp.forward_routed_compute_and_combine(ctx0, slot=0)
+        ctx1 = mlp.forward_routed_compute_and_combine(ctx1, slot=1)
+        o0 = mlp.forward_finish_combine(ctx0)
+        o1 = mlp.forward_finish_combine(ctx1)
+        out = torch.cat((o0, o1), dim=0)
+        return out if hidden.ndim == 2 else out.reshape(hidden.shape)
+    return mlp(hidden, use_triton_mxfp4=use_triton_mxfp4)
+
+
 class Qwen4_5DecoderLayer(nn.Module):
     """Single decoder layer of Qwen 4.5-Flash (GDN or FullAttn + Dense or LatentMoE)."""
 
@@ -559,6 +608,8 @@ class Qwen4_5DecoderLayer(nn.Module):
         self.is_source = sharing_plan.is_source(layer_idx)
         self.source_layer_idx = sharing_plan.source_for(layer_idx)
         self.kv_cache_owner = sharing_plan.kv_cache_owner(layer_idx)
+        self.ep_size = max(1, int(ep_size or 1))
+        self.ep_group = ep_group
         self.tp_size = max(1, int(tp_size or 1))
         self.tp_rank = int(tp_rank or 0)
         self.tp_group = tp_group
@@ -1029,8 +1080,17 @@ class Qwen4_5DecoderLayer(nn.Module):
         *,
         use_reference: bool = False,
         profiler: Optional[Qwen4_5ProfileRecorder] = None,
+        enable_moe_tbo: bool = False,
+        tbo_equal_tokens: Optional[bool] = None,
     ) -> torch.Tensor:
         if isinstance(self.mlp, Qwen4_5LatentMoE):
+            if enable_moe_tbo:
+                return self.forward_mlp_tbo(
+                    mlp_in,
+                    use_reference=use_reference,
+                    profiler=profiler,
+                    equal_tokens=tbo_equal_tokens,
+                )
             if profiler is not None:
                 with profiler.record("latent_moe"):
                     return self.mlp(mlp_in, use_triton_mxfp4=not use_reference)
@@ -1039,6 +1099,32 @@ class Qwen4_5DecoderLayer(nn.Module):
             with profiler.record("dense_mlp"):
                 return self.mlp(mlp_in, use_triton=not use_reference)
         return self.mlp(mlp_in, use_triton=not use_reference)
+
+    def forward_mlp_tbo(
+        self,
+        mlp_in: torch.Tensor,
+        *,
+        use_reference: bool = False,
+        profiler: Optional[Qwen4_5ProfileRecorder] = None,
+        equal_tokens: Optional[bool] = None,
+    ) -> torch.Tensor:
+        """Run 3-stage MoE TBO by splitting flattened tokens into 2 microbatches."""
+        if not isinstance(self.mlp, Qwen4_5LatentMoE):
+            return self._run_mlp(mlp_in, use_reference=use_reference, profiler=profiler)
+        if profiler is not None:
+            with profiler.record("latent_moe"):
+                return run_latent_moe_tbo_tokens(
+                    self.mlp,
+                    mlp_in,
+                    use_triton_mxfp4=not use_reference,
+                    equal_tokens=equal_tokens,
+                )
+        return run_latent_moe_tbo_tokens(
+            self.mlp,
+            mlp_in,
+            use_triton_mxfp4=not use_reference,
+            equal_tokens=equal_tokens,
+        )
 
     def forward_post_mlp(
         self,
@@ -1083,6 +1169,8 @@ class Qwen4_5DecoderLayer(nn.Module):
         enable_yoco_decode: Optional[bool] = None,
         use_reference: bool = False,
         profiler: Optional[Qwen4_5ProfileRecorder] = None,
+        enable_moe_tbo: bool = False,
+        tbo_equal_tokens: Optional[bool] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Tuple[torch.Tensor, torch.Tensor]]:
         """Run one full decoder layer returning ``(hyper_hidden, prev_latent, deferred)``."""
         mlp_in, hyper_hidden, mlp_inj, prev_latent = self.forward_pre_mlp(
@@ -1100,7 +1188,13 @@ class Qwen4_5DecoderLayer(nn.Module):
             use_reference=use_reference,
             profiler=profiler,
         )
-        mlp_out = self._run_mlp(mlp_in, use_reference=use_reference, profiler=profiler)
+        mlp_out = self._run_mlp(
+            mlp_in,
+            use_reference=use_reference,
+            profiler=profiler,
+            enable_moe_tbo=enable_moe_tbo,
+            tbo_equal_tokens=tbo_equal_tokens,
+        )
         return self.forward_post_mlp(
             mlp_out,
             hyper_hidden,
@@ -1145,6 +1239,7 @@ class Qwen4_5Model(nn.Module):
         use_symm_p2p_combine: Optional[bool] = None,
         dense_linear_mode: Optional[str] = None,
         fast_all_reduce: Any = None,
+        fast_ar_max_tokens: Optional[int] = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -1194,11 +1289,16 @@ class Qwen4_5Model(nn.Module):
             and dist.is_available()
             and dist.is_initialized()
         ):
+            ar_kwargs: Dict[str, Any] = {
+                "device": dev,
+                "dtype": dtype,
+                "hidden_dims": (int(config.hidden_size), int(config.routed_expert_hidden_size)),
+            }
+            if fast_ar_max_tokens is not None:
+                ar_kwargs["max_tokens"] = int(fast_ar_max_tokens)
             fast_all_reduce = get_qwen4_5_fast_all_reduce(
                 self.tp_group,
-                device=dev,
-                dtype=dtype,
-                hidden_dims=(int(config.hidden_size), int(config.routed_expert_hidden_size)),
+                **ar_kwargs,
             )
         self.fast_all_reduce = fast_all_reduce
 
@@ -1742,24 +1842,32 @@ class Qwen4_5Model(nn.Module):
         ssm0: Optional[Dict[int, torch.Tensor]] = {} if (st0 is not None and seq0 > 1 and past0 > 0) else None
         ssm1: Optional[Dict[int, torch.Tensor]] = {} if (st1 is not None and seq1 > 1 and past1 > 0) else None
 
-        for layer in self.layers:
+        precomputed_mb0: Optional[
+            Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]
+        ] = None
+        num_layers = len(self.layers)
+        for layer_idx, layer in enumerate(self.layers):
             assert isinstance(layer, Qwen4_5DecoderLayer)
             if isinstance(layer.mlp, Qwen4_5LatentMoE):
-                mlp_in0, hyp0, inj0, lat0 = layer.forward_pre_mlp(
-                    hyp0,
-                    ids0,
-                    prev_latent=lat0,
-                    deferred=def0,
-                    shared_gdn_by_source=gdn0,
-                    shared_qsa_by_source=qsa0,
-                    source_prefix_ssm=ssm0,
-                    state=st0,
-                    positions=pos0,
-                    seq_offset=off0,
-                    enable_yoco_decode=enable_yoco_decode,
-                    use_reference=use_reference,
-                    profiler=profiler,
-                )
+                if precomputed_mb0 is not None:
+                    mlp_in0, hyp0, inj0, lat0 = precomputed_mb0
+                    precomputed_mb0 = None
+                else:
+                    mlp_in0, hyp0, inj0, lat0 = layer.forward_pre_mlp(
+                        hyp0,
+                        ids0,
+                        prev_latent=lat0,
+                        deferred=def0,
+                        shared_gdn_by_source=gdn0,
+                        shared_qsa_by_source=qsa0,
+                        source_prefix_ssm=ssm0,
+                        state=st0,
+                        positions=pos0,
+                        seq_offset=off0,
+                        enable_yoco_decode=enable_yoco_decode,
+                        use_reference=use_reference,
+                        profiler=profiler,
+                    )
                 ctx0 = layer.mlp.forward_route_and_dispatch(
                     mlp_in0,
                     use_triton_mxfp4=not use_reference,
@@ -1799,6 +1907,31 @@ class Qwen4_5Model(nn.Module):
                     use_reference=use_reference,
                     profiler=profiler,
                 )
+                # When tp_size == 1 (pure dp_ep), next_layer.forward_pre_mlp has no TP
+                # collectives and can overlap Layer L mb1 combine on comm_stream cleanly.
+                next_layer = (
+                    self.layers[layer_idx + 1] if (layer_idx + 1 < num_layers) else None
+                )
+                if (
+                    self.tp_size == 1
+                    and isinstance(next_layer, Qwen4_5DecoderLayer)
+                    and isinstance(next_layer.mlp, Qwen4_5LatentMoE)
+                ):
+                    precomputed_mb0 = next_layer.forward_pre_mlp(
+                        hyp0,
+                        ids0,
+                        prev_latent=lat0,
+                        deferred=def0,
+                        shared_gdn_by_source=gdn0,
+                        shared_qsa_by_source=qsa0,
+                        source_prefix_ssm=ssm0,
+                        state=st0,
+                        positions=pos0,
+                        seq_offset=off0,
+                        enable_yoco_decode=enable_yoco_decode,
+                        use_reference=use_reference,
+                        profiler=profiler,
+                    )
                 out1 = layer.mlp.forward_finish_combine(ctx1)
                 hyp1, lat1, def1 = layer.forward_post_mlp(
                     out1,
@@ -1906,6 +2039,8 @@ class Qwen4_5Model(nn.Module):
                 enable_yoco_decode=enable_yoco_decode,
                 use_reference=use_reference,
                 profiler=profiler,
+                enable_moe_tbo=enable_tbo,
+                tbo_equal_tokens=tbo_equal_tokens,
             )
 
         return self._finalize_hyper_streams(
@@ -1951,6 +2086,7 @@ class Qwen4_5ForCausalLM(nn.Module):
         use_symm_p2p_combine: Optional[bool] = None,
         dense_linear_mode: Optional[str] = None,
         fast_all_reduce: Any = None,
+        fast_ar_max_tokens: Optional[int] = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -1982,6 +2118,7 @@ class Qwen4_5ForCausalLM(nn.Module):
             use_symm_p2p_combine=use_symm_p2p_combine,
             dense_linear_mode=dense_linear_mode,
             fast_all_reduce=fast_all_reduce,
+            fast_ar_max_tokens=fast_ar_max_tokens,
         )
         self.parallel_topology = self.model.parallel_topology
         self.parallel_mode = self.model.parallel_mode
@@ -2137,9 +2274,23 @@ class Qwen4_5ForCausalLM(nn.Module):
             profiler=profiler,
             equal_tokens=equal_tokens,
         )
+        keep_tail = int(logits_to_keep) if (logits_to_keep is not None and logits_to_keep > 0) else 0
+        if keep_tail > 0:
+            hid0_k = hid0[:, -keep_tail:, :]
+            hid1_k = hid1[:, -keep_tail:, :]
+        else:
+            hid0_k, hid1_k = hid0, hid1
+        if hid0_k.shape[1:] == hid1_k.shape[1:]:
+            b0 = int(hid0_k.shape[0])
+            logits_cat = self._project_logits(
+                torch.cat((hid0_k, hid1_k), dim=0),
+                logits_to_keep=None,
+                profiler=profiler,
+            )
+            return logits_cat[:b0], logits_cat[b0:]
         return (
-            self._project_logits(hid0, logits_to_keep=logits_to_keep, profiler=profiler),
-            self._project_logits(hid1, logits_to_keep=logits_to_keep, profiler=profiler),
+            self._project_logits(hid0_k, logits_to_keep=None, profiler=profiler),
+            self._project_logits(hid1_k, logits_to_keep=None, profiler=profiler),
         )
 
     def forward(
@@ -2171,6 +2322,7 @@ class Qwen4_5ForCausalLM(nn.Module):
 
 
 __all__ = [
+    "run_latent_moe_tbo_tokens",
     "Qwen4_5DecoderLayer",
     "Qwen4_5ForCausalLM",
     "Qwen4_5Model",

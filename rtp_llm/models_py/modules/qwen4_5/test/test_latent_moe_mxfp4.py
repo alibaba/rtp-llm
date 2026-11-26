@@ -62,6 +62,7 @@ from rtp_llm.models_py.modules.qwen4_5.moe import (
 )
 from rtp_llm.models_py.modules.qwen4_5.mxfp4_ops import (
     MXFP4_BLOCK_SIZE,
+    MXFP4MoEWeights,
     bench_sm100_shootout,
     dequantize_mxfp4,
     dequantize_mxfp4_ref,
@@ -664,19 +665,30 @@ def test_sm100_mxfp4_backends_and_cuda_graph(device: torch.device) -> None:
                 )
                 assert torch.all(out_e == 0), f"Empty EP slice non-zero on {b}"
 
-    # Verify empirical P-001 SM100 regime dispatch & sm100_winner toggle
+    # Verify empirical SM103 E_local-aware regime dispatch & sm100_winner (M>=2) toggle
     w_all_chk = prepare_mxfp4_moe_weights(w13_u8=w1_q, w13_scale=w1_s, w2_u8=w2_q, w2_scale=w2_s)
+    w_large_e = MXFP4MoEWeights(
+        w13_u8=torch.empty((320, 1, 1), dtype=torch.uint8, device="meta"),
+        w13_scale=torch.empty((320, 2 * N, 1), dtype=torch.uint8, device="meta"),
+        w2_u8=torch.empty((320, 1, 1), dtype=torch.uint8, device="meta"),
+        w2_scale=torch.empty((320, K, 1), dtype=torch.uint8, device="meta"),
+    )
     prev_dec = os.environ.get("QWEN4_5_MXFP4_DECODE_BACKEND")
     try:
         os.environ.pop("QWEN4_5_MXFP4_DECODE_BACKEND", None)
         assert _resolve_moe_backend(torch.empty((1, K), device=device, dtype=torch.bfloat16), w_all_chk, "auto", True) == "triton_splitk"
         assert _resolve_moe_backend(torch.empty((16, K), device=device, dtype=torch.bfloat16), w_all_chk, "auto", True) == "triton_splitk"
         if use_dg:
-            for m_dg in (72, 512, 1024):
+            # E_local <= 256 (EP>=4): deepgemm_masked up to M<=2048, deepgemm_contiguous for M>2048
+            for m_dg in (72, 512, 1024, 2048):
                 assert _resolve_moe_backend(torch.empty((m_dg, K), device=device, dtype=torch.bfloat16), w_all_chk, "auto", True) == "deepgemm_masked"
+            assert _resolve_moe_backend(torch.empty((4096, K), device=device, dtype=torch.bfloat16), w_all_chk, "auto", True) == "deepgemm_contiguous"
             assert _resolve_moe_backend(torch.empty((16384, K), device=device, dtype=torch.bfloat16), w_all_chk, "auto", True) == "deepgemm_contiguous"
-        if use_fi:
-            assert _resolve_moe_backend(torch.empty((2048, K), device=device, dtype=torch.bfloat16), w_all_chk, "auto", True) == "flashinfer"
+            # E_local > 256 (EP=1..2): deepgemm_masked <= 1024, flashinfer 1025..16383, contiguous >= 16384
+            assert _resolve_moe_backend(torch.empty((1024, K), device=device, dtype=torch.bfloat16), w_large_e, "auto", True) == "deepgemm_masked"
+            if use_fi:
+                assert _resolve_moe_backend(torch.empty((2048, K), device=device, dtype=torch.bfloat16), w_large_e, "auto", True) == "flashinfer"
+            assert _resolve_moe_backend(torch.empty((16384, K), device=device, dtype=torch.bfloat16), w_large_e, "auto", True) == "deepgemm_contiguous"
         prev_wg = os.environ.get("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD")
         try:
             os.environ["RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD"] = "1"
@@ -690,13 +702,14 @@ def test_sm100_mxfp4_backends_and_cuda_graph(device: torch.device) -> None:
         os.environ["QWEN4_5_MXFP4_DECODE_BACKEND"] = "sm100_winner"
         assert _resolve_moe_backend(torch.empty((1, K), device=device, dtype=torch.bfloat16), w_all_chk, "auto", True) == "triton_splitk"
         if use_dg:
-            assert _resolve_moe_backend(torch.empty((4, K), device=device, dtype=torch.bfloat16), w_all_chk, "auto", True) == "deepgemm_masked"
+            assert _resolve_moe_backend(torch.empty((2, K), device=device, dtype=torch.bfloat16), w_all_chk, "auto", True) == "deepgemm_masked"
+            assert _resolve_moe_backend(torch.empty((64, K), device=device, dtype=torch.bfloat16), w_all_chk, "auto", True) == "deepgemm_masked"
     finally:
         if prev_dec is None:
             os.environ.pop("QWEN4_5_MXFP4_DECODE_BACKEND", None)
         else:
             os.environ["QWEN4_5_MXFP4_DECODE_BACKEND"] = prev_dec
-    del w_all_chk
+    del w_all_chk, w_large_e
 
     # CUDA Graph replay on mxfp4_moe_forward (Decode M<=64 AND Target Verify/Batch M>64)
     w_all = prepare_mxfp4_moe_weights(w13_u8=w1_q, w13_scale=w1_s, w2_u8=w2_q, w2_scale=w2_s)
@@ -1176,6 +1189,85 @@ def _dist_worker_body(rank: int, world_size: int, device: torch.device, group) -
     assert torch.equal(ag_dim0_cg, ag_dim0_ref), f"rank={rank} all_gather(dim=0) CG mismatch"
     del g_hc, g_ag
 
+    # 4b. R3 Chunked FastAllReduce (M > fi_ws_max_tokens) & P2P SymmMem AllGather (bf16/fp32/int32 + multi-chunk + CG)
+    prev_ws_cap = os.environ.get("QWEN4_5_FAST_AR_WS_MAX_TOKENS")
+    prev_ag_bytes = os.environ.get("QWEN4_5_FAST_AG_SYMM_BYTES")
+    prev_ag_min = os.environ.get("QWEN4_5_FAST_AG_SYMM_MIN_BYTES")
+    try:
+        os.environ["QWEN4_5_FAST_AR_WS_MAX_TOKENS"] = "128"
+        os.environ["QWEN4_5_FAST_AG_SYMM_BYTES"] = "32768"
+        os.environ["QWEN4_5_FAST_AG_SYMM_MIN_BYTES"] = "0"
+        ar_r3 = Qwen4_5FastAllReduce(
+            group, device, max_tokens=512, hidden_dims=(5120, 2560)
+        )
+        assert ar_r3._fi_ws_max_tokens == 128
+        for H_chk in (5120, 2560):
+            M_chk = 320
+            torch.manual_seed(7100 + rank + H_chk)
+            x_c = torch.randn((M_chk, H_chk), dtype=torch.bfloat16, device=device) * 0.25
+            res_c = torch.randn((M_chk, H_chk), dtype=torch.bfloat16, device=device) * 0.25
+            x_c_ref = x_c.clone()
+            dist.all_reduce(x_c_ref, op=dist.ReduceOp.SUM, group=group)
+            y_c = ar_r3(x_c)
+            assert _diff_stats(y_c, x_c_ref)[2] > 0.9999, f"Chunked AR H={H_chk} mismatch"
+            torch.manual_seed(7199)
+            w_c = torch.randn((H_chk,), dtype=torch.bfloat16, device=device) * 0.1
+            norm_c, r_out_c = ar_r3.all_reduce_residual_gemma_rmsnorm(x_c, res_c, w_c, eps=1e-6)
+            norm_ref_c = gemma_rmsnorm_ref(x_c_ref + res_c, w_c, eps=1e-6)
+            assert _diff_stats(norm_c, norm_ref_c)[2] > 0.999
+            assert torch.allclose(r_out_c, x_c_ref + res_c, atol=2e-2, rtol=2e-2)
+            for _ in range(2):
+                ar_r3(x_c)
+            torch.cuda.synchronize(device)
+            g_chk = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(g_chk):
+                y_c_cg = ar_r3(x_c)
+            g_chk.replay()
+            torch.cuda.synchronize(device)
+            assert _diff_stats(y_c_cg, x_c_ref)[2] > 0.9999
+            del g_chk
+
+        # SymmMem P2P all_gather across bf16, fp32, int32 & multi-chunk (32768B cap -> M=128, D=256 bf16 = 65536B)
+        for dt_ag in (torch.bfloat16, torch.float32, torch.int32):
+            for shp_ag in ((16, 64), (128, 256)):
+                if dt_ag == torch.int32:
+                    x_ag = torch.randint(-10000, 10000, shp_ag, dtype=dt_ag, device=device)
+                else:
+                    x_ag = torch.randn(shp_ag, dtype=dt_ag, device=device) * 0.5
+                chunks_ag = [torch.empty_like(x_ag) for _ in range(world_size)]
+                dist.all_gather(chunks_ag, x_ag, group=group)
+                ref_last = torch.cat(chunks_ag, dim=-1)
+                ref_d0 = torch.cat(chunks_ag, dim=0)
+                out_last = ar_r3.all_gather(x_ag, dim=-1)
+                out_d0 = ar_r3.all_gather(x_ag, dim=0)
+                assert torch.equal(out_last, ref_last), f"P2P all_gather(dim=-1) dt={dt_ag} shp={shp_ag}"
+                assert torch.equal(out_d0, ref_d0), f"P2P all_gather(dim=0) dt={dt_ag} shp={shp_ag}"
+                if shp_ag == (16, 64) and dt_ag in (torch.bfloat16, torch.int32):
+                    for _ in range(2):
+                        ar_r3.all_gather(x_ag, dim=-1)
+                    torch.cuda.synchronize(device)
+                    g_p2p = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(g_p2p):
+                        out_last_cg = ar_r3.all_gather(x_ag, dim=-1)
+                    g_p2p.replay()
+                    torch.cuda.synchronize(device)
+                    assert torch.equal(out_last_cg, ref_last), f"CG P2P all_gather dt={dt_ag}"
+                    del g_p2p
+        ar_r3.destroy()
+    finally:
+        if prev_ws_cap is None:
+            os.environ.pop("QWEN4_5_FAST_AR_WS_MAX_TOKENS", None)
+        else:
+            os.environ["QWEN4_5_FAST_AR_WS_MAX_TOKENS"] = prev_ws_cap
+        if prev_ag_bytes is None:
+            os.environ.pop("QWEN4_5_FAST_AG_SYMM_BYTES", None)
+        else:
+            os.environ["QWEN4_5_FAST_AG_SYMM_BYTES"] = prev_ag_bytes
+        if prev_ag_min is None:
+            os.environ.pop("QWEN4_5_FAST_AG_SYMM_MIN_BYTES", None)
+        else:
+            os.environ["QWEN4_5_FAST_AG_SYMM_MIN_BYTES"] = prev_ag_min
+
     # 5. Qwen4_5AllToAllComm: uneven ragged routed_a2a + dense_gather FP8 + symm_mem CG + DP-EP MoE
     a2a = get_qwen4_5_all_to_all(group, device=device, max_tokens_per_rank=64, hidden_dim=2560, top_k=4)
     torch.manual_seed(5050 + rank)
@@ -1258,6 +1350,37 @@ def _dist_worker_body(rank: int, world_size: int, device: torch.device, group) -
     torch.cuda.synchronize(device)
     _, _, cos_dp_ep = _diff_stats(y_dp_cg, y_dp_ref)
     assert cos_dp_ep > 0.996, f"rank={rank} DP-EP LatentMoE ({dp_backend}) CG cos={cos_dp_ep}"
+
+    # Deterministic chunked symm_p2p default combine (M_local=160 > max_tokens_per_rank=64 -> M_global > _symm_max_rows)
+    if a2a.active_backend == "symm_mem":
+        M_chunk_test = 160
+        torch.manual_seed(6090)
+        x_ch = torch.randn((M_chunk_test, 2560), dtype=torch.bfloat16, device=device) * 0.25
+        ids_ch = torch.randint(0, 16, (M_chunk_test, 4), dtype=torch.int32, device=device)
+        w_ch = torch.rand((M_chunk_test, 4), dtype=torch.float32, device=device)
+        st_ch = a2a.dispatch(x_ch, ids_ch, w_ch, num_experts=16, equal_tokens=True)
+        torch.manual_seed(6091 + rank)
+        ep_ch = torch.randn((world_size * M_chunk_test, 2560), dtype=torch.bfloat16, device=device) * 0.25
+        comb_ch = a2a.combine(ep_ch, st_ch)
+        ep_all = [torch.empty_like(ep_ch) for _ in range(world_size)]
+        dist.all_gather(ep_all, ep_ch, group=group)
+        ref_ch = sum(t[rank * M_chunk_test : (rank + 1) * M_chunk_test].float() for t in ep_all).to(torch.bfloat16)
+        assert _diff_stats(comb_ch, ref_ch)[2] >= 0.99999, "chunked default symm_p2p combine parity failed"
+        # Same inputs on every rank must yield bit-identical output across ranks (0..WS-1 order)
+        st_det = a2a.dispatch(x_ch, ids_ch, w_ch, num_experts=16, equal_tokens=True)
+        ep_det = st_det.hidden * 0.5
+        for _ in range(2):
+            a2a.combine(ep_det, st_det)
+        torch.cuda.synchronize(device)
+        g_det = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g_det):
+            comb_det = a2a.combine(ep_det, st_det)
+        g_det.replay()
+        torch.cuda.synchronize(device)
+        det_ranks = [torch.empty_like(comb_det) for _ in range(world_size)]
+        dist.all_gather(det_ranks, comb_det, group=group)
+        assert torch.equal(det_ranks[0], det_ranks[rank]), f"rank {rank} symm_p2p combine not bit-identical to rank 0"
+        del g_det
 
     # Asymmetric (7 vs 0) DP-EP Qwen4_5LatentMoE forward parity (verifies 0-token rank joins A2A without deadlock)
     dp_moe.dp_equal_tokens = None
@@ -1566,7 +1689,8 @@ def test_sm100_fp8_linear(device: torch.device) -> None:
     narrow_lin.prepare_weights()
     assert narrow_lin._resolve_backend(8, device) == "bf16"
     assert narrow_lin._resolve_backend(512, device) == "bf16"
-    assert narrow_lin._resolve_backend(2048, device) == (
+    assert narrow_lin._resolve_backend(2048, device) == "bf16"
+    assert narrow_lin._resolve_backend(4096, device) == (
         "mxfp8" if has_flashinfer_mxfp8(dev_idx) else "bf16"
     )
     dflash_fc_lin = SM100FP8Linear(

@@ -86,10 +86,42 @@ def _all_gather_transpose_lastdim_kernel(
     vals = tl.load(src_ptr + (r * M + m) * D + offs_d, mask=mask_d)
     tl.store(dst_ptr + (m * WS + r) * D + offs_d, vals, mask=mask_d)
 
+
+@triton.jit
+def _symm_p2p_gather_kernel(
+    ptrs_dev_ptr,
+    dst_ptr,
+    M,
+    D_units,
+    WS: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    ELEM_BYTES: tl.constexpr,
+    IS_LAST_DIM: tl.constexpr,
+):
+    """Read ``[M, D_units]`` directly from NVLink5 symmetric peer buffers into ``dst``."""
+    m = tl.program_id(0).to(tl.int64)
+    r = tl.program_id(1).to(tl.int64)
+    db = tl.program_id(2)
+    if m >= M or r >= WS:
+        return
+    offs_d = db * BLOCK_D + tl.arange(0, BLOCK_D)
+    mask_d = offs_d < D_units
+    ptrs_base = tl.cast(ptrs_dev_ptr, tl.pointer_type(tl.int64))
+    peer_addr = tl.load(ptrs_base + r).to(tl.int64)
+    ptr_ty = tl.uint32 if ELEM_BYTES == 4 else tl.uint16
+    peer_ptr = tl.cast(peer_addr, tl.pointer_type(ptr_ty))
+    dst_cast = tl.cast(dst_ptr, tl.pointer_type(ptr_ty))
+    vals = tl.load(peer_ptr + m * D_units + offs_d, mask=mask_d)
+    out_row = (m * WS + r) if IS_LAST_DIM else (r * M + m)
+    tl.store(dst_cast + out_row * D_units + offs_d, vals, mask=mask_d)
+
+
 _SUPPORTED_WORLD_SIZES = (2, 4, 8)
 _DEFAULT_HIDDEN_DIMS = (5120, 2560)
-_DEFAULT_MAX_TOKENS = 1024
+_DEFAULT_MAX_TOKENS = 2048
+_DEFAULT_FI_WS_MAX_TOKENS = 1024
 _DEFAULT_SYMM_MAX_BYTES = 32 * 1024 * 1024  # 32 MiB (~3276 tokens at H=5120 bf16)
+_DEFAULT_SYMM_AG_BYTES = 16 * 1024 * 1024  # 16 MiB persistent NVLink5 P2P AllGather buffer
 
 _COMM_CACHE_LOCK = threading.Lock()
 _COMM_CACHE: Dict[Tuple[Any, ...], "Qwen4_5FastAllReduce"] = {}
@@ -170,6 +202,10 @@ class Qwen4_5FastAllReduce:
             else (env_max_tokens or _DEFAULT_MAX_TOKENS)
         )
         self.max_elements = self.max_tokens * self.max_hidden_dim
+        env_ws_max = os.environ.get("QWEN4_5_FAST_AR_WS_MAX_TOKENS")
+        ws_cap = int(env_ws_max) if env_ws_max else _DEFAULT_FI_WS_MAX_TOKENS
+        self._fi_ws_max_tokens = max(1, min(self.max_tokens, ws_cap))
+        self._fi_ws_max_elements = self._fi_ws_max_tokens * self.max_hidden_dim
 
         req_backend = (
             backend
@@ -202,6 +238,13 @@ class Qwen4_5FastAllReduce:
         self._symm_buffer: Optional[torch.Tensor] = None
         self._symm_group_name: Optional[str] = None
         self._symm_use_oneshot: bool = True
+        self._ag_symm_buf: Optional[torch.Tensor] = None
+        self._ag_symm_hdl: Any = None
+        self._ag_symm_bytes: int = 0
+        env_ag_min = os.environ.get("QWEN4_5_FAST_AG_SYMM_MIN_BYTES")
+        self._ag_symm_min_bytes: Optional[int] = (
+            int(env_ag_min) if env_ag_min is not None and env_ag_min != "" else None
+        )
         self._gemma_gamma_cache: Dict[int, Tuple[torch.Tensor, int, torch.Tensor]] = {}
         self._destroyed: bool = False
         self._is_gloo: bool = False
@@ -268,6 +311,7 @@ class Qwen4_5FastAllReduce:
             raise RuntimeError(
                 "Cannot initialize fast_comm workspace during CUDA Graph capture."
             )
+        self._try_init_symm_gather()
         if self.active_backend in ("flashinfer", "symm_mem"):
             return self.active_backend
 
@@ -283,6 +327,53 @@ class Qwen4_5FastAllReduce:
 
         self.active_backend = "nccl"
         return self.active_backend
+
+    def _try_init_symm_gather(self) -> bool:
+        if self._ag_symm_hdl is not None:
+            return True
+        if (
+            not self.single_node
+            or self.world_size not in _SUPPORTED_WORLD_SIZES
+            or self.requested_backend == "nccl"
+        ):
+            return False
+        group_name = getattr(self.group, "group_name", None)
+        local_ready = False
+        symm_mem = None
+        try:
+            import torch.distributed._symmetric_memory as symm_mem
+
+            cap_major, _ = torch.cuda.get_device_capability(self.device)
+            if cap_major in (9, 10) and group_name is not None:
+                local_ready = True
+        except Exception:
+            local_ready = False
+
+        if not _agree_bool(local_ready, self.group, self.device):
+            return False
+
+        assert symm_mem is not None and group_name is not None
+        ag_bytes = int(os.environ.get("QWEN4_5_FAST_AG_SYMM_BYTES", str(_DEFAULT_SYMM_AG_BYTES)))
+        ag_buf = None
+        ag_hdl = None
+        local_ok = False
+        try:
+            torch.cuda.set_device(self.device)
+            ag_buf = symm_mem.empty((ag_bytes,), dtype=torch.uint8, device=self.device)
+            ag_hdl = symm_mem.rendezvous(ag_buf, str(group_name))
+            local_ok = ag_hdl is not None
+        except Exception as exc:
+            logger.info("FastAllReduce P2P AllGather symm_mem rendezvous failed (%s)", exc)
+
+        if not _agree_bool(local_ok, self.group, self.device):
+            return False
+
+        self._ag_symm_buf = ag_buf
+        self._ag_symm_hdl = ag_hdl
+        self._ag_symm_bytes = ag_bytes
+        if self._ag_symm_min_bytes is None:
+            self._ag_symm_min_bytes = 32768 if self.world_size == 2 else 0
+        return True
 
     def _try_init_flashinfer(self) -> bool:
         if not self.single_node or self.world_size not in _SUPPORTED_WORLD_SIZES:
@@ -317,7 +408,7 @@ class Qwen4_5FastAllReduce:
                 backend=self._fi_backend_pref,
                 world_size=self.world_size,
                 rank=self.rank,
-                max_token_num=self.max_tokens,
+                max_token_num=self._fi_ws_max_tokens,
                 hidden_dim=self.max_hidden_dim,
                 dtype=self.dtype,
                 comm_backend=torch_dist_backend_cls(group=self.group),
@@ -428,12 +519,13 @@ class Qwen4_5FastAllReduce:
         M = int(tensor.numel() // H) if H > 0 else 0
         if M <= 0 or H <= 0 or (H % 8) != 0:
             return False
-        if M * H > self.max_elements:
+        if M * H > self.max_elements or H > self._fi_ws_max_elements:
             return False
+        chunk_m = min(M, max(1, self._fi_ws_max_elements // H))
         if hasattr(self._fi_workspace, "is_buffer_size_sufficient"):
             return bool(
                 self._fi_workspace.is_buffer_size_sufficient(
-                    self.world_size, M, H, self.dtype
+                    self.world_size, chunk_m, H, self.dtype
                 )
             )
         return True
@@ -448,8 +540,9 @@ class Qwen4_5FastAllReduce:
             or not tensor.is_contiguous()
         ):
             return False
-        n = tensor.numel()
-        return 0 < n <= self._symm_buffer.numel()
+        H = int(tensor.shape[-1])
+        M = int(tensor.numel() // H) if H > 0 else 0
+        return M > 0 and H > 0 and (M * H) <= self.max_elements and H <= self._symm_buffer.numel()
 
     @staticmethod
     def _parse_oneshot_env() -> Optional[bool]:
@@ -470,35 +563,57 @@ class Qwen4_5FastAllReduce:
         return use_oneshot
 
     def _run_flashinfer(self, x_2d: torch.Tensor, out_2d: torch.Tensor) -> torch.Tensor:
-        M, _ = x_2d.shape
-        use_oneshot = self._resolve_flashinfer_oneshot(M)
-        self._flashinfer_comm.allreduce_fusion(
-            input=x_2d,
-            workspace=self._fi_workspace,
-            pattern=self._fi_pattern_allreduce,
-            launch_with_pdl=True,
-            trigger_completion_at_end=True,
-            output=out_2d,
-            use_oneshot=use_oneshot,
-            fp32_acc=self._fp32_acc,
-        )
+        M, H = x_2d.shape
+        chunk_m = max(1, self._fi_ws_max_elements // H)
+        if M <= chunk_m:
+            use_oneshot = self._resolve_flashinfer_oneshot(M)
+            self._flashinfer_comm.allreduce_fusion(
+                input=x_2d,
+                workspace=self._fi_workspace,
+                pattern=self._fi_pattern_allreduce,
+                launch_with_pdl=True,
+                trigger_completion_at_end=True,
+                output=out_2d,
+                use_oneshot=use_oneshot,
+                fp32_acc=self._fp32_acc,
+            )
+            return out_2d
+        for m0 in range(0, M, chunk_m):
+            m1 = min(M, m0 + chunk_m)
+            use_oneshot = self._resolve_flashinfer_oneshot(m1 - m0)
+            self._flashinfer_comm.allreduce_fusion(
+                input=x_2d[m0:m1],
+                workspace=self._fi_workspace,
+                pattern=self._fi_pattern_allreduce,
+                launch_with_pdl=True,
+                trigger_completion_at_end=True,
+                output=out_2d[m0:m1],
+                use_oneshot=use_oneshot,
+                fp32_acc=self._fp32_acc,
+            )
         return out_2d
 
     def _run_symm_mem(self, x_2d: torch.Tensor, out_2d: torch.Tensor) -> torch.Tensor:
         assert self._symm_buffer is not None and self._symm_group_name is not None
-        numel = x_2d.numel()
-        buf_slice = self._symm_buffer[:numel]
-        buf_slice.copy_(x_2d.view(-1))
-        if self._symm_use_oneshot and self._use_oneshot is not False:
-            res = torch.ops.symm_mem.one_shot_all_reduce(
-                buf_slice, "sum", self._symm_group_name
-            )
-            out_2d.view(-1).copy_(res)
-        else:
-            torch.ops.symm_mem.two_shot_all_reduce_(
-                buf_slice, "sum", self._symm_group_name
-            )
-            out_2d.view(-1).copy_(buf_slice)
+        M, H = x_2d.shape
+        chunk_m = max(1, self._symm_buffer.numel() // H)
+        use_os = self._symm_use_oneshot and self._use_oneshot is not False
+        for m0 in range(0, M, chunk_m):
+            m1 = min(M, m0 + chunk_m)
+            sub_in = x_2d[m0:m1]
+            sub_out = out_2d[m0:m1]
+            buf_slice = self._symm_buffer[: sub_in.numel()]
+            buf_slice.copy_(sub_in.view(-1))
+            if use_os:
+                res = torch.ops.symm_mem.one_shot_all_reduce(
+                    buf_slice, "sum", self._symm_group_name
+                )
+                sub_out.view(-1).copy_(res)
+            else:
+                torch.ops.symm_mem.two_shot_all_reduce_(
+                    buf_slice, "sum", self._symm_group_name
+                )
+                sub_out.view(-1).copy_(buf_slice)
         return out_2d
 
     def all_reduce(
@@ -641,23 +756,28 @@ class Qwen4_5FastAllReduce:
             and weight.dtype == self.dtype
             and weight.shape == (H,)
         ):
+            M = int(x_2d.shape[0])
             res_out = torch.empty_like(x_2d)
             norm_out = torch.empty_like(x_2d)
-            use_oneshot = self._resolve_flashinfer_oneshot(x_2d.shape[0])
-            self._flashinfer_comm.allreduce_fusion(
-                input=x_2d,
-                workspace=self._fi_workspace,
-                pattern=self._fi_pattern_ar_res_norm,
-                launch_with_pdl=True,
-                trigger_completion_at_end=True,
-                residual_out=res_out,
-                norm_out=norm_out,
-                residual_in=res_2d,
-                rms_gamma=weight.contiguous(),
-                rms_eps=float(eps),
-                use_oneshot=use_oneshot,
-                fp32_acc=self._fp32_acc,
-            )
+            w_c = weight.contiguous()
+            chunk_m = max(1, self._fi_ws_max_elements // H)
+            for m0 in range(0, M, chunk_m):
+                m1 = min(M, m0 + chunk_m)
+                use_oneshot = self._resolve_flashinfer_oneshot(m1 - m0)
+                self._flashinfer_comm.allreduce_fusion(
+                    input=x_2d[m0:m1],
+                    workspace=self._fi_workspace,
+                    pattern=self._fi_pattern_ar_res_norm,
+                    launch_with_pdl=True,
+                    trigger_completion_at_end=True,
+                    residual_out=res_out[m0:m1],
+                    norm_out=norm_out[m0:m1],
+                    residual_in=res_2d[m0:m1],
+                    rms_gamma=w_c,
+                    rms_eps=float(eps),
+                    use_oneshot=use_oneshot,
+                    fp32_acc=self._fp32_acc,
+                )
             return norm_out.reshape(orig_shape), res_out.reshape(orig_shape)
 
         reduced = self.all_reduce(x_c)
@@ -717,23 +837,27 @@ class Qwen4_5FastAllReduce:
         ):
             gamma = self._resolve_gemma_gamma(weight, gamma_plus_one)
             if gamma.dtype == self.dtype and gamma.shape == (H,):
+                M = int(x_2d.shape[0])
                 res_out = torch.empty_like(x_2d)
                 norm_out = torch.empty_like(x_2d)
-                use_oneshot = self._resolve_flashinfer_oneshot(x_2d.shape[0])
-                self._flashinfer_comm.allreduce_fusion(
-                    input=x_2d,
-                    workspace=self._fi_workspace,
-                    pattern=self._fi_pattern_ar_res_norm,
-                    launch_with_pdl=True,
-                    trigger_completion_at_end=True,
-                    residual_out=res_out,
-                    norm_out=norm_out,
-                    residual_in=res_2d,
-                    rms_gamma=gamma,
-                    rms_eps=float(eps),
-                    use_oneshot=use_oneshot,
-                    fp32_acc=self._fp32_acc,
-                )
+                chunk_m = max(1, self._fi_ws_max_elements // H)
+                for m0 in range(0, M, chunk_m):
+                    m1 = min(M, m0 + chunk_m)
+                    use_oneshot = self._resolve_flashinfer_oneshot(m1 - m0)
+                    self._flashinfer_comm.allreduce_fusion(
+                        input=x_2d[m0:m1],
+                        workspace=self._fi_workspace,
+                        pattern=self._fi_pattern_ar_res_norm,
+                        launch_with_pdl=True,
+                        trigger_completion_at_end=True,
+                        residual_out=res_out[m0:m1],
+                        norm_out=norm_out[m0:m1],
+                        residual_in=res_2d[m0:m1],
+                        rms_gamma=gamma,
+                        rms_eps=float(eps),
+                        use_oneshot=use_oneshot,
+                        fp32_acc=self._fp32_acc,
+                    )
                 return norm_out.reshape(orig_shape), res_out.reshape(orig_shape)
 
         reduced = self.all_reduce(x_c)
@@ -852,6 +976,77 @@ class Qwen4_5FastAllReduce:
                 return out
             return res
 
+        if (norm_dim == 0 or norm_dim == ndim - 1) and x_c.is_cuda:
+            is_last_dim = norm_dim == ndim - 1
+            D = int(x_c.shape[-1]) if is_last_dim else int(x_c.numel() // max(1, int(x_c.shape[0])))
+            M = int(x_c.numel() // D) if is_last_dim else int(x_c.shape[0])
+            row_bytes = D * int(x_c.element_size())
+            total_bytes = M * row_bytes
+            min_symm_bytes = 0 if self._ag_symm_min_bytes is None else int(self._ag_symm_min_bytes)
+            can_symm_ag = (
+                self._ag_symm_hdl is not None
+                and self._ag_symm_buf is not None
+                and x_c.device == self.device
+                and M > 0
+                and row_bytes > 0
+                and (row_bytes % 2) == 0
+                and row_bytes <= self._ag_symm_bytes
+                and total_bytes >= min_symm_bytes
+            )
+            if can_symm_ag:
+                assert self._ag_symm_hdl is not None and self._ag_symm_buf is not None
+                use_out = out is not None and out.is_contiguous() and tuple(out.shape) == tuple(out_shape)
+                if is_last_dim:
+                    dst = (
+                        out.reshape(M, self.world_size * D)
+                        if use_out
+                        else torch.empty((M, self.world_size * D), dtype=x_c.dtype, device=x_c.device)
+                    )
+                else:
+                    dst = (
+                        out.reshape(self.world_size, M, D)
+                        if use_out
+                        else torch.empty((self.world_size, M, D), dtype=x_c.dtype, device=x_c.device)
+                    )
+                src_u8 = x_c.reshape(M, D).view(torch.uint8).reshape(M, row_bytes)
+                elem_unit = 4 if (row_bytes % 4) == 0 else 2
+                d_units = row_bytes // elem_unit
+                bd = min(1024, triton.next_power_of_2(max(d_units, 32)))
+                chunk_rows = max(1, min(M, self._ag_symm_bytes // row_bytes))
+                for m0 in range(0, M, chunk_rows):
+                    m1 = min(M, m0 + chunk_rows)
+                    cm = m1 - m0
+                    nbytes = cm * row_bytes
+                    self._ag_symm_buf[:nbytes].reshape(cm, row_bytes).copy_(src_u8[m0:m1])
+                    self._ag_symm_hdl.barrier(channel=0)
+                    if is_last_dim:
+                        dst_slice = dst[m0:m1]
+                    else:
+                        dst_slice = (
+                            dst
+                            if cm == M
+                            else torch.empty((self.world_size, cm, D), dtype=x_c.dtype, device=x_c.device)
+                        )
+                    _symm_p2p_gather_kernel[(cm, self.world_size, triton.cdiv(d_units, bd))](
+                        self._ag_symm_hdl.buffer_ptrs_dev,
+                        dst_slice,
+                        cm,
+                        d_units,
+                        WS=self.world_size,
+                        BLOCK_D=bd,
+                        ELEM_BYTES=elem_unit,
+                        IS_LAST_DIM=is_last_dim,
+                        num_warps=4,
+                    )
+                    if (not is_last_dim) and cm != M:
+                        dst[:, m0:m1, :].copy_(dst_slice)
+                    self._ag_symm_hdl.barrier(channel=1)
+                res = dst.reshape(out_shape)
+                if out is not None and not use_out:
+                    out.copy_(res)
+                    return out
+                return res
+
         if norm_dim == 0:
             if out is not None and out.is_contiguous() and tuple(out.shape) == tuple(out_shape):
                 dist.all_gather_into_tensor(out.view(self.world_size, *x_c.shape), x_c, group=self.group)
@@ -908,6 +1103,8 @@ class Qwen4_5FastAllReduce:
                 pass
             self._fi_workspace = None
         self._symm_buffer = None
+        self._ag_symm_buf = None
+        self._ag_symm_hdl = None
         self._gemma_gamma_cache.clear()
         self.active_backend = "nccl" if self.world_size > 1 else "noop"
 

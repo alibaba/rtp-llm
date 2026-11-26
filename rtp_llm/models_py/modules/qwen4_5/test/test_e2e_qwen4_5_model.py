@@ -750,6 +750,16 @@ class TestQwen4_5E2E(unittest.TestCase):
             lg_sl_mb = torch.cat([ref_sl(toks_sl[:2]), ref_sl(toks_sl[2:])], dim=0)
             self.assertGreater(_cos_sim(lg_sl_tbo, lg_sl_mb), 0.9999)
             self.assertGreater(_cos_sim(lg_sl_tbo, ref_sl(toks_sl)), 0.999)
+            # R3: bsz=1 & stateful enable_tbo + batched forward_tbo(logits_to_keep) + fast_ar_max_tokens arg
+            lg_sl_b1 = m_sl(toks_sl[:1], enable_tbo=True)
+            self.assertGreater(_cos_sim(lg_sl_b1, ref_sl(toks_sl[:1])), 0.9999)
+            lg_k0, lg_k1 = m_sl.forward_tbo((toks_sl[:2], toks_sl[2:]), logits_to_keep=2)
+            self.assertEqual(lg_k0.shape, (2, 2, cfg.vocab_size))
+            self.assertGreater(_cos_sim(lg_k0, ref_sl(toks_sl[:2], logits_to_keep=2)), 0.9999)
+            self.assertGreater(_cos_sim(lg_k1, ref_sl(toks_sl[2:], logits_to_keep=2)), 0.9999)
+            m_kw = Qwen4_5ForCausalLM(cfg_stateless, dtype=torch.bfloat16, device=self.device, fast_ar_max_tokens=256)
+            self.assertEqual((m_kw.sp_size, m_kw.sp_rank), (1, 0))
+            del m_kw
 
             # Single-GPU CUDA Graph capture/replay of 8-layer forward_tbo
             cg_mb0 = torch.randint(10, cfg.vocab_size, (2, 6), device=self.device)
@@ -897,6 +907,14 @@ def _gloo_tbo_and_shm_worker(rank: int, world_size: int, port: int, ckpt_dir: st
                 d_r0 = m_ref(toks0[:, 8:9], state=st_r0, enable_yoco_decode=True)
                 d_r1 = m_ref(toks1[:, 8:9], state=st_r1, enable_yoco_decode=True)
                 assert _cos_sim(d_t0, d_r0) > 0.999 and _cos_sim(d_t1, d_r1) > 0.999
+                # R3: stateful enable_tbo token-split MoE TBO + direct layer.forward_mlp_tbo parity in dp4_ep4
+                st_single_tbo = m_tbo.create_runtime_state(2, max_seq_len=32, enable_yoco_decode=True)
+                st_single_ref = m_ref.create_runtime_state(2, max_seq_len=32, enable_yoco_decode=True)
+                p_moe_tbo = m_tbo(toks0[:, :8], state=st_single_tbo, enable_yoco_decode=True, enable_tbo=True, tbo_equal_tokens=True)
+                p_moe_ref = m_ref(toks0[:, :8], state=st_single_ref, enable_yoco_decode=True)
+                assert _cos_sim(p_moe_tbo, p_moe_ref) > 0.999
+                x_mlp_tbo = torch.randn((6, cfg.hidden_size), dtype=torch.bfloat16, device=device, generator=gen) * 0.2
+                assert _cos_sim(m_tbo.model.layers[1].forward_mlp_tbo(x_mlp_tbo, equal_tokens=True), m_ref.model.layers[1].mlp(x_mlp_tbo)) > 0.999
 
             # Asymmetric 0-token DP rank TBO (rank 0,2 empty on mb0; rank 1,3 empty on mb1)
             for layer in m_tbo.model.layers:

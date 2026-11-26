@@ -905,27 +905,55 @@ class Qwen4_5AllToAllComm:
                 and self._symm_buf is not None
                 and L == self.hidden_dim
                 and ep_c.dtype == self.dtype
-                and M_global <= self._symm_max_rows
+                and self._symm_max_rows >= self.world_size
             )
-            want_symm = bool(use_symm_p2p) if use_symm_p2p is not None else False
+            env_symm = os.environ.get("QWEN4_5_A2A_SYMM_P2P_COMBINE")
+            want_symm = (
+                bool(use_symm_p2p)
+                if use_symm_p2p is not None
+                else (True if env_symm is None else env_symm.strip().lower() not in ("0", "false", "no"))
+            )
             if want_symm and can_symm:
                 assert self._symm_buf is not None and self._symm_hdl is not None
-                self._symm_buf[:M_global].copy_(ep_c)
-                self._symm_hdl.barrier(channel=0)
                 BK = min(512, triton.next_power_of_2(L))
-                _symm_p2p_sum_rows_kernel[(M_local, triton.cdiv(L, BK))](
-                    self._symm_hdl.buffer_ptrs_dev,
-                    out,
-                    self.rank * M_local,
-                    M_local,
-                    L,
-                    self.hidden_dim,
-                    out.stride(0),
-                    WORLD_SIZE=self.world_size,
-                    BLOCK_L=BK,
-                    num_warps=4,
-                )
-                self._symm_hdl.barrier(channel=1)
+                if M_global <= self._symm_max_rows:
+                    self._symm_buf[:M_global].copy_(ep_c)
+                    self._symm_hdl.barrier(channel=0)
+                    _symm_p2p_sum_rows_kernel[(M_local, triton.cdiv(L, BK))](
+                        self._symm_hdl.buffer_ptrs_dev,
+                        out,
+                        self.rank * M_local,
+                        M_local,
+                        L,
+                        self.hidden_dim,
+                        out.stride(0),
+                        WORLD_SIZE=self.world_size,
+                        BLOCK_L=BK,
+                        num_warps=4,
+                    )
+                    self._symm_hdl.barrier(channel=1)
+                    return out
+                chunk_local = max(1, self._symm_max_rows // self.world_size)
+                ep_3d = ep_c.view(self.world_size, M_local, L)
+                for m0 in range(0, M_local, chunk_local):
+                    m1 = min(M_local, m0 + chunk_local)
+                    cm = m1 - m0
+                    total_c = self.world_size * cm
+                    self._symm_buf[:total_c].copy_(ep_3d[:, m0:m1, :].reshape(total_c, L))
+                    self._symm_hdl.barrier(channel=0)
+                    _symm_p2p_sum_rows_kernel[(cm, triton.cdiv(L, BK))](
+                        self._symm_hdl.buffer_ptrs_dev,
+                        out[m0:m1],
+                        self.rank * cm,
+                        cm,
+                        L,
+                        self.hidden_dim,
+                        out.stride(0),
+                        WORLD_SIZE=self.world_size,
+                        BLOCK_L=BK,
+                        num_warps=4,
+                    )
+                    self._symm_hdl.barrier(channel=1)
                 return out
             self._collective_reduce_scatter(out, ep_c)
             return out

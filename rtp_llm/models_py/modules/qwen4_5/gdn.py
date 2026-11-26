@@ -2030,15 +2030,17 @@ def _gdn_chunk_state_recurrence_ragged_kernel(
     STORE_FINAL_STATE: tl.constexpr,
     HAS_SNAPS: tl.constexpr,
     SKIP_INVALID_PHYS: tl.constexpr,
+    BLOCK_DV: tl.constexpr = 64,
 ):
     """Ragged Stage 2: inter-chunk FP32 state recurrence + direct block-boundary FP32 SSM scatter."""
     b = tl.program_id(0)
     h_v = tl.program_id(1)
+    dv_blk = tl.program_id(2)
     h_k = h_v // GQA_RATIO
 
     oc = tl.arange(0, 64)
     ok = tl.arange(0, D_K)
-    ov = tl.arange(0, D_V)
+    ov = dv_blk * BLOCK_DV + tl.arange(0, BLOCK_DV)
 
     if HAS_INIT_STATE:
         h = tl.load(
@@ -2049,7 +2051,7 @@ def _gdn_chunk_state_recurrence_ragged_kernel(
             + ov[None, :] * stride_sv
         ).to(tl.float32)
     else:
-        h = tl.zeros((D_K, D_V), dtype=tl.float32)
+        h = tl.zeros((D_K, BLOCK_DV), dtype=tl.float32)
 
     req_start = tl.load(CU_SEQLENS_ptr + b)
     req_end = tl.load(CU_SEQLENS_ptr + b + 1)
@@ -2437,7 +2439,8 @@ def gdn_chunk_prefill_ragged_with_snapshots_triton(
             raise ValueError(f"ssm_dst_pool dtype {ssm_dst_pool.dtype} must be >= 4 bytes")
         dst_stride_blk = int(ssm_dst_pool.stride(0)) * elem_scale
 
-    _gdn_chunk_state_recurrence_ragged_kernel[(bsz, num_v_heads)](
+    block_dv_s2 = 16 if (bsz * num_v_heads <= 128 and num_chunks >= 128) else 64
+    _gdn_chunk_state_recurrence_ragged_kernel[(bsz, num_v_heads, 64 // block_dv_s2)](
         k,
         g_cum,
         w_buf,
@@ -2493,7 +2496,8 @@ def gdn_chunk_prefill_ragged_with_snapshots_triton(
         STORE_FINAL_STATE=output_final_states,
         HAS_SNAPS=has_snaps,
         SKIP_INVALID_PHYS=skip_invalid_phys,
-        num_warps=2 if bsz >= 4 else 4,
+        BLOCK_DV=block_dv_s2,
+        num_warps=2 if (block_dv_s2 < 64 or bsz >= 4) else 4,
         num_stages=1 if (bsz >= 4 and num_chunks >= 128) else 2,
     )
 
@@ -3250,7 +3254,7 @@ class Qwen4_5GatedDeltaNet(nn.Module):
         has_stage_s = stage_ssm_state is not None
         block_dv = (
             32
-            if (2 <= bsz <= 16 and self.head_v_dim % 32 == 0)
+            if (bsz == 1 and self.head_v_dim % 32 == 0)
             else (16 if self.head_v_dim % 16 == 0 else self.head_v_dim)
         )
         _gdn_verify_scan_kernel[(bsz, self.num_v_heads, self.head_v_dim // block_dv)](
@@ -3302,7 +3306,7 @@ class Qwen4_5GatedDeltaNet(nn.Module):
             BLOCK_DV=block_dv,
             HAS_INIT_STATE=has_init_s,
             HAS_STAGE_STATE=has_stage_s,
-            num_warps=2 if bsz >= 2 else (8 if block_dv <= 16 else 4),
+            num_warps=1 if bsz >= 2 else (8 if block_dv <= 16 else 2),
         )
         return core_out
 

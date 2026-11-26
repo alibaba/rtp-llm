@@ -531,7 +531,7 @@ class SM100FP8Linear(nn.Module):
                 return "trtllm_ll"
             if self.weight is not None:
                 return "bf16"
-        if (M >= 2048 or (M >= 1024 and is_wide)) and self.w_mxfp8 is not None:
+        if (M >= 4096 or (M >= 1024 and is_wide)) and self.w_mxfp8 is not None:
             return "mxfp8"
         if is_wide and self.w_fp8_row is not None:
             return "scaled_mm"

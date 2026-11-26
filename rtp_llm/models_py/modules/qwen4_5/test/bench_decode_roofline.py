@@ -136,6 +136,7 @@ def load_dspark_5l_sharded(
     dflash_kv_dtype: str = "bf16",
     dflash_attn_backend: str = "auto",
     dense_linear_mode: Optional[str] = None,
+    enable_tbo: bool = False,
 ) -> Tuple[Any, Any, float]:
     """Load 5L full-width DFlash2 weights onto `device` with EP+TP sharding."""
     from rtp_llm.model_loader.model_weight_info import ModelWeights
@@ -188,6 +189,8 @@ def load_dspark_5l_sharded(
         extra_kw["dflash_attn_backend"] = dflash_attn_backend
     if "dense_linear_mode" in sig_params and dense_linear_mode:
         extra_kw["dense_linear_mode"] = dense_linear_mode
+    if "enable_tbo" in sig_params:
+        extra_kw["enable_tbo"] = bool(enable_tbo)
 
     model = Qwen4_5DSparkModel(
         cfg, parallelism_config, mw, max_generate_batch_size=128, **extra_kw
@@ -1026,6 +1029,8 @@ def _update_leaderboard(
         for k in ("kv_dtype", "dflash_kv_dtype", "dflash_attn_backend", "dense_linear_mode", "ple_mode", "router_margin"):
             if e.get(k) != meta.get(k):
                 return False
+        if bool(e.get("enable_tbo", False)) != bool(meta.get("enable_tbo", False)):
+            return False
         return True
 
     existing["entries"] = [e for e in existing["entries"] if not _same_cfg(e)]
@@ -1072,9 +1077,20 @@ def main() -> int:
     parser.add_argument("--parity-router-margin", type=float, default=2.0, help="Per-expert router bias step applied during parity probe (>=1.0 eliminates 1-ULP expert flips)")
     parser.add_argument("--parity-min-cos", type=float, default=0.999)
     parser.add_argument("--fail-on-parity", action="store_true", default=False)
+    parser.add_argument(
+        "--enable-tbo",
+        dest="enable_tbo",
+        action="store_true",
+        default=None,
+        help="Enable 3-stage EP TBO in Target Verify & DFlash2 (default: follow QWEN4_5_RUNTIME_MOE_TBO)",
+    )
+    parser.add_argument("--no-enable-tbo", dest="enable_tbo", action="store_false")
     args = parser.parse_args()
     if args.verify_parity and not args.ref_in:
         args.ref_in = args.verify_parity
+    if args.enable_tbo is None:
+        args.enable_tbo = os.environ.get("QWEN4_5_RUNTIME_MOE_TBO", "0") == "1"
+    os.environ["QWEN4_5_RUNTIME_MOE_TBO"] = "1" if args.enable_tbo else "0"
 
     _apply_dtype_mode_env(args.dtype_mode)
     if args.dense_linear_mode:
@@ -1237,6 +1253,7 @@ def main() -> int:
         dflash_kv_dtype=eff_dflash_kv,
         dflash_attn_backend=args.dflash_attn_backend,
         dense_linear_mode=(args.dense_linear_mode or None),
+        enable_tbo=bool(args.enable_tbo),
     )
     dflash_kv, dflash_kv_bufs = build_20k_dflash_kv_cache(
         d_cfg._dflash2_spec,
@@ -1550,7 +1567,11 @@ def main() -> int:
                 seq_len_per_step=args.verify_width,
                 avg_ctx=args.avg_ctx,
                 parallel_mode=args.parallel_mode,
-                dtype_mode=("mxfp4" if args.dtype_mode == "w4a8" else args.dtype_mode),
+                dtype_mode=(
+                    "mxfp4"
+                    if args.dtype_mode in ("w4a8", "auto", "triton")
+                    else args.dtype_mode
+                ),
                 kv_dtype=args.kv_dtype,
                 dflash_kv_dtype=(args.dflash_kv_dtype or args.kv_dtype),
                 indexer_kv_dtype=args.indexer_kv_dtype,
@@ -1619,6 +1640,7 @@ def main() -> int:
             "dflash_attn_backend": args.dflash_attn_backend,
             "indexer_kv_dtype": args.indexer_kv_dtype,
             "router_margin": float(args.router_margin),
+            "enable_tbo": bool(args.enable_tbo),
         }
         report = {
             "round": args.round_tag,

@@ -708,6 +708,60 @@ def test_gdn_fused_unpack_verify_ragged_and_tp() -> None:
 
 
 @torch.no_grad()
+def test_r3_gdn_stage2_sub_dv_and_verify_nw1() -> None:
+    print("[R3 Test] GDN Stage 2 BLOCK_DV=16 (num_chunks>=128) Snapshot Parity + VerifyScan nw=1...")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    dtype = torch.bfloat16
+    if device.type != "cuda":
+        print("  SKIP (CUDA required)")
+        return
+    torch.manual_seed(202633)
+
+    N, Hk, Hv = 8192, 16, 32
+    cu_list, cu, _, _, c_req, c_t0, rcs, _, _, rss, sle, sp_phys, _, pool_sz = _build_ragged_meta_for_test([N], device=device)
+    q = torch.randn((N, Hk, 64), device=device, dtype=dtype) * 0.2
+    k = torch.randn((N, Hk, 64), device=device, dtype=dtype) * 0.2
+    v = torch.randn((N, Hv, 64), device=device, dtype=dtype) * 0.2
+    g = -torch.rand((N, Hv), device=device, dtype=torch.float32) * 0.2
+    beta = torch.sigmoid(torch.randn((N, Hv), device=device, dtype=torch.float32))
+    init = torch.randn((1, Hv, 64, 64), device=device, dtype=torch.float32) * 0.1
+    pool_gpu = torch.zeros((pool_sz, Hv, 64, 64), device=device, dtype=torch.float32)
+    out_gpu, fs_gpu = gdn_chunk_prefill_ragged_with_snapshots_triton(
+        q, k, v, g, beta, cu, c_req, c_t0, rcs,
+        initial_state=init, req_snap_start=rss, snap_local_end=sle, snap_phys=sp_phys,
+        ssm_dst_pool=pool_gpu, output_final_states=True,
+    )
+    out_ref, fs_ref = gdn_chunk_prefill_triton(
+        q.unsqueeze(0), k.unsqueeze(0), v.unsqueeze(0), g.unsqueeze(0), beta.unsqueeze(0),
+        initial_state=init, output_final_state=True,
+    )
+    assert F.cosine_similarity(out_gpu.float().flatten(), out_ref.squeeze(0).float().flatten(), dim=0).item() > 0.9999
+    assert F.cosine_similarity(fs_gpu.float().flatten(), fs_ref.float().flatten(), dim=0).item() > 0.9999
+    assert F.cosine_similarity(pool_gpu[int(sp_phys[-1])].flatten(), fs_gpu[0].flatten(), dim=0).item() > 0.99999
+
+    cfg = make_config(2048)
+    gdn = Qwen4_5GatedDeltaNet.from_config(cfg, layer_idx=0).to(device=device, dtype=dtype).eval()
+    for bsz in (1, 8, 64):
+        vw = 8
+        vq = torch.randn((bsz, vw, gdn.num_k_heads, 64), device=device, dtype=dtype) * 0.2
+        vk = torch.randn((bsz, vw, gdn.num_k_heads, 64), device=device, dtype=dtype) * 0.2
+        vv = torch.randn((bsz, vw, gdn.num_v_heads, 64), device=device, dtype=dtype) * 0.2
+        vg = -torch.rand((bsz, vw, gdn.num_v_heads), device=device, dtype=torch.float32) * 0.3
+        vb = torch.sigmoid(torch.randn((bsz, vw, gdn.num_v_heads), device=device, dtype=torch.float32))
+        s0 = torch.randn((bsz, gdn.num_v_heads, 64, 64), device=device, dtype=torch.float32) * 0.1
+        st = torch.empty((bsz, vw, gdn.num_v_heads, 64, 64), device=device, dtype=torch.float32)
+        vo = gdn._launch_gdn_verify_scan(vq, vk, vv, vg, vb, s0, st, verify_w=vw)
+        cur = s0.clone()
+        refs = []
+        for s_i in range(vw):
+            o_s, cur = gdn_recurrent_ref(vq[:, s_i : s_i + 1], vk[:, s_i : s_i + 1], vv[:, s_i : s_i + 1], vg[:, s_i : s_i + 1], vb[:, s_i : s_i + 1], initial_state=cur, output_final_state=True)
+            refs.append(o_s.squeeze(1))
+            assert F.cosine_similarity(st[:, s_i].flatten(), cur.flatten(), dim=0).item() > 0.99998
+        assert F.cosine_similarity(vo.float().flatten(), torch.stack(refs, dim=1).float().flatten(), dim=0).item() > 0.99995
+    print("  PASS: GDN Stage 2 BLOCK_DV=16 + VerifyScan nw=1 verified.")
+
+
+@torch.no_grad()
 def bench_cuda(fn, warmup: int = 10, iters: int = 50) -> tuple[float, float]:
     """Return (median_ms, mean_ms) using CUDA events."""
     for _ in range(warmup):
@@ -887,6 +941,7 @@ def main() -> None:
     test_gdn_kernels_and_module()
     test_yoco_shared_gdn_source_and_consumer()
     test_gdn_fused_unpack_verify_ragged_and_tp()
+    test_r3_gdn_stage2_sub_dv_and_verify_nw1()
     run_b300_benchmarks()
     print(f"\nALL TESTS & BENCHMARKS PASSED in {time.time() - t0:.2f}s")
 

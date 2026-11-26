@@ -22,6 +22,7 @@ from __future__ import annotations
 import copy
 import logging
 import math
+import os
 from collections.abc import Mapping
 from contextlib import nullcontext
 from dataclasses import dataclass, field
@@ -2224,6 +2225,20 @@ class Qwen4_5QSADecodeHandle:
         return out.squeeze(2)
 
 
+def _run_runtime_mlp(layer: Any, mlp_in: torch.Tensor) -> torch.Tensor:
+    """Dispatch layer MLP with optional 3-stage EP TBO (QWEN4_5_RUNTIME_MOE_TBO=1)."""
+    if (
+        mlp_in.shape[0] >= 2
+        and os.environ.get("QWEN4_5_RUNTIME_MOE_TBO", "0") == "1"
+        and hasattr(layer, "forward_mlp_tbo")
+    ):
+        return layer.forward_mlp_tbo(
+            mlp_in,
+            use_reference=not bool(getattr(layer.mlp, "use_triton_mxfp4", True)),
+        )
+    return layer.mlp(mlp_in)
+
+
 @dataclass
 class _RaggedPrefillPlan:
     """Precomputed device metadata for whole-batch packed ragged prefill."""
@@ -3322,7 +3337,7 @@ class Qwen4_5PagedStateBridge:
                 )
             )
             assert mlp_inj is not None
-            mlp_out = layer.mlp(mlp_in)
+            mlp_out = _run_runtime_mlp(layer, mlp_in)
 
             # 6. FFN Output ShortConv + clamp
             if layer.ffn_output_sconv is not None:
@@ -4036,10 +4051,7 @@ class Qwen4_5PagedStateBridge:
                 )
             )
             assert mlp_inj is not None
-            if hasattr(layer.mlp, "expert_bias") or hasattr(layer.mlp, "w13_u8"):
-                mlp_out = layer.mlp(mlp_in)
-            else:
-                mlp_out = layer.mlp(mlp_in)
+            mlp_out = _run_runtime_mlp(layer, mlp_in)
 
             # 6. FFN Output ShortConv + clamp
             if layer.ffn_output_sconv is not None:
@@ -5172,7 +5184,7 @@ class Qwen4_5PagedStateBridge:
                 )
             )
             assert mlp_inj is not None
-            mlp_out = layer.mlp(mlp_in)
+            mlp_out = _run_runtime_mlp(layer, mlp_in)
 
             # 6. FFN Output ShortConv + clip (1 pass across ALL N tokens)
             if layer.ffn_output_sconv is not None:
@@ -5873,7 +5885,7 @@ class Qwen4_5PagedStateBridge:
                 )
             )
             assert mlp_inj is not None
-            mlp_out = layer.mlp(mlp_in)
+            mlp_out = _run_runtime_mlp(layer, mlp_in)
 
             # 6. FFN Output ShortConv + clip (single V-step Triton kernel!)
             if layer.ffn_output_sconv is not None:
@@ -7043,6 +7055,27 @@ class Qwen4_5RTPModel(_RtpGptModelBase):
         self.dp_group = dp_group if dp_group is not None else getattr(self.model, "dp_group", None)
         self.dp_attn = bool(getattr(self.model, "dp_attn", dp_attn))
         self.parallel_mode = parallel_mode if parallel_mode is not None else getattr(self.model, "parallel_mode", None)
+        self.fast_all_reduce = getattr(self.model, "fast_all_reduce", None)
+        if (
+            self.fast_all_reduce is None
+            and self.tp_size > 1
+            and self.tp_group is not None
+            and getattr(self.lm_head, "weight", None) is not None
+            and self.lm_head.weight.device.type == "cuda"
+            and torch.distributed.is_available()
+            and torch.distributed.is_initialized()
+        ):
+            from rtp_llm.models_py.modules.qwen4_5.fast_comm import get_qwen4_5_fast_all_reduce
+
+            self.fast_all_reduce = get_qwen4_5_fast_all_reduce(
+                self.tp_group,
+                device=self.lm_head.weight.device,
+                dtype=self.lm_head.weight.dtype,
+                hidden_dims=(
+                    int(self.arch_config.hidden_size),
+                    int(self.arch_config.routed_expert_hidden_size),
+                ),
+            )
         self.bridge = Qwen4_5PagedStateBridge(self.arch_config, tp_size=self.tp_size)
         self.tx_manager = _Qwen4_5OpaqueTxManager(self.bridge, self.arch_config)
 
@@ -7548,9 +7581,13 @@ class Qwen4_5RTPModel(_RtpGptModelBase):
                 if grp is not None:
                     ws = int(torch.distributed.get_world_size(grp))
                     if ws > 1:
-                        chunks = [torch.empty_like(logits) for _ in range(ws)]
-                        torch.distributed.all_gather(chunks, logits.contiguous(), group=grp)
-                        logits = torch.cat(chunks, dim=-1)
+                        fast_ar = getattr(self, "fast_all_reduce", None)
+                        if fast_ar is not None and fast_ar.group is grp:
+                            logits = fast_ar.all_gather(logits, dim=-1)
+                        else:
+                            chunks = [torch.empty_like(logits) for _ in range(ws)]
+                            torch.distributed.all_gather(chunks, logits.contiguous(), group=grp)
+                            logits = torch.cat(chunks, dim=-1)
                         vocab_size = int(self.arch_config.vocab_size)
                         if int(logits.shape[-1]) > vocab_size:
                             logits = logits[..., :vocab_size]
