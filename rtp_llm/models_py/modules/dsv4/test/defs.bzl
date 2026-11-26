@@ -2,6 +2,7 @@
 
 load("@pip_dsv4_test//:requirements.bzl", test_requirement = "requirement")
 load("//rtp_llm/test/utils:cuda13_sm100_test.bzl", "cuda13_sm100_py_test")
+load("//rtp_llm/test/utils:cuda13_sm120_test.bzl", "cuda13_sm120_py_test")
 
 def dsv4_py_test(name, deps, src = None, gpu_count = 1, tags = [], args = [], **kwargs):
     source = src or name + ".py"
@@ -11,9 +12,29 @@ def dsv4_py_test(name, deps, src = None, gpu_count = 1, tags = [], args = [], **
         srcs = [source, runner],
         main = runner,
         args = ["--cuda-devices", str(gpu_count), "$(location :" + source + ")"] + args,
-        deps = deps + ["//rtp_llm:jit_cache_env", test_requirement("pytest")],
+        deps = deps + ["//rtp_llm:jit_cache_env", "//rtp_llm:torch", test_requirement("pytest")],
         gpu_count = gpu_count,
         tags = ["dsv4_cuda13"] + tags,
+        legacy_create_init = 0,
+        **kwargs
+    )
+
+def dsv4_sm120_py_test(name, deps, src = None, extra_srcs = [], gpu_count = 1, tags = [], args = [], data = [], env = {}, **kwargs):
+    """Run the shared CUDA13 build on the SM120 pool."""
+    if gpu_count <= 0:
+        fail("dsv4_sm120_py_test requires gpu_count > 0, got {}".format(gpu_count))
+    source = src or name + ".py"
+    runner = "//rtp_llm/test/pytest:pytest_main.py"
+    cuda13_sm120_py_test(
+        name = name,
+        srcs = [source, runner] + extra_srcs,
+        main = runner,
+        args = ["--cuda-devices", str(gpu_count), "--cuda-capability", "12.0", "$(location :" + source + ")"] + args,
+        deps = deps + ["//rtp_llm:jit_cache_env", "//rtp_llm:torch", test_requirement("pytest")],
+        data = data,
+        env = env,
+        gpu_count = gpu_count,
+        tags = ["dsv4_cuda13", "dsv4_cuda13_sm120"] + tags,
         legacy_create_init = 0,
         **kwargs
     )
@@ -27,7 +48,7 @@ def dsv4_sm100_py_test(name, deps, src = None, extra_srcs = [], gpu_count = 1, t
         srcs = [source, runner] + extra_srcs,
         main = runner,
         args = ["--cuda-devices", str(gpu_count), "$(location :" + source + ")"] + args,
-        deps = deps + ["//rtp_llm:jit_cache_env", test_requirement("pytest")],
+        deps = deps + ["//rtp_llm:jit_cache_env", "//rtp_llm:torch", test_requirement("pytest")],
         gpu_count = gpu_count,
         tags = ["dsv4_cuda13"] + tags,
         legacy_create_init = 0,

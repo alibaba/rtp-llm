@@ -10,13 +10,27 @@ from pathlib import Path
 
 
 class PytestLauncherTest(unittest.TestCase):
-    def _run(self, body, env_overrides=None):
+    def _run(self, body, env_overrides=None, cuda_args=(), capability=None):
         with tempfile.TemporaryDirectory() as root:
             source = Path(root) / "test_fixture.py"
             source.write_text(body)
             report = Path(root) / "results.xml"
             env = dict(os.environ)
             env["PYTHONPATH"] = os.pathsep.join(sys.path)
+            if capability is not None:
+                capabilities = (
+                    list(capability)
+                    if isinstance(capability, list)
+                    else [capability]
+                )
+                (Path(root) / "torch.py").write_text(
+                    "from types import SimpleNamespace\n"
+                    f"_caps = {capabilities!r}\n"
+                    "version = SimpleNamespace(cuda='13.2')\n"
+                    "cuda = SimpleNamespace(device_count=lambda: len(_caps), "
+                    "get_device_capability=lambda index: _caps[index])\n"
+                )
+                env["PYTHONPATH"] = root + os.pathsep + env["PYTHONPATH"]
             env["XML_OUTPUT_FILE"] = str(report)
             env["TEST_TMPDIR"] = root
             for name, value in (env_overrides or {}).items():
@@ -28,6 +42,7 @@ class PytestLauncherTest(unittest.TestCase):
                 [
                     sys.executable,
                     str(Path(__file__).with_name("pytest_main.py")),
+                    *cuda_args,
                     str(source),
                 ],
                 capture_output=True,
@@ -135,6 +150,96 @@ class PytestLauncherTest(unittest.TestCase):
                 env_overrides={"DG_JIT_CACHE_DIR": os.path.relpath(cache)},
             )
             self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+
+    def test_cuda_capability_12_0_gate_rejects_other_minor_architectures(self):
+        for capability, expected_success in [((12, 0), True), ((12, 1), False)]:
+            with self.subTest(capability=capability):
+                process, report = self._run(
+                    "def test_pass():\n    assert True\n",
+                    cuda_args=("--cuda-devices", "1", "--cuda-capability", "12.0"),
+                    capability=capability,
+                )
+                self.assertEqual(
+                    process.returncode == 0, expected_success, process.stderr
+                )
+                if expected_success:
+                    self.assertIsNotNone(report)
+                else:
+                    self.assertIn("require SM120 devices, found SM121", process.stderr)
+                    self.assertIsNone(report)
+
+    def test_cuda_capability_major_only_gate_preserves_minor_compatibility(self):
+        process, report = self._run(
+            "def test_pass():\n    assert True\n",
+            cuda_args=("--cuda-devices", "1", "--cuda-capability", "12"),
+            capability=(12, 1),
+        )
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertIsNotNone(report)
+
+        process_bad, report_bad = self._run(
+            "def test_pass():\n    assert True\n",
+            cuda_args=("--cuda-devices", "1", "--cuda-capability", "12"),
+            capability=(10, 0),
+        )
+        self.assertNotEqual(process_bad.returncode, 0, process_bad.stderr)
+        self.assertIn("require SM12x devices, found SM100", process_bad.stderr)
+        self.assertNotIn("SM12None", process_bad.stderr)
+        self.assertIsNone(report_bad)
+
+    def test_default_cuda_capability_gate_requires_sm10x(self):
+        process_ok, report_ok = self._run(
+            "def test_pass():\n    assert True\n",
+            cuda_args=("--cuda-devices", "1"),
+            capability=(10, 0),
+        )
+        self.assertEqual(process_ok.returncode, 0, process_ok.stderr)
+        self.assertIsNotNone(report_ok)
+
+        process_bad, report_bad = self._run(
+            "def test_pass():\n    assert True\n",
+            cuda_args=("--cuda-devices", "1"),
+            capability=(12, 0),
+        )
+        self.assertNotEqual(process_bad.returncode, 0, process_bad.stderr)
+        self.assertIn("require SM10x devices, found SM120", process_bad.stderr)
+        self.assertIsNone(report_bad)
+
+    def test_invalid_cuda_capability_specification_raises(self):
+        for bad_spec in ("12.0.1", "-10", "12.", "sm_120", "120"):
+            with self.subTest(bad_spec=bad_spec):
+                process, report = self._run(
+                    "def test_pass():\n    assert True\n",
+                    cuda_args=("--cuda-devices", "1", "--cuda-capability", bad_spec),
+                    capability=(12, 0),
+                )
+                self.assertNotEqual(process.returncode, 0, process.stderr)
+                self.assertIn("Invalid --cuda-capability specification", process.stderr)
+                self.assertIsNone(report)
+
+    def test_explicit_cuda_capability_requires_positive_cuda_devices(self):
+        for cuda_args in (
+            ("--cuda-capability", "12.0"),
+            ("--cuda-devices", "0", "--cuda-capability", "12.0"),
+            ("--cuda-devices", "-1", "--cuda-capability", "12.0"),
+        ):
+            with self.subTest(cuda_args=cuda_args):
+                process, report = self._run(
+                    "def test_pass():\n    assert True\n",
+                    cuda_args=cuda_args,
+                )
+                self.assertNotEqual(process.returncode, 0, process.stderr)
+                self.assertIsNone(report)
+
+    def test_multi_device_gate_checks_every_requested_ordinal(self):
+        process, report = self._run(
+            "def test_pass():\n    assert True\n",
+            cuda_args=("--cuda-devices", "2", "--cuda-capability", "12.0"),
+            capability=[(12, 0), (12, 1)],
+        )
+        self.assertNotEqual(process.returncode, 0, process.stderr)
+        self.assertIn("require SM120 devices, found SM121 on device 1", process.stderr)
+        self.assertIsNone(report)
 
 
 if __name__ == "__main__":
