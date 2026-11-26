@@ -119,8 +119,9 @@ void launchOrderedSoftmax(torch::Tensor logits) {
 
 void splitSoftmaxInplace(torch::Tensor logits) {
     TORCH_CHECK(logits.is_cuda() && logits.scalar_type() == torch::kFloat32 && logits.dim() == 2
-                    && logits.is_contiguous() && logits.size(0) > 0 && logits.size(0) <= 32 && logits.size(1) == 248320,
-                "split softmax expects contiguous CUDA FP32 [1..32,248320]");
+                    && logits.is_contiguous() && logits.size(0) > 0 && logits.size(0) <= 32 && logits.size(1) >= 65536
+                    && logits.size(1) % 4 == 0,
+                "split softmax expects contiguous CUDA FP32 [1..32,vocab>=65536,vocab%4==0]");
     at::cuda::CUDAGuard guard(logits.device());
     if (reinterpret_cast<uintptr_t>(logits.data_ptr<float>()) % 16 == 0) {
         launchOrderedSoftmax(logits);

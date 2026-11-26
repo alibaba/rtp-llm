@@ -72,7 +72,10 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraft(const torch::Tensor& base_lo
         // dense distribution once, sample from it with FlashInfer, and pass
         // the same q to rejection sampling. Request top-k/top-p stay target-side.
         logits.div_(temperature_column);
-        auto sampling_probabilities = torch::softmax(logits, -1);
+        // logits is a fresh [batch, draft_vocab] tensor here (select+add above,
+        // already mutated by div_), so the in-place multi-CTA split softmax is
+        // safe and replaces the latency-bound single-CTA torch::softmax row.
+        auto sampling_probabilities = execSamplerSoftmaxInplace(logits);
         auto sampled_draft_tokens   = execSampleFromProbs(sampling_probabilities).to(torch::kInt32);
         auto sampled_target_tokens  = sampled_draft_tokens;
         if (d2t_map_.defined()) {

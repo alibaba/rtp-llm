@@ -104,6 +104,10 @@ void fusedStridedCopy(const FusedStridedCopyParams& params);
 
 GreedyOutput     execSampleGreedy(const GreedyParams& params);
 torch::Tensor    execSampleFromProbs(const torch::Tensor& probabilities);
+// Multi-CTA split softmax over large-vocab [rows, vocab] fp32 logits; returns
+// the probabilities (aliasing ``logits`` in-place) with PyTorch's exact FP32
+// accumulation order. Falls back to torch::softmax off the split domain.
+torch::Tensor    execSamplerSoftmaxInplace(const torch::Tensor& logits);
 BeamSearchOutput execSampleBeamSearch(BeamSearchParams params);
 void             execRejectionSampling(const RejectionSamplingParams& params);
 void             execMappingDraft2Target(const MappingDraft2TargetParams& params);

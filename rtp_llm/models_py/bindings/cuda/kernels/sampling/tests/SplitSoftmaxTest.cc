@@ -48,4 +48,30 @@ TEST(SplitSoftmaxTest, testSplitSoftmaxRejectsUnsupportedVocabulary) {
     auto logits = torch::zeros({3, 4093}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
     EXPECT_THROW(rtp_llm::splitSoftmaxInplace(logits), c10::Error);
     ASSERT_EQ(logits.count_nonzero().item<int64_t>(), 0);
+    // Large but row-misaligned vocab (>= 65536, % 4 != 0) must also reject so
+    // the vec4 loads never see an unaligned row base.
+    auto misaligned = torch::zeros({3, 65538}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+    EXPECT_THROW(rtp_llm::splitSoftmaxInplace(misaligned), c10::Error);
+    ASSERT_EQ(misaligned.count_nonzero().item<int64_t>(), 0);
+}
+
+TEST(SplitSoftmaxTest, testSplitSoftmaxCoversNonSm120LargeVocab) {
+    // The gate historically required SM120 + vocab 248320; the widened domain
+    // must cover e.g. DeepSeek's 129280 on any CUDA arch. The kernel
+    // replicates PyTorch's FP32 accumulation order for the measured 248320
+    // width (bit-exact there); for other vocab widths PyTorch's internal
+    // thread/ILP partitioning can differ, so compare with the same tolerance
+    // the float64-reference test uses.
+    auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+    torch::manual_seed(20261126);
+    constexpr int64_t vocab = 129280;
+    for (int64_t rows : {1, 4, 32}) {
+        for (float gain : {1.0f, 50.0f}) {
+            auto logits    = torch::randn({rows, vocab}, options) * gain;
+            auto reference = torch::softmax(logits, -1);
+            rtp_llm::splitSoftmaxInplace(logits);
+            ASSERT_TRUE(torch::allclose(logits, reference, 3e-6, 1e-8));
+            ASSERT_TRUE(torch::allclose(logits.sum(-1), torch::ones({rows}, options), 3e-6, 1e-8));
+        }
+    }
 }

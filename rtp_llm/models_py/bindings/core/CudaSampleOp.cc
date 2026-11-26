@@ -513,6 +513,19 @@ torch::Tensor sampleFromProbs(const torch::Tensor& probabilities) {
     return token_ids;
 }
 
+torch::Tensor execSamplerSoftmaxInplace(const torch::Tensor& logits) {
+    // Multi-CTA split softmax for large-vocab sampling logits; the single-CTA
+    // torch::softmax dispatch is latency-bound (~58us for a 129280-wide row on
+    // SM103) while the split trio keeps PyTorch's exact FP32 accumulation
+    // order. Off the split domain (small/unaligned vocab, rows > 32, non-CUDA)
+    // return a plain torch::softmax so callers that only consume the returned
+    // probabilities pay no extra copy-back versus torch::softmax itself.
+    if (!canSamplerSplitSoftmax(logits)) {
+        return torch::softmax(logits, -1);
+    }
+    return samplerSoftmaxInplace(logits);
+}
+
 void rejectionSampling(const RejectionSamplingParams& params) {
     auto config = validateRejectionSamplingParams(params);
     auto stream = at::cuda::getCurrentCUDAStream().stream();
@@ -888,6 +901,14 @@ torch::Tensor sampleFromProbs(const torch::Tensor& probabilities) {
     // process-local default generator. The regular ROCm sampler above uses the
     // same fallback because FlashInfer sampling is not stable for TP > 1.
     return torch::multinomial(probabilities, 1, /*replacement=*/false).squeeze(-1).to(torch::kInt32);
+}
+
+torch::Tensor execSamplerSoftmaxInplace(const torch::Tensor& logits) {
+    // The CUDA split-softmax trio is unavailable here; keep the shared
+    // in-place probabilities contract of the sampler wrapper.
+    auto probs = torch::softmax(logits, -1);
+    logits.copy_(probs, true);
+    return probs;
 }
 
 }  // namespace rtp_llm
