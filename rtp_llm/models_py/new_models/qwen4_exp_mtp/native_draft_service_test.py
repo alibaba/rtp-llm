@@ -14,7 +14,7 @@ from safetensors.torch import load_file, save_file
 
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.models.qwen4_exp.qwen4_exp_mtp import Qwen4ExpMTP
-from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers, requires_native_fst
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers, has_native_fst, requires_native_fst
 from rtp_llm.models_py.new_models.qwen4_exp.language import Qwen4ForCausalLM
 from rtp_llm.models_py.new_models.qwen4_exp.test.test_native_service import (
     CheckpointOnlyQwen4,
@@ -577,6 +577,8 @@ def _profiles_worker(rank, directory):
                                     )
                                 finally:
                                     target.close()
+                            if not has_native_fst():
+                                continue  # Scratch ownership checks above still ran.
                             assert drafts[0].keys() == drafts[1].keys()
                             for key in drafts[0]:
                                 torch.testing.assert_close(

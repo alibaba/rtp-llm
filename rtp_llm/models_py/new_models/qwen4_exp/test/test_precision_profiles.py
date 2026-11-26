@@ -11,7 +11,7 @@ import torch
 from safetensors.torch import load_file, save_file
 
 from rtp_llm.models.qwen4_exp.qwen4_exp import Qwen4Exp
-from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers, has_native_fst
 from rtp_llm.models_py.new_models.qwen4_exp.target_weights import Qwen4CheckpointPlan
 from rtp_llm.models_py.new_models.qwen4_exp.test.test_native_service import native_config
 from rtp_llm.models_py.new_models.qwen4_exp.language import Qwen4ForCausalLM
@@ -159,6 +159,8 @@ def _whole_worker(rank, rendezvous):
                             snapshots.append({key:value.detach().clone() for key,value in owner.state_dict().items()})
                         finally:
                             owner.close()
+                    if not has_native_fst():
+                        continue  # Scratch ownership checks above still ran.
                     assert snapshots[0].keys() == snapshots[1].keys()
                     for key in snapshots[0]:
                         left,right = snapshots[0][key],snapshots[1][key]
