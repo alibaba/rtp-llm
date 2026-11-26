@@ -496,14 +496,18 @@ def _write_indexer_cache_vectorized(
         in_bounds = (logical_blocks >= 0) & (logical_blocks < width)
         safe_columns = logical_blocks.clamp(0, max(width - 1, 0))
         blocks = table[requests, safe_columns].to(torch.long)
-        out_of_pool = required & in_bounds & (blocks >= pool_blocks)
-        if bool(torch.any(out_of_pool).item()):
-            raise IndexError(f"{tag} physical block is outside pool size {pool_blocks}")
+        out_of_pool = (required & in_bounds & (blocks >= pool_blocks)).any()
         allocated = in_bounds & (blocks > 0) & (blocks < pool_blocks)
         if active is not None:
             allocated = allocated & active[requests]
-        missing = required & ~allocated
-        if invalid_block_policy == "raise" and bool(torch.any(missing).item()):
+        flags = out_of_pool
+        if invalid_block_policy == "raise":
+            missing = (required & ~allocated).any()
+            flags = out_of_pool.to(torch.int32) + 2 * missing
+        verdict = int(flags.item())
+        if verdict & 1:
+            raise IndexError(f"{tag} physical block is outside pool size {pool_blocks}")
+        if verdict & 2:
             raise ValueError(f"{tag} resolves to an unallocated logical block")
         return blocks, allocated
 
@@ -615,6 +619,9 @@ def _write_indexer_cache_vectorized(
         "kv_slots": kv_slots,
         "completed": completed,
     }
+    if collect_stats:
+        result["num_state_writes"] = int(state_write_mask.sum().item())
+        result["num_kv_writes"] = int((kv_slots >= 0).sum().item())
     if capture_undo:
         result["undo"] = _commit_indexer_cache_with_undo(
             state_pool,
@@ -627,9 +634,6 @@ def _write_indexer_cache_vectorized(
     else:
         state_pool.flatten(0, 1).index_copy_(0, state_write_slots, state_write_values)
         kv_pool.flatten(0, 1).index_copy_(0, kv_write_slots, kv_write_values)
-    if collect_stats:
-        result["num_state_writes"] = int(state_write_mask.sum().item())
-        result["num_kv_writes"] = int((kv_slots >= 0).sum().item())
     return result
 
 

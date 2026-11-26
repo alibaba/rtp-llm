@@ -334,13 +334,6 @@ def _draft_incremental_prefill_geometry(
     # A completed group may read committed raw keys preceding the new rows.
     # Validate that source tail and every destination absolute state page.
     state_table_width = int(state_table.shape[1])
-    state_page_ranges = tuple(
-        range(
-            (prefix - prefix % ratio) // state_tokens_per_block,
-            (end - 1) // state_tokens_per_block + 1,
-        )
-        for prefix, end in zip(host_prefixes, host_visible_ends)
-    )
     if max_end > state_table_width * state_tokens_per_block:
         raise RuntimeError(
             "QSA cache 'indexer_state' block table does not cover the "
@@ -404,8 +397,13 @@ def _draft_incremental_prefill_geometry(
             state_table,
             [
                 (request, column)
-                for request, pages in enumerate(state_page_ranges)
-                for column in pages
+                for request, (prefix, end) in enumerate(
+                    zip(host_prefixes, host_visible_ends)
+                )
+                for column in range(
+                    (prefix - prefix % ratio) // state_tokens_per_block,
+                    (end - 1) // state_tokens_per_block + 1,
+                )
             ],
             int(state_pool.shape[0]),
             "draft incremental tail",
@@ -415,7 +413,14 @@ def _draft_incremental_prefill_geometry(
     check_prefill_metadata_once(
         self,
         checks,
-        ("indexer_state_pages", state_page_ranges, int(state_pool.shape[0])),
+        (
+            "indexer_state_pages",
+            tuple(host_prefixes),
+            tuple(host_visible_ends),
+            ratio,
+            state_tokens_per_block,
+            int(state_pool.shape[0]),
+        ),
         (state_table,),
         add_state_page_checks,
     )

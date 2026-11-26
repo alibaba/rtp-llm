@@ -1003,6 +1003,52 @@ class Qwen4ExpQSAMtpTest(QSARuntimeFixture, TestCase):
             self.assertEqual(tuple(other.kv_writes.shape), (3, 0))
 
     @skipUnless(torch.cuda.is_available(), "CUDA is required for paged scoring")
+    def test_target_prefix_writer_falls_back_for_different_page_sizes(self):
+        from rtp_llm.models_py.model_desc.qwen4_exp_runtime import qsa_context
+
+        self.D = self.KV_TOKENS_PER_BLOCK = 128
+        self.STATE_TOKENS_PER_BLOCK = 256
+        self.indexer.k_norm_gamma = torch.rand(self.D, device="cuda")
+        indexer = self._decode_indexer(heads=4)
+        rope = self._base_rope_config(3)
+        rope.dim = 64
+        raw = torch.randn(12, self.D, dtype=torch.bfloat16, device="cuda")
+        q = torch.randn(12, 4, self.D, dtype=torch.bfloat16, device="cuda")
+        kv = torch.randn(8, 32 * self.D, dtype=torch.bfloat16, device="cuda").view(
+            torch.uint8
+        )
+        state = torch.randn(8, 8 * self.D, device="cuda")
+        before_kv, before_state = kv.clone(), state.clone()
+        context = self._draft_incremental_context(
+            kv,
+            state,
+            prefixes=[128, 256],
+            lengths=[5, 7],
+            kv_table=torch.tensor(
+                [[1, 2, 0], [3, 4, 5]], dtype=torch.int32, device="cuda"
+            ),
+            state_table=torch.tensor(
+                [[6, 0], [7, 3]], dtype=torch.int32, device="cuda"
+            ),
+            is_mtp_draft=False,
+        )
+        with patch.object(
+            qsa_context,
+            "write_indexer_cache",
+            wraps=qsa_context.write_indexer_cache,
+        ) as writer:
+            selected = context.select_prefix_reuse_prefill_tokens(
+                q, raw, indexer=indexer, rope_config=rope
+            )
+            writer.assert_called_once()
+        self.assertEqual(tuple(selected.shape), (12, indexer.token_budget))
+        self.assertFalse(torch.equal(kv, before_kv))
+        self.assertFalse(torch.equal(state, before_state))
+        context.rollback_side_cache()
+        torch.testing.assert_close(kv, before_kv, rtol=0, atol=0)
+        torch.testing.assert_close(state, before_state, rtol=0, atol=0)
+
+    @skipUnless(torch.cuda.is_available(), "CUDA is required for paged scoring")
     def test_mtp_draft_prefix_reuse_accepts_local_cu_kv_coordinates(self):
         device = torch.device("cuda")
         indexer = self._decode_indexer()
@@ -1145,13 +1191,20 @@ class Qwen4ExpQSAMtpTest(QSARuntimeFixture, TestCase):
                 raw_keys, indexer=self.indexer, rope_config=self.rope_config
             )
         undo = context._side_cache_undo
-        with self.assertRaisesRegex(RuntimeError, "already active"):
-            context.select_prefix_reuse_prefill_tokens(
-                raw_keys[:, None, :],
-                raw_keys,
-                indexer=self.indexer,
-                rope_config=self.rope_config,
-            )
+        for select in (
+            context.select_prefix_reuse_prefill_tokens,
+            context.select_decode_tokens,
+            context.select_target_verify_tokens,
+            context.select_draft_graph_tokens,
+        ):
+            with self.subTest(select=select.__name__):
+                with self.assertRaisesRegex(RuntimeError, "already active"):
+                    select(
+                        raw_keys[:, None, :],
+                        raw_keys,
+                        indexer=self.indexer,
+                        rope_config=self.rope_config,
+                    )
         self.assertIs(context._side_cache_undo, undo)
         context.rollback_side_cache()
 

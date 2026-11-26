@@ -32,12 +32,14 @@ def write_prefill_indexer_cache(
     *,
     indexer: Any,
     rope_config: Any,
+    collect_stats: bool = True,
 ) -> tuple[list[int], torch.Tensor, torch.Tensor, dict]:
     """Write one ragged prefill projection to both side pools.
 
     This path requires zero prefixes. Page-aligned prefix reuse uses
     select_prefix_reuse_prefill_tokens and its paged writer instead.
     """
+    self.require_idle_side_cache()
     lengths = self._validate_mode_and_metadata(expect_prefill=True)
     token_count = int(raw_keys.shape[0]) if raw_keys.dim() == 2 else -1
     if token_count < 0 or sum(lengths) != token_count:
@@ -202,8 +204,6 @@ def write_prefill_indexer_cache(
             write_zero_prefix_prefill,
         )
 
-        if self._side_cache_undo is not None:
-            raise RuntimeError("qwen4_exp QSA side-cache transaction is already active")
         try:
             fused_result = write_zero_prefix_prefill(
                 raw_keys,
@@ -248,7 +248,7 @@ def write_prefill_indexer_cache(
     # The fallback writer still needs the ordinary partition preflight.
     if defer_cu:
         check_cu_partition()
-    result = self._write_indexer_cache_transactional(
+    result = self._write_indexer_cache_with_undo(
         raw_keys,
         cu_seqlens,
         start_positions,
@@ -263,6 +263,7 @@ def write_prefill_indexer_cache(
         kv_tokens_per_block=kv_tokens_per_block,
         state_tokens_per_block=int(self.indexer_state_cache.seq_size_per_block),
         norm_eps=float(indexer.norm_eps),
+        collect_stats=collect_stats,
     )
     return lengths, rope_cos, rope_sin, result
 
@@ -288,6 +289,7 @@ def select_draft_graph_tokens(
         write_draft_window_with_undo_,
     )
 
+    self.require_idle_side_cache()
     inputs = self.main_inputs
     if (
         not self.is_mtp_draft
@@ -419,8 +421,6 @@ def select_draft_graph_tokens(
             device=q.device,
             inv_freq=frequency,
         )
-    if self._side_cache_undo is not None:
-        raise RuntimeError("QSA draft graph side-cache transaction is already active")
     undo = write_draft_window_with_undo_(
         raw_keys,
         inputs.cu_seqlens_device,

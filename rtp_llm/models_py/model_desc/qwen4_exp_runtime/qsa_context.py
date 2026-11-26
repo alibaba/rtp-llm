@@ -92,10 +92,6 @@ class Qwen4ExpQSARuntimeContext:
         if self._side_cache_undo is not None:
             raise RuntimeError("qwen4_exp QSA side-cache transaction is already active")
 
-    def _write_indexer_cache_transactional(self, *args, **kwargs) -> dict:
-        self.require_idle_side_cache()
-        return self._write_indexer_cache_with_undo(*args, **kwargs)
-
     def _write_indexer_cache_with_undo(self, *args, **kwargs) -> dict:
         result = write_indexer_cache(
             *args,
@@ -299,9 +295,14 @@ class Qwen4ExpQSARuntimeContext:
         *,
         indexer: Any,
         rope_config: Any,
+        collect_stats: bool = True,
     ) -> tuple[list[int], torch.Tensor, torch.Tensor, dict]:
         return qsa_prefill.write_prefill_indexer_cache(
-            self, raw_keys, indexer=indexer, rope_config=rope_config
+            self,
+            raw_keys,
+            indexer=indexer,
+            rope_config=rope_config,
+            collect_stats=collect_stats,
         )
 
     def select_draft_graph_tokens(

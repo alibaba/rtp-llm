@@ -49,6 +49,7 @@ def select_decode_tokens(
     compression group, to the compressed KV pool).  The same projected q is
     then rotated and scored against every visible compressed entry.
     """
+    self.require_idle_side_cache()
     graph_decode = bool(self.main_inputs.is_cuda_graph)
     checks = self.take_prewrite_checks()
     input_lengths = self._validate_mode_and_metadata(
@@ -301,8 +302,6 @@ def select_decode_tokens(
             "qwen4_exp QSA Graph decode requires the fixed-shape Triton writer"
         )
     if fused_writer:
-        if self._side_cache_undo is not None:
-            raise RuntimeError("qwen4_exp QSA side-cache transaction is already active")
         undo = write_decode_key_with_undo_(
             raw_keys,
             sequence_lengths,
@@ -318,7 +317,7 @@ def select_decode_tokens(
         self._side_cache_undo = undo
     else:
         cu_seqlens = torch.arange(batch_size + 1, dtype=torch.int32, device=q.device)
-        self._write_indexer_cache_transactional(
+        self._write_indexer_cache_with_undo(
             raw_keys,
             cu_seqlens,
             sequence_lengths.to(torch.int64),

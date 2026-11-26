@@ -23,6 +23,7 @@ def select_target_verify_tokens(
     raw_query: bool = False,
 ) -> torch.Tensor:
     """Select all ``gamma + 1`` target rows using a bounded tail overwrite."""
+    self.require_idle_side_cache()
     token_count = int(raw_keys.shape[0]) if raw_keys.dim() == 2 else -1
     plan = self._target_verify_plan
     self._target_verify_plan = None
@@ -88,8 +89,6 @@ def select_target_verify_tokens(
             try_prepare_target_window,
         )
 
-        if self._side_cache_undo is not None:
-            raise RuntimeError("qwen4_exp QSA side-cache transaction is already active")
         prepared = try_prepare_target_window(
             q,
             raw_keys,
@@ -139,10 +138,6 @@ def select_target_verify_tokens(
                 write_target_window_with_undo_,
             )
 
-            if self._side_cache_undo is not None:
-                raise RuntimeError(
-                    "qwen4_exp QSA side-cache transaction is already active"
-                )
             undo = write_target_window_with_undo_(
                 raw_keys,
                 plan.prefixes,
@@ -157,7 +152,7 @@ def select_target_verify_tokens(
             )
             self._side_cache_undo = undo
         else:
-            self._write_indexer_cache_transactional(
+            self._write_indexer_cache_with_undo(
                 raw_keys,
                 plan.cu_seqlens,
                 plan.prefixes.to(torch.int64),
