@@ -42,6 +42,11 @@ from rtp_llm.models_py.new_models.qwen3.language import (
 )
 from rtp_llm.models_py.new_models.qwen3_next.gdn import Qwen3NextGatedDeltaNet
 from rtp_llm.models_py.new_models.qwen3_next.gdn_parameters import _finite_positive_real
+from rtp_llm.models_py.new_models.qwen3_next.grouped_q_gate import (
+    grouped_q_gate_read_spec,
+    is_grouped_q_gate,
+    split_grouped_q_gate,
+)
 from rtp_llm.models_py.new_models.qwen_visual_namespace import is_visual_checkpoint_name
 from rtp_llm.models_py.quant_methods.base import QuantizationConfig
 from rtp_llm.models_py.read_spec import unwrap_checkpoint_tensor
@@ -417,13 +422,22 @@ class Qwen3NextAttention(Qwen3Attention):
             params_dtype=params_dtype,
             rms_norm_eps=rms_norm_eps,
         )
+        gate_quant, gate_prefix = quant_config, f"{prefix}.gate"
+        if getattr(quant_config, "quant_type", None) in ("awq", "gptq"):
+            from rtp_llm.models_py.quant_methods.unquantized import UnquantizedLinearMethod
+
+            # HF has no separate gate key: Q and gate are encoded by ONE
+            # checkpoint projection, even when exported as floating exceptions.
+            gate_prefix = f"{prefix}.q_proj"
+            if isinstance(self.qkv_proj.quant_method, UnquantizedLinearMethod):
+                gate_quant = None
         self.gate = ColumnParallelLinear(
             input_size=hidden_size,
             output_size=num_heads * head_dim,
             tp_size=tp_size,
             tp_rank=tp_rank,
-            quant_config=quant_config,
-            prefix=f"{prefix}.gate",
+            quant_config=gate_quant,
+            prefix=gate_prefix,
             bias=False,
             params_dtype=params_dtype,
         )
@@ -961,6 +975,10 @@ class Qwen3NextForCausalLM(ResidentDecoderOwner, DecoderHandlerOwner, Qwen3NextM
             yield name, b
 
     def resolve_checkpoint_load_plan(self, name, shape):
+        if is_grouped_q_gate(self._cfg, name):
+            # A pair of owners consumes this source. Never dispatch the raw
+            # interleaved bytes straight to the QKV leaf.
+            return None, grouped_q_gate_read_spec(self._cfg, name, shape)
         if name in getattr(getattr(self, "handler_heads", None), "sources", ()):
             return None, None
         if (
@@ -999,6 +1017,9 @@ class Qwen3NextForCausalLM(ResidentDecoderOwner, DecoderHandlerOwner, Qwen3NextM
         def _transform(it):
             cfg = self._cfg
             for name, tensor in it:
+                if is_grouped_q_gate(cfg, name):
+                    yield from split_grouped_q_gate(cfg, name, tensor)
+                    continue
                 if any(
                     name.endswith(f"self_attn.q_proj.{suffix}")
                     for suffix in (
