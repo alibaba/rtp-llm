@@ -799,6 +799,7 @@ class Qwen3NextDecoderLayer(RtpModule):
         # match the checkpoint key prefix.
         if self.layer_type == HybridAttentionType.LINEAR:
             self.linear_attn = Qwen3NextGatedDeltaNet(
+                grouped_control_source=model_config.model_type in ("qwen35_dense", "qwen35_moe"),
                 parallelism_config=cfg["parallelism_config"],
                 norm_activation=getattr(
                     model_config, "linear_attn_norm_activation", None

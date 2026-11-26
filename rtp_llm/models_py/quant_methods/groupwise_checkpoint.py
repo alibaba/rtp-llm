@@ -250,28 +250,42 @@ class PackedGroupwiseWeights(nn.Module):
         )
         return result
 
+    def _checkpoint_codes(self):
+        self._check_complete()
+        bits = self.layout.bits
+        if self.layout.method == "awq":
+            values = _reverse_awq(_unpack_last(self.qweight, bits))
+            zeros = _reverse_awq(_unpack_last(self.qzeros, bits))
+        else:
+            values = _unpack_last(self.qweight.T, bits).T.contiguous()
+            zeros = _unpack_last(self.qzeros, bits) + 1
+        return values, zeros
+
+    def decode_control_weight(self, dtype):
+        """Import a small [K,N] control projection for an existing floating consumer."""
+        values, zeros = self._checkpoint_codes()
+        rows = (
+            torch.arange(values.shape[0], device=values.device) // self.layout.group_size
+        )
+        weight = ((values - zeros[rows]).float() * self.scales[rows].float()).to(dtype)
+        if not torch.isfinite(weight).all():
+            raise ValueError("Non-finite decoded grouped control weight")
+        return weight
+
     def convert(self, weight_layout: Callable):
         """Convert to the existing mixed-GEMM export ABI, with explicit backend.
 
         ``weight_layout(signed_packed_weight, bits)`` owns platform swizzling.
         There is deliberately no automatic backend or full-precision fallback.
         """
-        self._check_complete()
+        values, zeros = self._checkpoint_codes()
         bits = self.layout.bits
         shift = 1 << (bits - 1)
-        if self.layout.method == "awq":
-            values = _reverse_awq(_unpack_last(self.qweight, bits))
-            zeros = _reverse_awq(_unpack_last(self.qzeros, bits))
-        else:
-            values = _unpack_last(self.qweight.T, bits).T.contiguous()
-            zeros = _unpack_last(self.qzeros, bits)
         signed = (values - shift).to(torch.int8)
         if bits == 4:
             unsigned = signed.to(torch.uint8) & 15
             signed = (unsigned[:, ::2] | (unsigned[:, 1::2] << 4)).view(torch.int8)
-        offsets = (
-            (-zeros + shift - int(self.layout.method == "gptq")) * self.scales
-        ).half()
+        offsets = ((-zeros + shift) * self.scales).half()
         return (
             weight_layout(signed.contiguous(), bits),
             offsets.contiguous(),

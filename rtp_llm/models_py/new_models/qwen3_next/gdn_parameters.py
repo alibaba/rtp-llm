@@ -81,6 +81,7 @@ class Qwen3NextGdnParameters(RtpModule):
         params_dtype: torch.dtype,
         quant_config: Optional[QuantizationConfig],
         prefix: str,
+        grouped_control_source: bool = False,
     ):
         super().__init__()
         self.linear_attn_config = linear_attn_config
@@ -123,6 +124,11 @@ class Qwen3NextGdnParameters(RtpModule):
             + self.head_v_dim * self.local_num_v_heads
         )
         self.ba_size = self.local_num_v_heads * 2
+        self._grouped_controls = None
+        if grouped_control_source and getattr(quant_config, "quant_type", None) in ("awq", "gptq"):
+            from rtp_llm.models_py.new_models.qwen3_next.grouped_controls import GroupedControlSource
+
+            self._grouped_controls = GroupedControlSource(quant_config, prefix, hidden_size, num_v_heads, params_dtype)
 
         # These projections are already rank-local after the model-specific
         # Q/K/V/Z transform. The common Linear layer still owns quantization,
@@ -628,6 +634,11 @@ class Qwen3NextGdnParameters(RtpModule):
     def load_weights(self, weights: Dict[str, torch.Tensor]) -> None:
         for name, tensor in weights.items():
             projection, _, parameter = name.partition(".")
+            if self._grouped_controls is not None and projection in ("in_proj_a", "in_proj_b", "in_proj_ba"):
+                tensor = self._grouped_controls.consume(projection.removeprefix("in_proj_"), parameter, tensor)
+                if tensor is None:
+                    continue
+                name = projection + ".weight"
             if projection in ("in_proj_qkvz", "in_proj_qkv", "in_proj_z") and hasattr(
                 self.in_proj_qkvz.quant_method, "configure_checkpoint_shards"
             ):
