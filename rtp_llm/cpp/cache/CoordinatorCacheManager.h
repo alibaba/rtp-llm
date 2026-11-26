@@ -69,6 +69,26 @@ public:
     virtual std::vector<BlockInfo> convertIndexToBuffer(int layer_id, const std::string& group_tag, int block_id) const;
     virtual std::vector<BlockInfo> convertIndexToBuffer(
         int layer_id, const std::string& group_tag, int block_id, int partition_count, int partition_id) const;
+    virtual std::shared_ptr<KVCacheResource>
+    incrKVCacheRef(const KVCacheResource& kvcache_resource, const CacheKeysType& cache_keys, bool is_connector = false);
+    virtual GroupedCacheLayerLayout allLayerCacheBase() const;
+    virtual bool                    updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cache_resource,
+                                                  const std::vector<int>&         block_src_batch,
+                                                  bool                            copy_last_block,
+                                                  std::vector<TaggedBlockIdPair>& block_update_mapping);
+    virtual int                     seqSizePerBlock() const;
+    virtual int
+    singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource, int seq_len, int reserve_step) const;
+    // Common-prefix growth is charged once; non-common growth is charged once per target sequence.
+    int estimateBatchPeakNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                                    int                            seq_len,
+                                    int                            common_seq_len,
+                                    int                            remaining_tokens,
+                                    int                            reserve_step,
+                                    bool                           enable_reuse_cache,
+                                    int                            target_batch_size,
+                                    LinearCachePolicy  linear_cache_policy = LinearCachePolicy::KEEP_HISTORY,
+                                    const std::string& pool_tag            = {}) const;
 
     MallocResult malloc(const MallocInfo& malloc_info);
     bool         abortPendingLoad(const std::shared_ptr<AsyncContext>& context);
