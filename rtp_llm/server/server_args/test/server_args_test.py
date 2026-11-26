@@ -308,30 +308,6 @@ class SharedHybridCacheArgumentsTest(TestCase):
             config.__setstate__(tuple(state))
 
 
-class AsyncCachePrepareArgumentsTest(TestCase):
-    def test_removed_override_leaves_the_native_role_policy_in_control(self):
-        from rtp_llm.server.server_args import server_args
-
-        with patch.dict(os.environ, {"RTP_LLM_ASYNC_PREPARE_CACHE": "1"}, clear=True):
-            config = server_args.setup_args([]).runtime_config.fifo_scheduler_config
-            self.assertFalse(config.async_cache_prepare)
-
-    def test_legacy_pickles_keep_preparation_disabled(self):
-        from rtp_llm.ops import FIFOSchedulerConfig
-
-        for state in (
-            (1, 8192),
-            (1, 8192, "", "1:1"),
-            (1, 8192, "", "1:1", True, 0),
-            (1, 8192, "", "1:1", True, 0, 2048),
-            (1, 8192, "", "1:1", True, 0, 2048, 128),
-        ):
-            with self.subTest(state=state):
-                config = FIFOSchedulerConfig.__new__(FIFOSchedulerConfig)
-                config.__setstate__(state)
-                self.assertFalse(config.async_cache_prepare)
-
-
 class CPRotateMethodArgumentsTest(TestCase):
     def test_serialized_disabled_environment_matches_default(self):
         from rtp_llm.ops import CPRotateMethod

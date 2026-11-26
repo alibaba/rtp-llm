@@ -164,7 +164,6 @@ private:
     const rtp_llm::ExecProperties                   device_props_;
     const bool                                      enable_prefill_cp_;
     const MtpIndexerRole                            mtp_indexer_role_;
-    const bool                                      fixed_graph_indexer_;
     const DSparkModelRole                           dspark_model_role_;
     const bool                                      track_cache_store_completion_;
     const bool                                      owns_py_model_;
@@ -241,8 +240,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     // run only on decode roles, where prefill CP is off (colocated CP is
     // rejected at executor construction).
     enable_prefill_cp_(device_props_.enable_prefill_cp),
-    mtp_indexer_role_(mtp_indexer_role != MtpIndexerRole::NORMAL ? mtp_indexer_role : params.mtp_indexer_role),
-    fixed_graph_indexer_(params.mtp_indexer_role != MtpIndexerRole::NORMAL),
+    mtp_indexer_role_(mtp_indexer_role),
     dspark_model_role_(dspark_model_role),
     track_cache_store_completion_(track_cache_store_completion),
     owns_py_model_(params.owns_py_model),
@@ -424,8 +422,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         params.sp_config.type == SP_TYPE_NONE && params.parallelism_config.role_type == RoleType::PDFUSION
         && params.parallelism_config.dp_size > 1 && py::hasattr(py_model_, "prepare_moe_forward");
     if (mtp_indexer_role_ != MtpIndexerRole::NORMAL) {
-        RTP_LLM_CHECK_WITH_INFO((fixed_graph_indexer_ || enable_cuda_graph_)
-                                    && dspark_model_role_ == DSparkModelRole::NONE,
+        RTP_LLM_CHECK_WITH_INFO(enable_cuda_graph_ && dspark_model_role_ == DSparkModelRole::NONE,
                                 "MTP index sharing requires a fixed ordinary CUDA graph wrapper");
         RTP_LLM_CHECK(py::hasattr(py_model_, "set_mtp_indexer_role"));
         py_model_.attr("set_mtp_indexer_role")(static_cast<int>(mtp_indexer_role_));

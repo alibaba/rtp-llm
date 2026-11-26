@@ -427,7 +427,6 @@ std::string FIFOSchedulerConfig::to_string() const {
         << "cp_force_single_prefill: " << cp_force_single_prefill << "\n"
         << "force_single_prefill: " << force_single_prefill << "\n"
         << "max_inited_kv_cache_streams: " << max_inited_kv_cache_streams << "\n"
-        << "async_cache_prepare: " << async_cache_prepare << "\n"
         << "max_batch_tokens_without_cache: " << max_batch_tokens_without_cache << "\n"
         << "prefill_chunk_size: " << prefill_chunk_size;
     return oss.str();

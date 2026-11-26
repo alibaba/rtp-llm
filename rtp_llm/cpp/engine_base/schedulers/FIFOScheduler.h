@@ -3,7 +3,6 @@
 #include <atomic>
 #include <cstddef>
 #include <list>
-#include <thread>
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
@@ -24,7 +23,6 @@ public:
                            const int                              max_score_len    = 1);
 
     ~FIFOScheduler() override;
-    absl::Status stop() override;
 
     // Group-aware enqueue: streams enter the dedicated group queues and are
     // co-scheduled at an isolated execution boundary. Falls back to individual
@@ -72,7 +70,7 @@ private:
                                const GenerateStreamPtr&            new_stream) override;
     // Counter-based admission check used by admitWaitingStreams(). evaluateRunningMemory()
     // is the list-based FIFOSchedulerBase entry point and delegates here.
-    bool evaluateRunningBatch(const ScheduleRuntime& schedule_runtime, const GenerateStreamPtr& new_stream) const;
+    bool   evaluateRunningBatch(const ScheduleRuntime& schedule_runtime, const GenerateStreamPtr& new_stream) const;
     // Overload for group-queue admission: the admitted streams are tracked as a list
     // because ScheduleRuntime is not built in the group-queue path.
     bool   evaluateRunningBatch(const std::list<GenerateStreamPtr>& streams, const GenerateStreamPtr& new_stream) const;
@@ -115,9 +113,6 @@ private:
     void    fillExtraMetrics(RtpLLMSchedulerMetricsCollector& collector) const override;
     void    appendExtraRunningTaskList(std::vector<EngineScheduleInfo::TaskInfo>& task_list) const override;
     bool    partitionChunkContinuations();
-    bool    hasUnpreparedCache() const;
-    bool    prepareWaitingCache();  // caller holds lock_, including capacity accounting
-    void    cachePrepareLoop(int local_rank);
 
     // Explicit request groups (enqueueGroup). Each group is admitted as a whole
     // to an isolated execution boundary; a partially admitted group keeps its
@@ -135,9 +130,6 @@ private:
     mutable std::atomic<int64_t> pending_group_fallback_count_ = 0;
     AdmissionLane                active_admission_lane_        = AdmissionLane::NONE;
     bool                         prefer_group_next_            = false;
-    std::atomic<bool>            async_cache_prepare_enabled_  = false;
-    std::thread                  cache_prepare_thread_;
-    std::mutex                   cache_prepare_stop_mutex_;
 
     // TODO @wangyin support different beams run togather
     std::list<GenerateStreamPtr> pending_decode_streams_;

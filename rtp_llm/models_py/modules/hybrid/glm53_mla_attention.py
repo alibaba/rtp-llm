@@ -185,10 +185,9 @@ class MlaAttention(nn.Module):
         q_c_fp8: Optional[torch.Tensor] = None,
         q_c_scale: Optional[torch.Tensor] = None,
         prev_topk_indices: Optional[torch.Tensor] = None,
-        force_reuse_topk_indices: bool = False,
         global_kv_cache: Optional[KVCache] = None,
     ) -> Optional[torch.Tensor]:
-        if self.reuse_topk_indices or force_reuse_topk_indices:
+        if self.reuse_topk_indices:
             if not fmha_impl.is_sparse():
                 return None
             if prev_topk_indices is None:
@@ -225,7 +224,6 @@ class MlaAttention(nn.Module):
         x_fp8: Optional[torch.Tensor] = None,
         x_scale: Optional[torch.Tensor] = None,
         prev_topk_indices: Optional[torch.Tensor] = None,
-        force_reuse_topk_indices: bool = False,
         return_topk: bool = False,
         global_kv_cache: Optional[KVCache] = None,
         reduce_scatter_output: bool = False,
@@ -288,7 +286,6 @@ class MlaAttention(nn.Module):
                     q_c_fp8,
                     q_c_scale,
                     prev_topk_indices,
-                    force_reuse_topk_indices,
                     global_kv_cache,
                 )
                 fmha_impl.prefetch_kv(self.layer_idx, topk_indices)
@@ -339,7 +336,6 @@ class MlaAttention(nn.Module):
                 q_c_fp8,
                 q_c_scale,
                 prev_topk_indices,
-                force_reuse_topk_indices,
                 global_kv_cache,
             )
         # q_c and its quantized representation are Indexer-only. Releasing

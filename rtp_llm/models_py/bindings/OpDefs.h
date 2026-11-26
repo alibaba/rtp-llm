@@ -346,26 +346,7 @@ struct PyAttentionInputs {
     torch::Tensor cu_kv_seqlens_device;  // device only (no host mirror needed)
     torch::Tensor decode_cu_seqlens;
     int           context_total_kv_length = 0;
-    // Exact live KV extent for device metadata. Keep it on device until a
-    // legacy CPU consumer explicitly requests the scalar; graph padding must
-    // not change this one-element view into the live cu_kv_seqlens.
-    torch::Tensor context_total_kv_length_device;
-    int           total_tokens = 0;
-
-    int contextTotalKvLength() const {
-        if (context_total_kv_length_device.defined()) {
-            TORCH_CHECK(context_total_kv_length_device.numel() == 1
-                            && context_total_kv_length_device.scalar_type() == torch::kInt32,
-                        "context KV extent must contain one int32 value");
-            return context_total_kv_length_device.item<int>();
-        }
-        return context_total_kv_length;
-    }
-
-    void setContextTotalKvLength(int value) {
-        context_total_kv_length        = value;
-        context_total_kv_length_device = torch::Tensor();
-    }
+    int           total_tokens            = 0;
     torch::Tensor padding_offset;
     torch::Tensor combo_position_ids;
 

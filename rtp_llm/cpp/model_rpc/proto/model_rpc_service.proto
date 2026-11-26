@@ -1007,7 +1007,7 @@ message SideChannelTensorPB {
 }
 
 // Side-channel payload: replaces fixed first_token/reuse/SP/position_ids fields
-// Also carries "mtp_indexer_topk" for the first MTP Decode step.
+// Keys: "propose_tokens", "propose_probs", "propose_hidden", "position_ids"
 message SideChannelPayloadPB {
     map<string, SideChannelTensorPB> tensors = 1;
     // Scalar fields that don't fit tensor format

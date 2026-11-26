@@ -154,37 +154,6 @@ void graphMemcpyAsync(void* dst, const void* src, size_t size, GraphMemcpyKind k
 #endif
 }
 
-void graphMemcpy2DAsync(void*           dst,
-                        size_t          dst_pitch,
-                        const void*     src,
-                        size_t          src_pitch,
-                        size_t          width,
-                        size_t          height,
-                        GraphMemcpyKind kind,
-                        void*           stream) {
-#if USING_ROCM
-    hipMemcpyKind hip_kind = hipMemcpyDeviceToDevice;
-    if (kind == GraphMemcpyKind::D2H) {
-        hip_kind = hipMemcpyDeviceToHost;
-    } else if (kind == GraphMemcpyKind::H2D) {
-        hip_kind = hipMemcpyHostToDevice;
-    }
-    graphCheck(
-        hipMemcpy2DAsync(dst, dst_pitch, src, src_pitch, width, height, hip_kind, static_cast<hipStream_t>(stream)),
-        "hipMemcpy2DAsync");
-#else
-    cudaMemcpyKind cuda_kind = cudaMemcpyDeviceToDevice;
-    if (kind == GraphMemcpyKind::D2H) {
-        cuda_kind = cudaMemcpyDeviceToHost;
-    } else if (kind == GraphMemcpyKind::H2D) {
-        cuda_kind = cudaMemcpyHostToDevice;
-    }
-    graphCheck(
-        cudaMemcpy2DAsync(dst, dst_pitch, src, src_pitch, width, height, cuda_kind, static_cast<cudaStream_t>(stream)),
-        "cudaMemcpy2DAsync");
-#endif
-}
-
 void graphDeviceSynchronize() {
 #if USING_ROCM
     graphCheck(hipDeviceSynchronize(), "hipDeviceSynchronize");

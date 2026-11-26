@@ -99,14 +99,7 @@ KVCacheSpecDesc makeOpaqueStateDesc(const std::string& tag) {
 
 }  // namespace
 
-TEST(ConfigAggregateCompatibilityTest, MainAggregateConfigRetainsTokenBudgets) {
-    FIFOSchedulerConfig config{4, 8192, "ratio", "2", false, true, 8, 2048, 4096, 128};
-    EXPECT_TRUE(config.force_single_prefill);
-    EXPECT_EQ(config.max_inited_kv_cache_streams, 8);
-    EXPECT_EQ(config.max_batch_tokens_without_cache, 2048);
-    EXPECT_EQ(config.max_batch_kv_len, 4096);
-    EXPECT_EQ(config.prefill_chunk_size, 128);
-    EXPECT_FALSE(config.async_cache_prepare);
+TEST(ConfigAggregateCompatibilityTest, MainAggregateConfigRetainsReuseCache) {
     KVCacheConfig cache_config{true};
     EXPECT_TRUE(cache_config.reuse_cache);
     EXPECT_EQ(cache_config.shared_hybrid_cache, -1);

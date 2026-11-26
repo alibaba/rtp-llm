@@ -31,8 +31,6 @@ enum class ParallelMode {
     STAGE = 6,
     /** Spans PP stages with the same DP/TP coordinates. */
     PP = 7,
-    /** CPU control collective across all ranks. */
-    WORLD_CPU = 8,
 };
 
 // A batch includes two parts: context batch and decoder batch.
@@ -95,8 +93,8 @@ struct GptModelInputs {
     std::optional<std::vector<torch::Tensor>> input_embeddings;  // all input embeddings in gathered stream stored here
     torch::Tensor                             input_embeddings_locs;  // input embeddings index
 
-    torch::Tensor request_id;           // int64, [context_batch_size]
-    torch::Tensor request_deadline_ms;  // int64, [context_batch_size], absolute deadline in milliseconds
+    torch::Tensor request_id;             // int64, [context_batch_size]
+    torch::Tensor request_deadline_ms;    // int64, [context_batch_size], absolute deadline in milliseconds
     // Receiver-local clock offset for P2P layer retention. The tensor remains source identity.
     int64_t       p2p_deadline_clock_offset_ms = 0;
     torch::Tensor request_pd_separation;  // bool, [context_batch_size]
@@ -117,13 +115,13 @@ struct GptModelInputs {
     bool need_all_hidden_states = false;
     bool skip_lm_head           = false;
     // PP batch contains only middle chunks; all TP ranks follow the same sampling/draft path.
-    bool is_middle_chunk_only  = false;
-    bool capture_hidden_states = false;
-    bool need_moe_gating       = false;
-    bool warmup                = false;
-    bool skip_run              = false;
-    bool shutdown              = false;
-    bool is_fake_stream        = false;
+    bool is_middle_chunk_only = false;
+    bool capture_hidden_states  = false;
+    bool need_moe_gating        = false;
+    bool warmup                 = false;
+    bool skip_run               = false;
+    bool shutdown               = false;
+    bool is_fake_stream         = false;
 
     // Linear attention target verify should write draft tokens mamba states
     // to extra kv_cache blocks when normal inference only write last token mamba state.

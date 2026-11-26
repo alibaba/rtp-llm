@@ -18,7 +18,6 @@
 #include <algorithm>
 #include <limits>
 #include <cstring>
-#include <stdexcept>
 #include <thread>
 #include <torch/extension.h>
 
@@ -116,15 +115,6 @@ bool p2pLoadSafeToRelease(const std::shared_ptr<AsyncContext>& context) {
 }
 
 void applyP2PSideChannel(const P2PSideChannelPayload& payload, GenerateStream* stream) {
-    torch::Tensor indexer_seed;
-    if (payload.mtp_indexer_topk) {
-        auto seed = TensorPbConvert::pbToTorch(*payload.mtp_indexer_topk);
-        if (seed.scalar_type() != torch::kInt32 || seed.dim() != 2 || seed.size(0) != stream->currentBatchSize()
-            || seed.size(1) == 0) {
-            throw std::invalid_argument("invalid MTP indexer seed: expected int32 [batch, topk]");
-        }
-        indexer_seed = seed.to(torch::kCUDA);
-    }
 #if defined(USING_CUDA)
     auto generator = stream->getGenerator();
     if (stream->generateConfig()->random_seed.has_value() || payload.has_rng_state) {
@@ -252,11 +242,6 @@ void applyP2PSideChannel(const P2PSideChannelPayload& payload, GenerateStream* s
         stream->setContextPositionIds(
             torch::tensor(payload.position_ids, torch::dtype(torch::kInt32).device(torch::kCPU)));
     }
-    if (indexer_seed.defined()) {
-        auto state                 = stream->getMtpAsyncDeviceState();
-        state.mtp_indexer_topk_gpu = std::move(indexer_seed);
-        stream->setMtpAsyncDeviceState(std::move(state));
-    }
 }
 
 std::shared_ptr<const CacheTopology> warmupCacheTopology() {
@@ -285,7 +270,7 @@ void StreamCacheResource::init(int batch_size) {
                               resource_context_.cache_manager->cacheConfig().topologyPtr() :
                               warmupCacheTopology();
     batch_kv_cache_resource_->initGroups(topology);
-    resource_released_                       = false;
+    resource_released_ = false;
     pending_linear_history_committed_tokens_ = 0;
 }
 
@@ -428,7 +413,7 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
                 InsertInfo insert_info{
                     batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false, target_tier, stream_->streamId()};
                 insert_info.pd_decode_linear_tail_only = pd_decode_linear_tail_only_;
-                size_t resident_prefix_length          = 0;
+                size_t resident_prefix_length = 0;
                 resource_context_.cache_manager->insertIntoCache(insert_info, resident_prefix_length);
             }
         } else {
@@ -520,8 +505,8 @@ absl::Status StreamCacheResource::initKVBlock() {
         malloc_info.enable_cache_lookup = enableCacheLookup();
     }
     malloc_info.enable_remove_skipped_blocks = false;
-    malloc_info.enable_storage_backend       = !skip_remote_cache_;
-    malloc_info.pd_decode_linear_tail_only   = pd_decode_linear_tail_only_;
+    malloc_info.enable_storage_backend     = !skip_remote_cache_;
+    malloc_info.pd_decode_linear_tail_only  = pd_decode_linear_tail_only_;
     malloc_info.max_chunk_tokens =
         stream_->chunkedPrefillEnabled() && stream_->isContextStream() ? stream_->maxChunkSize() : 0;
 
@@ -824,7 +809,7 @@ void StreamCacheResource::drainLinearHistory() {
         return;
     }
     const bool reuse_cache = reuseCache();
-    const int  committed_tokens =
+    const int committed_tokens =
         std::min(pending_linear_history_committed_tokens_, std::max(0, stream_->seqLength() - 1));
     updateCacheKeys(batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), seqSizePerBlock());
     resource_context_.cache_manager->reclaimLinearHistory(batch_kv_cache_resource_, committed_tokens, reuse_cache);
@@ -995,7 +980,7 @@ BatchKVCacheResource& StreamCacheResource::kvCacheMutable() {
 }
 
 void StreamCacheResource::setKVCache(const BatchKVCacheResource& kv_cache_resource) {
-    *batch_kv_cache_resource_                = kv_cache_resource;
+    *batch_kv_cache_resource_ = kv_cache_resource;
     pending_linear_history_committed_tokens_ = 0;
 }
 

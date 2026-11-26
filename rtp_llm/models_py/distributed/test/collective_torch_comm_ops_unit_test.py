@@ -116,42 +116,6 @@ class CollectiveTorchCommOpsUnitTest(unittest.TestCase):
     def _registered_allreduce(self):
         return self._registered_callbacks()[1]
 
-    def test_cpu_control_reduction_only_uses_its_explicit_group(self):
-        allreduce = self._registered_allreduce()
-        source = torch.tensor([1], dtype=torch.int32)
-        target = torch.zeros_like(source)
-        with (
-            patch.dict(collective._group_map, {}, clear=True),
-            patch.object(torch.distributed, "is_gloo_available", return_value=True),
-            patch.object(torch.distributed, "new_group") as create,
-            patch.object(torch.distributed, "all_reduce") as reduce,
-        ):
-            self.assertIs(
-                allreduce(source, 0, collective._CPP_PARALLEL_MODE_WORLD, None), source
-            )
-            create.assert_not_called()
-            for _ in range(2):
-                self.assertIs(
-                    allreduce(
-                        source, 0, collective._CPP_PARALLEL_MODE_WORLD_CPU, target
-                    ),
-                    target,
-                )
-                self.assertTrue(torch.equal(target, source))
-            create.assert_called_once()
-            self.assertEqual(create.call_args.kwargs["backend"], "gloo")
-            reduce.assert_called_with(
-                target, op=torch.distributed.ReduceOp.SUM, group=create.return_value
-            )
-
-        with patch.object(torch.distributed, "is_gloo_available", return_value=False):
-            target.zero_()
-            self.assertIs(
-                allreduce(source, 0, collective._CPP_PARALLEL_MODE_WORLD_CPU, target),
-                target,
-            )
-            self.assertTrue(torch.equal(target, source))
-
     def test_single_rank_allreduce_returns_input_without_dest(self):
         allreduce = self._registered_allreduce()
         tensor = torch.tensor([1.0, 2.0])

@@ -22,30 +22,29 @@ namespace rtp_llm {
 
 // Side-channel payload for P2P bypass (carries first token, reuse, SP info, position_ids)
 struct P2PSideChannelPayload {
-    bool                                has_rng_state                        = false;
-    uint64_t                            rng_offset                           = 0;
-    bool                                has_first_token                      = false;
-    int64_t                             first_token_id                       = 0;
-    int32_t                             total_reuse_len                      = 0;
-    int32_t                             local_reuse_len                      = 0;
-    int32_t                             remote_reuse_len                     = 0;
-    int32_t                             memory_reuse_len                     = 0;
-    int32_t                             disk_reuse_len                       = 0;
-    bool                                prefill_use_independent_block_pools  = false;
-    uint32_t                            generation_prefill_cuda_graph_status = 0;
-    std::map<int, int>                  multimodal_lengths;
-    std::vector<int>                    propose_tokens;
-    TensorPB                            propose_probs;
-    TensorPB                            propose_hidden;
-    std::optional<TensorPB>             mtp_indexer_topk;
-    std::vector<int32_t>                position_ids;
-    std::map<std::string, TensorPB>     first_token_tensors;
+    bool                            has_rng_state                        = false;
+    uint64_t                        rng_offset                           = 0;
+    bool                            has_first_token                      = false;
+    int64_t              first_token_id   = 0;
+    int32_t              total_reuse_len  = 0;
+    int32_t              local_reuse_len  = 0;
+    int32_t              remote_reuse_len = 0;
+    int32_t              memory_reuse_len = 0;
+    int32_t              disk_reuse_len   = 0;
+    bool                            prefill_use_independent_block_pools  = false;
+    uint32_t                        generation_prefill_cuda_graph_status = 0;
+    std::map<int, int> multimodal_lengths;
+    std::vector<int>     propose_tokens;
+    TensorPB             propose_probs;
+    TensorPB             propose_hidden;
+    std::vector<int32_t> position_ids;
+    std::map<std::string, TensorPB> first_token_tensors;
     std::optional<PromptLogitsOutputPB> prompt_logits;
     int64_t                             frontend_context_token_num                  = 0;
     int64_t                             frontend_context_token_num_with_cache       = 0;
     int64_t                             frontend_context_execute_time_us            = 0;
     int64_t                             frontend_context_execute_time_with_cache_us = 0;
-    bool                                has_data                                    = false;
+    bool                 has_data = false;
 };
 
 class DecodeLoadHelper {
@@ -71,11 +70,11 @@ public:
         FirstError::Snapshot firstError() const {
             return first_error_.snapshot();
         }
-        void complete(bool ok);
-        void setDoneCallback(std::function<void()> callback);
-        void cancel();
+        void    complete(bool ok);
+        void    setDoneCallback(std::function<void()> callback);
+        void    cancel();
         struct FirstTokenTiming {
-            int64_t                received_us = 0;
+            int64_t received_us = 0;
             std::optional<int64_t> produced_us;
         };
         FirstTokenTiming firstTokenTiming() const {
@@ -93,12 +92,12 @@ public:
         void       parseSideChannelPayload(P2PSideChannelPayload& side_channel_payload);
 
     public:
-        bool                                 success_ = false;
-        bool                                 done_    = false;
-        std::shared_ptr<RpcService::Stub>    stub;
-        std::shared_ptr<grpc::ClientContext> client_context;
-        P2PConnectorStartLoadRequestPB       request;
-        P2PConnectorStartLoadResponsePB      response;
+        bool                                                                              success_ = false;
+        bool                                                                              done_    = false;
+        std::shared_ptr<RpcService::Stub>                                                 stub;
+        std::shared_ptr<grpc::ClientContext>                                              client_context;
+        P2PConnectorStartLoadRequestPB                                                    request;
+        P2PConnectorStartLoadResponsePB                                                   response;
 
         std::unique_ptr<grpc::ClientAsyncResponseReader<P2PConnectorStartLoadResponsePB>> reader;
         grpc::Status                                                                      status;
@@ -118,8 +117,8 @@ public:
         // The shared CQ owns this result until physical Finish, even after cancel().
 
     private:
-        std::atomic<bool>     cancel_requested_{false};
-        mutable std::mutex    state_mutex_;
+        std::atomic<bool>  cancel_requested_{false};
+        mutable std::mutex state_mutex_;
         std::function<void()> done_callback_;
     };
 

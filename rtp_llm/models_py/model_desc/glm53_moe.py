@@ -715,21 +715,18 @@ class GenericMoeDecoderLayer(nn.Module):
         fmha_impl: FMHAImplBase,
         kv_cache: Optional[LayerKVCache],
         prev_topk_indices: Optional[torch.Tensor],
-        force_reuse_topk_indices: bool = False,
     ) -> DecodeLayerOutput:
         """Run the GLM5 CMP attention and MoE preparation path."""
         cmp = self.cmp
         if cmp is None:
             raise RuntimeError("GLM5 CMP execution was not initialized")
-        # Prepare MLA inputs with internal streams and PDL. MTP reuse layers
-        # consume the TopK indices produced by the seed model.
+        # Prepare MLA inputs with internal streams and PDL.
         output_residual, mla_query, topk_indices = cmp.mla_prologue(
             hidden_states,
             residual,
             fmha_impl,
             kv_cache,
             prev_topk_indices,
-            reuse_topk_indices=force_reuse_topk_indices,
         )
 
         # Run RTP's existing FlashMLA interface explicitly.
@@ -805,11 +802,10 @@ class GenericMoeDecoderLayer(nn.Module):
         global_kv_cache: Optional[KVCache] = None,
         prev_topk_indices: Optional[torch.Tensor] = None,
         enable_cmp: bool = False,
-        force_reuse_topk_indices: bool = False,
         mla_cp_layout=None,
     ) -> DecodeLayerOutput:
         if mla_cp_layout is not None:
-            if enable_cmp or force_reuse_topk_indices:
+            if enable_cmp:
                 raise ValueError("Prefill MLA CP cannot use a decode indexer/CMP path")
             return self._forward_mla_cp(
                 hidden_states,
@@ -826,7 +822,6 @@ class GenericMoeDecoderLayer(nn.Module):
                 fmha_impl,
                 kv_cache,
                 prev_topk_indices,
-                force_reuse_topk_indices=force_reuse_topk_indices,
             )
 
         topk_indices = None
@@ -847,7 +842,6 @@ class GenericMoeDecoderLayer(nn.Module):
                     x_fp8=fp8_hs,
                     x_scale=scale,
                     prev_topk_indices=prev_topk_indices,
-                    force_reuse_topk_indices=force_reuse_topk_indices,
                     return_topk=True,
                     global_kv_cache=global_kv_cache,
                 )
@@ -867,7 +861,6 @@ class GenericMoeDecoderLayer(nn.Module):
                     fmha_impl=fmha_impl,
                     kv_cache=kv_cache,
                     prev_topk_indices=prev_topk_indices,
-                    force_reuse_topk_indices=force_reuse_topk_indices,
                     return_topk=True,
                     global_kv_cache=global_kv_cache,
                 )

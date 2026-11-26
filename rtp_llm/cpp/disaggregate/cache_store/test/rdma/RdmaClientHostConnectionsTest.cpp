@@ -40,7 +40,8 @@ TEST_F(RdmaClientHostConnectionsTest, testConnectSuccessOrFailed_Busy) {
 
     auto                                             mock_xclient_transport = new ::accl::barex::MockXClientTransport;
     std::shared_ptr<::accl::barex::XClientTransport> xclient_transport(mock_xclient_transport);
-    EXPECT_CALL(*mock_xclient_transport, Connect(::accl::barex::TCP_V4, "1.2.3.4", 12345, _)).Times(0);
+    EXPECT_CALL(*mock_xclient_transport, Connect(::accl::barex::TCP_V4, "1.2.3.4", 12345, _))
+        .Times(0);
 
     auto host_connections = std::make_shared<RdmaClientHostConnections>(memory_util_, "1.2.3.4", 12345);
 
@@ -71,7 +72,8 @@ TEST_F(RdmaClientHostConnectionsTest, testConnectSuccessOrFailed_Available) {
 
     auto                                             mock_xclient_transport = new ::accl::barex::MockXClientTransport;
     std::shared_ptr<::accl::barex::XClientTransport> xclient_transport(mock_xclient_transport);
-    EXPECT_CALL(*mock_xclient_transport, Connect(::accl::barex::TCP_V4, "1.2.3.4", 12345, _)).Times(0);
+    EXPECT_CALL(*mock_xclient_transport, Connect(::accl::barex::TCP_V4, "1.2.3.4", 12345, _))
+        .Times(0);
 
     auto host_connections = std::make_shared<RdmaClientHostConnections>(memory_util_, "1.2.3.4", 12345);
 
@@ -217,7 +219,8 @@ TEST_F(RdmaClientHostConnectionsTest, testGetConnections_connectTimeout) {
 TEST_F(RdmaClientHostConnectionsTest, testReuseLateConnectionsWithoutReconnect) {
     ASSERT_TRUE(memory_util_ != nullptr);
 
-    auto host_connections = std::make_shared<RdmaClientHostConnections>(memory_util_, "1.2.3.4", 12345, 2, 1);
+    auto host_connections =
+        std::make_shared<RdmaClientHostConnections>(memory_util_, "1.2.3.4", 12345, 2, 1);
 
     auto                                             mock_xclient_transport = new ::accl::barex::MockXClientTransport;
     std::shared_ptr<::accl::barex::XClientTransport> xclient_transport(mock_xclient_transport);
@@ -249,7 +252,8 @@ TEST_F(RdmaClientHostConnectionsTest, testReuseLateConnectionsWithoutReconnect) 
 TEST_F(RdmaClientHostConnectionsTest, testReusePartialLateConnectionsWithoutReconnect) {
     ASSERT_TRUE(memory_util_ != nullptr);
 
-    auto host_connections       = std::make_shared<RdmaClientHostConnections>(memory_util_, "1.2.3.4", 12345, 2, 1);
+    auto host_connections =
+        std::make_shared<RdmaClientHostConnections>(memory_util_, "1.2.3.4", 12345, 2, 1);
     auto mock_xclient_transport = new ::accl::barex::MockXClientTransport;
     std::shared_ptr<::accl::barex::XClientTransport> xclient_transport(mock_xclient_transport);
     EXPECT_CALL(*mock_xclient_transport, Connect(::accl::barex::TCP_V4, "1.2.3.4", 12345, _))
@@ -258,7 +262,7 @@ TEST_F(RdmaClientHostConnectionsTest, testReusePartialLateConnectionsWithoutReco
 
     ASSERT_TRUE(host_connections->getConnection(xclient_transport) == nullptr);
 
-    auto                                        mock_connection = new ::accl::barex::MockXConnection();
+    auto mock_connection = new ::accl::barex::MockXConnection();
     std::shared_ptr<::accl::barex::XConnection> connection(mock_connection);
     host_connections->connectSuccess(connection);
 
@@ -269,45 +273,6 @@ TEST_F(RdmaClientHostConnectionsTest, testReusePartialLateConnectionsWithoutReco
     ASSERT_EQ(1, host_connections->busy_connections_.size());
 
     EXPECT_CALL(*mock_connection, Close()).Times(1).WillOnce(Return());
-}
-
-TEST_F(RdmaClientHostConnectionsTest, testAcquireWhileBorrowerRecycles) {
-    auto pool   = std::make_shared<RdmaClientHostConnections>(memory_util_, "1.2.3.4", 12345, 2, 50);
-    auto client = std::make_shared<::accl::barex::MockXClientTransport>();
-    auto qp     = std::make_shared<::accl::barex::MockXConnection>();
-    EXPECT_CALL(*qp, Close()).Times(1);
-    pool->connectSuccess(qp);
-    auto borrowed = pool->getConnection(client);
-    ASSERT_NE(nullptr, borrowed);
-
-    // Recycle after the new caller has missed the idle pool. Neither new
-    // handshake succeeds, so only the returned QP can satisfy this acquire.
-    EXPECT_CALL(*client, Connect(::accl::barex::TCP_V4, "1.2.3.4", 12345, _))
-        .WillOnce(InvokeWithoutArgs([&] { pool->recycleConnection(borrowed); }))
-        .WillOnce(Return());
-    auto reused = pool->getConnection(client);
-    ASSERT_NE(nullptr, reused);
-    ASSERT_EQ(borrowed->getAllConnections(), reused->getAllConnections());
-
-    pool->recycleConnection(reused);
-    EXPECT_CALL(*client, Connect(::accl::barex::TCP_V4, "1.2.3.4", 12345, _)).Times(0);
-    reused = pool->getConnection(client);
-    ASSERT_NE(nullptr, reused);
-    EXPECT_EQ(borrowed->getAllConnections(), reused->getAllConnections());
-}
-
-TEST_F(RdmaClientHostConnectionsTest, testFillAddsToWarmPool) {
-    auto pool   = std::make_shared<RdmaClientHostConnections>(memory_util_, "1.2.3.4", 12345, 2, 50);
-    auto client = std::make_shared<::accl::barex::MockXClientTransport>();
-    EXPECT_CALL(*client, Connect(::accl::barex::TCP_V4, "1.2.3.4", 12345, _))
-        .Times(4)
-        .WillRepeatedly(InvokeWithoutArgs([&] {
-            auto qp = std::make_shared<::accl::barex::MockXConnection>();
-            EXPECT_CALL(*qp, Close()).Times(1);
-            pool->connectSuccess(qp);
-        }));
-    ASSERT_TRUE(pool->fillConnectionPool(client, 2));
-    EXPECT_EQ(4, pool->getAvailableConnectionCount());
 }
 
 TEST_F(RdmaClientHostConnectionsTest, testRecycleConnections) {

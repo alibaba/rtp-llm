@@ -84,8 +84,7 @@ struct GptModelInitParams {
     HiddenStateCaptureDtype hidden_state_capture_dtype = HiddenStateCaptureDtype::BF16;
 
     // Warmup wrappers borrow the Python model later used by the real executor.
-    bool           owns_py_model    = true;
-    MtpIndexerRole mtp_indexer_role = MtpIndexerRole::NORMAL;
+    bool owns_py_model = true;
 };
 
 enum GptModelInputIndex : size_t {

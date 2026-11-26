@@ -597,8 +597,8 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
 #endif
             auto tokens = currentExecuteTokens(0);
             if (!tokens.empty()) {
-                side_data.has_first_token     = true;
-                side_data.first_token_id      = tokens.back();
+                side_data.has_first_token = true;
+                side_data.first_token_id  = tokens.back();
                 side_data.first_token_time_us = complete_token_ids_->firstTokenTimeUs();
             }
             side_data.generation_prefill_cuda_graph_status =
@@ -608,14 +608,14 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
             // the longer proven Decode reuse phase.
             side_data.prefill_use_independent_block_pools = rc.cache_manager->cacheConfig().groupNums() > 1;
             // Chunk advancement changes the execution cursor, not the cache hit.
-            side_data.total_reuse_len    = initialReuseLength();
-            side_data.local_reuse_len    = localReuseLength();
-            side_data.remote_reuse_len   = remoteReuseLength();
-            side_data.memory_reuse_len   = hostReuseLength();
-            side_data.disk_reuse_len     = diskReuseLength();
+            side_data.total_reuse_len  = initialReuseLength();
+            side_data.local_reuse_len  = localReuseLength();
+            side_data.remote_reuse_len = remoteReuseLength();
+            side_data.memory_reuse_len = hostReuseLength();
+            side_data.disk_reuse_len   = diskReuseLength();
             side_data.multimodal_lengths = generate_input_->multimodalLengths();
             // Publish owned CPU snapshots. Decode applies these through its normal output path.
-            const auto save_output = [&](const char* name, const torch::Tensor& tensor, bool requested) {
+            const auto  save_output = [&](const char* name, const torch::Tensor& tensor, bool requested) {
                 if (requested && tensor.defined()) {
                     side_data.first_token_tensors.emplace(name, tensor.to(torch::kCPU, false, true).contiguous());
                 }
@@ -628,8 +628,9 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
             save_output(
                 "first_token_softmax_probs", update_info.softmax_probs, config.aux_info && config.return_softmax_probs);
             save_output("first_token_cum_log_probs", update_info.cum_log_probs, config.aux_info);
-            save_output(
-                "first_token_all_probs", update_info.all_probs, config.return_all_probs != ReturnAllProbsMode::NONE);
+            save_output("first_token_all_probs",
+                        update_info.all_probs,
+                        config.return_all_probs != ReturnAllProbsMode::NONE);
             save_output("first_token_logprobs", update_info.token_logprobs, config.return_logprobs);
             save_output("first_token_top_logprob_token_ids", update_info.top_logprob_token_ids, config.return_logprobs);
             save_output("first_token_top_logprobs", update_info.top_logprobs, config.return_logprobs);
@@ -644,10 +645,6 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
             }
             if (!getProposeToken().empty()) {
                 side_data.propose_tokens = getProposeToken();
-            }
-            const auto indexer_seed = getMtpAsyncDeviceState().mtp_indexer_topk_gpu;
-            if (indexer_seed.defined()) {
-                side_data.mtp_indexer_topk = indexer_seed.to(torch::kCPU, false, true).contiguous();
             }
             auto sp_output_buffer = getSPOutputBuffer();
             if (sp_output_buffer) {
@@ -733,8 +730,7 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
     // first token once. A requested logits step also needs to reach the RPC
     // collector before it combines the non-streaming response.
     const auto role = resourceContext().role_type;
-    const bool pd_sep_first_token =
-        queryPdSep()
+    const bool pd_sep_first_token = queryPdSep()
         && (role == RoleType::PREFILL
             || (role == RoleType::DECODE && !update_info.update_remote_generate && iter_count_ == 1));
     const auto& config               = *generateConfig();

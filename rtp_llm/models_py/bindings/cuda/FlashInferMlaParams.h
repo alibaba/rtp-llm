@@ -49,7 +49,6 @@ private:
                             int&          reuse_page_num,
                             int&          batch_reuse_info_size);
 
-protected:
     // Ensure tensors are allocated with sufficient size.
     // forbid_realloc: when true (replay path only), throw if realloc would be needed.
     void ensureTensorSize(int  batch_size,
@@ -59,6 +58,7 @@ protected:
                           int  batch_reuse_info_size,
                           bool forbid_realloc = false);
 
+protected:
     void fillDecodeCudaGraphParamsImpl(torch::Tensor sequence_lengths_plus_1_d,
                                        torch::Tensor kv_cache_block_id_device,
                                        int           seq_size_per_block,
@@ -73,8 +73,7 @@ public:
                     torch::Tensor t_input_lengths,
                     torch::Tensor t_kv_cache_block_id_host,
                     int           seq_size_per_block,
-                    bool          forbid_realloc    = false,
-                    int64_t       min_page_capacity = 0);
+                    bool          forbid_realloc = false);
 
     void fillDecodeCudaGraphParams(torch::Tensor sequence_lengths_plus_1_d,
                                    torch::Tensor kv_cache_block_id_device,

@@ -1614,7 +1614,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("cp_force_single_prefill", &FIFOSchedulerConfig::cp_force_single_prefill)
         .def_readwrite("force_single_prefill", &FIFOSchedulerConfig::force_single_prefill)
         .def_readwrite("max_inited_kv_cache_streams", &FIFOSchedulerConfig::max_inited_kv_cache_streams)
-        .def_readwrite("async_cache_prepare", &FIFOSchedulerConfig::async_cache_prepare)
         .def_readwrite("max_batch_tokens_without_cache", &FIFOSchedulerConfig::max_batch_tokens_without_cache)
         .def_readwrite("prefill_chunk_size", &FIFOSchedulerConfig::prefill_chunk_size)
         .def("to_string", &FIFOSchedulerConfig::to_string)
@@ -1629,14 +1628,13 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.max_batch_tokens_without_cache,
                                       self.prefill_chunk_size,
                                       self.force_single_prefill,
-                                      self.max_batch_kv_len,
-                                      self.async_cache_prepare);
+                                      self.max_batch_kv_len);
             },
             [](py::tuple t) {
                 // Main's nine-slot state ends in force_single_prefill (bool);
                 // older KV-budget states end in max_batch_kv_len (int).
                 if (t.size() != 2 && t.size() != 4 && t.size() != 6 && t.size() != 7 && t.size() != 8 && t.size() != 9
-                    && t.size() != 10 && t.size() != 11)
+                    && t.size() != 10)
                     throw std::runtime_error("Invalid state!");
                 FIFOSchedulerConfig c;
                 try {
@@ -1657,17 +1655,14 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                         c.prefill_chunk_size = t[7].cast<int64_t>();
                     }
                     if (t.size() >= 9) {
-                        if (t.size() >= 10 || py::isinstance<py::bool_>(t[8])) {
+                        if (t.size() == 10 || py::isinstance<py::bool_>(t[8])) {
                             c.force_single_prefill = t[8].cast<bool>();
                         } else {
                             c.max_batch_kv_len = t[8].cast<int64_t>();
                         }
                     }
-                    if (t.size() >= 10) {
+                    if (t.size() == 10) {
                         c.max_batch_kv_len = t[9].cast<int64_t>();
-                    }
-                    if (t.size() == 11) {
-                        c.async_cache_prepare = t[10].cast<bool>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("FIFOSchedulerConfig unpickle error: ") + e.what());
@@ -2302,7 +2297,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("moe_normalize_expert_scale", &ModelConfig::moe_normalize_expert_scale)
         .def_readwrite("scoring_func", &ModelConfig::scoring_func)
         .def_readwrite("hc_mult", &ModelConfig::hc_mult)
-        .def_readwrite("index_share_for_mtp_iteration", &ModelConfig::index_share_for_mtp_iteration)
         .def_readwrite("hc_sinkhorn_iters", &ModelConfig::hc_sinkhorn_iters)
         .def_readwrite("hc_eps", &ModelConfig::hc_eps)
         .def_readwrite("swiglu_limit", &ModelConfig::swiglu_limit)

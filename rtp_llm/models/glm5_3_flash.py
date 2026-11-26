@@ -129,9 +129,6 @@ def _configure_glm53_mtp_attention_layout(
     _configure_glm53_indexer_compression(config.attn_config, text_config)
 
     config.is_glm53_mtp = True
-    config.index_share_for_mtp_iteration = bool(
-        text_config.get("index_share_for_mtp_iteration", False)
-    )
 
     # MTP layers live after ``layer_types`` in the checkpoint.  The reference
     # implementation classifies every such out-of-range layer as MLA, while

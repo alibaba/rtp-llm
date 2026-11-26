@@ -179,14 +179,6 @@ grpc::Status PrefillResultStore::fillStartLoadResponsePayload(const SideChannelD
         };
         fill_tensor("propose_probs", data.propose_probs);
         fill_tensor("propose_hidden", data.propose_hidden);
-        if (data.mtp_indexer_topk.defined()) {
-            const auto& seed = data.mtp_indexer_topk;
-            if (!seed.device().is_cpu() || seed.scalar_type() != torch::kInt32 || seed.dim() != 2
-                || seed.numel() == 0) {
-                throw std::runtime_error("MTP indexer seed must contain CPU int32 rows");
-            }
-            TensorPbConvert::torchToPb((*payload->mutable_tensors())["mtp_indexer_topk"].mutable_tensor(), seed);
-        }
         for (const auto& [name, tensor] : data.first_token_tensors) {
             if (!tensor.defined() || !tensor.device().is_cpu()) {
                 throw std::runtime_error("first token output tensor must be defined and on CPU");

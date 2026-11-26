@@ -193,7 +193,6 @@ TEST_F(PrefillResultStoreTest, FillsTokenReuseMtpAndFirstTokenTensors) {
     result.propose_tokens   = {7, 8};
     result.propose_probs    = torch::ones({2}, torch::kFloat32);
     result.propose_hidden   = torch::ones({2, 4}, torch::kFloat16);
-    result.mtp_indexer_topk = torch::tensor({3, -1}, torch::kInt32).reshape({1, 2});
     result.position_ids     = {10, 11};
     result.first_token_tensors.emplace("first_token_logits", torch::ones({1, 4}, torch::kFloat32));
     P2PConnectorStartLoadResponsePB response;
@@ -211,12 +210,6 @@ TEST_F(PrefillResultStoreTest, FillsTokenReuseMtpAndFirstTokenTensors) {
     EXPECT_EQ(payload.tensors().at("propose_tokens").tensor().int32_data().size(), 2 * sizeof(int32_t));
     EXPECT_EQ(payload.tensors().at("propose_probs").tensor().fp32_data().size(), 2 * sizeof(float));
     EXPECT_EQ(payload.tensors().at("propose_hidden").tensor().fp16_data().size(), 16u);
-    const auto& seed = payload.tensors().at("mtp_indexer_topk").tensor();
-    ASSERT_EQ(seed.shape_size(), 2);
-    EXPECT_EQ(seed.shape(0), 1);
-    EXPECT_EQ(seed.shape(1), 2);
-    EXPECT_EQ(seed.data_type(), TensorPB::INT32);
-    EXPECT_EQ(seed.int32_data().size(), 2 * sizeof(int32_t));
     EXPECT_EQ(payload.tensors().at("position_ids").tensor().int32_data().size(), 2 * sizeof(int32_t));
     EXPECT_EQ(payload.tensors().at("first_token_logits").tensor().shape_size(), 2);
 }

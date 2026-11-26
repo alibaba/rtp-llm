@@ -68,10 +68,6 @@ class DecodeMetadataContractTest(unittest.TestCase):
                     )
 
                 fill()
-                with self.assertRaisesRegex(RuntimeError, "exceeds captured capacity"):
-                    params.fill_multi_token_decode_cuda_graph_params(
-                        query_d, prefix_d, table_d.repeat(1, 2), 64
-                    )
                 pointers = (
                     params.positions_d.data_ptr(),
                     params.slot_mapping.data_ptr(),

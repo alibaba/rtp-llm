@@ -9,9 +9,6 @@ namespace rtp_llm {
 
 class SparseMlaParams: public FlashInferMlaAttnParams {
 private:
-    // Host initialization exposes only valid pages. Replay can consume every slot in the captured block table.
-    int64_t captured_page_capacity_ = 0;
-
     // SparseMlaParams-specific buffers (separate from base class buf_h/buf_d)
     torch::Tensor buf_h_i32_;  // HOST buffer for SparseMlaParams int32 tensors
     torch::Tensor buf_d_i32_;  // DEVICE buffer for SparseMlaParams int32 tensors
@@ -70,11 +67,6 @@ public:
     int  multi_token_decode_total_tokens_ = 0;
     int  prefill_tokens_per_batch_        = 0;
     void fillParams(torch_ext::PyAttentionInputs attn_inputs, int seq_size_per_block, bool forbid_realloc = false);
-    void fillMultiTokenDecodeParams(torch::Tensor input_lengths,
-                                    torch::Tensor prefix_lengths,
-                                    torch::Tensor block_table,
-                                    int           seq_size_per_block,
-                                    int           total_tokens);
     void fillMultiTokenDecodeCudaGraphParams(torch::Tensor input_lengths_d,
                                              torch::Tensor prefix_lengths_d,
                                              torch::Tensor kv_cache_block_id_device,

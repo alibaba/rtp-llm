@@ -6,7 +6,6 @@
 #include "rtp_llm/models_py/bindings/common/Torch_ext.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/mha_paged_attn_plan.h"
 #include <cstdint>
-#include <limits>
 #include <algorithm>
 #include <numeric>
 #include <cuda_runtime.h>
@@ -440,8 +439,7 @@ void FlashInferMlaAttnParams::fillParams(torch::Tensor t_prefix_lengths,
                                          torch::Tensor t_input_lengths,
                                          torch::Tensor t_kv_cache_block_id_host,
                                          int           seq_size_per_block,
-                                         bool          forbid_realloc,
-                                         int64_t       min_page_capacity) {
+                                         bool          forbid_realloc) {
     auto t_prefix_lengths_host   = toHostContiguousI32(t_prefix_lengths);
     auto t_sequence_lengths_host = toHostContiguousI32(t_sequence_lengths);
     auto t_input_lengths_host    = toHostContiguousI32(t_input_lengths);
@@ -481,11 +479,9 @@ void FlashInferMlaAttnParams::fillParams(torch::Tensor t_prefix_lengths,
     // Device-only decode replay sizes its page workspace from the block-table
     // width, which also includes reserved speculative/padding blocks. Reserve
     // the same upper bound before capture, not just the currently valid pages.
-    if (!prefix_lengths_ptr && t_kv_cache_block_id_host.defined()) {
-        min_page_capacity = std::max(min_page_capacity, batch_size * t_kv_cache_block_id_host.size(1));
-    }
-    const auto page_capacity = std::max<int64_t>(page_num, min_page_capacity);
-    RTP_LLM_CHECK_WITH_INFO(page_capacity <= std::numeric_limits<int>::max(), "MLA page capacity exceeds int32 range");
+    const int page_capacity = !prefix_lengths_ptr && t_kv_cache_block_id_host.defined() ?
+                                  std::max<int64_t>(page_num, batch_size * t_kv_cache_block_id_host.size(1)) :
+                                  page_num;
     ensureTensorSize(batch_size, input_token_num, page_capacity, reuse_page_num, batch_reuse_info_size, forbid_realloc);
 
     // Fill params directly into HOST tensors

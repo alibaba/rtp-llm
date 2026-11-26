@@ -1112,7 +1112,6 @@ class ModelConfig:
     moe_style: int
     moe_topk_group: int
     hc_mult: int
-    index_share_for_mtp_iteration: bool
     hc_sinkhorn_iters: int
     hc_eps: float
     swiglu_limit: float
