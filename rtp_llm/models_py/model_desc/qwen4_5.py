@@ -367,6 +367,49 @@ class _CpuAllToAllCommShim:
         off = sum(state.splits[: self.rank])
         return buf[off : off + state.local_tokens].to(dev)
 
+    def _ensure_tbo_resources(self) -> None:
+        return None
+
+    def dispatch_async(
+        self,
+        hidden: torch.Tensor,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+        *,
+        num_experts: Optional[int] = None,
+        equal_tokens: Optional[bool] = None,
+        quantize_fp8: bool = False,
+        comm_stream: Any = None,
+        slot: int = 0,
+    ) -> _CpuAllToAllState:
+        del comm_stream, slot
+        return self.dispatch(
+            hidden,
+            topk_ids,
+            topk_weights,
+            num_experts=num_experts,
+            equal_tokens=equal_tokens,
+            quantize_fp8=quantize_fp8,
+        )
+
+    def wait_dispatch(self, handle: _CpuAllToAllState) -> _CpuAllToAllState:
+        return handle
+
+    def combine_async(
+        self,
+        ep_output: torch.Tensor,
+        state: _CpuAllToAllState,
+        *,
+        use_symm_p2p: Optional[bool] = None,
+        comm_stream: Any = None,
+        slot: int = 0,
+    ) -> torch.Tensor:
+        del comm_stream, slot
+        return self.combine(ep_output, state, use_symm_p2p=use_symm_p2p)
+
+    def wait_combine(self, handle: torch.Tensor) -> torch.Tensor:
+        return handle
+
 
 def resolve_qwen4_5_all_to_all(
     ep_group: Any,
@@ -743,7 +786,7 @@ class Qwen4_5DecoderLayer(nn.Module):
                 self.self_attn.o_proj, eff_mode
             )
 
-    def forward(
+    def forward_pre_mlp(
         self,
         hyper_hidden: torch.Tensor,
         input_ids: torch.Tensor,
@@ -759,8 +802,8 @@ class Qwen4_5DecoderLayer(nn.Module):
         enable_yoco_decode: Optional[bool] = None,
         use_reference: bool = False,
         profiler: Optional[Qwen4_5ProfileRecorder] = None,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Tuple[torch.Tensor, torch.Tensor]]:
-        """Run one full decoder layer returning ``(hyper_hidden, prev_latent, deferred)``."""
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+        """Run PLE, attention HC, attention core, attn ShortConv, and MLP HC mix."""
         cfg = self.config
         lid = self.layer_idx
 
@@ -978,22 +1021,39 @@ class Qwen4_5DecoderLayer(nn.Module):
                 )
             )
         assert mlp_inj is not None
+        return mlp_in, hyper_hidden, mlp_inj, prev_latent
 
-        # Step F: Dense MLP (Layer 0) or Latent MoE (Layers 1..39)
+    def _run_mlp(
+        self,
+        mlp_in: torch.Tensor,
+        *,
+        use_reference: bool = False,
+        profiler: Optional[Qwen4_5ProfileRecorder] = None,
+    ) -> torch.Tensor:
         if isinstance(self.mlp, Qwen4_5LatentMoE):
             if profiler is not None:
                 with profiler.record("latent_moe"):
-                    mlp_out = self.mlp(mlp_in, use_triton_mxfp4=not use_reference)
-            else:
-                mlp_out = self.mlp(mlp_in, use_triton_mxfp4=not use_reference)
-        else:
-            if profiler is not None:
-                with profiler.record("dense_mlp"):
-                    mlp_out = self.mlp(mlp_in, use_triton=not use_reference)
-            else:
-                mlp_out = self.mlp(mlp_in, use_triton=not use_reference)
+                    return self.mlp(mlp_in, use_triton_mxfp4=not use_reference)
+            return self.mlp(mlp_in, use_triton_mxfp4=not use_reference)
+        if profiler is not None:
+            with profiler.record("dense_mlp"):
+                return self.mlp(mlp_in, use_triton=not use_reference)
+        return self.mlp(mlp_in, use_triton=not use_reference)
 
-        # Step G: FFN output ShortConv + output clamping [-1000.0, 1000.0]
+    def forward_post_mlp(
+        self,
+        mlp_out: torch.Tensor,
+        hyper_hidden: torch.Tensor,
+        prev_latent: Optional[torch.Tensor],
+        mlp_inj: torch.Tensor,
+        *,
+        state: Optional[Qwen4_5RuntimeState] = None,
+        use_reference: bool = False,
+        profiler: Optional[Qwen4_5ProfileRecorder] = None,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Tuple[torch.Tensor, torch.Tensor]]:
+        """Run FFN output ShortConv + clamping and emit deferred branch tuple."""
+        cfg = self.config
+        lid = self.layer_idx
         if self.ffn_output_sconv is not None:
             sc_state = state.ffn_output_sconv.get(lid) if state is not None else None
             if profiler is not None:
@@ -1005,8 +1065,51 @@ class Qwen4_5DecoderLayer(nn.Module):
                 mlp_out = self.ffn_output_sconv(mlp_out, state=sc_state)
         if cfg.clip_mlp_output is not None:
             mlp_out = mlp_out.clamp(-cfg.clip_mlp_output, cfg.clip_mlp_output)
-
         return hyper_hidden, prev_latent, (mlp_out, mlp_inj)
+
+    def forward(
+        self,
+        hyper_hidden: torch.Tensor,
+        input_ids: torch.Tensor,
+        *,
+        prev_latent: Optional[torch.Tensor],
+        deferred: Optional[Tuple[torch.Tensor, torch.Tensor]],
+        shared_gdn_by_source: Dict[int, SharedGDNInputs],
+        shared_qsa_by_source: Optional[Dict[int, Tuple[torch.Tensor, torch.Tensor]]] = None,
+        source_prefix_ssm: Optional[Dict[int, torch.Tensor]] = None,
+        state: Optional[Qwen4_5RuntimeState] = None,
+        positions: Optional[torch.Tensor] = None,
+        seq_offset: Optional[int] = None,
+        enable_yoco_decode: Optional[bool] = None,
+        use_reference: bool = False,
+        profiler: Optional[Qwen4_5ProfileRecorder] = None,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Tuple[torch.Tensor, torch.Tensor]]:
+        """Run one full decoder layer returning ``(hyper_hidden, prev_latent, deferred)``."""
+        mlp_in, hyper_hidden, mlp_inj, prev_latent = self.forward_pre_mlp(
+            hyper_hidden,
+            input_ids,
+            prev_latent=prev_latent,
+            deferred=deferred,
+            shared_gdn_by_source=shared_gdn_by_source,
+            shared_qsa_by_source=shared_qsa_by_source,
+            source_prefix_ssm=source_prefix_ssm,
+            state=state,
+            positions=positions,
+            seq_offset=seq_offset,
+            enable_yoco_decode=enable_yoco_decode,
+            use_reference=use_reference,
+            profiler=profiler,
+        )
+        mlp_out = self._run_mlp(mlp_in, use_reference=use_reference, profiler=profiler)
+        return self.forward_post_mlp(
+            mlp_out,
+            hyper_hidden,
+            prev_latent,
+            mlp_inj,
+            state=state,
+            use_reference=use_reference,
+            profiler=profiler,
+        )
 
 
 class Qwen4_5Model(nn.Module):
@@ -1185,6 +1288,12 @@ class Qwen4_5Model(nn.Module):
             for hc in (layer.attn_hyper_connection, layer.mlp_hyper_connection):
                 if hc.emits_latent and hc.use_combine and hasattr(hc, "_get_fused_down_inject_weight"):
                     hc._get_fused_down_inject_weight()
+        if (
+            self.all_to_all_comm is not None
+            and not torch.cuda.is_current_stream_capturing()
+            and hasattr(self.all_to_all_comm, "_ensure_tbo_resources")
+        ):
+            self.all_to_all_comm._ensure_tbo_resources()
 
     def create_runtime_state(
         self,
@@ -1472,34 +1581,273 @@ class Qwen4_5Model(nn.Module):
                             )
                     ple.set_ngram_table(shards, weight_scale=DEFAULT_PLE_WEIGHT_SCALE)
                 elif ple_mode == "cpu_uva":
+                    from rtp_llm.models_py.modules.qwen4_5.checkpoint_loader import (
+                        alloc_shared_host_ple_shards,
+                        finalize_shared_host_ple_shards,
+                        resolve_ple_share_group,
+                    )
+
+                    share_group = resolve_ple_share_group(self)
                     cpu_gen = torch.Generator(device="cpu")
-                    shards = []
-                    for s_global in range(total_shards):
-                        cpu_gen.manual_seed(seed + 900_000 + lid * 1_000 + s_global)
-                        if ple_fp8:
-                            raw = torch.randint(
-                                0, 120, (shard_rows, ple.head_dim), dtype=torch.uint8, generator=cpu_gen
-                            )
-                            sign = torch.randint(
-                                0, 2, (shard_rows, ple.head_dim), dtype=torch.uint8, generator=cpu_gen
-                            ) << 7
-                            raw |= sign
-                            del sign
-                            shards.append(raw.view(torch.float8_e4m3fn))
-                        else:
-                            shards.append(
-                                torch.empty((shard_rows, ple.head_dim), dtype=dtype).normal_(
+                    if share_group is not None:
+                        shard_specs = [(table_dtype, (shard_rows, ple.head_dim)) for _ in range(total_shards)]
+                        shared_buf = alloc_shared_host_ple_shards(
+                            shard_specs,
+                            group=share_group,
+                            device=device,
+                        )
+                        node_size = len(shared_buf.same_host_ranks)
+                        host_local_rank = shared_buf.host_local_rank
+                        for s_global in range(total_shards):
+                            if s_global % node_size != host_local_rank:
+                                continue
+                            cpu_gen.manual_seed(seed + 900_000 + lid * 1_000 + s_global)
+                            dst_shard = shared_buf.shard_bufs[s_global]
+                            if ple_fp8:
+                                raw = torch.randint(
+                                    0, 120, (shard_rows, ple.head_dim), dtype=torch.uint8, generator=cpu_gen
+                                )
+                                sign = torch.randint(
+                                    0, 2, (shard_rows, ple.head_dim), dtype=torch.uint8, generator=cpu_gen
+                                ) << 7
+                                raw |= sign
+                                dst_shard.copy_(raw.view(torch.float8_e4m3fn))
+                            else:
+                                tmp_bf = torch.empty((shard_rows, ple.head_dim), dtype=dtype).normal_(
                                     0.0, 0.02, generator=cpu_gen
                                 )
-                            )
-                    ple.set_ngram_table(
-                        shards,
-                        weight_scale=DEFAULT_PLE_WEIGHT_SCALE,
-                        pin_cpu=True,
-                        enable_cpu_uva=True,
-                    )
+                                dst_shard.copy_(tmp_bf)
+                        pinned_ok = finalize_shared_host_ple_shards(shared_buf)
+                        ple.set_ngram_table(
+                            shared_buf.shard_bufs,
+                            weight_scale=DEFAULT_PLE_WEIGHT_SCALE,
+                            pin_cpu=False,
+                            enable_cpu_uva=pinned_ok,
+                            ep_group=None,
+                        )
+                    else:
+                        shards = []
+                        for s_global in range(total_shards):
+                            cpu_gen.manual_seed(seed + 900_000 + lid * 1_000 + s_global)
+                            if ple_fp8:
+                                raw = torch.randint(
+                                    0, 120, (shard_rows, ple.head_dim), dtype=torch.uint8, generator=cpu_gen
+                                )
+                                sign = torch.randint(
+                                    0, 2, (shard_rows, ple.head_dim), dtype=torch.uint8, generator=cpu_gen
+                                ) << 7
+                                raw |= sign
+                                del sign
+                                shards.append(raw.view(torch.float8_e4m3fn))
+                            else:
+                                shards.append(
+                                    torch.empty((shard_rows, ple.head_dim), dtype=dtype).normal_(
+                                        0.0, 0.02, generator=cpu_gen
+                                    )
+                                )
+                        ple.set_ngram_table(
+                            shards,
+                            weight_scale=DEFAULT_PLE_WEIGHT_SCALE,
+                            pin_cpu=True,
+                            enable_cpu_uva=True,
+                        )
                 else:
                     raise ValueError(f"Unsupported ple_mode={ple_mode!r}")
+
+    def _embed_hyper_streams(
+        self,
+        input_ids: torch.Tensor,
+        *,
+        profiler: Optional[Qwen4_5ProfileRecorder] = None,
+    ) -> torch.Tensor:
+        if profiler is not None:
+            with profiler.record("embed"):
+                emb = self.embed_tokens(input_ids)
+                return emb.repeat(1, 1, self.config.hc_count)
+        emb = self.embed_tokens(input_ids)
+        return emb.repeat(1, 1, self.config.hc_count)
+
+    def _finalize_hyper_streams(
+        self,
+        hyper_hidden: torch.Tensor,
+        deferred: Optional[Tuple[torch.Tensor, torch.Tensor]],
+        seq_len: int,
+        *,
+        state: Optional[Qwen4_5RuntimeState] = None,
+        use_reference: bool = False,
+        profiler: Optional[Qwen4_5ProfileRecorder] = None,
+    ) -> torch.Tensor:
+        assert deferred is not None
+        if profiler is not None:
+            with profiler.record("final_hc"):
+                hidden, _, _, _ = self.hyper_connection_mixer.combine_and_mix_with_latent(
+                    deferred[0], hyper_hidden, deferred[1], prev_latent=None
+                )
+        elif use_reference:
+            hidden, _, _, _ = self.hyper_connection_mixer.combine_and_mix_with_latent_ref(
+                deferred[0], hyper_hidden, deferred[1], prev_latent=None
+            )
+        else:
+            hidden, _, _, _ = self.hyper_connection_mixer.combine_and_mix_with_latent(
+                deferred[0], hyper_hidden, deferred[1], prev_latent=None
+            )
+        if state is not None:
+            state.seq_len += seq_len
+        return hidden
+
+    def forward_tbo(
+        self,
+        microbatches: Sequence[torch.Tensor],
+        *,
+        states: Optional[Sequence[Optional[Qwen4_5RuntimeState]]] = None,
+        positions: Optional[Sequence[Optional[torch.Tensor]]] = None,
+        seq_offsets: Optional[Sequence[Optional[int]]] = None,
+        enable_yoco_decode: Optional[bool] = None,
+        use_reference: bool = False,
+        profiler: Optional[Qwen4_5ProfileRecorder] = None,
+        equal_tokens: Optional[bool] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Run 3-stage Two-Batch Overlap (TBO) forward across two microbatches."""
+        if len(microbatches) != 2:
+            raise ValueError(f"Expected exactly 2 microbatches for TBO, got {len(microbatches)}")
+        ids0, ids1 = microbatches[0], microbatches[1]
+        if ids0.ndim != 2 or ids1.ndim != 2:
+            raise ValueError(
+                f"Expected [B, T] microbatches, got {tuple(ids0.shape)} and {tuple(ids1.shape)}"
+            )
+        st0, st1 = (states[0], states[1]) if states is not None else (None, None)
+        pos0, pos1 = (positions[0], positions[1]) if positions is not None else (None, None)
+        off0, off1 = (seq_offsets[0], seq_offsets[1]) if seq_offsets is not None else (None, None)
+
+        if (
+            self.all_to_all_comm is not None
+            and not torch.cuda.is_current_stream_capturing()
+            and hasattr(self.all_to_all_comm, "_ensure_tbo_resources")
+        ):
+            self.all_to_all_comm._ensure_tbo_resources()
+
+        hyp0 = self._embed_hyper_streams(ids0, profiler=profiler)
+        hyp1 = self._embed_hyper_streams(ids1, profiler=profiler)
+        lat0: Optional[torch.Tensor] = None
+        lat1: Optional[torch.Tensor] = None
+        def0: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
+        def1: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
+        gdn0: Dict[int, SharedGDNInputs] = {}
+        gdn1: Dict[int, SharedGDNInputs] = {}
+        qsa0: Dict[int, Tuple[torch.Tensor, torch.Tensor]] = {}
+        qsa1: Dict[int, Tuple[torch.Tensor, torch.Tensor]] = {}
+        seq0, seq1 = int(ids0.shape[1]), int(ids1.shape[1])
+        past0 = st0.seq_len if st0 is not None else 0
+        past1 = st1.seq_len if st1 is not None else 0
+        ssm0: Optional[Dict[int, torch.Tensor]] = {} if (st0 is not None and seq0 > 1 and past0 > 0) else None
+        ssm1: Optional[Dict[int, torch.Tensor]] = {} if (st1 is not None and seq1 > 1 and past1 > 0) else None
+
+        for layer in self.layers:
+            assert isinstance(layer, Qwen4_5DecoderLayer)
+            if isinstance(layer.mlp, Qwen4_5LatentMoE):
+                mlp_in0, hyp0, inj0, lat0 = layer.forward_pre_mlp(
+                    hyp0,
+                    ids0,
+                    prev_latent=lat0,
+                    deferred=def0,
+                    shared_gdn_by_source=gdn0,
+                    shared_qsa_by_source=qsa0,
+                    source_prefix_ssm=ssm0,
+                    state=st0,
+                    positions=pos0,
+                    seq_offset=off0,
+                    enable_yoco_decode=enable_yoco_decode,
+                    use_reference=use_reference,
+                    profiler=profiler,
+                )
+                ctx0 = layer.mlp.forward_route_and_dispatch(
+                    mlp_in0,
+                    use_triton_mxfp4=not use_reference,
+                    equal_tokens=equal_tokens,
+                    slot=0,
+                )
+                mlp_in1, hyp1, inj1, lat1 = layer.forward_pre_mlp(
+                    hyp1,
+                    ids1,
+                    prev_latent=lat1,
+                    deferred=def1,
+                    shared_gdn_by_source=gdn1,
+                    shared_qsa_by_source=qsa1,
+                    source_prefix_ssm=ssm1,
+                    state=st1,
+                    positions=pos1,
+                    seq_offset=off1,
+                    enable_yoco_decode=enable_yoco_decode,
+                    use_reference=use_reference,
+                    profiler=profiler,
+                )
+                ctx1 = layer.mlp.forward_route_and_dispatch(
+                    mlp_in1,
+                    use_triton_mxfp4=not use_reference,
+                    equal_tokens=equal_tokens,
+                    slot=1,
+                )
+                ctx0 = layer.mlp.forward_routed_compute_and_combine(ctx0, slot=0)
+                ctx1 = layer.mlp.forward_routed_compute_and_combine(ctx1, slot=1)
+                out0 = layer.mlp.forward_finish_combine(ctx0)
+                hyp0, lat0, def0 = layer.forward_post_mlp(
+                    out0,
+                    hyp0,
+                    lat0,
+                    inj0,
+                    state=st0,
+                    use_reference=use_reference,
+                    profiler=profiler,
+                )
+                out1 = layer.mlp.forward_finish_combine(ctx1)
+                hyp1, lat1, def1 = layer.forward_post_mlp(
+                    out1,
+                    hyp1,
+                    lat1,
+                    inj1,
+                    state=st1,
+                    use_reference=use_reference,
+                    profiler=profiler,
+                )
+            else:
+                hyp0, lat0, def0 = layer(
+                    hyp0,
+                    ids0,
+                    prev_latent=lat0,
+                    deferred=def0,
+                    shared_gdn_by_source=gdn0,
+                    shared_qsa_by_source=qsa0,
+                    source_prefix_ssm=ssm0,
+                    state=st0,
+                    positions=pos0,
+                    seq_offset=off0,
+                    enable_yoco_decode=enable_yoco_decode,
+                    use_reference=use_reference,
+                    profiler=profiler,
+                )
+                hyp1, lat1, def1 = layer(
+                    hyp1,
+                    ids1,
+                    prev_latent=lat1,
+                    deferred=def1,
+                    shared_gdn_by_source=gdn1,
+                    shared_qsa_by_source=qsa1,
+                    source_prefix_ssm=ssm1,
+                    state=st1,
+                    positions=pos1,
+                    seq_offset=off1,
+                    enable_yoco_decode=enable_yoco_decode,
+                    use_reference=use_reference,
+                    profiler=profiler,
+                )
+
+        hid0 = self._finalize_hyper_streams(
+            hyp0, def0, seq0, state=st0, use_reference=use_reference, profiler=profiler
+        )
+        hid1 = self._finalize_hyper_streams(
+            hyp1, def1, seq1, state=st1, use_reference=use_reference, profiler=profiler
+        )
+        return hid0, hid1
 
     def forward(
         self,
@@ -1511,20 +1859,28 @@ class Qwen4_5Model(nn.Module):
         enable_yoco_decode: Optional[bool] = None,
         use_reference: bool = False,
         profiler: Optional[Qwen4_5ProfileRecorder] = None,
+        enable_tbo: bool = False,
+        tbo_equal_tokens: Optional[bool] = None,
     ) -> torch.Tensor:
         """Run full backbone forward returning collapsed ``[B, T, hidden_size]``."""
         if input_ids.ndim != 2:
             raise ValueError(f"Expected input_ids of shape [B, T], got {tuple(input_ids.shape)}")
-        _, seq_len = input_ids.shape
+        bsz, seq_len = input_ids.shape
+        if enable_tbo and state is None and bsz >= 2:
+            b0 = bsz // 2
+            pos_pair = (positions[:b0], positions[b0:]) if positions is not None else None
+            h0, h1 = self.forward_tbo(
+                (input_ids[:b0], input_ids[b0:]),
+                positions=pos_pair,
+                seq_offsets=(seq_offset, seq_offset),
+                enable_yoco_decode=enable_yoco_decode,
+                use_reference=use_reference,
+                profiler=profiler,
+                equal_tokens=tbo_equal_tokens,
+            )
+            return torch.cat([h0, h1], dim=0)
 
-        if profiler is not None:
-            with profiler.record("embed"):
-                emb = self.embed_tokens(input_ids)
-                hyper_hidden = emb.repeat(1, 1, self.config.hc_count)
-        else:
-            emb = self.embed_tokens(input_ids)
-            hyper_hidden = emb.repeat(1, 1, self.config.hc_count)
-
+        hyper_hidden = self._embed_hyper_streams(input_ids, profiler=profiler)
         prev_latent: Optional[torch.Tensor] = None
         deferred: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
         shared_gdn_by_source: Dict[int, SharedGDNInputs] = {}
@@ -1552,25 +1908,14 @@ class Qwen4_5Model(nn.Module):
                 profiler=profiler,
             )
 
-        # Final HC combine + collapse to [B, T, hidden_size] (NO model.norm!)
-        assert deferred is not None
-        if profiler is not None:
-            with profiler.record("final_hc"):
-                hidden, _, _, _ = self.hyper_connection_mixer.combine_and_mix_with_latent(
-                    deferred[0], hyper_hidden, deferred[1], prev_latent=None
-                )
-        elif use_reference:
-            hidden, _, _, _ = self.hyper_connection_mixer.combine_and_mix_with_latent_ref(
-                deferred[0], hyper_hidden, deferred[1], prev_latent=None
-            )
-        else:
-            hidden, _, _, _ = self.hyper_connection_mixer.combine_and_mix_with_latent(
-                deferred[0], hyper_hidden, deferred[1], prev_latent=None
-            )
-
-        if state is not None:
-            state.seq_len += seq_len
-        return hidden
+        return self._finalize_hyper_streams(
+            hyper_hidden,
+            deferred,
+            seq_len,
+            state=state,
+            use_reference=use_reference,
+            profiler=profiler,
+        )
 
 
 class Qwen4_5ForCausalLM(nn.Module):
@@ -1654,6 +1999,7 @@ class Qwen4_5ForCausalLM(nn.Module):
         self.sp_group = self.model.sp_group
         self.dp_attn = self.model.dp_attn
         self.kv_dtype = self.model.kv_dtype
+        self.fast_all_reduce = self.model.fast_all_reduce
         self._dense_linear_mode = dense_linear_mode
         if config.vocab_size % self.tp_size != 0:
             raise ValueError(
@@ -1739,27 +2085,13 @@ class Qwen4_5ForCausalLM(nn.Module):
         else:
             self.lm_head.weight.normal_(0.0, 0.02, generator=g)
 
-    def forward(
+    def _project_logits(
         self,
-        input_ids: torch.Tensor,
+        hidden: torch.Tensor,
         *,
-        state: Optional[Qwen4_5RuntimeState] = None,
-        positions: Optional[torch.Tensor] = None,
-        seq_offset: Optional[int] = None,
-        enable_yoco_decode: Optional[bool] = None,
         logits_to_keep: Optional[int] = None,
-        use_reference: bool = False,
         profiler: Optional[Qwen4_5ProfileRecorder] = None,
     ) -> torch.Tensor:
-        hidden = self.model(
-            input_ids,
-            state=state,
-            positions=positions,
-            seq_offset=seq_offset,
-            enable_yoco_decode=enable_yoco_decode,
-            use_reference=use_reference,
-            profiler=profiler,
-        )
         if logits_to_keep is not None and logits_to_keep > 0:
             hidden = hidden[:, -logits_to_keep:, :]
         if profiler is not None:
@@ -1773,10 +2105,69 @@ class Qwen4_5ForCausalLM(nn.Module):
             and dist.is_available()
             and dist.is_initialized()
         ):
-            gathered = [torch.empty_like(logits) for _ in range(self.tp_size)]
-            dist.all_gather(gathered, logits.contiguous(), group=self.tp_group)
-            logits = torch.cat(gathered, dim=-1)
+            if self.fast_all_reduce is not None and self.fast_all_reduce.group is self.tp_group:
+                logits = self.fast_all_reduce.all_gather(logits, dim=-1)
+            else:
+                gathered = [torch.empty_like(logits) for _ in range(self.tp_size)]
+                dist.all_gather(gathered, logits.contiguous(), group=self.tp_group)
+                logits = torch.cat(gathered, dim=-1)
         return logits
+
+    def forward_tbo(
+        self,
+        microbatches: Sequence[torch.Tensor],
+        *,
+        states: Optional[Sequence[Optional[Qwen4_5RuntimeState]]] = None,
+        positions: Optional[Sequence[Optional[torch.Tensor]]] = None,
+        seq_offsets: Optional[Sequence[Optional[int]]] = None,
+        enable_yoco_decode: Optional[bool] = None,
+        logits_to_keep: Optional[int] = None,
+        use_reference: bool = False,
+        profiler: Optional[Qwen4_5ProfileRecorder] = None,
+        equal_tokens: Optional[bool] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Run 3-stage TBO forward on two microbatches and gather vocab-sharded logits."""
+        hid0, hid1 = self.model.forward_tbo(
+            microbatches,
+            states=states,
+            positions=positions,
+            seq_offsets=seq_offsets,
+            enable_yoco_decode=enable_yoco_decode,
+            use_reference=use_reference,
+            profiler=profiler,
+            equal_tokens=equal_tokens,
+        )
+        return (
+            self._project_logits(hid0, logits_to_keep=logits_to_keep, profiler=profiler),
+            self._project_logits(hid1, logits_to_keep=logits_to_keep, profiler=profiler),
+        )
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        *,
+        state: Optional[Qwen4_5RuntimeState] = None,
+        positions: Optional[torch.Tensor] = None,
+        seq_offset: Optional[int] = None,
+        enable_yoco_decode: Optional[bool] = None,
+        logits_to_keep: Optional[int] = None,
+        use_reference: bool = False,
+        profiler: Optional[Qwen4_5ProfileRecorder] = None,
+        enable_tbo: bool = False,
+        tbo_equal_tokens: Optional[bool] = None,
+    ) -> torch.Tensor:
+        hidden = self.model(
+            input_ids,
+            state=state,
+            positions=positions,
+            seq_offset=seq_offset,
+            enable_yoco_decode=enable_yoco_decode,
+            use_reference=use_reference,
+            profiler=profiler,
+            enable_tbo=enable_tbo,
+            tbo_equal_tokens=tbo_equal_tokens,
+        )
+        return self._project_logits(hidden, logits_to_keep=logits_to_keep, profiler=profiler)
 
 
 __all__ = [

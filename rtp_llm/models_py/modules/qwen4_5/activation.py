@@ -717,13 +717,18 @@ def _situ_glu_fp8_quant_packed_kernel(
     up_beta: tl.constexpr,
     eps: tl.constexpr,
     BLOCK_D: tl.constexpr,
+    active_rows_ptr,
     SCALE_FMT: tl.constexpr,
     HAS_INDPTR: tl.constexpr,
+    HAS_ACTIVE_ROWS: tl.constexpr,
     NUM_EP_GROUPS: tl.constexpr,
     BSEARCH_ITERS: tl.constexpr,
 ):
     pid_m = tl.program_id(0).to(tl.int64)
     pid_d = tl.program_id(1)
+    if HAS_ACTIVE_ROWS:
+        if pid_m >= tl.load(active_rows_ptr).to(tl.int64):
+            return
     if pid_m >= M:
         return
 
@@ -803,13 +808,18 @@ def _situ_glu_fp8_quant_packed_1d_kernel(
     up_beta: tl.constexpr,
     eps: tl.constexpr,
     BLOCK_D: tl.constexpr,
+    active_rows_ptr,
     SCALE_FMT: tl.constexpr,
     HAS_INDPTR: tl.constexpr,
+    HAS_ACTIVE_ROWS: tl.constexpr,
     NUM_EP_GROUPS: tl.constexpr,
     BSEARCH_ITERS: tl.constexpr,
 ):
     """Row-per-CTA SiTU-GLU + block-32 UE8M0 FP8 quant (exact D % 128 == 0 fast path)."""
     row = tl.program_id(0).to(tl.int64)
+    if HAS_ACTIVE_ROWS:
+        if row >= tl.load(active_rows_ptr).to(tl.int64):
+            return
     if row >= M:
         return
     TILES: tl.constexpr = D // BLOCK_D
@@ -986,12 +996,14 @@ def _alloc_scale_tensor(
     scale_format: str,
     device: torch.device,
     m_indptr: Optional[torch.Tensor] = None,
+    zero_unused_scales: bool = True,
 ) -> Tuple[torch.Tensor, int, int]:
     num_packs = (num_groups + 3) // 4
     sf_cols_pad = num_packs * 4
+    alloc_fn = torch.zeros if zero_unused_scales else torch.empty
     if scale_format == "deepgemm":
         tma_m = ((M + 3) // 4) * 4
-        sc = torch.zeros((num_packs, tma_m), dtype=torch.int32, device=device).T[:M]
+        sc = alloc_fn((num_packs, tma_m), dtype=torch.int32, device=device).T[:M]
         return sc, 0, sf_cols_pad
     if scale_format == "raw":
         sc = torch.empty((M, num_groups), dtype=torch.uint8, device=device)
@@ -999,7 +1011,7 @@ def _alloc_scale_tensor(
     if scale_format == "flashinfer":
         G = int(m_indptr.numel()) - 1 if m_indptr is not None else 1
         total_rows = (((M + max(G - 1, 0) * 127) + 127) // 128) * 128 if M > 0 else 0
-        sc = torch.zeros((total_rows * sf_cols_pad,), dtype=torch.uint8, device=device)
+        sc = alloc_fn((total_rows * sf_cols_pad,), dtype=torch.uint8, device=device)
         return sc, 2, sf_cols_pad
     raise ValueError(f"Unsupported scale_format={scale_format!r}")
 
@@ -1189,6 +1201,8 @@ def situ_glu_fp8_quant_packed(
     scale_format: str = "deepgemm",
     m_indptr: Optional[torch.Tensor] = None,
     eps: float = _QUANT_EPS,
+    zero_unused_scales: bool = True,
+    max_active_rows: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Fused SiTU-GLU(gate_beta=4.0, up_beta=25.0) + block-32 UE8M0 FP8 quantization.
 
@@ -1245,7 +1259,12 @@ def situ_glu_fp8_quant_packed(
     num_groups = D // 32
     num_packs = (num_groups + 3) // 4
     sc, fmt_code, sf_cols_pad = _alloc_scale_tensor(
-        M, num_groups, scale_format, x.device, m_indptr=m_indptr
+        M,
+        num_groups,
+        scale_format,
+        x.device,
+        m_indptr=m_indptr,
+        zero_unused_scales=zero_unused_scales,
     )
     if M == 0 or D == 0:
         if scale_format == "raw":
@@ -1261,6 +1280,8 @@ def situ_glu_fp8_quant_packed(
             if D % cand == 0:
                 bd_1d = cand
                 break
+    has_active_rows = max_active_rows is not None
+    active_rows_t = max_active_rows if has_active_rows else q
     if bd_1d > 0 and D // bd_1d <= 16:
         nw_1d = 4
         _situ_glu_fp8_quant_packed_1d_kernel[(M,)](
@@ -1282,8 +1303,10 @@ def situ_glu_fp8_quant_packed(
             up_beta=float(up_beta),
             eps=float(eps),
             BLOCK_D=bd_1d,
+            active_rows_ptr=active_rows_t,
             SCALE_FMT=fmt_code,
             HAS_INDPTR=(m_indptr is not None),
+            HAS_ACTIVE_ROWS=has_active_rows,
             NUM_EP_GROUPS=num_ep_groups,
             BSEARCH_ITERS=bsearch_iters,
             num_warps=nw_1d,
@@ -1311,8 +1334,10 @@ def situ_glu_fp8_quant_packed(
             up_beta=float(up_beta),
             eps=float(eps),
             BLOCK_D=BLOCK_D,
+            active_rows_ptr=active_rows_t,
             SCALE_FMT=fmt_code,
             HAS_INDPTR=(m_indptr is not None),
+            HAS_ACTIVE_ROWS=has_active_rows,
             NUM_EP_GROUPS=num_ep_groups,
             BSEARCH_ITERS=bsearch_iters,
             num_warps=4,

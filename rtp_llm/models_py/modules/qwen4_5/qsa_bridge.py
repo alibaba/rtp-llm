@@ -377,37 +377,41 @@ if _HAS_TRITON:
             other=0.0,
         )
 
-        M_Q: tl.constexpr = QS * H_IDX
+        SUB_QS: tl.constexpr = 8 if QS >= 8 else QS
+        SUB_GRPS: tl.constexpr = QS // SUB_QS
+        M_Q: tl.constexpr = SUB_QS * H_IDX
         rm = tl.arange(0, M_Q)
         q_local = rm // H_IDX
         q_head = rm % H_IDX
-        s_offs = q_grp * QS + q_local
-        s_live = s_offs < NEXT_N
-        qv = tl.load(
-            q_ptr
-            + b * stride_qb
-            + s_offs[:, None] * stride_qs
-            + q_head[:, None] * D_IDX
-            + rd[None, :],
-            mask=s_live[:, None],
-            other=0.0,
-        )
-        if IS_FP8_K:
-            qv = qv.to(tl.float8e4nv)
-        logits = tl.dot(qv, tl.trans(k_mat))
-        logits = tl.maximum(logits, 0.0)
-        scores = tl.sum(tl.reshape(logits, (QS, H_IDX, BN)), axis=1) * SCALE
 
-        s_idx = q_grp * QS + tl.arange(0, QS)
-        s_mask = s_idx < NEXT_N
-        vis_s = tl.load(ctx_ptr + b * NEXT_N + s_idx, mask=s_mask, other=0)
-        valid = s_mask[:, None] & has_blk[None, :] & (rn[None, :] < vis_s[:, None])
-        out_vals = tl.where(valid, scores, float("-inf"))
-        tl.store(
-            out_ptr + (b * NEXT_N + s_idx[:, None]) * max_ctx_len + rn[None, :],
-            out_vals,
-            mask=s_mask[:, None] & n_mask[None, :],
-        )
+        for sg in tl.static_range(SUB_GRPS):
+            s_offs = q_grp * QS + sg * SUB_QS + q_local
+            s_live = s_offs < NEXT_N
+            qv = tl.load(
+                q_ptr
+                + b * stride_qb
+                + s_offs[:, None] * stride_qs
+                + q_head[:, None] * D_IDX
+                + rd[None, :],
+                mask=s_live[:, None],
+                other=0.0,
+            )
+            if IS_FP8_K:
+                qv = qv.to(tl.float8e4nv)
+            logits = tl.dot(qv, tl.trans(k_mat))
+            logits = tl.maximum(logits, 0.0)
+            scores = tl.sum(tl.reshape(logits, (SUB_QS, H_IDX, BN)), axis=1) * SCALE
+
+            s_idx = q_grp * QS + sg * SUB_QS + tl.arange(0, SUB_QS)
+            s_mask = s_idx < NEXT_N
+            vis_s = tl.load(ctx_ptr + b * NEXT_N + s_idx, mask=s_mask, other=0)
+            valid = s_mask[:, None] & has_blk[None, :] & (rn[None, :] < vis_s[:, None])
+            out_vals = tl.where(valid, scores, float("-inf"))
+            tl.store(
+                out_ptr + (b * NEXT_N + s_idx[:, None]) * max_ctx_len + rn[None, :],
+                out_vals,
+                mask=s_mask[:, None] & n_mask[None, :],
+            )
 
     @triton.jit
     def _qsa_bsearch_topk_expand_kernel(
@@ -624,8 +628,10 @@ def qsa_prefill_score(
         and n_heads > 0
         and (n_heads & (n_heads - 1)) == 0
     ):
-        bm = max(64, 4 * n_heads)
-        bn = 64
+        if seq_len >= 128 and num_blocks >= 128 and n_heads <= 8:
+            bm, bn, nw, stg = 128, 128, 8, 2
+        else:
+            bm, bn, nw, stg = max(64, 4 * n_heads), 64, 4, 1
         rows_per_group = bm // n_heads
         out = torch.empty(
             (bsz, seq_len, num_blocks), device=q_rot.device, dtype=torch.float32
@@ -651,8 +657,8 @@ def qsa_prefill_score(
             D_IDX=head_dim,
             BM=bm,
             BN=bn,
-            num_warps=4,
-            num_stages=1,
+            num_warps=nw,
+            num_stages=stg,
         )
         return out
 
@@ -714,8 +720,12 @@ def qsa_paged_score(
         )
         if can_tc:
             min_qs = max(1, 16 // n_heads)
-            qs = max(min_qs, min(8, triton.next_power_of_2(max(1, next_n))))
-            bn = 32 if (bsz * triton.cdiv(max_ctx_len, 64) < 32 and max_ctx_len >= 32) else 64
+            if next_n >= 128 and bsz * next_n >= 1024 and max_ctx_len >= 64:
+                qs = 32 if n_heads <= 8 else 16
+                bn = 64
+            else:
+                qs = max(min_qs, min(8, triton.next_power_of_2(max(1, next_n))))
+                bn = 32 if (bsz * triton.cdiv(max_ctx_len, 64) < 32 and max_ctx_len >= 32) else 64
             if max_ctx_len < 32:
                 bn = 16
             if qs == 8 and next_n == 8 and bsz <= 2 and min_qs <= 4:
@@ -1735,12 +1745,11 @@ if _HAS_TRITON:
 
             k_val = tl.load(k_ptrs, mask=t_ok[:, None], other=0.0)
             if IS_FP8:
-                if HAS_SCALE:
-                    sc_k = tl.load(sc_base, mask=t_ok, other=1.0).to(tl.float32)
-                    k_val = (k_val.to(tl.float32) * sc_k[:, None]).to(tl.bfloat16)
-                else:
-                    k_val = k_val.to(tl.bfloat16)
+                k_val = k_val.to(tl.bfloat16)
             logits = tl.dot(qv, tl.trans(k_val)) * SCALE
+            if IS_FP8 and HAS_SCALE:
+                sc_k = tl.load(sc_base, mask=t_ok, other=1.0).to(tl.float32)
+                logits = logits * sc_k[None, :]
             logits = tl.where(valid, logits, float("-inf"))
             nxt = tl.maximum(mx, tl.max(logits, 1))
             rescale = tl.where(nxt == float("-inf"), 0.0, tl.exp(mx - nxt))
@@ -1750,15 +1759,15 @@ if _HAS_TRITON:
             if IS_FP8:
                 if HAS_SCALE:
                     sc_v = tl.load(sc_base + stride_sckv, mask=t_ok, other=1.0).to(tl.float32)
-                    v_val = (v_val.to(tl.float32) * sc_v[:, None]).to(tl.bfloat16)
+                    prob_v = (prob * sc_v[None, :]).to(tl.bfloat16)
                 else:
-                    v_val = v_val.to(tl.bfloat16)
+                    prob_v = prob.to(tl.bfloat16)
+                v_val = v_val.to(tl.bfloat16)
+            else:
+                prob_v = prob.to(tl.bfloat16)
 
-            high = prob.to(tl.bfloat16)
-            low = (prob - high.to(tl.float32)).to(tl.bfloat16)
             acc = acc * rescale[:, None]
-            acc = tl.dot(high, v_val, acc)
-            acc = tl.dot(low, v_val, acc)
+            acc = tl.dot(prob_v, v_val, acc)
             z = z * rescale + tl.sum(prob, 1)
             mx = nxt
 
@@ -1863,12 +1872,11 @@ if _HAS_TRITON:
 
                 k = tl.load(k_ptrs, mask=valid[:, None], other=0.0)
                 if IS_FP8:
-                    if HAS_SCALE:
-                        sc_k = tl.load(sc_base, mask=valid, other=1.0).to(tl.float32)
-                        k = (k.to(tl.float32) * sc_k[:, None]).to(tl.bfloat16)
-                    else:
-                        k = k.to(tl.bfloat16)
+                    k = k.to(tl.bfloat16)
                 score = tl.dot(q, tl.trans(k)) * SCALE
+                if IS_FP8 and HAS_SCALE:
+                    sc_k = tl.load(sc_base, mask=valid, other=1.0).to(tl.float32)
+                    score = score * sc_k[None, :]
                 score = tl.where(valid[None, :], score, float("-inf"))
                 next_max = tl.maximum(max_score, tl.max(score, axis=1))
                 rescale = tl.where(
@@ -1879,14 +1887,14 @@ if _HAS_TRITON:
                 if IS_FP8:
                     if HAS_SCALE:
                         sc_v = tl.load(sc_base + stride_sc_kv, mask=valid, other=1.0).to(tl.float32)
-                        v = (v.to(tl.float32) * sc_v[:, None]).to(tl.bfloat16)
+                        w_pv = (weights * sc_v[None, :]).to(tl.bfloat16)
                     else:
-                        v = v.to(tl.bfloat16)
-                high = weights.to(tl.bfloat16)
-                low = (weights - high.to(tl.float32)).to(tl.bfloat16)
+                        w_pv = weights.to(tl.bfloat16)
+                    v = v.to(tl.bfloat16)
+                else:
+                    w_pv = weights.to(tl.bfloat16)
                 acc = acc * rescale[:, None]
-                acc = tl.dot(high, v, acc)
-                acc = tl.dot(low, v, acc)
+                acc = tl.dot(w_pv, v, acc)
                 sum_exp = sum_exp * rescale + tl.sum(weights, axis=1)
                 max_score = next_max
 
@@ -2001,13 +2009,12 @@ if _HAS_TRITON:
                 )
                 k_val = tl.load(k_ptrs, mask=valid[:, None], other=0.0)
                 if IS_FP8:
-                    if HAS_SCALE:
-                        sc_base = sc_ptr + phys * stride_scp + hk * stride_sch + slot * stride_sct
-                        sc_k = tl.load(sc_base, mask=valid, other=1.0).to(tl.float32)
-                        k_val = (k_val.to(tl.float32) * sc_k[:, None]).to(tl.bfloat16)
-                    else:
-                        k_val = k_val.to(tl.bfloat16)
+                    k_val = k_val.to(tl.bfloat16)
                 logits = tl.dot(qv, tl.trans(k_val)) * SCALE
+                if IS_FP8 and HAS_SCALE:
+                    sc_base = sc_ptr + phys * stride_scp + hk * stride_sch + slot * stride_sct
+                    sc_k = tl.load(sc_base, mask=valid, other=1.0).to(tl.float32)
+                    logits = logits * sc_k[None, :]
                 logits = tl.where(valid[None, :], logits, float("-inf"))
                 nxt = tl.maximum(mx, tl.max(logits, 1))
                 rescale = tl.where(nxt == float("-inf"), 0.0, tl.exp(mx - nxt))
@@ -2016,11 +2023,14 @@ if _HAS_TRITON:
                 if IS_FP8:
                     if HAS_SCALE:
                         sc_v = tl.load(sc_base + stride_sckv, mask=valid, other=1.0).to(tl.float32)
-                        v_val = (v_val.to(tl.float32) * sc_v[:, None]).to(tl.bfloat16)
+                        prob_v = (prob * sc_v[None, :]).to(tl.bfloat16)
                     else:
-                        v_val = v_val.to(tl.bfloat16)
+                        prob_v = prob.to(tl.bfloat16)
+                    v_val = v_val.to(tl.bfloat16)
+                else:
+                    prob_v = prob.to(tl.bfloat16)
                 acc = acc * rescale[:, None]
-                acc = tl.dot(prob.to(tl.bfloat16), v_val, acc)
+                acc = tl.dot(prob_v, v_val, acc)
                 z = z * rescale + tl.sum(prob, 1)
                 mx = nxt
 
@@ -2275,12 +2285,12 @@ def _try_run_q4_prefill(
         G=q_per_kv,
         M_ROWS=m_rows,
         PAGE_SIZE=max(4, page_size) if is_paged else 4,
-        BK_Q=8,
+        BK_Q=16,
         IS_PAGED=is_paged,
         IS_FP8=is_fp8,
         HAS_SCALE=has_scale,
         num_warps=4,
-        num_stages=2,
+        num_stages=1 if is_fp8 else 2,
     )
     return out
 
@@ -2598,7 +2608,7 @@ def qsa_sparse_paged_prefill_attention(
             IS_FP8=is_fp8,
             HAS_SCALE=has_scale,
             num_warps=4,
-            num_stages=2,
+            num_stages=1 if is_fp8 else 2,
         )
         return out
 
@@ -2706,7 +2716,7 @@ def qsa_sparse_paged_decode_attention(
                 else:
                     target_sp, kt, nw, stg = 4, (64 if K >= 256 else 32), 4, 2
             else:
-                target_sp, kt, nw, stg = 4, (64 if D <= 256 and K >= 256 else 32), 8, 1
+                target_sp, kt, nw, stg = 4, 32, 4, 2
 
         splits = min(target_sp, triton.next_power_of_2(triton.cdiv(K, kt)))
         m_rows = 16

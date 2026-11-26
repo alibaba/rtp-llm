@@ -26,8 +26,65 @@ from typing import Any, Dict, Optional, Sequence, Tuple
 
 import torch
 import torch.distributed as dist
+import triton
+import triton.language as tl
 
 logger = logging.getLogger(__name__)
+
+
+@triton.jit
+def _hc_combine_add_kernel(
+    streams_ptr,
+    h_post_ptr,
+    reduced_ptr,
+    out_ptr,
+    M,
+    H,
+    stride_sm: tl.int64,
+    stride_sk: tl.int64,
+    stride_hm: tl.int64,
+    stride_rm: tl.int64,
+    stride_om: tl.int64,
+    stride_ok: tl.int64,
+    K_STREAMS: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+):
+    m = tl.program_id(0).to(tl.int64)
+    pid_h = tl.program_id(1)
+    if m >= M:
+        return
+    offs_h = pid_h * BLOCK_H + tl.arange(0, BLOCK_H)
+    mask_h = offs_h < H
+    r = tl.load(reduced_ptr + m * stride_rm + offs_h, mask=mask_h, other=0.0).to(tl.float32)
+    s_base = streams_ptr + m * stride_sm
+    h_base = h_post_ptr + m * stride_hm
+    o_base = out_ptr + m * stride_om
+    for k in tl.static_range(K_STREAMS):
+        hp = tl.load(h_base + k).to(tl.float32)
+        sv = tl.load(s_base + k * stride_sk + offs_h, mask=mask_h, other=0.0).to(tl.float32)
+        ov = (sv + hp * r).to(out_ptr.dtype.element_ty)
+        tl.store(o_base + k * stride_ok + offs_h, ov, mask=mask_h)
+
+
+@triton.jit
+def _all_gather_transpose_lastdim_kernel(
+    src_ptr,
+    dst_ptr,
+    M,
+    D,
+    WS: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+):
+    """Copy ``[WS, M, D]`` contiguous gathered ranks to ``[M, WS * D]`` in one pass."""
+    m = tl.program_id(0).to(tl.int64)
+    r = tl.program_id(1).to(tl.int64)
+    db = tl.program_id(2)
+    if m >= M or r >= WS:
+        return
+    offs_d = db * BLOCK_D + tl.arange(0, BLOCK_D)
+    mask_d = offs_d < D
+    vals = tl.load(src_ptr + (r * M + m) * D + offs_d, mask=mask_d)
+    tl.store(dst_ptr + (m * WS + r) * D + offs_d, vals, mask=mask_d)
 
 _SUPPORTED_WORLD_SIZES = (2, 4, 8)
 _DEFAULT_HIDDEN_DIMS = (5120, 2560)
@@ -147,6 +204,7 @@ class Qwen4_5FastAllReduce:
         self._symm_use_oneshot: bool = True
         self._gemma_gamma_cache: Dict[int, Tuple[torch.Tensor, int, torch.Tensor]] = {}
         self._destroyed: bool = False
+        self._is_gloo: bool = False
 
         if group is None or not dist.is_initialized():
             self.world_size = 1
@@ -180,8 +238,12 @@ class Qwen4_5FastAllReduce:
             self.single_node = True
             return
 
-        if self.device.type != "cuda" or self.requested_backend == "nccl":
-            self.active_backend = "nccl"
+        try:
+            self._is_gloo = dist.get_backend(group) == "gloo"
+        except Exception:
+            self._is_gloo = False
+        if self._is_gloo or self.device.type != "cuda" or self.requested_backend == "nccl":
+            self.active_backend = "gloo" if self._is_gloo else "nccl"
             self.single_node = bool(single_node) if single_node is not None else True
             return
 
@@ -200,7 +262,7 @@ class Qwen4_5FastAllReduce:
 
     def init_workspace(self) -> str:
         """Eagerly allocate collective workspaces prior to CUDA Graph capture."""
-        if self.world_size <= 1 or self.device.type != "cuda" or self._destroyed:
+        if self.world_size <= 1 or self._is_gloo or self.device.type != "cuda" or self._destroyed:
             return self.active_backend
         if torch.cuda.is_current_stream_capturing():
             raise RuntimeError(
@@ -503,6 +565,18 @@ class Qwen4_5FastAllReduce:
             return out_2d.reshape(orig_shape)
 
         # Clean NCCL / Gloo fallback (used for prefill > max_tokens or when fast backends unavailable)
+        if self._is_gloo and x_2d.is_cuda:
+            cpu_buf = x_2d.detach().cpu().contiguous()
+            dist.all_reduce(cpu_buf, op=dist.ReduceOp.SUM, group=self.group)
+            reduced_dev = cpu_buf.to(device=x_2d.device, dtype=x_2d.dtype).reshape(orig_shape)
+            if out is not None:
+                out.copy_(reduced_dev)
+                return out
+            if inplace:
+                x.copy_(reduced_dev)
+                return x
+            return reduced_dev
+
         if out is not None:
             if out.data_ptr() != x_2d.data_ptr():
                 out.copy_(x)
@@ -686,12 +760,142 @@ class Qwen4_5FastAllReduce:
         """All-reduce ``branch_out`` and combine into mHC-lite ``streams``.
 
         Equivalent to ``streams + h_post[..., None] * all_reduce(branch_out)``.
+        Uses a single-pass Triton kernel on CUDA (eliminates 3 FP32 intermediates).
         """
         reduced = self.all_reduce(branch_out)
+        if (
+            streams.is_cuda
+            and streams.ndim >= 3
+            and h_post.is_cuda
+            and reduced.is_cuda
+            and streams.shape[-2] <= 16
+        ):
+            K_streams = int(streams.shape[-2])
+            H = int(streams.shape[-1])
+            M = int(streams.numel() // (K_streams * H))
+            if M == 0 or H == 0:
+                return torch.empty_like(streams)
+            s_3d = streams.reshape(M, K_streams, H)
+            if s_3d.stride(-1) != 1:
+                s_3d = s_3d.contiguous()
+            hp_2d = h_post.reshape(M, K_streams)
+            if hp_2d.stride(-1) != 1:
+                hp_2d = hp_2d.contiguous()
+            r_2d = reduced.reshape(M, H)
+            if r_2d.stride(-1) != 1:
+                r_2d = r_2d.contiguous()
+            out_3d = torch.empty((M, K_streams, H), dtype=streams.dtype, device=streams.device)
+            BLOCK_H = 512 if H >= 512 else triton.next_power_of_2(max(H, 64))
+            _hc_combine_add_kernel[(M, triton.cdiv(H, BLOCK_H))](
+                s_3d,
+                hp_2d,
+                r_2d,
+                out_3d,
+                M,
+                H,
+                s_3d.stride(0),
+                s_3d.stride(1),
+                hp_2d.stride(0),
+                r_2d.stride(0),
+                out_3d.stride(0),
+                out_3d.stride(1),
+                K_STREAMS=K_streams,
+                BLOCK_H=BLOCK_H,
+                num_warps=4,
+            )
+            return out_3d.reshape(streams.shape)
         if reduced.dim() == 2 and streams.dim() == 3:
             reduced = reduced.unsqueeze(1)
         out_f32 = streams.float() + h_post.float().unsqueeze(-1) * reduced.float()
         return out_f32.to(streams.dtype)
+
+    def all_gather(
+        self,
+        x: torch.Tensor,
+        *,
+        dim: int = -1,
+        out: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Fast CUDA-Graph-safe AllGather across ``self.group`` along ``dim``.
+
+        For ``dim == -1`` (e.g. ``lm_head`` vocab-sharded logits ``[M, V_local]``),
+        runs a single ``dist.all_gather_into_tensor`` into ``[WS, M, D]`` followed
+        by a single-pass Triton transpose kernel into ``[M, WS * D]`` (faster and
+        lower allocation overhead than ``dist.all_gather(list) + torch.cat``).
+        """
+        ndim = x.ndim
+        norm_dim = dim if dim >= 0 else (ndim + dim)
+        if norm_dim < 0 or norm_dim >= ndim:
+            raise ValueError(f"Invalid all_gather dim={dim} for tensor shape {tuple(x.shape)}")
+        if self.world_size <= 1 or self.group is None or x.numel() == 0:
+            if self.world_size <= 1 or self.group is None:
+                if out is not None and out.data_ptr() != x.data_ptr():
+                    out.copy_(x)
+                    return out
+                return x
+            out_shape = list(x.shape)
+            out_shape[norm_dim] *= self.world_size
+            return out if out is not None else torch.empty(out_shape, dtype=x.dtype, device=x.device)
+
+        x_c = x if x.is_contiguous() else x.contiguous()
+        out_shape = list(x_c.shape)
+        out_shape[norm_dim] *= self.world_size
+
+        if self._is_gloo:
+            cpu_in = x_c.detach().cpu() if x_c.is_cuda else x_c
+            cpu_chunks = [torch.empty_like(cpu_in) for _ in range(self.world_size)]
+            dist.all_gather(cpu_chunks, cpu_in, group=self.group)
+            res_cpu = torch.cat(cpu_chunks, dim=norm_dim)
+            res = res_cpu.to(device=x_c.device, dtype=x_c.dtype) if x_c.is_cuda else res_cpu
+            if out is not None:
+                out.copy_(res)
+                return out
+            return res
+
+        if norm_dim == 0:
+            if out is not None and out.is_contiguous() and tuple(out.shape) == tuple(out_shape):
+                dist.all_gather_into_tensor(out.view(self.world_size, *x_c.shape), x_c, group=self.group)
+                return out
+            buf = torch.empty(out_shape, dtype=x_c.dtype, device=x_c.device)
+            dist.all_gather_into_tensor(buf.view(self.world_size, *x_c.shape), x_c, group=self.group)
+            if out is not None:
+                out.copy_(buf)
+                return out
+            return buf
+
+        if norm_dim == ndim - 1 and x_c.is_cuda:
+            D = int(x_c.shape[-1])
+            M = int(x_c.numel() // D)
+            gathered = torch.empty((self.world_size, M, D), dtype=x_c.dtype, device=x_c.device)
+            dist.all_gather_into_tensor(gathered, x_c.reshape(M, D), group=self.group)
+            use_out = out is not None and out.is_contiguous() and tuple(out.shape) == tuple(out_shape)
+            dst = out.reshape(M, self.world_size * D) if use_out else torch.empty(
+                (M, self.world_size * D), dtype=x_c.dtype, device=x_c.device
+            )
+            BLOCK_D = min(1024, triton.next_power_of_2(max(D, 32)))
+            _all_gather_transpose_lastdim_kernel[(M, self.world_size, triton.cdiv(D, BLOCK_D))](
+                gathered,
+                dst,
+                M,
+                D,
+                WS=self.world_size,
+                BLOCK_D=BLOCK_D,
+                num_warps=4,
+            )
+            res = dst.reshape(out_shape)
+            if out is not None and not use_out:
+                out.copy_(res)
+                return out
+            return res
+
+        gathered = torch.empty((self.world_size, *x_c.shape), dtype=x_c.dtype, device=x_c.device)
+        dist.all_gather_into_tensor(gathered, x_c, group=self.group)
+        perm = list(range(1, norm_dim + 1)) + [0] + list(range(norm_dim + 1, ndim + 1))
+        res = gathered.permute(*perm).contiguous().reshape(out_shape)
+        if out is not None:
+            out.copy_(res)
+            return out
+        return res
 
     def destroy(self) -> None:
         if self._destroyed:

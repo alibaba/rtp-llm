@@ -620,6 +620,353 @@ class TestQwen4_5E2E(unittest.TestCase):
             a_d = m_auto(tokens[:, t : t + 1], state=st_auto, enable_yoco_decode=True)
             self.assertGreater(_cos_sim(a_d, r_d), 0.999)
 
+    @torch.no_grad()
+    def test_09_dp4_ep4_shared_host_ple_pss_cleanup_and_parity(self) -> None:
+        """Verify 4-rank DP4+EP4 shared host PLE occupies 1 physical copy (Pss), cleans up, captures CG, and matches bitwise."""
+        import glob
+        import socket
+        import tempfile
+        import torch.multiprocessing as mp
+        from rtp_llm.models_py.modules.qwen4_5.checkpoint_loader import save_qwen4_5_safetensors_checkpoint
+
+        cfg = make_mini_qwen4_5_config()
+        ref = Qwen4_5ForCausalLM(cfg, dtype=torch.bfloat16, device=self.device)
+        ref.init_synthetic_weights(seed=7707, ple_mode="gpu_full")
+        _stabilize_router_margins(ref)
+        ref.prepare_weights()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            save_qwen4_5_safetensors_checkpoint(ref, tmpdir)
+            del ref
+            torch.cuda.empty_cache()
+
+            for pmode in ("cpu_uva", "gpu_sharded"):
+                with socket.socket() as sock:
+                    sock.bind(("127.0.0.1", 0))
+                    port = sock.getsockname()[1]
+
+                ctx = mp.get_context("spawn")
+                err_q = ctx.Queue()
+                res_q = ctx.Queue()
+                procs = [
+                    ctx.Process(
+                        target=_gloo_shared_ple_worker,
+                        args=(r, 4, port, tmpdir, pmode, err_q, res_q),
+                    )
+                    for r in range(4)
+                ]
+                for proc in procs:
+                    proc.start()
+                for proc in procs:
+                    proc.join(timeout=120)
+                errors = []
+                while not err_q.empty():
+                    errors.append(err_q.get())
+                for r, proc in enumerate(procs):
+                    if proc.is_alive():
+                        proc.terminate()
+                        self.fail(f"Gloo shared PLE ({pmode}) worker {r} timed out")
+                    self.assertEqual(proc.exitcode, 0, f"worker {r} exited {proc.exitcode}: {errors}")
+                self.assertEqual(errors, [])
+
+                stats = sorted([res_q.get() for _ in range(4)], key=lambda x: x[0])
+                total_pss_mb = sum(s[2] for s in stats) / 1024.0
+                max_shared_mb = max(s[3] for s in stats) / 1024.0
+                cleanup_pss_mb = sum(s[4] for s in stats) / 1024.0
+                print(
+                    f"[Shared PLE {pmode}] 128MiB 4-rank Pss_sum_delta={total_pss_mb:.1f}MiB, "
+                    f"Shared_Dirty={max_shared_mb:.1f}MiB, post_cleanup_Pss={cleanup_pss_mb:.1f}MiB, "
+                    f"cos={[round(s[5], 6) for s in stats]}"
+                )
+                self.assertGreater(total_pss_mb, 100.0)
+                self.assertLess(total_pss_mb, 200.0)
+                self.assertGreater(max_shared_mb, 110.0)
+                self.assertLess(cleanup_pss_mb, 32.0)
+                leftover = glob.glob("/tmp/qwen45_ple_*") + glob.glob("/dev/shm/qwen45_ple_*")
+                self.assertEqual(leftover, [], f"Leaked shared PLE files: {leftover}")
+
+    @torch.no_grad()
+    def test_10_tbo_fast_comm_all_gather_cg_and_shm_alias_parity(self) -> None:
+        """Verify Target TBO (CG replay, stateful YoCo, 0-token DP rank), dp2_tp2_ep4 fast_comm.all_gather, and shm/mmap/cpu_uva aliases."""
+        import glob
+        import socket
+        import tempfile
+        from dataclasses import replace
+        import torch.multiprocessing as mp
+        from rtp_llm.models_py.modules.qwen4_5.checkpoint_loader import (
+            load_qwen4_5_from_checkpoint,
+            save_qwen4_5_safetensors_checkpoint,
+        )
+
+        cfg = make_mini_qwen4_5_config()
+        cfg_stateless = replace(cfg, share_map="", enable_yoco_decode=False)
+
+        ref = Qwen4_5ForCausalLM(cfg, dtype=torch.bfloat16, device=self.device)
+        ref.init_synthetic_weights(seed=7708, ple_mode="gpu_full")
+        _stabilize_router_margins(ref)
+        ref.prepare_weights()
+
+        ref_sl = Qwen4_5ForCausalLM(cfg_stateless, dtype=torch.bfloat16, device=self.device)
+        ref_sl.init_synthetic_weights(seed=7708, ple_mode="cpu_uva")
+        _stabilize_router_margins(ref_sl)
+        ref_sl.prepare_weights()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            save_qwen4_5_safetensors_checkpoint(ref, tmpdir)
+
+            # Single-rank alias smoke check: "mmap" and "auto" + single-rank stateless enable_tbo=True & YoCo forward_tbo parity
+            for alias_mode in ("mmap", "auto"):
+                m_alias = Qwen4_5ForCausalLM(cfg, dtype=torch.bfloat16, device=self.device)
+                load_qwen4_5_from_checkpoint(m_alias, tmpdir, ple_mode=alias_mode, num_workers=1)
+                _stabilize_router_margins(m_alias)
+                m_alias.prepare_weights()
+                toks = torch.randint(10, cfg.vocab_size, (4, 6), device=self.device)
+                st_ref0 = ref.create_runtime_state(2, max_seq_len=32, enable_yoco_decode=True)
+                st_ref1 = ref.create_runtime_state(2, max_seq_len=32, enable_yoco_decode=True)
+                st_al0 = m_alias.create_runtime_state(2, max_seq_len=32, enable_yoco_decode=True)
+                st_al1 = m_alias.create_runtime_state(2, max_seq_len=32, enable_yoco_decode=True)
+                lg_tbo0, lg_tbo1 = m_alias.forward_tbo((toks[:2], toks[2:]), states=(st_al0, st_al1))
+                self.assertGreater(_cos_sim(lg_tbo0, ref(toks[:2], state=st_ref0)), 0.9999)
+                self.assertGreater(_cos_sim(lg_tbo1, ref(toks[2:], state=st_ref1)), 0.9999)
+                del m_alias
+
+            class _ProbeA2A:
+                def __init__(self) -> None:
+                    self.tbo_inited = False
+                    self.world_size = 1
+                def _ensure_tbo_resources(self) -> None:
+                    self.tbo_inited = True
+            probe_a2a = _ProbeA2A()
+            m_sl = Qwen4_5ForCausalLM(
+                cfg_stateless, dtype=torch.bfloat16, device=self.device, all_to_all_comm=probe_a2a
+            )
+            m_sl.init_synthetic_weights(seed=7708, ple_mode="cpu_uva")
+            _stabilize_router_margins(m_sl)
+            m_sl.prepare_weights()
+            self.assertTrue(probe_a2a.tbo_inited)
+
+            toks_sl = torch.randint(10, cfg.vocab_size, (4, 6), device=self.device)
+            lg_sl_tbo = m_sl(toks_sl, enable_tbo=True)
+            lg_sl_mb = torch.cat([ref_sl(toks_sl[:2]), ref_sl(toks_sl[2:])], dim=0)
+            self.assertGreater(_cos_sim(lg_sl_tbo, lg_sl_mb), 0.9999)
+            self.assertGreater(_cos_sim(lg_sl_tbo, ref_sl(toks_sl)), 0.999)
+
+            # Single-GPU CUDA Graph capture/replay of 8-layer forward_tbo
+            cg_mb0 = torch.randint(10, cfg.vocab_size, (2, 6), device=self.device)
+            cg_mb1 = torch.randint(10, cfg.vocab_size, (2, 6), device=self.device)
+            for _ in range(2):
+                _ = m_sl.forward_tbo((cg_mb0, cg_mb1), equal_tokens=True)
+            torch.cuda.synchronize(self.device)
+            g_tbo = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(g_tbo):
+                cg_out0, cg_out1 = m_sl.forward_tbo((cg_mb0, cg_mb1), equal_tokens=True)
+            new_mb0 = torch.randint(10, cfg.vocab_size, (2, 6), device=self.device)
+            new_mb1 = torch.randint(10, cfg.vocab_size, (2, 6), device=self.device)
+            cg_mb0.copy_(new_mb0)
+            cg_mb1.copy_(new_mb1)
+            ref_cg0 = ref_sl(new_mb0)
+            ref_cg1 = ref_sl(new_mb1)
+            g_tbo.replay()
+            torch.cuda.synchronize(self.device)
+            self.assertGreater(_cos_sim(cg_out0, ref_cg0), 0.9999)
+            self.assertGreater(_cos_sim(cg_out1, ref_cg1), 0.9999)
+            del g_tbo, cg_out0, cg_out1, m_sl, ref_sl, ref
+            torch.cuda.empty_cache()
+
+            with socket.socket() as sock:
+                sock.bind(("127.0.0.1", 0))
+                port = sock.getsockname()[1]
+
+            ctx = mp.get_context("spawn")
+            err_q = ctx.Queue()
+            procs = [
+                ctx.Process(
+                    target=_gloo_tbo_and_shm_worker,
+                    args=(r, 4, port, tmpdir, err_q),
+                )
+                for r in range(4)
+            ]
+            for proc in procs:
+                proc.start()
+            for proc in procs:
+                proc.join(timeout=150)
+            errors = []
+            while not err_q.empty():
+                errors.append(err_q.get())
+            for r, proc in enumerate(procs):
+                if proc.is_alive():
+                    proc.terminate()
+                    self.fail(f"Gloo TBO/shm worker {r} timed out")
+                self.assertEqual(proc.exitcode, 0, f"worker {r} exited {proc.exitcode}: {errors}")
+            self.assertEqual(errors, [])
+            leftover = glob.glob("/tmp/qwen45_ple_*") + glob.glob("/dev/shm/qwen45_ple_*")
+            self.assertEqual(leftover, [], f"Leaked shared PLE files: {leftover}")
+
+
+@torch.no_grad()
+def _gloo_tbo_and_shm_worker(rank: int, world_size: int, port: int, ckpt_dir: str, err_q) -> None:
+    import gc
+    from dataclasses import replace
+    from rtp_llm.models_py.modules.qwen4_5.checkpoint_loader import load_qwen4_5_from_checkpoint
+
+    try:
+        os.environ["MASTER_ADDR"] = "127.0.0.1"
+        os.environ["MASTER_PORT"] = str(port)
+        torch.cuda.set_device(0)
+        device = torch.device("cuda:0")
+        dist.init_process_group(backend="gloo", rank=rank, world_size=world_size)
+        try:
+            cfg = make_mini_qwen4_5_config()
+            cfg_stateless = replace(cfg, share_map="", enable_yoco_decode=False)
+
+            # 1) init_synthetic_weights(ple_mode="cpu_uva") under 4-rank DP4+EP4
+            m_syn = Qwen4_5ForCausalLM(cfg, dtype=torch.bfloat16, device=device, parallel_mode="dp4_ep4")
+            m_syn.init_synthetic_weights(seed=8808, ple_mode="cpu_uva")
+            assert m_syn.model.layers[1].ple._ple_ep_group is None
+            del m_syn
+            gc.collect()
+
+            # 2) Stateless dp4_ep4 + cpu_uva + 4-rank Gloo 3-stage TBO parity
+            m_cg = Qwen4_5ForCausalLM(
+                cfg_stateless, dtype=torch.bfloat16, device=device, parallel_mode="dp4_ep4", dp_equal_tokens=True
+            )
+            m_cg.init_synthetic_weights(seed=7708, ple_mode="cpu_uva")
+            _stabilize_router_margins(m_cg)
+            m_cg.prepare_weights()
+            for layer in m_cg.model.layers:
+                if hasattr(layer.mlp, "backend"):
+                    layer.mlp.backend = "triton_splitk"
+            assert m_cg.model.layers[1].ple._ple_ep_group is None
+            assert m_cg.model.all_to_all_comm is not None
+            assert hasattr(m_cg.model.all_to_all_comm, "dispatch_async")
+            assert hasattr(m_cg.model.all_to_all_comm, "combine_async")
+
+            m_cg_ref = Qwen4_5ForCausalLM(cfg_stateless, dtype=torch.bfloat16, device=device)
+            m_cg_ref.init_synthetic_weights(seed=7708, ple_mode="cpu_uva")
+            _stabilize_router_margins(m_cg_ref)
+            m_cg_ref.prepare_weights()
+            for layer in m_cg_ref.model.layers:
+                if hasattr(layer.mlp, "backend"):
+                    layer.mlp.backend = "triton_splitk"
+
+            gen = torch.Generator(device=device).manual_seed(6600 + rank * 37)
+            mb0 = torch.randint(10, cfg.vocab_size, (2, 6), device=device, generator=gen)
+            mb1 = torch.randint(10, cfg.vocab_size, (2, 6), device=device, generator=gen)
+            with torch.inference_mode():
+                gloo_l0, gloo_l1 = m_cg.forward_tbo((mb0, mb1), equal_tokens=True)
+                ref0 = m_cg_ref(mb0)
+                ref1 = m_cg_ref(mb1)
+                cos0 = _cos_sim(gloo_l0, ref0)
+                cos1 = _cos_sim(gloo_l1, ref1)
+            assert cos0 > 0.999 and cos1 > 0.999, f"rank={rank} Gloo TBO cos={cos0}, {cos1}"
+            del m_cg, m_cg_ref
+            gc.collect()
+            torch.cuda.empty_cache()
+
+            # 3) Full YoCo dp4_ep4 + ple_mode="shm" stateful TBO + asymmetric 0-token DP rank parity
+            m_tbo = Qwen4_5ForCausalLM(
+                cfg, dtype=torch.bfloat16, device=device, parallel_mode="dp4_ep4", dp_equal_tokens=True
+            )
+            load_qwen4_5_from_checkpoint(m_tbo, ckpt_dir, ple_mode="shm", num_workers=2)
+            _stabilize_router_margins(m_tbo)
+            m_tbo.prepare_weights()
+            for layer in m_tbo.model.layers:
+                if hasattr(layer.mlp, "backend"):
+                    layer.mlp.backend = "triton_splitk"
+
+            m_ref = Qwen4_5ForCausalLM(cfg, dtype=torch.bfloat16, device=device)
+            load_qwen4_5_from_checkpoint(m_ref, ckpt_dir, ple_mode="gpu_full", num_workers=2)
+            _stabilize_router_margins(m_ref)
+            m_ref.prepare_weights()
+            for layer in m_ref.model.layers:
+                if hasattr(layer.mlp, "backend"):
+                    layer.mlp.backend = "triton_splitk"
+
+            st_t0 = m_tbo.create_runtime_state(2, max_seq_len=32, enable_yoco_decode=True)
+            st_t1 = m_tbo.create_runtime_state(2, max_seq_len=32, enable_yoco_decode=True)
+            st_r0 = m_ref.create_runtime_state(2, max_seq_len=32, enable_yoco_decode=True)
+            st_r1 = m_ref.create_runtime_state(2, max_seq_len=32, enable_yoco_decode=True)
+            toks0 = torch.randint(10, cfg.vocab_size, (2, 10), device=device, generator=gen)
+            toks1 = torch.randint(10, cfg.vocab_size, (2, 10), device=device, generator=gen)
+            with torch.inference_mode():
+                p_t0, p_t1 = m_tbo.forward_tbo((toks0[:, :8], toks1[:, :8]), states=(st_t0, st_t1), enable_yoco_decode=True, equal_tokens=True)
+                p_r0 = m_ref(toks0[:, :8], state=st_r0, enable_yoco_decode=True)
+                p_r1 = m_ref(toks1[:, :8], state=st_r1, enable_yoco_decode=True)
+                assert _cos_sim(p_t0, p_r0) > 0.999 and _cos_sim(p_t1, p_r1) > 0.999
+                d_t0, d_t1 = m_tbo.forward_tbo((toks0[:, 8:9], toks1[:, 8:9]), states=(st_t0, st_t1), enable_yoco_decode=True, equal_tokens=True)
+                d_r0 = m_ref(toks0[:, 8:9], state=st_r0, enable_yoco_decode=True)
+                d_r1 = m_ref(toks1[:, 8:9], state=st_r1, enable_yoco_decode=True)
+                assert _cos_sim(d_t0, d_r0) > 0.999 and _cos_sim(d_t1, d_r1) > 0.999
+
+            # Asymmetric 0-token DP rank TBO (rank 0,2 empty on mb0; rank 1,3 empty on mb1)
+            for layer in m_tbo.model.layers:
+                if hasattr(layer.mlp, "dp_equal_tokens"):
+                    layer.mlp.dp_equal_tokens = False
+            b_a0 = 0 if (rank % 2 == 0) else 2
+            b_a1 = 2 if (rank % 2 == 0) else 0
+            a0 = torch.randint(10, cfg.vocab_size, (b_a0, 6), device=device, generator=gen)
+            a1 = torch.randint(10, cfg.vocab_size, (b_a1, 6), device=device, generator=gen)
+            st_a0 = m_tbo.create_runtime_state(b_a0, max_seq_len=32, enable_yoco_decode=True)
+            st_a1 = m_tbo.create_runtime_state(b_a1, max_seq_len=32, enable_yoco_decode=True)
+            with torch.inference_mode():
+                oa0, oa1 = m_tbo.forward_tbo((a0, a1), states=(st_a0, st_a1), equal_tokens=False)
+                assert oa0.shape == (b_a0, 6, cfg.vocab_size) and oa1.shape == (b_a1, 6, cfg.vocab_size)
+                if b_a0 > 0:
+                    sr0 = m_ref.create_runtime_state(b_a0, max_seq_len=32, enable_yoco_decode=True)
+                    assert _cos_sim(oa0, m_ref(a0, state=sr0)) > 0.999
+                if b_a1 > 0:
+                    sr1 = m_ref.create_runtime_state(b_a1, max_seq_len=32, enable_yoco_decode=True)
+                    assert _cos_sim(oa1, m_ref(a1, state=sr1)) > 0.999
+
+            del m_tbo, m_ref
+            gc.collect()
+            torch.cuda.empty_cache()
+
+            # 4) dp2_tp2_ep4 fast_comm.all_gather + forward_tbo parity
+            m_dt = Qwen4_5ForCausalLM(
+                cfg, dtype=torch.bfloat16, device=device, parallel_mode="dp2_tp2_ep4", dp_equal_tokens=True
+            )
+            m_dt.init_synthetic_weights(seed=7709, ple_mode="gpu_full")
+            _stabilize_router_margins(m_dt)
+            m_dt.prepare_weights()
+            for layer in m_dt.model.layers:
+                if hasattr(layer.mlp, "backend"):
+                    layer.mlp.backend = "triton_splitk"
+            assert m_dt.fast_all_reduce is not None
+            assert m_dt.fast_all_reduce.world_size == 2 and m_dt.fast_all_reduce.group is m_dt.tp_group
+
+            m_dt_ref = Qwen4_5ForCausalLM(cfg, dtype=torch.bfloat16, device=device)
+            m_dt_ref.init_synthetic_weights(seed=7709, ple_mode="gpu_full")
+            _stabilize_router_margins(m_dt_ref)
+            m_dt_ref.prepare_weights()
+            for layer in m_dt_ref.model.layers:
+                if hasattr(layer.mlp, "backend"):
+                    layer.mlp.backend = "triton_splitk"
+
+            dp_gen = torch.Generator(device=device).manual_seed(9500 + m_dt.dp_rank * 41)
+            dt_ids = torch.randint(10, cfg.vocab_size, (4, 6), device=device, generator=dp_gen)
+            with torch.inference_mode():
+                st_dt = m_dt.create_runtime_state(4, max_seq_len=32, enable_yoco_decode=True)
+                dt_lg = m_dt(dt_ids, state=st_dt)
+                st_dt0 = m_dt.create_runtime_state(2, max_seq_len=32, enable_yoco_decode=True)
+                st_dt1 = m_dt.create_runtime_state(2, max_seq_len=32, enable_yoco_decode=True)
+                dt_tbo0, dt_tbo1 = m_dt.forward_tbo((dt_ids[:2], dt_ids[2:]), states=(st_dt0, st_dt1), equal_tokens=True)
+                st_r0 = m_dt_ref.create_runtime_state(2, max_seq_len=32, enable_yoco_decode=True)
+                st_r1 = m_dt_ref.create_runtime_state(2, max_seq_len=32, enable_yoco_decode=True)
+                dt_ref0 = m_dt_ref(dt_ids[:2], state=st_r0)
+                dt_ref1 = m_dt_ref(dt_ids[2:], state=st_r1)
+                assert _cos_sim(dt_lg[:2], dt_ref0) > 0.999 and _cos_sim(dt_lg[2:], dt_ref1) > 0.999
+                assert _cos_sim(dt_tbo0, dt_ref0) > 0.999 and _cos_sim(dt_tbo1, dt_ref1) > 0.999
+
+            del m_dt, m_dt_ref
+            gc.collect()
+            dist.barrier()
+        finally:
+            dist.destroy_process_group()
+    except BaseException as exc:
+        err_q.put(f"rank {rank}: {exc!r}")
+        raise
+
 
 @torch.no_grad()
 def _gloo_multi_parallel_worker(rank: int, world_size: int, port: int, pmode: str, err_q) -> None:
@@ -779,6 +1126,137 @@ def _gloo_tp4_ep4_worker(rank: int, world_size: int, port: int, err_q) -> None:
             dist.destroy_process_group()
     except BaseException as exc:
         err_q.put(f"rank {rank}: {exc!r}")
+        raise
+
+
+def _read_smaps_kb() -> dict:
+    res = {}
+    with open(f"/proc/{os.getpid()}/smaps_rollup", encoding="utf-8") as f:
+        for line in f:
+            k, v = line.split(":", 1)
+            if k in ("Rss", "Pss", "Shared_Dirty", "Private_Dirty"):
+                res[k] = int(v.strip().split()[0])
+    return res
+
+
+@torch.no_grad()
+def _gloo_shared_ple_worker(
+    rank: int,
+    world_size: int,
+    port: int,
+    ckpt_dir: str,
+    ple_mode: str,
+    err_q,
+    res_q,
+) -> None:
+    import gc
+    from rtp_llm.models_py.modules.qwen4_5.checkpoint_loader import (
+        alloc_shared_host_ple_shards,
+        finalize_shared_host_ple_shards,
+        load_qwen4_5_from_checkpoint,
+    )
+
+    try:
+        os.environ["MASTER_ADDR"] = "127.0.0.1"
+        os.environ["MASTER_PORT"] = str(port)
+        torch.cuda.set_device(0)
+        device = torch.device("cuda:0")
+        dist.init_process_group(backend="gloo", rank=rank, world_size=world_size)
+        try:
+            specs = [(torch.float8_e4m3fn, (65536, 256)) for _ in range(8)]
+            base_m = _read_smaps_kb()
+            sbuf = alloc_shared_host_ple_shards(specs, group=dist.group.WORLD, device=device)
+            for idx, sh in enumerate(sbuf.shard_bufs):
+                if idx % world_size == rank:
+                    sh.view(torch.uint8).fill_(0x3C)
+            del sh
+            pinned_ok = finalize_shared_host_ple_shards(sbuf)
+            assert pinned_ok, "Expected shared PLE host buffer to pin for CUDA UVA"
+            dist.barrier()
+            after_m = _read_smaps_kb()
+            dist.barrier()
+            del sbuf
+            gc.collect()
+            dist.barrier()
+            clean_m = _read_smaps_kb()
+
+            cfg = make_mini_qwen4_5_config()
+            m_par = Qwen4_5ForCausalLM(
+                cfg,
+                dtype=torch.bfloat16,
+                device=device,
+                parallel_mode="dp4_ep4",
+                dp_equal_tokens=True,
+            )
+            load_qwen4_5_from_checkpoint(m_par, ckpt_dir, ple_mode=ple_mode, num_workers=2)
+            _stabilize_router_margins(m_par)
+            m_par.prepare_weights()
+            for layer in m_par.model.layers:
+                if hasattr(layer.mlp, "backend"):
+                    layer.mlp.backend = "triton_splitk"
+
+            ple_par = m_par.model.layers[1].ple
+            assert len(ple_par._ngram_shards) == cfg.split_ngram_parts
+            assert ple_par._ple_ep_group is None
+
+            h_in = torch.ones((2, 4, cfg.hc_count * cfg.hidden_size), dtype=torch.bfloat16, device=device) * 0.2
+            ids_in = torch.randint(
+                10, cfg.vocab_size, (2, 4), device=device, generator=torch.Generator(device).manual_seed(900 + rank)
+            )
+            with torch.inference_mode():
+                ple_eager = ple_par(h_in, ids_in).clone()
+                static_h = h_in.clone()
+                static_ids = ids_in.clone()
+                _ = ple_par(static_h, static_ids)
+                torch.cuda.synchronize(device)
+                g = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(g):
+                    static_out = ple_par(static_h, static_ids)
+                g.replay()
+                torch.cuda.synchronize(device)
+                assert torch.equal(static_out, ple_eager)
+
+            m_ref = Qwen4_5ForCausalLM(cfg, dtype=torch.bfloat16, device=device)
+            load_qwen4_5_from_checkpoint(m_ref, ckpt_dir, ple_mode="gpu_full", num_workers=2)
+            _stabilize_router_margins(m_ref)
+            m_ref.prepare_weights()
+            for layer in m_ref.model.layers:
+                if hasattr(layer.mlp, "backend"):
+                    layer.mlp.backend = "triton_splitk"
+
+            with torch.inference_mode():
+                ple_ref = m_ref.model.layers[1].ple(h_in, ids_in)
+            assert torch.equal(ple_eager, ple_ref), "DP4+EP4 shared PLE bitwise mismatch vs gpu_full"
+
+            B, T_prompt, T_gen = 2, 16, 4
+            tok_seq = torch.randint(
+                10, cfg.vocab_size, (B, T_prompt + T_gen), device=device, generator=torch.Generator(device).manual_seed(5151 + rank * 73)
+            )
+            st_par = m_par.create_runtime_state(B, max_seq_len=64, enable_yoco_decode=True)
+            st_ref = m_ref.create_runtime_state(B, max_seq_len=64, enable_yoco_decode=True)
+            with torch.inference_mode():
+                lp = m_par(tok_seq[:, :T_prompt], state=st_par, enable_yoco_decode=True)
+                lr = m_ref(tok_seq[:, :T_prompt], state=st_ref, enable_yoco_decode=True)
+                cos_e2e = _cos_sim(lp, lr)
+            assert cos_e2e > 0.999, f"dp4_ep4 shared PLE E2E cos mismatch: {cos_e2e}"
+
+            del m_par, m_ref, g, static_out
+            gc.collect()
+            res_q.put(
+                (
+                    rank,
+                    pinned_ok,
+                    after_m["Pss"] - base_m["Pss"],
+                    after_m["Shared_Dirty"] - base_m["Shared_Dirty"],
+                    clean_m["Pss"] - base_m["Pss"],
+                    cos_e2e,
+                )
+            )
+            dist.barrier()
+        finally:
+            dist.destroy_process_group()
+    except BaseException as exc:
+        err_q.put(f"rank {rank} ({ple_mode}): {exc!r}")
         raise
 
 

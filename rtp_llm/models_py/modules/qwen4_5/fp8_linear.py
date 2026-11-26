@@ -41,37 +41,86 @@ from rtp_llm.models_py.modules.qwen4_5.mxfp4_ops import (
 _FP8_E4M3_MAX = 448.0
 _QUANT_EPS = 1.0e-12
 _TRTLLM_PERM_CACHE: Dict[torch.Size, torch.Tensor] = {}
+_MXFP8_PROBE_CACHE: Dict[int, bool] = {}
+_TRTLLM_LL_PROBE_CACHE: Dict[int, bool] = {}
 
 
-@functools.lru_cache(maxsize=8)
 def has_flashinfer_mxfp8(device_index: int = 0) -> bool:
     if not torch.cuda.is_available():
         return False
-    cap = torch.cuda.get_device_capability(device_index)
+    dev_idx = int(device_index)
+    cached = _MXFP8_PROBE_CACHE.get(dev_idx)
+    if cached is not None:
+        return cached
+    cap = torch.cuda.get_device_capability(dev_idx)
     if cap[0] < 10:
+        _MXFP8_PROBE_CACHE[dev_idx] = False
+        return False
+    if torch.cuda.is_current_stream_capturing():
         return False
     try:
         import flashinfer  # type: ignore
 
-        return hasattr(flashinfer, "mxfp8_quantize") and hasattr(flashinfer, "mm_mxfp8")
+        if not (hasattr(flashinfer, "mxfp8_quantize") and hasattr(flashinfer, "mm_mxfp8")):
+            _MXFP8_PROBE_CACHE[dev_idx] = False
+            return False
+        # One-shot JIT probe catches container CUDA header conflicts safely pre-capture.
+        with torch.cuda.device(dev_idx):
+            dev = torch.device("cuda", dev_idx)
+            t_a = torch.zeros((16, 128), dtype=torch.bfloat16, device=dev)
+            t_w = torch.zeros((128, 128), dtype=torch.bfloat16, device=dev)
+            aq, asc = flashinfer.mxfp8_quantize(t_a, is_sf_swizzled_layout=True, alignment=32)
+            wq, wsc = flashinfer.mxfp8_quantize(t_w, is_sf_swizzled_layout=True, alignment=32)
+            _ = flashinfer.mm_mxfp8(
+                aq, wq.t(), asc, wsc, out_dtype=torch.bfloat16, backend="cutlass"
+            )
+        _MXFP8_PROBE_CACHE[dev_idx] = True
+        return True
     except Exception:
+        _MXFP8_PROBE_CACHE[dev_idx] = False
         return False
 
 
-@functools.lru_cache(maxsize=8)
 def has_flashinfer_trtllm_ll(device_index: int = 0) -> bool:
     if not torch.cuda.is_available():
         return False
-    cap = torch.cuda.get_device_capability(device_index)
+    dev_idx = int(device_index)
+    cached = _TRTLLM_LL_PROBE_CACHE.get(dev_idx)
+    if cached is not None:
+        return cached
+    cap = torch.cuda.get_device_capability(dev_idx)
     if cap[0] != 10:
+        _TRTLLM_LL_PROBE_CACHE[dev_idx] = False
+        return False
+    if torch.cuda.is_current_stream_capturing():
         return False
     try:
         import flashinfer  # type: ignore
 
-        return hasattr(flashinfer, "mm_fp8") and hasattr(
-            flashinfer, "prepare_low_latency_gemm_weights"
-        )
+        if not (
+            hasattr(flashinfer, "mm_fp8")
+            and hasattr(flashinfer, "prepare_low_latency_gemm_weights")
+        ):
+            _TRTLLM_LL_PROBE_CACHE[dev_idx] = False
+            return False
+        # One-shot cubin probe catches non-writable cubin cache PermissionError safely.
+        with torch.cuda.device(dev_idx):
+            dev = torch.device("cuda", dev_idx)
+            ax = torch.zeros((8, 128), dtype=torch.float8_e4m3fn, device=dev)
+            wq = torch.zeros((128, 128), dtype=torch.float8_e4m3fn, device=dev)
+            w_prep = flashinfer.prepare_low_latency_gemm_weights(wq, _TRTLLM_PERM_CACHE)
+            alpha = torch.ones((1,), dtype=torch.float32, device=dev)
+            _ = flashinfer.mm_fp8(
+                ax,
+                w_prep,
+                alpha=alpha,
+                out_dtype=torch.bfloat16,
+                backend="trtllm_low_latency",
+            )
+        _TRTLLM_LL_PROBE_CACHE[dev_idx] = True
+        return True
     except Exception:
+        _TRTLLM_LL_PROBE_CACHE[dev_idx] = False
         return False
 
 
@@ -385,11 +434,15 @@ class SM100FP8Linear(nn.Module):
             and self.mode in ("auto", "fp8", "mxfp8")
             and has_flashinfer_mxfp8(dev_idx)
         ):
-            import flashinfer  # type: ignore
+            try:
+                import flashinfer  # type: ignore
 
-            wm8, wms = flashinfer.mxfp8_quantize(w_d, is_sf_swizzled_layout=True, alignment=32)
-            self.w_mxfp8 = wm8
-            self.w_mxfp8_sc = wms
+                wm8, wms = flashinfer.mxfp8_quantize(w_d, is_sf_swizzled_layout=True, alignment=32)
+                self.w_mxfp8 = wm8
+                self.w_mxfp8_sc = wms
+            except Exception:
+                self.w_mxfp8 = None
+                self.w_mxfp8_sc = None
 
         if (
             self._prepare_dg_fp8_flag
@@ -398,11 +451,15 @@ class SM100FP8Linear(nn.Module):
             and self.mode in ("auto", "fp8", "deepgemm_fp8")
             and has_deepgemm_fp8(dev_idx)
         ):
-            import deep_gemm  # type: ignore
+            try:
+                import deep_gemm  # type: ignore
 
-            wdq, wds = deep_gemm.per_block_cast_to_fp8(w_d, use_ue8m0=True)
-            self.w_dg_fp8 = wdq
-            self.w_dg_sc = wds
+                wdq, wds = deep_gemm.per_block_cast_to_fp8(w_d, use_ue8m0=True)
+                self.w_dg_fp8 = wdq
+                self.w_dg_sc = wds
+            except Exception:
+                self.w_dg_fp8 = None
+                self.w_dg_sc = None
 
         if (
             self._prepare_trtllm_ll_flag
@@ -455,20 +512,31 @@ class SM100FP8Linear(nn.Module):
             return "w4a8" if self.w_fp4_i8 is not None else "bf16"
 
         # Empirical SM100/SM103 Pareto frontier (cos >= 0.999):
-        #   - Narrow/medium shapes (N < 10240 and K*N < 64M, e.g. TP4 q_proj, o_proj,
-        #     qkvz_tp4, latent) at M <= 512: single-kernel BF16 F.linear beats 2-kernel
-        #     (quant + FP8) by 1.3x-2.2x; Prefill M >= 1024 crosses cleanly to FP8/MXFP8.
-        #   - Wide / compute-heavy projections (N >= 10240 or K*N >= 64M: TP1 q/qkvz/gu,
-        #     DFlash fc, lm_head): trtllm_ll (M<=16, N>=10240) -> scaled_mm -> mxfp8.
-        is_wide = N >= 10240
-        is_heavy = (K * N) >= 64_000_000
-        if self.weight is not None:
-            if (not is_wide and not is_heavy and M <= 512) or (not is_wide and is_heavy and M <= 16):
+        #   - Decode (M <= 512): keep all N < 16384 layers (GDN, QSA, MoE, DFlash fc)
+        #     in BF16 so zero 1-ULP router flips occur and single-kernel BF16 wins
+        #     over 2-kernel rowwise quant+FP8. Wide outputs (N >= 16384, lm_head_tp4)
+        #     run scaled_mm (1.35x-1.6x faster than BF16, cos>=0.9993) or opt-in trtllm_ll.
+        #   - Prefill (M > 512): use block-32 mxfp8 when available; otherwise keep
+        #     N < 16384 in BF16 (avoids rowwise scaled_mm cos drop and latency regression).
+        is_wide = N >= 16384
+        if M <= 512:
+            if not is_wide and self.weight is not None:
                 return "bf16"
-        if M <= 16 and self.w_trtllm_ll is not None and (is_wide or self.weight is None):
-            return "trtllm_ll"
+            prefer_ll = os.environ.get("QWEN4_5_FP8_PREFER_TRTLLM_LL", "0") == "1"
+            if M <= 16 and prefer_ll and self.w_trtllm_ll is not None and (is_wide or self.weight is None):
+                return "trtllm_ll"
+            if self.w_fp8_row is not None:
+                return "scaled_mm"
+            if M <= 16 and self.w_trtllm_ll is not None:
+                return "trtllm_ll"
+            if self.weight is not None:
+                return "bf16"
         if (M >= 2048 or (M >= 1024 and is_wide)) and self.w_mxfp8 is not None:
             return "mxfp8"
+        if is_wide and self.w_fp8_row is not None:
+            return "scaled_mm"
+        if self.weight is not None:
+            return "bf16"
         if self.w_fp8_row is not None:
             return "scaled_mm"
         if self.w_trtllm_ll is not None:
@@ -477,8 +545,6 @@ class SM100FP8Linear(nn.Module):
             return "deepgemm_fp8"
         if self.w_mxfp8 is not None:
             return "mxfp8"
-        if self.weight is not None:
-            return "bf16"
         raise RuntimeError("SM100FP8Linear has no prepared weights for active backend.")
 
     def forward_prequant_rowwise(

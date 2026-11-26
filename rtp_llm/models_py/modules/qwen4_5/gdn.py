@@ -2408,7 +2408,8 @@ def gdn_chunk_prefill_ragged_with_snapshots_triton(
         GQA_RATIO=gqa_ratio,
         D_K=64,
         D_V=64,
-        num_warps=4,
+        num_warps=2 if (bsz >= 4 and num_chunks >= 128) else 4,
+        num_stages=1 if (bsz >= 4 and num_chunks >= 128) else 2,
     )
 
     has_init = initial_state is not None
@@ -2492,7 +2493,8 @@ def gdn_chunk_prefill_ragged_with_snapshots_triton(
         STORE_FINAL_STATE=output_final_states,
         HAS_SNAPS=has_snaps,
         SKIP_INVALID_PHYS=skip_invalid_phys,
-        num_warps=4,
+        num_warps=2 if bsz >= 4 else 4,
+        num_stages=1 if (bsz >= 4 and num_chunks >= 128) else 2,
     )
 
     _gdn_chunk_output_ragged_kernel[(num_v_heads, num_chunks)](
@@ -2531,6 +2533,7 @@ def gdn_chunk_prefill_ragged_with_snapshots_triton(
         D_K=64,
         D_V=64,
         num_warps=4,
+        num_stages=1 if (bsz >= 4 and num_chunks >= 128) else 2,
     )
 
     return out, final_states
@@ -3313,6 +3316,7 @@ class Qwen4_5GatedDeltaNet(nn.Module):
         stage_ssm_state: Optional[torch.Tensor] = None,
         shared: Optional[SharedGDNInputs] = None,
         enable_yoco_decode: Optional[bool] = None,
+        lazy_kvgb_buffers: Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = None,
     ) -> Tuple[torch.Tensor, Optional[SharedGDNInputs]]:
         """Single-pass batched V-step verify forward keeping SSM & conv state in registers."""
         bsz, verify_w, _ = int(hidden_states.shape[0]), int(hidden_states.shape[1]), int(hidden_states.shape[2])
@@ -3459,8 +3463,14 @@ class Qwen4_5GatedDeltaNet(nn.Module):
 
         if self._can_use_fused_unpack_conv(qkvz):
             q = torch.empty((bsz, verify_w, self.num_k_heads, self.head_k_dim), dtype=dtype, device=device)
-            k = torch.empty((bsz, verify_w, self.num_k_heads, self.head_k_dim), dtype=dtype, device=device)
-            v = torch.empty((bsz, verify_w, self.num_v_heads, self.head_v_dim), dtype=dtype, device=device)
+            if lazy_kvgb_buffers is not None:
+                k = lazy_kvgb_buffers[0][:bsz]
+                v = lazy_kvgb_buffers[1][:bsz]
+                lazy_kvgb_buffers[2][:bsz].copy_(g)
+                lazy_kvgb_buffers[3][:bsz].copy_(beta)
+            else:
+                k = torch.empty((bsz, verify_w, self.num_k_heads, self.head_k_dim), dtype=dtype, device=device)
+                v = torch.empty((bsz, verify_w, self.num_v_heads, self.head_v_dim), dtype=dtype, device=device)
             has_stage_c = stage_conv_state is not None
             sc_arg = stage_conv_state if has_stage_c else q
             v_group = self.gqa_ratio * self.head_v_dim
@@ -3521,6 +3531,11 @@ class Qwen4_5GatedDeltaNet(nn.Module):
             q = qf.reshape(bsz, verify_w, self.num_k_heads, self.head_k_dim)
             k = kf.reshape(bsz, verify_w, self.num_k_heads, self.head_k_dim)
             v = vf.reshape(bsz, verify_w, self.num_v_heads, self.head_v_dim)
+            if lazy_kvgb_buffers is not None:
+                lazy_kvgb_buffers[0][:bsz].copy_(k)
+                lazy_kvgb_buffers[1][:bsz].copy_(v)
+                lazy_kvgb_buffers[2][:bsz].copy_(g)
+                lazy_kvgb_buffers[3][:bsz].copy_(beta)
 
         core_out = self._launch_gdn_verify_scan(
             q,

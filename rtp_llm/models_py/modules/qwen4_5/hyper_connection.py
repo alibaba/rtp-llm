@@ -250,6 +250,34 @@ def _hc_down_inject_epilogue_kernel(
     )
 
 
+@triton.jit
+def _hc_inject_epilogue_kernel(
+    RAW_PTR,
+    INJ_PTR,
+    ROWS,
+    HC_COUNT: tl.constexpr,
+    RAW_STRIDE: tl.constexpr,
+    BLOCK_R: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+):
+    r_offs = tl.program_id(0).to(tl.int64) * BLOCK_R + tl.arange(0, BLOCK_R)
+    r_mask = r_offs < ROWS
+    inv_hc: tl.constexpr = 1.0 / HC_COUNT
+    h_offs = tl.arange(0, BLOCK_H)
+    h_mask = r_mask[:, None] & (h_offs[None, :] < HC_COUNT)
+    raw_h = tl.load(
+        RAW_PTR + r_offs[:, None] * RAW_STRIDE + h_offs[None, :],
+        mask=h_mask,
+        other=0.0,
+    ).to(tl.float32)
+    inj = 2.0 * tl.sigmoid(raw_h * inv_hc)
+    tl.store(
+        INJ_PTR + r_offs[:, None] * HC_COUNT + h_offs[None, :],
+        inj,
+        mask=h_mask,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Functional Triton & Reference Wrappers
 # ---------------------------------------------------------------------------
@@ -552,7 +580,7 @@ def hc_down_inject_epilogue_triton(
     if not down_inject_raw.is_cuda:
         raw_f = down_inject_raw.float()
         latent = F.silu(raw_f[..., :hc_lowrank] / hc_count).to(down_inject_raw.dtype)
-        inject_w = (2.0 * torch.sigmoid(raw_f[..., hc_lowrank:] / hc_count)).to(
+        inject_w = (2.0 * torch.sigmoid(raw_f[..., hc_lowrank : hc_lowrank + hc_count] / hc_count)).to(
             down_inject_raw.dtype
         )
         return latent, inject_w
@@ -582,6 +610,48 @@ def hc_down_inject_epilogue_triton(
         num_warps=4,
     )
     return latent, inject_w
+
+
+def hc_inject_epilogue_triton(
+    inject_raw: torch.Tensor,
+    hc_count: int,
+) -> torch.Tensor:
+    """Compute 2.0 * sigmoid(raw[..., :hc_count] / hc_count) directly from padded GEMM output."""
+    prefix = inject_raw.shape[:-1]
+    if not inject_raw.is_cuda:
+        return (2.0 * torch.sigmoid(inject_raw[..., :hc_count].float() / hc_count)).to(
+            inject_raw.dtype
+        )
+
+    raw_c = inject_raw.contiguous()
+    raw_stride = int(raw_c.shape[-1])
+    rows = raw_c.numel() // raw_stride
+    inject_w = torch.empty((*prefix, hc_count), device=raw_c.device, dtype=raw_c.dtype)
+    if rows == 0:
+        return inject_w
+
+    block_r = 1 if rows <= 8 else (8 if rows <= 128 else 16)
+    block_h = max(16, triton.next_power_of_2(hc_count))
+    _hc_inject_epilogue_kernel[(triton.cdiv(rows, block_r),)](
+        raw_c,
+        inject_w,
+        ROWS=rows,
+        HC_COUNT=hc_count,
+        RAW_STRIDE=raw_stride,
+        BLOCK_R=block_r,
+        BLOCK_H=block_h,
+        num_warps=4,
+    )
+    return inject_w
+
+
+def _aligned_hc_out_dim(n: int, *, hidden_size: int = 0) -> int:
+    """Align HC linear N dimension to SM100 TensorCore multiples (avoid cutlass_80)."""
+    if hidden_size < 1024:
+        return 16 if n < 16 else n
+    if 32 < n < 64:
+        return 64
+    return ((n + 15) // 16) * 16
 
 
 # ---------------------------------------------------------------------------
@@ -669,21 +739,61 @@ class Qwen4_5HyperConnection(nn.Module):
         else:
             self.register_parameter("block_inject_weight", None)
 
-        # Inference cache for fused [input_mix_weight_down; block_inject_weight]
+        # Inference caches for padded/fused SM100-aligned [input_mix_weight_down; block_inject_weight]
         self._fused_down_inject_key: Optional[Tuple[int, int, int, int]] = None
         self._fused_down_inject_weight: Optional[torch.Tensor] = None
+        self._padded_down_key: Optional[Tuple[int, int]] = None
+        self._padded_down_weight: Optional[torch.Tensor] = None
+        self._padded_inj_key: Optional[Tuple[int, int]] = None
+        self._padded_inj_weight: Optional[torch.Tensor] = None
 
     def _get_fused_down_inject_weight(self) -> torch.Tensor:
         w_down = self.input_mix_weight_down
         w_inj = self.block_inject_weight
         assert w_down is not None and w_inj is not None
         if torch.is_grad_enabled() and (w_down.requires_grad or w_inj.requires_grad):
-            return torch.cat([w_down, w_inj], dim=0)
+            w_cat = torch.cat([w_down, w_inj], dim=0)
+            pad_n = _aligned_hc_out_dim(int(w_cat.shape[0]), hidden_size=self.hidden_size) - int(w_cat.shape[0])
+            return F.pad(w_cat, (0, 0, 0, pad_n)) if pad_n > 0 else w_cat
         key = (w_down.data_ptr(), 0 if w_down.is_inference() else w_down._version, w_inj.data_ptr(), 0 if w_inj.is_inference() else w_inj._version)
         if self._fused_down_inject_key != key or self._fused_down_inject_weight is None:
-            self._fused_down_inject_weight = torch.cat([w_down, w_inj], dim=0).contiguous()
+            w_cat = torch.cat([w_down, w_inj], dim=0)
+            pad_n = _aligned_hc_out_dim(int(w_cat.shape[0]), hidden_size=self.hidden_size) - int(w_cat.shape[0])
+            self._fused_down_inject_weight = (
+                F.pad(w_cat, (0, 0, 0, pad_n)).contiguous() if pad_n > 0 else w_cat.contiguous()
+            )
             self._fused_down_inject_key = key
         return self._fused_down_inject_weight
+
+    def _get_padded_down_weight(self) -> torch.Tensor:
+        w_down = self.input_mix_weight_down
+        assert w_down is not None
+        out_n = int(w_down.shape[0])
+        pad_n = _aligned_hc_out_dim(out_n, hidden_size=self.hidden_size) - out_n
+        if pad_n <= 0:
+            return w_down
+        if torch.is_grad_enabled() and w_down.requires_grad:
+            return F.pad(w_down, (0, 0, 0, pad_n))
+        key = (w_down.data_ptr(), 0 if w_down.is_inference() else w_down._version)
+        if self._padded_down_key != key or self._padded_down_weight is None:
+            self._padded_down_weight = F.pad(w_down, (0, 0, 0, pad_n)).contiguous()
+            self._padded_down_key = key
+        return self._padded_down_weight
+
+    def _get_padded_inject_weight(self) -> torch.Tensor:
+        w_inj = self.block_inject_weight
+        assert w_inj is not None
+        out_n = int(w_inj.shape[0])
+        pad_n = _aligned_hc_out_dim(out_n, hidden_size=self.hidden_size) - out_n
+        if pad_n <= 0:
+            return w_inj
+        if torch.is_grad_enabled() and w_inj.requires_grad:
+            return F.pad(w_inj, (0, 0, 0, pad_n))
+        key = (w_inj.data_ptr(), 0 if w_inj.is_inference() else w_inj._version)
+        if self._padded_inj_key != key or self._padded_inj_weight is None:
+            self._padded_inj_weight = F.pad(w_inj, (0, 0, 0, pad_n)).contiguous()
+            self._padded_inj_key = key
+        return self._padded_inj_weight
 
     def _project_and_mix_from_normed(
         self,
@@ -691,7 +801,7 @@ class Qwen4_5HyperConnection(nn.Module):
         residual: torch.Tensor,
         prev_latent: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
-        # 1. Down & inject projections (fused single GEMM when both exist)
+        # 1. Down & inject projections (SM100-aligned fused GEMM when both exist)
         if self.emits_latent and self.use_combine:
             w_fused = self._get_fused_down_inject_weight()
             raw = F.linear(normed, w_fused)
@@ -702,15 +812,11 @@ class Qwen4_5HyperConnection(nn.Module):
             latent = None
             inject_w = None
             if self.emits_latent:
-                assert self.input_mix_weight_down is not None
-                raw_down = F.linear(normed, self.input_mix_weight_down)
+                raw_down = F.linear(normed, self._get_padded_down_weight())[..., : self.hc_lowrank]
                 latent = F.silu(raw_down.float() / self.hc_count).to(normed.dtype)
             if self.use_combine:
-                assert self.block_inject_weight is not None
-                raw_inj = F.linear(normed, self.block_inject_weight)
-                inject_w = (2.0 * torch.sigmoid(raw_inj.float() / self.hc_count)).to(
-                    normed.dtype
-                )
+                raw_inj = F.linear(normed, self._get_padded_inject_weight())
+                inject_w = hc_inject_epilogue_triton(raw_inj, self.hc_count)
 
         # 2. hc_prev_mix gate latent selection
         if not self.prev_mix or self.is_head:

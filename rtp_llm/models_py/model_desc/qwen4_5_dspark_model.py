@@ -415,6 +415,409 @@ if _HAS_TRITON:
         g = tl.load(gate_ptr + offs, mask=mask, other=0.0).to(tl.float32)
         tl.store(out_ptr + offs, (o * tl.sigmoid(g)).to(out_ptr.dtype.element_ty), mask=mask)
 
+    @triton.jit(do_not_specialize=["batch_size", "max_blocks", "num_blocks", "window_left"])
+    def _dflash2_paged_noncausal_mha_stage1_body_triton(
+        q_ptr,
+        kv_cache_ptr,
+        bt_ptr,
+        prefix_lens_ptr,
+        pos_ptr,
+        active_ptr,
+        k_scale_ptr,
+        v_scale_ptr,
+        ws_m_ptr,
+        ws_l_ptr,
+        ws_acc_ptr,
+        sm_scale,
+        batch_size: tl.int32,
+        query_len: tl.int32,
+        num_kv_heads: tl.int32,
+        gqa_groups: tl.int32,
+        num_g_tiles: tl.int32,
+        body_splits: tl.int32,
+        total_splits: tl.int32,
+        page_size: tl.int32,
+        head_dim: tl.int32,
+        max_blocks: tl.int32,
+        num_blocks: tl.int32,
+        window_left: tl.int32,
+        q_stride_tok: tl.int64,
+        q_stride_h: tl.int64,
+        q_stride_d: tl.int64,
+        bt_stride_req: tl.int64,
+        bt_stride_col: tl.int64,
+        kv_stride_page: tl.int64,
+        kv_stride_kv: tl.int64,
+        kv_stride_head: tl.int64,
+        kv_stride_pos: tl.int64,
+        kv_stride_dim: tl.int64,
+        ws_stride_bs: tl.int64,
+        ws_stride_h: tl.int64,
+        ws_stride_q: tl.int64,
+        acc_stride_bs: tl.int64,
+        acc_stride_h: tl.int64,
+        acc_stride_q: tl.int64,
+        acc_stride_d: tl.int64,
+        HAS_SWA: tl.constexpr,
+        IS_FP8_KV: tl.constexpr,
+        USE_FP8_DOT: tl.constexpr,
+        HEAD_DIM_MATCH: tl.constexpr,
+        ALL_M_VALID: tl.constexpr,
+        BLOCK_Q: tl.constexpr,
+        BLOCK_G: tl.constexpr,
+        BLOCK_M: tl.constexpr,
+        BLOCK_N: tl.constexpr,
+        BLOCK_D: tl.constexpr,
+    ):
+        """Pipelined zero-early-return Split-KV body over strictly full unmasked KV tiles."""
+        qg_tile_id = tl.program_id(0)
+        pid_bh = tl.program_id(1)
+        split_id = tl.program_id(2)
+        q_tile_id = qg_tile_id // num_g_tiles
+        g_tile_id = qg_tile_id % num_g_tiles
+        b = pid_bh // num_kv_heads
+        h_kv = pid_bh % num_kv_heads
+
+        offs_m = tl.arange(0, BLOCK_M)
+        q_idx = q_tile_id * BLOCK_Q + (offs_m // BLOCK_G)
+        g_idx = g_tile_id * BLOCK_G + (offs_m % BLOCK_G)
+        valid_m = (q_idx < query_len) & (g_idx < gqa_groups)
+        safe_q = tl.where(q_idx < query_len, q_idx, 0)
+        safe_g = tl.where(g_idx < gqa_groups, g_idx, 0)
+        tok_m = b * query_len + safe_q
+        hq_m = h_kv * gqa_groups + safe_g
+        offs_d = tl.arange(0, BLOCK_D)
+        mask_d = offs_d < head_dim
+
+        act = tl.load(active_ptr + b).to(tl.int32)
+        total_kv = tl.where(
+            act != 0,
+            tl.minimum(tl.load(prefix_lens_ptr + b).to(tl.int32) + query_len, max_blocks * page_size),
+            0,
+        )
+
+        q_ptrs = (
+            q_ptr
+            + tok_m[:, None].to(tl.int64) * q_stride_tok
+            + hq_m[:, None].to(tl.int64) * q_stride_h
+            + offs_d[None, :]
+        )
+        q_tile = (
+            tl.load(q_ptrs)
+            if (ALL_M_VALID and HEAD_DIM_MATCH)
+            else tl.load(q_ptrs, mask=valid_m[:, None] & mask_d[None, :], other=0.0)
+        )
+        if USE_FP8_DOT:
+            q_f32 = q_tile.to(tl.float32)
+            q_s = tl.maximum(tl.max(tl.abs(q_f32)) / 448.0, 1.0e-6)
+            q_dot = tl.clamp(q_f32 / q_s, -448.0, 448.0).to(tl.float8e4nv)
+            k_s = tl.load(k_scale_ptr).to(tl.float32)
+            v_s = tl.load(v_scale_ptr).to(tl.float32)
+            qk_scale = sm_scale * q_s * k_s
+        else:
+            q_dot = q_tile.to(tl.bfloat16) if q_tile.dtype == tl.float32 else q_tile
+            k_s = tl.load(k_scale_ptr).to(tl.float32) if IS_FP8_KV else 1.0
+            v_s = tl.load(v_scale_ptr).to(tl.float32) if IS_FP8_KV else 1.0
+            qk_scale = sm_scale * k_s
+
+        m_i = tl.full((BLOCK_M,), float("-inf"), dtype=tl.float32)
+        l_i = tl.zeros((BLOCK_M,), dtype=tl.float32)
+        acc = tl.zeros((BLOCK_M, BLOCK_D), dtype=tl.float32)
+        LOG_P_SCALE: tl.constexpr = 5.545177444479562
+        P_INV_SCALE: tl.constexpr = 1.0 / 256.0
+        offs_n = tl.arange(0, BLOCK_N)
+        max_phys_idx = tl.maximum(num_blocks - 1, 0)
+
+        last_tile = tl.cdiv(total_kv, BLOCK_N)
+        if HAS_SWA:
+            q_pos_m = tl.load(pos_ptr + tok_m, mask=(q_idx < query_len), other=0).to(tl.int32)
+            kv_start_m = tl.maximum(0, q_pos_m - window_left)
+            tile_kv_max_start = tl.max(tl.where(valid_m, kv_start_m, 0), axis=0)
+            body_first = tl.minimum(tl.cdiv(tile_kv_max_start, BLOCK_N), last_tile)
+        else:
+            body_first = 0
+        body_last = tl.minimum(last_tile, tl.maximum(body_first, total_kv // BLOCK_N))
+        body_tiles = tl.maximum(body_last - body_first, 0)
+        tiles_per_split = tl.cdiv(body_tiles, body_splits)
+        t_start = body_first + split_id * tiles_per_split
+        t_end = tl.minimum(body_last, t_start + tiles_per_split)
+
+        for tile_idx in range(t_start, t_end):
+            kv_base = tile_idx * BLOCK_N
+            page_idx = kv_base // page_size
+            slot_base = kv_base - page_idx * page_size
+            phys = tl.load(
+                bt_ptr + b.to(tl.int64) * bt_stride_req + page_idx.to(tl.int64) * bt_stride_col
+            ).to(tl.int32)
+            safe_phys = tl.maximum(0, tl.minimum(phys, max_phys_idx))
+            k_base = (
+                safe_phys.to(tl.int64) * kv_stride_page
+                + h_kv.to(tl.int64) * kv_stride_head
+                + (slot_base + offs_n[:, None]).to(tl.int64) * kv_stride_pos
+                + offs_d[None, :]
+            )
+            if HEAD_DIM_MATCH:
+                k_tile = tl.load(kv_cache_ptr + k_base, eviction_policy="evict_first")
+                v_tile = tl.load(kv_cache_ptr + k_base + kv_stride_kv, eviction_policy="evict_first")
+            else:
+                k_tile = tl.load(
+                    kv_cache_ptr + k_base, mask=mask_d[None, :], other=0.0, eviction_policy="evict_first"
+                )
+                v_tile = tl.load(
+                    kv_cache_ptr + k_base + kv_stride_kv,
+                    mask=mask_d[None, :],
+                    other=0.0,
+                    eviction_policy="evict_first",
+                )
+            if not USE_FP8_DOT and IS_FP8_KV:
+                k_tile = k_tile.to(q_dot.dtype)
+                v_tile = v_tile.to(q_dot.dtype)
+            qk = tl.dot(q_dot, tl.trans(k_tile)).to(tl.float32) * qk_scale
+            if not ALL_M_VALID:
+                qk = tl.where(valid_m[:, None], qk, float("-inf"))
+            m_ij = tl.maximum(m_i, tl.max(qk, axis=1))
+            if USE_FP8_DOT:
+                p = tl.exp(qk - m_ij[:, None] + LOG_P_SCALE)
+                if not ALL_M_VALID:
+                    p = tl.where(valid_m[:, None] & (m_ij[:, None] > float("-inf")), p, 0.0)
+                p_dot = p.to(tl.float8e4nv)
+                p_sum = tl.sum(p, axis=1) * P_INV_SCALE
+            else:
+                p = tl.exp(qk - m_ij[:, None])
+                if not ALL_M_VALID:
+                    p = tl.where(valid_m[:, None] & (m_ij[:, None] > float("-inf")), p, 0.0)
+                p_dot = p.to(v_tile.dtype)
+                p_sum = tl.sum(p, axis=1)
+            alpha = (
+                tl.exp(m_i - m_ij)
+                if ALL_M_VALID
+                else tl.where((m_i > float("-inf")) & (m_ij > float("-inf")), tl.exp(m_i - m_ij), 0.0)
+            )
+            l_i = l_i * alpha + p_sum
+            acc = acc * alpha[:, None]
+            acc = tl.dot(p_dot, v_tile, acc)
+            m_i = m_ij
+
+        if USE_FP8_DOT:
+            acc = acc * (v_s * P_INV_SCALE)
+        elif IS_FP8_KV:
+            acc = acc * v_s
+
+        bs_slot = b.to(tl.int64) * total_splits + split_id.to(tl.int64)
+        ml_off = (
+            bs_slot * ws_stride_bs
+            + hq_m.to(tl.int64) * ws_stride_h
+            + safe_q.to(tl.int64) * ws_stride_q
+        )
+        tl.store(ws_m_ptr + ml_off, m_i, mask=valid_m)
+        tl.store(ws_l_ptr + ml_off, l_i, mask=valid_m)
+        acc_off = (
+            bs_slot * acc_stride_bs
+            + hq_m[:, None].to(tl.int64) * acc_stride_h
+            + safe_q[:, None].to(tl.int64) * acc_stride_q
+            + offs_d[None, :]
+        )
+        tl.store(ws_acc_ptr + acc_off, acc, mask=(valid_m & (l_i > 0.0))[:, None] & mask_d[None, :])
+
+    @triton.jit(do_not_specialize=["batch_size", "max_blocks", "num_blocks", "window_left"])
+    def _dflash2_paged_noncausal_mha_stage1_edge_triton(
+        q_ptr,
+        kv_cache_ptr,
+        bt_ptr,
+        prefix_lens_ptr,
+        pos_ptr,
+        active_ptr,
+        k_scale_ptr,
+        v_scale_ptr,
+        ws_m_ptr,
+        ws_l_ptr,
+        ws_acc_ptr,
+        sm_scale,
+        batch_size: tl.int32,
+        query_len: tl.int32,
+        num_kv_heads: tl.int32,
+        gqa_groups: tl.int32,
+        num_g_tiles: tl.int32,
+        edge_split_id: tl.int32,
+        total_splits: tl.int32,
+        page_size: tl.int32,
+        head_dim: tl.int32,
+        max_blocks: tl.int32,
+        num_blocks: tl.int32,
+        window_left: tl.int32,
+        q_stride_tok: tl.int64,
+        q_stride_h: tl.int64,
+        q_stride_d: tl.int64,
+        bt_stride_req: tl.int64,
+        bt_stride_col: tl.int64,
+        kv_stride_page: tl.int64,
+        kv_stride_kv: tl.int64,
+        kv_stride_head: tl.int64,
+        kv_stride_pos: tl.int64,
+        kv_stride_dim: tl.int64,
+        ws_stride_bs: tl.int64,
+        ws_stride_h: tl.int64,
+        ws_stride_q: tl.int64,
+        acc_stride_bs: tl.int64,
+        acc_stride_h: tl.int64,
+        acc_stride_q: tl.int64,
+        acc_stride_d: tl.int64,
+        HAS_SWA: tl.constexpr,
+        IS_FP8_KV: tl.constexpr,
+        USE_FP8_DOT: tl.constexpr,
+        BLOCK_Q: tl.constexpr,
+        BLOCK_G: tl.constexpr,
+        BLOCK_M: tl.constexpr,
+        BLOCK_N: tl.constexpr,
+        BLOCK_D: tl.constexpr,
+    ):
+        """Edge Split-KV pass handling only SWA left boundary and partial tail KV tiles."""
+        qg_tile_id = tl.program_id(0)
+        pid_bh = tl.program_id(1)
+        q_tile_id = qg_tile_id // num_g_tiles
+        g_tile_id = qg_tile_id % num_g_tiles
+        b = pid_bh // num_kv_heads
+        h_kv = pid_bh % num_kv_heads
+
+        offs_m = tl.arange(0, BLOCK_M)
+        q_idx = q_tile_id * BLOCK_Q + (offs_m // BLOCK_G)
+        g_idx = g_tile_id * BLOCK_G + (offs_m % BLOCK_G)
+        valid_m = (q_idx < query_len) & (g_idx < gqa_groups)
+        safe_q = tl.where(q_idx < query_len, q_idx, 0)
+        safe_g = tl.where(g_idx < gqa_groups, g_idx, 0)
+        tok_m = b * query_len + safe_q
+        hq_m = h_kv * gqa_groups + safe_g
+        offs_d = tl.arange(0, BLOCK_D)
+        mask_d = offs_d < head_dim
+
+        act = tl.load(active_ptr + b).to(tl.int32)
+        total_kv = tl.where(
+            act != 0,
+            tl.minimum(tl.load(prefix_lens_ptr + b).to(tl.int32) + query_len, max_blocks * page_size),
+            0,
+        )
+
+        q_ptrs = (
+            q_ptr
+            + tok_m[:, None].to(tl.int64) * q_stride_tok
+            + hq_m[:, None].to(tl.int64) * q_stride_h
+            + offs_d[None, :]
+        )
+        q_tile = tl.load(q_ptrs, mask=valid_m[:, None] & mask_d[None, :], other=0.0)
+        if USE_FP8_DOT:
+            q_f32 = q_tile.to(tl.float32)
+            q_s = tl.maximum(tl.max(tl.abs(q_f32)) / 448.0, 1.0e-6)
+            q_dot = tl.clamp(q_f32 / q_s, -448.0, 448.0).to(tl.float8e4nv)
+            k_s = tl.load(k_scale_ptr).to(tl.float32)
+            v_s = tl.load(v_scale_ptr).to(tl.float32)
+            qk_scale = sm_scale * q_s * k_s
+        else:
+            q_dot = q_tile.to(tl.bfloat16) if q_tile.dtype == tl.float32 else q_tile
+            k_s = tl.load(k_scale_ptr).to(tl.float32) if IS_FP8_KV else 1.0
+            v_s = tl.load(v_scale_ptr).to(tl.float32) if IS_FP8_KV else 1.0
+            qk_scale = sm_scale * k_s
+
+        m_i = tl.full((BLOCK_M,), float("-inf"), dtype=tl.float32)
+        l_i = tl.zeros((BLOCK_M,), dtype=tl.float32)
+        acc = tl.zeros((BLOCK_M, BLOCK_D), dtype=tl.float32)
+        LOG_P_SCALE: tl.constexpr = 5.545177444479562
+        P_INV_SCALE: tl.constexpr = 1.0 / 256.0
+        offs_n = tl.arange(0, BLOCK_N)
+        last_tile = tl.cdiv(total_kv, BLOCK_N)
+        if HAS_SWA:
+            q_pos_m = tl.load(pos_ptr + tok_m, mask=(q_idx < query_len), other=0).to(tl.int32)
+            kv_start_m = tl.maximum(0, q_pos_m - window_left)
+            tile_kv_start = tl.minimum(
+                tl.min(tl.where(valid_m, kv_start_m, total_kv), axis=0), total_kv
+            )
+            tile_kv_max_start = tl.max(tl.where(valid_m, kv_start_m, 0), axis=0)
+            left_tile = tl.minimum(tile_kv_start // BLOCK_N, last_tile)
+            body_first = tl.minimum(tl.cdiv(tile_kv_max_start, BLOCK_N), last_tile)
+        else:
+            kv_start_m = tl.zeros((BLOCK_M,), dtype=tl.int32)
+            left_tile = 0
+            body_first = 0
+        body_last = tl.minimum(last_tile, tl.maximum(body_first, total_kv // BLOCK_N))
+
+        for pass_id in range(2):
+            r_start = left_tile if pass_id == 0 else body_last
+            r_end = body_first if pass_id == 0 else last_tile
+            for tile_idx in range(r_start, r_end):
+                kv_base = tile_idx * BLOCK_N
+                page_idx = kv_base // page_size
+                slot_base = kv_base - page_idx * page_size
+                in_bt = (page_idx >= 0) & (page_idx < max_blocks)
+                phys = tl.load(
+                    bt_ptr
+                    + b.to(tl.int64) * bt_stride_req
+                    + tl.where(in_bt, page_idx, 0).to(tl.int64) * bt_stride_col
+                ).to(tl.int32)
+                phys_ok = in_bt & (phys >= 0) & (phys < num_blocks)
+                safe_phys = tl.where(phys_ok, phys, 0)
+                kv_pos = kv_base + offs_n
+                valid_n = phys_ok & (kv_pos < total_kv)
+                k_base = (
+                    safe_phys.to(tl.int64) * kv_stride_page
+                    + h_kv.to(tl.int64) * kv_stride_head
+                    + (slot_base + offs_n[:, None]).to(tl.int64) * kv_stride_pos
+                    + offs_d[None, :]
+                )
+                mask_kd = valid_n[:, None] & mask_d[None, :]
+                k_tile = tl.load(kv_cache_ptr + k_base, mask=mask_kd, other=0.0)
+                v_tile = tl.load(kv_cache_ptr + k_base + kv_stride_kv, mask=mask_kd, other=0.0)
+                if not USE_FP8_DOT and IS_FP8_KV:
+                    k_tile = k_tile.to(q_dot.dtype)
+                    v_tile = v_tile.to(q_dot.dtype)
+                vmn = (
+                    valid_m[:, None] & valid_n[None, :] & (kv_pos[None, :] >= kv_start_m[:, None])
+                    if HAS_SWA
+                    else (valid_m[:, None] & valid_n[None, :])
+                )
+                qk = tl.where(vmn, tl.dot(q_dot, tl.trans(k_tile)).to(tl.float32) * qk_scale, float("-inf"))
+                m_ij = tl.maximum(m_i, tl.max(qk, axis=1))
+                if USE_FP8_DOT:
+                    p = tl.where(
+                        vmn & (m_ij[:, None] > float("-inf")),
+                        tl.exp(qk - m_ij[:, None] + LOG_P_SCALE),
+                        0.0,
+                    )
+                    p_dot = p.to(tl.float8e4nv)
+                    p_sum = tl.sum(p, axis=1) * P_INV_SCALE
+                else:
+                    p = tl.where(
+                        vmn & (m_ij[:, None] > float("-inf")),
+                        tl.exp(qk - m_ij[:, None]),
+                        0.0,
+                    )
+                    p_dot = p.to(v_tile.dtype)
+                    p_sum = tl.sum(p, axis=1)
+                alpha = tl.where((m_i > float("-inf")) & (m_ij > float("-inf")), tl.exp(m_i - m_ij), 0.0)
+                l_i = l_i * alpha + p_sum
+                acc = acc * alpha[:, None]
+                acc = tl.dot(p_dot, v_tile, acc)
+                m_i = m_ij
+
+        if USE_FP8_DOT:
+            acc = acc * (v_s * P_INV_SCALE)
+        elif IS_FP8_KV:
+            acc = acc * v_s
+
+        bs_slot = b.to(tl.int64) * total_splits + edge_split_id.to(tl.int64)
+        ml_off = (
+            bs_slot * ws_stride_bs
+            + hq_m.to(tl.int64) * ws_stride_h
+            + safe_q.to(tl.int64) * ws_stride_q
+        )
+        tl.store(ws_m_ptr + ml_off, m_i, mask=valid_m)
+        tl.store(ws_l_ptr + ml_off, l_i, mask=valid_m)
+        acc_off = (
+            bs_slot * acc_stride_bs
+            + hq_m[:, None].to(tl.int64) * acc_stride_h
+            + safe_q[:, None].to(tl.int64) * acc_stride_q
+            + offs_d[None, :]
+        )
+        tl.store(ws_acc_ptr + acc_off, acc, mask=(valid_m & (l_i > 0.0))[:, None] & mask_d[None, :])
+
     @triton.jit
     def _dflash2_paged_noncausal_mha_stage1_triton(
         q_ptr,
@@ -1330,7 +1733,7 @@ class CandidateSelector(nn.Module):
         )
 
 
-_DFLASH2_MAX_SPLITS = 16
+_DFLASH2_MAX_SPLITS = 33
 
 
 def _select_tagged_attn_inputs(
@@ -1489,8 +1892,11 @@ def _choose_dflash2_tile_and_splits(
     max_blocks: int,
     page_size: int,
     max_splits: int = _DFLASH2_MAX_SPLITS,
+    *,
+    has_swa: bool = False,
+    is_fp8_kv: bool = False,
 ) -> Tuple[int, int, int, int]:
-    """Select (BLOCK_Q, BLOCK_G, BLOCK_M, num_splits) saturating 148+ SMs."""
+    """Select (BLOCK_Q, BLOCK_G, BLOCK_M, num_splits) tuned for L20D/SM100 saturation."""
     block_g = min(8, max(1, int(triton.next_power_of_2(max(1, gqa_groups)))))
     if q_len <= 1:
         block_g = min(16, max(1, int(triton.next_power_of_2(max(1, gqa_groups)))))
@@ -1507,10 +1913,18 @@ def _choose_dflash2_tile_and_splits(
         num_splits = 1
     else:
         base_ctas = max(1, batch_size * num_kv_heads * num_q_tiles * num_g_tiles)
-        desired = (296 + base_ctas - 1) // base_ctas
-        raw = max(1, min(int(max_splits), int(desired), max(1, (max_possible_kv + 63) // 64)))
-        pow2 = 1 << (raw - 1).bit_length()
-        num_splits = min(int(max_splits), pow2)
+        if base_ctas >= 128:
+            target_splits = 4
+        elif base_ctas >= 64:
+            target_splits = 4 if is_fp8_kv else 8
+        elif base_ctas >= 32:
+            target_splits = 8
+        else:
+            desired = (296 + base_ctas - 1) // base_ctas
+            cap_ctx = 16 if has_swa else 32
+            raw = max(1, min(cap_ctx, int(desired), max(1, (max_possible_kv + 63) // 64)))
+            target_splits = 1 << (raw - 1).bit_length()
+        num_splits = min(int(max_splits), max(1, target_splits))
     return block_q, block_g, block_m, max(1, num_splits)
 
 
@@ -1973,82 +2387,211 @@ class _DFlash2PagedFMHADispatcher(FMHAImplBase):
 
                 block_n, page_aligned = _dflash2_choose_block_n(self._page_size)
                 use_fp8_dot = bool(is_fp8_kv and block_n >= 32 and torch.cuda.get_device_capability(q.device)[0] >= 8)
+                has_swa = sliding_window is not None and int(sliding_window) >= 0
                 if torch.cuda.is_current_stream_capturing() and self.split_kv_workspace.max_bs_slots > 0:
                     cap_splits = max(1, self.split_kv_workspace.max_bs_slots // batch_size)
                 else:
                     cap_splits = _DFLASH2_MAX_SPLITS
-                block_q, block_g, block_m, num_splits = _choose_dflash2_tile_and_splits(
+                use_body_edge = bool(page_aligned and cap_splits >= 2)
+                max_body_cap = (cap_splits - 1) if use_body_edge else cap_splits
+                block_q, block_g, block_m, body_splits = _choose_dflash2_tile_and_splits(
                     batch_size,
                     q_len,
                     kv_head_num,
                     gqa_groups,
                     max_blocks,
                     self._page_size,
-                    max_splits=cap_splits,
+                    max_splits=max_body_cap,
+                    has_swa=has_swa,
+                    is_fp8_kv=is_fp8_kv,
                 )
                 num_q_tiles = (q_len + block_q - 1) // block_q
                 num_g_tiles = (gqa_groups + block_g - 1) // block_g
+                num_splits = (body_splits + 1) if use_body_edge else body_splits
                 ws_m, ws_l, ws_acc = self.split_kv_workspace.ensure_capacity(
                     batch_size, head_num, q_len, num_splits, block_d, q.device
                 )
 
                 out = torch.empty_like(q)
-                has_swa = sliding_window is not None and int(sliding_window) >= 0
-                _dflash2_paged_noncausal_mha_stage1_triton[
-                    (num_q_tiles * num_g_tiles, batch_size * kv_head_num, num_splits)
-                ](
-                    q,
-                    kv_hnd,
-                    bt,
-                    pref_d,
-                    pos_d,
-                    act_d,
-                    ks_t,
-                    vs_t,
-                    ws_m,
-                    ws_l,
-                    ws_acc,
-                    sm_scale,
-                    batch_size,
-                    q_len,
-                    kv_head_num,
-                    gqa_groups,
-                    num_g_tiles,
-                    num_splits,
-                    self._page_size,
-                    head_dim,
-                    max_blocks,
-                    num_blocks,
-                    w_left,
-                    int(q.stride(0)),
-                    int(q.stride(1)),
-                    int(q.stride(2)),
-                    int(bt.stride(0)),
-                    int(bt.stride(1)),
-                    int(kv_hnd.stride(0)),
-                    int(kv_hnd.stride(1)),
-                    int(kv_hnd.stride(2)),
-                    int(kv_hnd.stride(3)),
-                    int(kv_hnd.stride(4)),
-                    int(ws_m.stride(0)),
-                    int(ws_m.stride(1)),
-                    int(ws_m.stride(2)),
-                    int(ws_acc.stride(0)),
-                    int(ws_acc.stride(1)),
-                    int(ws_acc.stride(2)),
-                    int(ws_acc.stride(3)),
-                    HAS_SWA=has_swa,
-                    PAGE_ALIGNED=page_aligned,
-                    IS_FP8_KV=is_fp8_kv,
-                    USE_FP8_DOT=use_fp8_dot,
-                    BLOCK_Q=block_q,
-                    BLOCK_G=block_g,
-                    BLOCK_M=block_m,
-                    BLOCK_N=block_n,
-                    BLOCK_D=block_d,
-                    num_warps=4,
-                    num_stages=2 if block_n >= 32 else 3,
-                )
+                base_ctas = max(1, batch_size * kv_head_num * num_q_tiles * num_g_tiles)
+                if use_fp8_dot:
+                    body_warps, body_stages = 8, 2
+                elif base_ctas >= 64 or base_ctas < 32:
+                    body_warps, body_stages = 4, 3 if block_n >= 32 else 3
+                else:
+                    body_warps, body_stages = 8, 2
+
+                if use_body_edge:
+                    all_m_valid = (q_len % block_q == 0) and (gqa_groups % block_g == 0)
+                    head_dim_match = head_dim == block_d
+                    _dflash2_paged_noncausal_mha_stage1_body_triton[
+                        (num_q_tiles * num_g_tiles, batch_size * kv_head_num, body_splits)
+                    ](
+                        q,
+                        kv_hnd,
+                        bt,
+                        pref_d,
+                        pos_d,
+                        act_d,
+                        ks_t,
+                        vs_t,
+                        ws_m,
+                        ws_l,
+                        ws_acc,
+                        sm_scale,
+                        batch_size,
+                        q_len,
+                        kv_head_num,
+                        gqa_groups,
+                        num_g_tiles,
+                        body_splits,
+                        num_splits,
+                        self._page_size,
+                        head_dim,
+                        max_blocks,
+                        num_blocks,
+                        w_left,
+                        int(q.stride(0)),
+                        int(q.stride(1)),
+                        int(q.stride(2)),
+                        int(bt.stride(0)),
+                        int(bt.stride(1)),
+                        int(kv_hnd.stride(0)),
+                        int(kv_hnd.stride(1)),
+                        int(kv_hnd.stride(2)),
+                        int(kv_hnd.stride(3)),
+                        int(kv_hnd.stride(4)),
+                        int(ws_m.stride(0)),
+                        int(ws_m.stride(1)),
+                        int(ws_m.stride(2)),
+                        int(ws_acc.stride(0)),
+                        int(ws_acc.stride(1)),
+                        int(ws_acc.stride(2)),
+                        int(ws_acc.stride(3)),
+                        HAS_SWA=has_swa,
+                        IS_FP8_KV=is_fp8_kv,
+                        USE_FP8_DOT=use_fp8_dot,
+                        HEAD_DIM_MATCH=head_dim_match,
+                        ALL_M_VALID=all_m_valid,
+                        BLOCK_Q=block_q,
+                        BLOCK_G=block_g,
+                        BLOCK_M=block_m,
+                        BLOCK_N=block_n,
+                        BLOCK_D=block_d,
+                        num_warps=body_warps,
+                        num_stages=body_stages,
+                    )
+                    _dflash2_paged_noncausal_mha_stage1_edge_triton[
+                        (num_q_tiles * num_g_tiles, batch_size * kv_head_num)
+                    ](
+                        q,
+                        kv_hnd,
+                        bt,
+                        pref_d,
+                        pos_d,
+                        act_d,
+                        ks_t,
+                        vs_t,
+                        ws_m,
+                        ws_l,
+                        ws_acc,
+                        sm_scale,
+                        batch_size,
+                        q_len,
+                        kv_head_num,
+                        gqa_groups,
+                        num_g_tiles,
+                        body_splits,
+                        num_splits,
+                        self._page_size,
+                        head_dim,
+                        max_blocks,
+                        num_blocks,
+                        w_left,
+                        int(q.stride(0)),
+                        int(q.stride(1)),
+                        int(q.stride(2)),
+                        int(bt.stride(0)),
+                        int(bt.stride(1)),
+                        int(kv_hnd.stride(0)),
+                        int(kv_hnd.stride(1)),
+                        int(kv_hnd.stride(2)),
+                        int(kv_hnd.stride(3)),
+                        int(kv_hnd.stride(4)),
+                        int(ws_m.stride(0)),
+                        int(ws_m.stride(1)),
+                        int(ws_m.stride(2)),
+                        int(ws_acc.stride(0)),
+                        int(ws_acc.stride(1)),
+                        int(ws_acc.stride(2)),
+                        int(ws_acc.stride(3)),
+                        HAS_SWA=has_swa,
+                        IS_FP8_KV=is_fp8_kv,
+                        USE_FP8_DOT=use_fp8_dot,
+                        BLOCK_Q=block_q,
+                        BLOCK_G=block_g,
+                        BLOCK_M=block_m,
+                        BLOCK_N=block_n,
+                        BLOCK_D=block_d,
+                        num_warps=4,
+                        num_stages=2,
+                    )
+                else:
+                    _dflash2_paged_noncausal_mha_stage1_triton[
+                        (num_q_tiles * num_g_tiles, batch_size * kv_head_num, num_splits)
+                    ](
+                        q,
+                        kv_hnd,
+                        bt,
+                        pref_d,
+                        pos_d,
+                        act_d,
+                        ks_t,
+                        vs_t,
+                        ws_m,
+                        ws_l,
+                        ws_acc,
+                        sm_scale,
+                        batch_size,
+                        q_len,
+                        kv_head_num,
+                        gqa_groups,
+                        num_g_tiles,
+                        num_splits,
+                        self._page_size,
+                        head_dim,
+                        max_blocks,
+                        num_blocks,
+                        w_left,
+                        int(q.stride(0)),
+                        int(q.stride(1)),
+                        int(q.stride(2)),
+                        int(bt.stride(0)),
+                        int(bt.stride(1)),
+                        int(kv_hnd.stride(0)),
+                        int(kv_hnd.stride(1)),
+                        int(kv_hnd.stride(2)),
+                        int(kv_hnd.stride(3)),
+                        int(kv_hnd.stride(4)),
+                        int(ws_m.stride(0)),
+                        int(ws_m.stride(1)),
+                        int(ws_m.stride(2)),
+                        int(ws_acc.stride(0)),
+                        int(ws_acc.stride(1)),
+                        int(ws_acc.stride(2)),
+                        int(ws_acc.stride(3)),
+                        HAS_SWA=has_swa,
+                        PAGE_ALIGNED=page_aligned,
+                        IS_FP8_KV=is_fp8_kv,
+                        USE_FP8_DOT=use_fp8_dot,
+                        BLOCK_Q=block_q,
+                        BLOCK_G=block_g,
+                        BLOCK_M=block_m,
+                        BLOCK_N=block_n,
+                        BLOCK_D=block_d,
+                        num_warps=4,
+                        num_stages=2 if block_n >= 32 else 3,
+                    )
 
                 has_gate = output_gate is not None
                 gate_arg = output_gate.view(total_tokens, head_num, head_dim) if has_gate else out
@@ -2807,8 +3350,8 @@ class Qwen4_5DSparkModel(DSparkProposerMixin, GptModelBase):
         sp_rank: Optional[int] = None,
         sp_group: Any = None,
         dp_attn: Optional[bool] = None,
-        dflash_kv_dtype: str = "bf16",
-        dflash_attn_backend: str = "auto",
+        dflash_kv_dtype: Optional[str] = None,
+        dflash_attn_backend: Optional[str] = None,
         all_to_all_comm: Any = None,
         dp_equal_tokens: Optional[bool] = None,
         use_symm_p2p_combine: Optional[bool] = None,
@@ -2875,8 +3418,23 @@ class Qwen4_5DSparkModel(DSparkProposerMixin, GptModelBase):
         self.sp_rank = topo.sp_rank
         self.sp_group = topo.sp_group
         self.dp_attn = topo.dp_attn
-        self.dflash_kv_dtype = str(dflash_kv_dtype or "bf16").strip().lower()
-        self.dflash_attn_backend = str(dflash_attn_backend or "auto").strip().lower()
+        eff_df_kv = (
+            dflash_kv_dtype
+            if dflash_kv_dtype is not None
+            else os.environ.get("QWEN4_5_DFLASH_KV_DTYPE", "bf16")
+        )
+        eff_df_backend = (
+            dflash_attn_backend
+            if dflash_attn_backend is not None
+            else os.environ.get("QWEN4_5_DFLASH_ATTN_BACKEND", "auto")
+        )
+        self.dflash_kv_dtype = str(eff_df_kv or "bf16").strip().lower()
+        self.dflash_attn_backend = str(eff_df_backend or "auto").strip().lower()
+        if self.dflash_attn_backend not in ("auto", "flashinfer", "triton"):
+            raise ValueError(
+                f"Unsupported dflash_attn_backend={self.dflash_attn_backend!r}; "
+                "expected one of ('auto', 'flashinfer', 'triton')"
+            )
         tp_rank = self.tp_rank
         if self.dflash_kv_dtype.startswith("fp8"):
             fp8_dt = getattr(torch, "float8_e4m3fn", None)
@@ -3047,10 +3605,14 @@ class Qwen4_5DSparkModel(DSparkProposerMixin, GptModelBase):
             hidden_dim=spec.hidden_size,
         )
         local_num_heads = self.layers[0].self_attn.num_heads if self.layers else (spec.num_attention_heads // self.tp_size)
-        init_batch_cap = max(8, min(32 if local_num_heads > 16 else 64, int(max_generate_batch_size or 16)))
-        # Flat workspace keeps max_bs_slots = max(512, max_batch * 8) (~32 MiB at tp4, ~128 MiB at dp4)
+        init_batch_cap = max(
+            8,
+            min(64 if local_num_heads > 16 else 128, int(max_generate_batch_size or 16)),
+        )
+        init_slots = max(1024 if local_num_heads <= 16 else 512, init_batch_cap * 8)
+        # Flat workspace reserves up to 1024 slots at tp4 (~67 MiB) so B=1..128 runs CG-safe.
         self._mha_workspace = _DFlash2SplitKVWorkspace(
-            max_batch=max(init_batch_cap, 64),
+            max_batch=max(1, init_slots // 8),
             num_heads=local_num_heads,
             query_len=max(1, int(spec.query_width)),
             max_splits=8,
@@ -3112,6 +3674,12 @@ class Qwen4_5DSparkModel(DSparkProposerMixin, GptModelBase):
                 transpose_mxfp4=transpose_mxfp4,
                 dense_linear_mode=eff_mode,
             )
+        if (
+            self.all_to_all_comm is not None
+            and not torch.cuda.is_current_stream_capturing()
+            and hasattr(self.all_to_all_comm, "_ensure_tbo_resources")
+        ):
+            self.all_to_all_comm._ensure_tbo_resources()
 
     def cuda_graph_input_hidden_size(self) -> int:
         return int(self._dspark_aux_feature_dim)
@@ -3128,9 +3696,7 @@ class Qwen4_5DSparkModel(DSparkProposerMixin, GptModelBase):
                 and dist.is_available()
                 and dist.is_initialized()
             ):
-                gathered = [torch.empty_like(emb) for _ in range(self.tp_size)]
-                dist.all_gather(gathered, emb.contiguous(), group=self.tp_group)
-                emb = torch.cat(gathered, dim=-1)
+                emb = self._tp_all_gather_lastdim(emb)
         if self.input_embedding_scale != 1.0:
             emb = emb * self.input_embedding_scale
         return emb
@@ -3377,6 +3943,13 @@ class Qwen4_5DSparkModel(DSparkProposerMixin, GptModelBase):
             return self._fp8_lm_head(x_in).float()
         return F.linear(x_in, self.lm_head_weight).float()
 
+    def _tp_all_gather_lastdim(self, x: torch.Tensor) -> torch.Tensor:
+        if self.fast_all_reduce is not None and self.fast_all_reduce.group is self.tp_group:
+            return self.fast_all_reduce.all_gather(x, dim=-1)
+        gathered = [torch.empty_like(x) for _ in range(self.tp_size)]
+        dist.all_gather(gathered, x.contiguous(), group=self.tp_group)
+        return torch.cat(gathered, dim=-1)
+
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         logits_local = self._linear_lm_head_local(hidden_states)
         if (
@@ -3386,10 +3959,11 @@ class Qwen4_5DSparkModel(DSparkProposerMixin, GptModelBase):
             and dist.is_available()
             and dist.is_initialized()
         ):
-            gathered = [torch.empty_like(logits_local) for _ in range(self.tp_size)]
-            dist.all_gather(gathered, logits_local.contiguous(), group=self.tp_group)
-            logits_full = torch.cat(gathered, dim=-1)
-            return logits_full[:, : int(self.spec.vocab_size)].contiguous()
+            logits_full = self._tp_all_gather_lastdim(logits_local)
+            vsz = int(self.spec.vocab_size)
+            if logits_full.shape[-1] == vsz and logits_full.is_contiguous():
+                return logits_full
+            return logits_full[:, :vsz].contiguous()
         return logits_local[:, : int(self.spec.vocab_size)]
 
     def vocab_parallel_topk(
@@ -3414,12 +3988,8 @@ class Qwen4_5DSparkModel(DSparkProposerMixin, GptModelBase):
             and dist.is_available()
             and dist.is_initialized()
         ):
-            gathered_vals = [torch.empty_like(local_vals) for _ in range(self.tp_size)]
-            gathered_ids = [torch.empty_like(local_ids) for _ in range(self.tp_size)]
-            dist.all_gather(gathered_vals, local_vals.contiguous(), group=self.tp_group)
-            dist.all_gather(gathered_ids, local_ids.contiguous(), group=self.tp_group)
-            all_vals = torch.cat(gathered_vals, dim=-1)
-            all_ids = torch.cat(gathered_ids, dim=-1)
+            all_vals = self._tp_all_gather_lastdim(local_vals)
+            all_ids = self._tp_all_gather_lastdim(local_ids)
             top_vals, top_pos = torch.topk(all_vals, top_k, dim=-1)
             top_ids = torch.gather(all_ids, -1, top_pos)
             return top_vals, top_ids

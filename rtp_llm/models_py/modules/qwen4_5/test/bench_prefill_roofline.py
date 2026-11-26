@@ -201,6 +201,9 @@ def build_prefill_model_and_kv(
     max_kv_tokens: int,
     tokens_per_block: int = 64,
     num_load_workers: int = 8,
+    ple_mode: str = "gpu_sharded",
+    dense_linear_mode: Optional[str] = None,
+    fp8_indexer_kv: Optional[bool] = None,
 ) -> Tuple[Any, LocalKVCache, Qwen4_5RTPModel]:
     """Load 5L full-width QSA checkpoint across 4 GPUs and wrap in Qwen4_5RTPModel."""
     cfg_raw = json.loads((Path(ckpt_path) / "config.json").read_text(encoding="utf-8"))
@@ -210,19 +213,29 @@ def build_prefill_model_and_kv(
         raise ValueError(f"Unsupported dtype_mode={dtype_mode!r}; expected {tuple(DTYPE_PRESETS)}")
 
     compute_mode = "fp8" if dm in ("fp8", "fp8_mxfp4", "w8a8_mxfp4", "fp8_fp4") else "bf16"
-    dense_linear_mode = "auto" if dm in ("fp8", "fp8_mxfp4", "w8a8_mxfp4", "fp8_fp4") else "bf16"
+    eff_dense_mode = (
+        str(dense_linear_mode).strip().lower()
+        if dense_linear_mode is not None and str(dense_linear_mode).strip() != ""
+        else ("auto" if dm in ("fp8", "fp8_mxfp4", "w8a8_mxfp4", "fp8_fp4") else "bf16")
+    )
+    kv_low = str(kv_dtype).strip().lower()
+    is_fp8_kv = kv_low.startswith("fp8") or kv_low == "f8_e4m3"
+    eff_fp8_idx = is_fp8_kv if fp8_indexer_kv is None else bool(fp8_indexer_kv)
+    eff_ple_mode = str(ple_mode).strip().lower()
+
+    model_parallel_mode = None if pg["parallel_mode"] == "tp1_ep1" else pg["parallel_mode"]
     causal_kwargs = _filter_supported_kwargs(
         Qwen4_5ForCausalLM.__init__,
         {
             "use_triton_mxfp4": (dm != "bf16"),
             "compute_mode": compute_mode,
-            "dense_linear_mode": dense_linear_mode,
-            "kv_dtype": kv_dtype.lower(),
-            "fp8_indexer_kv": kv_dtype.lower().startswith("fp8"),
+            "dense_linear_mode": eff_dense_mode,
+            "kv_dtype": "fp8_e4m3" if is_fp8_kv else "bf16",
+            "fp8_indexer_kv": eff_fp8_idx,
             "dtype": torch.bfloat16,
             "device": device,
             "init_mxfp4_weights": True,
-            "parallel_mode": pg["parallel_mode"],
+            "parallel_mode": model_parallel_mode,
             "dp_attn": bool(pg["dp_size"] > 1),
             "dp_size": pg["dp_size"],
             "dp_rank": pg["dp_rank"],
@@ -239,23 +252,30 @@ def build_prefill_model_and_kv(
         },
     )
     causal_lm = Qwen4_5ForCausalLM(arch, **causal_kwargs)
-    load_qwen4_5_from_checkpoint(
-        causal_lm,
-        ckpt_path,
-        ple_mode="gpu_sharded",
-        num_workers=num_load_workers,
+    load_kwargs = _filter_supported_kwargs(
+        load_qwen4_5_from_checkpoint,
+        {"ple_mode": eff_ple_mode, "num_workers": num_load_workers},
     )
+    load_qwen4_5_from_checkpoint(causal_lm, ckpt_path, **load_kwargs)
     prep_kwargs = _filter_supported_kwargs(
         causal_lm.prepare_weights,
-        {"dense_linear_mode": dense_linear_mode},
+        {"dense_linear_mode": eff_dense_mode},
     )
     causal_lm.prepare_weights(**prep_kwargs)
 
-    plan_kwargs = _filter_supported_kwargs(
-        build_qwen4_5_kv_cache_plan,
-        {"tp_size": pg["tp_size"], "parallel_mode": pg["parallel_mode"], "kv_dtype": kv_dtype},
-    )
-    plan = build_qwen4_5_kv_cache_plan(arch, **plan_kwargs)
+    plan_kv_dt = "F8_E4M3" if is_fp8_kv else "BF16"
+    try:
+        plan_kwargs = _filter_supported_kwargs(
+            build_qwen4_5_kv_cache_plan,
+            {"tp_size": pg["tp_size"], "parallel_mode": model_parallel_mode, "kv_dtype": plan_kv_dt},
+        )
+        plan = build_qwen4_5_kv_cache_plan(arch, **plan_kwargs)
+    except ValueError:
+        plan_kwargs = _filter_supported_kwargs(
+            build_qwen4_5_kv_cache_plan,
+            {"tp_size": pg["tp_size"], "parallel_mode": model_parallel_mode, "kv_dtype": "FP8" if is_fp8_kv else "BF16"},
+        )
+        plan = build_qwen4_5_kv_cache_plan(arch, **plan_kwargs)
 
     total_blocks = max(64, (max_kv_tokens + tokens_per_block - 1) // tokens_per_block + 16)
     num_blocks_per_tag: Dict[str, int] = {}
@@ -272,13 +292,40 @@ def build_prefill_model_and_kv(
         for reg in lp.opaque_regions:
             num_blocks_per_tag[reg.tag] = total_blocks
 
+    fp8_dt = getattr(torch, "float8_e4m3fn", None) if is_fp8_kv else None
+    if is_fp8_kv and fp8_dt is None:
+        raise RuntimeError("torch.float8_e4m3fn is required for fp8_e4m3 KV cache")
+    kv_extra = _filter_supported_kwargs(
+        LocalKVCache.__init__,
+        {
+            "kv_dtype": fp8_dt if is_fp8_kv else torch.bfloat16,
+            "allocate_fp8_kv_scale": is_fp8_kv,
+        },
+    )
     kv_cache = LocalKVCache(
         plan,
         tokens_per_block=tokens_per_block,
         num_blocks_per_tag=num_blocks_per_tag,
         device=device,
         dtype=torch.bfloat16,
+        **kv_extra,
     )
+    if is_fp8_kv:
+        assert fp8_dt is not None
+        for lp in plan.layers:
+            lid = lp.layer_idx
+            tag_map = kv_cache.layer_caches[lid]
+            if "full" in tag_map:
+                lc = tag_map["full"]
+                nb = int(lc.kv_cache_base.shape[0])
+                if lc.kv_cache_base.dtype != fp8_dt:
+                    lc.kv_cache_base = torch.zeros_like(lc.kv_cache_base, dtype=fp8_dt)
+                if lc.kv_scale_base is None:
+                    lc.kv_scale_base = torch.ones(
+                        (nb, 2, int(lp.num_kv_heads), int(tokens_per_block)),
+                        dtype=torch.float32,
+                        device=device,
+                    )
     mcfg = Qwen4_5ModelConfig(arch_config=arch)
     mcfg.max_seq_len = max(int(getattr(mcfg, "max_seq_len", 8192)), max_kv_tokens + 64)
     mcfg.is_mtp = False
@@ -288,7 +335,7 @@ def build_prefill_model_and_kv(
             "model_config": mcfg,
             "parallelism_config": pg.get("pc"),
             "kv_cache": kv_cache,
-            "parallel_mode": pg["parallel_mode"],
+            "parallel_mode": model_parallel_mode,
             "dp_size": pg["dp_size"],
             "dp_rank": pg["dp_rank"],
             "dp_group": pg["dp_group"],
@@ -780,20 +827,147 @@ def _cosine(a: torch.Tensor, b: torch.Tensor) -> float:
     return float(F.cosine_similarity(a.float().reshape(1, -1), b.float().reshape(1, -1)).item())
 
 
-def run_parity_suite(
+def _per_tok_cos_stats(cur: torch.Tensor, ref: torch.Tensor) -> Dict[str, Any]:
+    if cur.ndim != 2 or cur.shape != ref.shape or cur.shape[0] <= 0:
+        return {}
+    per_tok = F.cosine_similarity(cur.float(), ref.float(), dim=-1)
+    return {
+        "per_tok_cos_min": round(float(per_tok.min().item()), 6),
+        "per_tok_cos_p10": round(float(torch.quantile(per_tok, 0.10).item()), 6),
+        "per_tok_cos_median": round(float(per_tok.median().item()), 6),
+        "frac_ge_0999": round(float((per_tok >= 0.999).float().mean().item()), 4),
+    }
+
+
+@contextlib.contextmanager
+def _temporary_stabilized_router(
+    rtp_model: Qwen4_5RTPModel,
+    pg: Mapping[str, Any],
+    *,
+    base_bias: float = 4.0,
+    step: float = 0.25,
+):
+    """Temporarily set deterministic expert_bias margins across EP shards, restoring on exit."""
+    model = getattr(rtp_model, "model", None)
+    saved: List[Tuple[Any, torch.Tensor]] = []
+    try:
+        with torch.no_grad():
+            for layer in getattr(model, "layers", ()):
+                if not getattr(layer, "is_moe", False):
+                    continue
+                mlp = getattr(layer, "mlp", None)
+                eb = getattr(mlp, "expert_bias", None)
+                if mlp is None or eb is None:
+                    continue
+                saved.append((eb, eb.detach().clone()))
+                eb.zero_()
+                n_exp = int(getattr(mlp, "num_experts", eb.numel()))
+                top_k = max(1, min(int(getattr(mlp, "top_k", 10)), n_exp))
+                shard_cnt = 4 if (n_exp >= 4 and n_exp % 4 == 0) else max(1, int(pg.get("ep_size", 1)))
+                shard = max(1, n_exp // shard_cnt)
+                lid = int(getattr(layer, "layer_idx", 0))
+                used: set[int] = set()
+                for slot in range(top_k):
+                    r = slot % shard_cnt
+                    k_within = slot // shard_cnt
+                    e_id = r * shard + ((lid * 7 + k_within * 13) % shard)
+                    while e_id in used:
+                        e_id = (e_id + 1) % n_exp
+                    used.add(e_id)
+                    eb[e_id] = float(base_bias) + float(step) * float(top_k - slot)
+        yield
+    finally:
+        with torch.no_grad():
+            for eb, orig in saved:
+                eb.copy_(orig)
+
+
+@contextlib.contextmanager
+def _temporary_mxfp4_ref_backend(rtp_model: Qwen4_5RTPModel):
+    """Temporarily switch all MoE layers on `rtp_model` to PyTorch MXFP4/FP32 ref backend."""
+    model = getattr(rtp_model, "model", None)
+    prev_env = os.environ.get("QWEN4_5_MXFP4_BACKEND")
+    saved_mlp: List[Tuple[Any, bool, Any, Any]] = []
+    try:
+        os.environ["QWEN4_5_MXFP4_BACKEND"] = "ref"
+        for layer in getattr(model, "layers", ()):
+            mlp = getattr(layer, "mlp", None)
+            if mlp is None:
+                continue
+            se = getattr(mlp, "shared_expert", None)
+            saved_mlp.append(
+                (
+                    mlp,
+                    bool(getattr(mlp, "use_triton_mxfp4", True)),
+                    se,
+                    getattr(se, "use_triton", None) if se is not None else None,
+                )
+            )
+            if hasattr(mlp, "use_triton_mxfp4"):
+                mlp.use_triton_mxfp4 = False
+            if se is not None and hasattr(se, "use_triton"):
+                se.use_triton = False
+        yield
+    finally:
+        if prev_env is None:
+            os.environ.pop("QWEN4_5_MXFP4_BACKEND", None)
+        else:
+            os.environ["QWEN4_5_MXFP4_BACKEND"] = prev_env
+        for mlp, orig_m, se, orig_se in saved_mlp:
+            if hasattr(mlp, "use_triton_mxfp4"):
+                mlp.use_triton_mxfp4 = orig_m
+            if se is not None and orig_se is not None:
+                se.use_triton = orig_se
+
+
+@contextlib.contextmanager
+def _capture_layer_mlp_hooks(
+    rtp_model: Qwen4_5RTPModel,
+    pg: Mapping[str, Any],
+    expected_tokens: int,
+):
+    """Capture `L{lid}:mlp_out` snapshots cleanly for Case 2 and detach handles in `finally`."""
+    layer_snaps: Dict[str, torch.Tensor] = {}
+    handles: List[Any] = []
+    model = getattr(rtp_model, "model", None)
+    sp_size = int(pg.get("sp_size", 1))
+    sp_group = pg.get("sp_group")
+    try:
+        for idx, layer in enumerate(getattr(model, "layers", ())):
+            mlp = getattr(layer, "mlp", None)
+            if mlp is None:
+                continue
+            lid = int(getattr(layer, "layer_idx", idx))
+
+            def _make_hook(layer_id: int):
+                def _hook(_mod: Any, _inp: Any, out: Any) -> None:
+                    t = out[0] if isinstance(out, tuple) else out
+                    if not isinstance(t, torch.Tensor):
+                        return
+                    if sp_size > 1 and sp_group is not None and int(t.shape[0]) < expected_tokens:
+                        chunks = [torch.empty_like(t) for _ in range(sp_size)]
+                        dist.all_gather(chunks, t.contiguous(), group=sp_group)
+                        t = torch.cat(chunks, dim=0)
+                    layer_snaps[f"L{layer_id}:mlp_out"] = t[:expected_tokens].detach().cpu()
+
+                return _hook
+
+            handles.append(mlp.register_forward_hook(_make_hook(lid)))
+        yield layer_snaps
+    finally:
+        for h in handles:
+            h.remove()
+
+
+def _run_parity_cases(
     arch: Any,
     kv_cache: LocalKVCache,
     rtp_model: Qwen4_5RTPModel,
     pg: Mapping[str, Any],
     *,
     device: torch.device,
-    save_ref_path: Optional[str] = None,
-    verify_ref_path: Optional[str] = None,
-    min_cos: float = 0.999,
 ) -> Dict[str, Any]:
-    """Run deterministic BF16/candidate parity & 64-token boundary snapshot suite."""
-    is_rank0 = not (dist.is_available() and dist.is_initialized() and dist.get_rank() != 0)
-    # Every DP rank must participate symmetrically in PLE/EP collectives even on B=1 parity checks.
+    """Execute deterministic 0%-2K, 64-tok boundary + 24 snaps, and 90%-hit 18K+2K passes."""
     local_b = 1
     tpb = kv_cache.tokens_per_block
 
@@ -816,17 +990,19 @@ def run_parity_suite(
     tok_64a = _make_deterministic_tokens([tpb], vocab_size=arch.vocab_size, seed=202, device=device)
     tok_64b = _make_deterministic_tokens([tpb], vocab_size=arch.vocab_size, seed=203, device=device)
     tbl_64 = build_block_tables_for_requests(kv_cache, [2 * tpb]) if local_b else {t: [] for t in kv_cache.group_tags()}
-    _run_prefill_pass(
-        rtp_model,
-        kv_cache,
-        tbl_64,
-        tok_64a if local_b else torch.empty((0,), dtype=torch.int64, device=device),
-        [tpb] if local_b else [],
-        [0] if local_b else [],
-        device=device,
-        compute_last_logits=False,
-    )
+    with _capture_layer_mlp_hooks(rtp_model, pg, tpb) as mlp_snaps:
+        _run_prefill_pass(
+            rtp_model,
+            kv_cache,
+            tbl_64,
+            tok_64a if local_b else torch.empty((0,), dtype=torch.int64, device=device),
+            [tpb] if local_b else [],
+            [0] if local_b else [],
+            device=device,
+            compute_last_logits=False,
+        )
     snap_64 = _extract_64tok_snapshots(kv_cache, tbl_64, pg) if local_b else {}
+    snap_64.update(mlp_snaps)
     h_64b, log_64b = _run_prefill_pass(
         rtp_model,
         kv_cache,
@@ -865,61 +1041,193 @@ def run_parity_suite(
         device=device,
     )
 
-    res: Dict[str, Any] = {"saved": None, "verified": None}
-    if save_ref_path and is_rank0 and local_b > 0:
-        payload = {
-            "h_0pct": h_0.detach().cpu(),
-            "logits_0pct": log_0.detach().cpu() if log_0 is not None else None,
-            "h_64b": h_64b.detach().cpu(),
-            "logits_64b": log_64b.detach().cpu() if log_64b is not None else None,
-            "snap_64": snap_64,
-            "h_90pct": h_90.detach().cpu(),
-            "logits_90pct": log_90.detach().cpu() if log_90 is not None else None,
-        }
-        p = Path(save_ref_path)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        torch.save(payload, p)
-        res["saved"] = str(p)
+    return {
+        "h_0pct": h_0.detach().cpu(),
+        "logits_0pct": log_0.detach().cpu() if log_0 is not None else None,
+        "h_64b": h_64b.detach().cpu(),
+        "logits_64b": log_64b.detach().cpu() if log_64b is not None else None,
+        "snap_64": snap_64,
+        "h_90pct": h_90.detach().cpu(),
+        "logits_90pct": log_90.detach().cpu() if log_90 is not None else None,
+    }
 
-    if verify_ref_path and is_rank0 and local_b > 0:
-        ref = torch.load(verify_ref_path, map_location="cpu", weights_only=False)
-        checks = {}
-        for name, cur_h, cur_l, r_h_key, r_l_key in (
-            ("prefill_0pct_2048", h_0, log_0, "h_0pct", "logits_0pct"),
-            ("prefill_64tok_cont", h_64b, log_64b, "h_64b", "logits_64b"),
-            ("prefill_90pct_18k_2k", h_90, log_90, "h_90pct", "logits_90pct"),
-        ):
-            rh = ref[r_h_key]
-            cos_h = _cosine(cur_h.cpu(), rh)
-            max_h = float((cur_h.cpu().float() - rh.float()).abs().max().item())
-            top1_ok = True
-            cos_l = None
-            if cur_l is not None and ref.get(r_l_key) is not None:
-                rl = ref[r_l_key]
-                cos_l = _cosine(cur_l.cpu(), rl)
-                top1_ok = int(cur_l.cpu().argmax(dim=-1).item()) == int(rl.argmax(dim=-1).item())
-            checks[name] = {
-                "hidden_cos": round(cos_h, 6),
-                "hidden_max_abs": round(max_h, 5),
-                "logits_cos": round(cos_l, 6) if cos_l is not None else None,
-                "top1_match": top1_ok,
-                "pass": cos_h >= min_cos and top1_ok,
+
+def _compare_parity_payload(
+    cur: Mapping[str, Any],
+    ref: Mapping[str, Any],
+    *,
+    min_cos: float,
+    kv_min_cos: Optional[float] = None,
+) -> Dict[str, Any]:
+    checks: Dict[str, Any] = {}
+    for name, c_h_key, c_l_key, r_h_key, r_l_key in (
+        ("prefill_0pct_2048", "h_0pct", "logits_0pct", "h_0pct", "logits_0pct"),
+        ("prefill_64tok_cont", "h_64b", "logits_64b", "h_64b", "logits_64b"),
+        ("prefill_90pct_18k_2k", "h_90pct", "logits_90pct", "h_90pct", "logits_90pct"),
+    ):
+        cur_h = cur[c_h_key]
+        rh = ref[r_h_key]
+        cos_h = _cosine(cur_h, rh)
+        max_h = float((cur_h.float() - rh.float()).abs().max().item())
+        top1_ok = True
+        cos_l = None
+        cur_l = cur.get(c_l_key)
+        rl = ref.get(r_l_key)
+        if cur_l is not None and rl is not None:
+            cos_l = _cosine(cur_l, rl)
+            top1_ok = int(cur_l.argmax(dim=-1).item()) == int(rl.argmax(dim=-1).item())
+        case_entry: Dict[str, Any] = {
+            "hidden_cos": round(cos_h, 6),
+            "hidden_max_abs": round(max_h, 5),
+            "logits_cos": round(cos_l, 6) if cos_l is not None else None,
+            "top1_match": top1_ok,
+            "pass": cos_h >= min_cos and top1_ok,
+        }
+        case_entry.update(_per_tok_cos_stats(cur_h, rh))
+        checks[name] = case_entry
+
+    snap_diffs: Dict[str, Any] = {}
+    ref_snaps = ref.get("snap_64", {})
+    for skey, cur_s in cur.get("snap_64", {}).items():
+        ref_s = ref_snaps.get(skey)
+        if ref_s is None or cur_s.shape != ref_s.shape:
+            continue
+        is_kv_buf = skey.endswith(":full") or skey.endswith(":indexer_state")
+        eff_thr = kv_min_cos if (kv_min_cos is not None and is_kv_buf) else min_cos
+        if skey.endswith(":indexer_kv") and cur_s.dtype == torch.uint8 and ref_s.dtype == torch.uint8:
+            scos = _cosine(cur_s.contiguous().view(torch.bfloat16), ref_s.contiguous().view(torch.bfloat16))
+            snap_diffs[skey] = {"cos": round(scos, 6), "threshold": eff_thr, "pass": scos >= eff_thr}
+        elif cur_s.dtype in (torch.int32, torch.int64, torch.uint8):
+            eq = bool(torch.equal(cur_s, ref_s))
+            snap_diffs[skey] = {"exact_equal": eq, "pass": eq}
+        else:
+            scos = _cosine(cur_s, ref_s)
+            snap_diffs[skey] = {"cos": round(scos, 6), "threshold": eff_thr, "pass": scos >= eff_thr}
+
+    all_ok = all(v["pass"] for v in checks.values()) and all(v["pass"] for v in snap_diffs.values())
+    return {
+        "all_pass": all_ok,
+        "min_cos": min_cos,
+        "kv_min_cos": kv_min_cos if kv_min_cos is not None else min_cos,
+        "num_snapshots": len(snap_diffs),
+        "cases": checks,
+        "snapshots": snap_diffs,
+    }
+
+
+def run_parity_suite(
+    arch: Any,
+    kv_cache: LocalKVCache,
+    rtp_model: Qwen4_5RTPModel,
+    pg: Mapping[str, Any],
+    *,
+    device: torch.device,
+    save_ref_path: Optional[str] = None,
+    verify_ref_path: Optional[str] = None,
+    min_cos: float = 0.999,
+    kv_min_cos: Optional[float] = None,
+    stabilize_router: bool = False,
+    verify_inproc_ref: bool = False,
+    strict_raw_parity: bool = False,
+) -> Dict[str, Any]:
+    """Run BF16/candidate parity with 24+ layer/KV snapshots, stabilized-router & in-proc ref gates."""
+    is_rank0 = not (dist.is_available() and dist.is_initialized() and dist.get_rank() != 0)
+    res: Dict[str, Any] = {
+        "saved": None,
+        "verified": None,
+        "stabilized_verified": None,
+        "inproc_ref_verified": None,
+        "raw_diagnostic": None,
+    }
+
+    cur_raw: Optional[Dict[str, Any]] = None
+    cur_stab: Optional[Dict[str, Any]] = None
+
+    if save_ref_path:
+        cur_raw = _run_parity_cases(arch, kv_cache, rtp_model, pg, device=device)
+        with _temporary_stabilized_router(rtp_model, pg):
+            cur_stab = _run_parity_cases(arch, kv_cache, rtp_model, pg, device=device)
+        if is_rank0:
+            payload = dict(cur_raw)
+            payload["stabilized"] = dict(cur_stab)
+            payload["is_stabilized_bundle"] = True
+            p = Path(save_ref_path)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            torch.save(payload, p)
+            res["saved"] = str(p)
+
+    if verify_ref_path or verify_inproc_ref:
+        ref = torch.load(verify_ref_path, map_location="cpu", weights_only=False) if verify_ref_path else None
+        raw_diag: Optional[Dict[str, Any]] = None
+        stab_cmp: Optional[Dict[str, Any]] = None
+        inproc_cmp: Optional[Dict[str, Any]] = None
+        has_stab_ref = False
+
+        if ref is not None:
+            if cur_raw is None:
+                cur_raw = _run_parity_cases(arch, kv_cache, rtp_model, pg, device=device)
+            if is_rank0 and "h_0pct" in ref:
+                raw_diag = _compare_parity_payload(cur_raw, ref, min_cos=min_cos, kv_min_cos=kv_min_cos)
+                res["raw_diagnostic"] = raw_diag
+
+            stab_ref: Optional[Mapping[str, Any]] = None
+            if isinstance(ref.get("stabilized"), Mapping):
+                stab_ref = ref["stabilized"]
+                has_stab_ref = True
+            elif stabilize_router or bool(ref.get("is_stabilized", False)):
+                stab_ref = ref
+                has_stab_ref = True
+
+            if stab_ref is not None:
+                if cur_stab is None:
+                    with _temporary_stabilized_router(rtp_model, pg):
+                        cur_stab = _run_parity_cases(arch, kv_cache, rtp_model, pg, device=device)
+                if is_rank0:
+                    stab_cmp = _compare_parity_payload(cur_stab, stab_ref, min_cos=min_cos, kv_min_cos=kv_min_cos)
+                    res["stabilized_verified"] = stab_cmp
+
+        need_inproc = bool(verify_inproc_ref) or (ref is not None and not has_stab_ref)
+        if need_inproc:
+            if ref is not None and not has_stab_ref:
+                res["legacy_raw_ref_fallback_inproc"] = True
+            with _temporary_stabilized_router(rtp_model, pg):
+                if cur_stab is None:
+                    cur_stab = _run_parity_cases(arch, kv_cache, rtp_model, pg, device=device)
+                with _temporary_mxfp4_ref_backend(rtp_model):
+                    inproc_ref = _run_parity_cases(arch, kv_cache, rtp_model, pg, device=device)
+            if is_rank0:
+                inproc_cmp = _compare_parity_payload(cur_stab, inproc_ref, min_cos=min_cos, kv_min_cos=kv_min_cos)
+                res["inproc_ref_verified"] = inproc_cmp
+
+        if is_rank0:
+            gate_checks: List[Tuple[str, Dict[str, Any]]] = []
+            if stab_cmp is not None:
+                gate_checks.append(("stabilized_ref", stab_cmp))
+            if inproc_cmp is not None:
+                gate_checks.append(("inproc_ref", inproc_cmp))
+            if strict_raw_parity and raw_diag is not None:
+                gate_checks.append(("raw_strict", raw_diag))
+            all_ok = bool(gate_checks) and all(c["all_pass"] for _, c in gate_checks)
+            summary: Dict[str, Any] = {
+                "all_pass": all_ok,
+                "min_cos": min_cos,
+                "kv_min_cos": kv_min_cos if kv_min_cos is not None else min_cos,
+                "active_gates": [k for k, _ in gate_checks],
+                "num_snapshots": max((c["num_snapshots"] for _, c in gate_checks), default=0),
             }
-        # Also verify 64-tok boundary snapshots
-        snap_diffs = {}
-        for skey, cur_s in snap_64.items():
-            ref_s = ref["snap_64"].get(skey)
-            if ref_s is not None and cur_s.shape == ref_s.shape:
-                if cur_s.dtype in (torch.int32, torch.int64, torch.uint8):
-                    eq = bool(torch.equal(cur_s, ref_s))
-                    snap_diffs[skey] = {"exact_equal": eq, "pass": eq}
-                else:
-                    scos = _cosine(cur_s, ref_s)
-                    snap_diffs[skey] = {"cos": round(scos, 6), "pass": scos >= min_cos}
-        all_ok = all(v["pass"] for v in checks.values()) and all(v["pass"] for v in snap_diffs.values())
-        res["verified"] = {"all_pass": all_ok, "min_cos": min_cos, "cases": checks, "snapshots": snap_diffs}
-        if not all_ok:
-            raise AssertionError(f"Parity gate FAILED: {json.dumps(res['verified'], indent=2)}")
+            primary = stab_cmp if stab_cmp is not None else inproc_cmp
+            if primary is not None:
+                summary["cases"] = primary["cases"]
+                summary["snapshots"] = primary["snapshots"]
+            res["verified"] = summary
+            if not all_ok:
+                fail_payload = {
+                    "summary": summary,
+                    "stabilized_verified": stab_cmp,
+                    "inproc_ref_verified": inproc_cmp,
+                    "raw_diagnostic": raw_diag,
+                }
+                raise AssertionError(f"Parity gate FAILED: {json.dumps(fail_payload, indent=2)}")
     return res
 
 
@@ -1259,6 +1567,270 @@ def run_prefill_90pct_sweep(
     return {"rows": rows, "kineto_90pct": kineto_90pct}
 
 
+def run_tbo_prefill_benchmark(
+    arch: Any,
+    rtp_model: Qwen4_5RTPModel,
+    pg: Mapping[str, Any],
+    hr: HardwareRoofline,
+    *,
+    dtype_mode: str,
+    kv_dtype: str,
+    seq_len: int = 2048,
+    global_batches: Sequence[int] = (8, 16),
+    warmup: int = 2,
+    iters: int = 6,
+    device: torch.device,
+    kineto_dir: Optional[Path] = None,
+    min_cos: float = 0.999,
+) -> Dict[str, Any]:
+    """Benchmark Qwen4_5Model Two-Batch Overlap (enable_tbo=False vs True) sharing loaded weights."""
+    is_rank0 = not (dist.is_available() and dist.is_initialized() and dist.get_rank() != 0)
+    core = getattr(rtp_model, "model", None)
+    if core is None or not hasattr(core, "forward_tbo"):
+        return {
+            "paged_runtime_tbo_supported": False,
+            "model_forward_tbo_supported": False,
+            "rows": [],
+        }
+
+    dp_size = max(1, int(pg.get("dp_size", 1)))
+    dp_rank = int(pg.get("dp_rank", 0))
+    rows: List[Dict[str, Any]] = []
+
+    def _reset_rt_state(st: Any) -> None:
+        if st is None:
+            return
+        st.seq_len = 0
+        for kv in getattr(st, "full_attn_kv", {}).values():
+            kv.seq_len = 0
+        for g in getattr(st, "gdn", {}).values():
+            if getattr(g, "ssm_state", None) is not None:
+                g.ssm_state.zero_()
+            if getattr(g, "conv_state", None) is not None:
+                g.conv_state.zero_()
+        for attr in ("k_sconv", "v_sconv", "attn_output_sconv", "ffn_output_sconv"):
+            for sc in getattr(st, attr, {}).values():
+                if getattr(sc, "conv_state", None) is not None:
+                    sc.conv_state.zero_()
+        for p in getattr(st, "ple", {}).values():
+            if getattr(p, "conv_state", None) is not None:
+                p.conv_state.zero_()
+            if getattr(p, "ngram_ctx", None) is not None:
+                p.ngram_ctx.zero_()
+        rk = getattr(st, "qsa_raw_keys", None)
+        if isinstance(rk, dict):
+            for lid in list(rk.keys()):
+                rk[lid] = rk[lid][:, :0]
+
+    # Stabilized-router numerical parity between TBO Off and TBO On before timing.
+    # Under W4A8, B=2 vs B=1 crosses MoE/Triton M-tiling boundaries (even TBO-off B=2[:1] vs B=1
+    # differs at ~0.992), so we verify BOTH active same-shape microbatch parity (tbo0 vs non_tbo_b1_0,
+    # tbo1 vs non_tbo_b1_1) AND full-batch B=2 parity under _temporary_mxfp4_ref_backend.
+    probe_seq = min(int(seq_len), 128)
+    probe_g = torch.Generator(device=device).manual_seed(9100 + dp_rank)
+    probe_ids = torch.randint(0, arch.vocab_size, (2, probe_seq), generator=probe_g, dtype=torch.int64, device=device)
+    has_state_api = hasattr(core, "create_runtime_state")
+    def _mk_state(bs: int):
+        return core.create_runtime_state(bs, probe_seq + 8, device=device, dtype=torch.bfloat16) if has_state_api else None
+    with _temporary_stabilized_router(rtp_model, pg):
+        with torch.no_grad():
+            st_p_off, st_p0, st_p1 = _mk_state(2), _mk_state(1), _mk_state(1)
+            st_s0, st_s1 = _mk_state(1), _mk_state(1)
+            h_off = core(probe_ids, state=st_p_off, enable_tbo=False)
+            h_s0 = core(probe_ids[:1], state=st_s0, enable_tbo=False)
+            h_s1 = core(probe_ids[1:], state=st_s1, enable_tbo=False)
+            if has_state_api:
+                h0_p, h1_p = core.forward_tbo(
+                    (probe_ids[:1], probe_ids[1:]),
+                    states=(st_p0, st_p1),
+                    equal_tokens=True,
+                )
+                h_on = torch.cat([h0_p, h1_p], dim=0)
+            else:
+                h_on = core(probe_ids, enable_tbo=True, tbo_equal_tokens=True)
+                h0_p, h1_p = h_on[:1], h_on[1:]
+            del st_p_off, st_p0, st_p1, st_s0, st_s1
+        with _temporary_mxfp4_ref_backend(rtp_model):
+            with torch.no_grad():
+                st_r_off, st_r0, st_r1 = _mk_state(2), _mk_state(1), _mk_state(1)
+                h_off_ref = core(probe_ids, state=st_r_off, enable_tbo=False)
+                if has_state_api:
+                    h0_r, h1_r = core.forward_tbo(
+                        (probe_ids[:1], probe_ids[1:]),
+                        states=(st_r0, st_r1),
+                        equal_tokens=True,
+                    )
+                    h_on_ref = torch.cat([h0_r, h1_r], dim=0)
+                else:
+                    h_on_ref = core(probe_ids, enable_tbo=True, tbo_equal_tokens=True)
+                del st_r_off, st_r0, st_r1
+    if is_rank0:
+        tbo_mb0_cos = _cosine(h0_p.detach().float().cpu(), h_s0.detach().float().cpu())
+        tbo_mb1_cos = _cosine(h1_p.detach().float().cpu(), h_s1.detach().float().cpu())
+        tbo_full_active_cos = _cosine(h_on.detach().float().cpu(), h_off.detach().float().cpu())
+        tbo_full_ref_cos = _cosine(h_on_ref.detach().float().cpu(), h_off_ref.detach().float().cpu())
+        tbo_cos = min(tbo_mb0_cos, tbo_mb1_cos, tbo_full_ref_cos)
+        print(
+            f"[tbo_parity] mb0_cos={tbo_mb0_cos:.6f} mb1_cos={tbo_mb1_cos:.6f} "
+            f"full_active_cos={tbo_full_active_cos:.6f} full_ref_cos={tbo_full_ref_cos:.6f} "
+            f"min_gate={tbo_cos:.6f}",
+            flush=True,
+        )
+    else:
+        tbo_cos = 1.0
+    if is_rank0 and tbo_cos < min_cos:
+        raise AssertionError(f"TBO parity FAILED: cos={tbo_cos:.6f} < {min_cos}")
+
+    valid_batches = [
+        b for b in global_batches
+        if b % dp_size == 0 and (b // dp_size) >= 2 and (b // dp_size) % 2 == 0
+    ]
+    for b_global in valid_batches:
+        local_b = b_global // dp_size
+        b0 = local_b // 2
+        g = torch.Generator(device=device).manual_seed(9200 + dp_rank + b_global)
+        ids = torch.randint(0, arch.vocab_size, (local_b, seq_len), generator=g, dtype=torch.int64, device=device)
+        mb0, mb1 = ids[:b0], ids[b0:]
+        st_off = core.create_runtime_state(local_b, seq_len + 8, device=device, dtype=torch.bfloat16) if has_state_api else None
+        st0 = core.create_runtime_state(b0, seq_len + 8, device=device, dtype=torch.bfloat16) if has_state_api else None
+        st1 = core.create_runtime_state(local_b - b0, seq_len + 8, device=device, dtype=torch.bfloat16) if has_state_api else None
+
+        def _run_tbo_off() -> torch.Tensor:
+            return core(ids, state=st_off, enable_tbo=False)
+
+        def _run_tbo_on() -> Tuple[torch.Tensor, torch.Tensor]:
+            if has_state_api:
+                return core.forward_tbo((mb0, mb1), states=(st0, st1), equal_tokens=True)
+            return core(ids, enable_tbo=True, tbo_equal_tokens=True)
+
+        try:
+            torch.cuda.reset_peak_memory_stats(device)
+            with torch.no_grad():
+                off_mean, off_p50 = _timed_step_ms(
+                    _run_tbo_off,
+                    device=device,
+                    warmup=warmup,
+                    iters=iters,
+                    pre_iter_fn=(lambda: _reset_rt_state(st_off)) if has_state_api else None,
+                )
+                on_mean, on_p50 = _timed_step_ms(
+                    _run_tbo_on,
+                    device=device,
+                    warmup=warmup,
+                    iters=iters,
+                    pre_iter_fn=(lambda: (_reset_rt_state(st0), _reset_rt_state(st1))) if has_state_api else None,
+                )
+            peak_gib = torch.cuda.max_memory_allocated(device) / (1024**3)
+            k_off: Dict[str, Any] = {}
+            k_on: Dict[str, Any] = {}
+            if kineto_dir is not None and b_global == valid_batches[-1]:
+                with torch.no_grad():
+                    def _k_off_fn():
+                        _reset_rt_state(st_off)
+                        return _run_tbo_off()
+
+                    def _k_on_fn():
+                        _reset_rt_state(st0)
+                        _reset_rt_state(st1)
+                        return _run_tbo_on()
+
+                    k_off = capture_prefill_kineto(
+                        _k_off_fn,
+                        trace_path=kineto_dir / f"prefill_tbo_off_{pg['parallel_mode']}_b{b_global}.json",
+                        tp_size=int(pg["tp_size"]),
+                        device=device,
+                        rtp_model=rtp_model,
+                    )
+                    k_on = capture_prefill_kineto(
+                        _k_on_fn,
+                        trace_path=kineto_dir / f"prefill_tbo_on_{pg['parallel_mode']}_b{b_global}.json",
+                        tp_size=int(pg["tp_size"]),
+                        device=device,
+                        rtp_model=rtp_model,
+                    )
+            op_off = {k: v["ms"] for k, v in k_off.get("buckets", {}).items()} if k_off else None
+            op_on = {k: v["ms"] for k, v in k_on.get("buckets", {}).items()} if k_on else None
+            wl_off = compute_qwen45_workload_metrics(
+                arch,
+                batch_size=b_global,
+                seq_len_per_step=seq_len,
+                avg_ctx=seq_len,
+                parallel_mode=pg["parallel_mode"],
+                dtype_mode=dtype_mode,
+                kv_dtype=kv_dtype,
+                world_size=hr.world_size,
+                is_prefill=True,
+                prefix_len=0,
+                roofline=hr,
+                elapsed_ms=off_mean,
+                op_times_ms=op_off,
+            ).to_dict()
+            wl_on = compute_qwen45_workload_metrics(
+                arch,
+                batch_size=b_global,
+                seq_len_per_step=seq_len,
+                avg_ctx=seq_len,
+                parallel_mode=pg["parallel_mode"],
+                dtype_mode=dtype_mode,
+                kv_dtype=kv_dtype,
+                world_size=hr.world_size,
+                is_prefill=True,
+                prefix_len=0,
+                roofline=hr,
+                elapsed_ms=on_mean,
+                op_times_ms=op_on,
+            ).to_dict()
+            tot_tok = b_global * seq_len
+            row: Dict[str, Any] = {
+                "batch_size": b_global,
+                "local_batch": local_b,
+                "seq_len": seq_len,
+                "total_tokens": tot_tok,
+                "tbo_off_mean_ms": round(off_mean, 3),
+                "tbo_off_p50_ms": round(off_p50, 3),
+                "tbo_off_tok_s": round(tot_tok / (off_mean * 1e-3), 2),
+                "tbo_on_mean_ms": round(on_mean, 3),
+                "tbo_on_p50_ms": round(on_p50, 3),
+                "tbo_on_tok_s": round(tot_tok / (on_mean * 1e-3), 2),
+                "speedup_mean": round(off_mean / max(on_mean, 1e-6), 4),
+                "speedup_p50": round(off_p50 / max(on_p50, 1e-6), 4),
+                "mfu_bf16_off_pct": wl_off.get("mfu_bf16_pct"),
+                "mfu_bf16_on_pct": wl_on.get("mfu_bf16_pct"),
+                "mbu_off_pct": wl_off.get("mbu_pct"),
+                "mbu_on_pct": wl_on.get("mbu_pct"),
+                "peak_alloc_gib": round(peak_gib, 2),
+                "workload_off": wl_off,
+                "workload_on": wl_on,
+            }
+            if k_off:
+                row["kineto_tbo_off"] = k_off
+            if k_on:
+                row["kineto_tbo_on"] = k_on
+        except RuntimeError as exc:
+            if "out of memory" not in str(exc).lower():
+                raise
+            torch.cuda.empty_cache()
+            row = {"batch_size": b_global, "oom": str(exc)}
+        finally:
+            del st_off, st0, st1
+            torch.cuda.empty_cache()
+        rows.append(row)
+        if is_rank0:
+            print(
+                f"[TBO B={b_global} T={seq_len}] "
+                f"off={row.get('tbo_off_mean_ms', 'OOM')}ms -> on={row.get('tbo_on_mean_ms', 'OOM')}ms "
+                f"({row.get('speedup_mean', '-')}x)",
+                flush=True,
+            )
+
+    return {
+        "paged_runtime_tbo_supported": False,
+        "model_forward_tbo_supported": True,
+        "tbo_stabilized_cos": round(tbo_cos, 6),
+        "rows": rows,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Main CLI
 # ---------------------------------------------------------------------------
@@ -1273,7 +1845,22 @@ def main() -> int:
     parser.add_argument("--ckpt-path", default=DEFAULT_CKPT_PATH)
     parser.add_argument("--parallel-mode", default="tp4_ep4", choices=tuple(PARALLEL_MODES))
     parser.add_argument("--dtype-mode", default="mxfp4", choices=tuple(DTYPE_PRESETS))
-    parser.add_argument("--kv-dtype", default="BF16", choices=("BF16", "FP8", "F8_E4M3", "bf16", "fp8_e4m3"))
+    parser.add_argument(
+        "--kv-dtype",
+        default="BF16",
+        choices=("BF16", "FP8", "F8_E4M3", "FP8_E4M3", "bf16", "fp8_e4m3", "fp8"),
+    )
+    parser.add_argument(
+        "--ple-mode",
+        default="gpu_sharded",
+        choices=("auto", "gpu_sharded", "cpu_uva", "shm", "mmap"),
+    )
+    parser.add_argument(
+        "--dense-linear-mode",
+        default="",
+        choices=("", "auto", "bf16", "scaled_mm", "fp8_mxfp4"),
+    )
+    parser.add_argument("--fp8-indexer-kv", default="auto", choices=("auto", "on", "off"))
     parser.add_argument("--roofline-json", default="/home/admin/lhc_qwen45_opt/logs/l20a_roofline.json")
     parser.add_argument("--calibrate-if-missing", action="store_true", default=True)
     parser.add_argument("--prompt-len-0pct", type=int, default=20480)
@@ -1285,11 +1872,20 @@ def main() -> int:
     parser.add_argument("--iters", type=int, default=6)
     parser.add_argument("--kineto-dir", default="/home/admin/lhc_qwen45_opt/traces")
     parser.add_argument("--save-ref", default="")
+    parser.add_argument("--save-stabilized-ref", default="")
     parser.add_argument("--verify-parity", default="")
+    parser.add_argument("--verify-stabilized-ref", default="")
+    parser.add_argument("--stabilize-router-parity", action="store_true", default=False)
+    parser.add_argument("--verify-inproc-ref", action="store_true", default=False)
+    parser.add_argument("--strict-raw-parity", action="store_true", default=False)
     parser.add_argument("--min-cos", type=float, default=0.999)
+    parser.add_argument("--kv-min-cos", type=float, default=None)
     parser.add_argument("--out-json", default="")
     parser.add_argument("--skip-0pct", action="store_true")
     parser.add_argument("--skip-90pct", action="store_true")
+    parser.add_argument("--benchmark-tbo", action="store_true", default=False)
+    parser.add_argument("--tbo-seq-len", type=int, default=2048)
+    parser.add_argument("--tbo-batches", default="8,16")
     args = parser.parse_args()
 
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
@@ -1318,7 +1914,14 @@ def main() -> int:
         max(budgets_0 or [20480]),
         max_90_local * (args.prefix_len_90pct + args.suffix_len_90pct),
     )
-    kv_dt = "FP8" if args.kv_dtype.lower().startswith("fp8") or args.kv_dtype.lower() == "f8_e4m3" else "BF16"
+    kv_low = str(args.kv_dtype).strip().lower()
+    is_fp8_kv = kv_low.startswith("fp8") or kv_low == "f8_e4m3"
+    kv_dt = "fp8_e4m3" if is_fp8_kv else "BF16"
+    fp8_idx_arg: Optional[bool] = None
+    if args.fp8_indexer_kv == "on":
+        fp8_idx_arg = True
+    elif args.fp8_indexer_kv == "off":
+        fp8_idx_arg = False
 
     arch, kv_cache, rtp_model = build_prefill_model_and_kv(
         args.ckpt_path,
@@ -1327,19 +1930,30 @@ def main() -> int:
         kv_dtype=kv_dt,
         device=device,
         max_kv_tokens=max_kv_tokens,
+        ple_mode=args.ple_mode,
+        dense_linear_mode=args.dense_linear_mode or None,
+        fp8_indexer_kv=fp8_idx_arg,
     )
 
+    save_ref = args.save_ref or args.save_stabilized_ref or None
+    verify_ref = args.verify_parity or args.verify_stabilized_ref or None
+    use_stab = bool(args.stabilize_router_parity or args.verify_stabilized_ref or args.save_stabilized_ref)
+
     parity_res: Dict[str, Any] = {}
-    if args.save_ref or args.verify_parity:
+    if save_ref or verify_ref or args.verify_inproc_ref:
         parity_res = run_parity_suite(
             arch,
             kv_cache,
             rtp_model,
             pg,
             device=device,
-            save_ref_path=args.save_ref or None,
-            verify_ref_path=args.verify_parity or None,
+            save_ref_path=save_ref,
+            verify_ref_path=verify_ref,
             min_cos=args.min_cos,
+            kv_min_cos=args.kv_min_cos,
+            stabilize_router=use_stab,
+            verify_inproc_ref=args.verify_inproc_ref,
+            strict_raw_parity=args.strict_raw_parity,
         )
 
     k_dir = Path(args.kineto_dir) if args.kineto_dir else None
@@ -1380,16 +1994,39 @@ def main() -> int:
             kineto_dir=k_dir,
         )
 
+    tbo_res: Dict[str, Any] = {}
+    tbo_batches = _parse_int_list(args.tbo_batches)
+    if args.benchmark_tbo and tbo_batches:
+        tbo_res = run_tbo_prefill_benchmark(
+            arch,
+            rtp_model,
+            pg,
+            hr,
+            dtype_mode=args.dtype_mode,
+            kv_dtype=kv_dt,
+            seq_len=args.tbo_seq_len,
+            global_batches=tbo_batches,
+            warmup=args.warmup,
+            iters=args.iters,
+            device=device,
+            kineto_dir=k_dir,
+            min_cos=args.min_cos,
+        )
+
     if rank == 0:
         report = {
             "parallel_mode": pg["parallel_mode"],
             "dtype_mode": args.dtype_mode,
             "kv_dtype": kv_dt,
+            "ple_mode": args.ple_mode,
+            "dense_linear_mode": args.dense_linear_mode or "default",
+            "fp8_indexer_kv": args.fp8_indexer_kv,
             "world_size": world_size,
             "hardware_roofline": hr.to_dict(),
             "parity": parity_res,
             "prefill_0pct": sweep_0,
             "prefill_90pct": sweep_90,
+            "tbo_probe": tbo_res,
         }
         if args.out_json:
             op = Path(args.out_json)

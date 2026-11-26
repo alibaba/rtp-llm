@@ -1031,7 +1031,11 @@ class Qwen4_5PLELayer(nn.Module):
         if ref_dtype not in (torch.float8_e4m3fn, torch.bfloat16, torch.float32):
             raise ValueError(f"Unsupported ngram_table dtype {ref_dtype}")
         for s in shards:
-            if s.shape != ref_shape or s.dtype != ref_dtype or s.device != ref_device:
+            if s.shape != ref_shape or s.dtype != ref_dtype:
+                raise ValueError("All ngram_table shards must share shape, dtype, and device")
+            if s.device != ref_device and not (
+                s.device.type == "cuda" and ref_device.type == "cuda"
+            ):
                 raise ValueError("All ngram_table shards must share shape, dtype, and device")
         eff_total_shards = len(shards) if total_shards is None else int(total_shards)
         if shard_offset < 0 or shard_offset + len(shards) > eff_total_shards:
@@ -1108,7 +1112,18 @@ class Qwen4_5PLELayer(nn.Module):
         self._weight_scale_cuda = self.weight_scale.to(device=target_device)
 
         table_device = shards[0].device
-        if table_device == target_device:
+        if table_device == target_device or (
+            table_device.type == "cuda"
+            and target_device.type == "cuda"
+            and all(
+                s.device == target_device
+                or (
+                    s.device.type == "cuda"
+                    and torch.cuda.can_device_access_peer(target_device, s.device)
+                )
+                for s in shards
+            )
+        ):
             if self._total_shards > len(shards):
                 ptrs = [0] * self._total_shards
                 for idx, s in enumerate(shards):

@@ -172,11 +172,15 @@ class LocalKVCache:
         num_blocks_per_tag: Optional[Dict[str, int]] = None,
         device: torch.device = torch.device("cpu"),
         dtype: torch.dtype = torch.bfloat16,
+        kv_dtype: Optional[torch.dtype] = None,
+        allocate_fp8_kv_scale: bool = False,
     ) -> None:
         self.plan = plan
         self.tokens_per_block = int(tokens_per_block)
         self.device = device
         self.dtype = dtype
+        self.kv_dtype = kv_dtype if kv_dtype is not None else dtype
+        self.allocate_fp8_kv_scale = bool(allocate_fp8_kv_scale)
         self.layer_caches: List[Dict[str, LocalLayerKVCache]] = [
             {} for _ in range(len(plan.layers))
         ]
@@ -207,10 +211,17 @@ class LocalKVCache:
                 nb = (num_blocks_per_tag or {}).get(FULL_ATTN_KV_TAG, default_blocks)
                 base = torch.zeros(
                     (nb, 2, self.tokens_per_block, lp.num_kv_heads, lp.head_dim),
-                    dtype=dtype,
+                    dtype=self.kv_dtype,
                     device=device,
                 )
-                self._add_cache(lid, FULL_ATTN_KV_TAG, base)
+                kv_scale_base = None
+                if self.kv_dtype == torch.float8_e4m3fn and self.allocate_fp8_kv_scale:
+                    kv_scale_base = torch.ones(
+                        (nb, 2, lp.num_kv_heads, self.tokens_per_block),
+                        dtype=torch.float32,
+                        device=device,
+                    )
+                self._add_cache(lid, FULL_ATTN_KV_TAG, base, kv_scale_base=kv_scale_base)
                 if lp.has_qsa_indexer_cache:
                     ratio = lp.indexer_compress_ratio
                     if self.tokens_per_block % ratio != 0:
@@ -268,12 +279,20 @@ class LocalKVCache:
         # Track allocated physical block IDs per request slot (block 0 reserved null)
         self._next_free_block: Dict[str, int] = {t: 1 for t in self._tags_present}
 
-    def _add_cache(self, layer_idx: int, tag: str, base: torch.Tensor) -> None:
+    def _add_cache(
+        self,
+        layer_idx: int,
+        tag: str,
+        base: torch.Tensor,
+        *,
+        kv_scale_base: Optional[torch.Tensor] = None,
+    ) -> None:
         self.layer_caches[layer_idx][tag] = LocalLayerKVCache(
             kv_cache_base=base,
             seq_size_per_block=self.tokens_per_block,
             layer_id=layer_idx,
             tag=tag,
+            kv_scale_base=kv_scale_base,
         )
         if tag not in self._tags_present:
             self._tags_present.append(tag)
@@ -578,6 +597,26 @@ def _check_phys_block(phys_id: int, pool_rows: int, tag: str, layer_idx: int) ->
     return phys_id
 
 
+def _reshape_paged_kv_cache(
+    paged_kv_cache: torch.Tensor,
+    num_kv_heads: int,
+    tokens_per_block: int,
+    head_dim: int,
+) -> torch.Tensor:
+    if paged_kv_cache.dim() != 2:
+        return paged_kv_cache
+    block_num = int(paged_kv_cache.shape[0])
+    expected_elems_per_block = 2 * num_kv_heads * tokens_per_block * head_dim
+    if int(paged_kv_cache.shape[1]) < expected_elems_per_block:
+        raise ValueError(
+            f"packed kv_cache_base has insufficient stride: "
+            f"got stride={paged_kv_cache.shape[1]} elems, need={expected_elems_per_block} elems"
+        )
+    return paged_kv_cache[:, :expected_elems_per_block].reshape(
+        block_num, 2, num_kv_heads, tokens_per_block, head_dim
+    )
+
+
 def _view_mha_kv_nhd(
     base: torch.Tensor,
     num_kv_heads: int,
@@ -639,6 +678,81 @@ def _view_opaque_row(
     return row_u8[:need_bytes].view(target_dtype).view(*target_shape)
 
 
+def _cast_for_kv_pool(t: torch.Tensor, pool_dtype: torch.dtype) -> torch.Tensor:
+    """Cast K/V tensor to KV pool dtype, saturating cleanly to E4M3 range to avoid NaNs."""
+    if t.dtype == pool_dtype:
+        return t
+    if pool_dtype == torch.float8_e4m3fn:
+        return t.clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
+    return t.to(pool_dtype)
+
+
+def _resolve_kv_scale_4d(
+    kv_scale: Optional[torch.Tensor],
+    num_blocks: int,
+    num_kv_heads: int,
+    tokens_per_block: int,
+) -> Optional[torch.Tensor]:
+    """View 4D HND or 2D packed FP8 KV scales as ``[N, 2, H_kv, B_tok]``."""
+    if kv_scale is None or kv_scale.dtype != torch.float32:
+        return None
+    if (
+        kv_scale.ndim == 2
+        and int(kv_scale.shape[0]) == num_blocks
+        and int(kv_scale.shape[1]) >= 2 * num_kv_heads * tokens_per_block
+        and int(kv_scale.stride(1)) == 1
+    ):
+        return torch.as_strided(
+            kv_scale,
+            (num_blocks, 2, num_kv_heads, tokens_per_block),
+            (int(kv_scale.stride(0)), num_kv_heads * tokens_per_block, tokens_per_block, 1),
+        )
+    if kv_scale.ndim == 4 and tuple(int(d) for d in kv_scale.shape) == (
+        num_blocks,
+        2,
+        num_kv_heads,
+        tokens_per_block,
+    ):
+        return kv_scale
+    return None
+
+
+def _dequantize_full_attn_kv_pages(
+    gathered_nhd: torch.Tensor,
+    page_ids: torch.Tensor,
+    kv_scale: Optional[torch.Tensor],
+    *,
+    num_blocks: int,
+    tokens_per_block: int,
+    num_kv_heads: int,
+    out_dtype: Optional[torch.dtype] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Split gathered NHD pages into K/V, dequantizing FP8 E4M3 pools when needed."""
+    k = gathered_nhd[..., 0, :, :, :]
+    v = gathered_nhd[..., 1, :, :, :]
+    if gathered_nhd.dtype != torch.float8_e4m3fn:
+        if out_dtype is not None and k.dtype != out_dtype:
+            return k.to(out_dtype), v.to(out_dtype)
+        return k, v
+    target_dtype = out_dtype or torch.bfloat16
+    if kv_scale is None:
+        return k.to(target_dtype), v.to(target_dtype)
+    if kv_scale.ndim == 1 and kv_scale.numel() >= 2:
+        k_out = (k.to(torch.float32) * kv_scale[0].to(torch.float32)).to(target_dtype)
+        v_out = (v.to(torch.float32) * kv_scale[1].to(torch.float32)).to(target_dtype)
+        return k_out, v_out
+    sc_4d = _resolve_kv_scale_4d(kv_scale, num_blocks, num_kv_heads, tokens_per_block)
+    if sc_4d is None:
+        return k.to(target_dtype), v.to(target_dtype)
+    sc_g = sc_4d.index_select(0, page_ids)
+    # Match batch prefix of gathered_nhd: [..., n_pages, 2, H_kv, B_tok] -> [..., n_pages, 2, B_tok, H_kv, 1]
+    batch_prefix = gathered_nhd.shape[:-4]
+    sc_nhd = sc_g.view(*batch_prefix, 2, num_kv_heads, tokens_per_block).transpose(-2, -1).unsqueeze(-1)
+    k_out = (k.to(torch.float32) * sc_nhd[..., 0, :, :, :]).to(target_dtype)
+    v_out = (v.to(torch.float32) * sc_nhd[..., 1, :, :, :]).to(target_dtype)
+    return k_out, v_out
+
+
 def _load_single_req_full_attn_kv(
     base: torch.Tensor,
     blocks: torch.Tensor,
@@ -648,6 +762,8 @@ def _load_single_req_full_attn_kv(
     num_kv_heads: Optional[int] = None,
     head_dim: Optional[int] = None,
     allow_zero_padded: bool = False,
+    kv_scale: Optional[torch.Tensor] = None,
+    out_dtype: Optional[torch.dtype] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Read [total_tokens, H_kv, D] K/V from MHA paged pool (NHD, HND, or 2D packed)."""
     if num_kv_heads is not None and head_dim is not None:
@@ -655,21 +771,35 @@ def _load_single_req_full_attn_kv(
     else:
         nhd = base
         num_kv_heads, head_dim = int(nhd.shape[3]), int(nhd.shape[4])
+    ret_dtype = (
+        out_dtype
+        if out_dtype is not None
+        else (torch.bfloat16 if nhd.dtype == torch.float8_e4m3fn else nhd.dtype)
+    )
     if total_tokens <= 0:
-        empty = torch.empty((0, num_kv_heads, head_dim), dtype=nhd.dtype, device=nhd.device)
+        empty = torch.empty((0, num_kv_heads, head_dim), dtype=ret_dtype, device=nhd.device)
         return empty, empty
     n_pages = (total_tokens + tokens_per_block - 1) // tokens_per_block
     page_ids = blocks[:n_pages].to(device=nhd.device, dtype=torch.long)
     if allow_zero_padded and (page_ids == 0).all().item():
-        z = torch.zeros((total_tokens, num_kv_heads, head_dim), dtype=nhd.dtype, device=nhd.device)
+        z = torch.zeros((total_tokens, num_kv_heads, head_dim), dtype=ret_dtype, device=nhd.device)
         return z, z.clone()
     if (page_ids <= 0).any().item() or (page_ids >= nhd.shape[0]).any().item():
         raise RuntimeError(
             f"Invalid FullAttn physical page ids {page_ids.tolist()} for pool={nhd.shape[0]}"
         )
     gathered = nhd.index_select(0, page_ids)  # [n_pages, 2, B_tok, H_kv, D]
-    k = gathered[:, 0].reshape(n_pages * tokens_per_block, num_kv_heads, head_dim)[:total_tokens]
-    v = gathered[:, 1].reshape(n_pages * tokens_per_block, num_kv_heads, head_dim)[:total_tokens]
+    k_blk, v_blk = _dequantize_full_attn_kv_pages(
+        gathered,
+        page_ids,
+        kv_scale,
+        num_blocks=int(nhd.shape[0]),
+        tokens_per_block=tokens_per_block,
+        num_kv_heads=num_kv_heads,
+        out_dtype=out_dtype,
+    )
+    k = k_blk.reshape(n_pages * tokens_per_block, num_kv_heads, head_dim)[:total_tokens]
+    v = v_blk.reshape(n_pages * tokens_per_block, num_kv_heads, head_dim)[:total_tokens]
     return k, v
 
 
@@ -682,11 +812,18 @@ def _load_batched_full_attn_kv(
     *,
     num_kv_heads: int,
     head_dim: int,
+    kv_scale: Optional[torch.Tensor] = None,
+    out_dtype: Optional[torch.dtype] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Vectorized [bsz, total_tokens, H_kv, D] gather from paged MHA pool."""
     nhd = _view_mha_kv_nhd(base, num_kv_heads, tokens_per_block, head_dim)
+    ret_dtype = (
+        out_dtype
+        if out_dtype is not None
+        else (torch.bfloat16 if nhd.dtype == torch.float8_e4m3fn else nhd.dtype)
+    )
     if bsz <= 0 or total_tokens <= 0:
-        empty = torch.empty((max(0, bsz), max(0, total_tokens), num_kv_heads, head_dim), dtype=nhd.dtype, device=nhd.device)
+        empty = torch.empty((max(0, bsz), max(0, total_tokens), num_kv_heads, head_dim), dtype=ret_dtype, device=nhd.device)
         return empty, empty
     n_pages = (total_tokens + tokens_per_block - 1) // tokens_per_block
     page_ids = bt_blocks[:bsz, :n_pages].reshape(-1).to(device=nhd.device, dtype=torch.long)
@@ -699,8 +836,17 @@ def _load_batched_full_attn_kv(
     gathered = nhd.index_select(0, page_ids).view(
         bsz, n_pages, 2, tokens_per_block, num_kv_heads, head_dim
     )
-    k = gathered[:, :, 0].reshape(bsz, n_pages * tokens_per_block, num_kv_heads, head_dim)[:, :total_tokens]
-    v = gathered[:, :, 1].reshape(bsz, n_pages * tokens_per_block, num_kv_heads, head_dim)[:, :total_tokens]
+    k_blk, v_blk = _dequantize_full_attn_kv_pages(
+        gathered,
+        page_ids,
+        kv_scale,
+        num_blocks=int(nhd.shape[0]),
+        tokens_per_block=tokens_per_block,
+        num_kv_heads=num_kv_heads,
+        out_dtype=out_dtype,
+    )
+    k = k_blk.reshape(bsz, n_pages * tokens_per_block, num_kv_heads, head_dim)[:, :total_tokens]
+    v = v_blk.reshape(bsz, n_pages * tokens_per_block, num_kv_heads, head_dim)[:, :total_tokens]
     return k, v
 
 
@@ -715,12 +861,16 @@ def _store_single_req_full_attn_kv(
     num_kv_heads: Optional[int] = None,
     head_dim: Optional[int] = None,
     allow_zero_padded: bool = False,
+    kv_scale: Optional[torch.Tensor] = None,
 ) -> None:
     """Write [T_new, H_kv, D] K/V starting at ``start_pos`` into paged pool."""
     if num_kv_heads is not None and head_dim is not None:
         nhd = _view_mha_kv_nhd(base, num_kv_heads, tokens_per_block, head_dim)
     else:
         nhd = base
+    num_blocks = int(nhd.shape[0])
+    h_kv = int(nhd.shape[3])
+    sc_4d = _resolve_kv_scale_4d(kv_scale, num_blocks, h_kv, tokens_per_block)
     t_new = int(k.shape[0])
     pos = start_pos
     written = 0
@@ -733,10 +883,12 @@ def _store_single_req_full_attn_kv(
             pos += take
             written += take
             continue
-        phys_id = _check_phys_block(raw_phys, int(nhd.shape[0]), FULL_ATTN_KV_TAG, -1)
+        phys_id = _check_phys_block(raw_phys, num_blocks, FULL_ATTN_KV_TAG, -1)
         take = min(tokens_per_block - in_page, t_new - written)
-        nhd[phys_id, 0, in_page : in_page + take].copy_(k[written : written + take])
-        nhd[phys_id, 1, in_page : in_page + take].copy_(v[written : written + take])
+        nhd[phys_id, 0, in_page : in_page + take].copy_(_cast_for_kv_pool(k[written : written + take], nhd.dtype))
+        nhd[phys_id, 1, in_page : in_page + take].copy_(_cast_for_kv_pool(v[written : written + take], nhd.dtype))
+        if sc_4d is not None:
+            sc_4d[phys_id, :, :, in_page : in_page + take].fill_(1.0)
         pos += take
         written += take
 
@@ -793,6 +945,7 @@ if _HAS_TRITON:
     @triton.jit
     def _store_decode_full_attn_kv_triton(
         pool_ptr,
+        scale_ptr,
         k_ptr,
         v_ptr,
         block_table_ptr,
@@ -802,6 +955,10 @@ if _HAS_TRITON:
         s_h: tl.int64,
         s_tok: tl.int64,
         s_d: tl.int64,
+        sc_sb: tl.int64,
+        sc_skv: tl.int64,
+        sc_sh: tl.int64,
+        sc_st: tl.int64,
         k_sb: tl.int64,
         k_sh: tl.int64,
         k_sd: tl.int64,
@@ -815,6 +972,8 @@ if _HAS_TRITON:
         num_blocks: tl.int32,
         head_dim: tl.int32,
         BLOCK_D: tl.constexpr,
+        HAS_SCALE: tl.constexpr,
+        IS_FP8_POOL: tl.constexpr,
     ):
         b = tl.program_id(0)
         h = tl.program_id(1)
@@ -846,8 +1005,15 @@ if _HAS_TRITON:
             + slot.to(tl.int64) * s_tok
             + offs_d * s_d
         )
-        tl.store(pool_ptr + dst_base, k_val, mask=mask_d)
-        tl.store(pool_ptr + dst_base + s_kv, v_val, mask=mask_d)
+        if IS_FP8_POOL:
+            k_val = tl.minimum(tl.maximum(k_val.to(tl.float32), -448.0), 448.0)
+            v_val = tl.minimum(tl.maximum(v_val.to(tl.float32), -448.0), 448.0)
+        tl.store(pool_ptr + dst_base, k_val.to(pool_ptr.dtype.element_ty), mask=mask_d)
+        tl.store(pool_ptr + dst_base + s_kv, v_val.to(pool_ptr.dtype.element_ty), mask=mask_d)
+        if HAS_SCALE:
+            sc_base = phys.to(tl.int64) * sc_sb + h.to(tl.int64) * sc_sh + slot.to(tl.int64) * sc_st
+            tl.store(scale_ptr + sc_base, 1.0)
+            tl.store(scale_ptr + sc_base + sc_skv, 1.0)
 
 
 if _HAS_TRITON:
@@ -855,6 +1021,7 @@ if _HAS_TRITON:
     @triton.jit
     def _store_ragged_full_attn_kv_triton(
         pool_ptr,
+        scale_ptr,
         k_ptr,
         v_ptr,
         block_table_ptr,
@@ -865,6 +1032,10 @@ if _HAS_TRITON:
         s_tok: tl.int64,
         s_h: tl.int64,
         s_d: tl.int64,
+        sc_sb: tl.int64,
+        sc_skv: tl.int64,
+        sc_sh: tl.int64,
+        sc_st: tl.int64,
         k_sn: tl.int64,
         k_sh: tl.int64,
         k_sd: tl.int64,
@@ -878,6 +1049,8 @@ if _HAS_TRITON:
         num_blocks: tl.int32,
         head_dim: tl.int32,
         BLOCK_D: tl.constexpr,
+        HAS_SCALE: tl.constexpr,
+        IS_FP8_POOL: tl.constexpr,
     ):
         tok = tl.program_id(0).to(tl.int64)
         h = tl.program_id(1).to(tl.int64)
@@ -902,12 +1075,20 @@ if _HAS_TRITON:
             + h * s_h
             + offs_d * s_d
         )
-        tl.store(pool_ptr + dst_base, k_val, mask=mask_d)
-        tl.store(pool_ptr + dst_base + s_kv, v_val, mask=mask_d)
+        if IS_FP8_POOL:
+            k_val = tl.minimum(tl.maximum(k_val.to(tl.float32), -448.0), 448.0)
+            v_val = tl.minimum(tl.maximum(v_val.to(tl.float32), -448.0), 448.0)
+        tl.store(pool_ptr + dst_base, k_val.to(pool_ptr.dtype.element_ty), mask=mask_d)
+        tl.store(pool_ptr + dst_base + s_kv, v_val.to(pool_ptr.dtype.element_ty), mask=mask_d)
+        if HAS_SCALE:
+            sc_base = phys.to(tl.int64) * sc_sb + h * sc_sh + slot.to(tl.int64) * sc_st
+            tl.store(scale_ptr + sc_base, 1.0)
+            tl.store(scale_ptr + sc_base + sc_skv, 1.0)
 
     @triton.jit
     def _store_verify_full_attn_kv_triton(
         pool_ptr,
+        scale_ptr,
         k_ptr,
         v_ptr,
         block_table_ptr,
@@ -917,6 +1098,10 @@ if _HAS_TRITON:
         s_h: tl.int64,
         s_tok: tl.int64,
         s_d: tl.int64,
+        sc_sb: tl.int64,
+        sc_skv: tl.int64,
+        sc_sh: tl.int64,
+        sc_st: tl.int64,
         k_sb: tl.int64,
         k_sv: tl.int64,
         k_sh: tl.int64,
@@ -932,6 +1117,8 @@ if _HAS_TRITON:
         num_blocks: tl.int32,
         head_dim: tl.int32,
         BLOCK_D: tl.constexpr,
+        HAS_SCALE: tl.constexpr,
+        IS_FP8_POOL: tl.constexpr,
     ):
         b = tl.program_id(0).to(tl.int64)
         v_step = tl.program_id(1).to(tl.int64)
@@ -960,8 +1147,15 @@ if _HAS_TRITON:
             + slot.to(tl.int64) * s_tok
             + offs_d * s_d
         )
-        tl.store(pool_ptr + dst_base, k_val, mask=mask_d)
-        tl.store(pool_ptr + dst_base + s_kv, v_val, mask=mask_d)
+        if IS_FP8_POOL:
+            k_val = tl.minimum(tl.maximum(k_val.to(tl.float32), -448.0), 448.0)
+            v_val = tl.minimum(tl.maximum(v_val.to(tl.float32), -448.0), 448.0)
+        tl.store(pool_ptr + dst_base, k_val.to(pool_ptr.dtype.element_ty), mask=mask_d)
+        tl.store(pool_ptr + dst_base + s_kv, v_val.to(pool_ptr.dtype.element_ty), mask=mask_d)
+        if HAS_SCALE:
+            sc_base = phys.to(tl.int64) * sc_sb + h * sc_sh + slot.to(tl.int64) * sc_st
+            tl.store(scale_ptr + sc_base, 1.0)
+            tl.store(scale_ptr + sc_base + sc_skv, 1.0)
 
     @triton.jit
     def _read_opaque_rows_triton(
@@ -1049,6 +1243,8 @@ if _HAS_TRITON:
         phys = tl.where(do_commit & (raw_phys > 0) & (raw_phys < num_blocks), raw_phys, 0)
         if blk == 0:
             tl.store(phys_ids_ptr + row, phys)
+        if phys <= 0:
+            return
 
         offs = blk * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
         mask = offs < n_elems
@@ -1057,12 +1253,13 @@ if _HAS_TRITON:
             mask=mask,
         )
         tl.store(commit_ptr + row * commit_sb + offs, c_val, mask=mask)
-        safe_phys = tl.minimum(tl.maximum(phys, 0), num_blocks - 1).to(tl.int64)
-        u_val = tl.load(base_ptr + safe_phys * base_sb + offs, mask=mask)
+        u_val = tl.load(base_ptr + phys.to(tl.int64) * base_sb + offs, mask=mask)
         tl.store(undo_ptr + row * undo_sb + offs, u_val, mask=mask)
 
     @triton.jit
     def _prepare_opaque_tx_commit_batched_triton(
+        tile_e_ptr,
+        tile_blk_ptr,
         ptrs_bt_ptr,
         ptrs_steps_ptr,
         ptrs_base_ptr,
@@ -1086,13 +1283,12 @@ if _HAS_TRITON:
         verify_w: tl.int32,
         BLOCK_SIZE: tl.constexpr,
     ):
-        """Prepare commit & undo snapshots across all opaque TxStage entries in 1 kernel."""
-        e = tl.program_id(0).to(tl.int64)
+        """Prepare commit & undo snapshots across compact active tiles in 1 kernel."""
+        tile_idx = tl.program_id(0).to(tl.int64)
         row = tl.program_id(1).to(tl.int64)
-        blk = tl.program_id(2).to(tl.int64)
+        e = tl.load(tile_e_ptr + tile_idx).to(tl.int64)
+        blk = tl.load(tile_blk_ptr + tile_idx).to(tl.int64)
         n_elems = tl.load(n_elems_ptr + e).to(tl.int32)
-        if blk * BLOCK_SIZE >= n_elems:
-            return
         tpb = tl.load(tpb_ptr + e).to(tl.int32)
         max_blocks = tl.load(max_blocks_ptr + e).to(tl.int32)
         num_blocks = tl.load(num_blocks_ptr + e).to(tl.int32)
@@ -1127,6 +1323,8 @@ if _HAS_TRITON:
         if blk == 0:
             phys_ids_ptr = tl.load(ptrs_phys_ptr + e).to(tl.pointer_type(tl.int32))
             tl.store(phys_ids_ptr + row, phys)
+        if phys <= 0:
+            return
 
         offs = blk * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
         mask = offs < n_elems
@@ -1145,12 +1343,13 @@ if _HAS_TRITON:
             mask=mask,
         )
         tl.store(commit_ptr + row * commit_sb + offs, c_val, mask=mask)
-        safe_phys = tl.minimum(tl.maximum(phys, 0), num_blocks - 1).to(tl.int64)
-        u_val = tl.load(base_ptr + safe_phys * base_sb + offs, mask=mask)
+        u_val = tl.load(base_ptr + phys.to(tl.int64) * base_sb + offs, mask=mask)
         tl.store(undo_ptr + row * undo_sb + offs, u_val, mask=mask)
 
     @triton.jit
     def _write_opaque_rows_batched_triton(
+        tile_e_ptr,
+        tile_blk_ptr,
         ptrs_dst_ptr,
         ptrs_src_ptr,
         ptrs_phys_ptr,
@@ -1160,13 +1359,12 @@ if _HAS_TRITON:
         n_elems_ptr,
         BLOCK_SIZE: tl.constexpr,
     ):
-        """Scatter commit or undo snapshots back to persistent opaque pools in 1 kernel."""
-        e = tl.program_id(0).to(tl.int64)
+        """Scatter commit or undo snapshots back to persistent opaque pools across compact tiles."""
+        tile_idx = tl.program_id(0).to(tl.int64)
         row = tl.program_id(1).to(tl.int64)
-        blk = tl.program_id(2).to(tl.int64)
+        e = tl.load(tile_e_ptr + tile_idx).to(tl.int64)
+        blk = tl.load(tile_blk_ptr + tile_idx).to(tl.int64)
         n_elems = tl.load(n_elems_ptr + e).to(tl.int32)
-        if blk * BLOCK_SIZE >= n_elems:
-            return
         num_blocks = tl.load(num_blocks_ptr + e).to(tl.int32)
         phys_ptr = tl.load(ptrs_phys_ptr + e).to(tl.pointer_type(tl.int32))
         phys = tl.load(phys_ptr + row).to(tl.int32)
@@ -1180,6 +1378,165 @@ if _HAS_TRITON:
         dst_sb = tl.load(dst_sb_ptr + e).to(tl.int64)
         val = tl.load(src_ptr + row * src_sb + offs, mask=mask)
         tl.store(dst_ptr + phys.to(tl.int64) * dst_sb + offs, val, mask=mask)
+
+    @triton.jit
+    def _prepare_gdn_ssm_lazy_commit_batched_triton(
+        sample_kv_ptr,
+        ptrs_bt_ptr,
+        ptrs_init_ptr,
+        ptrs_k_ptr,
+        ptrs_v_ptr,
+        ptrs_g_ptr,
+        ptrs_beta_ptr,
+        ptrs_base_ptr,
+        ptrs_phys_ptr,
+        ptrs_commit_ptr,
+        ptrs_undo_ptr,
+        pos_before_ptr,
+        accept_len_ptr,
+        bt_s0_ptr,
+        bt_s1_ptr,
+        init_sb_ptr,
+        k_sb_ptr,
+        k_sv_ptr,
+        k_shk_ptr,
+        k_sd_ptr,
+        v_sb_ptr,
+        v_sv_ptr,
+        v_shv_ptr,
+        v_vd_ptr,
+        g_sb_ptr,
+        g_sv_ptr,
+        g_shv_ptr,
+        b_sb_ptr,
+        b_sv_ptr,
+        b_shv_ptr,
+        base_sb_ptr,
+        commit_sb_ptr,
+        undo_sb_ptr,
+        tpb_ptr,
+        max_blocks_ptr,
+        num_blocks_ptr,
+        live_bs: tl.int32,
+        V_STEPS: tl.constexpr,
+        GQA_RATIO: tl.constexpr,
+        H_V: tl.constexpr,
+        D_K: tl.constexpr,
+        D_V: tl.constexpr,
+        BLOCK_DV: tl.constexpr,
+        L2_EPS: tl.constexpr,
+    ):
+        """Lazy GDN SSM replay on accepted/crossed rows only, eliminating forward stage_ssm writes."""
+        pid0 = tl.program_id(0).to(tl.int64)
+        row = tl.program_id(1).to(tl.int64)
+        n_dv: tl.constexpr = D_V // BLOCK_DV
+        tiles_per_e: tl.constexpr = H_V * n_dv
+        e = pid0 // tiles_per_e
+        rem = pid0 % tiles_per_e
+        h_v = rem // n_dv
+        dv_blk = rem % n_dv
+        h_k = h_v // GQA_RATIO
+
+        tpb = tl.load(tpb_ptr + e).to(tl.int32)
+        max_blocks = tl.load(max_blocks_ptr + e).to(tl.int32)
+        num_blocks = tl.load(num_blocks_ptr + e).to(tl.int32)
+        is_bnd = row >= live_bs
+        b = row - live_bs if is_bnd else row
+        a_len = tl.load(accept_len_ptr + b).to(tl.int32)
+        pos_b = tl.load(pos_before_ptr + b).to(tl.int32)
+        valid = a_len > 0
+
+        if not is_bnd:
+            step_idx = tl.minimum(tl.maximum(a_len - 1, 0), V_STEPS - 1)
+            target_pos = tl.maximum(pos_b + a_len - 1, 0)
+            do_commit = valid
+        else:
+            boundary_step = (tpb - 1) - (pos_b % tpb)
+            crossed = (
+                valid
+                & ((a_len - 1) > boundary_step)
+                & (boundary_step >= 0)
+                & (boundary_step < V_STEPS)
+            )
+            step_idx = tl.minimum(tl.maximum(boundary_step, 0), V_STEPS - 1)
+            target_pos = pos_b
+            do_commit = crossed
+
+        bt_ptr = tl.load(ptrs_bt_ptr + e).to(tl.pointer_type(tl.int32))
+        bt_s0 = tl.load(bt_s0_ptr + e).to(tl.int64)
+        bt_s1 = tl.load(bt_s1_ptr + e).to(tl.int64)
+        page = tl.minimum(tl.maximum(target_pos // tpb, 0), max_blocks - 1)
+        raw_phys = tl.load(bt_ptr + b * bt_s0 + page.to(tl.int64) * bt_s1).to(tl.int32)
+        phys = tl.where(do_commit & (raw_phys > 0) & (raw_phys < num_blocks), raw_phys, 0)
+        if rem == 0:
+            phys_ids_ptr = tl.load(ptrs_phys_ptr + e).to(tl.pointer_type(tl.int32))
+            tl.store(phys_ids_ptr + row, phys)
+        if phys <= 0:
+            return
+
+        offs_k = tl.arange(0, D_K)
+        offs_v = dv_blk * BLOCK_DV + tl.arange(0, BLOCK_DV)
+        ssm_offs = h_v * (D_K * D_V) + offs_k[:, None] * D_V + offs_v[None, :]
+
+        base_i32_ptr = tl.load(ptrs_base_ptr + e).to(tl.pointer_type(tl.int32))
+        base_sb = tl.load(base_sb_ptr + e).to(tl.int64)
+        undo_i32_ptr = tl.load(ptrs_undo_ptr + e).to(tl.pointer_type(tl.int32))
+        undo_sb = tl.load(undo_sb_ptr + e).to(tl.int64)
+        u_val = tl.load(base_i32_ptr + phys.to(tl.int64) * base_sb + ssm_offs)
+        tl.store(undo_i32_ptr + row * undo_sb + ssm_offs, u_val)
+
+        init_ptr = tl.load(ptrs_init_ptr + e).to(tl.pointer_type(tl.float32))
+        init_sb = tl.load(init_sb_ptr + e).to(tl.int64)
+        h = tl.load(init_ptr + b * init_sb + ssm_offs).to(tl.float32)
+
+        kv_ty: tl.constexpr = sample_kv_ptr.dtype.element_ty
+        k_ptr = tl.load(ptrs_k_ptr + e).to(tl.pointer_type(kv_ty))
+        v_ptr = tl.load(ptrs_v_ptr + e).to(tl.pointer_type(kv_ty))
+        g_ptr = tl.load(ptrs_g_ptr + e).to(tl.pointer_type(tl.float32))
+        beta_ptr = tl.load(ptrs_beta_ptr + e).to(tl.pointer_type(tl.float32))
+        k_base = (
+            k_ptr
+            + b * tl.load(k_sb_ptr + e).to(tl.int64)
+            + h_k * tl.load(k_shk_ptr + e).to(tl.int64)
+            + offs_k * tl.load(k_sd_ptr + e).to(tl.int64)
+        )
+        v_base = (
+            v_ptr
+            + b * tl.load(v_sb_ptr + e).to(tl.int64)
+            + h_v * tl.load(v_shv_ptr + e).to(tl.int64)
+            + offs_v * tl.load(v_vd_ptr + e).to(tl.int64)
+        )
+        g_base = (
+            g_ptr
+            + b * tl.load(g_sb_ptr + e).to(tl.int64)
+            + h_v * tl.load(g_shv_ptr + e).to(tl.int64)
+        )
+        beta_base = (
+            beta_ptr
+            + b * tl.load(b_sb_ptr + e).to(tl.int64)
+            + h_v * tl.load(b_shv_ptr + e).to(tl.int64)
+        )
+        k_sv = tl.load(k_sv_ptr + e).to(tl.int64)
+        v_sv = tl.load(v_sv_ptr + e).to(tl.int64)
+        g_sv = tl.load(g_sv_ptr + e).to(tl.int64)
+        b_sv = tl.load(b_sv_ptr + e).to(tl.int64)
+
+        t = 0
+        while t <= step_idx:
+            k_t = tl.load(k_base + t * k_sv).to(tl.float32)
+            v_t = tl.load(v_base + t * v_sv).to(tl.float32)
+            g_t = tl.load(g_base + t * g_sv).to(tl.float32)
+            beta_t = tl.load(beta_base + t * b_sv).to(tl.float32)
+            k_t = k_t * tl.rsqrt(tl.sum(k_t * k_t, axis=0) + L2_EPS)
+            h = h * tl.exp(g_t)
+            v_pred = tl.sum(h * k_t[:, None], axis=0)
+            delta = (v_t - v_pred) * beta_t
+            h = h + k_t[:, None] * delta[None, :]
+            t += 1
+
+        commit_f32_ptr = tl.load(ptrs_commit_ptr + e).to(tl.pointer_type(tl.float32))
+        commit_sb = tl.load(commit_sb_ptr + e).to(tl.int64)
+        tl.store(commit_f32_ptr + row * commit_sb + ssm_offs, h)
 
 
 def _view_opaque_pool_2d(base: torch.Tensor, target_dtype: torch.dtype) -> Tuple[torch.Tensor, int]:
@@ -1227,6 +1584,9 @@ def _store_ragged_full_attn_kv_gpu(
         req_list = tok_req_dev.tolist()
         pos_list = tok_abs_pos_dev.tolist()
         nhd = _view_mha_kv_nhd(kv_cache_layer.kv_cache_base, h_kv, tpb, head_dim)
+        sc_4d = _resolve_kv_scale_4d(
+            getattr(kv_cache_layer, "kv_scale_base", None), int(nhd.shape[0]), h_kv, tpb
+        )
         for i in range(n_tok):
             b = int(req_list[i])
             pos = int(pos_list[i])
@@ -1235,17 +1595,30 @@ def _store_ragged_full_attn_kv_gpu(
             pg = pos // tpb
             sl = pos % tpb
             phys = _check_phys_block(int(block_table[b, pg].item()), int(nhd.shape[0]), FULL_ATTN_KV_TAG, -1)
-            nhd[phys, 0, sl].copy_(k_3d[i])
-            nhd[phys, 1, sl].copy_(v_3d[i])
+            nhd[phys, 0, sl].copy_(_cast_for_kv_pool(k_3d[i], nhd.dtype))
+            nhd[phys, 1, sl].copy_(_cast_for_kv_pool(v_3d[i], nhd.dtype))
+            if sc_4d is not None:
+                sc_4d[phys, :, :, sl].fill_(1.0)
         return
     pool_nhd = _view_mha_kv_nhd(kv_cache_layer.kv_cache_base, h_kv, tpb, head_dim)
     num_blocks = int(pool_nhd.shape[0])
     if num_blocks == 0:
         return
+    sc_4d = _resolve_kv_scale_4d(
+        getattr(kv_cache_layer, "kv_scale_base", None), num_blocks, h_kv, tpb
+    )
+    has_scale = sc_4d is not None
+    sc_ptr = sc_4d if sc_4d is not None else pool_nhd
+    sc_sb, sc_skv, sc_sh, sc_st = (
+        (int(sc_4d.stride(0)), int(sc_4d.stride(1)), int(sc_4d.stride(2)), int(sc_4d.stride(3)))
+        if sc_4d is not None
+        else (0, 0, 0, 0)
+    )
     s_blk, s_kv, s_tok, s_h, s_d = [int(s) for s in pool_nhd.stride()]
     block_d = max(16, int(triton.next_power_of_2(head_dim)))
     _store_ragged_full_attn_kv_triton[(n_tok, h_kv)](
         pool_nhd,
+        sc_ptr,
         k_3d,
         v_3d,
         block_table,
@@ -1256,6 +1629,10 @@ def _store_ragged_full_attn_kv_gpu(
         s_tok,
         s_h,
         s_d,
+        sc_sb,
+        sc_skv,
+        sc_sh,
+        sc_st,
         int(k_3d.stride(0)),
         int(k_3d.stride(1)),
         int(k_3d.stride(2)),
@@ -1269,6 +1646,8 @@ def _store_ragged_full_attn_kv_gpu(
         num_blocks,
         head_dim,
         BLOCK_D=block_d,
+        HAS_SCALE=has_scale,
+        IS_FP8_POOL=(pool_nhd.dtype == torch.float8_e4m3fn),
     )
 
 
@@ -1281,25 +1660,33 @@ def _store_verify_full_attn_kv_gpu(
 ) -> None:
     if not _HAS_TRITON:
         raise RuntimeError("Triton is required for GPU verify paged KV store")
-    from rtp_llm.models_py.modules.factory.attention.common import (
-        reshape_paged_kv_cache,
-    )
 
     tpb = int(kv_cache_layer.seq_size_per_block)
     bsz, verify_w, h_kv, head_dim = [int(x) for x in k_4d.shape]
     max_blocks = int(block_table.shape[1]) if block_table.ndim >= 2 else 0
     if bsz == 0 or verify_w == 0 or max_blocks == 0:
         return
-    pool_hnd = reshape_paged_kv_cache(kv_cache_layer.kv_cache_base, h_kv, tpb, head_dim)
+    pool_hnd = _reshape_paged_kv_cache(kv_cache_layer.kv_cache_base, h_kv, tpb, head_dim)
     if int(pool_hnd.shape[2]) != h_kv or int(pool_hnd.shape[3]) != tpb:
         pool_hnd = pool_hnd.transpose(2, 3)
     num_blocks = int(pool_hnd.shape[0])
     if num_blocks == 0:
         return
+    sc_4d = _resolve_kv_scale_4d(
+        getattr(kv_cache_layer, "kv_scale_base", None), num_blocks, h_kv, tpb
+    )
+    has_scale = sc_4d is not None
+    sc_ptr = sc_4d if sc_4d is not None else pool_hnd
+    sc_sb, sc_skv, sc_sh, sc_st = (
+        (int(sc_4d.stride(0)), int(sc_4d.stride(1)), int(sc_4d.stride(2)), int(sc_4d.stride(3)))
+        if sc_4d is not None
+        else (0, 0, 0, 0)
+    )
     s_blk, s_kv, s_h, s_tok, s_d = [int(s) for s in pool_hnd.stride()]
     block_d = max(16, int(triton.next_power_of_2(head_dim)))
     _store_verify_full_attn_kv_triton[(bsz, verify_w, h_kv)](
         pool_hnd,
+        sc_ptr,
         k_4d,
         v_4d,
         block_table,
@@ -1309,6 +1696,10 @@ def _store_verify_full_attn_kv_gpu(
         s_h,
         s_tok,
         s_d,
+        sc_sb,
+        sc_skv,
+        sc_sh,
+        sc_st,
         int(k_4d.stride(0)),
         int(k_4d.stride(1)),
         int(k_4d.stride(2)),
@@ -1324,6 +1715,8 @@ def _store_verify_full_attn_kv_gpu(
         num_blocks,
         head_dim,
         BLOCK_D=block_d,
+        HAS_SCALE=has_scale,
+        IS_FP8_POOL=(pool_hnd.dtype == torch.float8_e4m3fn),
     )
 
 
@@ -1336,25 +1729,33 @@ def _store_decode_full_attn_kv_gpu(
 ) -> None:
     if not _HAS_TRITON:
         raise RuntimeError("Triton is required for GPU paged KV store")
-    from rtp_llm.models_py.modules.factory.attention.common import (
-        reshape_paged_kv_cache,
-    )
 
     tpb = int(kv_cache_layer.seq_size_per_block)
     bsz, _, h_kv, head_dim = k_4d.shape
     max_blocks = int(block_table.shape[1]) if block_table.ndim >= 2 else 0
     if bsz == 0 or max_blocks == 0:
         return
-    pool_hnd = reshape_paged_kv_cache(kv_cache_layer.kv_cache_base, h_kv, tpb, head_dim)
+    pool_hnd = _reshape_paged_kv_cache(kv_cache_layer.kv_cache_base, h_kv, tpb, head_dim)
     if int(pool_hnd.shape[2]) != h_kv or int(pool_hnd.shape[3]) != tpb:
         pool_hnd = pool_hnd.transpose(2, 3)
     num_blocks = int(pool_hnd.shape[0])
+    sc_4d = _resolve_kv_scale_4d(
+        getattr(kv_cache_layer, "kv_scale_base", None), num_blocks, h_kv, tpb
+    )
+    has_scale = sc_4d is not None
+    sc_ptr = sc_4d if sc_4d is not None else pool_hnd
+    sc_sb, sc_skv, sc_sh, sc_st = (
+        (int(sc_4d.stride(0)), int(sc_4d.stride(1)), int(sc_4d.stride(2)), int(sc_4d.stride(3)))
+        if sc_4d is not None
+        else (0, 0, 0, 0)
+    )
     k_3d = k_4d[:, 0]
     v_3d = v_4d[:, 0]
     s_blk, s_kv, s_h, s_tok, s_d = pool_hnd.stride()
     block_d = int(triton.next_power_of_2(head_dim))
     _store_decode_full_attn_kv_triton[(bsz, h_kv)](
         pool_hnd,
+        sc_ptr,
         k_3d,
         v_3d,
         block_table,
@@ -1364,6 +1765,10 @@ def _store_decode_full_attn_kv_gpu(
         s_h,
         s_tok,
         s_d,
+        sc_sb,
+        sc_skv,
+        sc_sh,
+        sc_st,
         int(k_3d.stride(0)),
         int(k_3d.stride(1)),
         int(k_3d.stride(2)),
@@ -1377,6 +1782,8 @@ def _store_decode_full_attn_kv_gpu(
         num_blocks,
         head_dim,
         BLOCK_D=block_d,
+        HAS_SCALE=has_scale,
+        IS_FP8_POOL=(pool_hnd.dtype == torch.float8_e4m3fn),
     )
 
 
@@ -1513,16 +1920,13 @@ def _qwen4_5_paged_causal_step_attn_gpu(
 ) -> torch.Tensor:
     if not _HAS_TRITON:
         raise RuntimeError("Triton is required for GPU causal paged verify attention")
-    from rtp_llm.models_py.modules.factory.attention.common import (
-        reshape_paged_kv_cache,
-    )
 
     bsz, head_num, _ = q_3d.shape
     tpb = int(kv_cache_layer.seq_size_per_block)
     max_blocks = int(bt_kv.shape[1]) if bt_kv.ndim >= 2 else 0
     if bsz == 0 or max_blocks == 0:
         return torch.zeros_like(q_3d)
-    pool_hnd = reshape_paged_kv_cache(kv_cache_layer.kv_cache_base, kv_heads, tpb, head_dim)
+    pool_hnd = _reshape_paged_kv_cache(kv_cache_layer.kv_cache_base, kv_heads, tpb, head_dim)
     if int(pool_hnd.shape[2]) != kv_heads or int(pool_hnd.shape[3]) != tpb:
         pool_hnd = pool_hnd.transpose(2, 3)
     num_blocks = int(pool_hnd.shape[0])
@@ -1927,6 +2331,8 @@ class Qwen4_5PagedStateBridge:
                     num_kv_heads=h_kv,
                     head_dim=h_d,
                     allow_zero_padded=allow_zero_padded,
+                    kv_scale=getattr(cache, "kv_scale_base", None),
+                    out_dtype=dtype,
                 )
                 k_buf[b, :plen].copy_(k_req)
                 v_buf[b, :plen].copy_(v_req)
@@ -3496,6 +3902,7 @@ class Qwen4_5PagedStateBridge:
                             num_kv_heads=self.cfg.num_key_value_heads,
                             head_dim=self.cfg.head_dim,
                             allow_zero_padded=is_padded,
+                            kv_scale=getattr(kv_c, "kv_scale_base", None),
                         )
                     if len(set(seq_lens_before)) == 1:
                         # Repack contiguous valid KV for consumer layers on this step
@@ -3803,6 +4210,8 @@ class Qwen4_5PagedStateBridge:
                     int(src_kv_c.seq_size_per_block),
                     num_kv_heads=sa.num_kv_heads,
                     head_dim=sa.head_dim,
+                    kv_scale=getattr(src_kv_c, "kv_scale_base", None),
+                    out_dtype=dtype,
                 )
                 full_kv_batched[src_id] = (k_fb, v_fb)
             return full_kv_batched[src_id]
@@ -4355,6 +4764,8 @@ class Qwen4_5PagedStateBridge:
                                         int(kv_c.seq_size_per_block),
                                         num_kv_heads=sa.num_kv_heads,
                                         head_dim=sa.head_dim,
+                                        kv_scale=getattr(kv_c, "kv_scale_base", None),
+                                        out_dtype=attn_in.dtype,
                                     )
                                     full_kv_batched[lid] = (k_full_b, v_full_b)
                                     out_u = qsa_sparse_prefill_attention(
@@ -4373,6 +4784,8 @@ class Qwen4_5PagedStateBridge:
                                     int(kv_c.seq_size_per_block),
                                     num_kv_heads=sa.num_kv_heads,
                                     head_dim=sa.head_dim,
+                                    kv_scale=getattr(kv_c, "kv_scale_base", None),
+                                    out_dtype=attn_in.dtype,
                                 )
                             else:
                                 k_full_b = k_all.view(bsz_u, t_in, sa.num_kv_heads, sa.head_dim)
@@ -4438,6 +4851,8 @@ class Qwen4_5PagedStateBridge:
                                     tpb_kv,
                                     num_kv_heads=sa.num_kv_heads,
                                     head_dim=sa.head_dim,
+                                    kv_scale=getattr(kv_c, "kv_scale_base", None),
+                                    out_dtype=attn_in.dtype,
                                 )
                                 k_full = torch.cat([k_pfx.unsqueeze(0), k_all[:, s:e]], dim=1)
                                 v_full = torch.cat([v_pfx.unsqueeze(0), v_all[:, s:e]], dim=1)
@@ -5034,10 +5449,20 @@ class Qwen4_5PagedStateBridge:
                     conv_n = math.prod(self.gdn_conv_shape)
                     stage_conv: Optional[torch.Tensor] = None
                     stage_ssm: Optional[torch.Tensor] = None
+                    lazy_kvgb: Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = None
+                    gdn = layer.linear_attn
+                    use_lazy_gdn = (
+                        _HAS_TRITON
+                        and attn_in.is_cuda
+                        and not (gdn.publishes_shared and yoco_on)
+                        and gdn.head_k_dim == gdn.head_v_dim
+                        and (gdn.head_k_dim & (gdn.head_k_dim - 1)) == 0
+                        and gdn.num_v_heads % gdn.num_k_heads == 0
+                    )
                     if GDN_SSM_STATE_TAG in layer_caches:
                         c_ssm = layer_caches[GDN_SSM_STATE_TAG]
                         bt_ssm = _block_table_for_tag(attention_inputs, GDN_SSM_STATE_TAG)
-                        init_ssm = self._read_opaque_batch_static_gpu(
+                        init_ssm_buf = self._read_opaque_batch_static_gpu(
                             c_ssm,
                             bt_ssm,
                             seq_lens_before_dev,
@@ -5045,9 +5470,26 @@ class Qwen4_5PagedStateBridge:
                             GDN_SSM_STATE_TAG,
                             lid,
                         )
-                        stage_ssm = tx_stage.stage_tensor(
-                            GDN_SSM_STATE_TAG, lid, c_ssm, bt_ssm, self.ssm_shape, torch.float32
-                        )[:bsz]
+                        init_ssm = init_ssm_buf
+                        if use_lazy_gdn:
+                            lk, lv, lg, lb, _ = tx_stage.register_lazy_gdn(
+                                GDN_SSM_STATE_TAG,
+                                lid,
+                                c_ssm,
+                                bt_ssm,
+                                init_ssm_buf.view(bsz, ssm_n),
+                                ssm_n=ssm_n,
+                                num_k_heads=gdn.num_k_heads,
+                                num_v_heads=gdn.num_v_heads,
+                                head_k_dim=gdn.head_k_dim,
+                                head_v_dim=gdn.head_v_dim,
+                                kv_dtype=dtype,
+                            )
+                            lazy_kvgb = (lk, lv, lg, lb)
+                        else:
+                            stage_ssm = tx_stage.stage_tensor(
+                                GDN_SSM_STATE_TAG, lid, c_ssm, bt_ssm, self.ssm_shape, torch.float32
+                            )[:bsz]
                         if GDN_CONV_STATE_TAG in layer_caches:
                             c_conv = layer_caches[GDN_CONV_STATE_TAG]
                             bt_conv = _block_table_for_tag(attention_inputs, GDN_CONV_STATE_TAG)
@@ -5083,17 +5525,37 @@ class Qwen4_5PagedStateBridge:
                             .view(torch.bfloat16)[:, :conv_n]
                             .view(bsz, *self.gdn_conv_shape)
                         )
-                        stage_lin = tx_stage.stage_tensor(
-                            LINEAR_ATTN_TAG, lid, lin_c, bt_lin, (lin_row_elems,), torch.float32
-                        )[:bsz]
-                        stage_ssm = stage_lin[:, :, :ssm_n].view(bsz, verify_w, *self.ssm_shape)
-                        stage_conv = (
-                            stage_lin[:, :, ssm_n:]
-                            .view(torch.bfloat16)[:, :, :conv_n]
-                            .view(bsz, verify_w, *self.gdn_conv_shape)
-                        )
+                        if use_lazy_gdn and (conv_n * 2) % 4 == 0:
+                            lk, lv, lg, lb, stage_conv_full = tx_stage.register_lazy_gdn(
+                                LINEAR_ATTN_TAG,
+                                lid,
+                                lin_c,
+                                bt_lin,
+                                init_packed[:, :ssm_n],
+                                ssm_n=ssm_n,
+                                num_k_heads=gdn.num_k_heads,
+                                num_v_heads=gdn.num_v_heads,
+                                head_k_dim=gdn.head_k_dim,
+                                head_v_dim=gdn.head_v_dim,
+                                kv_dtype=dtype,
+                                needs_conv_stage=True,
+                                conv_shape=self.gdn_conv_shape,
+                                conv_i32_elems=(conv_n + 1) // 2,
+                            )
+                            lazy_kvgb = (lk, lv, lg, lb)
+                            stage_conv = stage_conv_full[:bsz] if stage_conv_full is not None else None
+                        else:
+                            stage_lin = tx_stage.stage_tensor(
+                                LINEAR_ATTN_TAG, lid, lin_c, bt_lin, (lin_row_elems,), torch.float32
+                            )[:bsz]
+                            stage_ssm = stage_lin[:, :, :ssm_n].view(bsz, verify_w, *self.ssm_shape)
+                            stage_conv = (
+                                stage_lin[:, :, ssm_n:]
+                                .view(torch.bfloat16)[:, :, :conv_n]
+                                .view(bsz, verify_w, *self.gdn_conv_shape)
+                            )
 
-                    attn_out, pub = layer.linear_attn.forward_verify(
+                    attn_out, pub = gdn.forward_verify(
                         attn_in,
                         init_conv_state=init_conv,
                         init_ssm_state=init_ssm,
@@ -5101,6 +5563,7 @@ class Qwen4_5PagedStateBridge:
                         stage_ssm_state=stage_ssm,
                         shared=None,
                         enable_yoco_decode=yoco_on,
+                        lazy_kvgb_buffers=lazy_kvgb,
                     )
                     if pub is not None:
                         shared_gdn_batched[lid] = pub
@@ -5467,6 +5930,32 @@ class _TxStageEntry:
     commit_u8_buf: torch.Tensor  # [2 * B_cap, need_bytes] uint8
     undo_u8_buf: torch.Tensor  # [2 * B_cap, need_bytes] uint8
     need_bytes: int
+    gen: int = 0
+
+
+@dataclass
+class _LazyGdnEntry:
+    tag: str
+    layer_idx: int
+    cache: Any
+    bt: torch.Tensor
+    init_ssm: torch.Tensor  # [B_cap, ssm_n] float32
+    lazy_k: torch.Tensor  # [B_cap, V, H_k, D_k]
+    lazy_v: torch.Tensor  # [B_cap, V, H_v, D_v]
+    lazy_g: torch.Tensor  # [B_cap, V, H_v] float32
+    lazy_beta: torch.Tensor  # [B_cap, V, H_v] float32
+    conv_steps: Optional[torch.Tensor]  # [B_cap, V, *conv_shape] bf16
+    phys_ids_buf: torch.Tensor  # [2 * B_cap] int32
+    conv_phys_buf: torch.Tensor  # [2 * B_cap] int32
+    commit_u8_buf: torch.Tensor  # [2 * B_cap, (ssm_n + conv_i32_elems) * 4] uint8
+    undo_u8_buf: torch.Tensor  # [2 * B_cap, (ssm_n + conv_i32_elems) * 4] uint8
+    ssm_n: int
+    conv_i32_elems: int
+    num_k_heads: int
+    num_v_heads: int
+    head_k_dim: int
+    head_v_dim: int
+    gen: int = 0
 
 
 @dataclass
@@ -5486,6 +5975,7 @@ class _Qwen4_5OpaqueTxStage:
         self.bsz = int(bsz)
         self.verify_width = int(verify_width)
         self.entries: Dict[Tuple[str, int], _TxStageEntry] = {}
+        self.lazy_gdn_entries: Dict[Tuple[str, int], _LazyGdnEntry] = {}
         self.scratches: Dict[Any, torch.Tensor] = {}
         self._scratch_bts: Dict[int, torch.Tensor] = {}
         self._steps_arange: Optional[torch.Tensor] = None
@@ -5495,8 +5985,11 @@ class _Qwen4_5OpaqueTxStage:
         self.attention_inputs: Any = None
         self.kv_cache: Any = None
         self.ready = False
+        self._gen = 0
         self._batched_sig: Any = None
         self._batched_meta: Optional[Dict[str, Any]] = None
+        self._lazy_sig: Any = None
+        self._lazy_meta: Optional[List[Dict[str, Any]]] = None
 
     def get_steps_arange(self, verify_w: int, device: torch.device) -> torch.Tensor:
         if (
@@ -5528,6 +6021,7 @@ class _Qwen4_5OpaqueTxStage:
         self.kv_cache = kv_cache
         self.attention_inputs = attention_inputs
         self.ready = False
+        self._gen += 1
 
     def get_or_alloc_aux(
         self, rows: int, cols: int, *, dtype: torch.dtype, device: torch.device
@@ -5575,12 +6069,93 @@ class _Qwen4_5OpaqueTxStage:
                 commit_u8_buf=commit_u8_buf,
                 undo_u8_buf=undo_u8_buf,
                 need_bytes=need_bytes,
+                gen=self._gen,
             )
             self.entries[key] = entry
         else:
             entry.cache = cache
             entry.bt = bt
+            entry.gen = self._gen
         return entry.steps
+
+    def register_lazy_gdn(
+        self,
+        tag: str,
+        layer_idx: int,
+        cache: Any,
+        bt: torch.Tensor,
+        init_ssm: torch.Tensor,
+        *,
+        ssm_n: int,
+        num_k_heads: int,
+        num_v_heads: int,
+        head_k_dim: int,
+        head_v_dim: int,
+        kv_dtype: torch.dtype,
+        needs_conv_stage: bool = False,
+        conv_shape: Optional[Tuple[int, ...]] = None,
+        conv_i32_elems: int = 0,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+        key = (tag, int(layer_idx))
+        dev = bt.device
+        k_shape = (self.bsz, self.verify_width, num_k_heads, head_k_dim)
+        v_shape = (self.bsz, self.verify_width, num_v_heads, head_v_dim)
+        gb_shape = (self.bsz, self.verify_width, num_v_heads)
+        need_bytes = (int(ssm_n) + (int(conv_i32_elems) if needs_conv_stage else 0)) * 4
+        conv_st_shape = (self.bsz, self.verify_width, *conv_shape) if (needs_conv_stage and conv_shape is not None) else None
+        entry = self.lazy_gdn_entries.get(key)
+        if (
+            entry is None
+            or tuple(entry.lazy_k.shape) != k_shape
+            or entry.lazy_k.dtype != kv_dtype
+            or entry.lazy_k.device != dev
+            or int(entry.commit_u8_buf.shape[1]) != need_bytes
+            or (entry.conv_steps is None) != (conv_st_shape is None)
+            or (conv_st_shape is not None and entry.conv_steps is not None and tuple(entry.conv_steps.shape) != conv_st_shape)
+        ):
+            lazy_k = self.scratch_tensor(("lazy_k", tag, int(layer_idx)), k_shape, kv_dtype, dev)
+            lazy_v = self.scratch_tensor(("lazy_v", tag, int(layer_idx)), v_shape, kv_dtype, dev)
+            lazy_g = self.scratch_tensor(("lazy_g", tag, int(layer_idx)), gb_shape, torch.float32, dev)
+            lazy_beta = self.scratch_tensor(("lazy_beta", tag, int(layer_idx)), gb_shape, torch.float32, dev)
+            conv_steps = (
+                self.scratch_tensor(("lazy_conv", tag, int(layer_idx)), conv_st_shape, kv_dtype, dev)
+                if conv_st_shape is not None
+                else None
+            )
+            phys_ids_buf = torch.empty((2 * self.bsz,), dtype=torch.int32, device=dev)
+            conv_phys_buf = torch.empty((2 * self.bsz,), dtype=torch.int32, device=dev)
+            commit_u8_buf = torch.empty((2 * self.bsz, need_bytes), dtype=torch.uint8, device=dev)
+            undo_u8_buf = torch.empty((2 * self.bsz, need_bytes), dtype=torch.uint8, device=dev)
+            entry = _LazyGdnEntry(
+                tag=tag,
+                layer_idx=int(layer_idx),
+                cache=cache,
+                bt=bt,
+                init_ssm=init_ssm,
+                lazy_k=lazy_k,
+                lazy_v=lazy_v,
+                lazy_g=lazy_g,
+                lazy_beta=lazy_beta,
+                conv_steps=conv_steps,
+                phys_ids_buf=phys_ids_buf,
+                conv_phys_buf=conv_phys_buf,
+                commit_u8_buf=commit_u8_buf,
+                undo_u8_buf=undo_u8_buf,
+                ssm_n=int(ssm_n),
+                conv_i32_elems=int(conv_i32_elems) if needs_conv_stage else 0,
+                num_k_heads=int(num_k_heads),
+                num_v_heads=int(num_v_heads),
+                head_k_dim=int(head_k_dim),
+                head_v_dim=int(head_v_dim),
+                gen=self._gen,
+            )
+            self.lazy_gdn_entries[key] = entry
+        else:
+            entry.cache = cache
+            entry.bt = bt
+            entry.init_ssm = init_ssm
+            entry.gen = self._gen
+        return entry.lazy_k, entry.lazy_v, entry.lazy_g, entry.lazy_beta, entry.conv_steps
 
     def scratch_tensor(
         self,
@@ -5617,6 +6192,44 @@ class _Qwen4_5OpaqueTxStage:
 
     def mark_ready(self) -> None:
         self.ready = True
+
+
+def _build_batched_tx_meta(specs: List[Tuple[Any, ...]], block_sz: int, dev: torch.device, *, with_steps: bool) -> Dict[str, Any]:
+    tile_e_list: List[int] = []
+    tile_blk_list: List[int] = []
+    for ei, s in enumerate(specs):
+        nt = int(triton.cdiv(s[17], block_sz))
+        tile_e_list.extend([ei] * nt)
+        tile_blk_list.extend(range(nt))
+    meta: Dict[str, Any] = {
+        "num_e": len(specs),
+        "num_tiles": len(tile_e_list),
+        "tile_e": torch.tensor(tile_e_list, dtype=torch.int32, device=dev),
+        "tile_blk": torch.tensor(tile_blk_list, dtype=torch.int32, device=dev),
+        "ptrs_base": torch.tensor([s[3].data_ptr() for s in specs], dtype=torch.int64, device=dev),
+        "ptrs_phys": torch.tensor([s[4].data_ptr() for s in specs], dtype=torch.int64, device=dev),
+        "ptrs_commit": torch.tensor([s[5].data_ptr() for s in specs], dtype=torch.int64, device=dev),
+        "ptrs_undo": torch.tensor([s[6].data_ptr() for s in specs], dtype=torch.int64, device=dev),
+        "base_sb": torch.tensor([s[11] for s in specs], dtype=torch.int64, device=dev),
+        "commit_sb": torch.tensor([s[12] for s in specs], dtype=torch.int64, device=dev),
+        "undo_sb": torch.tensor([s[13] for s in specs], dtype=torch.int64, device=dev),
+        "num_blocks": torch.tensor([s[16] for s in specs], dtype=torch.int32, device=dev),
+        "n_elems": torch.tensor([s[17] for s in specs], dtype=torch.int32, device=dev),
+    }
+    if with_steps:
+        meta.update(
+            {
+                "ptrs_bt": torch.tensor([s[1].data_ptr() for s in specs], dtype=torch.int64, device=dev),
+                "ptrs_steps": torch.tensor([s[2].data_ptr() for s in specs], dtype=torch.int64, device=dev),
+                "bt_s0": torch.tensor([s[7] for s in specs], dtype=torch.int64, device=dev),
+                "bt_s1": torch.tensor([s[8] for s in specs], dtype=torch.int64, device=dev),
+                "steps_sb": torch.tensor([s[9] for s in specs], dtype=torch.int64, device=dev),
+                "steps_sv": torch.tensor([s[10] for s in specs], dtype=torch.int64, device=dev),
+                "tpb": torch.tensor([s[14] for s in specs], dtype=torch.int32, device=dev),
+                "max_blocks": torch.tensor([s[15] for s in specs], dtype=torch.int32, device=dev),
+            }
+        )
+    return meta
 
 
 class _Qwen4_5OpaqueTxManager:
@@ -5677,7 +6290,11 @@ class _Qwen4_5OpaqueTxManager:
             stage.seq_before_buf.copy_(seq_before_dev[: stage.bsz].to(torch.int32))
         stage.attention_inputs = attention_inputs
         for entry in stage.entries.values():
-            entry.bt = _block_table_for_tag(attention_inputs, entry.tag)
+            if entry.gen == stage._gen:
+                entry.bt = _block_table_for_tag(attention_inputs, entry.tag)
+        for lentry in stage.lazy_gdn_entries.values():
+            if lentry.gen == stage._gen:
+                lentry.bt = _block_table_for_tag(attention_inputs, lentry.tag)
         stage.ready = True
         self._active_pending = stage
 
@@ -5700,10 +6317,14 @@ class _Qwen4_5OpaqueTxManager:
         v_w = stage.verify_width
 
         undo_records: List[_TxUndoRecord] = []
-        elig_specs: List[Tuple[Any, ...]] = []
+        prep_specs: List[Tuple[Any, ...]] = []
+        write_specs: List[Tuple[Any, ...]] = []
+        lazy_specs: List[Tuple[Any, ...]] = []
         non_triton_entries: List[Tuple[_TxStageEntry, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int, int, int, int, torch.Tensor]] = []
 
         for entry in stage.entries.values():
+            if entry.gen != stage._gen:
+                continue
             base = entry.cache.kv_cache_base
             num_blocks = int(base.shape[0])
             tpb = max(1, int(entry.cache.seq_size_per_block))
@@ -5753,34 +6374,164 @@ class _Qwen4_5OpaqueTxManager:
                 commit_i32 = commit_slice.view(torch.int32)
                 undo_i32 = undo_slice.view(torch.int32)
                 n_elems = need_bytes // 4
-                elig_specs.append(
-                    (
-                        rec,
-                        bt_live,
-                        steps_i32_3d,
-                        base_i32,
-                        phys_slice,
-                        commit_i32,
-                        undo_i32,
-                        int(bt_live.stride(0)),
-                        int(bt_live.stride(1)),
-                        int(steps_i32_3d.stride(0)),
-                        int(steps_i32_3d.stride(1)),
-                        int(base_i32.stride(0)),
-                        int(commit_i32.stride(0)),
-                        int(undo_i32.stride(0)),
-                        tpb,
-                        max_blocks,
-                        num_blocks,
-                        n_elems,
-                    )
+                spec = (
+                    rec,
+                    bt_live,
+                    steps_i32_3d,
+                    base_i32,
+                    phys_slice,
+                    commit_i32,
+                    undo_i32,
+                    int(bt_live.stride(0)),
+                    int(bt_live.stride(1)),
+                    int(steps_i32_3d.stride(0)),
+                    int(steps_i32_3d.stride(1)),
+                    int(base_i32.stride(0)),
+                    int(commit_i32.stride(0)),
+                    int(undo_i32.stride(0)),
+                    tpb,
+                    max_blocks,
+                    num_blocks,
+                    n_elems,
                 )
+                prep_specs.append(spec)
+                write_specs.append(spec)
             else:
                 non_triton_entries.append(
                     (entry, bt_live, phys_slice, commit_slice, undo_slice, need_bytes, tpb, max_blocks, num_blocks, base_u8)
                 )
 
-        fallback_recs: List[_TxUndoRecord] = [item[0] for item in []]
+        fallback_recs: List[_TxUndoRecord] = []
+        for lentry in stage.lazy_gdn_entries.values():
+            if lentry.gen != stage._gen:
+                continue
+            base = lentry.cache.kv_cache_base
+            num_blocks = int(base.shape[0])
+            tpb = max(1, int(lentry.cache.seq_size_per_block))
+            bt_live = lentry.bt[:live_bs]
+            max_blocks = int(bt_live.shape[1]) if bt_live.ndim >= 2 else 0
+            if num_blocks <= 0 or max_blocks <= 0:
+                continue
+            phys_slice = lentry.phys_ids_buf[: 2 * live_bs]
+            commit_slice = lentry.commit_u8_buf[: 2 * live_bs]
+            undo_slice = lentry.undo_u8_buf[: 2 * live_bs]
+            rec = _TxUndoRecord(
+                cache=lentry.cache,
+                tag=lentry.tag,
+                layer_idx=lentry.layer_idx,
+                phys_ids=phys_slice,
+                commit_u8=commit_slice,
+                undo_u8=undo_slice,
+            )
+            undo_records.append(rec)
+
+            base_i32, _ = _view_opaque_pool_2d(base, torch.int32)
+            commit_i32 = commit_slice.view(torch.int32)
+            undo_i32 = undo_slice.view(torch.int32)
+            init_2d = lentry.init_ssm[:live_bs]
+            k_4d = lentry.lazy_k[:live_bs]
+            v_4d = lentry.lazy_v[:live_bs]
+            g_3d = lentry.lazy_g[:live_bs]
+            b_3d = lentry.lazy_beta[:live_bs]
+            lazy_specs.append(
+                (
+                    (
+                        lentry.num_k_heads,
+                        lentry.num_v_heads,
+                        lentry.head_k_dim,
+                        lentry.head_v_dim,
+                        k_4d.dtype,
+                    ),
+                    bt_live,
+                    init_2d,
+                    k_4d,
+                    v_4d,
+                    g_3d,
+                    b_3d,
+                    base_i32,
+                    phys_slice,
+                    commit_i32,
+                    undo_i32,
+                    int(bt_live.stride(0)),
+                    int(bt_live.stride(1)),
+                    int(init_2d.stride(0)),
+                    int(k_4d.stride(0)),
+                    int(k_4d.stride(1)),
+                    int(k_4d.stride(2)),
+                    int(k_4d.stride(3)),
+                    int(v_4d.stride(0)),
+                    int(v_4d.stride(1)),
+                    int(v_4d.stride(2)),
+                    int(v_4d.stride(3)),
+                    int(g_3d.stride(0)),
+                    int(g_3d.stride(1)),
+                    int(g_3d.stride(2)),
+                    int(b_3d.stride(0)),
+                    int(b_3d.stride(1)),
+                    int(b_3d.stride(2)),
+                    int(base_i32.stride(0)),
+                    int(commit_i32.stride(0)),
+                    int(undo_i32.stride(0)),
+                    tpb,
+                    max_blocks,
+                    num_blocks,
+                )
+            )
+            full_elems = lentry.ssm_n + lentry.conv_i32_elems
+            write_specs.append(
+                (
+                    rec,
+                    bt_live,
+                    commit_i32,
+                    base_i32,
+                    phys_slice,
+                    commit_i32,
+                    undo_i32,
+                    int(bt_live.stride(0)),
+                    int(bt_live.stride(1)),
+                    0,
+                    0,
+                    int(base_i32.stride(0)),
+                    int(commit_i32.stride(0)),
+                    int(undo_i32.stride(0)),
+                    tpb,
+                    max_blocks,
+                    num_blocks,
+                    full_elems,
+                )
+            )
+            if lentry.conv_steps is not None and lentry.conv_i32_elems > 0:
+                conv_i32, conv_row_elems = _view_opaque_pool_2d(
+                    lentry.conv_steps[:live_bs].reshape(live_bs * v_w, -1), torch.int32
+                )
+                conv_i32_3d = conv_i32.view(live_bs, v_w, conv_row_elems)
+                base_conv = base_i32[:, lentry.ssm_n :]
+                commit_conv = commit_i32[:, lentry.ssm_n :]
+                undo_conv = undo_i32[:, lentry.ssm_n :]
+                conv_phys = lentry.conv_phys_buf[: 2 * live_bs]
+                prep_specs.append(
+                    (
+                        rec,
+                        bt_live,
+                        conv_i32_3d,
+                        base_conv,
+                        conv_phys,
+                        commit_conv,
+                        undo_conv,
+                        int(bt_live.stride(0)),
+                        int(bt_live.stride(1)),
+                        int(conv_i32_3d.stride(0)),
+                        int(conv_i32_3d.stride(1)),
+                        int(base_conv.stride(0)),
+                        int(commit_conv.stride(0)),
+                        int(undo_conv.stride(0)),
+                        tpb,
+                        max_blocks,
+                        num_blocks,
+                        lentry.conv_i32_elems,
+                    )
+                )
+
         for (entry, bt_live, phys_slice, commit_slice, undo_slice, need_bytes, tpb, max_blocks, num_blocks, base_u8) in non_triton_entries:
             fallback_recs.append(
                 _TxUndoRecord(
@@ -5875,78 +6626,166 @@ class _Qwen4_5OpaqueTxManager:
                 safe_phys = phys_slice.to(torch.int64).clamp(min=0, max=num_blocks - 1)
                 undo_slice.copy_(base_u8[:, :need_bytes].index_select(0, safe_phys))
 
-        batched_meta: Optional[Dict[str, Any]] = None
-        if len(elig_specs) > 1:
-            sig = tuple(
-                (
-                    s[1].data_ptr(),
-                    s[2].data_ptr(),
-                    s[3].data_ptr(),
-                    s[4].data_ptr(),
-                    s[5].data_ptr(),
-                    s[6].data_ptr(),
-                    *s[7:],
+        if lazy_specs:
+            lsig = tuple(
+                (ls[0], ls[1].data_ptr(), ls[2].data_ptr(), ls[3].data_ptr(), ls[4].data_ptr(), ls[5].data_ptr(), ls[6].data_ptr(), ls[7].data_ptr(), ls[8].data_ptr(), ls[9].data_ptr(), ls[10].data_ptr(), *ls[11:])
+                for ls in lazy_specs
+            )
+            lazy_meta_groups: Optional[List[Dict[str, Any]]] = None
+            if stage._lazy_sig == lsig and stage._lazy_meta is not None:
+                lazy_meta_groups = stage._lazy_meta
+            elif not torch.cuda.is_current_stream_capturing():
+                groups_map: Dict[Any, List[Tuple[Any, ...]]] = {}
+                for ls in lazy_specs:
+                    groups_map.setdefault(ls[0], []).append(ls)
+                lazy_meta_groups = []
+                for g_key, grp in groups_map.items():
+                    lazy_meta_groups.append(
+                        {
+                            "shape_key": g_key,
+                            "num_e": len(grp),
+                            "sample_kv": grp[0][3],
+                            "ptrs_bt": torch.tensor([x[1].data_ptr() for x in grp], dtype=torch.int64, device=dev),
+                            "ptrs_init": torch.tensor([x[2].data_ptr() for x in grp], dtype=torch.int64, device=dev),
+                            "ptrs_k": torch.tensor([x[3].data_ptr() for x in grp], dtype=torch.int64, device=dev),
+                            "ptrs_v": torch.tensor([x[4].data_ptr() for x in grp], dtype=torch.int64, device=dev),
+                            "ptrs_g": torch.tensor([x[5].data_ptr() for x in grp], dtype=torch.int64, device=dev),
+                            "ptrs_beta": torch.tensor([x[6].data_ptr() for x in grp], dtype=torch.int64, device=dev),
+                            "ptrs_base": torch.tensor([x[7].data_ptr() for x in grp], dtype=torch.int64, device=dev),
+                            "ptrs_phys": torch.tensor([x[8].data_ptr() for x in grp], dtype=torch.int64, device=dev),
+                            "ptrs_commit": torch.tensor([x[9].data_ptr() for x in grp], dtype=torch.int64, device=dev),
+                            "ptrs_undo": torch.tensor([x[10].data_ptr() for x in grp], dtype=torch.int64, device=dev),
+                            "bt_s0": torch.tensor([x[11] for x in grp], dtype=torch.int64, device=dev),
+                            "bt_s1": torch.tensor([x[12] for x in grp], dtype=torch.int64, device=dev),
+                            "init_sb": torch.tensor([x[13] for x in grp], dtype=torch.int64, device=dev),
+                            "k_sb": torch.tensor([x[14] for x in grp], dtype=torch.int64, device=dev),
+                            "k_sv": torch.tensor([x[15] for x in grp], dtype=torch.int64, device=dev),
+                            "k_shk": torch.tensor([x[16] for x in grp], dtype=torch.int64, device=dev),
+                            "k_sd": torch.tensor([x[17] for x in grp], dtype=torch.int64, device=dev),
+                            "v_sb": torch.tensor([x[18] for x in grp], dtype=torch.int64, device=dev),
+                            "v_sv": torch.tensor([x[19] for x in grp], dtype=torch.int64, device=dev),
+                            "v_shv": torch.tensor([x[20] for x in grp], dtype=torch.int64, device=dev),
+                            "v_vd": torch.tensor([x[21] for x in grp], dtype=torch.int64, device=dev),
+                            "g_sb": torch.tensor([x[22] for x in grp], dtype=torch.int64, device=dev),
+                            "g_sv": torch.tensor([x[23] for x in grp], dtype=torch.int64, device=dev),
+                            "g_shv": torch.tensor([x[24] for x in grp], dtype=torch.int64, device=dev),
+                            "b_sb": torch.tensor([x[25] for x in grp], dtype=torch.int64, device=dev),
+                            "b_sv": torch.tensor([x[26] for x in grp], dtype=torch.int64, device=dev),
+                            "b_shv": torch.tensor([x[27] for x in grp], dtype=torch.int64, device=dev),
+                            "base_sb": torch.tensor([x[28] for x in grp], dtype=torch.int64, device=dev),
+                            "commit_sb": torch.tensor([x[29] for x in grp], dtype=torch.int64, device=dev),
+                            "undo_sb": torch.tensor([x[30] for x in grp], dtype=torch.int64, device=dev),
+                            "tpb": torch.tensor([x[31] for x in grp], dtype=torch.int32, device=dev),
+                            "max_blocks": torch.tensor([x[32] for x in grp], dtype=torch.int32, device=dev),
+                            "num_blocks": torch.tensor([x[33] for x in grp], dtype=torch.int32, device=dev),
+                        }
+                    )
+                stage._lazy_sig = lsig
+                stage._lazy_meta = lazy_meta_groups
+            if lazy_meta_groups is None:
+                raise RuntimeError("Lazy GDN commit metadata unavailable during CUDA graph capture; run eager warmup first")
+            for lm in lazy_meta_groups:
+                hk, hv, dk, dv, _ = lm["shape_key"]
+                bdv = min(16, dv)
+                grid_x = lm["num_e"] * hv * (dv // bdv)
+                _prepare_gdn_ssm_lazy_commit_batched_triton[(grid_x, 2 * live_bs)](
+                    lm["sample_kv"],
+                    lm["ptrs_bt"],
+                    lm["ptrs_init"],
+                    lm["ptrs_k"],
+                    lm["ptrs_v"],
+                    lm["ptrs_g"],
+                    lm["ptrs_beta"],
+                    lm["ptrs_base"],
+                    lm["ptrs_phys"],
+                    lm["ptrs_commit"],
+                    lm["ptrs_undo"],
+                    stage.seq_before_buf,
+                    stage.accept_len_buf,
+                    lm["bt_s0"],
+                    lm["bt_s1"],
+                    lm["init_sb"],
+                    lm["k_sb"],
+                    lm["k_sv"],
+                    lm["k_shk"],
+                    lm["k_sd"],
+                    lm["v_sb"],
+                    lm["v_sv"],
+                    lm["v_shv"],
+                    lm["v_vd"],
+                    lm["g_sb"],
+                    lm["g_sv"],
+                    lm["g_shv"],
+                    lm["b_sb"],
+                    lm["b_sv"],
+                    lm["b_shv"],
+                    lm["base_sb"],
+                    lm["commit_sb"],
+                    lm["undo_sb"],
+                    lm["tpb"],
+                    lm["max_blocks"],
+                    lm["num_blocks"],
+                    live_bs,
+                    V_STEPS=v_w,
+                    GQA_RATIO=hv // hk,
+                    H_V=hv,
+                    D_K=dk,
+                    D_V=dv,
+                    BLOCK_DV=bdv,
+                    L2_EPS=1e-6,
+                    num_warps=2,
                 )
-                for s in elig_specs
+
+        batched_meta: Optional[Dict[str, Any]] = None
+        block_sz = 2048
+        if len(write_specs) >= 1:
+            sig = (
+                tuple((s[1].data_ptr(), s[2].data_ptr(), s[3].data_ptr(), s[4].data_ptr(), s[5].data_ptr(), s[6].data_ptr(), *s[7:]) for s in prep_specs),
+                tuple((s[3].data_ptr(), s[4].data_ptr(), s[5].data_ptr(), s[6].data_ptr(), s[11], s[12], s[13], s[16], s[17]) for s in write_specs),
             )
             if stage._batched_sig == sig and stage._batched_meta is not None:
                 batched_meta = stage._batched_meta
             elif not torch.cuda.is_current_stream_capturing():
                 batched_meta = {
-                    "num_e": len(elig_specs),
-                    "max_n_elems": max(s[17] for s in elig_specs),
-                    "ptrs_bt": torch.tensor([s[1].data_ptr() for s in elig_specs], dtype=torch.int64, device=dev),
-                    "ptrs_steps": torch.tensor([s[2].data_ptr() for s in elig_specs], dtype=torch.int64, device=dev),
-                    "ptrs_base": torch.tensor([s[3].data_ptr() for s in elig_specs], dtype=torch.int64, device=dev),
-                    "ptrs_phys": torch.tensor([s[4].data_ptr() for s in elig_specs], dtype=torch.int64, device=dev),
-                    "ptrs_commit": torch.tensor([s[5].data_ptr() for s in elig_specs], dtype=torch.int64, device=dev),
-                    "ptrs_undo": torch.tensor([s[6].data_ptr() for s in elig_specs], dtype=torch.int64, device=dev),
-                    "bt_s0": torch.tensor([s[7] for s in elig_specs], dtype=torch.int64, device=dev),
-                    "bt_s1": torch.tensor([s[8] for s in elig_specs], dtype=torch.int64, device=dev),
-                    "steps_sb": torch.tensor([s[9] for s in elig_specs], dtype=torch.int64, device=dev),
-                    "steps_sv": torch.tensor([s[10] for s in elig_specs], dtype=torch.int64, device=dev),
-                    "base_sb": torch.tensor([s[11] for s in elig_specs], dtype=torch.int64, device=dev),
-                    "commit_sb": torch.tensor([s[12] for s in elig_specs], dtype=torch.int64, device=dev),
-                    "undo_sb": torch.tensor([s[13] for s in elig_specs], dtype=torch.int64, device=dev),
-                    "tpb": torch.tensor([s[14] for s in elig_specs], dtype=torch.int32, device=dev),
-                    "max_blocks": torch.tensor([s[15] for s in elig_specs], dtype=torch.int32, device=dev),
-                    "num_blocks": torch.tensor([s[16] for s in elig_specs], dtype=torch.int32, device=dev),
-                    "n_elems": torch.tensor([s[17] for s in elig_specs], dtype=torch.int32, device=dev),
+                    "prep": _build_batched_tx_meta(prep_specs, block_sz, dev, with_steps=True) if prep_specs else None,
+                    "write": _build_batched_tx_meta(write_specs, block_sz, dev, with_steps=False),
+                    "block_sz": block_sz,
                 }
                 stage._batched_sig = sig
                 stage._batched_meta = batched_meta
 
             if batched_meta is not None:
-                block_sz = 1024
-                _prepare_opaque_tx_commit_batched_triton[
-                    (batched_meta["num_e"], 2 * live_bs, int(triton.cdiv(batched_meta["max_n_elems"], block_sz)))
-                ](
-                    batched_meta["ptrs_bt"],
-                    batched_meta["ptrs_steps"],
-                    batched_meta["ptrs_base"],
-                    batched_meta["ptrs_phys"],
-                    batched_meta["ptrs_commit"],
-                    batched_meta["ptrs_undo"],
-                    stage.seq_before_buf,
-                    stage.accept_len_buf,
-                    batched_meta["bt_s0"],
-                    batched_meta["bt_s1"],
-                    batched_meta["steps_sb"],
-                    batched_meta["steps_sv"],
-                    batched_meta["base_sb"],
-                    batched_meta["commit_sb"],
-                    batched_meta["undo_sb"],
-                    batched_meta["tpb"],
-                    batched_meta["max_blocks"],
-                    batched_meta["num_blocks"],
-                    batched_meta["n_elems"],
-                    live_bs,
-                    v_w,
-                    BLOCK_SIZE=block_sz,
-                )
+                pm = batched_meta["prep"]
+                if pm is not None and pm["num_tiles"] > 0:
+                    _prepare_opaque_tx_commit_batched_triton[(pm["num_tiles"], 2 * live_bs)](
+                        pm["tile_e"],
+                        pm["tile_blk"],
+                        pm["ptrs_bt"],
+                        pm["ptrs_steps"],
+                        pm["ptrs_base"],
+                        pm["ptrs_phys"],
+                        pm["ptrs_commit"],
+                        pm["ptrs_undo"],
+                        stage.seq_before_buf,
+                        stage.accept_len_buf,
+                        pm["bt_s0"],
+                        pm["bt_s1"],
+                        pm["steps_sb"],
+                        pm["steps_sv"],
+                        pm["base_sb"],
+                        pm["commit_sb"],
+                        pm["undo_sb"],
+                        pm["tpb"],
+                        pm["max_blocks"],
+                        pm["num_blocks"],
+                        pm["n_elems"],
+                        live_bs,
+                        v_w,
+                        BLOCK_SIZE=block_sz,
+                        num_warps=4,
+                    )
             else:
-                for s in elig_specs:
-                    block_sz = 1024
+                for s in prep_specs:
                     _prepare_opaque_tx_commit_triton[(2 * live_bs, int(triton.cdiv(s[17], block_sz)))](
                         s[1],
                         stage.seq_before_buf,
@@ -5970,36 +6809,9 @@ class _Qwen4_5OpaqueTxManager:
                         s[16],
                         s[17],
                         BLOCK_SIZE=block_sz,
+                        num_warps=4,
                     )
-                    fallback_recs.append(s[0])
-        elif len(elig_specs) == 1:
-            s = elig_specs[0]
-            block_sz = 1024
-            _prepare_opaque_tx_commit_triton[(2 * live_bs, int(triton.cdiv(s[17], block_sz)))](
-                s[1],
-                stage.seq_before_buf,
-                stage.accept_len_buf,
-                s[2],
-                s[3],
-                s[4],
-                s[5],
-                s[6],
-                s[7],
-                s[8],
-                s[9],
-                s[10],
-                s[11],
-                s[12],
-                s[13],
-                live_bs,
-                v_w,
-                s[14],
-                s[15],
-                s[16],
-                s[17],
-                BLOCK_SIZE=block_sz,
-            )
-            fallback_recs.append(s[0])
+                fallback_recs.extend(s[0] for s in write_specs)
 
         self._batched_undo_meta = (
             {"meta": batched_meta, "live_bs": live_bs, "fallback_recs": fallback_recs}
@@ -6012,21 +6824,23 @@ class _Qwen4_5OpaqueTxManager:
     def finish_commit(self, commit: bool) -> None:
         if commit:
             if self._batched_undo_meta is not None:
-                bm = self._batched_undo_meta["meta"]
+                wm = self._batched_undo_meta["meta"]["write"]
                 lbs = self._batched_undo_meta["live_bs"]
-                block_sz = 1024
-                _write_opaque_rows_batched_triton[
-                    (bm["num_e"], 2 * lbs, int(triton.cdiv(bm["max_n_elems"], block_sz)))
-                ](
-                    bm["ptrs_base"],
-                    bm["ptrs_commit"],
-                    bm["ptrs_phys"],
-                    bm["base_sb"],
-                    bm["commit_sb"],
-                    bm["num_blocks"],
-                    bm["n_elems"],
-                    BLOCK_SIZE=block_sz,
-                )
+                block_sz = int(self._batched_undo_meta["meta"]["block_sz"])
+                if wm["num_tiles"] > 0:
+                    _write_opaque_rows_batched_triton[(wm["num_tiles"], 2 * lbs)](
+                        wm["tile_e"],
+                        wm["tile_blk"],
+                        wm["ptrs_base"],
+                        wm["ptrs_commit"],
+                        wm["ptrs_phys"],
+                        wm["base_sb"],
+                        wm["commit_sb"],
+                        wm["num_blocks"],
+                        wm["n_elems"],
+                        BLOCK_SIZE=block_sz,
+                        num_warps=4,
+                    )
                 for rec in self._batched_undo_meta["fallback_recs"]:
                     _write_opaque_rows_raw_gpu(
                         rec.cache.kv_cache_base, rec.phys_ids, rec.commit_u8, rec.tag, rec.layer_idx
@@ -6040,21 +6854,23 @@ class _Qwen4_5OpaqueTxManager:
         else:
             if self._committed:
                 if self._batched_undo_meta is not None:
-                    bm = self._batched_undo_meta["meta"]
+                    wm = self._batched_undo_meta["meta"]["write"]
                     lbs = self._batched_undo_meta["live_bs"]
-                    block_sz = 1024
-                    _write_opaque_rows_batched_triton[
-                        (bm["num_e"], 2 * lbs, int(triton.cdiv(bm["max_n_elems"], block_sz)))
-                    ](
-                        bm["ptrs_base"],
-                        bm["ptrs_undo"],
-                        bm["ptrs_phys"],
-                        bm["base_sb"],
-                        bm["undo_sb"],
-                        bm["num_blocks"],
-                        bm["n_elems"],
-                        BLOCK_SIZE=block_sz,
-                    )
+                    block_sz = int(self._batched_undo_meta["meta"]["block_sz"])
+                    if wm["num_tiles"] > 0:
+                        _write_opaque_rows_batched_triton[(wm["num_tiles"], 2 * lbs)](
+                            wm["tile_e"],
+                            wm["tile_blk"],
+                            wm["ptrs_base"],
+                            wm["ptrs_undo"],
+                            wm["ptrs_phys"],
+                            wm["base_sb"],
+                            wm["undo_sb"],
+                            wm["num_blocks"],
+                            wm["n_elems"],
+                            BLOCK_SIZE=block_sz,
+                            num_warps=4,
+                        )
                     for rec in self._batched_undo_meta["fallback_recs"]:
                         _write_opaque_rows_raw_gpu(
                             rec.cache.kv_cache_base, rec.phys_ids, rec.undo_u8, rec.tag, rec.layer_idx

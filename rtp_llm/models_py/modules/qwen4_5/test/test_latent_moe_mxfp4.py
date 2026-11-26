@@ -73,6 +73,7 @@ from rtp_llm.models_py.modules.qwen4_5.mxfp4_ops import (
     prepare_fp4_weight_scale_for_deepgemm,
     prepare_mxfp4_moe_weights,
     quantize_mxfp4,
+    resolve_moe_backend_for_shape,
     _resolve_moe_backend,
 )
 
@@ -575,6 +576,17 @@ def test_situ_glu_fp8_quant(device: torch.device) -> None:
         assert torch.equal(s_cg[e, :cnt], s_r)
     del g_q, gu_cg, gu_cg2, q_cg, s_cg
 
+    # Verify max_active_rows + zero_unused_scales=False on situ_glu_fp8_quant_packed
+    gu_cap = torch.randn((32, 2560), dtype=torch.bfloat16, device=device) * 1.1
+    active_rows = torch.tensor([11], dtype=torch.int32, device=device)
+    q_cap, s_cap = situ_glu_fp8_quant_packed(
+        gu_cap, zero_unused_scales=False, max_active_rows=active_rows
+    )
+    q_cap_ref, s_cap_ref = situ_glu_fp8_quant_ref(gu_cap[:11], scale_format="deepgemm")
+    assert torch.equal(q_cap[:11].view(torch.uint8), q_cap_ref.view(torch.uint8))
+    assert torch.equal(s_cap[:11], s_cap_ref)
+    del gu_cap, q_cap, s_cap
+
     print("PASS Fused SiTU-GLU + Block-32 UE8M0 FP8 Quantization")
 
 
@@ -660,9 +672,11 @@ def test_sm100_mxfp4_backends_and_cuda_graph(device: torch.device) -> None:
         assert _resolve_moe_backend(torch.empty((1, K), device=device, dtype=torch.bfloat16), w_all_chk, "auto", True) == "triton_splitk"
         assert _resolve_moe_backend(torch.empty((16, K), device=device, dtype=torch.bfloat16), w_all_chk, "auto", True) == "triton_splitk"
         if use_dg:
-            assert _resolve_moe_backend(torch.empty((72, K), device=device, dtype=torch.bfloat16), w_all_chk, "auto", True) == "deepgemm_masked"
+            for m_dg in (72, 512, 1024):
+                assert _resolve_moe_backend(torch.empty((m_dg, K), device=device, dtype=torch.bfloat16), w_all_chk, "auto", True) == "deepgemm_masked"
+            assert _resolve_moe_backend(torch.empty((16384, K), device=device, dtype=torch.bfloat16), w_all_chk, "auto", True) == "deepgemm_contiguous"
         if use_fi:
-            assert _resolve_moe_backend(torch.empty((512, K), device=device, dtype=torch.bfloat16), w_all_chk, "auto", True) == "flashinfer"
+            assert _resolve_moe_backend(torch.empty((2048, K), device=device, dtype=torch.bfloat16), w_all_chk, "auto", True) == "flashinfer"
         prev_wg = os.environ.get("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD")
         try:
             os.environ["RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD"] = "1"
@@ -813,7 +827,48 @@ def test_sm100_mxfp4_backends_and_cuda_graph(device: torch.device) -> None:
     del g_512
     print(f"  LatentMoE + aux_stream CG replay {'auto(warmup=1)':16s} M=512: cos={cos_512:.8f}")
 
-    del moe, w_all
+    # Verify strict_bf16 / QWEN4_5_MXFP4_STRICT_BF16=1 override and deepgemm_contiguous nosync parity
+    x_strict = torch.randn((128, 5120), dtype=torch.bfloat16, device=device) * 0.5
+    strict_b = resolve_moe_backend_for_shape(
+        128,
+        2560,
+        device,
+        w_all,
+        "auto",
+        True,
+        compute_mode="bf16_strict",
+    )
+    assert strict_b in ("triton_splitk", "triton"), f"Expected triton strict backend, got {strict_b}"
+    y_strict_ref = moe(x_strict, use_triton_mxfp4=False, backend="triton")
+    y_strict_mode = moe(x_strict, compute_mode="bf16_strict", backend="auto")
+    _, _, cos_strict_mode = _diff_stats(y_strict_mode, y_strict_ref)
+    assert cos_strict_mode >= 0.9999, f"bf16_strict M=128 cos={cos_strict_mode}"
+    prev_strict = os.environ.get("QWEN4_5_MXFP4_STRICT_BF16")
+    try:
+        os.environ["QWEN4_5_MXFP4_STRICT_BF16"] = "1"
+        assert resolve_moe_backend_for_shape(128, 2560, device, w_all, "auto", True) in ("triton_splitk", "triton")
+        y_strict_env = moe(x_strict, compute_mode="bf16", backend="auto")
+        _, _, cos_strict_env = _diff_stats(y_strict_env, y_strict_ref)
+        assert cos_strict_env >= 0.9999, f"QWEN4_5_MXFP4_STRICT_BF16=1 M=128 cos={cos_strict_env}"
+    finally:
+        if prev_strict is None:
+            os.environ.pop("QWEN4_5_MXFP4_STRICT_BF16", None)
+        else:
+            os.environ["QWEN4_5_MXFP4_STRICT_BF16"] = prev_strict
+    if use_dg and has_flashinfer_mxfp4(dev_idx):
+        x_dg = torch.randn((2048, 2560), dtype=torch.bfloat16, device=device) * 0.5
+        lg_dg = torch.randn((2048, w_all.num_experts), dtype=torch.float32, device=device)
+        t_dg = torch.topk(lg_dg, k=10, dim=-1).indices.to(torch.int32)
+        tw_dg = torch.softmax(lg_dg.gather(-1, t_dg.long()), dim=-1).to(torch.float32)
+        y_dg1 = mxfp4_moe_forward(x_dg, t_dg, tw_dg, w_all, backend="deepgemm_contiguous")
+        y_dg2 = mxfp4_moe_forward(x_dg, t_dg, tw_dg, w_all, backend="deepgemm_contiguous")
+        y_fi = mxfp4_moe_forward(x_dg, t_dg, tw_dg, w_all, backend="flashinfer")
+        _, _, cos_dg_fi = _diff_stats(y_dg1, y_fi)
+        assert _diff_stats(y_dg1, y_dg2)[2] >= 0.999999
+        assert cos_dg_fi >= 0.9999, f"deepgemm_contiguous vs flashinfer M=2048 cos={cos_dg_fi}"
+        del x_dg, lg_dg, t_dg, tw_dg, y_dg1, y_dg2, y_fi
+
+    del moe, w_all, x_strict
     gc.collect()
     torch.cuda.empty_cache()
     print("PASS SM100 MXFP4 Backends, Shared Overlap & CUDA Graph Replay")
@@ -1086,6 +1141,40 @@ def _dist_worker_body(rank: int, world_size: int, device: torch.device, group) -
     hc_fc = ar.all_reduce_hc_combine(x_g, streams_hc, h_post_hc)
     _, _, cos_hc = _diff_stats(hc_fc, hc_ref)
     assert cos_hc > 0.9995, f"rank={rank} AR+HC combine cos={cos_hc}"
+    for _ in range(2):
+        ar.all_reduce_hc_combine(x_g, streams_hc, h_post_hc)
+    torch.cuda.synchronize(device)
+    g_hc = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(g_hc):
+        hc_cg = ar.all_reduce_hc_combine(x_g, streams_hc, h_post_hc)
+    g_hc.replay()
+    torch.cuda.synchronize(device)
+    _, _, cos_hc_cg = _diff_stats(hc_cg, hc_ref)
+    assert cos_hc_cg > 0.9995, f"rank={rank} CG AR+HC combine cos={cos_hc_cg}"
+
+    # Verify Qwen4_5FastAllReduce.all_gather (dim=-1 and dim=0) eager & CUDA Graph
+    ag_in_last = torch.randn((8, 64), dtype=torch.bfloat16, device=device) * 0.25
+    ag_chunks = [torch.empty_like(ag_in_last) for _ in range(world_size)]
+    dist.all_gather(ag_chunks, ag_in_last, group=group)
+    ag_last_ref = torch.cat(ag_chunks, dim=-1)
+    ag_last_fc = ar.all_gather(ag_in_last, dim=-1)
+    assert torch.equal(ag_last_fc, ag_last_ref), f"rank={rank} all_gather(dim=-1) eager mismatch"
+    ag_dim0_ref = torch.cat(ag_chunks, dim=0)
+    ag_dim0_fc = ar.all_gather(ag_in_last, dim=0)
+    assert torch.equal(ag_dim0_fc, ag_dim0_ref), f"rank={rank} all_gather(dim=0) eager mismatch"
+    for _ in range(2):
+        ar.all_gather(ag_in_last, dim=-1)
+        ar.all_gather(ag_in_last, dim=0)
+    torch.cuda.synchronize(device)
+    g_ag = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(g_ag):
+        ag_last_cg = ar.all_gather(ag_in_last, dim=-1)
+        ag_dim0_cg = ar.all_gather(ag_in_last, dim=0)
+    g_ag.replay()
+    torch.cuda.synchronize(device)
+    assert torch.equal(ag_last_cg, ag_last_ref), f"rank={rank} all_gather(dim=-1) CG mismatch"
+    assert torch.equal(ag_dim0_cg, ag_dim0_ref), f"rank={rank} all_gather(dim=0) CG mismatch"
+    del g_hc, g_ag
 
     # 5. Qwen4_5AllToAllComm: uneven ragged routed_a2a + dense_gather FP8 + symm_mem CG + DP-EP MoE
     a2a = get_qwen4_5_all_to_all(group, device=device, max_tokens_per_rank=64, hidden_dim=2560, top_k=4)
@@ -1180,7 +1269,53 @@ def _dist_worker_body(rank: int, world_size: int, device: torch.device, group) -
         _, _, cos_asym = _diff_stats(y_asym, y_asym_ref)
         assert cos_asym > 0.996, f"Asymmetric (7 vs 0) DP-EP LatentMoE cos={cos_asym}"
 
-    del g_mlp, g_moe, g_gnorm, g_dp
+    # Two-microbatch ping-pong TBO under CUDA Graph (equal_tokens=True) and eager 0-token DP rank
+    dp_moe.dp_equal_tokens = True
+    torch.manual_seed(6160 + rank)
+    x_mb0 = torch.randn((8, 5120), dtype=torch.bfloat16, device=device) * 0.4
+    x_mb1 = torch.randn((8, 5120), dtype=torch.bfloat16, device=device) * 0.4
+
+    def _run_tbo_pair(t0: torch.Tensor, t1: torch.Tensor, eq_tok: bool):
+        c0 = dp_moe.forward_route_and_dispatch(t0, equal_tokens=eq_tok, slot=0)
+        c1 = dp_moe.forward_route_and_dispatch(t1, equal_tokens=eq_tok, slot=1)
+        c0 = dp_moe.forward_routed_compute_and_combine(c0, slot=0)
+        c1 = dp_moe.forward_routed_compute_and_combine(c1, slot=1)
+        return dp_moe.forward_finish_combine(c0), dp_moe.forward_finish_combine(c1)
+
+    for _ in range(3):
+        _run_tbo_pair(x_mb0, x_mb1, True)
+    torch.cuda.synchronize(device)
+    g_tbo = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(g_tbo):
+        y_mb0_cg, y_mb1_cg = _run_tbo_pair(x_mb0, x_mb1, True)
+    nx_mb0 = torch.randn((8, 5120), dtype=torch.bfloat16, device=device) * 0.4
+    nx_mb1 = torch.randn((8, 5120), dtype=torch.bfloat16, device=device) * 0.4
+    x_mb0.copy_(nx_mb0)
+    x_mb1.copy_(nx_mb1)
+    y_mb0_ref = ref_moe(nx_mb0)
+    y_mb1_ref = ref_moe(nx_mb1)
+    g_tbo.replay()
+    torch.cuda.synchronize(device)
+    _, _, cos_tbo0 = _diff_stats(y_mb0_cg, y_mb0_ref)
+    _, _, cos_tbo1 = _diff_stats(y_mb1_cg, y_mb1_ref)
+    assert cos_tbo0 > 0.996 and cos_tbo1 > 0.996, (
+        f"rank={rank} TBO CG parity failed: mb0={cos_tbo0}, mb1={cos_tbo1}"
+    )
+
+    # Eager asymmetric 2-microbatch TBO with alternating 0-token DP ranks ((7 vs 0) and (0 vs 5))
+    dp_moe.dp_equal_tokens = False
+    xa0 = torch.randn((7 if rank == 0 else 0, 5120), dtype=torch.bfloat16, device=device) * 0.4
+    xa1 = torch.randn((0 if rank == 0 else 5, 5120), dtype=torch.bfloat16, device=device) * 0.4
+    ya0, ya1 = _run_tbo_pair(xa0, xa1, False)
+    assert ya0.shape == xa0.shape and ya1.shape == xa1.shape
+    if rank == 0:
+        _, _, cos_tbo_asym0 = _diff_stats(ya0, ref_moe(xa0))
+        assert cos_tbo_asym0 > 0.996, f"rank=0 TBO 0-token asym mb0 cos={cos_tbo_asym0}"
+    else:
+        _, _, cos_tbo_asym1 = _diff_stats(ya1, ref_moe(xa1))
+        assert cos_tbo_asym1 > 0.996, f"rank=1 TBO 0-token asym mb1 cos={cos_tbo_asym1}"
+
+    del g_mlp, g_moe, g_gnorm, g_dp, g_tbo
     if rank == 0:
         print(
             f"  PASS Distributed TP/EP={world_size} (fast_comm={ar.active_backend}, a2a={a2a.active_backend}): "
@@ -1259,6 +1394,110 @@ def test_distributed_fast_comm_tp_ep(world_size: int = 2) -> None:
     assert not errors, f"Distributed TP/EP failures: {errors}"
 
 
+def _gloo_dist_worker(rank: int, world_size: int, port: int, err_q: mp.Queue) -> None:
+    try:
+        os.environ["MASTER_ADDR"] = "127.0.0.1"
+        os.environ["MASTER_PORT"] = str(port)
+        torch.cuda.set_device(rank)
+        device = torch.device("cuda", rank)
+        dist.init_process_group(backend="gloo", rank=rank, world_size=world_size)
+        group = dist.group.WORLD
+        with torch.inference_mode():
+            ar = get_qwen4_5_fast_all_reduce(
+                group, device=device, backend="auto", max_tokens=64, hidden_dims=(5120, 2560)
+            )
+            assert ar._is_gloo, "Expected _is_gloo=True on gloo group"
+            torch.manual_seed(9191 + rank)
+            x = torch.randn((8, 64), dtype=torch.bfloat16, device=device) * 0.3
+            xr_list = [torch.empty_like(x.cpu()) for _ in range(world_size)]
+            dist.all_gather(xr_list, x.cpu(), group=group)
+            sum_ref = sum(t.to(device) for t in xr_list)
+            xr_ar = ar.all_reduce(x)
+            _, _, cos_gloo_ar = _diff_stats(xr_ar, sum_ref)
+            assert cos_gloo_ar >= 0.9999, f"gloo all_reduce cos={cos_gloo_ar}"
+            ag_last = ar.all_gather(x, dim=-1)
+            assert torch.equal(ag_last, torch.cat([t.to(device) for t in xr_list], dim=-1))
+            ag_d0 = ar.all_gather(x, dim=0)
+            assert torch.equal(ag_d0, torch.cat([t.to(device) for t in xr_list], dim=0))
+            streams = torch.randn((8, 4, 2560), dtype=torch.bfloat16, device=device) * 0.2
+            h_post = torch.randn((8, 4), dtype=torch.float32, device=device) * 0.1
+            xg = torch.randn((8, 2560), dtype=torch.bfloat16, device=device) * 0.2
+            xg_list = [torch.empty_like(xg.cpu()) for _ in range(world_size)]
+            dist.all_gather(xg_list, xg.cpu(), group=group)
+            xg_sum = sum(t.to(device) for t in xg_list)
+            hc_ref = (streams.float() + h_post.unsqueeze(-1) * xg_sum.unsqueeze(1).float()).to(torch.bfloat16)
+            hc_out = ar.all_reduce_hc_combine(xg, streams, h_post)
+            assert _diff_stats(hc_out, hc_ref)[2] >= 0.9995
+
+            a2a = Qwen4_5AllToAllComm(
+                group, device=device, backend="auto", max_tokens_per_rank=32, hidden_dim=2560, top_k=4
+            )
+            assert a2a._is_gloo
+            xa = torch.randn((4, 2560), dtype=torch.bfloat16, device=device) * 0.25
+            ia = torch.randint(0, 16, (4, 4), dtype=torch.int32, device=device)
+            wa = torch.rand((4, 4), dtype=torch.float32, device=device)
+            st_d = a2a.dispatch(xa, ia, wa, num_experts=16, equal_tokens=True)
+            assert st_d.mode == "dense_gather" and st_d.hidden is not None
+            comb_d = a2a.combine(st_d.hidden, st_d)
+            assert _diff_stats(comb_d, (xa.float() * world_size).to(torch.bfloat16))[2] >= 0.9999
+
+            m_z = 3 if rank == 0 else 0
+            st_r = a2a.dispatch(xa[:m_z], ia[:m_z], wa[:m_z], num_experts=16, equal_tokens=False)
+            assert st_r.mode == "routed_a2a", f"expected routed_a2a, got {st_r.mode}"
+            local_lo, local_hi = rank * 8, (rank + 1) * 8
+            in_loc = (st_r.topk_ids >= local_lo) & (st_r.topk_ids < local_hi)
+            ep_out = torch.where(in_loc.any(dim=-1, keepdim=True), st_r.hidden * 2.0, torch.zeros_like(st_r.hidden))
+            comb_r = a2a.combine(ep_out, st_r)
+            assert comb_r.shape == (m_z, 2560), f"expected {(m_z, 2560)}, got {comb_r.shape}"
+            if m_z > 0:
+                owners = torch.zeros((m_z,), dtype=torch.float32, device=device)
+                for r_i in range(world_size):
+                    owners += ((ia[:m_z] >= r_i * 8) & (ia[:m_z] < (r_i + 1) * 8)).any(dim=-1).float()
+                exp_r = (xa[:m_z].float() * 2.0 * owners[:, None]).to(torch.bfloat16)
+                cos_r = _diff_stats(comb_r, exp_r)[2]
+                assert cos_r >= 0.9999, f"gloo routed_a2a cos={cos_r}" 
+            a2a.destroy()
+            if rank == 0:
+                print(f"  PASS Gloo CUDA fallback fast_comm + AllToAll (AR cos={cos_gloo_ar:.6f})")
+        err_q.put((rank, None))
+    except Exception as exc:
+        err_q.put((rank, f"{type(exc).__name__}: {exc}"))
+    finally:
+        destroy_qwen4_5_all_to_all()
+        destroy_qwen4_5_fast_all_reduce()
+        if dist.is_initialized():
+            dist.destroy_process_group()
+
+
+def test_distributed_gloo_fallback(world_size: int = 2) -> None:
+    print(f"\n=== [10d] Test Gloo Backend CPU-Bounce Fallback (world_size={world_size}) ===")
+    avail = torch.cuda.device_count()
+    assert avail >= world_size, f"Need >= {world_size} GPUs, found {avail}"
+    port = _find_free_port()
+    ctx = mp.get_context("spawn")
+    err_q = ctx.Queue()
+    procs = [
+        ctx.Process(target=_gloo_dist_worker, args=(r, world_size, port, err_q))
+        for r in range(world_size)
+    ]
+    for p in procs:
+        p.start()
+    for p in procs:
+        p.join(timeout=120)
+    errors = []
+    while not err_q.empty():
+        r, err = err_q.get()
+        if err is not None:
+            errors.append(f"rank {r}: {err}")
+    for r, p in enumerate(procs):
+        if p.is_alive():
+            p.terminate()
+            errors.append(f"rank {r}: timed out")
+        elif p.exitcode not in (0, None):
+            errors.append(f"rank {r}: exitcode={p.exitcode}")
+    assert not errors, f"Distributed Gloo fallback failures: {errors}" 
+
+
 def test_sm100_fp8_linear(device: torch.device) -> None:
     print("\n=== [10c] Test SM100FP8Linear & FP8 Dense/Latent MoE Wiring ===")
     torch.manual_seed(7070)
@@ -1319,16 +1558,50 @@ def test_sm100_fp8_linear(device: torch.device) -> None:
         assert cos_cg >= 0.999, f"SM100FP8Linear CG cos={cos_cg}"
         del g
 
-    # Verify SM100/SM103 Pareto frontier dispatch on keep_bf16=True
+    # Verify SM100/SM103 Pareto frontier dispatch on keep_bf16=True (N >= 16384 threshold)
+    assert isinstance(has_flashinfer_mxfp8(dev_idx), bool)
+    assert isinstance(has_flashinfer_trtllm_ll(dev_idx), bool)
     narrow_lin = SM100FP8Linear(5120, 2560, mode="auto", keep_bf16=True, device=device)
+    torch.nn.init.normal_(narrow_lin.weight, 0.0, 0.02)
     narrow_lin.prepare_weights()
     assert narrow_lin._resolve_backend(8, device) == "bf16"
-    assert narrow_lin._resolve_backend(2048, device) in ("scaled_mm", "mxfp8")
-    wide_lin = SM100FP8Linear(5120, 12288, mode="auto", keep_bf16=True, device=device)
+    assert narrow_lin._resolve_backend(512, device) == "bf16"
+    assert narrow_lin._resolve_backend(2048, device) == (
+        "mxfp8" if has_flashinfer_mxfp8(dev_idx) else "bf16"
+    )
+    dflash_fc_lin = SM100FP8Linear(
+        25600, 5120, mode="auto", keep_bf16=True, prepare_trtllm_ll=False, prepare_mxfp8=False, device=device
+    )
+    torch.nn.init.normal_(dflash_fc_lin.weight, 0.0, 0.02)
+    dflash_fc_lin.prepare_weights()
+    for m_df in (1, 8, 64, 512):
+        assert dflash_fc_lin._resolve_backend(m_df, device) == "bf16"
+    wide_lin = SM100FP8Linear(
+        5120, 62080, mode="auto", keep_bf16=True, prepare_trtllm_ll=True, prepare_mxfp8=True, device=device
+    )
+    torch.nn.init.normal_(wide_lin.weight, 0.0, 0.02)
     wide_lin.prepare_weights()
-    if has_flashinfer_trtllm_ll(dev_idx):
-        assert wide_lin._resolve_backend(8, device) == "trtllm_ll"
-    assert wide_lin._resolve_backend(64, device) == "scaled_mm"
+    for m_w in (8, 64, 512):
+        assert wide_lin._resolve_backend(m_w, device) == "scaled_mm"
+        xw = torch.randn((m_w, 5120), dtype=torch.bfloat16, device=device) * 0.5
+        yw_ref = F.linear(xw, wide_lin.weight)
+        yw_auto = wide_lin(xw)
+        assert _diff_stats(yw_auto, yw_ref)[2] >= 0.999, f"wide lm_head M={m_w} cos low"
+    assert wide_lin._resolve_backend(2048, device) == (
+        "mxfp8" if has_flashinfer_mxfp8(dev_idx) else "scaled_mm"
+    )
+    prev_pref_ll = os.environ.get("QWEN4_5_FP8_PREFER_TRTLLM_LL")
+    try:
+        os.environ["QWEN4_5_FP8_PREFER_TRTLLM_LL"] = "1"
+        if has_flashinfer_trtllm_ll(dev_idx):
+            assert wide_lin._resolve_backend(8, device) == "trtllm_ll"
+        assert wide_lin._resolve_backend(64, device) == "scaled_mm"
+    finally:
+        if prev_pref_ll is None:
+            os.environ.pop("QWEN4_5_FP8_PREFER_TRTLLM_LL", None)
+        else:
+            os.environ["QWEN4_5_FP8_PREFER_TRTLLM_LL"] = prev_pref_ll
+    del narrow_lin, dflash_fc_lin, wide_lin
 
     # DenseMLP & LatentMoE dense_linear_mode="auto" parity
     cfg = Qwen4_5ArchConfig()
@@ -1395,7 +1668,7 @@ def main() -> int:
     parser.add_argument("--world-size", type=int, default=2, help="World size for --distributed")
     parser.add_argument("--shootout", action="store_true", help="Run SM100 MoE shootout benchmark")
     parser.add_argument("--shootout-ep", type=int, default=4, help="EP size for --shootout")
-    parser.add_argument("--shootout-m", type=str, default="1,4,8,16,32,64,512,2048", help="Comma-separated M values")
+    parser.add_argument("--shootout-m", type=str, default="1,4,8,16,32,64,512,2048,5120,16384,20480", help="Comma-separated M values")
     args, _ = parser.parse_known_args()
 
     assert torch.cuda.is_available(), "CUDA GPU is required"
@@ -1452,6 +1725,7 @@ def main() -> int:
 
     if args.distributed:
         test_distributed_fast_comm_tp_ep(world_size=args.world_size)
+        test_distributed_gloo_fallback(world_size=args.world_size)
 
     print("\nALL TESTS AND BENCHMARKS PASSED!")
     return 0

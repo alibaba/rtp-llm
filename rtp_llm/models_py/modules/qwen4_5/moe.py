@@ -30,6 +30,7 @@ are applied immediately after ``Qwen4_5DenseMLP`` / ``Qwen4_5LatentMoE`` inside
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, Optional, Tuple
 
@@ -525,6 +526,26 @@ class Qwen4_5DenseMLP(nn.Module):
 def _shared_stream_for_device(device_index: int) -> torch.cuda.Stream:
     """Reuse one auxiliary CUDA stream per device for shared-expert overlap."""
     return torch.cuda.Stream(device=torch.device("cuda", int(device_index)))
+
+
+@dataclass
+class LatentMoETBOContext:
+    """Per-microbatch pipeline state for 3-stage LatentMoE TBO overlap."""
+
+    orig_shape: Tuple[int, ...]
+    x: torch.Tensor
+    run_triton: bool
+    mode: str
+    backend: str
+    weights: MXFP4MoEWeights
+    has_a2a: bool
+    topk_ids: Optional[torch.Tensor] = None
+    topk_weights: Optional[torch.Tensor] = None
+    routed: Optional[torch.Tensor] = None
+    dispatch_handle: Optional[Any] = None
+    combine_handle: Optional[Any] = None
+    shared: Optional[torch.Tensor] = None
+    early_return: Optional[torch.Tensor] = None
 
 
 class Qwen4_5LatentMoE(nn.Module):
@@ -1119,6 +1140,7 @@ class Qwen4_5LatentMoE(nn.Module):
                 weights,
                 backend,
                 run_triton,
+                compute_mode=mode,
             )
             want_fp8_a2a = run_triton and resolved_b in (
                 "deepgemm_masked",
@@ -1317,3 +1339,232 @@ class Qwen4_5LatentMoE(nn.Module):
 
         # 9. Combine routed + shared (ffn_output_sconv + clamp(-1000, 1000) in DecoderLayer)
         return (routed + shared).reshape(orig_shape)
+
+    def _compute_latent_and_route(
+        self, x: torch.Tensor, *, run_triton: bool
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if self._latent_down_gate_weight is not None:
+            dg = (
+                self._fp8_latent_down_gate(x)
+                if self._fp8_latent_down_gate is not None
+                else F.linear(x, self._latent_down_gate_weight)
+            )
+            if run_triton and self.latent_dim <= 4096 and dg.is_cuda:
+                dg_2d = dg if dg.is_contiguous() else dg.contiguous()
+                M_dg = int(dg_2d.shape[0])
+                routed = torch.empty((M_dg, self.latent_dim), dtype=dg_2d.dtype, device=dg_2d.device)
+                if M_dg > 0:
+                    _latent_norm_mul_sigmoid_kernel[(M_dg,)](
+                        dg_2d,
+                        self.pre_moe_latent_layernorm.weight.contiguous(),
+                        routed,
+                        M_dg,
+                        self.latent_dim,
+                        dg_2d.stride(0),
+                        routed.stride(0),
+                        eps=float(self.rms_norm_eps),
+                        BLOCK_L=triton.next_power_of_2(self.latent_dim),
+                        num_warps=4,
+                    )
+            else:
+                d_part, g_part = dg.split(self.latent_dim, dim=-1)
+                routed = self.pre_moe_latent_layernorm(d_part, use_triton=run_triton) * torch.sigmoid(g_part)
+        else:
+            routed = (
+                self._fp8_latent_down(x)
+                if self._fp8_latent_down is not None
+                else F.linear(x, self.latent_down_proj.weight)
+            )
+            routed = self.pre_moe_latent_layernorm(routed, use_triton=run_triton)
+            l_gate = (
+                self._fp8_latent_gate(x)
+                if self._fp8_latent_gate is not None
+                else F.linear(x, self.latent_gate_proj.weight)
+            )
+            routed = routed * torch.sigmoid(l_gate)
+        topk_ids, topk_weights = self.route(routed, use_triton=run_triton)
+        return routed, topk_ids, topk_weights
+
+    def forward_route_and_dispatch(
+        self,
+        hidden_states: torch.Tensor,
+        *,
+        use_triton_mxfp4: Optional[bool] = None,
+        compute_mode: Optional[str] = None,
+        backend: Optional[str] = None,
+        equal_tokens: Optional[bool] = None,
+        slot: int = 0,
+    ) -> LatentMoETBOContext:
+        """TBO Stage 1: project latent + route + launch async AllToAll dispatch."""
+        orig_shape = tuple(hidden_states.shape)
+        x = hidden_states.reshape(-1, self.hidden_size)
+        has_a2a = (
+            self.all_to_all_comm is not None
+            and self.ep_size > 1
+            and getattr(self.all_to_all_comm, "world_size", 1) > 1
+        )
+        use_triton = (
+            self.use_triton_mxfp4 if use_triton_mxfp4 is None else bool(use_triton_mxfp4)
+        )
+        mode = self.compute_mode if compute_mode is None else compute_mode
+        eff_backend = self.backend if backend is None else backend
+        run_triton = use_triton and x.is_cuda and supports_triton_mxfp4(x.device)
+        weights = self._mxfp4_weights()
+        if x.shape[0] == 0 and not has_a2a:
+            return LatentMoETBOContext(
+                orig_shape=orig_shape,
+                x=x,
+                run_triton=run_triton,
+                mode=mode,
+                backend=eff_backend,
+                weights=weights,
+                has_a2a=False,
+                early_return=torch.empty_like(hidden_states),
+            )
+        routed, topk_ids, topk_weights = self._compute_latent_and_route(x, run_triton=run_triton)
+        dispatch_handle = None
+        if has_a2a:
+            assert self.all_to_all_comm is not None
+            eff_m_est = int(routed.shape[0]) * self.ep_size
+            resolved_b = resolve_moe_backend_for_shape(
+                eff_m_est,
+                self.latent_dim,
+                routed.device,
+                weights,
+                eff_backend,
+                run_triton,
+                compute_mode=mode,
+            )
+            want_fp8_a2a = run_triton and resolved_b in (
+                "deepgemm_masked",
+                "deepgemm_contiguous",
+                "flashinfer",
+                "flashinfer_noswap",
+            )
+            eq_tok = self.dp_equal_tokens if equal_tokens is None else equal_tokens
+            dispatch_handle = self.all_to_all_comm.dispatch_async(
+                routed,
+                topk_ids,
+                topk_weights,
+                num_experts=self.num_experts,
+                equal_tokens=eq_tok,
+                quantize_fp8=want_fp8_a2a,
+                slot=slot,
+            )
+        return LatentMoETBOContext(
+            orig_shape=orig_shape,
+            x=x,
+            run_triton=run_triton,
+            mode=mode,
+            backend=eff_backend,
+            weights=weights,
+            has_a2a=has_a2a,
+            topk_ids=topk_ids,
+            topk_weights=topk_weights,
+            routed=routed,
+            dispatch_handle=dispatch_handle,
+        )
+
+    def forward_routed_compute_and_combine(
+        self, ctx: LatentMoETBOContext, *, slot: int = 0
+    ) -> LatentMoETBOContext:
+        """TBO Stage 2: wait dispatch -> routed MXFP4 -> launch async combine + shared."""
+        if ctx.early_return is not None:
+            return ctx
+        assert ctx.routed is not None and ctx.topk_ids is not None and ctx.topk_weights is not None
+        if ctx.has_a2a:
+            assert self.all_to_all_comm is not None and ctx.dispatch_handle is not None
+            a2a_state = self.all_to_all_comm.wait_dispatch(ctx.dispatch_handle)
+            if ctx.run_triton:
+                routed_ep = mxfp4_moe_forward(
+                    a2a_state.hidden,
+                    a2a_state.topk_ids,
+                    a2a_state.topk_weights,
+                    ctx.weights,
+                    gate_beta=self.gate_beta,
+                    up_beta=self.up_beta,
+                    compute_mode=ctx.mode,
+                    use_triton=True,
+                    ep_start=self.ep_start,
+                    ep_size=self.ep_size,
+                    backend=ctx.backend,
+                    prequant_fp8=a2a_state.hidden_fp8,
+                    out_dtype=ctx.routed.dtype,
+                )
+            else:
+                assert a2a_state.hidden is not None
+                routed_ep = mxfp4_moe_forward_ref(
+                    a2a_state.hidden,
+                    a2a_state.topk_ids,
+                    a2a_state.topk_weights,
+                    ctx.weights,
+                    gate_beta=self.gate_beta,
+                    up_beta=self.up_beta,
+                    ep_start=self.ep_start,
+                    ep_size=self.ep_size,
+                )
+            ctx.combine_handle = self.all_to_all_comm.combine_async(
+                routed_ep,
+                a2a_state,
+                use_symm_p2p=self.use_symm_p2p_combine,
+                slot=slot,
+            )
+            # Compute collective-free shared branch on main stream while combine runs on comm_stream.
+            ctx.shared = self._forward_shared(ctx.x, run_triton=ctx.run_triton)
+        else:
+            if ctx.run_triton:
+                routed = mxfp4_moe_forward(
+                    ctx.routed,
+                    ctx.topk_ids,
+                    ctx.topk_weights,
+                    ctx.weights,
+                    gate_beta=self.gate_beta,
+                    up_beta=self.up_beta,
+                    compute_mode=ctx.mode,
+                    use_triton=True,
+                    ep_start=self.ep_start,
+                    ep_size=self.ep_size,
+                    backend=ctx.backend,
+                )
+            else:
+                routed = mxfp4_moe_forward_ref(
+                    ctx.routed,
+                    ctx.topk_ids,
+                    ctx.topk_weights,
+                    ctx.weights,
+                    gate_beta=self.gate_beta,
+                    up_beta=self.up_beta,
+                    ep_start=self.ep_start,
+                    ep_size=self.ep_size,
+                )
+            if self.ep_size > 1 and self.ep_group is not None:
+                if self.fast_all_reduce is not None and self.fast_all_reduce.group is self.ep_group:
+                    routed = self.fast_all_reduce(routed)
+                else:
+                    if not routed.is_contiguous():
+                        routed = routed.contiguous()
+                    torch.distributed.all_reduce(
+                        routed, op=torch.distributed.ReduceOp.SUM, group=self.ep_group
+                    )
+            ctx.routed = routed
+            ctx.shared = self._forward_shared(ctx.x, run_triton=ctx.run_triton)
+        return ctx
+
+    def forward_finish_combine(self, ctx: LatentMoETBOContext) -> torch.Tensor:
+        """TBO Stage 3: wait combine -> latent up + scale gate + add shared expert."""
+        if ctx.early_return is not None:
+            return ctx.early_return
+        if ctx.has_a2a:
+            assert self.all_to_all_comm is not None and ctx.combine_handle is not None
+            routed = self.all_to_all_comm.wait_combine(ctx.combine_handle)
+        else:
+            assert ctx.routed is not None
+            routed = ctx.routed
+        routed = (
+            self._fp8_latent_up(routed)
+            if self._fp8_latent_up is not None
+            else F.linear(routed, self.latent_up_proj.weight)
+        )
+        scale = torch.sigmoid(F.linear(ctx.x, self.latent_scale_gate.weight))
+        shared = ctx.shared if ctx.shared is not None else self._forward_shared(ctx.x, run_triton=ctx.run_triton)
+        return (routed * scale + shared).reshape(ctx.orig_shape)

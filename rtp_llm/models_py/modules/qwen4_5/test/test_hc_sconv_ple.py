@@ -853,6 +853,89 @@ def test_ple_packed_prefill_verify_and_tp_hooks() -> None:
 
 
 @torch.no_grad()
+
+def test_r2_hc_aligned_projections_and_ple_p2p() -> None:
+    from unittest.mock import patch
+    from rtp_llm.models_py.modules.qwen4_5.hyper_connection import _aligned_hc_out_dim
+
+    print("\n=== [3d] R2 HC Zero-cutlass_80 Aligned Projections & PLE P2P Check ===")
+    device = torch.device("cuda")
+    dtype = torch.bfloat16
+    assert _aligned_hc_out_dim(36, hidden_size=5120) == 64
+    assert _aligned_hc_out_dim(4, hidden_size=5120) == 16
+    assert _aligned_hc_out_dim(36, hidden_size=512) == 36
+
+    torch.manual_seed(202620)
+    for use_prev in (True, False):
+        hc = Qwen4_5HyperConnection(
+            hidden_size=5120,
+            hc_count=4,
+            hc_lowrank=32,
+            prev_mix=use_prev,
+            use_combine=True,
+            emits_latent=True,
+            dtype=dtype,
+            device=device,
+        ).eval()
+        for m in (1, 8, 64, 512):
+            x = torch.randn((1, m, 4 * 5120), device=device, dtype=dtype) * 0.5
+            prev = torch.randn((1, m, 32), device=device, dtype=dtype) * 0.5 if use_prev else None
+            mixed_tri, _, inj_tri, lat_tri = hc.mix_with_latent(x, prev_latent=prev)
+            mixed_ref, _, inj_ref, lat_ref = hc.mix_with_latent_ref(x, prev_latent=prev)
+            m_abs, r_m = _diff_stats(mixed_tri, mixed_ref)
+            i_abs, r_i = _diff_stats(inj_tri, inj_ref)
+            l_abs, r_l = _diff_stats(lat_tri, lat_ref)
+            assert m_abs < 1.5e-2 and i_abs < 1.5e-2 and l_abs < 1.5e-2, (
+                f"use_prev={use_prev} m={m} abs=({m_abs}, {i_abs}, {l_abs}) rel=({r_m}, {r_i}, {r_l})"
+            )
+
+    # Verify zero cutlass_80 kernel launch on H=5120, lowrank=32 decode & prefill
+    hc_prof = Qwen4_5HyperConnection(
+        hidden_size=5120, hc_count=4, hc_lowrank=32, prev_mix=False, use_combine=True, emits_latent=True, dtype=dtype, device=device
+    ).eval()
+    for m in (64, 512):
+        xp = torch.randn((1, m, 4 * 5120), device=device, dtype=dtype) * 0.5
+        _ = hc_prof.mix_with_latent(xp)
+        torch.cuda.synchronize()
+        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as prof:
+            _ = hc_prof.mix_with_latent(xp)
+        torch.cuda.synchronize()
+        bad = [e.key for e in prof.key_averages() if "cutlass_80" in e.key]
+        assert not bad, f"Unexpected cutlass_80 kernel at H=5120 LR=32 m={m}: {bad}"
+
+    # Verify CUDA Graph capture & replay on H=5120, LR=32
+    x_cg = torch.randn((1, 64, 4 * 5120), device=device, dtype=dtype) * 0.5
+    p_cg = torch.randn((1, 64, 32), device=device, dtype=dtype) * 0.5
+    hc_cg = Qwen4_5HyperConnection(
+        hidden_size=5120, hc_count=4, hc_lowrank=32, prev_mix=True, use_combine=True, emits_latent=True, dtype=dtype, device=device
+    ).eval()
+    _ = hc_cg.mix_with_latent(x_cg, prev_latent=p_cg)
+    torch.cuda.synchronize()
+    g = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(g):
+        om, _, oi, ol = hc_cg.mix_with_latent(x_cg, prev_latent=p_cg)
+    x_cg.copy_(torch.randn_like(x_cg) * 0.5)
+    p_cg.copy_(torch.randn_like(p_cg) * 0.5)
+    g.replay()
+    rm, _, ri, rl = hc_cg.mix_with_latent(x_cg, prev_latent=p_cg)
+    assert float((om.float() - rm.float()).abs().max().item()) == 0.0
+    assert float((oi.float() - ri.float()).abs().max().item()) == 0.0
+    assert float((ol.float() - rl.float()).abs().max().item()) == 0.0
+
+    # Verify PLE peer-access check accepts P2P CUDA shards and builds pointer table
+    primes = compute_ngram_vocab_sizes(256, 20)
+    ple = Qwen4_5PLELayer(
+        hidden_size=64, hc_count=4, ple_embed_dim=160, ngram_size=3, heads_per_ngram=10,
+        conv_kernel_size=4, split_ngram_parts=4, eos_token_id=151645, ngram_heads_vocab_sizes=primes,
+        weight_scale=DEFAULT_PLE_WEIGHT_SCALE, dtype=dtype, device=device,
+    ).eval()
+    s_rows = (sum(primes) + 3) // 4
+    shards = [torch.zeros((s_rows, 8), dtype=torch.int8, device=device).view(torch.float8_e4m3fn) for _ in range(4)]
+    with patch("torch.cuda.can_device_access_peer", return_value=True):
+        ple.set_ngram_table(shards)
+        assert ple._ensure_pointer_table(device).numel() == 4
+    print("  [PASS] R2 HC H=5120 LR=32 zero cutlass_80, CG parity=0.0, & PLE P2P shard check")
+
 def run_benchmarks() -> None:
     print("\n=== [4] B300 (SM103) CUDA-Graph Pure-GPU Micro-Benchmarks at REAL Qwen 4.5-Flash Shapes ===")
     device = torch.device("cuda")
@@ -973,6 +1056,7 @@ def main() -> int:
     test_ple_layer()
     test_short_conv_verify_and_packed_prefill()
     test_ple_packed_prefill_verify_and_tp_hooks()
+    test_r2_hc_aligned_projections_and_ple_p2p()
     run_benchmarks()
     print(f"\nALL TESTS & BENCHMARKS PASSED in {time.perf_counter() - t0:.2f}s!")
     return 0

@@ -9,15 +9,23 @@ Compatible with:
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+import ctypes
 from dataclasses import dataclass
+import errno
 import json
 import math
 import mmap
+from multiprocessing import reduction as mp_reduction
 import os
+from pathlib import Path
+import platform
+import shutil
+import socket
 import struct
 import time
-from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
+import uuid
+import weakref
 
 import torch
 import torch.distributed as dist
@@ -760,6 +768,427 @@ def _enqueue_hc_copy_ops(
     ops.append((f"{hc_prefix}input_mix_weight_up.weight", hc.input_mix_weight_up, None))
 
 
+
+class _CudaPtrArray:
+    """Zero-copy ``__cuda_array_interface__`` adapter for externally owned GPU memory."""
+
+    def __init__(self, ptr: int, shape: Sequence[int], typestr: str = "|u1") -> None:
+        self.__cuda_array_interface__ = {
+            "shape": tuple(int(d) for d in shape),
+            "typestr": typestr,
+            "data": (int(ptr), False),
+            "version": 3,
+        }
+
+
+def _read_local_boot_id() -> str:
+    boot_path = Path("/proc/sys/kernel/random/boot_id")
+    try:
+        val = boot_path.read_text(encoding="utf-8").strip()
+        if val:
+            return val
+    except Exception:
+        pass
+    return socket.gethostname()
+
+
+def _memfd_syscall_nr() -> Optional[int]:
+    mach = platform.machine().lower()
+    if mach in ("x86_64", "amd64"):
+        return 319
+    if mach in ("aarch64", "arm64"):
+        return 279
+    return None
+
+
+def _get_libcudart() -> Any:
+    return ctypes.CDLL(torch._C.__file__)
+
+
+def _cuda_host_unregister(ptr: int, dev_idx: int, is_cuda: bool) -> None:
+    if not is_cuda or ptr == 0:
+        return
+    try:
+        if not torch.cuda.is_initialized():
+            return
+        rt = _get_libcudart()
+        with torch.cuda.device(dev_idx):
+            rt.cudaHostUnregister(ctypes.c_void_p(ptr))
+    except Exception:
+        pass
+
+
+def _cuda_free_ptr(ptr: int, dev_idx: int) -> None:
+    if ptr == 0:
+        return
+    try:
+        if not torch.cuda.is_initialized():
+            return
+        rt = _get_libcudart()
+        with torch.cuda.device(dev_idx):
+            rt.cudaFree(ctypes.c_void_p(ptr))
+    except Exception:
+        pass
+
+
+def _cuda_ipc_close_ptr(ptr: int, dev_idx: int) -> None:
+    if ptr == 0:
+        return
+    try:
+        if not torch.cuda.is_initialized():
+            return
+        rt = _get_libcudart()
+        with torch.cuda.device(dev_idx):
+            rt.cudaIpcCloseMemHandle(ctypes.c_void_p(ptr))
+    except Exception:
+        pass
+
+
+def resolve_ple_share_group(backbone: Any) -> Any:
+    """Pick a distributed group whose ranks share the same model checkpoint."""
+    if not (dist.is_available() and dist.is_initialized()):
+        return None
+    for attr in ("ep_group", "dp_group", "tp_group"):
+        grp = getattr(backbone, attr, None)
+        if grp is not None:
+            try:
+                if dist.get_world_size(grp) > 1:
+                    return grp
+            except Exception:
+                pass
+    return None
+
+
+def _gather_host_topology(
+    group: Any, device: torch.device
+) -> Tuple[int, int, List[int], List[str]]:
+    if group is None or not (dist.is_available() and dist.is_initialized()):
+        return 0, 1, [0], []
+    gsize = int(dist.get_world_size(group))
+    grank = int(dist.get_rank(group))
+    if gsize <= 1:
+        return 0, 1, [0], []
+
+    boot_id = _read_local_boot_id()
+    gpu_id = ""
+    if device.type == "cuda" and torch.cuda.is_available():
+        try:
+            props = torch.cuda.get_device_properties(device)
+            if hasattr(props, "uuid") and props.uuid is not None:
+                gpu_id = str(props.uuid)
+            elif hasattr(props, "pci_bus_id"):
+                gpu_id = f"pci:{props.pci_bus_id}"
+            else:
+                gpu_id = f"idx:{torch.cuda.current_device()}"
+        except Exception:
+            gpu_id = f"idx:{device.index if device.index is not None else 0}"
+
+    gathered: List[Any] = [None] * gsize
+    dist.all_gather_object(gathered, (boot_id, gpu_id), group=group)
+    same_host_ranks = [r for r, item in enumerate(gathered) if item is not None and item[0] == boot_id]
+    if not same_host_ranks:
+        same_host_ranks = [grank]
+    host_gpu_ids = [gathered[r][1] for r in same_host_ranks]
+    return grank, gsize, same_host_ranks, host_gpu_ids
+
+
+def _align_up(val: int, align: int) -> int:
+    return ((val + align - 1) // align) * align
+
+
+def _wrap_flat_shard_views(
+    raw_u8: torch.Tensor,
+    shard_specs: Sequence[Tuple[torch.dtype, Tuple[int, ...]]],
+) -> Tuple[List[torch.Tensor], List[Tuple[int, int]]]:
+    views: List[torch.Tensor] = []
+    byte_spans: List[Tuple[int, int]] = []
+    cur = 0
+    for s_dt, s_sh in shard_specs:
+        nbytes = int(math.prod(s_sh)) * max(1, int(s_dt.itemsize))
+        off = _align_up(cur, 256)
+        byte_spans.append((off, nbytes))
+        view = raw_u8[off : off + nbytes].view(s_dt).reshape(s_sh)
+        views.append(view)
+        cur = off + nbytes
+    return views, byte_spans
+
+
+def _total_aligned_shard_bytes(
+    shard_specs: Sequence[Tuple[torch.dtype, Tuple[int, ...]]],
+) -> int:
+    cur = 0
+    for s_dt, s_sh in shard_specs:
+        off = _align_up(cur, 256)
+        cur = off + int(math.prod(s_sh)) * max(1, int(s_dt.itemsize))
+    return max(4096, _align_up(cur, 4096))
+
+
+@dataclass
+class SharedHostPLEBuffer:
+    """Single-host shared physical RAM allocation backing all PLE ngram shards."""
+
+    raw_u8: torch.Tensor
+    shard_bufs: List[torch.Tensor]
+    same_host_ranks: List[int]
+    host_local_rank: int
+    alloc_bytes: int
+    group: Any
+    device: torch.device
+
+
+def alloc_shared_host_ple_shards(
+    shard_specs: Sequence[Tuple[torch.dtype, Tuple[int, ...]]],
+    *,
+    group: Any,
+    device: torch.device,
+) -> SharedHostPLEBuffer:
+    """Allocate ONE host RAM buffer shared across all local processes on the same host."""
+    grank, _gsize, same_host_ranks, _ = _gather_host_topology(group, device)
+    node_size = len(same_host_ranks)
+    host_local_rank = same_host_ranks.index(grank)
+    alloc_bytes = _total_aligned_shard_bytes(shard_specs)
+    leader_rank = same_host_ranks[0]
+
+    fd = -1
+    backing = ""
+    shm_path: Optional[str] = None
+    sock_path: Optional[str] = None
+    srv_sock: Optional[socket.socket] = None
+
+    if host_local_rank == 0:
+        nr = _memfd_syscall_nr()
+        if nr is not None:
+            try:
+                libc = ctypes.CDLL("libc.so.6")
+                cand_fd = int(libc.syscall(nr, b"qwen45_ple_shared", 0))
+                if cand_fd >= 0:
+                    os.ftruncate(cand_fd, alloc_bytes)
+                    fd = cand_fd
+                    backing = "memfd"
+            except Exception:
+                if fd >= 0:
+                    os.close(fd)
+                    fd = -1
+
+        if fd < 0:
+            shm_dir = Path("/dev/shm")
+            if shm_dir.is_dir() and shutil.disk_usage(shm_dir).free >= alloc_bytes:
+                shm_path = str(shm_dir / f"qwen45_ple_{os.getpid()}_{uuid.uuid4().hex[:8]}.bin")
+                fd = os.open(shm_path, os.O_CREAT | os.O_RDWR | os.O_EXCL, 0o600)
+                os.ftruncate(fd, alloc_bytes)
+                backing = "dev_shm"
+
+        if fd < 0:
+            raise RuntimeError(
+                f"Failed to allocate shared host PLE buffer of {alloc_bytes} bytes "
+                "(memfd_create failed and /dev/shm lacks space)"
+            )
+
+        if node_size > 1 and backing == "memfd":
+            sock_path = f"/tmp/qwen45_ple_{os.getpid()}_{uuid.uuid4().hex[:8]}.sock"
+            srv_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            srv_sock.settimeout(60.0)
+            srv_sock.bind(sock_path)
+            os.chmod(sock_path, 0o600)
+            srv_sock.listen(max(4, node_size))
+
+    try:
+        if group is not None and dist.is_available() and dist.is_initialized() and dist.get_world_size(group) > 1:
+            gsize = int(dist.get_world_size(group))
+            msg = (backing, sock_path if backing == "memfd" else shm_path) if host_local_rank == 0 else None
+            all_msgs: List[Any] = [None] * gsize
+            dist.all_gather_object(all_msgs, msg, group=group)
+            leader_msg = all_msgs[leader_rank]
+            assert leader_msg is not None
+            leader_backing, leader_loc = leader_msg
+
+            if node_size > 1:
+                if host_local_rank == 0:
+                    if leader_backing == "memfd":
+                        assert srv_sock is not None
+                        for _ in range(node_size - 1):
+                            conn, _ = srv_sock.accept()
+                            try:
+                                conn.settimeout(30.0)
+                                mp_reduction.sendfds(conn, [fd])
+                            finally:
+                                conn.close()
+                else:
+                    if leader_backing == "memfd":
+                        assert leader_loc is not None
+                        for attempt in range(50):
+                            cli = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                            try:
+                                cli.settimeout(60.0)
+                                cli.connect(leader_loc)
+                                fd = int(mp_reduction.recvfds(cli, 1)[0])
+                                break
+                            except OSError as exc:
+                                cli.close()
+                                if exc.errno in (errno.ENOENT, errno.ECONNREFUSED) and attempt < 49:
+                                    time.sleep(0.02)
+                                    continue
+                                raise
+                            finally:
+                                try:
+                                    cli.close()
+                                except Exception:
+                                    pass
+                    elif leader_backing == "dev_shm":
+                        assert leader_loc is not None
+                        fd = os.open(leader_loc, os.O_RDWR)
+
+            dist.barrier(group=group)
+    finally:
+        if srv_sock is not None:
+            try:
+                srv_sock.close()
+            except Exception:
+                pass
+        if sock_path is not None:
+            try:
+                if os.path.exists(sock_path):
+                    os.unlink(sock_path)
+            except Exception:
+                pass
+        if shm_path is not None:
+            try:
+                if os.path.exists(shm_path):
+                    os.unlink(shm_path)
+            except Exception:
+                pass
+
+    mm = mmap.mmap(fd, alloc_bytes, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE)
+    os.close(fd)
+    raw_u8 = torch.frombuffer(mm, dtype=torch.uint8)
+    shard_bufs, _ = _wrap_flat_shard_views(raw_u8, shard_specs)
+    return SharedHostPLEBuffer(
+        raw_u8=raw_u8,
+        shard_bufs=shard_bufs,
+        same_host_ranks=same_host_ranks,
+        host_local_rank=host_local_rank,
+        alloc_bytes=alloc_bytes,
+        group=group,
+        device=device,
+    )
+
+
+def finalize_shared_host_ple_shards(buf: SharedHostPLEBuffer) -> bool:
+    """Sync writers across host ranks and register ONE UVA mapping per CUDA process."""
+    if buf.group is not None and dist.is_available() and dist.is_initialized() and dist.get_world_size(buf.group) > 1:
+        dist.barrier(group=buf.group)
+
+    if buf.device.type != "cuda" or not torch.cuda.is_available():
+        return False
+
+    dev_idx = buf.device.index if buf.device.index is not None else torch.cuda.current_device()
+    rt = _get_libcudart()
+    ptr = int(buf.raw_u8.data_ptr())
+    with torch.cuda.device(buf.device):
+        rc = int(
+            rt.cudaHostRegister(
+                ctypes.c_void_p(ptr),
+                ctypes.c_size_t(buf.alloc_bytes),
+                ctypes.c_uint(0x01 | 0x02),  # cudaHostRegisterPortable | cudaHostRegisterMapped
+            )
+        )
+    if rc == 0:
+        weakref.finalize(buf.raw_u8.untyped_storage(), _cuda_host_unregister, ptr, int(dev_idx), True)
+    else:
+        import warnings
+        warnings.warn(
+            f"cudaHostRegister failed (rc={rc}) for shared PLE buffer ({buf.alloc_bytes} bytes); "
+            "falling back to host-side gather or pin_memory.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    return rc == 0 and all(s.is_pinned() for s in buf.shard_bufs)
+
+
+def _probe_cuda_ipc_ple_peers(
+    group: Any,
+    device: torch.device,
+    same_host_ranks: List[int],
+    host_gpu_ids: List[str],
+    local_bytes_needed: int,
+) -> bool:
+    """Return True iff every rank on the host has distinct GPU + VRAM + working CUDA IPC P2P."""
+    if group is None or not (dist.is_available() and dist.is_initialized()):
+        return False
+    gsize = int(dist.get_world_size(group))
+    grank = int(dist.get_rank(group))
+    node_size = len(same_host_ranks)
+    if gsize <= 1 or node_size <= 1 or device.type != "cuda" or not torch.cuda.is_available():
+        return False
+    if len(set(host_gpu_ids)) != node_size or "" in host_gpu_ids:
+        return False
+
+    dev_idx = device.index if device.index is not None else torch.cuda.current_device()
+    local_ok = False
+    probe_ptr = 0
+    probe_handle = b""
+    rt = _get_libcudart()
+
+    try:
+        with torch.cuda.device(device):
+            free_bytes, _ = torch.cuda.mem_get_info(device)
+            if free_bytes > int(local_bytes_needed * 1.08) + 256 * 1024 * 1024:
+                p = ctypes.c_void_p()
+                if int(rt.cudaMalloc(ctypes.byref(p), ctypes.c_size_t(4096))) == 0 and p.value:
+                    probe_ptr = int(p.value)
+                    probe_t = torch.as_tensor(_CudaPtrArray(probe_ptr, (4096,)), device=device)
+                    probe_t[:16].fill_(grank & 0xFF)
+                    torch.cuda.synchronize(device)
+                    h_buf = (ctypes.c_ubyte * 64)()
+                    if int(rt.cudaIpcGetMemHandle(ctypes.byref(h_buf), p)) == 0:
+                        probe_handle = bytes(h_buf)
+                        local_ok = True
+    except Exception:
+        local_ok = False
+
+    all_info: List[Any] = [None] * gsize
+    dist.all_gather_object(all_info, (local_ok, probe_handle), group=group)
+
+    host_probe_ok = local_ok and all(bool(all_info[r][0]) for r in same_host_ranks)
+    if host_probe_ok:
+        opened_ptrs: List[int] = []
+        try:
+            with torch.cuda.device(device):
+                for peer_r in same_host_ranks:
+                    if peer_r == grank:
+                        continue
+                    peer_h = all_info[peer_r][1]
+                    h_arr = (ctypes.c_ubyte * 64).from_buffer_copy(peer_h)
+                    peer_p = ctypes.c_void_p()
+                    rc_open = int(rt.cudaIpcOpenMemHandle(ctypes.byref(peer_p), h_arr, ctypes.c_uint(1)))
+                    if rc_open != 0 or not peer_p.value:
+                        host_probe_ok = False
+                        break
+                    opened_ptrs.append(int(peer_p.value))
+                    peer_t = torch.as_tensor(_CudaPtrArray(int(peer_p.value), (16,)), device=device)
+                    val = int(peer_t[0].item())
+                    if val != (peer_r & 0xFF):
+                        host_probe_ok = False
+                        break
+                torch.cuda.synchronize(device)
+        except Exception:
+            host_probe_ok = False
+        finally:
+            with torch.cuda.device(device):
+                for op_p in opened_ptrs:
+                    try:
+                        rt.cudaIpcCloseMemHandle(ctypes.c_void_p(op_p))
+                    except Exception:
+                        pass
+
+    dist.barrier(group=group)
+    if probe_ptr != 0:
+        _cuda_free_ptr(probe_ptr, int(dev_idx))
+
+    agreed: List[bool] = [False] * gsize
+    dist.all_gather_object(agreed, bool(host_probe_ok), group=group)
+    return all(agreed)
+
 @torch.no_grad()
 def load_qwen4_5_from_checkpoint(
     causal_lm: Any,
@@ -778,6 +1207,22 @@ def load_qwen4_5_from_checkpoint(
     ep_size = int(getattr(backbone, "ep_size", 1) or 1)
     ep_rank = int(getattr(backbone, "ep_rank", 0) or 0)
     ep_group = getattr(backbone, "ep_group", None)
+    raw_ple_mode = str(ple_mode or "gpu_sharded").strip().lower()
+    if raw_ple_mode in ("shm", "mmap", "cpu_uva_shared", "host_shared", "cpu_uva"):
+        norm_ple_mode = "cpu_uva"
+        force_shared_host = raw_ple_mode in ("shm", "mmap", "cpu_uva_shared", "host_shared")
+    elif raw_ple_mode == "auto":
+        norm_ple_mode = "gpu_sharded"
+        force_shared_host = False
+    elif raw_ple_mode in ("gpu_sharded", "gpu_full"):
+        norm_ple_mode = raw_ple_mode
+        force_shared_host = False
+    else:
+        raise ValueError(
+            f"Unsupported ple_mode={ple_mode!r}; expected one of "
+            "('gpu_sharded', 'gpu_full', 'cpu_uva', 'shm', 'mmap', 'auto')"
+        )
+
     tp_size = max(1, int(getattr(backbone, "tp_size", 1) or 1))
     tp_rank = int(getattr(backbone, "tp_rank", 0) or 0)
     tp_group = getattr(backbone, "tp_group", None)
@@ -787,8 +1232,21 @@ def load_qwen4_5_from_checkpoint(
     ple_shard_group = tp_group if dp_attn else ep_group
 
     device = backbone.embed_tokens.weight.device
+    dev_idx = device.index if (device.type == "cuda" and device.index is not None) else (
+        torch.cuda.current_device() if (device.type == "cuda" and torch.cuda.is_available()) else 0
+    )
+    share_group = resolve_ple_share_group(backbone)
+    same_host_ranks: List[int] = [0]
+    host_gpu_ids: List[str] = []
+    share_rank = 0
+    if share_group is not None:
+        share_rank, _share_size, same_host_ranks, host_gpu_ids = _gather_host_topology(share_group, device)
+    node_size = len(same_host_ranks)
+    host_local_rank = same_host_ranks.index(share_rank) if node_size > 1 else 0
+
     ops: List[Tuple[Any, ...]] = []
-    ple_plans: List[Tuple[Any, List[torch.Tensor], Optional[torch.Tensor], int, int]] = []
+    # (ple, mode_tag, payload, w_scale_tensor, shard_offset, total_shards)
+    ple_plans: List[Tuple[Any, str, Any, Optional[torch.Tensor], int, int]] = []
 
     with SafetensorsShardReader(ckpt_path) as reader:
         ops.append((f"{prefix}embed_tokens.weight", backbone.embed_tokens.weight, None))
@@ -849,27 +1307,109 @@ def load_qwen4_5_from_checkpoint(
                     ops.append((scale_key, w_scale_tensor, torch.bfloat16))
 
                 total_shards = cfg.split_ngram_parts
-                if ple_mode == "gpu_sharded" and ple_shard_size > 1:
-                    local_shards = total_shards // ple_shard_size
-                    shard_offset = ple_shard_rank * local_shards
-                    shard_dev = device
-                elif ple_mode == "cpu_uva":
-                    local_shards = total_shards
-                    shard_offset = 0
-                    shard_dev = torch.device("cpu")
-                else:
-                    local_shards = total_shards
-                    shard_offset = 0
-                    shard_dev = device
-
-                shard_bufs: List[torch.Tensor] = []
-                for s in range(shard_offset, shard_offset + local_shards):
+                shard_specs: List[Tuple[torch.dtype, Tuple[int, ...]]] = []
+                shard_keys: List[str] = []
+                for s in range(total_shards):
                     skey = f"{ple_p}ple_embedding.ngram_embedding.shard_{s}.weight"
                     s_dt, s_sh = reader.get_tensor_spec(skey)
-                    sbuf = torch.empty(s_sh, dtype=s_dt, device=shard_dev)
-                    shard_bufs.append(sbuf)
-                    ops.append((skey, sbuf, s_dt))
-                ple_plans.append((ple, shard_bufs, w_scale_tensor, shard_offset, total_shards))
+                    shard_specs.append((s_dt, s_sh))
+                    shard_keys.append(skey)
+
+                use_gpu_sharded_ar = (
+                    norm_ple_mode == "gpu_sharded"
+                    and not dp_attn
+                    and ple_shard_size > 1
+                )
+                use_cuda_ipc_p2p = False
+                if (
+                    norm_ple_mode == "gpu_sharded"
+                    and dp_attn
+                    and node_size > ple_shard_size
+                    and total_shards % node_size == 0
+                    and len({spec for spec in shard_specs}) == 1
+                ):
+                    uniform_dt, uniform_sh = shard_specs[0]
+                    per_shard_bytes = int(math.prod(uniform_sh)) * max(1, int(uniform_dt.itemsize))
+                    local_shards_ipc = total_shards // node_size
+                    use_cuda_ipc_p2p = _probe_cuda_ipc_ple_peers(
+                        share_group,
+                        device,
+                        same_host_ranks,
+                        host_gpu_ids,
+                        local_shards_ipc * per_shard_bytes,
+                    )
+
+                if use_gpu_sharded_ar:
+                    local_shards = total_shards // ple_shard_size
+                    shard_offset = ple_shard_rank * local_shards
+                    shard_bufs = []
+                    for s in range(shard_offset, shard_offset + local_shards):
+                        s_dt, s_sh = shard_specs[s]
+                        sbuf = torch.empty(s_sh, dtype=s_dt, device=device)
+                        shard_bufs.append(sbuf)
+                        ops.append((shard_keys[s], sbuf, s_dt))
+                    ple_plans.append((ple, "gpu_sharded_ar", shard_bufs, w_scale_tensor, shard_offset, total_shards))
+                elif use_cuda_ipc_p2p:
+                    uniform_dt, uniform_sh = shard_specs[0]
+                    local_shards_ipc = total_shards // node_size
+                    local_bytes_ipc = local_shards_ipc * int(math.prod(uniform_sh)) * max(1, int(uniform_dt.itemsize))
+                    rt = _get_libcudart()
+                    local_p = ctypes.c_void_p()
+                    with torch.cuda.device(device):
+                        rc_m = int(rt.cudaMalloc(ctypes.byref(local_p), ctypes.c_size_t(local_bytes_ipc)))
+                    if rc_m != 0 or not local_p.value:
+                        raise RuntimeError(f"cudaMalloc failed for PLE IPC shard buffer ({local_bytes_ipc} bytes, rc={rc_m})")
+                    local_ptr_int = int(local_p.value)
+                    local_raw = torch.as_tensor(_CudaPtrArray(local_ptr_int, (local_bytes_ipc,)), device=device)
+                    weakref.finalize(local_raw.untyped_storage(), _cuda_free_ptr, local_ptr_int, int(dev_idx))
+                    local_view = local_raw.view(uniform_dt).reshape(local_shards_ipc, *uniform_sh)
+                    my_offset = host_local_rank * local_shards_ipc
+                    for idx_local in range(local_shards_ipc):
+                        s_global = my_offset + idx_local
+                        ops.append((shard_keys[s_global], local_view[idx_local], uniform_dt))
+                    ple_plans.append(
+                        (
+                            ple,
+                            "gpu_ipc_p2p",
+                            (local_p, local_raw, local_view, uniform_dt, uniform_sh, local_shards_ipc),
+                            w_scale_tensor,
+                            0,
+                            total_shards,
+                        )
+                    )
+                elif (
+                    (
+                        force_shared_host
+                        or (norm_ple_mode == "cpu_uva" and node_size > 1 and share_group is not None)
+                        or (norm_ple_mode == "gpu_sharded" and dp_attn and node_size > ple_shard_size and node_size > 1 and share_group is not None)
+                    )
+                ):
+                    shared_buf = alloc_shared_host_ple_shards(
+                        shard_specs,
+                        group=share_group,
+                        device=device,
+                    )
+                    for s in range(total_shards):
+                        if s % node_size == host_local_rank:
+                            s_dt, _ = shard_specs[s]
+                            ops.append((shard_keys[s], shared_buf.shard_bufs[s], s_dt))
+                    ple_plans.append((ple, "shared_host_uva", shared_buf, w_scale_tensor, 0, total_shards))
+                elif norm_ple_mode == "cpu_uva":
+                    shard_bufs = []
+                    for s in range(total_shards):
+                        s_dt, s_sh = shard_specs[s]
+                        sbuf = torch.empty(s_sh, dtype=s_dt, device=torch.device("cpu"))
+                        shard_bufs.append(sbuf)
+                        ops.append((shard_keys[s], sbuf, s_dt))
+                    ple_plans.append((ple, "cpu_uva_local", shard_bufs, w_scale_tensor, 0, total_shards))
+                else:
+                    shard_bufs = []
+                    for s in range(total_shards):
+                        s_dt, s_sh = shard_specs[s]
+                        sbuf = torch.empty(s_sh, dtype=s_dt, device=device)
+                        shard_bufs.append(sbuf)
+                        ops.append((shard_keys[s], sbuf, s_dt))
+                    ple_plans.append((ple, "gpu_full", shard_bufs, w_scale_tensor, 0, total_shards))
 
             # Attention
             if layer.linear_attn is not None:
@@ -1010,25 +1550,67 @@ def load_qwen4_5_from_checkpoint(
         if device.type == "cuda":
             torch.cuda.synchronize(device)
 
-        for ple, shard_bufs, w_scale_tensor, shard_offset, total_shards in ple_plans:
+        for ple, mode_tag, payload, w_scale_tensor, shard_offset, total_shards in ple_plans:
             w_scale = w_scale_tensor if w_scale_tensor is not None else DEFAULT_PLE_WEIGHT_SCALE
-            if ple_mode == "gpu_sharded" and ple_shard_size > 1:
+            if mode_tag == "gpu_sharded_ar":
                 ple.set_ngram_table(
-                    shard_bufs,
+                    payload,
                     weight_scale=w_scale,
                     shard_offset=shard_offset,
                     total_shards=total_shards,
                     ep_group=ple_shard_group,
                 )
-            elif ple_mode == "cpu_uva":
+            elif mode_tag == "gpu_ipc_p2p":
+                local_p, local_raw, local_view, uniform_dt, uniform_sh, local_shards_ipc = payload
+                rt = _get_libcudart()
+                h_buf = (ctypes.c_ubyte * 64)()
+                with torch.cuda.device(device):
+                    rc_h = int(rt.cudaIpcGetMemHandle(ctypes.byref(h_buf), local_p))
+                if rc_h != 0:
+                    raise RuntimeError(f"cudaIpcGetMemHandle failed (rc={rc_h})")
+                gsize = int(dist.get_world_size(share_group))
+                all_handles: List[bytes] = [b""] * gsize
+                dist.all_gather_object(all_handles, bytes(h_buf), group=share_group)
+
+                local_bytes_ipc = int(local_raw.numel())
+                all_shards: List[Optional[torch.Tensor]] = [None] * total_shards
+                with torch.cuda.device(device):
+                    for k, peer_r in enumerate(same_host_ranks):
+                        if peer_r == share_rank:
+                            peer_view = local_view
+                        else:
+                            h_arr = (ctypes.c_ubyte * 64).from_buffer_copy(all_handles[peer_r])
+                            peer_p = ctypes.c_void_p()
+                            rc_o = int(rt.cudaIpcOpenMemHandle(ctypes.byref(peer_p), h_arr, ctypes.c_uint(1)))
+                            if rc_o != 0 or not peer_p.value:
+                                raise RuntimeError(f"cudaIpcOpenMemHandle failed for peer {peer_r} (rc={rc_o})")
+                            peer_ptr_int = int(peer_p.value)
+                            peer_raw = torch.as_tensor(_CudaPtrArray(peer_ptr_int, (local_bytes_ipc,)), device=device)
+                            weakref.finalize(peer_raw.untyped_storage(), _cuda_ipc_close_ptr, peer_ptr_int, int(dev_idx))
+                            peer_view = peer_raw.view(uniform_dt).reshape(local_shards_ipc, *uniform_sh)
+                        base_s = k * local_shards_ipc
+                        for idx_local in range(local_shards_ipc):
+                            all_shards[base_s + idx_local] = peer_view[idx_local]
+                dist.barrier(group=share_group)
+                ple.set_ngram_table([s for s in all_shards if s is not None], weight_scale=w_scale, ep_group=None)
+            elif mode_tag == "shared_host_uva":
+                pinned_ok = finalize_shared_host_ple_shards(payload)
                 ple.set_ngram_table(
-                    shard_bufs,
+                    payload.shard_bufs,
+                    weight_scale=w_scale,
+                    pin_cpu=False,
+                    enable_cpu_uva=pinned_ok,
+                    ep_group=None,
+                )
+            elif mode_tag == "cpu_uva_local":
+                ple.set_ngram_table(
+                    payload,
                     weight_scale=w_scale,
                     pin_cpu=True,
                     enable_cpu_uva=True,
                 )
             else:
-                ple.set_ngram_table(shard_bufs, weight_scale=w_scale)
+                ple.set_ngram_table(payload, weight_scale=w_scale)
 
     causal_lm.prepare_weights()
     if device.type == "cuda":

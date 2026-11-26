@@ -657,6 +657,24 @@ class TestQwen4_5ConfigWeightKVCache(unittest.TestCase):
         self.assertEqual(d_fp8.kv_bytes_per_token, 5 * 2 * 1 * 256 * 1)
         self.assertEqual(d_fp8.total_bytes_for_seq_len(20480, 1), d_bf16.total_bytes_for_seq_len(20480, 1) // 2)
 
+    def test_9_fp8_e4m3_kv_cache_plan_alias(self):
+        from rtp_llm.models.qwen4_5.qwen4_5_kv_cache import build_qwen4_5_kv_cache_plan
+
+        p_fp8 = build_qwen4_5_kv_cache_plan(self.arch_cfg, parallel_mode="tp4_ep4", kv_dtype="fp8")
+        p_f8 = build_qwen4_5_kv_cache_plan(self.arch_cfg, parallel_mode="tp4_ep4", kv_dtype="f8_e4m3")
+        p_fp8_e4m3 = build_qwen4_5_kv_cache_plan(
+            self.arch_cfg, parallel_mode="tp4_ep4", kv_dtype="fp8_e4m3"
+        )
+        p_fp8_e4m3_upper = build_qwen4_5_kv_cache_plan(
+            self.arch_cfg, parallel_mode="dp4_ep4", kv_dtype="FP8_E4M3"
+        )
+        self.assertEqual(p_fp8_e4m3.kv_dtype, "FP8_E4M3")
+        self.assertEqual(p_fp8_e4m3.kv_dtype_bytes, 1)
+        self.assertEqual(p_fp8_e4m3.kv_bytes_per_token, 2560)
+        self.assertEqual(p_fp8_e4m3.kv_bytes_per_token, p_fp8.kv_bytes_per_token)
+        self.assertEqual(p_fp8_e4m3.kv_bytes_per_token, p_f8.kv_bytes_per_token)
+        self.assertEqual(p_fp8_e4m3_upper.kv_bytes_per_token, 2560)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1784,7 +1784,8 @@ def mxfp4_grouped_moe_gemm(
     grid = (triton.cdiv(N, BN), schedule.max_num_tiles)
     k_divisible = (K % BK) == 0
 
-    if compute_mode == "bf16":
+    mode_norm = "bf16" if str(compute_mode).lower() in ("bf16", "bf16_strict", "strict_bf16") else str(compute_mode).lower()
+    if mode_norm == "bf16":
         _mxfp4_grouped_gemm_bf16_kernel[grid](
             x,
             w_u8,
@@ -1813,7 +1814,7 @@ def mxfp4_grouped_moe_gemm(
             num_warps=num_warps,
             num_stages=num_stages,
         )
-    elif compute_mode == "e4m3":
+    elif mode_norm == "e4m3":
         x_q, x_sc = quantize_mxfp8_e4m3(x)
         _mxfp4_grouped_gemm_e4m3_kernel[grid](
             x_q,
@@ -1846,7 +1847,7 @@ def mxfp4_grouped_moe_gemm(
             num_stages=num_stages,
         )
     else:
-        raise ValueError(f"Unsupported compute_mode={compute_mode!r}; expected bf16 or e4m3")
+        raise ValueError(f"Unsupported compute_mode={compute_mode!r}; expected bf16, bf16_strict, or e4m3")
 
     return out
 
@@ -2413,18 +2414,34 @@ def _init_m_indices_kernel(
     aligned_counts_ptr,
     offsets_ptr,
     m_indices_ptr,
+    write_cnt_ptr,
+    active_rows_ptr,
+    cap_tokens,
+    num_experts: tl.constexpr,
+    FILL_TAIL: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     e = tl.program_id(0)
-    c = tl.load(counts_ptr + e)
-    if c == 0:
-        return
-    ac = tl.load(aligned_counts_ptr + e)
-    start = tl.load(offsets_ptr + e)
-    for base in range(0, ac, BLOCK):
-        offs = base + tl.arange(0, BLOCK)
-        mask = offs < ac
-        tl.store(m_indices_ptr + start + offs, e, mask=mask)
+    if e < num_experts:
+        tl.store(write_cnt_ptr + e, 0)
+        c = tl.load(counts_ptr + e)
+        if c > 0:
+            ac = tl.load(aligned_counts_ptr + e).to(tl.int32)
+            start = tl.load(offsets_ptr + e).to(tl.int32)
+            for base in range(0, ac, BLOCK):
+                offs = base + tl.arange(0, BLOCK)
+                tl.store(m_indices_ptr + start + offs, e, mask=(offs < ac))
+    elif FILL_TAIL:
+        total_aligned = (
+            tl.load(offsets_ptr + num_experts - 1) + tl.load(aligned_counts_ptr + num_experts - 1)
+        ).to(tl.int32)
+        if e == num_experts:
+            tl.store(active_rows_ptr, total_aligned)
+        pid_tail = e - num_experts
+        n_tail_ctas = tl.num_programs(0) - num_experts
+        for base in range(total_aligned + pid_tail * BLOCK, cap_tokens, n_tail_ctas * BLOCK):
+            offs = base + tl.arange(0, BLOCK)
+            tl.store(m_indices_ptr + offs, -1, mask=(offs < cap_tokens))
 
 
 @triton.jit(do_not_specialize=["stride_q_row", "stride_sc_row", "stride_out_q_row", "stride_out_sc_k"])
@@ -2571,9 +2588,19 @@ def mxfp4_moe_deepgemm_contiguous(
     counts = _gpu_expert_bincount(flat_local, E_local)
     aligned_counts = ((counts + alignment - 1) // alignment) * alignment
     offsets = torch.cumsum(aligned_counts, dim=0) - aligned_counts
-    all_tokens = int(aligned_counts.sum().item())
-    if all_tokens == 0:
-        return torch.zeros((M, L), dtype=res_dtype, device=dev)
+    use_cap_nosync = ep_size <= 1
+    if use_cap_nosync:
+        all_tokens = (
+            (M * top_k + E_local * (alignment - 1) + alignment - 1) // alignment
+        ) * alignment
+        active_rows_t: Optional[torch.Tensor] = torch.empty((1,), dtype=torch.int32, device=dev)
+        grid_init = (E_local + 32,)
+    else:
+        all_tokens = int(aligned_counts.sum().item())
+        if all_tokens == 0:
+            return torch.zeros((M, L), dtype=res_dtype, device=dev)
+        active_rows_t = None
+        grid_init = (E_local,)
 
     (w13_i8, w13_s), (w2_i8, w2_s) = weights.get_deepgemm_pair()
 
@@ -2582,19 +2609,29 @@ def mxfp4_moe_deepgemm_contiguous(
     else:
         assert x is not None
         x_q, x_sc_raw = per_token_group_quant_fp8_ue8m0(x, scale_format="raw")
-    a_fp8 = torch.zeros((all_tokens, L), dtype=torch.float8_e4m3fn, device=dev)
+    a_fp8 = torch.empty((all_tokens, L), dtype=torch.float8_e4m3fn, device=dev)
     num_groups = L // 32
     num_packs = num_groups // 4
     tma_m = ((all_tokens + 3) // 4) * 4
-    a_scale = torch.zeros((num_packs, tma_m), dtype=torch.int32, device=dev).T[:all_tokens]
+    a_scale = torch.empty((num_packs, tma_m), dtype=torch.int32, device=dev).T[:all_tokens]
 
-    m_indices = torch.zeros((all_tokens,), dtype=torch.int32, device=dev)
-    _init_m_indices_kernel[(E_local,)](
-        counts, aligned_counts, offsets, m_indices, BLOCK=256, num_warps=4
+    m_indices = torch.empty((all_tokens,), dtype=torch.int32, device=dev)
+    write_cnt = torch.empty((E_local,), dtype=torch.int32, device=dev)
+    _init_m_indices_kernel[grid_init](
+        counts,
+        aligned_counts,
+        offsets,
+        m_indices,
+        write_cnt,
+        active_rows_t if active_rows_t is not None else write_cnt,
+        all_tokens,
+        num_experts=E_local,
+        FILL_TAIL=use_cap_nosync,
+        BLOCK=256,
+        num_warps=4,
     )
 
     M_total = M * top_k
-    write_cnt = torch.zeros((E_local,), dtype=torch.int32, device=dev)
     dst_slots = torch.empty((M, top_k), dtype=torch.int32, device=dev)
     _scatter_fp8_to_contig_kernel[(M_total,)](
         x_q.view(torch.uint8),
@@ -2631,7 +2668,12 @@ def mxfp4_moe_deepgemm_contiguous(
     )
 
     h_fp8, h_scale = situ_glu_fp8_quant_packed(
-        gate_up, gate_beta=gate_beta, up_beta=up_beta, scale_format="deepgemm"
+        gate_up,
+        gate_beta=gate_beta,
+        up_beta=up_beta,
+        scale_format="deepgemm",
+        zero_unused_scales=False,
+        max_active_rows=active_rows_t,
     )
 
     down_out = torch.empty((all_tokens, L), dtype=torch.bfloat16, device=dev)
@@ -3040,11 +3082,11 @@ def mxfp4_moe_flashinfer(
     else:
         assert x is not None
         x_q, x_sc_raw = per_token_group_quant_fp8_ue8m0(x, scale_format="raw")
-    a_fp8 = torch.zeros((cum_m, L), dtype=torch.float8_e4m3fn, device=dev)
+    a_fp8 = torch.empty((cum_m, L), dtype=torch.float8_e4m3fn, device=dev)
     num_groups = L // 32
     sf_cols_pad = ((num_groups + 3) // 4) * 4
     total_sf_rows = ((cum_m + max(E_local - 1, 0) * 127 + 127) // 128) * 128
-    a_scale = torch.zeros((total_sf_rows * sf_cols_pad,), dtype=torch.uint8, device=dev)
+    a_scale = torch.empty((total_sf_rows * sf_cols_pad,), dtype=torch.uint8, device=dev)
 
     M_total = M * top_k
     write_cnt = torch.zeros((E_local,), dtype=torch.int32, device=dev)
@@ -3090,6 +3132,7 @@ def mxfp4_moe_flashinfer(
         up_beta=up_beta,
         scale_format="flashinfer",
         m_indptr=m_indptr,
+        zero_unused_scales=False,
     )
 
     down_out = torch.empty((cum_m, L), dtype=torch.bfloat16, device=dev)
@@ -3135,6 +3178,7 @@ def resolve_moe_backend_for_shape(
     weights: MXFP4MoEWeights,
     backend: str,
     use_triton: bool,
+    compute_mode: str = "bf16",
 ) -> str:
     """Resolve active MXFP4 MoE backend without needing a live activation tensor."""
     if backend == "ref" or not use_triton or device.type != "cuda" or not supports_triton_mxfp4(device):
@@ -3158,6 +3202,13 @@ def resolve_moe_backend_for_shape(
             # Contiguous / FlashInfer scatter allocates dynamic shapes via .item().
             return "deepgemm_masked" if dg_masked_ok else ("triton_splitk" if M <= 64 else "triton")
         return req
+
+    strict_bf16 = (
+        str(compute_mode).lower() in ("bf16_strict", "strict_bf16")
+        or os.environ.get("QWEN4_5_MXFP4_STRICT_BF16", "0") == "1"
+    )
+    if strict_bf16:
+        return "triton_splitk" if M <= 64 else "triton"
 
     fi_ok = (
         not weights.weights_transposed
@@ -3186,9 +3237,14 @@ def resolve_moe_backend_for_shape(
         return pref_env
     if capturing:
         return "deepgemm_masked" if dg_masked_ok else "triton"
-    # Empirical P-001 (4x L20A) winners: deepgemm_masked for M<=256 (also CG-safe), flashinfer for M>=512.
-    if M <= 256 and dg_masked_ok:
+    # Empirical SM100/SM103 Pareto: deepgemm_masked for M<=1024 (beats flashinfer & CG-safe),
+    # flashinfer for 1024<M<16384, and FillFunctor-free deepgemm_contiguous for M>=16384.
+    masked_max_m = int(os.environ.get("QWEN4_5_MXFP4_MASKED_MAX_M", "1024"))
+    contig_min_m = int(os.environ.get("QWEN4_5_MXFP4_CONTIG_MIN_M", "16384"))
+    if M <= masked_max_m and dg_masked_ok:
         return "deepgemm_masked"
+    if M >= contig_min_m and dg_masked_ok:
+        return "deepgemm_contiguous"
     if fi_ok:
         return "flashinfer"
     if dg_masked_ok:
@@ -3201,9 +3257,16 @@ def _resolve_moe_backend(
     weights: MXFP4MoEWeights,
     backend: str,
     use_triton: bool,
+    compute_mode: str = "bf16",
 ) -> str:
     return resolve_moe_backend_for_shape(
-        int(x.shape[0]), int(x.shape[1]), x.device, weights, backend, use_triton
+        int(x.shape[0]),
+        int(x.shape[1]),
+        x.device,
+        weights,
+        backend,
+        use_triton,
+        compute_mode=compute_mode,
     )
 
 
@@ -3250,7 +3313,9 @@ def mxfp4_moe_forward(
     if M == 0:
         return torch.empty((0, L), dtype=res_dtype, device=dev)
 
-    chosen = resolve_moe_backend_for_shape(M, L, dev, weights, backend, use_triton)
+    chosen = resolve_moe_backend_for_shape(
+        M, L, dev, weights, backend, use_triton, compute_mode=compute_mode
+    )
 
     if chosen == "deepgemm_contiguous":
         return mxfp4_moe_deepgemm_contiguous(
@@ -3529,7 +3594,7 @@ def bench_sm100_shootout(
         row: Dict[str, Any] = {}
         best_b, best_ms = None, 1e9
         for b in backends:
-            if b == "deepgemm_masked" and M > 512:
+            if b == "deepgemm_masked" and M > 1024:
                 continue
             if b == "triton_splitk" and M > 256:
                 continue

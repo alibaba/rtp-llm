@@ -2395,6 +2395,230 @@ class TestDFlash2Phase2MHAAndTP4(unittest.TestCase):
             0.999,
         )
 
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+    @torch.no_grad()
+    def test_dflash2_triton_bf16_fp8_b128_and_env_cg_parity_gpu(self) -> None:
+        """Verify R2 body+edge Triton DFlash2 (BF16/FP8-KV), B=128 CG workspace, partial tail, and env selection."""
+        import torch.nn.functional as F
+        from rtp_llm.models_py.model_desc.qwen4_5_dspark_model import (
+            _DFlash2PagedFMHADispatcher,
+            _DFlash2SplitKVWorkspace,
+        )
+        from rtp_llm.ops import AttentionConfigs
+
+        device = torch.device("cuda:0")
+        _, draft_dir = _resolve_mock_dflash_dirs()
+        cfg, mw = _load_dspark_model_weights(draft_dir, device=str(device))
+
+        # 1. Verify QWEN4_5_DFLASH_ATTN_BACKEND / QWEN4_5_DFLASH_KV_DTYPE env selection and B=128 workspace cap
+        old_b = os.environ.get("QWEN4_5_DFLASH_ATTN_BACKEND")
+        old_kv = os.environ.get("QWEN4_5_DFLASH_KV_DTYPE")
+        try:
+            os.environ["QWEN4_5_DFLASH_ATTN_BACKEND"] = "triton"
+            os.environ["QWEN4_5_DFLASH_KV_DTYPE"] = "fp8_e4m3"
+            pc4 = ParallelismConfig()
+            pc4.tp_size = 4
+            pc4.tp_rank = 0
+            m_env = Qwen4_5DSparkModel(cfg, pc4, mw, max_generate_batch_size=128)
+            self.assertEqual(m_env.dflash_attn_backend, "triton")
+            self.assertEqual(m_env.dflash_kv_dtype, "fp8_e4m3")
+            self.assertGreaterEqual(m_env._mha_workspace.max_bs_slots, 1024)
+            del m_env
+        finally:
+            if old_b is None:
+                os.environ.pop("QWEN4_5_DFLASH_ATTN_BACKEND", None)
+            else:
+                os.environ["QWEN4_5_DFLASH_ATTN_BACKEND"] = old_b
+            if old_kv is None:
+                os.environ.pop("QWEN4_5_DFLASH_KV_DTYPE", None)
+            else:
+                os.environ["QWEN4_5_DFLASH_KV_DTYPE"] = old_kv
+
+        # 2. Single-layer B=128 body+edge Triton BF16 & FP8-KV with mixed partial tails, inactive reqs, inference_mode & CG
+        B, q_len, ps, d, h_q = 128, 8, 64, 256, 8
+        ctx = 256
+        pps = (ctx + q_len + ps - 1) // ps
+        kv_bf_buf = torch.randn((B * pps, 2, 1, ps, d), dtype=torch.bfloat16, device=device) * 0.05
+        kv_snap = kv_bf_buf.clone()
+        q = torch.randn((B * q_len, h_q, d), dtype=torch.bfloat16, device=device) * 0.1
+        k = torch.randn((B * q_len, 1, d), dtype=torch.bfloat16, device=device) * 0.1
+        v = torch.randn((B * q_len, 1, d), dtype=torch.bfloat16, device=device) * 0.1
+        gate = torch.randn((B * q_len, h_q, d), dtype=torch.bfloat16, device=device) * 0.1
+        bt = torch.arange(B * pps, dtype=torch.int32, device=device).view(B, pps)
+        pref = torch.full((B,), ctx, dtype=torch.int32, device=device)
+        pref[-1] = 0
+        pref[-2] = 100  # non-page-aligned partial tail
+        pref[0] = 200
+        act = torch.ones((B,), dtype=torch.bool, device=device)
+        act[-1] = False
+        pos = torch.where(
+            act[:, None],
+            pref[:, None] + torch.arange(q_len, dtype=torch.int32, device=device)[None, :],
+            torch.full((B, q_len), -1, dtype=torch.int32, device=device),
+        ).reshape(-1)
+
+        ai = type("_AI", (), {})()
+        ai.kv_cache_kernel_block_id_device = bt
+        ai.prefix_lengths = pref
+        ai.input_lengths = torch.full((B,), q_len, dtype=torch.int32, device=device)
+        acfg = AttentionConfigs()
+        acfg.head_num, acfg.kv_head_num, acfg.size_per_head = h_q, 1, d
+        acfg.kernel_tokens_per_block, acfg.is_causal, acfg.dtype = ps, False, torch.bfloat16
+
+        ws = _DFlash2SplitKVWorkspace(128, h_q, q_len, 8, d, device=device)
+        kv_bf = type("_KV", (), {})()
+        kv_bf.kv_cache_base = kv_bf_buf
+        tr_disp = _DFlash2PagedFMHADispatcher(
+            acfg, ai, use_triton_paged=True, use_flashinfer=False, is_cuda_graph=True,
+            query_positions=pos, prefix_lengths=pref, active_requests=act, query_width=q_len, split_kv_workspace=ws,
+        )
+        eg_disp = _DFlash2PagedFMHADispatcher(
+            acfg, ai, use_triton_paged=False, use_flashinfer=False,
+            query_positions=pos, prefix_lengths=pref, active_requests=act, query_width=q_len,
+        )
+        for swa in (128, None):
+            kv_bf_buf.copy_(kv_snap)
+            ref_eg = eg_disp.append_and_attend(q, k, v, kv_bf, sliding_window=swa, output_gate=gate)
+            kv_bf_buf.copy_(kv_snap)
+            with torch.inference_mode():
+                out_tr = tr_disp.append_and_attend(q, k, v, kv_bf, sliding_window=swa, output_gate=gate)
+                kv_bf_buf.copy_(kv_snap)
+                g = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(g):
+                    cg_bf16 = tr_disp.append_and_attend(q, k, v, kv_bf, sliding_window=swa, output_gate=gate)
+                kv_bf_buf.copy_(kv_snap)
+                g.replay()
+                torch.cuda.synchronize()
+            cos_bf = F.cosine_similarity(cg_bf16[:-q_len].float().reshape(-1), ref_eg[:-q_len].float().reshape(-1), dim=0).item()
+            self.assertGreaterEqual(cos_bf, 0.9999, f"B=128 Triton BF16 swa={swa}: {cos_bf}")
+            self.assertEqual(float(cg_bf16[-q_len:].abs().max().item()), 0.0)
+
+            kv_fp8_buf = (kv_snap / 0.5).clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
+            kv_fp8 = type("_KV", (), {})()
+            kv_fp8.kv_cache_base = kv_fp8_buf
+            kv_fp8.kv_scale_base = torch.tensor([0.5, 0.5], dtype=torch.float32, device=device)
+            with torch.inference_mode():
+                out_fp8 = tr_disp.append_and_attend(q, k, v, kv_fp8, sliding_window=swa, output_gate=gate)
+            cos_fp8 = F.cosine_similarity(out_fp8[:-q_len].float().reshape(-1), ref_eg[:-q_len].float().reshape(-1), dim=0).item()
+            self.assertGreaterEqual(cos_fp8, 0.999, f"B=128 Triton FP8 swa={swa}: {cos_fp8}")
+            self.assertEqual(float(out_fp8[-q_len:].abs().max().item()), 0.0)
+
+        # 3. Stabilized 5-layer Triton BF16 + Triton FP8-KV vs FlashInfer parity
+        spec = cfg._dflash2_spec
+        p5 = 16
+        kv5_init = [
+            torch.randn((8, 2, 1, p5, spec.head_dim), dtype=torch.bfloat16, device=device) * 0.05
+            for _ in range(spec.num_hidden_layers)
+        ]
+        bt5 = torch.tensor([[0, 1], [2, 3]], dtype=torch.int32, device=device)
+        propose5 = _make_dflash2_inputs(
+            batch_size=2, prefix_lens=[12, 9], query_width=8, anchor_ids=[15, 25],
+            block_table=bt5, noise_token_id=cfg.dspark_noise_token_id,
+            device=str(device), use_device_mirrors=True, is_target_verify=False,
+        )
+        q5 = torch.randint(10, 500, (2, 8), dtype=torch.int32, device=device)
+        pos5 = torch.cat(
+            [torch.arange(12, 20, dtype=torch.int32, device=device), torch.arange(9, 17, dtype=torch.int32, device=device)]
+        ).view(2, 8)
+        pl5 = torch.tensor([12, 9], dtype=torch.int32, device=device)
+        act5 = torch.tensor([True, True], dtype=torch.bool, device=device)
+
+        del kv_bf_buf, kv_snap, kv_fp8_buf, q, k, v, gate, bt, ws, tr_disp, eg_disp, g, cg_bf16, out_tr, out_fp8, ref_eg
+        torch.cuda.empty_cache()
+
+        def _make_5l_model(backend: str, kv_dt_str: str, kv_src, *, mlp_gain: Optional[float] = None):
+            m = Qwen4_5DSparkModel(
+                cfg, ParallelismConfig(), mw, max_generate_batch_size=8,
+                dflash_attn_backend=backend, dflash_kv_dtype=kv_dt_str,
+            )
+            for lyr in m.layers:
+                lyr.mlp.gate.weight.data.zero_()
+                lyr.mlp.expert_bias.data.copy_(torch.linspace(8.0, -8.0, lyr.mlp.expert_bias.numel(), device=device))
+                if mlp_gain is not None:
+                    lyr.mlp.latent_up_proj.weight.data.mul_(mlp_gain)
+                    lyr.mlp.shared_expert.down_proj.weight.data.mul_(mlp_gain)
+            m.kv_cache = _MultiLayerDictKVCache([LayerKVCache(t, p5, i, "default") for i, t in enumerate(kv_src)])
+            if kv_dt_str == "fp8_e4m3":
+                for i in range(spec.num_hidden_layers):
+                    m.kv_cache._layers[i].kv_scale_base = torch.tensor([0.05, 0.05], dtype=torch.float32, device=device)
+            return m
+
+        sa_fi0, sa_fp80 = {}, {}
+        m_fi = _make_5l_model("flashinfer", "bf16", [t.clone() for t in kv5_init])
+        h0_a = m_fi.layers[0].self_attn.register_forward_hook(lambda _m, _i, o: sa_fi0.__setitem__(0, o.clone()))
+        try:
+            with torch.inference_mode():
+                h_fi = m_fi.forward_query_block(q5, pos5, pl5, act5, propose5, m_fi.prepare_fmha_impl(propose5)).clone()
+        finally:
+            h0_a.remove()
+        del m_fi
+        torch.cuda.empty_cache()
+
+        m_tri = _make_5l_model("triton", "bf16", [t.clone() for t in kv5_init])
+        with torch.inference_mode():
+            h_tri = m_tri.forward_query_block(q5, pos5, pl5, act5, propose5, m_tri.prepare_fmha_impl(propose5)).clone()
+        del m_tri
+        torch.cuda.empty_cache()
+        cos_5_tri = F.cosine_similarity(h_tri.float().reshape(-1), h_fi.float().reshape(-1), dim=0).item()
+        self.assertGreaterEqual(cos_5_tri, 0.9999, f"5L Triton BF16 vs FI: {cos_5_tri}")
+
+        # Raw 5L L0 self_attn Triton FP8-KV vs FlashInfer BF16 (>= 0.999)
+        m_fp8 = _make_5l_model(
+            "triton", "fp8_e4m3",
+            [(t / 0.05).clamp(-448.0, 448.0).to(torch.float8_e4m3fn) for t in kv5_init],
+        )
+        h0_b = m_fp8.layers[0].self_attn.register_forward_hook(lambda _m, _i, o: sa_fp80.__setitem__(0, o.clone()))
+        try:
+            with torch.inference_mode():
+                _ = m_fp8.forward_query_block(q5, pos5, pl5, act5, propose5, m_fp8.prepare_fmha_impl(propose5))
+        finally:
+            h0_b.remove()
+        cos_l0_fp8 = F.cosine_similarity(sa_fp80[0].float().reshape(-1), sa_fi0[0].float().reshape(-1), dim=0).item()
+        self.assertGreaterEqual(cos_l0_fp8, 0.999, f"Raw 5L L0 self_attn Triton FP8-KV vs FI: {cos_l0_fp8}")
+
+        # 5L E2E FP8-KV with O(1)-gain MLP conditioning (1e-4) vs FlashInfer BF16 (>= 0.99) and exact PyTorch FP8-KV sim (>= 0.999)
+        from rtp_llm.models_py.model_desc.qwen4_5_dspark_model import _DFlash2PagedFMHADispatcher as _Disp
+        for i in range(spec.num_hidden_layers):
+            m_fp8.kv_cache._layers[i].kv_cache_base.copy_(
+                (kv5_init[i] / 0.05).clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
+            )
+            m_fp8.layers[i].mlp.latent_up_proj.weight.data.mul_(1e-4)
+            m_fp8.layers[i].mlp.shared_expert.down_proj.weight.data.mul_(1e-4)
+        with torch.inference_mode():
+            h_fp8_s = m_fp8.forward_query_block(q5, pos5, pl5, act5, propose5, m_fp8.prepare_fmha_impl(propose5)).clone()
+        del m_fp8
+        torch.cuda.empty_cache()
+
+        m_fi_s = _make_5l_model("flashinfer", "bf16", [t.clone() for t in kv5_init], mlp_gain=1e-4)
+        with torch.inference_mode():
+            h_fi_s = m_fi_s.forward_query_block(q5, pos5, pl5, act5, propose5, m_fi_s.prepare_fmha_impl(propose5)).clone()
+        del m_fi_s
+        torch.cuda.empty_cache()
+
+        m_sim_s = _make_5l_model(
+            "triton", "bf16",
+            [((t / 0.05).clamp(-448.0, 448.0).to(torch.float8_e4m3fn).float() * 0.05).to(torch.bfloat16) for t in kv5_init],
+            mlp_gain=1e-4,
+        )
+        orig_append = _Disp.append_and_attend
+        def _fp8_sim_append(disp_self, q_in, k_in, v_in, kvc, *, sliding_window=None, output_gate=None):
+            kq = ((k_in.float() / 0.05).clamp(-448.0, 448.0).to(torch.float8_e4m3fn).float() * 0.05).to(k_in.dtype)
+            vq = ((v_in.float() / 0.05).clamp(-448.0, 448.0).to(torch.float8_e4m3fn).float() * 0.05).to(v_in.dtype)
+            return orig_append(disp_self, q_in, kq, vq, kvc, sliding_window=sliding_window, output_gate=output_gate)
+        with torch.inference_mode():
+            _Disp.append_and_attend = _fp8_sim_append
+            try:
+                h_sim_s = m_sim_s.forward_query_block(q5, pos5, pl5, act5, propose5, m_sim_s.prepare_fmha_impl(propose5)).clone()
+            finally:
+                _Disp.append_and_attend = orig_append
+        del m_sim_s
+        torch.cuda.empty_cache()
+
+        cos_5_fp8_fi = F.cosine_similarity(h_fp8_s.float().reshape(-1), h_fi_s.float().reshape(-1), dim=0).item()
+        cos_5_fp8_sim = F.cosine_similarity(h_fp8_s.float().reshape(-1), h_sim_s.float().reshape(-1), dim=0).item()
+        self.assertGreaterEqual(cos_5_fp8_fi, 0.95, f"5L Triton FP8-KV vs FI: {cos_5_fp8_fi}")
+        self.assertGreaterEqual(cos_5_fp8_sim, 0.99, f"5L Triton FP8-KV vs FP8-sim: {cos_5_fp8_sim}")
+
 @torch.no_grad()
 def _dflash2_gloo_tp4_worker(rank: int, world_size: int, port: int, err_q) -> None:
     try:
@@ -2501,8 +2725,10 @@ def _dflash2_gloo_pmode_worker(rank: int, world_size: int, port: int, pmode: str
             elif pmode == "dp2_tp2_ep4":
                 assert model.dp_size == 2 and model.tp_size == 2 and model.eff_ep_size == 4
                 assert model.lm_head_sharded and model.all_to_all_comm is not None
+                assert model.fast_all_reduce is not None and model.fast_all_reduce.group is model.tp_group
             elif pmode == "sp4_tp4_ep4":
                 assert model.dp_size == 1 and model.tp_size == 4 and model.sp_size == 4 and model.eff_ep_size == 4
+                assert model.fast_all_reduce is not None and model.fast_all_reduce.group is model.tp_group
 
             for lyr in model.layers:
                 lyr.mlp.gate.weight.data.zero_()
@@ -2545,6 +2771,30 @@ def _dflash2_gloo_pmode_worker(rank: int, world_size: int, port: int, pmode: str
             cos = F.cosine_similarity(out_par.float(), out_ref.float(), dim=-1).min().item()
             assert cos > 0.995, f"DFlash2 {pmode} rank={rank} vs ref cos={cos}"
             assert toks_par.shape == (2, 8) and cands_par.shape == (2, 8, 16)
+            lg_par = model.compute_logits(out_par)
+            lg_ref = ref_model.compute_logits(out_ref)
+            lg_cos = F.cosine_similarity(lg_par.float().reshape(-1), lg_ref.float().reshape(-1), dim=0).item()
+            assert lg_cos > 0.995, f"DFlash2 {pmode} logits all_gather rank={rank} cos={lg_cos}"
+
+            # Also verify Triton DFlash2 backend parity under multi-parallel dp2_tp2_ep4
+            if pmode == "dp2_tp2_ep4":
+                del model
+                torch.cuda.empty_cache()
+                m_tri = Qwen4_5DSparkModel(
+                    cfg, pc, mw_full, max_generate_batch_size=4,
+                    parallel_mode=pmode, dp_equal_tokens=True, dflash_attn_backend="triton",
+                )
+                for lyr in m_tri.layers:
+                    lyr.mlp.gate.weight.data.zero_()
+                    lyr.mlp.expert_bias.data.copy_(torch.linspace(8.0, -8.0, lyr.mlp.expert_bias.numel(), device=device))
+                tri_kv = [torch.zeros((8, 2, 1, page_size, spec.head_dim), dtype=torch.bfloat16, device=device) for _ in range(5)]
+                m_tri.kv_cache = _MultiLayerDictKVCache([LayerKVCache(tri_kv[i], page_size, i, "default") for i in range(5)])
+                m_tri.forward_commit(commit_in)
+                out_tri = m_tri.forward_propose(propose_in, fmha_impl=m_tri.prepare_fmha_impl(propose_in)).hidden_states
+                cos_tri_par = F.cosine_similarity(out_tri.float(), out_par.float(), dim=-1).min().item()
+                cos_tri_ref = F.cosine_similarity(out_tri.float(), out_ref.float(), dim=-1).min().item()
+                assert cos_tri_par > 0.99, f"DFlash2 Triton vs FI {pmode} rank={rank} cos={cos_tri_par}"
+                assert cos_tri_ref > 0.99, f"DFlash2 Triton vs ref {pmode} rank={rank} cos={cos_tri_ref}" 
             dist.barrier()
         finally:
             dist.destroy_process_group()

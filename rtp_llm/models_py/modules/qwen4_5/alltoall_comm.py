@@ -67,6 +67,19 @@ class AllToAllDispatchState:
     recv_splits: Optional[List[int]] = None
 
 
+@dataclass
+class AllToAllAsyncHandle:
+    """Async stream/event handle returned by ``dispatch_async`` / ``combine_async``."""
+
+    kind: str  # "dispatch" | "combine"
+    comm_stream: Optional[torch.cuda.Stream]
+    done_event: Optional[torch.cuda.Event]
+    main_stream: Optional[torch.cuda.Stream]
+    capturing: bool
+    result: Any
+    keepalive: Tuple[Any, ...] = ()
+
+
 # ---------------------------------------------------------------------------
 # Triton pack / unpack / dedup / combine kernels
 # ---------------------------------------------------------------------------
@@ -410,6 +423,10 @@ class Qwen4_5AllToAllComm:
         self._symm_hdl: Any = None
         self._symm_buf: Optional[torch.Tensor] = None
         self._symm_max_rows: int = 0
+        self._tbo_stream: Optional[torch.cuda.Stream] = None
+        self._tbo_events: Optional[Tuple[Tuple[torch.cuda.Event, torch.cuda.Event], ...]] = None
+        self._is_gloo: bool = False
+        self._gloo_tag_seq: int = 0
         self._destroyed: bool = False
 
         if group is None or not dist.is_initialized() or dist.get_world_size(group) <= 1:
@@ -434,9 +451,29 @@ class Qwen4_5AllToAllComm:
         self.single_node = (
             _detect_single_node(group) if single_node is None else bool(single_node)
         )
-        self.active_backend = "nccl"
-        if eager_init and self.device.type == "cuda":
+        try:
+            self._is_gloo = dist.get_backend(group) == "gloo"
+        except Exception:
+            self._is_gloo = False
+        self.active_backend = "gloo" if self._is_gloo else "nccl"
+        if self.device.type == "cuda" and not torch.cuda.is_current_stream_capturing():
+            self._ensure_tbo_resources()
+        if eager_init and self.device.type == "cuda" and not self._is_gloo:
             self.init_workspace()
+
+    def _ensure_tbo_resources(self) -> None:
+        """Pre-allocate TBO comm stream and dual-slot events before CUDA Graph capture."""
+        if self.device.type != "cuda" or not torch.cuda.is_available():
+            return
+        if torch.cuda.is_current_stream_capturing():
+            return
+        if self._tbo_stream is None or self._tbo_stream.device != self.device:
+            self._tbo_stream = torch.cuda.Stream(device=self.device)
+        if self._tbo_events is None:
+            self._tbo_events = (
+                (torch.cuda.Event(), torch.cuda.Event()),
+                (torch.cuda.Event(), torch.cuda.Event()),
+            )
 
     def init_workspace(self) -> str:
         """Eagerly initialize NVLink5 symmetric-memory workspace before CG capture."""
@@ -444,12 +481,16 @@ class Qwen4_5AllToAllComm:
             self.active_backend = "noop"
             return self.active_backend
         if self.device.type != "cuda":
-            self.active_backend = "nccl"
+            self.active_backend = "gloo" if self._is_gloo else "nccl"
             return self.active_backend
         if torch.cuda.is_current_stream_capturing():
             raise RuntimeError(
                 "Qwen4_5AllToAllComm must be initialized eagerly before CUDA Graph capture."
             )
+        self._ensure_tbo_resources()
+        if self._is_gloo:
+            self.active_backend = "gloo"
+            return self.active_backend
         if self.requested_backend == "nccl":
             self.active_backend = "nccl"
             return self.active_backend
@@ -549,8 +590,9 @@ class Qwen4_5AllToAllComm:
             if capturing:
                 equal_tokens = True
             else:
-                m_vec = torch.empty((self.world_size,), dtype=torch.int64, device=x_c.device)
-                m_local_t = torch.tensor([M_local], dtype=torch.int64, device=x_c.device)
+                m_dev = torch.device("cpu") if self._is_gloo else x_c.device
+                m_vec = torch.empty((self.world_size,), dtype=torch.int64, device=m_dev)
+                m_local_t = torch.tensor([M_local], dtype=torch.int64, device=m_dev)
                 dist.all_gather_into_tensor(m_vec, m_local_t, group=self.group)
                 counts_cpu = m_vec.tolist()
                 equal_tokens = all(c == counts_cpu[0] for c in counts_cpu) and counts_cpu[0] > 0
@@ -636,7 +678,7 @@ class Qwen4_5AllToAllComm:
                 num_warps=4,
             )
             all_buf = torch.empty((M_global, row_bytes), dtype=torch.uint8, device=x_c.device)
-            dist.all_gather_into_tensor(all_buf, pack_buf, group=self.group)
+            self._collective_all_gather(all_buf, pack_buf)
 
             out_xq = torch.empty((M_global, L), dtype=torch.float8_e4m3fn, device=x_c.device)
             out_xsc = torch.empty((M_global, num_groups), dtype=torch.uint8, device=x_c.device)
@@ -693,7 +735,7 @@ class Qwen4_5AllToAllComm:
             num_warps=4,
         )
         all_buf = torch.empty((M_global, row_bytes), dtype=torch.uint8, device=x_c.device)
-        dist.all_gather_into_tensor(all_buf, pack_buf, group=self.group)
+        self._collective_all_gather(all_buf, pack_buf)
 
         out_x = torch.empty((M_global, L), dtype=x_c.dtype, device=x_c.device)
         out_ids = torch.empty((M_global, top_k), dtype=torch.int32, device=x_c.device)
@@ -755,7 +797,7 @@ class Qwen4_5AllToAllComm:
             )
 
         recv_counts = torch.empty((self.world_size,), dtype=torch.int32, device=dev)
-        dist.all_to_all_single(recv_counts, send_counts, group=self.group)
+        self._collective_all_to_all_single(recv_counts, send_counts)
 
         offsets = torch.cumsum(send_counts, dim=0) - send_counts
         send_splits = [int(v) for v in send_counts.tolist()]
@@ -795,12 +837,11 @@ class Qwen4_5AllToAllComm:
             )
 
         recv_buf = torch.empty((total_recv, row_bytes), dtype=torch.uint8, device=dev)
-        dist.all_to_all_single(
+        self._collective_all_to_all_single(
             recv_buf.view(-1),
             send_buf.view(-1),
             output_split_sizes=[c * row_bytes for c in recv_splits],
             input_split_sizes=[c * row_bytes for c in send_splits],
-            group=self.group,
         )
 
         out_x = torch.empty((total_recv, L), dtype=x_c.dtype, device=dev)
@@ -886,7 +927,7 @@ class Qwen4_5AllToAllComm:
                 )
                 self._symm_hdl.barrier(channel=1)
                 return out
-            dist.reduce_scatter_tensor(out, ep_c, op=dist.ReduceOp.SUM, group=self.group)
+            self._collective_reduce_scatter(out, ep_c)
             return out
 
         assert state.mode == "routed_a2a"
@@ -894,12 +935,11 @@ class Qwen4_5AllToAllComm:
         assert state.send_src_tok is not None
         total_send = sum(state.send_splits)
         returned = torch.empty((total_send, L), dtype=ep_c.dtype, device=ep_c.device)
-        dist.all_to_all_single(
+        self._collective_all_to_all_single(
             returned,
             ep_c,
             output_split_sizes=state.send_splits,
             input_split_sizes=state.recv_splits,
-            group=self.group,
         )
         if M_local == 0:
             return torch.empty((0, L), dtype=state.dtype, device=ep_c.device)
@@ -919,12 +959,292 @@ class Qwen4_5AllToAllComm:
             )
         return out_fp32.to(state.dtype)
 
+    def _collective_all_gather(self, dst: torch.Tensor, src: torch.Tensor) -> None:
+        if self._is_gloo:
+            src_cpu = src.detach().cpu().contiguous() if src.is_cuda else src.contiguous()
+            chunks = [torch.empty_like(src_cpu) for _ in range(self.world_size)]
+            dist.all_gather(chunks, src_cpu, group=self.group)
+            if dst.numel() > 0:
+                dst_cpu = torch.cat(chunks, dim=0)
+                dst.copy_(dst_cpu.to(device=dst.device) if dst.is_cuda else dst_cpu)
+            return
+        dist.all_gather_into_tensor(dst, src, group=self.group)
+
+    def _collective_reduce_scatter(self, dst: torch.Tensor, src: torch.Tensor) -> None:
+        if self._is_gloo:
+            src_cpu = src.detach().cpu().contiguous() if src.is_cuda else src.contiguous()
+            ws = self.world_size
+            chunks = [c.contiguous() for c in src_cpu.chunk(ws, dim=0)]
+            out_cpu = torch.empty(dst.shape, dtype=dst.dtype, device="cpu")
+            dist.reduce_scatter(out_cpu, chunks, op=dist.ReduceOp.SUM, group=self.group)
+            if dst.numel() > 0:
+                dst.copy_(out_cpu.to(device=dst.device) if dst.is_cuda else out_cpu)
+            return
+        dist.reduce_scatter_tensor(dst, src, op=dist.ReduceOp.SUM, group=self.group)
+
+    def _collective_all_to_all_single(
+        self,
+        dst: torch.Tensor,
+        src: torch.Tensor,
+        *,
+        output_split_sizes: Optional[List[int]] = None,
+        input_split_sizes: Optional[List[int]] = None,
+    ) -> None:
+        if self._is_gloo:
+            ws = self.world_size
+            me = self.rank
+            src_cpu = src.detach().cpu().contiguous() if src.is_cuda else src.contiguous()
+            if input_split_sizes is None:
+                in_splits = [src_cpu.shape[0] // ws] * ws
+            else:
+                in_splits = [int(s) for s in input_split_sizes]
+            if output_split_sizes is None:
+                out_splits = [dst.shape[0] // ws] * ws
+            else:
+                out_splits = [int(s) for s in output_split_sizes]
+            in_chunks = [t.contiguous() for t in torch.split(src_cpu, in_splits, dim=0)]
+            out_chunks = [
+                torch.empty((s, *dst.shape[1:]), dtype=dst.dtype, device="cpu")
+                for s in out_splits
+            ]
+            if out_splits[me] > 0:
+                out_chunks[me].copy_(in_chunks[me])
+            # Gloo lacks alltoall/alltoall_base; emulate with tagged P2P CPU bounce.
+            tag_base = (self._gloo_tag_seq & 0xFFFF) * (ws * ws)
+            self._gloo_tag_seq += 1
+            reqs = []
+            for peer in range(ws):
+                if peer == me:
+                    continue
+                g_peer = dist.get_global_rank(self.group, peer)
+                if in_chunks[peer].numel() > 0:
+                    reqs.append(
+                        dist.isend(
+                            in_chunks[peer],
+                            dst=g_peer,
+                            group=self.group,
+                            tag=tag_base + me * ws + peer,
+                        )
+                    )
+                if out_chunks[peer].numel() > 0:
+                    reqs.append(
+                        dist.irecv(
+                            out_chunks[peer],
+                            src=g_peer,
+                            group=self.group,
+                            tag=tag_base + peer * ws + me,
+                        )
+                    )
+            for req in reqs:
+                req.wait()
+            if dst.numel() > 0:
+                dst_cpu = torch.cat(out_chunks, dim=0)
+                dst.copy_(dst_cpu.to(device=dst.device) if dst.is_cuda else dst_cpu)
+            return
+        if output_split_sizes is None:
+            dist.all_to_all_single(dst, src, group=self.group)
+        else:
+            dist.all_to_all_single(
+                dst,
+                src,
+                output_split_sizes=output_split_sizes,
+                input_split_sizes=input_split_sizes,
+                group=self.group,
+            )
+
+    def dispatch_async(
+        self,
+        hidden: torch.Tensor,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+        *,
+        num_experts: Optional[int] = None,
+        equal_tokens: Optional[bool] = None,
+        quantize_fp8: bool = False,
+        comm_stream: Optional[torch.cuda.Stream] = None,
+        slot: int = 0,
+    ) -> AllToAllAsyncHandle:
+        """Launch AllToAll dispatch asynchronously on a secondary stream for TBO overlap.
+
+        CG-safe when pre-initialized prior to capture and called with ``equal_tokens=True``;
+        in eager unequal/sparse DP batches (``equal_tokens=False``), 0-token DP ranks still
+        participate in all collectives on ``comm_stream``.
+        """
+        if self.world_size <= 1 or self.group is None or not hidden.is_cuda:
+            st = self.dispatch(
+                hidden,
+                topk_ids,
+                topk_weights,
+                num_experts=num_experts,
+                equal_tokens=equal_tokens,
+                quantize_fp8=quantize_fp8,
+            )
+            return AllToAllAsyncHandle(
+                kind="dispatch",
+                comm_stream=None,
+                done_event=None,
+                main_stream=None,
+                capturing=False,
+                result=st,
+            )
+
+        capturing = torch.cuda.is_current_stream_capturing()
+        if not capturing:
+            self._ensure_tbo_resources()
+        stream = comm_stream if comm_stream is not None else self._tbo_stream
+        events = self._tbo_events[int(slot) & 1] if self._tbo_events is not None else None
+        if stream is None or events is None or stream.device != hidden.device:
+            st = self.dispatch(
+                hidden,
+                topk_ids,
+                topk_weights,
+                num_experts=num_experts,
+                equal_tokens=equal_tokens,
+                quantize_fp8=quantize_fp8,
+            )
+            return AllToAllAsyncHandle(
+                kind="dispatch",
+                comm_stream=None,
+                done_event=None,
+                main_stream=None,
+                capturing=capturing,
+                result=st,
+            )
+
+        ready_ev, done_ev = events
+        main_stream = torch.cuda.current_stream(hidden.device)
+        ready_ev.record(main_stream)
+        exc_hit = False
+        try:
+            with torch.cuda.stream(stream):
+                ready_ev.wait(stream)
+                if not capturing:
+                    hidden.record_stream(stream)
+                    topk_ids.record_stream(stream)
+                    topk_weights.record_stream(stream)
+                st = self.dispatch(
+                    hidden,
+                    topk_ids,
+                    topk_weights,
+                    num_experts=num_experts,
+                    equal_tokens=equal_tokens,
+                    quantize_fp8=quantize_fp8,
+                )
+        except BaseException:
+            exc_hit = True
+            raise
+        finally:
+            if not (capturing and exc_hit):
+                done_ev.record(stream)
+        return AllToAllAsyncHandle(
+            kind="dispatch",
+            comm_stream=stream,
+            done_event=done_ev,
+            main_stream=main_stream,
+            capturing=capturing,
+            result=st,
+            keepalive=(hidden, topk_ids, topk_weights),
+        )
+
+    def wait_dispatch(self, handle: AllToAllAsyncHandle) -> AllToAllDispatchState:
+        """Synchronize caller stream with an in-flight :meth:`dispatch_async`."""
+        st: AllToAllDispatchState = handle.result
+        if handle.done_event is not None and handle.comm_stream is not None:
+            cur = torch.cuda.current_stream(handle.comm_stream.device)
+            handle.done_event.wait(cur)
+            if not handle.capturing:
+                for t in (st.hidden, st.topk_ids, st.topk_weights, st.send_src_tok):
+                    if t is not None and t.is_cuda:
+                        t.record_stream(cur)
+                if st.hidden_fp8 is not None:
+                    for t in st.hidden_fp8:
+                        if t.is_cuda:
+                            t.record_stream(cur)
+        return st
+
+    def combine_async(
+        self,
+        ep_output: torch.Tensor,
+        state: AllToAllDispatchState,
+        *,
+        use_symm_p2p: Optional[bool] = None,
+        comm_stream: Optional[torch.cuda.Stream] = None,
+        slot: int = 0,
+    ) -> AllToAllAsyncHandle:
+        """Launch AllToAll combine asynchronously on a secondary stream for TBO overlap."""
+        if state.mode == "noop" or self.world_size <= 1 or self.group is None or not ep_output.is_cuda:
+            out = self.combine(ep_output, state, use_symm_p2p=use_symm_p2p)
+            return AllToAllAsyncHandle(
+                kind="combine",
+                comm_stream=None,
+                done_event=None,
+                main_stream=None,
+                capturing=False,
+                result=out,
+            )
+
+        capturing = torch.cuda.is_current_stream_capturing()
+        if not capturing:
+            self._ensure_tbo_resources()
+        stream = comm_stream if comm_stream is not None else self._tbo_stream
+        events = self._tbo_events[int(slot) & 1] if self._tbo_events is not None else None
+        if stream is None or events is None or stream.device != ep_output.device:
+            out = self.combine(ep_output, state, use_symm_p2p=use_symm_p2p)
+            return AllToAllAsyncHandle(
+                kind="combine",
+                comm_stream=None,
+                done_event=None,
+                main_stream=None,
+                capturing=capturing,
+                result=out,
+            )
+
+        ready_ev, done_ev = events
+        main_stream = torch.cuda.current_stream(ep_output.device)
+        ready_ev.record(main_stream)
+        exc_hit = False
+        try:
+            with torch.cuda.stream(stream):
+                ready_ev.wait(stream)
+                if not capturing:
+                    ep_output.record_stream(stream)
+                    if state.send_src_tok is not None and state.send_src_tok.is_cuda:
+                        state.send_src_tok.record_stream(stream)
+                out = self.combine(ep_output, state, use_symm_p2p=use_symm_p2p)
+        except BaseException:
+            exc_hit = True
+            raise
+        finally:
+            if not (capturing and exc_hit):
+                done_ev.record(stream)
+        return AllToAllAsyncHandle(
+            kind="combine",
+            comm_stream=stream,
+            done_event=done_ev,
+            main_stream=main_stream,
+            capturing=capturing,
+            result=out,
+            keepalive=(ep_output,),
+        )
+
+    def wait_combine(self, handle: AllToAllAsyncHandle) -> torch.Tensor:
+        """Synchronize caller stream with an in-flight :meth:`combine_async`."""
+        out: torch.Tensor = handle.result
+        if handle.done_event is not None and handle.comm_stream is not None:
+            cur = torch.cuda.current_stream(handle.comm_stream.device)
+            handle.done_event.wait(cur)
+            if not handle.capturing and out.is_cuda:
+                out.record_stream(cur)
+        return out
+
     def destroy(self) -> None:
         if self._destroyed:
             return
         self._destroyed = True
         self._symm_hdl = None
         self._symm_buf = None
+        self._tbo_stream = None
+        self._tbo_events = None
         self.active_backend = "nccl" if self.world_size > 1 else "noop"
 
 
@@ -996,6 +1316,7 @@ def destroy_qwen4_5_all_to_all() -> None:
 
 
 __all__ = [
+    "AllToAllAsyncHandle",
     "AllToAllDispatchState",
     "Qwen4_5AllToAllComm",
     "destroy_qwen4_5_all_to_all",

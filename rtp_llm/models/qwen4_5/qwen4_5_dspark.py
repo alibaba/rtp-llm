@@ -1273,7 +1273,7 @@ class Qwen4_5DSpark(BaseModel):
         kv_dtype_str = (
             "fp8_e4m3"
             if getattr(self.model_config.attn_config, "kv_cache_dtype", None) == KvCacheDataType.FP8
-            else "bf16"
+            else None
         )
         self.py_model = Qwen4_5DSparkModel(
             self.model_config,

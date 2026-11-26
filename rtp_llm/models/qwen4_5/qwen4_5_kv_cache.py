@@ -69,6 +69,7 @@ _KV_DTYPE_BYTES: Dict[str, int] = {
     "F16": 2,
     "FP8": 1,
     "F8_E4M3": 1,
+    "FP8_E4M3": 1,
     "F32": 4,
     "FP32": 4,
 }
@@ -330,7 +331,7 @@ def build_qwen4_5_kv_cache_plan(
         if enable_yoco_decode is None
         else bool(enable_yoco_decode)
     )
-    kv_dt = kv_dtype.upper()
+    kv_dt = str(kv_dtype or "BF16").strip().upper()
     if kv_dt not in _KV_DTYPE_BYTES:
         raise ValueError(f"Unsupported kv_dtype={kv_dtype!r}")
     kv_elem_bytes = _KV_DTYPE_BYTES[kv_dt]

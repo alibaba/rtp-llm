@@ -289,7 +289,10 @@ class Qwen4_5(_BaseModel):
         import torch.distributed as dist
 
         from rtp_llm.model_loader.model_weight_info import ModelWeights
-        from rtp_llm.models_py.model_desc.qwen4_5 import Qwen4_5ForCausalLM
+        from rtp_llm.models_py.model_desc.qwen4_5 import (
+            Qwen4_5ForCausalLM,
+            resolve_qwen4_5_parallel_topology,
+        )
         from rtp_llm.models_py.modules.qwen4_5.checkpoint_loader import (
             load_qwen4_5_from_checkpoint,
         )
@@ -311,6 +314,9 @@ class Qwen4_5(_BaseModel):
         kv_dtype = str(getattr(self.model_config, "kv_dtype", "bf16") or "bf16")
 
         tp_group = None
+        dp_group = getattr(self.parallelism_config, "dp_group", None)
+        sp_group = getattr(self.parallelism_config, "sp_group", None)
+        ep_group = None
         if tp_size > 1 and dist.is_available() and dist.is_initialized():
             try:
                 from rtp_llm.models_py.distributed import collective_torch
@@ -322,12 +328,9 @@ class Qwen4_5(_BaseModel):
                     tp_group = _get_group(Group.TP)
             except Exception:
                 pass
-            if tp_group is None and dist.get_world_size() >= tp_size:
-                tp_group = dist.group.WORLD
 
         eff_ep_size = 1
         eff_ep_rank = 0
-        ep_group = None
         if tp_size > 1 and dp_size == 1:
             eff_ep_size = tp_size
             eff_ep_rank = tp_rank
@@ -346,8 +349,32 @@ class Qwen4_5(_BaseModel):
                         ep_group = _get_group(Group.WORLD)
                 except Exception:
                     pass
-                if ep_group is None:
-                    ep_group = dist.group.WORLD
+
+        if dist.is_available() and dist.is_initialized() and (
+            (tp_size > 1 and tp_group is None)
+            or (eff_ep_size > 1 and ep_group is None)
+            or (dp_size > 1 and dp_group is None)
+        ):
+            topo = resolve_qwen4_5_parallel_topology(
+                parallel_mode=parallel_mode,
+                tp_size=tp_size,
+                tp_rank=tp_rank,
+                tp_group=tp_group,
+                ep_size=eff_ep_size,
+                ep_rank=eff_ep_rank,
+                ep_group=ep_group,
+                dp_size=dp_size,
+                dp_rank=dp_rank,
+                dp_group=dp_group,
+                sp_size=sp_size,
+                sp_rank=sp_rank,
+                sp_group=sp_group,
+                dp_attn=getattr(self.parallelism_config, "dp_attn", None),
+            )
+            tp_group = topo.tp_group
+            ep_group = topo.ep_group
+            dp_group = topo.dp_group
+            sp_group = topo.sp_group
 
         # Refresh TP-aware KV/GDN cache plan and KVCacheSpecDescs before engine pool creation.
         if tp_size > 1:
@@ -399,10 +426,10 @@ class Qwen4_5(_BaseModel):
             tp_group=tp_group,
             dp_size=dp_size,
             dp_rank=dp_rank,
-            dp_group=getattr(self.parallelism_config, "dp_group", None),
+            dp_group=dp_group,
             sp_size=sp_size,
             sp_rank=sp_rank,
-            sp_group=getattr(self.parallelism_config, "sp_group", None),
+            sp_group=sp_group,
             dp_attn=getattr(self.parallelism_config, "dp_attn", None),
             kv_dtype=kv_dtype,
             dense_linear_mode=getattr(self.model_config, "dense_linear_mode", None),

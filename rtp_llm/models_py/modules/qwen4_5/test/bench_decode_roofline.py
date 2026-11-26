@@ -227,7 +227,7 @@ def build_20k_target_kv_cache(
     if "parallel_mode" in plan_sig:
         plan_kw["parallel_mode"] = parallel_mode
     if "kv_dtype" in plan_sig:
-        plan_kw["kv_dtype"] = kv_dtype
+        plan_kw["kv_dtype"] = "FP8" if str(kv_dtype).lower().startswith("fp8") else kv_dtype
     plan = build_qwen4_5_kv_cache_plan(arch, **plan_kw)
     blocks_per_req = (avg_ctx + verify_width + 4 + tokens_per_block - 1) // tokens_per_block + 1
     num_full_blocks = max_batch * blocks_per_req + 64
@@ -244,46 +244,58 @@ def build_20k_target_kv_cache(
         if lp.layer_type == "linear_attention":
             num_blocks_per_tag.setdefault("linear", num_opaque_blocks)
             num_blocks_per_tag.setdefault("gdn_consumer_q_conv", num_opaque_blocks)
-    kv_cache = LocalKVCache(
-        plan,
-        tokens_per_block=tokens_per_block,
-        num_blocks_per_tag=num_blocks_per_tag,
-        device=device,
-        dtype=torch.bfloat16,
-    )
+    is_fp8_kv = str(kv_dtype).lower().startswith("fp8")
+    fp8_dt = getattr(torch, "float8_e4m3fn", None)
+    lkv_sig = inspect.signature(LocalKVCache.__init__).parameters
+    lkv_kw: Dict[str, Any] = {
+        "tokens_per_block": tokens_per_block,
+        "num_blocks_per_tag": num_blocks_per_tag,
+        "device": device,
+        "dtype": torch.bfloat16,
+    }
+    if "kv_dtype" in lkv_sig and is_fp8_kv and fp8_dt is not None:
+        lkv_kw["kv_dtype"] = fp8_dt
+        if "allocate_fp8_kv_scale" in lkv_sig:
+            lkv_kw["allocate_fp8_kv_scale"] = True
+    kv_cache = LocalKVCache(plan, **lkv_kw)
 
-    # Populate deterministic max_batch-invariant BF16 data (repeating fixed 32-block template)
-    def _fill_kv_periodic(t_bf16: torch.Tensor, seed_val: int) -> None:
-        if t_bf16.ndim < 2:
+    # Populate deterministic max_batch-invariant data (repeating fixed 32-block template)
+    def _fill_kv_periodic(t_buf: torch.Tensor, seed_val: int) -> None:
+        if t_buf.ndim < 2:
             return
-        blk_axis = 0 if t_bf16.shape[0] >= 32 else (1 if t_bf16.shape[1] >= 32 else 0)
-        n_blk = int(t_bf16.shape[blk_axis])
+        blk_axis = 0 if t_buf.shape[0] >= 32 else (1 if t_buf.shape[1] >= 32 else 0)
+        n_blk = int(t_buf.shape[blk_axis])
         if n_blk <= 0:
             return
         pat_n = min(32, n_blk)
-        pat_shape = list(t_bf16.shape)
+        pat_shape = list(t_buf.shape)
         pat_shape[blk_axis] = pat_n
         g_cpu = torch.Generator(device="cpu").manual_seed(seed_val)
         pat = (torch.randn(pat_shape, dtype=torch.float32, generator=g_cpu) * 0.05).to(
-            device=t_bf16.device, dtype=t_bf16.dtype
+            device=t_buf.device, dtype=t_buf.dtype
         )
         for start in range(0, n_blk, pat_n):
             end = min(n_blk, start + pat_n)
             cnt = end - start
             if blk_axis == 0:
-                t_bf16[start:end].copy_(pat[:cnt])
+                t_buf[start:end].copy_(pat[:cnt])
             else:
-                t_bf16[:, start:end].copy_(pat[:, :cnt])
+                t_buf[:, start:end].copy_(pat[:, :cnt])
 
-    is_fp8_kv = str(kv_dtype).lower().startswith("fp8")
-    fp8_dt = getattr(torch, "float8_e4m3fn", None)
     for lid, tag_map in enumerate(kv_cache.layer_caches):
         for tag, lc in tag_map.items():
             if tag == FULL_ATTN_KV_TAG:
                 _fill_kv_periodic(lc.kv_cache_base, 1337 + lid * 17)
-                if is_fp8_kv and fp8_dt is not None:
+                if is_fp8_kv and fp8_dt is not None and lc.kv_cache_base.dtype != fp8_dt:
                     lc.kv_cache_base = (lc.kv_cache_base.float() / 0.5).clamp(-448.0, 448.0).to(fp8_dt)
-                    lc.kv_scale_base = torch.tensor([0.5, 0.5], dtype=torch.float32, device=device)
+                    if lc.kv_cache_base.ndim == 5:
+                        # 4D HND contiguous scale matching sparse_paged_fmha.py:107 [N, 2, H_kv, B_tok]
+                        nb, _, b_tok, n_kvh, _ = lc.kv_cache_base.shape
+                        lc.kv_scale_base = torch.full(
+                            (nb, 2, n_kvh, b_tok), 0.5, dtype=torch.float32, device=device
+                        )
+                    else:
+                        lc.kv_scale_base = torch.tensor([0.5, 0.5], dtype=torch.float32, device=device)
             elif tag == INDEXER_KV_TAG:
                 _fill_kv_periodic(lc.kv_cache_base.view(torch.bfloat16), 1937 + lid * 17)
     return kv_cache
@@ -457,7 +469,7 @@ def _build_verify_and_draft_inputs(
     c_attn.kv_cache_kernel_block_id = d_attn.kv_cache_kernel_block_id
     c_attn.kv_cache_block_id_device = d_bt
     c_attn.kv_cache_kernel_block_id_device = d_bt
-    g_commit = torch.Generator(device="cpu").manual_seed(seed + 100 + batch_size)
+    g_commit = torch.Generator(device="cpu").manual_seed(seed + 100 + global_bs)
     d_commit_in = types.SimpleNamespace(
         input_ids=anchor_ids.clone(),
         input_hiddens=torch.randn(
@@ -779,7 +791,198 @@ def _compute_parity(test_t: torch.Tensor, ref_t: torch.Tensor) -> Dict[str, Any]
     cos = float(F.cosine_similarity(tf.unsqueeze(0), rf.unsqueeze(0)).item())
     max_abs = float((tf - rf).abs().max().item())
     top1 = float((test_t.float().argmax(dim=-1) == ref_t.float().argmax(dim=-1)).float().mean().item())
-    return {"cosine": round(cos, 7), "max_abs": round(max_abs, 6), "top1_agreement": round(top1, 6)}
+    res: Dict[str, Any] = {"cosine": round(cos, 7), "max_abs": round(max_abs, 6), "top1_agreement": round(top1, 6)}
+    if test_t.ndim >= 2 and test_t.shape[0] > 0:
+        t2 = test_t.float().reshape(test_t.shape[0], -1)
+        r2 = ref_t.float().reshape(ref_t.shape[0], -1)
+        row_cos = F.cosine_similarity(t2, r2, dim=-1)
+        res["per_tok_min"] = round(float(row_cos.min().item()), 7)
+        res["per_tok_p10"] = round(float(torch.quantile(row_cos, 0.10).item()), 7)
+        res["frac_ge_0999"] = round(float((row_cos >= 0.999).float().mean().item()), 6)
+    return res
+
+
+def _stabilize_moe_routers(
+    model: Any, step: float, seed: int = 2026
+) -> List[Tuple[Any, bool, Optional[torch.Tensor]]]:
+    """Apply deterministic per-expert router bias step (gap >= step) and return restore handles."""
+    saved: List[Tuple[Any, bool, Optional[torch.Tensor]]] = []
+    if step <= 0.0:
+        return saved
+    core = getattr(model, "model", model)
+    layers = getattr(core, "layers", ())
+    for lid, lyr in enumerate(layers):
+        mlp = getattr(lyr, "mlp", None)
+        if mlp is None or not hasattr(mlp, "num_experts"):
+            continue
+        num_exp = int(getattr(mlp, "num_experts", 0))
+        if num_exp <= 0:
+            continue
+        dev = mlp.gate.weight.device if hasattr(mlp, "gate") and hasattr(mlp.gate, "weight") else torch.device("cpu")
+        g_cpu = torch.Generator(device="cpu").manual_seed(seed + lid * 131)
+        perm = torch.randperm(num_exp, generator=g_cpu, dtype=torch.int64)
+        bias_vals = (perm.to(torch.float32) * float(step)).to(dev)
+        cur_bias = getattr(mlp, "expert_bias", None)
+        if cur_bias is not None and isinstance(cur_bias, torch.Tensor) and tuple(cur_bias.shape) == (num_exp,):
+            saved.append((mlp, True, cur_bias.data.clone()))
+            cur_bias.data.copy_(bias_vals.to(dtype=cur_bias.dtype))
+        else:
+            saved.append((mlp, False, None))
+            mlp.register_parameter("expert_bias", torch.nn.Parameter(bias_vals, requires_grad=False))
+    return saved
+
+
+def _restore_moe_routers(saved: List[Tuple[Any, bool, Optional[torch.Tensor]]]) -> None:
+    for mlp, had_param, prev_data in saved:
+        if had_param and prev_data is not None:
+            mlp.expert_bias.data.copy_(prev_data)
+        else:
+            mlp.register_parameter("expert_bias", None)
+
+
+def _extract_tensor(out: Any) -> Optional[torch.Tensor]:
+    if isinstance(out, torch.Tensor):
+        return out
+    if isinstance(out, (tuple, list)):
+        for item in out:
+            if isinstance(item, torch.Tensor):
+                return item
+    return None
+
+
+def _run_decode_parity_probe(
+    *,
+    target_rtp: Any,
+    dflash_model: Any,
+    target_kv: Any,
+    dflash_kv_bufs: List[torch.Tensor],
+    d_spec: Any,
+    p_bs: int,
+    dp_size: int,
+    dp_rank: int,
+    avg_ctx: int,
+    verify_width: int,
+    tokens_per_block: int,
+    device: torch.device,
+    world_rank: int,
+    save_ref: bool,
+    ref_entry: Optional[Dict[str, Any]],
+    parity_min_cos: float,
+) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """Run deterministic 1-step parity probe capturing Target + DFlash2 layer/attn snapshots & E2E outputs."""
+    from rtp_llm.models.qwen4_5.qwen4_5_kv_cache import FULL_ATTN_KV_TAG, INDEXER_KV_TAG
+
+    p_bs_local = p_bs // dp_size
+    for tag_map in target_kv.layer_caches:
+        for tag, lc in tag_map.items():
+            if tag not in (FULL_ATTN_KV_TAG, INDEXER_KV_TAG) and hasattr(lc, "kv_cache_base"):
+                lc.kv_cache_base.zero_()
+
+    p_v_in, p_d_in, _p_dc_in, _p_anch = _build_verify_and_draft_inputs(
+        target_kv=target_kv,
+        dflash_kv_bufs=dflash_kv_bufs,
+        spec=d_spec,
+        batch_size=p_bs_local,
+        avg_ctx=avg_ctx,
+        verify_width=verify_width,
+        tokens_per_block=tokens_per_block,
+        device=device,
+        dp_rank=dp_rank,
+        dp_size=dp_size,
+    )
+    snaps_raw: Dict[str, torch.Tensor] = {}
+    hooks: List[Any] = []
+
+    def _rec_hook(name: str, cap_dim: int = 1024):
+        def _fn(_mod: Any, _inp: Any, out: Any) -> None:
+            t = _extract_tensor(out)
+            if t is not None and t.ndim >= 2 and name not in snaps_raw:
+                t2 = t.reshape(-1, t.shape[-1])
+                snaps_raw[name] = t2[: min(8, t2.shape[0]), : min(cap_dim, t2.shape[1])].detach().cpu().float()
+        return _fn
+
+    if world_rank == 0:
+        t_core = getattr(target_rtp, "model", target_rtp)
+        for lid, lyr in enumerate(getattr(t_core, "layers", ())):
+            hooks.append(lyr.register_forward_hook(_rec_hook(f"target_l{lid}_mod")))
+            attn_sub = getattr(lyr, "self_attn", None) or getattr(lyr, "linear_attn", None)
+            if attn_sub is not None:
+                hooks.append(attn_sub.register_forward_hook(_rec_hook(f"target_l{lid}_attn")))
+            mlp_sub = getattr(lyr, "mlp", None)
+            if mlp_sub is not None:
+                hooks.append(mlp_sub.register_forward_hook(_rec_hook(f"target_l{lid}_mlp")))
+        d_core = getattr(dflash_model, "model", dflash_model)
+        for lid, lyr in enumerate(getattr(d_core, "layers", ())):
+            hooks.append(lyr.register_forward_hook(_rec_hook(f"dflash_l{lid}")))
+            attn_sub = getattr(lyr, "self_attn", None)
+            if attn_sub is not None:
+                hooks.append(attn_sub.register_forward_hook(_rec_hook(f"dflash_l{lid}_attn")))
+            mlp_sub = getattr(lyr, "mlp", None)
+            if mlp_sub is not None:
+                hooks.append(mlp_sub.register_forward_hook(_rec_hook(f"dflash_l{lid}_mlp")))
+
+    try:
+        p_fmha_t = target_rtp.prepare_fmha_impl(p_v_in, is_cuda_graph=False)
+        p_fmha_d = dflash_model.prepare_fmha_impl(p_d_in, is_cuda_graph=False)
+        p_zero_acc = torch.zeros((p_bs_local,), dtype=torch.int32, device=device)
+        p_d_out = dflash_model.forward_propose(p_d_in, fmha_impl=p_fmha_d)
+        p_t_out = target_rtp.forward(p_v_in, fmha_impl=p_fmha_t)
+        p_logits = target_rtp.compute_logits(p_t_out.hidden_states)
+        target_rtp.prepare_speculative_target_commit(p_zero_acc)
+        target_rtp.finish_speculative_target_commit(False)
+        target_rtp.finalize_speculative_target_commit()
+        torch.cuda.synchronize(device)
+    finally:
+        for h in hooks:
+            h.remove()
+
+    saved_rec: Optional[Dict[str, Any]] = None
+    par_res: Optional[Dict[str, Any]] = None
+    if world_rank == 0:
+        aux_h = getattr(p_t_out, "mtp_target_hidden_states", None)
+        t_layers = getattr(getattr(target_rtp, "model", target_rtp), "layers", ())
+        n_t_layers = len(t_layers)
+        if aux_h is not None and n_t_layers > 0 and aux_h.shape[-1] % n_t_layers == 0:
+            aux_3d = aux_h.view(aux_h.shape[0], n_t_layers, -1)
+            for lid in range(n_t_layers):
+                t_slice = aux_3d[: min(8, aux_3d.shape[0]), lid, :1024].detach().cpu().float()
+                snaps_raw[f"target_l{lid}"] = t_slice
+        tl_sample = p_logits[: min(8, p_logits.shape[0]), :4096].cpu().float()
+        dh_sample = p_d_out.hidden_states[: min(8, p_d_out.hidden_states.shape[0]), :1024].cpu().float()
+        if save_ref:
+            saved_rec = {
+                "target_logits_sample": tl_sample.tolist(),
+                "dflash_hidden_sample": dh_sample.tolist(),
+                "snapshots": {k: v.tolist() for k, v in snaps_raw.items()},
+            }
+        if ref_entry is not None:
+            r_tl = torch.tensor(ref_entry["target_logits_sample"], dtype=torch.float32)
+            r_dh = torch.tensor(ref_entry["dflash_hidden_sample"], dtype=torch.float32)
+            tl_par = _compute_parity(tl_sample[: r_tl.shape[0], : r_tl.shape[1]], r_tl)
+            dh_par = _compute_parity(dh_sample[: r_dh.shape[0], : r_dh.shape[1]], r_dh)
+            snap_pars: Dict[str, Any] = {}
+            ref_snaps = ref_entry.get("snapshots", {})
+            for sk, sval in snaps_raw.items():
+                if sk in ref_snaps:
+                    rt = torch.tensor(ref_snaps[sk], dtype=torch.float32)
+                    snap_pars[sk] = _compute_parity(sval[: rt.shape[0], : rt.shape[1]], rt)
+            min_e2e = min(tl_par["cosine"], dh_par["cosine"])
+            min_snap = min((v["cosine"] for v in snap_pars.values()), default=None)
+            passed = bool(min_e2e >= parity_min_cos and (min_snap is None or min_snap >= parity_min_cos))
+            par_res = {
+                "target_logits": tl_par,
+                "dflash_hidden": dh_par,
+                "dflash_l0_attn_cos": snap_pars.get("dflash_l0_attn", {}).get("cosine"),
+                "target_l0_attn_cos": snap_pars.get("target_l0_attn", {}).get("cosine"),
+                "snap_count": len(snap_pars),
+                "min_snap_cos": min_snap,
+                "min_e2e_cos": round(min_e2e, 7),
+                "passed": passed,
+                "snapshots": snap_pars,
+            }
+    del p_v_in, p_d_in, _p_dc_in, _p_anch, p_fmha_t, p_fmha_d, p_d_out, p_t_out, p_logits
+    torch.cuda.empty_cache()
+    return saved_rec, par_res
 
 
 def _update_leaderboard(
@@ -791,6 +994,7 @@ def _update_leaderboard(
     avg_ctx: int,
     hw: HardwareRoofline,
     rows: List[Dict[str, Any]],
+    extra_meta: Optional[Dict[str, Any]] = None,
 ) -> None:
     existing: Dict[str, Any] = {"entries": []}
     if path.is_file():
@@ -801,12 +1005,14 @@ def _update_leaderboard(
         except Exception:
             existing = {"entries": []}
 
+    meta = dict(extra_meta or {})
     entry = {
         "round": round_tag,
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S %z"),
         "parallel_mode": parallel_mode,
         "dtype_mode": dtype_mode,
         "avg_ctx": avg_ctx,
+        **meta,
         "hw_roofline": hw.to_dict(),
         "b1": next((r for r in rows if r["batch_size"] == 1), None),
         "b8": next((r for r in rows if r["batch_size"] == 8), None),
@@ -814,10 +1020,15 @@ def _update_leaderboard(
         "peak_tok_s": max((r["raw_cycle_tok_s"] for r in rows), default=0.0),
         "rows": rows,
     }
-    existing["entries"] = [
-        e for e in existing["entries"]
-        if not (e.get("round") == round_tag and e.get("parallel_mode") == parallel_mode and e.get("dtype_mode") == dtype_mode)
-    ]
+    def _same_cfg(e: Dict[str, Any]) -> bool:
+        if not (e.get("round") == round_tag and e.get("parallel_mode") == parallel_mode and e.get("dtype_mode") == dtype_mode):
+            return False
+        for k in ("kv_dtype", "dflash_kv_dtype", "dflash_attn_backend", "dense_linear_mode", "ple_mode", "router_margin"):
+            if e.get(k) != meta.get(k):
+                return False
+        return True
+
+    existing["entries"] = [e for e in existing["entries"] if not _same_cfg(e)]
     existing["entries"].append(entry)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
@@ -834,7 +1045,7 @@ def main() -> int:
     parser.add_argument("--verify-width", type=int, default=8)
     parser.add_argument("--batches", default="1,4,8,16,32,64,96,128")
     parser.add_argument("--tokens-per-block", type=int, default=64)
-    parser.add_argument("--ple-mode", choices=("gpu_sharded", "cpu_uva"), default="gpu_sharded")
+    parser.add_argument("--ple-mode", choices=("auto", "gpu_sharded", "cpu_uva", "shm", "mmap"), default="gpu_sharded")
     parser.add_argument("--warmup-iters", type=int, default=3)
     parser.add_argument("--bench-iters", type=int, default=20)
     parser.add_argument("--cuda-graph", dest="cuda_graph", action="store_true", default=True)
@@ -856,7 +1067,14 @@ def main() -> int:
     parser.add_argument("--no-op-kineto", dest="op_kineto", action="store_false")
     parser.add_argument("--ref-out", default="")
     parser.add_argument("--ref-in", default="")
+    parser.add_argument("--verify-parity", dest="verify_parity", default="", help="Alias for --ref-in")
+    parser.add_argument("--router-margin", type=float, default=0.0, help="Persistent per-expert router bias step during timing & parity (0.0 disables)")
+    parser.add_argument("--parity-router-margin", type=float, default=2.0, help="Per-expert router bias step applied during parity probe (>=1.0 eliminates 1-ULP expert flips)")
+    parser.add_argument("--parity-min-cos", type=float, default=0.999)
+    parser.add_argument("--fail-on-parity", action="store_true", default=False)
     args = parser.parse_args()
+    if args.verify_parity and not args.ref_in:
+        args.ref_in = args.verify_parity
 
     _apply_dtype_mode_env(args.dtype_mode)
     if args.dense_linear_mode:
@@ -979,6 +1197,8 @@ def main() -> int:
         num_workers=8,
         verbose=(world_rank == 0),
     )
+    if args.router_margin > 0.0:
+        _stabilize_moe_routers(target_lm, args.router_margin, seed=2026)
     if hasattr(target_lm, "prepare_weights"):
         prep_sig = inspect.signature(target_lm.prepare_weights).parameters
         if "dense_linear_mode" in prep_sig and args.dense_linear_mode:
@@ -1028,6 +1248,8 @@ def main() -> int:
         device=device,
     )
     dflash_model.kv_cache = dflash_kv
+    if args.router_margin > 0.0:
+        _stabilize_moe_routers(dflash_model, args.router_margin, seed=3026)
     dist.barrier(group=world_grp)
 
     if world_rank == 0:
@@ -1045,56 +1267,88 @@ def main() -> int:
 
     parity_by_bs: Dict[int, Dict[str, Any]] = {}
     if args.ref_out or ref_in_data is not None:
-        from rtp_llm.models.qwen4_5.qwen4_5_kv_cache import FULL_ATTN_KV_TAG, INDEXER_KV_TAG
-        parity_batches = [b for b in (1, 8, 64) if b in batches]
-        for p_bs in parity_batches:
-            p_bs_local = p_bs // dp_size
-            # Zero opaque state pools so parity probe starts deterministically regardless of batch order
-            for tag_map in target_kv.layer_caches:
-                for tag, lc in tag_map.items():
-                    if tag not in (FULL_ATTN_KV_TAG, INDEXER_KV_TAG) and hasattr(lc, "kv_cache_base"):
-                        lc.kv_cache_base.zero_()
-            p_v_in, p_d_in, _p_dc_in, _p_anch = _build_verify_and_draft_inputs(
-                target_kv=target_kv,
-                dflash_kv_bufs=dflash_kv_bufs,
-                spec=d_cfg._dflash2_spec,
-                batch_size=p_bs_local,
-                avg_ctx=args.avg_ctx,
-                verify_width=args.verify_width,
-                tokens_per_block=args.tokens_per_block,
-                device=device,
-                dp_rank=pc.dp_rank,
-                dp_size=dp_size,
-            )
-            p_fmha_t = target_rtp.prepare_fmha_impl(p_v_in, is_cuda_graph=False)
-            p_fmha_d = dflash_model.prepare_fmha_impl(p_d_in, is_cuda_graph=False)
-            p_zero_acc = torch.zeros((p_bs_local,), dtype=torch.int32, device=device)
-            p_d_out = dflash_model.forward_propose(p_d_in, fmha_impl=p_fmha_d)
-            p_t_out = target_rtp.forward(p_v_in, fmha_impl=p_fmha_t)
-            p_logits = target_rtp.compute_logits(p_t_out.hidden_states)
-            target_rtp.prepare_speculative_target_commit(p_zero_acc)
-            target_rtp.finish_speculative_target_commit(False)
-            target_rtp.finalize_speculative_target_commit()
-            torch.cuda.synchronize(device)
-            if world_rank == 0:
+        eff_parity_margin = args.router_margin if args.router_margin > 0.0 else float(args.parity_router_margin)
+        if ref_in_data is not None and not args.ref_out and args.router_margin <= 0.0:
+            meta_margin = (ref_in_data.get("_meta") or {}).get("router_margin")
+            if meta_margin is None:
+                for rv in ref_in_data.values():
+                    if isinstance(rv, dict) and "router_margin" in rv:
+                        meta_margin = rv["router_margin"]
+                        break
+            if meta_margin is None:
+                if world_rank == 0:
+                    print(
+                        f"[PARITY WARN] Reference lacks router_margin metadata (legacy unstabilized ref); "
+                        f"aligning parity probe router_margin=0.0 instead of {eff_parity_margin}",
+                        flush=True,
+                    )
+                eff_parity_margin = 0.0
+            elif float(meta_margin) != eff_parity_margin:
+                if world_rank == 0:
+                    print(
+                        f"[PARITY INFO] Aligning parity probe router_margin={float(meta_margin)} to match reference",
+                        flush=True,
+                    )
+                eff_parity_margin = float(meta_margin)
+        if args.ref_out and world_rank == 0:
+            ref_out_records["_meta"] = {"router_margin": eff_parity_margin, "dtype_mode": args.dtype_mode}
+        saved_t_routers = _stabilize_moe_routers(target_lm, eff_parity_margin, seed=2026) if (args.router_margin <= 0.0 and eff_parity_margin > 0.0) else []
+        saved_d_routers = _stabilize_moe_routers(dflash_model, eff_parity_margin, seed=3026) if (args.router_margin <= 0.0 and eff_parity_margin > 0.0) else []
+        try:
+            parity_batches = [b for b in (1, 8, 64) if b in batches]
+            for p_bs in parity_batches:
                 pkey = f"b{p_bs}"
-                if args.ref_out:
-                    ref_out_records[pkey] = {
-                        "target_logits_sample": p_logits[:min(8, p_logits.shape[0]), :4096].cpu().float().tolist(),
-                        "dflash_hidden_sample": p_d_out.hidden_states[:min(8, p_d_out.hidden_states.shape[0]), :1024].cpu().float().tolist(),
-                    }
-                if ref_in_data is not None and pkey in ref_in_data:
-                    r_entry = ref_in_data[pkey]
-                    r_tl = torch.tensor(r_entry["target_logits_sample"], dtype=torch.float32)
-                    c_tl = p_logits[: r_tl.shape[0], : r_tl.shape[1]].cpu().float()
-                    r_dh = torch.tensor(r_entry["dflash_hidden_sample"], dtype=torch.float32)
-                    c_dh = p_d_out.hidden_states[: r_dh.shape[0], : r_dh.shape[1]].cpu().float()
-                    parity_by_bs[p_bs] = {
-                        "target_logits": _compute_parity(c_tl, r_tl),
-                        "dflash_hidden": _compute_parity(c_dh, r_dh),
-                    }
-            del p_v_in, p_d_in, _p_dc_in, _p_anch, p_fmha_t, p_fmha_d, p_d_out, p_t_out, p_logits
-            torch.cuda.empty_cache()
+                r_entry = ref_in_data.get(pkey) if (ref_in_data is not None and pkey in ref_in_data) else None
+                saved_rec, par_res = _run_decode_parity_probe(
+                    target_rtp=target_rtp,
+                    dflash_model=dflash_model,
+                    target_kv=target_kv,
+                    dflash_kv_bufs=dflash_kv_bufs,
+                    d_spec=d_cfg._dflash2_spec,
+                    p_bs=p_bs,
+                    dp_size=dp_size,
+                    dp_rank=pc.dp_rank,
+                    avg_ctx=args.avg_ctx,
+                    verify_width=args.verify_width,
+                    tokens_per_block=args.tokens_per_block,
+                    device=device,
+                    world_rank=world_rank,
+                    save_ref=bool(args.ref_out),
+                    ref_entry=r_entry,
+                    parity_min_cos=float(args.parity_min_cos),
+                )
+                if world_rank == 0:
+                    if saved_rec is not None:
+                        saved_rec["router_margin"] = eff_parity_margin
+                        ref_out_records[pkey] = saved_rec
+                    if par_res is not None:
+                        par_res["router_margin"] = eff_parity_margin
+                        parity_by_bs[p_bs] = par_res
+                        print(
+                            f"[PARITY B={p_bs} margin={eff_parity_margin}] pass={par_res['passed']} "
+                            f"t_cos={par_res['target_logits']['cosine']:.6f} "
+                            f"d_cos={par_res['dflash_hidden']['cosine']:.6f} "
+                            f"d_l0_attn={par_res.get('dflash_l0_attn_cos')} "
+                            f"min_snap={par_res.get('min_snap_cos')} ({par_res.get('snap_count')} snaps)",
+                            flush=True,
+                        )
+                        if not par_res["passed"] and par_res.get("snapshots"):
+                            worst = sorted(par_res["snapshots"].items(), key=lambda kv: kv[1]["cosine"])[:4]
+                            print(f"  [PARITY WORST B={p_bs}] " + ", ".join(f"{k}={v['cosine']:.6f}" for k, v in worst), flush=True)
+        finally:
+            if saved_t_routers:
+                _restore_moe_routers(saved_t_routers)
+            if saved_d_routers:
+                _restore_moe_routers(saved_d_routers)
+        if args.fail_on_parity and parity_by_bs:
+            parity_ok_t = torch.tensor(
+                [1 if all(bool(v.get("passed")) for v in parity_by_bs.values()) else 0],
+                dtype=torch.int32,
+                device=device,
+            )
+            dist.broadcast(parity_ok_t, src=0, group=world_grp)
+            if int(parity_ok_t.item()) == 0:
+                raise RuntimeError(f"Parity gate failed (<{args.parity_min_cos}): {parity_by_bs}")
 
     bench_rows: List[Dict[str, Any]] = []
 
@@ -1357,12 +1611,22 @@ def main() -> int:
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(json.dumps(ref_out_records) + "\n", encoding="utf-8")
 
+        extra_meta = {
+            "ple_mode": args.ple_mode,
+            "dense_linear_mode": args.dense_linear_mode or "bf16",
+            "kv_dtype": args.kv_dtype,
+            "dflash_kv_dtype": eff_dflash_kv,
+            "dflash_attn_backend": args.dflash_attn_backend,
+            "indexer_kv_dtype": args.indexer_kv_dtype,
+            "router_margin": float(args.router_margin),
+        }
         report = {
             "round": args.round_tag,
             "parallel_mode": args.parallel_mode,
             "dtype_mode": args.dtype_mode,
             "avg_ctx": args.avg_ctx,
             "verify_width": args.verify_width,
+            **extra_meta,
             "hw_roofline": hw.to_dict(),
             "results": bench_rows,
             "kineto": kineto_results,
@@ -1380,6 +1644,7 @@ def main() -> int:
                 avg_ctx=args.avg_ctx,
                 hw=hw,
                 rows=bench_rows,
+                extra_meta=extra_meta,
             )
 
     dist.barrier(group=world_grp)
