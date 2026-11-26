@@ -38,6 +38,24 @@ import static org.junit.jupiter.api.Assertions.*;
 class PdGenerationTest {
     @TempDir Path directory;
 
+    @Test void stopWordsDoNotChangeMockOutputLength() throws Exception {
+        try (var prefill = node("prefill", 16, 1); var decode = node("decode", 32, 1)) {
+            var rpc = RpcServiceGrpc.newBlockingStub(prefill.channel).withDeadlineAfter(4, TimeUnit.SECONDS);
+            for (int outputLength : List.of(1, 3)) {
+                var request = input(decode, outputLength, 4, outputLength, 3000, true).toBuilder();
+                // The mock emits the last prompt token first. Matching it must not end the stream early.
+                request.getGenerateConfigBuilder().setStopWordsList(IntMatrix.newBuilder()
+                    .addRows(IntVector.newBuilder().addValues(4)));
+                var responses = rpc.generateStreamCall(request.build());
+                GenerateOutputsPB last = null;
+                while (responses.hasNext()) last = responses.next();
+                assertNotNull(last);
+                assertTrue(last.getFlattenOutput().getFinished(0));
+                assertEquals(outputLength, last.getFlattenOutput().getAuxInfo(0).getOutputLen());
+            }
+        }
+    }
+
     @Test void shardedPrefillTransfersSemanticInputToUnshardedDecode() throws Exception {
         try(var p=node("prefill",16,1,Map.of("settings",Map.of("prefill_cp_size",4)));
             var d=node("decode",32,1,Map.of("settings",Map.of("prefill_cp_size",4)))) {
@@ -296,7 +314,6 @@ class PdGenerationTest {
         try (var p = node("prefill", 16, 1); var d = node("decode", 16, 1)) {
             var modes = List.<java.util.function.Consumer<GenerateConfigPB.Builder>>of(
                 g -> g.setPrefillOnly(true),
-                g -> g.getStopWordsListBuilder().addRowsBuilder().addValues(1),
                 g -> g.setSpEdit(true), g -> g.setSpInputLookup(true),
                 g -> g.setReturnLogits(true), g -> g.setNumBeams(2), g -> g.setAdapterName(com.google.protobuf.StringValue.of("adapter")));
             long id = 1000;

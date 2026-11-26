@@ -68,7 +68,7 @@ final class RpcMessages {
                 || g.getNumBeams() > 1 || g.getNumReturnSequences() > 1 || g.getVariableNumBeamsCount() > 0
                 || g.getReturnPromptLogits() || g.getReturnHiddenStates() || g.getReturnLogits() || g.getReturnAllHiddenStates()
                 || g.getReturnAllProbs() || g.getReturnSoftmaxProbs() || g.getReturnCumLogProbs() || g.getCalculateLoss() != 0
-                || g.getStopWordsList().getRowsCount() > 0 || g.getSpEdit() || g.getSpInputLookup())
+                || g.getSpEdit() || g.getSpInputLookup())
             throw Status.UNIMPLEMENTED.withDescription("Unsupported adapter, sequence shape or output mode").asRuntimeException();
     }
 
