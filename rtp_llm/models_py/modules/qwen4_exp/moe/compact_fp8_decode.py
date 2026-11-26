@@ -229,7 +229,8 @@ def compact_fp8_decode(
     down_input = x.new_empty((routes, intermediate))
     down_scale = x.new_empty((routes, groups), dtype=torch.float32)
     pdl = sm90_pdl_enabled(x.device)
-    if large or routes > 640:
+    # Four-row tiles also pay off for small top-10 batches on H20.
+    if large or routes > 640 or (routes >= 80 and _device_num_sms(x.device) == 78):
         tile_rows = 8 if routes >= 5120 else 4
         _silu_mul_quantize_tiles[(triton.cdiv(routes, tile_rows), groups)](
             up,

@@ -35,6 +35,7 @@ def _gdn_norm_quant(
     WARPS: gl.constexpr,
     UE8M0: gl.constexpr,
     V2: gl.constexpr,
+    PDL: gl.constexpr,
 ):
     layout: gl.constexpr = gl.BlockedLayout([1, 4], [1, 32], [WARPS, 1], [1, 0])
     flat = gl.program_id(0) * GH + gl.arange(0, GH, layout=gl.SliceLayout(1, layout))
@@ -43,14 +44,23 @@ def _gdn_norm_quant(
     col = gl.arange(0, 128, layout=gl.SliceLayout(0, layout))
     offset = head[:, None] * 128 + col[None, :]
     valid = flat[:, None] < M * GROUPS
+    weight = gl.load(W + col).to(gl.float32)
+    gate = gl.load(Z + row[:, None] * ZX + offset, valid, other=0.0).to(gl.float32)
+    sigmoid = 1.0 / (1.0 + gl.exp(-gate))
+    if PDL:
+        # Gluon uses the same grid dependency wait as the Triton producer.
+        gl.inline_asm_elementwise(
+            "griddepcontrol.wait; // $0",
+            "=r",
+            [],
+            dtype=gl.int32,
+            is_pure=False,
+            pack=1,
+        )
     value = gl.load(X + row[:, None] * N + offset, valid, other=0.0).to(gl.float32)
     variance = gl.sum(value * value, 1) / 128.0
     inverse = 1.0 / gl.sqrt(variance + EPS)
-    weight = gl.load(W + col).to(gl.float32)
-    gate = gl.load(Z + row[:, None] * ZX + offset, valid, other=0.0).to(gl.float32)
-    normalized = ((value * inverse[:, None]) * weight[None, :]) * (
-        1.0 / (1.0 + gl.exp(-gate))
-    )
+    normalized = ((value * inverse[:, None]) * weight[None, :]) * sigmoid
     rounded = normalized.to(gl.bfloat16).to(gl.float32)
     absolute = gl.abs(rounded)
     amax = gl.maximum(gl.max(gl.where(absolute == absolute, absolute, 0.0), 1), 1.0e-4)
@@ -110,7 +120,9 @@ def norm_quant(x, z, weight, eps, groups=8, warps=1):
     return _launch_norm_quant(x, z, weight, eps, groups, warps, scale_ue8m0=True)
 
 
-def _launch_norm_quant(x, z, weight, eps, groups=8, warps=1, *, scale_ue8m0, v2=False):
+def _launch_norm_quant(
+    x, z, weight, eps, groups=8, warps=1, *, scale_ue8m0, v2=False, pdl=False
+):
     """Launch after the public helper or model dispatch validates the layout."""
     rows, width = x.shape
     q = torch.empty_like(x, dtype=torch.float8_e4m3fn)
@@ -133,6 +145,8 @@ def _launch_norm_quant(x, z, weight, eps, groups=8, warps=1, *, scale_ue8m0, v2=
         WARPS=warps,
         UE8M0=scale_ue8m0,
         V2=v2,
+        PDL=pdl,
+        launch_pdl=pdl,
         num_warps=warps,
     )
     return q, s
