@@ -11,6 +11,11 @@ repos:
     # Formatters
   - repo: local
     hooks:
+      - id: mock-traffic-dataset
+        name: Keep replay datasets in the shared traffic directory
+        entry: Put generated .mckidx files under the Case shared-root instead of staging them.
+        language: fail
+        files: \.mckidx$
       - id: flexlb-java-checker-tests
         name: Test FlexLB Java checkers
         entry: python -m unittest discover -s rtp_llm/flexlb/tools -p test_*.py

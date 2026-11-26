@@ -33,6 +33,11 @@ public final class VitNode implements AutoCloseable {
             node.rpc=NettyServerBuilder.forAddress(node.address.listener(rpcPort)).addService(node.service).addService(node.service.mockVitService()).build().start();
             node.metrics=org.flexlb.mock.metrics.MetricsOutput.start(node.service::collectMetrics);
             node.api=new ControlHttpServer(node.address.listener(controlPort)).health(node::checkHealthy);
+            var capture = node.service.capture;
+            if (capture != null) {
+                node.api.route("vit/capture/arm", CaptureArm.class, CaptureState.class, capture::arm);
+                node.api.route("vit/capture/read", CaptureRead.class, CaptureChunk.class, capture::read);
+            }
             if(node.metrics.prometheus()) node.api.metrics(node.service::metrics);
             node.api.start();return node;
         } catch(Exception | Error error) {
@@ -65,6 +70,13 @@ public final class VitNode implements AutoCloseable {
 
     int inflight() { return service.preparation.inflight(); }
 
+    public record CaptureArm(long run, long start, long end, long expires, String signature) {}
+    public record CaptureState(long start, String state, String instance, CaptureGeometry geometry) {}
+    public record CaptureGeometry(int patch_size, int downsample_ratio, int min_pixels, int max_image_tokens) {}
+    public record CaptureRead(long start, String owner, long expires, long offset, int size, String signature) {}
+    public record CaptureChunk(String owner, long start, String name, long bytes, String sha256, long offset,
+                               String chunk_sha256, String data_base64) {}
+
     /**
      * Serves native multimodal RPCs and owns their workers and pending replies.
      */
@@ -75,6 +87,7 @@ public final class VitNode implements AutoCloseable {
         private final VitScheduler scheduler;
         private final VitPreparation preparation;
         private final String instance=UUID.randomUUID().toString();
+        private final VitCaptureWindows capture;
         private final ExecutorService replies=Executors.newVirtualThreadPerTaskExecutor();
 
         private volatile boolean closed;
@@ -82,6 +95,8 @@ public final class VitNode implements AutoCloseable {
         RpcService(VitConfig config, VitMetrics metrics) {
             this.config = config;
             this.metrics = metrics;
+            var captureKey = VitGeometryCapture.configuredKey();
+            capture = captureKey == null ? null : new VitCaptureWindows(config, instance, captureKey);
             cache = new VitCache(config, metrics);
             scheduler = new VitScheduler(config, metrics);
             preparation = new VitPreparation(config, cache, scheduler, metrics);
@@ -100,6 +115,7 @@ public final class VitNode implements AutoCloseable {
                     var entry=MultimodalHashEntryPB.newBuilder().setKey(key);String tier=cache.tier(key);
                     entry.setEmbeddingHit(!tier.isEmpty()).setEmbeddingTier(tier);
                     if (image != null) {
+                        if (capture != null) capture.record(image);
                         long seed = MultimodalProtocol.featureSeed(image.featureIdentity());
                         entry.setHashHit(true).setEntryGeneration(instance+":"+key).addSplitSize(image.rows());
                         entry.setFeatureHashes(MultimodalProtocol.expandFeatureHashes(seed, image.rows()));
@@ -167,6 +183,7 @@ public final class VitNode implements AutoCloseable {
                             var image = computed.get(key);
                             if (image == null) image = cache.hash(key);
                             if (image != null) {
+                                if (capture != null) capture.record(image);
                                 seeds.addEntries(ImageHashSeed.newBuilder().setKey(key).setRows(image.rows())
                                     .setSeed(MultimodalProtocol.featureSeed(image.featureIdentity())));
                             }
