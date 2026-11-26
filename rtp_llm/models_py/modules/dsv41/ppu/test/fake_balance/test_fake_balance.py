@@ -8,7 +8,7 @@ from unittest.mock import Mock, patch
 
 import torch
 
-from rtp_llm.models_py.modules.dsv41.ppu import moe
+from rtp_llm.models_py.modules.dsv41.ppu import eplb, moe
 from rtp_llm.models_py.modules.dsv41.ppu.moe import PPUMoE, _DPForwardMegaBuffer
 
 
@@ -264,6 +264,32 @@ class FakeBalanceTest(unittest.TestCase):
                     self.assertTrue(torch.equal(ids, before[0]))
                     self.assertTrue(torch.equal(weights, before[1]))
                 self.assertEqual(value.execution_stats()["fake_balance_policy"], "sail_round_robin")
+
+    def test_sail_replica_candidates_follow_resolved_slot_count(self):
+        for redundancy in (32, 64):
+            physical = 384 + redundancy
+            local = physical // 8
+            for rank in range(8):
+                with self.subTest(redundancy=redundancy, rank=rank):
+                    layer = NS(
+                        layer_id=0, ep_rank=rank, num_logical_experts=384,
+                        num_physical_experts=physical, num_local_experts=local,
+                        physical_to_logical=torch.arange(physical, dtype=torch.int32) % 384,
+                        logical_to_physical=torch.empty(0),
+                    )
+                    remap = Mock()
+                    with patch.object(eplb, "_sail_dynamic_remap", return_value=remap):
+                        eplb._configure_sail_dynamic(layer)
+                    layer.map_ids(torch.tensor([0, 383]))
+                    _, candidates, counts, _ = remap.call_args.args
+                    expected = []
+                    for expert in range(384):
+                        slots = [expert, expert + 384] if expert < redundancy else [expert]
+                        local_slots = [slot for slot in slots if slot // local == rank]
+                        expected.append(local_slots or slots)
+                    self.assertEqual(counts.tolist(), [len(slots) for slots in expected])
+                    self.assertEqual(candidates.tolist(), [slots if len(slots) == 2 else slots + [-1]
+                                                           for slots in expected])
 
     def test_sail_policy_declines_native_prefill_cache_and_forwards_layer(self):
         with patch.dict(os.environ, {"RTP_V41_PPU_MEGAMOE_FAKE_BALANCE_POLICY": "sail_round_robin"}):

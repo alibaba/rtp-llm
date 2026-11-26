@@ -134,16 +134,18 @@ def _configure_sail_dynamic(layer):
     """Match Sail's single-node candidate pruning and random replica choice."""
     import torch
 
-    if (layer.num_logical_experts, layer.num_physical_experts, layer.num_local_experts) != (384, 448, 56):
-        raise ValueError("Sail dynamic replica benchmark requires target 384+64 experts on EP8")
-    expected = torch.arange(448, dtype=torch.int32) % 384
+    logical = layer.num_logical_experts
+    physical, local = physical_expert_geometry(logical, layer.num_physical_experts, 8)
+    if logical != 384 or physical == logical or layer.num_local_experts != local:
+        raise ValueError("Sail dynamic replica benchmark requires target E384 with replicas on EP8")
+    expected = torch.arange(physical, dtype=torch.int32) % logical
     if not torch.equal(layer.physical_to_logical.cpu(), expected):
         raise ValueError("Sail dynamic replica benchmark requires the Sail trivial physical map")
-    first = torch.arange(384, dtype=torch.int32)
-    other = first + 384
-    has_replica = first < 64
-    local_first = first // 56 == layer.ep_rank
-    local_other = has_replica & (other // 56 == layer.ep_rank)
+    first = torch.arange(logical, dtype=torch.int32)
+    other = first + logical
+    has_replica = other < physical
+    local_first = first // local == layer.ep_rank
+    local_other = has_replica & (other // local == layer.ep_rank)
     has_remote_choice = has_replica & ~local_first & ~local_other
     mapping = torch.stack((torch.where(local_other, other, first),
                            torch.where(has_remote_choice, other, -1)), dim=1)
@@ -162,8 +164,8 @@ def _configure_sail_dynamic(layer):
         os.environ.get("RTP_V41_PPU_SAIL_FUSED_BALANCED_REPLICA_ROUTES", "1") == "1"
     )
     if layer.layer_id == 0:
-        logging.info("V4.1 Sail replica benchmark EP rank=%d physical=448 local=56 remote_choices=%d",
-                     layer.ep_rank, int(has_remote_choice.sum()))
+        logging.info("V4.1 Sail replica benchmark EP rank=%d physical=%d local=%d remote_choices=%d",
+                     layer.ep_rank, physical, local, int(has_remote_choice.sum()))
 
 
 def bind_layer(engine, layer_id, mapping, counts, *, raw_tensors=()):
