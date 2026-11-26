@@ -223,7 +223,8 @@ cc_test(
         "@havenask//aios/autil:net",
     ],
     env = {"TEST_USING_DEVICE": "CUDA"},
-    exec_properties = {"gpu": "H20"},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 cc_test(
