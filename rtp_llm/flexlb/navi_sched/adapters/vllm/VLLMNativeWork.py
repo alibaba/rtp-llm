@@ -8,6 +8,7 @@ The caller owns request progress and Native step/checkpoint lifetimes.
 from __future__ import annotations
 from bisect import bisect_right
 import heapq
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Iterable
@@ -102,6 +103,8 @@ class NativeWorkWindow:
     begin: NativeWorkPrefix
     # Only requests already started before begin can need a moment correction.
     old_requests: tuple[NativeRequestProgress,...]
+    admission_elapsed_time_ms: float | None = None
+    admission_elapsed_observed_ns: int = 0
 
     @classmethod
     def capture(cls,begin,request_refs:Iterable[NativeRequestProgress]):
@@ -183,6 +186,45 @@ class NativeWorkHistory:
         self._times = [initial_completed_ns]
         self._checkpoints = [CompletedWorkCheckpoint(initial_completed_ns, NativeWorkPrefix())]
         self._head = 0
+        self._elapsed_times = []
+        self._elapsed_values = []
+        self._elapsed_head = 0
+
+    def record_elapsed(self, observed_ns, elapsed_ms, running_count):
+        """Retain scalar workload curves under the same admission watermark.
+
+        A ready batch can precede Python handoff. Reading the latest workload
+        at handoff must not give its training sample future queue state.
+        The caller owns the existing workload/execution locks.
+        """
+        if (type(observed_ns) is not int or observed_ns < self._times[self._head]
+                or type(running_count) is not int or running_count < 0
+                or type(elapsed_ms) not in (int, float)
+                or not math.isfinite(elapsed_ms) or elapsed_ms < 0):
+            raise ValueError('invalid Native admission elapsed checkpoint')
+        if self._elapsed_times and observed_ns < self._elapsed_times[-1]:
+            raise ValueError('Native elapsed observation clock moved backwards')
+        value = (float(elapsed_ms), running_count)
+        if self._elapsed_times and observed_ns == self._elapsed_times[-1]:
+            self._elapsed_values[-1] = value
+        else:
+            self._elapsed_times.append(observed_ns)
+            self._elapsed_values.append(value)
+
+    def clear_elapsed(self):
+        self._elapsed_times.clear()
+        self._elapsed_values.clear()
+        self._elapsed_head = 0
+
+    def elapsed_at(self, ready_ns):
+        if type(ready_ns) is not int or ready_ns < self._times[self._head]:
+            raise ValueError('Native elapsed admission boundary was retired')
+        if not self._elapsed_times or ready_ns < self._elapsed_times[self._elapsed_head]:
+            return None, 0
+        index = bisect_right(self._elapsed_times, ready_ns, lo=self._elapsed_head) - 1
+        elapsed, running = self._elapsed_values[index]
+        observed = self._elapsed_times[index]
+        return elapsed + (ready_ns - observed) * running / 1_000_000.0, observed
 
     def append(self, completed_ns, prefix, request_refs):
         if type(completed_ns) is not int or completed_ns < self._times[-1]:
@@ -202,7 +244,9 @@ class NativeWorkHistory:
         # handoff, and therefore disappeared from the live scheduler table.
         for checkpoint in self._checkpoints[index + 1:]:
             refs.extend(checkpoint.request_refs)
-        return NativeWorkWindow.capture(self._checkpoints[index].prefix, refs)
+        window = NativeWorkWindow.capture(self._checkpoints[index].prefix, refs)
+        elapsed, observed = self.elapsed_at(ready_ns)
+        return NativeWorkWindow(window.begin, window.old_requests, elapsed, observed)
 
     def prune(self, retained_ready_ns):
         if type(retained_ready_ns) is not int or retained_ready_ns < self._times[self._head]:
@@ -220,6 +264,14 @@ class NativeWorkHistory:
             self._times = self._times[self._head:]
             self._checkpoints = self._checkpoints[self._head:]
             self._head = 0
+
+        if self._elapsed_times:
+            head = max(self._elapsed_head, bisect_right(self._elapsed_times, retained_ready_ns) - 1)
+            self._elapsed_head = head
+            if head >= 64 and head * 2 >= len(self._elapsed_times):
+                self._elapsed_times = self._elapsed_times[head:]
+                self._elapsed_values = self._elapsed_values[head:]
+                self._elapsed_head = 0
 
     @property
     def earliest_completed_ns(self):

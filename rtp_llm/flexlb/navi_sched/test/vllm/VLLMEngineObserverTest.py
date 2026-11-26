@@ -3073,7 +3073,7 @@ class VLLMEngineObserverTest(unittest.TestCase):
         observer = VLLMEngineObserver(self.make_config(), self.make_kv_cache_config())
         observer._response_request_ids[7] = "image"
         # Two native image spans replace one token each in the frontend prompt.
-        observer._response_image_positions = {7: ((4, 8), (16, 4))}
+        observer._response_media_spans = {7: ((4, 8, 1), (16, 4, 1))}
         encoded = []
         observer._response_encoder = SimpleNamespace(
             encode=lambda outputs: encoded.append(outputs) or [b"projected"]
@@ -3110,7 +3110,7 @@ class VLLMEngineObserverTest(unittest.TestCase):
                 self.assertIsNot(outputs, encoded[-1])
         terminal = SimpleNamespace(outputs=[], finished_requests={"image"})
         self.assertTrue(observer.route_engine_outputs(7, terminal))
-        self.assertEqual({}, observer._response_image_positions)
+        self.assertEqual({}, observer._response_media_spans)
 
     def test_streaming_outputs_use_response_pipe_until_terminal(self):
         observer = VLLMEngineObserver(self.make_config(), self.make_kv_cache_config())
@@ -3139,7 +3139,7 @@ class VLLMEngineObserverTest(unittest.TestCase):
         )
         self.assertEqual({}, observer._response_request_ids)
         self.assertEqual(set(), observer._inactive_response_request_ids)
-        self.assertEqual({}, observer._response_image_positions)
+        self.assertEqual({}, observer._response_media_spans)
 
     def test_remote_scheduler_stats_stay_on_execution_node(self):
         from vllm.v1.engine import EngineCoreOutputs
@@ -4128,7 +4128,7 @@ class VLLMEngineObserverTest(unittest.TestCase):
         second_seen = threading.Event()
         received = []
 
-        def enqueue(batch, *unused_args, image_predictions=None):
+        def enqueue(batch, *unused_args, media_predictions=None):
             received.append(batch.batch_id)
             if len(received) == 1:
                 first_seen.set()
@@ -4201,7 +4201,7 @@ class VLLMEngineObserverTest(unittest.TestCase):
             preprocess_add_request=mock.Mock(return_value=(request,))
         )
 
-        def decode_forward_batch(*unused_args, image_predictions=None):
+        def decode_forward_batch(*unused_args, media_predictions=None):
             self.assertIn(batch.request_ids[0], observer._preprocessed_cache_touches)
             return []
 
@@ -4337,7 +4337,7 @@ class VLLMEngineObserverTest(unittest.TestCase):
             decoder,
             msgpack,
             resume_rendering=False,
-            image_predictions=predictions,
+            media_predictions=predictions,
         )
         self.assertIs(tokens, predictions[71].prompt_token_ids)
         self.assertIs(features, predictions[71].mm_features)
@@ -4364,17 +4364,17 @@ class VLLMEngineObserverTest(unittest.TestCase):
                 ),
             ),
         ):
-            observer._register_image_cache_mappings(
+            observer._register_media_cache_mappings(
                 batch, [(71, (actual,))], predictions
             )
         decoder.decode.assert_called_once_with([b"frame"])
         batch.get_request_block_hashes.assert_called_once_with(71)
-        record = next(iter(observer._image_cache_map._records.values()))
+        record = next(iter(observer._media_cache_map._records.values()))
         self.assertEqual(((102).to_bytes(32, "big"),), record.logical_hashes)
         self.assertEqual((4,), record.required_blocks)
-        self.assertEqual({71: ((17, 32),)}, observer._response_image_positions)
+        self.assertEqual({71: ((17, 32, 1),)}, observer._response_media_spans)
         observer._remove_response_requests((71,))
-        self.assertEqual({}, observer._response_image_positions)
+        self.assertEqual({}, observer._response_media_spans)
 
     def test_text_decode_does_not_capture_image_mapping_metadata(self):
         observer = VLLMEngineObserver(self.make_config(), self.make_kv_cache_config())
@@ -4385,10 +4385,10 @@ class VLLMEngineObserverTest(unittest.TestCase):
             batch,
             SimpleNamespace(decode=lambda frames: request),
             SimpleNamespace(decode=lambda payload: [b"frame"]),
-            image_predictions=predictions,
+            media_predictions=predictions,
         )
         self.assertEqual({}, predictions)
-        observer._register_image_cache_mappings(batch, [], predictions)
+        observer._register_media_cache_mappings(batch, [], predictions)
 
     def test_failed_native_render_uses_decode_failure_cleanup(self):
         observer = VLLMEngineObserver(self.make_config(), self.make_kv_cache_config())
@@ -10355,7 +10355,7 @@ class VLLMEngineObserverTest(unittest.TestCase):
             "navi_sched.adapters.vllm.VLLMImageCacheMap.calculate_vllm_block_hashes",
             return_value=[101, 102, 103],
         ):
-            observer._image_cache_map.register(71, prediction, actual, 16)
+            observer._media_cache_map.register(71, prediction, actual, 16)
         observer.on_block_lifecycle_event(
             "stored", 0, (hashes[0], hashes[1], hashes[3])
         )
@@ -10367,12 +10367,12 @@ class VLLMEngineObserverTest(unittest.TestCase):
             ([13, 102], [], [], [], [], []), observer._bridge.cache_updates[-1]
         )
         observer._remove_response_requests([71])
-        self.assertEqual({}, observer._image_cache_map._owners)
+        self.assertEqual({}, observer._media_cache_map._owners)
         observer.on_block_lifecycle_event("removed", 0, (hashes[1],))
         self.assertEqual(
             ([], [12, 102], [], [], [], []), observer._bridge.cache_updates[-1]
         )
-        self.assertEqual({}, observer._image_cache_map._records)
+        self.assertEqual({}, observer._media_cache_map._records)
 
     def test_reports_group_aware_vllm_cache_lifecycle(self):
         observer = VLLMEngineObserver(self.make_config(), self.make_kv_cache_config())
@@ -11421,7 +11421,7 @@ class NaviSchedVLLMPluginTest(unittest.TestCase):
     @mock.patch(
         "navi_sched.adapters.vllm.VLLMPluginRegistry.register_engine_observer_factory"
     )
-    def test_enabled_by_default_or_explicitly_registers_observer(
+    def test_registers_only_when_explicitly_enabled(
         self,
         register_factory,
         register_transport_factory,
@@ -11430,20 +11430,33 @@ class NaviSchedVLLMPluginTest(unittest.TestCase):
         register_frontend_configurator,
         register_renderer_factory,
     ):
-        for environment in ({}, {"VLLM_NAVI_SCHED_ENABLE": "1"}):
+        registrations = (
+            register_factory,
+            register_transport_factory,
+            register_frontend_interceptor,
+            register_scheduler_metrics,
+            register_frontend_configurator,
+            register_renderer_factory,
+        )
+        for environment in (
+            {},
+            {"VLLM_NAVI_SCHED_ENABLE": "0"},
+            {"VLLM_NAVI_SCHED_ENABLE": "1"},
+        ):
             with (
                 self.subTest(environment=environment),
                 mock.patch.dict(os.environ, environment, clear=True),
             ):
                 register_vllm_plugin()
-                self.assertEqual("0", os.environ["PYTHONHASHSEED"])
+                if environment.get("VLLM_NAVI_SCHED_ENABLE") == "1":
+                    self.assertEqual("0", os.environ["PYTHONHASHSEED"])
+                else:
+                    self.assertNotIn("PYTHONHASHSEED", os.environ)
+                    for registration in registrations:
+                        self.assertEqual(0, registration.call_count)
 
-        self.assertEqual(2, register_factory.call_count)
-        self.assertEqual(2, register_transport_factory.call_count)
-        self.assertEqual(2, register_frontend_interceptor.call_count)
-        self.assertEqual(2, register_scheduler_metrics.call_count)
-        self.assertEqual(2, register_frontend_configurator.call_count)
-        self.assertEqual(2, register_renderer_factory.call_count)
+        for registration in registrations:
+            self.assertEqual(1, registration.call_count)
 
     @mock.patch(
         "navi_sched.adapters.vllm.VLLMPluginRegistry.register_scheduler_iteration_metrics",
