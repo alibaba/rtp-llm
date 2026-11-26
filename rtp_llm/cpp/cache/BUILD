@@ -415,6 +415,9 @@ cc_library(
     copts = copts() + select({
         "//:using_remote_kv_cache": ["-DRTP_LLM_USE_REMOTE_KV_CACHE=1"],
         "//conditions:default": [],
+    }) + select({
+        "//:using_kvs2_cache": ["-DRTP_LLM_USE_KVS2_CACHE=1"],
+        "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],
     deps = [
@@ -442,6 +445,9 @@ cc_library(
             "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:kvcm_storage_backend",
             "//rtp_llm/cpp/utils:core_utils",
         ],
+        "//conditions:default": [],
+    }) + select({
+        "//:using_kvs2_cache": ["//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvs2"],
         "//conditions:default": [],
     }),
 )

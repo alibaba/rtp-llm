@@ -145,6 +145,11 @@ config_setting(
     define_values = {"use_remote_kv_cache": "true"},
 )
 
+config_setting(
+    name = "using_kvs2_cache",
+    define_values = {"use_kvs2_cache": "true"},
+)
+
 # accl is permanently closed; do NOT add any fetch rule (http_archive/rpm) for
 # accl in public deps/ — RDMA impls are only buildable with the internal overlay.
 config_setting(

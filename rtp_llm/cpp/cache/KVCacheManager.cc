@@ -10,6 +10,7 @@
 #include <array>
 #include <stdexcept>
 #include <chrono>
+#include <cstdlib>
 #include <limits>
 #include <numeric>
 #include <optional>
@@ -27,6 +28,9 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.h"
 #ifdef RTP_LLM_USE_REMOTE_KV_CACHE
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/KVCMStorageBackend.h"
+#endif
+#ifdef RTP_LLM_USE_KVS2_CACHE
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvs2/Kvs2StorageBackend.h"
 #endif
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferRequestConverter.h"
@@ -363,19 +367,48 @@ bool KVCacheManager::init() {
 
     std::shared_ptr<StorageBackend> storage_backend;
     if (kv_cache_config_.enable_remote_cache) {
-#ifdef RTP_LLM_USE_REMOTE_KV_CACHE
-        storage_backend = std::make_shared<KVCMStorageBackend>(config_,
-                                                               kv_cache_config_,
-                                                               runtime_config_,
-                                                               parallelism_config_,
-                                                               sp_config_,
-                                                               broadcast_manager,
-                                                               nullptr,
-                                                               metrics_reporter_);
+        const auto* kvs2_master = std::getenv("RTP_LLM_KVS2_MASTER");
+        if (kvs2_master && *kvs2_master) {
+#ifdef RTP_LLM_USE_KVS2_CACHE
+            const auto* tenant = std::getenv("RTP_LLM_KVS2_TENANT");
+            if (pd_sep_config_.role_type != RoleType::PREFILL || !tenant || !*tenant) {
+                RTP_LLM_LOG_ERROR("KVS2 requires a Prefill worker and RTP_LLM_KVS2_TENANT");
+                return false;
+            }
+            kvs::ClientOptions options;
+            options.master     = kvs2_master;
+            options.timeout_ms = kv_cache_config_.kvcm_task_timeout_ms;
+            if (const auto* pool = std::getenv("RTP_LLM_KVS2_POOL"); pool && *pool) {
+                options.pool = pool;
+            }
+            storage_backend = std::make_shared<Kvs2StorageBackend>(config_,
+                                                                  std::move(options),
+                                                                  tenant,
+                                                                  runtime_config_.model_name,
+                                                                  parallelism_config_.tp_rank,
+                                                                  parallelism_config_.tp_size,
+                                                                  parallelism_config_.world_rank,
+                                                                  broadcast_manager,
+                                                                  metrics_reporter_);
 #else
-        RTP_LLM_LOG_ERROR("remote cache was requested, but this build does not include the KVCM client");
-        return false;
+            RTP_LLM_LOG_ERROR("KVS2 was requested, but this build does not include the KVS2 Client");
+            return false;
 #endif
+        } else {
+#ifdef RTP_LLM_USE_REMOTE_KV_CACHE
+            storage_backend = std::make_shared<KVCMStorageBackend>(config_,
+                                                                   kv_cache_config_,
+                                                                   runtime_config_,
+                                                                   parallelism_config_,
+                                                                   sp_config_,
+                                                                   broadcast_manager,
+                                                                   nullptr,
+                                                                   metrics_reporter_);
+#else
+            RTP_LLM_LOG_ERROR("remote cache was requested, but this build does not include the KVCM client");
+            return false;
+#endif
+        }
     }
 
     block_tree_cache_ = createBlockTreeCache(config_,
@@ -394,6 +427,11 @@ bool KVCacheManager::init() {
     if (isAllocatorOwner()) {
         completion_cleanup_ = std::make_shared<TransferCompletionCleanup>();
         block_tree_cache_->setCompletionCleanup(completion_cleanup_);
+#ifdef RTP_LLM_USE_KVS2_CACHE
+        if (auto backend = std::dynamic_pointer_cast<Kvs2StorageBackend>(block_tree_cache_->storageBackend())) {
+            backend->setCompletionCleanup(completion_cleanup_);
+        }
+#endif
 #ifdef RTP_LLM_USE_REMOTE_KV_CACHE
         if (auto backend = std::dynamic_pointer_cast<KVCMStorageBackend>(block_tree_cache_->storageBackend()))
             backend->setCompletionCleanup(completion_cleanup_);
@@ -1285,6 +1323,12 @@ std::vector<std::shared_ptr<FrozenTask>> KVCacheManager::frozenTasks() const {
         return {};
     }
     auto tasks = block_tree_cache_->frozenTasks();
+#ifdef RTP_LLM_USE_KVS2_CACHE
+    if (auto backend = std::dynamic_pointer_cast<Kvs2StorageBackend>(block_tree_cache_->storageBackend())) {
+        const auto remote_tasks = backend->frozenTasks();
+        tasks.insert(tasks.end(), remote_tasks.begin(), remote_tasks.end());
+    }
+#endif
 #ifdef RTP_LLM_USE_REMOTE_KV_CACHE
     auto backend = std::dynamic_pointer_cast<KVCMStorageBackend>(block_tree_cache_->storageBackend());
     if (backend) {
@@ -1302,6 +1346,11 @@ TransferTaskRegistry::State KVCacheManager::localTransferCompletion(const Transf
     if (const auto* transfer_trace = std::get_if<uint64_t>(&trace_id)) {
         return block_tree_cache_->localTransferCompletion(*transfer_trace);
     }
+#ifdef RTP_LLM_USE_KVS2_CACHE
+    if (auto backend = std::dynamic_pointer_cast<Kvs2StorageBackend>(block_tree_cache_->storageBackend())) {
+        return backend->queryCompletion(std::get<std::string>(trace_id));
+    }
+#endif
 #ifdef RTP_LLM_USE_REMOTE_KV_CACHE
     auto backend = std::dynamic_pointer_cast<KVCMStorageBackend>(block_tree_cache_->storageBackend());
     if (backend) {
@@ -1322,6 +1371,11 @@ KVCacheManager::localForgetTransferCompletion(const TransferExecutionTrace& trac
         return Result::FAILED;
     if (const auto* trace = std::get_if<uint64_t>(&trace_id))
         return block_tree_cache_->forgetLocalTransferCompletion(*trace);
+#ifdef RTP_LLM_USE_KVS2_CACHE
+    if (auto backend = std::dynamic_pointer_cast<Kvs2StorageBackend>(block_tree_cache_->storageBackend())) {
+        return backend->forgetCompletion(std::get<std::string>(trace_id));
+    }
+#endif
 #ifdef RTP_LLM_USE_REMOTE_KV_CACHE
     auto backend = std::dynamic_pointer_cast<KVCMStorageBackend>(block_tree_cache_->storageBackend());
     if (backend)
@@ -1427,11 +1481,17 @@ bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionR
         return true;
     }
     if (request.has_remote_request()) {
-#ifdef RTP_LLM_USE_REMOTE_KV_CACHE
         if (!block_tree_cache_) {
             RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: block tree cache is not initialized");
             return false;
         }
+#ifdef RTP_LLM_USE_KVS2_CACHE
+        if (auto backend = std::dynamic_pointer_cast<Kvs2StorageBackend>(block_tree_cache_->storageBackend())) {
+            backend->execute(request.remote_request(), *response.mutable_remote_response());
+            return true;
+        }
+#endif
+#ifdef RTP_LLM_USE_REMOTE_KV_CACHE
         auto backend = std::dynamic_pointer_cast<KVCMStorageBackend>(block_tree_cache_->storageBackend());
         if (!backend) {
             RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: KVCM storage backend is not initialized");
@@ -1443,7 +1503,7 @@ bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionR
         // when the SDK failed or timed out. Metadata handlers retain their contract.
         return operation == REMOTE_OPERATION_READ || operation == REMOTE_OPERATION_WRITE ? true : success;
 #else
-        RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: KVCM support is not compiled in");
+        RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: remote cache backend unavailable");
         return false;
 #endif
     }
@@ -1896,6 +1956,11 @@ void KVCacheManager::missingCleanupLoop() {
     while (!missing_cleanup_cv_.wait_for(lock, std::chrono::minutes(1), [this] { return missing_cleanup_stopped_; })) {
         lock.unlock();
         block_tree_cache_->cleanupExpiredMissing();
+#ifdef RTP_LLM_USE_KVS2_CACHE
+        if (auto backend = std::dynamic_pointer_cast<Kvs2StorageBackend>(block_tree_cache_->storageBackend())) {
+            backend->cleanupExpiredMissing();
+        }
+#endif
 #ifdef RTP_LLM_USE_REMOTE_KV_CACHE
         if (auto backend = std::dynamic_pointer_cast<KVCMStorageBackend>(block_tree_cache_->storageBackend())) {
             backend->cleanupExpiredMissing();

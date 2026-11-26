@@ -300,6 +300,28 @@ TEST(FrozenTaskRecoveryTest, ConfiguredTimeoutCanShortenExtendOrDisableForcedRel
     EXPECT_THROW((FrozenTaskRecovery({}, {}, {}, {}, -1)), std::invalid_argument);
 }
 
+TEST(FrozenTaskRecoveryTest, ExecutionCanRequireSafetyProofPastTheForceReleaseTimeout) {
+    auto       pool      = makePool();
+    const auto block     = hold(pool);
+    const auto original  = makeTask(std::string{"remote-read"}, pool, block, true);
+    auto       execution = original->execution();
+    execution.allow_force_release = false;
+    auto task = std::make_shared<FrozenTask>(FrozenTask::prepare(std::move(execution)), original->failure());
+    task->freeze();
+    task->frozen_at_us_ -= std::chrono::duration_cast<std::chrono::microseconds>(1min).count();
+    State              state = State::RUNNING;
+    FrozenTaskRecovery recovery([&] { return std::vector<std::shared_ptr<FrozenTask>>{task}; },
+                                [&](const auto& execution, int) { return proof(execution, state); },
+                                {},
+                                [](const auto&, bool forced) { EXPECT_FALSE(forced); },
+                                1000);
+    EXPECT_EQ(recovery.runOnce(1000).released, 0u);
+    EXPECT_TRUE(pool->isFrozen(block));
+    state = State::BUFFER_SAFE;
+    EXPECT_EQ(recovery.runOnce(1000).released, 1u);
+    EXPECT_FALSE(pool->isFrozen(block));
+}
+
 TEST(FrozenTaskRecoveryTest, TimeoutPreservesOtherFrozenOwnersAndRetriesForgetUntilSafe) {
     auto       pool     = makePool();
     const auto block    = hold(pool);

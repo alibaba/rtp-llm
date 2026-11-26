@@ -30,6 +30,10 @@ rocm_configure(name = "local_config_rocm")
 
 python_configure(name = "local_config_python")
 
+load("//3rdparty/kvs2:repository.bzl", "kvs2_sdk_repository")
+
+kvs2_sdk_repository(name = "kvs2_sdk")
+
 local_repository(
     name = "rtp_deps",
     path = "deps",

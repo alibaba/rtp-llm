@@ -271,8 +271,8 @@ FrozenTaskRecovery::Summary FrozenTaskRecovery::runOnce(int                     
         const auto now_us =
             std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch())
                 .count();
-        const bool expired =
-            force_release_timeout_us_ > 0 && now_us - snapshot.frozen_at_us >= force_release_timeout_us_;
+        const bool expired = task->execution().allow_force_release && force_release_timeout_us_ > 0
+                             && now_us - snapshot.frozen_at_us >= force_release_timeout_us_;
         if ((safe || expired) && snapshot.state == FrozenTask::State::FROZEN) {
             if (stop())
                 break;

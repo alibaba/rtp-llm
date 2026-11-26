@@ -57,6 +57,7 @@ public:
         size_t                      expected_rank_count{0};
         std::vector<ExpectedPeer>   expected_peers;
         std::vector<DescriptorInfo> descriptors;
+        bool                        allow_force_release{true};
     };
 
     enum class State {
