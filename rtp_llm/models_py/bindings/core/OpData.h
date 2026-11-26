@@ -32,6 +32,8 @@ enum class ParallelMode {
     STAGE = 6,
     /** Spans PP stages with the same DP/TP coordinates. */
     PP = 7,
+    /** CPU control collective across all ranks. */
+    WORLD_CPU = 8,
 };
 
 // A batch includes two parts: context batch and decoder batch.

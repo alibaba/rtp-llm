@@ -628,9 +628,8 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
             save_output(
                 "first_token_softmax_probs", update_info.softmax_probs, config.aux_info && config.return_softmax_probs);
             save_output("first_token_cum_log_probs", update_info.cum_log_probs, config.aux_info);
-            save_output("first_token_all_probs",
-                        update_info.all_probs,
-                        config.return_all_probs != ReturnAllProbsMode::NONE);
+            save_output(
+                "first_token_all_probs", update_info.all_probs, config.return_all_probs != ReturnAllProbsMode::NONE);
             save_output("first_token_logprobs", update_info.token_logprobs, config.return_logprobs);
             save_output("first_token_top_logprob_token_ids", update_info.top_logprob_token_ids, config.return_logprobs);
             save_output("first_token_top_logprobs", update_info.top_logprobs, config.return_logprobs);
@@ -645,6 +644,10 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
             }
             if (!getProposeToken().empty()) {
                 side_data.propose_tokens = getProposeToken();
+            }
+            const auto indexer_seed = getMtpAsyncDeviceState().mtp_indexer_topk_gpu;
+            if (indexer_seed.defined()) {
+                side_data.mtp_indexer_topk = indexer_seed.to(torch::kCPU, false, true).contiguous();
             }
             auto sp_output_buffer = getSPOutputBuffer();
             if (sp_output_buffer) {
@@ -730,7 +733,8 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
     // first token once. A requested logits step also needs to reach the RPC
     // collector before it combines the non-streaming response.
     const auto role = resourceContext().role_type;
-    const bool pd_sep_first_token = queryPdSep()
+    const bool pd_sep_first_token =
+        queryPdSep()
         && (role == RoleType::PREFILL
             || (role == RoleType::DECODE && !update_info.update_remote_generate && iter_count_ == 1));
     const auto& config               = *generateConfig();

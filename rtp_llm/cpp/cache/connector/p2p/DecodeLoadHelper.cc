@@ -63,9 +63,8 @@ bool parseWorkerAddr(const std::string& worker_addr, WorkerAddrParts* parts) {
         grpc_port_text        = worker_addr.substr(cache_port_end + 1);
     } else {
         const auto grpc_col = worker_addr.rfind(':');
-        const auto cache_col = (grpc_col == std::string::npos || grpc_col == 0)
-                                   ? std::string::npos
-                                   : worker_addr.rfind(':', grpc_col - 1);
+        const auto cache_col =
+            (grpc_col == std::string::npos || grpc_col == 0) ? std::string::npos : worker_addr.rfind(':', grpc_col - 1);
         if (cache_col == std::string::npos || cache_col == 0 || cache_col + 1 >= grpc_col
             || grpc_col + 1 >= worker_addr.size()) {
             return false;
@@ -260,8 +259,8 @@ bool DecodeLoadHelper::buildAndStartAsyncRpc(const std::shared_ptr<Result>&     
                 + " transfer_deadline=" + std::to_string(transfer_deadline_ms)));
         return false;
     }
-    result->timeout_ms = static_cast<int>(std::min<int64_t>(
-        transfer_deadline_ms - now_ms, std::numeric_limits<int>::max()));
+    result->timeout_ms =
+        static_cast<int>(std::min<int64_t>(transfer_deadline_ms - now_ms, std::numeric_limits<int>::max()));
     result->request.set_timeout_ms(load_timeout_ms);
     result->request.set_handoff_timeout_ms(transfer_deadline_ms - now_ms);
     result->request.set_decode_tp_size(decode_tp_size_);
@@ -386,6 +385,11 @@ void DecodeLoadHelper::Result::parseSideChannelPayload(P2PSideChannelPayload& si
             side_channel_payload.propose_hidden.Swap(it_hidden->second.mutable_tensor());
         }
 
+        auto it_seed = tensors.find("mtp_indexer_topk");
+        if (it_seed != tensors.end() && it_seed->second.has_tensor()) {
+            side_channel_payload.mtp_indexer_topk.emplace().Swap(it_seed->second.mutable_tensor());
+        }
+
         auto it_pos = payload.tensors().find("position_ids");
         if (it_pos != payload.tensors().end() && it_pos->second.has_tensor()) {
             const auto& tensor_pb = it_pos->second.tensor();
@@ -469,9 +473,12 @@ void DecodeLoadHelper::Result::complete(bool ok) {
         if (!success_) {
             RTP_LLM_LOG_WARNING("P2P Decode StartLoad failed, unique_key=%s peer=%s grpc_code=%d "
                                 "wire_code=%d error_code=%d error_name=%s error=%s",
-                                unique_key.c_str(), server_addr.c_str(),
-                                static_cast<int>(status.error_code()), static_cast<int>(response.error_code()),
-                                static_cast<int>(error_code), ErrorCodeToString(error_code).c_str(),
+                                unique_key.c_str(),
+                                server_addr.c_str(),
+                                static_cast<int>(status.error_code()),
+                                static_cast<int>(response.error_code()),
+                                static_cast<int>(error_code),
+                                ErrorCodeToString(error_code).c_str(),
                                 error_message.c_str());
         }
         done_              = true;

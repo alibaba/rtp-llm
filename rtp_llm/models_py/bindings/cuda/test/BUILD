@@ -16,6 +16,23 @@ cuda13_torch_link_deps = select({
 })
 
 cc_test(
+    name = "flashinfer_decode_params_test",
+    srcs = ["FlashInferDecodeParamsTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/models_py/bindings/cuda/kernels:cuda_graph_prepare",
+        "@com_google_googletest//:gtest_main",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps() + cuda13_torch_link_deps,
+    exec_properties = select({
+        "//:using_cuda13_arm": {"gpu": "SM100_ARM_CU13"},
+        "//conditions:default": {"gpu": "H20_CU13"},
+    }),
+    tags = ["exclusive-if-local"],
+)
+
+cc_test(
     name = "cuda_speculative_sampling_test",
     srcs = ["CudaSpeculativeSamplingTest.cc"],
     copts = copts(),

@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <limits>
 #include <cstring>
+#include <stdexcept>
 #include <thread>
 #include <torch/extension.h>
 
@@ -115,6 +116,15 @@ bool p2pLoadSafeToRelease(const std::shared_ptr<AsyncContext>& context) {
 }
 
 void applyP2PSideChannel(const P2PSideChannelPayload& payload, GenerateStream* stream) {
+    torch::Tensor indexer_seed;
+    if (payload.mtp_indexer_topk) {
+        auto seed = TensorPbConvert::pbToTorch(*payload.mtp_indexer_topk);
+        if (seed.scalar_type() != torch::kInt32 || seed.dim() != 2 || seed.size(0) != stream->currentBatchSize()
+            || seed.size(1) == 0) {
+            throw std::invalid_argument("invalid MTP indexer seed: expected int32 [batch, topk]");
+        }
+        indexer_seed = seed.to(torch::kCUDA);
+    }
 #if defined(USING_CUDA)
     auto generator = stream->getGenerator();
     if (stream->generateConfig()->random_seed.has_value() || payload.has_rng_state) {
@@ -241,6 +251,11 @@ void applyP2PSideChannel(const P2PSideChannelPayload& payload, GenerateStream* s
     if (!payload.position_ids.empty()) {
         stream->setContextPositionIds(
             torch::tensor(payload.position_ids, torch::dtype(torch::kInt32).device(torch::kCPU)));
+    }
+    if (indexer_seed.defined()) {
+        auto state                 = stream->getMtpAsyncDeviceState();
+        state.mtp_indexer_topk_gpu = std::move(indexer_seed);
+        stream->setMtpAsyncDeviceState(std::move(state));
     }
 }
 

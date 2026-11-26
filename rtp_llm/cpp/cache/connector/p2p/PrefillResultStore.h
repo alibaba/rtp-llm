@@ -36,6 +36,7 @@ public:
         std::vector<int>                     propose_tokens;
         torch::Tensor                        propose_probs;
         torch::Tensor                        propose_hidden;
+        torch::Tensor                        mtp_indexer_topk;
         std::vector<int32_t>                 position_ids;
         std::map<std::string, torch::Tensor> first_token_tensors;
         int64_t                              frontend_context_token_num                  = 0;

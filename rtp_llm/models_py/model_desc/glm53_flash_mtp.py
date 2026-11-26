@@ -25,6 +25,13 @@ from rtp_llm.models_py.modules.base.common.multimodal_embedding import (
 from rtp_llm.models_py.modules.dsv4.forward_metadata import scoped_forward_metadata
 from rtp_llm.models_py.modules.glm53.norm import Glm53RMSNorm as RMSNorm
 from rtp_llm.models_py.modules.glm53.norm import Glm53RMSResNorm as RMSResNorm
+from rtp_llm.models_py.modules.glm53_mtp_indexer import (
+    MTP_INDEXER_NORMAL,
+    MTP_INDEXER_REUSE,
+    MTP_INDEXER_SEED,
+    Glm53MtpIndexerSeeds,
+    mtp_indexer_share_active,
+)
 from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
 
@@ -83,16 +90,34 @@ class Glm53FlashMtpModel(GptModelBase):
             )
             for i in range(self.layer_num)
         )
+        self.requires_ep_sync = any(
+            getattr(layer.mlp, "requires_ep_sync", False) for layer in self.layers
+        )
         self.norm = RMSResNorm(
             weights.get_global_weight(W.multi_tokens_predict_final_ln_gamma),
             eps=config.layernorm_eps,
+        )
+        self._mtp_indexer_share_enabled = mtp_indexer_share_active(
+            config, parallelism, self.layer_num, config.attn_config.indexer_topk
+        )
+        self._mtp_indexer_role = MTP_INDEXER_NORMAL
+        self._mtp_indexer_seeds = (
+            Glm53MtpIndexerSeeds(
+                max_generate_batch_size,
+                config.attn_config.indexer_topk,
+                config.attn_config.indexer_compress_ratio,
+                weights.get_global_weight(W.multi_tokens_predict_enorm).device,
+            )
+            if self._mtp_indexer_share_enabled
+            else None
         )
 
     def cuda_graph_draft_prefill_uses_request_lanes(self) -> bool:
         return True
 
     def clone_for_cuda_graph(self):
-        # Graphs share immutable weights and own their MegaMoE working buffers.
+        # Share immutable weights and the seed buffer, but give every graph
+        # role its own module registry and symmetric MegaMoE working buffers.
         clone = copy.copy(self)
         clone._modules = self._modules.copy()
         clone._parameters = self._parameters.copy()
@@ -101,7 +126,25 @@ class Glm53FlashMtpModel(GptModelBase):
             layer.clone_for_cuda_graph(draft_prefill=True) for layer in self.layers
         )
         clone.kv_cache = None
+        clone._mtp_indexer_role = MTP_INDEXER_NORMAL
         return clone
+
+    def set_mtp_indexer_role(self, role):
+        if role not in (MTP_INDEXER_NORMAL, MTP_INDEXER_SEED, MTP_INDEXER_REUSE):
+            raise ValueError("invalid MTP indexer graph role")
+        self._mtp_indexer_role = (
+            role if self._mtp_indexer_share_enabled else MTP_INDEXER_NORMAL
+        )
+
+    def load_mtp_indexer_topk(self, indices):
+        if self._mtp_indexer_seeds is None:
+            raise RuntimeError("MTP indexer sharing is disabled")
+        self._mtp_indexer_seeds.load(indices)
+
+    def snapshot_mtp_indexer_topk(self, batch_size):
+        if self._mtp_indexer_seeds is None:
+            raise RuntimeError("MTP indexer sharing is disabled")
+        return self._mtp_indexer_seeds.snapshot(batch_size)
 
     def prepare_fmha_impl(
         self,
@@ -157,6 +200,14 @@ class Glm53FlashMtpModel(GptModelBase):
         hidden = self.fc(torch.cat((self.enorm(embeds), self.hnorm(hiddens)), -1))
         del embeds, hiddens
         residual = torch.zeros_like(hidden)
+        reuse = (
+            self._mtp_indexer_share_enabled
+            and self._mtp_indexer_role == MTP_INDEXER_REUSE
+            and not full_inputs.is_prefill
+        )
+        topk_indices = (
+            self._mtp_indexer_seeds.snapshot(hidden.shape[0]) if reuse else None
+        )
         for i, layer in enumerate(self.layers):
             cache = self.kv_cache.get_layer_cache(i, "full") if self.kv_cache else None
             out = layer(
@@ -165,9 +216,12 @@ class Glm53FlashMtpModel(GptModelBase):
                 fmha_impl,
                 kv_cache=cache,
                 global_kv_cache=self.kv_cache,
+                prev_topk_indices=topk_indices,
+                force_reuse_topk_indices=reuse,
                 mla_cp_layout=layout,
             )
             hidden, residual = out.hidden_states, out.residual
+            topk_indices = out.topk_indices
             if (
                 self.kv_cache
                 and full_inputs.is_prefill
@@ -180,6 +234,27 @@ class Glm53FlashMtpModel(GptModelBase):
                             group.cache_store_inputs,
                             self.kv_cache.get_layer_cache(i, tag),
                         )
+        if self._mtp_indexer_share_enabled and (
+            self._mtp_indexer_role == MTP_INDEXER_SEED
+            or (
+                full_inputs.is_prefill
+                and not full_inputs.is_target_verify
+                and not full_inputs.is_draft_extend
+            )
+        ):
+            if layout is not None:
+                self._mtp_indexer_seeds.store_prefill_cp(
+                    topk_indices,
+                    layout,
+                    fmha_impl.cp_params.total_local_ids,
+                    full_inputs.prefix_lengths,
+                )
+            else:
+                self._mtp_indexer_seeds.store(
+                    topk_indices,
+                    full_inputs.mtp_indexer_seed_rows,
+                    fmha_impl.fmha_params.positions_d,
+                )
         hidden, _ = self.norm(hidden, residual)
         if layout is not None:
             hidden = all_gather_trim(hidden, layout.sp_layout.logical_tokens, Group.TP)

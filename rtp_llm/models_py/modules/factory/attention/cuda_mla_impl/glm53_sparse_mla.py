@@ -255,6 +255,9 @@ class SparseMlaOp(object):
                 f"got shape={tuple(topk_indices.shape)}"
             )
         topk_2d = _topk_2d(topk_indices)
+        if self.indexer_group_size > 1 and int(topk_2d.shape[1]) == self.top_k:
+            # MTP reuse already contains the frozen, expanded raw-token seed.
+            return topk_2d
         if self.indexer_group_size > 1:
             # The compressed indexer emits [T, 0] before the first complete
             # group (and during pool warmup). Preserve the raw live tail while
@@ -768,6 +771,9 @@ class SparseMlaImpl(MlaImplBase):
         self.rope_head_dim = attn_configs.rope_head_dim
         self.nope_head_dim = attn_configs.nope_head_dim
         self.is_prefill = attn_inputs.is_prefill
+        self._device_graph_metadata = not attn_inputs.is_prefill or (
+            _is_multi_token_decode(attn_inputs) and attn_inputs.total_tokens > 0
+        )
         self.parallelism_config = parallelism_config
 
         # Pick the right op class
@@ -920,9 +926,23 @@ class SparseMlaImpl(MlaImplBase):
         self, attn_inputs: PyAttentionInputs, forbid_realloc: bool = False
     ) -> None:
         """Refresh per-forward params + plan. forbid_realloc=True under cuda graph replay."""
-        self.fmha_params.fill_params(
-            attn_inputs, self.seq_size_per_block, forbid_realloc
-        )
+        if (
+            _is_multi_token_decode(attn_inputs)
+            and isinstance(self.fmha_impl, SparseMlaOp)
+            and not forbid_realloc
+            and attn_inputs.total_tokens > 0
+        ):
+            self.fmha_params.fill_multi_token_decode_params(
+                attn_inputs.input_lengths_device,
+                attn_inputs.prefix_lengths_device,
+                attn_inputs.kv_cache_kernel_block_id_device,
+                self.seq_size_per_block,
+                attn_inputs.total_tokens,
+            )
+        else:
+            self.fmha_params.fill_params(
+                attn_inputs, self.seq_size_per_block, forbid_realloc
+            )
         self._refresh_paged_mqa_schedule_metadata(attn_inputs, forbid_realloc)
         block_table = getattr(attn_inputs, "kv_cache_kernel_block_id_device", None)
         if not isinstance(block_table, torch.Tensor) or block_table.numel() == 0:
@@ -931,6 +951,13 @@ class SparseMlaImpl(MlaImplBase):
             self.fmha_params,
             block_table,
             attn_inputs=attn_inputs,
+        )
+
+    def cuda_graph_requires_host_metadata(self) -> bool:
+        # GLM53 KDA/cache writes and the MLA device plan consume the tagged
+        # device tables. Ordinary Prefill retains its host geometry contract.
+        return not (
+            self._device_graph_metadata and isinstance(self.fmha_impl, SparseMlaOp)
         )
 
     def prepare_cuda_graph(self, group_inputs: AttentionInputs) -> None:

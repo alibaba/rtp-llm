@@ -4614,6 +4614,30 @@ TEST_F(MtpExecutorTest, testFakeDecodeUsesHyperConnectionInputHiddenSize) {
     EXPECT_EQ((std::vector<int64_t>{1, 32}), sp_buffer->hidden_states.sizes().vec());
 }
 
+TEST_F(MtpExecutorTest, MtpIndexerRequestSeedsFollowBatchOrderAndPreserveDeviceState) {
+    auto components = createMtpExecutorComponents(MtpExecutorTestConfig{});
+    auto first =
+        createContextStream(components.model_config, components.runtime_config, components.resource_context, {0, 1});
+    auto second =
+        createContextStream(components.model_config, components.runtime_config, components.resource_context, {1, 2});
+    GenerateStream::MtpAsyncDeviceState initial;
+    initial.accept_len_gpu           = torch::tensor({2}, torch::kInt32).cuda();
+    initial.next_seq_len_upper_bound = 19;
+    first->setMtpAsyncDeviceState(initial);
+    auto seeds = torch::tensor({{10, 11, -1}, {20, 21, 22}}, torch::kInt32).cuda();
+    MtpExecutor::publishMtpIndexerSeeds(StreamGroups({second, first}), seeds);
+    EXPECT_TRUE(torch::equal(second->getMtpAsyncDeviceState().mtp_indexer_topk_gpu, seeds.narrow(0, 0, 1)));
+    auto first_state = first->getMtpAsyncDeviceState();
+    EXPECT_TRUE(torch::equal(first_state.mtp_indexer_topk_gpu, seeds.narrow(0, 1, 1)));
+    EXPECT_TRUE(torch::equal(first_state.accept_len_gpu, initial.accept_len_gpu));
+    EXPECT_EQ(first_state.next_seq_len_upper_bound, 19);
+    const auto epoch = first_state.epoch;
+    EXPECT_THROW(MtpExecutor::publishMtpIndexerSeeds(StreamGroups({first}), seeds), std::runtime_error);
+    EXPECT_EQ(first->getMtpAsyncDeviceState().epoch, epoch);
+    MtpExecutor::publishMtpIndexerSeeds(StreamGroups({first}), torch::Tensor());
+    EXPECT_EQ(first->getMtpAsyncDeviceState().epoch, epoch);
+}
+
 TEST_F(MtpExecutorTest, MixedPreviousTargetTokensUseDeviceStateWithoutBookkeepingWait) {
     auto components = createMtpExecutorComponents(MtpExecutorTestConfig{});
     auto steady =

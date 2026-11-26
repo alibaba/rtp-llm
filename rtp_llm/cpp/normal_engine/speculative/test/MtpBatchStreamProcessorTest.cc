@@ -19,7 +19,10 @@
 #include "rtp_llm/cpp/normal_engine/speculative/MtpBatchStreamProcessor.h"
 #undef private
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
+#include "rtp_llm/cpp/normal_engine/NormalSamplerInputGatherer.h"
+#include "rtp_llm/cpp/normal_engine/speculative/SpeculativeSampler.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
+#include "rtp_llm/cpp/models/Sampler.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
 #include "rtp_llm/cpp/models/logits_processor/ThinkModeLogitsProcessor.h"
@@ -222,6 +225,146 @@ TEST_F(MtpBatchStreamProcessorTest, DISABLED_benchmarkScoreTokenIdsTorchCopyVsMe
     std::cout << "[mtp-score-token-ids-copy] streams=" << stream_count << " score_len=" << score_len
               << " max_seq_len=" << max_seq_len << " iterations=" << iterations << " memcpy_us=" << memcpy_us
               << " torch_copy_us=" << torch_us << " speedup=" << (memcpy_us / torch_us) << std::endl;
+}
+
+TEST_F(MtpBatchStreamProcessorTest, CompactGreedyMtpMatchesFullHistoryAndEveryRejectionPosition) {
+    for (int proposals : {3, 4}) {
+        SCOPED_TRACE(proposals);
+        ModelConfig model_config;
+        model_config.max_seq_len = 83968;
+        model_config.vocab_size  = 4;
+        model_config.num_layers  = 1;
+        RuntimeConfig              runtime_config;
+        SpeculativeExecutionConfig sp_config;
+        sp_config.gen_num_per_cycle = proposals;
+        ResourceContext              resources;
+        std::list<GenerateStreamPtr> streams;
+        for (int i = 0; i < 2; ++i) {
+            auto stream =
+                createContextStream(model_config, runtime_config, resources, std::vector<int>(81920, 1), i + 1);
+            auto cfg         = stream->generateConfig();
+            cfg->top_k       = 1;
+            cfg->top_p       = 1.0f;
+            cfg->temperature = 1.0f;
+            cfg->do_sample   = false;
+            stream->setScoreLen(proposals + 1);
+            streams.push_back(stream);
+        }
+        StreamGroups groups(streams);
+        auto         processor = MtpBatchStreamProcessor(
+            model_config, PDSepConfig(), ProfilingDebugLoggingConfig(), makeProcessorCacheConfig(), sp_config, false);
+        GptModelOutputs outputs;
+        outputs.logits = torch::zeros({2 * (proposals + 1), 4}, torch::TensorOptions().device(torch::kCUDA));
+        outputs.logits.select(1, 2).fill_(10.0f);
+        auto draft_ids = torch::full({2, proposals}, 2, torch::kInt32);
+        auto compact   = processor.gatherSpecSamplerInput(groups, outputs, {}, draft_ids);
+        ASSERT_TRUE(compact.ok());
+        const char* flag    = std::getenv("RTP_LLM_MTP_COMPACT_SAMPLER_HISTORY");
+        const bool  enabled = flag == nullptr || std::string(flag) == "1";
+        EXPECT_EQ(compact->token_ids.size(1), enabled ? 1 : compact->step + 1);
+        EXPECT_EQ(compact->step, 81920 + proposals);
+        // do_sample=false still normalizes top_p to one inside the sampler.
+        // A conservative eligibility miss supplies an equivalent full-history oracle.
+        streams.back()->generateConfig()->top_p = 0.9f;
+        auto full                               = processor.gatherSpecSamplerInput(groups, outputs, {}, draft_ids);
+        ASSERT_TRUE(full.ok());
+        EXPECT_EQ(full->token_ids.size(1), full->step + 1);
+        EXPECT_EQ(toVec<int32_t>(compact->sequence_lengths), toVec<int32_t>(full->sequence_lengths));
+
+        Sampler sampler(SamplerInitParams{});
+        auto    compact_output = sampler.forward(compact.value());
+        auto    full_output    = sampler.forward(full.value());
+        EXPECT_TRUE(torch::equal(compact_output.token_ids.select(1, compact_output.token_ids.size(1) - 1),
+                                 full_output.token_ids.select(1, full_output.token_ids.size(1) - 1)));
+        auto expected_tokens = torch::full({2 * (proposals + 1)}, 2, torch::kInt32);
+        EXPECT_EQ(toVec<int32_t>(compact_output.token_ids.select(1, compact_output.token_ids.size(1) - 1)),
+                  toVec<int32_t>(expected_tokens));
+
+        compact_output.all_probs = compact_output.all_probs.reshape({2, proposals + 1, 4});
+        full_output.all_probs    = full_output.all_probs.reshape({2, proposals + 1, 4});
+        speculative::SpeculativeSampler        rejection(torch::Tensor(), proposals);
+        speculative::SpeculativeSamplingParams params;
+        params.do_sample    = torch::zeros({2}, torch::kBool);
+        params.force_accept = torch::zeros({2}, torch::kBool);
+        params.generators.resize(2);
+        for (int rejected = 0; rejected <= proposals; ++rejected) {
+            SCOPED_TRACE(rejected);
+            SamplerOutput draft;
+            draft.token_ids = draft_ids.clone();
+            if (rejected < proposals) {
+                draft.token_ids.select(1, rejected).fill_(3);
+            }
+            draft.token_ids_are_point_mass = true;
+            auto compact_accepted          = rejection.forward(params, draft, compact_output);
+            auto full_accepted             = rejection.forward(params, draft, full_output);
+            EXPECT_EQ(toVec<int32_t>(compact_accepted.accept_len), (std::vector<int32_t>{rejected + 1, rejected + 1}));
+            EXPECT_TRUE(torch::equal(compact_accepted.accept_tokens, full_accepted.accept_tokens));
+            EXPECT_TRUE(torch::equal(compact_accepted.accept_len, full_accepted.accept_len));
+        }
+    }
+}
+
+TEST_F(MtpBatchStreamProcessorTest, CompactMtpHistoryRejectsHistoryConsumersAndOrdinaryDecode) {
+    ModelConfig model_config;
+    model_config.max_seq_len = 256;
+    model_config.vocab_size  = 4;
+    model_config.num_layers  = 1;
+    ResourceContext resources;
+    auto            stream = createContextStream(model_config, RuntimeConfig(), resources, {1, 2, 3}, 1);
+    stream->setScoreLen(5);
+    auto cfg         = stream->generateConfig();
+    cfg->do_sample   = false;
+    cfg->top_k       = 1;
+    cfg->top_p       = 1.0f;
+    cfg->temperature = 1.0f;
+    NormalSamplerInputGatherer gatherer;
+    auto                       assert_full = [&](size_t propose_step = 4) {
+        auto input = gatherer.allocateSamplerInputs(StreamGroups({stream}), 5, 5, propose_step);
+        EXPECT_FALSE(input.token_ids.is_cuda());
+        EXPECT_EQ(input.token_ids.size(1), input.step + 1);
+    };
+    assert_full(0);
+    cfg->do_sample = true;
+    assert_full();
+    cfg->do_sample = false;
+    cfg->top_k     = 2;
+    assert_full();
+    cfg->top_k = 1;
+    cfg->top_p = 0.9f;
+    assert_full();
+    cfg->top_p       = 1.0f;
+    cfg->temperature = 0.9f;
+    assert_full();
+    cfg->temperature        = 1.0f;
+    cfg->repetition_penalty = 1.1f;
+    assert_full();
+    cfg->repetition_penalty = 1.0f;
+    cfg->presence_penalty   = 1.0f;
+    assert_full();
+    cfg->presence_penalty  = 0.0f;
+    cfg->frequency_penalty = 1.0f;
+    assert_full();
+    cfg->frequency_penalty    = 0.0f;
+    cfg->no_repeat_ngram_size = 2;
+    assert_full();
+    cfg->no_repeat_ngram_size.reset();
+    cfg->return_cum_log_probs = true;
+    assert_full();
+    cfg->return_cum_log_probs = false;
+    cfg->num_beams            = 2;
+    assert_full();
+    cfg->num_beams = 1;
+
+    auto constrained           = createContextStream(model_config, RuntimeConfig(), resources, {1, 2, 3}, 1, {1}, {2});
+    auto constrained_cfg       = constrained->generateConfig();
+    constrained_cfg->do_sample = false;
+    constrained_cfg->top_k     = 1;
+    constrained_cfg->top_p     = 1.0f;
+    constrained_cfg->temperature = 1.0f;
+    ASSERT_FALSE(constrained->getAllLogitsProcessorPtr().empty());
+    auto input = gatherer.allocateSamplerInputs(StreamGroups({constrained}), 5, 5, 4);
+    EXPECT_FALSE(input.token_ids.is_cuda());
+    EXPECT_EQ(input.token_ids.size(1), input.step + 1);
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputBuildsPositionSpecificHistories) {

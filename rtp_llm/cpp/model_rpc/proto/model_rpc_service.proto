@@ -1020,7 +1020,7 @@ message SideChannelTensorPB {
 }
 
 // Side-channel payload: replaces fixed first_token/reuse/SP/position_ids fields
-// Keys: "propose_tokens", "propose_probs", "propose_hidden", "position_ids"
+// Keys: "propose_tokens", "propose_probs", "propose_hidden", "position_ids", "mtp_indexer_topk"
 message SideChannelPayloadPB {
     map<string, SideChannelTensorPB> tensors = 1;
     // Scalar fields that don't fit tensor format
