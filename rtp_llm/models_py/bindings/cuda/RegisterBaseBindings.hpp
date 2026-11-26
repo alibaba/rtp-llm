@@ -312,6 +312,15 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("workspace_starts"),
                   py::arg("batch_size"));
 
+    rtp_ops_m.def("cp_gather_and_upconvert_fp8_kv_cache_padded",
+                  &rtp_llm::cp_gather_and_upconvert_fp8_kv_cache_padded,
+                  "Read FP8 KV into padded BF16 rows, fusing conversion, scatter and zero fill",
+                  py::arg("src_cache"),
+                  py::arg("dst_fused"),
+                  py::arg("block_table"),
+                  py::arg("actual_lens"),
+                  py::arg("padded_lens"),
+                  py::arg("padded_starts"));
     rtp_ops_m.def("cp_gather_and_upconvert_fp8_kv_cache_v2",
                   &rtp_llm::cp_gather_and_upconvert_fp8_kv_cache_v2,
                   "Gather and upconvert FP8 KV cache to fused BF16 [total_tokens, 576] (vectorized v3)",

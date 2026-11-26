@@ -100,6 +100,7 @@ public:
 
     // schedule_metadata for deep_gemm
     torch::Tensor schedule_metadata;
+    int           schedule_next_n = 1;
 
     // CP Plan: compute CP indices on CPU, single cudaMemcpyAsync to device
     void fillCpPlanParams(const torch::Tensor&        padding_mask,

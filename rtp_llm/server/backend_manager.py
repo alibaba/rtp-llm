@@ -67,7 +67,10 @@ class BackendManager(object):
         from rtp_llm.models_py.distributed import pynccl_cp
 
         # Each spawned worker must publish this before CP communicators are built.
-        pynccl_cp.configure(self.py_env_configs.py_hw_kernel_config.glm5_cp_opt)
+        hw = self.py_env_configs.py_hw_kernel_config
+        pynccl_cp.configure(
+            hw.glm5_cp_opt, defer_padded_scatter=hw.glm5_cp_defer_padded_scatter
+        )
         if engine_config.parallelism_config.world_size > 1:
             init_distributed_environment(
                 engine_config.parallelism_config,

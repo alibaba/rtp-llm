@@ -178,6 +178,93 @@ def _baseline_logits_head_gate(
     return w.unsqueeze(-1) * q_scale_b * scale_const
 
 
+@triton.jit
+def _normalize_projected_key(
+    X,
+    W,
+    B,
+    Y,
+    GATE,
+    HEADS: tl.constexpr,
+    STRIDE: tl.constexpr,
+    DIM: tl.constexpr,
+    EPS: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    row = tl.program_id(0)
+    col = tl.arange(0, BLOCK)
+    valid = col < DIM
+    x = tl.load(X + row * STRIDE + col, valid, other=0).to(tl.float32)
+    centered = tl.where(valid, x - tl.sum(x, 0) / DIM, 0.0)
+    inv_std = tl.rsqrt(tl.sum(centered * centered, 0) / DIM + EPS)
+    w = tl.load(W + col, valid, other=0).to(tl.float32)
+    b = tl.load(B + col, valid, other=0).to(tl.float32)
+    tl.store(Y + row * DIM + col, centered * inv_std * w + b, valid)
+    if HEADS:
+        g = tl.load(X + row * STRIDE + DIM + col, col < HEADS, other=0)
+        tl.store(GATE + row * HEADS + col, g.to(tl.float32), col < HEADS)
+
+
+def normalize_projected_key(k, norm, gate_out=None):
+    rows, dim = k.shape
+    output = torch.empty((rows, dim), dtype=k.dtype, device=k.device)
+    if rows:
+        _normalize_projected_key[(rows,)](
+            k,
+            norm.weight,
+            norm.beta,
+            output,
+            gate_out,
+            gate_out.size(1) if gate_out is not None else 0,
+            k.stride(0),
+            dim,
+            norm.variance_epsilon,
+            triton.next_power_of_2(max(dim, gate_out.size(1) if gate_out is not None else 0)),
+        )
+    return output
+
+
+@triton.jit
+def _scale_projected_gate(
+    gate,
+    scales,
+    output,
+    row_stride,
+    n_elements,
+    HEADS: tl.constexpr,
+    SOFTMAX_SCALE: tl.constexpr,
+    HEAD_SCALE: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    i = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    valid = i < n_elements
+    value = tl.load(
+        gate + (i // HEADS) * row_stride + i % HEADS, mask=valid, other=0
+    ).to(tl.float32)
+    scale = tl.load(scales + i, mask=valid, other=0)
+    tl.store(output + i, value * scale * SOFTMAX_SCALE * HEAD_SCALE, mask=valid)
+
+
+def scale_projected_gate(gate, q_scale, softmax_scale, head_scale):
+    scale = q_scale.reshape(gate.shape)
+    if not gate.is_cuda or gate.stride(1) != 1 or not scale.is_contiguous():
+        return (gate.float() * scale * softmax_scale * head_scale).unsqueeze(-1)
+    output = torch.empty((*gate.shape, 1), device=gate.device, dtype=torch.float32)
+    if gate.numel():
+        _scale_projected_gate[(triton.cdiv(gate.numel(), 256),)](
+            gate,
+            scale,
+            output,
+            gate.stride(0),
+            gate.numel(),
+            gate.shape[1],
+            softmax_scale,
+            head_scale,
+            256,
+        )
+    return output
+
+
 def fused_logits_head_gate(
     x: torch.Tensor,
     q_scale: torch.Tensor,

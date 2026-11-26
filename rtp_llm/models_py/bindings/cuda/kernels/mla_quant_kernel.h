@@ -46,6 +46,13 @@ void cp_gather_and_upconvert_fp8_kv_cache(const torch::Tensor& src_cache,       
 
 // V2: Gather and upconvert FP8 KV cache to a single fused BF16 buffer [total_tokens, 576]
 // One CUDA block per token for full GPU utilization.
+void cp_gather_and_upconvert_fp8_kv_cache_padded(const torch::Tensor& src_cache,
+                                                 torch::Tensor&       dst_fused,
+                                                 const torch::Tensor& block_table,
+                                                 const torch::Tensor& actual_lens,
+                                                 const torch::Tensor& padded_lens,
+                                                 const torch::Tensor& padded_starts);
+
 void cp_gather_and_upconvert_fp8_kv_cache_v2(const torch::Tensor& src_cache,         // [NUM_BLOCKS, BLOCK_SIZE, 656]
                                              torch::Tensor&       dst_fused,         // [TOT_TOKENS, 576]
                                              const torch::Tensor& block_table,       // [BATCH, BLOCK_INDICES]

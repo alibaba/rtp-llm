@@ -3,6 +3,10 @@ import json
 import os
 from typing import List
 
+import torch
+
+from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
+from rtp_llm.model_loader.per_block_fp8_quant_weight import PerBlockFp8Weight
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.model_weight_info import ModelWeightInfo
@@ -12,10 +16,42 @@ from rtp_llm.utils.dsa_indexing import dsa_layer_has_indexer
 from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity, transpose, zeros
 
 
+def pack_indexer_weight(tensors):
+    wk, scales, gate = tensors
+    rows, cols = wk.shape
+    if scales.shape != ((rows + 127) // 128, (cols + 127) // 128):
+        raise ValueError(
+            f"Unexpected indexer scale shape {scales.shape} for {wk.shape}"
+        )
+    expanded = scales.float().repeat_interleave(128, 0).repeat_interleave(128, 1)
+    return torch.cat((wk.float() * expanded[:rows, :cols], gate.float()), dim=0)
+
+
+class PackedIndexerWeight(AtomicWeight):
+    def _load_raw_tensor(self, tensor_source, layer_id, device, load_config):
+        weights = super()._load_raw_tensor(tensor_source, layer_id, device, load_config)
+        return {self.name: weights[self.name].to(torch.bfloat16)}
+
+
 class Glm5Weight(DeepSeekV2Weight):
     def _get_hf_layer_weight_info(self, layer_id):
         weights = super()._get_hf_layer_weight_info(layer_id)
         if dsa_layer_has_indexer(self.model_config, layer_id):
+            if (
+                self.model_config.indexer_types
+                and self.model_config.attn_config.indexer_head_dim == 128
+                and type(self._quant_config) is Fp8BlockWiseQuantConfig
+                and self._quant_config.is_quanted()
+            ):
+                prefix = "model.layers.{i}.self_attn.indexer."
+                suffix = PerBlockFp8Weight._get_scale_suffix(self._quant_config.scale_fmt)
+                weights = [w for w in weights if w.name not in (W.mla_indexer_k_w, W.mla_indexer_weights_proj_w)]
+                weights.append(PackedIndexerWeight(
+                    W.mla_indexer_k_gate_w,
+                    [CkptWeightInfo(prefix + "wk.weight"), CkptWeightInfo(prefix + "wk" + suffix),
+                     CkptWeightInfo(prefix + "weights_proj.weight")],
+                    pack_indexer_weight, data_type=torch.float32,
+                ))
             return weights
         indexer_weights = {
             W.mla_indexer_qb_w,

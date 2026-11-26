@@ -3,6 +3,7 @@ import math
 import os
 import random
 import sys
+from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 from unittest import SkipTest, TestCase, main
@@ -120,6 +121,7 @@ def make_sparse_routing_attention():
     torch.nn.Module.__init__(attention)
     topk_indices = torch.tensor([[1]], dtype=torch.int32)
     attention.indexer = Mock(return_value=topk_indices)
+    attention.indexer.prefetch_cp_k.return_value = nullcontext()
     attention.q_lora_rank = 0
     attention.reuse_topk_indices = False
     attention._fuse_kv_a_norm = False
@@ -173,9 +175,8 @@ class SparseMlaRoutingTest(TestCase):
             "default": self.default_cache,
         }
 
-        output = attention(
-            torch.zeros((2, 4), dtype=torch.float32), fmha_routes, cache_routes
-        )
+        hidden_states = torch.zeros((2, 4), dtype=torch.float32)
+        output = attention(hidden_states, fmha_routes, cache_routes)
 
         self.assertTrue(torch.equal(output, torch.tensor([[9.0, 10.0], [11.0, 12.0]])))
         self.assertEqual(len(default_impl.calls), 1)
@@ -189,6 +190,9 @@ class SparseMlaRoutingTest(TestCase):
             default_inputs.cache_store_inputs, self.default_cache
         )
 
+        attention.indexer.prefetch_cp_k.assert_called_once_with(
+            hidden_states, self.indexer_cache, indexer_impl, None, None
+        )
         attention.indexer.assert_called_once()
         indexer_args = attention.indexer.call_args.args
         self.assertIs(indexer_args[2], self.indexer_cache)

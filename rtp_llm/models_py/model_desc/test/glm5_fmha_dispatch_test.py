@@ -55,7 +55,7 @@ def fp8_attention_projections():
         fused_qkv_a_proj=linear(),
         q_b_proj=linear(),
         o_proj=linear(),
-        indexer=SimpleNamespace(wk=linear(), wq_b=linear()),
+        indexer=SimpleNamespace(wk=linear(), wq_b=linear(), packed_index_weight=None),
     )
 
 

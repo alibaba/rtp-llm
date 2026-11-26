@@ -1,4 +1,5 @@
 from collections.abc import Mapping
+from contextlib import nullcontext
 from typing import Dict, Optional, Tuple, Union, cast
 
 import torch
@@ -181,6 +182,7 @@ class MlaAttention(nn.Module):
         q_c_scale: Optional[torch.Tensor] = None,
         prev_topk_indices: Optional[torch.Tensor] = None,
         force_reuse_topk_indices: bool = False,
+        prepared_cp_k=None,
     ) -> Optional[torch.Tensor]:
         if self.reuse_topk_indices or force_reuse_topk_indices:
             if not fmha_impl.is_sparse():
@@ -201,6 +203,7 @@ class MlaAttention(nn.Module):
             kv_cache,
             fmha_impl.fmha_params,
             fmha_impl.attn_inputs,
+            prepared_cp_k=prepared_cp_k,
             use_fast_path=not fmha_impl.is_sparse(),
             cp_params=fmha_impl.cp_params,
             x_fp8=x_fp8,
@@ -230,6 +233,7 @@ class MlaAttention(nn.Module):
         force_reuse_topk_indices: bool = False,
         return_topk: bool = False,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, Optional[torch.Tensor]]]:
+        indexer_fmha_impl = indexer_kv_cache = None
         if self.attn_config.is_sparse:
             required_tags = {"default", "indexer_kv"}
             if not isinstance(fmha_impl, Mapping) or set(fmha_impl) != required_tags:
@@ -269,9 +273,49 @@ class MlaAttention(nn.Module):
             default_fmha_impl = cast(MlaImplBase, fmha_impl)
             default_kv_cache = cast(Optional[LayerKVCache], kv_cache)
 
-        fmha_impl = default_fmha_impl
-        kv_cache = default_kv_cache
+        prefetch = nullcontext(None)
+        if (
+            self.indexer is not None
+            and indexer_kv_cache is not None
+            and indexer_fmha_impl.is_sparse()
+            and indexer_fmha_impl.cp_params is not None
+            and not self.reuse_topk_indices
+            and not force_reuse_topk_indices
+        ):
+            prefetch = self.indexer.prefetch_cp_k(
+                hidden_states, indexer_kv_cache, indexer_fmha_impl, x_fp8, x_scale
+            )
+        with prefetch as prepared_cp_k:
+            return self._forward_projections(
+                hidden_states,
+                default_fmha_impl,
+                default_kv_cache,
+                indexer_fmha_impl,
+                indexer_kv_cache,
+                x_fp8,
+                x_scale,
+                prev_topk_indices,
+                force_reuse_topk_indices,
+                return_topk,
+                prepared_cp_k,
+            )
+
+    def _forward_projections(
+        self,
+        hidden_states,
+        fmha_impl,
+        kv_cache,
+        indexer_fmha_impl,
+        indexer_kv_cache,
+        x_fp8,
+        x_scale,
+        prev_topk_indices,
+        force_reuse_topk_indices,
+        return_topk,
+        prepared_cp_k,
+    ):
         input_shape = hidden_states.shape[:-1]
+        overlap_kv = kv_cache is not None and fmha_impl.overlap_kv_projections
         q_c = None
         q_c_fp8 = None
         q_c_scale = None
@@ -310,11 +354,12 @@ class MlaAttention(nn.Module):
                 )
             else:
                 q_c = self.q_a_layernorm(q.contiguous())
-            q = (
-                self.q_b_proj(q_c_fp8, input_scales=q_c_scale)
-                if q_c_fp8 is not None
-                else self.q_b_proj(q_c)
-            )
+            if not overlap_kv:
+                q = (
+                    self.q_b_proj(q_c_fp8, input_scales=q_c_scale)
+                    if q_c_fp8 is not None
+                    else self.q_b_proj(q_c)
+                )
         else:
             if x_fp8 is not None and x_scale is not None:
                 fused_qkv = self.fused_qkv_proj(x_fp8, input_scales=x_scale)
@@ -329,7 +374,6 @@ class MlaAttention(nn.Module):
                 ],
                 dim=-1,
             )
-        q_view = q.reshape(-1, self.num_heads, self.q_head_dim)
 
         compressed_kv, k_pe = torch.split(
             compressed_kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
@@ -345,33 +389,43 @@ class MlaAttention(nn.Module):
         else:
             compressed_kv = self.kv_a_layernorm(compressed_kv.contiguous())
 
-        topk_indices = None
-        if self.attn_config.is_sparse:
-            topk_indices = self._run_sparse_indexer(
-                hidden_states,
-                q_c,
+        scope = fmha_impl.prefetch_kv_projections(compressed_kv, k_pe, kv_cache) if overlap_kv else nullcontext()
+        with scope:
+            if overlap_kv:
+                q = (
+                    self.q_b_proj(q_c_fp8, input_scales=q_c_scale)
+                    if q_c_fp8 is not None
+                    else self.q_b_proj(q_c)
+                )
+            q_view = q.reshape(-1, self.num_heads, self.q_head_dim)
+            topk_indices = None
+            if self.attn_config.is_sparse:
+                topk_indices = self._run_sparse_indexer(
+                    hidden_states,
+                    q_c,
+                    q_view,
+                    indexer_kv_cache,
+                    indexer_fmha_impl,
+                    x_fp8,
+                    x_scale,
+                    q_c_fp8,
+                    q_c_scale,
+                    prev_topk_indices,
+                    force_reuse_topk_indices,
+                    prepared_cp_k,
+                )
+            # q_c and its quantized representation are Indexer-only. Releasing
+            # the local references here lets SparseMLA reuse their blocks;
+            # q_view, compressed_kv and k_pe must stay live through attention.
+            del q_c, q_c_fp8, q_c_scale
+            attn_output = fmha_impl.forward(
                 q_view,
-                indexer_kv_cache,
-                indexer_fmha_impl,
-                x_fp8,
-                x_scale,
-                q_c_fp8,
-                q_c_scale,
-                prev_topk_indices,
-                force_reuse_topk_indices,
+                compressed_kv,
+                k_pe,
+                kv_cache,
+                self.layer_idx,
+                topk_indices,
             )
-        # q_c and its quantized representation are Indexer-only. Releasing
-        # the local references here lets SparseMLA reuse their blocks;
-        # q_view, compressed_kv and k_pe must stay live through attention.
-        del q_c, q_c_fp8, q_c_scale
-        attn_output = fmha_impl.forward(
-            q_view,
-            compressed_kv,
-            k_pe,
-            kv_cache,
-            self.layer_idx,
-            topk_indices,
-        )
 
         # The sparse-attention launch has consumed these projections. PyTorch's
         # stream-aware allocator delays physical reuse until the launch is safe.
