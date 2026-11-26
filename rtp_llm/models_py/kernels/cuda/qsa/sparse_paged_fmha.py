@@ -459,8 +459,17 @@ def sparse_paged_gqa_attn(
         return output
 
     if batch_invariant:
+        # The grouped kernel this path forces is head-count generic: it takes
+        # HQ and HG = q_heads // kv_heads as parameters and tiles heads with a
+        # fixed `tl.arange(0, 16)` masked by HG, so it needs HG <= 16 and
+        # nothing more. Qwen4-Max M11 is 64/4 = 16 exactly; Qwen3.8-Flash-Next
+        # is 24/2 = 12 at TP1 and 12/1 = 12 at TP2. Gate on the properties the
+        # kernel actually depends on rather than on one model's head counts.
         if (
-            (q_heads, kv_heads, head_dim, page_size, block_k) != (64, 4, 256, 128, 64)
+            (head_dim, page_size, block_k) != (256, 128, 64)
+            or kv_heads < 1
+            or q_heads % kv_heads
+            or not 1 <= q_heads // kv_heads <= 16
             or kv_cache.dtype != torch.bfloat16
             or selected.shape[-1] != 2051
             or selected_has_count
@@ -468,7 +477,11 @@ def sparse_paged_gqa_attn(
             or output_gate is not None
             or fp16_pv
         ):
-            raise ValueError("M11 batch-invariant QSA requires eager BF16 paged GQA")
+            raise ValueError(
+                "batch-invariant QSA requires eager BF16 paged GQA with head size "
+                "256, 128-token pages, 64-wide KV blocks and at most 16 query "
+                "heads per KV head"
+            )
         from rtp_llm.models_py.kernels.cuda.qsa.qsa_topk_triton import (
             compact_qsa_selection,
         )
@@ -483,7 +496,8 @@ def sparse_paged_gqa_attn(
             output = output * torch.sigmoid(output_gate.transpose(1, 2))
         return output
     if (
-        query_len >= 16
+        not batch_invariant
+        and query_len >= 16
         and head_dim == 256
         and kv_heads in (1, 2)
         and q_heads % kv_heads == 0
