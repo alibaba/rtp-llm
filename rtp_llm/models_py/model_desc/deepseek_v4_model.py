@@ -373,6 +373,10 @@ class DeepSeekV4Model(GptModelBase):
             max_generate_batch_size,
             moe_config=moe_config,
         )
+        args.hw_kernel_config = py_hw_kernel_config
+        self.batch_invariant = (
+            getattr(py_hw_kernel_config, "batch_invariant", False) is True
+        )
         self._max_generate_batch_size = int(max_generate_batch_size)
         assert self._max_generate_batch_size > 0, (
             "max_generate_batch_size must be positive, "
@@ -639,7 +643,7 @@ class DeepSeekV4Model(GptModelBase):
         # lifetime. CP gather/restore region is sized only when CP is active.
         cp_size = int(self._prefill_cp_size)
         q_rows = int(self._resolve_prefill_q_token_capacity())
-        q_dim = int(self._v4_args.n_heads) * int(self._v4_args.head_dim)
+        q_dim = int(self.v4.layers[0].attn.n_heads) * int(self._v4_args.head_dim)
         if cp_size > 1:
             full_rows = q_rows * cp_size
             main_w, idx_w = self._resolve_prefill_ws_gather_widths()
@@ -770,7 +774,7 @@ class DeepSeekV4Model(GptModelBase):
         # doing it here (outside graph capture) caches the compiled kernel so
         # subsequent calls inside CUDA graph capture hit the cache and skip
         # JIT — which would otherwise abort via __unexpected (noexcept violation).
-        model_warm_up = model_warm_up_enabled()
+        model_warm_up = model_warm_up_enabled() and not self.batch_invariant
         if device_str.startswith("cuda") and model_warm_up:
             from rtp_llm.models_py.modules.dsv4 import tilelang_kernels as _tl_kernels
 

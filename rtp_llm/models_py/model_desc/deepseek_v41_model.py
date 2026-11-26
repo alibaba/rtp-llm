@@ -89,7 +89,11 @@ class DeepSeekV41Model(DeepSeekV4Model):
         results = {}
         for layer_id in ordered:
             results[layer_id] = Engram.from_checkpoint(
-                config, layer_id, checkpoint_path, device
+                config,
+                layer_id,
+                checkpoint_path,
+                device,
+                **({"batch_invariant": True} if self.batch_invariant else {}),
             )
         for layer_id in loadable:
             self.v4.layers[layer_id].engram = results[layer_id]
@@ -125,6 +129,8 @@ class DeepSeekV41Model(DeepSeekV4Model):
         if not features:
             self._image_plan = None
             return
+        if getattr(self, "batch_invariant", False) is True:
+            raise ValueError("RTP_BATCH_INVARIANT=1 supports text-only requests")
         locs = inputs.multimodal_inputs.mm_features_locs
         if not locs.is_cuda:
             locs = locs.to(device=features[0].device, non_blocking=True)
@@ -217,10 +223,10 @@ class DeepSeekV41Model(DeepSeekV4Model):
 
     @torch.inference_mode()
     def forward(self, inputs, fmha_impl: Any = None):
-        if self.kv_cache is not None:
-            self._prepare_engram(inputs)
-        self._prepare_image_features(inputs)
         try:
+            self._prepare_image_features(inputs)
+            if self.kv_cache is not None:
+                self._prepare_engram(inputs)
             return super().forward(inputs, fmha_impl)
         finally:
             # Request-local lookup rows must not keep whole prompt tensors live.

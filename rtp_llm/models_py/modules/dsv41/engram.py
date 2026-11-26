@@ -795,7 +795,15 @@ class Engram(nn.Module):
         self.eps = eps
 
     @classmethod
-    def from_checkpoint(cls, config, layer_id: int, checkpoint_path: str, device):
+    def from_checkpoint(
+        cls,
+        config,
+        layer_id: int,
+        checkpoint_path: str,
+        device,
+        *,
+        batch_invariant: bool = False,
+    ):
         from safetensors import safe_open
 
         layout = EngramLayout(config)
@@ -843,7 +851,9 @@ class Engram(nn.Module):
             )
             table, scales = pinned.weight, pinned.scales
             projection = V41MXFP8Linear(
-                load("wkv.weight").to(device), load("wkv.scale").to(device)
+                load("wkv.weight").to(device),
+                load("wkv.scale").to(device),
+                batch_invariant=batch_invariant,
             )
         else:
             table, scales = load("embed.weight"), load("embed.scale")

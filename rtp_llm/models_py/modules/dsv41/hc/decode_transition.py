@@ -44,6 +44,8 @@ def can_defer_decode_post(layer, next_layer, preserve_output: bool) -> bool:
         or next_layer.engram is not None
         or type(layer.ffn_hc) is not DelayedHCUnit
         or type(next_layer.attn_hc) is not DelayedHCUnit
+        or layer.ffn_hc.batch_invariant
+        or next_layer.attn_hc.batch_invariant
     ):
         return False
     previous = next_layer.attn_hc._previous_ref

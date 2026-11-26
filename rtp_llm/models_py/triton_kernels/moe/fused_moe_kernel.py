@@ -1,6 +1,6 @@
 """Fused MoE Triton kernel, adapted from SGLang/vLLM.
 
-Supports the BF16/FP16 path and dynamic-activation, 128x128 block-scaled FP8.
+Supports BF16/FP16, block-scaled FP8, and native DeepSeek MXFP4 weights.
 """
 
 from typing import Any, Dict
@@ -8,6 +8,8 @@ from typing import Any, Dict
 import torch
 import triton
 import triton.language as tl
+
+from rtp_llm.models_py.determinism.quantized_linear import _load_e2m1
 
 
 @triton.jit
@@ -54,6 +56,7 @@ def fused_moe_kernel(
     use_fp8_w8a8: tl.constexpr,
     scale_ue8m0: tl.constexpr,
     even_Ks: tl.constexpr,
+    mxfp4_activation_group_size: tl.constexpr = 0,
 ):
     """
     Fused MoE GEMM kernel.
@@ -130,12 +133,44 @@ def fused_moe_kernel(
                 other=0.0,
             )
 
-        if even_Ks:
+        if mxfp4_activation_group_size:
+            b = _load_e2m1(
+                b_ptr + off_experts * stride_be,
+                k_start + offs_k,
+                offs_bn,
+                stride_bn,
+                stride_bk,
+            )
+        elif even_Ks:
             b = tl.load(b_ptrs)
         else:
             b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k_start, other=0.0)
 
-        if use_fp8_w8a8:
+        if mxfp4_activation_group_size:
+            group = k_start // mxfp4_activation_group_size
+            packed = tl.load(
+                a_scale_ptr
+                + offs_token // top_k * stride_asm
+                + group // 4 * stride_ask,
+                token_mask,
+                other=0,
+            )
+            a_bits = ((packed >> ((group % 4) * 8)) & 255) << 23
+            b_bits = (
+                tl.load(
+                    b_scale_ptr
+                    + off_experts * stride_bse
+                    + offs_bn * stride_bsn
+                    + k_start // 32 * stride_bsk
+                ).to(tl.int32)
+                << 23
+            )
+            a_scale = a_bits.to(tl.float32, bitcast=True)
+            b_scale = b_bits.to(tl.float32, bitcast=True)
+            accumulator += tl.dot(a.to(tl.float16), b.to(tl.float16)) * (
+                a_scale[:, None] * b_scale[None, :]
+            )
+        elif use_fp8_w8a8:
             offs_ks = k_start // group_k
             if scale_ue8m0:
                 scale_pack_idx = offs_ks // 4
@@ -165,7 +200,8 @@ def fused_moe_kernel(
             accumulator += tl.dot(a, b)
 
         a_ptrs += BLOCK_SIZE_K * stride_ak
-        b_ptrs += BLOCK_SIZE_K * stride_bk
+        if not mxfp4_activation_group_size:
+            b_ptrs += BLOCK_SIZE_K * stride_bk
 
     # Apply router weights if requested
     if MUL_ROUTED_WEIGHT:
@@ -198,6 +234,7 @@ def invoke_fused_moe_kernel(
     B_scale: torch.Tensor | None = None,
     block_shape: list[int] | None = None,
     scale_ue8m0: bool = False,
+    mxfp4_activation_group_size: int = 0,
 ) -> None:
     assert sorted_token_ids.stride(0) == 1
 
@@ -206,7 +243,7 @@ def invoke_fused_moe_kernel(
         * triton.cdiv(B.shape[1], META["BLOCK_SIZE_N"]),
     )
 
-    K = B.shape[2]
+    K = B.shape[2] * (2 if mxfp4_activation_group_size else 1)
     even_Ks = K % config["BLOCK_SIZE_K"] == 0
     use_fp8_w8a8 = block_shape is not None
     if use_fp8_w8a8:
@@ -236,6 +273,13 @@ def invoke_fused_moe_kernel(
             assert triton.cdiv(A.shape[-1], block_k) == A_scale.shape[-1]
             assert triton.cdiv(B.shape[-2], block_n) == B_scale.shape[-2]
             assert triton.cdiv(B.shape[-1], block_k) == B_scale.shape[-1]
+    elif mxfp4_activation_group_size:
+        assert mxfp4_activation_group_size in (32, 128)
+        assert K % mxfp4_activation_group_size == 0 and config["BLOCK_SIZE_K"] == 32
+        assert A.dtype == torch.float8_e4m3fn and B.dtype == torch.int8
+        assert A_scale is not None and A_scale.dtype == torch.int32
+        assert B_scale is not None and B_scale.dtype == torch.uint8
+        block_n, block_k = 1, 32
     else:
         assert A_scale is None and B_scale is None
         block_n, block_k = 0, 0
@@ -274,6 +318,7 @@ def invoke_fused_moe_kernel(
         use_fp8_w8a8=use_fp8_w8a8,
         scale_ue8m0=scale_ue8m0,
         even_Ks=even_Ks,
+        mxfp4_activation_group_size=mxfp4_activation_group_size,
         **config,
     )
 

@@ -8,6 +8,7 @@ from .fp4 import (
     CudaNvfp4MarlinStrategy,
 )
 from .fp8_fp4 import (
+    CudaBatchInvariantMXFP4Strategy,
     CudaGroupedFp4Strategy,
     CudaLocalLoopStrategy,
     CudaMegaMoeFp8SEStrategy,

@@ -107,6 +107,7 @@ class V4Args:
     fp8_kv_cache: bool = True
     # V4.1 uses delayed mHC readout and a distinct compressed attention layout.
     v41_config: Optional[Dict] = None
+    hw_kernel_config: Optional[object] = None
 
 
 def _block_kwargs(
@@ -179,6 +180,7 @@ def _build_block(
         **_block_kwargs(layer_id, args, layer_weights, commit_only=commit_only),
         v41_config=args.v41_config,
         shared_attention=shared_attention,
+        hw_kernel_config=args.hw_kernel_config,
     )
 
 
@@ -193,6 +195,9 @@ class V4Transformer(nn.Module):
         that constructs the transformer with empty weights."""
         super().__init__()
         self.args = args
+        self.batch_invariant = (
+            getattr(args.hw_kernel_config, "batch_invariant", False) is True
+        )
         self.max_seq_len = args.max_seq_len
         self.hc_mult = args.hc_mult
         self.commit_only = bool(getattr(args, "commit_only", False))
@@ -248,7 +253,11 @@ class V4Transformer(nn.Module):
             # ``EmbeddingTorch`` keeps ``self.weight`` as a plain attribute (no
             # ``nn.Parameter``); the framework dict supplies the real tensor.
             self.embed = EmbeddingTorch(gw[W.embedding])
-            self.norm = RMSNorm(gw[W.final_ln_gamma], args.norm_eps)
+            self.norm = RMSNorm(
+                gw[W.final_ln_gamma],
+                args.norm_eps,
+                **({"batch_invariant": True} if self.batch_invariant else {}),
+            )
 
         # LM head — plain weight matrix [vocab_size, dim].  Accept either
         # BF16 (ckpt-native, used when ``enable_fp32_lm_head=False``) or
@@ -612,6 +621,12 @@ class V4Transformer(nn.Module):
         h = self.norm(h.reshape(bsz * seq, dim_)).view(bsz, seq, dim_)
 
         if apply_lm_head:
+            if self.batch_invariant:
+                from rtp_llm.models_py.determinism.quantized_linear import linear
+
+                return linear(
+                    h[:, -1], self.head_weight, out_dtype=self.head_weight.dtype
+                ).float()
             # Match h dtype to head_weight so F.linear works regardless of
             # load-time dtype (bf16 when enable_fp32_lm_head=False, f32
             # otherwise).  Final cast to f32 keeps logits dtype stable for

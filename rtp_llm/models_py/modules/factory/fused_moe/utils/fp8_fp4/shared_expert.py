@@ -62,6 +62,8 @@ class W13SharedExpert(nn.Module):
         inter_dim: int,
         expert_weights: dict[str, torch.Tensor],
         swiglu_limit: float = 0.0,
+        *,
+        hw_kernel_config=None,
     ) -> None:
         super().__init__()
         w13_w = expert_weights["w13_w"]
@@ -73,8 +75,14 @@ class W13SharedExpert(nn.Module):
                 "shared w13 weight shape mismatch: "
                 f"got {tuple(w13_w.shape)}, expected {(2 * inter_dim, dim)}"
             )
-        self.w13 = create_fp8_linear(w13_w, w13_s)
-        self.w2 = create_fp8_linear(expert_weights["w2_w"], expert_weights["w2_s"])
+        self.batch_invariant = (
+            getattr(hw_kernel_config, "batch_invariant", False) is True
+        )
+        options = {"hw_kernel_config": hw_kernel_config} if self.batch_invariant else {}
+        self.w13 = create_fp8_linear(w13_w, w13_s, **options)
+        self.w2 = create_fp8_linear(
+            expert_weights["w2_w"], expert_weights["w2_s"], **options
+        )
         self.swiglu_limit = swiglu_limit
 
     def _apply_layer(self, layer: nn.Module, x: torch.Tensor) -> torch.Tensor:
@@ -86,7 +94,11 @@ class W13SharedExpert(nn.Module):
     def forward(
         self, x: torch.Tensor, weights: torch.Tensor | None = None
     ) -> torch.Tensor:
-        if weights is None and self._can_run_mxfp8_fused_silu(x):
+        if (
+            not self.batch_invariant
+            and weights is None
+            and self._can_run_mxfp8_fused_silu(x)
+        ):
             return self._forward_mxfp8_fused_silu(x)
         dtype = x.dtype
         with record_function_range("moe.shared_expert.w13"):
@@ -478,6 +490,8 @@ def _run_shared_expert(
     x: torch.Tensor,
     fast_path: FusedSharedExpertFastPath | None,
 ) -> torch.Tensor:
+    if getattr(shared_experts, "batch_invariant", False):
+        return shared_experts(x)
     if fast_path is not None and fast_path.can_run(shared_experts, x):
         try:
             return fast_path._run_prepared(shared_experts, x)

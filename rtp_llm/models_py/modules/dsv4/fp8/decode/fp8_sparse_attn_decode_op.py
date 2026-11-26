@@ -71,10 +71,13 @@ class SparseAttnV4DecodeFp8Op:
         n_heads: int,
         head_dim: int,
         softmax_scale: float,
+        *,
+        batch_invariant: bool = False,
     ) -> None:
         self.n_heads = n_heads
         self.head_dim = head_dim
         self.softmax_scale = softmax_scale
+        self.batch_invariant = batch_invariant
 
     def forward(
         self,
@@ -105,6 +108,22 @@ class SparseAttnV4DecodeFp8Op:
         over a second FP8 KV pool in a single FlashMLA invocation. The
         kernel merges softmax across both pools natively.
         """
+        if self.batch_invariant:
+            from rtp_llm.models_py.modules.dsv4.fp8.batch_invariant_attention import (
+                indexed_attention,
+            )
+
+            return indexed_attention(
+                q,
+                kv_cache,
+                topk_idxs,
+                topk_length,
+                attn_sink,
+                self.softmax_scale,
+                extra_kv=extra_k_cache,
+                extra_indices=extra_topk_idxs,
+                extra_lengths=extra_topk_length,
+            )
         assert _FLASH_MLA_AVAILABLE, (
             "flash_mla wheel is required for FP8 sparse decode "
             "(install rtp_llm with cuda12_9 / cuda13 config)"

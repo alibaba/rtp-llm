@@ -72,6 +72,8 @@ def _select_routes_with_nonfinite_fallback(
     route_scale: float,
     normalize: bool,
     indices: Optional[torch.Tensor] = None,
+    *,
+    batch_invariant: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Select routes without exposing non-finite router outputs downstream."""
     # ranking_scores contains original_scores plus the optional bias, so every
@@ -85,11 +87,23 @@ def _select_routes_with_nonfinite_fallback(
             posinf=-float("inf"),
             neginf=-float("inf"),
         )
-        indices = safe_ranking_scores.topk(topk, dim=-1)[1]
+        indices = (
+            safe_ranking_scores.argsort(descending=True, stable=True)[:, :topk]
+            if batch_invariant
+            else safe_ranking_scores.topk(topk, dim=-1)[1]
+        )
 
     weights = original_scores.gather(1, indices)
     if normalize:
-        weights = weights / (weights.sum(dim=-1, keepdim=True) + 1e-12)
+        if batch_invariant:
+            columns = weights.unbind(-1)
+            total = columns[0]
+            for column in columns[1:]:
+                total = total + column
+            denom = total.unsqueeze(-1)
+        else:
+            denom = weights.sum(dim=-1, keepdim=True)
+        weights = weights / (denom + 1e-12)
     weights = weights * route_scale
 
     # A bad router row must not reach MegaMoE. PyTorch topk still returns valid
@@ -128,6 +142,8 @@ class Gate(nn.Module):
         n_hash_layers: int = 0,
         vocab_size: int = 0,
         layer_weights: Optional[Dict[str, torch.Tensor]] = None,
+        *,
+        batch_invariant: bool = False,
     ):
         """``layer_weights`` is the framework's per-layer dict
         (``ModelWeights.weights[layer_id]``) keyed by ``W``. Reads
@@ -141,6 +157,7 @@ class Gate(nn.Module):
         self.route_scale = route_scale
         self.hash = layer_id < n_hash_layers
         self.fuse_hash_gate = False
+        self.batch_invariant = batch_invariant
         self.vocab_size = int(vocab_size)
         from rtp_llm.utils.model_weight import W
 
@@ -185,6 +202,10 @@ class Gate(nn.Module):
         original positions; ``_prefill_gate_chunk_rows`` bounds the GEMM rows
         independently of the MoE token budget.
         """
+        if self.batch_invariant:
+            from rtp_llm.models_py.determinism.quantized_linear import linear
+
+            return linear(x, weight)
         projection = getattr(self, "_ced_row_projection", None)
         if projection is not None:
             return projection(x, weight)
@@ -226,7 +247,8 @@ class Gate(nn.Module):
         """Return whether this call can use the fused route-and-pack path."""
 
         if (
-            x.size(0) == 0
+            self.batch_invariant
+            or x.size(0) == 0
             or os.environ.get("MOE_GATE_FP32", "0") == "1"
             or self._visual_routing_active()
             or not _use_fused_gate(self.score_func, x.size(0), self.topk)
@@ -286,7 +308,8 @@ class Gate(nn.Module):
         else:
             scores = self._bf16_scores(x)
             if (
-                self.hash
+                not self.batch_invariant
+                and self.hash
                 and self.fuse_hash_gate
                 and not self._visual_routing_active()
                 and _use_fused_gate(self.score_func, x.size(0), self.topk)
@@ -304,7 +327,8 @@ class Gate(nn.Module):
         # Fuse softplus+sqrt+bias+topk+normalize for sqrtsoftplus + non-hash
         # routing.
         if (
-            not self.hash
+            not self.batch_invariant
+            and not self.hash
             and self.bias is not None
             and not self._visual_routing_active()
             and _use_fused_gate(self.score_func, x.size(0), self.topk)
@@ -345,9 +369,12 @@ class Gate(nn.Module):
                 indices = self.tid2eid[flat_ids].long()  # [N, topk]
             else:
                 indices = self.tid2eid[torch.where(image_mask, 0, flat_ids)].long()
-                vision_indices = (original_scores + self.bias_vl).topk(
-                    self.topk, dim=-1
-                )[1]
+                vision_scores = original_scores + self.bias_vl
+                vision_indices = (
+                    vision_scores.argsort(descending=True, stable=True)[:, : self.topk]
+                    if self.batch_invariant
+                    else vision_scores.topk(self.topk, dim=-1)[1]
+                )
                 indices = torch.where(
                     image_mask.unsqueeze(-1), vision_indices.long(), indices
                 )
@@ -361,4 +388,5 @@ class Gate(nn.Module):
             float(self.route_scale),
             self.score_func != "softmax",
             indices,
+            batch_invariant=self.batch_invariant,
         )

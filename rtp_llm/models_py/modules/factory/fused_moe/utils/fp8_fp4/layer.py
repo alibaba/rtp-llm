@@ -60,6 +60,9 @@ class Fp8Fp4MoeRuntimeConfig:
         physical_expert_num: Optional[int] = None,
         shared_fp8_block_size: int = FP8_BLOCK,
         is_decode_role: bool = False,
+        batch_invariant: bool = False,
+        tp_size: int = 1,
+        tp_rank: int = 0,
     ) -> None:
         if expert_num % max(ep_size, 1) != 0:
             raise ValueError(
@@ -117,20 +120,52 @@ class Fp8Fp4MoeRuntimeConfig:
         self.world_size = int(ep_size if world_size is None else world_size)
         self.world_rank = int(ep_rank if world_rank is None else world_rank)
 
-        self.tp_size = 1
-        self.tp_rank = 0
-        self.dp_size = self.ep_size
-        self.dp_rank = self.ep_rank
+        self.batch_invariant = batch_invariant
+        if batch_invariant:
+            from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.strategy.fp8_fp4 import (
+                CudaBatchInvariantMXFP4Strategy,
+            )
+
+            if self.moe_strategy != "auto":
+                raise ValueError(
+                    "DeepSeek batch-invariant MXFP4 requires MOE_STRATEGY=auto"
+                )
+            self.moe_strategy = CudaBatchInvariantMXFP4Strategy.strategy_name
+            if self.has_redundant_experts:
+                raise ValueError(
+                    "batch-invariant FP8/FP4 MoE requires one copy of each expert per EP group"
+                )
+            if (
+                tp_size != self.ep_size
+                or tp_rank != self.ep_rank
+                or self.world_size != tp_size
+            ):
+                raise ValueError(
+                    "batch-invariant FP8/FP4 MoE requires matching TP and EP groups"
+                )
+            # Inputs are replicated across TP. The invariant router reduces
+            # disjoint local expert outputs, and a full expert replica needs
+            # no reduction.
+            self.tp_size = self.ep_size
+            self.tp_rank = self.ep_rank
+            self.dp_size = 1
+            self.dp_rank = 0
+        else:
+            self.tp_size = 1
+            self.tp_rank = 0
+            self.dp_size = self.ep_size
+            self.dp_rank = self.ep_rank
         self.local_rank = self.world_rank
         self.data_type = torch.bfloat16
         self.head_num = 0
         self.moe_topk_group = 0
         self.quant_config = None
+        self.model_type = model_type
         self.model_config = SimpleNamespace(
             model_type=model_type,
             quant_config=None,
         )
-        self.parallelism_config = SimpleNamespace(tp_size=1)
+        self.parallelism_config = SimpleNamespace(tp_size=self.tp_size)
         self.moe_config = SimpleNamespace(
             moe_strategy=self.moe_strategy,
             use_deepep_low_latency=False,
@@ -179,6 +214,9 @@ class Fp8Fp4MoeLayer(nn.Module):
         moe_w1_layout: str = "up_gate",
         physical_expert_num: Optional[int] = None,
         is_decode_role: bool = False,
+        hw_kernel_config=None,
+        tp_size: int = 1,
+        tp_rank: int = 0,
     ) -> None:
         super().__init__()
         if n_shared_experts < 0:
@@ -189,6 +227,10 @@ class Fp8Fp4MoeLayer(nn.Module):
         self.dim = int(dim)
         self.max_tokens_per_rank = int(max_tokens_per_rank)
         self.n_shared_experts = int(n_shared_experts)
+        batch_invariant = getattr(hw_kernel_config, "batch_invariant", False) is True
+        kernel_options = (
+            {"hw_kernel_config": hw_kernel_config} if batch_invariant else {}
+        )
         # A fused executor may consume the shared weights; a resident restart reuses this size.
         shared_fp8_block_size = resident_init_scalar(
             layer_weights,
@@ -205,6 +247,7 @@ class Fp8Fp4MoeLayer(nn.Module):
             n_hash_layers,
             vocab_size,
             layer_weights=layer_weights,
+            **({"batch_invariant": True} if batch_invariant else {}),
         )
         runtime_config = Fp8Fp4MoeRuntimeConfig(
             layer_id=layer_id,
@@ -228,6 +271,9 @@ class Fp8Fp4MoeLayer(nn.Module):
             physical_expert_num=physical_expert_num,
             shared_fp8_block_size=shared_fp8_block_size,
             is_decode_role=is_decode_role,
+            batch_invariant=batch_invariant,
+            tp_size=tp_size,
+            tp_rank=tp_rank,
         )
         self.fused_moe = FusedMoeFactory().create_fused_moe(
             runtime_config, layer_weights
@@ -256,14 +302,22 @@ class Fp8Fp4MoeLayer(nn.Module):
                     "w2_s": layer_weights[W.ffn_s2],
                 },
                 swiglu_limit=swiglu_limit,
+                **kernel_options,
             )
-            self._shared_executor = get_shared_expert_executor(
-                max_tokens_per_rank=max_tokens_per_rank,
-                dim=dim,
-                inter_dim=shared_inter_dim,
-                swiglu_limit=swiglu_limit,
-                native_mxfp8=shared_fp8_block_size == MXFP8_BLOCK,
-            )
+            if batch_invariant:
+                from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.shared_expert import (
+                    SequentialSharedExpertExecutor,
+                )
+
+                self._shared_executor = SequentialSharedExpertExecutor()
+            else:
+                self._shared_executor = get_shared_expert_executor(
+                    max_tokens_per_rank=max_tokens_per_rank,
+                    dim=dim,
+                    inter_dim=shared_inter_dim,
+                    swiglu_limit=swiglu_limit,
+                    native_mxfp8=shared_fp8_block_size == MXFP8_BLOCK,
+                )
             self._shared_executor.prepare(self.shared_experts)
 
     def forward(

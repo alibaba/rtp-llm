@@ -121,6 +121,55 @@ class BatchInvariantConfigTest(unittest.TestCase):
             fake_balance_expert=False,
         )
 
+    def _set_deepseek_flash(self, v41):
+        self._set_qwen3_moe()
+        tp = 4 if v41 else 2
+        self._set_tp_size(tp)
+        self.parallel.ep_size = tp
+        self.model.model_type = "deepseek_v41" if v41 else "deepseek_v4"
+        self.model.num_layers = 40 if v41 else 43
+        self.model.hidden_size = 5120 if v41 else 4096
+        self.model.expert_num = 384 if v41 else 256
+        self.model.moe_inter_size = 2304 if v41 else 2048
+        self.model.moe_k = 6
+        self.model.hc_mult = 4
+        self.model.quant_config = Fp8BlockWiseQuantConfig(
+            group_size=32 if v41 else 128, is_quanted=True
+        )
+        self.model.mm_model_config = SimpleNamespace(is_multimodal=v41)
+        self.model.vit_separation = VitSeparation.VIT_SEPARATION_LOCAL
+        attn = self.model.attn_config
+        attn.head_num, attn.kv_head_num, attn.size_per_head = 64, 1, 512
+        attn.rope_head_dim, attn.indexer_head_dim = 64, 128
+        attn.layer_compress_ratios = [0, 1, 2] if v41 else [0, 4, 128]
+        attn.tokens_per_block = 128 if v41 else 256
+        attn.kernel_tokens_per_block = 128
+        attn.kv_cache_dtype = KvCacheDataType.FP8
+        self.engine.moe_config.use_deepep_moe = True
+
+    def test_deepseek_uses_native_quant_and_tp_aligned_experts(self):
+        for v41 in (False, True):
+            with self.subTest(v41=v41):
+                self._set_deepseek_flash(v41)
+                configure_batch_invariant_model(self.engine, self.model)
+                self.assertEqual(self.engine.moe_config.moe_strategy, "auto")
+                self.assertFalse(self.engine.moe_config.use_deepep_moe)
+                self.assertFalse(self.model.mm_model_config.is_multimodal)
+                self.assertFalse(self.model.enable_fp32_lm_head)
+
+    def test_deepseek_rejects_other_layouts_before_applying_policy(self):
+        self._set_deepseek_flash(v41=True)
+        self.hw.enable_cuda_graph = True
+        self.model.attn_config.kv_cache_dtype = KvCacheDataType.BASE
+        self.parallel.ep_size = 1
+        self.model.quant_config = Fp8BlockWiseQuantConfig(group_size=128)
+        with self.assertRaises(ValueError) as raised:
+            configure_batch_invariant_model(self.engine, self.model)
+        for reason in ("eager", "FP8 KV", "TP/DP/EP", "native DeepSeek Flash"):
+            self.assertIn(reason, str(raised.exception))
+        self.assertTrue(self.model.mm_model_config.is_multimodal)
+        self.assertTrue(self.engine.moe_config.use_deepep_moe)
+
     def test_qwen3_moe_uses_no_quant_cpp_before_weight_loading(self):
         self._set_qwen3_moe()
         for size in (1, 2, 4):

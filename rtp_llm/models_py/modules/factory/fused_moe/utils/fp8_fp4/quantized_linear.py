@@ -52,13 +52,21 @@ def is_mxfp8_scale(weight: torch.Tensor, scale: torch.Tensor) -> bool:
     )
 
 
-def create_fp8_linear(weight: torch.Tensor, scale: torch.Tensor):
+def create_fp8_linear(weight: torch.Tensor, scale: torch.Tensor, hw_kernel_config=None):
     """Build the CUDA FP8 linear used by FP8 shared experts."""
     from rtp_llm.models_py.modules.factory.linear import LinearFactory
 
     if is_mxfp8_scale(weight, scale):
-        return Mxfp8Linear(weight, scale)
+        return Mxfp8Linear(
+            weight,
+            scale,
+            batch_invariant=getattr(hw_kernel_config, "batch_invariant", False) is True,
+        )
 
+    if getattr(hw_kernel_config, "batch_invariant", False) is True:
+        from rtp_llm.models_py.determinism.quantized_linear import BlockFp8Linear
+
+        return BlockFp8Linear(weight, scale)
     if scale.dtype == torch.float8_e8m0fnu:
         from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
 
@@ -217,10 +225,17 @@ class Mxfp8Linear(nn.Module):
     ``fp8_fp4_gemm_nt`` with ``recipe=(1, 1, 32)``.
     """
 
-    def __init__(self, weight: torch.Tensor, scale: torch.Tensor):
+    def __init__(
+        self,
+        weight: torch.Tensor,
+        scale: torch.Tensor,
+        *,
+        batch_invariant: bool = False,
+    ):
         super().__init__()
         self.out_features, self.in_features = weight.shape
         self.weight = weight
+        self.batch_invariant = batch_invariant
         self.weight_scales = self.pack_scales(scale)
 
     def pack_scales(self, scale: torch.Tensor) -> torch.Tensor:
@@ -229,6 +244,12 @@ class Mxfp8Linear(nn.Module):
                 f"invalid MXFP8 scale {tuple(scale.shape)} for weight "
                 f"{tuple(self.weight.shape)}"
             )
+        if self.batch_invariant:
+            from rtp_llm.models_py.determinism.quantized_linear import (
+                pack_checkpoint_scales,
+            )
+
+            return pack_checkpoint_scales(self.weight, scale, MXFP8_BLOCK)
         from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
 
         rows = torch.arange(self.out_features, device=scale.device) // MXFP8_BLOCK
@@ -242,14 +263,22 @@ class Mxfp8Linear(nn.Module):
         )
 
         flat = x.reshape(-1, self.in_features).contiguous()
-        quantized, scales = sgl_per_token_group_quant_fp8(
-            flat,
-            group_size=MXFP8_BLOCK,
-            eps=torch.finfo(torch.float32).tiny,
-            column_major_scales=True,
-            scale_tma_aligned=True,
-            scale_ue8m0=True,
-        )
+        eps = torch.finfo(torch.float32).tiny
+        if self.batch_invariant:
+            from rtp_llm.models_py.determinism.quantized_linear import (
+                quantize_fp8_blocks,
+            )
+
+            quantized, scales = quantize_fp8_blocks(flat, True, MXFP8_BLOCK, eps=eps)
+        else:
+            quantized, scales = sgl_per_token_group_quant_fp8(
+                flat,
+                group_size=MXFP8_BLOCK,
+                eps=eps,
+                column_major_scales=True,
+                scale_tma_aligned=True,
+                scale_ue8m0=True,
+            )
         return quantized.view(x.shape), scales
 
     def forward_quantized(
@@ -264,6 +293,19 @@ class Mxfp8Linear(nn.Module):
         quantized SwiGLU output directly. Input layout and disjoint BF16 output
         storage are caller preconditions.
         """
+        if self.batch_invariant:
+            from rtp_llm.models_py.determinism.quantized_linear import _launch_linear
+
+            return _launch_linear(
+                x_q,
+                self.weight,
+                None,
+                torch.bfloat16,
+                x_s,
+                self.weight_scales,
+                group_size=MXFP8_BLOCK,
+                out=out,
+            )
         m = x_q.numel() // self.in_features
         shape = (*x_q.shape[:-1], self.out_features)
         output = (

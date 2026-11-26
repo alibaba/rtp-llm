@@ -580,6 +580,64 @@ def test_state_pool_clear_pool_context() -> None:
     print("  [warmup]      no-pool forward OK")
 
 
+def test_batch_invariant_page_boundary() -> None:
+    """All compressor pool bytes agree across a physical page boundary."""
+    torch.manual_seed(3115)
+    dim = 128
+    rows = TOKENS_PER_STATE_BLOCK + 17
+    split = TOKENS_PER_STATE_BLOCK - 1
+    for ratio, head_dim in (
+        (4, KV_HEAD_DIM),
+        (4, INDEXER_HEAD_DIM),
+        (128, KV_HEAD_DIM),
+    ):
+        hidden = torch.randn((1, rows, dim), device=DEVICE, dtype=torch.bfloat16)
+        cmp = _build_compressor(
+            dim=dim, head_dim=head_dim, rope_head_dim=64, compress_ratio=ratio
+        )
+        cmp.batch_invariant = True
+
+        def pools():
+            return _bind_pools(
+                cmp,
+                seqlen=rows,
+                head_dim=head_dim,
+                coff=1 + (ratio == 4),
+                compress_ratio=ratio,
+            )[:2]
+
+        baseline = pools()
+        cmp(hidden, 0, workspace=_WS)
+        chunked = pools()
+        cmp(hidden[:, :split], 0, workspace=_WS)
+        cmp(hidden[:, split:], split, workspace=_WS)
+        decoded = pools()
+        cmp(hidden[:, :split], 0, workspace=_WS)
+        for pos in range(split, rows):
+            cmp.forward_decode_vectorized(
+                hidden[:, pos : pos + 1], torch.tensor([pos], device=DEVICE)
+            )
+        captured = pools()
+        cmp(hidden[:, :split], 0, workspace=_WS)
+        graph_input = hidden[:, split : split + 1].clone()
+        graph_pos = torch.tensor([split], device=DEVICE)
+        torch.cuda.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            cmp.forward_decode_vectorized(graph_input, graph_pos)
+        for pos in range(split, rows):
+            graph_input.copy_(hidden[:, pos : pos + 1])
+            graph_pos.fill_(pos)
+            graph.replay()
+        for expected, actual_chunked, actual_decoded, actual_captured in zip(
+            baseline, chunked, decoded, captured
+        ):
+            expected_bytes = expected.view(torch.uint8)
+            assert torch.equal(expected_bytes, actual_chunked.view(torch.uint8))
+            assert torch.equal(expected_bytes, actual_decoded.view(torch.uint8))
+            assert torch.equal(expected_bytes, actual_captured.view(torch.uint8))
+
+
 if __name__ == "__main__":
     if not torch.cuda.is_available():
         raise SystemExit("CUDA required for CompressorFP8 UT")
@@ -592,4 +650,5 @@ if __name__ == "__main__":
     test_prepared_metadata_path()
     test_decode_strided_kv_score_matches_contiguous_path()
     test_state_pool_clear_pool_context()
+    test_batch_invariant_page_boundary()
     print("\nOK")

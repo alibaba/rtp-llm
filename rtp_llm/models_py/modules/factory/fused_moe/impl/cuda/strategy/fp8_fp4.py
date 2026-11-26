@@ -2,6 +2,8 @@
 
 from typing import Any, Type
 
+import torch
+
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
@@ -12,6 +14,36 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.strategy_base import MoeStrategy
+
+
+class CudaBatchInvariantMXFP4Strategy(MoeStrategy):
+    """Explicit replicated-token execution on matching DeepSeek TP/EP groups."""
+
+    supported_moe_quant_method = "FP8_FP4"
+    strategy_name = "batch_invariant_mxfp4"
+
+    def can_handle(self, config: MoEConfigAdapter) -> bool:
+        if getattr(config, "batch_invariant", False) is not True or (
+            config.moe_strategy != self.strategy_name
+        ):
+            return False
+        return super().can_handle(config)
+
+    def get_attributes(self) -> StrategyAttributes:
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.triton_fused_executor import (
+            BatchInvariantMXFP4Executor,
+        )
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.pure_tp_router import (
+            PureTpRouterMXFP4,
+        )
+
+        return StrategyAttributes(
+            router_class=PureTpRouterMXFP4,
+            executor_class=BatchInvariantMXFP4Executor,
+            quant_config=FusedMoEQuantConfig(
+                quant_dtype=torch.int8, block_shape=[1, 32]
+            ),
+        )
 
 
 class _CudaFp8Fp4Strategy(MoeStrategy):

@@ -3,7 +3,6 @@
 import weakref
 
 import torch
-from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
 
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.models_py.modules.base.common.embedding import Embedding
@@ -25,9 +24,16 @@ class V41Embedding(Embedding):
 class V41MXFP8Linear(torch.nn.Module):
     """Native 32x32 checkpoint blocks, expanded to per-row MXFP8 scales."""
 
-    def __init__(self, weight: torch.Tensor, scales: torch.Tensor):
+    def __init__(
+        self,
+        weight: torch.Tensor,
+        scales: torch.Tensor,
+        *,
+        batch_invariant: bool = False,
+    ):
         super().__init__()
         self.weight = weight
+        self.batch_invariant = batch_invariant
         self.N, self.K = weight.shape
         self.weight_scales = self.pack_scales(scales)
 
@@ -36,25 +42,41 @@ class V41MXFP8Linear(torch.nn.Module):
             raise ValueError(
                 f"Invalid V4.1 FP8 scales: {(self.N, self.K)}, {scales.shape}"
             )
+        if self.batch_invariant:
+            from rtp_llm.models_py.determinism.quantized_linear import (
+                pack_checkpoint_scales,
+            )
+
+            return pack_checkpoint_scales(self.weight, scales, 32)
+        from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
+
         rows = torch.arange(self.N, device=scales.device) // 32
         return get_mn_major_tma_aligned_packed_ue8m0_tensor(
             scales.float().index_select(0, rows)
         )
 
     def _quantize_input(self, x: torch.Tensor):
-        from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
-            sgl_per_token_group_quant_fp8,
-        )
-
         flat = x.reshape(-1, self.K).contiguous()
-        quantized, scales = sgl_per_token_group_quant_fp8(
-            flat,
-            group_size=32,
-            eps=torch.finfo(torch.float32).tiny,
-            column_major_scales=True,
-            scale_tma_aligned=True,
-            scale_ue8m0=True,
-        )
+        eps = torch.finfo(torch.float32).tiny
+        if self.batch_invariant:
+            from rtp_llm.models_py.determinism.quantized_linear import (
+                quantize_fp8_blocks,
+            )
+
+            quantized, scales = quantize_fp8_blocks(flat, True, 32, eps=eps)
+        else:
+            from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
+                sgl_per_token_group_quant_fp8,
+            )
+
+            quantized, scales = sgl_per_token_group_quant_fp8(
+                flat,
+                group_size=32,
+                eps=eps,
+                column_major_scales=True,
+                scale_tma_aligned=True,
+                scale_ue8m0=True,
+            )
         return (quantized.view(x.shape), scales)
 
     def forward_quantized(self, x_q: torch.Tensor, x_s: torch.Tensor, out=None):
@@ -64,6 +86,19 @@ class V41MXFP8Linear(torch.nn.Module):
         remain closed for this linear. The caller owns the BF16 norm tensor.
         Input layout and disjoint BF16 output storage are caller preconditions.
         """
+        if self.batch_invariant:
+            from rtp_llm.models_py.determinism.quantized_linear import _launch_linear
+
+            return _launch_linear(
+                x_q,
+                self.weight,
+                None,
+                torch.bfloat16,
+                x_s,
+                self.weight_scales,
+                group_size=32,
+                out=out,
+            )
         m = x_q.numel() // self.K
         shape = (*x_q.shape[:-1], self.N)
         output = (
@@ -153,6 +188,8 @@ def iter_fp8_linears() -> list:
 
 def _repack_v4_fp8_scale_to_int32(scale: torch.Tensor) -> torch.Tensor:
     """V4 ckpt UE8M0 ``[N/128, K/128]`` to DeepGEMM int32-packed scale."""
+    from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
+
     n_blk, _ = scale.shape
     n = n_blk * 128
     idx = torch.arange(n, device=scale.device) // 128
@@ -160,15 +197,25 @@ def _repack_v4_fp8_scale_to_int32(scale: torch.Tensor) -> torch.Tensor:
     return get_mn_major_tma_aligned_packed_ue8m0_tensor(scale_rep)
 
 
-def _v4_fp8_linear(w: torch.Tensor, s: torch.Tensor):
+def _v4_fp8_linear(w: torch.Tensor, s: torch.Tensor, hw_kernel_config=None):
     """Build a CudaFp8DeepGEMMLinear from raw V4 FP8 weight + scale tensors."""
     if _is_v41_fp8_scale(w, s):
-        return V41MXFP8Linear(w, s)
-    raw_scale = s
+        return V41MXFP8Linear(
+            w,
+            s,
+            batch_invariant=getattr(hw_kernel_config, "batch_invariant", False) is True,
+        )
+    if getattr(hw_kernel_config, "batch_invariant", False) is True:
+        from rtp_llm.models_py.determinism.quantized_linear import BlockFp8Linear
+
+        return BlockFp8Linear(w, s)
     if s.dtype == torch.float8_e8m0fnu:
         s = _repack_v4_fp8_scale_to_int32(s)
     linear = LinearFactory.create_linear_from_weights(
-        {"_w": w, "_s": s}, "_w", "_s", quant_config=_V4_FP8_BLOCK_CFG
+        {"_w": w, "_s": s},
+        "_w",
+        "_s",
+        quant_config=_V4_FP8_BLOCK_CFG,
     )
     _FP8_LINEAR_REGISTRY.add(linear)
     return linear

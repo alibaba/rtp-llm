@@ -444,6 +444,8 @@ class CompressorFP8(PoolBackedModule):
     layer's ratio (typically 4, overlap=True).
     """
 
+    batch_invariant = False
+
     def __init__(
         self,
         dim: int,
@@ -456,6 +458,7 @@ class CompressorFP8(PoolBackedModule):
         norm_eps: float = 1e-6,
         rotate: bool = False,
         compressor_weights: Optional[Dict[str, torch.Tensor]] = None,
+        batch_invariant: bool = False,
     ):
         """``compressor_weights`` is a 4-key dict ``{"ape", "wkv", "wgate",
         "norm"}`` extracted by the caller from ``layer_weights[W.v4_*compressor_*]``."""
@@ -469,6 +472,7 @@ class CompressorFP8(PoolBackedModule):
             "stand-alone construction is not supported (use the BF16 path)."
         )
         self.dim = dim
+        self.batch_invariant = batch_invariant
         self.head_dim = head_dim
         # Which per-forward workspace CP buffer pair this compressor's gather
         # draws from — passed EXPLICITLY by the caller (main CSA/HCA vs nested
@@ -531,6 +535,13 @@ class CompressorFP8(PoolBackedModule):
         self._cp_gather_stream: Optional[Any] = None
         self._kv_cache_sharded: bool = False
         self._profile_label: Optional[str] = None
+
+    def _project(self, x: torch.Tensor) -> torch.Tensor:
+        if self.batch_invariant:
+            from rtp_llm.models_py.determinism.quantized_linear import linear
+
+            return linear(x, self._wkv_wgate_fused, out_dtype=torch.float32)
+        return _linear_bf16_bf16_fp32(x, self._wkv_wgate_fused)
 
     def _cp_profile_name(self, profile_label: Optional[str]) -> str:
         label = profile_label or self._profile_label
@@ -996,7 +1007,7 @@ class CompressorFP8(PoolBackedModule):
 
         out_dim = (1 + self.overlap) * self.head_dim
         with record_function_range("dsv4.fp8.compressor.prefill.fused_linear"):
-            fused_out = _linear_bf16_bf16_fp32(x, self._wkv_wgate_fused)
+            fused_out = self._project(x)
             N = bsz * seqlen
             fused_flat = fused_out.reshape(N, -1)
 
@@ -1159,7 +1170,7 @@ class CompressorFP8(PoolBackedModule):
         device = x.device
         out_dim = (1 + self.overlap) * self.head_dim
         with record_function_range("dsv4.fp8.compressor.prefill.fused_linear"):
-            fused_out = _linear_bf16_bf16_fp32(x, self._wkv_wgate_fused)
+            fused_out = self._project(x)
             N = bsz * seqlen
             fused_flat = fused_out.reshape(N, -1)
 
@@ -1259,7 +1270,7 @@ class CompressorFP8(PoolBackedModule):
 
         device = x.device
         out_dim = (1 + self.overlap) * self.head_dim
-        fused_out = _linear_bf16_bf16_fp32(x, self._wkv_wgate_fused)
+        fused_out = self._project(x)
         kv, score = fused_out[..., :out_dim], fused_out[..., out_dim:]
 
         # ``kv`` and ``score`` are last-dim slices of ``fused_out``. Keep

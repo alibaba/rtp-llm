@@ -1,8 +1,10 @@
-# Qwen3 batch-invariant inference
+# Batch-invariant text generation
 
 Set `RTP_BATCH_INVARIANT=1` for text generation on one SM103 CUDA node.
-Use a BF16 checkpoint, BF16 activations, a BF16 KV cache with 64-token pages,
-and the regular scheduler with dynamic batching and chunked prefill.
+Use the regular scheduler with dynamic batching and chunked prefill.
+The Qwen configurations use a BF16 checkpoint, BF16 activations and a BF16
+KV cache with 64-token pages. DeepSeek uses the native checkpoint and paged
+cache layouts described below.
 Leave speculative decoding and prefix reuse disabled. An unset switch or `0`
 selects the regular execution path.
 
@@ -12,6 +14,8 @@ selects the regular execution path.
 | Qwen3-30B-A3B | `qwen_3_moe` | 1/1/1, 2/1/1, 4/1/1 | BF16 | Eager |
 | Qwen3.6-35B-A3B | `qwen35_moe` | 1/1/1, 1/4/4 | BF16, `FP8_PER_BLOCK` | Eager or decode CUDA Graph |
 | Qwen3.5-397B-A17B | `qwen35_moe` | 4/1/1, 4/1/4 | BF16, `FP8_PER_BLOCK` | Eager or decode CUDA Graph |
+| DeepSeek-V4-Flash | `deepseek_v4` | 2/1/2 | Native FP8 projections and FP4 routed experts | Eager |
+| DeepSeek-V4.1-Flash (text) | `deepseek_v41` | 4/1/4 | Native MXFP8 projections and FP4 routed experts | Eager |
 
 The two `qwen35_moe` models use the text weights and rotary position
 configuration from the multimodal checkpoint and keep Gated DeltaNet state in
@@ -104,6 +108,22 @@ for topology in "" "--tp"; do
     torchrun --standalone --nproc-per-node=4 "$tests/ep_test.py" $topology --fp8
 done
 ```
+
+For DeepSeek, use the release checkpoint with BF16 activations and leave
+`--moe_strategy auto`. Enable `--fp8_kv_cache 1`. Set
+`--seq_size_per_block 256 --kernel_seq_size_per_block 128` for V4, or
+`--seq_size_per_block 128 --kernel_seq_size_per_block 128` for V4.1.
+Use single-node PDFUSION with `TP_SIZE=EP_SIZE=WORLD_SIZE=LOCAL_WORLD_SIZE`
+and `DP_SIZE=PP_SIZE=1`. Keep CUDA Graph, context parallelism, speculative
+decoding and cache reuse disabled. For V4.1, leave `DSV41_CED` and
+`DSV41_SWA_BOUNDED_REPLAY` at zero.
+
+Use `--max_seq_len 4096` and pass `--target-length 2305` to both service
+comparisons. Save the solo reference with `--prefill_chunk_size 0`, then use
+`--prefill_chunk_size 2304` for the chunked comparison. This target crosses
+the V4 CSA top-512 cutoff after 4:1 compression and paged-cache boundaries
+on both models. `deepseek_attention_test.py` contains the lower-level
+comparisons for sparse attention and paged indexing.
 
 The Linear and Attention factories select the fixed-order implementations
 using the same separation between model code and backend selection as vLLM.

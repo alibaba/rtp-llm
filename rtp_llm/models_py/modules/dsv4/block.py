@@ -56,6 +56,7 @@ def _prefill_fast_norm(norm: nn.Module, x: torch.Tensor) -> torch.Tensor:
 
 
 class Block(nn.Module):
+
     def __init__(
         self,
         layer_id: int,
@@ -105,10 +106,13 @@ class Block(nn.Module):
         fp8_kv_cache: bool = False,
         commit_only: bool = False,
         n_physical_experts: Optional[int] = None,
+        *,
+        hw_kernel_config=None,
     ):
         super().__init__()
         self.layer_id = layer_id
         self.fp8_kv_cache = fp8_kv_cache
+        batch_invariant = getattr(hw_kernel_config, "batch_invariant", False) is True
 
         attn_cls = CommitOnlyAttentionFP8 if commit_only else AttentionFP8
         self.attn = attn_cls(
@@ -137,6 +141,11 @@ class Block(nn.Module):
             layer_weights=layer_weights,
             tp_size=tp_size,
             tp_rank=tp_rank,
+            **(
+                {"hw_kernel_config": hw_kernel_config}
+                if batch_invariant and not commit_only
+                else {}
+            ),
         )
         self._cp_sync_after_attn_done = False
         if commit_only:
@@ -173,6 +182,15 @@ class Block(nn.Module):
             max_tokens_per_rank=max_tokens_per_rank,
             is_decode_role=is_decode_role,
             strategy=moe_strategy,
+            **(
+                {
+                    "hw_kernel_config": hw_kernel_config,
+                    "tp_size": tp_size,
+                    "tp_rank": tp_rank,
+                }
+                if batch_invariant
+                else {}
+            ),
             n_physical_experts=n_physical_experts,
             chunking_enabled=chunked_moe_enabled(),
             model_type="deepseek_v4",
@@ -184,8 +202,13 @@ class Block(nn.Module):
         # into ``RMSNorm`` at construction time.  Norms here see 2D inputs
         # ``[T, dim]`` from the hc_pre output, so framework ``RMSNorm``
         # (which expects 2D) drops in directly.
-        self.attn_norm = RMSNorm(layer_weights[W.v4_attn_norm], norm_eps)
-        self.ffn_norm = RMSNorm(layer_weights[W.v4_ffn_norm], norm_eps)
+        invariant_options = {"batch_invariant": True} if batch_invariant else {}
+        self.attn_norm = RMSNorm(
+            layer_weights[W.v4_attn_norm], norm_eps, **invariant_options
+        )
+        self.ffn_norm = RMSNorm(
+            layer_weights[W.v4_ffn_norm], norm_eps, **invariant_options
+        )
 
         self.attn_hc = build_hc_unit(
             layer_weights[W.v4_hc_attn_fn],
@@ -198,6 +221,7 @@ class Block(nn.Module):
             hc_eps=hc_eps,
             layer_id=layer_id,
             name="attn",
+            **invariant_options,
         )
         self.ffn_hc = build_hc_unit(
             layer_weights[W.v4_hc_ffn_fn],
@@ -210,6 +234,7 @@ class Block(nn.Module):
             hc_eps=hc_eps,
             layer_id=layer_id,
             name="ffn",
+            **invariant_options,
         )
         self._prefill_fast_hc_impls_cached = self._resolve_prefill_fast_hc_impls()
         self._mega_csa_adapter = None

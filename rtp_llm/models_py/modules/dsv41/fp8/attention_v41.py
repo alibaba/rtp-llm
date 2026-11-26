@@ -391,8 +391,28 @@ def _prefill_x_tiles(x, cp_ctx, plan, pending, buffers, weights=()):
         del tile
 
 
-def rms_norm(x, weight, eps):
+def _project_global(x, weight, *, batch_invariant, fp32=False):
+    if batch_invariant:
+        from rtp_llm.models_py.determinism.quantized_linear import linear
+
+        return linear(x, weight, out_dtype=torch.float32 if fp32 else x.dtype)
+    if fp32:
+        from rtp_llm.models_py.modules.dsv41.fp8.compressor import (
+            _linear_bf16_bf16_fp32,
+        )
+
+        return _linear_bf16_bf16_fp32(x, weight)
+    return F.linear(x, weight)
+
+
+def rms_norm(x, weight, eps, *, batch_invariant=False):
     """Preserve the BF16 normalization boundary used by V4.1."""
+    if batch_invariant:
+        from rtp_llm.models_py.determinism.quantized_linear import (
+            rms_norm as fixed_norm,
+        )
+
+        return fixed_norm(x, weight, eps)
     # Match the main CUDA RMSNorm path while retaining the FP32 boundary
     # for compressor projections and non-CUDA reference execution.
     if (
@@ -418,11 +438,21 @@ def rms_norm(x, weight, eps):
     ).to(x.dtype)
 
 
-def compress_pairs(values, scores, norm_weight, eps):
+def compress_pairs(values, scores, norm_weight, eps, *, batch_invariant=False):
     """Pool consecutive non-overlapping pairs independently for each channel."""
-    weights = torch.softmax(scores.float(), dim=-2)
-    latent = (values.float() * weights).sum(-2)
-    return rms_norm(latent, norm_weight, eps).to(torch.bfloat16)
+    if batch_invariant:
+        s0, s1 = scores.float().unbind(-2)
+        vmax = torch.maximum(s0, s1)
+        w0, w1 = (s0 - vmax).exp(), (s1 - vmax).exp()
+        denom = w0 + w1
+        x0, x1 = values.float().unbind(-2)
+        latent = x0 * (w0 / denom) + x1 * (w1 / denom)
+    else:
+        weights = torch.softmax(scores.float(), dim=-2)
+        latent = (values.float() * weights).sum(-2)
+    return rms_norm(latent, norm_weight, eps, batch_invariant=batch_invariant).to(
+        torch.bfloat16
+    )
 
 
 def rope_only(x, freqs, rope_dim):
@@ -467,7 +497,9 @@ def fp4_roundtrip(x):
     return values.view(shape)
 
 
-def select_candidate_blocks(logits, visible, block_size, topk_blocks):
+def select_candidate_blocks(
+    logits, visible, block_size, topk_blocks, *, batch_invariant=False
+):
     """V4.1 candidate max-pooling, including the newest visible block."""
     nblocks = (logits.shape[1] + block_size - 1) // block_size
     padded = F.pad(
@@ -475,10 +507,23 @@ def select_candidate_blocks(logits, visible, block_size, topk_blocks):
     )
     scores = padded.view(logits.shape[0], nblocks, block_size).amax(-1)
     newest = ((visible - 1).clamp_min(0) // block_size).long()
+    if batch_invariant:
+        blocks = torch.arange(nblocks, device=logits.device)
+        readable = (blocks[None, :] <= newest[:, None]) & scores.isfinite()
+        newest = torch.where(readable, blocks, -1).amax(dim=1)
+        has_newest = newest >= 0
+        newest = newest.clamp_min(0)
+    else:
+        has_newest = visible > 0
     scores.scatter_(
-        1, newest[:, None], torch.where(visible > 0, torch.inf, -torch.inf)[:, None]
+        1, newest[:, None], torch.where(has_newest, torch.inf, -torch.inf)[:, None]
     )
-    values, ids = scores.topk(min(topk_blocks, nblocks), dim=-1)
+    count = min(topk_blocks, nblocks)
+    if batch_invariant:
+        ids = scores.argsort(descending=True, stable=True)[:, :count]
+        values = scores.gather(1, ids)
+    else:
+        values, ids = scores.topk(count, dim=-1)
     return torch.where(values > -torch.inf, ids, -1).int()
 
 
@@ -588,6 +633,11 @@ class AttentionV41FP8(AttentionFP8):
         # compressor/indexer (their checkpoint topology differs from V4.1).
         kwargs["compress_ratio"] = 0
         super().__init__(*args, **kwargs)
+        kernel_options = (
+            {"hw_kernel_config": kwargs.get("hw_kernel_config")}
+            if self.batch_invariant
+            else {}
+        )
         self.compress_ratio = ratio
         self.skip_post_q_norm = True
         self.v41_config = v41_config
@@ -640,7 +690,7 @@ class AttentionV41FP8(AttentionFP8):
             self.index_k_norm = w[W.v41_indexer_k_norm]
         if self.is_index_source:
             self.index_wq = _v4_fp8_linear(
-                w[W.v4_indexer_wq_b_w], w[W.v4_indexer_wq_b_s]
+                w[W.v4_indexer_wq_b_w], w[W.v4_indexer_wq_b_s], **kernel_options
             )
             self.index_weights = w[W.v4_indexer_weights_proj_w]
         self._pool_spec[CSA_STATE] = (torch.float32, 2 * self.head_dim)
@@ -658,10 +708,13 @@ class AttentionV41FP8(AttentionFP8):
                 _v4_fp8_linear(
                     self.wo_a_w[begin:end].contiguous(),
                     self.wo_a_s[begin // scale_block : end // scale_block].contiguous(),
+                    **kernel_options,
                 )
             )
 
     def can_fuse_prefill_attn_norm_input_quant(self, x, norm_weight) -> bool:
+        if self.batch_invariant:
+            return False
         # Small eager inputs regressed in the standalone wrapper benchmark.
         if x.ndim != 2 or x.shape[0] < 32768 or x.shape[1] != 5120:
             return False
@@ -693,7 +746,7 @@ class AttentionV41FP8(AttentionFP8):
         from rtp_llm.models_py.modules.dsv41.fp8 import _v41_output_projection
 
         o = o.reshape(-1, self.n_heads, self.head_dim)
-        if _v41_output_projection.is_supported(
+        if not self.batch_invariant and _v41_output_projection.is_supported(
             o, freqs, self._wo_a_stk_w, self._wo_a_stk_s
         ):
             from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
@@ -917,7 +970,12 @@ class AttentionV41FP8(AttentionFP8):
             out = qkv.qr.new_empty((0, self.dim))
             self._prefill_output_all_reduce(out)
             return out
-        from rtp_llm.models_py.modules.dsv41.flash_mla import flash_mla_sparse_fwd
+        if self.batch_invariant:
+            from rtp_llm.models_py.modules.dsv4.fp8.batch_invariant_attention import (
+                indexed_attention,
+            )
+        else:
+            from rtp_llm.models_py.modules.dsv41.flash_mla import flash_mla_sparse_fwd
 
         out = torch.empty((rows, self.dim), dtype=torch.bfloat16, device=qkv.qr.device)
         for start in range(0, rows, _FLASH_MLA_SPARSE_Q_CHUNK):
@@ -925,14 +983,24 @@ class AttentionV41FP8(AttentionFP8):
             freqs = common.freqs_cis[start:end]
             q = self._project_prefill_q(qkv.qr[start:end], freqs, common.workspace)
             with record_function_range(profile_name):
-                o, _, _ = flash_mla_sparse_fwd(
-                    q=q,
-                    kv=kv,
-                    indices=indices[start:end],
-                    sm_scale=self.softmax_scale,
-                    attn_sink=self.attn_sink,
-                    topk_length=topk_length[start:end],
-                )
+                if self.batch_invariant:
+                    o = indexed_attention(
+                        q,
+                        kv,
+                        indices[start:end],
+                        topk_length[start:end],
+                        self.attn_sink,
+                        self.softmax_scale,
+                    )
+                else:
+                    o, _, _ = flash_mla_sparse_fwd(
+                        q=q,
+                        kv=kv,
+                        indices=indices[start:end],
+                        sm_scale=self.softmax_scale,
+                        attn_sink=self.attn_sink,
+                        topk_length=topk_length[start:end],
+                    )
             with record_function_range("dsv4.fp8.attn.prefill.output_proj"):
                 self._prefill_output_proj_into(o, freqs, out=out[start:end])
             dispose_tensor(o)
@@ -1133,12 +1201,9 @@ class AttentionV41FP8(AttentionFP8):
         batched_groups=False,
     ):
         """Publish global pools in sequence order, carrying pairs across tiles."""
+        batch_invariant = getattr(self, "batch_invariant", False) is True
         owner = self._owner()
         ratio = self.compress_ratio
-        from rtp_llm.models_py.modules.dsv41.fp8.compressor import (
-            _linear_bf16_bf16_fp32,
-        )
-
         main_pool = self._source_pool(self._global_region())
         index_pool = self._source_pool(INDEXER_KV)
         rows = int(positions.shape[0])
@@ -1325,14 +1390,21 @@ class AttentionV41FP8(AttentionFP8):
             values = (
                 x_tile[:, : self.head_dim]
                 if projected_tiles is not None
-                else _linear_bf16_bf16_fp32(x_tile, owner.global_wkv)
+                else _project_global(
+                    x_tile, owner.global_wkv, batch_invariant=batch_invariant, fp32=True
+                )
             )
             scores = None
             if ratio == 2:
                 scores = (
                     x_tile[:, self.head_dim :]
                     if projected_tiles is not None
-                    else _linear_bf16_bf16_fp32(x_tile, owner.global_wgate)
+                    else _project_global(
+                        x_tile,
+                        owner.global_wgate,
+                        batch_invariant=batch_invariant,
+                        fp32=True,
+                    )
                 )
             group_plan = None
             if batched_groups:
@@ -1434,7 +1506,7 @@ class AttentionV41FP8(AttentionFP8):
                         ratio,
                         carry,
                     )
-                    if prefill and main_pool is not None
+                    if prefill and main_pool is not None and not batch_invariant
                     else None
                 )
             )
@@ -1466,11 +1538,15 @@ class AttentionV41FP8(AttentionFP8):
                         ),
                         owner.global_norm,
                         self.eps,
+                        batch_invariant=batch_invariant,
                     )
                 else:
-                    latent = rms_norm(values, owner.global_norm, self.eps).to(
-                        torch.bfloat16
-                    )
+                    latent = rms_norm(
+                        values,
+                        owner.global_norm,
+                        self.eps,
+                        batch_invariant=batch_invariant,
+                    ).to(torch.bfloat16)
             if ratio == 2:
                 # The immutable predecessor snapshot and old carry are consumed
                 # before any ring writes or publication of the next tile carry.
@@ -1518,9 +1594,12 @@ class AttentionV41FP8(AttentionFP8):
                     )
                     del pieces
             else:
-                projected_index = F.linear(latent, owner.index_wk)
+                projected_index = _project_global(
+                    latent, owner.index_wk, batch_invariant=batch_invariant
+                )
             index_stored = (
                 prefill
+                and not batch_invariant
                 and main_pool is not None
                 and index_pool is not None
                 and (
@@ -1544,7 +1623,12 @@ class AttentionV41FP8(AttentionFP8):
                 global_keys = rope_only(latent.clone(), freqs, self.rope_head_dim)
             if not index_stored:
                 index_keys = rope_only(
-                    rms_norm(projected_index, owner.index_k_norm, self.eps),
+                    rms_norm(
+                        projected_index,
+                        owner.index_k_norm,
+                        self.eps,
+                        batch_invariant=batch_invariant,
+                    ),
                     freqs,
                     self.rope_head_dim,
                 )
@@ -1674,6 +1758,11 @@ class AttentionV41FP8(AttentionFP8):
         shared = self._shared_attention
         if not self.is_index_source:
             return shared["topk"][self.index_source_layer_id]
+        if (
+            getattr(self, "batch_invariant", False) is True
+            and self._source_pool(INDEXER_KV) is not None
+        ):
+            return self._select_indices_batch_invariant(x, qr, positions, req_ids)
         globals_by_req = shared["global"][self.kv_source_layer_id]
         out = torch.full(
             (x.shape[0], self.index_topk), -1, dtype=torch.int32, device=x.device
@@ -2238,7 +2327,12 @@ class AttentionV41FP8(AttentionFP8):
                     x, common.cp_ctx, first_tile, x_buffers[0], weights
                 )
         # Read old SWA tails before writes wrap over them in long prefill chunks.
-        fuse_swa_fresh = self._can_fuse_swa_fresh(qkv, common)
+        raw_swa = qkv.kv_full
+        if self.batch_invariant:
+            qkv = qkv._replace(kv_full=swa_codec.roundtrip_swa_kv(raw_swa))
+        fuse_swa_fresh = not self.batch_invariant and self._can_fuse_swa_fresh(
+            qkv, common
+        )
         swa, swa_starts = (
             self._swa_prefill_workspace(qkv, common, fuse_cache_write=fuse_swa_fresh)
             if self.compress_ratio
@@ -2252,7 +2346,7 @@ class AttentionV41FP8(AttentionFP8):
             else None
         )
         if not fuse_swa_fresh:
-            self._prefill_write_swa_fp8_paged(common, qkv.kv_full)
+            self._prefill_write_swa_fp8_paged(common, raw_swa)
         if not self.compress_ratio or not self.is_kv_source:
             return common, qkv, swa, swa_starts, swa_only_workspace
         starts = common.prefix_lengths
@@ -2457,20 +2551,24 @@ class AttentionV41FP8(AttentionFP8):
             quantize_and_insert_k_cache_fp4,
             quantize_indexer_k_fp4,
         )
-        from rtp_llm.models_py.modules.dsv41.fp8.compressor import (
-            _linear_bf16_bf16_fp32,
-        )
 
         B, S, _ = x.shape
+        batch_invariant = getattr(self, "batch_invariant", False) is True
         from rtp_llm.models_py.modules.dsv41.fp8._v41_decode_global import (
             try_produce_global,
         )
 
-        if not try_produce_global(self, x, positions, req_ids, starts):
+        if batch_invariant or not try_produce_global(
+            self, x, positions, req_ids, starts
+        ):
             flat = x.reshape(B * S, -1)
-            values = _linear_bf16_bf16_fp32(flat, self.global_wkv)
+            values = _project_global(
+                flat, self.global_wkv, batch_invariant=batch_invariant, fp32=True
+            )
             if self.compress_ratio == 2:
-                scores = _linear_bf16_bf16_fp32(flat, self.global_wgate)
+                scores = _project_global(
+                    flat, self.global_wgate, batch_invariant=batch_invariant, fp32=True
+                )
                 previous = self._read_state(
                     (starts - 1).clamp_min(0), torch.arange(B, device=x.device)
                 )
@@ -2486,6 +2584,7 @@ class AttentionV41FP8(AttentionFP8):
                     torch.stack((score_prev, scores), 1),
                     self.global_norm,
                     self.eps,
+                    batch_invariant=batch_invariant,
                 )
                 slots = self._slots(CSA_STATE, positions, req_ids, state_end=starts + S)
                 state_rows = torch.cat((values, scores), -1)
@@ -2497,13 +2596,25 @@ class AttentionV41FP8(AttentionFP8):
                     torch.where((slots >= 0)[:, None], state_rows, 0.0),
                 )
             else:
-                latent = rms_norm(values, self.global_norm, self.eps).to(torch.bfloat16)
+                latent = rms_norm(
+                    values,
+                    self.global_norm,
+                    self.eps,
+                    batch_invariant=batch_invariant,
+                ).to(torch.bfloat16)
             freqs = self.freqs_cis[
                 (positions // self.compress_ratio) * self.compress_ratio
             ]
             global_keys = rope_only(latent.clone(), freqs, self.rope_head_dim)
             index_keys = rope_only(
-                rms_norm(F.linear(latent, self.index_wk), self.index_k_norm, self.eps),
+                rms_norm(
+                    _project_global(
+                        latent, self.index_wk, batch_invariant=batch_invariant
+                    ),
+                    self.index_k_norm,
+                    self.eps,
+                    batch_invariant=batch_invariant,
+                ),
                 freqs,
                 self.rope_head_dim,
             )
@@ -2518,6 +2629,8 @@ class AttentionV41FP8(AttentionFP8):
                 self._slots(INDEXER_KV, positions, req_ids),
                 index_pool,
             )
+        if batch_invariant:
+            return
         index_pool = self._source_pool(INDEXER_KV)
         capacity = self._rope_max_seq_len // self.compress_ratio
         from rtp_llm.models_py.modules.dsv41.fp8 import (
@@ -2568,6 +2681,11 @@ class AttentionV41FP8(AttentionFP8):
             return shared["topk"][self.index_source_layer_id]
         B, S, _ = x.shape
         T = B * S
+        if getattr(self, "batch_invariant", False) is True:
+            requests = torch.arange(B, device=x.device)[:, None].expand(B, S)
+            return self._select_indices_batch_invariant(
+                x.reshape(T, -1), qr.reshape(T, -1), positions, requests.reshape(-1)
+            )
         keys = shared["global"][self.kv_source_layer_id]
         from rtp_llm.models_py.modules.dsv41.fp8 import (
             _v41_decode_indexer as decode_indexer,
@@ -2767,6 +2885,7 @@ class AttentionV41FP8(AttentionFP8):
             decode_rope_metadata,
         )
 
+        batch_invariant = getattr(self, "batch_invariant", False) is True
         self._begin_forward()
         B, S, _ = x.shape
         T = B * S
@@ -2782,7 +2901,8 @@ class AttentionV41FP8(AttentionFP8):
 
             req = metadata.req_id_per_token[:T].long()
             starts = metadata.start_pos[:B].long()
-            global_work = start_global_decode(self, x, positions, req, starts)
+            if not batch_invariant:
+                global_work = start_global_decode(self, x, positions, req, starts)
         try:
             qkv = decode_compute_qkv(
                 self,
@@ -2798,41 +2918,170 @@ class AttentionV41FP8(AttentionFP8):
             if global_work is not None:
                 global_work.finish()
         if not self.compress_ratio:
-            o = self._forward_decode_swa_only(qkv.q, B, S, metadata)
+            if batch_invariant:
+                o = self._batch_invariant_decode_attention(qkv.q, metadata)
+            else:
+                o = self._forward_decode_swa_only(qkv.q, B, S, metadata)
         else:
             if self.is_kv_source and global_work is None:
                 self._produce_global_decode(x, positions, req, starts)
             selected = self._select_indices_decode(
                 x, qkv.qr, positions, qkv.qr_quantized
             )
-            from rtp_llm.models_py.modules.dsv41.fp8._v41_fp4_decode_attn import (
-                fp4_dual_decode_attention,
-            )
-            from rtp_llm.models_py.modules.dsv41.fp8.decode.decode_attn_metadata import (
-                get_or_build_sched_meta,
-            )
+            if batch_invariant:
+                o = self._batch_invariant_decode_attention(qkv.q, metadata, selected)
+            else:
+                from rtp_llm.models_py.modules.dsv41.fp8._v41_fp4_decode_attn import (
+                    fp4_dual_decode_attention,
+                )
+                from rtp_llm.models_py.modules.dsv41.fp8.decode.decode_attn_metadata import (
+                    get_or_build_sched_meta,
+                )
 
-            slots = self._decode_global_slots(selected, metadata.req_id_per_token[:T])
-            o = fp4_dual_decode_attention(
-                q=qkv.q,
-                swa_pool_3d=self._pool_view_3d_fp8(SWA_KV),
-                global_pool_3d=self._source_pool(self._global_region()),
-                attn_sink=self.attn_sink,
-                swa_topk_3d=metadata.swa_global_slots[:T]
-                .view(B, S, self.window_size)
-                .contiguous(),
-                global_topk_3d=slots.int().view(B, S, self.index_topk).contiguous(),
-                swa_block_table=metadata.pool_block_tables[SWA_KV][:B],
-                sched_meta=get_or_build_sched_meta(
-                    metadata,
-                    batch_size=B,
-                    q_len=S,
-                    num_heads=self.n_heads,
-                    topk=self.window_size,
-                    extra_attn_type=self._global_region(),
-                ),
-                fp8_op=self._get_fp8_decode_op(),
-            )
+                slots = self._decode_global_slots(
+                    selected, metadata.req_id_per_token[:T]
+                )
+                o = fp4_dual_decode_attention(
+                    q=qkv.q,
+                    swa_pool_3d=self._pool_view_3d_fp8(SWA_KV),
+                    global_pool_3d=self._source_pool(self._global_region()),
+                    attn_sink=self.attn_sink,
+                    swa_topk_3d=metadata.swa_global_slots[:T]
+                    .view(B, S, self.window_size)
+                    .contiguous(),
+                    global_topk_3d=slots.int().view(B, S, self.index_topk).contiguous(),
+                    swa_block_table=metadata.pool_block_tables[SWA_KV][:B],
+                    sched_meta=get_or_build_sched_meta(
+                        metadata,
+                        batch_size=B,
+                        q_len=S,
+                        num_heads=self.n_heads,
+                        topk=self.window_size,
+                        extra_attn_type=self._global_region(),
+                    ),
+                    fp8_op=self._get_fp8_decode_op(),
+                )
         out = self._project_output(o, qkv.freqs_cis)
         self._prefill_output_all_reduce(out)
         return out.view(B, S, self.dim)
+
+    def _batch_invariant_decode_attention(self, q, metadata, selected=None):
+        from rtp_llm.models_py.modules.dsv4.fp8.batch_invariant_attention import (
+            indexed_attention,
+        )
+
+        def compact(slots):
+            valid = slots >= 0
+            order = torch.argsort(~valid, dim=-1, stable=True)
+            return slots.gather(-1, order), valid.sum(dim=-1, dtype=torch.int32)
+
+        query = q.reshape(-1, self.n_heads, self.head_dim)
+        rows = query.size(0)
+        swa, swa_lengths = compact(metadata.swa_global_slots[:rows])
+        options = {}
+        if selected is not None:
+            sorted_keys = selected.sort(dim=-1).values
+            global_slots = self._decode_global_slots(
+                sorted_keys, metadata.req_id_per_token[:rows]
+            )
+            indices, lengths = compact(global_slots)
+            options.update(
+                extra_kv=self._source_pool(self._global_region()),
+                extra_indices=indices,
+                extra_lengths=lengths,
+            )
+        return indexed_attention(
+            query,
+            self._pool_view_3d_fp8(SWA_KV),
+            swa,
+            swa_lengths,
+            self.attn_sink,
+            self.softmax_scale,
+            **options,
+        ).view_as(q)
+
+    def _select_indices_batch_invariant(self, x, qr, positions, requests):
+        from rtp_llm.models_py.determinism.quantized_linear import linear
+        from rtp_llm.models_py.modules.dsv41.fp8._v41_batch_invariant_indexer import (
+            score_paged,
+        )
+        from rtp_llm.models_py.modules.dsv41.fp8._v41_fp4_triton import (
+            quantize_rows_fp4,
+        )
+
+        pool = self._source_pool(INDEXER_KV)
+        pages = self._block_tables_by_type[INDEXER_KV]
+        logical_page = require_pool_tokens_per_block(self._kv_cache, region=INDEXER_KV)
+        logical_page //= self.compress_ratio
+        rows = x.size(0)
+        visible = ((positions + 1) // self.compress_ratio).reshape(-1)
+        q = self._lin(self.index_wq, qr).view(
+            rows, self.index_n_heads, self.index_head_dim
+        )
+        rope_only(q, self.freqs_cis[positions], self.rope_head_dim)
+        q, scales = quantize_rows_fp4(q)
+        weights = linear(x, self.index_weights).float()
+        weights *= (self.index_head_dim * self.index_n_heads) ** -0.5
+
+        shared = self._shared_attention
+        config = self.v41_config
+        source = int(config.get("candidate_source_layer_id", -1))
+        blocks = int(config.get("candidate_topk_blocks", 0))
+        block_size = int(config.get("candidate_block_size", 0))
+        capacity = pages.size(1) * logical_page
+        candidate_count = (
+            min(blocks, (capacity + block_size - 1) // block_size)
+            if block_size > 0
+            else 0
+        )
+        publish = self.layer_id == source and candidate_count > 0
+        if publish:
+            shared["candidates"] = torch.full(
+                (rows, candidate_count), -1, dtype=torch.int32, device=x.device
+            )
+        candidates = (
+            shared.get("candidates")
+            if source >= 0 and self.layer_id >= source
+            else None
+        )
+        out = torch.full(
+            (rows, self.index_topk), -1, dtype=torch.int32, device=x.device
+        )
+        count = min(self.index_topk, capacity)
+        for begin in range(0, rows, 32):
+            part = slice(begin, begin + 32)
+            lengths = visible[part]
+            logits = score_paged(
+                q[part],
+                scales[part],
+                weights[part],
+                pool,
+                pages,
+                lengths,
+                requests[part],
+                logical_page,
+            )
+            # On short rows every readable key ties, so stable ranking emits
+            # its logical index in order even when earlier pages are missing.
+            # Save these scores before applying any long-context candidate mask.
+            short_scores = torch.where(logits[:, :count].isfinite(), 0.0, -torch.inf)
+            if publish:
+                candidates[part] = select_candidate_blocks(
+                    logits,
+                    lengths,
+                    block_size,
+                    candidate_count,
+                    batch_invariant=True,
+                )
+            elif candidates is not None:
+                mask_candidate_logits(logits, candidates[part], block_size)
+            logits[:, :count] = torch.where(
+                lengths[:, None] <= self.index_topk, short_scores, logits[:, :count]
+            )
+            selected = logits.argsort(descending=True, stable=True)[:, :count]
+            selected = selected.masked_fill(
+                ~torch.isfinite(logits.gather(1, selected)), -1
+            )
+            out[part, :count] = selected
+        shared["topk"] = {self.layer_id: out}
+        return out

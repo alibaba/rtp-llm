@@ -409,7 +409,8 @@ def warmup_v41_decode_jit(model, *, device):
     """
     device = torch.device(device)
     if (
-        not model_warm_up_enabled()
+        getattr(model, "batch_invariant", False) is True
+        or not model_warm_up_enabled()
         or not model._is_decode_role
         or not common._is_cuda_device(device)
     ):
@@ -470,7 +471,8 @@ def warmup_v41_prefill_jit(model, *, device):
     """Same initialization/health-gate lifecycle as V4, with V41 kernel ABIs."""
     device = torch.device(device)
     if (
-        not model_warm_up_enabled()
+        getattr(model, "batch_invariant", False) is True
+        or not model_warm_up_enabled()
         or model._is_decode_role
         or not common._is_cuda_device(device)
     ):

@@ -11,12 +11,29 @@ from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 
 class EmbeddingTorch(nn.Module):
-    def __init__(self, weight: torch.Tensor):
+
+    def __init__(self, weight: torch.Tensor, *, hidden_size: Optional[int] = None):
         super().__init__()
         self.weight = weight
+        shard_size = weight.size(-1)
+        self.hidden_size = shard_size if hidden_size is None else hidden_size
+        self.tp_size = 1
+        if hidden_size is not None:
+            if shard_size <= 0 or hidden_size <= 0 or hidden_size % shard_size:
+                raise ValueError("Embedding shards must evenly divide the hidden size")
+            self.tp_size = hidden_size // shard_size
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        return F.embedding(input, self.weight)
+        output = F.embedding(input, self.weight)
+        if self.tp_size == 1:
+            return output
+        rows = output.reshape(-1, self.weight.size(-1))
+        gathered = all_gather(rows, group=Group.TP)
+        return (
+            gathered.view(self.tp_size, *rows.shape)
+            .transpose(0, 1)
+            .reshape(*input.shape, self.hidden_size)
+        )
 
 
 class Embedding(nn.Module):

@@ -690,6 +690,8 @@ class PrefillQKV(NamedTuple):
 
 
 class AttentionFP8(nn.Module):
+    batch_invariant = False
+
     def __init__(
         self,
         layer_id: int,
@@ -717,6 +719,8 @@ class AttentionFP8(nn.Module):
         layer_weights: Optional[Dict[str, torch.Tensor]] = None,
         tp_size: int = 1,
         tp_rank: int = 0,
+        *,
+        hw_kernel_config=None,
     ):
         """``layer_weights`` is the framework's per-layer dict
         (``ModelWeights.weights[layer_id]``) keyed by ``W.v4_*`` enum.
@@ -735,6 +739,9 @@ class AttentionFP8(nn.Module):
         self.compress_ratio = compress_ratio
         self.eps = norm_eps
         self.softmax_scale = head_dim ** (-0.5)
+        self.batch_invariant = (
+            getattr(hw_kernel_config, "batch_invariant", False) is True
+        )
         self.tp_size = tp_size
         self.tp_rank = tp_rank
         self.n_heads = n_heads // tp_size
@@ -789,16 +796,26 @@ class AttentionFP8(nn.Module):
             if row_slice is not None or col_slice is not None:
                 w = w.contiguous()
                 s = s.contiguous()
-            linear = _v4_fp8_linear(w, s)
+            linear = _v4_fp8_linear(
+                w,
+                s,
+                **(
+                    {"hw_kernel_config": hw_kernel_config}
+                    if self.batch_invariant
+                    else {}
+                ),
+            )
             return linear
 
-        self.wq_a_wkv = merge_v41_qkv_weights(
-            layer_weights,
-            W.v4_attn_wq_a_w,
-            W.v4_attn_wq_a_s,
-            W.v4_attn_wkv_w,
-            W.v4_attn_wkv_s,
-        )
+        self.wq_a_wkv = None
+        if not self.batch_invariant:
+            self.wq_a_wkv = merge_v41_qkv_weights(
+                layer_weights,
+                W.v4_attn_wq_a_w,
+                W.v4_attn_wq_a_s,
+                W.v4_attn_wkv_w,
+                W.v4_attn_wkv_s,
+            )
         self.wq_a = _fp8_w_s(W.v4_attn_wq_a_w, W.v4_attn_wq_a_s)
         self.wq_b = _fp8_w_s(
             W.v4_attn_wq_b_w,
@@ -823,10 +840,12 @@ class AttentionFP8(nn.Module):
                 ].contiguous()
         self.wo_a_w = wo_a_w
         self.wo_a_s = wo_a_s
-        K_local = n_heads_local * head_dim // n_groups_local
-        _stk_w, _stk_s = _prepare_wo_a_stacked(
-            wo_a_w, wo_a_s, n_groups_local, o_lora_rank, K_local
-        )
+        _stk_w = _stk_s = None
+        if not self.batch_invariant:
+            K_local = n_heads_local * head_dim // n_groups_local
+            _stk_w, _stk_s = _prepare_wo_a_stacked(
+                wo_a_w, wo_a_s, n_groups_local, o_lora_rank, K_local
+            )
         self.register_buffer("_wo_a_stk_w", _stk_w, persistent=False)
         self.register_buffer("_wo_a_stk_s", _stk_s, persistent=False)
         self.wo_b = _fp8_w_s(
@@ -1674,6 +1693,10 @@ class AttentionFP8(nn.Module):
         return self._fp8_decode_op
 
     def _rmsnorm_weighted(self, x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+        if self.batch_invariant:
+            from rtp_llm.models_py.determinism.quantized_linear import rms_norm
+
+            return rms_norm(x, weight, self.eps)
         # The historical native rtp_llm_ops.rmsnorm binding left the tree with the
         # bundled C++ FlashInfer; flashinfer-python owns the same kernel now.
         import flashinfer
@@ -1713,7 +1736,8 @@ class AttentionFP8(nn.Module):
 
     def _can_reuse_qkv_input_quant(self) -> bool:
         return (
-            hasattr(self.wq_a, "quantize_input")
+            not self.batch_invariant
+            and hasattr(self.wq_a, "quantize_input")
             and hasattr(self.wq_a, "forward_quantized")
             and hasattr(self.wkv, "forward_quantized")
             and (getattr(self.wq_a, "K", None) == getattr(self.wkv, "K", None))

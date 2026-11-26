@@ -15,12 +15,21 @@ from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 
 class RMSNorm(BaseNorm):
-    def __init__(self, weight: torch.Tensor, eps: float = 1e-6):
+
+    def __init__(
+        self, weight: torch.Tensor, eps: float = 1e-6, *, batch_invariant: bool = False
+    ):
         super().__init__(weight, eps)
+        self.batch_invariant = batch_invariant
 
     def forward(
         self, hidden_states: torch.Tensor, output: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
+        if self.batch_invariant:
+            from rtp_llm.models_py.determinism.quantized_linear import rms_norm
+
+            normalized = rms_norm(hidden_states, self.weight, self.variance_epsilon)
+            return normalized if output is None else output.copy_(normalized)
         # Lazy import: this module is also imported where flashinfer is
         # absent (e.g. ppu/rocm), so importing it must not require flashinfer.
         import flashinfer

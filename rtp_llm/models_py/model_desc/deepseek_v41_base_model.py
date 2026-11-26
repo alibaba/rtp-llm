@@ -301,6 +301,10 @@ class DeepSeekV4Model(GptModelBase):
         args = _args_from_model_config(
             model_config, max_generate_batch_size, moe_config=moe_config
         )
+        args.hw_kernel_config = py_hw_kernel_config
+        self.batch_invariant = (
+            getattr(py_hw_kernel_config, "batch_invariant", False) is True
+        )
         self._max_generate_batch_size = int(max_generate_batch_size)
         self._gen_num_per_cycle = int(model_config.gen_num_per_cycle)
         self._capture_aux_hidden_layer_ids = tuple(

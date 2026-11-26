@@ -22,9 +22,13 @@ def _repack_v4_fp8_scale_to_int32(scale: torch.Tensor) -> torch.Tensor:
     return get_mn_major_tma_aligned_packed_ue8m0_tensor(scale_rep)
 
 
-def _v4_fp8_linear(w: torch.Tensor, s: torch.Tensor):
+def _v4_fp8_linear(w: torch.Tensor, s: torch.Tensor, hw_kernel_config=None):
     """Build a CudaFp8DeepGEMMLinear from raw V4 FP8 weight + scale tensors."""
     assert s is not None, "expected non-null FP8 scale"
+    if getattr(hw_kernel_config, "batch_invariant", False) is True:
+        from rtp_llm.models_py.determinism.quantized_linear import BlockFp8Linear
+
+        return BlockFp8Linear(w, s)
     if s.dtype == torch.float8_e8m0fnu:
         s = _repack_v4_fp8_scale_to_int32(s)
     local = {"_w": w, "_s": s}

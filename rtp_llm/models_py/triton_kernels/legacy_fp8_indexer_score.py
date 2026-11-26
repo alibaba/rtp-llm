@@ -46,6 +46,9 @@ def _score(
     CLEAN: tl.constexpr,
     BH: tl.constexpr,
     BN: tl.constexpr,
+    TABLE_ROWS: tl.constexpr = -1,
+    CACHE_PAGE_STRIDE: tl.constexpr = 0,
+    FIRST_VALID_PAGE: tl.constexpr = 0,
 ):
     row = tl.program_id(0).to(tl.int64)
     n = (tl.program_id(1) * BN + tl.arange(0, BN)).to(tl.int64)
@@ -55,22 +58,33 @@ def _score(
         Q + row * Q_ROW + h[:, None] * Q_HEAD + d[None, :], h[:, None] < H, 0.0
     ).to(tl.bfloat16)
     if PAGED:
+        if TABLE_ROWS >= 0:
+            request = tl.load(START + row).to(tl.int64)
+            request_valid = (request >= 0) & (request < TABLE_ROWS)
+        else:
+            request = row // NEXT_N
+            request_valid = True
         length = tl.load(END + row)
         logical_page = n // PAGE
         physical_page = tl.load(
-            TABLE + (row // NEXT_N) * TABLE_WIDTH + logical_page,
-            (n < N) & (n < length) & (logical_page < TABLE_WIDTH),
+            TABLE + request * TABLE_WIDTH + logical_page,
+            request_valid & (n < N) & (n < length) & (logical_page < TABLE_WIDTH),
             -1,
         )
         valid = (
-            (n < N) & (n < length) & (physical_page >= 0) & (physical_page < N_PAGES)
+            (n < N)
+            & (n < length)
+            & (physical_page >= FIRST_VALID_PAGE)
+            & (physical_page < N_PAGES)
         )
         # DeepGEMM's fused 132-byte pool is block-planar: each page holds
         # PAGE*128 K bytes followed by PAGE*4 scale bytes. Slot (page, off)
         # therefore reads K at page*PAGE*132 + off*128 and its FP32 scale
         # at page*PAGE*132 + PAGE*128 + off*4; both are naturally aligned
         # for the page sizes DeepGEMM accepts.
-        block = physical_page.to(tl.int64) * (PAGE * 132)
+        block = physical_page.to(tl.int64) * (
+            CACHE_PAGE_STRIDE if CACHE_PAGE_STRIDE else PAGE * 132
+        )
         off = n % PAGE
         raw = tl.load(
             K + block[None, :] + off[None, :] * 128 + d[:, None],
@@ -157,6 +171,74 @@ def legacy_fp8_mqa_logits(
         num_warps=4,
     )
     return output
+
+
+def _packed_fp8_paged_mqa_logits(q, kv_cache, weights, requests, lengths, block_table):
+    """Score packed query tokens with a causal extent and page table per request."""
+    rows, heads, _ = q.shape
+    page_size = kv_cache.size(1)
+    width = block_table.size(1) * page_size
+    if not is_supported(q, weights) or kv_cache.shape[2:] != (132,):
+        raise ValueError("unsupported batch-invariant MLA indexer data format")
+    output = torch.empty((rows, width), dtype=torch.float32, device=q.device)
+    if rows and width:
+        _score[(rows, triton.cdiv(width, 64))](
+            q,
+            kv_cache,
+            None,
+            weights,
+            requests,
+            lengths,
+            block_table,
+            output,
+            width,
+            heads,
+            q.stride(0),
+            q.stride(1),
+            132,
+            1,
+            weights.stride(0),
+            weights.stride(1),
+            page_size,
+            block_table.size(1),
+            kv_cache.size(0),
+            1,
+            True,
+            True,
+            max(16, triton.next_power_of_2(heads)),
+            64,
+            TABLE_ROWS=block_table.size(0),
+            CACHE_PAGE_STRIDE=kv_cache.stride(0),
+            # RTP's BlockPool reserves page zero; the generic MQA API allows it.
+            FIRST_VALID_PAGE=1,
+            num_warps=4,
+        )
+    return output
+
+
+def packed_fp8_paged_mqa_topk(
+    q, kv_cache, weights, requests, lengths, block_table, topk
+):
+    """Return request-local indices in a fixed order, with -1 padding."""
+    block_table = block_table.contiguous()
+    requests = requests.contiguous()
+    lengths = lengths.contiguous()
+    capacity = block_table.size(1) * kv_cache.size(1)
+    count = min(topk, capacity)
+    result = torch.empty((q.size(0), count), device=q.device, dtype=torch.int32)
+    # Bound the score workspace independently of the scheduler's prefill budget.
+    for begin in range(0, q.size(0), 32):
+        rows = slice(begin, begin + 32)
+        scores = _packed_fp8_paged_mqa_logits(
+            q[rows], kv_cache, weights[rows], requests[rows], lengths[rows], block_table
+        )
+        indices = scores.argsort(descending=True, stable=True)[:, :count]
+        unavailable = ~torch.isfinite(scores.gather(1, indices))
+        # Stable score ranking breaks ties by position. Attention consumes the
+        # selected keys in increasing position for both prefill and decode.
+        selected = indices.masked_fill(unavailable, capacity).sort(dim=-1).values
+        result[rows] = selected.masked_fill(selected == capacity, -1)
+    return result
 
 
 def legacy_fp8_paged_mqa_logits(

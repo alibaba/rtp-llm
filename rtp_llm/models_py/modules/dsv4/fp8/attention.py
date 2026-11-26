@@ -30,7 +30,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.models_py.modules.dsv4._fused_inv_rope_fp8_quant_triton import (
     fused_inv_rope_fp8_quant,
 )
@@ -73,7 +72,12 @@ from rtp_llm.models_py.modules.dsv4.fp8.compressor import CompressorFP8, Compres
 from rtp_llm.models_py.modules.dsv4.fp8.indexer import IndexerFP8
 from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
 from rtp_llm.models_py.modules.dsv4.rope import precompute_freqs_cis
-from rtp_llm.models_py.modules.factory.linear import LinearFactory
+from rtp_llm.models_py.modules.dsv4.utils import (
+    _V4_FP8_BLOCK_CFG,
+    _repack_v4_fp8_scale_to_int32,
+    _v4_fp8_linear,
+    _v4_fp8_linear_from_dict,
+)
 from rtp_llm.models_py.utils.memory import dispose_tensor
 
 
@@ -266,8 +270,6 @@ def _build_suffix_cp_sliced_slot_mapping(
     return torch.where(valid, slot, torch.full_like(slot, -1)).contiguous()
 
 
-_V4_FP8_BLOCK_CFG = Fp8BlockWiseQuantConfig()
-
 _DSV4_FP8_KV_ENTRY_BYTES = 584
 
 # Call sites whose first byte-sliced (CP-RR) SWA cache write has been logged.
@@ -316,23 +318,6 @@ if _FLASH_MLA_SPARSE_Q_CHUNK <= 0:
     )
 
 
-def _repack_v4_fp8_scale_to_int32(scale: torch.Tensor) -> torch.Tensor:
-    """V4 ckpt UE8M0 ``[N/128, K/128]`` → DeepGEMM ``[N, K/128]`` UE8M0
-    int32-packed TMA-aligned scale.  Row-repeats by 128 along N so each
-    weight row gets its own scale row, then hands off to DeepGEMM's
-    ``get_mn_major_tma_aligned_packed_ue8m0_tensor`` (column-major,
-    int32-packed).  Must be called on-device (DeepGEMM helper is CUDA)."""
-    assert scale.dtype == torch.float8_e8m0fnu, f"unexpected scale dtype {scale.dtype}"
-    assert scale.dim() == 2, f"unexpected scale dim {scale.dim()}"
-    from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
-
-    N_blk, _ = scale.shape
-    N = N_blk * 128
-    idx = torch.arange(N, device=scale.device) // 128
-    scale_rep = scale.float().index_select(-2, idx)
-    return get_mn_major_tma_aligned_packed_ue8m0_tensor(scale_rep)
-
-
 def _prepare_wo_a_stacked(
     weight_fp8: torch.Tensor,
     scale_raw: torch.Tensor,
@@ -361,39 +346,6 @@ def _prepare_wo_a_stacked(
     scale_rep = scale_fp32.index_select(-2, idx).contiguous()  # [G, R, K/128]
     s_stk = get_mn_major_tma_aligned_packed_ue8m0_tensor(scale_rep)
     return w_stk, s_stk
-
-
-def _v4_fp8_linear(w: torch.Tensor, s: torch.Tensor):
-    """Build a CudaFp8DeepGEMMLinear from raw V4 FP8 weight + scale tensors.
-
-    Repacks the UE8M0 ``float8_e8m0fnu`` scale into DeepGEMM's int32
-    TMA-aligned packed layout when needed. Framework descriptor path may
-    deliver the scale already packed (dtype int32) — we no-op then."""
-    assert s is not None, "expected non-null FP8 scale"
-    if s.dtype == torch.float8_e8m0fnu:
-        s = _repack_v4_fp8_scale_to_int32(s)
-    # LinearFactory.create_linear_from_weights consumes a (weights_dict,
-    # weight_key, scale_key) triple — feed it a one-shot dict so the
-    # factory plumbing is unchanged.
-    local = {"_w": w, "_s": s}
-    return LinearFactory.create_linear_from_weights(
-        local,
-        "_w",
-        "_s",
-        quant_config=_V4_FP8_BLOCK_CFG,
-    )
-
-
-def _v4_fp8_linear_from_dict(weights: dict, weight_key: str, scale_key: str):
-    """Backwards-compat bridge over ``_v4_fp8_linear`` for callers that
-    still pass a flat dict + keys.  Mutates ``weights[scale_key]`` to the
-    packed form so subsequent callers don't repack."""
-    w = weights[weight_key]
-    s = weights[scale_key]
-    if s.dtype == torch.float8_e8m0fnu:
-        s = _repack_v4_fp8_scale_to_int32(s)
-        weights[scale_key] = s
-    return _v4_fp8_linear(w, s)
 
 
 def _get_window_topk_idxs(
@@ -822,6 +774,8 @@ class PrefillQKV(NamedTuple):
 
 
 class AttentionFP8(nn.Module):
+    batch_invariant = False
+
     def __init__(
         self,
         layer_id: int,
@@ -850,6 +804,8 @@ class AttentionFP8(nn.Module):
         layer_weights: Optional[Dict[str, torch.Tensor]] = None,
         tp_size: int = 1,
         tp_rank: int = 0,
+        *,
+        hw_kernel_config=None,
     ):
         """``layer_weights`` is the framework's per-layer dict
         (``ModelWeights.weights[layer_id]``) keyed by ``W.v4_*`` enum.
@@ -867,6 +823,9 @@ class AttentionFP8(nn.Module):
         self.compress_ratio = compress_ratio
         self.eps = norm_eps
         self.softmax_scale = head_dim**-0.5
+        self.batch_invariant = (
+            getattr(hw_kernel_config, "batch_invariant", False) is True
+        )
         self.tp_size = tp_size
         self.tp_rank = tp_rank
         # Per-rank head + group counts (S7a). Sharding only kicks in when
@@ -933,7 +892,7 @@ class AttentionFP8(nn.Module):
             if row_slice is not None or col_slice is not None:
                 w = w.contiguous()
                 s = s.contiguous()
-            return _v4_fp8_linear(w, s)
+            return _v4_fp8_linear(w, s, hw_kernel_config)
 
         self.wq_a = _fp8_w_s(W.v4_attn_wq_a_w, W.v4_attn_wq_a_s)
         # wq_b is row-split along N (n_heads * head_dim)
@@ -966,9 +925,14 @@ class AttentionFP8(nn.Module):
         self.wo_a_w = wo_a_w
         self.wo_a_s = wo_a_s
         K_local = n_heads_local * head_dim // n_groups_local
-        _stk_w, _stk_s = _prepare_wo_a_stacked(
-            wo_a_w, wo_a_s, n_groups_local, o_lora_rank, K_local
-        )
+        if self.batch_invariant and wo_a_s.dtype == torch.int32:
+            # Framework-loaded packed scales already have one row per output.
+            _stk_w = wo_a_w.view(n_groups_local, o_lora_rank, K_local)
+            _stk_s = wo_a_s.reshape(n_groups_local, o_lora_rank, -1)
+        else:
+            _stk_w, _stk_s = _prepare_wo_a_stacked(
+                wo_a_w, wo_a_s, n_groups_local, o_lora_rank, K_local
+            )
         self.register_buffer("_wo_a_stk_w", _stk_w, persistent=False)
         self.register_buffer("_wo_a_stk_s", _stk_s, persistent=False)
 
@@ -1013,6 +977,7 @@ class AttentionFP8(nn.Module):
                 cp_role=_CP_ROLE_MAIN,
                 norm_eps=norm_eps,
                 compressor_weights=outer_cmp_weights,
+                **({"batch_invariant": True} if self.batch_invariant else {}),
             )
             self.compressor._profile_label = (
                 f"L{layer_id:02d}.csa_main"
@@ -1043,6 +1008,11 @@ class AttentionFP8(nn.Module):
                     max_seq_len=max_seq_len,
                     norm_eps=norm_eps,
                     layer_weights=layer_weights,
+                    **(
+                        {"hw_kernel_config": hw_kernel_config}
+                        if self.batch_invariant
+                        else {}
+                    ),
                 )
 
                 # Configure nested indexer compressor shape hint so warmup
@@ -1886,10 +1856,15 @@ class AttentionFP8(nn.Module):
                 n_heads=self.n_heads,
                 head_dim=self.head_dim,
                 softmax_scale=self.softmax_scale,
+                **({"batch_invariant": True} if self.batch_invariant else {}),
             )
         return self._fp8_decode_op
 
     def _rmsnorm_weighted(self, x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+        if self.batch_invariant:
+            from rtp_llm.models_py.determinism.quantized_linear import rms_norm
+
+            return rms_norm(x, weight, self.eps)
         # Lazy import: this module is also imported where flashinfer is
         # absent (e.g. ppu/rocm), so importing it must not require flashinfer.
         import flashinfer
@@ -1913,7 +1888,8 @@ class AttentionFP8(nn.Module):
 
     def _can_reuse_qkv_input_quant(self) -> bool:
         return (
-            hasattr(self.wq_a, "quantize_input")
+            not self.batch_invariant
+            and hasattr(self.wq_a, "quantize_input")
             and hasattr(self.wq_a, "forward_quantized")
             and hasattr(self.wkv, "forward_quantized")
             and getattr(self.wq_a, "K", None) == getattr(self.wkv, "K", None)
@@ -1976,6 +1952,21 @@ class AttentionFP8(nn.Module):
         ``"bhr,hdr->bhd"`` + recipe ``(1, 1, 128)`` for SM100 UE8M0)."""
         M, G, _K = o_fp8.shape
         R = self.o_lora_rank
+        if self.batch_invariant:
+            from rtp_llm.models_py.determinism.quantized_linear import _launch_linear
+
+            projections = [
+                _launch_linear(
+                    o_fp8[:, group],
+                    self._wo_a_stk_w[group],
+                    None,
+                    torch.bfloat16,
+                    o_scale[:, group],
+                    self._wo_a_stk_s[group],
+                )
+                for group in range(G)
+            ]
+            return torch.stack(projections, dim=1).view(B, S, G, R)
         out = torch.empty(M, G, R, dtype=torch.bfloat16, device=o_fp8.device)
         deep_gemm.fp8_einsum(
             "bhr,hdr->bhd",
@@ -2206,14 +2197,16 @@ class AttentionFP8(nn.Module):
         swa_global = attn_metadata.swa_global_slots[:T]
         swa_topk_3d = swa_global.view(bsz, q_len, win).contiguous()
 
-        sched_meta = get_or_build_sched_meta(
-            attn_metadata,
-            batch_size=bsz,
-            q_len=q_len,
-            num_heads=self.n_heads,
-            topk=self.window_size,
-            extra_attn_type=None,
-        )
+        sched_meta = None
+        if not self.batch_invariant:
+            sched_meta = get_or_build_sched_meta(
+                attn_metadata,
+                batch_size=bsz,
+                q_len=q_len,
+                num_heads=self.n_heads,
+                topk=self.window_size,
+                extra_attn_type=None,
+            )
         # opt_flash_mla: pass the per-request SWA effective length so FlashMLA
         # scans only ``min(window, seq_len)`` instead of the full window width.
         swa_topk_length = (
@@ -2423,14 +2416,16 @@ class AttentionFP8(nn.Module):
         swa_topk_3d = swa_global.view(bsz, q_len, win).contiguous()
         cmp_topk_3d = cmp_global.view(bsz, q_len, K_cmp).contiguous()
 
-        sched_meta = get_or_build_sched_meta(
-            attn_metadata,
-            batch_size=bsz,
-            q_len=q_len,
-            num_heads=self.n_heads,
-            topk=win,
-            extra_attn_type=cmp_attn_type,
-        )
+        sched_meta = None
+        if not self.batch_invariant:
+            sched_meta = get_or_build_sched_meta(
+                attn_metadata,
+                batch_size=bsz,
+                q_len=q_len,
+                num_heads=self.n_heads,
+                topk=win,
+                extra_attn_type=cmp_attn_type,
+            )
         # opt_flash_mla: pass per-request effective lengths so FlashMLA scans
         # only the true SWA / compressed widths. ``extra_topk_length`` keyed by
         # this layer's compress_ratio (4=CSA capped at index_topk, 128=HCA dense)
@@ -2668,6 +2663,12 @@ class AttentionFP8(nn.Module):
         qkv = self._ensure_prefill_kv_full(qkv, common)
         with record_function_range("dsv4.fp8.attn.prefill.swa_write"):
             self._prefill_write_swa_fp8_paged(common, qkv.kv_full)
+        if self.batch_invariant:
+            from rtp_llm.models_py.modules.dsv4.fp8._swa_kv_insert_triton import (
+                roundtrip_swa_kv,
+            )
+
+            qkv = qkv._replace(kv_full=roundtrip_swa_kv(qkv.kv_full))
 
         if self.compress_ratio == 0:
             with record_function_range("dsv4.fp8.attn.prefill.path_swa"):
@@ -5424,9 +5425,14 @@ class AttentionFP8(nn.Module):
             int(freqs_cis.shape[0]) == s_q
         ), f"RoPE rows ({freqs_cis.shape[0]}) != Q rows ({s_q})"
 
-        from rtp_llm.models_py.utils.flash_mla_legacy import (
-            flash_mla_sparse_fwd,  # type: ignore[import-not-found]
-        )
+        if self.batch_invariant:
+            from rtp_llm.models_py.modules.dsv4.fp8.batch_invariant_attention import (
+                indexed_attention,
+            )
+        else:
+            from rtp_llm.models_py.utils.flash_mla_legacy import (
+                flash_mla_sparse_fwd,  # type: ignore[import-not-found]
+            )
 
         chunk_rows = min(_FLASH_MLA_SPARSE_Q_CHUNK, s_q)
         if out is None:
@@ -5447,14 +5453,24 @@ class AttentionFP8(nn.Module):
         for start in range(0, s_q, chunk_rows):
             end = min(start + chunk_rows, s_q)
             with record_function_range(profile_name):
-                o_part, _, _ = flash_mla_sparse_fwd(
-                    q=q[start:end],
-                    kv=kv,
-                    indices=indices[start:end],
-                    sm_scale=self.softmax_scale,
-                    attn_sink=self.attn_sink,
-                    topk_length=topk_length[start:end],
-                )
+                if self.batch_invariant:
+                    o_part = indexed_attention(
+                        q[start:end],
+                        kv,
+                        indices[start:end],
+                        topk_length[start:end],
+                        self.attn_sink,
+                        self.softmax_scale,
+                    )
+                else:
+                    o_part, _, _ = flash_mla_sparse_fwd(
+                        q=q[start:end],
+                        kv=kv,
+                        indices=indices[start:end],
+                        sm_scale=self.softmax_scale,
+                        attn_sink=self.attn_sink,
+                        topk_length=topk_length[start:end],
+                    )
             with record_function_range("dsv4.fp8.attn.prefill.output_proj"):
                 self._prefill_output_proj_into(
                     o_part,

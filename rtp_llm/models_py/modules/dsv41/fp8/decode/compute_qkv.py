@@ -92,7 +92,8 @@ def decode_compute_qkv(
         try_project_quantized_qkv,
     )
 
-    quantized_qkv = try_project_quantized_qkv(attn, x)
+    batch_invariant = getattr(attn, "batch_invariant", False)
+    quantized_qkv = None if batch_invariant else try_project_quantized_qkv(attn, x)
     qr_quantized = None if quantized_qkv is None else quantized_qkv[2]
     fused_qkv = attn._try_fused_qr_kv(x) if quantized_qkv is None else quantized_qkv[:2]
     # Q path; fused KV remains a view until its strided RMSNorm/RoPE below.
@@ -110,6 +111,7 @@ def decode_compute_qkv(
     raw_kv = attn._lin(attn.wkv, x) if fused_qkv is None else fused_qkv[1]
     if (
         getattr(attn, "skip_post_q_norm", False)
+        and not batch_invariant
         and rd == 64
         and swa_pool is not None
         and swa_slots is not None

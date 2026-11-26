@@ -31,7 +31,7 @@ def read_vocab_size(checkpoint):
 def make_prompt(tokenizer, length, lead):
     instruction = tokenizer.encode(
         "\nContinue with the text: red blue green yellow\n", add_special_tokens=False
-    ).ids
+    ).ids[-length:]
     text = tokenizer.encode(lead * (length + 1), add_special_tokens=False).ids
     prompt = text[: length - len(instruction)] + instruction
     assert len(prompt) == length
@@ -153,7 +153,14 @@ def real_rows(batch):
     return [row for row in batch["requests"] if not row.get("is_fake")]
 
 
-def verify_execution(log_dir, offsets, neighbors=(), target_first=True, chunked=False):
+def verify_execution(
+    log_dir,
+    offsets,
+    neighbors=(),
+    target_first=True,
+    chunked=False,
+    target_length=TARGET_LENGTH,
+):
     # Require the full prefill history so an async log flush from the previous
     # request cannot satisfy the check.
     deadline = time.monotonic() + 10
@@ -162,7 +169,7 @@ def verify_execution(log_dir, offsets, neighbors=(), target_first=True, chunked=
         for batch in read_records(log_dir, offsets):
             rows = real_rows(batch)
             for i, row in enumerate(rows):
-                if row["input_len"] == TARGET_LENGTH:
+                if row["input_len"] == target_length:
                     targets[row["request_id"]].append((i, rows))
 
         for records in targets.values():
@@ -177,11 +184,23 @@ def verify_execution(log_dir, offsets, neighbors=(), target_first=True, chunked=
                 lengths = {peer["input_len"] for peer in rows if peer["phase"] == phase}
                 if neighbors and i == wanted_row and set(neighbors) <= lengths:
                     mixed_phases.add(phase)
-            grants = [size for _, size in sorted(prefill)]
-            expected = [193]
-            if chunked:
-                expected = [192, 1] if target_first else [128, 65]
-            if grants != expected:
+            covered = 0
+            grants = []
+            for start, size in sorted(prefill):
+                if start != covered or size <= 0:
+                    break
+                covered += size
+                grants.append(size)
+            if covered != target_length or len(grants) != len(prefill):
+                continue
+            if (len(grants) > 1) != chunked:
+                continue
+            # Preserve the exact grants from the original 64-token-page cases.
+            if (
+                chunked
+                and target_length == TARGET_LENGTH
+                and grants != ([192, 1] if target_first else [128, 65])
+            ):
                 continue
             if neighbors:
                 if mixed_phases != {"prefill", "decode"}:
@@ -222,6 +241,12 @@ def main():
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--address", default="127.0.0.1:19481")
     parser.add_argument(
+        "--target-length",
+        type=int,
+        default=TARGET_LENGTH,
+        help="Measured prompt length. Use 2305 to exercise compressed DeepSeek top-k.",
+    )
+    parser.add_argument(
         "--peer-address",
         help="Also compare the target on a second DP worker while the first decodes",
     )
@@ -229,16 +254,22 @@ def main():
     budget = parser.add_mutually_exclusive_group(required=True)
     budget.add_argument("--save", type=Path, help="Save the unchunked solo reference")
     budget.add_argument(
-        "--reference", type=Path, help="Compare budget 192 to this file"
+        "--reference",
+        type=Path,
+        help="Compare chunked execution to this solo reference",
     )
     args = parser.parse_args()
     if args.peer_address == args.address:
         parser.error("--peer-address must point to another DP worker")
+    if args.target_length <= SHORT_LENGTH or args.target_length in (37, LONG_LENGTH):
+        parser.error(
+            "--target-length must exceed the short request and differ from its peers"
+        )
     chunked = args.reference is not None
     tokenizer = Tokenizer.from_file(str(args.checkpoint / "tokenizer.json"))
     vocab_size = read_vocab_size(args.checkpoint)
     fixed = tokenizer.encode(CONTINUATION, add_special_tokens=False).ids
-    target = make_prompt(tokenizer, TARGET_LENGTH, " The ocean is calm.")
+    target = make_prompt(tokenizer, args.target_length, " The ocean is calm.")
     short = make_prompt(tokenizer, SHORT_LENGTH, " Good.")
     long = make_prompt(tokenizer, LONG_LENGTH, " An oak grew near the hill.")
     blocker = make_prompt(tokenizer, 37, " Write a long story.")
@@ -251,7 +282,9 @@ def main():
             len(fixed),
             vocab_size,
         )
-        verify_execution(args.log_dir, offsets, chunked=chunked)
+        verify_execution(
+            args.log_dir, offsets, chunked=chunked, target_length=args.target_length
+        )
         np.testing.assert_array_equal(solo["tokens"], fixed)
         baseline = solo
         if chunked:
@@ -270,7 +303,14 @@ def main():
             target_first = order[0] is target
             offsets = record_offsets(args.log_dir)
             result = run_mixed(stub, blocker, order, target, len(fixed), vocab_size)
-            verify_execution(args.log_dir, offsets, neighbors, target_first, chunked)
+            verify_execution(
+                args.log_dir,
+                offsets,
+                neighbors,
+                target_first,
+                chunked,
+                args.target_length,
+            )
             compare(baseline, result, f"target {'first' if target_first else 'last'}")
 
         if args.peer_address:

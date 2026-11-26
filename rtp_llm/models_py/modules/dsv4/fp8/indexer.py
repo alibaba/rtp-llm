@@ -228,6 +228,8 @@ class IndexerFP8(PoolBackedModule):
     """FP8 lightning indexer. DeepGEMM-only score; nested
     ``CompressorFP8(head_dim=128)`` writes the 132B pool."""
 
+    batch_invariant = False
+
     def __init__(
         self,
         dim: int,
@@ -241,6 +243,8 @@ class IndexerFP8(PoolBackedModule):
         max_seq_len: int,
         norm_eps: float = 1e-6,
         layer_weights: Optional[Dict[str, torch.Tensor]] = None,
+        *,
+        hw_kernel_config=None,
     ):
         """``layer_weights`` is the framework's per-layer dict
         (``ModelWeights.weights[layer_id]``), keyed by ``W.v4_*`` enum.
@@ -269,13 +273,17 @@ class IndexerFP8(PoolBackedModule):
         self.q_lora_rank = q_lora_rank
         self.softmax_scale = self.head_dim**-0.5
         self.compress_ratio = compress_ratio
+        self.batch_invariant = (
+            getattr(hw_kernel_config, "batch_invariant", False) is True
+        )
 
-        from rtp_llm.models_py.modules.dsv4.fp8.attention import _v4_fp8_linear
+        from rtp_llm.models_py.modules.dsv4.utils import _v4_fp8_linear
         from rtp_llm.utils.model_weight import W
 
         self.wq_b = _v4_fp8_linear(
             layer_weights[W.v4_indexer_wq_b_w],
             layer_weights[W.v4_indexer_wq_b_s],
+            **({"hw_kernel_config": hw_kernel_config} if self.batch_invariant else {}),
         )
         # weights_proj is plain BF16. Pre-fold the runtime ``softmax_scale *
         # n_heads^-0.5`` into the weight at load time so prefill / decode can
@@ -303,6 +311,7 @@ class IndexerFP8(PoolBackedModule):
             norm_eps=norm_eps,
             rotate=True,
             compressor_weights=inner_cmp_weights,
+            **({"batch_invariant": True} if self.batch_invariant else {}),
         )
         self.max_batch_size = max_batch_size
         self._kv_cache_t = max_seq_len // compress_ratio
@@ -541,6 +550,40 @@ class IndexerFP8(PoolBackedModule):
     # --------------------------------------------------------------
     # Decode (vectorized over B)
     # --------------------------------------------------------------
+    def _project_weights(self, x: torch.Tensor) -> torch.Tensor:
+        if self.batch_invariant:
+            from rtp_llm.models_py.determinism.quantized_linear import linear
+
+            return linear(x, self.weights_proj)
+        return F.linear(x, self.weights_proj)
+
+    def _select_batch_invariant(
+        self,
+        q: torch.Tensor,
+        weights: torch.Tensor,
+        lengths: torch.Tensor,
+        request_ids: torch.Tensor,
+        pages: torch.Tensor,
+        out: torch.Tensor,
+    ) -> torch.Tensor:
+        from rtp_llm.models_py.triton_kernels.legacy_fp8_indexer_score import (
+            packed_fp8_paged_mqa_topk,
+        )
+
+        rows = lengths.numel()
+        cache = self._kv_pool_view.view(-1, self._kv_eb, 132)
+        selected = packed_fp8_paged_mqa_topk(
+            q.reshape(rows, self.n_heads, INDEXER_HEAD_DIM),
+            cache,
+            weights.reshape(rows, self.n_heads),
+            request_ids.reshape(-1),
+            lengths.reshape(-1),
+            pages,
+            self.index_topk,
+        )
+        out.view(rows, self.index_topk).fill_(-1)[:, : selected.size(1)].copy_(selected)
+        return out
+
     def forward_decode_vectorized(
         self,
         x: torch.Tensor,
@@ -584,7 +627,7 @@ class IndexerFP8(PoolBackedModule):
                     bsz, q_len, 1
                 )
             # ``softmax_scale * n_heads^-0.5`` is pre-folded into weights_proj at __init__.
-            weights = F.linear(x, self.weights_proj)
+            weights = self._project_weights(x)
 
             # Always use DeepGEMM (FP8 path). Decode uses a static score
             # width from the cache/block-table upper bound; replay updates
@@ -604,6 +647,18 @@ class IndexerFP8(PoolBackedModule):
             )
             ctx_lens_2d = compressed_len.view(bsz, q_len)
             bt_i32 = self._kv_block_table[:bsz].to(torch.int32).contiguous()
+            if self.batch_invariant:
+                request_ids = torch.arange(bsz, device=x.device)[:, None].expand(
+                    bsz, q_len
+                )
+                return self._select_batch_invariant(
+                    q_fp8,
+                    w_fold,
+                    ctx_lens_2d,
+                    request_ids,
+                    bt_i32,
+                    out_topk_buffer,
+                )
             # ``_kv_pool_view`` is 3D ``[num_blocks, eb, 132]`` from production
             # (set by ``Attention._set_compressor_pool_context``); standalone
             # tests still pass flat 2D. Flatten to ``[total_slots, 132]``
@@ -1083,7 +1138,7 @@ class IndexerFP8(PoolBackedModule):
                 )
             # ``softmax_scale * n_heads^-0.5`` is pre-folded into weights_proj at __init__.
             with record_function_range("dsv4.fp8.indexer.prefill.weights_proj"):
-                weights = F.linear(x, self.weights_proj)
+                weights = self._project_weights(x)
 
             q_for_quant = q if q.dim() == 4 else q.unsqueeze(0)
             w_for_quant = weights if weights.dim() == 3 else weights.unsqueeze(0)
@@ -1095,10 +1150,22 @@ class IndexerFP8(PoolBackedModule):
                     self.rope_head_dim,
                 )
             del q, weights, q_for_quant, w_for_quant
+            if self.batch_invariant:
+                meta = attention_inputs.compressor_meta
+                request_ids = meta.token_to_req if meta is not None else None
+                if request_ids is None:
+                    request_ids = torch.arange(attention_inputs.bsz, device=x.device)
+                    request_ids = request_ids.repeat_interleave(attention_inputs.seqlen)
+                return self._select_batch_invariant(
+                    q_fp8,
+                    w_fold,
+                    attention_inputs.ke - attention_inputs.ks,
+                    request_ids,
+                    attention_inputs.block_table_i32,
+                    torch.empty(out_shape, dtype=torch.int32, device=x.device),
+                )
 
-            assert (
-                has_fp8_mqa_logits()
-            ), (
+            assert has_fp8_mqa_logits(), (
                 "FP8 prefill kernel stack unavailable — IndexerFP8 needs either "
                 "deep_gemm.fp8_mqa_logits or the group-128 Triton fallback"
             )
@@ -1301,7 +1368,7 @@ class IndexerFP8(PoolBackedModule):
             with record_function_range("dsv4.fp8.indexer.prefill.nested_compressor"):
                 self.compressor.finish_prefill(nested_pending)
             with record_function_range("dsv4.fp8.indexer.prefill.weights_proj"):
-                weights = F.linear(x, self.weights_proj)
+                weights = self._project_weights(x)
 
             q_for_quant = q if q.dim() == 4 else q.unsqueeze(0)
             w_for_quant = weights if weights.dim() == 3 else weights.unsqueeze(0)
@@ -1314,9 +1381,7 @@ class IndexerFP8(PoolBackedModule):
                 )
             del q, weights, q_for_quant, w_for_quant
 
-            assert (
-                has_fp8_mqa_logits()
-            ), (
+            assert has_fp8_mqa_logits(), (
                 "FP8 prefill kernel stack unavailable — IndexerFP8 needs either "
                 "deep_gemm.fp8_mqa_logits or the group-128 Triton fallback"
             )

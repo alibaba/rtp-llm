@@ -190,6 +190,13 @@ py_library(
 )
 
 py_library(
+    name = "batch_invariant_quantized_linear",
+    srcs = ["determinism/quantized_linear.py"],
+    deps = [":kernels", "//rtp_llm:ops", "//rtp_llm:torch", "//rtp_llm:triton"],
+    visibility = ["//rtp_llm/models_py/triton_kernels:__pkg__"],
+)
+
+py_library(
     name = "batch_invariant_config",
     srcs = ["determinism/batch_invariant_config.py"],
     deps = ["//rtp_llm:device", "//rtp_llm:ops", "//rtp_llm:torch", "//rtp_llm:utils"],
@@ -218,6 +225,7 @@ py_library(
         ":kernels",
         ":tile_kernels_mhc",
         ":determinism",
+        ":batch_invariant_quantized_linear",
         "//rtp_llm:warmup",
         "//rtp_llm/models_py/kernel_tuning",
         "//rtp_llm/resident_weights",

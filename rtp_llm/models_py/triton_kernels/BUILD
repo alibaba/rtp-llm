@@ -58,7 +58,10 @@ py_library(
 py_library(
     name = "moe",
     srcs = glob(["moe/*.py"]),
-    deps = ["//rtp_llm/models_py:utils"],
+    deps = [
+        "//rtp_llm/models_py:utils",
+        "//rtp_llm/models_py:batch_invariant_quantized_linear",
+    ],
     visibility = ["//visibility:public"],
 )
 

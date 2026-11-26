@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import torch
 
-from rtp_llm.models_py.modules.dsv41.block import Block
+from rtp_llm.models_py.modules.dsv41.block import Block, _prefill_fast_norm
 from rtp_llm.models_py.modules.dsv41.hc import decode_transition as transition
 from rtp_llm.models_py.modules.dsv41.hc.delayed import DelayedHCHead, DelayedHCUnit
 
@@ -138,6 +138,15 @@ class CrossLayerMHCCPUTest(unittest.TestCase):
     def test_two_transitions_and_final_delayed_head(self):
         self.assertEqual(self.compare(backend=reference_transition), 2)
 
+    def test_batch_invariant_disables_cross_layer_mhc_fusion(self):
+        layer, next_layer = make_blocks(count=2)
+        self.assertTrue(transition.can_defer_decode_post(layer, next_layer, False))
+        layer.ffn_hc.batch_invariant = True
+        self.assertFalse(transition.can_defer_decode_post(layer, next_layer, False))
+        layer.ffn_hc.batch_invariant = False
+        next_layer.attn_hc.batch_invariant = True
+        self.assertFalse(transition.can_defer_decode_post(layer, next_layer, False))
+
     def test_attention_override_uses_prepared_input(self):
         self.assertEqual(
             self.compare(backend=reference_transition, attn_fn=lambda x: x * 0.5), 2
@@ -226,6 +235,25 @@ class CrossLayerMHCCudaTest(unittest.TestCase):
             rms = (got.float() - ref.float()).square().mean().sqrt()
             bound = 1e-5 + 0.01 * ref.float().square().mean().sqrt()
             self.assertLessEqual(rms.item(), bound.item())
+
+    @torch.no_grad()
+    def test_first_prefill_readout_preserves_single_token_residual(self):
+        block = make_blocks(5120, "cuda", count=1)[0]
+        block.attn_hc.batch_invariant = block.attn_norm.batch_invariant = True
+        prompt = torch.randn(33, 4, 5120, dtype=torch.bfloat16, device="cuda") * 4
+
+        def run(rows):
+            residual = rows.clone()
+            readout, post, comb = block.attn_hc.pre(residual)
+            normalized = _prefill_fast_norm(block.attn_norm, readout)
+            self.assertTrue(torch.equal(residual, rows))
+            self.assertFalse(torch.equal(normalized, rows[:, 0]))
+            return normalized, block.attn_hc.post(normalized, residual, post, comb)
+
+        full = run(prompt)
+        tail = run(prompt[-1:])
+        for all_rows, one_row in zip(full, tail):
+            self.assertTrue(torch.equal(all_rows[-1:], one_row))
 
     @torch.no_grad()
     def test_proposal_and_verify_layouts(self):

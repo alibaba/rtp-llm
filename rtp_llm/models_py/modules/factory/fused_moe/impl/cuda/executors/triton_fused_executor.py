@@ -170,14 +170,12 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
         output = routes.view(M, top_k, K).sum(dim=1)
         return CombineForwardPayload(fused_expert_output=output)
 
-    def _batch_invariant_experts(
-        self, hidden_states, topk_ids, topk_weights
-    ) -> torch.Tensor:
+    def _projection_plan(self, hidden_states, topk_ids, topk_weights):
         from rtp_llm.models_py.determinism.batch_invariant import (
             batch_invariant_moe_plan,
         )
 
-        tile, chunk_size = batch_invariant_moe_plan(
+        return batch_invariant_moe_plan(
             hidden_states,
             self.w1,
             self.w2,
@@ -185,6 +183,11 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
             topk_weights,
             ep_size=self.ep_size,
         )
+
+    def _batch_invariant_experts(
+        self, hidden_states, topk_ids, topk_weights
+    ) -> torch.Tensor:
+        tile, chunk_size = self._projection_plan(hidden_states, topk_ids, topk_weights)
         output = hidden_states.new_empty(hidden_states.shape)
         with torch.cuda.device_of(hidden_states):
             for start in range(0, hidden_states.size(0), chunk_size):
@@ -220,7 +223,7 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
         )
 
         up_gate = hidden_states.new_empty((M * top_k, self.N))
-        invoke_fused_moe_kernel(
+        self._invoke_projection(
             hidden_states,
             self.w1,
             up_gate,
@@ -233,12 +236,11 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
             compute_type=compute_type,
         )
 
-        activated = hidden_states.new_empty((M * top_k, self.inter_size))
-        silu_and_mul(activated, up_gate)
+        activated = self._activate(up_gate)
         del up_gate
 
         routes = hidden_states.new_empty((M * top_k, K))
-        invoke_fused_moe_kernel(
+        self._invoke_projection(
             activated,
             self.w2,
             routes,
@@ -252,3 +254,105 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
         )
 
         return routes
+
+    def _activate(self, up_gate):
+        activated = up_gate.new_empty((up_gate.size(0), self.inter_size))
+        return silu_and_mul(activated, up_gate)
+
+    def _invoke_projection(self, *args, **kwargs):
+        invoke_fused_moe_kernel(*args, **kwargs)
+
+
+class BatchInvariantMXFP4Executor(TritonFusedMoeExecutor):
+    """Native DeepSeek E2M1 expert weights with per-token FP8 activations."""
+
+    @classmethod
+    def check_conditions(cls, checker, config):
+        checker.check(config.moe_quant_method == "FP8_FP4")
+        checker.check(config.model_type in ("deepseek_v4", "deepseek_v41"))
+        checker.check(config.data_type == torch.bfloat16)
+
+    def __init__(self, config, quant_config, weights):
+        super().__init__(config, quant_config, weights)
+        self.K *= 2
+        self.group_size = 32 if config.model_type == "deepseek_v41" else 128
+        if (
+            not self._batch_invariant
+            or config.model_type not in ("deepseek_v4", "deepseek_v41")
+            or config.tp_size != config.ep_size
+            or config.dp_size != 1
+            or config.tp_rank != config.ep_rank
+            or self.E != self.num_experts_per_partition
+            or self.K != config.hidden_size
+            or self.inter_size != config.moe_inter_dim
+            or self.N != 2 * self.inter_size
+            or self.K % self.group_size
+            or self.inter_size % self.group_size
+            or self.w2.shape != (self.E, self.K, self.inter_size // 2)
+        ):
+            raise ValueError(
+                "DeepSeek MXFP4 requires matching TP/EP groups and local expert shapes"
+            )
+        self.w1_scales = self._weight_scales(self.w1, weights[W.moe_s1])
+        self.w2_scales = self._weight_scales(self.w2, weights[W.moe_s2])
+        self.tile = {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": 32,
+            "GROUP_SIZE_M": 1,
+            "num_warps": 4,
+        }
+
+    @staticmethod
+    def _weight_scales(weight, scales):
+        if (
+            weight.dtype != torch.int8
+            or scales.dtype not in (torch.uint8, torch.float8_e8m0fnu)
+            or weight.device != scales.device
+            or scales.shape != (*weight.shape[:-1], weight.size(-1) // 16)
+        ):
+            raise ValueError(
+                "DeepSeek routed weights require packed E2M1 and group-32 UE8M0 scales"
+            )
+        return scales.view(torch.uint8)
+
+    def _projection_plan(self, hidden_states, topk_ids, topk_weights):
+        if hidden_states.dtype != torch.bfloat16 or hidden_states.size(1) != self.K:
+            raise ValueError(
+                "MXFP4 experts require BF16 hidden states of the checkpoint width"
+            )
+        # Limit routed BF16 intermediates and FP8 activation buffers during prefill.
+        bytes_per_token = topk_ids.size(1) * (6 * self.inter_size + 2 * self.K)
+        return self.tile, max(1, (64 * 1024 * 1024) // bytes_per_token)
+
+    def _activate(self, gate_up):
+        from rtp_llm.models_py.triton_kernels.moe.silu_mul_split import silu_mul_split
+
+        first, second = gate_up.chunk(2, dim=-1)
+        gate, up = (
+            (first, second)
+            if self.config.moe_w1_layout == "gate_up"
+            else (second, first)
+        )
+        return silu_mul_split(
+            gate.float().contiguous(), up.float().contiguous(), self.config.swiglu_limit
+        ).to(gate_up.dtype)
+
+    def _invoke_projection(self, x, weight, *args, **kwargs):
+        from rtp_llm.models_py.determinism.quantized_linear import quantize_fp8_blocks
+
+        quantized, scales = quantize_fp8_blocks(
+            x,
+            True,
+            self.group_size,
+            eps=torch.finfo(torch.float32).tiny if self.group_size == 32 else 1e-4,
+        )
+        invoke_fused_moe_kernel(
+            quantized,
+            weight,
+            *args,
+            **kwargs,
+            A_scale=scales,
+            B_scale=self.w1_scales if weight is self.w1 else self.w2_scales,
+            mxfp4_activation_group_size=self.group_size,
+        )

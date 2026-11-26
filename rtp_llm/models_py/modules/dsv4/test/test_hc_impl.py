@@ -19,6 +19,49 @@ def _weights(hc: int, dim: int, device: str = "cpu"):
 
 
 class TestHCImpl(unittest.TestCase):
+
+    @unittest.skipUnless(
+        torch.cuda.is_available() and torch.cuda.get_device_capability()[0] == 10,
+        "requires NVIDIA SM10x",
+    )
+    @torch.inference_mode()
+    def test_batch_invariant_mhc_matches_solo_at_different_token_positions(self):
+        from rtp_llm.models_py.modules.dsv41.hc.delayed import DelayedHCUnit
+
+        for dim, make_unit in ((4096, build_hc_unit), (5120, DelayedHCUnit)):
+            with self.subTest(dim=dim):
+                unit = make_unit(
+                    *_weights(4, dim, "cuda"),
+                    dim=dim,
+                    hc_mult=4,
+                    hc_sinkhorn_iters=20,
+                    norm_eps=1e-6,
+                    hc_eps=1e-6,
+                    batch_invariant=True,
+                )
+                rows = torch.randn(67, 4, dim, device="cuda", dtype=torch.bfloat16)
+                target = rows[0:1].clone()
+
+                def run(residual, index):
+                    layer_input, post, comb = unit.pre(residual)
+                    outputs = [layer_input, post, comb]
+                    if isinstance(unit, DelayedHCUnit):
+                        outputs.append(unit.pre_mix_out)
+                    result = [
+                        value[index].clone().contiguous().view(torch.uint8)
+                        for value in outputs
+                    ]
+                    hidden = unit.post(layer_input * 0.25, residual, post, comb)
+                    result.append(hidden[index].contiguous().view(torch.uint8))
+                    return result
+
+                expected = run(target.clone(), 0)
+                for index in (0, 33, 66):
+                    mixed = rows.clone()
+                    mixed[index].copy_(target[0])
+                    for actual, solo in zip(run(mixed, index), expected):
+                        self.assertTrue(torch.equal(actual, solo), f"token row {index}")
+
     def test_factory_default_tilelang_fails_fast_on_cpu(self) -> None:
         hc, dim = 4, 16
         fn, base, scale = _weights(hc, dim)

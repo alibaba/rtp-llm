@@ -263,6 +263,15 @@ def dequantize_swa_k_cache(
     return out
 
 
+def roundtrip_swa_kv(key: torch.Tensor) -> torch.Tensor:
+    """Apply the V4.1 cache rounding to fresh keys, including their RoPE tail."""
+    rows = key.size(0)
+    slots = torch.arange(rows, device=key.device, dtype=torch.int64)
+    packed = torch.empty((rows, 1, ENTRY_BYTES), device=key.device, dtype=torch.uint8)
+    quantize_and_insert_swa_k_cache(key, packed, slots)
+    return dequantize_swa_k_cache(packed, slots)
+
+
 def dequantize_and_gather_k_cache_slots(
     out: torch.Tensor,
     k_cache: torch.Tensor,

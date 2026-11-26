@@ -1,6 +1,6 @@
 """DSV4 SWA FP8 KV insert — vLLM-aligned Triton kernel.
 
-Vendored verbatim (signature + math) from vLLM
+Adapted from vLLM
 ``vllm/v1/attention/ops/deepseek_v4_ops/cache_utils.py``
 (``quantize_and_insert_k_kernel`` / ``quantize_and_insert_k_cache``).
 
@@ -39,6 +39,15 @@ def _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS: tl.constexpr) -> None:
             is_pure=False,
             pack=1,
         )
+
+
+@triton.jit
+def _quantize_nope_tile(x, fp8_max: tl.constexpr):
+    block_max = tl.maximum(tl.max(tl.abs(x), axis=0), 1e-4)
+    exponent = tl.ceil(tl.log2(block_max / fp8_max))
+    scale = tl.exp2(exponent)
+    quantized = tl.clamp(x / scale, -fp8_max, fp8_max).to(tl.float8e4nv)
+    return quantized, exponent
 
 
 @triton.jit(do_not_specialize=["num_tokens", "block_stride", "num_cache_blocks"])
@@ -107,19 +116,7 @@ def _quantize_and_insert_k_kernel(
 
             x = tl.load(input_row_ptr + offsets, mask=mask, other=0.0)
 
-            abs_x = tl.abs(x)
-            block_max = tl.max(abs_x, axis=0)
-            block_max = tl.maximum(block_max, 1e-4)  # match CUDA fmaxf(amax, 1e-4)
-
-            # UE8M0: scale = 2^ceil(log2(block_max / fp8_max))
-            raw_scale = block_max / fp8_max
-            log_scale = tl.log2(raw_scale)
-            exponent = tl.ceil(log_scale)
-            scale = tl.exp2(exponent)
-
-            x_scaled = x / scale
-            x_clamped = tl.clamp(x_scaled, -fp8_max, fp8_max)
-            x_fp8 = x_clamped.to(tl.float8e4nv)
+            x_fp8, exponent = _quantize_nope_tile(x, fp8_max)
             x_uint8 = x_fp8.to(tl.uint8, bitcast=True)
 
             tl.store(token_fp8_ptr + offsets, x_uint8, mask=mask)
@@ -149,6 +146,42 @@ _QUANT_BLOCK_SIZE = 64
 _FP8_MAX = 448.0
 _TOKEN_DATA_SIZE = _TOKEN_FP8_DIM + _TOKEN_BF16_DIM * 2  # 576
 _INPUT_DIM = 512
+
+
+@triton.jit
+def _roundtrip_swa_kv_kernel(
+    key,
+    output,
+    stride: tl.constexpr,
+    quant_block: tl.constexpr,
+    fp8_dim: tl.constexpr,
+    fp8_max: tl.constexpr,
+):
+    token = tl.program_id(0).to(tl.int64)
+    start = tl.program_id(1) * quant_block
+    offset = start + tl.arange(0, quant_block)
+    source = tl.load(key + token * stride + offset)
+    if start < fp8_dim:
+        quantized, exponent = _quantize_nope_tile(source, fp8_max)
+        exponent = tl.clamp(exponent + 127.0, 0.0, 255.0) - 127.0
+        source = (quantized.to(tl.float32) * tl.exp2(exponent)).to(tl.bfloat16)
+    tl.store(output + token * (fp8_dim + quant_block) + offset, source)
+
+
+def roundtrip_swa_kv(key: torch.Tensor) -> torch.Tensor:
+    """Apply the cache's NoPE rounding to fresh, possibly unpaged keys."""
+    output = torch.empty(key.shape, dtype=key.dtype, device=key.device)
+    if key.size(0):
+        _roundtrip_swa_kv_kernel[(key.size(0), _INPUT_DIM // _QUANT_BLOCK_SIZE)](
+            key,
+            output,
+            key.stride(0),
+            _QUANT_BLOCK_SIZE,
+            _TOKEN_FP8_DIM,
+            _FP8_MAX,
+            num_warps=2,
+        )
+    return output
 
 
 def quantize_and_insert_k_cache(

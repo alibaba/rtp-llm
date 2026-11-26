@@ -1,5 +1,6 @@
-"""Validate and apply startup settings for batch-invariant Qwen3 inference."""
+"""Validate and apply startup settings for batch-invariant text generation."""
 
+import os
 from typing import TYPE_CHECKING
 
 import torch
@@ -24,6 +25,29 @@ if TYPE_CHECKING:
 def _supported_topologies(model: "ModelConfig") -> tuple[tuple[int, int, int], ...]:
     """Return supported (TP, DP, EP) layouts for the unsharded checkpoint."""
     attn = model.attn_config
+    if model.model_type in ("deepseek_v4", "deepseek_v41"):
+        v41 = model.model_type == "deepseek_v41"
+        # These are the unsharded Flash checkpoints. Pro uses the same V4
+        # registration, with different dimensions and expert sharding.
+        expected = (40, 5120, 384, 2304) if v41 else (43, 4096, 256, 2048)
+        if (
+            (
+                model.num_layers,
+                model.hidden_size,
+                model.expert_num,
+                model.moe_inter_size,
+            )
+            != expected
+            or model.moe_k != 6
+            or model.hc_mult != 4
+            or (attn.head_num, attn.kv_head_num, attn.size_per_head) != (64, 1, 512)
+            or (attn.rope_head_dim, attn.indexer_head_dim) != (64, 128)
+            or set(attn.layer_compress_ratios) != ({0, 1, 2} if v41 else {0, 4, 128})
+        ):
+            raise ValueError(
+                "RTP_BATCH_INVARIANT=1 requires a DeepSeek Flash checkpoint"
+            )
+        return ((4, 1, 4),) if v41 else ((2, 1, 2),)
     ffn = (
         (model.inter_size, model.expert_num, model.moe_k, model.moe_inter_size)
         if model.model_type in ("qwen_3_moe", "qwen35_moe")
@@ -49,7 +73,7 @@ def _supported_topologies(model: "ModelConfig") -> tuple[tuple[int, int, int], .
         return ((4, 1, 1), (4, 1, 4))
     raise ValueError(
         "RTP_BATCH_INVARIANT=1 requires Qwen3-8B Dense, Qwen3-30B-A3B, "
-        "Qwen3.6-35B-A3B or Qwen3.5-397B-A17B"
+        "Qwen3.6-35B-A3B, Qwen3.5-397B-A17B, DeepSeek-V4-Flash or DeepSeek-V4.1-Flash"
     )
 
 
@@ -57,8 +81,10 @@ def apply_batch_invariant_config(engine: "EngineConfig", model: "ModelConfig") -
     hw = engine.hw_kernel_config
     attn = model.attn_config
     layouts = _supported_topologies(model)
+    deepseek = model.model_type in ("deepseek_v4", "deepseek_v41")
+    v41 = model.model_type == "deepseek_v41"
     hybrid = model.model_type == "qwen35_moe"
-    is_moe = hybrid or model.model_type == "qwen_3_moe"
+    is_moe = deepseek or hybrid or model.model_type == "qwen_3_moe"
     parallel = engine.parallelism_config
     cp = parallel.prefill_cp_config
     cache = engine.kv_cache_config
@@ -77,7 +103,9 @@ def apply_batch_invariant_config(engine: "EngineConfig", model: "ModelConfig") -
         or parallel.role_type != RoleType.PDFUSION
     ):
         layout_description = (
-            f"TP/DP/EP in {layouts}" if hybrid else "TP1, TP2 or TP4 with DP=EP=PP=1"
+            f"TP/DP/EP in {layouts}"
+            if hybrid or deepseek
+            else "TP1, TP2 or TP4 with DP=EP=PP=1"
         )
         conflicts.append(
             f"requires single-node PDFUSION {layout_description}, FFN TP=TP, "
@@ -89,12 +117,10 @@ def apply_batch_invariant_config(engine: "EngineConfig", model: "ModelConfig") -
         config = get_config_from_path(model.ckpt_path) or {}
         text_config = config.get("text_config") or {}
         dtype = text_config.get("dtype") or text_config.get("torch_dtype")
-        if model.vit_separation != VitSeparation.VIT_SEPARATION_LOCAL:
-            conflicts.append(
-                "requires colocated text generation without a separate ViT"
-            )
         if model.linear_attention_config.ssm_state_dtype != DataType.TYPE_FP32:
             conflicts.append("requires FP32 SSM state")
+    if (hybrid or v41) and model.vit_separation != VitSeparation.VIT_SEPARATION_LOCAL:
+        conflicts.append("requires colocated text generation without a separate ViT")
     try:
         checkpoint_dtype = WEIGHT_TYPE.from_str(str(dtype))
     except ValueError:
@@ -110,7 +136,20 @@ def apply_batch_invariant_config(engine: "EngineConfig", model: "ModelConfig") -
     valid_dtype = (
         checkpoint_dtype is WEIGHT_TYPE.BF16 and model.data_type == DataType.TYPE_BF16
     )
-    if hybrid:
+    if deepseek:
+        weight_group = 32 if v41 else 128
+        if (
+            not valid_dtype
+            or quant is None
+            or quant.get_method() != "FP8_PER_BLOCK"
+            or not quant.is_quanted()
+            or quant.group_size() != weight_group
+        ):
+            conflicts.append(
+                f"requires native DeepSeek Flash weights with FP8 group size "
+                f"{weight_group}, FP4 routed experts and BF16 activations"
+            )
+    elif hybrid:
         if not valid_dtype:
             conflicts.append("requires a BF16 text checkpoint and BF16 activations")
         if quant is not None and not fp8_block:
@@ -124,7 +163,7 @@ def apply_batch_invariant_config(engine: "EngineConfig", model: "ModelConfig") -
     if getattr(model, "headwise_config", None):
         conflicts.append("does not support HeadWise attention (headwise_config)")
     if hw.enable_cuda_graph and not hybrid:
-        conflicts.append("requires eager execution for standard Qwen3")
+        conflicts.append(f"requires eager execution for {model.model_type}")
     if (
         engine.sp_config.type != SpeculativeType.NONE
         or engine.runtime_config.use_batch_decode_scheduler
@@ -133,7 +172,18 @@ def apply_batch_invariant_config(engine: "EngineConfig", model: "ModelConfig") -
             "requires speculative decoding and USE_BATCH_DECODE_SCHEDULER to be disabled"
         )
     page_sizes = (attn.tokens_per_block, attn.kernel_tokens_per_block)
-    if attn.kv_cache_dtype != KvCacheDataType.BASE or page_sizes != (64, 64):
+    if deepseek:
+        required_pages = (128, 128) if v41 else (256, 128)
+        if attn.kv_cache_dtype != KvCacheDataType.FP8 or page_sizes != required_pages:
+            conflicts.append(
+                f"requires FP8 KV cache with logical/kernel pages {required_pages}"
+            )
+        if v41 and any(
+            os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+            for name in ("DSV41_CED", "DSV41_SWA_BOUNDED_REPLAY")
+        ):
+            conflicts.append("requires DSV41_CED and DSV41_SWA_BOUNDED_REPLAY disabled")
+    elif attn.kv_cache_dtype != KvCacheDataType.BASE or page_sizes != (64, 64):
         conflicts.append("requires BF16 KV cache with 64-token pages")
     if (
         cache.reuse_cache
@@ -149,7 +199,15 @@ def apply_batch_invariant_config(engine: "EngineConfig", model: "ModelConfig") -
         )
     if is_moe:
         moe = engine.moe_config
-        if parallel.dp_size > 1 and hybrid:
+        if deepseek:
+            # The model owns its native FP8/FP4 MoE layer. Its BI route
+            # consumes replicated tokens and partitions experts across TP=EP.
+            strategy = "auto"
+            if moe.moe_strategy != strategy or moe.use_mori_ep:
+                conflicts.append(
+                    "requires native DeepSeek MoE with --moe_strategy auto"
+                )
+        elif parallel.dp_size > 1 and hybrid:
             # The DP/EP router gathers rows and combines expert outputs in rank order.
             strategy, alias = (
                 ("fp8_per_block_pure_dp", "fp8_per_block_ep_normal")
@@ -187,11 +245,11 @@ def apply_batch_invariant_config(engine: "EngineConfig", model: "ModelConfig") -
     hw.enable_decode_cascade_attention = False
     # The invariant projection accumulates BF16 products directly into FP32 logits.
     model.enable_fp32_lm_head = False
-    if hybrid:
+    if hybrid or v41:
         model.mm_model_config.is_multimodal = False
     if is_moe:
         moe.moe_strategy = strategy
-        if parallel.dp_size > 1:
+        if parallel.dp_size > 1 or deepseek:
             moe.use_all_gather = True
             moe.use_deepep_moe = False
             moe.use_deepep_low_latency = False

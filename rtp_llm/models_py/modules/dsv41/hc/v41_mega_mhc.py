@@ -58,7 +58,10 @@ def _units_supported(previous, next_hc, norm, device) -> bool:
     if type(previous) is not DelayedHCUnit or type(next_hc) is not DelayedHCUnit:
         return False
     if (
-        previous.dim != 5120
+        getattr(previous, "batch_invariant", False)
+        or getattr(next_hc, "batch_invariant", False)
+        or getattr(norm, "batch_invariant", False)
+        or previous.dim != 5120
         or next_hc.dim != 5120
         or previous.hc_mult != 4
         or next_hc.hc_mult != 4

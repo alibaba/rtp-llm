@@ -163,6 +163,17 @@ class PureTpRouterNoQuant(PureTpRouterBase):
         return a1, None
 
 
+class PureTpRouterMXFP4(PureTpRouterNoQuant):
+    """Replicate BF16 rows, then reduce disjoint local MXFP4 expert outputs."""
+
+    @classmethod
+    def check_conditions(cls, checker, config):
+        checker.check(config.moe_quant_method == "FP8_FP4")
+        checker.check(config.tp_size == config.ep_size == config.world_size)
+        checker.check(config.tp_rank == config.ep_rank and config.dp_size == 1)
+        checker.check(not config.has_redundant_experts)
+
+
 class PureTpRouterFp8PerTensor(PureTpRouterBase):
     """Pure TP router with FP8 per-tensor quantization."""
 

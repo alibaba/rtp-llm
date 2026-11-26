@@ -123,6 +123,7 @@ class V4Args:
     # the default reflects that; the BF16 path remains supported for
     # debugging by callers that pass ``fp8_kv_cache=False`` explicitly.
     fp8_kv_cache: bool = True
+    hw_kernel_config: Optional[object] = None
 
 
 def _block_kwargs(
@@ -194,7 +195,8 @@ def _build_block(
     commit_only: bool = False,
 ) -> Block:
     return Block(
-        **_block_kwargs(layer_id, args, layer_weights, commit_only=commit_only)
+        **_block_kwargs(layer_id, args, layer_weights, commit_only=commit_only),
+        hw_kernel_config=args.hw_kernel_config,
     )
 
 
@@ -209,6 +211,9 @@ class V4Transformer(nn.Module):
         that constructs the transformer with empty weights."""
         super().__init__()
         self.args = args
+        self.batch_invariant = (
+            getattr(args.hw_kernel_config, "batch_invariant", False) is True
+        )
         self.max_seq_len = args.max_seq_len
         self.hc_mult = args.hc_mult
         self.commit_only = bool(getattr(args, "commit_only", False))
@@ -230,7 +235,11 @@ class V4Transformer(nn.Module):
             mega_request = _optional_env_bool("DSV4_MEGA")
             # SWA-only MTP/DSpark drafts share the process switch, but have no
             # Mega sublayers to initialize or require from the runtime.
-            if mega_request is not False and any(args.compress_ratios[: args.n_layers]):
+            if (
+                not self.batch_invariant
+                and mega_request is not False
+                and any(args.compress_ratios[: args.n_layers])
+            ):
                 from rtp_llm.models_py.modules.dsv4.fp8.decode.mega_support import (
                     mega_decode_unavailable_reason,
                 )
@@ -290,8 +299,14 @@ class V4Transformer(nn.Module):
             # ``EmbeddingTorch`` keeps ``self.weight`` as a plain attribute (no
             # ``nn.Parameter``); the framework dict supplies the real tensor.
             assert embedding_weight is not None
-            self.embed = EmbeddingTorch(embedding_weight)
-            self.norm = RMSNorm(gw[W.final_ln_gamma], args.norm_eps)
+            self.embed = EmbeddingTorch(
+                embedding_weight, hidden_size=args.dim if self.batch_invariant else None
+            )
+            self.norm = RMSNorm(
+                gw[W.final_ln_gamma],
+                args.norm_eps,
+                **({"batch_invariant": True} if self.batch_invariant else {}),
+            )
             if self._mega_decode_enabled:
                 from rtp_llm.models_py.modules.dsv4.fp8.decode.mega_csa_runtime import (
                     MegaCSARuntime,
@@ -683,6 +698,12 @@ class V4Transformer(nn.Module):
         h = self.norm(h.reshape(bsz * seq, dim_)).view(bsz, seq, dim_)
 
         if apply_lm_head:
+            if self.batch_invariant:
+                from rtp_llm.models_py.determinism.quantized_linear import linear
+
+                return linear(
+                    h[:, -1], self.head_weight, out_dtype=self.head_weight.dtype
+                ).float()
             # Match h dtype to head_weight so F.linear works regardless of
             # load-time dtype (bf16 when enable_fp32_lm_head=False, f32
             # otherwise).  Final cast to f32 keeps logits dtype stable for
