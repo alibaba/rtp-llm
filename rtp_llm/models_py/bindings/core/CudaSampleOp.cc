@@ -521,7 +521,9 @@ torch::Tensor execSamplerSoftmaxInplace(const torch::Tensor& logits) {
     // return a plain torch::softmax so callers that only consume the returned
     // probabilities pay no extra copy-back versus torch::softmax itself.
     if (!canSamplerSplitSoftmax(logits)) {
-        return torch::softmax(logits, -1);
+        auto probs = torch::softmax(logits, -1);
+        logits.copy_(probs);
+        return probs;
     }
     return samplerSoftmaxInplace(logits);
 }
