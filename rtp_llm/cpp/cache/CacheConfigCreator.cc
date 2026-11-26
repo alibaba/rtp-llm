@@ -350,10 +350,10 @@ CacheConfig createConfigFromDescs(const ModelConfig&       model_config,
     config.cache_key_hash_seed     = model_config.cache_key_hash_seed;
 
     const auto& cp = parallelism_config.prefill_cp_config;
-    config.local_kv_cache_sharded =
-        parallelism_config.tp_size > 1
-        && (model_config.use_page_rr_kv_cache || parallelism_config.kvCacheCpSize() > 1
-            || (cp.kv_cache_sharded && cp.is_prefill_enabled() && parallelism_config.role_type != RoleType::DECODE));
+    config.local_kv_cache_sharded = parallelism_config.tp_size > 1
+                                    && (model_config.use_page_rr_kv_cache
+                                        || (cp.kv_cache_sharded && (cp.is_enabled() || cp.is_prefill_enabled())
+                                            && parallelism_config.role_type != RoleType::DECODE));
     RTP_LLM_CHECK_WITH_INFO(!config.local_kv_cache_sharded || cp.kv_cache_sharded,
                             "local PageRR allocation requires kv_cache_sharded transport metadata");
 

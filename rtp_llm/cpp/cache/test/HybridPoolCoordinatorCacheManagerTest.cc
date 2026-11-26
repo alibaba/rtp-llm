@@ -2106,8 +2106,11 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, DeferredLinearCheckpointShortfallR
     retry_context->waitDone();
     ASSERT_TRUE(retry_context->success());
     EXPECT_EQ(retry_context->matchedBlocks(), 4u);
-    EXPECT_EQ(backend->readGroupTags(),
-              (std::vector<std::vector<std::string>>{{"full"}, {"full"}, {"full"}, {"linear", "full"}}));
+    auto read_groups = backend->readGroupTags();
+    for (auto& groups : read_groups) {
+        std::sort(groups.begin(), groups.end());
+    }
+    EXPECT_EQ(read_groups, (std::vector<std::vector<std::string>>{{"full"}, {"full"}, {"full"}, {"full", "linear"}}));
     const auto handles = backend->readHandles();
     ASSERT_EQ(handles.size(), 4u);
     for (size_t position = 0; position < handles.size(); ++position) {

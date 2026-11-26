@@ -64,6 +64,10 @@ TEST(PrefillRpcServerTest, GetPeerInfoReportsModelOwnedShardingWithAttentionTp) 
     GetPeerInfoRequestPB  request;
     GetPeerInfoResponsePB response;
     ASSERT_TRUE(server.GetPeerInfo(&context, &request, &response).ok());
+    EXPECT_EQ(response.cp_size(), 1);
+
+    server.maga_init_params_.model_config_.use_page_rr_kv_cache = true;
+    ASSERT_TRUE(server.GetPeerInfo(&context, &request, &response).ok());
     EXPECT_EQ(response.cp_size(), 8);
     EXPECT_EQ(pc.get_attn_tp_size(), 8);
 }

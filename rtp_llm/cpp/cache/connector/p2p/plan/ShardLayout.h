@@ -55,7 +55,7 @@ struct ShardLayout {
     // ---- rank 坐标：CP 轴与 head 轴相互独立，不做除法分解（设计文档 §3.3）----
 
     int cpSize() const {
-        return local_full_page_rr ? static_cast<int>(pc.tp_size) : static_cast<int>(pc.kvCacheCpSize());
+        return static_cast<int>(pc.kvCacheCpSize(local_full_page_rr));
     }
 
     // Compact state pages retain Prefill's token geometry on Decode, without

@@ -636,6 +636,8 @@ class Glm53Flash(BaseModel):
         self.model_config.prefill_mla_cp = use_dedicated_mla_cp(
             self.model_config, self.parallelism_config
         )
+        if self.model_config.prefill_mla_cp:
+            self.model_config.use_page_rr_kv_cache = True
         loader = super().create_model_loader()
         load_config = loader.get_load_config()
         load_config.fp8_defer_moe_requant = (

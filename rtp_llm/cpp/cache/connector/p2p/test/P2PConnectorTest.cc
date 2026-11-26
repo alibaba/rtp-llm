@@ -251,10 +251,14 @@ TEST(P2PConnectorRegistrationTest, RegistersSharedBackingOnceAtLayerBlockBoundar
 
     for (int layer : {0, 1}) {
         auto blocks = converter.convertIndexToBuffer(layer, group.tag, group.block_num - 1, 1, 0);
-        ASSERT_EQ(blocks.size(), 1u);
-        const auto offset = reinterpret_cast<uintptr_t>(blocks.front().addr) - reinterpret_cast<uintptr_t>(buffer.addr);
-        EXPECT_EQ(offset % alignment, 0u);
-        EXPECT_LE(offset + blocks.front().size_bytes, buffer.size_bytes);
+        ASSERT_EQ(blocks.size(), 2u);
+        const auto base     = reinterpret_cast<uintptr_t>(buffer.addr);
+        const auto k_offset = reinterpret_cast<uintptr_t>(blocks[0].addr) - base;
+        const auto v_offset = reinterpret_cast<uintptr_t>(blocks[1].addr) - base;
+        EXPECT_EQ(k_offset % alignment, 0u);
+        EXPECT_EQ(v_offset, k_offset + blocks[0].size_bytes);
+        EXPECT_EQ(blocks[0].size_bytes + blocks[1].size_bytes, alignment);
+        EXPECT_LE(v_offset + blocks[1].size_bytes, buffer.size_bytes);
     }
 }
 

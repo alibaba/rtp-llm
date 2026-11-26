@@ -90,12 +90,10 @@ struct ParallelismConfig {
     // Context Parallel configuration
     PrefillCPConfig prefill_cp_config;
 
-    int64_t kvCacheCpSize() const {
-        // Dedicated Prefill can own CP while keeping framework attention CP disabled.
-        // Decode uses CP settings to describe its Prefill peer.
-        const auto& cp      = prefill_cp_config;
-        const bool  sharded = role_type != RoleType::DECODE && tp_size > 1 && cp.kv_cache_sharded
-                             && (role_type == RoleType::PREFILL || cp.is_enabled());
+    int64_t kvCacheCpSize(bool local_page_rr) const {
+        // Decode's framework CP settings describe its Prefill peer.
+        const auto& cp     = prefill_cp_config;
+        const bool sharded = local_page_rr || (role_type != RoleType::DECODE && cp.kv_cache_sharded && cp.is_enabled());
         return sharded ? tp_size : 1;
     }
 

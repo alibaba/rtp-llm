@@ -140,11 +140,14 @@ class DecodeMetadataContractTest(unittest.TestCase):
         impl.fmha_params.fill_params(inputs, 64)
         captured_ptr = impl.fmha_params.positions_d.data_ptr()
 
-        inputs.input_lengths = torch.tensor([2], dtype=torch.int32)
-        inputs.input_lengths_device = inputs.input_lengths.cuda()
-        inputs.prefix_lengths_device = inputs.prefix_lengths.cuda()
-        inputs.kv_cache_kernel_block_id_device = inputs.kv_cache_kernel_block_id.cuda()
-        impl.prepare_cuda_graph({"full": inputs})
+        replay_inputs = SimpleNamespace(
+            is_prefill=True,
+            is_draft_extend=True,
+            input_lengths_device=torch.tensor([2], dtype=torch.int32, device="cuda"),
+            prefix_lengths_device=inputs.prefix_lengths.cuda(),
+            kv_cache_kernel_block_id_device=inputs.kv_cache_kernel_block_id.cuda(),
+        )
+        impl.prepare_cuda_graph({"full": replay_inputs})
 
         self.assertEqual(impl.fmha_params.positions_d.data_ptr(), captured_ptr)
         self.assertEqual(impl.fmha_params.positions_d.tolist(), [63, 64, 0, 0, 0])
