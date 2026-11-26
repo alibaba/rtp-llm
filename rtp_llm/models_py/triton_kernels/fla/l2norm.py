@@ -104,6 +104,31 @@ def fused_l2norm_qk_kernel(
     tl.store(k_out + offs, b_k_out.to(k_out.dtype.element_ty), mask=mask)
 
 
+@triton.jit(do_not_specialize=["T"])
+def l2norm_fwd_kernel_rows(
+    x,
+    y,
+    eps,
+    T,
+    D: tl.constexpr,
+    BT: tl.constexpr,
+    BD: tl.constexpr,
+):
+    """Normalize BT rows per CTA with the one-row kernel's rsqrt formula.
+
+    Batch invariance needs a row reduction whose layout does not depend on T,
+    not one row per CTA. BT and BD are constants and T is unspecialized, so a
+    row gets the same instruction sequence in a 128-row and a 65536-row launch.
+    """
+    rows = tl.program_id(0) * BT + tl.arange(0, BT)
+    cols = tl.arange(0, BD)
+    mask = (rows[:, None] < T) & (cols[None, :] < D)
+    offs = rows[:, None].to(tl.int64) * D + cols[None, :]
+    b_x = tl.load(x + offs, mask=mask, other=0.0).to(tl.float32)
+    b_rstd = tl.math.rsqrt(tl.sum(b_x * b_x, axis=1) + eps)
+    tl.store(y + offs, (b_x * b_rstd[:, None]).to(y.dtype.element_ty), mask=mask)
+
+
 # @triton.autotune(
 #     configs=[
 #         triton.Config({"BT": BT}, num_warps=num_warps)
@@ -165,7 +190,24 @@ def l2norm_fwd(
 
     # The small-input kernel divides by the norm. Keep one reduction and
     # rounding path when the same Q/K row can arrive in a different chunk.
-    if not batch_invariant and D <= 512 and T <= 128:
+    if batch_invariant and D <= 512:
+        # One row per CTA leaves this bandwidth-bound kernel at ~0.6 TB/s on
+        # SM103. A fixed 16-row tile reaches ~2.7 TB/s and is still invariant.
+        # Keep the same D bound as the tiled non-BI branch below: a 16-row tile
+        # of a very wide row would raise register and shared-memory pressure
+        # for no bandwidth gain, and the per-row kernel is already invariant.
+        l2norm_fwd_kernel_rows[(triton.cdiv(T, 16),)](
+            x,
+            y,
+            eps,
+            T,
+            D=D,
+            BT=16,
+            BD=BD,
+            num_warps=8,
+            num_stages=3,
+        )
+    elif D <= 512 and T <= 128:
         NB = triton.cdiv(T, 2048)
 
         def grid(meta):
