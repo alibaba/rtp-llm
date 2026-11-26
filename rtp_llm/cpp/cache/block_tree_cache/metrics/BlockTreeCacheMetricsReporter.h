@@ -18,7 +18,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/metrics/ReuseMetrics.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/metrics/TransferMetrics.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/FrozenTask.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 
 namespace kmonitor {
@@ -44,8 +44,7 @@ public:
         return stage_metrics_ != nullptr;
     }
     void flushStageMetrics() const;
-    void reportUnfreezeMetrics(const FrozenTask::ExecutionInfo& execution, bool forced) const;
-    void reportUnfreezeZeroMetrics(const std::vector<CachePoolMetrics>& pools) const;
+    void reportUnfreezeMetrics(const std::vector<TransferTargetBlock>& blocks, const std::string& backend, bool forced) const;
 
     // Durations are per worker batch, except coordinator multi-rank stages.
     // Request/transfer IDs belong in the timeline, never in metric tags.

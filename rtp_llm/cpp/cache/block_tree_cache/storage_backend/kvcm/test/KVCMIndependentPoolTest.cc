@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeReclaimer.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test/KVCMMockTestBase.h"
 #include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.h"
@@ -220,6 +221,7 @@ protected:
                                                         nullptr,
                                                         wrapper_);
         if (fail_second || rank != 0) {
+            backend_->setReclaimer(std::make_shared<BlockTreeReclaimer>());
             auto topology = config_.topologyPtr();
             auto tags     = config_.groupTags();
             auto pools    = pools_;
@@ -332,7 +334,7 @@ TEST_F(KVCMIndependentPoolTest, FactoryPublishesHeterogeneousSpecsAndRoundTripsE
     EXPECT_EQ(state_->destroyed, 3u);
 }
 
-TEST_F(KVCMIndependentPoolTest, PartialWriteFailureAbortsSessionAndReleasesSourcePins) {
+TEST_F(KVCMIndependentPoolTest, PartialWriteFailureLeavesSessionOpenAndReleasesSourcePins) {
     ASSERT_TRUE(initialize());
     kv_cache_manager::WriteLocation proposal;
     proposal.write_session_id = "failed_session";
@@ -340,12 +342,7 @@ TEST_F(KVCMIndependentPoolTest, PartialWriteFailureAbortsSessionAndReleasesSourc
     proposal.locations        = {{{"tp0_Llinear0", "linear"}, {"tp0_Ffull1", "full1"}, {"tp0_Ffull0", "full0"}}};
     EXPECT_CALL(*meta_, StartWrite(_, _, _, _, _, 0))
         .WillOnce(Return(std::make_pair(kv_cache_manager::ClientErrorCode::ER_OK, proposal)));
-    EXPECT_CALL(*meta_,
-                FinishWrite(_,
-                            "failed_session",
-                            ::testing::VariantWith<kv_cache_manager::BlockMaskOffset>(::testing::Eq(0u)),
-                            ::testing::IsEmpty()))
-        .WillOnce(Return(kv_cache_manager::ClientErrorCode::ER_OK));
+    EXPECT_CALL(*meta_, FinishWrite(_, "failed_session", _, _)).Times(0);
     state_->fail_pool = 1;
     fill(29);
     backend_->write(backend_->prepareWrite(request()));
@@ -356,6 +353,7 @@ TEST_F(KVCMIndependentPoolTest, PartialWriteFailureAbortsSessionAndReleasesSourc
         EXPECT_EQ(pools_[group]->treeRefCount(blocks_[group]), 0u);
         EXPECT_EQ(pools_[group]->refCount(blocks_[group]), 1u);
     }
+    EXPECT_TRUE(cache_->reclaimer().frozen_.empty());
     backend_->shutdown();
     EXPECT_EQ(state_->destroyed, 3u);
     refs_.clear();
@@ -392,12 +390,7 @@ TEST_P(KVCMIndependentPoolFailureTest, SdkFailureFreezesOnlyReadDestinations) {
         proposal.locations        = locations;
         EXPECT_CALL(*meta_, StartWrite(_, _, _, _, _, 0))
             .WillOnce(Return(std::make_pair(kv_cache_manager::ClientErrorCode::ER_OK, proposal)));
-        EXPECT_CALL(*meta_,
-                    FinishWrite(_,
-                                "sdk_failure",
-                                ::testing::VariantWith<kv_cache_manager::BlockMaskOffset>(::testing::Eq(0u)),
-                                ::testing::IsEmpty()))
-            .WillOnce(Return(kv_cache_manager::ClientErrorCode::ER_OK));
+        EXPECT_CALL(*meta_, FinishWrite(_, "sdk_failure", _, _)).Times(0);
         EXPECT_TRUE(backend_->write(backend_->prepareWrite(request())));
     } else {
         const std::vector<std::string> uris{"full0", "full1", "linear"};
