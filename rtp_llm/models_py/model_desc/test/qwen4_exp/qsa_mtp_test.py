@@ -1041,7 +1041,10 @@ class Qwen4ExpQSAMtpTest(QSARuntimeFixture, TestCase):
                 q, raw, indexer=indexer, rope_config=rope
             )
             writer.assert_called_once()
-        self.assertEqual(tuple(selected.shape), (12, indexer.token_budget))
+        self.assertEqual(
+            tuple(selected.shape),
+            (12, indexer.token_budget + indexer.compress_ratio - 1),
+        )
         self.assertFalse(torch.equal(kv, before_kv))
         self.assertFalse(torch.equal(state, before_state))
         context.rollback_side_cache()
