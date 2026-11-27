@@ -18,6 +18,12 @@ class CudaGraphGate:
         self._waiting_captures = 0
         self._capturing_thread = None
         self._local = threading.local()
+        self._native_capture = None
+
+    def register_native_capture_gate(self, lock, unlock):
+        with self._condition:
+            self._condition.wait_for(lambda: self._capturing_thread is None)
+            self._native_capture = (lock, unlock)
 
     @contextmanager
     def operation(self):
@@ -61,6 +67,9 @@ class CudaGraphGate:
                 or self._waiting_captures
                 or self._capturing_thread is not None
             )
+            native = self._native_capture
+            if acquired and native is not None:
+                acquired = native[0](False)
             if acquired:
                 self._capturing_thread = threading.get_ident()
         try:
@@ -68,6 +77,8 @@ class CudaGraphGate:
         finally:
             if acquired:
                 with self._condition:
+                    if native is not None:
+                        native[1]()
                     self._capturing_thread = None
                     self._condition.notify_all()
 
@@ -82,6 +93,9 @@ class CudaGraphGate:
             try:
                 while self._capturing_thread is not None or self._readers:
                     self._condition.wait()
+                native = self._native_capture
+                if native is not None:
+                    native[0](True)
                 self._capturing_thread = threading.get_ident()
             finally:
                 self._waiting_captures -= 1
@@ -90,6 +104,8 @@ class CudaGraphGate:
             yield
         finally:
             with self._condition:
+                if native is not None:
+                    native[1]()
                 self._capturing_thread = None
                 self._condition.notify_all()
 

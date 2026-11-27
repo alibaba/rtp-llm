@@ -54,8 +54,8 @@ public:
         return acquireExtent(bytes, forWrite, timeoutNs, sample, Activity::Legacy);
     }
 
-    Acquisition tryAcquireForNativeWrite(int64_t bytes, bool sample) {
-        return acquireExtent(bytes, true, 0, sample, Activity::NativeWrite);
+    Acquisition acquireForNativeWrite(int64_t bytes, int64_t timeoutNs, bool sample) {
+        return acquireExtent(bytes, true, timeoutNs, sample, Activity::NativeWrite);
     }
 
     Acquisition tryAcquireForNativeRead(int64_t bytes, bool sample) {
@@ -143,6 +143,11 @@ public:
         std::lock_guard<std::timed_mutex> lock(mutex_);
         const auto&                       counters = native_[write];
         return {counters.quarantinedBytes, counters.quarantinedExtents};
+    }
+
+    bool deviceFailed() const {
+        std::lock_guard<std::timed_mutex> lock(mutex_);
+        return deviceFailed_;
     }
 
 private:
@@ -283,7 +288,7 @@ inline void registerEmbRegisteredArena(pybind11::module& module) {
         .value("extent_unavailable", Result::ExtentUnavailable)
         .value("closed", Result::Closed)
         .value("quarantined", Result::Quarantined);
-    py::class_<Arena>(module, "EmbRegisteredArena")
+    py::class_<Arena, std::shared_ptr<Arena>>(module, "EmbRegisteredArena")
         .def(py::init<int64_t, int64_t, int64_t, int64_t>())
         .def("acquire",
              [](Arena& arena, const at::Tensor& root, int64_t bytes, bool write, int64_t timeoutNs, bool sample) {
@@ -336,6 +341,7 @@ inline void registerEmbRegisteredArena(pybind11::module& module) {
         .def("free_space", &Arena::freeSpace, ReleaseGil())
         .def("stop", &Arena::stop, ReleaseGil())
         .def("fail_device", &Arena::failDevice, ReleaseGil())
+        .def("device_failed", &Arena::deviceFailed, ReleaseGil())
         .def("wait_drained", &Arena::waitDrained, ReleaseGil());
 }
 

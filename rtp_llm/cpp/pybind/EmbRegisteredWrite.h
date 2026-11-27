@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/pybind/EmbNativeObjectApi.h"
 #include "rtp_llm/cpp/pybind/EmbRegisteredArena.h"
 #include "rtp_llm/cpp/pybind/EmbTensorCodec.h"
+#include <c10/util/ScopeExit.h>
 #include <chrono>
 
 namespace rtp_llm {
@@ -42,7 +43,8 @@ inline EmbWriteResult writeEmbObject(EmbRegisteredArena&                       a
                                      const std::string&                        key,
                                      const std::string&                        trace,
                                      int64_t                                   budget_ns,
-                                     bool                                      sample_locks) {
+                                     bool                                      sample_locks,
+                                     bool                                      wait_for_extent = false) {
     TORCH_CHECK(root.is_cuda() && root.is_contiguous() && root.scalar_type() == at::kByte && root.dim() == 1,
                 "expected a registered CUDA byte arena");
     TORCH_CHECK(length > 0 && length <= root.numel() && budget_ns <= 600'000'000'000,
@@ -65,9 +67,11 @@ inline EmbWriteResult writeEmbObject(EmbRegisteredArena&                       a
         return {EmbWriteState::Expired, 0, false, readiness_ns};
     }
 
-    // The cooperating Python graph gate covers this call. A writer must not
-    // wait here for a lease whose owner may need an operation on the same gate.
-    const auto [acquired, ticket, offset, extent, lock_ns] = arena.tryAcquireForNativeWrite(length, sample_locks);
+    // Python callers preserve their nonblocking lease attempt. The native
+    // worker may wait up to the deadline, and arena stop wakes it on shutdown.
+    const auto remaining = std::chrono::duration_cast<std::chrono::nanoseconds>(deadline - lease_requested).count();
+    const auto [acquired, ticket, offset, extent, lock_ns] =
+        arena.acquireForNativeWrite(length, wait_for_extent ? remaining : 0, sample_locks);
     if (acquired != EmbRegisteredArena::Result::Acquired) {
         return {EmbWriteState::LeaseUnavailable, 0, false, readiness_ns};
     }

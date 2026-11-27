@@ -90,6 +90,7 @@ cc_library(
     srcs = [
         "ComputeInit.cc",
         "EmbTensorObjectDecode.cc",
+        "emb_local/EmbEvictionWriter.cc",
         "emb_local/EmbLocalBindings.cc",
     ],
     hdrs = [
@@ -100,6 +101,7 @@ cc_library(
         "EmbTensorCodec.h",
         "EmbTensorObjectPlan.h",
         "EmbTransportCudaStreams.h",
+        "emb_local/EmbEvictionWriter.h",
         "emb_local/EmbHashCache.h",
         "emb_local/EmbLocalArena.h",
         "emb_local/EmbLocalIndex.h",
