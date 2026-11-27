@@ -80,7 +80,7 @@ class MediaNetworkTest(unittest.TestCase):
         self.net = native.Network(2, 1, policy)
         self.addCleanup(self.net.close)
 
-    def fetch(self, path, **options):
+    def submit(self, path, **options):
         req = native.Request()
         req.url = "http://127.0.0.1:%d%s" % (self.server.server_port, path)
         for name, value in options.items():
@@ -88,7 +88,10 @@ class MediaNetworkTest(unittest.TestCase):
                 req.set_body(value)
             else:
                 setattr(req, name, value)
-        job = self.net.submit(req)
+        return self.net.submit(req)
+
+    def fetch(self, path, **options):
+        job = self.submit(path, **options)
         self.assertIs(self.net.next(), job)
         return job.result()
 
@@ -104,6 +107,134 @@ class MediaNetworkTest(unittest.TestCase):
         self.assertEqual(self.server.visits, ["/redirect", "/binary"])
         self.assertEqual(self.fetch("/binary", cache_key="b")[1], "")
         self.assertFalse(self.fetch("/redirect", cache_key="a")[3])
+
+    def test_cached_image_completes_while_all_network_workers_are_occupied(self):
+        self.fetch("/binary", cache_key="warm")
+        busy = []
+        for path, (started, release) in self.server.gates.items():
+            self.addCleanup(release.set)
+            busy.append(self.submit(path))
+            self.assertTrue(started.wait(3))
+
+        result = self.fetch("/binary", cache_key="warm")
+        self.assertEqual(result[:4], (200, "", b"\x00\xffbinary", True))
+        self.assertEqual(
+            self.fetch("/binary", cache_key="warm", limit=1)[1], "too_large"
+        )
+        self.assertEqual(
+            self.fetch("/binary", cache_key="warm", budget_ms=0)[1], "timeout"
+        )
+        self.assertEqual(self.server.visits.count("/binary"), 1)
+        for _, release in self.server.gates.values():
+            release.set()
+        self.assertCountEqual([self.net.next() for _ in busy], busy)
+
+    def test_concurrent_cold_image_uses_one_transfer(self):
+        started, release = self.server.gates["/slow"]
+        self.addCleanup(release.set)
+        owner = self.submit("/slow", cache_key="image")
+        self.assertTrue(started.wait(3))
+        followers = [self.submit("/slow", cache_key="image") for _ in range(4)]
+        # A different URL can use the other worker while the shared image is in flight.
+        self.assertEqual(self.fetch("/binary")[0], 200)
+        release.set()
+        jobs = [owner, *followers]
+        self.assertCountEqual([self.net.next() for _ in jobs], jobs)
+        for job in jobs:
+            self.assertEqual(job.result()[:4], (200, "", b"slow", False))
+        self.assertFalse(owner.result()[8])
+        self.assertTrue(all(job.result()[8] for job in followers))
+        self.assertEqual(self.server.visits.count("/slow"), 1)
+        self.assertTrue(self.fetch("/slow", cache_key="image")[3])
+
+    def test_zero_capacity_bypasses_cache_and_inflight_reuse(self):
+        self.net = native.Network(2, 0, native.Policy())
+        self.addCleanup(self.net.close)
+        started, release = self.server.gates["/slow"]
+        self.addCleanup(release.set)
+        first = self.submit("/slow", cache_key="image")
+        self.assertTrue(started.wait(3))
+        second = self.submit("/slow", cache_key="image")
+        release.set()
+        self.assertCountEqual([self.net.next(), self.net.next()], [first, second])
+        third = self.fetch("/slow", cache_key="image")
+        for result in (first.result(), second.result(), third):
+            self.assertEqual(result[:4], (200, "", b"slow", False))
+            self.assertFalse(result[8])
+        self.assertEqual(self.server.visits.count("/slow"), 3)
+
+    def test_cancelling_first_caller_preserves_other_image_waiters(self):
+        started, release = self.server.gates["/slow"]
+        self.addCleanup(release.set)
+        first = self.submit("/slow", cache_key="image")
+        self.assertTrue(started.wait(3))
+        waiter = self.submit("/slow", cache_key="image")
+        first.cancel()
+        release.set()
+        self.assertCountEqual([self.net.next(), self.net.next()], [first, waiter])
+        self.assertEqual(first.result()[1], "cancelled")
+        self.assertEqual(waiter.result()[:3], (200, "", b"slow"))
+        self.assertEqual(self.server.visits.count("/slow"), 1)
+
+    def test_expired_waiter_does_not_cancel_active_download(self):
+        started, release = self.server.gates["/slow"]
+        self.addCleanup(release.set)
+        first = self.submit("/slow", cache_key="image")
+        self.assertTrue(started.wait(3))
+        waiter = self.submit("/slow", cache_key="image", budget_ms=100)
+        self.assertIs(self.net.next(), waiter)
+        self.assertEqual(waiter.result()[1], "timeout")
+        release.set()
+        self.assertIs(self.net.next(), first)
+        self.assertEqual(first.result()[:3], (200, "", b"slow"))
+
+    def test_concurrent_limits_are_enforced_per_request(self):
+        started, release = self.server.gates["/slow"]
+        self.addCleanup(release.set)
+        small = self.submit("/slow", cache_key="image", limit=1)
+        self.assertTrue(started.wait(3))
+        large = self.submit("/slow", cache_key="image", limit=8)
+        release.set()
+        self.assertCountEqual([self.net.next(), self.net.next()], [small, large])
+        self.assertEqual(small.result()[1], "too_large")
+        self.assertEqual(large.result()[:3], (200, "", b"slow"))
+
+    def test_compatible_waiters_still_merge_after_incompatible_request(self):
+        started, release = self.server.gates["/slow"]
+        self.addCleanup(release.set)
+        first = self.submit("/slow", cache_key="image", limit=4)
+        self.assertTrue(started.wait(3))
+        other = self.submit("/slow", cache_key="image", limit=8)
+        waiter = self.submit("/slow", cache_key="image", limit=4)
+        release.set()
+        jobs = [first, other, waiter]
+        self.assertCountEqual([self.net.next() for _ in jobs], jobs)
+        for job in jobs:
+            self.assertEqual(job.result()[:3], (200, "", b"slow"))
+        self.assertLessEqual(self.server.visits.count("/slow"), 2)
+
+    def test_short_owner_deadline_does_not_duplicate_surviving_downloads(self):
+        started, release = self.server.gates["/slow"]
+        self.addCleanup(release.set)
+        owner = self.submit("/slow", cache_key="image", budget_ms=500)
+        self.assertTrue(started.wait(3))
+        waiters = [
+            self.submit("/slow", cache_key="image", budget_ms=5000) for _ in range(4)
+        ]
+        self.assertIs(self.net.next(), owner)
+        self.assertEqual(owner.result()[1], "timeout")
+        release.set()
+        self.assertCountEqual([self.net.next() for _ in waiters], waiters)
+        for waiter in waiters:
+            self.assertEqual(waiter.result()[:3], (200, "", b"slow"))
+        # The first transfer can expire. All survivors can share the replacement.
+        self.assertLessEqual(self.server.visits.count("/slow"), 2)
+
+    def test_failed_image_can_be_fetched_again(self):
+        self.assertEqual(self.fetch("/retry", cache_key="image", attempts=1)[0], 503)
+        self.assertEqual(self.fetch("/retry", cache_key="image")[:2], (200, ""))
+        self.assertTrue(self.fetch("/retry", cache_key="image")[3])
+        self.assertEqual(self.server.visits.count("/retry"), 2)
 
     def test_policy_deadline_retry_and_size(self):
         self.assertEqual(self.fetch("/policy")[1], "blocked")

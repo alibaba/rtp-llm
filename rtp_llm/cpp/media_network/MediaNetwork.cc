@@ -145,13 +145,33 @@ struct Request {
 };
 struct Job {
     Request           req;
-    Clock::time_point deadline, started, finished;
+    Clock::time_point submitted = Clock::now(), deadline, started, finished;
     std::atomic<bool> canceled{false}, completed{false};
     std::string       error;
     Bytes             body;
     long              status  = 0;
     bool              hit     = false;
     int               retries = 0, connect_retries = 0, proxy_attempts = 0, fallbacks = 0;
+    // One subscription per caller. Cancellation of the owner only stops the
+    // shared transfer when every other caller has also cancelled.
+    std::shared_ptr<std::atomic<size_t>> subscribers;
+    std::vector<std::shared_ptr<Job>>    followers;
+    std::atomic<bool>                    released{false};
+    bool                                 owner = false, joined = false;
+    Clock::time_point                    queued_since = submitted;
+    Clock::duration                      queue_time{};
+    void                                 release_subscription() {
+        if (subscribers && !released.exchange(true))
+            subscribers->fetch_sub(1);
+    }
+
+    void cancel() {
+        canceled = true;
+        release_subscription();
+    }
+    bool stop_transfer() const {
+        return owner ? subscribers->load() == 0 : canceled.load();
+    }
 };
 struct RangeMetadata {
     std::string url, etag;
@@ -189,7 +209,7 @@ struct Transfer {
     }
 
     bool canceled() const {
-        return job.canceled.load() || (stop_ranges && stop_ranges->load());
+        return job.stop_transfer() || (stop_ranges && stop_ranges->load());
     }
 
     std::string failure() const {
@@ -276,7 +296,7 @@ size_t read_header(char* bytes, size_t size, size_t count, void* ptr) noexcept {
                         lower(transfer.content_encoding),
                         [&transfer](std::string_view decoded) { transfer.append(decoded); },
                         [&transfer] {
-                            if (transfer.job.canceled.load() || Clock::now() >= transfer.job.deadline)
+                            if (transfer.job.stop_transfer() || Clock::now() >= transfer.job.deadline)
                                 throw Failure("download stopped");
                         },
                         transfer.job.req.limit);
@@ -349,7 +369,7 @@ void validate_proxied_media_host(const Endpoint& dest, Job& job) {
     ares_gethostbyname(raw, dest.host.c_str(), AF_INET6, completed, &lookup);
     ares_gethostbyname(raw, dest.host.c_str(), AF_INET, completed, &lookup);
     while (!lookup.found && lookup.pending) {
-        if (job.canceled.load())
+        if (job.stop_transfer())
             throw Failure("cancelled");
         auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(job.deadline - Clock::now()).count();
         if (remaining <= 0)
@@ -514,7 +534,7 @@ void configure_transfer(CURL*              curl,
     auto&       job = transfer.job;
     const auto& req = job.req;
     auto        ms  = std::chrono::duration_cast<std::chrono::milliseconds>(job.deadline - Clock::now()).count();
-    if (job.canceled.load())
+    if (job.stop_transfer())
         throw Failure("cancelled");
     if (ms <= 0)
         throw Failure("timeout");
@@ -590,7 +610,7 @@ void exchange(CurlConnectionPool& connections,
         HeaderList headers;
         configure_transfer(curl, transfer, headers, policy, url, proxy, strip);
         auto rc = connections.submit(curl, transfer).get();
-        if (job.canceled.load())
+        if (job.stop_transfer())
             throw Failure("cancelled");
         if (transfer.large)
             throw Failure("too_large");
@@ -690,16 +710,56 @@ public:
             || (req.media ? req.method != "GET" : (req.method != "GET" && req.method != "POST" && req.method != "PUT")))
             throw std::invalid_argument("invalid network request options");
         auto job      = std::make_shared<Job>();
-        job->deadline = Clock::now() + std::chrono::milliseconds(req.budget_ms);
+        job->deadline         = job->submitted + std::chrono::milliseconds(req.budget_ms);
         job->req      = std::move(req);
-        {
-            std::lock_guard<std::mutex> lock(mu_);
-            if (closed_)
-                throw Failure("network is closed");
-            if (queue_.size() >= 4096)
-                throw Failure("network queue full");
-            queue_.push_back(job);
+        const auto& request   = job->req;
+        const bool  cacheable = capacity_ && !request.cache_key.empty();
+        if (cacheable && request.media) {
+            try {
+                endpoint(rewrite(request.url, policy_), policy_, true);
+            } catch (const Failure& error) {
+                job->error = error.what();
+            }
         }
+        std::lock_guard<std::mutex> lock(mu_);
+        if (closed_)
+            throw Failure("network is closed");
+        if (cacheable) {
+            if (Clock::now() >= job->deadline)
+                job->error = "timeout";
+            if (!job->error.empty() || cached(*job)) {
+                finish(job);
+                return job;
+            }
+        }
+        if (queue_.size() + follower_count_ >= 4096)
+            throw Failure("network queue full");
+        if (cacheable && request.media) {
+            const auto [begin, end] = flights_.equal_range(request.cache_key);
+            for (auto flight = begin; flight != end; ++flight) {
+                if (!compatible(*flight->second, *job))
+                    continue;
+                auto& owner = *flight->second;
+                // Increment only while a live caller still owns this transfer.
+                auto live = owner.subscribers->load();
+                while (live && !owner.subscribers->compare_exchange_weak(live, live + 1)) {}
+                if (live) {
+                    job->subscribers = owner.subscribers;
+                    job->joined      = true;
+                    try {
+                        owner.followers.push_back(job);
+                    } catch (...) {
+                        job->release_subscription();
+                        throw;
+                    }
+                    ++follower_count_;
+                    return job;
+                }
+            }
+            job->subscribers = std::make_shared<std::atomic<size_t>>(1);
+            job->owner       = true;
+        }
+        enqueue(job);
         cv_.notify_one();
         return job;
     }
@@ -719,11 +779,12 @@ public:
                 return;
             closed_ = true;
             for (const auto& job : queue_)
-                job->canceled = true;
+                cancel_group(*job);
             for (const auto& job : running_)
-                job->canceled = true;
+                cancel_group(*job);
         }
         cv_.notify_all();
+        retry_cv_.notify_all();
         connections_->stop();
         for (auto& worker : workers_)
             if (worker.joinable())
@@ -734,17 +795,52 @@ public:
 
 private:
     using Entry = std::pair<std::string, Bytes>;
+    void enqueue(const std::shared_ptr<Job>& job) {
+        queue_.push_back(job);
+        if (job->owner) {
+            try {
+                flights_.emplace(job->req.cache_key, job);
+            } catch (...) {
+                queue_.pop_back();
+                throw;
+            }
+        }
+    }
+    static bool compatible(const Job& owner, const Job& caller) {
+        const auto& a = owner.req;
+        const auto& b = caller.req;
+        // An earlier deadline gets independent admission and timeout handling.
+        return owner.deadline <= caller.deadline && a.url == b.url && a.headers == b.headers && a.proxy == b.proxy
+               && a.proxy_headers == b.proxy_headers && a.limit == b.limit && a.connect_ms == b.connect_ms
+               && a.idle_ms == b.idle_ms && a.attempts == b.attempts;
+    }
+    static void cancel_group(Job& owner) {
+        owner.cancel();
+        for (const auto& follower : owner.followers)
+            follower->cancel();
+    }
+    // Cache publication, in-flight lookup and completion all use mu_.
+    void finish(const std::shared_ptr<Job>& job) {
+        job->release_subscription();
+        job->finished = Clock::now();
+        job->req      = Request{};
+        job->completed.store(true);
+        done_.push_back(job);
+        done_cv_.notify_one();
+    }
     bool cached(Job& job) {
         if (!capacity_ || job.req.cache_key.empty())
             return false;
-        std::lock_guard<std::mutex> lock(cache_mu_);
-        auto                        it = entries_.find(job.req.cache_key);
+        auto it = entries_.find(job.req.cache_key);
         if (it == entries_.end())
             return false;
         lru_.splice(lru_.begin(), lru_, it->second);
         job.body = it->second->second;
-        if (job.req.limit && job.body->size() > job.req.limit)
-            throw Failure("too_large");
+        if (job.req.limit && job.body->size() > job.req.limit) {
+            job.error = "too_large";
+            job.body.reset();
+            return true;
+        }
         job.hit    = true;
         job.status = 200;
         return true;
@@ -752,11 +848,15 @@ private:
     void remember(const Job& job) {
         if (!capacity_ || job.req.cache_key.empty() || job.status != 200)
             return;
-        std::lock_guard<std::mutex> lock(cache_mu_);
         if (entries_.count(job.req.cache_key))
             return;
         lru_.emplace_front(job.req.cache_key, job.body);
-        entries_.emplace(lru_.front().first, lru_.begin());
+        try {
+            entries_.emplace(lru_.front().first, lru_.begin());
+        } catch (...) {
+            lru_.pop_front();
+            throw;
+        }
         if (entries_.size() > capacity_) {
             entries_.erase(lru_.back().first);
             lru_.pop_back();
@@ -864,14 +964,12 @@ private:
 
     void run(CURL* curl, Job& job) {
         auto& req = job.req;
-        if (job.canceled.load())
+        if (job.stop_transfer())
             throw Failure("cancelled");
         if (Clock::now() >= job.deadline)
             throw Failure("timeout");
-        if (req.media)
+        if (req.media && !job.owner)
             endpoint(rewrite(req.url, policy_), policy_, true);
-        if (cached(job))
-            return;
         for (int attempt = 0;; ++attempt) {
             bool transient = false;
             try {
@@ -879,10 +977,8 @@ private:
                 transient = req.media
                             && (job.status == 408 || job.status == 429 || job.status == 500 || job.status == 502
                                 || job.status == 503 || job.status == 504);
-                if (!transient || attempt + 1 >= req.attempts) {
-                    remember(job);
+                if (!transient || attempt + 1 >= req.attempts)
                     return;
-                }
             } catch (const Failure& e) {
                 if ((std::string(e.what()) != "transport" && std::string(e.what()) != "timeout"
                      && std::string(e.what()) != "body_transport" && std::string(e.what()) != "dns")
@@ -893,10 +989,51 @@ private:
                 throw Failure("timeout");
             ++job.retries;
             std::unique_lock<std::mutex> lock(mu_);
-            cv_.wait_until(lock,
-                           std::min(job.deadline, Clock::now() + std::chrono::milliseconds(200 * (1 << attempt))),
-                           [&job] { return job.canceled.load(); });
+            retry_cv_.wait_until(lock,
+                                 std::min(job.deadline, Clock::now() + std::chrono::milliseconds(200 * (1 << attempt))),
+                                 [&job] { return job.stop_transfer(); });
         }
+    }
+    void complete_followers(const std::shared_ptr<Job>& job, Clock::time_point now) {
+        const auto [begin, end] = flights_.equal_range(job->req.cache_key);
+        auto flight             = std::find_if(begin, end, [&](const auto& pair) { return pair.second == job; });
+        flights_.erase(flight);
+        follower_count_ -= job->followers.size();
+        std::vector<std::shared_ptr<Job>> remaining;
+        const bool exhausted = job->error == "timeout" && now + std::chrono::milliseconds(1) >= job->deadline;
+        for (auto& waiter : job->followers) {
+            if (job->started > waiter->queued_since)
+                waiter->queue_time += job->started - waiter->queued_since;
+            if (waiter->canceled.load())
+                waiter->error = "cancelled";
+            else if (now >= waiter->deadline)
+                waiter->error = "timeout";
+            else if (exhausted) {
+                waiter->queued_since = now;
+                remaining.push_back(std::move(waiter));
+                continue;
+            } else {
+                waiter->body   = job->body;
+                waiter->error  = job->error;
+                waiter->status = job->status;
+            }
+            finish(waiter);
+        }
+        job->followers.clear();
+        if (remaining.empty())
+            return;
+        // The physical request used its own deadline. Keep the live callers
+        // together and retry within the earliest remaining caller's budget.
+        auto first = std::min_element(
+            remaining.begin(), remaining.end(), [](const auto& a, const auto& b) { return a->deadline < b->deadline; });
+        auto next = *first;
+        remaining.erase(first);
+        next->owner     = true;
+        next->joined    = false;
+        next->followers = std::move(remaining);
+        follower_count_ += next->followers.size();
+        enqueue(next);
+        cv_.notify_one();
     }
     void work() {
         std::unique_ptr<CURL, decltype(&curl_easy_cleanup)> curl(curl_easy_init(), curl_easy_cleanup);
@@ -913,6 +1050,7 @@ private:
                 ++active_;
             }
             job->started = Clock::now();
+            job->queue_time += job->started - job->queued_since;
             try {
                 if (!curl)
                     throw Failure("curl initialization failed");
@@ -920,23 +1058,30 @@ private:
             } catch (const std::exception& e) {
                 job->error = e.what();
             }
-            job->finished = Clock::now();
-            job->req      = Request{};
-            job->completed.store(true);
-            {
-                std::lock_guard<std::mutex> lock(mu_);
-                running_.erase(job);
-                --active_;
-                done_.push_back(std::move(job));
+            std::lock_guard<std::mutex> lock(mu_);
+            running_.erase(job);
+            --active_;
+            const auto now = Clock::now();
+            if (job->error.empty() && !job->stop_transfer()) {
+                try {
+                    remember(*job);
+                } catch (const std::bad_alloc&) {
+                    // Cache publication is optional once the body has been downloaded.
+                }
             }
-            done_cv_.notify_one();
+            if (job->owner)
+                complete_followers(job, now);
+            if (job->canceled.load())
+                job->error = "cancelled";
+            finish(job);
         }
     }
-    size_t                                                      capacity_, active_ = 0;
+    size_t                                                      capacity_, active_ = 0, follower_count_ = 0;
     Policy                                                      policy_;
+    std::unordered_multimap<std::string, std::shared_ptr<Job>>  flights_;
     bool                                                        closed_ = false;
-    std::mutex                                                  mu_, cache_mu_;
-    std::condition_variable                                     cv_, done_cv_;
+    std::mutex                                                  mu_;
+    std::condition_variable                                     cv_, done_cv_, retry_cv_;
     std::deque<std::shared_ptr<Job>>                            queue_, done_;
     std::unordered_set<std::shared_ptr<Job>>                    running_;
     std::unique_ptr<CurlConnectionPool>                         connections_;
@@ -985,33 +1130,34 @@ PYBIND11_MODULE(_media_network, m) {
         .def_readwrite("budget_ms", &Request::budget_ms)
         .def_readwrite("attempts", &Request::attempts)
         .def_readwrite("media", &Request::media);
-    py::class_<Job, std::shared_ptr<Job>>(m, "Job")
-        .def("cancel", [](Job& j) { j.canceled = true; })
-        .def("result", [](const Job& j) {
-            if (!j.completed.load())
-                throw std::logic_error("transfer still in progress");
-            size_t size   = j.body && j.error.empty() ? j.body->size() : 0;
-            auto*  buffer = PyBytes_FromStringAndSize(nullptr, size);
-            if (!buffer)
-                throw py::error_already_set();
-            auto bytes = py::reinterpret_steal<py::bytes>(buffer);
-            if (size) {
-                char* destination = PyBytes_AS_STRING(buffer);
-                if (size >= 65536) {
-                    py::gil_scoped_release unlock;
-                    std::memcpy(destination, j.body->data(), size);
-                } else {
-                    std::memcpy(destination, j.body->data(), size);
-                }
+    py::class_<Job, std::shared_ptr<Job>>(m, "Job").def("cancel", &Job::cancel).def("result", [](const Job& j) {
+        if (!j.completed.load())
+            throw std::logic_error("transfer still in progress");
+        size_t size   = j.body && j.error.empty() ? j.body->size() : 0;
+        auto*  buffer = PyBytes_FromStringAndSize(nullptr, size);
+        if (!buffer)
+            throw py::error_already_set();
+        auto bytes = py::reinterpret_steal<py::bytes>(buffer);
+        if (size) {
+            char* destination = PyBytes_AS_STRING(buffer);
+            if (size >= 65536) {
+                py::gil_scoped_release unlock;
+                std::memcpy(destination, j.body->data(), size);
+            } else {
+                std::memcpy(destination, j.body->data(), size);
             }
-            return py::make_tuple(j.status,
-                                  j.error,
-                                  std::move(bytes),
-                                  j.hit,
-                                  j.retries,
-                                  py::make_tuple(j.proxy_attempts, j.fallbacks, j.connect_retries),
-                                  std::chrono::duration<double, std::milli>(j.finished - j.started).count());
-        });
+        }
+        return py::make_tuple(
+            j.status,
+            j.error,
+            std::move(bytes),
+            j.hit,
+            j.retries,
+            py::make_tuple(j.proxy_attempts, j.fallbacks, j.connect_retries),
+            std::chrono::duration<double, std::milli>(j.finished - j.submitted - j.queue_time).count(),
+            std::chrono::duration<double, std::milli>(j.queue_time).count(),
+            j.joined);
+    });
     py::class_<Network>(m, "Network")
         .def(py::init<int, size_t, Policy>())
         .def("submit", [](Network& net, Request& req) { return net.submit(std::move(req)); })

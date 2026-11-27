@@ -169,9 +169,11 @@ class MediaNetwork:
                 return
             from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
 
-            status, error, body, hit, retries, counts, _ = done.result()
+            result = done.result()
+            status, error, body, hit, retries, counts = result[:6]
+            joined = len(result) > 8 and result[8]
             proxy_attempts, fallbacks, connect_retries = counts
-            if via_proxy and not hit:
+            if via_proxy and not hit and not joined:
                 for _ in range(proxy_attempts):
                     self.report_proxy(AccMetrics.MM_DOWNLOAD_PROXY_QPS_METRIC, region)
                 for _ in range(fallbacks):
@@ -179,10 +181,20 @@ class MediaNetwork:
                         AccMetrics.MM_DOWNLOAD_PROXY_FALLBACK_QPS_METRIC, region
                     )
             if VIT_PHASE_METRICS:
+                source = "cache" if hit else "load"
+                if joined:
+                    source = "shared"
                 kmonitor.report(
-                    AccMetrics.VIT_URL_SOURCE_QPS_METRIC,
-                    tags={"source": "cache" if hit else "load"},
+                    AccMetrics.VIT_URL_SOURCE_QPS_METRIC, tags={"source": source}
                 )
+                if len(result) > 7:
+                    kmonitor.report(
+                        GaugeMetrics.VIT_HTTP_PHASE_RT_US_METRIC,
+                        result[7] * 1000,
+                        tags={"phase": "worker_queue", "source": source},
+                    )
+                if joined:
+                    return
                 for _ in range(connect_retries):
                     kmonitor.report(AccMetrics.VIT_HTTP_CONNECT_RETRY_QPS_METRIC)
                 for _ in range(retries):
@@ -322,10 +334,18 @@ class SourceBatch:
     def result(self):
         self.finished = time.monotonic()
         completed = [job.result() if job is not None else None for job in self.jobs]
-        self.fetch_times_us = tuple(
-            result[-1] * 1000 if result is not None else 0 for result in completed
+        # The original native result ends at worker time (index 6). Newer
+        # results also carry queue time at index 7, both in milliseconds.
+        durations_ms = [sum(result[6:8]) if result else 0.0 for result in completed]
+        self.fetch_times_us = tuple(ms * 1000 for ms in durations_ms)
+        self.network_ms = max(
+            (
+                ms
+                for ms, result in zip(durations_ms, completed)
+                if result and not result[3]
+            ),
+            default=0.0,
         )
-        self.network_ms = max((r[-1] for r in completed if r and not r[3]), default=0.0)
         return tuple(image_result(r, v41=self.v41) if r else None for r in completed)
 
     @property

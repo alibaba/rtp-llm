@@ -8,7 +8,7 @@ import os
 import sys
 import threading
 import unittest
-from concurrent.futures import CancelledError
+from concurrent.futures import CancelledError, Future
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -310,6 +310,70 @@ class V41ImageDownloadTimingTest(unittest.TestCase):
         self.assertEqual(result, [b"image", b"image"])
         self.assertEqual(requests, 2)
         self.assertEqual(elapsed_ms, 250.0)
+
+    def test_native_download_timing_includes_each_callers_queue_wait(self):
+        from rtp_llm.multimodal.media_network import SourceBatch
+
+        # A legacy wheel returns seven fields. A new wheel appends queue
+        # milliseconds and the shared-transfer flag.
+        def completed(worker_ms, hit=False, extra=()):
+            result = Future()
+            result.set_result((200, "", b"data", hit, 0, (0, 0, 0), worker_ms) + extra)
+            return result
+
+        network = MagicMock()
+        network.config.mm_image_max_file_size_kb = 1
+        network.image.side_effect = [
+            completed(3),
+            completed(5, extra=(100, False)),
+            completed(8, extra=(25, True)),
+            completed(1, hit=True, extra=(0, False)),
+        ]
+        item = SimpleNamespace(
+            mm_inputs=[
+                SimpleNamespace(
+                    url=f"https://example.invalid/{i}", mm_type=MMUrlType.IMAGE
+                )
+                for i in range(4)
+            ],
+            remaining_timeout_s=lambda: 30,
+            region=None,
+            preprocess_ready_event=threading.Event(),
+        )
+        batch = SourceBatch(network, item)
+        self.assertEqual(batch.result(), (b"data",) * 4)
+        self.assertEqual(batch.fetch_times_us, (3000, 105000, 33000, 1000))
+        self.assertEqual(batch.network_ms, 105)
+
+    def test_native_join_reports_wait_once_without_recounting_transfer(self):
+        from rtp_llm.metrics import AccMetrics
+        from rtp_llm.multimodal.media_network import MediaNetwork
+
+        network = MagicMock(spec=MediaNetwork)
+        network.native = SimpleNamespace(Request=lambda: SimpleNamespace(proxy=""))
+        network.proxy_for = None
+        future = Future()
+        network.submit.return_value = future
+        with patch("rtp_llm.multimodal.vit_metrics.VIT_PHASE_METRICS", True), patch(
+            "rtp_llm.metrics.kmonitor.report"
+        ) as report:
+            MediaNetwork.image(network, "http://example.invalid/img", "", 0, 30, None)
+            future.set_result((200, "", b"data", False, 1, (0, 0, 1), 8, 25, True))
+        self.assertEqual(
+            [call.args[0] for call in report.call_args_list],
+            [
+                AccMetrics.VIT_URL_SOURCE_QPS_METRIC,
+                GaugeMetrics.VIT_HTTP_PHASE_RT_US_METRIC,
+            ],
+        )
+        report.assert_any_call(
+            AccMetrics.VIT_URL_SOURCE_QPS_METRIC, tags={"source": "shared"}
+        )
+        report.assert_any_call(
+            GaugeMetrics.VIT_HTTP_PHASE_RT_US_METRIC,
+            25000,
+            tags={"phase": "worker_queue", "source": "shared"},
+        )
 
     def test_configured_image_size_limit_on_python_and_native_downloads(self):
         from functools import partial
