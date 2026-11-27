@@ -15,7 +15,8 @@ void launchGatherMarkovEmbedding(const torch::Tensor& markov_w1,
 
 // Fused DSpARK step logits computation:
 //   out[b, v] = (float(base_logits[b * propose_step + step, v]) + float(markov_bias[b, v])) / temperature[b]
-// Supports base_logits in kBFloat16 or kFloat32 and markov_bias in kBFloat16 or kFloat32.
+// Supports base_logits in kBFloat16 or kFloat32, and optional markov_bias (undefined when has_markov is false)
+// in kBFloat16 or kFloat32.
 void launchDSparkAddMarkovDivTemp(const torch::Tensor& base_logits,
                                   const torch::Tensor& markov_bias,
                                   const torch::Tensor& temperature,
@@ -23,6 +24,19 @@ void launchDSparkAddMarkovDivTemp(const torch::Tensor& base_logits,
                                   int64_t              step,
                                   int64_t              propose_step,
                                   int64_t              draft_vocab_size);
+
+// Prepare per-replay device inputs for a DSpARK CUDA graph:
+// - Populates per-(step, row) Philox seed/offset arrays on device
+// - Clamps padded batch tail [live_bsz, padded_bsz) to anchor=0 and temperature=1.0f
+void launchPrepareDSparkDraftGraphInputs(torch::Tensor& anchors_slot,
+                                         torch::Tensor& temperature_slot,
+                                         torch::Tensor& seed_arr,
+                                         torch::Tensor& offset_arr,
+                                         int64_t        live_bsz,
+                                         int64_t        padded_bsz,
+                                         int64_t        gamma,
+                                         uint64_t       seed,
+                                         uint64_t       base_offset);
 
 // Map [B] int32 draft token IDs through int64/int32 d2t_map directly into out_tokens[b]
 // (which may have an arbitrary outer stride, e.g. column `step` of [B, propose_step]).

@@ -225,6 +225,7 @@ struct MtpExecutorTestConfig {
     SpeculativeType sp_type                   = SP_TYPE_MTP;
     int64_t         dspark_mask_token_id      = -1;
     RoleType        role_type                 = RoleType::PDFUSION;
+    bool            enable_cuda_graph         = false;
     bool            enable_batch_record       = false;
     double          record_decode_sample_rate = 1.0;
 };
@@ -1015,6 +1016,7 @@ public:
         model_config.mm_model_config.mm_position_ids_style              = test_config.mm_position_ids_style;
         params.model_config_.mm_model_config.mm_position_ids_style      = test_config.mm_position_ids_style;
         params.sp_config                                                = sp_config;
+        params.hw_kernel_config.enable_cuda_graph                       = test_config.enable_cuda_graph;
         params.pd_sep_config.role_type                                  = test_config.role_type;
         params.parallelism_config.role_type                             = test_config.role_type;
         params.parallelism_config.tp_size                               = test_config.tp_size;
@@ -5223,6 +5225,134 @@ TEST_F(MtpCacheSnapshotCapacityTest, FullAndReplayGroupsNeedNoProposalReserve) {
     config.linear_replay.group_ids = {linear_group_id};
     types[linear_group_id]         = CacheGroupType::FULL;
     EXPECT_TRUE(MtpExecutor::hasLinearCacheSnapshotCapacity({stream}, config, types, 1, 1, 4));
+}
+
+TEST_F(MtpExecutorTest, testDSparkCudaGraphWiringAndMixedGreedyBatch) {
+    constexpr int32_t gamma      = 3;
+    constexpr int32_t vocab_size = 6;
+
+    // 1. Verify wiring rules on MtpExecutor across roles and enable_cuda_graph.
+    {
+        MtpExecutorTestConfig cfg;
+        cfg.vocab_size           = vocab_size;
+        cfg.gen_num_per_cycle    = gamma;
+        cfg.vocab_size_override  = vocab_size;
+        cfg.sp_type              = SP_TYPE_DSPARK;
+        cfg.dspark_mask_token_id = 0;
+        cfg.enable_cuda_graph    = false;
+        cfg.role_type            = RoleType::DECODE;
+        auto disabled_comp       = createMtpExecutorComponents(cfg);
+        EXPECT_FALSE(disabled_comp.executor->speculative_sampler_->dsparkCudaGraphEnabled());
+
+        cfg.enable_cuda_graph = true;
+        cfg.role_type         = RoleType::PREFILL;
+        auto prefill_comp     = createMtpExecutorComponents(cfg);
+        EXPECT_FALSE(prefill_comp.executor->speculative_sampler_->dsparkCudaGraphEnabled());
+
+        cfg.role_type    = RoleType::DECODE;
+        auto decode_comp = createMtpExecutorComponents(cfg);
+        EXPECT_TRUE(decode_comp.executor->speculative_sampler_->dsparkCudaGraphEnabled());
+    }
+
+    // 2. Mixed batch (greedy via do_sample=false, greedy via top_k=1, stochastic, invalid temp)
+    MtpExecutorTestConfig test_config;
+    test_config.vocab_size           = vocab_size;
+    test_config.gen_num_per_cycle    = gamma;
+    test_config.vocab_size_override  = vocab_size;
+    test_config.sp_type              = SP_TYPE_DSPARK;
+    test_config.dspark_mask_token_id = 0;
+    test_config.enable_cuda_graph    = true;
+    test_config.role_type            = RoleType::PDFUSION;
+    auto components                  = createMtpExecutorComponents(test_config);
+    ASSERT_TRUE(components.executor->speculative_sampler_->dsparkCudaGraphEnabled());
+
+    auto markov_w1 =
+        torch::tensor({0.0f, 0.2f, 0.4f, 0.6f, 0.8f, 1.0f}, torch::kFloat32).reshape({vocab_size, 1}).to(torch::kCUDA);
+    auto markov_w2 = torch::tensor({-0.3f, -0.1f, 0.1f, 0.3f, 0.5f, 0.7f}, torch::kFloat32)
+                         .reshape({vocab_size, 1})
+                         .to(torch::kCUDA);
+    components.executor->dspark_markov_w1_ = markov_w1;
+    components.executor->dspark_markov_w2_ = markov_w2;
+
+    auto s_greedy_dosample =
+        createContextStream(components.model_config, components.runtime_config, components.resource_context, {0, 1});
+    s_greedy_dosample->generateConfig()->do_sample   = false;
+    s_greedy_dosample->generateConfig()->temperature = 1.2f;
+
+    auto s_greedy_topk1 =
+        createContextStream(components.model_config, components.runtime_config, components.resource_context, {1, 2});
+    s_greedy_topk1->generateConfig()->do_sample   = true;
+    s_greedy_topk1->generateConfig()->top_k       = 1;
+    s_greedy_topk1->generateConfig()->temperature = 0.9f;
+
+    auto s_stochastic =
+        createContextStream(components.model_config, components.runtime_config, components.resource_context, {2, 3});
+    s_stochastic->generateConfig()->do_sample   = true;
+    s_stochastic->generateConfig()->top_k       = 0;
+    s_stochastic->generateConfig()->temperature = 0.7f;
+
+    StreamGroups stream_groups({s_greedy_dosample, s_greedy_topk1, s_stochastic});
+
+    auto base_logits = torch::tensor({
+                                         0.1f, 0.2f, 0.8f, 0.3f, 0.4f, 0.5f,
+                                         0.2f, 0.9f, 0.1f, 0.3f, 0.4f, 0.5f,
+                                         0.1f, 0.2f, 0.3f, 0.4f, 0.9f, 0.5f,
+
+                                         0.3f, 0.1f, 0.2f, 0.8f, 0.4f, 0.5f,
+                                         0.8f, 0.1f, 0.2f, 0.3f, 0.4f, 0.5f,
+                                         0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.9f,
+
+                                         0.1f, 0.3f, 0.2f, 0.4f, 0.6f, 0.5f,
+                                         0.4f, 0.2f, 0.5f, 0.1f, 0.3f, 0.6f,
+                                         0.6f, 0.5f, 0.4f, 0.3f, 0.2f, 0.1f,
+                                     },
+                                     torch::kFloat32)
+                           .reshape({3, gamma, vocab_size})
+                           .to(torch::kCUDA);
+    auto anchors = torch::tensor({1, 2, 3}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+
+    auto output =
+        components.executor->sampleDSparkDraft(stream_groups, base_logits.reshape({3 * gamma, vocab_size}), anchors);
+    EXPECT_EQ(components.executor->speculative_sampler_->dsparkGraphCacheSize(), 1u);
+    ASSERT_EQ(output.token_ids.sizes().vec(), (std::vector<int64_t>{3, gamma}));
+    ASSERT_EQ(output.all_probs.sizes().vec(), (std::vector<int64_t>{3, gamma, vocab_size}));
+
+    auto temps_ref = torch::tensor({1.0e-6f, 1.0e-6f, 0.7f}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA))
+                         .unsqueeze(1);
+    auto prev = anchors.to(torch::kLong);
+    for (int64_t step = 0; step < gamma; ++step) {
+        auto bias       = torch::mm(markov_w1.index_select(0, prev), markov_w2.transpose(0, 1));
+        auto expected_q = torch::softmax((base_logits.select(1, step) + bias) / temps_ref, -1);
+        EXPECT_TRUE(torch::allclose(output.all_probs.select(1, step), expected_q, 1e-5, 1e-6));
+        if (step == 0 || step == 1 || step == 2) {
+            // Greedy rows [0, 1] must match argmax exactly.
+            EXPECT_EQ(output.token_ids[0][step].item<int32_t>(), expected_q[0].argmax(-1).item<int32_t>());
+            EXPECT_EQ(output.token_ids[1][step].item<int32_t>(), expected_q[1].argmax(-1).item<int32_t>());
+        }
+        prev = output.token_ids.select(1, step).to(torch::kLong);
+    }
+
+    // Replay with B=4 then shrink to B=3 reusing the same padded_bsz=4 graph + invalid NaN temperature clamping.
+    auto s_extra_greedy =
+        createContextStream(components.model_config, components.runtime_config, components.resource_context, {3, 4});
+    s_extra_greedy->generateConfig()->do_sample   = false;
+    s_extra_greedy->generateConfig()->temperature = 0.0f;
+    StreamGroups b4_groups({s_greedy_dosample, s_greedy_topk1, s_stochastic, s_extra_greedy});
+    auto         b4_logits = torch::cat({base_logits, base_logits.narrow(0, 0, 1)}, 0);
+    auto         b4_anchors =
+        torch::tensor({1, 2, 3, 1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+    auto b4_out =
+        components.executor->sampleDSparkDraft(b4_groups, b4_logits.reshape({4 * gamma, vocab_size}), b4_anchors);
+    EXPECT_EQ(components.executor->speculative_sampler_->dsparkGraphCacheSize(), 1u);
+    ASSERT_EQ(b4_out.token_ids.sizes().vec(), (std::vector<int64_t>{4, gamma}));
+
+    s_stochastic->generateConfig()->temperature = std::numeric_limits<float>::quiet_NaN();
+    StreamGroups shrunk_groups({s_greedy_dosample, s_stochastic});
+    auto         shrunk_out = components.executor->sampleDSparkDraft(
+        shrunk_groups, base_logits.narrow(0, 0, 2).reshape({2 * gamma, vocab_size}), anchors.narrow(0, 0, 2));
+    EXPECT_FLOAT_EQ(s_stochastic->generateConfig()->temperature, 1.0f);
+    EXPECT_EQ(components.executor->speculative_sampler_->dsparkGraphCacheSize(), 2u);
+    ASSERT_EQ(shrunk_out.token_ids.sizes().vec(), (std::vector<int64_t>{2, gamma}));
 }
 
 }  // namespace rtp_llm

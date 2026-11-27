@@ -427,6 +427,14 @@ struct RejectionSamplingLaunchConfig {
     int target_token_stride;
 };
 
+struct SampleFromProbsIntoParams {
+    torch::Tensor probabilities;
+    torch::Tensor out_token_ids;
+    torch::Tensor out_valid;
+    torch::Tensor seed_arr;
+    torch::Tensor offset_arr;
+};
+
 struct MappingDraft2TargetParams {
     torch::Tensor tokens;
     torch::Tensor d2t_map;

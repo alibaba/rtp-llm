@@ -26,6 +26,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <limits>
 #include <utility>
 #if USING_CUDA
@@ -42,12 +43,14 @@ using DeviceGuard = c10::hip::HIPGuardMasqueradingAsCUDA;
 #endif
 
 namespace rtp_llm {
-GreedyOutput     sampleGreedy(const GreedyParams& params);
-torch::Tensor    sampleFromProbs(const torch::Tensor& probabilities);
-BeamSearchOutput sampleBeamSearch(BeamSearchParams params);
-void             rejectionSampling(const RejectionSamplingParams& params);
-void             mappingDraft2Target(const MappingDraft2TargetParams& params);
-void             multiMergeCopy(const MultiMergeCopyParams& params);
+GreedyOutput                   sampleGreedy(const GreedyParams& params);
+torch::Tensor                  sampleFromProbs(const torch::Tensor& probabilities);
+void                           sampleFromProbsInto(const SampleFromProbsIntoParams& params);
+std::tuple<uint64_t, uint64_t> getSeedAndOffset(int increment_size);
+BeamSearchOutput               sampleBeamSearch(BeamSearchParams params);
+void                           rejectionSampling(const RejectionSamplingParams& params);
+void                           mappingDraft2Target(const MappingDraft2TargetParams& params);
+void                           multiMergeCopy(const MultiMergeCopyParams& params);
 }  // namespace rtp_llm
 
 #if USING_CUDA
@@ -673,6 +676,14 @@ GreedyOutput execSampleGreedy(const GreedyParams& params) {
 
 torch::Tensor execSampleFromProbs(const torch::Tensor& probabilities) {
     return sampleFromProbs(probabilities);
+}
+
+void execSampleFromProbsInto(const SampleFromProbsIntoParams& params) {
+    sampleFromProbsInto(params);
+}
+
+std::tuple<uint64_t, uint64_t> execGetSeedAndOffset(int increment_size) {
+    return getSeedAndOffset(increment_size);
 }
 
 BeamSearchOutput execSampleBeamSearch(BeamSearchParams params) {

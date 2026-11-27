@@ -60,7 +60,7 @@ __global__ void gatherMarkovEmbeddingKernel(const T* __restrict__ weight,
     out[b * rank + col] = val;
 }
 
-template<typename BaseT, typename MarkovT>
+template<typename BaseT, typename MarkovT, bool HasMarkov>
 __global__ void fusedAddMarkovDivTempScalarKernel(const BaseT* __restrict__ base_logits,
                                                   int64_t base_row_stride,
                                                   const MarkovT* __restrict__ markov_bias,
@@ -76,11 +76,15 @@ __global__ void fusedAddMarkovDivTempScalarKernel(const BaseT* __restrict__ base
     if (col >= draft_vocab_size) {
         return;
     }
-    const BaseT*   base_row   = base_logits + (b * propose_step + step) * base_row_stride;
-    const MarkovT* markov_row = markov_bias + b * markov_row_stride;
-    float*         out_row    = out_logits + b * out_row_stride;
-    const float    temp       = temperature[b];
-    out_row[col]              = (toFloat(base_row[col]) + toFloat(markov_row[col])) / temp;
+    const BaseT* base_row = base_logits + (b * propose_step + step) * base_row_stride;
+    float*       out_row  = out_logits + b * out_row_stride;
+    const float  temp     = temperature[b];
+    float        m_val    = 0.0f;
+    if constexpr (HasMarkov) {
+        const MarkovT* markov_row = markov_bias + b * markov_row_stride;
+        m_val                     = toFloat(markov_row[col]);
+    }
+    out_row[col] = (toFloat(base_row[col]) + m_val) / temp;
 }
 
 __device__ __forceinline__ void loadVec4Float(const float* ptr, float (&vals)[4]) {
@@ -100,7 +104,7 @@ __device__ __forceinline__ void loadVec4Float(const __nv_bfloat16* ptr, float (&
     vals[3]                  = __bfloat162float(bf[3]);
 }
 
-template<typename BaseT, typename MarkovT>
+template<typename BaseT, typename MarkovT, bool HasMarkov>
 __global__ void fusedAddMarkovDivTempVec4Kernel(const BaseT* __restrict__ base_logits,
                                                 int64_t base_row_stride,
                                                 const MarkovT* __restrict__ markov_bias,
@@ -116,30 +120,37 @@ __global__ void fusedAddMarkovDivTempVec4Kernel(const BaseT* __restrict__ base_l
     if (vec_col >= draft_vocab_size) {
         return;
     }
-    const BaseT*   base_row   = base_logits + (b * propose_step + step) * base_row_stride;
-    const MarkovT* markov_row = markov_bias + b * markov_row_stride;
-    float*         out_row    = out_logits + b * out_row_stride;
-    const float    temp       = temperature[b];
+    const BaseT* base_row = base_logits + (b * propose_step + step) * base_row_stride;
+    float*       out_row  = out_logits + b * out_row_stride;
+    const float  temp     = temperature[b];
 
     if (vec_col + 3 < draft_vocab_size) {
         float b_vals[4];
-        float m_vals[4];
+        float m_vals[4] = {0.0f, 0.0f, 0.0f, 0.0f};
         loadVec4Float(base_row + vec_col, b_vals);
-        loadVec4Float(markov_row + vec_col, m_vals);
+        if constexpr (HasMarkov) {
+            const MarkovT* markov_row = markov_bias + b * markov_row_stride;
+            loadVec4Float(markov_row + vec_col, m_vals);
+        }
         float4 out_vec;
-        out_vec.x                                       = (b_vals[0] + m_vals[0]) / temp;
-        out_vec.y                                       = (b_vals[1] + m_vals[1]) / temp;
-        out_vec.z                                       = (b_vals[2] + m_vals[2]) / temp;
-        out_vec.w                                       = (b_vals[3] + m_vals[3]) / temp;
-        *reinterpret_cast<float4*>(out_row + vec_col)   = out_vec;
+        out_vec.x                                     = (b_vals[0] + m_vals[0]) / temp;
+        out_vec.y                                     = (b_vals[1] + m_vals[1]) / temp;
+        out_vec.z                                     = (b_vals[2] + m_vals[2]) / temp;
+        out_vec.w                                     = (b_vals[3] + m_vals[3]) / temp;
+        *reinterpret_cast<float4*>(out_row + vec_col) = out_vec;
     } else {
         for (int64_t col = vec_col; col < draft_vocab_size; ++col) {
-            out_row[col] = (toFloat(base_row[col]) + toFloat(markov_row[col])) / temp;
+            float m_val = 0.0f;
+            if constexpr (HasMarkov) {
+                const MarkovT* markov_row = markov_bias + b * markov_row_stride;
+                m_val                     = toFloat(markov_row[col]);
+            }
+            out_row[col] = (toFloat(base_row[col]) + m_val) / temp;
         }
     }
 }
 
-template<typename BaseT, typename MarkovT>
+template<typename BaseT, typename MarkovT, bool HasMarkov>
 void dispatchDSparkAddMarkovDivTempTypes(const torch::Tensor& base_logits,
                                           const torch::Tensor& markov_bias,
                                           const torch::Tensor& temperature,
@@ -150,46 +161,70 @@ void dispatchDSparkAddMarkovDivTempTypes(const torch::Tensor& base_logits,
                                           cudaStream_t         stream) {
     const int64_t  batch_size        = temperature.numel();
     const BaseT*   base_ptr          = reinterpret_cast<const BaseT*>(base_logits.data_ptr());
-    const MarkovT* markov_ptr        = reinterpret_cast<const MarkovT*>(markov_bias.data_ptr());
+    const MarkovT* markov_ptr        = HasMarkov ? reinterpret_cast<const MarkovT*>(markov_bias.data_ptr()) : nullptr;
     const float*   temp_ptr          = temperature.data_ptr<float>();
     float*         out_ptr           = out_logits.data_ptr<float>();
     const int64_t  base_row_stride   = base_logits.stride(0);
-    const int64_t  markov_row_stride = markov_bias.stride(0);
+    const int64_t  markov_row_stride = HasMarkov ? markov_bias.stride(0) : 0;
     const int64_t  out_row_stride    = out_logits.stride(0);
 
-    const bool can_vec4 = ((reinterpret_cast<uintptr_t>(base_ptr) & (4 * sizeof(BaseT) - 1)) == 0)
-                          && ((reinterpret_cast<uintptr_t>(markov_ptr) & (4 * sizeof(MarkovT) - 1)) == 0)
-                          && ((reinterpret_cast<uintptr_t>(out_ptr) & 15) == 0) && (base_row_stride % 4 == 0)
-                          && (markov_row_stride % 4 == 0) && (out_row_stride % 4 == 0);
+    const bool can_vec4 =
+        ((reinterpret_cast<uintptr_t>(base_ptr) & (4 * sizeof(BaseT) - 1)) == 0)
+        && (!HasMarkov
+            || (((reinterpret_cast<uintptr_t>(markov_ptr) & (4 * sizeof(MarkovT) - 1)) == 0)
+                && (markov_row_stride % 4 == 0)))
+        && ((reinterpret_cast<uintptr_t>(out_ptr) & 15) == 0) && (base_row_stride % 4 == 0)
+        && (out_row_stride % 4 == 0);
 
     constexpr int kThreads = 256;
     if (can_vec4) {
         const int64_t vec_cols = (draft_vocab_size + 3) / 4;
         const dim3    grid(static_cast<uint32_t>((vec_cols + kThreads - 1) / kThreads),
                         static_cast<uint32_t>(batch_size));
-        fusedAddMarkovDivTempVec4Kernel<BaseT, MarkovT><<<grid, kThreads, 0, stream>>>(base_ptr,
-                                                                                       base_row_stride,
-                                                                                       markov_ptr,
-                                                                                       markov_row_stride,
-                                                                                       temp_ptr,
-                                                                                       out_ptr,
-                                                                                       out_row_stride,
-                                                                                       step,
-                                                                                       propose_step,
-                                                                                       draft_vocab_size);
+        fusedAddMarkovDivTempVec4Kernel<BaseT, MarkovT, HasMarkov><<<grid, kThreads, 0, stream>>>(base_ptr,
+                                                                                                  base_row_stride,
+                                                                                                  markov_ptr,
+                                                                                                  markov_row_stride,
+                                                                                                  temp_ptr,
+                                                                                                  out_ptr,
+                                                                                                  out_row_stride,
+                                                                                                  step,
+                                                                                                  propose_step,
+                                                                                                  draft_vocab_size);
     } else {
         const dim3 grid(static_cast<uint32_t>((draft_vocab_size + kThreads - 1) / kThreads),
                         static_cast<uint32_t>(batch_size));
-        fusedAddMarkovDivTempScalarKernel<BaseT, MarkovT><<<grid, kThreads, 0, stream>>>(base_ptr,
-                                                                                         base_row_stride,
-                                                                                         markov_ptr,
-                                                                                         markov_row_stride,
-                                                                                         temp_ptr,
-                                                                                         out_ptr,
-                                                                                         out_row_stride,
-                                                                                         step,
-                                                                                         propose_step,
-                                                                                         draft_vocab_size);
+        fusedAddMarkovDivTempScalarKernel<BaseT, MarkovT, HasMarkov><<<grid, kThreads, 0, stream>>>(base_ptr,
+                                                                                                    base_row_stride,
+                                                                                                    markov_ptr,
+                                                                                                    markov_row_stride,
+                                                                                                    temp_ptr,
+                                                                                                    out_ptr,
+                                                                                                    out_row_stride,
+                                                                                                    step,
+                                                                                                    propose_step,
+                                                                                                    draft_vocab_size);
+    }
+}
+
+__global__ void prepareDSparkDraftGraphInputsKernel(int32_t* __restrict__ anchors_slot,
+                                                    float* __restrict__ temperature_slot,
+                                                    int64_t* __restrict__ seed_arr,
+                                                    int64_t* __restrict__ offset_arr,
+                                                    int64_t  live_bsz,
+                                                    int64_t  padded_bsz,
+                                                    int64_t  gamma,
+                                                    uint64_t seed,
+                                                    uint64_t base_offset) {
+    const int64_t idx   = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const int64_t total = gamma * padded_bsz;
+    if (idx < total) {
+        seed_arr[idx]   = static_cast<int64_t>(seed);
+        offset_arr[idx] = static_cast<int64_t>(base_offset + static_cast<uint64_t>(idx) * 4ULL);
+    }
+    if (idx >= live_bsz && idx < padded_bsz) {
+        anchors_slot[idx]     = 0;
+        temperature_slot[idx] = 1.0f;
     }
 }
 
@@ -349,43 +384,107 @@ void launchDSparkAddMarkovDivTemp(const torch::Tensor& base_logits,
     if (batch_size == 0 || draft_vocab_size == 0) {
         return;
     }
-    RTP_LLM_CHECK_WITH_INFO(base_logits.is_cuda() && markov_bias.is_cuda() && temperature.is_cuda()
-                                && out_logits.is_cuda(),
+    const bool has_markov = markov_bias.defined() && markov_bias.numel() > 0;
+    RTP_LLM_CHECK_WITH_INFO(base_logits.is_cuda() && temperature.is_cuda() && out_logits.is_cuda(),
                             "launchDSparkAddMarkovDivTemp requires CUDA tensors");
-    RTP_LLM_CHECK_WITH_INFO(base_logits.dim() == 2 && base_logits.stride(1) == 1 && markov_bias.dim() == 2
-                                && markov_bias.stride(1) == 1 && out_logits.dim() == 2 && out_logits.stride(1) == 1,
+    RTP_LLM_CHECK_WITH_INFO(base_logits.dim() == 2 && base_logits.stride(1) == 1 && out_logits.dim() == 2
+                                && out_logits.stride(1) == 1,
                             "launchDSparkAddMarkovDivTemp requires row-contiguous 2D tensors");
+    if (has_markov) {
+        RTP_LLM_CHECK_WITH_INFO(markov_bias.is_cuda() && markov_bias.dim() == 2 && markov_bias.stride(1) == 1,
+                                "launchDSparkAddMarkovDivTemp requires row-contiguous CUDA 2D markov_bias");
+    }
     RTP_LLM_CHECK_WITH_INFO(temperature.is_contiguous() && temperature.scalar_type() == torch::kFloat32,
                             "launchDSparkAddMarkovDivTemp requires contiguous float32 temperature");
     RTP_LLM_CHECK_WITH_INFO(out_logits.scalar_type() == torch::kFloat32,
                             "launchDSparkAddMarkovDivTemp requires float32 output");
 
-    const cudaStream_t stream      = at::cuda::getCurrentCUDAStream().stream();
-    const auto         base_dtype  = base_logits.scalar_type();
-    const auto         markov_dtype = markov_bias.scalar_type();
+    const cudaStream_t stream     = at::cuda::getCurrentCUDAStream().stream();
+    const auto         base_dtype = base_logits.scalar_type();
 
-    if (base_dtype == torch::kBFloat16 && markov_dtype == torch::kBFloat16) {
-        dispatchDSparkAddMarkovDivTempTypes<__nv_bfloat16, __nv_bfloat16>(
-            base_logits, markov_bias, temperature, out_logits, step, propose_step, draft_vocab_size, stream);
-    } else if (base_dtype == torch::kFloat32 && markov_dtype == torch::kBFloat16) {
-        dispatchDSparkAddMarkovDivTempTypes<float, __nv_bfloat16>(
-            base_logits, markov_bias, temperature, out_logits, step, propose_step, draft_vocab_size, stream);
-    } else if (base_dtype == torch::kBFloat16 && markov_dtype == torch::kFloat32) {
-        dispatchDSparkAddMarkovDivTempTypes<__nv_bfloat16, float>(
-            base_logits, markov_bias, temperature, out_logits, step, propose_step, draft_vocab_size, stream);
-    } else if (base_dtype == torch::kFloat32 && markov_dtype == torch::kFloat32) {
-        dispatchDSparkAddMarkovDivTempTypes<float, float>(
-            base_logits, markov_bias, temperature, out_logits, step, propose_step, draft_vocab_size, stream);
+    if (!has_markov) {
+        if (base_dtype == torch::kBFloat16) {
+            dispatchDSparkAddMarkovDivTempTypes<__nv_bfloat16, float, false>(
+                base_logits, markov_bias, temperature, out_logits, step, propose_step, draft_vocab_size, stream);
+        } else if (base_dtype == torch::kFloat32) {
+            dispatchDSparkAddMarkovDivTempTypes<float, float, false>(
+                base_logits, markov_bias, temperature, out_logits, step, propose_step, draft_vocab_size, stream);
+        } else {
+            RTP_LLM_CHECK_WITH_INFO(false,
+                                    "launchDSparkAddMarkovDivTemp supports float32/bfloat16 base_logits, got %s",
+                                    c10::toString(base_dtype));
+        }
     } else {
-        RTP_LLM_CHECK_WITH_INFO(false,
-                                "launchDSparkAddMarkovDivTemp supports float32/bfloat16 inputs, got %s and %s",
-                                c10::toString(base_dtype),
-                                c10::toString(markov_dtype));
+        const auto markov_dtype = markov_bias.scalar_type();
+        if (base_dtype == torch::kBFloat16 && markov_dtype == torch::kBFloat16) {
+            dispatchDSparkAddMarkovDivTempTypes<__nv_bfloat16, __nv_bfloat16, true>(
+                base_logits, markov_bias, temperature, out_logits, step, propose_step, draft_vocab_size, stream);
+        } else if (base_dtype == torch::kFloat32 && markov_dtype == torch::kBFloat16) {
+            dispatchDSparkAddMarkovDivTempTypes<float, __nv_bfloat16, true>(
+                base_logits, markov_bias, temperature, out_logits, step, propose_step, draft_vocab_size, stream);
+        } else if (base_dtype == torch::kBFloat16 && markov_dtype == torch::kFloat32) {
+            dispatchDSparkAddMarkovDivTempTypes<__nv_bfloat16, float, true>(
+                base_logits, markov_bias, temperature, out_logits, step, propose_step, draft_vocab_size, stream);
+        } else if (base_dtype == torch::kFloat32 && markov_dtype == torch::kFloat32) {
+            dispatchDSparkAddMarkovDivTempTypes<float, float, true>(
+                base_logits, markov_bias, temperature, out_logits, step, propose_step, draft_vocab_size, stream);
+        } else {
+            RTP_LLM_CHECK_WITH_INFO(false,
+                                    "launchDSparkAddMarkovDivTemp supports float32/bfloat16 inputs, got %s and %s",
+                                    c10::toString(base_dtype),
+                                    c10::toString(markov_dtype));
+        }
     }
 
     const cudaError_t err = cudaGetLastError();
     RTP_LLM_CHECK_WITH_INFO(
         err == cudaSuccess, "fusedAddMarkovDivTempKernel failed: %s", cudaGetErrorString(err));
+}
+
+void launchPrepareDSparkDraftGraphInputs(torch::Tensor& anchors_slot,
+                                         torch::Tensor& temperature_slot,
+                                         torch::Tensor& seed_arr,
+                                         torch::Tensor& offset_arr,
+                                         int64_t        live_bsz,
+                                         int64_t        padded_bsz,
+                                         int64_t        gamma,
+                                         uint64_t       seed,
+                                         uint64_t       base_offset) {
+    RTP_LLM_CHECK_WITH_INFO(live_bsz >= 0 && live_bsz <= padded_bsz && padded_bsz > 0 && gamma > 0,
+                            "launchPrepareDSparkDraftGraphInputs invalid dimensions: live=%ld padded=%ld gamma=%ld",
+                            live_bsz,
+                            padded_bsz,
+                            gamma);
+    RTP_LLM_CHECK_WITH_INFO(anchors_slot.is_cuda() && anchors_slot.is_contiguous()
+                                && anchors_slot.scalar_type() == torch::kInt32 && anchors_slot.numel() == padded_bsz,
+                            "anchors_slot must be contiguous CUDA int32 [padded_bsz]");
+    RTP_LLM_CHECK_WITH_INFO(temperature_slot.is_cuda() && temperature_slot.is_contiguous()
+                                && temperature_slot.scalar_type() == torch::kFloat32
+                                && temperature_slot.numel() == padded_bsz,
+                            "temperature_slot must be contiguous CUDA float32 [padded_bsz]");
+    const int64_t total = gamma * padded_bsz;
+    RTP_LLM_CHECK_WITH_INFO(seed_arr.is_cuda() && seed_arr.is_contiguous() && seed_arr.scalar_type() == torch::kInt64
+                                && seed_arr.numel() == total,
+                            "seed_arr must be contiguous CUDA int64 [gamma * padded_bsz]");
+    RTP_LLM_CHECK_WITH_INFO(offset_arr.is_cuda() && offset_arr.is_contiguous()
+                                && offset_arr.scalar_type() == torch::kInt64 && offset_arr.numel() == total,
+                            "offset_arr must be contiguous CUDA int64 [gamma * padded_bsz]");
+
+    const cudaStream_t stream   = at::cuda::getCurrentCUDAStream().stream();
+    constexpr int      kThreads = 128;
+    const uint32_t     blocks   = static_cast<uint32_t>((total + kThreads - 1) / kThreads);
+    prepareDSparkDraftGraphInputsKernel<<<blocks, kThreads, 0, stream>>>(anchors_slot.data_ptr<int32_t>(),
+                                                                         temperature_slot.data_ptr<float>(),
+                                                                         seed_arr.data_ptr<int64_t>(),
+                                                                         offset_arr.data_ptr<int64_t>(),
+                                                                         live_bsz,
+                                                                         padded_bsz,
+                                                                         gamma,
+                                                                         seed,
+                                                                         base_offset);
+    const cudaError_t err = cudaGetLastError();
+    RTP_LLM_CHECK_WITH_INFO(
+        err == cudaSuccess, "prepareDSparkDraftGraphInputsKernel failed: %s", cudaGetErrorString(err));
 }
 
 void launchMapDraftToTargetInt32(const torch::Tensor& draft_tokens,

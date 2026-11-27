@@ -49,6 +49,8 @@ cc_test(
         "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
     ] + torch_deps() + cuda13_torch_link_deps,
     # Includes CUDA point-mass rejection sampling and force-accept coverage.
     env = {

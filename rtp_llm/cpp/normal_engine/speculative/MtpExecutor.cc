@@ -1009,6 +1009,9 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
         RTP_LLM_LOG_INFO("[speculative decoding] DSpARK PREFILL commit-only worker: skipping proposal/Markov weights");
     }
     speculative_sampler_.reset(new speculative::SpeculativeSampler(d2t_map_, propose_step_));
+    speculative_sampler_->setDSparkCudaGraphEnabled(params.hw_kernel_config.enable_cuda_graph && !warm_up_
+                                                    && is_block_draft_ && !is_dflash_
+                                                    && dsparkDraftGraphAllowed(is_block_draft_, role_type_));
     if (!is_block_draft_) {
         fast_topk_sampler_.reset(new speculative::FastTopKSampler(d2t_map_));
     }

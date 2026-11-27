@@ -2,6 +2,7 @@
 #include "rtp_llm/models_py/bindings/core/CommonDefines.h"
 
 #include <limits>
+#include <tuple>
 
 #if USING_CUDA
 #include <ATen/cuda/CUDAContext.h>
@@ -494,26 +495,76 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     return output;
 }
 
+std::tuple<uint64_t, uint64_t> getSeedAndOffset(int increment_size) {
+    RTP_LLM_CHECK_WITH_INFO(increment_size > 0, "increment_size must be positive, got %d", increment_size);
+    return get_seed_and_offset(increment_size);
+}
+
+void sampleFromProbsInto(const SampleFromProbsIntoParams& params) {
+    RTP_LLM_CHECK_WITH_INFO(params.probabilities.defined() && params.probabilities.is_cuda()
+                                && params.probabilities.dim() == 2
+                                && params.probabilities.scalar_type() == torch::kFloat32
+                                && params.probabilities.is_contiguous(),
+                            "probability sampling expects contiguous CUDA FP32 [batch,vocab] probabilities");
+    const auto batch_size = params.probabilities.size(0);
+    const auto device     = params.probabilities.device();
+    RTP_LLM_CHECK_WITH_INFO(params.out_token_ids.defined() && params.out_token_ids.is_cuda()
+                                && params.out_token_ids.dim() == 1 && params.out_token_ids.size(0) == batch_size
+                                && params.out_token_ids.scalar_type() == torch::kInt32
+                                && params.out_token_ids.is_contiguous() && params.out_token_ids.device() == device,
+                            "sampleFromProbsInto expects contiguous CUDA int32 [batch] out_token_ids on matching device");
+    RTP_LLM_CHECK_WITH_INFO(params.out_valid.defined() && params.out_valid.is_cuda() && params.out_valid.dim() == 1
+                                && params.out_valid.size(0) == batch_size
+                                && params.out_valid.scalar_type() == torch::kBool && params.out_valid.is_contiguous()
+                                && params.out_valid.device() == device,
+                            "sampleFromProbsInto expects contiguous CUDA bool [batch] out_valid on matching device");
+    const bool has_seed_arr   = params.seed_arr.defined();
+    const bool has_offset_arr = params.offset_arr.defined();
+    RTP_LLM_CHECK_WITH_INFO(has_seed_arr == has_offset_arr,
+                            "sampleFromProbsInto requires both seed_arr and offset_arr or neither");
+    if (has_seed_arr) {
+        RTP_LLM_CHECK_WITH_INFO(params.seed_arr.is_cuda() && params.seed_arr.dim() == 1
+                                    && params.seed_arr.size(0) == batch_size
+                                    && params.seed_arr.scalar_type() == torch::kInt64
+                                    && params.seed_arr.is_contiguous() && params.seed_arr.device() == device,
+                                "sampleFromProbsInto expects contiguous CUDA int64 [batch] seed_arr on matching device");
+        RTP_LLM_CHECK_WITH_INFO(params.offset_arr.is_cuda() && params.offset_arr.dim() == 1
+                                    && params.offset_arr.size(0) == batch_size
+                                    && params.offset_arr.scalar_type() == torch::kInt64
+                                    && params.offset_arr.is_contiguous() && params.offset_arr.device() == device,
+                                "sampleFromProbsInto expects contiguous CUDA int64 [batch] offset_arr on matching device");
+    }
+    if (batch_size == 0) {
+        return;
+    }
+
+    at::cuda::CUDAGuard device_guard(device);
+    uint64_t            seed_val   = 0;
+    uint64_t            offset_val = 0;
+    if (!has_seed_arr) {
+        std::tie(seed_val, offset_val) = get_seed_and_offset(/*increment_size=*/4);
+    }
+    sampling_from_probs(params.probabilities,
+                        params.out_token_ids,
+                        params.out_valid,
+                        std::nullopt,
+                        /*deterministic=*/true,
+                        has_seed_arr ? std::optional<torch::Tensor>(params.seed_arr) : std::nullopt,
+                        seed_val,
+                        has_offset_arr ? std::optional<torch::Tensor>(params.offset_arr) : std::nullopt,
+                        offset_val);
+}
+
 torch::Tensor sampleFromProbs(const torch::Tensor& probabilities) {
     RTP_LLM_CHECK_WITH_INFO(probabilities.defined() && probabilities.is_cuda() && probabilities.dim() == 2
                                 && probabilities.scalar_type() == torch::kFloat32 && probabilities.is_contiguous(),
                             "probability sampling expects contiguous CUDA FP32 [batch,vocab] probabilities");
     const auto          batch_size = probabilities.size(0);
     at::cuda::CUDAGuard device_guard(probabilities.device());
-    auto [seed, offset] = get_seed_and_offset(/*increment_size=*/4);
-
-    auto token_ids =
+    auto                token_ids =
         torch::empty({batch_size}, torch::TensorOptions().dtype(torch::kInt32).device(probabilities.device()));
     auto valid = torch::empty({batch_size}, torch::TensorOptions().dtype(torch::kBool).device(probabilities.device()));
-    sampling_from_probs(probabilities,
-                        token_ids,
-                        valid,
-                        std::nullopt,
-                        /*deterministic=*/true,
-                        std::nullopt,
-                        seed,
-                        std::nullopt,
-                        offset);
+    sampleFromProbsInto({probabilities, token_ids, valid, torch::Tensor(), torch::Tensor()});
     return token_ids;
 }
 
@@ -898,6 +949,31 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     return {success};
 }
 
+std::tuple<uint64_t, uint64_t> getSeedAndOffset(int increment_size) {
+    RTP_LLM_CHECK_WITH_INFO(increment_size > 0, "increment_size must be positive, got %d", increment_size);
+    return get_seed_and_offset(increment_size);
+}
+
+void sampleFromProbsInto(const SampleFromProbsIntoParams& params) {
+    RTP_LLM_CHECK_WITH_INFO(params.probabilities.defined() && params.probabilities.is_cuda()
+                                && params.probabilities.dim() == 2
+                                && params.probabilities.scalar_type() == torch::kFloat32
+                                && params.probabilities.is_contiguous(),
+                            "probability sampling expects contiguous CUDA/HIP FP32 [batch,vocab] probabilities");
+    RTP_LLM_CHECK_WITH_INFO(params.out_token_ids.defined() && params.out_token_ids.is_cuda()
+                                && params.out_token_ids.dim() == 1
+                                && params.out_token_ids.size(0) == params.probabilities.size(0)
+                                && params.out_token_ids.scalar_type() == torch::kInt32
+                                && params.out_token_ids.is_contiguous()
+                                && params.out_token_ids.device() == params.probabilities.device(),
+                            "sampleFromProbsInto expects contiguous HIP int32 [batch] out_token_ids");
+    auto tokens = sampleFromProbs(params.probabilities);
+    params.out_token_ids.copy_(tokens, /*non_blocking=*/true);
+    if (params.out_valid.defined()) {
+        params.out_valid.fill_(true);
+    }
+}
+
 torch::Tensor sampleFromProbs(const torch::Tensor& probabilities) {
     RTP_LLM_CHECK_WITH_INFO(probabilities.defined() && probabilities.is_cuda() && probabilities.dim() == 2
                                 && probabilities.scalar_type() == torch::kFloat32 && probabilities.is_contiguous(),
@@ -1251,6 +1327,33 @@ void mappingDraft2Target(const MappingDraft2TargetParams& params) {
     auto safe_tokens   = active_tokens.to(torch::kLong).clamp(0, params.d2t_map.numel() - 1);
     auto mapped_tokens = params.d2t_map.index_select(0, safe_tokens.flatten()).reshape_as(active_tokens);
     active_tokens.copy_(torch::where(valid_tokens, mapped_tokens.to(active_tokens.dtype()), active_tokens));
+}
+
+std::tuple<uint64_t, uint64_t> getSeedAndOffset(int increment_size) {
+    (void)increment_size;
+    return {0, 0};
+}
+
+void sampleFromProbsInto(const SampleFromProbsIntoParams& params) {
+    RTP_LLM_CHECK_WITH_INFO(params.probabilities.defined() && params.probabilities.dim() == 2
+                                && params.probabilities.scalar_type() == torch::kFloat32
+                                && params.probabilities.is_contiguous(),
+                            "probability sampling expects contiguous FP32 [batch,vocab] probabilities");
+    RTP_LLM_CHECK_WITH_INFO(params.out_token_ids.defined() && params.out_token_ids.dim() == 1
+                                && params.out_token_ids.size(0) == params.probabilities.size(0)
+                                && params.out_token_ids.scalar_type() == torch::kInt32
+                                && params.out_token_ids.is_contiguous()
+                                && params.out_token_ids.device() == params.probabilities.device(),
+                            "sampleFromProbsInto expects contiguous int32 [batch] out_token_ids");
+    if (params.probabilities.size(0) == 0) {
+        return;
+    }
+    auto sampled =
+        torch::multinomial(params.probabilities, 1, /*replacement=*/false).squeeze(-1).to(torch::kInt32);
+    params.out_token_ids.copy_(sampled);
+    if (params.out_valid.defined()) {
+        params.out_valid.fill_(true);
+    }
 }
 
 #endif  // USING_CUDA / USING_ROCM / generic fallback

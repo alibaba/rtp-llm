@@ -495,6 +495,8 @@ PPExecutor::PPExecutor(const EngineInitParams&                params,
             }
         }
         speculative_sampler_ = std::make_unique<speculative::SpeculativeSampler>(d2t_map_, propose_step_);
+        speculative_sampler_->setDSparkCudaGraphEnabled(params.hw_kernel_config.enable_cuda_graph && !warm_up_
+                                                        && is_dspark_ && role_type_ != RoleType::PREFILL);
         if (!is_dspark_) {
             /** Each TP rank needs a greedy sampler to advance draft tokens without another broadcast. */
             fast_topk_sampler_ = std::make_unique<speculative::FastTopKSampler>(d2t_map_);

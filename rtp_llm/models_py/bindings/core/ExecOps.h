@@ -14,6 +14,7 @@
 #include <functional>
 #include <mutex>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #if USING_ROCM
@@ -102,8 +103,10 @@ void fusedStridedCopy(const FusedStridedCopyParams& params);
 // Sample ops
 // ===================================================================
 
-GreedyOutput     execSampleGreedy(const GreedyParams& params);
-torch::Tensor    execSampleFromProbs(const torch::Tensor& probabilities);
+GreedyOutput                   execSampleGreedy(const GreedyParams& params);
+torch::Tensor                  execSampleFromProbs(const torch::Tensor& probabilities);
+void                           execSampleFromProbsInto(const SampleFromProbsIntoParams& params);
+std::tuple<uint64_t, uint64_t> execGetSeedAndOffset(int increment_size);
 // Multi-CTA split softmax over large-vocab [rows, vocab] fp32 logits; returns
 // the probabilities (aliasing ``logits`` in-place) with PyTorch's exact FP32
 // accumulation order. Falls back to torch::softmax off the split domain.

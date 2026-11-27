@@ -1,6 +1,7 @@
 #pragma once
 
 #include <functional>
+#include <memory>
 
 #include "absl/status/statusor.h"
 #include "c10/core/Event.h"
@@ -61,9 +62,16 @@ struct SpeculativeSamplingParams {
 // Works on CPU as well as CUDA/ROCm so filtering semantics have a small oracle test.
 torch::Tensor dflashDraftProbabilities(const torch::Tensor& logits, const GenerateConfig& config);
 
+struct DSparkGraphState;
+
 class SpeculativeSampler {
 public:
-    SpeculativeSampler(torch::Tensor d2t_map, size_t propose_step): d2t_map_(d2t_map), propose_step_(propose_step) {}
+    SpeculativeSampler(torch::Tensor d2t_map, size_t propose_step);
+    virtual ~SpeculativeSampler();
+
+    void   setDSparkCudaGraphEnabled(bool enabled);
+    bool   dsparkCudaGraphEnabled() const;
+    size_t dsparkGraphCacheSize() const;
 
     using PrepareSpecCapFn = std::function<torch::Tensor(const torch::Device&)>;
 
@@ -97,6 +105,10 @@ private:
                      bool*                            fused_cap_applied = nullptr) const;
 
 protected:
+    size_t dsparkGraphCaptureCount() const;
+    size_t dsparkGraphReplayCount() const;
+    bool   dsparkCaptureDirty() const;
+
     torch::Tensor        d2t_map_;
     size_t               propose_step_;
     mutable TensorHolder buffer_holder_;
@@ -104,6 +116,10 @@ protected:
     // Reusable buffer for draft_probs vocab-padding when draft/target vocab sizes differ.
     // Grow-only; reused across batchSample calls to avoid per-forward GPU allocation in hot path.
     mutable torch::Tensor draft_probs_padding_buffer_;
+
+private:
+    bool                                      dspark_cuda_graph_enabled_ = false;
+    mutable std::unique_ptr<DSparkGraphState> dspark_graph_state_;
 };
 
 }  // namespace speculative
