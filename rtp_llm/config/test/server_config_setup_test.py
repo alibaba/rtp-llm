@@ -341,7 +341,9 @@ class SingleGpuBackendRankTest(TestCase):
             selected_world_rank,
             pipe_writer,
             service_draining=None,
+            *, scr_manifest,
         ):
+            self.assertIsNone(scr_manifest)
             set_parallelism_config(
                 configs.parallelism_config,
                 selected_world_rank,

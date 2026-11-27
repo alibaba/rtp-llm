@@ -1,3 +1,4 @@
+import ipaddress
 import json
 import logging
 import os
@@ -33,8 +34,10 @@ from rtp_llm.ops import (
     RoleType,
     RuntimeConfig,
     SpeculativeExecutionConfig,
-    VitSeparation,
 )
+from rtp_llm.utils.gang_info import get_gang_member
+from rtp_llm.utils.scr.network import cache_store_advertise_ip
+
 
 
 @dataclass
@@ -195,15 +198,11 @@ class EngineConfig:
 
         derive_grammar_compile_threads(grammar_config, parallelism_config)
 
-        # Setup pd_sep_config role_type based on vit_separation
-        if (
-            py_env_configs.vit_config.vit_separation
-            == VitSeparation.VIT_SEPARATION_ROLE
-        ):
-            pd_sep_config.role_type = RoleType.VIT
-        else:
-            # role_config.role_type property automatically converts string to RoleType enum
-            pd_sep_config.role_type = py_env_configs.role_config.role_type
+        # Setup pd_sep_config role_type.  VIT_SEPARATION=ROLE describes the
+        # deployment, not this process: only the container that actually runs
+        # the VIT role reports RoleType.VIT.  A prefill/decode container keeps
+        # its own role even when the flag is set for the whole deployment.
+        pd_sep_config.role_type = py_env_configs.role_config.role_type
 
         # Mirror role into parallelism_config so model construction can read it
         # via parallelism_config.role_type instead of os.environ["ROLE_TYPE"].
@@ -274,6 +273,7 @@ def update_worker_addrs(
     runtime_config: RuntimeConfig,
     parallelism_config: ParallelismConfig,
     world_info,
+    gang_info: dict[str, Any] | None = None,
     role_type: RoleType = RoleType.PDFUSION,
 ) -> None:
     """Update worker addresses in runtime_config based on gang info.
@@ -281,6 +281,8 @@ def update_worker_addrs(
     PD workers publish `ip:p2p_transfer_port:grpc_port`. Other roles keep the
     CacheStore address format. The P2P transfer port uses the reserved slot
     `cache_store_listen_port + 1` and is validated before publishing.
+    SCR uses the restored container IP for both formats so the VIP stays a
+    control-plane address.
     """
     p2p_enabled = role_type in (RoleType.PREFILL, RoleType.DECODE)
     if world_info is None:
@@ -291,6 +293,7 @@ def update_worker_addrs(
         return
     worker_addrs = []
     worker_grpc_addrs = []
+    advertise_ip = cache_store_advertise_ip(world_info, parallelism_config)
     p2p_transfer_ports_by_ip = {}
     local_rank = parallelism_config.local_rank
     # P2P rank0 builds CP-local plans by worker_grpc_addrs index. Canonicalize
@@ -310,7 +313,6 @@ def update_worker_addrs(
                     f"duplicate p2p_transfer_port={p2p_transfer_port} on ip={member.ip}"
                 )
             p2p_transfer_ports.add(p2p_transfer_port)
-        p2p_worker_addr = f"{member.ip}:{p2p_transfer_port}:{member.rpc_server_port}"
         if (
             int(
                 (member.world_rank / parallelism_config.tp_size)
@@ -318,14 +320,32 @@ def update_worker_addrs(
             )
             == parallelism_config.dp_rank
         ):
-            worker_addr = (
-                p2p_worker_addr
-                if p2p_enabled
-                else (
-                    f"{member.ip}:{member.cache_store_listen_port}:"
+            cache_ip = advertise_ip or member.ip
+            if gang_info is not None:
+                node_rank = member.world_rank // parallelism_config.local_world_size
+                node = get_gang_member(gang_info, node_rank)
+                if node is None or node["ip"] != member.ip:
+                    raise ValueError(
+                        "SCR CacheStore member does not match platform topology"
+                    )
+                container_ip = ipaddress.IPv4Address(node["real_ip"])
+                if (
+                    container_ip.is_loopback
+                    or container_ip.is_unspecified
+                    or container_ip.is_multicast
+                    or str(container_ip) == member.ip
+                ):
+                    raise ValueError(
+                        "SCR CacheStore requires a unicast container IP distinct from VIP"
+                    )
+                cache_ip = str(container_ip)
+            if p2p_enabled:
+                worker_addr = f"{cache_ip}:{p2p_transfer_port}:{member.rpc_server_port}"
+            else:
+                worker_addr = (
+                    f"{cache_ip}:{member.cache_store_listen_port}:"
                     f"{member.cache_store_rdma_listen_port}"
                 )
-            )
             worker_addrs.append(worker_addr)
             worker_grpc_addrs.append(f"{member.ip}:{member.rpc_server_port}")
             logging.info(

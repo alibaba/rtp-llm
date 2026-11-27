@@ -343,22 +343,17 @@ grpc::Status DecodeRpcServer::init(const EngineInitParams&                      
         RTP_LLM_LOG_ERROR("decode rpc server new2 init failed, err: %s", ret.error_message().c_str());
         return ret;
     }
-
-    auto kvcache_manager = engine_->getCacheManager();
-    if (!kvcache_manager) {
-        RTP_LLM_LOG_WARNING("decode rpc server new2 init failed, kvcache manager is null");
-        return grpc::Status(grpc::StatusCode::INTERNAL, "kvcache manager is null");
-    }
-    if (!kvcache_manager->hasP2PConnector()) {
-        RTP_LLM_LOG_WARNING("decode rpc server new2 init failed, PD requires P2P connector");
-        return grpc::Status(grpc::StatusCode::INTERNAL, "PD requires P2P connector");
-    }
-
-    prefill_server_caller_ = std::make_shared<PrefillServerCaller>();
-    initCancelRegistry();
-
     RTP_LLM_LOG_INFO("decode rpc server new2 init");
     return grpc::Status::OK;
+}
+
+void DecodeRpcServer::startServices() {
+    LocalRpcServer::startServices();
+    auto kvcache_manager = engine_->getCacheManager();
+    RTP_LLM_CHECK_WITH_INFO(kvcache_manager != nullptr, "decode rpc server requires a kvcache manager");
+    RTP_LLM_CHECK_WITH_INFO(kvcache_manager->hasP2PConnector(), "PD requires P2P connector");
+    prefill_server_caller_ = std::make_shared<PrefillServerCaller>();
+    initCancelRegistry();
 }
 
 grpc::Status DecodeRpcServer::BatchGenerateCall(grpc::ServerContext*        context,

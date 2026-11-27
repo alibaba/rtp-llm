@@ -163,6 +163,16 @@ class GrammarValidatorTest(unittest.TestCase):
         self.validator._live = 1
         self.validator._last_spawn_error = ""
 
+    def test_construction_warms_sandbox_pool(self) -> None:
+        admission = grammar_validator_module.GrammarAdmissionConfig(sandbox_pool_size=1)
+        config = MagicMock(num_workers=1, constrained_json_disable_any_whitespace=False)
+        with patch.object(GrammarValidator, "_build_backend"), patch.object(
+            GrammarValidator, "_ensure_pool"
+        ) as warm_pool:
+            validator = GrammarValidator("{}", config, admission)
+            self.addCleanup(validator.close)
+            warm_pool.assert_called_once_with()
+
     def test_json_object_allows_object_or_array(self) -> None:
         self.assertTrue(
             self.validator.validate_response_format({"type": "json_object"})

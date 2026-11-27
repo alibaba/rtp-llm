@@ -5,7 +5,6 @@ import os
 import random
 import shlex
 import signal as signal_mod
-import socket
 import subprocess
 import sys
 import threading
@@ -177,6 +176,9 @@ class MagaServerManager(object):
         ptuning_path: Optional[str] = None,
         log_to_file: bool = True,
         timeout: int = 1600,
+        *,
+        wait_ready: bool = True,
+        server_module: str = "rtp_llm.start_server",
     ):
         role_log_name = self._role_name + "_logs"
         current_env: Dict[str, str] = {
@@ -297,7 +299,7 @@ class MagaServerManager(object):
             with self._state_lock:
                 p = subprocess.Popen(
                     self._process_prefix
-                    + [python_bin, "-m", "rtp_llm.start_server"]
+                    + [python_bin, "-m", server_module]
                     + parsed_args,
                     env=current_env,
                     stdout=self._file_stream,
@@ -328,6 +330,9 @@ class MagaServerManager(object):
             )
             self.stop_server()
             return False
+
+        if not wait_ready:
+            return True
 
         return self.wait_sever_done(timeout)
 

@@ -3,9 +3,12 @@ from dataclasses import FrozenInstanceError
 from unittest import TestCase
 
 from rtp_llm.config.collective_config import CollectiveConfig
-from rtp_llm.config.engine_config import EngineConfig, finalize_scheduler_config
+from rtp_llm.config.engine_config import (
+    EngineConfig,
+    finalize_scheduler_config,
+)
 from rtp_llm.config.py_config_modules import PyEnvConfigs
-from rtp_llm.ops import RoleType
+from rtp_llm.ops import RoleType, VitSeparation
 
 
 class DummyFIFOSchedulerConfig:
@@ -13,6 +16,21 @@ class DummyFIFOSchedulerConfig:
         self.max_context_batch_size = 2
         self.max_batch_tokens_size = 0
         self.prefill_chunk_size = 0
+
+
+class PdRoleResolutionTest(TestCase):
+    def test_engine_config_preserves_launcher_role_for_vit_separation(self):
+        for role in (RoleType.PREFILL, RoleType.DECODE, RoleType.VIT, RoleType.PDFUSION):
+            for separation in (
+                VitSeparation.VIT_SEPARATION_ROLE,
+                VitSeparation.VIT_SEPARATION_LOCAL,
+            ):
+                with self.subTest(role=role, separation=separation):
+                    configs = PyEnvConfigs()
+                    configs.role_config.role_type = role
+                    configs.vit_config.vit_separation = separation
+                    engine = EngineConfig.create(configs)
+                    self.assertEqual(engine.pd_sep_config.role_type, role)
 
 
 class EngineConfigTest(TestCase):

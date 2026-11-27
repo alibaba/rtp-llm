@@ -9,6 +9,7 @@ exports_files(
 )
 
 exports_files([
+    "BUILD",
     "ops/libth_transformer_config.pyi",
     "ops/librtp_compute_ops/__init__.pyi",
 ])
@@ -171,18 +172,29 @@ py_library(
 )
 
 py_library(
+    name = "scr_lifecycle",
+    srcs = ["utils/scr/__init__.py", "utils/scr/lifecycle.py"],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
     name = "utils",
     srcs = glob([
         "utils/**/*.py",
     ], exclude = _JIT_CACHE_SRCS + _JIT_CACHE_ENV_SRCS + [
         "utils/warmup.py",
+        "utils/scr/__init__.py",
+        "utils/scr/lifecycle.py",
         "utils/test/*.py",
         "utils/test/**/*.py",
+        "utils/scr/test/*.py",
+        "utils/scr/test/**/*.py",
     ]),
     data = glob(["utils/moe_luts/*"]),
     deps = [
         ":request_id_generator",
         ":jit_cache_env",
+        ":scr_lifecycle",
         ":torch",
         ":safetensors",
         #":decord",
@@ -380,6 +392,7 @@ py_library(
     srcs = glob([
         "vipserver/*.py",
     ]),
+    deps = [":requests"],
 )
 
 filegroup(
@@ -804,7 +817,7 @@ whl_reqs_frontend = [
     # The PPU vendor lock pins the transformers 4.57.1 family and carries no
     # xgrammar; mirror it so the frontend wheel metadata matches its lock.
     "@//:using_ppu": ["transformers==4.57.1"],
-    "//conditions:default": ["transformers==5.2.0", "xgrammar==0.2.5"],
+    "//conditions:default": ["transformers==5.2.0", "xgrammar==0.2.8"],
 })
 
 py_wheel(
@@ -847,7 +860,7 @@ whl_reqs_dash_sc_grpc = [
     "grpcio>=1.57.0",
     "jsonschema==4.26.0",
     "protobuf>=4.25",
-    "xgrammar==0.2.5",
+    "xgrammar==0.2.8",
 ]
 
 py_wheel(

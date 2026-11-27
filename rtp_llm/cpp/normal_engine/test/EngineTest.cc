@@ -64,6 +64,7 @@ TEST_F(NormalEngineTest, StopRetainsScheduledResourcesUntilForwardFinishes) {
         }
     } factory_reset;
     auto engine                            = std::make_shared<NormalEngine>(params, nullptr);
+    ASSERT_TRUE(engine->startLoop().ok());
     auto input                             = std::make_shared<GenerateInput>();
     input->input_ids                       = torch::tensor({1, 2}, torch::kInt32);
     input->generate_config                 = std::make_shared<GenerateConfig>();
@@ -817,6 +818,7 @@ TEST_F(NormalEngineTest, testPdRolesIgnoreGenerationPrefillWithOrWithoutSpeculat
             params.sp_config.type               = speculative_type;
             auto         proposal = speculative_type == SP_TYPE_NONE ? nullptr : makeLocalProposalParams(params);
             NormalEngine engine(params, std::move(proposal));
+            ASSERT_TRUE(engine.startLoop().ok());
             if (speculative_type == SP_TYPE_NONE) {
                 ASSERT_NE(dynamic_cast<NormalExecutor*>(engine.executor_.get()), nullptr);
             } else {

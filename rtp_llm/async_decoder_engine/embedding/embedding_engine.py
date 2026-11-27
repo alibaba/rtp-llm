@@ -60,6 +60,7 @@ class EmbeddingCppEngine(BaseEngine):
                     device=f"cuda:{self.engine_config.parallelism_config.local_rank}",
                 )
             )
+            self.mm_process_engine.start_remote_embedding_cache()
         self.cpp_engine.init(
             self.model,
             self.engine_config,

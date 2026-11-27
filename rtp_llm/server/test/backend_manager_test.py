@@ -6,7 +6,12 @@ from unittest.mock import MagicMock, Mock, patch
 from rtp_llm.config.collective_config import CollectiveConfig
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import set_parallelism_config
-from rtp_llm.ops import NcclCommConfig
+from rtp_llm.ops import (
+    NcclCommConfig,
+    RoleType,
+    SpeculativeType,
+    TaskType,
+)
 from rtp_llm.server import backend_manager
 from rtp_llm.server.backend_manager import BackendManager
 
@@ -210,7 +215,6 @@ class BackendManagerDeepEPTest(unittest.TestCase):
                 manager = BackendManager.__new__(BackendManager)
                 manager.py_env_configs = Mock()
                 manager._distributed_server = Mock()
-                manager._mark_serving_when_ready = Mock()
                 config = Mock()
                 config.parallelism_config.world_size = 4
                 config.moe_config.use_all_gather = False
@@ -229,6 +233,7 @@ class BackendManagerDeepEPTest(unittest.TestCase):
                         get_world_info=Mock(),
                         update_worker_addrs=Mock(),
                         validate_hw_kernel_group_args=Mock(),
+                        get_template_lifecycle=Mock(),
                     ),
                     patch.dict(
                         "sys.modules",
@@ -248,6 +253,138 @@ class BackendManagerDeepEPTest(unittest.TestCase):
                     init_deepep.assert_not_called()
                 factory.from_model_configs.assert_called_once()
 
+
+class BackendManagerServiceStartTest(unittest.TestCase):
+    """Preparation precedes listener startup and serving metrics activation."""
+
+    def _manager_and_config(self):
+        manager = BackendManager.__new__(BackendManager)
+        manager._distributed_server = Mock()
+        manager._distributed_server.get_nccl_comm_config.return_value = None
+        manager._shutdown_requested = threading.Event()
+        manager._service_draining = None
+        manager._metrics_state_lock = threading.RLock()
+
+        profiling = SimpleNamespace(log_file_backup_count=1)
+        py_config = SimpleNamespace(
+            profiling_debug_logging_config=profiling,
+            server_config=SimpleNamespace(),
+            parallelism_config=SimpleNamespace(world_size=1, local_rank=0),
+            distribute_config=SimpleNamespace(dist_comm_timeout=1),
+            model_args=object(),
+            lora_config=SimpleNamespace(merge_lora=False),
+            generate_env_config=object(),
+            embedding_config=object(),
+            quantization_config=object(),
+            render_config=object(),
+            eplb_config=object(),
+            vit_config=object(),
+            py_hw_kernel_config=SimpleNamespace(glm5_cp_opt=False),
+        )
+
+        engine_config = SimpleNamespace(
+            parallelism_config=SimpleNamespace(
+                world_size=1, local_rank=0, role_type=RoleType.PDFUSION
+            ),
+            runtime_config=SimpleNamespace(
+                fifo_scheduler_config=SimpleNamespace(max_context_batch_size=1)
+            ),
+            kv_cache_config=object(),
+            profiling_debug_logging_config=profiling,
+            moe_config=SimpleNamespace(
+                use_deepep_moe=False, use_all_gather=False
+            ),
+            sp_config=SimpleNamespace(type=SpeculativeType.MTP),
+            # Graph validation returns early when the master switch is off.
+            hw_kernel_config=SimpleNamespace(
+                enable_cuda_graph=False,
+                generation_prefill_capture_token_buckets=[],
+            ),
+            concurrency_config=SimpleNamespace(concurrency_limit=1),
+        )
+        model_config = SimpleNamespace(expert_num=0, task_type=TaskType.LANGUAGE_MODEL)
+        engine = SimpleNamespace(
+            task_type=TaskType.LANGUAGE_MODEL, set_serving=Mock()
+        )
+        return manager, py_config, engine_config, model_config, engine
+
+    def test_start_prepares_then_start_service_binds_listeners(self):
+        """Every deployment is two-phase: start() prepares, start_service() binds."""
+        manager, py_config, engine_config, model_config, engine = (
+            self._manager_and_config()
+        )
+        events = []
+        engine.start_service = Mock(side_effect=lambda: events.append("listeners"))
+        engine.set_serving.side_effect = lambda serving: events.append("serving")
+        with patch(
+            "rtp_llm.server.backend_manager.EngineConfig.create",
+            return_value=engine_config,
+        ), patch(
+            "rtp_llm.server.backend_manager.get_template_lifecycle"
+        ), patch(
+            "rtp_llm.server.backend_manager.get_world_info", return_value=None
+        ), patch(
+            "rtp_llm.server.backend_manager.ModelFactory.create_model_config",
+            return_value=model_config,
+        ), patch(
+            "rtp_llm.server.backend_manager.ModelFactory.update_engine_config_from_model_config"
+        ), patch(
+            "rtp_llm.server.backend_manager.ModelFactory.create_propose_model_config",
+            return_value=None,
+        ), patch(
+            "rtp_llm.server.backend_manager.ModelFactory.from_model_configs",
+            return_value=engine,
+        ) as create_engine:
+            manager.py_env_configs = py_config
+            manager.start()
+            engine.start_service.assert_not_called()
+            engine.set_serving.assert_not_called()
+            manager.start_service()
+            manager.start_service()
+
+        create_engine.assert_called_once()
+        # BackendManager forwards every call; LanguageCppEngine owns the
+        # idempotence guard.
+        self.assertEqual(engine.start_service.call_count, 2)
+        self.assertEqual(events, ["listeners", "serving", "listeners", "serving"])
+
+    def test_failed_service_start_does_not_mark_serving(self):
+        manager, _, _, _, engine = self._manager_and_config()
+        manager.engine = engine
+        engine.start_service = Mock(side_effect=RuntimeError("listener failed"))
+        with self.assertRaisesRegex(RuntimeError, "listener failed"):
+            manager.start_service()
+        engine.set_serving.assert_not_called()
+
+    def test_start_rejects_embedding_in_deferred_template_mode(self):
+        manager, py_config, engine_config, model_config, engine = (
+            self._manager_and_config()
+        )
+        model_config.task_type = TaskType.DENSE_EMBEDDING
+        with patch(
+            "rtp_llm.server.backend_manager.EngineConfig.create",
+            return_value=engine_config,
+        ), patch(
+            "rtp_llm.server.backend_manager.get_world_info", return_value=None
+        ), patch(
+            "rtp_llm.server.backend_manager.ModelFactory.create_model_config",
+            return_value=model_config,
+        ), patch(
+            "rtp_llm.server.backend_manager.ModelFactory.update_engine_config_from_model_config"
+        ), patch(
+            "rtp_llm.server.backend_manager.ModelFactory.create_propose_model_config",
+            return_value=None,
+        ), patch(
+            "rtp_llm.server.backend_manager.ModelFactory.from_model_configs"
+        ) as create_engine, patch(
+            "rtp_llm.server.backend_manager.template_phase_active",
+            return_value=True,
+        ):
+            manager.py_env_configs = py_config
+            with self.assertRaisesRegex(RuntimeError, "does not support embedding"):
+                manager.start()
+
+        create_engine.assert_not_called()
 
 if __name__ == "__main__":
     unittest.main()

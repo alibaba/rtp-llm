@@ -7,6 +7,14 @@ def init_server_group_args(parser, server_config, distribute_config):
     ##############################################################################################################
     server_group = parser.add_argument_group("Server Configuration")
     server_group.add_argument(
+        "--enable_scr",
+        env_name="RTPLLM_ENABLE_SCR",
+        bind_to=(server_config, "enable_scr"),
+        type=str2bool,
+        default=False,
+        help="Enable RTP-LLM participation in SCR checkpoint/restore.",
+    )
+    server_group.add_argument(
         "--frontend_metrics_enable",
         env_name="RTP_LLM_FRONTEND_METRICS_ENABLE",
         bind_to=(server_config, "frontend_metrics_enable"),

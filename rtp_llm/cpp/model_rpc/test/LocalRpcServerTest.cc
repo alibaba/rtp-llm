@@ -208,6 +208,10 @@ public:
         return {std::vector<bool>(streams.size(), true), streams};
     }
 
+    absl::Status startLoop() override {
+        return absl::OkStatus();
+    }
+
     absl::Status stop() override {
         return absl::OkStatus();
     }
@@ -405,6 +409,10 @@ public:
         }
         return {{true, true}, streams};
     }
+    absl::Status startLoop() override {
+        return absl::OkStatus();
+    }
+
     absl::Status stop() override {
         return absl::OkStatus();
     }
@@ -431,6 +439,12 @@ public:
 private:
     LocalRpcServer& server_;
 };
+
+TEST(LocalRpcServerTest, StopBeforeEngineInitializationIsSafe) {
+    LocalRpcServer server;
+    ASSERT_EQ(server.getEngine(), nullptr);
+    EXPECT_NO_THROW(server.stop());
+}
 
 TEST(LocalRpcServerTest, BatchTraceKeepsPerItemParentsErrorsAndTransportOk) {
     namespace memory = opentelemetry::exporter::memory;

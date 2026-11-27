@@ -128,6 +128,8 @@ class BindBarrierTest(TestCase):
         app._shutdown_event = Mock()
         app._install_signal_handlers = Mock()
         app._start_enqueue_loop = Mock(return_value=Mock())
+        app._stop_enqueue_loop = Mock()
+        app._close_servicer_on_loop = Mock()
         app.stop = Mock()
 
         events = []
@@ -137,6 +139,8 @@ class BindBarrierTest(TestCase):
             events.append("start_on_loop")
         )
         servicer = Mock()
+        on_prebind = Mock(side_effect=lambda: events.append("prebind"))
+        on_ready = Mock(side_effect=lambda: events.append("ready"))
 
         def submit(coroutine, _loop):
             coroutine.close()
@@ -149,11 +153,119 @@ class BindBarrierTest(TestCase):
             side_effect=submit,
         ), patch("rtp_llm.dash_sc.app.kmonitor.init"), patch(
             "rtp_llm.dash_sc.app.get_log_path", return_value="/tmp"
-        ):
-            app.start(bind_barrier=barrier)
+        ), patch(
+            "rtp_llm.dash_sc.app.init_telemetry",
+            side_effect=lambda *_args: events.append("tracing"),
+        ) as init_tracing:
+            ready_pipe = Mock()
+            with self.assertRaisesRegex(RuntimeError, "SCR restore failed"):
+                app.start(
+                    bind_barrier=barrier,
+                    on_prebind=Mock(side_effect=RuntimeError("SCR restore failed")),
+                    on_ready=on_ready,
+                    ready_pipe_writer=ready_pipe,
+                )
+            app._grpc_server.start_on_loop.assert_not_called()
+            init_tracing.assert_not_called()
+            app._start_enqueue_loop.assert_not_called()
+            on_ready.assert_not_called()
+            ready_pipe.send.assert_called_once()
+            self.assertEqual(ready_pipe.send.call_args.args[0]["status"], "failed")
+            barrier.abort.assert_called_once_with()
+            events.clear()
 
-        self.assertEqual(events, ["barrier", "start_on_loop"])
+            app.start(
+                bind_barrier=barrier,
+                on_prebind=on_prebind,
+                on_ready=on_ready,
+            )
+
+        self.assertEqual(events, ["barrier", "prebind", "tracing", "start_on_loop", "ready"])
+        init_tracing.assert_called_once_with("dash_sc", 0)
+        on_prebind.assert_called_once_with()
+        on_ready.assert_called_once_with()
         app._grpc_server.start_on_loop.assert_called_once()
+
+    def test_inference_workers_start_after_prebind_with_current_identity(self) -> None:
+        for mode in ("normal", "restore", "failed"):
+            with self.subTest(mode=mode):
+                events = []
+                app = bg_app.DashScApp.__new__(bg_app.DashScApp)
+                app.py_env_configs = MagicMock()
+                app.py_env_configs.generate_env_config.think_terminate_token_id = 0
+                app.server_config = SimpleNamespace(
+                    ip="192.0.2.1",
+                    dash_sc_grpc_server_port=26818,
+                    rank_id=0,
+                    frontend_server_id=0,
+                    monitor_interval=1,
+                )
+                app.py_env_configs.server_config = app.server_config
+                app._grpc_server = Mock()
+                app._shutdown_manager = Mock()
+                app._shutdown_event = Mock()
+                app._install_signal_handlers = Mock()
+                app._start_enqueue_loop = Mock(
+                    side_effect=lambda: events.append("loop")
+                )
+                app._stop_enqueue_loop = Mock()
+                app._close_servicer_on_loop = Mock()
+                app.stop = Mock()
+                model = Mock(task_type=bg_app.TaskType.LANGUAGE_MODEL)
+
+                def prebind():
+                    events.append("barrier")
+                    if mode == "failed":
+                        raise RuntimeError("checkpoint failed")
+                    app.server_config.ip = "192.0.2.2"
+
+                validator = Mock(side_effect=lambda *_args: events.append("grammar"))
+                inference = Mock()
+                inference.start_metrics.side_effect = lambda: events.append("metrics")
+                servicer = Mock(
+                    side_effect=lambda **_kwargs: events.append("servicer") or inference
+                )
+                app._grpc_server.start_on_loop.side_effect = (
+                    lambda *_args, **_kwargs: events.append("listen")
+                )
+                visitor = Mock(
+                    side_effect=lambda **_kwargs: events.append("visitor") or Mock()
+                )
+                patches = {
+                    "_is_proxy_mode_enabled": Mock(return_value=False),
+                    "ModelFactory": Mock(create_model_config=Mock(return_value=model)),
+                    "TokenizerFactory": Mock(),
+                    "create_backend_rpc_server_visitor": visitor,
+                    "_derive_echo_prefix_ids": Mock(),
+                    "_derive_stop_word_ids_list": Mock(),
+                    "_build_repetition_monitor_config": Mock(),
+                    "build_think_runtime": Mock(),
+                    "derive_grammar_compile_threads": Mock(),
+                    "_v41_image_processor_config": Mock(),
+                    "build_model_grammar_tokenizer_info_json": Mock(return_value="{}"),
+                    "GrammarValidator": validator,
+                    "DashScInferenceServicer": servicer,
+                    "kmonitor": Mock(),
+                    "get_log_path": Mock(return_value="/tmp"),
+                    "_init_trace_telemetry": Mock(),
+                    "_shutdown_trace_telemetry": Mock(),
+                }
+                with patch.multiple(bg_app, **patches):
+                    if mode == "failed":
+                        with self.assertRaisesRegex(RuntimeError, "checkpoint failed"):
+                            app.start(on_prebind=prebind)
+                        self.assertEqual(events, ["barrier"])
+                        continue
+                    app.start(on_prebind=prebind if mode == "restore" else None)
+
+                expected = ["loop", "visitor", "grammar", "servicer", "listen", "metrics"]
+                if mode == "restore":
+                    expected.insert(0, "barrier")
+                self.assertEqual(events, expected)
+                self.assertEqual(
+                    servicer.call_args.kwargs["ip"],
+                    "192.0.2.2" if mode == "restore" else "192.0.2.1",
+                )
 
 
 class DeriveEchoPrefixIdsTest(TestCase):

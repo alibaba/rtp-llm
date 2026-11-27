@@ -1,7 +1,7 @@
 import os
 import unittest
 from itertools import product
-from unittest.mock import Mock, patch
+from unittest.mock import ANY, Mock, patch
 
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import set_parallelism_config
@@ -168,7 +168,9 @@ class StartFrontendRankTest(unittest.TestCase):
                     if is_dash_sc:
                         self.assertIs(args[5], barrier.return_value)
                         app.return_value.start.assert_called_with(
-                            ready_pipe_writer=args[4], bind_barrier=args[5]
+                            ready_pipe_writer=args[4],
+                            bind_barrier=args[5],
+                            on_prebind=ANY,
                         )
                 self.assertEqual(
                     parent_config.parallelism_config.world_rank, parent_rank

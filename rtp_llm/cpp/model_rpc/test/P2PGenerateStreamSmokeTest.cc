@@ -196,6 +196,12 @@ public:
         thread_ = std::thread([this] { run(); });
     }
 
+    // The smoke harness drives its own execution thread through start(); it
+    // never goes through LocalRpcServer::startServices().
+    absl::Status startLoop() override {
+        return absl::OkStatus();
+    }
+
     std::shared_ptr<GenerateStream> makeStream(const std::shared_ptr<GenerateInput>& input) override {
         return std::make_shared<NormalGenerateStream>(input, model_, runtime_, resource_context_, nullptr);
     }

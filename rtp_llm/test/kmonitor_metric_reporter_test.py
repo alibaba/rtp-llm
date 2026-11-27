@@ -44,6 +44,8 @@ class MetricReporterServingStateTest(unittest.TestCase):
         # Use the real metric queues and rendering, but drive reporting cycles
         # explicitly so the tests need neither Flume nor a background thread.
         self.worker = ReportWorker.__new__(ReportWorker)
+        self.worker._runtime_tag_keys = set()
+        self.worker._runtime_tags = {}
         self.worker.metrics = {}
         self.worker.metric_lock = threading.Lock()
         self.worker.report_lock = threading.Lock()

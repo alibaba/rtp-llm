@@ -37,9 +37,14 @@ class LocalRpcServer {
 public:
     LocalRpcServer() {}
     virtual ~LocalRpcServer() {}
+    // Prepare engine state. The request loop and RPC transports start later.
     virtual grpc::Status init(const EngineInitParams&                                maga_init_params,
                               std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
                               py::object                                             mm_process_engine);
+
+    // Start services after the startup barrier and before binding model RPC.
+    virtual void startServices();
+    virtual void updateRuntimeEndpoints(const RuntimeConfig& runtime_config);
 
     grpc::Status
     GetWorkerStatus(grpc::ServerContext* context, const ::StatusVersionPB* request, ::WorkerStatusPB* response);
@@ -95,7 +100,13 @@ public:
     virtual size_t onflightRequestNum();
 
     virtual void stop() {
-        (void)engine_->stop();
+        if (engine_) {
+            (void)engine_->stop();
+        }
+    }
+
+    std::shared_ptr<EngineBase> getEngine() const {
+        return engine_;
     }
 
     virtual EngineScheduleInfo getEngineScheduleInfo(int64_t latest_finised_version);
@@ -186,6 +197,7 @@ protected:
     std::chrono::steady_clock::time_point torch_allocator_dump_last_completed_at_;
     std::unordered_set<std::string>       torch_allocator_dump_ids_;
     std::deque<std::string>               torch_allocator_dump_id_order_;
+    bool                                  services_started_{false};
 };
 
 }  // namespace rtp_llm
