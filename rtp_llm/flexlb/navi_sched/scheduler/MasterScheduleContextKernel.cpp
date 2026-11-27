@@ -773,6 +773,7 @@ void MasterScheduleResultKernel::reportPredictionMetrics(
         report("master.schedule_request_wait_ms", request.waitTimeMs);
     }
     std::unordered_set<int64_t> batches;
+    std::unordered_set<size_t> probabilityReportedNodes;
     const NaviSchedScheduleNode *oldestNode = nullptr;
     int64_t oldestReportUs = 0;
     int64_t oldestAgeUs = 0;
@@ -784,6 +785,39 @@ void MasterScheduleResultKernel::reportPredictionMetrics(
             continue;
         }
         const auto &node = context._scheduleNodes[context._selectedNodeIndexes[index]];
+        // One record per selected node and round, outside candidate evaluation.
+        // The stored probability is the value used in features, never recomputed here.
+        if (probabilityReportedNodes.insert(context._selectedNodeIndexes[index]).second) {
+            for (const auto &audit : node.getKVPreparationProbabilityAudits()) {
+                report("master.kv_preparation_probability", audit.probability);
+                report("master.kv_preparation_probability_elapsed_ms", audit.elapsedAtSnapshotMs);
+                report("master.kv_preparation_probability_queue_horizon_ms", audit.queueHorizonMs);
+                report("master.kv_preparation_probability_forecast_known", audit.frozenTotalMs ? 1 : 0);
+                if (audit.frozenTotalMs) {
+                    report("master.kv_preparation_probability_frozen_total_ms", *audit.frozenTotalMs);
+                }
+                const auto scheduleElapsedMs = std::max<int64_t>(
+                    0, context._queuePredictionTimeUs - context._scheduleTimeUs) / 1000.0;
+                report("master.kv_preparation_probability_schedule_elapsed_ms", scheduleElapsedMs);
+                reporter->report(1, "master.kv_preparation_probability_qps",
+                                 kmonitor::MetricType::QPS, nullptr,
+                                 kmonitor::MetricLevel::FATAL);
+                NAVI_KERNEL_LOG(
+                    INFO,
+                    "[navi-master-kv-preparation-probability] schedule_id=%lu "
+                    "schedule_batch_id=%ld agent=%s request_id=%lu load_generation=%lu "
+                    "snapshot_mono_us=%ld report_receive_mono_us=%ld "
+                    "observed_preparation_ms=%.9f elapsed_at_snapshot_ms=%.9f "
+                    "queue_horizon_ms=%.9f forecast_known=%d frozen_total_ms=%.9f "
+                    "probability=%.9f schedule_elapsed_ms=%.9f",
+                    context._scheduleId, decision.batchId, node.getAgentId().c_str(),
+                    audit.requestId, audit.generation, audit.snapshotMonoUs,
+                    audit.reportReceiveMonoUs, audit.observedPreparationMs,
+                    audit.elapsedAtSnapshotMs, audit.queueHorizonMs,
+                    int(audit.frozenTotalMs.has_value()), audit.frozenTotalMs.value_or(-1.0),
+                    audit.probability, scheduleElapsedMs);
+            }
+        }
         const auto reportReceiveTimeUs = node.usesUnifiedLatencyPrediction()
                                              ? node._workloadReportReceiveTimeUs
                                              : node._queueReportReceiveTimeUs;

@@ -126,6 +126,19 @@ NaviSchedScheduleNode::NaviSchedScheduleNode(NaviSchedNodeConstPtr node,
             }
             ++at;
             const double p=estimate.weight(snapshot.kvPreparationSnapshotMonoUs,horizon);
+            NaviSchedKVPreparationProbabilityAudit audit;
+            audit.requestId = request.requestId;
+            audit.generation = request.loadGeneration;
+            audit.snapshotMonoUs = snapshot.kvPreparationSnapshotMonoUs;
+            audit.reportReceiveMonoUs = estimate.receivedMonoUs;
+            audit.observedPreparationMs = estimate.observedPreparationMs;
+            audit.elapsedAtSnapshotMs = estimate.observedPreparationMs +
+                std::max<int64_t>(0, snapshot.kvPreparationSnapshotMonoUs -
+                                       estimate.receivedMonoUs) / 1000.0;
+            audit.queueHorizonMs = horizon;
+            audit.frozenTotalMs = estimate.totalMs;
+            audit.probability = p;
+            _kvPreparationProbabilityAudits.push_back(audit);
             expected.precedingRequests+=p;
             if(request.computeTokens>0) {
                 auto &moments=request.runningCapacity ? expected.running : expected.waiting;

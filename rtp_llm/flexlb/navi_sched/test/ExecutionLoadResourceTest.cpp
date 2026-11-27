@@ -678,6 +678,36 @@ TEST(ExecutionLoadResourceTest, NodeUsesFractionalPlanningLoadAndRetainsActualFa
     EXPECT_DOUBLE_EQ(1.20,floor.getPlanningPrecedingRequestCount());
     EXPECT_DOUBLE_EQ(0.0,floor.getPlanningCacheMissTokenCount());
 }
+TEST(ExecutionLoadResourceTest, ProbabilityAuditPreservesAppliedInputsAndUnknownForecast) {
+    auto snapshot = preparationProjectionSnapshot();
+    snapshot.kvPreparationSnapshotMonoUs += 10000;
+    NaviSchedScheduleNode node(nullptr, std::move(snapshot), 1);
+    const auto &audits = node.getKVPreparationProbabilityAudits();
+    ASSERT_EQ(1u, audits.size());
+    const auto &audit = audits.front();
+    EXPECT_EQ(1u, audit.requestId);
+    EXPECT_EQ(5u, audit.generation);
+    EXPECT_EQ(1010000, audit.snapshotMonoUs);
+    EXPECT_EQ(1000000, audit.reportReceiveMonoUs);
+    EXPECT_DOUBLE_EQ(20.0, audit.observedPreparationMs);
+    EXPECT_DOUBLE_EQ(30.0, audit.elapsedAtSnapshotMs);
+    EXPECT_DOUBLE_EQ(0.0, audit.queueHorizonMs);
+    ASSERT_TRUE(audit.frozenTotalMs);
+    EXPECT_DOUBLE_EQ(100.0, *audit.frozenTotalMs);
+    EXPECT_DOUBLE_EQ(0.30, audit.probability);
+    ASSERT_NE(nullptr, node.getReportedWorkloadFeatures().getExpectedKVWorkload());
+    EXPECT_DOUBLE_EQ(audit.probability,
+        node.getReportedWorkloadFeatures().getExpectedKVWorkload()->precedingRequests);
+
+    auto unknown = preparationProjectionSnapshot();
+    unknown.kvPreparationEstimates.front().totalMs.reset();
+    NaviSchedScheduleNode unknownNode(nullptr, std::move(unknown), 1);
+    const auto &unknownAudits = unknownNode.getKVPreparationProbabilityAudits();
+    ASSERT_EQ(1u, unknownAudits.size());
+    EXPECT_FALSE(unknownAudits.front().frozenTotalMs);
+    EXPECT_DOUBLE_EQ(1.0, unknownAudits.front().probability);
+}
+
 TEST(ExecutionLoadResourceTest, ReadyAndFailureRemoveExpectedContributionAndWrongIdentityCannotDefault) {
     for(auto state:{NativeKVExecutionState::READY,NativeKVExecutionState::FAILED}) {
         auto snapshot=preparationProjectionSnapshot();snapshot.workload.executionLoadRequests[0].state=state;
@@ -685,6 +715,7 @@ TEST(ExecutionLoadResourceTest, ReadyAndFailureRemoveExpectedContributionAndWron
         snapshot.workloadFeatures=snapshot.reportedWorkloadFeatures;
         NaviSchedScheduleNode node(nullptr,std::move(snapshot),1);
         EXPECT_EQ(nullptr,node.getWorkloadFeatures().getExpectedKVWorkload());
+        EXPECT_TRUE(node.getKVPreparationProbabilityAudits().empty());
     }
     auto wrong=preparationProjectionSnapshot();wrong.kvPreparationEstimates[0].generation=6;
     EXPECT_THROW(NaviSchedScheduleNode(nullptr,std::move(wrong),1),std::invalid_argument);
@@ -698,6 +729,7 @@ TEST(ExecutionLoadResourceTest, FrozenSnapshotProjectionIsNotRecomputedOrDropped
         ASSERT_TRUE(snapshot.workloadFeatures.setExpectedKVWorkload(expected));snapshot.kvPreparationEstimates.clear();snapshot.kvPreparationSnapshotMonoUs=0;
         NaviSchedScheduleNode node(nullptr,std::move(snapshot),1);
         EXPECT_DOUBLE_EQ(1.0+probability,node.getWorkloadFeatures().getPlanningPrecedingRequestCount());
+        EXPECT_TRUE(node.getKVPreparationProbabilityAudits().empty());
         const auto restored=node.getReportedWorkloadFeatures().getExpectedKVWorkload();
         if(probability==0.0) EXPECT_EQ(nullptr,restored);else {ASSERT_NE(nullptr,restored);EXPECT_DOUBLE_EQ(probability,restored->precedingRequests);}
     }
@@ -710,6 +742,7 @@ TEST(ExecutionLoadResourceTest, UntrackedNodePredictionDoesNotAcquireExpectedWor
     EXPECT_EQ(nullptr,node.getWorkloadFeatures().getExpectedKVWorkload());EXPECT_DOUBLE_EQ(prediction,node.predictLatency(node.getWorkloadFeatures()));
     NaviSchedLatencyFeatures floor;ASSERT_TRUE(node.getUnifiedDecayFloorFeatures(floor));
     EXPECT_FALSE(floor.usesCapacitySplit()); // Keep the pre-feature untracked path.
+    EXPECT_TRUE(node.getKVPreparationProbabilityAudits().empty());
 }
 }
 

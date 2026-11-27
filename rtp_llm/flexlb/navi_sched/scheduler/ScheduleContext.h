@@ -133,8 +133,27 @@ struct NaviSchedExecutionCacheInputCapture {
     bool peerCacheMerged = false;
 };
 
+// Frozen inputs actually used to weight one PREPARING request in this round.
+// Master-local diagnostics only; replay snapshots do not reconstruct these inputs.
+struct NaviSchedKVPreparationProbabilityAudit {
+    uint64_t requestId = 0;
+    uint64_t generation = 0;
+    int64_t snapshotMonoUs = 0;
+    int64_t reportReceiveMonoUs = 0;
+    double observedPreparationMs = 0.0;
+    double elapsedAtSnapshotMs = 0.0;
+    double queueHorizonMs = 0.0;
+    std::optional<double> frozenTotalMs;
+    double probability = 0.0;
+};
+
 class NaviSchedScheduleNode {
 public:
+    const std::vector<NaviSchedKVPreparationProbabilityAudit> &
+    getKVPreparationProbabilityAudits() const
+    {
+        return _kvPreparationProbabilityAudits;
+    }
     double getExecutionUtilization() const;
     double getExecutionBusyUtilization() const;
     int32_t getExecutionRunningRequests() const { return _workload.runningRequestCount; }
@@ -268,6 +287,7 @@ private:
     NaviSchedLatencyFeatures _workloadFeatures;
     NaviSchedLatencyFeatures _reportedWorkloadFeatures;
     NaviSchedLatencyFeatures _reservedWorkloadFeatures;
+    std::vector<NaviSchedKVPreparationProbabilityAudit> _kvPreparationProbabilityAudits;
     int32_t _maxRunningRequestCount = 0;
     int32_t _workloadRunningCapacitySlotCount = 0;
     int32_t _reservedRunningCapacitySlotCount = 0;
