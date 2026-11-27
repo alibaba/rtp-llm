@@ -2111,3 +2111,11 @@ py_test(
     python_version = "PY3",
     deps = [":py_sched_lib"],
 )
+
+py_test(
+    name = "navi_sched_native_pp_agent_config_test",
+    srcs = ["test/vllm/NativePPAgentConfigTest.py"],
+    main = "test/vllm/NativePPAgentConfigTest.py",
+    python_version = "PY3",
+    deps = [":py_sched_lib"],
+)

@@ -28,6 +28,7 @@ class NaviSchedAgent(_navi_sched.NaviSchedAgent):
         execution_cache_source_enabled: bool = False,
         prefill_execution_policy=None,
         native_prefill_pipeline_stages: int = 0,
+        native_prefill_observation_only: bool = False,
         peer_cache_enabled: bool = False,
         tair_kvcm_config=None,
         mamba_replay_stop_shift: bool = False,
@@ -88,6 +89,10 @@ class NaviSchedAgent(_navi_sched.NaviSchedAgent):
             raise ValueError(
                 "Native PP observation requires the supported four-stage topology"
             )
+        if type(native_prefill_observation_only) is not bool or (
+            native_prefill_observation_only and native_prefill_pipeline_stages != 4
+        ):
+            raise ValueError("observation-only mode requires Native PP4 topology")
         if native_prefill_pipeline_stages and (
             not pd_separated
             or latency_prediction_mode != "unified"
@@ -122,6 +127,7 @@ class NaviSchedAgent(_navi_sched.NaviSchedAgent):
             execution_cache_source_enabled
         )
         agent_config.native_prefill_pipeline_stages = native_prefill_pipeline_stages
+        agent_config.native_prefill_observation_only = native_prefill_observation_only
         if prefill_execution_policy is not None:
             agent_config.prefill_execution_policy = prefill_execution_policy
         agent_config.mamba_replay_stop_shift = bool(mamba_replay_stop_shift)
