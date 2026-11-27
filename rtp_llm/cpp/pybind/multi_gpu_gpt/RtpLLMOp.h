@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServiceImpl.h"
 #include "rtp_llm/cpp/model_rpc/RemoteRpcServiceImpl.h"
+#include <mutex>
 #include "rtp_llm/cpp/telemetry/TelemetryRuntime.h"
 
 namespace th = torch;
@@ -23,6 +24,11 @@ public:
               py::object propose_model,
               py::object mm_process_engine,
               py::object trace_config = py::none());
+    std::vector<torch::Tensor> gpuCacheTensors() const;
+    void startRPCServer();
+    void updateRuntimeEndpoints(py::object runtime_config);
+    void pause();
+    void restart();
     void stop();
     void setServing(bool serving);
 
@@ -30,10 +36,11 @@ private:
     EngineInitParams initModel(py::object model, py::object engine_config, py::object vit_config);
     std::unique_ptr<ProposeModelEngineInitParams> initProposeModel(py::object              propose_model,
                                                                    const EngineInitParams& base_params);
-    void                                          initRPCServer(const EngineInitParams                        maga_init_params,
-                                                                std::unique_ptr<ProposeModelEngineInitParams> propose_params,
-                                                                py::object                                    mm_process_engine,
-                                                                telemetry::TelemetryConfig                    trace_config);
+    void prepareRPCService(const EngineInitParams&                       maga_init_params,
+                           py::object                                    mm_process_engine,
+                           std::unique_ptr<ProposeModelEngineInitParams> propose_params);
+    void startRPCServerInternal(const EngineInitParams& maga_init_params);
+    void setServerStartError(const std::string& error);
 
 private:
     std::unique_ptr<RpcServiceImpl> model_rpc_service_;
@@ -41,6 +48,11 @@ private:
     std::thread                     grpc_server_thread_;
     std::atomic<bool>               is_server_ready_{false};
     std::atomic<bool>               is_server_shutdown_{false};
+    std::unique_ptr<EngineInitParams> init_params_;
+    telemetry::TelemetryConfig       trace_config_;
+    std::atomic<bool>               stop_requested_{false};
+    std::mutex                      server_state_mutex_;
+    std::string                     server_start_error_;
     size_t                          model_id_ = 0;
 };
 

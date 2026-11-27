@@ -1864,7 +1864,6 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             "protocol": "dash_sc_grpc",
             "priority": priority,
         }
-
     def _record_and_report_chunk(
         self,
         record: GrpcAccessRecord,

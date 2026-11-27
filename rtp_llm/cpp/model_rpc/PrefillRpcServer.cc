@@ -375,25 +375,24 @@ grpc::Status PrefillRpcServer::init(const EngineInitParams&                     
         RTP_LLM_LOG_ERROR("prefill rpc server new2 init failed, err: %s", ret.error_message().c_str());
         return ret;
     }
+    return grpc::Status::OK;
+}
+
+void PrefillRpcServer::startServices() {
+    LocalRpcServer::startServices();
+    auto kvcache_manager = engine_->getCacheManager();
+    RTP_LLM_CHECK_WITH_INFO(kvcache_manager != nullptr, "prefill rpc server requires a kvcache manager");
+    RTP_LLM_CHECK_WITH_INFO(kvcache_manager->hasP2PConnector(), "PD requires P2P connector");
 
     if (autil::EnvUtil::getEnv("ENABLE_PREFILL_REQUEST_LOG", false)) {
         try {
             request_logger_ = std::make_unique<PrefillRequestLogger>(
                 autil::EnvUtil::getEnv("LOG_PATH", std::string("logs")),
-                maga_init_params.parallelism_config.world_rank,
-                maga_init_params.profiling_debug_logging_config.log_file_backup_count);
+                maga_init_params_.parallelism_config.world_rank,
+                maga_init_params_.profiling_debug_logging_config.log_file_backup_count);
         } catch (const std::exception& e) {
             RTP_LLM_LOG_WARNING("Failed to initialize prefill request logger: %s", e.what());
         }
-    }
-    auto kvcache_manager = engine_->getCacheManager();
-    if (!kvcache_manager) {
-        RTP_LLM_LOG_WARNING("prefill rpc server new2 init failed, kvcache manager is null");
-        return grpc::Status(grpc::StatusCode::INTERNAL, "kvcache manager is null");
-    }
-    if (!kvcache_manager->hasP2PConnector()) {
-        RTP_LLM_LOG_WARNING("prefill rpc server new2 init failed, PD requires P2P connector");
-        return grpc::Status(grpc::StatusCode::INTERNAL, "PD requires P2P connector");
     }
 
     cancel_registry_ = std::make_shared<PDCancelRegistry>(meta_);
@@ -407,7 +406,6 @@ grpc::Status PrefillRpcServer::init(const EngineInitParams&                     
     if (!hang_diag_thread_) {
         RTP_LLM_LOG_WARNING("prefill rpc server new2: failed to start hang_diag_thread_, watchdog disabled");
     }
-    return grpc::Status::OK;
 }
 
 grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*                   server_context,

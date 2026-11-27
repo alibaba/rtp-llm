@@ -937,7 +937,24 @@ class GrammarValidator:
                 daemon=True,
             )
             self._coordinator_thread = coordinator
-            coordinator.start()
+            try:
+                coordinator.start()
+            except RuntimeError:
+                self._spawning -= deficit
+                self._coordinator_running = False
+                self._coordinator_thread = None
+                # Apply the same replacement backoff as a failed spawn so a
+                # persistent thread-creation failure cannot retry per request.
+                self._replacement_failures += 1
+                backoff_step = min(self._replacement_failures - 1, 16)
+                delay_s = min(
+                    _REPLACEMENT_BACKOFF_INITIAL_S * (2**backoff_step),
+                    _REPLACEMENT_BACKOFF_MAX_S,
+                )
+                self._replacement_not_before = time.monotonic() + delay_s
+                self._last_spawn_error = "unable to start grammar sandbox coordinator"
+                # Pool warmup is opportunistic. Requests retry through _ensure_pool.
+                logger.exception("Unable to start the grammar sandbox coordinator")
 
     def _spawn_many(self, count: int) -> None:
         unattempted = 0

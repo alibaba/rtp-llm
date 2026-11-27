@@ -284,6 +284,21 @@ def _apply_auto_deepep_config(
     )
 
 
+def _explicit_local_world_size() -> Optional[int]:
+    raw = os.environ.get("LOCAL_WORLD_SIZE")
+    if raw is None or not raw.strip():
+        return None
+    try:
+        value = int(raw)
+    except ValueError as e:
+        raise ValueError(
+            f"LOCAL_WORLD_SIZE must be an integer, got {raw!r}"
+        ) from e
+    if value <= 0:
+        raise ValueError(f"LOCAL_WORLD_SIZE must be positive, got {value}")
+    return value
+
+
 def set_parallelism_config(
     parallelism_config: ParallelismConfig,
     world_rank: Optional[int] = None,
@@ -299,7 +314,12 @@ def set_parallelism_config(
         world_rank: World rank to apply (local_rank = world_rank % local_world_size, etc.). Default 0.
     """
     world_size = parallelism_config.world_size
-    need_local = world_size > 1 and parallelism_config.local_world_size == 1
+    explicit_local_size = _explicit_local_world_size()
+    need_local = (
+        world_size > 1
+        and parallelism_config.local_world_size == 1
+        and explicit_local_size != 1
+    )
     if need_local:
         if torch.cuda.is_available():
             n = min(torch.cuda.device_count(), world_size)

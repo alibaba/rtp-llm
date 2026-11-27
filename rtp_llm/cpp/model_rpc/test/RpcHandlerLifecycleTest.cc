@@ -140,6 +140,10 @@ public:
         }
         throw std::runtime_error("test stream was not admitted to RUNNING: " + value->statusInfo().ToString());
     }
+    absl::Status startLoop() override {
+        return absl::OkStatus();
+    }
+
     absl::Status stop() override {
         return scheduler_->stop();
     }

@@ -313,6 +313,19 @@ py_test(
 )
 
 py_test(
+    name = "gang_info_test",
+    srcs = ["gang_info_test.py"],
+    deps = ["//rtp_llm:utils"],
+)
+
+
+py_test(
+    name = "signal_guard_test",
+    srcs = ["signal_guard_test.py"],
+    deps = ["//rtp_llm:utils"],
+)
+
+py_test(
     name = "drain_flag_test",
     srcs = ["drain_flag_test.py"],
     deps = ["//rtp_llm:utils"],

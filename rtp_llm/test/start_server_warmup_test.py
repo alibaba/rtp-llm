@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, call, patch
 
 from rtp_llm import start_backend_server, start_server
+from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.ops import RoleType, SpeculativeType
 from rtp_llm.utils.backend_restart import RestartOutcome
 from rtp_llm.utils.drain_flag import DrainFlag
@@ -12,7 +13,7 @@ from rtp_llm.utils.drain_flag import DrainFlag
 
 class ServiceDrainingPropagationTest(unittest.TestCase):
     def test_each_launch_passes_a_fresh_event_to_all_process_groups(self):
-        configs = Mock()
+        configs = PyEnvConfigs()
         configs.parallelism_config.dp_size = 1
         # Without in-place restart every process group shares the instance's event.
         configs.server_config.engine_restart_limit = 0
@@ -43,13 +44,17 @@ class ServiceDrainingPropagationTest(unittest.TestCase):
             for role in (RoleType.PDFUSION, RoleType.PDFUSION, RoleType.VIT):
                 configs.role_config.role_type = role
                 start_server.start_server(configs)
+                manager_class.return_value.request_failure_shutdown.assert_not_called()
                 event = manager_class.call_args.kwargs["service_draining"]
                 # multiprocessing.Event.set() hangs once a waiter was killed.
                 self.assertIsInstance(event, DrainFlag)
                 self.assertIsNot(event, previous)
                 self.assertFalse(event.is_set())
-                for starter in [vit] if role == RoleType.VIT else starters:
-                    self.assertIs(starter.call_args.args[-1], event)
+                if role == RoleType.VIT:
+                    self.assertIs(vit.call_args.args[2], event)
+                else:
+                    for starter in starters:
+                        self.assertIs(starter.call_args.args[3], event)
                 event.set()
                 previous = event
 

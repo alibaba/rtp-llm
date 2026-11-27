@@ -46,6 +46,7 @@ class ServerConfig:
     """Port layout: base = start_port + rank_id * worker_info_port_num."""
 
     def __init__(self):
+        self.enable_scr: bool = False
         self.frontend_metrics_enable = False
         self.frontend_server_count = 4
         self.vit_server_count = 1
@@ -145,6 +146,7 @@ class ServerConfig:
 
     def to_string(self):
         return (
+            f"enable_scr: {self.enable_scr}\n"
             f"frontend_server_count: {self.frontend_server_count}\n"
             f"vit_server_count: {self.vit_server_count}\n"
             f"start_port: {self.start_port}\n"

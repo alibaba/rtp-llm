@@ -30,8 +30,9 @@ from uvicorn.loops.auto import auto_loop_setup
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.uvicorn_config import get_uvicorn_logging_config
 from rtp_llm.distribute.distributed_server import (
-    get_dp_rpc_addresses,
+    get_dp_addrs_from_world_info,
     get_eplb_stage_root_addresses,
+    get_frontend_world_info,
 )
 from rtp_llm.embedding.embedding_type import TYPE_STR, EmbeddingType
 from rtp_llm.frontend.frontend_server import FrontendServer
@@ -45,6 +46,7 @@ from rtp_llm.server.misc import format_exception
 from rtp_llm.telemetry import init_telemetry, shutdown_telemetry
 from rtp_llm.utils.concurrency_controller import ConcurrencyException
 from rtp_llm.utils.grpc_client_wrapper import GrpcClientWrapper
+from rtp_llm.utils.scr.template_utils import register_server_config_template_hook
 from rtp_llm.utils.shutdown_config import (
     AUTO_PRE_STOP_DRAIN_HEADROOM_SECONDS,
     DEFAULT_PRE_STOP_DRAIN_SECONDS,
@@ -414,6 +416,7 @@ class FrontendApp(object):
     ):
         self.py_env_configs = py_env_configs
         self.server_config = py_env_configs.server_config
+        register_server_config_template_hook(py_env_configs)
         self.frontend_server = FrontendServer(
             self.server_config.rank_id,
             self.server_config.frontend_server_id,
@@ -421,27 +424,32 @@ class FrontendApp(object):
         )
         self.shutdown_manager = FrontendShutdownManager()
         self.separated_frontend = separated_frontend
-
-        # Compute all DP addresses for broadcast operations (e.g. update_scheduler_info)
-        dp_addresses = get_dp_rpc_addresses(py_env_configs)
-        client_config = self.py_env_configs.grpc_config.get_client_config()
+        self.client_config = self.py_env_configs.grpc_config.get_client_config()
         # Resolve stage roots only on PP EPLB updates, after backend bootstrap.
-        eplb_address_resolver = None
+        self.eplb_address_resolver = None
         if py_env_configs.parallelism_config.pp_size > 1:
-            eplb_address_resolver = lambda: get_eplb_stage_root_addresses(
+            self.eplb_address_resolver = lambda: get_eplb_stage_root_addresses(
                 py_env_configs
             )
-        self.grpc_client = GrpcClientWrapper(
-            self.server_config.rpc_server_port,
-            dp_addresses=dp_addresses,
-            client_config=client_config,
-            eplb_address_resolver=eplb_address_resolver,
-        )
+        # Built after the SCR prebind barrier: the restored pod must resolve
+        # backend addresses from the refreshed config, not from the snapshot.
+        self._grpc_client: Optional[GrpcClientWrapper] = None
 
         logging.info(
             f"frontend app rank_id = {self.server_config.rank_id}, "
             f"server_port = {self.server_config.server_port}, frontend_server_id = {self.server_config.frontend_server_id}"
         )
+
+    @property
+    def grpc_client(self) -> GrpcClientWrapper:
+        if self._grpc_client is None:
+            raise RuntimeError("frontend gRPC client is not initialized")
+        return self._grpc_client
+
+    @grpc_client.setter
+    def grpc_client(self, client: Optional[GrpcClientWrapper]) -> None:
+        # Tests and embedders inject a client; start() builds it after on_prebind.
+        self._grpc_client = client
 
     async def _wait_backend_health_ready_impl(self) -> None:
         """Loop until backend gRPC health_check returns ok (used when PD 不分离)."""
@@ -471,11 +479,55 @@ class FrontendApp(object):
             "Backend health_check did not become ready within %ds" % timeout_s
         )
 
-    def start(self):
-        # spawn 后独立初始化；仅合法且启用的 JSON 配置会创建 Trace 运行时。
-        init_telemetry("frontend", 0)
+    def _init_grpc_client(self) -> None:
+        """Resolve backend addresses and build the RPC client.
+
+        Deferred until after ``on_prebind`` so a restored pod uses the
+        addresses refreshed by the SCR fixup hook instead of the ones frozen
+        into the snapshot.
+        """
+        # Compute all DP addresses for broadcast operations (e.g. update_scheduler_info)
+        world_info = get_frontend_world_info(
+            server_config=self.py_env_configs.server_config,
+            distribute_config=self.py_env_configs.distribute_config,
+            parallelism_config=self.py_env_configs.parallelism_config,
+        )
+        dp_addresses = get_dp_addrs_from_world_info(
+            world_info=world_info,
+            parallelism_config=self.py_env_configs.parallelism_config,
+        )
+        self._grpc_client = GrpcClientWrapper(
+            self.server_config.rpc_server_port,
+            dp_addresses=dp_addresses,
+            client_config=self.client_config,
+            eplb_address_resolver=self.eplb_address_resolver,
+        )
+
+    def start(
+        self,
+        on_ready: Optional[Callable[[], None]] = None,
+        on_prebind: Optional[Callable[[], None]] = None,
+    ):
+        """Start the HTTP server and block on its main-thread service loop.
+
+        ``on_prebind`` runs after application initialization but before the
+        listening socket is created.  A checkpoint/template barrier belongs
+        here: the process must remain out of service until the control plane
+        releases the barrier.
+
+        ``on_ready`` is invoked by the ASGI startup hook, after the socket has
+        been bound and (for a colocated backend) the backend health check has
+        completed.  It must be installed before ``server.run``: this method
+        intentionally blocks and therefore callers cannot reliably run a
+        readiness callback after it returns.
+        """
+        self._on_ready = on_ready
+        if on_prebind is not None:
+            on_prebind()
+        self._init_grpc_client()
         self.frontend_server.start()
         app = self.create_app()
+        init_telemetry("frontend", 0)
 
         loop = "auto"
         if threading.current_thread() != threading.main_thread():
@@ -585,6 +637,9 @@ class FrontendApp(object):
                 )
             )
             kmonitor.start_serving_when_ready()
+            on_ready = getattr(self, "_on_ready", None)
+            if on_ready is not None:
+                on_ready()
 
         def draining_response():
             reason = (

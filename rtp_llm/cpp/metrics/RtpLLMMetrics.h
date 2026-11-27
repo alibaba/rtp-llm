@@ -704,6 +704,8 @@ private:
     AUTIL_LOG_DECLARE();
 };
 
+bool kmonitorReportsDeferredForScr();
+
 template<typename MetricsType, typename CollectType>
 class MetricsLoopReporter {
 public:
@@ -785,6 +787,10 @@ private:
 
     void reportLoop() {
         while (metrics_reporter_ && !stop_) {
+            if (kmonitorReportsDeferredForScr()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms_));
+                continue;
+            }
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (!isKmonMetricReportingEnabled()) {
@@ -922,6 +928,10 @@ private:
 
     void reportLoop() {
         while (metrics_reporter_ && !stop_.load(std::memory_order_acquire)) {
+            if (kmonitorReportsDeferredForScr()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms_));
+                continue;
+            }
             bool        should_report = false;
             CollectType report_collector;
             {
@@ -1657,6 +1667,7 @@ private:
 
 bool initKmonitorFactory();
 void stopKmonitorFactory();
+bool resumeKmonitorAfterScr();
 
 void setHippoTags(kmonitor::MetricsConfig& config);
 
