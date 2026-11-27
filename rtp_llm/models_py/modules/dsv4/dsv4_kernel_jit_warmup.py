@@ -70,6 +70,7 @@ _DENSE_GEMM_JIT_WARMED_KEYS: set[tuple] = set()
 _BATCHED_FP8_EINSUM_JIT_WARMED_KEYS: set[tuple] = set()
 _MHC_PRENORM_GEMM_JIT_WARMED_KEYS: set[tuple] = set()
 _MHC_HEAD_FUSED_JIT_WARMED_KEYS: set[tuple] = set()
+_MEGA_MHC_JIT_WARMED_KEYS: set[tuple] = set()
 _FP8_MQA_LOGITS_JIT_WARMED_KEYS: set[tuple] = set()
 _SWA_SLOT_DEQUANT_JIT_WARMED_KEYS: set[tuple] = set()
 _CP_METADATA_JIT_WARMED_KEYS: set[tuple] = set()
@@ -1245,6 +1246,119 @@ def _collect_dsv4_mhc_head_fused_shapes(model: Any) -> Dict[tuple[int, int], dic
     return shapes
 
 
+def _extract_mega_mhc_pair_info(
+    previous: Any,
+    next_hc: Any,
+    norm: Any,
+    *,
+    pair_name: str,
+) -> Optional[tuple[tuple, dict]]:
+    if (
+        getattr(previous, "__class__", None).__name__ != "TileLangHCUnit"
+        or getattr(next_hc, "__class__", None).__name__ != "TileLangHCUnit"
+        or getattr(norm, "__class__", None).__name__ != "RMSNorm"
+    ):
+        return None
+    hc_mult = int(getattr(next_hc, "hc_mult", 0) or 0)
+    prev_mult = int(getattr(previous, "hc_mult", 0) or 0)
+    dim = int(getattr(next_hc, "dim", 0) or 0)
+    prev_dim = int(getattr(previous, "dim", 0) or 0)
+    sinkhorn_iters = int(getattr(next_hc, "hc_sinkhorn_iters", 0) or 0)
+    if (
+        hc_mult != 4
+        or prev_mult != 4
+        or dim <= 0
+        or prev_dim != dim
+        or dim % 1024 != 0
+        or sinkhorn_iters < 1
+    ):
+        return None
+
+    fn = getattr(next_hc, "fn", None)
+    scale = getattr(next_hc, "scale", None)
+    base = getattr(next_hc, "base", None)
+    norm_weight = getattr(norm, "weight", None)
+    if not (
+        isinstance(fn, torch.Tensor)
+        and fn.dtype == torch.float32
+        and tuple(fn.shape) == (24, 4 * dim)
+        and isinstance(scale, torch.Tensor)
+        and scale.dtype == torch.float32
+        and tuple(scale.shape) == (3,)
+        and isinstance(base, torch.Tensor)
+        and base.dtype == torch.float32
+        and tuple(base.shape) == (24,)
+        and isinstance(norm_weight, torch.Tensor)
+        and norm_weight.dtype == torch.bfloat16
+        and tuple(norm_weight.shape) == (dim,)
+    ):
+        return None
+
+    norm_eps = float(getattr(next_hc, "norm_eps", 1.0e-6))
+    hc_eps = float(getattr(next_hc, "hc_eps", 1.0e-6))
+    rmsnorm_eps = float(getattr(norm, "variance_epsilon", 1.0e-6))
+    key = (dim, hc_mult, sinkhorn_iters, norm_eps, hc_eps, rmsnorm_eps)
+    return key, {
+        "name": pair_name,
+        "dim": dim,
+        "hc_mult": hc_mult,
+        "hc_sinkhorn_iters": sinkhorn_iters,
+        "norm_eps": norm_eps,
+        "hc_eps": hc_eps,
+        "rmsnorm_eps": rmsnorm_eps,
+    }
+
+
+def _collect_dsv4_mega_mhc_pairs(model: Any) -> Dict[tuple, dict]:
+    """Collect intra-layer and cross-layer ``mega_mhc`` configs from a DSV4 model."""
+    pairs: Dict[tuple, dict] = {}
+    layers = list(getattr(model, "layers", ()) or ())
+    if not layers:
+        layers = [
+            module
+            for _, module in model.named_modules()
+            if all(
+                hasattr(module, attr)
+                for attr in ("attn_hc", "ffn_hc", "attn_norm", "ffn_norm")
+            )
+        ]
+
+    for idx, layer in enumerate(layers):
+        attn_hc = getattr(layer, "attn_hc", None)
+        ffn_hc = getattr(layer, "ffn_hc", None)
+        ffn_norm = getattr(layer, "ffn_norm", None)
+        intra = _extract_mega_mhc_pair_info(
+            attn_hc,
+            ffn_hc,
+            ffn_norm,
+            pair_name=f"layer_{idx}_attn_to_ffn",
+        )
+        if intra is not None and intra[0] not in pairs:
+            pairs[intra[0]] = intra[1]
+
+        if idx + 1 < len(layers):
+            next_layer = layers[idx + 1]
+            if (
+                getattr(next_layer, "_mega_csa_adapter", None) is None
+                and getattr(next_layer, "_mega_hca_adapter", None) is None
+            ):
+                cross = _extract_mega_mhc_pair_info(
+                    ffn_hc,
+                    getattr(next_layer, "attn_hc", None),
+                    getattr(next_layer, "attn_norm", None),
+                    pair_name=f"layer_{idx}_to_{idx + 1}",
+                )
+                if cross is not None and cross[0] not in pairs:
+                    pairs[cross[0]] = cross[1]
+
+    logging.info(
+        "[DSV4 MegaMHC] collected pairs: count=%d configs=%s",
+        len(pairs),
+        sorted(pairs.keys()),
+    )
+    return pairs
+
+
 def _collect_dsv4_batched_fp8_einsum_shapes(
     model: Any,
 ) -> Dict[tuple[int, int, int], dict]:
@@ -2058,6 +2172,88 @@ def warmup_mhc_head_fused_jit(
 
 
 @torch.inference_mode()
+def warmup_mega_mhc_jit(
+    pairs: Dict[tuple, dict],
+    *,
+    max_m: int,
+    device: torch.device,
+) -> None:
+    """Compile reachable ``deep_gemm.mega_mhc`` ``num_splits`` kernels and warm split barriers."""
+
+    if not model_warm_up_enabled():
+        return
+    device = torch.device(device)
+    if not _is_cuda_device(device) or not pairs:
+        return
+
+    from rtp_llm.models_py.modules.dsv4.hc import mega_mhc as _mega_mhc
+
+    if _mega_mhc._get_mega_mhc() is None or not _mega_mhc._is_sm10x_device(device):
+        return
+    _assert_not_capturing()
+
+    num_sms = _get_deep_gemm_num_sms(device)
+    keys = tuple(sorted(pairs.keys()))
+    tokens_by_key = {
+        key: _mega_mhc.representative_tokens(
+            int(max_m),
+            num_sms,
+            hidden=int(pairs[key]["dim"]),
+        )
+        for key in keys
+    }
+    tokens_by_key = {key: tokens for key, tokens in tokens_by_key.items() if tokens}
+    if not tokens_by_key:
+        return
+
+    stream_key = _mega_mhc._stream_key(device)
+    warmup_key = (
+        int(max_m),
+        tuple((key, tokens_by_key.get(key, ())) for key in keys),
+        int(num_sms),
+        str(device),
+        int(stream_key[1]),
+    )
+    if warmup_key in _MEGA_MHC_JIT_WARMED_KEYS:
+        return
+
+    rank = _dist_rank()
+    if rank == 0:
+        total_launches = sum(len(tokens) for tokens in tokens_by_key.values())
+        logging.info(
+            "[DSV4 MegaMHC] JIT warmup start: %d configs, %d representative launches, max_m=%d, num_sms=%d",
+            len(keys),
+            total_launches,
+            int(max_m),
+            num_sms,
+        )
+
+    def _run_warmup_launches() -> None:
+        for key in keys:
+            info = pairs[key]
+            for m_value in tokens_by_key.get(key, ()):
+                _run_deepgemm_warmup_launch_with_retry(
+                    "DSV4 MegaMHC",
+                    f"dim={info['dim']} tokens={m_value}",
+                    partial(
+                        _launch_dummy_mega_mhc,
+                        info=info,
+                        m_value=m_value,
+                        device=device,
+                    ),
+                    device=device,
+                )
+            _sync_cuda(device)
+            _release_cuda_cache(device)
+
+    t0 = time.time()
+    _run_deepgemm_warmup_launches_serialized("DSV4 MegaMHC", _run_warmup_launches)
+    if rank == 0:
+        logging.info("[DSV4 MegaMHC] JIT warmup done in %.2fs", time.time() - t0)
+    _MEGA_MHC_JIT_WARMED_KEYS.add(warmup_key)
+
+
+@torch.inference_mode()
 def warmup_fp8_mqa_logits_jit(
     shapes: Dict[tuple[int, int], dict],
     *,
@@ -2613,6 +2809,73 @@ def _launch_dummy_mhc_head_fused(
         )
         del residual, out
     del fn, scale, base
+
+
+def _launch_dummy_mega_mhc(
+    *,
+    info: dict,
+    m_value: int,
+    device: torch.device,
+) -> None:
+    """Launch ``deep_gemm.mega_mhc`` once on fresh disposable buffers and modules."""
+    from rtp_llm.models_py.modules.base.cuda.norm import RMSNorm
+    from rtp_llm.models_py.modules.dsv4.hc import mega_mhc as _mega_mhc
+    from rtp_llm.models_py.modules.dsv4.hc.tilelang_impl import TileLangHCUnit
+
+    dim = int(info["dim"])
+    hc_mult = int(info["hc_mult"])
+    sinkhorn_iters = int(info["hc_sinkhorn_iters"])
+    norm_eps = float(info["norm_eps"])
+    hc_eps = float(info["hc_eps"])
+    rmsnorm_eps = float(info["rmsnorm_eps"])
+    tokens = max(int(m_value), 1)
+
+    dummy_prev = TileLangHCUnit(
+        torch.zeros((24, hc_mult * dim), dtype=torch.float32, device=device),
+        torch.zeros((24,), dtype=torch.float32, device=device),
+        torch.ones((3,), dtype=torch.float32, device=device),
+        dim=dim,
+        hc_mult=hc_mult,
+        hc_sinkhorn_iters=sinkhorn_iters,
+        norm_eps=norm_eps,
+        hc_eps=hc_eps,
+        name="warmup_prev",
+    )
+    dummy_next = TileLangHCUnit(
+        torch.zeros((24, hc_mult * dim), dtype=torch.float32, device=device),
+        torch.zeros((24,), dtype=torch.float32, device=device),
+        torch.ones((3,), dtype=torch.float32, device=device),
+        dim=dim,
+        hc_mult=hc_mult,
+        hc_sinkhorn_iters=sinkhorn_iters,
+        norm_eps=norm_eps,
+        hc_eps=hc_eps,
+        name="warmup_next",
+    )
+    dummy_norm = RMSNorm(
+        torch.ones((dim,), dtype=torch.bfloat16, device=device),
+        eps=rmsnorm_eps,
+    )
+
+    x_sub = torch.zeros((tokens, dim), dtype=torch.bfloat16, device=device)
+    residual = torch.zeros((tokens, hc_mult, dim), dtype=torch.bfloat16, device=device)
+    post = torch.zeros((tokens, hc_mult, 1), dtype=torch.float32, device=device)
+    comb = torch.zeros((tokens, hc_mult, hc_mult), dtype=torch.float32, device=device)
+
+    out = _mega_mhc.try_fused_post_pre(
+        x_sub,
+        residual,
+        post,
+        comb,
+        previous=dummy_prev,
+        next_hc=dummy_next,
+        norm=dummy_norm,
+    )
+    if out is None:
+        raise RuntimeError(
+            f"mega_mhc warmup returned None for dim={dim}, tokens={tokens}, device={device}"
+        )
+    del out, x_sub, residual, post, comb, dummy_prev, dummy_next, dummy_norm
 
 
 def _launch_dummy_fp8_mqa_logits(

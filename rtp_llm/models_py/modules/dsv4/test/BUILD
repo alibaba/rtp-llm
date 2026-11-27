@@ -114,6 +114,42 @@ dsv4_sm100_py_test(
     deps = _MODEL_TEST_DEPS + ["//rtp_llm/models_py:models"],
 )
 
+dsv4_sm100_py_test(
+    name = "test_dsv4_mega_mhc",
+    deps = _MODEL_TEST_DEPS + ["//rtp_llm/models_py:tile_kernels_mhc"],
+)
+
+dsv4_sm100_py_test(
+    name = "test_dsv4_block_mega_mhc",
+    deps = _MODEL_TEST_DEPS + [
+        "//rtp_llm/models_py:models",
+        "//rtp_llm/models_py:tile_kernels_mhc",
+    ],
+)
+
+[
+    py_test(
+        name = name + "_cpu",
+        srcs = [name + ".py"],
+        main = name + ".py",
+        env = {"GPU_COUNT": "0"},
+        deps = _MODEL_TEST_DEPS + [
+            "//rtp_llm/models_py:models",
+            "//rtp_llm:jit_cache_env",
+        ],
+        target_compatible_with = select({
+            "@//:using_cuda13_x86": [],
+            "@//:using_cuda13_arm": [],
+            "//conditions:default": ["@platforms//:incompatible"],
+        }),
+    )
+    for name in [
+        "test_dsv4_mega_mhc",
+        "test_dsv4_block_mega_mhc",
+        "test_dsv4_kernel_jit_warmup",
+    ]
+]
+
 _PERF_TESTS = [
     "test_fused_inv_rope_fp8_quant_perf",
     "test_fused_rmsnorm_rope_perf",
@@ -170,6 +206,8 @@ _MOVED_CONTRACT_TESTS = [
 
 _PAIRED_GPU_TESTS = [
     ":test_prefill_fast_path_cuda",
+    ":test_dsv4_mega_mhc",
+    ":test_dsv4_block_mega_mhc",
     "//rtp_llm/models_py/modules/factory/fused_moe/utils/test:test_shared_expert_executor",
     "//rtp_llm/models_py/modules/factory/fused_moe/utils/test:test_mega_moe_input_packer",
     "//rtp_llm/models_py/modules/factory/fused_moe/impl/cuda/executors/test:test_grouped_fp4_strategy_cuda_graph",

@@ -6,7 +6,7 @@ twice — once for Attention and once for MoE FFN.
 
 import logging
 import os
-from typing import Callable, Dict, Optional, Tuple
+from typing import Callable, Dict, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -24,6 +24,8 @@ from rtp_llm.models_py.modules.dsv4.hc import (
     fused_mhc_pre_norm,
     fused_mhc_pre_norm_quant,
 )
+from rtp_llm.models_py.modules.dsv4.hc import mega_mhc as _mega_mhc
+from rtp_llm.models_py.modules.dsv4.hc.decode_transition import PendingDecodePost
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
     ChunkedFp8Fp4MoeLayer,
 )
@@ -399,6 +401,64 @@ class Block(nn.Module):
         _, _, _, ffn_hc_post = self._prefill_fast_hc_impls()
         return ffn_hc_post(ffn_out, residual, post, comb)
 
+    def _intra_post_pre_norm(
+        self,
+        attn_out: torch.Tensor,
+        residual: torch.Tensor,
+        post: torch.Tensor,
+        comb: torch.Tensor,
+    ) -> Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]:
+        return _mega_mhc.try_fused_post_pre(
+            attn_out,
+            residual,
+            post,
+            comb,
+            previous=self.attn_hc,
+            next_hc=self.ffn_hc,
+            norm=self.ffn_norm,
+        )
+
+    def _finish_attn_post_ffn_pre(
+        self,
+        attn_out: torch.Tensor,
+        residual: torch.Tensor,
+        post: torch.Tensor,
+        comb: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        fused = self._intra_post_pre_norm(attn_out, residual, post, comb)
+        if fused is not None:
+            return fused
+        x = self.attn_hc.post(attn_out, residual, post, comb)
+        x_pre, post, comb = self._hc_pre_norm_profiled(x, self.ffn_hc, self.ffn_norm)
+        return x, x_pre, post, comb
+
+    def _can_fuse_mega_adapter_outputs(
+        self, mega_adapter, device: torch.device
+    ) -> bool:
+        adapter_cls = type(mega_adapter)
+        if not hasattr(adapter_cls, "forward_attention_sublayer_outputs"):
+            return False
+        if "forward_attention_sublayer" in getattr(mega_adapter, "__dict__", {}):
+            return False
+        if not _mega_mhc.is_supported(self.attn_hc, self.ffn_hc, self.ffn_norm, device):
+            return False
+        from rtp_llm.models_py.modules.dsv4.fp8.decode.mega_csa_adapter import (
+            MegaCSAAdapter,
+        )
+        from rtp_llm.models_py.modules.dsv4.fp8.decode.mega_hca_adapter import (
+            MegaHCAAdapter,
+        )
+
+        for base_cls in (MegaCSAAdapter, MegaHCAAdapter):
+            if isinstance(mega_adapter, base_cls):
+                if (
+                    adapter_cls._forward_bound is not base_cls._forward_bound
+                    and adapter_cls._forward_bound_outputs
+                    is base_cls._forward_bound_outputs
+                ):
+                    return False
+        return True
+
     def forward_decode(
         self,
         x: torch.Tensor,  # [B, 1, hc, dim]
@@ -406,7 +466,12 @@ class Block(nn.Module):
         input_ids: torch.Tensor,  # [B, 1]
         kv_cache=None,
         attn_fn=None,
-    ) -> torch.Tensor:
+        *,
+        _prepared_attn: Optional[
+            Tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        ] = None,
+        _defer_ffn_post: bool = False,
+    ) -> Union[torch.Tensor, PendingDecodePost]:
         """Decode-only block forward — mirrors prefill ``forward`` but
         delegates attention to ``Attention.forward_decode``. Prefill
         ``forward`` is byte-identical for PD-disagg cleanliness.
@@ -416,38 +481,70 @@ class Block(nn.Module):
         the single authority; the DSpARK draft substitutes its non-causal
         fixed-block attention this way instead of copying the block body.
         """
-        mega_adapter = self._mega_csa_adapter or self._mega_hca_adapter
-        use_mega_attention = (
-            attn_fn is None
-            and mega_adapter is not None
-            and mega_adapter.supports_decode_shape(x, attn_metadata)
-        )
-        if use_mega_attention:
-            # Fused HC/norm intermediates are not exposed by Mega;
-            # Falls back to the ordinary attention path when Mega decode is unavailable or shape is unsupported.
-            x = mega_adapter.forward_attention_sublayer(
-                self, x, attn_metadata, kv_cache=kv_cache
+        if _prepared_attn is not None:
+            residual = x
+            x_pre, post, comb = _prepared_attn
+            attn_out = (
+                attn_fn(x_pre)
+                if attn_fn is not None
+                else self.attn.forward_decode(x_pre, attn_metadata, kv_cache=kv_cache)
+            )
+            residual, x_pre, post, comb = self._finish_attn_post_ffn_pre(
+                attn_out, residual, post, comb
             )
         else:
-            # Attention path
-            residual = x
-            x_pre, post, comb = self._hc_pre_norm_profiled(
-                x, self.attn_hc, self.attn_norm
+            mega_adapter = self._mega_csa_adapter or self._mega_hca_adapter
+            use_mega_attention = (
+                attn_fn is None
+                and mega_adapter is not None
+                and mega_adapter.supports_decode_shape(x, attn_metadata)
             )
-            if attn_fn is not None:
-                attn_out = attn_fn(x_pre)
+            if use_mega_attention:
+                if self._can_fuse_mega_adapter_outputs(mega_adapter, x.device):
+                    attn_out, residual, post, comb = (
+                        mega_adapter.forward_attention_sublayer_outputs(
+                            self, x, attn_metadata, kv_cache=kv_cache
+                        )
+                    )
+                    residual, x_pre, post, comb = self._finish_attn_post_ffn_pre(
+                        attn_out, residual, post, comb
+                    )
+                else:
+                    # Fallback when mega_mhc or adapter output exposure is unavailable.
+                    x = mega_adapter.forward_attention_sublayer(
+                        self, x, attn_metadata, kv_cache=kv_cache
+                    )
+                    residual = x
+                    x_pre, post, comb = self._hc_pre_norm_profiled(
+                        x, self.ffn_hc, self.ffn_norm
+                    )
             else:
-                attn_out = self.attn.forward_decode(
-                    x_pre, attn_metadata, kv_cache=kv_cache
+                residual = x
+                x_pre, post, comb = self._hc_pre_norm_profiled(
+                    x, self.attn_hc, self.attn_norm
                 )
-            x = self.attn_hc.post(attn_out, residual, post, comb)
+                attn_out = (
+                    attn_fn(x_pre)
+                    if attn_fn is not None
+                    else self.attn.forward_decode(
+                        x_pre, attn_metadata, kv_cache=kv_cache
+                    )
+                )
+                residual, x_pre, post, comb = self._finish_attn_post_ffn_pre(
+                    attn_out, residual, post, comb
+                )
 
         # FFN path — MoE has no per-step state, reuse existing forward
-        residual = x
-        x_pre, post, comb = self._hc_pre_norm_profiled(x, self.ffn_hc, self.ffn_norm)
         ffn_out = self.ffn(x_pre, input_ids, is_decode_forward=True)
-        x = self.ffn_hc.post(ffn_out, residual, post, comb)
-        return x
+        if _defer_ffn_post:
+            return PendingDecodePost(
+                sublayer_out=ffn_out,
+                residual=residual,
+                post=post,
+                comb=comb,
+                hc_unit=self.ffn_hc,
+            )
+        return self.ffn_hc.post(ffn_out, residual, post, comb)
 
     def forward_prefill_fast(
         self,
@@ -582,13 +679,23 @@ class Block(nn.Module):
                     kv_cache=kv_cache,
                     block_tables_by_type=block_tables_by_type,
                 )
-        x = attn_hc_post(attn_out, residual, post, comb)
-        self._sync_after_first_cp_prefill_attention()
+        fused = None
+        if (
+            attn_hc_post == self.attn_hc._post_impl
+            and ffn_hc_pre == self.ffn_hc._pre_impl
+        ):
+            fused = self._intra_post_pre_norm(attn_out, residual, post, comb)
+        if fused is not None:
+            residual, x_pre, post, comb = fused
+            self._sync_after_first_cp_prefill_attention()
+        else:
+            x = attn_hc_post(attn_out, residual, post, comb)
+            self._sync_after_first_cp_prefill_attention()
 
-        residual = x
-        x_pre, post, comb = self._prefill_fast_hc_pre_norm(
-            x, hc_unit=self.ffn_hc, hc_pre_impl=ffn_hc_pre, norm=self.ffn_norm
-        )
+            residual = x
+            x_pre, post, comb = self._prefill_fast_hc_pre_norm(
+                x, hc_unit=self.ffn_hc, hc_pre_impl=ffn_hc_pre, norm=self.ffn_norm
+            )
         ffn_out = self.ffn(x_pre, input_ids)
         return ffn_hc_post(ffn_out, residual, post, comb)
 
@@ -683,14 +790,19 @@ class Block(nn.Module):
                 attn_out = attn_out_padded.reshape(T, D)
             else:
                 attn_out = attn_out_padded[b_idx, s_idx]  # [T, dim]
-        x = self.attn_hc.post(attn_out, residual, post, comb)  # [T, hc, dim]
-        self._sync_after_first_cp_prefill_attention()
+        fused = self._intra_post_pre_norm(attn_out, residual, post, comb)
+        if fused is not None:
+            residual, x_pre, post, comb = fused
+            self._sync_after_first_cp_prefill_attention()
+        else:
+            x = self.attn_hc.post(attn_out, residual, post, comb)  # [T, hc, dim]
+            self._sync_after_first_cp_prefill_attention()
 
-        # FFN path
-        residual = x
-        x_pre, post, comb = self._hc_pre_norm_profiled(
-            x, self.ffn_hc, self.ffn_norm
-        )  # [T, dim], ...
+            # FFN path
+            residual = x
+            x_pre, post, comb = self._hc_pre_norm_profiled(
+                x, self.ffn_hc, self.ffn_norm
+            )  # [T, dim], ...
         ffn_in_ids = (
             input_ids
             if input_ids is not None

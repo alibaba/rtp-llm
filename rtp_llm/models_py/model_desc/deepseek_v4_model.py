@@ -943,6 +943,7 @@ class DeepSeekV4Model(GptModelBase):
                     _collect_dsv4_batched_fp8_einsum_shapes,
                     _collect_dsv4_dense_gemm_shapes,
                     _collect_dsv4_fp8_mqa_logits_shapes,
+                    _collect_dsv4_mega_mhc_pairs,
                     _collect_dsv4_mhc_head_fused_shapes,
                     _collect_dsv4_mhc_prenorm_shapes,
                     resolve_dense_gemm_warmup_max_m,
@@ -951,6 +952,7 @@ class DeepSeekV4Model(GptModelBase):
                     warmup_dense_gemm_jit,
                     warmup_dsv4_fp8_swa_slot_dequant_jit,
                     warmup_fp8_mqa_logits_jit,
+                    warmup_mega_mhc_jit,
                     warmup_mhc_head_fused_jit,
                     warmup_mhc_prenorm_gemm_jit,
                     warmup_prefill_cp_metadata_jit,
@@ -1077,6 +1079,12 @@ class DeepSeekV4Model(GptModelBase):
                 _mhc_head_fused_shapes = _collect_dsv4_mhc_head_fused_shapes(self.v4)
                 warmup_mhc_head_fused_jit(
                     _mhc_head_fused_shapes,
+                    device=_jit_device,
+                )
+                _mega_mhc_pairs = _collect_dsv4_mega_mhc_pairs(self.v4)
+                warmup_mega_mhc_jit(
+                    _mega_mhc_pairs,
+                    max_m=_dense_gemm_max_m,
                     device=_jit_device,
                 )
                 if (

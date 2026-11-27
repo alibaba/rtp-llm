@@ -27,6 +27,11 @@ from rtp_llm.models_py.modules.dsv4 import _profiler
 from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import (
     require_pool_tokens_per_block,
 )
+from rtp_llm.models_py.modules.dsv4.hc.decode_transition import (
+    PendingDecodePost,
+    can_defer_decode_post,
+    forward_decode_layer,
+)
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
     CSA_KV,
     CSA_STATE,
@@ -332,11 +337,34 @@ def forward_layers(
         begin_decode(attn_metadata)
     capture_ids = frozenset(v4.capture_aux_hidden_layer_ids)
     layer_forward_range = _profiler.make_layer_forward_range()
+    num_layers = len(v4.layers)
     for layer_idx, layer in enumerate(v4.layers):
+        next_layer = v4.layers[layer_idx + 1] if layer_idx + 1 < num_layers else None
+        preserve_output = layer_idx in capture_ids
+        hidden_device = (
+            h.residual.device if isinstance(h, PendingDecodePost) else h.device
+        )
+        defer_post = can_defer_decode_post(
+            layer,
+            next_layer,
+            device=hidden_device,
+            preserve_output=preserve_output,
+        )
         with layer_forward_range(layer_idx):
-            h = layer.forward_decode(h, attn_metadata, input_ids, kv_cache=kv_cache)
-            if layer_idx in capture_ids:
+            h = forward_decode_layer(
+                layer,
+                h,
+                attn_metadata,
+                input_ids,
+                kv_cache=kv_cache,
+                defer_post=defer_post,
+            )
+            if preserve_output:
+                if isinstance(h, PendingDecodePost):
+                    h = h.materialize()
                 v4.capture_aux_hidden(layer_idx, h)
+    if isinstance(h, PendingDecodePost):
+        h = h.materialize()
     if v4._mtp_hidden_buffer is not None:
         if capture_ids:
             # DSpARK mode: the buffer already holds this forward's aux rows

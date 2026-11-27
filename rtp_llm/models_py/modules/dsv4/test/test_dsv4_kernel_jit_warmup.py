@@ -1377,5 +1377,166 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             )
 
 
+class TestMegaMHCJitWarmup(unittest.TestCase):
+    @staticmethod
+    def _ensure_cpu_compute_ops_stub() -> None:
+        if os.environ.get("GPU_COUNT", "0") != "0":
+            return
+        try:
+            import librtp_compute_ops  # noqa: F401
+        except ImportError:
+            if "librtp_compute_ops" not in sys.modules:
+                pkg = types.ModuleType("librtp_compute_ops")
+                sub = types.ModuleType("librtp_compute_ops.rtp_llm_ops")
+                pkg.rtp_llm_ops = sub
+                sys.modules["librtp_compute_ops"] = pkg
+                sys.modules["librtp_compute_ops.rtp_llm_ops"] = sub
+
+    def setUp(self) -> None:
+        self._ensure_cpu_compute_ops_stub()
+        from rtp_llm.models_py.modules.dsv4 import dsv4_kernel_jit_warmup as warmup_mod
+
+        self._warmup_mod = warmup_mod
+        self._saved_keys = set(warmup_mod._MEGA_MHC_JIT_WARMED_KEYS)
+        warmup_mod._MEGA_MHC_JIT_WARMED_KEYS.clear()
+        self.addCleanup(
+            lambda: (
+                warmup_mod._MEGA_MHC_JIT_WARMED_KEYS.clear(),
+                warmup_mod._MEGA_MHC_JIT_WARMED_KEYS.update(self._saved_keys),
+            )
+        )
+
+    def _make_pair_layer(
+        self,
+        *,
+        dim: int = 4096,
+        mega_adapter=None,
+    ):
+        from rtp_llm.models_py.modules.base.cuda.norm import RMSNorm
+        from rtp_llm.models_py.modules.dsv4.hc.tilelang_impl import TileLangHCUnit
+
+        def unit(name: str):
+            return TileLangHCUnit(
+                torch.ones((24, 4 * dim), dtype=torch.float32),
+                torch.zeros((24,), dtype=torch.float32),
+                torch.ones((3,), dtype=torch.float32),
+                dim=dim,
+                hc_mult=4,
+                hc_sinkhorn_iters=20,
+                norm_eps=1.0e-6,
+                hc_eps=1.0e-6,
+                name=name,
+            )
+
+        return SimpleNamespace(
+            attn_hc=unit("attn_hc"),
+            ffn_hc=unit("ffn_hc"),
+            attn_norm=RMSNorm(torch.ones((dim,), dtype=torch.bfloat16), eps=1.0e-6),
+            ffn_norm=RMSNorm(torch.ones((dim,), dtype=torch.bfloat16), eps=1.0e-6),
+            _mega_csa_adapter=mega_adapter,
+            _mega_hca_adapter=None,
+        )
+
+    def test_collect_dsv4_mega_mhc_pairs_deduplicates_and_filters(self):
+        l0 = self._make_pair_layer(dim=4096)
+        l1 = self._make_pair_layer(dim=4096)
+        l2_mega = self._make_pair_layer(dim=4096, mega_adapter=object())
+        # Distinct dim=7168 layer pair, plus ineligible dim=1280 layer pair.
+        l3_pro = self._make_pair_layer(dim=7168)
+        l4_bad = self._make_pair_layer(dim=1280)
+
+        model = SimpleNamespace(layers=[l0, l1, l2_mega, l3_pro, l4_bad])
+        pairs = self._warmup_mod._collect_dsv4_mega_mhc_pairs(model)
+        dims = sorted(info["dim"] for info in pairs.values())
+        self.assertEqual(dims, [4096, 7168])
+
+    def test_warmup_mega_mhc_jit_skips_and_launches_cleanly(self):
+        from rtp_llm.models_py.modules.dsv4.hc import mega_mhc as _mega_mhc
+
+        model = SimpleNamespace(layers=[self._make_pair_layer(dim=4096)])
+        pairs = self._warmup_mod._collect_dsv4_mega_mhc_pairs(model)
+        cuda_dev = torch.device("cuda:0")
+
+        # 1. model_warm_up_enabled=False skips cleanly.
+        with (
+            mock.patch.object(
+                self._warmup_mod, "model_warm_up_enabled", return_value=False
+            ),
+            mock.patch.object(
+                self._warmup_mod, "_launch_dummy_mega_mhc"
+            ) as launch_mock,
+        ):
+            self._warmup_mod.warmup_mega_mhc_jit(pairs, max_m=4096, device=cuda_dev)
+            launch_mock.assert_not_called()
+
+        # 2. CPU device and non-SM10x device (e.g. SM90/H20) skip cleanly.
+        with (
+            mock.patch.object(
+                self._warmup_mod, "model_warm_up_enabled", return_value=True
+            ),
+            mock.patch.object(
+                self._warmup_mod, "_launch_dummy_mega_mhc"
+            ) as launch_mock,
+        ):
+            self._warmup_mod.warmup_mega_mhc_jit(
+                pairs, max_m=4096, device=torch.device("cpu")
+            )
+            launch_mock.assert_not_called()
+
+        with (
+            mock.patch.object(
+                self._warmup_mod, "model_warm_up_enabled", return_value=True
+            ),
+            mock.patch.object(self._warmup_mod, "_is_cuda_device", return_value=True),
+            mock.patch.object(
+                _mega_mhc, "_get_mega_mhc", return_value=lambda *a, **k: None
+            ),
+            mock.patch.object(_mega_mhc, "_is_sm10x_device", return_value=False),
+            mock.patch.object(
+                self._warmup_mod, "_launch_dummy_mega_mhc"
+            ) as launch_mock,
+        ):
+            self._warmup_mod.warmup_mega_mhc_jit(pairs, max_m=4096, device=cuda_dev)
+            launch_mock.assert_not_called()
+
+        # 3. SM10x CUDA warmup invokes representative token buckets and is idempotent.
+        seen_tokens = []
+        live_fn_before = model.layers[0].ffn_hc.fn.clone()
+        with (
+            mock.patch.object(
+                self._warmup_mod, "model_warm_up_enabled", return_value=True
+            ),
+            mock.patch.object(self._warmup_mod, "_is_cuda_device", return_value=True),
+            mock.patch.object(
+                _mega_mhc, "_get_mega_mhc", return_value=lambda *a, **k: None
+            ),
+            mock.patch.object(_mega_mhc, "_is_sm10x_device", return_value=True),
+            mock.patch.object(self._warmup_mod, "_assert_not_capturing"),
+            mock.patch.object(
+                self._warmup_mod, "_get_deep_gemm_num_sms", return_value=148
+            ),
+            mock.patch.object(_mega_mhc, "_stream_key", return_value=(0, 888)),
+            mock.patch.object(self._warmup_mod, "_sync_cuda"),
+            mock.patch.object(self._warmup_mod, "_release_cuda_cache"),
+            mock.patch.object(
+                self._warmup_mod,
+                "_run_deepgemm_warmup_launches_serialized",
+                side_effect=lambda _label, fn: fn(),
+            ),
+            mock.patch.object(
+                self._warmup_mod,
+                "_launch_dummy_mega_mhc",
+                side_effect=lambda *, info, m_value, device: seen_tokens.append(
+                    m_value
+                ),
+            ),
+        ):
+            self._warmup_mod.warmup_mega_mhc_jit(pairs, max_m=4096, device=cuda_dev)
+            self._warmup_mod.warmup_mega_mhc_jit(pairs, max_m=4096, device=cuda_dev)
+
+        self.assertEqual(seen_tokens, [1, 129, 257, 385])
+        torch.testing.assert_close(model.layers[0].ffn_hc.fn, live_fn_before)
+
+
 if __name__ == "__main__":
     unittest.main()

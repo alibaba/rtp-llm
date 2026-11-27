@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple
 
 import torch
 
@@ -265,15 +265,15 @@ class MegaCSAAdapter:
             slots=slots,
         )
 
-    def forward_attention_sublayer(
+    def _run_bound(
         self,
         block: "Block",
         hidden: torch.Tensor,
         metadata: Any,
         *,
-        kv_cache: Optional[Any] = None,
-    ) -> torch.Tensor:
-        """Run the complete CSA attention sublayer; never falls back after entry."""
+        kv_cache: Optional[Any],
+        runner: Callable[["Block", torch.Tensor, Any, MegaCSAPoolContext, Any], Any],
+    ) -> Any:
         g = self._geometry
         if hidden.dim() != 4 or tuple(hidden.shape[2:]) != (HC, g.dim):
             raise ValueError(
@@ -310,10 +310,44 @@ class MegaCSAAdapter:
         try:
             attn._ensure_freqs_cis_bound()
             pools = self._bind_pools(block, metadata, token_count)
-            return self._forward_bound(block, hidden, metadata, pools, dsv4_mega)
+            return runner(block, hidden, metadata, pools, dsv4_mega)
         finally:
             attn._kv_cache = previous_kv
             attn._block_tables_by_type = previous_tables
+
+    def forward_attention_sublayer(
+        self,
+        block: "Block",
+        hidden: torch.Tensor,
+        metadata: Any,
+        *,
+        kv_cache: Optional[Any] = None,
+    ) -> torch.Tensor:
+        """Run the complete CSA attention sublayer; never falls back after entry."""
+        return self._run_bound(
+            block,
+            hidden,
+            metadata,
+            kv_cache=kv_cache,
+            runner=self._forward_bound,
+        )
+
+    def forward_attention_sublayer_outputs(
+        self,
+        block: "Block",
+        hidden: torch.Tensor,
+        metadata: Any,
+        *,
+        kv_cache: Optional[Any] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Run CSA attention up to projection and return ``(projected, residual, post, comb)``."""
+        return self._run_bound(
+            block,
+            hidden,
+            metadata,
+            kv_cache=kv_cache,
+            runner=self._forward_bound_outputs,
+        )
 
     def _forward_bound(
         self,
@@ -323,6 +357,23 @@ class MegaCSAAdapter:
         pools: MegaCSAPoolContext,
         dsv4_mega: Any,
     ) -> torch.Tensor:
+        projected, residual, post_view, comb_view = self._forward_bound_outputs(
+            block,
+            hidden,
+            metadata,
+            pools,
+            dsv4_mega,
+        )
+        return block.attn_hc.post(projected, residual, post_view, comb_view)
+
+    def _forward_bound_outputs(
+        self,
+        block: "Block",
+        hidden: torch.Tensor,
+        metadata: Any,
+        pools: MegaCSAPoolContext,
+        dsv4_mega: Any,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         g = self._geometry
         from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import tf32_hc_prenorm_gemm
         from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_attn_metadata import (
@@ -571,7 +622,7 @@ class MegaCSAAdapter:
             q_len,
         )
         projected = attn._lin(attn.wo_b, o_lora.flatten(2))
-        return block.attn_hc.post(
+        return (
             projected,
             hidden,
             workspace.post.view(batch_size, q_len, HC, 1),
