@@ -174,7 +174,7 @@ py::tuple mutationResult(Shard::Mutations& mutations, Args&&... args) {
 }  // namespace
 
 void registerEmbLocalCache(pybind11::module& m) {
-    py::class_<EvictionWriter, std::shared_ptr<EvictionWriter>>(m, "EmbEvictionWriter")
+    py::class_<RemoteWriteQueue, std::shared_ptr<RemoteWriteQueue>>(m, "EmbRemoteWriteQueue")
         .def(py::init([](std::shared_ptr<EmbRegisteredArena> arena, std::optional<at::Tensor> root, py::capsule capsule,
                         int64_t object_bytes, int64_t max_pending, int64_t max_bytes, int64_t timeout_ms,
                         int workers, bool request_scoped) {
@@ -186,26 +186,46 @@ void registerEmbLocalCache(pybind11::module& m) {
             if (!validEmbNativeWriteApi(api)) {
                 throw std::invalid_argument("invalid exact-object native API");
             }
-            return std::make_shared<EvictionWriter>(std::move(arena), root.value_or(at::Tensor{}), *api, object_bytes, max_pending,
+            return std::make_shared<RemoteWriteQueue>(std::move(arena), root.value_or(at::Tensor{}), *api, object_bytes, max_pending,
                                                      max_bytes, timeout_ms, workers, request_scoped);
         }), py::keep_alive<1, 4>())
-        .def("reserve_external", &EvictionWriter::reserveExternal, py::call_guard<py::gil_scoped_release>())
-        .def("release_external", &EvictionWriter::releaseExternal, py::call_guard<py::gil_scoped_release>())
-        .def("close", &EvictionWriter::close, py::call_guard<py::gil_scoped_release>())
-        .def("stats", [](const EvictionWriter& writer) {
+        .def("reserve_external", &RemoteWriteQueue::reserveExternal, py::call_guard<py::gil_scoped_release>())
+        .def("release_external", &RemoteWriteQueue::releaseExternal, py::call_guard<py::gil_scoped_release>())
+        .def("close", &RemoteWriteQueue::close, py::call_guard<py::gil_scoped_release>())
+        .def("submit_encoded", [](RemoteWriteQueue& writer,
+                                  const std::string& key,
+                                  const std::string& trace,
+                                  py::handle value,
+                                  const std::optional<std::tuple<bool, bool, int64_t, std::string>>& verdict,
+                                  const std::vector<std::pair<c10::DeviceIndex, c10::StreamId>>& producers) {
+            Tree tree;
+            Shard::TensorList tensors;
+            std::unordered_map<PyObject*, int64_t> seen;
+            if (!encode(value, tree, tensors, seen, 0)) {
+                return;
+            }
+            Audit audit;
+            if (verdict) {
+                audit.verdict_present = true;
+                std::tie(audit.checked, audit.passed, audit.code, audit.message) = *verdict;
+            }
+            py::gil_scoped_release release;
+            writer.submitEncoded(key, trace, audit, tree, tensors, producers);
+        })
+        .def("stats", [](const RemoteWriteQueue& writer) {
             const auto stats = withoutGil([&] { return writer.stats(); });
             return py::make_tuple(stats.pending, stats.bytes, stats.success, stats.error, stats.skipped,
                                   stats.inflight_failure);
         });
-    m.def("lock_emb_eviction_capture", [](bool wait) {
-        auto& gate = EvictionWriter::graphGate();
+    m.def("lock_emb_write_capture", [](bool wait) {
+        auto& gate = RemoteWriteQueue::graphGate();
         if (!wait) {
             return gate.try_lock();
         }
         withoutGil([&] { gate.lock(); });
         return true;
     });
-    m.def("unlock_emb_eviction_capture", [] { EvictionWriter::graphGate().unlock(); });
+    m.def("unlock_emb_write_capture", [] { RemoteWriteQueue::graphGate().unlock(); });
     py::class_<Shard::Eviction>(m, "EmbLocalEviction")
         .def("unpack", [](const Shard::Eviction& victim) {
             py::tuple leaves(victim.tensors.size());
@@ -247,7 +267,7 @@ void registerEmbLocalCache(pybind11::module& m) {
     py::class_<Shard>(m, "EmbLocalCacheShard")
         .def(py::init<int64_t, int64_t, int>())
         .def(py::init<int64_t, int64_t, int, bool, bool, int64_t>())
-        .def(py::init<int64_t, int64_t, int, bool, bool, int64_t, std::shared_ptr<EvictionWriter>>(),
+        .def(py::init<int64_t, int64_t, int, bool, bool, int64_t, std::shared_ptr<RemoteWriteQueue>>(),
              py::keep_alive<1, 8>())
         .def("claim",
              [](Shard& shard, const std::string& key) {

@@ -567,7 +567,7 @@ class RegisteredTransportPool:
         self._native_read = None
         self._native_client_capsule = None
         self._native_write_event_type = None
-        self._eviction_writer = None
+        self._remote_write_queue = None
         self._native_io_quarantined_bytes = 0
         self._native_io_quarantine_started = None
         self._native_observed_use = [(0, 0), (0, 0)]
@@ -617,22 +617,22 @@ class RegisteredTransportPool:
         with RegisteredObjectTransport._quarantine_lock:
             RegisteredObjectTransport._native_io_owners.append(self)
 
-    def enable_native_eviction_write(self, *limits):
+    def enable_native_write_queue(self, *limits):
         if self._native_client_capsule is None:
             return None
         from librtp_compute_ops import (
-            EmbEvictionWriter,
-            lock_emb_eviction_capture,
-            unlock_emb_eviction_capture,
+            EmbRemoteWriteQueue,
+            lock_emb_write_capture,
+            unlock_emb_write_capture,
         )
 
         cuda_graph_gate.register_native_capture_gate(
-            lock_emb_eviction_capture, unlock_emb_eviction_capture
+            lock_emb_write_capture, unlock_emb_write_capture
         )
-        self._eviction_writer = EmbEvictionWriter(
+        self._remote_write_queue = EmbRemoteWriteQueue(
             self._native_arena, self._arena, self._native_client_capsule, *limits
         )
-        return self._eviction_writer
+        return self._remote_write_queue
 
     def try_native_write(self, plan, ready_events, key, trace_id, deadline):
         invoke, capsule, root = self._native_write, self._native_client_capsule, self._arena
@@ -937,7 +937,7 @@ class RegisteredTransportPool:
     def quarantined(self):
         if self._native_arena is not None:
             io_quarantined_bytes = self._native_io_quarantined_bytes
-            if self._eviction_writer is not None:
+            if self._remote_write_queue is not None:
                 if self._native_arena.device_failed():
                     return True
                 io_quarantined_bytes = self._native_io_quarantine()[0]
@@ -1223,8 +1223,8 @@ class RegisteredTransportPool:
 
     def close(self):
         self.stop_acquiring()
-        if self._eviction_writer is not None:
-            self._eviction_writer.close()
+        if self._remote_write_queue is not None:
+            self._remote_write_queue.close()
         if self._native_arena is not None:
             self._native_arena.wait_drained()
         with self._condition:

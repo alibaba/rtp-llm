@@ -249,8 +249,8 @@ class RtpKvMetaObjectLiveIntegrationTest(TestCase):
             write_policy="on_evict",
         )
         self.addCleanup(remote.close)
-        writer = remote.enable_native_eviction_write()
-        self.assertEqual(remote.eviction_write_backend, "native_staging")
+        writer = remote.enable_native_write_queue()
+        self.assertEqual(remote.write_queue_backend, "native_staging")
         cache = NativeMMEmbeddingCache(16, 16, native_eviction_writer=writer)
         self.addCleanup(cache.close)
         exact_key = self._keys(1)[0]
@@ -290,6 +290,59 @@ class RtpKvMetaObjectLiveIntegrationTest(TestCase):
         self.assertIsNone(position)
         self.assertEqual(restored["greennet"]["message"], "approved")
         self.assertTrue(torch.equal(restored["result"][0].view(torch.int16), bits))
+
+    def test_native_encode_write_preserves_producer_stream_and_aliases(self):
+        if not torch.cuda.is_available() or os.environ.get("MM_EMB_NATIVE") != "1":
+            self.skipTest("requires CUDA and MM_EMB_NATIVE=1")
+        from rtp_llm.multimodal import mm_remote_embedding_cache
+        from rtp_llm.multimodal.greennet_hook import GreenNetVerdict
+        from rtp_llm.multimodal.mm_embedding_cache import MMEmbeddingCacheEntry
+        from rtp_llm.multimodal.mm_remote_embedding_cache import MMRemoteEmbeddingCache
+
+        remote = MMRemoteEmbeddingCache(
+            self.client,
+            max_object_bytes=64 * 1024,
+            max_inflight_bytes=256 * 1024,
+            write_timeout_ms=2000,
+        )
+        self.addCleanup(remote.close)
+        writer = remote.enable_native_write_queue()
+        self.assertEqual(remote.write_queue_backend, "native_staging")
+        key = self._keys(1)[0]
+        entry = MMEmbeddingCacheEntry()
+        entry.set_greennet_verdict(GreenNetVerdict(True, 0, "approved"))
+        source = torch.zeros(32, dtype=torch.bfloat16, device="cuda")
+        expected = torch.arange(32, dtype=torch.int16, device="cuda").view(torch.bfloat16)
+        producer = torch.cuda.Stream()
+        producer.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(producer):
+            torch.cuda._sleep(10_000_000)
+            source.copy_(expected)
+        with patch.object(mm_remote_embedding_cache, "plan_object") as plan, patch.object(
+            remote._write_executor, "submit"
+        ) as submit:
+            remote.submit_result(
+                key,
+                (source, [source]),
+                trace_id=self.prefix,
+                producer_streams=(producer,),
+                entry=entry,
+            )
+            with torch.cuda.stream(producer):
+                source.zero_()
+            deadline = time.monotonic() + 3
+            while writer.stats()[2] < 1 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(writer.stats()[2], 1, writer.stats())
+            plan.assert_not_called()
+            submit.assert_not_called()
+        with _new_client() as reader:
+            restored = reader.load_object(key, cuda_device=source.device)
+        self.assertIsNotNone(restored)
+        result, aliases = restored["result"]
+        self.assertIs(result, aliases[0])
+        self.assertEqual(restored["greennet"]["message"], "approved")
+        self.assertTrue(torch.equal(result.view(torch.int16), expected.view(torch.int16)))
 
     def test_cross_process_variable_payload_roundtrip(self):
         specs = _specs()

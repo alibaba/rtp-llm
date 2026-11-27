@@ -14,7 +14,7 @@ namespace rtp_llm::emb_local {
 
 // Uses the existing SDK client and MR. The transport stops and joins this
 // queue before closing the SDK or releasing its capsule and allocator.
-class EvictionWriter {
+class RemoteWriteQueue {
 public:
     struct Stats {
         int64_t pending          = 0;
@@ -25,16 +25,16 @@ public:
         int64_t inflight_failure = 0;
     };
 
-    EvictionWriter(std::shared_ptr<EmbRegisteredArena> arena,
-                   at::Tensor                          root,
-                   KvcmObjectNativeApiV2               api,
-                   int64_t                             max_object_bytes,
-                   int64_t                             max_pending,
-                   int64_t                             max_bytes,
-                   int64_t                             timeout_ms,
-                   int                                 workers,
-                   bool                                request_scoped);
-    ~EvictionWriter();
+    RemoteWriteQueue(std::shared_ptr<EmbRegisteredArena> arena,
+                     at::Tensor                          root,
+                     KvcmObjectNativeApiV2               api,
+                     int64_t                             max_object_bytes,
+                     int64_t                             max_pending,
+                     int64_t                             max_bytes,
+                     int64_t                             timeout_ms,
+                     int                                 workers,
+                     bool                                request_scoped);
+    ~RemoteWriteQueue();
 
     // Called after the exact local generation has left the index, with a
     // reference to its block until copy-out completes. No SDK I/O here.
@@ -42,6 +42,12 @@ public:
                  const Audit&                           audit,
                  const std::shared_ptr<const Resident>& record,
                  std::optional<c10::cuda::CUDAStream>   stream);
+    void  submitEncoded(const std::string&                                             key,
+                        const std::string&                                             trace,
+                        const Audit&                                                   audit,
+                        const Tree&                                                    tree,
+                        const std::vector<at::Tensor>&                                 inputs,
+                        const std::vector<std::pair<c10::DeviceIndex, c10::StreamId>>& producers);
     bool  reserveExternal(int64_t bytes, bool check_task_limit);
     void  releaseExternal(int64_t bytes);
     Stats stats() const;
@@ -51,14 +57,24 @@ public:
 
 private:
     struct Job {
-        std::string                 key;
-        WriteClock::time_point      deadline;
-        int64_t                     bytes          = 0;
-        int64_t                     charge         = 0;
-        int64_t                     payload_offset = 0;
-        std::string                 prefix;
-        std::vector<EmbTensorInput> tensors;
+        std::string                                        key;
+        std::string                                        trace;
+        WriteClock::time_point                             deadline;
+        int64_t                                            bytes          = 0;
+        int64_t                                            charge         = 0;
+        int64_t                                            payload_offset = 0;
+        std::string                                        prefix;
+        std::vector<EmbTensorInput>                        tensors;
+        std::vector<std::unique_ptr<EmbCudaSnapshotReady>> events;
     };
+
+    template<typename Snapshot>
+    void enqueue(const std::string&        key,
+                 const std::string&        trace,
+                 const Audit&              audit,
+                 const Tree&               tree,
+                 const std::vector<Slice>& slices,
+                 Snapshot                  snapshot);
 
     void           run();
     EmbWriteResult writeStaged(Job& job, const std::string& trace);

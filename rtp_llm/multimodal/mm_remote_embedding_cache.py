@@ -138,7 +138,7 @@ class MMRemoteEmbeddingCache:
             )
         self._client = client
         self._gdr_pool = gdr_pool
-        self._native_eviction_writer = None
+        self._native_writer = None
         self._native_staging_client = None
         self._write_transfer_workers = write_transfer_workers
         self._direct_payload = getattr(gdr_pool, "direct_payload", False) is True
@@ -279,9 +279,11 @@ class MMRemoteEmbeddingCache:
                     arena_bytes is None
                     and block_bytes is None
                     and USE_NATIVE_EMB
-                    and _native_local_cache_enabled()
-                    and getattr(vit_config, "mm_remote_cache_write_policy", "on_encode")
-                    == "on_evict"
+                    and (
+                        getattr(vit_config, "mm_remote_cache_write_policy", "on_encode")
+                        == "on_encode"
+                        or _native_local_cache_enabled()
+                    )
                 ):
                     # Use the native allocator with the same slot geometry
                     # when no explicit arena size or granularity is configured.
@@ -938,15 +940,15 @@ class MMRemoteEmbeddingCache:
         with self._stats_lock:
             self._stats[name] += 1
 
-    def enable_native_eviction_write(self):
-        """Bind the eviction writer at engine startup, before any admission."""
+    def enable_native_write_queue(self):
+        """Bind the native writer at engine startup, before any admission."""
         if not USE_NATIVE_EMB:
             return None
-        if self._native_eviction_writer is not None:
-            return self._native_eviction_writer
+        if self._native_writer is not None:
+            return self._native_writer
         import librtp_compute_ops
 
-        if not hasattr(librtp_compute_ops, "EmbEvictionWriter"):
+        if not hasattr(librtp_compute_ops, "EmbRemoteWriteQueue"):
             return None
         limits = (
             self.max_object_bytes,
@@ -957,15 +959,15 @@ class MMRemoteEmbeddingCache:
             self.request_scoped_inspection,
         )
         if self._gdr_pool is not None:
-            self._native_eviction_writer = self._gdr_pool.enable_native_eviction_write(
+            self._native_writer = self._gdr_pool.enable_native_write_queue(
                 *limits
             )
         else:
             from librtp_compute_ops import (
-                EmbEvictionWriter,
-                lock_emb_eviction_capture,
+                EmbRemoteWriteQueue,
+                lock_emb_write_capture,
                 supports_registered_emb_write,
-                unlock_emb_eviction_capture,
+                unlock_emb_write_capture,
             )
 
             try:
@@ -975,21 +977,21 @@ class MMRemoteEmbeddingCache:
                     capsule = export() if callable(export) else None
                     if capsule is not None and supports_registered_emb_write(capsule):
                         cuda_graph_gate.register_native_capture_gate(
-                            lock_emb_eviction_capture, unlock_emb_eviction_capture
+                            lock_emb_write_capture, unlock_emb_write_capture
                         )
-                        self._native_eviction_writer = EmbEvictionWriter(
+                        self._native_writer = EmbRemoteWriteQueue(
                             None, None, capsule, *limits
                         )
                         self._native_staging_client = client
                 finally:
                     self._release_client(client)
             except Exception as error:
-                _log_error("MM_EMB_NATIVE_EVICTION_UNAVAILABLE", error, operation="init")
-        return self._native_eviction_writer
+                _log_error("MM_EMB_NATIVE_WRITE_QUEUE_UNAVAILABLE", error, operation="init")
+        return self._native_writer
 
     @property
-    def eviction_write_backend(self):
-        if self._native_eviction_writer is None:
+    def write_queue_backend(self):
+        if self._native_writer is None:
             return "python"
         return "native_gdr" if self._gdr_pool is not None else "native_staging"
 
@@ -1000,8 +1002,8 @@ class MMRemoteEmbeddingCache:
                 or self._tasks >= self.max_pending
                 or self._bytes + nbytes > self.max_inflight_bytes
                 or (
-                    self._native_eviction_writer is not None
-                    and not self._native_eviction_writer.reserve_external(nbytes, True)
+                    self._native_writer is not None
+                    and not self._native_writer.reserve_external(nbytes, True)
                 )
             ):
                 self._count("admission_skip")
@@ -1012,8 +1014,8 @@ class MMRemoteEmbeddingCache:
 
     def _release(self, nbytes):
         with self._lock:
-            if self._native_eviction_writer is not None:
-                self._native_eviction_writer.release_external(nbytes)
+            if self._native_writer is not None:
+                self._native_writer.release_external(nbytes)
             self._tasks -= 1
             self._bytes -= nbytes
 
@@ -1128,11 +1130,16 @@ class MMRemoteEmbeddingCache:
         write_source="encoder_result",
     ):
         """Admit an encoder result and enqueue its owned snapshot for upload."""
-        if key is None or self._skip_quarantined("write"):
+        writer = (
+            self._native_writer
+            if self.write_policy == "on_encode" and devices is None
+            else None
+        )
+        if key is None or (writer is None and self._skip_quarantined("write")):
             return
         started = time.perf_counter()
         try:
-            inspection = None
+            verdict, checked = None, False
             if entry is not None:
                 if write_source == "local_eviction":
                     inspection_state = entry.greennet_snapshot_if_valid()
@@ -1141,16 +1148,37 @@ class MMRemoteEmbeddingCache:
                 else:
                     inspection_state = entry.greennet_snapshot()
                 verdict, checked = inspection_state
-                if verdict is not None:
-                    if not verdict.passed:
-                        return
-                    inspection = dict(
-                        checked=checked,
-                        passed=verdict.passed,
-                        code=verdict.code,
-                        message=verdict.message,
-                        request_scoped=self.request_scoped_inspection,
+            if verdict is not None and not verdict.passed:
+                return
+            if writer is not None:
+                try:
+                    with cuda_graph_gate.operation():
+                        writer.submit_encoded(
+                            key,
+                            trace_id or "",
+                            result,
+                            (checked, verdict.passed, verdict.code, verdict.message)
+                            if verdict is not None
+                            else None,
+                            [
+                                (stream.device.index, stream.stream_id)
+                                for stream in producer_streams
+                            ],
+                        )
+                except Exception as error:
+                    _log_error(
+                        "MM_EMB_NATIVE_WRITE_QUEUE_ERROR", error, operation="submit"
                     )
+                return
+            inspection = None
+            if verdict is not None:
+                inspection = dict(
+                    checked=checked,
+                    passed=verdict.passed,
+                    code=verdict.code,
+                    message=verdict.message,
+                    request_scoped=self.request_scoped_inspection,
+                )
             with self._observe_stage("write", "plan_submit"):
                 plan = plan_object(
                     {
@@ -1750,8 +1778,8 @@ class MMRemoteEmbeddingCache:
                 if self._closed:
                     skip_reason = "executor_closed"
                 elif self._bytes + reservation > self.max_inflight_bytes or (
-                    self._native_eviction_writer is not None
-                    and not self._native_eviction_writer.reserve_external(reservation, False)
+                    self._native_writer is not None
+                    and not self._native_writer.reserve_external(reservation, False)
                 ):
                     skip_reason = "payload_budget"
                 else:
@@ -1922,16 +1950,16 @@ class MMRemoteEmbeddingCache:
             stats = dict(
                 self._stats, inflight_bytes=self._bytes, inflight_tasks=self._tasks
             )
-            if self._native_eviction_writer is not None:
+            if self._native_writer is not None:
                 tasks, nbytes, success, errors, skipped, ambiguous = (
-                    self._native_eviction_writer.stats()
+                    self._native_writer.stats()
                 )
                 stats["inflight_tasks"] += tasks
                 stats["inflight_bytes"] += nbytes
-                stats["native_eviction_write_success"] = success
-                stats["native_eviction_write_error"] = errors
-                stats["native_eviction_write_skip"] = skipped
-                stats["native_eviction_write_ambiguous"] = ambiguous
+                stats["native_write_success"] = success
+                stats["native_write_error"] = errors
+                stats["native_write_skip"] = skipped
+                stats["native_write_ambiguous"] = ambiguous
             return stats
 
     def close(self):
@@ -1941,18 +1969,18 @@ class MMRemoteEmbeddingCache:
             self._closed = True
         if self._gdr_pool is not None:
             self._gdr_pool.stop_acquiring()
-        if self._native_eviction_writer is not None:
-            self._native_eviction_writer.close()
+        if self._native_writer is not None:
+            self._native_writer.close()
         self._write_executor.shutdown(wait=True, cancel_futures=True)
         self._transfer_executor.shutdown(wait=True, cancel_futures=True)
         with self._client_lock:
             client, self._client = self._client, None
             if (
                 self._native_staging_client is not None
-                and self._native_eviction_writer.stats()[-1]
+                and self._native_writer.stats()[-1]
             ):
                 self._native_staging_quarantine.append(
-                    (self._native_staging_client, self._native_eviction_writer)
+                    (self._native_staging_client, self._native_writer)
                 )
                 client = None
             if client is not None:

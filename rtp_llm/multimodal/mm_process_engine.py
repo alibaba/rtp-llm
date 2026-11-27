@@ -405,12 +405,17 @@ class MMProcessEngine:
         remote = self._remote_embedding_cache
         evict_to_remote = remote is not None and remote.write_policy == "on_evict"
         native_eviction_writer = None
-        if evict_to_remote and emb_host_feature_enabled("MM_EMB_NATIVE_LOCAL_CACHE"):
-            native_eviction_writer = remote.enable_native_eviction_write()
-        if evict_to_remote:
+        if remote is not None and (
+            not evict_to_remote or emb_host_feature_enabled("MM_EMB_NATIVE_LOCAL_CACHE")
+        ):
+            writer = remote.enable_native_write_queue()
+            if evict_to_remote:
+                native_eviction_writer = writer
+        if remote is not None:
             logging.info(
-                "MM_EMB_EVICTION_WRITE_BACKEND %s",
-                remote.eviction_write_backend,
+                "MM_EMB_WRITE_QUEUE backend=%s policy=%s",
+                remote.write_queue_backend,
+                remote.write_policy,
             )
         eviction_callback = (
             remote.submit_evicted
