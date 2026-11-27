@@ -1,7 +1,9 @@
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <condition_variable>
 #include <csignal>
 #include <cstdlib>
 #include <cstring>
@@ -10,6 +12,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <future>
 #include <iterator>
 #include <limits>
 #include <memory>
@@ -23,6 +26,8 @@
 #include <unistd.h>
 #include "torch/all.h"
 #include "gtest/gtest.h"
+#include "autil/EnvUtil.h"
+#include "rtp_llm/cpp/utils/test/DecodePublicationTestStartup.h"
 #include "rtp_llm/cpp/distribute/CpuTpBroadcaster.h"
 
 extern char** environ;
@@ -59,6 +64,7 @@ extern char** environ;
 #if USING_CUDA
 #include "rtp_llm/models_py/bindings/cuda/kernels/mtp_target_verify_prepare.h"
 #include <ATen/cuda/CUDAContext.h>
+#include <ATen/cuda/CUDAGraph.h>
 #endif
 
 namespace rtp_llm {
@@ -67,6 +73,61 @@ void registerExecCtxOps(pybind11::module& m);
 
 using namespace std;
 namespace spec = speculative;
+
+#if USING_CUDA
+namespace {
+
+// Hold only a CUDA stream's completion event, without an SM spin kernel. The
+// watchdog bounds a regression that calls synchronize() instead of query().
+class ScopedPublicationWriterGate {
+public:
+    explicit ScopedPublicationWriterGate(cuda_graph::GraphStream stream): state_(std::make_shared<State>()) {
+        auto*      callback_state = new std::shared_ptr<State>(state_);
+        const auto status         = cudaLaunchHostFunc(
+            stream.stream(),
+            [](void* opaque) {
+                std::unique_ptr<std::shared_ptr<State>> owner(static_cast<std::shared_ptr<State>*>(opaque));
+                auto&                                   state = **owner;
+                std::unique_lock<std::mutex>            lock(state.mutex);
+                if (!state.cv.wait_for(lock, std::chrono::seconds(5), [&] { return state.released; })) {
+                    state.timed_out.store(true);
+                }
+            },
+            callback_state);
+        if (status != cudaSuccess) {
+            delete callback_state;
+            throw std::runtime_error(cudaGetErrorString(status));
+        }
+    }
+
+    ~ScopedPublicationWriterGate() {
+        release();
+    }
+
+    void release() {
+        {
+            std::lock_guard<std::mutex> lock(state_->mutex);
+            state_->released = true;
+        }
+        state_->cv.notify_all();
+    }
+
+    bool timedOut() const {
+        return state_->timed_out.load();
+    }
+
+private:
+    struct State {
+        std::mutex              mutex;
+        std::condition_variable cv;
+        bool                    released = false;
+        std::atomic<bool>       timed_out{false};
+    };
+    std::shared_ptr<State> state_;
+};
+
+}  // namespace
+#endif
 
 TEST(MtpExecutorPolicyTest, SpeculativePrefillCPRequiresPrefillRole) {
     PrefillCPConfig prefill_cp_config;
@@ -4142,6 +4203,154 @@ TEST_F(MtpExecutorTest, testDraftPrefillReadsHiddenFromActualCommitModel) {
     EXPECT_TRUE(draft_model->mtp_hidden_requests.empty());
     EXPECT_EQ(draft_model->forwardCount(), 0);
 }
+
+#if USING_CUDA
+TEST_F(MtpExecutorTest, DecodeEndpointCapturePinsPendingPagesWithoutWaitingForFinalWriter) {
+    autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    test::withDecodePublicationStartup([&] {
+        MtpExecutorTestConfig config;
+        config.role_type = RoleType::DECODE;
+        config.sp_type = SP_TYPE_DSPARK;
+        config.dspark_mask_token_id = 0;
+        config.gen_num_per_cycle = 3;
+        auto components = createMtpExecutorComponents(config);
+        auto& executor = *components.executor;
+        auto context = components.resource_context;
+        context.cache_manager = executor.cache_manager_;
+        context.reuse_cache = true;
+        context.ignore_request_cache_switches = true;
+        context.enable_remote_cache = true;
+        enum class Outcome { COMPLETE, CANCELLED, GRAPH_REPLAY, LAUNCH_FAILURE };
+        for (const auto outcome : {Outcome::COMPLETE, Outcome::CANCELLED, Outcome::GRAPH_REPLAY, Outcome::LAUNCH_FAILURE}) {
+            SCOPED_TRACE(static_cast<int>(outcome));
+            auto stream = createContextStream(components.model_config, components.runtime_config, context, {0, 1, 2}, 16);
+            ASSERT_TRUE(stream->initKVBlock().ok());
+            const auto& tags = executor.cache_manager_->cacheConfig().groupTags();
+            ASSERT_EQ(executor.cache_manager_->decodePublicationUnit(), 2u);
+            ASSERT_TRUE(stream->mayCrossDecodePublicationBoundary(2, executor.propose_step_ + 1));
+            size_t slots = 0;
+            for (const auto& tag : tags) slots = std::max(slots, stream->kvCache().blocks(0, tag).size());
+            ASSERT_GE(slots, 2u);
+            GptModelInputs target, draft;
+            target.kv_cache_group_tags = tags;
+            target.prefix_lengths = draft.prefix_lengths = torch::tensor({2}, torch::kInt32);
+            target.input_lengths = draft.input_lengths = torch::tensor({2}, torch::kInt32);
+            target.kv_cache_block_id = torch::full(
+                {static_cast<int64_t>(tags.size()), 1, static_cast<int64_t>(slots)}, NULL_BLOCK_IDX, torch::kInt32);
+            for (size_t group = 0; group < tags.size(); ++group) {
+                const auto& blocks = stream->kvCache().blocks(0, tags[group]);
+                for (size_t slot = 0; slot < blocks.size(); ++slot)
+                    target.kv_cache_block_id.data_ptr<int32_t>()[group * slots + slot] = blocks[slot];
+            }
+            draft.last_hidden_states = torch::zeros({1, 1}, torch::kFloat32);
+            spec::SpeculativeSamplerOutput sampled;
+            sampled.accept_len_cpu = torch::tensor({2}, torch::kInt32);
+            sampled.transfer_done_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
+            sampled.transfer_done_event->record(cuda_graph::graphGetCurrentStream());
+            sampled.transfer_done_event->synchronize(); // Accept metadata is ready before the final-writer marker.
+            const auto options = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+            sampled.accept_len = sampled.accept_len_cpu.to(options);
+            sampled.accept_tokens = torch::tensor({1, 2}, options).reshape({1, 2});
+            // Use a distinct producer stream so the launch-failure branch can
+            // enter the real async dispatch while the writer remains pending.
+            const auto producer = outcome == Outcome::COMPLETE || outcome == Outcome::CANCELLED ?
+                cuda_graph::graphGetCurrentStream() : cuda_graph::toGraphStream(executor.collect_metrics_stream_);
+            const auto final_writer = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
+            torch::Tensor graph_write;
+            std::unique_ptr<at::cuda::CUDAGraph> graph;
+            if (outcome == Outcome::GRAPH_REPLAY) {
+                graph_write = torch::empty({1}, options);
+                cuda_graph::GraphStreamGuard guard(producer);
+                graph = std::make_unique<at::cuda::CUDAGraph>();
+                graph_write.fill_(0);
+                ASSERT_EQ(cudaStreamSynchronize(producer.stream()), cudaSuccess);
+                cuda_graph::graphCaptureBegin(*graph, cuda_graph::graphPoolHandle());
+                graph_write.fill_(17);
+                graph->capture_end();
+            }
+            ScopedPublicationWriterGate gate(producer);
+            if (graph) {
+                cuda_graph::GraphStreamGuard guard(producer);
+                graph->replay();
+            }
+            final_writer->record(producer);
+            // This invokes the real production capture entry. The pre-optimization
+            // first-capture sync drains the gated stream and trips its watchdog.
+            auto publication = executor.retainDecodePublicationPages(StreamGroups({stream}), target, draft, sampled);
+            ASSERT_TRUE(publication);
+            ASSERT_EQ(publication->candidates.size(), 1u);
+            EXPECT_FALSE(gate.timedOut()) << "capture waited for the final writer instead of pinning pending pages";
+            EXPECT_FALSE(final_writer->query());
+            EXPECT_FALSE(stream->kvCache().decode_endpoint);
+            EXPECT_FALSE(stream->latestDecodePublicationEndpoint());
+            ASSERT_EQ(publication->candidates.front().second.size(), 1u);
+            auto pending = publication->candidates.front().second.front();
+            ASSERT_TRUE(pending);
+            EXPECT_EQ(pending->end, 4u);
+            ASSERT_FALSE(pending->pages.empty());
+            for (const auto& [tag, holds] : pending->pages) for (const auto& hold : holds) {
+                ASSERT_TRUE(hold);
+                ASSERT_TRUE(hold->pool);
+                EXPECT_TRUE(hold->pin);
+                EXPECT_TRUE(hold->pool->isAllocated(hold->block));
+            }
+            if (outcome == Outcome::LAUNCH_FAILURE) {
+                executor.spec_bookkeeping_runner_.launch([] { throw std::runtime_error("injected bookkeeping failure"); });
+                try {
+                    (void)executor.dispatchDecodeAsync(StreamGroups({stream}), sampled, {}, {}, {}, MergedOutput{},
+                                                      {}, {}, nullptr, final_writer, {}, std::move(publication));
+                    ADD_FAILURE() << "AsyncRunner did not propagate its previous task failure";
+                } catch (const std::runtime_error& error) {
+                    EXPECT_STREQ(error.what(), "injected bookkeeping failure");
+                }
+                EXPECT_FALSE(stream->hasPendingAsyncBookkeeping());
+                EXPECT_FALSE(stream->latestDecodePublicationEndpoint());
+                EXPECT_FALSE(final_writer->query());
+                for (const auto& [tag, holds] : pending->pages) {
+                    for (const auto& hold : holds) {
+                        EXPECT_TRUE(hold->pool->isFrozen(hold->block)) << tag;
+                    }
+                }
+                gate.release();
+                final_writer->synchronize();
+                continue;
+            }
+            if (outcome == Outcome::CANCELLED) {
+                stream->reportError(ErrorCode::CANCELLED, std::string("cancelled after pin"));
+            }
+            if (graph) {
+                std::promise<void> entered;
+                auto started = entered.get_future();
+                auto completion = std::async(std::launch::async, [&] {
+                    cudaSetDevice(producer.device_index());
+                    entered.set_value();
+                    publication->complete(*final_writer);
+                });
+                EXPECT_EQ(started.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+                EXPECT_EQ(completion.wait_for(std::chrono::milliseconds(25)), std::future_status::timeout);
+                gate.release();
+                EXPECT_NO_THROW(completion.get());
+            } else {
+                gate.release();
+                publication->complete(*final_writer);
+            }
+            EXPECT_TRUE(publication->writer_resolved);
+            EXPECT_FALSE(stream->latestDecodePublicationEndpoint());
+            EXPECT_FALSE(stream->kvCache().decode_endpoint);
+            const auto& provisional = stream->kvCache().decode_provisional_endpoints;
+            if (outcome == Outcome::CANCELLED) {
+                EXPECT_TRUE(provisional.empty());
+            } else {
+                ASSERT_EQ(provisional.size(), 1u);
+                EXPECT_EQ(provisional.front(), pending);
+            }
+            if (graph) {
+                EXPECT_EQ(graph_write.item<int>(), 17);
+            }
+        }
+    });
+}
+#endif
 
 TEST_F(MtpExecutorTest, testMultiBatchDecode) {
     runMultiBatchDecode(false);

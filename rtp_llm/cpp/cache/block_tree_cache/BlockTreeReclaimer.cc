@@ -185,20 +185,58 @@ void BlockTreeReclaimer::freezeTargetBlocksWithTraceIDAndStillIOWorkerID(const T
         pending.erase(std::unique(pending.begin(), pending.end()), pending.end());
         RTP_LLM_CHECK(pending.back() < ranks);
     }
+    freezeBlocks(task);
+    frozen_.insert(registered_.extract(it));
+}
+
+bool BlockTreeReclaimer::freezeWriteSources(const TransferCompletionKey& trace,
+                                           std::vector<TransferTargetBlock> sources) noexcept {
+    if (trace.trace_id.empty() || sources.empty()) {
+        return false;
+    }
+    try {
+        Task task;
+        task.recovery = Recovery::HOLD_WRITE_SOURCES;
+        task.targets = std::move(sources);
+        task.backend = "kvcm_write";
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (registered_.count(trace.trace_id)) {
+            return false;
+        }
+        const auto [entry, inserted] = frozen_.try_emplace(trace.trace_id, std::move(task));
+        if (!inserted) {
+            return false;
+        }
+        try {
+            freezeBlocks(entry->second);
+        } catch (...) {
+            // freezeBlocks prepares all bookkeeping before taking any
+            // references. The caller still holds its pins if this fails.
+            frozen_.erase(entry);
+            return false;
+        }
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+void BlockTreeReclaimer::freezeBlocks(Task& task) {
     std::map<IBlockPool*, std::set<BlockIdxType>> groups;
     for (const auto& target : task.targets) {
         RTP_LLM_CHECK(target.pool != nullptr);
         groups[target.pool.get()].insert(target.block);
     }
-    std::vector<std::function<void()>> release;
-    for (const auto& [pool, blocks] : groups)
-        release.push_back(pool->prepareFrozenReferenceRelease({blocks.begin(), blocks.end()}));
-    task.release = std::move(release);
+    if (task.recovery == Recovery::WORKER_QUERY) {
+        std::vector<std::function<void()>> release;
+        for (const auto& [pool, blocks] : groups)
+            release.push_back(pool->prepareFrozenReferenceRelease({blocks.begin(), blocks.end()}));
+        task.release = std::move(release);
+    }
     task.frozen_at = Clock::now();
     for (const auto& [pool, blocks] : groups)
         for (const auto block : blocks)
             pool->freezeBlock(block);
-    frozen_.insert(registered_.extract(it));
 }
 
 bool BlockTreeReclaimer::markWorkerSafe(const TransferCompletionKey& trace, size_t worker) {
@@ -206,7 +244,7 @@ bool BlockTreeReclaimer::markWorkerSafe(const TransferCompletionKey& trace, size
     {
         std::lock_guard<std::mutex> lock(mutex_);
         const auto it = frozen_.find(trace.trace_id);
-        if (it == frozen_.end())
+        if (it == frozen_.end() || it->second.recovery != Recovery::WORKER_QUERY)
             return false;
         auto& pending = it->second.pending;
         const auto pos = std::lower_bound(pending.begin(), pending.end(), worker);
@@ -225,10 +263,11 @@ bool BlockTreeReclaimer::forceRelease(const TransferCompletionKey& trace) {
     TaskMap::node_type task;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        task = frozen_.extract(trace.trace_id);
+        const auto it = frozen_.find(trace.trace_id);
+        if (it == frozen_.end() || it->second.recovery != Recovery::WORKER_QUERY)
+            return false;
+        task = frozen_.extract(it);
     }
-    if (!task)
-        return false;
     unregisterTask(std::move(task), true);
     return true;
 }
@@ -259,7 +298,7 @@ void BlockTreeReclaimer::releaseExpired() {
         std::lock_guard<std::mutex> lock(mutex_);
         const auto cutoff = Clock::now() - std::chrono::milliseconds(force_release_timeout_ms_);
         for (const auto& [id, task] : frozen_)
-            if (task.frozen_at <= cutoff)
+            if (task.recovery == Recovery::WORKER_QUERY && task.frozen_at <= cutoff)
                 expired.push_back(task.forget.front().trace);
     }
     for (const auto& trace : expired) {
@@ -276,6 +315,8 @@ void BlockTreeReclaimer::queryFrozen() {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         for (const auto& [id, task] : frozen_) {
+            if (task.recovery != Recovery::WORKER_QUERY)
+                continue;
             const auto& route = task.forget.front();
             if (!route.participants.remote)
                 local.push_back(route.trace);

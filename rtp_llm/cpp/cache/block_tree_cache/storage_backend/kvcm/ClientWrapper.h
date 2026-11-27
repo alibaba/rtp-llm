@@ -48,6 +48,9 @@ public:
                               kv_cache_manager::RoleType           role,
                               const std::vector<PoolRegistration>& registrations,
                               const std::vector<std::string>&      tags);
+    // A second metadata namespace can share the native PACE payload clients
+    // when both instances advertise the same storage configuration.
+    virtual std::shared_ptr<ClientWrapper> createMetadataOnlyClient(KVCMConfigPtr config);
     virtual void shutdown() noexcept;
     // for meta client
     virtual std::pair<bool, kv_cache_manager::Locations> match(const std::string&                      unique_id,
@@ -86,11 +89,20 @@ public:
                                                                                 const std::vector<std::string>& medium,
                                                                                 int32_t p2p_host_count);
 
+    enum class FinishWriteResult { NOT_SENT, ACKNOWLEDGED, UNKNOWN };
     virtual bool finishWrite(const std::string&                 unique_id,
                              const std::string&                 trace_id,
                              const std::string&                 write_session_id,
                              const kv_cache_manager::BlockMask& block_mask,
                              const kv_cache_manager::Locations& locations);
+    virtual FinishWriteResult finishWriteWithResult(const std::string& unique_id,
+                                                    const std::string& trace_id,
+                                                    const std::string& write_session_id,
+                                                    const kv_cache_manager::BlockMask& block_mask,
+                                                    const kv_cache_manager::Locations& locations);
+    // Reuse the existing shutdown-aware wait for bounded metadata cleanup.
+    bool waitForRetry(int sleep_time_ms);
+
     virtual bool
     abortWrite(const std::string& unique_id, const std::string& trace_id, const std::string& write_session_id);
 
@@ -157,8 +169,8 @@ private:
     std::shared_ptr<kv_cache_manager::MetaClient> getMetaClient(const std::string& unique_id);
     bool checkError(kv_cache_manager::ClientErrorCode ec, const std::shared_ptr<kv_cache_manager::MetaClient>& client);
     void reinitWorkerLoop() noexcept;
-    bool waitForRetry(int sleep_time_ms);
 
+    std::optional<std::string> expected_storage_configs_;
     kv_cache_manager::InitParams init_params_;
     // InitParams carries a pointer, so retain the descriptor for every later
     // meta-client re-registration performed by this wrapper.

@@ -59,6 +59,31 @@ TEST(BlockTreeReclaimerTest, OnlyTheLastPendingWorkerReleasesTheTrace) {
     pool->decTreeRef(block, BlockTreeRefType::CACHE);
 }
 
+TEST(BlockTreeReclaimerTest, UnknownWriteSourcesSurviveReadRecoveryAndForcedExpiry) {
+    BlockTreeReclaimer owner;
+    auto pool = makePool("write-source");
+    const auto block = heldBlock(pool);
+    const TransferCompletionKey read_trace{"test-read"};
+    const TransferCompletionKey write_trace{"test-write"};
+    ASSERT_TRUE(owner.registerTask(read_trace, {false, 1}, {{pool, block}}));
+    owner.freezeTargetBlocksWithTraceIDAndStillIOWorkerID(read_trace, {0});
+    ASSERT_TRUE(owner.freezeWriteSources(write_trace, {{pool, block}, {pool, block}}));
+    EXPECT_FALSE(owner.freezeWriteSources(write_trace, {{pool, block}}));
+    pool->decTreeRef(block, BlockTreeRefType::CACHE);
+    EXPECT_EQ(pool->treeRefCount(block), 2u);
+
+    EXPECT_TRUE(owner.markWorkerSafe(read_trace, 0));
+    EXPECT_FALSE(owner.markWorkerSafe(write_trace, 0));
+    EXPECT_FALSE(owner.forceRelease(write_trace));
+    owner.frozen_.at(write_trace.trace_id).frozen_at -= std::chrono::minutes(2);
+    owner.releaseExpired();
+    owner.queryFrozen();
+    ASSERT_TRUE(owner.frozen_.count(write_trace.trace_id));
+    EXPECT_TRUE(pool->isFrozen(block));
+    EXPECT_EQ(pool->treeRefCount(block), 1u);
+    EXPECT_EQ(owner.forget_queue_.size(), 1u);
+}
+
 TEST(BlockTreeReclaimerTest, ReleasesEachOwnedTargetOnceBeforeSubmittingForget) {
     BlockTreeReclaimer owner;
     auto primary = makePool("primary");

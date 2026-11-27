@@ -243,12 +243,13 @@ bool IBlockPool::validBlock(BlockIdxType block) const {
     return validBlockNoLock(block);
 }
 
+bool IBlockPool::isAllocatedNoLock(BlockIdxType block) const {
+    return validBlockNoLock(block) && allocated_[block] != 0;
+}
+
 bool IBlockPool::isAllocated(BlockIdxType block) const {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!validBlockNoLock(block)) {
-        return false;
-    }
-    return allocated_[block] != 0;
+    return isAllocatedNoLock(block);
 }
 
 size_t IBlockPool::totalBlocksNum() const {

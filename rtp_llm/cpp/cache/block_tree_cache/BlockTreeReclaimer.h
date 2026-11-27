@@ -56,6 +56,10 @@ public:
                                                          const std::vector<size_t>& pending_workers) noexcept;
     bool markWorkerSafe(const TransferCompletionKey& trace, size_t worker);
 
+    // Current KVCM has no write-source quiescence query. Keep these FROZEN
+    // references out of worker polling and forced expiry.
+    bool freezeWriteSources(const TransferCompletionKey& trace, std::vector<TransferTargetBlock> sources) noexcept;
+
     static bool executeFunction(BlockTreeReclaimer* owner, int rank, const FunctionRequestPB& request,
                                 FunctionResponsePB& response, std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::time_point::max());
 
@@ -87,7 +91,9 @@ private:
         Participants participants;
         bool forced{false};
     };
+    enum class Recovery { WORKER_QUERY, HOLD_WRITE_SOURCES };
     struct Task {
+        Recovery recovery{Recovery::WORKER_QUERY};
         std::list<Route> forget;
         std::vector<TransferTargetBlock> targets;
         std::string backend;
@@ -97,6 +103,7 @@ private:
     };
     using TaskMap = std::map<std::string, Task>;
 
+    static void freezeBlocks(Task& task);
     void unregisterTask(TaskMap::node_type task, bool forced);
     bool forceRelease(const TransferCompletionKey& trace);
     void queryFrozen();

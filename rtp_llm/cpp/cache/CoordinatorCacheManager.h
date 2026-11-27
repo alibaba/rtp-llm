@@ -28,6 +28,7 @@ namespace rtp_llm {
 class CPSlotMapper;
 class LoadAsyncContext;
 class BlockTreeCache;
+class StorageCompletionAdmission;
 using BlockTreeCachePtr = std::shared_ptr<BlockTreeCache>;
 class SingleTypeCacheManager;
 using SingleTypeCacheManagerPtr = std::shared_ptr<SingleTypeCacheManager>;
@@ -108,6 +109,7 @@ public:
                                           const std::vector<std::string>& group_tags,
                                           const torch::Tensor&            valid_token_lengths = torch::Tensor());
 
+
     virtual const std::vector<DeviceBlockPoolPtr>& groupBlockPools() const {
         return group_block_pools_;
     }
@@ -117,6 +119,9 @@ public:
     }
 
     void attachBlockTreeCache(BlockTreeCachePtr block_tree_cache);
+    bool captureCompletedDecode(const BatchKVCacheResource&, size_t, bool = true) const;
+    std::shared_ptr<StorageCompletionAdmission> reserveDecodePublication(size_t bytes) const;
+    bool canStartDecodePublication(const BatchKVCacheResource& resource) const;
 
     BlockTreeCachePtr blockTreeCache() const {
         return block_tree_cache_;

@@ -790,6 +790,8 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
     RecordedTokenTiming* recorded_timings =
         merge_outputs.recorded_batch ? merge_outputs.recorded_batch->sliceTimings(batch_idx_in, cur_batch_size) :
                                        nullptr;
+    const bool decode_writer_complete = merge_outputs.decode_publication_writer_complete && !stream->isContextStream()
+                                        && !stream->hasNumBeams() && stream->maxBatchSize() == 1;
     StreamUpdateInfo update_info{
         has_beam_search ? batch_new_all_token_ids : new_tokens,
         1,
@@ -811,7 +813,8 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
         token_logprobs,
         top_logprob_token_ids,
         top_logprobs,
-        stream->generateConfig()->return_logprobs ? stream->logprobsContentOffset(new_tokens, 1) : 0};
+        stream->generateConfig()->return_logprobs ? stream->logprobsContentOffset(new_tokens, 1) : 0,
+        decode_writer_complete};
     stream->update(update_info, true, recorded_timings, cur_batch_size);
 }
 

@@ -131,6 +131,7 @@ cc_test_wrapper(
         "//conditions:default": ["@platforms//:incompatible"],
     }),
     deps = kvcm_backend_test_deps + [
+        "//rtp_llm/cpp/utils/test:decode_publication_test_startup",
         "//rtp_llm/cpp/cache/block_tree_cache/test:bounded_thread_test_utils",
         "//rtp_llm/cpp/cache:cache",
         "//rtp_llm/cpp/cache:device_block_pool_config_helper",
@@ -241,5 +242,44 @@ cc_test_wrapper(
         "//rtp_llm/cpp/cache:coordinator_cache_manager",
         "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:subscriber",
         "//rtp_llm/cpp/testing:device_test_utils",
+    ],
+)
+
+cc_test_wrapper(
+    name = "native_dtop_completion_test",
+    testonly = True,
+    size = "large",
+    timeout = "long",
+    exec_properties = {"gpu": "L20_CU13"},
+    srcs = [
+        "NativeDtopCompletionTest.cc",
+        "KVCMMockTestBase.h",
+        "MockKVCMClient.h",
+    ],
+    copts = ["-fno-access-control"] + copts(),
+    tags = [
+        "L20_CU13",
+        "exclusive-if-local",
+    ],
+    target_compatible_with = select({
+        "//:using_remote_kv_cache": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = [
+        "//rtp_llm/cpp/utils/test:decode_publication_test_startup",
+        "//rtp_llm/cpp/cache:cache",
+        "//rtp_llm/cpp/cache/test:block_pool_test_helper",
+        "//rtp_llm/cpp/cache/block_tree_cache/test:bounded_thread_test_utils",
+    ] + kvcm_backend_test_deps,
+)
+
+cc_test_wrapper(
+    name = "sdk_buffer_safety_test",
+    srcs = ["SdkBufferSafetyTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:sdk_buffer_safety",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
     ],
 )

@@ -336,7 +336,7 @@ cc_library(
         ":cache_config",
         ":cache_group_type",
         "//rtp_llm/cpp/utils:core_utils",
-    ],
+    ] + torch_deps(),
 )
 
 cc_library(
@@ -424,6 +424,7 @@ cc_library(
         ":cache_core",
         ":cp_slot_mapper",
         ":prefill_cache_hit_metrics_reporter",
+        "//rtp_llm/cpp/cache/block_tree_cache:storage_completion_admission",
         "//rtp_llm/cpp/cache/block_tree_cache",
         "//rtp_llm/cpp/model_rpc:broadcast_manager",
         "//rtp_llm/cpp/utils:time_util",

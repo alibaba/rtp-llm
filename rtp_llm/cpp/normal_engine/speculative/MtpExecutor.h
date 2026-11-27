@@ -191,6 +191,17 @@ protected:
                                                       std::shared_ptr<torch::Event>                rejection_event);
     void         finishEarlyMtpTargetLogprobsFinalize(std::shared_ptr<MtpTargetLogprobs>& early_finalize_state,
                                                       MtpTargetLogprobs&                  target_logprobs);
+
+    struct DecodePublicationRound {
+        std::vector<std::pair<GenerateStreamPtr, std::vector<std::shared_ptr<const DecodeEndpoint>>>> candidates;
+        bool writer_resolved{true};
+        bool release_snapshot{false};
+
+        ~DecodePublicationRound();
+        void freezeUnknownWriter() noexcept;
+        void complete(const torch::Event& writer_done);
+    };
+
     absl::Status dispatchDecodeOutput(const StreamGroups&                          stream_groups,
                                       const std::list<GenerateStreamPtr>&          streams,
                                       const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
@@ -204,7 +215,9 @@ protected:
                                       std::shared_ptr<torch::Event>                rejection_event,
                                       std::shared_ptr<torch::Event>                draft_event,
                                       std::shared_ptr<RecordedBatch>               recorded_batch,
-                                      MtpTargetLogprobs                            target_logprobs);
+                                      MtpTargetLogprobs                            target_logprobs,
+                                      std::shared_ptr<DecodePublicationRound>       publication = {},
+                                      const MtpWriterHostRows&                     writer_host_rows = {});
 
     torch::Tensor gatherPreviousTargetTokens(const StreamGroups& stream_groups,
                                              int64_t             batch_size,
@@ -272,7 +285,9 @@ protected:
                                      const std::vector<GenerateStream::LinearReplayRound>& replay_rounds,
                                      std::shared_ptr<torch::Event>                rejection_event,
                                      std::shared_ptr<torch::Event>                draft_event,
-                                     MtpTargetLogprobs                            target_logprobs);
+                                     MtpTargetLogprobs                            target_logprobs,
+                                     std::shared_ptr<DecodePublicationRound>       publication = {},
+                                      const MtpWriterHostRows&                     writer_host_rows = {});
 
     // Synchronous dispatch also publishes the same per-stream device state as
     // the async path, using the host seqLength after specUpdate as truth.
@@ -323,6 +338,7 @@ private:
     // unlike MTP there is no autoregressive draft loop or hidden-state chain.
     bool is_block_draft_ = false;
     bool is_dflash_      = false;
+    bool dsv41_release_publication_supported_ = false;
     // Dedicated PREFILL workers only seed DSpARK's draft feature KV and must
     // not construct proposal wrappers or require proposal-only Markov weights.
     bool          dspark_prefill_commit_only_ = false;
@@ -344,6 +360,9 @@ private:
     TensorHolder buffer_holder_;
 
     bool     warm_up_;
+    std::shared_ptr<DecodePublicationRound>
+    retainDecodePublicationPages(const StreamGroups& streams, const GptModelInputs& target,
+                                 const GptModelInputs& draft, const speculative::SpeculativeSamplerOutput& sampled);
     RoleType role_type_;
     // True when any KV-cache group is CacheGroupType::LINEAR (RWKV / Mamba /
     // hybrid linear+full). Per-step state advances every token, so the page

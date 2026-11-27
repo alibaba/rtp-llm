@@ -3964,4 +3964,162 @@ TEST_F(KVCacheManagerTest, CompletionEvidenceUsesUniquePipelineAndTensorParticip
 
 }  // namespace test
 
+namespace test {
+
+namespace {
+// Real page pools and retainDecodeEndpoint, without a model writer or SDK.
+// These cases prove pin/owner behavior, not STATE contents or kernel ranges.
+struct EndpointHoldFixture {
+    std::shared_ptr<KVCacheManager> manager;
+    std::vector<std::string> tags;
+    std::unordered_map<std::string, DeviceBlockPoolPtr> pools;
+    std::vector<std::pair<DeviceBlockPoolPtr, BlockIdxType>> allocated;
+    torch::Tensor ids;
+
+    EndpointHoldFixture() {
+        CacheConfig config;
+        config.dtype = DataType::TYPE_FP16;
+        config.layer_num = 3;
+        config.seq_size_per_block = 4;
+        auto full = defaultCacheGroupPolicy(CacheGroupType::FULL);
+        auto tail = defaultCacheGroupPolicy(CacheGroupType::SWA);
+        tail.enable_prefix_reuse = true;
+        tail.sliding_window_size = 4;
+        config.fromGroupedSpecs({makeMhaSpec("full", 4, config.dtype, 1, 1),
+                                 makeMhaSpec("state", 4, config.dtype, 1, 1),
+                                 makeMhaSpec("swa", 4, config.dtype, 1, 1)},
+                                {{0}, {1}, {2}}, {CacheGroupType::FULL, CacheGroupType::SWA, CacheGroupType::SWA},
+                                {"full", "state", "swa"}, {full, tail, tail});
+        config.finalizeBlockNums(16, RuntimeConfig{});
+        ParallelismConfig parallel;
+        parallel.role_type = RoleType::DECODE;
+        parallel.prefill_cp_config.prefill_cp_size = 1;
+        manager = std::make_shared<KVCacheManager>(config, false, nullptr, KVCacheConfig{}, parallel);
+        if (!manager->init()) throw std::runtime_error("endpoint test manager init failed");
+        tags = manager->cacheConfig().groupTags();
+        ids = torch::full({static_cast<int64_t>(tags.size()), 1, 4}, NULL_BLOCK_IDX, torch::kInt32);
+        const auto& group_pools = manager->coordinator_manager_->groupBlockPools();
+        for (size_t group = 0; group < tags.size(); ++group) {
+            const auto pool = group_pools.at(group);
+            pools.emplace(tags[group], pool);
+            for (size_t slot = 0; slot < 4; ++slot) {
+                const auto block = pool->malloc();
+                if (!block) throw std::runtime_error("endpoint test page allocation failed");
+                pool->incRef(*block, DeviceBlockRefType::REQUEST);
+                allocated.emplace_back(pool, *block);
+                ids.data_ptr<int32_t>()[group * 4 + slot] = *block;
+            }
+        }
+    }
+    ~EndpointHoldFixture() {
+        for (const auto& value : allocated) value.first->decRef(value.second, DeviceBlockRefType::REQUEST);
+    }
+    BlockIdxType block(const std::string& tag, size_t slot) const {
+        const auto group = std::find(tags.begin(), tags.end(), tag) - tags.begin();
+        return ids.data_ptr<int32_t>()[group * 4 + slot];
+    }
+    uint32_t refs(const std::string& tag, size_t slot) const { return pools.at(tag)->refCount(block(tag, slot)); }
+    std::vector<uint32_t> refs() const {
+        std::vector<uint32_t> result;
+        for (const auto& value : allocated) result.push_back(value.first->refCount(value.second));
+        return result;
+    }
+    std::shared_ptr<const DecodeEndpoint> capture(size_t end, const std::shared_ptr<const DecodeEndpoint>& previous = {},
+                                                 bool defer_writer_wait = false) {
+        return manager->retainDecodeEndpoint(ids, tags, 0, end, previous, defer_writer_wait);
+    }
+};
+} // namespace
+
+
+TEST_F(KVCacheManagerTest, FailedNativeFreezeKeepsEveryCandidateOwnerWithoutReplacingAnEarlierFrame) {
+    EndpointHoldFixture f;
+    const auto baseline = f.refs();
+    auto first = f.capture(4);
+    auto second = f.capture(8, first);
+    ASSERT_TRUE(first);
+    ASSERT_TRUE(second);
+    BatchKVCacheResource resource;
+    resource.resetBatchSize(1);
+    resource.initGroups(f.manager->cacheConfig().topologyPtr());
+    resource.decode_endpoint = first;
+    const auto coordinator = f.manager->coordinator_manager_;
+    block_tree_cache_detail::ScopeRollback restore([&] { f.manager->coordinator_manager_ = coordinator; });
+    f.manager->coordinator_manager_.reset(); // No native custody can be established.
+    EXPECT_FALSE(f.manager->freezeUnknownDecodeWriter(resource, {second}));
+    std::weak_ptr<const DecodeEndpoint> old_frame = first, new_frame = second;
+    resource.decode_endpoint.reset();
+    first.reset();
+    second.reset();
+    EXPECT_FALSE(old_frame.expired());
+    EXPECT_FALSE(new_frame.expired());
+    EXPECT_EQ(f.refs("state", 0), 2u);
+    EXPECT_EQ(f.refs("state", 1), 2u);
+    // Only this fixture's absence of a real writer permits clearing UNKNOWN.
+    for (const auto& weak : {old_frame, new_frame}) {
+        auto held = weak.lock();
+        ASSERT_TRUE(held);
+        std::atomic_store_explicit(&held->unknown_freeze_failure_owner,
+                                   std::shared_ptr<const DecodeEndpoint>{}, std::memory_order_relaxed);
+    }
+    EXPECT_TRUE(old_frame.expired());
+    EXPECT_TRUE(new_frame.expired());
+    EXPECT_EQ(f.refs(), baseline);
+}
+
+TEST_F(KVCacheManagerTest, DsparkReleaseSelectsCompleteResidentStateIndependently) {
+    EndpointHoldFixture f;
+    const auto baseline = f.refs();
+    BatchKVCacheResource resource;
+    resource.resetBatchSize(1);
+    resource.initGroups(f.manager->cacheConfig().topologyPtr());
+    for (const auto& tag : f.tags) {
+        BlockIndicesType blocks;
+        for (size_t slot = 0; slot < 4; ++slot) blocks.push_back(f.block(tag, slot));
+        resource.setBatchBlocks(0, tag, std::move(blocks));
+    }
+    resource.dspark_decode_publication_unit = 4;
+    resource.dspark_release_computed_end = 13;
+    auto latest = f.manager->retainReleasedDSparkPages(resource, f.ids, f.ids, false);
+    ASSERT_TRUE(latest);
+    EXPECT_EQ(latest->end, 12u);
+    EXPECT_EQ(latest->blocks.at("swa"), (BlockIndicesType{NULL_BLOCK_IDX, NULL_BLOCK_IDX, f.block("swa", 2)}));
+    latest.reset();
+    auto all = f.manager->retainReleasedDSparkPages(resource, f.ids, f.ids, true);
+    ASSERT_TRUE(all);
+    EXPECT_EQ(all->blocks.at("state"), (BlockIndicesType{f.block("state", 0), f.block("state", 1), f.block("state", 2)}));
+    EXPECT_EQ(f.refs("full", 0), 2u);
+    EXPECT_EQ(f.refs("state", 2), 2u);
+    EXPECT_EQ(f.refs("state", 3), 1u); // The incomplete fourth endpoint is never retained.
+    all.reset();
+
+    // A late backfill can have a perfectly matching numeric page ID. Reject H=8
+    // as a whole, and reject H=12 on an independent missing SWA slot.
+    resource.dspark_state_backfills["state"][1] = 8;
+    resource.mutableBlockIds(0, "swa").setAt(2, NULL_BLOCK_IDX);
+    auto earlier = f.manager->retainReleasedDSparkPages(resource, f.ids, f.ids, true);
+    ASSERT_TRUE(earlier);
+    EXPECT_EQ(earlier->end, 12u); // FULL publication is independent from missing state.
+    for (const auto& tag : {"state", "swa"}) {
+        EXPECT_EQ(earlier->blocks.at(tag), (BlockIndicesType{f.block(tag, 0), NULL_BLOCK_IDX, NULL_BLOCK_IDX}));
+        EXPECT_EQ(f.refs(tag, 0), 2u);
+        EXPECT_EQ(f.refs(tag, 1), 1u);
+    }
+    earlier.reset();
+    auto full_only = f.manager->retainReleasedDSparkPages(resource, f.ids, f.ids, false);
+    ASSERT_TRUE(full_only);
+    EXPECT_EQ(full_only->blocks.at("state"), (BlockIndicesType(3, NULL_BLOCK_IDX)));
+    full_only.reset();
+    EXPECT_EQ(f.refs(), baseline);
+
+    resource.dspark_state_backfills.clear();
+    resource.mutableBlockIds(0, "swa").setAt(2, f.block("swa", 2));
+    std::shared_ptr<StorageCompletionAdmission> admission;
+    EXPECT_FALSE(f.manager->retainReleasedDSparkPages(resource, f.ids, f.ids, false, &admission));
+    EXPECT_FALSE(admission);
+    EXPECT_EQ(f.refs(), baseline);
+}
+
+}  // namespace test
+
 }  // namespace rtp_llm

@@ -549,6 +549,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("kvcm_model_sdk_config", &KVCacheConfig::kvcm_model_sdk_config)
         .def_readwrite("kvcm_model_user_data", &KVCacheConfig::kvcm_model_user_data)
         .def_readwrite("kvcm_model_extra_info", &KVCacheConfig::kvcm_model_extra_info)
+        .def_readwrite("kvcm_model_checkpoint_path", &KVCacheConfig::kvcm_model_checkpoint_path)
+        .def_readwrite("kvcm_read_backend_type", &KVCacheConfig::kvcm_read_backend_type)
+        .def_readwrite("kvcm_min_replica_count", &KVCacheConfig::kvcm_min_replica_count)
         .def_readwrite("kvcm_instance_id_salt", &KVCacheConfig::kvcm_instance_id_salt)
         .def_readwrite("kvcm_asyncwrapper_thread_num", &KVCacheConfig::kvcm_asyncwrapper_thread_num)
         .def_readwrite("kvcm_asyncwrapper_queue_size", &KVCacheConfig::kvcm_asyncwrapper_queue_size)
@@ -589,7 +592,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      25,
+                                      26,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -671,9 +674,22 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       // the per-pool block weights at the tail so indices 0-78
                                       // stay identical to main's v23.
                                       self.enable_linear_cache_reclaim,
-                                      self.kv_cache_pool_block_weights);
+                                      self.kv_cache_pool_block_weights,
+                                      self.kvcm_model_checkpoint_path,
+                                      self.kvcm_read_backend_type,
+                                      self.kvcm_min_replica_count);
             },
             [](py::tuple t) {
+                std::string checkpoint_path;
+                int32_t read_backend_type = 0;
+                int32_t min_replica_count = 0;
+                if (t.size() == 84 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 26) {
+                    checkpoint_path = t[81].cast<std::string>();
+                    read_backend_type = t[82].cast<int32_t>();
+                    min_replica_count = t[83].cast<int32_t>();
+                    t = t[py::slice(0, 81, 1)].cast<py::tuple>();
+                    t[1] = py::int_(25);
+                }
                 // Pickle version ladder after merging main #1643 (dsv41 btc):
                 // v9  = ours enable_linear_cache_reclaim (size 71);
                 // v10 = ours reclaim + pool weights (size 72) or reclaim +
@@ -762,6 +778,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 }
 
                 KVCacheConfig c;
+                c.kvcm_model_checkpoint_path = std::move(checkpoint_path);
+                c.kvcm_read_backend_type = read_backend_type;
+                c.kvcm_min_replica_count = min_replica_count;
                 // The compact layout starts at version 21. Version 22 drops the abort ratios.
                 const bool   compact_state       = version >= 21;
                 const size_t retired_abort_slots = version == 21 ? 2 : 0;

@@ -12,6 +12,7 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferStageTimer.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeReclaimer.h"
 
 namespace rtp_llm::storage_backend_detail {
 
@@ -54,7 +55,24 @@ struct StorageTaskState {
     std::vector<Pin>  pins;
     std::once_flag    finish_once;
     std::atomic<bool> completion_started{false};
-    void              finish(bool freeze_pins = false) {
+    bool handoffFrozenWriteSources(BlockTreeReclaimer* reclaimer) const noexcept {
+        if (!reclaimer || !request.decode_write || pins.empty()) {
+            return false;
+        }
+        try {
+            std::vector<TransferTargetBlock> sources;
+            sources.reserve(pins.size());
+            for (const auto& pin : pins) {
+                sources.push_back({pin.pool, pin.block});
+            }
+            return reclaimer->freezeWriteSources(
+                TransferCompletionKey{"kvcm-write-source-" + std::to_string(trace_id)}, std::move(sources));
+        } catch (...) {
+            return false;
+        }
+    }
+
+    void finish(bool freeze_pins = false) {
         std::call_once(finish_once, [this, freeze_pins] {
             if (freeze_pins) {
                 for (const Pin& pin : pins)
@@ -65,6 +83,10 @@ struct StorageTaskState {
                     pin.release();
             }
             pins.clear();
+            if (const auto& decode = request.decode_write) {
+                decode->source_endpoints.clear();
+                decode->admission.reset();
+            }
         });
     }
 
@@ -334,25 +356,44 @@ StorageBackend::prepare(StorageRequest request, bool for_write, uint64_t trace_i
     auto timer =
         stageValue(for_write ? "write_prepare" : "read_prepare", request, for_write ? "write" : "read", trace_id);
     validateRequest(request, /*allow_null_blocks=*/false);
+    if (auto& decode = request.decode_write; decode) {
+        RTP_LLM_CHECK(for_write);
+        // The task releases its endpoint and budget references independently
+        // of any copies made before submission.
+        if (!decode.unique())
+            decode = std::make_shared<DecodeWriteContext>(*decode);
+    }
     auto state      = std::make_shared<storage_backend_detail::StorageTaskState>();
     state->request  = std::move(request);
     state->trace_id = trace_id;
     RTP_LLM_CHECK(initialized_);
 
     std::unordered_set<BlockKey, BlockKeyHash> pinned;
-    for (const auto& key_handles : state->request.handles) {
-        for (const StorageBlockHandle& handle : key_handles) {
-            const auto&    pool = devicePool(handle.tag);
-            const BlockKey key{pool.get(), handle.block};
-            if (pinned.insert(key).second) {
-                state->pins.push_back({pool, handle.block, {}});
-            }
+    const auto add_pin = [&](const DeviceBlockPoolPtr& pool, BlockIdxType block) {
+        RTP_LLM_CHECK(!isNullBlockIdx(block));
+        if (pinned.insert({pool.get(), block}).second)
+            state->pins.push_back({pool, block, {}});
+    };
+    for (const auto& handles : state->request.handles)
+        for (const auto& handle : handles)
+            add_pin(devicePool(handle.tag), handle.block);
+    const auto& decode = state->request.decode_write;
+    if (decode) {
+        for (const auto& [tag, rows] : decode->peer_blocks) {
+            const auto& pool = devicePool(tag);
+            for (const auto& blocks : rows)
+                for (const auto block : blocks)
+                    add_pin(pool, block);
         }
     }
     // Finish all metadata allocation before acquiring any pin. A partial pin
     // acquisition then releases only the closures that were successfully prepared.
     for (auto& pin : state->pins)
         pin.release = pin.pool->pinForStorageIo(pin.block);
+    if (decode) {
+        // Every selected page, including projected peers, has a task pin now.
+        decode->source_endpoints.clear();
+    }
     timer.finish(true);
     return state;
 }
@@ -589,16 +630,52 @@ StorageWriteTask StorageBackend::prepareWrite(StorageRequest request) {
 }
 
 bool StorageBackend::write(StorageWriteTask task) {
-    RTP_LLM_CHECK(initialized_);
     RTP_LLM_CHECK(task.state_ != nullptr);
-    auto       state = std::move(task.state_);
-    auto       total = stageTimer("write_total", state->request, "write", state->trace_id, AsyncProfileKind::Lifecycle);
-    auto       queue = stageTimer("write_queue_wait", state->request, "write", state->trace_id, AsyncProfileKind::Wait);
+    const auto deadline = task.state_->request.transfer_task->deadline();
+    return dispatchWrite(std::move(task), {}, deadline);
+}
+
+bool StorageBackend::enqueuePlannedWrite(std::function<StorageWriteTask()> prepare,
+                                       StorageBackendExecutor::Clock::time_point deadline) {
+    if (!remoteCacheEnabled()) return false;
+    return dispatchWrite({}, std::move(prepare), deadline);
+}
+
+bool StorageBackend::dispatchWrite(StorageWriteTask task, std::function<StorageWriteTask()> prepare,
+                                  StorageBackendExecutor::Clock::time_point deadline) {
+    RTP_LLM_CHECK(initialized_);
+    auto state = std::move(task.state_);
+    const StorageRequest planning_request;
+    const auto& timer_request = state ? state->request : planning_request;
+    const auto trace_id = state ? state->trace_id : storage_backend_detail::nextTraceId();
+    auto total = stageTimer("write_total", timer_request, "write", trace_id, AsyncProfileKind::Lifecycle);
+    auto queue = stageTimer("write_queue_wait", timer_request, "write", trace_id, AsyncProfileKind::Wait);
     const bool skip_remote = !remoteCacheEnabled();
     const bool admitted    = dispatch(
-        [this, skip_remote, state, total, queue](Lifecycle outcome, Task finished) {
+        [this, skip_remote, state, total, queue, prepare = std::move(prepare), deadline, trace_id](Lifecycle outcome, Task finished) mutable {
             const bool accepting = outcome == Lifecycle::ACCEPTING;
-            queue.finish(accepting && !state->request.transfer_task->expired());
+            if (prepare) {
+                const bool can_plan = accepting && !skip_remote && remoteCacheEnabled()
+                                      && StorageBackendExecutor::Clock::now() < deadline;
+                queue.finish(can_plan);
+                if (can_plan) {
+                    try { state = prepare().state_; }
+                    catch (const std::exception& error) {
+                        RTP_LLM_LOG_WARNING("Decode publication planning failed: %s", error.what());
+                    } catch (...) {
+                        RTP_LLM_LOG_WARNING("Decode publication planning failed: unknown exception");
+                    }
+                }
+                if (!state) {
+                    total.finish(false);
+                    finished();
+                    return;
+                }
+                prepare = {};
+                state->trace_id = trace_id;
+            } else {
+                queue.finish(accepting && !state->request.transfer_task->expired());
+            }
             const bool disabled = accepting && (skip_remote || !remoteCacheEnabled());
             if (disabled)
                 onRemoteCacheSkipped("write");
@@ -613,6 +690,14 @@ bool StorageBackend::write(StorageWriteTask task) {
                 storage_backend_detail::invokeCallback(this, [&] {
                     bool success     = false;
                     bool freeze_pins = false;
+                    // Safety must settle even if metrics or diagnostics throw.
+                    block_tree_cache_detail::ScopeRollback release([&] {
+                        const bool handed_off = freeze_pins && state->request.decode_write
+                                                && state->handoffFrozenWriteSources(writeSourceReclaimer());
+                        // Fall back to the native permanent freeze if reclaimer
+                        // bookkeeping could not take custody of every source.
+                        state->finish(freeze_pins && !handed_off);
+                    });
                     if (run) {
                         try {
                             std::optional<TransferStageTimer> complete;
@@ -645,7 +730,7 @@ bool StorageBackend::write(StorageWriteTask task) {
                         io.finish(success);
                     }
                     auto settle = stageValue("write_settle", state->request, "write", state->trace_id);
-                    state->finish(freeze_pins);
+                    release.run();
                     settle.finish(true);
                     total.finish(success);
                 });
@@ -678,6 +763,14 @@ bool StorageBackend::write(StorageWriteTask task) {
                             required.insert({pool.get(), handle.block});
                         }
                     }
+                    if (const auto& decode = state->request.decode_write) {
+                        for (const auto& [tag, rows] : decode->peer_blocks) {
+                            const auto& pool = devicePool(tag);
+                            for (const auto key_index : key_indices)
+                                for (const auto block : rows.at(key_index))
+                                    required.insert({pool.get(), block});
+                        }
+                    }
                     auto& pins = state->pins;
                     pins.erase(std::remove_if(pins.begin(),
                                               pins.end(),
@@ -702,7 +795,7 @@ bool StorageBackend::write(StorageWriteTask task) {
         },
         BlockTreeTaskClass::BACKGROUND,
         skip_remote,
-        state->request.transfer_task->deadline());
+        deadline);
     return admitted && !skip_remote;
 }
 

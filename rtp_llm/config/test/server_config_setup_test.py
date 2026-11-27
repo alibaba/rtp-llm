@@ -21,6 +21,7 @@ from rtp_llm.config.quant_config import (
 )
 from rtp_llm.config.server_config_setup import (
     configure_kv_cache_event_host_ip_port,
+    fetch_model_files_to_local,
     set_parallelism_config,
     setup_and_configure_server,
 )
@@ -318,6 +319,93 @@ class KVCacheEventHostIdentityTest(TestCase):
         configs.parallelism_config.tp_rank = 1
         configure_kv_cache_event_host_ip_port(configs)
         self.assertEqual(configs.kv_cache_config.kv_cache_event_host_ip_port, "")
+
+
+class CheckpointPathEnvironmentTest(TestCase):
+    def test_identity_uses_resolved_effective_path_except_nas(self):
+        cases = [
+            ("direct", "oss://models/target", "/mnt/fuse/a", "oss://models/target", "/mnt/fuse/a"),
+            ("pre_resolved", "/mnt/fuse/a", "/mnt/fuse/a", "/mnt/fuse/a", "/mnt/fuse/a"),
+            ("other_source", "oss://models/other", "/mnt/fuse/b", "oss://models/other", "/mnt/fuse/b"),
+            ("local", "/models/local", "/models/local", "/models/local", "/models/local"),
+            ("config_over_env", "oss://models/target", "/mnt/fuse/a", "oss://models/stale", "/mnt/fuse/a"),
+            ("no_env", "/models/cli", "/models/cli", None, "/models/cli"),
+            ("empty_env", "/models/cli", "/models/cli", "", "/models/cli"),
+            ("nas", "nas://host/models", "/mnt/ft_123_nfs_x/models", "nas://host/models", ""),
+            ("nas_no_env", "nas://host/models", "/mnt/ft_123_nfs_x/models", None, ""),
+            ("empty", "", "", "unchanged", ""),
+        ]
+        for name, source, resolved, original, expected in cases:
+            with self.subTest(name=name):
+                configs = PyEnvConfigs()
+                configs.model_args.ckpt_path = source
+                env = dict(_PINNED_DEVICES)
+                if original is not None:
+                    env["CHECKPOINT_PATH"] = original
+                with patch.dict("os.environ", env, clear=True), patch(
+                    "rtp_llm.config.server_config_setup.fetch_remote_file_to_local",
+                    return_value=resolved,
+                ) as fetch:
+                    original_environment = dict(os.environ)
+                    fetch_model_files_to_local(configs)
+                    self.assertEqual(configs.model_args.ckpt_path, resolved)
+                    self.assertEqual(dict(os.environ), original_environment)
+                    self.assertEqual(
+                        configs.kv_cache_config.kvcm_model_checkpoint_path, expected
+                    )
+                    if source:
+                        fetch.assert_called_once_with(source)
+                    else:
+                        fetch.assert_not_called()
+
+    def test_resolved_identity_survives_backend_config_pickle(self):
+        import pickle
+
+        configs = PyEnvConfigs()
+        configs.model_args.ckpt_path = "oss://models/target"
+        with patch.dict("os.environ", {**_PINNED_DEVICES, "CHECKPOINT_PATH": "oss://models/target"}, clear=True), patch(
+            "rtp_llm.config.server_config_setup.fetch_remote_file_to_local",
+            return_value="/mnt/fuse/a",
+        ) as fetch:
+            fetch_model_files_to_local(configs)
+            # The backend and its local ranks receive configuration through spawn.
+            config = configs.kv_cache_config
+            for _ in range(2):
+                config = pickle.loads(pickle.dumps(config))
+                self.assertEqual(config.kvcm_model_checkpoint_path, "/mnt/fuse/a")
+            self.assertEqual(os.environ["CHECKPOINT_PATH"], "oss://models/target")
+            fetch.assert_called_once_with("oss://models/target")
+
+    def test_repeated_setup_clears_identity_for_nas_and_empty_source(self):
+        for source in ("nas://host/models", ""):
+            with self.subTest(source=source):
+                configs = PyEnvConfigs()
+                configs.model_args.ckpt_path = "oss://models/target"
+                with patch.dict("os.environ", {**_PINNED_DEVICES, "CHECKPOINT_PATH": source}, clear=True), patch(
+                    "rtp_llm.config.server_config_setup.fetch_remote_file_to_local",
+                    return_value="/mnt/fuse/a",
+                ):
+                    fetch_model_files_to_local(configs)
+                    self.assertEqual(configs.kv_cache_config.kvcm_model_checkpoint_path, "/mnt/fuse/a")
+                    configs.model_args.ckpt_path = source
+                    fetch_model_files_to_local(configs)
+                    self.assertEqual(configs.kv_cache_config.kvcm_model_checkpoint_path, "")
+                    self.assertEqual(os.environ["CHECKPOINT_PATH"], source)
+
+    def test_failed_fetch_preserves_checkpoint_environment(self):
+        source = "oss://models/target"
+        configs = PyEnvConfigs()
+        configs.model_args.ckpt_path = source
+        with patch.dict("os.environ", {**_PINNED_DEVICES, "CHECKPOINT_PATH": source}, clear=True), patch(
+            "rtp_llm.config.server_config_setup.fetch_remote_file_to_local",
+            side_effect=RuntimeError("mount failed"),
+        ) as fetch:
+            with self.assertRaisesRegex(RuntimeError, "mount failed"):
+                fetch_model_files_to_local(configs)
+            self.assertEqual(os.environ["CHECKPOINT_PATH"], source)
+            self.assertEqual(configs.model_args.ckpt_path, source)
+            self.assertEqual(configs.kv_cache_config.kvcm_model_checkpoint_path, "")
+            fetch.assert_called_once_with(source)
 
 
 class SingleGpuBackendRankTest(TestCase):
@@ -716,8 +804,8 @@ class GenerateConfigTest(TestCase):
         config.block_tree_disk_evict_high_watermark_ratio = 0.83
 
         state = config.__getstate__()
-        self.assertEqual(len(state), 81)
-        self.assertEqual(state[:2], ("KVCacheConfig", 25))
+        self.assertEqual(len(state), 84)
+        self.assertEqual(state[:2], ("KVCacheConfig", 26))
 
         restored = pickle.loads(pickle.dumps(config))
         self.assertEqual(restored.disk_cache_staging_block_count, 8)
@@ -841,6 +929,9 @@ class GenerateConfigTest(TestCase):
         from rtp_llm.ops import KVCacheConfig
 
         expected_fields = {
+            "kvcm_model_checkpoint_path": "str",
+            "kvcm_read_backend_type": "int",
+            "kvcm_min_replica_count": "int",
             "enable_crc": "bool",
             "kv_cache_pool_block_weights": "str",
             "enable_linear_cache_reclaim": "bool",

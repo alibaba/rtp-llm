@@ -1,6 +1,7 @@
 #pragma once
 
 #include <unordered_map>
+#include <utility>
 #include <atomic>
 
 #include <condition_variable>
@@ -20,6 +21,7 @@
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackendExecutor.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageCompletionAdmission.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 
@@ -31,6 +33,7 @@ namespace rtp_llm {
 class BlockTreeReclaimer;
 
 class BatchKVCacheResource;
+struct DecodeEndpoint;
 class BlockTreeCacheMetricsReporter;
 enum class AsyncProfileKind;
 class TransferStageTimer;
@@ -108,6 +111,13 @@ struct StorageMatchResult {
     std::shared_ptr<StorageBackendMatchMeta> match_meta;
 };
 
+struct DecodeWriteContext {
+    // Physical source pages indexed by group and canonical key, for CP sharding.
+    std::unordered_map<std::string, std::vector<BlockIndicesType>> peer_blocks;
+    std::vector<std::shared_ptr<const DecodeEndpoint>>              source_endpoints;
+    std::shared_ptr<StorageCompletionAdmission>                     admission;
+};
+
 struct StorageRequest {
     std::shared_ptr<const CacheKeysType> keys;
     // handles[i] contains every group block associated with (*keys)[i].
@@ -117,6 +127,7 @@ struct StorageRequest {
     size_t                      local_matched_blocks_num{0};
     std::optional<int64_t>      request_id;
     std::optional<TransferTask> transfer_task;
+    std::shared_ptr<DecodeWriteContext> decode_write;
 
     bool empty() const {
         for (const auto& key_handles : handles) {
@@ -193,15 +204,32 @@ public:
     }
     void             match(StorageRequest request, MatchDone done);
     void             read(StorageRequest request, std::shared_ptr<StorageBackendMatchMeta> match_meta, Done done);
-    StorageWriteTask prepareWrite(StorageRequest request);
+    virtual StorageWriteTask prepareWrite(StorageRequest request);
     // Returns admission only, not the I/O result; never waits for completion.
     // Source pins live through payload completion and publication.
     bool write(StorageWriteTask task);
+    virtual bool captureCompletedDecode(const BatchKVCacheResource&, size_t, bool = true) {
+        return false;
+    }
+    // A rejected submission does not invoke prepare_source. After admission
+    // a canceled/expired job may discard it without calling it.
+    using DecodePublicationPrepare = std::function<std::shared_ptr<const BatchKVCacheResource>()>;
+    virtual bool enqueueCompletedDecode(const BatchKVCacheResource&, size_t, DecodePublicationPrepare) {
+        return false;
+    }
+    virtual std::shared_ptr<StorageCompletionAdmission> reserveDecodePublication(size_t) { return {}; }
+    virtual bool canStartDecodePublication(const BatchKVCacheResource&) const { return false; }
     // Must not be called from backend I/O or completion callbacks.
     void shutdown();
 
 protected:
+    virtual BlockTreeReclaimer* writeSourceReclaimer() const noexcept { return nullptr; }
+    std::chrono::milliseconds operationTimeout() const noexcept { return timeout_; }
+
     using Task = StorageBackendExecutor::Task;
+    // Plan and start the write in one existing storage-queue slot.
+    bool enqueuePlannedWrite(std::function<StorageWriteTask()> prepare,
+                             StorageBackendExecutor::Clock::time_point deadline);
     // The completion callable only checks results and updates local state; it
     // must not start blocking I/O on the RPC completion/settlement thread.
     using ReadCompletion = std::function<void(Task)>;
@@ -267,6 +295,8 @@ private:
                                       BlockTreeTaskClass                                       task_class,
                                       bool                                                     run_inline = false,
                                       std::optional<StorageBackendExecutor::Clock::time_point> io_deadline = std::nullopt);
+    bool dispatchWrite(StorageWriteTask task, std::function<StorageWriteTask()> prepare,
+                       StorageBackendExecutor::Clock::time_point deadline);
     void                     taskFinished();
     std::shared_ptr<const CacheTopology>           topology_;
     std::atomic<bool>                              remote_cache_enabled_{true};

@@ -183,6 +183,10 @@ public:
     const std::vector<GroupSetPtr>& groupSets() const {
         return tree_->groupSets();
     }
+    bool remoteCacheEnabled() const noexcept {
+        return storage_backend_ && storage_backend_->remoteCacheEnabled();
+    }
+
     std::shared_ptr<StorageBackend> storageBackend() const {
         return storage_backend_;
     }

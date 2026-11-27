@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/utils/test/DecodePublicationTestStartup.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test/KVCMMockTestBase.h"
 
 #include <algorithm>
@@ -979,6 +980,509 @@ TEST(KVCMLocalTest, PayloadReadTimeoutFreezesOnlyDestinationBlock) {
     EXPECT_EQ(environment.device_pool->refCount(environment.block_id), ref_count_before + 1);
     EXPECT_TRUE(environment.device_pool->isFrozen(environment.block_id));
     EXPECT_EQ(environment.device_pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
+}
+
+TEST(KVCMLocalTest, AutomaticIdentityUsesResolvedCheckpointWithoutChangingEnvironment) {
+    const auto instance = [](const std::string& source, const std::string& resolved) {
+        autil::EnvGuard checkpoint("CHECKPOINT_PATH", source);
+        auto environment = makeBackendEnvironment("checkpoint_identity");
+        auto client = std::make_shared<MockClientWrapper>();
+        std::string id;
+        EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Invoke(
+            [&](const auto& configs, auto, const auto&, const auto&) {
+                id = configs.at("")->instance_id();
+                return true;
+            }));
+        EXPECT_CALL(*client, shutdown()).Times(1);
+        KVCacheConfig config;
+        config.kvcm_model_checkpoint_path = resolved;
+        auto backend = makeBackend(environment, singleRankConfig(), client, nullptr, nullptr, false, config);
+        EXPECT_TRUE(initSingleRank(*backend.backend, environment));
+        EXPECT_FALSE(id.empty());
+        EXPECT_EQ(autil::EnvUtil::getEnv("CHECKPOINT_PATH", std::string("")), source);
+        backend.backend->shutdown();
+        return id;
+    };
+    // Equivalent to the old env-sync hash, while leaving the raw URI visible to other readers.
+    const auto local = instance("/mnt/fuse/a", "");
+    EXPECT_EQ(instance("oss://models/target", "/mnt/fuse/a"), local);
+    EXPECT_EQ(instance("oss://models/stale", "/mnt/fuse/a"), local);
+    EXPECT_NE(instance("oss://models/target", ""), local);
+    EXPECT_NE(instance("oss://models/target", "/mnt/fuse/b"), local);
+}
+
+TEST(KVCMLocalTest, DecodePublicationParsesSdkOptionsAndKeepsBackendContracts) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
+    struct Case { std::string json; int read_backend; bool gdr; bool valid; };
+    const std::vector<Case> cases{
+        {R"([{"type":"pace","sdk_log_file_path":"logs/pace client.log","sdk_log_level":"INFO"}])", 0, true, true},
+        {R"( [ { "sdk_log_level" : "INFO", "type" : "pace", "sdk_log_file_path" : "logs/pace client.log" } ] )", 3, true, true},
+        {R"([{"sdk_log_level":"INFO","type":"pace_ssd","sdk_log_file_path":"logs/pace client.log"}])", 9, true, true},
+        {R"([{"type":"pace_ssd"}])", 0, true, false},
+        {R"([{"type":"pace"}])", 9, true, false},
+        {R"([{"type":"pace_ssd"}])", 9, false, false},
+        {R"([{"type":"pace"}])", 0, false, true},
+        {R"([{"type":"pace"}])", 0, true, true},
+        {R"(null)", 0, true, false},
+        {R"([])", 0, true, false},
+        {R"({"type":"pace"})", 0, true, false},
+        {R"([1])", 0, true, false},
+        {R"([{}])", 0, true, false},
+        {R"([{"type":1}])", 0, true, false},
+        {R"([{"type":"pace_typo"}])", 0, true, false},
+        {R"([{"type":"pace"},{"type":"pace_ssd"}])", 0, true, false},
+        {R"([{"type":"pace"},{"type":"local"}])", 0, true, false},
+        {R"([{"type":"pace"},{"type":"pace"}])", 0, true, false},
+        {R"([{"type":"pace"})", 0, true, false},
+    };
+    for (const auto& value : cases) {
+        SCOPED_TRACE(value.json);
+        auto environment = makeBackendEnvironment("publication_sdk_options");
+        auto client = std::make_shared<MockClientWrapper>();
+        EXPECT_CALL(*client, shutdown()).Times(1);
+        EXPECT_CALL(*client, initForPools(_, _, _, _)).Times(value.valid ? 1 : 0)
+            .WillRepeatedly(Invoke([&](const auto& configs, auto, const auto&, const auto&) {
+                // Observe the effective SDK config passed to real client creation,
+                // not just a standalone JSON parse or the admission helper.
+                const auto fields = autil::legacy::AnyCast<autil::legacy::json::JsonMap>(
+                    autil::legacy::ToJson(configs.at("")));
+                const auto sdk_fields = autil::legacy::AnyCast<autil::legacy::json::JsonMap>(
+                    fields.at("sdk_config"));
+                kvcm::SdkWrapperConfig expected;
+                expected.parseBackendConfigs(value.json);
+                const auto actual = autil::legacy::ToJsonString(sdk_fields.at("sdk_backend_configs"));
+                EXPECT_EQ(actual, autil::legacy::ToJsonString(expected.sdk_backend_configs()));
+                if (value.json.find("sdk_log_file_path") != std::string::npos) {
+                    const auto backends = autil::legacy::AnyCast<autil::legacy::json::JsonArray>(
+                        sdk_fields.at("sdk_backend_configs"));
+                    EXPECT_EQ(backends.size(), 1u);
+                    if (backends.size() != 1u) return false;
+                    const auto fields = autil::legacy::AnyCast<autil::legacy::json::JsonMap>(backends.front());
+                    EXPECT_EQ(autil::legacy::AnyCast<std::string>(fields.at("sdk_log_file_path")),
+                              "logs/pace client.log");
+                    EXPECT_EQ(autil::legacy::AnyCast<std::string>(fields.at("sdk_log_level")), "INFO");
+                }
+                return true;
+            }));
+        KVCacheConfig config;
+        config.kvcm_model_sdk_config = value.json;
+        config.kvcm_read_backend_type = value.read_backend;
+        config.kvcm_instance_id_salt = "sdk-options-contract";
+        auto parallel = singleRankConfig();
+        parallel.role_type = RoleType::DECODE;
+        parallel.prefill_cp_config.prefill_cp_size = 1;
+        auto backend = makeBackend(environment, parallel, client, nullptr, nullptr, value.gdr, config);
+        bool initialized = false;
+        EXPECT_NO_THROW(initialized = initSingleRank(*backend.backend, environment));
+        EXPECT_EQ(initialized, value.valid);
+    }
+    });
+}
+
+std::pair<std::string, std::string> observeRoleGeometry(RoleType role, int tp, int dp, int target_cp,
+                                                        const std::string& salt, bool check_read = false) {
+    auto environment = makeBackendEnvironment("read_publish_geometry");
+    auto client = std::make_shared<MockClientWrapper>();
+    auto metadata = std::make_shared<MockClientWrapper>();
+    const bool projected = role == RoleType::DECODE && (target_cp != tp || dp != 1);
+    std::string native_id;
+    std::string publication_id;
+    const auto check_specs = [](const kvcm::KVCMConfigPtr& config, int ranks) {
+        const auto fields = autil::legacy::AnyCast<autil::legacy::json::JsonMap>(autil::legacy::ToJson(config));
+        kvcm::KVCMConfig::LocationSpecInfoMap infos;
+        autil::legacy::FromJson(infos, fields.at("location_spec_infos"));
+        EXPECT_EQ(infos.size(), static_cast<size_t>(ranks));
+        for (int rank = 0; rank < ranks; ++rank) {
+            EXPECT_EQ(infos.count("tp" + std::to_string(rank) + "_Fdefault"), 1u);
+        }
+    };
+    EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Invoke(
+        [&](const auto& configs, auto, const auto& registrations, const auto& tags) {
+            native_id = configs.at("")->instance_id();
+            check_specs(configs.at(""), tp);
+            EXPECT_EQ(tags, std::vector<std::string>{"default"});
+            EXPECT_EQ(registrations.size(), 1u);
+            return true;
+        }));
+    EXPECT_CALL(*client, shutdown()).Times(1);
+    EXPECT_CALL(*metadata, shutdown()).Times(projected ? 1 : 0);
+    EXPECT_CALL(*client, createMetadataOnlyClient(_)).Times(projected ? 1 : 0).WillRepeatedly(Invoke(
+        [&](const auto& config) {
+            publication_id = config->instance_id();
+            check_specs(config, target_cp);
+            return metadata;
+        }));
+    KVCacheConfig config;
+    config.kvcm_model_sdk_config = R"([{"type":"pace","sdk_log_level":"INFO"}])";
+    config.kvcm_instance_id_salt = salt;
+    auto parallel = singleRankConfig();
+    parallel.role_type = role;
+    parallel.tp_size = tp;
+    parallel.dp_size = dp;
+    parallel.prefill_cp_config.prefill_cp_size = target_cp;
+    std::shared_ptr<BroadcastManager> broadcast;
+    if (tp > 1)
+        broadcast = std::make_shared<BroadcastManager>(std::vector<std::string>(tp, "unused-geometry-peer"));
+    auto backend = makeBackend(environment, parallel, client, std::move(broadcast), nullptr, true, config);
+    EXPECT_TRUE(initSingleRank(*backend.backend, environment));
+    EXPECT_FALSE(native_id.empty());
+    if (check_read) {
+        const kv_cache_manager::Locations expected{{{"tp0_Fdefault", "pace://native"}}};
+        EXPECT_CALL(*metadata, match(_, _, _, _, _, _)).Times(0);
+        EXPECT_CALL(*client, match("", _, _, _, _, _)).WillOnce(Return(std::make_pair(true, expected)));
+        EXPECT_CALL(*client, loadKvCachesForTag("default", kv_cache_manager::UriStrVec{"pace://native"}, _, _))
+            .WillOnce(Return(true));
+        auto observation = match(*backend.backend, makeStorageRequest(environment));
+        EXPECT_TRUE(observation.success);
+        EXPECT_NE(observation.match_meta, nullptr);
+        if (observation.match_meta) {
+            EXPECT_TRUE(read(*backend.backend, makeStorageRequest(environment), std::move(observation.match_meta)));
+        }
+    }
+    backend.backend->shutdown();
+    return std::make_pair(native_id, projected ? publication_id : native_id);
+}
+
+TEST(KVCMLocalTest, OptionalSaltPreservesPrefillDecodeIdentityAndLayoutIsolation) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
+        const auto p = observeRoleGeometry(RoleType::PREFILL, 1, 1, 1, "").first;
+        const auto d = observeRoleGeometry(RoleType::DECODE, 1, 1, 1, "").second;
+        EXPECT_EQ(p, d);
+        EXPECT_EQ(observeRoleGeometry(RoleType::PREFILL, 1, 1, 1, "explicit-salt").first, "explicit-salt_" + p);
+        EXPECT_EQ(observeRoleGeometry(RoleType::DECODE, 1, 1, 1, "explicit-salt").second, "explicit-salt_" + d);
+        EXPECT_NE(observeRoleGeometry(RoleType::DECODE, 1, 1, 2, "").second, d);
+        EXPECT_NE(observeRoleGeometry(RoleType::DECODE, 1, 1, 2, "explicit-salt").second, "explicit-salt_" + d);
+    });
+}
+
+TEST(KVCMLocalTest, PrefillIdentityAndSpecsUseOwnGeometryWhileOnlyDecodeProjects) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
+        const auto p11 = observeRoleGeometry(RoleType::PREFILL, 1, 1, 1, "").first;
+        EXPECT_EQ(observeRoleGeometry(RoleType::PREFILL, 1, 1, 2, "").first, p11);
+        const auto p12 = observeRoleGeometry(RoleType::PREFILL, 1, 2, 1, "").first;
+        EXPECT_NE(p12, p11);
+        EXPECT_EQ(observeRoleGeometry(RoleType::PREFILL, 1, 2, 2, "").first, p12);
+        EXPECT_EQ(observeRoleGeometry(RoleType::DECODE, 1, 1, 1, "").first, p11);
+        EXPECT_EQ(observeRoleGeometry(RoleType::DECODE, 1, 1, 1, "explicit-salt").second, "explicit-salt_" + p11);
+        for (const auto cp : {2, 4}) {
+            const auto p = observeRoleGeometry(RoleType::PREFILL, cp, 1, cp, "").first;
+            EXPECT_EQ(observeRoleGeometry(RoleType::PREFILL, cp, 1, 1, "").first, p);
+            EXPECT_NE(p, p11);
+            EXPECT_EQ(observeRoleGeometry(RoleType::DECODE, 1, 1, cp, ""), std::make_pair(p11, p));
+            EXPECT_EQ(observeRoleGeometry(RoleType::DECODE, 1, 2, cp, ""), std::make_pair(p12, p));
+        }
+    });
+}
+
+TEST(KVCMLocalTest, ExplicitDecodePublicationPreservesMergedAndUnmergedLayouts) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
+        BackendEnvironment env;
+        auto& cache = env.cache_config;
+        cache.dtype = DataType::TYPE_FP16;
+        cache.layer_num = 3;
+        cache.seq_size_per_block = 8;
+        const std::vector<std::string> tags{"hca_kv", "csa_kv", "indexer_kv"};
+        std::vector<KVCacheSpecPtr> specs;
+        for (const auto& tag : tags) {
+            specs.push_back(test::makeMhaSpec(tag, 8, DataType::TYPE_FP16, 1, 2));
+        }
+        cache.fromGroupedSpecs(specs, {{0}, {1}, {2}}, std::vector<CacheGroupType>(3, CacheGroupType::FULL), tags);
+        cache.finalizeBlockNums(8, RuntimeConfig{});
+        initializeEnvironmentPools(env, "kvcm_explicit_projection", 8);
+        const auto config_for = [&](int tp, bool merged, int block, const std::string& id) {
+            auto sdk = std::make_shared<kvcm::SdkWrapperConfig>();
+            sdk->parseBackendConfigs(R"([{"type":"pace"}])");
+            auto infos = std::make_shared<kvcm::KVCMConfig::LocationSpecInfoMap>();
+            auto groups = std::make_shared<kvcm::KVCMConfig::LocationSpecGroups>();
+            for (size_t group = 0; group < tags.size(); ++group) {
+                const auto name = "F" + std::to_string(group);
+                for (int rank = 0; rank < tp; ++rank) {
+                    const auto spec = (merged ? std::string("F") : name) + "_TP" + std::to_string(rank);
+                    (*infos)[spec] += cache.blockSizeBytesForGroup(tags[group]);
+                    if (!merged) {
+                        (*groups)[name].push_back(spec);
+                    }
+                    if (merged && group == 0) {
+                        (*groups)["F"].push_back(spec);
+                    }
+                }
+            }
+            if (!merged) {
+                // KVCM's aggregate uses canonical tag order (csa, hca, indexer).
+                for (const auto* name : {"F1", "F0", "F2"}) {
+                    const auto& source = groups->at(name);
+                    auto& full = (*groups)["F"];
+                    full.insert(full.end(), source.begin(), source.end());
+                }
+            }
+            return std::make_shared<kvcm::KVCMConfig>(
+                false, "", block, "explicit", id, std::vector<std::string>{"unused"}, infos,
+                std::make_shared<kvcm::MetaChannelConfig>(), sdk, groups,
+                kvcm::ModelDeployment("DeepSeekV41", "fp16", false, tp, 1, 1, "", ""));
+        };
+        auto parallel = singleRankConfig();
+        parallel.role_type = RoleType::DECODE;
+        RuntimeConfig runtime;
+        runtime.model_name = "DeepSeekV41";
+        std::string auto_native_id;
+        {
+            auto client = std::make_shared<MockClientWrapper>();
+            EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Invoke(
+                [&](const auto& map, auto, const auto&, const auto&) {
+                    EXPECT_TRUE(map.at("")->hasLocationSpec("F_TP0"));
+                    auto_native_id = map.at("")->instance_id();
+                    return true;
+                }));
+            EXPECT_CALL(*client, shutdown()).Times(1);
+            KVCacheConfig settings;
+            settings.kvcm_server_address = "unused";
+            settings.kvcm_instance_group = "explicit";
+            settings.kvcm_model_sdk_config = R"([{"type":"pace"}])";
+            BackendHandle baseline(std::make_unique<KVCMStorageBackend>(
+                cache, settings, runtime, parallel, SpeculativeExecutionConfig{}, nullptr, false, nullptr, client));
+            ASSERT_TRUE(initSingleRank(*baseline.backend, env));
+            ASSERT_FALSE(auto_native_id.empty());
+        }
+        for (const int cp : {2, 4}) {
+            for (const bool merged : {false, true}) {
+                for (const bool separate : {false, true}) {
+                    for (const bool correct_block : {false, true}) {
+                        SCOPED_TRACE(::testing::Message() << cp << '/' << merged << '/' << separate << '/' << correct_block);
+                        auto metadata = std::make_shared<MockClientWrapper>();
+                        auto native = std::make_shared<MockClientWrapper>();
+                        auto projected = config_for(cp, merged, correct_block ? 8 : 16, "prefill-id");
+                        kvcm::ClientWrapper::ConfigMap configs;
+                        if (separate) {
+                            configs.emplace("", config_for(1, false, 8, "decode-id"));
+                            configs.emplace("decode_publication", projected);
+                        } else {
+                            configs.emplace("", projected);
+                        }
+                        EXPECT_CALL(*native, initForPools(_, _, _, _)).Times(correct_block ? 1 : 0)
+                            .WillRepeatedly(Invoke([&](const auto& map, auto, const auto&, const auto&) {
+                                EXPECT_EQ(map.at("")->hasLocationSpec("F_TP0"), !separate);
+                                EXPECT_EQ(map.at("")->hasLocationSpec("F0_TP0"), separate);
+                                EXPECT_FALSE(map.at("")->hasLocationSpec("F0_TP1"));
+                                EXPECT_EQ(map.at("")->instance_id(), separate ? "decode-id" : auto_native_id);
+                                return true;
+                            }));
+                        EXPECT_CALL(*native, createMetadataOnlyClient(_)).Times(correct_block ? 1 : 0)
+                            .WillRepeatedly(Invoke([&](const auto& effective) {
+                                EXPECT_EQ(effective->instance_id(), "prefill-id");
+                                EXPECT_EQ(effective->blockSize(), 8);
+                                EXPECT_EQ(effective->hasLocationSpec("F_TP1"), merged);
+                                EXPECT_EQ(effective->hasLocationSpec("F0_TP1"), !merged);
+                                return metadata;
+                            }));
+                        EXPECT_CALL(*native, shutdown()).Times(1);
+                        EXPECT_CALL(*metadata, shutdown()).Times(correct_block ? 1 : 0);
+                        KVCacheConfig settings;
+                        settings.kvcm_client_config = autil::legacy::ToJsonString(configs);
+                        parallel.prefill_cp_config.prefill_cp_size = cp;
+                        BackendHandle backend(std::make_unique<KVCMStorageBackend>(
+                            cache, settings, runtime, parallel, SpeculativeExecutionConfig{}, nullptr, false, nullptr, native));
+                        EXPECT_EQ(initSingleRank(*backend.backend, env), correct_block);
+                    }
+                }
+            }
+        }
+        for (const bool bad_block : {false, true}) {
+            SCOPED_TRACE(bad_block);
+            auto native_config = config_for(1, false, bad_block ? 16 : 8, "decode-id");
+            if (!bad_block) {
+                ++native_config->locationSpecSizes()->at("F0_TP0");
+            }
+            KVCacheConfig settings;
+            settings.kvcm_client_config = autil::legacy::ToJsonString(kvcm::ClientWrapper::ConfigMap{
+                {"", native_config}, {"decode_publication", config_for(2, true, 8, "prefill-id")}});
+            parallel.prefill_cp_config.prefill_cp_size = 2;
+            auto client = std::make_shared<MockClientWrapper>();
+            EXPECT_CALL(*client, initForPools(_, _, _, _)).Times(0);
+            EXPECT_CALL(*client, createMetadataOnlyClient(_)).Times(0);
+            EXPECT_CALL(*client, shutdown()).Times(1);
+            BackendHandle backend(std::make_unique<KVCMStorageBackend>(
+                cache, settings, runtime, parallel, SpeculativeExecutionConfig{}, nullptr, false, nullptr, client));
+            EXPECT_FALSE(initSingleRank(*backend.backend, env));
+        }
+    });
+}
+
+TEST(KVCMLocalTest, NativeDecodeReadsAndProjectedPublicationUseTheirOwnNamespaces) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
+        for (const int cp : {2, 4}) {
+            const auto [read_id, publication_id] = observeRoleGeometry(RoleType::DECODE, 1, 2, cp, "", true);
+            EXPECT_NE(read_id, publication_id);
+        }
+    });
+}
+
+TEST(KVCMLocalTest, DecodeOffSkipsRemoteWritesBeforePinningButKeepsLocalTreeAndRemoteReads) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
+    for (const auto role : {RoleType::PREFILL, RoleType::PDFUSION, RoleType::DECODE}) {
+        SCOPED_TRACE(static_cast<int>(role));
+        ::rtp_llm::test::withDecodePublicationStartup([&] {
+            const bool decode = role == RoleType::DECODE;
+            auto environment = makeBackendEnvironment("publication_write_admission");
+            const auto original_refs = environment.device_pool->refCount(environment.block_id);
+            auto client = std::make_shared<MockClientWrapper>();
+            EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Return(true));
+            EXPECT_CALL(*client, shutdown()).Times(1);
+            kv_cache_manager::WriteLocation allocation;
+            allocation.write_session_id = "prefill-write";
+            allocation.block_mask = kv_cache_manager::BlockMaskOffset{0};
+            allocation.locations = {{{"tp0_Fdefault", "write_uri"}}};
+            EXPECT_CALL(*client, getWriteLocation(_, _, _, _, _, _, _))
+                .Times(decode ? 0 : 1).WillRepeatedly(Return(std::make_pair(true, allocation)));
+            EXPECT_CALL(*client, saveKvCachesForTag(_, _, _, _))
+                .Times(decode ? 0 : 1)
+                .WillRepeatedly(Return(std::make_pair(true, kv_cache_manager::UriStrVec{"write_uri"})));
+            EXPECT_CALL(*client, finishWrite(_, _, _, _, _)).Times(decode ? 0 : 1)
+                .WillRepeatedly(Invoke([](const auto&, const auto&, const auto&, const auto& mask, const auto&) {
+                    const auto* offset = std::get_if<kv_cache_manager::BlockMaskOffset>(&mask);
+                    EXPECT_NE(offset, nullptr);
+                    if (offset) {
+                        EXPECT_EQ(*offset, 1u);
+                    }
+                    return true;
+                }));
+            auto parallel = singleRankConfig();
+            parallel.role_type = role;
+            auto handle = makeBackend(environment, parallel, client);
+            auto backend = std::shared_ptr<KVCMStorageBackend>(std::move(handle.backend));
+            auto group = std::make_shared<FullGroupSet>(
+                std::vector<DeviceBlockPoolPtr>{environment.device_pool}, nullptr, nullptr);
+            group->initialize(0, environment.cache_config.topologyPtr(), environment.cache_config.groupTags());
+            BlockTreeCacheConfig config;
+            config.enable_remote_cache = true;
+            auto cache = block_tree_cache_test::makeBlockTreeCacheForTest({group}, config, backend);
+            ASSERT_NE(cache, nullptr);
+            ASSERT_TRUE(backend->remoteCacheEnabled());
+            // Exercise virtual dispatch through the same base type the tree uses.
+            StorageBackend& remote = *backend;
+            auto projected_request = makeStorageRequest(environment);
+            projected_request.decode_write = std::make_shared<DecodeWriteContext>();
+            EXPECT_FALSE(remote.prepareWrite(std::move(projected_request)));
+            if (decode)
+                EXPECT_FALSE(remote.prepareWrite(makeStorageRequest(environment)));
+            EXPECT_EQ(environment.device_pool->refCount(environment.block_id), original_refs);
+            std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
+            resources[0][0].device_blocks = {environment.block_id};
+            cache->insert({101}, resources, Tier::DEVICE);
+            ASSERT_TRUE(waitForBackendOperationsForTest(remote));
+            EXPECT_EQ(cache->getKeySnapshot().keys, CacheKeysType({101}));
+            auto local = cache->match({101}, {}, /*enable_storage_backend=*/false);
+            EXPECT_EQ(local.matched_device_blocks, 1u);
+            block_tree_cache_test::releaseRequestRefsForTest(*cache, local.matched_device_resources);
+            local.matched_device_resources.clear();
+            EXPECT_EQ(environment.device_pool->treeRefCount(environment.block_id), 1u);
+            EXPECT_EQ(environment.device_pool->refCount(environment.block_id), original_refs + 1);
+            EXPECT_FALSE(environment.device_pool->isFrozen(environment.block_id));
+            if (decode) {
+                const kv_cache_manager::Locations locations{{{"tp0_Fdefault", "read_uri"}}};
+                EXPECT_CALL(*client, match(_, _, _, _, _, _))
+                    .WillOnce(Return(std::make_pair(true, locations)));
+                EXPECT_CALL(*client, loadKvCachesForTag("default", kv_cache_manager::UriStrVec{"read_uri"}, _, _))
+                    .WillOnce(Return(true));
+                auto observation = match(*backend, makeStorageRequest(environment));
+                ASSERT_TRUE(observation.success);
+                ASSERT_NE(observation.match_meta, nullptr);
+                EXPECT_TRUE(read(*backend, makeStorageRequest(environment), std::move(observation.match_meta)));
+                ASSERT_TRUE(waitForBackendOperationsForTest(remote));
+            }
+            cache.reset();
+            EXPECT_EQ(environment.device_pool->refCount(environment.block_id), original_refs);
+        });
+    }
+}
+
+TEST(KVCMLocalTest, DsparkDecodeAdmitsNativeCacheTagsAndRejectsIncompleteDraftConfiguration) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
+    for (const auto role : {RoleType::DECODE}) {
+        // Native bounded-replay layout: target encoder STATE/SWA, plus an
+        // independent non-reusable decoder SWA segment for all three draft layers.
+        for (int invalid = 0; invalid < 10; ++invalid) {
+            SCOPED_TRACE(::testing::PrintToString(std::make_tuple(static_cast<int>(role), invalid)));
+            BackendEnvironment environment;
+            auto& target = environment.cache_config;
+            target.dtype = DataType::TYPE_FP16;
+            target.layer_num = 2;
+            target.seq_size_per_block = 8;
+            const std::string state_tag = invalid == 1 ? "Lcsa_state" : "csa_state";
+            const std::string swa_tag = invalid == 2 ? "Lswa_kv" : "swa_kv";
+            auto full = test::makeMhaSpec("csa_kv", 8, DataType::TYPE_FP16, 1, 2);
+            auto state = test::makeResolvedOpaqueSpec(true, state_tag, DataType::TYPE_FP32, 32, 8);
+            auto swa = test::makeResolvedOpaqueSpec(true, swa_tag, DataType::TYPE_FP16, 32, 8);
+            auto decoder = test::makeResolvedOpaqueSpec(true, "decoder_swa_kv", DataType::TYPE_FP16, 32, 8);
+            auto full_policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
+            auto swa_policy = defaultCacheGroupPolicy(CacheGroupType::SWA);
+            auto decoder_policy = swa_policy;
+            decoder_policy.enable_prefix_reuse = false;
+            target.fromGroupedSpecs({full, state, swa, decoder}, {{0}, {0}, {0}, {1}},
+                {CacheGroupType::FULL, CacheGroupType::SWA, CacheGroupType::SWA, CacheGroupType::SWA},
+                {"csa_kv", state_tag, swa_tag, "decoder_swa_kv"},
+                {full_policy, swa_policy, swa_policy, decoder_policy});
+            CacheConfig draft;
+            draft.dtype = target.dtype;
+            draft.layer_num = 3;
+            draft.seq_size_per_block = target.seq_size_per_block;
+            draft.fromGroupedSpecs({decoder}, {{0, 1, 2}}, {CacheGroupType::SWA},
+                {"decoder_swa_kv"}, {decoder_policy});
+            target.mtp_sub_configs.push_back(target.mergeMTPModule(draft, 0, target.layer_num));
+            target.finalizeBlockNums(8, RuntimeConfig{});
+            ASSERT_EQ(target.mtp_sub_configs.size(), 1u);
+            EXPECT_EQ(target.layer_all_num(), 5u);
+            EXPECT_EQ(target.mtp_sub_configs.front()->layerIdsForGroup("decoder_swa_kv"),
+                      (std::vector<int>{0, 1, 2}));
+            EXPECT_EQ(target.layerIdsForGroup("decoder_swa_kv"), (std::vector<int>{1, 2, 3, 4}));
+            for (int layer = 2; layer < 5; ++layer)
+                EXPECT_EQ(&target.physicalGroupForLayer(layer, "decoder_swa_kv"),
+                          &target.mtp_sub_configs.front()->topology().groupForLayer(layer - 2, "decoder_swa_kv"));
+            initializeEnvironmentPools(environment, "dspark_native_tags", 8);
+            if (invalid == 3) target.mtp_sub_configs.clear();
+            if (invalid == 4) target.mtp_sub_configs.push_back(target.mtp_sub_configs.front());
+            if (invalid == 5) target.mtp_sub_configs.front().reset();
+            if (invalid == 6) target.mtp_sub_configs.front()->layer_num = 0;
+            SpeculativeExecutionConfig speculation;
+            speculation.type = invalid == 7 ? SP_TYPE_EAGLE : (invalid == 8 ? SP_TYPE_MTP : SP_TYPE_DSPARK);
+            speculation.gen_num_per_cycle = 5; // Proposal width is not the draft layer/module count.
+            auto client = std::make_shared<MockClientWrapper>();
+            EXPECT_CALL(*client, initForPools(_, _, _, _)).Times(invalid == 0 ? 1 : 0).WillRepeatedly(Return(true));
+            EXPECT_CALL(*client, shutdown()).Times(1);
+            KVCacheConfig config;
+            config.kvcm_server_address = "unused-test-address";
+            config.kvcm_instance_id_salt = "dspark-native-tag-admission";
+            config.kvcm_model_sdk_config = R"([{"type":"pace_ssd"}])";
+            config.kvcm_read_backend_type = 9;
+            auto parallel = singleRankConfig();
+            parallel.role_type = role;
+            parallel.prefill_cp_config.prefill_cp_size = 1;
+            RuntimeConfig runtime;
+            runtime.model_name = invalid == 9 ? "DeepSeekV4" : "DeepSeekV41";
+            BackendHandle backend(std::make_unique<KVCMStorageBackend>(target, config, runtime, parallel,
+                speculation, nullptr, true, nullptr, client));
+            EXPECT_EQ(initSingleRank(*backend.backend, environment), invalid == 0);
+            if (invalid == 0 && role == RoleType::DECODE) {
+                BatchKVCacheResource resource;
+                resource.resetBatchSize(1);
+                resource.initGroups(target.topologyPtr());
+                EXPECT_FALSE(resource.decode_endpoint);
+                EXPECT_CALL(*client, getWriteLocation(_, _, _, _, _, _, _)).Times(0);
+                EXPECT_CALL(*client, saveKvCachesForTag(_, _, _, _)).Times(0);
+                for (size_t attempt = 1; attempt <= 3; ++attempt) {
+                    EXPECT_TRUE(backend.backend->captureCompletedDecode(resource, 8));
+                    EXPECT_EQ(resource.decodePublicationAttempts(), std::min(attempt, size_t{2}));
+                    EXPECT_FALSE(resource.decodeCompletionSubmitted());
+                }
+            }
+        }
+    }
+    });
 }
 
 }  // namespace

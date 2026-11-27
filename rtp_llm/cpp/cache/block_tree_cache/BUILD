@@ -242,6 +242,7 @@ cc_library(
         "load/LoadTaskRunner.h",
         "storage_backend/StorageBackend.h",
         "storage_backend/StorageBackendExecutor.h",
+        "storage_backend/StorageCompletionAdmission.h",
         "store/BlockTreeStorer.h",
         "transfer/BlockTransferDispatcher.h",
         "transfer/MultiRankBlockTransferEngine.h",

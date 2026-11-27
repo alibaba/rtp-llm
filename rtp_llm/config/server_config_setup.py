@@ -4,6 +4,7 @@ import os
 import socket
 import subprocess
 from typing import Optional
+from urllib.parse import urlparse
 
 import torch
 
@@ -476,11 +477,15 @@ def setup_default_args(py_env_configs):
 
 
 def fetch_model_files_to_local(py_env_configs: PyEnvConfigs):
-    """Fetch remote model files to local and update py_env_configs in place."""
-    # Fetch checkpoint_path from model_args
+    """Fetch model files and retain the resolved path for KVCM identity only."""
     model_args = py_env_configs.model_args
+    py_env_configs.kv_cache_config.kvcm_model_checkpoint_path = ""
     if model_args.ckpt_path:
-        model_args.ckpt_path = fetch_remote_file_to_local(model_args.ckpt_path)
+        checkpoint_source = model_args.ckpt_path
+        model_args.ckpt_path = fetch_remote_file_to_local(checkpoint_source)
+        # NAS mount paths can contain a PID; retain their URI-based identity.
+        if urlparse(checkpoint_source).scheme != "nas":
+            py_env_configs.kv_cache_config.kvcm_model_checkpoint_path = model_args.ckpt_path
 
     # Fetch tokenizer_path from model_args
     tokenizer_path = model_args.tokenizer_path

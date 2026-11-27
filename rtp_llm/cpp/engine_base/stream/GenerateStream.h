@@ -17,6 +17,7 @@
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPrompt.h"
 #include "rtp_llm/cpp/models/position_ids/PositionIdsGenerator.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
+#include "rtp_llm/cpp/utils/RemoteCacheConfig.h"
 #include <atomic>
 #include <condition_variable>
 #include <iterator>
@@ -63,6 +64,8 @@ struct StreamUpdateInfo {
     const torch::Tensor top_logprob_token_ids{};
     const torch::Tensor top_logprobs{};
     int32_t             logprobs_offset = 0;
+    // Proof for this ordinary Decode round, before any endpoint is retained.
+    bool decode_publication_writer_complete = false;
 };
 
 struct StreamSpecUpdateInfo {
@@ -91,6 +94,10 @@ struct StreamSpecUpdateInfo {
     torch::Tensor top_logprob_token_ids;
     torch::Tensor top_logprobs;
     int32_t       logprobs_offset = 0;
+    // Target-verified draft candidates for this published row, excluding the
+    // anchor/bonus and before EOS/window/output clipping. -1 means unknown.
+    int64_t verified_draft_tokens = -1;
+    DecodeWriterTables decode_writer_tables;
 };
 
 struct SpeculativeExecutorStreamOutput {
@@ -209,6 +216,7 @@ public:
                     bool                        update_processor = true,
                     RecordedTokenTiming*        timings          = nullptr,
                     size_t                      timing_count     = 0);
+    void setDecodePublicationCandidates(BatchKVCacheResource::DecodeEndpoints candidates);
     bool updateKvCacheBlocks(const torch::Tensor& src_batch_indices);
     void updateWithoutLock(const StreamUpdateInfo& update_info,
                            bool                    update_processor = true,
@@ -430,6 +438,9 @@ public:
         if (event == StreamEvents::GenerateDone && !generation_done_) {
             generation_done_         = true;
             generation_done_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds();
+            if (remoteCacheDecodePublicationEnabled() && resourceContext().role_type == RoleType::DECODE
+                && stream_cache_resource_ && stream_cache_resource_->reuseCache() && !hasErrorWithoutLock())
+                kvCache().recordDecodePublicationEos();
         }
         if (event == StreamEvents::Error || event == StreamEvents::GenerateDone
             || event == StreamEvents::PrefillHandoffReady) {
@@ -721,6 +732,13 @@ public:
     // Count worker claims on this stream's KV resource.
     // releaseResource waits for zero so worker-side update/specUpdate cannot
     // write into blocks already returned to the pool.
+    bool canCaptureDecodePublication() const;
+    bool mayCrossDecodePublicationBoundary(size_t unit, size_t advance) const;
+    std::shared_ptr<const DecodeEndpoint> latestDecodePublicationEndpoint() const;
+    void freezeUnknownDecodeWriter(const std::vector<std::shared_ptr<const DecodeEndpoint>>& pages) noexcept;
+    bool beginDecodePublicationSubmission(size_t dspark_publication_unit = 0);
+    void endDecodePublicationSubmission();
+    void retainUnknownDecodePublication(const std::shared_ptr<GenerateStream>& owner);
     void incPendingAsyncBookkeeping();
     void decPendingAsyncBookkeepingAndMaybeRelease();
     bool hasPendingAsyncBookkeeping() const;
@@ -777,6 +795,9 @@ public:
         // once bookkeeping catches up.
         // -1 = unset (first iter / cleared).
         int next_seq_len_upper_bound = -1;
+        // Immutable CPU sources associated with the actual device table.
+        std::vector<torch::Tensor> cache_snapshot_host_buffers;
+        bool cache_snapshot_host_row_compact = false;
     };
 
     uint64_t setMtpAsyncDeviceState(MtpAsyncDeviceState state) {
@@ -863,6 +884,8 @@ public:
         std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);
         mtp_async_state_.next_kv_cache_block_id_gpu        = torch::Tensor();
         mtp_async_state_.next_kv_cache_kernel_block_id_gpu = torch::Tensor();
+        mtp_async_state_.cache_snapshot_host_buffers.clear();
+        mtp_async_state_.cache_snapshot_host_row_compact = false;
     }
     torch::Tensor getLastHiddenStatesGpu() const {
         std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);
@@ -1190,7 +1213,12 @@ protected:
     // Separate lock/cv avoids deadlocking releaseResource with worker updates
     // that need mutex_. Shared ownership preserves the coordinator across
     // GenerateStream copies captured by async workers.
+    std::shared_ptr<GenerateStream> unknown_decode_publication_;
+    bool unknown_decode_kv_frozen_{false};
+    void tryReleaseResourceAfterBookkeeping();
+    bool hasOutstandingResourceUseWithoutLock() const;
     struct AsyncBookkeepingCoordinator {
+        std::atomic<size_t> submissions{0};
         std::atomic<int>        count{0};
         std::atomic<bool>       defer_release{false};
         std::mutex              mu;

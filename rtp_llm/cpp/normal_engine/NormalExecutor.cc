@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/observability/ExecutionRecorder.h"
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
+#include "rtp_llm/cpp/utils/RemoteCacheConfig.h"
 #include "rtp_llm/cpp/metrics/ServiceStatus.h"
 #include "rtp_llm/cpp/normal_engine/HiddenStateCapturePolicy.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
@@ -513,6 +514,33 @@ absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int6
     }
     FrontendMetricsStep<GenerateStreamPtr> frontend_step(stream_groups.allStreams(),
                                                          isKmonMetricReportingEnabled() && tp_rank_ == 0 && !warm_up_);
+    // Normal Decode can expose these pages to the storage worker as soon as
+    // output bookkeeping records a full endpoint. Join the actual writer
+    // only when an eligible Decode row may cross a publishable boundary.
+    bool decode_publication_writer_complete = false;
+    if (tp_rank_ == 0 && role_type_ == RoleType::DECODE && !warm_up_ && !is_propose_
+        && cache_manager_ && remoteCacheDecodePublicationEnabled() && cache_manager_->remoteCacheEnabled()
+        && cache_manager_->cacheConfig().mtp_sub_configs.empty()) {
+        const size_t unit = cache_manager_->decodePublicationUnit();
+        if (unit && std::any_of(streams.begin(), streams.end(), [unit](const auto& stream) {
+                return !stream->isContextStream() && !stream->hasNumBeams() && stream->maxBatchSize() == 1
+                       && stream->mayCrossDecodePublicationBoundary(unit, 1);
+            })) {
+            try {
+                auto writer = cuda_graph::makeGraphEvent();
+                writer.record(cuda_graph::graphGetCurrentStream());
+                writer.synchronize();
+                decode_publication_writer_complete = true;
+            } catch (const std::exception& error) {
+                for (const auto& stream : streams) {
+                    if (!stream->isFakeStream()) {
+                        stream->freezeUnknownDecodeWriter({});
+                    }
+                }
+                return absl::InternalError(std::string("Decode checkpoint writer completion is unknown: ") + error.what());
+            }
+        }
+    }
     if (useStreamAsync() && is_decode_only && single_sequence_streams && !zero_token_batch) {
         RTP_LLM_PROFILE_SCOPE("executor.dispatch_output(stream_async)");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
@@ -541,7 +569,8 @@ absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int6
                                    std::move(sampler_output),
                                    std::move(sampler_event),
                                    profile_step_finish_,
-                                   std::move(recorded_batch));
+                                   std::move(recorded_batch),
+                                   decode_publication_writer_complete);
     }
 
     {
@@ -553,7 +582,8 @@ absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int6
             result = batch_stream_processor_->dispatchPrefillOnly(stream_groups,
                                                                   model_output.generation_prefill_cuda_graph_status);
         } else {
-            MergedOutput merge_outputs{std::move(model_output), std::move(sampler_output), std::move(recorded_batch)};
+            MergedOutput merge_outputs{std::move(model_output), std::move(sampler_output), std::move(recorded_batch),
+                                       decode_publication_writer_complete};
             if (useDeviceInput()) {
                 publishNormalDeviceState(stream_groups, merge_outputs.sampler_output);
             }
@@ -884,7 +914,8 @@ absl::Status NormalExecutor::dispatchOutputAsync(const StreamGroups&            
                                                  SamplerOutput                  sampler_output,
                                                  std::shared_ptr<torch::Event>  sampler_event,
                                                  std::function<void()>          profile_step_finish,
-                                                 std::shared_ptr<RecordedBatch> recorded_batch) {
+                                                 std::shared_ptr<RecordedBatch> recorded_batch,
+                                                 bool decode_publication_writer_complete) {
     RTP_LLM_PROFILE_SCOPE("executor.dispatch_output_async");
 
     if (useDeviceInput()) {
@@ -908,7 +939,8 @@ absl::Status NormalExecutor::dispatchOutputAsync(const StreamGroups&            
                              model_output_copy   = std::move(model_output_copy),
                              sampler_output_copy = std::move(sampler_output_copy),
                              sampler_event,
-                             recorded_batch = std::move(recorded_batch)]() mutable {
+                             recorded_batch = std::move(recorded_batch),
+                             decode_publication_writer_complete]() mutable {
         RTP_LLM_PROFILE_SCOPE("executor.dispatch_output_worker");
 
         // Local ownership submits on normal return and on worker exceptions,
@@ -931,7 +963,8 @@ absl::Status NormalExecutor::dispatchOutputAsync(const StreamGroups&            
         }
 
         auto status = processor->dispatch(stream_groups_copy,
-                                          {std::move(model_output_copy), std::move(sampler_output_copy), batch_record});
+                                          {std::move(model_output_copy), std::move(sampler_output_copy), batch_record,
+                                           decode_publication_writer_complete});
         if (!status.ok()) {
             RTP_LLM_LOG_ERROR("[normal-stream-async] dispatch (worker) failed: %s", status.ToString().c_str());
         }

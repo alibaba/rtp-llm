@@ -77,7 +77,8 @@ protected:
                                      SamplerOutput                 sampler_output,
                                      std::shared_ptr<torch::Event> sampler_event,
                                      std::function<void()>          profile_step_finish = nullptr,
-                                     std::shared_ptr<RecordedBatch> recorded_batch      = nullptr);
+                                     std::shared_ptr<RecordedBatch> recorded_batch      = nullptr,
+                                     bool decode_publication_writer_complete           = false);
 
     bool has_engram_ = false;
     void publishNormalDeviceState(const StreamGroups& stream_groups, const SamplerOutput& sampler_output);

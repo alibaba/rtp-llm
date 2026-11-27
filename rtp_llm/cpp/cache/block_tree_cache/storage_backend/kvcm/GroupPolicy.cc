@@ -212,6 +212,10 @@ bool GroupPolicy::validateLocationSpecs(const kv_cache_manager::Location& locati
     return true;
 }
 
+bool GroupPolicy::validateWriteLocation(const kv_cache_manager::Location& location, const SpecNames& expected) const {
+    return validateLocationSpecs(location, expected, "write");
+}
+
 bool GroupPolicy::setLocationView(const kv_cache_manager::Location& location,
                                   const SpecNames&                  expected_specs,
                                   const SpecNames&                  selected_specs,

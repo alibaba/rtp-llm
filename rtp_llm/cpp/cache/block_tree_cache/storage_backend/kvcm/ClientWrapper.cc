@@ -226,6 +226,22 @@ bool ClientWrapper::initImpl(const ConfigMap&                     config_map,
     return false;
 }
 
+std::shared_ptr<ClientWrapper> ClientWrapper::createMetadataOnlyClient(KVCMConfigPtr config) {
+    if (!config || !config->meta_channel_config() || config->meta_channel_config()->retry_time() <= 0) {
+        return nullptr;
+    }
+    auto client = std::make_shared<ClientWrapper>();
+    client->init_params_.role_type = kv_cache_manager::RoleType::SCHEDULER;
+    client->expected_storage_configs_ = init_params_.storage_configs;
+    if (!client->initMetaClient("", std::move(config))
+        || client->meta_client_map_.at("")->GetStorageConfig() != *client->expected_storage_configs_) {
+        RTP_LLM_LOG_ERROR("Decode publication metadata client requires matching PACE storage");
+        return nullptr;
+    }
+    client->reinit_worker_ = std::thread([endpoint = client.get()] { endpoint->reinitWorkerLoop(); });
+    return client;
+}
+
 void ClientWrapper::shutdown() noexcept {
     std::lock_guard<std::mutex> shutdown_lock(shutdown_mutex_);
     {
@@ -417,13 +433,23 @@ bool ClientWrapper::finishWrite(const std::string&                 unique_id,
                                 const std::string&                 write_session_id,
                                 const kv_cache_manager::BlockMask& block_mask,
                                 const kv_cache_manager::Locations& locations) {
-    CHECK_INIT1(unique_id);
+    return finishWriteWithResult(unique_id, trace_id, write_session_id, block_mask, locations)
+           == FinishWriteResult::ACKNOWLEDGED;
+}
+
+ClientWrapper::FinishWriteResult
+ClientWrapper::finishWriteWithResult(const std::string& unique_id,
+                                    const std::string& trace_id,
+                                    const std::string& write_session_id,
+                                    const kv_cache_manager::BlockMask& block_mask,
+                                    const kv_cache_manager::Locations& locations) {
+    CHECK_INIT_BASE(unique_id, FinishWriteResult::NOT_SENT);
     auto ec = client->FinishWrite(trace_id, write_session_id, block_mask, locations);
     if (!checkError(ec, client)) {
         RTP_LLM_LOG_WARNING("FinishWrite fail, ec [%d]", ec);
-        return false;
+        return FinishWriteResult::UNKNOWN;
     }
-    return true;
+    return FinishWriteResult::ACKNOWLEDGED;
 }
 
 bool ClientWrapper::abortWrite(const std::string& unique_id,
@@ -594,9 +620,15 @@ void ClientWrapper::reinitWorkerLoop() noexcept {
             auto candidate_config = *config;
             candidate_config.set_addresses({address});
             candidate = client_factory_->createMetaClient(autil::legacy::ToJsonString(candidate_config), init_params_);
+            if (candidate && expected_storage_configs_ && candidate->GetStorageConfig() != *expected_storage_configs_) {
+                RTP_LLM_LOG_WARNING("Rejecting Decode publication metadata recovery with different PACE storage");
+                candidate.reset();
+            }
         } catch (const std::exception& error) {
+            candidate.reset();
             RTP_LLM_LOG_ERROR("KVCM re-registration attempt failed: %s", error.what());
         } catch (...) {
+            candidate.reset();
             RTP_LLM_LOG_ERROR("KVCM re-registration attempt failed with an unknown exception");
         }
         lock.lock();

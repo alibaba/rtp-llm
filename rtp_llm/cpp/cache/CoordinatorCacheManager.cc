@@ -1,7 +1,9 @@
+#include "rtp_llm/cpp/utils/RemoteCacheConfig.h"
 #include <algorithm>
 #include <cstdint>
 #include <limits>
 #include <map>
+#include <new>
 #include <type_traits>
 #include <unordered_set>
 #include <utility>
@@ -1035,6 +1037,23 @@ MallocResult CoordinatorCacheManager::incrMalloc(const MallocInfo& malloc_info) 
         if (!malloc_info.enable_remove_skipped_blocks) {
             return {true, 0};
         }
+        if (kv_resource->dspark_decode_publication_unit && !kv_resource->dspark_release_provenance_lost
+            && batch_size == 1) {
+            try {
+                for (size_t group_id = 0; group_id < kv_cache_groups_.size(); ++group_id) {
+                    const auto& filled = backfilled_positions[0][group_id];
+                    if (filled.empty()) continue;
+                    const auto& tag = config_.groupTags()[group_id];
+                    if (config_.topology().group(tag).policy.group_type != CacheGroupType::SWA) continue;
+                    for (size_t slot : filled)
+                        kv_resource->dspark_state_backfills[tag][slot] = static_cast<size_t>(raw_seq_len);
+                }
+            } catch (const std::bad_alloc&) {
+                // Publication is optional; keep the successful allocator
+                // transaction and decline capture when provenance is lost.
+                kv_resource->dspark_release_provenance_lost = true;
+            }
+        }
         for (int b = 0; b < batch_size; ++b) {
             for (int group_id = 0; group_id < config_.groupNums(); ++group_id) {
                 const auto& tag = config_.groupTags()[static_cast<size_t>(group_id)];
@@ -1238,6 +1257,26 @@ void CoordinatorCacheManager::reclaimLinearHistory(const BatchKVCacheResourcePtr
             kv_cache_groups_[i]->reclaimHistory(resource->mutableBlockIds(0, kv_cache_groups_[i]->tag()), ends[i]);
         }
     }
+}
+
+bool CoordinatorCacheManager::captureCompletedDecode(const BatchKVCacheResource& resource,
+                                                     size_t computed_end, bool decode_finished) const {
+    if (!block_tree_cache_) {
+        return false;
+    }
+    const auto backend = block_tree_cache_->storageBackend();
+    return backend && backend->remoteCacheEnabled()
+           && backend->captureCompletedDecode(resource, computed_end, decode_finished);
+}
+
+std::shared_ptr<StorageCompletionAdmission> CoordinatorCacheManager::reserveDecodePublication(size_t bytes) const {
+    const auto backend = block_tree_cache_ ? block_tree_cache_->storageBackend() : nullptr;
+    return backend ? backend->reserveDecodePublication(bytes) : nullptr;
+}
+
+bool CoordinatorCacheManager::canStartDecodePublication(const BatchKVCacheResource& resource) const {
+    const auto backend = block_tree_cache_ ? block_tree_cache_->storageBackend() : nullptr;
+    return backend && backend->canStartDecodePublication(resource);
 }
 
 void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info, size_t& resident_prefix_length) {
@@ -1588,7 +1627,12 @@ bool CoordinatorCacheManager::updateKVBlock(const BatchKVCacheResourcePtr&  batc
         for (const auto& [new_idx, old_idx] : retained_slots) {
             staged_resource.moveBatchResource(new_idx, std::move(batch_kv_cache_resource->cacheResource(old_idx)));
         }
-        batch_kv_cache_resource->swap(staged_resource);
+        if (new_batch_size == old_batch_size) {
+            batch_kv_cache_resource->swapBlockStorage(staged_resource);
+        } else {
+            // A new beam shape invalidates the single-request endpoint.
+            batch_kv_cache_resource->swap(staged_resource);
+        }
         block_update_mapping.swap(staged_mapping);
         return true;
     }
