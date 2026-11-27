@@ -24,9 +24,11 @@ import json
 import os
 import subprocess
 import sys
+import time
 import uuid
 from pathlib import Path
 from unittest import TestCase, main, skipUnless
+from unittest.mock import patch
 
 try:
     import torch
@@ -177,8 +179,10 @@ class RtpKvMetaObjectLiveIntegrationTest(TestCase):
         )
         from kv_cache_manager.client.pybind import kvcm_py_client
 
-        self.assertEqual(KV_META_OBJECT_API_VERSION, 2)
-        self.assertEqual(kvcm_py_client.KV_META_OBJECT_API_VERSION, 2)
+        self.assertIn(KV_META_OBJECT_API_VERSION, (2, 3))
+        self.assertEqual(
+            kvcm_py_client.KV_META_OBJECT_API_VERSION, KV_META_OBJECT_API_VERSION
+        )
         self.client_error = KvMetaObjectClientError
         self.codes = kvcm_py_client.ClientErrorCode
         self.prefix = "rtp-emb-it-" + uuid.uuid4().hex
@@ -224,6 +228,68 @@ class RtpKvMetaObjectLiveIntegrationTest(TestCase):
         for expected, actual in zip(tensors, outputs):
             self.assertTrue(torch.equal(expected, actual))
             self.assertEqual(_digest(expected), _digest(actual))
+
+    def test_native_local_eviction_writes_an_exact_object(self):
+        if not torch.cuda.is_available() or os.environ.get("MM_EMB_NATIVE") != "1":
+            self.skipTest("requires CUDA and MM_EMB_NATIVE=1")
+        import librtp_compute_ops
+
+        from rtp_llm.multimodal.greennet_hook import GreenNetVerdict
+        from rtp_llm.multimodal.mm_embedding_native_cache import NativeMMEmbeddingCache
+        from rtp_llm.multimodal.mm_remote_embedding_cache import MMRemoteEmbeddingCache
+
+        capsule = self.client.native_object_api()
+        self.assertIsNotNone(capsule, "SDK must export the exact-object native API")
+        self.assertTrue(librtp_compute_ops.supports_registered_emb_write(capsule))
+        remote = MMRemoteEmbeddingCache(
+            self.client,
+            max_object_bytes=64 * 1024,
+            max_inflight_bytes=256 * 1024,
+            write_timeout_ms=2000,
+            write_policy="on_evict",
+        )
+        self.addCleanup(remote.close)
+        writer = remote.enable_native_eviction_write()
+        self.assertEqual(remote.eviction_write_backend, "native_staging")
+        cache = NativeMMEmbeddingCache(16, 16, native_eviction_writer=writer)
+        self.addCleanup(cache.close)
+        exact_key = self._keys(1)[0]
+        bits = torch.tensor(
+            [0, -32768, 32705, 16256, -1, 193, 16255, 257],
+            dtype=torch.int16,
+            device="cuda",
+        )
+        value = bits.view(torch.bfloat16)
+        with patch.object(remote, "submit_evicted") as evicted, patch.object(
+            remote, "submit_result"
+        ) as submit:
+            _, entry = cache.try_acquire("victim")
+            remote.bind_entry(entry, exact_key, self.prefix)
+            entry.remote_embedding_origin = "encoder"
+            entry.set_greennet_verdict(GreenNetVerdict(True, 0, "approved"))
+            cache.complete("victim", entry, (value, None))
+            del entry
+            for key in ("replacement", "pressure"):
+                _, entry = cache.try_acquire(key)
+                cache.complete(key, entry, (torch.zeros_like(value), None))
+                del entry
+                if key == "replacement":
+                    self.assertEqual(cache.resident_tier("victim"), "cpu")
+                    self.assertEqual(writer.stats()[0], 0)
+            deadline = time.monotonic() + 3
+            while writer.stats()[2] < 1 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(writer.stats()[2], 1, writer.stats())
+            evicted.assert_not_called()
+            submit.assert_not_called()
+
+        with _new_client() as reader:
+            restored = reader.load_object(exact_key, cuda_device=value.device)
+        self.assertIsNotNone(restored)
+        _, position = restored["result"]
+        self.assertIsNone(position)
+        self.assertEqual(restored["greennet"]["message"], "approved")
+        self.assertTrue(torch.equal(restored["result"][0].view(torch.int16), bits))
 
     def test_cross_process_variable_payload_roundtrip(self):
         specs = _specs()

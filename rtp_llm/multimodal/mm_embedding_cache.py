@@ -2242,6 +2242,7 @@ class ShardedMMEmbeddingCache:
         async_publication: bool = False,
         on_gpu_evict: Optional[Callable[[str, MMEmbeddingCacheEntry], None]] = None,
         eviction_snapshot_max_bytes: Optional[int] = None,
+        native_eviction_writer=None,
     ):
         if shards < 1:
             raise ValueError("embedding cache shards must be positive")
@@ -2262,7 +2263,9 @@ class ShardedMMEmbeddingCache:
                 from .mm_embedding_native_cache import NativeMMEmbeddingCache
 
                 cache_class = NativeMMEmbeddingCache
-                if eviction_snapshot_max_bytes is not None:
+                if native_eviction_writer is not None:
+                    eviction_policy = {"native_eviction_writer": native_eviction_writer}
+                elif eviction_snapshot_max_bytes is not None:
                     eviction_policy["eviction_snapshot_max_bytes"] = (
                         eviction_snapshot_max_bytes
                     )

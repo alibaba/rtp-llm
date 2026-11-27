@@ -1,6 +1,6 @@
 #pragma once
 
-#include "rtp_llm/cpp/pybind/emb_local/EmbLocalTransfer.h"
+#include "rtp_llm/cpp/pybind/emb_local/EmbEvictionWriter.h"
 
 #include <limits>
 
@@ -29,8 +29,9 @@ public:
     };
 
     Shard(int64_t gpu_bytes, int64_t cpu_bytes, int device, bool notify_cpu = false, bool notify_gpu = false,
-          int64_t snapshot_limit = 0):
-        device_(device), limits_{cpu_bytes, gpu_bytes}, notify_{notify_cpu, notify_gpu}, snapshot_limit_(snapshot_limit) {
+          int64_t snapshot_limit = 0, std::shared_ptr<EvictionWriter> writer = {}):
+        device_(device), limits_{cpu_bytes, gpu_bytes}, notify_{notify_cpu, notify_gpu}, snapshot_limit_(snapshot_limit),
+        writer_(std::move(writer)) {
         TORCH_CHECK(gpu_bytes >= 0 && cpu_bytes >= 0 && snapshot_limit >= 0, "invalid local EMB capacity");
         arenas_[tierIndex(Tier::Cpu)] = makeArena(Tier::Cpu, cpu_bytes);
         arenas_[tierIndex(Tier::Gpu)] = makeArena(Tier::Gpu, gpu_bytes);
@@ -357,13 +358,15 @@ private:
         }
         if (auto removed = index_.remove(victim_key, record->generation, record.get())) {
             ++evicted.evicted;
-            if (notify_[tierIndex(record->tier)]) {
+            if (writer_ || notify_[tierIndex(record->tier)]) {
                 // The index removal selected this exact generation. Only detached
                 // tensors may outlive evict(): retaining its cell pins the slab
                 // interval that the incoming publication is about to reserve.
                 try {
                     auto meta = removed.cell->evictedMetadata();
-                    if (meta) {
+                    if (meta && writer_) {
+                        writer_->submit(meta->first, meta->second, record, stream);
+                    } else if (meta) {
                         const auto room = snapshot_limit_ - evicted.snapshot_bytes;
                         if (record->bytes[0] > room || record->bytes[1] > room - record->bytes[0]) {
                             ++dropped_snapshots_;
@@ -387,6 +390,7 @@ private:
     Bytes                                            limits_;
     const std::array<bool, 2>                        notify_;
     const int64_t                                    snapshot_limit_;
+    const std::shared_ptr<EvictionWriter>              writer_;
     std::atomic<int64_t>                             dropped_snapshots_{0};
     std::mutex                                       transfer_;
     std::mutex                                       pools_;

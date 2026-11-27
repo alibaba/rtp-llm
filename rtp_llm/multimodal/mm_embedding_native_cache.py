@@ -175,6 +175,7 @@ class NativeMMEmbeddingCache(MMEmbeddingCache):
         on_cpu_evict=None,
         on_gpu_evict=None,
         eviction_snapshot_max_bytes=None,
+        native_eviction_writer=None,
     ):
         from librtp_compute_ops import EmbLocalCacheShard, record_emb_local_ready
 
@@ -184,7 +185,11 @@ class NativeMMEmbeddingCache(MMEmbeddingCache):
             if gpu_max_bytes or torch.cuda.is_available()
             else -1
         )
-        self._notify_evictions = on_cpu_evict is not None or on_gpu_evict is not None
+        self._notify_evictions = (
+            native_eviction_writer is not None
+            or on_cpu_evict is not None
+            or on_gpu_evict is not None
+        )
         core_options = ()
         if self._notify_evictions:
             core_options = (
@@ -194,6 +199,8 @@ class NativeMMEmbeddingCache(MMEmbeddingCache):
                 if eviction_snapshot_max_bytes is None
                 else eviction_snapshot_max_bytes,
             )
+            if native_eviction_writer is not None:
+                core_options += (native_eviction_writer,)
         with cuda_graph_gate.operation():
             self._core = EmbLocalCacheShard(
                 gpu_max_bytes, cpu_max_bytes, self._native_device, *core_options

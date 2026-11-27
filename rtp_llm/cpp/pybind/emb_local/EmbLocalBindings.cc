@@ -174,6 +174,38 @@ py::tuple mutationResult(Shard::Mutations& mutations, Args&&... args) {
 }  // namespace
 
 void registerEmbLocalCache(pybind11::module& m) {
+    py::class_<EvictionWriter, std::shared_ptr<EvictionWriter>>(m, "EmbEvictionWriter")
+        .def(py::init([](std::shared_ptr<EmbRegisteredArena> arena, std::optional<at::Tensor> root, py::capsule capsule,
+                        int64_t object_bytes, int64_t max_pending, int64_t max_bytes, int64_t timeout_ms,
+                        int workers, bool request_scoped) {
+            const auto* api = static_cast<const KvcmObjectNativeApiV2*>(
+                PyCapsule_GetPointer(capsule.ptr(), KVCM_OBJECT_NATIVE_API_CAPSULE_V2));
+            if (!api) {
+                throw py::error_already_set();
+            }
+            if (!validEmbNativeWriteApi(api)) {
+                throw std::invalid_argument("invalid exact-object native API");
+            }
+            return std::make_shared<EvictionWriter>(std::move(arena), root.value_or(at::Tensor{}), *api, object_bytes, max_pending,
+                                                     max_bytes, timeout_ms, workers, request_scoped);
+        }), py::keep_alive<1, 4>())
+        .def("reserve_external", &EvictionWriter::reserveExternal, py::call_guard<py::gil_scoped_release>())
+        .def("release_external", &EvictionWriter::releaseExternal, py::call_guard<py::gil_scoped_release>())
+        .def("close", &EvictionWriter::close, py::call_guard<py::gil_scoped_release>())
+        .def("stats", [](const EvictionWriter& writer) {
+            const auto stats = withoutGil([&] { return writer.stats(); });
+            return py::make_tuple(stats.pending, stats.bytes, stats.success, stats.error, stats.skipped,
+                                  stats.inflight_failure);
+        });
+    m.def("lock_emb_eviction_capture", [](bool wait) {
+        auto& gate = EvictionWriter::graphGate();
+        if (!wait) {
+            return gate.try_lock();
+        }
+        withoutGil([&] { gate.lock(); });
+        return true;
+    });
+    m.def("unlock_emb_eviction_capture", [] { EvictionWriter::graphGate().unlock(); });
     py::class_<Shard::Eviction>(m, "EmbLocalEviction")
         .def("unpack", [](const Shard::Eviction& victim) {
             py::tuple leaves(victim.tensors.size());
@@ -215,6 +247,8 @@ void registerEmbLocalCache(pybind11::module& m) {
     py::class_<Shard>(m, "EmbLocalCacheShard")
         .def(py::init<int64_t, int64_t, int>())
         .def(py::init<int64_t, int64_t, int, bool, bool, int64_t>())
+        .def(py::init<int64_t, int64_t, int, bool, bool, int64_t, std::shared_ptr<EvictionWriter>>(),
+             py::keep_alive<1, 8>())
         .def("claim",
              [](Shard& shard, const std::string& key) {
                  return lookupResult(withoutGil([&] { return shard.claim(key); }));

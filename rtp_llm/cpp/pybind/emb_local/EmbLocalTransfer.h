@@ -87,7 +87,8 @@ inline void copyAndWait(const std::vector<at::Tensor>&       from,
 }
 
 inline std::vector<at::Tensor> copyOut(const std::shared_ptr<const Resident>& object,
-                                       std::optional<c10::cuda::CUDAStream>   stream) {
+                                       std::optional<c10::cuda::CUDAStream>   stream,
+                                       bool                                  restore_devices = true) {
     // Allocate output on the stream that first writes it. The CUDA allocator
     // may reuse a block whose prior operations are ordered on that stream.
     std::optional<c10::cuda::CUDAStreamGuard> guard;
@@ -97,8 +98,10 @@ inline std::vector<at::Tensor> copyOut(const std::shared_ptr<const Resident>& ob
     auto                    from = views(*object);
     std::vector<at::Tensor> requested;
     requested.reserve(from.size());
-    for (const auto& slice : object->slices) {
-        requested.push_back(at::empty(slice.sizes, at::TensorOptions().device(slice.original).dtype(slice.type)));
+    for (size_t i = 0; i < object->slices.size(); ++i) {
+        const auto& slice = object->slices[i];
+        const auto device = restore_devices ? slice.original : from[i].device();
+        requested.push_back(at::empty(slice.sizes, at::TensorOptions().device(device).dtype(slice.type)));
     }
     copyAndWait(from, requested, stream, object->storage);
     return requested;
