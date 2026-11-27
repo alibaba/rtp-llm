@@ -93,6 +93,8 @@ protected:
         int64_t fullPrefixBlocksBeforeQueryDrop = -1;
         int64_t beforeTairTokens = -1;
         int64_t readyOnlyHbmTokens = -1;
+        bool executionLoadTracked = false;
+        std::optional<bool> executionLoadIncluded;
     };
 
     struct AdmissionPredictionAudit {

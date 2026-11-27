@@ -3704,10 +3704,19 @@ TEST_F(GeometryIntegrationTest,
         external->_external = false;
         external->cacheRevision = 506;
         external->hbmBlocks = {0, 0};
+        // Report the actual per-member decision, including false. Never infer
+        // the marker from the first batch member or from a later HBM view.
+        context._scheduleNodes[0]._workload.executionLoadTracked = true;
+        context._decisions[0].executionLoadIncluded = false;
+        context._decisions[1].executionLoadIncluded = true;
         const auto audit =
             MasterScheduleResultKernel::getAdmissionPredictionAudit(context, 0, true);
         ASSERT_TRUE(audit.valid);
         ASSERT_EQ(2u, audit.frozenExecutionInputs.size());
+        EXPECT_TRUE(audit.frozenExecutionInputs[0].executionLoadTracked);
+        EXPECT_TRUE(audit.frozenExecutionInputs[1].executionLoadTracked);
+        EXPECT_EQ(std::optional<bool>(false), audit.frozenExecutionInputs[0].executionLoadIncluded);
+        EXPECT_EQ(std::optional<bool>(true), audit.frozenExecutionInputs[1].executionLoadIncluded);
         ASSERT_TRUE(audit.cacheObservation.has_value());
         EXPECT_EQ(489u, audit.cacheObservation->revision);
         EXPECT_EQ(8, audit.frozenExecutionInputs[0].fullPrefixBlocksBeforeQueryDrop);
@@ -3748,9 +3757,20 @@ TEST_F(GeometryIntegrationTest,
         missing->observation.readyOnlyHbmBlockCounts.reset();
         std::shared_ptr<const NaviSchedExecutionCacheInputCapture> published = missing;
         std::atomic_store(&context._scheduleNodes[0]._executionCacheInputs, published);
+        context._scheduleNodes[0]._workload.executionLoadTracked = false;
+        context._decisions[0].executionLoadIncluded.reset();
+        context._decisions[1].executionLoadIncluded = false;
         const auto unknown =
             MasterScheduleResultKernel::getAdmissionPredictionAudit(context, 0, true);
         ASSERT_EQ(2u, unknown.frozenExecutionInputs.size());
+        EXPECT_FALSE(unknown.frozenExecutionInputs[0].executionLoadTracked);
+        EXPECT_FALSE(unknown.frozenExecutionInputs[1].executionLoadTracked);
+        EXPECT_FALSE(unknown.frozenExecutionInputs[0].executionLoadIncluded.has_value());
+        EXPECT_EQ(std::optional<bool>(false), unknown.frozenExecutionInputs[1].executionLoadIncluded);
+        // Earlier audit values are frozen copies, including their marker source.
+        EXPECT_TRUE(audit.frozenExecutionInputs[0].executionLoadTracked);
+        EXPECT_EQ(std::optional<bool>(false), audit.frozenExecutionInputs[0].executionLoadIncluded);
+        EXPECT_EQ(std::optional<bool>(true), audit.frozenExecutionInputs[1].executionLoadIncluded);
         EXPECT_EQ(-1, unknown.frozenExecutionInputs[0].readyOnlyHbmTokens);
         EXPECT_EQ(-1, unknown.frozenExecutionInputs[1].readyOnlyHbmTokens);
         EXPECT_EQ(24576, audit.frozenExecutionInputs[0].readyOnlyHbmTokens);

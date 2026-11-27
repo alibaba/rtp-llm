@@ -443,7 +443,9 @@ MasterScheduleResultKernel::getAdmissionPredictionAudit(
                                  inputs->observation.readyOnlyHbmBlockCounts->at(storage) >= 0
                              ? inputs->observation.readyOnlyHbmBlockCounts->at(storage) *
                                    context._requests[storage].request.blockSize
-                             : -1});
+                             : -1,
+                         node._workload.executionLoadTracked,
+                         context._decisions[member].executionLoadIncluded});
                 }
             }
         }
@@ -493,7 +495,8 @@ void MasterScheduleResultKernel::logAdmissionPredictions(
                 "block_pool_full_ready_checksum=%lu block_pool_tail_ready_checksum=%lu "
                 "full_prefix_before_query_drop_blocks=%ld "
                 "tair_query_status=%s before_tair_hit_tokens=%ld after_tair_hit_tokens=%ld "
-                "ready_only_hbm_hit_tokens=%ld",
+                "ready_only_hbm_hit_tokens=%ld execution_load_tracked=%d "
+                "execution_load_included=%d",
                 admissionPhase, context.getScheduleTimeUs(), decision.scheduleId, decision.batchId,
                 entry.requestId, node.getAgentId().c_str(),
                 node.getLatencyModelRevision(), input.promptTokens, input.computedTokens,
@@ -505,7 +508,9 @@ void MasterScheduleResultKernel::logAdmissionPredictions(
                 observation.tailReadyChecksum, entry.fullPrefixBlocksBeforeQueryDrop,
                 nodeIndex < context._tairKvcmQueryStatuses.size()
                     ? context._tairKvcmQueryStatuses[nodeIndex].c_str() : "NOT_CONFIGURED",
-                entry.beforeTairTokens, input.computedTokens, entry.readyOnlyHbmTokens);
+                entry.beforeTairTokens, input.computedTokens, entry.readyOnlyHbmTokens,
+                int(entry.executionLoadTracked),
+                entry.executionLoadIncluded ? (*entry.executionLoadIncluded ? 1 : 0) : -1);
         }
         const auto localCache = std::atomic_load(&node._localCacheBlockCounts);
         const auto localHitTokens =
