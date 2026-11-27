@@ -1070,6 +1070,8 @@ def _combine_topk_swa_indices_cp_kernel(
     BLOCK_T: tl.constexpr,
     BLOCK_C: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    DENSE_ARANGE_TOPK: tl.constexpr,
+    ALIGNED_OUT: tl.constexpr,
 ):
     """CP-aware fused combine.
 
@@ -1081,24 +1083,36 @@ def _combine_topk_swa_indices_cp_kernel(
     block_t = tl.program_id(0)
     block_c = tl.program_id(1)
     rows = block_t * BLOCK_T + tl.arange(0, BLOCK_T)
-    cols = block_c * BLOCK_C + tl.arange(0, BLOCK_C)
+    if ALIGNED_OUT:
+        cols = tl.max_contiguous(
+            tl.multiple_of(block_c * BLOCK_C + tl.arange(0, BLOCK_C), [4]),
+            [BLOCK_C],
+        )
+        col_mask = (cols // 4) < (COMBINED_TOPK // 4)
+    else:
+        cols = block_c * BLOCK_C + tl.arange(0, BLOCK_C)
+        col_mask = cols < COMBINED_TOPK
     row_mask = rows < num_tokens
-    col_mask = cols < COMBINED_TOPK
 
-    gp = tl.load(global_positions_ptr + rows, mask=row_mask, other=0).to(tl.int64)
+    gp = tl.load(global_positions_ptr + rows, mask=row_mask, other=0).to(tl.int32)
     if IS_VARLEN:
-        req = tl.load(req_id_per_token_ptr + rows, mask=row_mask, other=0).to(tl.int64)
-        prefix = tl.load(prefix_lengths_ptr + req, mask=row_mask, other=0).to(tl.int64)
+        req = tl.load(req_id_per_token_ptr + rows, mask=row_mask, other=0).to(
+            tl.int32
+        )
+        prefix = tl.load(prefix_lengths_ptr + req, mask=row_mask, other=0).to(
+            tl.int32
+        )
         req_base = req * M
     else:
-        prefix = tl.full((BLOCK_T,), sp_int, tl.int64)
-        req_base = tl.zeros((BLOCK_T,), tl.int64)
+        prefix = tl.full((BLOCK_T,), sp_int, tl.int32)
+        req_base = tl.zeros((BLOCK_T,), tl.int32)
 
     p = tl.minimum(prefix, WINDOW_SIZE - 1)
     gather_start = prefix - p
     topk_len = tl.minimum((gp + 1) // COMPRESS_RATIO, TOP_K)
     swa_len = tl.minimum(gp + 1, WINDOW_SIZE)
     combined_len = topk_len + swa_len
+    swa_base = req_base + N + gp - gather_start - swa_len + 1 - topk_len
 
     col = cols[None, :]
     # int64 row indexing — long-context CP4 HCA L3 prefill of a 1.1M-token
@@ -1109,34 +1123,38 @@ def _combine_topk_swa_indices_cp_kernel(
     # at the next sync (typically caught at ``_ws_sync('combine_topk_cp')``
     # in ``Attention._attn_via_workspace``). Same wrap exists on
     # ``combined_indices_stride`` (9600) at ~2.63B. Promote the row
-    # broadcast once and reuse for both pointer expressions.
-    row = rows[:, None].to(tl.int64)
+    # broadcast once and reuse for both pointer expressions while keeping all
+    # 2D value intermediates in int32.
+    row_i64 = rows[:, None].to(tl.int64)
     in_topk = col < topk_len[:, None]
     in_swa = (col >= topk_len[:, None]) & (col < combined_len[:, None])
 
-    topk_val = tl.load(
-        topk_indices_ptr + row * topk_indices_stride + col,
-        mask=row_mask[:, None] & col_mask[None, :] & in_topk,
-        other=0,
-    ).to(tl.int64)
-    swa_off = col - topk_len[:, None]
-    swa_val = (
-        req_base[:, None]
-        + N
-        + gp[:, None]
-        - gather_start[:, None]
-        - swa_len[:, None]
-        + 1
-        + swa_off
-    )
+    if DENSE_ARANGE_TOPK:
+        topk_val = col.to(tl.int32)
+    else:
+        topk_val = tl.load(
+            topk_indices_ptr + row_i64 * topk_indices_stride.to(tl.int64) + col,
+            mask=row_mask[:, None] & col_mask[None, :] & in_topk,
+            other=0,
+        ).to(tl.int32)
+    swa_val = swa_base[:, None] + col
     out_val = tl.where(
         in_topk,
         req_base[:, None] + topk_val,
         tl.where(in_swa, swa_val, -1),
     ).to(tl.int32)
 
+    if ALIGNED_OUT:
+        c_stride = combined_indices_stride.to(tl.int64) * 4
+        out_off = tl.max_contiguous(
+            tl.multiple_of(row_i64 * c_stride + col, [1, 4]),
+            [1, BLOCK_C],
+        )
+    else:
+        out_off = row_i64 * combined_indices_stride.to(tl.int64) + col
+
     tl.store(
-        combined_indices_ptr + row * combined_indices_stride + col,
+        combined_indices_ptr + out_off,
         out_val,
         mask=row_mask[:, None] & col_mask[None, :],
     )
@@ -1161,6 +1179,7 @@ def combine_topk_swa_indices_cp(
     prefix_lengths: torch.Tensor | None = None,
     *,
     flash_mla_indices: bool = False,
+    dense_arange_topk: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """CP-aware fused combine for ``flash_mla_sparse_fwd``.
 
@@ -1228,15 +1247,23 @@ def combine_topk_swa_indices_cp(
         req_ptr = global_positions
         prefix_ptr = global_positions
 
-    BLOCK_T = 16
-    BLOCK_C = 128
+    BLOCK_T = 8
+    BLOCK_C = 256
+    out_stride = int(combined_indices.stride(0))
+    aligned_out = (
+        (combined_topk % 4 == 0)
+        and (out_stride % 4 == 0)
+        and ((combined_indices.data_ptr() % 16) == 0)
+        and (BLOCK_C % 4 == 0)
+    )
+    out_stride_arg = out_stride // 4 if aligned_out else out_stride
     grid = (
         triton.cdiv(num_tokens, BLOCK_T),
         triton.cdiv(combined_topk, BLOCK_C),
     )
     _combine_topk_swa_indices_cp_kernel[grid](
         combined_indices,
-        combined_indices.stride(0),
+        out_stride_arg,
         combined_lens,
         topk_indices,
         topk_indices.stride(0),
@@ -1254,6 +1281,8 @@ def combine_topk_swa_indices_cp(
         BLOCK_T=BLOCK_T,
         BLOCK_C=BLOCK_C,
         IS_VARLEN=bool(is_varlen),
+        DENSE_ARANGE_TOPK=bool(dense_arange_topk),
+        ALIGNED_OUT=bool(aligned_out),
         num_warps=4,
     )
     return combined_indices, combined_lens

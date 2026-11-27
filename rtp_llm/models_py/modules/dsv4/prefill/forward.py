@@ -101,6 +101,16 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple
 
 import torch
 
+try:
+    import triton
+    import triton.language as tl
+
+    _TRITON_AVAILABLE = True
+except Exception:  # pragma: no cover
+    triton = None
+    tl = None
+    _TRITON_AVAILABLE = False
+
 from rtp_llm.models_py.modules.dsv4 import _profiler
 from rtp_llm.models_py.modules.dsv4.cp import (
     build_cp_context_for_forward,
@@ -327,6 +337,95 @@ def set_cp_info(
         v4.set_cp_info(None, 1, 0)
 
 
+_BROADCAST_HC_MAX_BLOCK_D = 1024
+
+if _TRITON_AVAILABLE:
+
+    @triton.jit(do_not_specialize=["T", "dim_i32"])
+    def _broadcast_hc_streams_kernel(
+        in_ptr,
+        out_ptr,
+        T,
+        dim_i32,
+        HC_MULT: tl.constexpr,
+        BLOCK_D: tl.constexpr,
+        EVEN_D: tl.constexpr,
+    ):
+        """Load each [dim_i32] row once and store HC_MULT copies with 128-bit v4 vectorization."""
+        pid_t = tl.program_id(0).to(tl.int64)
+        if pid_t >= T:
+            return
+        pid_d = tl.program_id(1).to(tl.int64)
+        dim_i64 = tl.multiple_of(dim_i32.to(tl.int64), 4)
+        cols = pid_d * BLOCK_D + tl.arange(0, BLOCK_D)
+        in_base = in_ptr + tl.multiple_of(pid_t * dim_i64, 4)
+        out_base = out_ptr + tl.multiple_of(pid_t * HC_MULT * dim_i64, 4)
+        if EVEN_D:
+            vals = tl.load(in_base + cols)
+            for s in tl.static_range(HC_MULT):
+                tl.store(
+                    out_base + tl.multiple_of(s * dim_i64, 4) + cols,
+                    vals,
+                )
+        else:
+            mask = cols < dim_i32
+            vals = tl.load(in_base + cols, mask=mask)
+            for s in tl.static_range(HC_MULT):
+                tl.store(
+                    out_base + tl.multiple_of(s * dim_i64, 4) + cols,
+                    vals,
+                    mask=mask,
+                )
+
+
+def broadcast_hc_streams(h: torch.Tensor, hc_mult: int) -> torch.Tensor:
+    """Broadcast embedded hidden states ``[T, dim]`` to ``[T, hc_mult, dim]``.
+
+    Uses a single-pass 128-bit vectorized Triton kernel on CUDA for contiguous
+    16-byte-aligned tensors and falls back to ``unsqueeze(-2).repeat(...)`` on
+    CPU, empty batches, unaligned inputs, or non-contiguous inputs.
+    """
+    if (
+        not _TRITON_AVAILABLE
+        or not h.is_cuda
+        or h.dim() != 2
+        or hc_mult <= 0
+        or h.numel() == 0
+        or not h.is_contiguous()
+        or h.element_size() not in (1, 2, 4)
+        or (h.size(1) * h.element_size()) % 16 != 0
+        or h.data_ptr() % 16 != 0
+    ):
+        return h.unsqueeze(-2).repeat(1, hc_mult, 1)
+
+    T, dim = int(h.shape[0]), int(h.shape[1])
+    out = torch.empty((T, hc_mult, dim), dtype=h.dtype, device=h.device)
+    if out.data_ptr() % 16 != 0:
+        out.copy_(h.unsqueeze(-2).expand(T, hc_mult, dim))
+        return out
+
+    dim_i32 = (dim * h.element_size()) // 4
+    if dim_i32 % _BROADCAST_HC_MAX_BLOCK_D == 0:
+        block_d = _BROADCAST_HC_MAX_BLOCK_D
+        num_warps = 8
+    else:
+        block_d = 512
+        num_warps = 4
+    even_d = (dim_i32 % block_d) == 0
+    grid = (T, (dim_i32 + block_d - 1) // block_d)
+    _broadcast_hc_streams_kernel[grid](
+        h.view(torch.int32),
+        out.view(torch.int32),
+        T,
+        dim_i32,
+        HC_MULT=int(hc_mult),
+        BLOCK_D=block_d,
+        EVEN_D=even_d,
+        num_warps=num_warps,
+    )
+    return out
+
+
 def forward_layers(
     v4: V4Transformer,
     kv_cache: Optional[KVCache],
@@ -443,7 +542,7 @@ def forward_layers(
 
     if prepare_hidden_fn is None:
         h = v4.embed(input_ids)  # [T_total, dim]
-        h = h.unsqueeze(-2).repeat(1, v4.hc_mult, 1)  # [T_total, hc, dim]
+        h = broadcast_hc_streams(h, v4.hc_mult)  # [T_total, hc, dim]
     else:
         h = prepare_hidden_fn(input_ids=input_ids, positions=positions)
 

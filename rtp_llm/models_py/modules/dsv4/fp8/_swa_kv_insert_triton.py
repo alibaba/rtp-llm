@@ -238,48 +238,92 @@ def _row_scatter_kernel(
     dst_stride_row,
     dst_stride_col,
     slot_stride,
+    BLOCK_N: tl.constexpr,
     BLOCK_D: tl.constexpr,
     MASK_NEGATIVE: tl.constexpr,
     CONTIGUOUS_COLS: tl.constexpr,
+    STRIDE_UNIT: tl.constexpr,
     TRAP_INVALID_KV_ACCESS: tl.constexpr,
 ):
     """Vectorized 2D row scatter: ``dst[slots[r]] = src[r]`` for ``0 <= r < N``.
 
-    One program handles ``(row, col_tile)``. Negative slots are skipped
-    in-kernel when ``MASK_NEGATIVE`` is enabled without host sync.
+    Each CTA processes up to ``BLOCK_N`` rows × ``BLOCK_D`` columns with
+    128-bit vectorization hints when ``STRIDE_UNIT > 1``. Negative slots are
+    skipped in-kernel when ``MASK_NEGATIVE`` is enabled without host sync.
     """
     pid_n = tl.program_id(0).to(tl.int64)
-    pid_d = tl.program_id(1)
-    if pid_n >= N:
-        return
+    pid_d = tl.program_id(1).to(tl.int64)
 
-    slot = tl.load(slots_ptr + pid_n * slot_stride.to(tl.int64)).to(tl.int64)
+    row_offs = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    row_mask = row_offs < N
+
+    slots = tl.load(
+        slots_ptr + row_offs * slot_stride.to(tl.int64),
+        mask=row_mask,
+        other=0,
+    ).to(tl.int64)
     if MASK_NEGATIVE:
-        if slot < 0:
-            return
-    if slot < 0 or slot >= M_dst:
+        active_row = row_mask & (slots >= 0)
+        invalid = active_row & (slots >= M_dst)
+    else:
+        active_row = row_mask
+        invalid = active_row & ((slots < 0) | (slots >= M_dst))
+
+    if tl.max(invalid.to(tl.int32), axis=0) != 0:
         _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
+        if MASK_NEGATIVE:
+            active_row = active_row & (slots < M_dst)
+        else:
+            active_row = active_row & (slots >= 0) & (slots < M_dst)
+
+    if tl.max(active_row.to(tl.int32), axis=0) == 0:
         return
 
-    col_offs = pid_d * BLOCK_D + tl.arange(0, BLOCK_D)
-    col_mask = col_offs < D
+    safe_slots = tl.where(active_row, slots, 0)
 
-    src_row_ptr = src_ptr + pid_n * src_stride_row.to(tl.int64)
-    dst_row_ptr = dst_ptr + slot * dst_stride_row.to(tl.int64)
-
-    if CONTIGUOUS_COLS:
-        vals = tl.load(src_row_ptr + col_offs, mask=col_mask)
-        tl.store(dst_row_ptr + col_offs, vals, mask=col_mask)
+    if STRIDE_UNIT > 1:
+        col_offs = tl.max_contiguous(
+            tl.multiple_of(pid_d * BLOCK_D + tl.arange(0, BLOCK_D), [STRIDE_UNIT]),
+            [BLOCK_D],
+        )
+        col_mask = (col_offs // STRIDE_UNIT) < (D // STRIDE_UNIT)
+        s_src = src_stride_row.to(tl.int64) * STRIDE_UNIT
+        s_dst = dst_stride_row.to(tl.int64) * STRIDE_UNIT
+        src_off = tl.max_contiguous(
+            tl.multiple_of(
+                row_offs[:, None] * s_src + col_offs[None, :],
+                [1, STRIDE_UNIT],
+            ),
+            [1, BLOCK_D],
+        )
+        dst_off = tl.max_contiguous(
+            tl.multiple_of(
+                safe_slots[:, None] * s_dst + col_offs[None, :],
+                [1, STRIDE_UNIT],
+            ),
+            [1, BLOCK_D],
+        )
     else:
-        vals = tl.load(
-            src_row_ptr + col_offs.to(tl.int64) * src_stride_col.to(tl.int64),
-            mask=col_mask,
-        )
-        tl.store(
-            dst_row_ptr + col_offs.to(tl.int64) * dst_stride_col.to(tl.int64),
-            vals,
-            mask=col_mask,
-        )
+        col_offs = pid_d * BLOCK_D + tl.arange(0, BLOCK_D)
+        col_mask = col_offs < D
+        if CONTIGUOUS_COLS:
+            src_off = row_offs[:, None] * src_stride_row.to(tl.int64) + col_offs[None, :]
+            dst_off = (
+                safe_slots[:, None] * dst_stride_row.to(tl.int64) + col_offs[None, :]
+            )
+        else:
+            src_off = (
+                row_offs[:, None] * src_stride_row.to(tl.int64)
+                + col_offs[None, :].to(tl.int64) * src_stride_col.to(tl.int64)
+            )
+            dst_off = (
+                safe_slots[:, None] * dst_stride_row.to(tl.int64)
+                + col_offs[None, :].to(tl.int64) * dst_stride_col.to(tl.int64)
+            )
+
+    tile_mask = active_row[:, None] & col_mask[None, :]
+    vals = tl.load(src_ptr + src_off, mask=tile_mask, other=0)
+    tl.store(dst_ptr + dst_off, vals, mask=tile_mask)
 
 
 def _can_reinterpret_row_width(t: torch.Tensor, target_bytes: int) -> bool:
@@ -300,9 +344,13 @@ def _can_reinterpret_row_width(t: torch.Tensor, target_bytes: int) -> bool:
 def _reinterpret_for_scatter(
     dst: torch.Tensor,
     src: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Widen aligned contiguous-column rows to 64/32/16-bit integer words."""
+) -> tuple[torch.Tensor, torch.Tensor, int]:
+    """Widen aligned contiguous-column rows and return ``(dst_w, src_w, stride_unit)``."""
     if dst.stride(1) == 1 and src.stride(1) == 1:
+        if _can_reinterpret_row_width(dst, 16) and _can_reinterpret_row_width(src, 16):
+            dst_w = dst if dst.dtype == torch.int64 else dst.view(torch.int64)
+            src_w = src if src.dtype == torch.int64 else src.view(torch.int64)
+            return dst_w, src_w, 2
         for word_dtype, word_bytes in (
             (torch.int64, 8),
             (torch.int32, 4),
@@ -311,10 +359,10 @@ def _reinterpret_for_scatter(
             if _can_reinterpret_row_width(
                 dst, word_bytes
             ) and _can_reinterpret_row_width(src, word_bytes):
-                return dst.view(word_dtype), src.view(word_dtype)
+                return dst.view(word_dtype), src.view(word_dtype), 1
     if dst.element_size() == 1 and dst.dtype != torch.uint8:
-        return dst.view(torch.uint8), src.view(torch.uint8)
-    return dst, src
+        return dst.view(torch.uint8), src.view(torch.uint8), 1
+    return dst, src, 1
 
 
 def row_scatter(
@@ -367,24 +415,20 @@ def row_scatter(
             )
         return
 
-    dst_w, src_w = _reinterpret_for_scatter(dst, src)
+    dst_w, src_w, stride_unit = _reinterpret_for_scatter(dst, src)
     d_eff = int(src_w.shape[1])
     m_dst = int(dst_w.shape[0])
+    block_n = 8
     if d_eff <= 64:
         block_d = 64
-        num_warps = 2
     elif d_eff <= 128:
         block_d = 128
-        num_warps = 2
-    elif d_eff <= 256:
-        block_d = 256
-        num_warps = 4
     else:
-        block_d = 512
-        num_warps = 4
+        block_d = 256
+    num_warps = 4
 
     contiguous_cols = dst_w.stride(1) == 1 and src_w.stride(1) == 1
-    grid = (n_rows, triton.cdiv(d_eff, block_d))
+    grid = (triton.cdiv(n_rows, block_n), triton.cdiv(d_eff, block_d))
     _row_scatter_kernel[grid](
         dst_w,
         slots_1d,
@@ -392,14 +436,16 @@ def row_scatter(
         N=n_rows,
         D=d_eff,
         M_dst=m_dst,
-        src_stride_row=int(src_w.stride(0)),
+        src_stride_row=int(src_w.stride(0)) // stride_unit,
         src_stride_col=int(src_w.stride(1)),
-        dst_stride_row=int(dst_w.stride(0)),
+        dst_stride_row=int(dst_w.stride(0)) // stride_unit,
         dst_stride_col=int(dst_w.stride(1)),
         slot_stride=int(slots_1d.stride(0)),
+        BLOCK_N=block_n,
         BLOCK_D=block_d,
         MASK_NEGATIVE=mask_negative,
         CONTIGUOUS_COLS=contiguous_cols,
+        STRIDE_UNIT=stride_unit,
         TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access,
         num_warps=num_warps,
     )

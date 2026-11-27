@@ -100,6 +100,7 @@ _SHARED_COS_SIN_CACHE: weakref.WeakValueDictionary[
 class _CPStateReadSelection:
     block_ids: torch.Tensor
     read_block_table: torch.Tensor
+    compacted: bool = False
 
 
 def _select_cp_state_read_tail_blocks(
@@ -229,6 +230,45 @@ _CP_STATE_READ_SELECTION_CACHE: (
 ) = weakref.WeakKeyDictionary()
 
 
+def _compact_cp_state_read_selection(
+    selection: _CPStateReadSelection,
+) -> _CPStateReadSelection:
+    """Drop dummy block-id 0 entries (cold requests) from tail-block selection."""
+    if selection.compacted or int(selection.block_ids.numel()) == 0:
+        return selection
+    valid = selection.block_ids > 0
+    active_slots = torch.nonzero(valid).squeeze(-1)
+    if int(active_slots.numel()) == int(selection.block_ids.numel()):
+        return _CPStateReadSelection(
+            block_ids=selection.block_ids,
+            read_block_table=selection.read_block_table,
+            compacted=True,
+        )
+    new_block_ids = selection.block_ids.index_select(0, active_slots).contiguous()
+    slot_remap = torch.zeros(
+        int(selection.block_ids.numel()) + 1,
+        dtype=selection.read_block_table.dtype,
+        device=selection.read_block_table.device,
+    )
+    if int(active_slots.numel()) > 0:
+        slot_remap[active_slots + 1] = torch.arange(
+            1,
+            int(active_slots.numel()) + 1,
+            dtype=slot_remap.dtype,
+            device=slot_remap.device,
+        )
+    new_read_bt = (
+        slot_remap.index_select(0, selection.read_block_table.reshape(-1).long())
+        .view_as(selection.read_block_table)
+        .contiguous()
+    )
+    return _CPStateReadSelection(
+        block_ids=new_block_ids,
+        read_block_table=new_read_bt,
+        compacted=True,
+    )
+
+
 def _build_cp_full_state_read_cache(
     state_cache: torch.Tensor,
     block_table: torch.Tensor,
@@ -238,24 +278,15 @@ def _build_cp_full_state_read_cache(
     token_count: int = 0,
     state_tokens_per_block: int = 0,
     selection_cache_key: Optional[Any] = None,
+    tail_rows: int = 0,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Gather CP-sliced fixed-state blocks into a compact full-ring read cache.
 
     CP prefill stores INDEXER/CSA/HCA state as intra-block slices: each rank
     owns ``local_eb`` rows of the full ``local_eb * cp_size`` state ring.
-    The fused compressor may still need to read prefix-cache history that
-    spans all state-ring rows. For that read path only, gather the state
-    blocks the current compressor window can touch (``[seq_start -
-    token_count + 1, seq_start)`` per request) and keep the write path
-    local/sliced. When ``seq_start_per_req`` / ``token_count`` are not
-    provided the conservative full-table gather is used.
-
-    ``selection_cache_key`` (typically the per-attention-type
-    ``CompressorMeta``) is used to dedup the ``_select_cp_state_read_blocks``
-    work across the ~40 layers of a prefill: the selection only depends on
-    inputs that are invariant within a forward, so all layers sharing the
-    same key reuse the first layer's selection. Passing ``None`` disables
-    the cache.
+    Skips dummy block 0 (cold requests) and, when ``tail_rows > 0`` under
+    block-aligned prefix hits, broadcasts/gathers only the last ``tail_rows``
+    rows of each cached tail block.
     """
     if cp_size <= 1:
         return state_cache, block_table
@@ -277,22 +308,62 @@ def _build_cp_full_state_read_cache(
             token_count=token_count,
             state_tokens_per_block=state_tokens_per_block,
         )
+    if not selection.compacted:
+        selection = _compact_cp_state_read_selection(selection)
         if selection_cache_key is not None:
             try:
                 _CP_STATE_READ_SELECTION_CACHE[selection_cache_key] = selection
             except TypeError:
-                # Some keys (e.g. tuples of tensors) aren't weak-referencable;
-                # gracefully fall back to recomputing on every layer.
                 pass
     num_blocks = int(selection.block_ids.numel())
+    full_eb = cp_size * local_eb
 
-    read_cache = torch.empty(
-        (num_blocks + 1, cp_size * local_eb, hidden),
+    read_cache = torch.zeros(
+        (num_blocks + 1, full_eb, hidden),
         dtype=state_cache.dtype,
         device=state_cache.device,
     )
     if num_blocks == 0:
-        read_cache.zero_()
+        return read_cache, selection.read_block_table
+
+    if 0 < tail_rows <= local_eb and tail_rows < full_eb:
+        if torch.distributed.is_initialized():
+            from rtp_llm.models_py.distributed import collective_torch
+
+            pg = collective_torch._get_group(Group.TP)
+            ranks = torch.distributed.get_process_group_ranks(pg)
+            if len(ranks) == cp_size:
+                owner_global = ranks[cp_size - 1]
+                if torch.distributed.get_rank() == owner_global:
+                    tail_buf = (
+                        state_cache.index_select(0, selection.block_ids)[
+                            :, local_eb - tail_rows :
+                        ]
+                        .contiguous()
+                    )
+                else:
+                    tail_buf = torch.empty(
+                        (num_blocks, tail_rows, hidden),
+                        dtype=state_cache.dtype,
+                        device=state_cache.device,
+                    )
+                with record_function_range(
+                    "dsv4.cp.broadcast.state_read_tail.sync.launch"
+                ):
+                    torch.distributed.broadcast(tail_buf, src=owner_global, group=pg)
+                read_cache[1:, full_eb - tail_rows :].copy_(tail_buf)
+                return read_cache, selection.read_block_table
+
+        local_tail = (
+            state_cache.index_select(0, selection.block_ids)[:, local_eb - tail_rows :]
+            .reshape(num_blocks * tail_rows, hidden)
+            .contiguous()
+        )
+        with record_function_range("dsv4.cp.all_gather.state_read_tail.sync.launch"):
+            gathered = all_gather(local_tail, group=Group.TP)
+        read_cache[1:, full_eb - tail_rows :].copy_(
+            gathered.view(cp_size, num_blocks, tail_rows, hidden)[cp_size - 1]
+        )
         return read_cache, selection.read_block_table
 
     local_blocks = state_cache.index_select(0, selection.block_ids)
@@ -308,11 +379,21 @@ def _build_cp_full_state_read_cache(
 def _cp_sliced_state_read_needed(
     meta: "CompressorMeta", cp_ctx: Optional[CPContext], raw_disabled: bool
 ) -> bool:
-    if raw_disabled or cp_ctx is None or cp_ctx.cp_size <= 1:
+    if raw_disabled:
+        if cp_ctx is None or cp_ctx.cp_size <= 1:
+            return False
+        if not getattr(cp_ctx, "kv_cache_sharded", False):
+            return False
+        return bool(meta.has_prefix)
+    if cp_ctx is None or cp_ctx.cp_size <= 1:
         return False
     if not getattr(cp_ctx, "kv_cache_sharded", False):
         return False
-    return bool(meta.has_prefix)
+    if not meta.has_prefix or meta.can_skip_state_cache_read:
+        return False
+    if not meta.any_cached_boundary_global:
+        return False
+    return True
 
 
 @dataclass(frozen=True)
@@ -344,17 +425,16 @@ class CompressorMeta:
     token_to_req: torch.Tensor
     has_prefix: bool
     is_batched: bool = False
-    # Phase-3a part 4c — varlen raw path. Populated when is_batched;
-    # otherwise the legacy scalar-seq_start path is used.
-    #   seq_start_per_req[b] = abs position of req b's first new token (sp_b)
-    #   cu_seq_per_req[b+1]  = end offset of req b in flat kv_flat axis
-    # Both are int64 per-request metadata for the fused writer raw path.
     seq_start_per_req: Optional[torch.Tensor] = None
     cu_seq_per_req: Optional[torch.Tensor] = None
-    # Decode indexer hot path: per-token compressed length
-    # ``floor((position + 1) / ratio)``. Built once in decode metadata so
-    # CSA indexer layers do not relaunch tiny add/div kernels.
     compressed_lens_per_token: Optional[torch.Tensor] = None
+    active_state_indices: Optional[torch.Tensor] = None
+    raw_boundary_indices: Optional[torch.Tensor] = None
+    cached_boundary_indices: Optional[torch.Tensor] = None
+    active_boundary_indices: Optional[torch.Tensor] = None
+    can_skip_state_cache_read: bool = False
+    cp_state_tail_rows: int = 0
+    any_cached_boundary_global: bool = True
 
 
 def _cache_cp_state_read_selection(
@@ -375,16 +455,151 @@ def _cache_cp_state_read_selection(
         return meta
     try:
         with record_function_range("dsv4.fp8.compressor.meta.cp_state_read_selection"):
-            _CP_STATE_READ_SELECTION_CACHE[meta] = _select_cp_state_read_blocks(
+            sel = _select_cp_state_read_blocks(
                 state_cache,
                 block_table,
                 seq_start_per_req=meta.seq_start_per_req,
                 token_count=token_count,
                 state_tokens_per_block=state_tokens_per_block,
             )
+            _CP_STATE_READ_SELECTION_CACHE[meta] = _compact_cp_state_read_selection(
+                sel
+            )
     except TypeError:
         pass
     return meta
+
+
+def _resolve_host_prefixes(
+    compressor: "CompressorFP8",
+    seq_start_per_req: Optional[torch.Tensor],
+    prefix_lengths_host: Optional[Tuple[int, ...]] = None,
+) -> Optional[Tuple[int, ...]]:
+    if prefix_lengths_host is not None:
+        return tuple(int(p) for p in prefix_lengths_host)
+    cp_ctx = getattr(compressor, "_cp_ctx", None)
+    if cp_ctx is not None:
+        cp_host = getattr(cp_ctx, "prefix_lengths_host", None)
+        if cp_host is not None:
+            return tuple(int(p) for p in cp_host)
+        if getattr(cp_ctx, "prefix_lengths", None) is None:
+            return (int(getattr(cp_ctx, "prefix_length", 0)),)
+    if seq_start_per_req is not None and seq_start_per_req.device.type == "cpu":
+        return tuple(int(v) for v in seq_start_per_req.tolist())
+    return None
+
+
+def _build_compacted_slot_indices(
+    positions: torch.Tensor,
+    b_idx: torch.Tensor,
+    state_slots: torch.Tensor,
+    kv_slots: torch.Tensor,
+    seq_start_per_req: torch.Tensor,
+    *,
+    has_prefix: bool,
+    can_skip_state_cache_read: bool,
+    window_size: int,
+    compress_ratio: int,
+) -> Tuple[
+    Optional[torch.Tensor],
+    Optional[torch.Tensor],
+    Optional[torch.Tensor],
+    Optional[torch.Tensor],
+    bool,
+]:
+    """Compact active state & boundary indices once per step outside CUDA graph capture."""
+    N = int(positions.shape[0])
+    if N <= 0:
+        return None, None, None, None, False
+    if positions.is_cuda and torch.cuda.is_current_stream_capturing():
+        return (
+            None,
+            None,
+            None,
+            None,
+            bool(has_prefix and not can_skip_state_cache_read),
+        )
+
+    active_state_indices: Optional[torch.Tensor] = None
+    if N > 32:
+        active_state_indices = (
+            torch.nonzero(state_slots >= 0).squeeze(-1).to(torch.int32).contiguous()
+        )
+
+    active_kv_mask = kv_slots >= 0
+    active_boundary_indices = (
+        torch.nonzero(active_kv_mask).squeeze(-1).to(torch.int32).contiguous()
+    )
+    if can_skip_state_cache_read or not has_prefix:
+        return (
+            active_state_indices,
+            active_boundary_indices,
+            positions.new_empty((0,), dtype=torch.int32),
+            active_boundary_indices,
+            False,
+        )
+
+    # Derive collective participation from rank-invariant global coordinates
+    # rather than rank-local active_boundary_indices (which can be empty on
+    # non-owning CP ranks under sharded KV page-RR ownership).
+    starts = seq_start_per_req.to(
+        device=positions.device, dtype=torch.long
+    ).reshape(-1)
+    if int(starts.numel()) == 1:
+        all_starts = starts.expand_as(positions)
+    else:
+        all_starts = starts.index_select(0, b_idx.long())
+    global_need_cache = (
+        (positions >= 0)
+        & (((positions + 1) % int(compress_ratio)) == 0)
+        & (all_starts > 0)
+        & ((positions - window_size + 1) < all_starts)
+    )
+    if int(active_boundary_indices.numel()) == 0:
+        any_global = bool(global_need_cache.any().item())
+        return (
+            active_state_indices,
+            active_boundary_indices,
+            positions.new_empty((0,), dtype=torch.int32),
+            active_boundary_indices,
+            any_global,
+        )
+
+    active_idx_long = active_boundary_indices.long()
+    need_cache = global_need_cache.index_select(0, active_idx_long)
+    n_cached_val, any_global_val = torch.stack(
+        [
+            need_cache.sum().to(torch.int64),
+            global_need_cache.any().to(torch.int64),
+        ]
+    ).tolist()
+    n_cached = int(n_cached_val)
+    any_global = bool(any_global_val)
+    if n_cached == 0:
+        return (
+            active_state_indices,
+            active_boundary_indices,
+            positions.new_empty((0,), dtype=torch.int32),
+            active_boundary_indices,
+            any_global,
+        )
+    if n_cached == int(active_boundary_indices.numel()):
+        return (
+            active_state_indices,
+            positions.new_empty((0,), dtype=torch.int32),
+            active_boundary_indices,
+            active_boundary_indices,
+            any_global,
+        )
+    order = torch.argsort(need_cache.to(torch.uint8), descending=True)
+    sorted_active = active_boundary_indices.index_select(0, order).contiguous()
+    return (
+        active_state_indices,
+        sorted_active[n_cached:],
+        sorted_active[:n_cached],
+        active_boundary_indices,
+        any_global,
+    )
 
 
 @dataclass
@@ -587,6 +802,7 @@ class CompressorFP8(PoolBackedModule):
         is_batched: bool = False,
         seq_start_per_req: Optional[torch.Tensor] = None,
         cu_seq_per_req: Optional[torch.Tensor] = None,
+        prefix_lengths_host: Optional[Tuple[int, ...]] = None,
     ) -> CompressorMeta:
         """Compute slot mappings + token_to_req from current pool context.
 
@@ -659,6 +875,52 @@ class CompressorFP8(PoolBackedModule):
                 getattr(self, "_kv_owner_tokens_per_block", self._kv_tokens_per_block)
             ),
         )
+        overlap = bool(getattr(self, "overlap", False))
+        host_prefixes = _resolve_host_prefixes(
+            self, seq_start_per_req, prefix_lengths_host
+        )
+        can_skip_state_cache_read = (not has_prefix) or (
+            not overlap
+            and host_prefixes is not None
+            and len(host_prefixes) > 0
+            and all((p % self.compress_ratio) == 0 for p in host_prefixes)
+        )
+        full_state_eb = self._state_eb * max(1, cp_size)
+        cp_state_tail_rows = (
+            self.compress_ratio
+            if (
+                overlap
+                and has_prefix
+                and host_prefixes is not None
+                and len(host_prefixes) > 0
+                and self._state_tokens_per_block > self.compress_ratio
+                and full_state_eb > self.compress_ratio
+                and all(
+                    (p % self._state_tokens_per_block) == 0
+                    and (p % full_state_eb) == 0
+                    for p in host_prefixes
+                )
+            )
+            else 0
+        )
+        window_size = (1 + int(overlap)) * self.compress_ratio
+        (
+            active_state_indices,
+            raw_boundary_indices,
+            cached_boundary_indices,
+            active_boundary_indices,
+            any_cached_boundary_global,
+        ) = _build_compacted_slot_indices(
+            positions,
+            b_idx,
+            state_slots,
+            kv_slots,
+            seq_start_per_req,
+            has_prefix=has_prefix,
+            can_skip_state_cache_read=can_skip_state_cache_read,
+            window_size=window_size,
+            compress_ratio=self.compress_ratio,
+        )
         meta = CompressorMeta(
             positions=positions,
             b_idx=b_idx,
@@ -669,14 +931,20 @@ class CompressorFP8(PoolBackedModule):
             is_batched=is_batched,
             seq_start_per_req=seq_start_per_req,
             cu_seq_per_req=cu_seq_per_req,
+            active_state_indices=active_state_indices,
+            raw_boundary_indices=raw_boundary_indices,
+            cached_boundary_indices=cached_boundary_indices,
+            active_boundary_indices=active_boundary_indices,
+            can_skip_state_cache_read=can_skip_state_cache_read,
+            cp_state_tail_rows=cp_state_tail_rows,
+            any_cached_boundary_global=any_cached_boundary_global,
         )
         return _cache_cp_state_read_selection(
             meta,
             getattr(self, "_state_pool_3d", None),
             self._state_block_table,
             cp_ctx=self._cp_ctx,
-            token_count=(1 + int(getattr(self, "overlap", False)))
-            * self.compress_ratio,
+            token_count=window_size,
             state_tokens_per_block=self._state_tokens_per_block,
         )
 
@@ -874,20 +1142,112 @@ class CompressorFP8(PoolBackedModule):
                 meta.state_slots,
                 compress_ratio=self.compress_ratio,
                 unpad_restore=unpad_restore,
+                active_indices=meta.active_state_indices,
             )
 
-        # Decode path passes seq_start=None: disable the raw branch so the
-        # kernel only reads state_cache. seq_start value is then irrelevant.
-        # Phase-3a part 4c: when meta carries per-request raw windows, the
-        # kernel uses native varlen raw path (one address per request) and
-        # the scalar ``seq_start`` is unused.
         use_varlen_raw = (
             meta.is_batched
             and meta.seq_start_per_req is not None
             and meta.cu_seq_per_req is not None
         )
         raw_disabled = (seq_start is None) and not use_varlen_raw
-        may_use_cache = bool(raw_disabled or meta.has_prefix)
+        eff_seq_start = 0 if (raw_disabled or use_varlen_raw) else seq_start
+        eff_seq_start_per_req = meta.seq_start_per_req if use_varlen_raw else None
+        eff_cu_seq_per_req = meta.cu_seq_per_req if use_varlen_raw else None
+
+        split_boundary_write = (
+            not raw_disabled
+            and meta.raw_boundary_indices is not None
+            and meta.cached_boundary_indices is not None
+        )
+
+        if split_boundary_write:
+            if int(meta.raw_boundary_indices.numel()) > 0:
+                with record_function_range(
+                    "dsv4.fp8.compressor.launch.compress_kv_write"
+                ):
+                    run_fused_compress_kv_write(
+                        self._state_pool_3d,
+                        meta.token_to_req,
+                        meta.positions,
+                        meta.state_slots,
+                        self._state_block_table,
+                        self.norm.weight,
+                        self.norm_eps,
+                        cos_sin_cache,
+                        self._kv_pool_view,
+                        meta.kv_slots,
+                        kv_flat,
+                        score_flat,
+                        self.ape,
+                        eff_seq_start,
+                        disable_raw_path=False,
+                        head_dim=self.head_dim,
+                        rope_head_dim=self.rope_head_dim,
+                        compress_ratio=self.compress_ratio,
+                        overlap=self.overlap,
+                        seq_start_per_req=eff_seq_start_per_req,
+                        cu_seq_per_req=eff_cu_seq_per_req,
+                        state_tokens_per_block=self._state_tokens_per_block,
+                        may_use_cache=False,
+                        unpad_restore=unpad_restore,
+                        active_token_indices=meta.raw_boundary_indices,
+                    )
+            state_cache_for_read = self._state_pool_3d
+            state_block_table_for_read = self._state_block_table
+            if _cp_sliced_state_read_needed(meta, self._cp_ctx, raw_disabled=False):
+                with record_function_range(
+                    "dsv4.fp8.compressor.launch.cp_gather_state_read_cache"
+                ):
+                    state_cache_for_read, state_block_table_for_read = (
+                        _build_cp_full_state_read_cache(
+                            self._state_pool_3d,
+                            self._state_block_table,
+                            int(self._cp_ctx.cp_size),
+                            seq_start_per_req=eff_seq_start_per_req,
+                            token_count=(1 + int(self.overlap))
+                            * self.compress_ratio,
+                            state_tokens_per_block=self._state_tokens_per_block,
+                            selection_cache_key=meta,
+                            tail_rows=meta.cp_state_tail_rows,
+                        )
+                    )
+            if int(meta.cached_boundary_indices.numel()) > 0:
+                with record_function_range(
+                    "dsv4.fp8.compressor.launch.compress_kv_write"
+                ):
+                    run_fused_compress_kv_write(
+                        state_cache_for_read,
+                        meta.token_to_req,
+                        meta.positions,
+                        meta.state_slots,
+                        state_block_table_for_read,
+                        self.norm.weight,
+                        self.norm_eps,
+                        cos_sin_cache,
+                        self._kv_pool_view,
+                        meta.kv_slots,
+                        kv_flat,
+                        score_flat,
+                        self.ape,
+                        eff_seq_start,
+                        disable_raw_path=False,
+                        head_dim=self.head_dim,
+                        rope_head_dim=self.rope_head_dim,
+                        compress_ratio=self.compress_ratio,
+                        overlap=self.overlap,
+                        seq_start_per_req=eff_seq_start_per_req,
+                        cu_seq_per_req=eff_cu_seq_per_req,
+                        state_tokens_per_block=self._state_tokens_per_block,
+                        may_use_cache=True,
+                        unpad_restore=unpad_restore,
+                        active_token_indices=meta.cached_boundary_indices,
+                    )
+            return
+
+        may_use_cache = bool(
+            raw_disabled or (meta.has_prefix and not meta.can_skip_state_cache_read)
+        )
         state_cache_for_read = self._state_pool_3d
         state_block_table_for_read = self._state_block_table
         if _cp_sliced_state_read_needed(meta, self._cp_ctx, raw_disabled):
@@ -899,15 +1259,13 @@ class CompressorFP8(PoolBackedModule):
                         self._state_pool_3d,
                         self._state_block_table,
                         int(self._cp_ctx.cp_size),
-                        seq_start_per_req=(
-                            meta.seq_start_per_req if use_varlen_raw else None
-                        ),
+                        seq_start_per_req=eff_seq_start_per_req,
                         token_count=(1 + int(self.overlap)) * self.compress_ratio,
                         state_tokens_per_block=self._state_tokens_per_block,
-                        # All layers of the same attention-type share this
-                        # meta object per forward, so layer 1 builds the
-                        # selection and layers 2..N reuse it.
                         selection_cache_key=meta,
+                        tail_rows=(
+                            0 if raw_disabled else meta.cp_state_tail_rows
+                        ),
                     )
                 )
 
@@ -926,17 +1284,18 @@ class CompressorFP8(PoolBackedModule):
                 kv_flat,
                 score_flat,
                 self.ape,
-                0 if (raw_disabled or use_varlen_raw) else seq_start,
+                eff_seq_start,
                 disable_raw_path=raw_disabled,
                 head_dim=self.head_dim,
                 rope_head_dim=self.rope_head_dim,
                 compress_ratio=self.compress_ratio,
                 overlap=self.overlap,
-                seq_start_per_req=meta.seq_start_per_req if use_varlen_raw else None,
-                cu_seq_per_req=meta.cu_seq_per_req if use_varlen_raw else None,
+                seq_start_per_req=eff_seq_start_per_req,
+                cu_seq_per_req=eff_cu_seq_per_req,
                 state_tokens_per_block=self._state_tokens_per_block,
                 may_use_cache=may_use_cache,
                 unpad_restore=unpad_restore,
+                active_token_indices=meta.active_boundary_indices,
             )
 
     # ----------------------------------------------------------------------

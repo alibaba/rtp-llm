@@ -33,6 +33,16 @@ from typing import Any, Optional
 
 import torch
 
+try:
+    import triton
+    import triton.language as tl
+
+    _TRITON_AVAILABLE = True
+except Exception:  # pragma: no cover
+    triton = None
+    tl = None
+    _TRITON_AVAILABLE = False
+
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv4.cp import (
@@ -68,8 +78,8 @@ class IndexerCPChunkPlan:
 @dataclass
 class IndexerKCPGatherHandle:
     plan: IndexerCPChunkPlan
-    gathered_q: torch.Tensor
-    gathered_s: torch.Tensor
+    gathered_q: Optional[torch.Tensor]
+    gathered_s: Optional[torch.Tensor]
     work_q: Any
     work_s: Any
     completion_event: torch.cuda.Event
@@ -81,6 +91,8 @@ class IndexerKCPGatherHandle:
     out_k_scale: torch.Tensor
     done_event: Optional[torch.cuda.Event] = None
     work_waited: bool = False
+    packed_q_cols: Optional[int] = None
+    local_packed: Optional[torch.Tensor] = None
 
 
 def build_indexer_cp_chunk_plan(
@@ -241,6 +253,158 @@ def copy_actual_indexer_k_to_padded(
     padded_k_scale.index_copy_(0, dst_idx, actual_k_scale)
 
 
+if _TRITON_AVAILABLE:
+
+    @triton.jit(do_not_specialize=["n_rows", "q_stride", "s_stride", "packed_stride"])
+    def _pack_indexer_k_kernel(
+        local_q_ptr,
+        local_s_ptr,
+        packed_ptr,
+        n_rows,
+        q_stride,
+        s_stride,
+        packed_stride,
+        BLOCK_K: tl.constexpr,
+        BLOCK_S: tl.constexpr,
+    ):
+        row_id = tl.program_id(0).to(tl.int64)
+        if row_id >= n_rows:
+            return
+        k_cols = tl.arange(0, BLOCK_K)
+        k_mask = k_cols < q_stride
+        k_vals = tl.load(local_q_ptr + row_id * q_stride + k_cols, mask=k_mask)
+        tl.store(packed_ptr + row_id * packed_stride + k_cols, k_vals, mask=k_mask)
+
+        s_cols = tl.arange(0, BLOCK_S)
+        s_mask = s_cols < s_stride
+        s_vals = tl.load(local_s_ptr + row_id * s_stride + s_cols, mask=s_mask)
+        tl.store(
+            packed_ptr + row_id * packed_stride + q_stride + s_cols,
+            s_vals,
+            mask=s_mask,
+        )
+
+    @triton.jit(
+        do_not_specialize=["n_rows", "packed_stride", "k_stride", "s_stride"]
+    )
+    def _restore_packed_indexer_k_kernel(
+        gathered_packed_ptr,
+        out_k_ptr,
+        out_s_ptr,
+        indices_ptr,
+        packed_stride,
+        k_stride,
+        s_stride,
+        n_rows,
+        BLOCK_K: tl.constexpr,
+        BLOCK_S: tl.constexpr,
+    ):
+        row_id = tl.program_id(0).to(tl.int64)
+        if row_id >= n_rows:
+            return
+        src_row = tl.load(indices_ptr + row_id).to(tl.int64)
+        k_cols = tl.arange(0, BLOCK_K)
+        k_mask = k_cols < k_stride
+        k_vals = tl.load(
+            gathered_packed_ptr + src_row * packed_stride + k_cols, mask=k_mask
+        )
+        tl.store(out_k_ptr + row_id * k_stride + k_cols, k_vals, mask=k_mask)
+
+        s_cols = tl.arange(0, BLOCK_S)
+        s_mask = s_cols < s_stride
+        s_vals = tl.load(
+            gathered_packed_ptr + src_row * packed_stride + k_stride + s_cols,
+            mask=s_mask,
+        )
+        tl.store(out_s_ptr + row_id * s_stride + s_cols, s_vals, mask=s_mask)
+
+    @triton.jit(do_not_specialize=["n_rows", "k_stride", "s_stride"])
+    def _restore_separate_indexer_k_kernel(
+        gathered_k_ptr,
+        gathered_s_ptr,
+        out_k_ptr,
+        out_s_ptr,
+        indices_ptr,
+        k_stride,
+        s_stride,
+        n_rows,
+        BLOCK_K: tl.constexpr,
+        BLOCK_S: tl.constexpr,
+    ):
+        row_id = tl.program_id(0).to(tl.int64)
+        if row_id >= n_rows:
+            return
+        src_row = tl.load(indices_ptr + row_id).to(tl.int64)
+        k_cols = tl.arange(0, BLOCK_K)
+        k_mask = k_cols < k_stride
+        k_vals = tl.load(gathered_k_ptr + src_row * k_stride + k_cols, mask=k_mask)
+        tl.store(out_k_ptr + row_id * k_stride + k_cols, k_vals, mask=k_mask)
+
+        s_cols = tl.arange(0, BLOCK_S)
+        s_mask = s_cols < s_stride
+        s_vals = tl.load(gathered_s_ptr + src_row * s_stride + s_cols, mask=s_mask)
+        tl.store(out_s_ptr + row_id * s_stride + s_cols, s_vals, mask=s_mask)
+
+
+def _next_power_of_2(n: int) -> int:
+    if n <= 1:
+        return 1
+    return 1 << (n - 1).bit_length()
+
+
+def _pack_indexer_k_payload(
+    local_k_quant: torch.Tensor,
+    local_k_scale: torch.Tensor,
+) -> tuple[torch.Tensor, int, int]:
+    """Pack one-byte FP8 K and scale rows into one contiguous uint8 buffer."""
+    if local_k_quant.dim() != 2 or local_k_scale.dim() != 2:
+        raise ValueError(
+            "indexer K pack expects 2D quant/scale buffers, got "
+            f"{tuple(local_k_quant.shape)} and {tuple(local_k_scale.shape)}"
+        )
+    if local_k_quant.device != local_k_scale.device:
+        raise ValueError("indexer K pack requires quant/scale on the same device")
+    if local_k_quant.shape[0] != local_k_scale.shape[0]:
+        raise ValueError(
+            "indexer K pack row mismatch: "
+            f"quant={local_k_quant.shape[0]}, scale={local_k_scale.shape[0]}"
+        )
+    if local_k_quant.element_size() != 1 or local_k_scale.element_size() != 1:
+        raise ValueError(
+            "indexer K pack requires one-byte quant/scale elements, got "
+            f"{local_k_quant.dtype} and {local_k_scale.dtype}"
+        )
+
+    local_q_bytes = local_k_quant.contiguous().view(torch.uint8)
+    local_s_bytes = local_k_scale.contiguous().view(torch.uint8)
+    rows = int(local_q_bytes.shape[0])
+    q_cols = int(local_q_bytes.shape[1])
+    s_cols = int(local_s_bytes.shape[1])
+    packed = torch.empty(
+        (rows, q_cols + s_cols),
+        dtype=torch.uint8,
+        device=local_k_quant.device,
+    )
+    if rows > 0:
+        if _TRITON_AVAILABLE and packed.is_cuda:
+            _pack_indexer_k_kernel[(rows,)](
+                local_q_bytes,
+                local_s_bytes,
+                packed,
+                rows,
+                q_cols,
+                s_cols,
+                q_cols + s_cols,
+                BLOCK_K=_next_power_of_2(q_cols),
+                BLOCK_S=_next_power_of_2(s_cols),
+                num_warps=2 if q_cols <= 128 else 4,
+            )
+        else:
+            packed[:, :q_cols].copy_(local_q_bytes)
+            packed[:, q_cols:].copy_(local_s_bytes)
+    return packed, q_cols, s_cols
+
+
 def assemble_indexer_k(
     *,
     plan: IndexerCPChunkPlan,
@@ -264,21 +428,17 @@ def assemble_indexer_k(
     )
     if chunk_T == 0:
         return
-    # Use raw rank-major all_gather (NOT cp_all_gather_full_async, which
-    # asserts T_local == cp_ctx.chunk_length — that's the prefill-token
-    # space; here local_k_* lives in KV-pool-entry space sized by
-    # plan.total_local_T = sum_b n_virtual_blocks * block_size). The
-    # restore_indices are built against this rank-major layout.
-    # INVARIANT: the nested compressor writer lands its indexer-pool writes
-    # on the current stream (cp_wait_gather_full + writer _launch), so NCCL
-    # stream-ordering alone suffices for visibility. No CPU-blocking sync —
-    # at chunk granularity this would serialize the pipeline. See
-    # _pool_reader.fill for the same pattern.
-    with record_function_range("dsv4.cp.all_gather.indexer_k.quant.launch"):
-        gathered_q = all_gather(local_k_quant, group=Group.TP)
-    with record_function_range("dsv4.cp.all_gather.indexer_k.scale.launch"):
-        gathered_s = all_gather(local_k_scale, group=Group.TP)
-    restore_indexer_k(plan, gathered_q, gathered_s, out_k_quant, out_k_scale)
+    # Pack [quant | scale] into one [local_T, q_cols + s_cols] uint8 payload so
+    # each assemble issues a single rank-major NCCL AllGather instead of two.
+    with record_function_range("dsv4.cp.all_gather.indexer_k.packed.pack"):
+        local_packed, q_cols, s_cols = _pack_indexer_k_payload(
+            local_k_quant, local_k_scale
+        )
+    with record_function_range("dsv4.cp.all_gather.indexer_k.packed.launch"):
+        gathered_packed = all_gather(local_packed, group=Group.TP)
+    _restore_indexer_k_packed(
+        plan, gathered_packed, q_cols, s_cols, out_k_quant, out_k_scale
+    )
 
 
 def start_assemble_indexer_k_async(
@@ -320,53 +480,35 @@ def start_assemble_indexer_k_async(
     current_stream = torch.cuda.current_stream(device)
     stream.wait_stream(current_stream)
     with torch.cuda.stream(stream):
-        gathered_q = torch.empty(
-            (world_size * int(local_k_quant.shape[0]), local_k_quant.shape[1]),
-            dtype=local_k_quant.dtype,
+        local_packed, q_cols, s_cols = _pack_indexer_k_payload(
+            local_k_quant, local_k_scale
+        )
+        gathered_packed = torch.empty(
+            (world_size * int(local_packed.shape[0]), q_cols + s_cols),
+            dtype=torch.uint8,
             device=device,
         )
-        gathered_s = torch.empty(
-            (world_size * int(local_k_scale.shape[0]), local_k_scale.shape[1]),
-            dtype=local_k_scale.dtype,
-            device=device,
-        )
-        with record_function_range("dsv4.cp.all_gather.indexer_k.quant.launch"):
+        with record_function_range("dsv4.cp.all_gather.indexer_k.packed.launch"):
             work_q = torch.distributed.all_gather_into_tensor(
-                gathered_q,
-                local_k_quant,
+                gathered_packed,
+                local_packed,
                 group=process_group,
                 async_op=True,
             )
-        with record_function_range("dsv4.cp.all_gather.indexer_k.scale.launch"):
-            try:
-                work_s = torch.distributed.all_gather_into_tensor(
-                    gathered_s,
-                    local_k_scale,
-                    group=process_group,
-                    async_op=True,
-                )
-            except Exception:
-                # quant gather already launched — drain it before propagating.
-                work_q.wait()
-                current_stream.wait_stream(stream)
-                raise
         try:
             completion_event = torch.cuda.Event()
             completion_event.record(stream)
         except Exception:
-            # Both NCCL gathers in flight but pending handle never returns;
-            # drain both before propagating.
             work_q.wait()
-            work_s.wait()
             current_stream.wait_stream(stream)
             raise
 
     return IndexerKCPGatherHandle(
         plan=plan,
-        gathered_q=gathered_q,
-        gathered_s=gathered_s,
+        gathered_q=gathered_packed,
+        gathered_s=None,
         work_q=work_q,
-        work_s=work_s,
+        work_s=None,
         completion_event=completion_event,
         stream=stream,
         producer_stream=current_stream,
@@ -374,6 +516,8 @@ def start_assemble_indexer_k_async(
         local_k_scale=local_k_scale,
         out_k_quant=out_k_quant,
         out_k_scale=out_k_scale,
+        packed_q_cols=q_cols,
+        local_packed=local_packed,
     )
 
 
@@ -397,13 +541,30 @@ def prepare_assemble_indexer_k_async(
         with record_function_range("dsv4.cp.all_gather.indexer_k.wait_host"):
             _wait_indexer_k_work_once(handle)
         try:
-            restore_indexer_k(
-                handle.plan,
-                handle.gathered_q,
-                handle.gathered_s,
-                handle.out_k_quant,
-                handle.out_k_scale,
-            )
+            assert handle.gathered_q is not None
+            if handle.gathered_s is None:
+                q_cols = (
+                    handle.packed_q_cols
+                    if handle.packed_q_cols is not None
+                    else int(handle.out_k_quant.shape[1])
+                )
+                s_cols = int(handle.out_k_scale.shape[1])
+                _restore_indexer_k_packed(
+                    handle.plan,
+                    handle.gathered_q,
+                    q_cols,
+                    s_cols,
+                    handle.out_k_quant,
+                    handle.out_k_scale,
+                )
+            else:
+                restore_indexer_k(
+                    handle.plan,
+                    handle.gathered_q,
+                    handle.gathered_s,
+                    handle.out_k_quant,
+                    handle.out_k_scale,
+                )
         finally:
             try:
                 handle.done_event = torch.cuda.Event()
@@ -430,9 +591,55 @@ def discard_assemble_indexer_k_async(handle: IndexerKCPGatherHandle) -> None:
 
 def _wait_indexer_k_work_once(handle: IndexerKCPGatherHandle) -> None:
     if not handle.work_waited:
-        handle.work_q.wait()
-        handle.work_s.wait()
+        if handle.work_q is not None:
+            handle.work_q.wait()
+        if handle.work_s is not None:
+            handle.work_s.wait()
         handle.work_waited = True
+
+
+def _restore_indexer_k_packed(
+    plan: IndexerCPChunkPlan,
+    gathered_packed: torch.Tensor,
+    q_cols: int,
+    s_cols: int,
+    out_k_quant: torch.Tensor,
+    out_k_scale: torch.Tensor,
+) -> None:
+    with record_function_range("dsv4.cp.all_gather.indexer_k.restore"):
+        chunk_T = int(plan.restore_indices.numel())
+        if chunk_T == 0:
+            return
+        idx = plan.restore_indices.to(device=gathered_packed.device)
+        if (
+            _TRITON_AVAILABLE
+            and gathered_packed.is_cuda
+            and out_k_quant.dim() == 2
+            and out_k_scale.dim() == 2
+            and out_k_quant.is_contiguous()
+            and out_k_scale.is_contiguous()
+            and gathered_packed.is_contiguous()
+            and int(out_k_quant.shape[1]) == q_cols
+            and int(out_k_scale.shape[1]) == s_cols
+        ):
+            _restore_packed_indexer_k_kernel[(chunk_T,)](
+                gathered_packed,
+                out_k_quant.view(torch.uint8),
+                out_k_scale.view(torch.uint8),
+                idx,
+                q_cols + s_cols,
+                q_cols,
+                s_cols,
+                chunk_T,
+                BLOCK_K=_next_power_of_2(q_cols),
+                BLOCK_S=_next_power_of_2(s_cols),
+                num_warps=2 if q_cols <= 128 else 4,
+            )
+            return
+        out_k_quant.view(torch.uint8).copy_(gathered_packed[idx, :q_cols])
+        out_k_scale.view(torch.uint8).copy_(
+            gathered_packed[idx, q_cols : q_cols + s_cols]
+        )
 
 
 def restore_indexer_k(
@@ -443,8 +650,38 @@ def restore_indexer_k(
     out_k_scale: torch.Tensor,
 ) -> None:
     with record_function_range("dsv4.cp.all_gather.indexer_k.restore"):
-        out_k_quant.copy_(gathered_q[plan.restore_indices])
-        out_k_scale.copy_(gathered_s[plan.restore_indices])
+        chunk_T = int(plan.restore_indices.numel())
+        if chunk_T == 0:
+            return
+        idx = plan.restore_indices.to(device=gathered_q.device)
+        if (
+            _TRITON_AVAILABLE
+            and gathered_q.is_cuda
+            and out_k_quant.dim() == 2
+            and out_k_scale.dim() == 2
+            and gathered_q.is_contiguous()
+            and gathered_s.is_contiguous()
+            and out_k_quant.is_contiguous()
+            and out_k_scale.is_contiguous()
+        ):
+            q_cols = int(out_k_quant.shape[1])
+            s_cols = int(out_k_scale.shape[1])
+            _restore_separate_indexer_k_kernel[(chunk_T,)](
+                gathered_q.view(torch.uint8),
+                gathered_s.view(torch.uint8),
+                out_k_quant.view(torch.uint8),
+                out_k_scale.view(torch.uint8),
+                idx,
+                q_cols,
+                s_cols,
+                chunk_T,
+                BLOCK_K=_next_power_of_2(q_cols),
+                BLOCK_S=_next_power_of_2(s_cols),
+                num_warps=2 if q_cols <= 128 else 4,
+            )
+            return
+        out_k_quant.copy_(gathered_q[idx])
+        out_k_scale.copy_(gathered_s[idx])
 
 
 def _validate_assemble_args(

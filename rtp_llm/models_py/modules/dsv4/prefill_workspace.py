@@ -29,6 +29,9 @@ layers, never recycled by the allocator) and relies on the
 ``cp._CP_ROLE_*``.
 """
 
+from contextlib import contextmanager
+from typing import Iterator, Optional
+
 import torch
 
 # Default union-buffer alignment. Rounding every per-forward union block up to a
@@ -122,6 +125,107 @@ class PrefillWorkspace:
         union_bytes = max(self._q_bytes, cp_region_bytes)
         union_bytes = ((union_bytes + align - 1) // align) * align
         self._union = torch.empty(union_bytes, dtype=torch.uint8, device=device)
+        self._hca_disjoint_gather: Optional[torch.Tensor] = None
+        self._hca_disjoint_restore: Optional[torch.Tensor] = None
+        self._disjoint_main_gather_buf: Optional[torch.Tensor] = None
+        self._disjoint_live_q_end_bytes: int = 0
+
+    def try_disjoint_hca_gather(
+        self,
+        q_tokens: int,
+        cp_rows: int,
+        dim: int,
+        dtype: torch.dtype,
+    ) -> Optional[torch.Tensor]:
+        """Return a gather buffer disjoint from ``prefill_q[:q_tokens]`` if safe.
+
+        Order of preference:
+          1. Unused tail of ``self._union`` after ``[0, q_end)`` (zero extra HBM).
+          2. One lazily cached per-forward ``_hca_disjoint_gather`` buffer when
+             non-capturing CUDA free HBM comfortably exceeds ``2 * nbytes + 4 GiB``.
+          3. ``None`` so the caller falls back to the serialized ``cp_gather_main``
+             overlap-free schedule (zero OOM risk at near-full 1M context).
+        """
+        q_tokens = int(q_tokens)
+        cp_rows = int(cp_rows)
+        dim = int(dim)
+        if (
+            not self._has_main
+            or q_tokens < 0
+            or q_tokens > self._q_rows
+            or cp_rows < 0
+            or dim < 0
+        ):
+            return None
+
+        elem_bytes = _dtype_size(dtype)
+        nbytes = cp_rows * dim * elem_bytes
+        if nbytes == 0:
+            return torch.empty((cp_rows, dim), dtype=dtype, device=self._device)
+        if nbytes > self._main_bytes:
+            return None
+
+        q_end = q_tokens * self._q_dim * _dtype_size(torch.bfloat16)
+        union_bytes = int(self._union.numel())
+        align16 = max(16, elem_bytes)
+        tail_start_16 = ((q_end + align16 - 1) // align16) * align16
+        tail_start_elem = ((q_end + elem_bytes - 1) // elem_bytes) * elem_bytes
+        if union_bytes - tail_start_16 >= nbytes:
+            tail_start = tail_start_16
+        elif union_bytes - tail_start_elem >= nbytes:
+            tail_start = tail_start_elem
+        else:
+            tail_start = -1
+
+        if tail_start >= 0:
+            return (
+                self._union[tail_start : tail_start + nbytes]
+                .view(dtype)
+                .view(cp_rows, dim)
+            )
+
+        if self._device.type != "cuda" or torch.cuda.is_current_stream_capturing():
+            return None
+
+        if (
+            self._hca_disjoint_gather is not None
+            and int(self._hca_disjoint_gather.numel()) >= nbytes
+        ):
+            return (
+                self._hca_disjoint_gather[:nbytes]
+                .view(dtype)
+                .view(cp_rows, dim)
+            )
+
+        free_bytes, _ = torch.cuda.mem_get_info(self._device)
+        if free_bytes > 2 * nbytes + (4 << 30):
+            self._hca_disjoint_gather = torch.empty(
+                nbytes, dtype=torch.uint8, device=self._device
+            )
+            return self._hca_disjoint_gather.view(dtype).view(cp_rows, dim)
+        return None
+
+    @contextmanager
+    def use_disjoint_main_gather(
+        self,
+        buf: Optional[torch.Tensor],
+        *,
+        live_q_tokens: int = 0,
+    ) -> Iterator[None]:
+        """Temporarily redirect ``cp_gather_main`` to ``buf`` and guard ``cp_restore_main``."""
+        prev_buf = self._disjoint_main_gather_buf
+        prev_q_end = self._disjoint_live_q_end_bytes
+        self._disjoint_main_gather_buf = buf
+        self._disjoint_live_q_end_bytes = (
+            max(0, int(live_q_tokens)) * self._q_dim * _dtype_size(torch.bfloat16)
+            if buf is not None
+            else 0
+        )
+        try:
+            yield
+        finally:
+            self._disjoint_main_gather_buf = prev_buf
+            self._disjoint_live_q_end_bytes = prev_q_end
 
     def prefill_q(self, num_tokens: int) -> torch.Tensor:
         """``[num_tokens, q_dim]`` bf16 view at the front of the union buffer."""
@@ -137,6 +241,30 @@ class PrefillWorkspace:
 
     def cp_gather_main(self, rows: int, dim: int, dtype: torch.dtype) -> torch.Tensor:
         """``[rows, dim]`` view of the main compressor's CP gather buffer."""
+        if self._disjoint_main_gather_buf is not None:
+            assert self._has_main, "cp_gather_main region not reserved (reserve_cp=False)"
+            rows = int(rows)
+            dim = int(dim)
+            nbytes = rows * dim * _dtype_size(dtype)
+            assert nbytes <= self._main_bytes, (
+                f"cp_gather_main overflow: need {nbytes} B ({rows}x{dim}x{_dtype_size(dtype)}) "
+                f"> reserved {self._main_bytes} B"
+            )
+            buf = self._disjoint_main_gather_buf
+            assert (
+                buf.device == self._device
+                and buf.dtype == dtype
+                and buf.is_contiguous()
+            ), (
+                "disjoint cp_gather_main buffer mismatch: "
+                f"got device={buf.device}, dtype={buf.dtype}, contiguous={buf.is_contiguous()}"
+            )
+            assert (
+                buf.numel() >= rows * dim
+            ), f"disjoint cp_gather_main underflow: {buf.numel()} < {rows * dim}"
+            if rows == 0 or dim == 0:
+                return buf.view(-1)[:0].view(rows, dim)
+            return buf.view(-1)[: rows * dim].view(rows, dim)
         return self._cp_view(
             "cp_gather_main",
             self._has_main,
@@ -147,8 +275,66 @@ class PrefillWorkspace:
             dtype,
         )
 
+    def _union_byte_span(self, tensor: torch.Tensor) -> Optional[tuple[int, int]]:
+        nbytes = int(tensor.numel()) * int(tensor.element_size())
+        if nbytes == 0:
+            return None
+        base_ptr = int(self._union.data_ptr())
+        base_end = base_ptr + int(self._union.numel())
+        ptr = int(tensor.data_ptr())
+        if base_ptr <= ptr and ptr + nbytes <= base_end:
+            return (ptr - base_ptr, ptr - base_ptr + nbytes)
+        return None
+
     def cp_restore_main(self, rows: int, dim: int, dtype: torch.dtype) -> torch.Tensor:
         """``[rows, dim]`` view of the main compressor's CP restore buffer."""
+        if self._disjoint_main_gather_buf is not None:
+            assert self._has_main, "cp_restore_main region not reserved (reserve_cp=False)"
+            rows = int(rows)
+            dim = int(dim)
+            elem_bytes = _dtype_size(dtype)
+            nbytes = rows * dim * elem_bytes
+            assert nbytes <= self._main_bytes, (
+                f"cp_restore_main overflow: need {nbytes} B ({rows}x{dim}x{elem_bytes}) "
+                f"> reserved {self._main_bytes} B"
+            )
+            if nbytes == 0:
+                return self._cp_view(
+                    "cp_restore_main",
+                    self._has_main,
+                    self._off_restore_main,
+                    self._main_bytes,
+                    rows,
+                    dim,
+                    dtype,
+                )
+            r_start = self._off_restore_main
+            r_end = r_start + nbytes
+            q_end = self._disjoint_live_q_end_bytes
+            gather_span = self._union_byte_span(self._disjoint_main_gather_buf)
+            overlaps_q = r_start < q_end
+            overlaps_gather = (
+                gather_span is not None
+                and r_start < gather_span[1]
+                and gather_span[0] < r_end
+            )
+            if overlaps_q or overlaps_gather:
+                min_free = max(q_end, gather_span[1] if gather_span is not None else 0)
+                tail_start = ((min_free + elem_bytes - 1) // elem_bytes) * elem_bytes
+                if int(self._union.numel()) - tail_start >= nbytes:
+                    return (
+                        self._union[tail_start : tail_start + nbytes]
+                        .view(dtype)
+                        .view(rows, dim)
+                    )
+                if (
+                    self._hca_disjoint_restore is None
+                    or int(self._hca_disjoint_restore.numel()) < nbytes
+                ):
+                    self._hca_disjoint_restore = torch.empty(
+                        nbytes, dtype=torch.uint8, device=self._device
+                    )
+                return self._hca_disjoint_restore[:nbytes].view(dtype).view(rows, dim)
         return self._cp_view(
             "cp_restore_main",
             self._has_main,

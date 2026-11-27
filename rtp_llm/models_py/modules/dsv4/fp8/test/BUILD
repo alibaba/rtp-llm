@@ -51,6 +51,7 @@ _GPU_TESTS = [
     "test_pool_slot_mapping_split",
     "test_indexer_cp_padded_gather_triton",
     "test_prefill_common_metadata_cuda",
+    "test_prefill_mixed_cache_reuse",
 ]
 
 # Mock only non-target transport/kernel boundaries; these verify scheduling,

@@ -8,9 +8,10 @@ locks the orchestrator's externally observable call sequence:
   1. indexer.start_prefill_nested_compressor — NCCL #1 on cp_gather_stream
   2. compressor.start_prefill        — NCCL #2 on the SAME stream
   3. _prefill_write_swa_fp8_paged    — default-stream overlap zone
-  4. indexer.forward_with_pending_nested — drains nested NCCL #1, then waits
-                                       main NCCL #2 before gather_k/score/topk
-  5. compressor.finish_prefill       — writes main CSA pool after indexer topk
+  4. indexer.forward_with_pending_nested — drains nested NCCL #1, runs
+                                       gather_k/score/topk in parallel with
+                                       main NCCL #2 (before_gather_k=None)
+  5. compressor.finish_prefill       — drains main NCCL #2 + writes main CSA pool
   6. _forward_prefill_compressed(_skip_compressor_write=True,
                                   cmp_topk_runtime=raw)
                                      — workspace_attn
@@ -126,7 +127,8 @@ class CSAOverlapOrchestratorTest(unittest.TestCase):
 
         def fake_indexer_finish(*a, **kw):
             seq.append(("indexer_enter", a, kw))
-            kw["before_gather_k"]()
+            if kw.get("before_gather_k") is not None:
+                kw["before_gather_k"]()
             seq.append(("indexer_finish", a, kw))
             return raw_topk
 
@@ -147,9 +149,8 @@ class CSAOverlapOrchestratorTest(unittest.TestCase):
 
         out = layer._forward_prefill_csa_overlapped(x, qkv, common)
 
-        # Exact sequence, including the main-gather wait invoked from inside
-        # indexer.forward_with_pending_nested before gather_k/score/topk, while
-        # the main pool write remains after indexer topk as in the baseline.
+        # Main CSA gather stays overlapped across the full indexer chain
+        # (before_gather_k=None) and drains in finish_main afterwards.
         self.assertEqual(
             [step[0] for step in seq],
             [
@@ -157,7 +158,6 @@ class CSAOverlapOrchestratorTest(unittest.TestCase):
                 "start_main",
                 "swa_write",
                 "indexer_enter",
-                "wait_main",
                 "indexer_finish",
                 "finish_main",
                 "compressed",
@@ -188,19 +188,16 @@ class CSAOverlapOrchestratorTest(unittest.TestCase):
         self.assertIs(if_args[1], qkv.qr)
         self.assertIs(if_args[2], common.csa_meta.indexer_meta)
         self.assertIs(if_args[3], nested_pending)
-        self.assertIn("before_gather_k", if_kwargs)
-        self.assertTrue(callable(if_kwargs["before_gather_k"]))
-
-        # wait_main fences only the main gather before indexer returns.
-        self.assertIs(seq[4][1], main_pending)
+        self.assertIsNone(if_kwargs.get("before_gather_k"))
+        layer.compressor.wait_prefill_gather.assert_not_called()
 
         # finish_main writes the main CSA pool after indexer topk.
-        self.assertIs(seq[6][1], main_pending)
+        self.assertIs(seq[5][1], main_pending)
 
         # compressed receives the indexer's topk as cmp_topk_runtime and
         # the skip flag is set so the orchestrator's finish_main is the
         # only compressor write.
-        cp_args, cp_kwargs = seq[7][1], seq[7][2]
+        cp_args, cp_kwargs = seq[6][1], seq[6][2]
         self.assertIs(cp_kwargs["cmp_topk_runtime"], raw_topk)
         self.assertIs(cp_kwargs["compressor_meta"], common.csa_meta.compressor_meta)
         self.assertIs(cp_kwargs["workspace_meta"], common.csa_meta.workspace_meta)

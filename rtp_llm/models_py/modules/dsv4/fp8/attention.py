@@ -16,7 +16,7 @@ import json
 import logging
 import os
 import threading
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager, nullcontext, suppress
 from typing import Any, Dict, NamedTuple, Optional, Tuple, Union
 
 # P3 (audit §3.5 / §7.4 P0): wo_a batched output projection.
@@ -634,6 +634,8 @@ class SwaPrefillMeta(NamedTuple):
     cache_slot_mapping: Optional[torch.Tensor] = None
     slot_compaction: Optional[CPByteSlicedSlotCompaction] = None
     cache_compaction: Optional[CPByteSlicedSlotCompaction] = None
+    cache_cu_tiles: Optional[torch.Tensor] = None
+    cache_total_tiles: Optional[int] = None
 
 
 class WorkspaceMeta(NamedTuple):
@@ -705,6 +707,11 @@ class WorkspaceMeta(NamedTuple):
     # SWA prefix-tail read slots for the normal workspace path.
     swa_cache_slot_mapping: Optional[torch.Tensor] = None
     swa_cache_compaction: Optional[CPByteSlicedSlotCompaction] = None
+    hca_combine_cache: Optional[Dict[Any, Tuple[torch.Tensor, torch.Tensor]]] = None
+    cmp_cu_tiles: Optional[torch.Tensor] = None
+    cmp_total_tiles: Optional[int] = None
+    swa_cache_cu_tiles: Optional[torch.Tensor] = None
+    swa_cache_total_tiles: Optional[int] = None
 
 
 class CsaPrefillMeta(NamedTuple):
@@ -2038,7 +2045,7 @@ class AttentionFP8(nn.Module):
         position_ids = attn_metadata.position_ids[:T]  # [T] int32
 
         self._ensure_freqs_cis_bound()
-        qkv = decode_compute_qkv(self, x, position_ids)
+        qkv = decode_compute_qkv(self, x, position_ids, return_freqs_cis=False)
         with suppress(Exception):
             from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
                 CSA_KV,
@@ -2074,7 +2081,9 @@ class AttentionFP8(nn.Module):
         else:
             raise AssertionError(f"unknown compress_ratio={self.compress_ratio}")
 
-        return decode_output_proj(self, o, qkv.freqs_cis, bsz, q_len)
+        return decode_output_proj(
+            self, o, self.freqs_cis, bsz, q_len, position_ids=position_ids
+        )
 
     # ------------------------------------------------------------------
     # Decode per-path bodies + shared epilogue
@@ -2830,15 +2839,13 @@ class AttentionFP8(nn.Module):
                 qkv = self._ensure_prefill_kv_full(qkv, common)
                 self._prefill_write_swa_fp8_paged(common, qkv.kv_full)
 
-            def wait_main_before_indexer_k() -> None:
-                if main_pending is None:
-                    return
-                with record_function_range(
-                    "dsv4.fp8.attn.csa_overlap.wait_main_before_indexer_k"
-                ):
-                    self.compressor.wait_prefill_gather(main_pending)
-
             with record_function_range("dsv4.fp8.attn.csa_overlap.indexer"):
+                # ``main_pending`` only touches ``cp_gather_main`` / ``unpad_restore``
+                # and CSA pools while ``indexer`` touches ``cp_gather_idx`` /
+                # ``cp_restore_idx`` and ``INDEXER_KV`` (``prefill_q`` is not
+                # materialized until ``_forward_prefill_compressed`` after
+                # ``finish_prefill``), so pass ``before_gather_k=None`` to keep
+                # main's all-gather overlapped through the full indexer window.
                 indexer_post_stream = (
                     _get_cp_post_gather_stream(x.device) if x.is_cuda else None
                 )
@@ -2847,7 +2854,7 @@ class AttentionFP8(nn.Module):
                     qkv.qr,
                     csa_meta.indexer_meta,
                     nested_pending,
-                    before_gather_k=wait_main_before_indexer_k,
+                    before_gather_k=None,
                     cp_gather_stream=cp_stream,
                     post_gather_stream=indexer_post_stream,
                 )
@@ -2940,24 +2947,58 @@ class AttentionFP8(nn.Module):
 
         cp_stream = self._get_cp_gather_stream(x.device)
         layer_label = f"L{int(getattr(self, 'layer_id', 0)):02d}"
+        q_tokens = int(x.shape[0])
+        disjoint_buf: Optional[torch.Tensor] = None
+        if common.workspace is not None:
+            padded_seq_len = getattr(common.cp_ctx, "padded_seq_len", None)
+            cp_rows = (
+                int(padded_seq_len)
+                if padded_seq_len is not None
+                else int(common.cp_ctx.cp_size) * q_tokens
+            )
+            cmp_w = (
+                2
+                * (1 + int(bool(getattr(self.compressor, "overlap", False))))
+                * int(getattr(self.compressor, "head_dim", self.head_dim))
+            )
+            disjoint_buf = common.workspace.try_disjoint_hca_gather(
+                q_tokens, cp_rows, cmp_w, torch.float32
+            )
+
         main_pending = None
         try:
-            with record_function_range("dsv4.fp8.attn.hca_overlap.start_compressor"):
-                main_pending = self.compressor.start_prefill(
-                    x,
-                    common.sp_int,
-                    meta=common.hca_meta.compressor_meta,
-                    cp_gather_stream=cp_stream,
-                    profile_label=f"{layer_label}.hca_main",
-                    workspace=common.workspace,
+            with (
+                common.workspace.use_disjoint_main_gather(
+                    disjoint_buf, live_q_tokens=q_tokens
                 )
-            with record_function_range("dsv4.fp8.attn.hca_overlap.swa_write"):
-                # Default-stream work that overlaps with the NCCL gather above.
-                qkv = self._ensure_prefill_kv_full(qkv, common)
-                self._prefill_write_swa_fp8_paged(common, qkv.kv_full)
-            with record_function_range("dsv4.fp8.attn.hca_overlap.finish_compressor"):
-                self.compressor.finish_prefill(main_pending)
-            main_pending = None
+                if common.workspace is not None and disjoint_buf is not None
+                else nullcontext()
+            ):
+                with record_function_range("dsv4.fp8.attn.hca_overlap.start_compressor"):
+                    main_pending = self.compressor.start_prefill(
+                        x,
+                        common.sp_int,
+                        meta=common.hca_meta.compressor_meta,
+                        cp_gather_stream=cp_stream,
+                        profile_label=f"{layer_label}.hca_main",
+                        workspace=common.workspace,
+                    )
+                with record_function_range("dsv4.fp8.attn.hca_overlap.swa_write"):
+                    # Default-stream work that overlaps with the NCCL gather above.
+                    qkv = self._ensure_prefill_kv_full(qkv, common)
+                    self._prefill_write_swa_fp8_paged(common, qkv.kv_full)
+                if disjoint_buf is not None:
+                    with record_function_range(
+                        "dsv4.fp8.attn.hca_overlap.materialize_q"
+                    ):
+                        # Overlap q_lora_b + Q-RoPE onto cp_stream's all_gather while
+                        # gather targets disjoint_buf beyond live prefill_q[:q_tokens].
+                        qkv = self._materialize_prefill_q(qkv, common)
+                with record_function_range(
+                    "dsv4.fp8.attn.hca_overlap.finish_compressor"
+                ):
+                    self.compressor.finish_prefill(main_pending)
+                main_pending = None
 
             return self._forward_prefill_compressed(
                 x,
@@ -3175,15 +3216,32 @@ class AttentionFP8(nn.Module):
                             cmp_reader_for_pending = cmp_reader
                             cmp_prepare_for_pending = prepare_cmp
                     if cmp_pending is None:
-                        cmp_reader.fill(
-                            out=workspace,
-                            k_cache=cmp_pool_3d,
-                            seq_lens=wm.cmp_seq_lens,
-                            gather_lens=None,
-                            block_table=wm.cmp_bt_int32,
-                            block_size=wm.cmp_eb,
-                            offset=0,
-                        )
+                        if (
+                            type(cmp_reader) is LocalPoolReader
+                            and wm.cmp_cu_tiles is not None
+                            and wm.cmp_total_tiles is not None
+                        ):
+                            _swa_dq.dequantize_and_gather_k_cache(
+                                out=workspace,
+                                k_cache=cmp_pool_3d,
+                                seq_lens=wm.cmp_seq_lens,
+                                gather_lens=None,
+                                block_table=wm.cmp_bt_int32,
+                                block_size=wm.cmp_eb,
+                                offset=0,
+                                cu_tiles=wm.cmp_cu_tiles,
+                                total_tiles=wm.cmp_total_tiles,
+                            )
+                        else:
+                            cmp_reader.fill(
+                                out=workspace,
+                                k_cache=cmp_pool_3d,
+                                seq_lens=wm.cmp_seq_lens,
+                                gather_lens=None,
+                                block_table=wm.cmp_bt_int32,
+                                block_size=wm.cmp_eb,
+                                offset=0,
+                            )
             # SWA dequant only reads the cached prefix tail. The fresh new-K rows
             # are already available as BF16 and are overlaid below; cold prefill
             # does not need to read the SWA pool at all.
@@ -3211,6 +3269,8 @@ class AttentionFP8(nn.Module):
                                         f"dsv4.cp.all_gather.L{self.layer_id:02d}"
                                         ".swa_prefix"
                                     ),
+                                    cu_tiles=wm.swa_cache_cu_tiles,
+                                    total_tiles=wm.swa_cache_total_tiles,
                                 )
                         if swa_prefix_pending is None:
                             _swa_dq.dequantize_and_gather_k_cache_slots_cp_byte_sliced(
@@ -3223,6 +3283,8 @@ class AttentionFP8(nn.Module):
                                 cp_rank=int(common.cp_ctx.cp_rank),
                                 cp_size=int(common.cp_ctx.cp_size),
                                 compaction=wm.swa_cache_compaction,
+                                cu_tiles=wm.swa_cache_cu_tiles,
+                                total_tiles=wm.swa_cache_total_tiles,
                             )
                     else:
                         assert swa_pool_3d is not None
@@ -3232,6 +3294,8 @@ class AttentionFP8(nn.Module):
                             slot_mapping=wm.swa_cache_slot_mapping,
                             gather_lens=wm.swa_cache_gather_lens,
                             offset=wm.N,
+                            cu_tiles=wm.swa_cache_cu_tiles,
+                            total_tiles=wm.swa_cache_total_tiles,
                         )
             # BF16 overlay of freshly computed new K — single ``index_copy_``
             # using the meta-precomputed ``new_k_slot_in_flat``. Avoids the FP8
@@ -3297,27 +3361,57 @@ class AttentionFP8(nn.Module):
                 assert common.cp_ctx is not None
                 cp_ctx_local = common.cp_ctx
                 legacy_prefix_length = int(cp_ctx_local.prefix_length)
-                combine_kwargs = dict(
-                    topk_indices=cmp_topk,
-                    global_positions=_flat_1d(cp_ctx_local.global_positions),
-                    sp_int=legacy_prefix_length,
-                    window_size=self.window_size,
-                    compress_ratio=ratio,
-                    topk=int(cmp_topk.shape[-1]),
-                    M=wm.M,
-                    N=wm.N,
+                is_dense_hca = (
+                    wm.dense_cmp_topk is not None and cmp_topk is wm.dense_cmp_topk
                 )
-                assert common.req_id_per_token is not None
-                assert common.prefix_lengths is not None
-                combine_kwargs.update(
-                    req_id_per_token=_flat_1d(common.req_id_per_token),
-                    prefix_lengths=_flat_1d(common.prefix_lengths),
-                )
-                with record_function_range("dsv4.fp8.attn.workspace.combine_topk_cp"):
-                    combined_indices, combined_lens = combine_topk_swa_indices_cp(
-                        **combine_kwargs,
-                        flash_mla_indices=True,
+                combine_cache = wm.hca_combine_cache if is_dense_hca else None
+                combine_key = (
+                    (
+                        self.window_size,
+                        ratio,
+                        int(cmp_topk.shape[-1]),
+                        wm.M,
+                        wm.N,
+                        legacy_prefix_length,
                     )
+                    if combine_cache is not None
+                    else None
+                )
+                cached_combine = (
+                    combine_cache.get(combine_key)
+                    if combine_cache is not None and combine_key is not None
+                    else None
+                )
+                if cached_combine is not None:
+                    combined_indices, combined_lens = cached_combine
+                else:
+                    combine_kwargs = dict(
+                        topk_indices=cmp_topk,
+                        global_positions=_flat_1d(cp_ctx_local.global_positions),
+                        sp_int=legacy_prefix_length,
+                        window_size=self.window_size,
+                        compress_ratio=ratio,
+                        topk=int(cmp_topk.shape[-1]),
+                        M=wm.M,
+                        N=wm.N,
+                    )
+                    assert common.req_id_per_token is not None
+                    assert common.prefix_lengths is not None
+                    combine_kwargs.update(
+                        req_id_per_token=_flat_1d(common.req_id_per_token),
+                        prefix_lengths=_flat_1d(common.prefix_lengths),
+                    )
+                    with record_function_range("dsv4.fp8.attn.workspace.combine_topk_cp"):
+                        combined_indices, combined_lens = combine_topk_swa_indices_cp(
+                            **combine_kwargs,
+                            flash_mla_indices=True,
+                            dense_arange_topk=is_dense_hca,
+                        )
+                    if combine_cache is not None and combine_key is not None:
+                        combine_cache[combine_key] = (
+                            combined_indices,
+                            combined_lens,
+                        )
             else:
                 with record_function_range("dsv4.fp8.attn.workspace.combine_topk"):
                     combined_indices, combined_lens = combine_topk_swa_indices(
@@ -4427,6 +4521,7 @@ class AttentionFP8(nn.Module):
         ``COMPRESS_RATIO`` so no per-token mask is required up here).
         CSA passes ``False`` and feeds runtime indexer output to combine_topk.
         """
+        from rtp_llm.models_py.modules.dsv4.fp8 import _swa_dequant_triton as _swa_dq
         from rtp_llm.models_py.modules.dsv4.fp8 import _swa_ops_triton as _swa_ops
         from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
             CSA_KV,
@@ -4561,6 +4656,10 @@ class AttentionFP8(nn.Module):
                 cp_ctx_local, "input_lengths_global_host", None
             )
             host_prefix_lengths = getattr(cp_ctx_local, "prefix_lengths_host", None)
+            cmp_cu_tiles: Optional[torch.Tensor] = None
+            cmp_total_tiles: Optional[int] = None
+            swa_cache_cu_tiles: Optional[torch.Tensor] = None
+            swa_cache_total_tiles: Optional[int] = None
             if device.type == "cuda" and torch.cuda.is_current_stream_capturing():
                 # Replay can change device lengths/prefixes. Size from the
                 # fixed block-table/token capacities, not capture-time values.
@@ -4586,18 +4685,45 @@ class AttentionFP8(nn.Module):
                     int(length) + min(int(prefix), win - 1)
                     for prefix, length in zip(host_prefix_lengths, host_input_lengths)
                 ]
+                swa_prefix_lengths_host = [
+                    min(int(prefix), win - 1) for prefix in host_prefix_lengths
+                ]
                 N_max = max(compressed_lengths, default=0)
                 gather_len_max = max(gather_lengths, default=0)
                 total_cmp_tokens = sum(compressed_lengths)
+                cmp_cu_tiles, cmp_total_tiles = _swa_dq.build_dequant_cu_tiles_from_host(
+                    compressed_lengths, device=device
+                )
+                (
+                    swa_cache_cu_tiles,
+                    swa_cache_total_tiles,
+                ) = _swa_dq.build_dequant_cu_tiles_from_host(
+                    swa_prefix_lengths_host, device=device
+                )
             else:
-                # Fold the compressed-token total into the existing metadata D2H
-                # so the reader does not add a per-layer synchronization.
+                # Fold the compressed-token and dequant-tile totals into the
+                # existing metadata D2H so the readers add zero per-layer syncs.
+                tile_t = _swa_dq.TILE_T
+                cmp_tiles = (N_per_req + tile_t - 1) // tile_t
+                swa_prefix_tiles = (P_per_req + tile_t - 1) // tile_t
                 host_geometry = torch.stack(
-                    [N_per_req.max(), gather_len_per_req.max(), N_per_req.sum()]
+                    [
+                        N_per_req.max(),
+                        gather_len_per_req.max(),
+                        N_per_req.sum(),
+                        cmp_tiles.sum(),
+                        swa_prefix_tiles.sum(),
+                    ]
                 )
-                N_max, gather_len_max, total_cmp_tokens = (
-                    int(v) for v in host_geometry.tolist()
-                )
+                (
+                    N_max,
+                    gather_len_max,
+                    total_cmp_tokens,
+                    cmp_total_tiles,
+                    swa_cache_total_tiles,
+                ) = (int(v) for v in host_geometry.tolist())
+                cmp_cu_tiles = _swa_dq.build_dequant_cu_tiles_device(N_per_req)
+                swa_cache_cu_tiles = _swa_dq.build_dequant_cu_tiles_device(P_per_req)
             N = N_max
             M = N_max + gather_len_max
 
@@ -4793,6 +4919,11 @@ class AttentionFP8(nn.Module):
             use_cp_raw_q_merge=use_cp_raw_q_merge,
             swa_cache_slot_mapping=swa_cache_slot_mapping,
             swa_cache_compaction=swa_cache_compaction,
+            hca_combine_cache={} if with_dense_cmp_topk else None,
+            cmp_cu_tiles=cmp_cu_tiles,
+            cmp_total_tiles=cmp_total_tiles,
+            swa_cache_cu_tiles=swa_cache_cu_tiles,
+            swa_cache_total_tiles=swa_cache_total_tiles,
         )
 
     def _build_compressor_meta(
@@ -4902,6 +5033,7 @@ class AttentionFP8(nn.Module):
              Full meta. ``cache_*`` / ``combined_*`` populated on
              continuation; ``None``/0 on all-cold.
         """
+        from rtp_llm.models_py.modules.dsv4.fp8 import _swa_dequant_triton as _swa_dq
         from rtp_llm.models_py.modules.dsv4.fp8 import _swa_ops_triton as _swa_ops
         from rtp_llm.models_py.modules.dsv4.kv_cache_utils import SWA_KV
 
@@ -5077,10 +5209,52 @@ class AttentionFP8(nn.Module):
             num_decodes=0,
             window_size=win,
         )
-        if device.type == "cuda" and torch.cuda.is_current_stream_capturing():
+        cache_seq_lens: Optional[torch.Tensor] = None
+        cache_gather_lens: Optional[torch.Tensor] = None
+        cache_cu_tiles: Optional[torch.Tensor] = None
+        cache_total_tiles: Optional[int] = None
+        capturing = device.type == "cuda" and torch.cuda.is_current_stream_capturing()
+        if any_cont:
+            cache_seq_lens = prefix_lengths.to(device=device, dtype=torch.int32)[
+                :write_B
+            ].contiguous()
+            cache_gather_lens = (
+                torch.clamp_max(prefix_lengths, win - 1)
+                .to(device=device, dtype=torch.int32)[:write_B]
+                .contiguous()
+            )
+        if capturing:
             # Every request has at most write_num_tokens new tokens and
             # win-1 cached tokens. Keep this bound valid across graph replays.
             combined_gather_len_max = write_num_tokens + (win - 1 if any_cont else 0)
+        elif any_cont and cache_gather_lens is not None:
+            host_prefix_lengths = getattr(cp_ctx, "prefix_lengths_host", None)
+            if (
+                cp_on_write
+                and host_prefix_lengths is not None
+                and len(host_prefix_lengths) == write_B
+            ):
+                combined_gather_len_max = int(combined_gather_lens.max().item())
+                (
+                    cache_cu_tiles,
+                    cache_total_tiles,
+                ) = _swa_dq.build_dequant_cu_tiles_from_host(
+                    [min(int(prefix), win - 1) for prefix in host_prefix_lengths],
+                    device=device,
+                )
+            else:
+                cache_tiles = (
+                    cache_gather_lens + _swa_dq.TILE_T - 1
+                ) // _swa_dq.TILE_T
+                combined_gather_len_max, cache_total_tiles = (
+                    int(v)
+                    for v in torch.stack(
+                        [combined_gather_lens.max(), cache_tiles.sum()]
+                    ).tolist()
+                )
+                cache_cu_tiles = _swa_dq.build_dequant_cu_tiles_device(
+                    cache_gather_lens
+                )
         else:
             combined_gather_len_max = int(combined_gather_lens.max().item())
         M = max(combined_gather_len_max, 1)
@@ -5091,20 +5265,7 @@ class AttentionFP8(nn.Module):
         # P_b math runs through ``cache_gather_lens``. Sentinel ``1`` on
         # continuation avoids an extra ``.item()`` sync.
         if any_cont:
-            # cache_seq_lens / cache_gather_lens read the SWA prefix tail
-            # from each rank's own paged pool (Phase C wrote the full
-            # gather'd KV on every rank). prefix_lengths is rank-invariant
-            # under CP, so the same per-req tensors work for CP=1 and CP>1.
-            # Slice to ``write_B`` so CP B=1 (write_B=1) doesn't pull in
-            # the full rank-local request count from a longer prefix tensor.
-            cache_seq_lens = prefix_lengths.to(device=device, dtype=torch.int32)[
-                :write_B
-            ].contiguous()
-            cache_gather_lens = (
-                torch.clamp_max(prefix_lengths, win - 1)
-                .to(device=device, dtype=torch.int32)[:write_B]
-                .contiguous()
-            )
+            assert cache_seq_lens is not None and cache_gather_lens is not None
             cache_slot_mapping = _build_suffix_pool_slot_mapping(
                 block_table=bt_swa,
                 seq_lens=cache_seq_lens,
@@ -5210,6 +5371,8 @@ class AttentionFP8(nn.Module):
             cache_slot_mapping=cache_slot_mapping,
             slot_compaction=slot_compaction,
             cache_compaction=cache_compaction,
+            cache_cu_tiles=cache_cu_tiles,
+            cache_total_tiles=cache_total_tiles,
         )
 
     def _prefill_compute_qkv(
@@ -5609,6 +5772,8 @@ class AttentionFP8(nn.Module):
                         cp_rank=int(cp_ctx.cp_rank),
                         cp_size=int(cp_ctx.cp_size),
                         compaction=meta.cache_compaction,
+                        cu_tiles=meta.cache_cu_tiles,
+                        total_tiles=meta.cache_total_tiles,
                     )
                 else:
                     _swa_dq.dequantize_and_gather_k_cache_slots(
@@ -5617,6 +5782,8 @@ class AttentionFP8(nn.Module):
                         slot_mapping=meta.cache_slot_mapping,
                         gather_lens=meta.cache_gather_lens,
                         offset=0,
+                        cu_tiles=meta.cache_cu_tiles,
+                        total_tiles=meta.cache_total_tiles,
                     )
 
         # 2. New K BF16 overlay.

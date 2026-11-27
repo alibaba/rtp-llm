@@ -52,6 +52,8 @@ class CPByteSlicedSwaPrefixPending:
     out_stream: Any = None
     ready_event: Any = None
     work_waited: bool = False
+    cu_tiles: Optional[torch.Tensor] = None
+    total_tiles: Optional[int] = None
 
 
 # Layout constants — must stay byte-aligned with
@@ -135,7 +137,53 @@ def _select_dequant_num_workers(num_reqs: int, max_tokens_hint: int = 0) -> int:
     return min(1024, target)
 
 
-@triton.jit(do_not_specialize=["offset", "max_blocks_per_seq"])
+def build_dequant_cu_tiles_from_host(
+    lens_host: Any,
+    device: torch.device,
+    tile_t: int = TILE_T,
+) -> Tuple[torch.Tensor, int]:
+    """Build ``cu_tiles[B+1]`` (int32) and total tile count from host lengths."""
+    cu_list = [0]
+    acc = 0
+    for length in lens_host:
+        val = int(length)
+        if val > 0:
+            acc += (val + tile_t - 1) // tile_t
+        cu_list.append(acc)
+    return torch.tensor(cu_list, dtype=torch.int32, device=device), acc
+
+
+def build_dequant_cu_tiles_device(
+    lens: torch.Tensor,
+    tile_t: int = TILE_T,
+) -> torch.Tensor:
+    """Build ``cu_tiles[B+1]`` (int32) on ``lens.device`` without host sync."""
+    B = int(lens.numel())
+    cu = torch.zeros(B + 1, dtype=torch.int32, device=lens.device)
+    if B > 0:
+        tiles = (lens.to(torch.int32).clamp_min(0) + tile_t - 1) // tile_t
+        torch.cumsum(tiles, dim=0, dtype=torch.int32, out=cu[1:])
+    return cu
+
+
+@triton.jit
+def _resolve_flat_tile_batch_and_idx(cu_tiles_ptr, num_reqs):
+    """Map 1D ``program_id(0)`` to ``(batch_idx, tile_in_req)`` via ``cu_tiles``."""
+    tile_id = tl.program_id(0)
+    lo = tile_id * 0
+    hi = tile_id * 0 + num_reqs
+    while hi - lo > 1:
+        mid = (lo + hi) >> 1
+        mid_start = tl.load(cu_tiles_ptr + mid)
+        go_left = tile_id < mid_start
+        hi = tl.where(go_left, mid, hi)
+        lo = tl.where(go_left, lo, mid)
+    batch_idx = lo
+    tile_idx = tile_id - tl.load(cu_tiles_ptr + batch_idx)
+    return batch_idx, tile_idx
+
+
+@triton.jit(do_not_specialize=["offset", "max_blocks_per_seq", "num_reqs"])
 def _dequantize_and_gather_k_kernel(
     out_ptr,
     out_stride0,
@@ -146,6 +194,8 @@ def _dequantize_and_gather_k_kernel(
     offset,
     gather_lens_ptr,
     max_blocks_per_seq,
+    cu_tiles_ptr,
+    num_reqs,
     fp8_dim: tl.constexpr,
     bf16_dim: tl.constexpr,
     scale_dim: tl.constexpr,
@@ -161,15 +211,22 @@ def _dequantize_and_gather_k_kernel(
     n_scale_groups: tl.constexpr,
     TILE_T: tl.constexpr,
     TRAP_INVALID_KV_ACCESS: tl.constexpr,
+    USE_FLAT_GRID: tl.constexpr,
 ):
-    """One program per (request, tile worker); each loop iteration dequantizes
-    TILE_T contiguous gathered tokens with one wide 2D fp8 load, one
-    (TILE_T, n_scale_groups) scale load, and one wide RoPE transaction.
-    Mirrors vLLM's per-token math exactly — see the V4 paper or vLLM's
-    cache_utils.py."""
-    batch_idx = tl.program_id(0)
-    worker_id = tl.program_id(1)
-    num_workers = tl.num_programs(1)
+    """One program per (request, tile worker) or per active flat 1D tile.
+
+    Each loop iteration dequantizes TILE_T contiguous gathered tokens with one
+    wide 2D fp8 load, one (TILE_T, n_scale_groups) scale load, and one wide RoPE
+    transaction. Mirrors vLLM's per-token math exactly — see the V4 paper or
+    vLLM's cache_utils.py.
+    """
+    if USE_FLAT_GRID:
+        batch_idx, worker_id = _resolve_flat_tile_batch_and_idx(cu_tiles_ptr, num_reqs)
+        num_workers = 1
+    else:
+        batch_idx = tl.program_id(0)
+        worker_id = tl.program_id(1)
+        num_workers = tl.num_programs(1)
 
     seq_len = tl.load(seq_lens_ptr + batch_idx)
     if gather_lens_ptr is not None:  # noqa: SIM108
@@ -179,6 +236,8 @@ def _dequantize_and_gather_k_kernel(
     start_pos = seq_len - gather_len
 
     num_tiles = (gather_len + TILE_T - 1) // TILE_T
+    if USE_FLAT_GRID:
+        num_tiles = tl.minimum(num_tiles, worker_id + 1)
     for tile in range(worker_id, num_tiles, num_workers):
         i_vec = tile * TILE_T + tl.arange(0, TILE_T)
         # Rows past gather_len are never read downstream: their loads and
@@ -290,6 +349,9 @@ def dequantize_and_gather_k_cache(
     block_table: torch.Tensor,
     block_size: int,
     offset: int,
+    *,
+    cu_tiles: Optional[torch.Tensor] = None,
+    total_tiles: Optional[int] = None,
 ) -> None:
     """Dequantize + gather FP8 K cache into a BF16 workspace.
 
@@ -331,11 +393,30 @@ def dequantize_and_gather_k_cache(
         f"dev={block_table.device} (k_cache dev={k_cache.device})"
     )
 
-    num_reqs = seq_lens.shape[0]
-    num_workers = _select_dequant_num_workers(
-        num_reqs, max_tokens_hint=int(out.shape[1])
-    )
-    _dequantize_and_gather_k_kernel[(num_reqs, num_workers)](
+    num_reqs = int(seq_lens.shape[0])
+    if cu_tiles is not None and total_tiles is not None:
+        total_tiles_int = int(total_tiles)
+        if num_reqs == 0 or total_tiles_int <= 0:
+            return
+        assert (
+            cu_tiles.dim() == 1
+            and int(cu_tiles.numel()) == num_reqs + 1
+            and cu_tiles.dtype == torch.int32
+            and cu_tiles.device == out.device
+            and cu_tiles.is_contiguous()
+        ), f"cu_tiles contract mismatch: shape={cu_tiles.shape} dtype={cu_tiles.dtype}"
+        grid: Tuple[int, ...] = (total_tiles_int,)
+        use_flat_grid = True
+        cu_tiles_arg: Optional[torch.Tensor] = cu_tiles
+    else:
+        num_workers = _select_dequant_num_workers(
+            num_reqs, max_tokens_hint=int(out.shape[1])
+        )
+        grid = (num_reqs, num_workers)
+        use_flat_grid = False
+        cu_tiles_arg = None
+
+    _dequantize_and_gather_k_kernel[grid](
         out,
         out.stride(0),
         out.stride(1),
@@ -345,6 +426,8 @@ def dequantize_and_gather_k_cache(
         offset,
         gather_lens,
         max_blocks_per_seq=block_table.shape[-1],
+        cu_tiles_ptr=cu_tiles_arg,
+        num_reqs=num_reqs,
         fp8_dim=NOPE_DIM,
         bf16_dim=ROPE_DIM,
         scale_dim=SCALE_BYTES_PER_TOKEN,
@@ -360,6 +443,7 @@ def dequantize_and_gather_k_cache(
         n_scale_groups=N_SCALE_GROUPS,
         TILE_T=TILE_T,
         TRAP_INVALID_KV_ACCESS=True,
+        USE_FLAT_GRID=use_flat_grid,
         num_warps=4,
     )
 
@@ -411,6 +495,7 @@ def _packed_slot_byte_ptrs_2d(
         "max_gather_len",
         "block_stride",
         "num_cache_blocks",
+        "num_reqs",
     ]
 )
 def _dequantize_and_gather_k_slots_kernel(
@@ -423,6 +508,8 @@ def _dequantize_and_gather_k_slots_kernel(
     offset,
     gather_lens_ptr,
     max_gather_len,
+    cu_tiles_ptr,
+    num_reqs,
     fp8_dim: tl.constexpr,
     bf16_dim: tl.constexpr,
     scale_dim: tl.constexpr,
@@ -439,6 +526,7 @@ def _dequantize_and_gather_k_slots_kernel(
     TRAP_INVALID_KV_ACCESS: tl.constexpr,
     CP_RANK_MAJOR_RAW: tl.constexpr,
     SLICE_GE_TILE_COLS: tl.constexpr,
+    USE_FLAT_GRID: tl.constexpr,
 ):
     """Gather/dequant using pre-translated flat global slot ids, TILE_T
     contiguous gathered tokens per loop iteration.
@@ -449,9 +537,13 @@ def _dequantize_and_gather_k_slots_kernel(
     gather length are never stored: workspace writers rely on the per-request
     range disjointness of this kernel.
     """
-    batch_idx = tl.program_id(0)
-    worker_id = tl.program_id(1)
-    num_workers = tl.num_programs(1)
+    if USE_FLAT_GRID:
+        batch_idx, worker_id = _resolve_flat_tile_batch_and_idx(cu_tiles_ptr, num_reqs)
+        num_workers = 1
+    else:
+        batch_idx = tl.program_id(0)
+        worker_id = tl.program_id(1)
+        num_workers = tl.num_programs(1)
 
     if gather_lens_ptr is not None:  # noqa: SIM108
         gather_len = tl.load(gather_lens_ptr + batch_idx)
@@ -461,6 +553,8 @@ def _dequantize_and_gather_k_slots_kernel(
     slot_row_ptr = slot_mapping_ptr + batch_idx.to(tl.int64) * slot_mapping_stride0
 
     num_tiles = (gather_len + TILE_T - 1) // TILE_T
+    if USE_FLAT_GRID:
+        num_tiles = tl.minimum(num_tiles, worker_id + 1)
     for tile in range(worker_id, num_tiles, num_workers):
         i_vec = tile * TILE_T + tl.arange(0, TILE_T)
         row_valid = i_vec < gather_len
@@ -580,6 +674,8 @@ def _launch_dequantize_and_gather_k_slots_unchecked(
     block_stride: int,
     num_cache_blocks: int,
     cp_rank_major_raw: bool,
+    cu_tiles: Optional[torch.Tensor] = None,
+    total_tiles: Optional[int] = None,
 ) -> None:
     """Launch after the caller has established the packed-slot contracts."""
     batch_size = int(slot_mapping.shape[0])
@@ -587,10 +683,29 @@ def _launch_dequantize_and_gather_k_slots_unchecked(
     if batch_size == 0 or max_gather_len == 0:
         return
 
-    num_workers = _select_dequant_num_workers(
-        batch_size, max_tokens_hint=max_gather_len
-    )
-    _dequantize_and_gather_k_slots_kernel[(batch_size, num_workers)](
+    if cu_tiles is not None and total_tiles is not None:
+        total_tiles_int = int(total_tiles)
+        if total_tiles_int <= 0:
+            return
+        assert (
+            cu_tiles.dim() == 1
+            and int(cu_tiles.numel()) == batch_size + 1
+            and cu_tiles.dtype == torch.int32
+            and cu_tiles.device == out.device
+            and cu_tiles.is_contiguous()
+        ), f"cu_tiles contract mismatch: shape={cu_tiles.shape} dtype={cu_tiles.dtype}"
+        grid: Tuple[int, ...] = (total_tiles_int,)
+        use_flat_grid = True
+        cu_tiles_arg: Optional[torch.Tensor] = cu_tiles
+    else:
+        num_workers = _select_dequant_num_workers(
+            batch_size, max_tokens_hint=max_gather_len
+        )
+        grid = (batch_size, num_workers)
+        use_flat_grid = False
+        cu_tiles_arg = None
+
+    _dequantize_and_gather_k_slots_kernel[grid](
         out,
         out.stride(0),
         out.stride(1),
@@ -600,6 +715,8 @@ def _launch_dequantize_and_gather_k_slots_unchecked(
         int(offset),
         gather_lens,
         max_gather_len,
+        cu_tiles_ptr=cu_tiles_arg,
+        num_reqs=batch_size,
         fp8_dim=NOPE_DIM,
         bf16_dim=ROPE_DIM,
         scale_dim=SCALE_BYTES_PER_TOKEN,
@@ -619,6 +736,7 @@ def _launch_dequantize_and_gather_k_slots_unchecked(
         # carry-based rank translation (at most one boundary crossing per
         # element); narrower slices fall back to per-element division.
         SLICE_GE_TILE_COLS=int(block_stride) >= _MIN_SINGLE_CARRY_SLICE_BYTES,
+        USE_FLAT_GRID=use_flat_grid,
         num_warps=4,
     )
 
@@ -632,6 +750,8 @@ def _launch_dequantize_and_gather_k_slots_cp_rank_major_unchecked(
     *,
     full_entries_per_block: int,
     num_unique_blocks: int,
+    cu_tiles: Optional[torch.Tensor] = None,
+    total_tiles: Optional[int] = None,
 ) -> None:
     """Launch after start/compaction established rank-major raw contracts."""
     _launch_dequantize_and_gather_k_slots_unchecked(
@@ -644,6 +764,8 @@ def _launch_dequantize_and_gather_k_slots_cp_rank_major_unchecked(
         block_stride=int(gathered.shape[1]),
         num_cache_blocks=int(num_unique_blocks),
         cp_rank_major_raw=True,
+        cu_tiles=cu_tiles,
+        total_tiles=total_tiles,
     )
 
 
@@ -653,6 +775,9 @@ def dequantize_and_gather_k_cache_slots(
     slot_mapping: torch.Tensor,
     gather_lens: Optional[torch.Tensor],
     offset: int,
+    *,
+    cu_tiles: Optional[torch.Tensor] = None,
+    total_tiles: Optional[int] = None,
 ) -> None:
     """Dequantize + gather FP8 K cache using flat global slot ids.
 
@@ -688,12 +813,25 @@ def dequantize_and_gather_k_cache_slots(
     if max_gather_len == 0 or int(slot_mapping.shape[0]) == 0:
         return
 
-    slots_i64 = slot_mapping.to(device=out.device, dtype=torch.int64).contiguous()
-    gather_lens_i32 = (
-        None
-        if gather_lens is None
-        else gather_lens.to(device=out.device, dtype=torch.int32).contiguous()
+    slots_i64 = (
+        slot_mapping
+        if (
+            slot_mapping.device == out.device
+            and slot_mapping.dtype == torch.int64
+            and slot_mapping.is_contiguous()
+        )
+        else slot_mapping.to(device=out.device, dtype=torch.int64).contiguous()
     )
+    if gather_lens is None:
+        gather_lens_i32 = None
+    elif (
+        gather_lens.device == out.device
+        and gather_lens.dtype == torch.int32
+        and gather_lens.is_contiguous()
+    ):
+        gather_lens_i32 = gather_lens
+    else:
+        gather_lens_i32 = gather_lens.to(device=out.device, dtype=torch.int32).contiguous()
 
     _launch_dequantize_and_gather_k_slots_unchecked(
         out,
@@ -705,6 +843,8 @@ def dequantize_and_gather_k_cache_slots(
         block_stride=int(k_cache.stride(0)),
         num_cache_blocks=int(k_cache.shape[0]),
         cp_rank_major_raw=False,
+        cu_tiles=cu_tiles,
+        total_tiles=total_tiles,
     )
 
 
@@ -719,6 +859,9 @@ def try_dequantize_and_gather_k_cache_slots_to_workspace(
     slot_mapping: torch.Tensor,
     gather_lens: torch.Tensor,
     offset: int,
+    *,
+    cu_tiles: Optional[torch.Tensor] = None,
+    total_tiles: Optional[int] = None,
 ) -> bool:
     """Dequantize compact slots directly into their final workspace rows.
 
@@ -773,6 +916,8 @@ def try_dequantize_and_gather_k_cache_slots_to_workspace(
         block_stride=int(k_cache.stride(0)),
         num_cache_blocks=int(k_cache.shape[0]),
         cp_rank_major_raw=False,
+        cu_tiles=cu_tiles,
+        total_tiles=total_tiles,
     )
     return True
 
@@ -1658,6 +1803,8 @@ def start_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
     compaction: CPByteSlicedSlotCompaction,
     stream: Optional[Any] = None,
     profile_name: str = "dsv4.cp.all_gather.swa_prefix",
+    cu_tiles: Optional[torch.Tensor] = None,
+    total_tiles: Optional[int] = None,
 ) -> Optional[CPByteSlicedSwaPrefixPending]:
     """Launch only the NCCL stage for CP byte-sliced SWA prefix reads."""
     assert slot_mapping.dim() == 2
@@ -1703,6 +1850,15 @@ def start_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
         max_gather_len=W,
         device=device,
     )
+    if (
+        (cu_tiles is None or total_tiles is None)
+        and len(compaction.gather_lens_cpu) == B
+        and (device.type != "cuda" or not torch.cuda.is_current_stream_capturing())
+    ):
+        cu_tiles, total_tiles = build_dequant_cu_tiles_from_host(
+            compaction.gather_lens_cpu,
+            device=device,
+        )
     current_stream = torch.cuda.current_stream(device)
     if stream is None:
         raise ValueError("CP byte-sliced SWA async gather requires a stream")
@@ -1759,6 +1915,8 @@ def start_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
         producer_stream=current_stream,
         completion_event=completion_event,
         local_slices=local_slices,
+        cu_tiles=cu_tiles,
+        total_tiles=total_tiles,
     )
 
 
@@ -1800,6 +1958,8 @@ def prepare_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
                     pending.offset,
                     full_entries_per_block=pending.full_entries_per_block,
                     num_unique_blocks=int(pending.unique_blocks.numel()),
+                    cu_tiles=pending.cu_tiles,
+                    total_tiles=pending.total_tiles,
                 )
             else:
                 full_raw = (
@@ -1901,6 +2061,9 @@ def dequantize_and_gather_k_cache_slots_cp_byte_sliced(
     cp_rank: int,
     cp_size: int,
     compaction: CPByteSlicedSlotCompaction,
+    *,
+    cu_tiles: Optional[torch.Tensor] = None,
+    total_tiles: Optional[int] = None,
 ) -> None:
     """Reconstruct CP byte-sliced SWA entries with all_gather, then dequantize.
 
@@ -1977,6 +2140,18 @@ def dequantize_and_gather_k_cache_slots_cp_byte_sliced(
     if cp_swa_direct_dequant_scatter_enabled() and direct_triton_fast_path_supported(
         out.device
     ):
+        if (
+            (cu_tiles is None or total_tiles is None)
+            and len(compaction.gather_lens_cpu) == B
+            and (
+                out.device.type != "cuda"
+                or not torch.cuda.is_current_stream_capturing()
+            )
+        ):
+            cu_tiles, total_tiles = build_dequant_cu_tiles_from_host(
+                compaction.gather_lens_cpu,
+                device=out.device,
+            )
         _launch_dequantize_and_gather_k_slots_cp_rank_major_unchecked(
             out,
             gathered,
@@ -1985,6 +2160,8 @@ def dequantize_and_gather_k_cache_slots_cp_byte_sliced(
             offset,
             full_entries_per_block=full_entries_per_block,
             num_unique_blocks=int(unique_blocks.numel()),
+            cu_tiles=cu_tiles,
+            total_tiles=total_tiles,
         )
         return
     gathered = gathered.view(
