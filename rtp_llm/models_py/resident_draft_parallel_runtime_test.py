@@ -12,6 +12,7 @@ import torch.distributed as dist
 from safetensors.torch import save_file
 
 from rtp_llm.models.base_model import BaseModel
+from rtp_llm.models_py.checkpoint_reader_test_support import requires_native_fst
 from rtp_llm.models_py.distributed.rank_layout import Group
 from rtp_llm.models_py.model_loader import NewLoaderConfig
 from rtp_llm.models_py.parallel_checkpoint_test_support import (
@@ -102,6 +103,7 @@ def _resident_draft_worker(rank, root):
 
 
 class ResidentDraftParallelRuntimeTest(unittest.TestCase):
+    @requires_native_fst
     def test_resident_draft_mixed_hit_uses_real_tail_stage_fst(self):
         with tempfile.TemporaryDirectory() as root:
             save_file(

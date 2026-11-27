@@ -14,6 +14,7 @@ from rtp_llm.models_py.bert_service_test import (
     packed_inputs,
     public_load,
 )
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers
 from rtp_llm.models_py.model_loader import NewLoaderLoadMethod
 from rtp_llm.models_py.new_models.bert.checkpoint_metadata import (
     checkpoint_input_vocab_size,
@@ -55,11 +56,10 @@ class BertInputVocabularyTest(unittest.TestCase):
 
     @torch.inference_mode()
     def test_stale_config_preserves_real_rows_and_valid_last_token(self):
-        for method, extension in (
-            ("scratch", "bin"),
-            ("scratch", "safetensors"),
-            ("fastsafetensors", "safetensors"),
-        ):
+        cases = (("scratch", "bin"),) + checkpoint_readers(
+            ("scratch", "safetensors"), ("fastsafetensors", "safetensors")
+        )
+        for method, extension in cases:
             with self.subTest(
                 method=method, extension=extension
             ), tempfile.TemporaryDirectory() as path:

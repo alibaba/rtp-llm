@@ -10,6 +10,7 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 
 from rtp_llm.config.quant_config import Fp8PerChannelCompressedQuantConfig
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers
 from rtp_llm.models_py.layers.moe_experts import BaseMoEExperts
 from rtp_llm.models_py.model_loader import (
     NewLoaderConfig,
@@ -98,7 +99,7 @@ def check_stacked_routing(test):
         },
     ]
     for entries in sources:
-        for method, ep in (("scratch", 2), ("fastsafetensors", 1)):
+        for method, ep in checkpoint_readers(("scratch", 2), ("fastsafetensors", 1)):
             with test.subTest(method=method, key=next(iter(entries))):
                 owned = _load(entries, method, ep)
                 start = 2 if ep == 2 else 0

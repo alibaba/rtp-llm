@@ -12,6 +12,14 @@ py_library(
 )
 
 py_test(
+    name = "layers_import_test",
+    srcs = ["layers_import_test.py", "layers/__init__.py", "layers/norm.py"],
+    main = "layers_import_test.py",
+    env = {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "ROCR_VISIBLE_DEVICES": ""},
+    deps = [":new_loader_core", "//rtp_llm:torch"],
+)
+
+py_test(
     name = "v4_fst_nogds_test",
     srcs = ["v4_fst_nogds_test.py"],
     deps = [":new_loader_core"],
@@ -201,7 +209,7 @@ models_py_test(
     args = ["DenseProfileTest.test_sm120_uses_original_direct_packed_quantization"],
     env = {"RUN_Q4_DIRECT_STORAGE_GPU": "1"},
     tags = ["manual"],
-    deps = [":new_weight_loader"],
+    deps = [":checkpoint_reader_test_support", ":new_weight_loader"],
 )
 
 # Shared packed layout math must not depend on either model loader.
@@ -365,8 +373,9 @@ py_test(
     name = "resident_draft_parallel_runtime_test",
     srcs = ["resident_draft_parallel_runtime_test.py"],
     data = ["//rtp_llm/libs:libth_transformer_config_so"],
-    env = _GLOO_CPU_ENV,
+    env = checkpoint_reader_test_env(_GLOO_CPU_ENV),
     deps = [
+        ":checkpoint_reader_test_support",
         ":new_loader_core",
         ":parallel_checkpoint_test_support",
         "//rtp_llm:fastsafetensors",
@@ -828,7 +837,8 @@ py_test(
     name = "qwen3_dspark_sampler_checkpoint_test",
     srcs = ["new_models/qwen3_dspark_weights_test.py"],
     main = "new_models/qwen3_dspark_weights_test.py",
-    deps = [":new_weight_loader"],
+    env = checkpoint_reader_test_env(),
+    deps = [":checkpoint_reader_test_support", ":new_weight_loader"],
 )
 
 checkpoint_service_tests(
@@ -997,7 +1007,7 @@ py_library(
     name = "owner_migration_checkpoint_test_cases",
     testonly = True,
     srcs = ["owner_migration_checkpoint_test.py"],
-    deps = [":new_weight_loader"],
+    deps = [":checkpoint_reader_test_support", ":new_weight_loader"],
     visibility = ["//rtp_llm/model_loader/test:__pkg__"],
 )
 
@@ -1030,7 +1040,8 @@ py_test(
 py_test(
     name = "owner_migration_checkpoint_test",
     srcs = ["owner_migration_checkpoint_test.py"],
-    deps = [":new_weight_loader"],
+    env = checkpoint_reader_test_env(),
+    deps = [":checkpoint_reader_test_support", ":new_weight_loader"],
 )
 
 exports_files(

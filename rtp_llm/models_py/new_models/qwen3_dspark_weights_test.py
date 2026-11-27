@@ -12,6 +12,7 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
 
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers
 from rtp_llm.models_py.model_loader import (
     NewLoaderConfig,
     NewLoaderLoadMethod,
@@ -58,9 +59,6 @@ class SamplerTest(unittest.TestCase):
         return model
 
     def test_real_scratch_and_fst_distinct_vocabulary(self):
-        import fastsafetensors.cpp as native
-
-        self.assertTrue(native.__file__.endswith(".so"))
         a = torch.arange(32, dtype=torch.bfloat16).reshape(8, 4)
         b = torch.arange(20, dtype=torch.bfloat16).reshape(5, 4) + 91
         with tempfile.TemporaryDirectory() as root:
@@ -72,11 +70,16 @@ class SamplerTest(unittest.TestCase):
                 },
                 str(Path(root) / "model.safetensors"),
             )
-            scratch = self.load(root, 8, 5, 4, "scratch")
-            fst = self.load(root, 8, 5, 4, "fastsafetensors")
+            models = []
+            for method in checkpoint_readers("scratch", "fastsafetensors"):
+                if method == "fastsafetensors":
+                    import fastsafetensors.cpp as native
+
+                    self.assertTrue(native.__file__.endswith(".so"))
+                models.append(self.load(root, 8, 5, 4, method))
         gc.collect()
         _ = torch.empty(32 * 1024)
-        for model in (fst, scratch):
+        for model in models:
             self.assertTrue(torch.equal(model.markov_w1.weight, a))
             self.assertTrue(torch.equal(model.markov_w2.weight, b))
             self.assertIs(

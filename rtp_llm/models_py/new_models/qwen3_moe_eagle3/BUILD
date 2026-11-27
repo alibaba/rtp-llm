@@ -1,5 +1,11 @@
 load("//rtp_llm/models_py:checkpoint_test_platforms.bzl", "checkpoint_reader_test_env")
 
+_READER_ENV = checkpoint_reader_test_env({"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"})
+_READER_DEPS = ["//rtp_llm:fastsafetensors"] + select({
+    "@//:using_rocm": ["//rtp_llm:fast-safetensors"],
+    "//conditions:default": [],
+})
+
 py_library(
     name = "draft_body",
     srcs = ["__init__.py", "body.py", "ft_checkpoint.py", "proposal.py", "service.py"],
@@ -10,16 +16,16 @@ py_library(
 py_test(
     name = "draft_body_test",
     srcs = ["draft_body_test.py"],
-    env = {"CUDA_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"},
-    deps = [":draft_body", "//rtp_llm:safetensors"],
+    env = _READER_ENV,
+    deps = [":draft_body", "//rtp_llm:safetensors"] + _READER_DEPS,
 )
 
 py_test(
     name = "proposal_test",
     srcs = ["draft_body_test.py", "proposal_test.py"],
     main = "proposal_test.py",
-    env = {"CUDA_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"},
-    deps = [":draft_body", "//rtp_llm:safetensors"],
+    env = _READER_ENV,
+    deps = [":draft_body", "//rtp_llm:safetensors"] + _READER_DEPS,
 )
 
 # Rank-local checkpoint/loan assertions need no compute binding; the full
