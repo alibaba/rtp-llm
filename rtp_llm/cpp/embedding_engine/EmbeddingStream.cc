@@ -69,9 +69,11 @@ void EmbeddingStream::reportMetrics() {
 }
 
 void EmbeddingStream::setError(const std::string& error_info) {
+    lock_guard<mutex> lock(lock_);
     embedding_output_->setError(ErrorCode::UNKNOWN_ERROR, error_info);
     stream_state_ = StreamState::FINISHED;
     reportMetrics();
+    cond_.notify_all();
 }
 
 void EmbeddingStream::setStart() {

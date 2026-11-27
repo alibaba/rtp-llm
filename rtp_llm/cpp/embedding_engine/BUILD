@@ -1,5 +1,5 @@
 load("//:def.bzl", "copts")
-load("@arch_config//:arch_select.bzl", "requirement", "whl_deps")
+load("@arch_config//:arch_select.bzl", "requirement", "torch_deps", "whl_deps")
 
 cc_library(
     name = "embedding_engine",
@@ -9,6 +9,7 @@ cc_library(
     srcs = glob([
         "*.cc",
     ]),
+    copts = copts(),
     deps = [
         "//rtp_llm/cpp/engine_base:engine_base",
         "//rtp_llm/cpp/engine_base:executor",
@@ -22,9 +23,17 @@ cc_library(
         "//rtp_llm/cpp/cuda_graph:cuda_graph_base",
         "//rtp_llm/cpp/utils:profiling_scope",
         "//rtp_llm/models_py/bindings:no_block_copy_hdr",
-    ] + select({
-        "//:using_cuda": ["//rtp_llm/cpp/cuda_graph:cuda_graph_impl"],
-        "@//:using_rocm": ["//rtp_llm/cpp/cuda_graph:cuda_graph_impl"],
+    ] + torch_deps() + select({
+        "//:using_cuda": [
+            "//rtp_llm/cpp/cuda_graph:cuda_graph_impl",
+            "@local_config_cuda//cuda:cuda_headers",
+            "@local_config_cuda//cuda:cudart",
+        ],
+        "@//:using_rocm": [
+            "//rtp_llm/cpp/cuda_graph:cuda_graph_impl",
+            "@local_config_rocm//rocm:rocm_headers",
+            "@local_config_rocm//rocm:rocm",
+        ],
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"]
