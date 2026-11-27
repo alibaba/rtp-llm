@@ -1,0 +1,9 @@
+[Unit]
+Description=Forward merged RTP-LLM block_tree_cache PRs to DingTalk
+After=network-online.target
+
+[Service]
+Type=oneshot
+UMask=0077
+ExecStart=/usr/bin/python3 %h/.local/share/rtp-btc-notify/notify.py run
+TimeoutStartSec=20min

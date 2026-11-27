@@ -1,0 +1,10 @@
+[Unit]
+Description=Check RTP-LLM block_tree_cache merges every 15 minutes
+
+[Timer]
+OnCalendar=*-*-* *:00/15:00
+Persistent=true
+AccuracySec=15s
+
+[Install]
+WantedBy=timers.target
