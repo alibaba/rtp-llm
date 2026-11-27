@@ -12,6 +12,15 @@ from rtp_llm.ops import (
 
 
 class DecodeGraphConfigPickleTest(unittest.TestCase):
+    def test_batch_invariant_opt_in_round_trip(self):
+        config = HWKernelConfig()
+        state = config.__getstate__()
+        self.assertEqual(len(state), 15)
+        self.assertFalse(pickle.loads(pickle.dumps(config)).batch_invariant)
+        config.batch_invariant = True
+        self.assertEqual(config.__getstate__(), state + (True,))
+        self.assertTrue(pickle.loads(pickle.dumps(config)).batch_invariant)
+
     def test_capture_config_and_explicit_prefill_capacity_round_trip(self):
         config = HWKernelConfig()
         config.decode_capture_batch_sizes = [128, 2048, 256]
@@ -279,6 +288,33 @@ class GrammarConfigPickleTest(unittest.TestCase):
 
 
 class HWKernelConfigPickleTest(unittest.TestCase):
+    def test_default_keeps_pre_batch_invariant_resident_weight_config(self):
+        config = HWKernelConfig()
+        previous = (
+            "use_swizzleA: 0\n"
+            "enable_cuda_graph: 0\n"
+            "enable_dynamic_decode_backend: 0\n"
+            "dyn_decode_gate_thresholds: \n"
+            "enable_cuda_graph_debug_mode: 0\n"
+            "generation_prefill_cuda_graph_max_requests: 1\n"
+            "generation_prefill_capture_token_buckets size: 0\n"
+            "prefill_capture_seq_lens size: 0\n"
+            "decode_capture_batch_sizes size: 0\n"
+            "enable_decode_cascade_attention: 0\n"
+            "disable_dpc_random: 0\n"
+            "rocm_disable_custom_ag: 1\n"
+            "enable_fuse_kernels: 1, glm5_cp_opt: 0, enable_glm5_cmp: 0"
+        )
+        # BaseModel uses the exact string as the hardware config fingerprint field.
+        self.assertEqual(config.to_string(), previous)
+        config.batch_invariant = True
+        self.assertEqual(
+            config.to_string(),
+            previous.replace(
+                "use_swizzleA: 0\n", "use_swizzleA: 0\nbatch_invariant: 1\n"
+            ),
+        )
+
     def test_current_format_round_trip(self):
         config = HWKernelConfig()
         config.use_swizzleA = True
@@ -380,7 +416,7 @@ class HWKernelConfigPickleTest(unittest.TestCase):
                 self.assertFalse(restored.enable_dynamic_decode_backend)
 
     def test_unsupported_tuple_sizes_are_rejected(self):
-        for size in (6, 14, 16, 19, 20):
+        for size in (6, 14, 17, 19, 20):
             with self.subTest(size=size), self.assertRaisesRegex(
                 RuntimeError, "Invalid state"
             ):

@@ -1,3 +1,28 @@
+load("@arch_config//:arch_select.bzl", "cuda13_x86_test_gpu")
+
+py_test(
+    name = "batch_invariant_config_test",
+    srcs = ["batch_invariant/config_test.py"],
+    main = "batch_invariant/config_test.py",
+    deps = ["//rtp_llm:rtp_llm_frontend_lib"],
+)
+
+[
+    py_test(
+        name = "batch_invariant_" + test,
+        srcs = ["batch_invariant/" + test + ".py"],
+        main = "batch_invariant/" + test + ".py",
+        exec_properties = {"gpu": cuda13_x86_test_gpu()},
+        tags = [cuda13_x86_test_gpu()],
+        target_compatible_with = select({
+            "//:using_cuda13_x86": [],
+            "//conditions:default": ["@platforms//:incompatible"],
+        }),
+        deps = ["//rtp_llm:testlib"],
+    )
+    for test in ["attention_test", "moe_test"]
+]
+
 py_test(
     name = "kv_cache_specs_test",
     srcs = [

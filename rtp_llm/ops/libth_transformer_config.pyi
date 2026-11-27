@@ -616,6 +616,7 @@ class GrpcConfig:
     def to_string(self) -> str:
         ...
 class HWKernelConfig:
+    batch_invariant: bool
     enable_dynamic_decode_backend: bool
     dyn_decode_gate_thresholds: typing.Optional[str]
     generation_prefill_cuda_graph_max_capture_buckets: typing.ClassVar[int]

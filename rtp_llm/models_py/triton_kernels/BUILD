@@ -114,6 +114,9 @@ py_library(
 py_library(
     name = "peer_all_reduce",
     srcs = ["peer_all_reduce.py"],
-    deps = ["//rtp_llm:torch"],
+    deps = ["//rtp_llm:torch"] + select({
+        "@//:using_cuda": ["//rtp_llm:triton"],
+        "//conditions:default": [],
+    }),
     visibility = ["//visibility:public"],
 )

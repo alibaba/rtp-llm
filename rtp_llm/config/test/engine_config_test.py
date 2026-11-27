@@ -32,6 +32,52 @@ class EngineConfigTest(TestCase):
     def test_collective_policy_defaults_to_auto(self):
         engine = EngineConfig.create(PyEnvConfigs())
         self.assertEqual(engine.collective_config, CollectiveConfig())
+        self.assertEqual(
+            engine.collective_config.to_string(),
+            "all_reduce_backend: auto\nlarge_prefill: None",
+        )
+
+    def test_batch_invariant_collective_policy_only_applies_to_tp(self):
+        configs = PyEnvConfigs()
+        configs.py_hw_kernel_config.batch_invariant = True
+        configs.all_reduce_large_prefill = True
+        self.assertEqual(
+            EngineConfig.create(configs).collective_config,
+            CollectiveConfig(large_prefill=True),
+        )
+
+        for size, backend, large in ((2, "auto", None), (4, "nccl", False)):
+            with self.subTest(size=size, backend=backend):
+                configs.parallelism_config.tp_size = size
+                configs.parallelism_config.world_size = size
+                configs.parallelism_config.local_world_size = size
+                configs.parallelism_config.ffn_tp_size = size
+                configs.all_reduce_backend = backend
+                configs.all_reduce_large_prefill = large
+                configs.py_hw_kernel_config.batch_invariant = False
+                self.assertEqual(
+                    EngineConfig.create(configs).collective_config,
+                    CollectiveConfig(backend, large),
+                )
+                configs.py_hw_kernel_config.batch_invariant = True
+                policy = EngineConfig.create(configs).collective_config
+                self.assertEqual(policy, CollectiveConfig(backend, large, True))
+                self.assertIn("batch_invariant: True", policy.to_string())
+
+    def test_batch_invariant_tp_rejects_incompatible_collective_options(self):
+        configs = PyEnvConfigs()
+        configs.parallelism_config.tp_size = 2
+        configs.py_hw_kernel_config.batch_invariant = True
+        for backend, large in (
+            ("sm120_ipc", None),
+            ("sm120_p2p", None),
+            ("auto", True),
+        ):
+            with self.subTest(backend=backend, large=large):
+                configs.all_reduce_backend = backend
+                configs.all_reduce_large_prefill = large
+                with self.assertRaisesRegex(ValueError, "RTP_BATCH_INVARIANT"):
+                    EngineConfig.create(configs)
 
     def test_explicit_collective_topology_is_validated_on_single_rank(self):
         configs = PyEnvConfigs()

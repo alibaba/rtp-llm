@@ -418,6 +418,14 @@ class AttnImplFactory(object):
             parallelism_config.get_attn_tp_size()
         )
         attn_inputs.headwise_config = getattr(model_config, "headwise_config", None)
+        if getattr(hw_kernel_config, "batch_invariant", False) is True:
+            from rtp_llm.models_py.determinism.batch_invariant import (
+                create_batch_invariant_impl,
+            )
+
+            return create_batch_invariant_impl(
+                attn_configs, attn_inputs, is_cuda_graph, cuda_graph_selection_mode
+            )
         if (
             decode_cascade_max_requests > 0
             and not attn_inputs.is_prefill

@@ -1,8 +1,10 @@
-"""Capability-selected SM120 IPC/P2P behind the generic collective API."""
+"""Select the reduction policy shared by all tensor-parallel ranks."""
 
 import logging
 import socket
+from collections.abc import Callable
 from dataclasses import replace
+from functools import partial
 from typing import Optional
 
 import torch
@@ -11,8 +13,84 @@ import torch.distributed as dist
 from rtp_llm.config.collective_config import CollectiveConfig
 from rtp_llm.models_py.distributed.collective_utils import exchange_group_state
 
+_ALL_REDUCE_WORKSPACE_BYTES = 16 * 1024 * 1024
 _SMALL_BYTES = 32 * 2560 * 2
 _PREFILL_ROWS = (4093, 4094, 4095, 4096, 8192, 12288, 16384)
+
+
+def _all_reduce_chunks(source: torch.Tensor, dest: torch.Tensor, limit: int):
+    """Slice matching logical rows without flattening a strided tensor into a full copy."""
+    if source.numel() <= limit:
+        yield source, dest
+        return
+    row_size = source.numel() // source.size(0)
+    if row_size > limit:
+        for row in range(source.size(0)):
+            yield from _all_reduce_chunks(source[row], dest[row], limit)
+    else:
+        rows = limit // row_size
+        for start in range(0, source.size(0), rows):
+            yield source[start : start + rows], dest[start : start + rows]
+
+
+def all_reduce_batch_invariant(
+    tensor: torch.Tensor,
+    group: dist.ProcessGroup,
+    *,
+    sum_gathered_ranks: Callable[[torch.Tensor, torch.Tensor, int], None],
+    inplace: bool = True,
+) -> torch.Tensor:
+    """Sum like-shaped BF16 tensors in TP group-rank order and round once per element."""
+    if tensor.dtype != torch.bfloat16 or tensor.layout != torch.strided:
+        raise ValueError("batch-invariant all-reduce requires a strided BF16 tensor")
+    if group is None:
+        raise ValueError("batch-invariant all-reduce requires a TP process group")
+    world_size = dist.get_world_size(group)
+    if world_size < 1:
+        raise ValueError(
+            "batch-invariant all-reduce requires membership in the TP group"
+        )
+    if world_size == 1 or tensor.numel() == 0:
+        return tensor if inplace else tensor.clone()
+
+    if (
+        inplace
+        and not tensor.is_contiguous()
+        and torch._debug_has_internal_overlap(tensor) == 1
+    ):
+        raise ValueError(
+            "in-place batch-invariant all-reduce requires non-overlapping elements"
+        )
+    output = tensor if inplace else torch.empty_like(tensor)
+    # Reserve space for one rank-major gather and at most one local staging
+    # buffer. Chunk boundaries are independent of strides on individual ranks.
+    capacity = max(
+        1, _ALL_REDUCE_WORKSPACE_BYTES // ((world_size + 1) * tensor.element_size())
+    )
+    capacity = min(capacity, tensor.numel())
+    gathered = tensor.new_empty(world_size * capacity)
+    staging = None
+    if not (tensor.is_contiguous() and output.is_contiguous()):
+        staging = tensor.new_empty(capacity)
+
+    with torch.cuda.device_of(tensor):
+        for source, dest in _all_reduce_chunks(tensor, output, capacity):
+            count = source.numel()
+            if source.is_contiguous():
+                send = source.view(-1)
+            else:
+                send = staging[:count]
+                send.view_as(source).copy_(source)
+            # Synchronous c10d semantics order NCCL and the caller's current
+            # CUDA stream in both directions, including workspace reuse.
+            dist.all_gather_into_tensor(
+                gathered[: world_size * count], send, group=group
+            )
+            result = dest.view(-1) if dest.is_contiguous() else staging[:count]
+            sum_gathered_ranks(gathered, result, world_size)
+            if not dest.is_contiguous():
+                dest.copy_(result.view_as(dest))
+    return output
 
 
 class IpcAllReduce:
@@ -152,6 +230,7 @@ class IpcAllReduce:
 
 _communicator: Optional[IpcAllReduce] = None
 _canonical_p2p = None
+_batch_invariant_sum = None
 _group = None
 _options = None
 _capture_active = False
@@ -199,13 +278,29 @@ def _capability_error(device, options):
 
 def init_all_reduce(group, device, parallelism, options: CollectiveConfig):
     """Negotiate one backend before entering optional GPU setup on any rank."""
-    global _communicator, _canonical_p2p, _group, _options
+    global _communicator, _canonical_p2p, _batch_invariant_sum, _group, _options
     error = None
+    batch_invariant_sum = None
     try:
         options.validate_topology(parallelism)
     except ValueError as exception:
         error = str(exception)
+    if error is None and options.batch_invariant and _group is None:
+        try:
+            from rtp_llm.models_py.triton_kernels.peer_all_reduce import (
+                sum_gathered_ranks,
+            )
+
+            batch_invariant_sum = partial(
+                all_reduce_batch_invariant, sum_gathered_ranks=sum_gathered_ranks
+            )
+        except Exception as exception:
+            # A rank missing the selected backend must still join policy agreement.
+            error = str(exception)
     state = [options.all_reduce_backend, options.large_prefill, error, _group is group]
+    if options.batch_invariant:
+        # Keep the ordinary four-field handshake compatible with existing ranks.
+        state.extend([True, _group is not None, _options == options])
     peers = exchange_group_state(group, state, "policy")
     if any(peer[2] is not None for peer in peers):
         raise ValueError(f"Invalid AllReduce configuration: {peers}")
@@ -219,6 +314,12 @@ def init_all_reduce(group, device, parallelism, options: CollectiveConfig):
                 "Destroy the distributed environment before changing policy"
             )
         return _communicator
+
+    if batch_invariant_sum is not None:
+        _batch_invariant_sum = batch_invariant_sum
+        _group, _options = group, options
+        logging.info("AllReduce policy: TP BF16 SUM uses batch-invariant reduction")
+        return None
 
     candidate = options
     if options.all_reduce_backend == "auto":
@@ -324,8 +425,14 @@ def get_canonical_p2p():
     return _canonical_p2p
 
 
+def get_batch_invariant_sum(tensor):
+    if _batch_invariant_sum is not None and tensor.dtype == torch.bfloat16:
+        return _batch_invariant_sum
+    return None
+
+
 def destroy_all_reduce():
-    global _communicator, _canonical_p2p, _group, _options
+    global _communicator, _canonical_p2p, _batch_invariant_sum, _group, _options
     try:
         if _communicator is not None:
             _communicator.destroy()
@@ -333,4 +440,4 @@ def destroy_all_reduce():
             _canonical_p2p.close()
     finally:
         abort_graph_capture()
-        _communicator = _canonical_p2p = _group = _options = None
+        _communicator = _canonical_p2p = _batch_invariant_sum = _group = _options = None

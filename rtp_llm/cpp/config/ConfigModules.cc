@@ -230,8 +230,12 @@ std::string HybridAttentionConfig::to_string() const {
 // HWKernelConfig
 std::string HWKernelConfig::to_string() const {
     std::ostringstream oss;
-    oss << "use_swizzleA: " << use_swizzleA << "\n"
-        << "enable_cuda_graph: " << enable_cuda_graph << "\n"
+    oss << "use_swizzleA: " << use_swizzleA << "\n";
+    // Preserve the pre-BI resident weights fingerprint when the flag is off.
+    if (batch_invariant) {
+        oss << "batch_invariant: " << batch_invariant << "\n";
+    }
+    oss << "enable_cuda_graph: " << enable_cuda_graph << "\n"
         << "enable_dynamic_decode_backend: " << enable_dynamic_decode_backend << "\n"
         << "dyn_decode_gate_thresholds: " << dyn_decode_gate_thresholds.value_or("") << "\n"
         << "enable_cuda_graph_debug_mode: " << enable_cuda_graph_debug_mode << "\n"

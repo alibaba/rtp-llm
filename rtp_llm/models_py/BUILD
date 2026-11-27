@@ -183,8 +183,15 @@ cc_binary(
 )
 
 py_library(
+    name = "batch_invariant_config",
+    srcs = ["determinism/batch_invariant_config.py"],
+    deps = ["//rtp_llm:device", "//rtp_llm:ops", "//rtp_llm:torch", "//rtp_llm:utils"],
+    visibility = ["//rtp_llm:__pkg__"],
+)
+
+py_library(
     name = "modules",
-    srcs = glob([
+    srcs = ["determinism/batch_invariant.py"] + glob([
         "modules/*.py",
         "modules/**/*.py",
     ], exclude = _DSV4_PPU_MODULES + ["modules/qwen4_exp/test/**"]) + select({
@@ -203,6 +210,7 @@ py_library(
         ":utils",
         ":kernels",
         ":tile_kernels_mhc",
+        ":batch_invariant_config",
         "//rtp_llm:warmup",
         "//rtp_llm/models_py/kernel_tuning",
         "//rtp_llm/resident_weights",

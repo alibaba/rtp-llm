@@ -172,3 +172,24 @@ def _advance_pingpong_peer_barrier(
                 is_pure=False,
                 pack=1,
             )
+
+
+@triton.jit(do_not_specialize=["count"])
+def _fixed_rank_sum(
+    gathered, output, count, WORLD_SIZE: tl.constexpr, BLOCK: tl.constexpr
+):
+    offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    live = offsets < count
+    acc = tl.full((BLOCK,), 0, tl.float32)
+    for rank in tl.static_range(WORLD_SIZE):
+        values = tl.load(gathered + rank * count + offsets, live, other=0)
+        acc += values.to(tl.float32)
+    tl.store(output + offsets, acc, live)
+
+
+def sum_gathered_ranks(gathered, output, world_size):
+    """Sum the rank-major gather in FP32, then round once into the output."""
+    count = output.numel()
+    _fixed_rank_sum[(triton.cdiv(count, 256),)](
+        gathered, output, count, WORLD_SIZE=world_size, BLOCK=256
+    )

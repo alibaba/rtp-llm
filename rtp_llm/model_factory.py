@@ -36,6 +36,17 @@ from rtp_llm.utils.util import check_with_info
 from rtp_llm.utils.warmup import configure_warmup
 
 
+def configure_batch_invariant_model(engine: EngineConfig, model: ModelConfig) -> None:
+    """Load the worker-side configuration only when batch invariance is requested."""
+    hw = getattr(engine, "hw_kernel_config", None)
+    if getattr(hw, "batch_invariant", False) is True:
+        from rtp_llm.models_py.determinism.batch_invariant_config import (
+            apply_batch_invariant_config,
+        )
+
+        apply_batch_invariant_config(engine, model)
+
+
 class ModelFactory:
     @staticmethod
     def get_config_json(ckpt_path: str):
@@ -443,6 +454,7 @@ class ModelFactory:
             engine_config: EngineConfig to update
             model_config: ModelConfig containing model information
         """
+        configure_batch_invariant_model(engine_config, model_config)
         finalize_pp_partition(engine_config.parallelism_config, model_config.num_layers)
 
         # Finalize scheduler config based on ModelConfig (only once, for main model)

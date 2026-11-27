@@ -101,6 +101,20 @@ class LinearFactory:
         weight_scale_2: Optional[torch.Tensor] = None,
         input_scale: Optional[torch.Tensor] = None,
     ):
+        if getattr(hw_kernel_config, "batch_invariant", False) is True:
+            if weight.dtype != torch.bfloat16 or any(
+                scale is not None
+                for scale in (weight_scales, weight_scale_2, input_scale)
+            ):
+                raise ValueError(
+                    "batch-invariant linear requires unscaled BF16 weights"
+                )
+            from rtp_llm.models_py.determinism.batch_invariant import (
+                BatchInvariantLinear,
+            )
+
+            return BatchInvariantLinear(weight, bias=bias)
+
         candidates = [
             strategy_class
             for strategy_class in cls._strategies

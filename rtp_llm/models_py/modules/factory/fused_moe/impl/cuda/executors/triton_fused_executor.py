@@ -26,10 +26,12 @@ from rtp_llm.models_py.triton_kernels.moe.fused_moe_kernel import (
 )
 from rtp_llm.utils.model_weight import W
 
-from .decode_capabilities import decode_capabilities
+from .decode_capabilities import DecodeCapabilities, decode_capabilities
 
 
 class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
+    _batch_invariant = False
+
     @classmethod
     def executor_type(cls):
         return ExecutorType.FUSED_MOE
@@ -59,16 +61,22 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
         # w1: [E, 2*inter_size, hidden_size], w2: [E, hidden_size, inter_size]
         self.w1 = weights[W.moe_w1]
         self.w2 = weights[W.moe_w2]
-        self.E = self.w1.size(0)
-        self.N = self.w1.size(1)  # 2 * inter_size
-        self.K = self.w1.size(2)  # hidden_size
+        self.E, self.N, self.K = self.w1.shape
         self.inter_size = self.N // 2
-        capabilities = decode_capabilities(
-            self.w1,
-            self.top_k,
-            self.ep_size,
-            getattr(getattr(config, "model_config", None), "model_type", ""),
-        )
+        self._batch_invariant = getattr(config, "batch_invariant", False) is True
+        if self._batch_invariant:
+            if not MoeConfigResolver.is_pure_tp_mode(config):
+                raise ValueError("batch-invariant experts require pure TP")
+            capabilities = DecodeCapabilities(
+                alignment=False, tuned_tiles=False, small_gemv=False
+            )
+        else:
+            capabilities = decode_capabilities(
+                self.w1,
+                self.top_k,
+                self.ep_size,
+                getattr(getattr(config, "model_config", None), "model_type", ""),
+            )
         self._decode_alignment = capabilities.alignment
         self._decode_tiles = capabilities.tuned_tiles
         self._small_moe_gemv = capabilities.small_gemv
@@ -92,6 +100,29 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
 
         assert topk_ids is not None
         assert topk_weights is not None
+
+        if self._batch_invariant:
+            if activation not in ("silu", "SiGLU") or apply_router_weight_on_input:
+                raise ValueError(
+                    "batch-invariant experts require SwiGLU and output weighting"
+                )
+            if expert_map is not None or a2_scale is not None or extra_expert_args:
+                raise ValueError(
+                    "batch-invariant experts require unquantized pure-TP inputs"
+                )
+            from rtp_llm.models_py.determinism.batch_invariant import (
+                batch_invariant_experts,
+            )
+
+            output = batch_invariant_experts(
+                hidden_states,
+                self.w1,
+                self.w2,
+                topk_ids,
+                topk_weights,
+                self._project_experts,
+            )
+            return CombineForwardPayload(fused_expert_output=output)
 
         if (
             self._small_moe_gemv
@@ -119,10 +150,6 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
 
         M, K = hidden_states.shape
         top_k = topk_ids.size(1)
-        device = hidden_states.device
-        dtype = hidden_states.dtype
-        compute_type = tl.bfloat16 if dtype == torch.bfloat16 else tl.float16
-
         # Config selection for both GEMMs
         config1 = get_default_config(M, self.E, self.N, K, top_k)
         config2 = get_default_config(M, self.E, K, self.inter_size, top_k)
@@ -132,6 +159,21 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
             )
 
             config1, config2 = sm120_decode_gemm_configs(M, config1, config2)
+
+        output = self._project_experts(
+            hidden_states, topk_ids, topk_weights, config1, config2
+        )
+        return CombineForwardPayload(fused_expert_output=output)
+
+    def _project_experts(
+        self, hidden_states, topk_ids, topk_weights, config1, config2
+    ) -> torch.Tensor:
+        """Project the experts. The invariant caller reduces routing slots in fixed order."""
+        M, K = hidden_states.shape
+        top_k = topk_ids.size(1)
+        device = hidden_states.device
+        dtype = hidden_states.dtype
+        compute_type = tl.bfloat16 if dtype == torch.bfloat16 else tl.float16
 
         # Flat routing tensors for the kernel
         flat_topk_weights = topk_weights.view(-1)  # [M * top_k]
@@ -188,6 +230,8 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
             M * top_k, self.inter_size, device=device, dtype=dtype
         )
         silu_and_mul(intermediate2, intermediate1)
+        if self._batch_invariant:
+            del intermediate1  # Keep invariant chunks within their workspace budget.
 
         # GEMM2: intermediate2 @ w2.T → out [M*top_k, K]
         out = torch.empty(M * top_k, K, device=device, dtype=dtype)
@@ -206,7 +250,6 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
             compute_type=compute_type,
         )
 
-        # Sum reduce over top_k: out is [M*top_k, K], reshape and sum
-        output = out.view(M, top_k, K).sum(dim=1)
-
-        return CombineForwardPayload(fused_expert_output=output)
+        if self._batch_invariant:
+            return out
+        return out.view(M, top_k, K).sum(dim=1)

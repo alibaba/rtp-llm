@@ -47,6 +47,12 @@ class Qwen3DecoderLayer(nn.Module):
             quant_config,
             hw_kernel_config,
         )
+        if getattr(hw_kernel_config, "batch_invariant", False) is True:
+            from rtp_llm.models_py.determinism.batch_invariant import (
+                prepare_qwen3_batch_invariant_mlp,
+            )
+
+            prepare_qwen3_batch_invariant_mlp(config, self.mlp, weights)
         self.input_layernorm = RMSNorm(
             weights[W.pre_ln_gamma], eps=config.layernorm_eps
         )

@@ -60,6 +60,9 @@ class GenericMoeLayer(nn.Module):
         self.linear_factory = linear_factory or LinearFactory
         self.config = config
         self.parallelism_config = parallelism_config
+        self.batch_invariant = (
+            getattr(hw_kernel_config, "batch_invariant", False) is True
+        )
         self.ffn_tp_size = parallelism_config.get_ffn_tp_size()
         self.ep_size = parallelism_config.ep_size
 
@@ -152,6 +155,7 @@ class GenericMoeLayer(nn.Module):
             moe_config=moe_config,
             quant_config=self.config.quant_config,
             enable_cuda_graph=enable_cuda_graph,
+            batch_invariant=self.batch_invariant,
         )
         config_adapter.has_shared_expert_gate = (
             weights.get(W.shared_expert_gate) is not None

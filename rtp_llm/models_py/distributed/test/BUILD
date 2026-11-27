@@ -47,19 +47,13 @@ py_test (
     },
 )
 
-# Needs 4 *visible* devices, not 4 devices that can talk directly: every
-# collective here goes through NCCL, and the symm_mem fast path in
-# collective_torch.all_reduce/all_gather is never eligible because this test
-# only ever builds float32 tensors while symm_mem.py:147-149 requires bfloat16.
-# Verified on L20_CU13 (sm89): 4 tests run, 0 skipped, OK -- NCCL falls back
-# to its shared-memory transport when peer access is unavailable (originally
-# proven on sm86 hardware without peer access). The L20 executor presents 8
-# GPUs per node, so gpu_count 4 is satisfiable. Verification records live
-# with the internal CI evidence, not here.
+# Four visible CUDA devices suffice. Both the ordinary collectives and the
+# all-gather used for batch-invariant BF16 sums can use NCCL's SHM transport.
 py_test(
     name = "collective_torch_test",
     srcs = ["collective_torch_test.py"],
     deps = [
+        "//rtp_llm:collective_config",
         "//rtp_llm:testlib",
         "//rtp_llm/models_py/distributed:collective_torch",
     ],

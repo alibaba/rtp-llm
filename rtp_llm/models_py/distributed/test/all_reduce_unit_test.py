@@ -1,3 +1,4 @@
+import sys
 import threading
 import unittest
 from types import SimpleNamespace
@@ -272,7 +273,7 @@ class AllReduceUnitTest(unittest.TestCase):
 
     def test_rank_policy_mismatch_fails_before_optional_initialization(self):
         def disagree(group, state, tag):
-            return [state, ["nccl", None, None, False]]
+            return [state, ["nccl", *state[1:]]]
 
         with (
             patch.object(
@@ -283,6 +284,91 @@ class AllReduceUnitTest(unittest.TestCase):
         ):
             self.init(self.options)
         probe.assert_not_called()
+
+    def test_ordinary_ranks_keep_the_existing_policy_message(self):
+        policy = CollectiveConfig("nccl")
+        for initialized in (False, True):
+            legacy = ["nccl", None, None, initialized]
+            with patch.object(
+                all_reduce_module, "exchange_group_state", return_value=[legacy, legacy]
+            ) as exchange:
+                self.init(policy)
+                exchange.assert_called_once_with(self.group, legacy, "policy")
+
+    def test_batch_invariant_requires_all_ranks_to_agree(self):
+        ordinary = ["auto", None, None, False]
+        invariant = ordinary + [True, False, False]
+        for enabled, peer in ((False, invariant), (True, ordinary)):
+            with (
+                self.subTest(enabled=enabled),
+                patch.dict(
+                    sys.modules,
+                    {
+                        "rtp_llm.models_py.triton_kernels.peer_all_reduce": SimpleNamespace(
+                            sum_gathered_ranks=MagicMock()
+                        )
+                    },
+                ),
+                patch.object(
+                    all_reduce_module,
+                    "exchange_group_state",
+                    side_effect=lambda group, state, tag: [state, peer],
+                ),
+                patch.object(all_reduce_module, "_capability_error") as probe,
+                self.assertRaisesRegex(ValueError, "differs across TP ranks"),
+            ):
+                self.init(CollectiveConfig(batch_invariant=enabled))
+            probe.assert_not_called()
+            self.assertIsNone(all_reduce_module._group)
+
+    def test_batch_invariant_routes_only_tp_bf16_and_resets_on_teardown(self):
+        policy = CollectiveConfig(batch_invariant=True)
+        tensor = torch.ones(3, dtype=torch.bfloat16)
+        reducer = MagicMock(return_value=tensor.clone())
+        module_name = "rtp_llm.models_py.triton_kernels.peer_all_reduce"
+        module = SimpleNamespace(sum_gathered_ranks=MagicMock())
+        with (
+            patch.dict(sys.modules, {module_name: None}),
+            self.assertRaisesRegex(ValueError, "peer_all_reduce"),
+        ):
+            self.init(policy)
+        self.assertIsNone(all_reduce_module._group)
+        with (
+            patch.dict(
+                sys.modules,
+                {
+                    module_name: module,
+                    "rtp_llm.models_py.determinism.batch_invariant": None,
+                },
+            ),
+            patch.object(all_reduce_module, "all_reduce_batch_invariant", reducer),
+            patch.object(all_reduce_module, "_capability_error") as probe,
+            patch.object(collective, "_get_group", return_value=self.group),
+            patch.object(collective, "_get_rocm_rccl", return_value=None),
+            patch.object(collective, "_get_symm_mem") as symm_mem,
+            patch.object(torch.distributed, "all_reduce") as regular,
+        ):
+            symm_mem.return_value.get_symm_mem_communicator.return_value = None
+            self.init(policy)
+            self.init(policy)
+            with self.assertRaisesRegex(RuntimeError, "before changing"):
+                self.init(CollectiveConfig("nccl"))
+            result = collective.all_reduce(tensor, collective.Group.TP, inplace=False)
+            self.assertIs(result, reducer.return_value)
+            reducer.assert_called_once_with(
+                tensor,
+                self.group,
+                inplace=False,
+                sum_gathered_ranks=module.sum_gathered_ranks,
+            )
+            collective.all_reduce(tensor.float(), collective.Group.TP)
+            collective.all_reduce(tensor, collective.Group.WORLD)
+            all_reduce_module.destroy_all_reduce()
+            self.init(CollectiveConfig("nccl"))
+            collective.all_reduce(tensor, collective.Group.TP)
+            self.assertEqual(regular.call_count, 3)
+            reducer.assert_called_once()
+            probe.assert_not_called()
 
     def test_one_rank_probe_failure_falls_back_before_allocation(self):
         def peer_failed(group, value, tag):
