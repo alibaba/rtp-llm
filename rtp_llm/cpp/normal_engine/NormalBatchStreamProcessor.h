@@ -51,7 +51,8 @@ protected:
     SamplerInputs allocateSamplerInputs(const StreamGroups& stream_groups,
                                         size_t              total_batch_size_in,
                                         size_t              total_batch_size_out,
-                                        size_t              propose_step = 0) const;
+                                        size_t              propose_step           = 0,
+                                        bool                allocate_token_history = true) const;
 
     void setCommonSamplerInputs(SamplerInputs&                sampler_inputs,
                                 std::list<GenerateStreamPtr>& all_streams,

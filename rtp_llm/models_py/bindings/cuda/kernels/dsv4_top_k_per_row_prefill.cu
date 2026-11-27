@@ -19,15 +19,16 @@ namespace torch_ext {
 #ifndef USE_ROCM
 namespace {
 
-void dsv4_top_k_per_row_prefill_impl(const torch::Tensor& logits,
-                                     const torch::Tensor& row_starts,
-                                     const torch::Tensor& row_ends,
-                                     torch::Tensor&       indices_out,
-                                     int64_t              num_rows,
-                                     int64_t              stride0,
-                                     int64_t              stride1,
-                                     int64_t              top_k,
-                                     bool                 force_radix_sort) {
+void dsv4_top_k_per_row_prefill_impl(const torch::Tensor&                logits,
+                                     const torch::Tensor&                row_starts,
+                                     const torch::Tensor&                row_ends,
+                                     torch::Tensor&                      indices_out,
+                                     int64_t                             num_rows,
+                                     int64_t                             stride0,
+                                     int64_t                             stride1,
+                                     int64_t                             top_k,
+                                     bool                                force_radix_sort,
+                                     const std::optional<torch::Tensor>& row_indices) {
     TORCH_CHECK(logits.is_cuda(), "logits must be CUDA tensor");
     TORCH_CHECK(row_starts.is_cuda(), "row_starts must be CUDA tensor");
     TORCH_CHECK(row_ends.is_cuda(), "row_ends must be CUDA tensor");
@@ -38,6 +39,22 @@ void dsv4_top_k_per_row_prefill_impl(const torch::Tensor& logits,
     TORCH_CHECK(indices_out.dtype() == torch::kInt32, "indices_out must be int32");
     TORCH_CHECK(num_rows >= 0, "num_rows must be non-negative");
     TORCH_CHECK(top_k > 0, "top_k must be positive");
+
+    const int32_t* row_indices_ptr = nullptr;
+    if (row_indices.has_value()) {
+        TORCH_CHECK(row_indices->defined(), "row_indices must be defined");
+        TORCH_CHECK(row_indices->is_cuda(), "row_indices must be CUDA tensor");
+        TORCH_CHECK(row_indices->dtype() == torch::kInt32, "row_indices must be int32");
+        TORCH_CHECK(row_indices->dim() == 1, "row_indices must be 1D");
+        TORCH_CHECK(row_indices->is_contiguous(), "row_indices must be contiguous");
+        TORCH_CHECK(row_indices->numel() >= num_rows,
+                    "row_indices numel must cover num_rows (got ",
+                    row_indices->numel(),
+                    ", need >= ",
+                    num_rows,
+                    ")");
+        row_indices_ptr = row_indices->data_ptr<int32_t>();
+    }
 
     if (num_rows == 0) {
         return;
@@ -54,7 +71,7 @@ void dsv4_top_k_per_row_prefill_impl(const torch::Tensor& logits,
                 logits.data_ptr<float>(),
                 row_starts.data_ptr<int>(),
                 row_ends.data_ptr<int>(),
-                nullptr,
+                row_indices_ptr,
                 indices_out.data_ptr<int>(),
                 static_cast<int>(stride0),
                 static_cast<int>(stride1),
@@ -69,7 +86,7 @@ void dsv4_top_k_per_row_prefill_impl(const torch::Tensor& logits,
                 logits.data_ptr<float>(),
                 row_starts.data_ptr<int>(),
                 row_ends.data_ptr<int>(),
-                nullptr,
+                row_indices_ptr,
                 indices_out.data_ptr<int>(),
                 static_cast<int>(stride0),
                 static_cast<int>(stride1),
@@ -84,19 +101,21 @@ void dsv4_top_k_per_row_prefill_impl(const torch::Tensor& logits,
 }  // namespace
 #endif
 
-void dsv4_top_k_per_row_prefill(const torch::Tensor& logits,
-                                const torch::Tensor& row_starts,
-                                const torch::Tensor& row_ends,
-                                torch::Tensor&       indices_out,
-                                int64_t              num_rows,
-                                int64_t              stride0,
-                                int64_t              stride1,
-                                int64_t              top_k,
-                                bool                 force_radix_sort) {
+void dsv4_top_k_per_row_prefill(const torch::Tensor&                logits,
+                                const torch::Tensor&                row_starts,
+                                const torch::Tensor&                row_ends,
+                                torch::Tensor&                      indices_out,
+                                int64_t                             num_rows,
+                                int64_t                             stride0,
+                                int64_t                             stride1,
+                                int64_t                             top_k,
+                                bool                                force_radix_sort,
+                                const std::optional<torch::Tensor>& row_indices) {
 #ifndef USE_ROCM
     dsv4_top_k_per_row_prefill_impl(
-        logits, row_starts, row_ends, indices_out, num_rows, stride0, stride1, top_k, force_radix_sort);
+        logits, row_starts, row_ends, indices_out, num_rows, stride0, stride1, top_k, force_radix_sort, row_indices);
 #else
+    (void)row_indices;
     TORCH_CHECK(false, "dsv4_top_k_per_row_prefill is not supported on ROCm");
 #endif
 }

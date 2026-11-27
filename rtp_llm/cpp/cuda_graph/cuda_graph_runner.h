@@ -278,6 +278,7 @@ private:
     // capture seqLen -> GraphInstance (prefill)
     // batch_size -> GraphInstance (decode)
     std::unordered_map<int, GraphInstance> graph_instances_;
+    std::unordered_map<int, bool>          graph_uses_in_graph_prepare_;
     CaptureMemoryHold                      capture_mem_hold_;
     torch::Tensor                          position_encoding_;
     torch::Tensor                          token_type_embedding_;

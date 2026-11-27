@@ -1,5 +1,7 @@
 #pragma once
 
+#include <functional>
+
 #include "absl/status/statusor.h"
 #include "c10/core/Event.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
@@ -63,9 +65,17 @@ class SpeculativeSampler {
 public:
     SpeculativeSampler(torch::Tensor d2t_map, size_t propose_step): d2t_map_(d2t_map), propose_step_(propose_step) {}
 
+    using PrepareSpecCapFn = std::function<torch::Tensor(const torch::Device&)>;
+
     virtual SpeculativeSamplerOutput forward(const SpeculativeSamplingParams& params,
                                              SamplerOutput&                   draft_sampler_output,
                                              SamplerOutput&                   target_sampler_output);
+
+    SpeculativeSamplerOutput forwardWithSpecCap(const SpeculativeSamplingParams& params,
+                                                SamplerOutput&                   draft_sampler_output,
+                                                SamplerOutput&                   target_sampler_output,
+                                                const PrepareSpecCapFn&          prepare_spec_cap,
+                                                bool&                            fused_cap_applied);
 
     SamplerOutput sampleDSparkDraft(const torch::Tensor& base_logits,
                                     const torch::Tensor& anchors,
@@ -82,7 +92,9 @@ private:
     void batchSample(SpeculativeSamplerOutput&        sample_output,
                      const SpeculativeSamplingParams& params,
                      SamplerOutput&                   draft_sampler_output,
-                     SamplerOutput&                   target_sampler_output) const;
+                     SamplerOutput&                   target_sampler_output,
+                     const PrepareSpecCapFn*          prepare_spec_cap  = nullptr,
+                     bool*                            fused_cap_applied = nullptr) const;
 
 protected:
     torch::Tensor        d2t_map_;

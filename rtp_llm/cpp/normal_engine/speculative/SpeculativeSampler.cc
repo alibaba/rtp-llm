@@ -1,11 +1,15 @@
 #include "rtp_llm/cpp/normal_engine/speculative/SpeculativeSampler.h"
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <vector>
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#if USING_CUDA
+#include "rtp_llm/cpp/normal_engine/speculative/SpeculativeKernels.cuh"
+#endif
 
 namespace rtp_llm {
 namespace speculative {
@@ -40,41 +44,94 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraft(const torch::Tensor& base_lo
                                 && temperature.scalar_type() == torch::kFloat32 && temperature.dim() == 1,
                             "DSpARK draft temperatures must be contiguous CUDA FP32 [B]");
     const auto batch_size = temperature.numel();
-    RTP_LLM_CHECK_WITH_INFO(base_logits.defined() && base_logits.is_cuda() && base_logits.is_contiguous()
-                                && base_logits.scalar_type() == torch::kFloat32 && base_logits.dim() == 2
+    RTP_LLM_CHECK_WITH_INFO(base_logits.defined() && base_logits.is_cuda() && base_logits.stride(1) == 1
+                                && (base_logits.scalar_type() == torch::kFloat32
+                                    || base_logits.scalar_type() == torch::kBFloat16)
+                                && base_logits.dim() == 2
                                 && base_logits.size(0) == batch_size * static_cast<int64_t>(propose_step_)
                                 && base_logits.size(1) >= static_cast<int64_t>(draft_vocab_size),
-                            "DSpARK C++ lm_head must emit contiguous CUDA FP32 [B*gamma,vocab_padded] logits with "
-                            "vocab_padded >= draft vocab size");
+                            "DSpARK C++ lm_head must emit row-contiguous CUDA FP32/BF16 [B*gamma,vocab_padded] logits "
+                            "with vocab_padded >= draft vocab size");
     RTP_LLM_CHECK_WITH_INFO(anchors.defined() && anchors.is_cuda() && anchors.numel() == batch_size,
                             "DSpARK anchors must be a CUDA tensor with one token per request");
 
-    auto previous_tokens = anchors.reshape({batch_size}).to(torch::kLong);
-    auto all_probabilities =
-        torch::empty({batch_size, static_cast<int64_t>(propose_step_), static_cast<int64_t>(draft_vocab_size)},
-                     torch::TensorOptions().dtype(torch::kFloat32).device(base_logits.device()));
-    std::vector<torch::Tensor> token_columns;
-    token_columns.reserve(propose_step_);
-    // lm_head shards are padded to a TP alignment before gather. Sampling
-    // must ignore those synthetic tail columns just like the regular target
-    // sampler ignores padded vocabulary rows.
-    auto proposal_logits =
-        base_logits.narrow(1, 0, draft_vocab_size)
-            .view({batch_size, static_cast<int64_t>(propose_step_), static_cast<int64_t>(draft_vocab_size)});
-    auto temperature_column = temperature.unsqueeze(1);
+    const auto gamma      = static_cast<int64_t>(propose_step_);
+    const auto draft_v    = static_cast<int64_t>(draft_vocab_size);
+    const auto cuda_f32   = torch::TensorOptions().dtype(torch::kFloat32).device(base_logits.device());
+    const auto cuda_i32   = torch::TensorOptions().dtype(torch::kInt32).device(base_logits.device());
+    auto all_probabilities = torch::empty({batch_size, gamma, draft_v}, cuda_f32);
+    if (batch_size == 0 || gamma == 0 || draft_v == 0) {
+        SamplerOutput output;
+        output.token_ids                = torch::empty({batch_size, gamma}, cuda_i32);
+        output.all_probs                = std::move(all_probabilities);
+        output.token_ids_are_point_mass = false;
+        return output;
+    }
 
-    for (int64_t step = 0; step < static_cast<int64_t>(propose_step_); ++step) {
-        auto markov_embedding = markov_w1.index_select(0, previous_tokens);
-        auto markov_bias      = torch::mm(markov_embedding, markov_w2.transpose(0, 1)).to(torch::kFloat32);
-        auto logits           = proposal_logits.select(1, step) + markov_bias;
+#if USING_CUDA
+    auto token_ids       = torch::empty({batch_size, gamma}, cuda_i32);
+    auto anchors_i32     = anchors.scalar_type() == torch::kInt32 ? anchors.reshape({batch_size}) :
+                                                                   anchors.reshape({batch_size}).to(torch::kInt32);
+    auto markov_w2_t     = markov_w2.transpose(0, 1);
+    auto markov_emb_buf  = torch::empty({batch_size, markov_w1.size(1)}, markov_w1.options());
+    auto markov_bias_buf = torch::empty({batch_size, draft_v}, markov_w1.options());
+    auto step_logits_buf = batch_size == 1 ? torch::Tensor() : torch::empty({batch_size, draft_v}, cuda_f32);
+
+    for (int64_t step = 0; step < gamma; ++step) {
+        auto previous_tokens = step == 0 ? anchors_i32 : token_ids.select(1, step - 1);
+        launchGatherMarkovEmbedding(markov_w1, previous_tokens, markov_emb_buf);
+        torch::mm_out(markov_bias_buf, markov_emb_buf, markov_w2_t);
+
+        torch::Tensor step_target = batch_size == 1 ? all_probabilities.select(1, step) : step_logits_buf;
+        launchDSparkAddMarkovDivTemp(base_logits, markov_bias_buf, temperature, step_target, step, gamma, draft_v);
 
         // Draft q applies request temperature only. Materialize that exact
         // dense distribution once, sample from it with FlashInfer, and pass
         // the same q to rejection sampling. Request top-k/top-p stay target-side.
+        auto sampling_probabilities = execSamplerSoftmaxInplace(step_target);
+        auto sampled_draft_tokens   = execSampleFromProbs(sampling_probabilities);
+        if (sampled_draft_tokens.scalar_type() != torch::kInt32) {
+            sampled_draft_tokens = sampled_draft_tokens.to(torch::kInt32);
+        }
+        auto step_token_out = token_ids.select(1, step);
+        if (d2t_map_.defined()) {
+            if (d2t_map_.is_cuda()) {
+                launchMapDraftToTargetInt32(sampled_draft_tokens, d2t_map_, step_token_out);
+            } else {
+                step_token_out.copy_(
+                    d2t_map_.index_select(0, sampled_draft_tokens.cpu().to(torch::kLong))
+                        .to(torch::kInt32)
+                        .to(base_logits.device(), /*non_blocking=*/true));
+            }
+        } else {
+            step_token_out.copy_(sampled_draft_tokens, /*non_blocking=*/true);
+        }
+        if (batch_size != 1 || sampling_probabilities.data_ptr() != step_target.data_ptr()) {
+            all_probabilities.select(1, step).copy_(sampling_probabilities, /*non_blocking=*/true);
+        }
+    }
+
+    SamplerOutput output;
+    output.token_ids                = std::move(token_ids);
+    output.all_probs                = std::move(all_probabilities);
+    output.token_ids_are_point_mass = false;
+    return output;
+#else
+    auto previous_tokens = anchors.reshape({batch_size}).to(torch::kLong);
+    std::vector<torch::Tensor> token_columns;
+    token_columns.reserve(propose_step_);
+    auto proposal_logits = base_logits.narrow(1, 0, draft_vocab_size).view({batch_size, gamma, draft_v});
+    if (proposal_logits.scalar_type() != torch::kFloat32) {
+        proposal_logits = proposal_logits.to(torch::kFloat32);
+    }
+    auto temperature_column = temperature.unsqueeze(1);
+
+    for (int64_t step = 0; step < gamma; ++step) {
+        auto markov_embedding = markov_w1.index_select(0, previous_tokens);
+        auto markov_bias      = torch::mm(markov_embedding, markov_w2.transpose(0, 1)).to(torch::kFloat32);
+        auto logits           = proposal_logits.select(1, step) + markov_bias;
+
         logits.div_(temperature_column);
-        // logits is a fresh [batch, draft_vocab] tensor here (select+add above,
-        // already mutated by div_), so the in-place multi-CTA split softmax is
-        // safe and replaces the latency-bound single-CTA torch::softmax row.
         auto sampling_probabilities = execSamplerSoftmaxInplace(logits);
         auto sampled_draft_tokens   = execSampleFromProbs(sampling_probabilities).to(torch::kInt32);
         auto sampled_target_tokens  = sampled_draft_tokens;
@@ -91,6 +148,7 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraft(const torch::Tensor& base_lo
     output.all_probs                = std::move(all_probabilities);
     output.token_ids_are_point_mass = false;
     return output;
+#endif
 }
 
 torch::Tensor dflashDraftProbabilities(const torch::Tensor& logits, const GenerateConfig& config) {
@@ -229,10 +287,25 @@ SpeculativeSamplerOutput SpeculativeSampler::forward(const SpeculativeSamplingPa
     return sample_output;
 }
 
+SpeculativeSamplerOutput SpeculativeSampler::forwardWithSpecCap(const SpeculativeSamplingParams& params,
+                                                                SamplerOutput&                   draft_sampler_output,
+                                                                SamplerOutput&                   target_sampler_output,
+                                                                const PrepareSpecCapFn&          prepare_spec_cap,
+                                                                bool&                            fused_cap_applied) {
+    buffer_holder_.release();
+    SpeculativeSamplerOutput sample_output;
+    fused_cap_applied = false;
+    batchSample(
+        sample_output, params, draft_sampler_output, target_sampler_output, &prepare_spec_cap, &fused_cap_applied);
+    return sample_output;
+}
+
 void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&        sample_output,
                                      const SpeculativeSamplingParams& params,
                                      SamplerOutput&                   draft_sampler_output,
-                                     SamplerOutput&                   target_sampler_output) const {
+                                     SamplerOutput&                   target_sampler_output,
+                                     const PrepareSpecCapFn*          prepare_spec_cap,
+                                     bool*                            fused_cap_applied) const {
     RTP_LLM_PROFILE_SCOPE("speculative_sampler.batchSample");
     torch::Device target_device = getTorchCudaDevice();
 
@@ -338,35 +411,79 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&        sample_out
 
     RTP_LLM_PROFILE_SCOPE("speculative_sampler.batchSample.post_rejection_sampling");
 
-    // forceSpAccept: override rejection sampling results for streams that requested
-    // forced acceptance — accept all draft tokens plus the target bonus token.
-    {
-        bool has_force = false;
-        auto force_mask =
-            torch::zeros({(long)batch_size}, torch::TensorOptions().dtype(torch::kBool).device(target_device));
+    bool          has_force    = false;
+    torch::Tensor force_mask_d;
+    if (params.force_accept.defined() && batch_size > 0) {
+        auto        force_src = params.force_accept.contiguous();
+        const auto* force_ptr = force_src.data_ptr<bool>();
         for (int idx = 0; idx < batch_size; ++idx) {
-            if (params.force_accept[idx].item<bool>()) {
-                force_mask[idx] = true;
-                has_force       = true;
+            if (force_ptr[idx]) {
+                has_force = true;
+                break;
             }
         }
         if (has_force) {
-            RTP_LLM_PROFILE_SCOPE("speculative_sampler.batchSample.post_rejection_sampling.forceSpAccept");
-            // target_token_ids_d_t layout: [batch_size * (propose_step+1), token_stride]
-            // Extract the bonus token at position propose_step for each batch item.
-            int64_t token_stride = target_token_ids_d_t.size(1);
-            auto    target_bonus_t =
-                target_token_ids_d_t.reshape({(long)batch_size, (long)(propose_step_ + 1), token_stride});
-            auto target_bonus = target_bonus_t.select(1, propose_step_).select(1, token_stride - 1).unsqueeze(1);
-            // forced_tokens: draft tokens [0..propose_step-1] + target bonus
-            auto forced_tokens = torch::cat({draft_token_ids_d_t, target_bonus}, 1);
-            auto force_mask_2d = force_mask.unsqueeze(1).expand_as(output_token_ids_d);
-            output_token_ids_d = torch::where(force_mask_2d, forced_tokens, output_token_ids_d);
-            output_accepted_token_num_d =
-                torch::where(force_mask,
-                             torch::full_like(output_accepted_token_num_d, (int32_t)(propose_step_ + 1)),
-                             output_accepted_token_num_d);
+            auto force_mask_h = torch::empty(
+                {(long)batch_size}, torch::TensorOptions().dtype(torch::kBool).pinned_memory(true));
+            std::memcpy(force_mask_h.data_ptr<bool>(), force_ptr, static_cast<size_t>(batch_size) * sizeof(bool));
+            buffer_holder_.hold_host(force_mask_h);
+            force_mask_d = force_mask_h.to(target_device, /*non_blocking=*/true);
         }
+    }
+
+    torch::Tensor cap_gpu;
+    if (prepare_spec_cap != nullptr && *prepare_spec_cap) {
+        cap_gpu = (*prepare_spec_cap)(target_device);
+    }
+
+#if USING_CUDA
+    if (output_token_ids_d.is_cuda() && output_accepted_token_num_d.is_cuda() && output_token_ids_d.is_contiguous()
+        && output_accepted_token_num_d.is_contiguous()
+        && (!cap_gpu.defined()
+            || (cap_gpu.is_cuda() && cap_gpu.is_contiguous()
+                && (cap_gpu.scalar_type() == torch::kInt32 || cap_gpu.scalar_type() == torch::kInt64)))) {
+        auto draft_for_force = has_force ? draft_token_ids_d_t.contiguous() : torch::Tensor();
+        auto target_for_post = (has_force || cap_gpu.defined()) ?
+                                   (target_token_ids_d_t.scalar_type() == torch::kInt32 ?
+                                        target_token_ids_d_t :
+                                        target_token_ids_d_t.to(torch::kInt32)) :
+                                   torch::Tensor();
+        launchPostRejectionAndCap(output_token_ids_d,
+                                  output_accepted_token_num_d,
+                                  output_token_ids_d,
+                                  output_accepted_token_num_d,
+                                  force_mask_d,
+                                  draft_for_force,
+                                  target_for_post,
+                                  cap_gpu,
+                                  /*clamp_minus_one=*/true);
+        if (fused_cap_applied != nullptr) {
+            *fused_cap_applied = cap_gpu.defined();
+        }
+        sample_output.accept_tokens = output_token_ids_d;
+        sample_output.accept_len    = output_accepted_token_num_d;
+        return;
+    }
+#endif
+
+    // forceSpAccept: override rejection sampling results for streams that requested
+    // forced acceptance — accept all draft tokens plus the target bonus token.
+    if (has_force) {
+        RTP_LLM_PROFILE_SCOPE("speculative_sampler.batchSample.post_rejection_sampling.forceSpAccept");
+        // target_token_ids_d_t layout: [batch_size * (propose_step+1), token_stride]
+        // Extract the bonus token at position propose_step for each batch item.
+        int64_t token_stride = target_token_ids_d_t.size(1);
+        auto    target_bonus_t =
+            target_token_ids_d_t.reshape({(long)batch_size, (long)(propose_step_ + 1), token_stride});
+        auto target_bonus = target_bonus_t.select(1, propose_step_).select(1, token_stride - 1).unsqueeze(1);
+        // forced_tokens: draft tokens [0..propose_step-1] + target bonus
+        auto forced_tokens          = torch::cat({draft_token_ids_d_t, target_bonus}, 1);
+        auto force_mask_2d          = force_mask_d.unsqueeze(1).expand_as(output_token_ids_d);
+        output_token_ids_d          = torch::where(force_mask_2d, forced_tokens, output_token_ids_d);
+        output_accepted_token_num_d = torch::where(
+            force_mask_d,
+            torch::full_like(output_accepted_token_num_d, (int32_t)(propose_step_ + 1)),
+            output_accepted_token_num_d);
     }
 
     // use async sample here, we assume accept all tokens

@@ -305,12 +305,39 @@ bool attnImplRequiresHostInputs(const py::object& attn_pyobj) {
     return check_single(attn_pyobj);
 }
 
+bool attnImplUsesInGraphPrepare(const py::object& attn_pyobj) {
+    py::gil_scoped_acquire gil;
+    if (!attn_pyobj || attn_pyobj.is_none()) {
+        return false;
+    }
+    auto check_single = [](const py::object& obj) -> bool {
+        if (!obj || obj.is_none() || !py::hasattr(obj, "uses_in_graph_prepare")) {
+            return false;
+        }
+        return obj.attr("uses_in_graph_prepare")().cast<bool>();
+    };
+    if (py::isinstance<py::dict>(attn_pyobj)) {
+        auto dict = attn_pyobj.cast<py::dict>();
+        if (dict.empty()) {
+            return false;
+        }
+        for (auto item : dict) {
+            if (!check_single(py::reinterpret_borrow<py::object>(item.second))) {
+                return false;
+            }
+        }
+        return true;
+    }
+    return check_single(attn_pyobj);
+}
+
 }  // namespace
 
 void CudaGraphRunner::bindGraphFmhaImpl(int key) {
     auto& instance                         = graph_instances_[key];
     instance.mem_hold_.attn_pyobj_         = prepareFmhaImpl(instance.mem_hold_.py_model_inputs_, true);
     instance.needs_host_attention_inputs_  = attnImplRequiresHostInputs(instance.mem_hold_.attn_pyobj_);
+    graph_uses_in_graph_prepare_[key]      = attnImplUsesInGraphPrepare(instance.mem_hold_.attn_pyobj_);
 }
 
 py::object CudaGraphRunner::prepareFmhaImpl(const PyModelInputs& inputs, bool is_cuda_graph) {
@@ -1170,12 +1197,16 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
 #endif
     }
 
-    // launch prepare_cuda_graph when attention inputs are ready.
+    // launch prepare_cuda_graph when attention inputs are ready, unless the
+    // attention implementation refreshes its metadata inside the CUDA graph.
     // GIL is required: this function may be invoked from an AsyncRunner worker thread
     // (MtpExecutor::decodeStep) and from the engine main thread (PyWrappedModel::forward),
     // neither of which holds the GIL on entry. pybind11's attr() and call operator construct
     // a Python args tuple via PyTuple_New, which segfaults without the GIL.
-    {
+    const auto in_graph_it = graph_uses_in_graph_prepare_.find(static_cast<int>(graph_idx));
+    const bool uses_in_graph_prepare =
+        in_graph_it != graph_uses_in_graph_prepare_.end() && in_graph_it->second;
+    if (!uses_in_graph_prepare) {
         RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs(prepare_cuda_graph)");
         if (pending_host_mirror_d2h) {
             // Wait for the async D2H metadata copies above so the CPU-side

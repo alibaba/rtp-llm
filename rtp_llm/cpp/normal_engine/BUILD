@@ -1,5 +1,17 @@
-load("//:def.bzl", "copts")
+load("//:def.bzl", "copts", "cuda_copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
+
+cc_library(
+    name = "speculative_kernels",
+    srcs = ["speculative/SpeculativeKernels.cu"],
+    hdrs = ["speculative/SpeculativeKernels.cuh"],
+    copts = cuda_copts(),
+    deps = [
+        "//rtp_llm/cpp/utils:core_utils",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps(),
+)
 
 # Header-only PP wire types so consumers can depend on them without the whole executor.
 cc_library(
@@ -87,6 +99,7 @@ cc_library(
         "//rtp_llm/models_py/bindings:op_defs",
     ] + select({
         "//:using_cuda": [
+            ":speculative_kernels",
             "//rtp_llm/models_py/bindings/cuda/ops:standalone_ops",
             "//rtp_llm/models_py/bindings/cuda/kernels:mtp_target_verify_prepare",
             "//rtp_llm/cpp/cuda_graph:cuda_graph_impl",

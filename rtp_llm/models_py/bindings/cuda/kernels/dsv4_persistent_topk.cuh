@@ -109,7 +109,10 @@ struct RadixRowState {
     uint32_t prefix;
     int      arrival_counter;
     int      output_counter;
+    int      exit_counter;
 };
+
+static_assert(sizeof(RadixRowState) % sizeof(uint32_t) == 0, "RadixRowState must be 4-byte word aligned");
 
 // ============================================================================
 // Kernel parameters
@@ -129,9 +132,13 @@ struct PersistentTopKParams {
 };
 
 // ============================================================================
-// Decode path: 2048-bin histogram for short sequences (seq_len <= 8192)
+// Decode & Medium path: vectorized 2048-bin histogram (seq_len <= RADIX_THRESHOLD)
 // Uses 11-bit half-precision bins for fine granularity.
-// One histogram pass typically suffices since 8192/2048 = 4 elements/bin avg.
+// For seq_len <= HIST2048_THRESHOLD (8192), caches per-element bins in registers
+// (`UseRegBins=true`). For 8192 < seq_len <= RADIX_THRESHOLD (32768), re-reads
+// logits cleanly from L2 in Phase 2 (`UseRegBins=false`) with zero register bloat
+// and an exact unbuffered 4-pass FP32 radix fallback if the threshold bucket
+// exceeds the shared equality buffer (`DBUF`).
 // ============================================================================
 
 // 11-bit bin from half-precision representation (ascending: high values -> high
@@ -143,12 +150,15 @@ __device__ __forceinline__ uint32_t decode_bin(float x) {
     return key >> 5;
 }
 
-template<int TopK>
+template<int TopK, bool UseRegBins = true>
 __device__ __noinline__ void
 histogram_2048_topk(const float* __restrict__ logits, int32_t* __restrict__ output_indices, int32_t seq_len) {
     extern __shared__ int decode_smem[];
     const int             tx   = threadIdx.x;
     const int             lane = tx & 31;
+
+    // Ensure any prior row on this CTA has finished reading shared memory.
+    __syncthreads();
 
     // ---- Layout constants ----
     constexpr int SBASE                = 8192 - 8;            // 8184
@@ -173,7 +183,7 @@ histogram_2048_topk(const float* __restrict__ logits, int32_t* __restrict__ outp
 
     // ---- Phase 1: Build 2048-bin histogram with float4 vectorized loads ----
     int*     histo = decode_smem;
-    uint16_t reg_bins[MAX_ITEMS_PER_THREAD];
+    uint16_t reg_bins[UseRegBins ? MAX_ITEMS_PER_THREAD : 1];
     int      nitems = 0;
 
     for (int i = tx; i < kDecodeBins; i += kThreadsPerBlock) {
@@ -194,18 +204,31 @@ histogram_2048_topk(const float* __restrict__ logits, int32_t* __restrict__ outp
             load_float4_predicated(logits + base, base, seq_len, v0, v1, v2, v3);
         }
 
-        const uint16_t b0  = static_cast<uint16_t>(decode_bin(v0));
-        const uint16_t b1  = static_cast<uint16_t>(decode_bin(v1));
-        const uint16_t b2  = static_cast<uint16_t>(decode_bin(v2));
-        const uint16_t b3  = static_cast<uint16_t>(decode_bin(v3));
-        reg_bins[nitems++] = b0;
-        reg_bins[nitems++] = b1;
-        reg_bins[nitems++] = b2;
-        reg_bins[nitems++] = b3;
-        atomicAdd(&histo[b0], 1);
-        atomicAdd(&histo[b1], 1);
-        atomicAdd(&histo[b2], 1);
-        atomicAdd(&histo[b3], 1);
+        const uint16_t b0 = static_cast<uint16_t>(decode_bin(v0));
+        const uint16_t b1 = static_cast<uint16_t>(decode_bin(v1));
+        const uint16_t b2 = static_cast<uint16_t>(decode_bin(v2));
+        const uint16_t b3 = static_cast<uint16_t>(decode_bin(v3));
+        if constexpr (UseRegBins) {
+            reg_bins[nitems++] = b0;
+            reg_bins[nitems++] = b1;
+            reg_bins[nitems++] = b2;
+            reg_bins[nitems++] = b3;
+        }
+        if (base + 3 < seq_len) {
+            atomicAdd(&histo[b0], 1);
+            atomicAdd(&histo[b1], 1);
+            atomicAdd(&histo[b2], 1);
+            atomicAdd(&histo[b3], 1);
+        } else {
+            if (base < seq_len)
+                atomicAdd(&histo[b0], 1);
+            if (base + 1 < seq_len)
+                atomicAdd(&histo[b1], 1);
+            if (base + 2 < seq_len)
+                atomicAdd(&histo[b2], 1);
+            if (base + 3 < seq_len)
+                atomicAdd(&histo[b3], 1);
+        }
     }
     __syncthreads();
 
@@ -240,25 +263,47 @@ histogram_2048_topk(const float* __restrict__ logits, int32_t* __restrict__ outp
     int*      bufs[2]   = {decode_smem + BOFF, decode_smem + BOFF + DBUF};
     const int sOUT_abs  = SBASE + sOUT;
     const int sBUF0_abs = SBASE + sBUF0;
+    const uint32_t uthr = static_cast<uint32_t>(threshold);
+    const int      n_vec_iters = (n_vec + kThreadsPerBlock - 1) / kThreadsPerBlock;
 
     {
-        const uint32_t uthr        = static_cast<uint32_t>(threshold);
-        int            item        = 0;
-        const int      n_vec_iters = (n_vec + kThreadsPerBlock - 1) / kThreadsPerBlock;
+        int item = 0;
 
         for (int iter = 0; iter < n_vec_iters; iter++) {
             const int  i         = tx + iter * kThreadsPerBlock;
             const bool vec_valid = (i < n_vec);
             const int  base_idx  = i << 2;
 
+            uint16_t bins4[4] = {0, 0, 0, 0};
+            if constexpr (!UseRegBins) {
+                if (vec_valid) {
+                    float v0, v1, v2, v3;
+                    if (row_aligned && base_idx + 3 < seq_len) {
+                        load_float4(logits + base_idx, v0, v1, v2, v3);
+                    } else {
+                        load_float4_predicated(logits + base_idx, base_idx, seq_len, v0, v1, v2, v3);
+                    }
+                    bins4[0] = static_cast<uint16_t>(decode_bin(v0));
+                    bins4[1] = static_cast<uint16_t>(decode_bin(v1));
+                    bins4[2] = static_cast<uint16_t>(decode_bin(v2));
+                    bins4[3] = static_cast<uint16_t>(decode_bin(v3));
+                }
+            }
+
 #pragma unroll 4
             for (int sub = 0; sub < 4; sub++) {
-                const int elem_idx = base_idx + sub;
-                uint32_t  bin      = 0;
-                if (vec_valid)
-                    bin = reg_bins[item++];
-                const bool is_above = vec_valid && (bin > uthr);
-                const bool is_equal = vec_valid && (bin == uthr);
+                const int  elem_idx   = base_idx + sub;
+                const bool elem_valid = vec_valid && (elem_idx < seq_len);
+                uint32_t   bin        = 0;
+                if constexpr (UseRegBins) {
+                    if (vec_valid)
+                        bin = reg_bins[item++];
+                } else {
+                    if (elem_valid)
+                        bin = bins4[sub];
+                }
+                const bool is_above = elem_valid && (bin > uthr);
+                const bool is_equal = elem_valid && (bin == uthr);
 
                 const uint32_t above_mask = __ballot_sync(0xffffffff, is_above);
                 if (above_mask) {
@@ -308,9 +353,126 @@ histogram_2048_topk(const float* __restrict__ logits, int32_t* __restrict__ outp
         return;
     }
 
+    // ---- Rare overflow fallback (> DBUF elements tied in threshold FP16 bin) ----
+    if (raw_buf0 > DBUF) {
+        uint32_t prefix = 0;
+        for (int pass = 0; pass < 4; ++pass) {
+            const int      bit_offset = 24 - pass * 8;
+            const uint32_t match_mask = (pass == 0) ? 0u : (~0u << (32 - pass * 8));
+
+            for (int i = tx; i < RADIX + 1; i += kThreadsPerBlock) {
+                decode_smem[i] = 0;
+            }
+            __syncthreads();
+
+            for (int i = tx; i < n_vec; i += kThreadsPerBlock) {
+                const int base = i << 2;
+                float     vals[4];
+                if (row_aligned && base + 3 < seq_len) {
+                    load_float4(logits + base, vals[0], vals[1], vals[2], vals[3]);
+                } else {
+                    load_float4_predicated(logits + base, base, seq_len, vals[0], vals[1], vals[2], vals[3]);
+                }
+#pragma unroll 4
+                for (int sub = 0; sub < 4; ++sub) {
+                    if (base + sub < seq_len && decode_bin(vals[sub]) == uthr) {
+                        const uint32_t fp32 = convert_to_uint32_v2(vals[sub]);
+                        if ((fp32 & match_mask) == prefix) {
+                            atomicAdd(&decode_smem[(fp32 >> bit_offset) & 0xFF], 1);
+                        }
+                    }
+                }
+            }
+            __syncthreads();
+
+            const int bin_count  = (tx < RADIX) ? decode_smem[tx] : 0;
+            int       bin_prefix = 0, bin_total = 0;
+            BlockScanT(scan_storage).ExclusiveSum(bin_count, bin_prefix, bin_total);
+            if (tx <= RADIX) {
+                decode_smem[tx] = bin_total - bin_prefix;
+            }
+            __syncthreads();
+
+            if (tx < RADIX) {
+                const int count_ge = decode_smem[tx];
+                const int count_gt = decode_smem[tx + 1];
+                if (count_ge >= remaining_k && count_gt < remaining_k) {
+                    decode_smem[SBASE + sREF] = tx;
+                    decode_smem[SBASE + sFIN] = remaining_k - count_gt;
+                }
+            }
+            __syncthreads();
+
+            const int ref_thr  = decode_smem[SBASE + sREF];
+            const int count_gt = decode_smem[ref_thr + 1];
+            remaining_k -= count_gt;
+
+            for (int iter = 0; iter < n_vec_iters; ++iter) {
+                const int  i         = tx + iter * kThreadsPerBlock;
+                const bool vec_valid = (i < n_vec);
+                const int  base      = i << 2;
+                float      vals[4]   = {
+                    __uint_as_float(0xFF800000u),
+                    __uint_as_float(0xFF800000u),
+                    __uint_as_float(0xFF800000u),
+                    __uint_as_float(0xFF800000u),
+                };
+                if (vec_valid) {
+                    if (row_aligned && base + 3 < seq_len) {
+                        load_float4(logits + base, vals[0], vals[1], vals[2], vals[3]);
+                    } else {
+                        load_float4_predicated(logits + base, base, seq_len, vals[0], vals[1], vals[2], vals[3]);
+                    }
+                }
+#pragma unroll 4
+                for (int sub = 0; sub < 4; ++sub) {
+                    const int elem_idx = base + sub;
+                    bool      emit_gt  = false;
+                    bool      emit_eq  = false;
+                    if (vec_valid && elem_idx < seq_len && decode_bin(vals[sub]) == uthr) {
+                        const uint32_t fp32 = convert_to_uint32_v2(vals[sub]);
+                        if ((fp32 & match_mask) == prefix) {
+                            const int bin = static_cast<int>((fp32 >> bit_offset) & 0xFF);
+                            if (bin > ref_thr) {
+                                emit_gt = true;
+                            } else if (pass == 3 && bin == ref_thr) {
+                                emit_eq = true;
+                            }
+                        }
+                    }
+                    const uint32_t gt_mask = __ballot_sync(0xffffffff, emit_gt);
+                    if (gt_mask) {
+                        const int gt_count = __popc(gt_mask);
+                        const int gt_rank  = __popc(gt_mask & ((1u << lane) - 1));
+                        int       gt_base;
+                        if (lane == 0) {
+                            gt_base = atomicAdd(&decode_smem[sOUT_abs], gt_count);
+                        }
+                        gt_base = __shfl_sync(0xffffffff, gt_base, 0);
+                        if (emit_gt) {
+                            output_indices[gt_base + gt_rank] = elem_idx;
+                        }
+                    }
+                    if (pass == 3 && emit_eq) {
+                        const int slot = atomicAdd(&decode_smem[SBASE + sFIN], -1);
+                        if (slot > 0) {
+                            output_indices[TopK - slot] = elem_idx;
+                        }
+                    }
+                }
+            }
+            __syncthreads();
+            if (remaining_k <= 0) {
+                break;
+            }
+            prefix |= (static_cast<uint32_t>(ref_thr) << bit_offset);
+        }
+        return;
+    }
+
     // ---- Phase 3: Deferred refinement (rare path) ----
     int*      refine[2] = {decode_smem, decode_smem + RHIST};
-    const int num_buf0  = (raw_buf0 < DBUF) ? raw_buf0 : DBUF;
+    const int num_buf0  = raw_buf0;
 
     for (int i = tx; i < RHIST; i += kThreadsPerBlock) {
         refine[0][i] = 0;
@@ -615,6 +777,18 @@ __device__ __forceinline__ void st_release(int* ptr, int val) {
 #endif
 }
 
+__device__ __forceinline__ int atomic_add_acq_rel_gpu(int* ptr, int val) {
+    int old = 0;
+#if (__CUDA_ARCH__ >= 700)
+    asm volatile("atom.acq_rel.gpu.global.add.s32 %0, [%1], %2;\n" : "=r"(old) : "l"(ptr), "r"(val) : "memory");
+#else
+    __threadfence();
+    old = atomicAdd(ptr, val);
+    __threadfence();
+#endif
+    return old;
+}
+
 __device__ __forceinline__ void wait_ge(int* ptr, int target_val, int thread_idx) {
     if (thread_idx == 0) {
 #pragma unroll 1
@@ -838,6 +1012,7 @@ __device__ void radix_topk(const float* __restrict__ row_input,
             }
         }
     }
+    __syncthreads();
 }
 
 // ============================================================================
@@ -875,12 +1050,12 @@ __global__ void __launch_bounds__(kThreadsPerBlock, 2) persistent_topk_kernel(Pe
     uint32_t* shared_ordered  = reinterpret_cast<uint32_t*>(smem_raw + kFixedSmemLarge);
 
     // RadixRowState for multi-CTA cooperative radix.
-    // Zero-initialization is done host-side via cudaMemsetAsync before launch,
-    // giving all CTAs a stream-ordered happens-before edge. CTA0-only in-kernel
-    // init cannot synchronize with CTA1+'s first inter-CTA barrier release.
+    // Pre-zeroed once on initial/resized allocation and self-reset wait-freely
+    // by the last departing CTA via exit_counter below.
     RadixRowState* state = &params.row_states[group_id];
 
     int            barrier_phase = 0;
+    uint32_t       radix_iter    = 0;
     const uint32_t total_iters   = (params.num_rows + num_groups - 1) / num_groups;
 
     for (uint32_t iter = 0; iter < total_iters; iter++) {
@@ -893,28 +1068,39 @@ __global__ void __launch_bounds__(kThreadsPerBlock, 2) persistent_topk_kernel(Pe
         int32_t*       row_output = params.output + row_idx * params.top_k;
         const float*   row_input  = params.input + row_idx * params.stride;
 
-        if (seq_len <= RADIX_THRESHOLD) {
+        if (seq_len <= static_cast<uint32_t>(TopK)) {
             if (cta_in_group == 0) {
-                if (seq_len <= static_cast<uint32_t>(TopK)) {
-                    // Trivial case: seq_len <= TopK
-                    for (uint32_t i = tx; i < static_cast<uint32_t>(TopK); i += kThreadsPerBlock) {
-                        row_output[i] = (i < seq_len) ? static_cast<int32_t>(i) : -1;
-                    }
-                } else if (seq_len <= static_cast<uint32_t>(HIST2048_THRESHOLD)) {
-                    histogram_2048_topk<TopK>(row_input, row_output, seq_len);
-                } else {
-                    histogram_256_topk<TopK>(row_input, row_output, 0, seq_len);
+                for (uint32_t i = tx; i < static_cast<uint32_t>(TopK); i += kThreadsPerBlock) {
+                    row_output[i] = (i < seq_len) ? static_cast<int32_t>(i) : -1;
                 }
             }
             continue;
         }
+        if (seq_len <= static_cast<uint32_t>(HIST2048_THRESHOLD)) {
+            if (cta_in_group == 0) {
+                histogram_2048_topk<TopK, true>(row_input, row_output, seq_len);
+            }
+            continue;
+        }
+        if (seq_len <= RADIX_THRESHOLD && ctas_per_group == 1) {
+            histogram_2048_topk<TopK, false>(row_input, row_output, seq_len);
+            continue;
+        }
 
-        const uint32_t my_chunk_start = cta_in_group * chunk_size;
+        uint32_t row_chunk_size = chunk_size;
+        if (seq_len <= RADIX_THRESHOLD || seq_len < ctas_per_group * chunk_size) {
+            const uint32_t per_cta = (seq_len + ctas_per_group - 1) / ctas_per_group;
+            const uint32_t aligned = ((per_cta + VEC_SIZE - 1) / VEC_SIZE) * VEC_SIZE;
+            if (aligned < row_chunk_size) {
+                row_chunk_size = aligned;
+            }
+        }
+        const uint32_t my_chunk_start = cta_in_group * row_chunk_size;
         radix_topk<TopK, VEC_SIZE>(row_input,
                                    row_output,
                                    seq_len,
                                    my_chunk_start,
-                                   chunk_size,
+                                   row_chunk_size,
                                    local_histogram,
                                    suffix_sum,
                                    shared_scalars,
@@ -923,8 +1109,34 @@ __global__ void __launch_bounds__(kThreadsPerBlock, 2) persistent_topk_kernel(Pe
                                    cta_in_group,
                                    ctas_per_group,
                                    barrier_phase,
-                                   iter,
+                                   radix_iter,
                                    tx);
+        radix_iter++;
+    }
+
+    if (radix_iter > 0) {
+        if (ctas_per_group > 1) {
+            __syncthreads();
+            if (tx == 0) {
+                const int prev    = atomic_add_acq_rel_gpu(&state->exit_counter, 1);
+                shared_scalars[0] = (prev == static_cast<int>(ctas_per_group) - 1) ? 1u : 0u;
+            }
+            __syncthreads();
+            if (shared_scalars[0] != 0u) {
+                uint32_t*          state_words = reinterpret_cast<uint32_t*>(state);
+                constexpr uint32_t n_words     = sizeof(RadixRowState) / sizeof(uint32_t);
+                for (uint32_t i = tx; i < n_words; i += kThreadsPerBlock) {
+                    state_words[i] = 0;
+                }
+            }
+        } else {
+            __syncthreads();
+            uint32_t*          state_words = reinterpret_cast<uint32_t*>(state);
+            constexpr uint32_t n_words     = sizeof(RadixRowState) / sizeof(uint32_t);
+            for (uint32_t i = tx; i < n_words; i += kThreadsPerBlock) {
+                state_words[i] = 0;
+            }
+        }
     }
 }
 

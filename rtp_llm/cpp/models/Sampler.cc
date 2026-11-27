@@ -127,10 +127,12 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     // ROCm: hipMemcpyAsync from pageable memory is truly async, and
     // Tensor::record_stream() rejects at::hip streams.
     // PPU can reject the asynchronous token ID copy on the dedicated stream.
-    auto inputs_token_ids_cuda = inputs.token_ids.to(torch::kCUDA);
+    auto inputs_token_ids_cuda = inputs.token_ids.is_cuda() ? inputs.token_ids : inputs.token_ids.to(torch::kCUDA);
 #else
     torch::Tensor inputs_token_ids_cuda;
-    {
+    if (inputs.token_ids.is_cuda()) {
+        inputs_token_ids_cuda = inputs.token_ids;
+    } else {
         auto main_stream     = cuda_graph::graphGetCurrentStream();
         auto copy_done_event = cuda_graph::makeGraphEvent();
         {

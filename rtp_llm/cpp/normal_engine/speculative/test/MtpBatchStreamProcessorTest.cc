@@ -273,8 +273,31 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputBuildsPositionSpec
     EXPECT_EQ((std::vector<int64_t>{8, 4}), sampler_inputs.logits.sizes().vec());
     EXPECT_EQ((std::vector<int64_t>{8, 4}), sampler_inputs.all_probs.sizes().vec());
     EXPECT_TRUE(sampler_inputs.logits.eq(0).all().item<bool>());
+    EXPECT_TRUE(sampler_inputs.token_ids.is_cuda());
+    EXPECT_EQ(torch::kInt32, sampler_inputs.token_ids.scalar_type());
+    EXPECT_EQ((std::vector<int64_t>{8, 1}), sampler_inputs.token_ids.sizes().vec());
 
-    auto  token_ids = sampler_inputs.token_ids.cpu();
+    EXPECT_EQ((std::vector<int32_t>{1, 2, 3, 4, 2, 3, 4, 5}), toVec<int32_t>(sampler_inputs.sequence_lengths));
+    EXPECT_EQ((std::vector<int32_t>{0, 0, 0, 0, 0, 0, 0, 0}), toVec<int32_t>(sampler_inputs.top_k));
+    EXPECT_EQ((std::vector<float>{0.8f, 0.8f, 0.8f, 0.8f, 0.7f, 0.7f, 0.7f, 0.7f}), toVec<float>(sampler_inputs.top_p));
+    EXPECT_EQ((std::vector<float>{0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f}),
+              toVec<float>(sampler_inputs.temperature));
+
+    // When a history-dependent penalty is active, gatherSpecSamplerInput materializes
+    // full position-specific token histories and avoids cloning unpadded logits.
+    stream1->generateConfig()->repetition_penalty = 1.1f;
+    GptModelOutputs dense_output;
+    dense_output.logits =
+        torch::zeros({static_cast<int64_t>(stream_groups.size() * (sp_config.gen_num_per_cycle + 1)),
+                      static_cast<int64_t>(model_config.vocab_size)},
+                     torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+    auto penalty_inputs_status = processor.gatherSpecSamplerInput(stream_groups, dense_output, {}, draft_token_ids);
+    ASSERT_TRUE(penalty_inputs_status.ok());
+
+    const auto& penalty_inputs = penalty_inputs_status.value();
+    EXPECT_EQ(penalty_inputs.logits.data_ptr(), dense_output.logits.data_ptr());
+
+    auto  token_ids = penalty_inputs.token_ids.cpu();
     auto  stride    = token_ids.size(1);
     auto* data      = token_ids.data_ptr<int32_t>();
 
@@ -291,11 +314,6 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputBuildsPositionSpec
         EXPECT_EQ(2, data[row * stride + 3]);
         EXPECT_EQ(1, data[row * stride + 4]);
     }
-    EXPECT_EQ((std::vector<int32_t>{1, 2, 3, 4, 2, 3, 4, 5}), toVec<int32_t>(sampler_inputs.sequence_lengths));
-    EXPECT_EQ((std::vector<int32_t>{0, 0, 0, 0, 0, 0, 0, 0}), toVec<int32_t>(sampler_inputs.top_k));
-    EXPECT_EQ((std::vector<float>{0.8f, 0.8f, 0.8f, 0.8f, 0.7f, 0.7f, 0.7f, 0.7f}), toVec<float>(sampler_inputs.top_p));
-    EXPECT_EQ((std::vector<float>{0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f}),
-              toVec<float>(sampler_inputs.temperature));
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testSpecSamplerInputMasksThinkBoundaryTokens) {

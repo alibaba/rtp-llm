@@ -281,7 +281,8 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("stride0"),
                   py::arg("stride1"),
                   py::arg("top_k"),
-                  py::arg("force_radix_sort") = false);
+                  py::arg("force_radix_sort") = false,
+                  py::arg("row_indices")      = py::none());
 
     rtp_ops_m.def("indexer_k_quant_and_cache",
                   &rtp_llm::indexer_k_quant_and_cache,

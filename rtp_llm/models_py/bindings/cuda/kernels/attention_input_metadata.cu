@@ -8,46 +8,96 @@ namespace rtp_llm {
 
 namespace {
 
-__global__ void buildAttentionInputMetadataKernel(const int32_t* __restrict__ input_lengths,
-                                                  const int32_t* __restrict__ prefix_lengths,
-                                                  int32_t* __restrict__ cu_seqlens,
-                                                  int32_t* __restrict__ cu_kv_seqlens,
-                                                  int32_t* __restrict__ padding_offset,
-                                                  int32_t batch_size,
-                                                  int32_t total_tokens) {
+constexpr int32_t kPaddingOffsetBlockSize = 256;
+constexpr int32_t kWarpSize               = 32;
+constexpr int32_t kNumWarps               = kPaddingOffsetBlockSize / kWarpSize;
+
+__global__ void buildAttentionCuSeqlensKernel(const int32_t* __restrict__ input_lengths,
+                                              const int32_t* __restrict__ prefix_lengths,
+                                              int32_t* __restrict__ cu_seqlens,
+                                              int32_t* __restrict__ cu_kv_seqlens,
+                                              int32_t batch_size) {
     if (blockIdx.x != 0 || threadIdx.x != 0) {
         return;
     }
 
-    int32_t max_input_len = 0;
-    int32_t q_acc         = 0;
-    int32_t kv_acc        = 0;
-    cu_seqlens[0]         = 0;
-    cu_kv_seqlens[0]      = 0;
+    int32_t q_acc    = 0;
+    int32_t kv_acc   = 0;
+    cu_seqlens[0]    = 0;
+    cu_kv_seqlens[0] = 0;
 
     for (int32_t b = 0; b < batch_size; ++b) {
         const int32_t input_len  = input_lengths[b];
         const int32_t prefix_len = prefix_lengths ? prefix_lengths[b] : 0;
-        max_input_len            = max_input_len > input_len ? max_input_len : input_len;
         q_acc += input_len;
         kv_acc += input_len + prefix_len;
         cu_seqlens[b + 1]    = q_acc;
         cu_kv_seqlens[b + 1] = kv_acc;
     }
+}
 
-    if (!padding_offset || total_tokens <= 0) {
+__global__ void computePaddingOffsetKernel(const int32_t* __restrict__ cu_seqlens,
+                                           int32_t* __restrict__ padding_offset,
+                                           int32_t batch_size,
+                                           int32_t total_tokens) {
+    __shared__ int32_t smem_warp_max[kNumWarps];
+    __shared__ int32_t smem_max_input_len;
+
+    int32_t local_max = 0;
+    for (int32_t b = static_cast<int32_t>(threadIdx.x); b < batch_size; b += kPaddingOffsetBlockSize) {
+        const int32_t input_len = cu_seqlens[b + 1] - cu_seqlens[b];
+        if (input_len > local_max) {
+            local_max = input_len;
+        }
+    }
+
+    const int32_t lane    = static_cast<int32_t>(threadIdx.x) & (kWarpSize - 1);
+    const int32_t warp_id = static_cast<int32_t>(threadIdx.x) / kWarpSize;
+
+    for (int offset = kWarpSize >> 1; offset > 0; offset >>= 1) {
+        const int32_t other = __shfl_down_sync(0xffffffffu, local_max, offset);
+        if (other > local_max) {
+            local_max = other;
+        }
+    }
+    if (lane == 0) {
+        smem_warp_max[warp_id] = local_max;
+    }
+    __syncthreads();
+
+    if (warp_id == 0) {
+        int32_t block_max = (lane < kNumWarps) ? smem_warp_max[lane] : 0;
+        for (int offset = kNumWarps >> 1; offset > 0; offset >>= 1) {
+            const int32_t other = __shfl_down_sync(0xffffffffu, block_max, offset);
+            if (other > block_max) {
+                block_max = other;
+            }
+        }
+        if (lane == 0) {
+            smem_max_input_len = block_max;
+        }
+    }
+    __syncthreads();
+
+    const int32_t idx          = static_cast<int32_t>(blockIdx.x) * kPaddingOffsetBlockSize + static_cast<int32_t>(threadIdx.x);
+    const int32_t valid_tokens = total_tokens < cu_seqlens[batch_size] ? total_tokens : cu_seqlens[batch_size];
+    if (idx >= valid_tokens) {
         return;
     }
 
-    int32_t out_idx    = 0;
-    int32_t cum_offset = 0;
-    for (int32_t b = 0; b < batch_size; ++b) {
-        const int32_t input_len = input_lengths[b];
-        for (int32_t j = 0; j < input_len && out_idx < total_tokens; ++j) {
-            padding_offset[out_idx++] = cum_offset;
+    // Find the largest batch index b in [0, batch_size - 1] such that cu_seqlens[b] <= idx.
+    int32_t lo = 0;
+    int32_t hi = batch_size + 1;
+    while (lo < hi) {
+        const int32_t mid = lo + ((hi - lo) >> 1);
+        if (cu_seqlens[mid] <= idx) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
         }
-        cum_offset += max_input_len - input_len;
     }
+    const int32_t b = lo - 1;
+    padding_offset[idx] = b * smem_max_input_len - cu_seqlens[b];
 }
 
 }  // namespace
@@ -92,14 +142,22 @@ void invokeBuildAttentionInputMetadata(const at::Tensor& input_lengths,
         prefix_ptr = prefix_lengths.data_ptr<int32_t>();
     }
 
-    buildAttentionInputMetadataKernel<<<1, 1, 0, stream>>>(
+    int32_t* padding_ptr =
+        padding_offset.defined() && padding_offset.numel() > 0 ? padding_offset.data_ptr<int32_t>() : nullptr;
+
+    buildAttentionCuSeqlensKernel<<<1, 1, 0, stream>>>(
         input_lengths.data_ptr<int32_t>(),
         prefix_ptr,
         cu_seqlens.data_ptr<int32_t>(),
         cu_kv_seqlens.data_ptr<int32_t>(),
-        padding_offset.defined() && padding_offset.numel() > 0 ? padding_offset.data_ptr<int32_t>() : nullptr,
-        batch_size,
-        total_tokens);
+        batch_size);
+
+    if (padding_ptr != nullptr && total_tokens > 0) {
+        const int32_t num_blocks = (total_tokens + kPaddingOffsetBlockSize - 1) / kPaddingOffsetBlockSize;
+        computePaddingOffsetKernel<<<num_blocks, kPaddingOffsetBlockSize, 0, stream>>>(
+            cu_seqlens.data_ptr<int32_t>(), padding_ptr, batch_size, total_tokens);
+    }
+
     const auto result = cudaGetLastError();
     TORCH_CHECK(result == cudaSuccess, "build attention input metadata kernel failed: ", cudaGetErrorString(result));
 }

@@ -9,6 +9,9 @@
 #include <torch/all.h>
 
 #include <algorithm>
+#include <mutex>
+#include <unordered_map>
+#include <vector>
 
 #ifndef USE_ROCM
 #include "rtp_llm/models_py/bindings/cuda/kernels/dsv4_persistent_topk.cuh"
@@ -19,6 +22,129 @@ namespace torch_ext {
 namespace {
 
 #ifndef USE_ROCM
+struct DevicePropInfo {
+    int num_sms            = 0;
+    int max_smem_per_block = 0;
+};
+
+DevicePropInfo get_device_prop_info(int device) {
+    static std::mutex                              mu;
+    static std::unordered_map<int, DevicePropInfo> cache;
+    std::lock_guard<std::mutex>                    lock(mu);
+    auto                                           it = cache.find(device);
+    if (it != cache.end()) {
+        return it->second;
+    }
+    DevicePropInfo info;
+    cudaDeviceGetAttribute(&info.num_sms, cudaDevAttrMultiProcessorCount, device);
+    cudaDeviceGetAttribute(&info.max_smem_per_block, cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
+    cache.emplace(device, info);
+    return info;
+}
+
+class CaptureRelaxedGuard {
+public:
+    explicit CaptureRelaxedGuard(bool enabled): active_(enabled) {
+        if (active_) {
+            mode_ = cudaStreamCaptureModeRelaxed;
+            cudaThreadExchangeStreamCaptureMode(&mode_);
+        }
+    }
+    ~CaptureRelaxedGuard() {
+        if (active_) {
+            cudaThreadExchangeStreamCaptureMode(&mode_);
+        }
+    }
+
+private:
+    bool                  active_ = false;
+    cudaStreamCaptureMode mode_   = cudaStreamCaptureModeGlobal;
+};
+
+vllm::persistent::RadixRowState*
+get_radix_row_states(int device, size_t needed_groups, size_t hw_resident_cap, cudaStream_t stream) {
+    namespace P = vllm::persistent;
+    struct DeviceRadixState {
+        P::RadixRowState*  ptr             = nullptr;
+        size_t             capacity_groups = 0;
+        cudaStream_t       init_stream     = nullptr;
+        std::vector<void*> retired_ptrs;
+    };
+
+    static std::mutex                                mu;
+    static std::unordered_map<int, DeviceRadixState> states;
+    std::lock_guard<std::mutex>                      lock(mu);
+    auto&                                            st = states[device];
+
+    cudaStreamCaptureStatus cap_status = cudaStreamCaptureStatusNone;
+    cudaError_t             cap_err    = cudaStreamIsCapturing(stream, &cap_status);
+    TORCH_CHECK(cap_err == cudaSuccess, "cudaStreamIsCapturing failed: ", cudaGetErrorString(cap_err));
+    const bool is_capturing = (cap_status != cudaStreamCaptureStatusNone);
+
+    if (!is_capturing && !st.retired_ptrs.empty() && st.ptr != nullptr && st.capacity_groups >= needed_groups) {
+        cudaDeviceSynchronize();
+        for (void* old_ptr : st.retired_ptrs) {
+            cudaFree(old_ptr);
+        }
+        st.retired_ptrs.clear();
+    }
+
+    if (st.ptr != nullptr && st.capacity_groups >= needed_groups) {
+        return st.ptr;
+    }
+
+    CaptureRelaxedGuard guard(is_capturing);
+    int                 prev_device = device;
+    cudaGetDevice(&prev_device);
+    if (prev_device != device) {
+        cudaSetDevice(device);
+    }
+    struct DeviceRestore {
+        int  prev;
+        bool restore;
+        ~DeviceRestore() {
+            if (restore) {
+                cudaSetDevice(prev);
+            }
+        }
+    } dev_restore{prev_device, prev_device != device};
+
+    if (st.init_stream == nullptr) {
+        cudaError_t s_err = cudaStreamCreateWithFlags(&st.init_stream, cudaStreamNonBlocking);
+        TORCH_CHECK(s_err == cudaSuccess, "radix init stream creation failed: ", cudaGetErrorString(s_err));
+    }
+
+    const size_t target_groups = std::max(needed_groups, hw_resident_cap);
+    const size_t target_bytes  = target_groups * sizeof(P::RadixRowState);
+
+    void*       new_raw_ptr = nullptr;
+    cudaError_t alloc_err   = cudaMalloc(&new_raw_ptr, target_bytes);
+    TORCH_CHECK(alloc_err == cudaSuccess, "radix state allocation failed: ", cudaGetErrorString(alloc_err));
+
+    cudaError_t mz_err = cudaMemsetAsync(new_raw_ptr, 0, target_bytes, st.init_stream);
+    TORCH_CHECK(mz_err == cudaSuccess, "radix state pre-zero failed: ", cudaGetErrorString(mz_err));
+
+    cudaError_t sync_err = cudaStreamSynchronize(st.init_stream);
+    TORCH_CHECK(sync_err == cudaSuccess, "radix state sync failed: ", cudaGetErrorString(sync_err));
+
+    if (st.ptr != nullptr) {
+        if (is_capturing) {
+            st.retired_ptrs.push_back(st.ptr);
+        } else {
+            cudaDeviceSynchronize();
+            for (void* old_ptr : st.retired_ptrs) {
+                cudaFree(old_ptr);
+            }
+            st.retired_ptrs.clear();
+            cudaFree(st.ptr);
+        }
+    }
+
+    st.ptr             = reinterpret_cast<P::RadixRowState*>(new_raw_ptr);
+    st.capacity_groups = target_groups;
+    return st.ptr;
+}
+
 template<int TopK>
 void launch_persistent_topk(const torch::Tensor& logits,
                             const torch::Tensor& lengths,
@@ -43,14 +169,10 @@ void launch_persistent_topk(const torch::Tensor& logits,
     const int64_t  bound64     = std::min<int64_t>(std::max<int64_t>(max_seq_len, 1), std::max<int64_t>(stride, 1));
     const uint32_t chunk_bound = static_cast<uint32_t>(bound64);
 
-    static int num_sms            = 0;
-    static int max_smem_per_block = 0;
-    if (num_sms == 0) {
-        int device;
-        cudaGetDevice(&device);
-        cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, device);
-        cudaDeviceGetAttribute(&max_smem_per_block, cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
-    }
+    const int            device             = logits.get_device();
+    const DevicePropInfo prop_info          = get_device_prop_info(device);
+    const int            num_sms            = prop_info.num_sms;
+    const int            max_smem_per_block = prop_info.max_smem_per_block;
 
     if (num_rows > 32 && max_smem_per_block >= 128 * 1024) {
         cudaError_t status = vllm::FilteredTopKRaggedTransform<float, int32_t, TopK>(logits.data_ptr<float>(),
@@ -169,9 +291,6 @@ void launch_persistent_topk(const torch::Tensor& logits,
                         state_bytes,
                         " bytes");
 
-            cudaError_t mz_err = cudaMemsetAsync(workspace.data_ptr<uint8_t>(), 0, state_bytes, stream);
-            TORCH_CHECK(mz_err == cudaSuccess, "row_states memset failed: ", cudaGetErrorString(mz_err));
-
             P::PersistentTopKParams params;
             params.input          = logits.data_ptr<float>();
             params.output         = output.data_ptr<int32_t>();
@@ -180,7 +299,7 @@ void launch_persistent_topk(const torch::Tensor& logits,
             params.stride         = static_cast<uint32_t>(stride);
             params.top_k          = static_cast<uint32_t>(TopK);
             params.chunk_size     = chunk_size;
-            params.row_states     = reinterpret_cast<P::RadixRowState*>(workspace.data_ptr<uint8_t>());
+            params.row_states     = get_radix_row_states(device, num_groups, hw_resident_cap, stream);
             params.ctas_per_group = ctas_per_group;
             params.max_seq_len    = chunk_bound;
 

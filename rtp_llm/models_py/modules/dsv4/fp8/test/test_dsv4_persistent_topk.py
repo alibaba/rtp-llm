@@ -232,6 +232,105 @@ def test_lengths_2d_accepted():
     _assert_equiv(out, logits, lengths_1d, k=512, tag="lengths 2D ok via view")
 
 
+def test_long_seq_radix_repeated_multi_cta_stress():
+    """Stress repeated multi-CTA cooperative radix launches sharing one workspace."""
+    configs = [
+        # Production Cluster-2 decode warmup shape (N=32, T=77184, K=512)
+        (32, 77184, 512, 100),
+        # High-CTA-count cooperative radix shape (N=4, T=262144, K=512)
+        (4, 262144, 512, 200),
+    ]
+    ws = torch.empty(WORKSPACE_BYTES, dtype=torch.uint8, device="cuda")
+    for n, t, k, seed_base in configs:
+        out = torch.full((n, k), -1, dtype=torch.int32, device="cuda")
+        logits, lengths = _make(n, t, seed=seed_base, lengths_mode="full")
+        for it in range(64):
+            if it > 0:
+                g = torch.Generator(device="cuda").manual_seed(seed_base + it)
+                logits.normal_(generator=g)
+            rtp_llm_ops.dsv4_persistent_topk(logits, lengths, out, ws, k, t)
+            if it in (0, 63):
+                torch.cuda.synchronize()
+                _assert_equiv(
+                    out,
+                    logits,
+                    lengths,
+                    k=k,
+                    tag=f"radix stress N={n} T={t} iter={it}",
+                )
+
+
+def test_long_seq_radix_mixed_lengths_multi_iter():
+    """Mix trivial, histogram_2048, and multi-CTA radix rows across iterations."""
+    ws = torch.empty(WORKSPACE_BYTES, dtype=torch.uint8, device="cuda")
+    base_lens = [0, 128, 2048, 8192, 16384, 49152, 77184]
+    n, t = 32, 77184
+    lengths_list = [base_lens[(i * 3 + 1) % len(base_lens)] for i in range(n)]
+    lengths = torch.tensor(lengths_list, dtype=torch.int32, device="cuda")
+    for k in (512, 2048):
+        logits, _ = _make(n, t, seed=300 + k, lengths_mode="full")
+        out = torch.full((n, k), -1, dtype=torch.int32, device="cuda")
+        for it in range(16):
+            if it > 0:
+                g = torch.Generator(device="cuda").manual_seed(400 + k + it)
+                logits.normal_(generator=g)
+                shifted = [lengths_list[(i + it) % n] for i in range(n)]
+                lengths.copy_(
+                    torch.tensor(shifted, dtype=torch.int32, device="cuda")
+                )
+            rtp_llm_ops.dsv4_persistent_topk(logits, lengths, out, ws, k, t)
+            if it in (0, 7, 15):
+                torch.cuda.synchronize()
+                _assert_equiv(
+                    out,
+                    logits,
+                    lengths,
+                    k=k,
+                    tag=f"mixed len K={k} iter={it}",
+                )
+
+
+def test_long_seq_radix_cuda_graph_capture_and_replay():
+    """Capture 4 chained multi-CTA cooperative radix calls and replay 32 times."""
+    n, t, k = 32, 77184, 512
+    ws = torch.empty(WORKSPACE_BYTES, dtype=torch.uint8, device="cuda")
+    logits, lengths = _make(n, t, seed=500, lengths_mode="full")
+    out = torch.full((n, k), -1, dtype=torch.int32, device="cuda")
+
+    def run_four():
+        for _ in range(4):
+            rtp_llm_ops.dsv4_persistent_topk(logits, lengths, out, ws, k, t)
+
+    # Warmup before CUDA graph capture.
+    for _ in range(2):
+        run_four()
+    torch.cuda.synchronize()
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        run_four()
+    torch.cuda.synchronize()
+
+    for it in range(32):
+        g = torch.Generator(device="cuda").manual_seed(600 + it)
+        new_logits = torch.randn(n, t, device="cuda", generator=g)
+        new_lengths = torch.full(
+            (n,), t - (it % 7) * 1024, dtype=torch.int32, device="cuda"
+        )
+        logits.copy_(new_logits)
+        lengths.copy_(new_lengths)
+        graph.replay()
+        if it in (0, 31):
+            torch.cuda.synchronize()
+            _assert_equiv(
+                out,
+                logits,
+                lengths,
+                k=k,
+                tag=f"cuda graph N={n} T={t} replay={it}",
+            )
+
+
 # ---------------------------------------------------------------------------
 # Bench — compare against torch.topk (current production path).
 # ---------------------------------------------------------------------------
@@ -308,6 +407,9 @@ if __name__ == "__main__":
     test_long_seq_radix_path()
     test_zero_length_row()
     test_lengths_2d_accepted()
+    test_long_seq_radix_repeated_multi_cta_stress()
+    test_long_seq_radix_mixed_lengths_multi_iter()
+    test_long_seq_radix_cuda_graph_capture_and_replay()
     print("\n== Benchmark ==")
     bench_decode_sweep()
     print("\nOK")

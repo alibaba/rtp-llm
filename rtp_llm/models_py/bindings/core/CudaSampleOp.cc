@@ -181,7 +181,7 @@ std::pair<torch::Tensor, torch::Tensor> makeSamplingSeedOffsetTensors(const std:
 bool canUseCompactSamplerOutput(const GreedyParams& params) {
     return params.token_ids.is_cuda() && params.token_ids.is_contiguous() && params.token_ids.dim() == 2
            && params.token_ids.scalar_type() == torch::kInt32 && params.token_ids.size(0) == params.logits.size(0)
-           && params.token_ids.size(0) > 1 && params.token_ids.size(1) > 1;
+           && params.token_ids.size(0) >= 1 && params.token_ids.size(1) >= 1;
 }
 
 void processLogits(const GreedyParams& params, const torch::Tensor& device_tokens, torch::Tensor& transposed_tokens) {
@@ -485,7 +485,11 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     }
 
     // Sampling only changes the output column; every history prefix stays in place.
-    params.token_ids.select(1, params.token_ids.size(1) - 1).copy_(samples_t, true);
+    // Skip redundant self-copy when samples_t already aliases the output column (e.g. stride == 1).
+    auto dst_last_col = params.token_ids.select(1, params.token_ids.size(1) - 1);
+    if (!dst_last_col.is_cuda() || dst_last_col.data_ptr() != samples_t.data_ptr()) {
+        dst_last_col.copy_(samples_t, true);
+    }
     check_cuda_error();
     return output;
 }

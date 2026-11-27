@@ -6,9 +6,11 @@
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include <cstring>
+#include <typeinfo>
 #if USING_CUDA
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDACachingAllocator.h>
+#include "rtp_llm/cpp/normal_engine/speculative/SpeculativeKernels.cuh"
 #endif
 
 namespace rtp_llm {
@@ -211,16 +213,40 @@ void applySpecLogitsAcceptLenCap(const SpecLogitsVerifyRunner::LaunchResult& ver
     c10::cuda::CUDACachingAllocator::recordStream(cap_src.storage().data_ptr(),
                                                   at::cuda::getCurrentCUDAStream(cap_src.device().index()));
 #endif
-    auto cap_gpu      = cap_src.to(accept_len.options());
-    auto cap_plus_one = cap_gpu + 1;
-    accept_len        = torch::minimum(accept_len, cap_plus_one);
-
     RTP_LLM_CHECK_WITH_INFO(accept_tokens.defined() && accept_tokens.is_cuda(),
                             "spec logits cap requires CUDA accept_tokens");
     RTP_LLM_CHECK_WITH_INFO(target_token_ids.defined(), "spec logits cap requires target sampler token_ids");
     if (!target_token_ids.is_cuda()) {
         target_token_ids = target_token_ids.to(accept_tokens.device(), /*non_blocking=*/true);
     }
+
+#if USING_CUDA
+    if (accept_tokens.is_contiguous() && accept_len.is_contiguous() && cap_src.is_contiguous()
+        && accept_tokens.scalar_type() == torch::kInt32 && accept_len.scalar_type() == torch::kInt32
+        && (cap_src.scalar_type() == torch::kInt32 || cap_src.scalar_type() == torch::kInt64)) {
+        auto target_i32 = target_token_ids.scalar_type() == torch::kInt32 ? target_token_ids :
+                                                                            target_token_ids.to(torch::kInt32);
+        auto out_tokens = torch::empty_like(accept_tokens);
+        auto out_len    = torch::empty_like(accept_len);
+        speculative::launchPostRejectionAndCap(accept_tokens,
+                                               accept_len,
+                                               out_tokens,
+                                               out_len,
+                                               torch::Tensor(),
+                                               torch::Tensor(),
+                                               target_i32,
+                                               cap_src,
+                                               /*clamp_minus_one=*/false);
+        accept_tokens = std::move(out_tokens);
+        accept_len    = std::move(out_len);
+        return;
+    }
+#endif
+
+    auto cap_gpu      = cap_src.to(accept_len.options());
+    auto cap_plus_one = cap_gpu + 1;
+    accept_len        = torch::minimum(accept_len, cap_plus_one);
+
     const int64_t token_stride  = target_token_ids.size(1);
     auto          target_tokens = target_token_ids.reshape({batch_size, propose_step + 1, token_stride})
                              .select(2, token_stride - 1)
@@ -324,9 +350,34 @@ void runRejectionSampling(speculative::SpeculativeSampler&              sampler,
                           SamplerOutput&                                target_sampler_output,
                           const SpecLogitsVerifyRunner::LaunchResult&   verify_result,
                           speculative::SpeculativeSamplerOutput&        output) {
-    output                  = sampler.forward(params, draft_sampler_output, target_sampler_output);
+    bool fused_cap_applied = false;
+#if USING_CUDA
+    if (typeid(sampler) == typeid(speculative::SpeculativeSampler)
+        && (verify_result.spec_cap_gpu.defined() || verify_result.spec_cap_cpu.defined())) {
+        auto prepare_cap = [&](const torch::Device& target_device) -> torch::Tensor {
+            auto cap_src =
+                verify_result.spec_cap_gpu.defined() ? verify_result.spec_cap_gpu : verify_result.spec_cap_cpu;
+            if (verify_result.ready_event) {
+                verify_result.ready_event->block(cuda_graph::graphGetCurrentStream());
+            }
+            if (!cap_src.is_cuda()) {
+                cap_src = cap_src.to(target_device);
+            }
+            c10::cuda::CUDACachingAllocator::recordStream(
+                cap_src.storage().data_ptr(), at::cuda::getCurrentCUDAStream(cap_src.device().index()));
+            return cap_src;
+        };
+        output = sampler.forwardWithSpecCap(
+            params, draft_sampler_output, target_sampler_output, prepare_cap, fused_cap_applied);
+    } else
+#endif
+    {
+        output = sampler.forward(params, draft_sampler_output, target_sampler_output);
+    }
     output.processor_errors = verify_result.processor_errors;
-    applySpecLogitsAcceptLenCap(verify_result, target_sampler_output.token_ids, output);
+    if (!fused_cap_applied) {
+        applySpecLogitsAcceptLenCap(verify_result, target_sampler_output.token_ids, output);
+    }
     output.accept_tokens_cpu = output.accept_tokens.to(torch::kCPU, /*non_blocking=*/true);
     output.accept_len_cpu    = output.accept_len.to(torch::kCPU, /*non_blocking=*/true);
     output.transfer_done_event->record(cuda_graph::graphGetCurrentStream());

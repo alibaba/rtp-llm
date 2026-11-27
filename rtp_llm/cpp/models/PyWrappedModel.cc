@@ -47,6 +47,35 @@ torch::Tensor toHostAsync(const torch::Tensor& tensor, bool& has_d2h) {
     return host;
 }
 
+bool isHostContiguousIdentity(const torch::Tensor& indexes, int64_t expected_rows) {
+    if (!indexes.defined() || indexes.is_cuda() || !indexes.is_contiguous() || indexes.dim() != 1
+        || indexes.numel() != expected_rows) {
+        return false;
+    }
+    if (expected_rows == 0) {
+        return true;
+    }
+    if (indexes.scalar_type() == torch::kInt32) {
+        const auto* ptr = indexes.data_ptr<int32_t>();
+        for (int64_t i = 0; i < expected_rows; ++i) {
+            if (ptr[i] != static_cast<int32_t>(i)) {
+                return false;
+            }
+        }
+        return true;
+    }
+    if (indexes.scalar_type() == torch::kInt64) {
+        const auto* ptr = indexes.data_ptr<int64_t>();
+        for (int64_t i = 0; i < expected_rows; ++i) {
+            if (ptr[i] != i) {
+                return false;
+            }
+        }
+        return true;
+    }
+    return false;
+}
+
 /** Pair init() with a full drain on exceptional exits. On the normal tracked
  * path, finish submissions here and leave publication completion and error
  * handling to the caller. */
@@ -1280,11 +1309,16 @@ torch::Tensor PyWrappedModel::computeLogits(const torch::Tensor& hidden) {
                             && kernel.device() == hidden.device(),
                         "FP8 LM head requires its FP32 weight scale on the hidden device");
             auto rows = hidden.to(torch::kBFloat16).contiguous();
+            const bool keep_bf16 = (dspark_model_role_ == DSparkModelRole::PROPOSE);
             if (rows.size(0) == 0) {
-                logits = torch::empty({0, kernel.size(0)}, rows.options().dtype(torch::kFloat32));
+                logits = torch::empty({0, kernel.size(0)},
+                                      rows.options().dtype(keep_bf16 ? torch::kBFloat16 : torch::kFloat32));
             } else if (kernel.size(0) % 16 != 0 || kernel.size(1) % 16 != 0) {
                 auto weight = (kernel.to(torch::kFloat32) * head.scales).to(torch::kBFloat16);
-                logits      = torch::mm(rows, weight.t()).to(torch::kFloat32);
+                logits      = torch::mm(rows, weight.t());
+                if (!keep_bf16) {
+                    logits = logits.to(torch::kFloat32);
+                }
             } else {
                 // Quantize only live rows; zero padding must not change their amax domain.
                 const auto padded_rows = ((rows.size(0) + 15) / 16) * 16;
@@ -1292,8 +1326,10 @@ torch::Tensor PyWrappedModel::computeLogits(const torch::Tensor& hidden) {
                 auto       scale       = torch::zeros({1}, rows.options().dtype(torch::kFloat32));
                 per_tensor_quant_fp8(rows, quantized, scale, false);
                 logits = at::_scaled_mm(quantized, kernel.t(), scale, head.scales, {}, {}, torch::kBFloat16)
-                             .narrow(0, 0, rows.size(0))
-                             .to(torch::kFloat32);
+                             .narrow(0, 0, rows.size(0));
+                if (!keep_bf16) {
+                    logits = logits.to(torch::kFloat32);
+                }
             }
 #else
             TORCH_CHECK(false, "FP8 LM head requires a CUDA build with FP8 support");
@@ -1391,13 +1427,24 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
         }
         printTorchTensorData(lm_output_indexes, "lm_output_indexes");
 
-        buffer_holder_.hold_host(lm_output_indexes);
-        auto lm_output_indexes_device = lm_output_indexes.to(torch::kCUDA, /*non_blocking=*/true);
+        const bool need_last_hidden_select = has_context_request && !need_all_logits;
+        const bool host_identity =
+            (need_last_hidden_select || need_all_logits) && isHostContiguousIdentity(lm_output_indexes, hidden.size(0));
+
+        torch::Tensor lm_output_indexes_long;
+        auto          ensure_output_indexes_long = [&]() -> const torch::Tensor& {
+            if (!lm_output_indexes_long.defined()) {
+                buffer_holder_.hold_host(lm_output_indexes);
+                auto lm_output_indexes_device = lm_output_indexes.to(torch::kCUDA, /*non_blocking=*/true);
+                lm_output_indexes_long        = lm_output_indexes_device.to(torch::kLong);
+            }
+            return lm_output_indexes_long;
+        };
 
         torch::Tensor last_hidden;
-        if (has_context_request && !need_all_logits) {
+        if (need_last_hidden_select && !host_identity) {
             RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(index_select_last_hidden)");
-            last_hidden = torch::index_select(hidden, 0, lm_output_indexes_device.to(torch::kLong));
+            last_hidden = torch::index_select(hidden, 0, ensure_output_indexes_long());
         } else {
             last_hidden = hidden;
         }
@@ -1442,11 +1489,16 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
         outputs.all_hidden_states = hidden;
         if (need_all_logits) {
             RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(need_all_logits_index)");
-            const auto output_indexes = lm_output_indexes_device.to(torch::kLong);
-            outputs.all_logits        = logits;
-            outputs.logits            = torch::index_select(logits, 0, output_indexes);
-            /** Prompt scoring expands LM-head rows, but hidden_states must retain the same selected rows as logits. */
-            outputs.hidden_states = torch::index_select(hidden, 0, output_indexes);
+            outputs.all_logits = logits;
+            if (host_identity) {
+                outputs.logits        = logits;
+                outputs.hidden_states = hidden;
+            } else {
+                const auto& output_indexes = ensure_output_indexes_long();
+                outputs.logits             = torch::index_select(logits, 0, output_indexes);
+                /** Prompt scoring expands LM-head rows, but hidden_states must retain the same selected rows as logits. */
+                outputs.hidden_states = torch::index_select(hidden, 0, output_indexes);
+            }
         } else if (merged_eagle3_hidden.defined()) {
             outputs.all_hidden_states = merged_eagle3_hidden;
         }

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <optional>
+
 #include <torch/all.h>
 
 namespace torch_ext {
@@ -20,22 +22,25 @@ namespace torch_ext {
 //   indices_out : [num_rows, top_k] int32   — written; positions past the
 //                 row's valid count are ``-1`` padded.  Indices are
 //                 relative to ``row_starts[r]`` (i.e. 0..rowEnd-rowStart-1).
-//   num_rows    : == logits.size(0)
+//   num_rows    : == logits.size(0) (or len(row_indices) when row_indices is set)
 //   stride0     : logits.stride(0)
 //   stride1     : logits.stride(1)
 //   top_k       : K
 //   force_radix_sort : when true, route every row through the radix final
 //                      pass instead of the hybrid insertion/radix split.
+//   row_indices : optional [>= num_rows] int32 indirect row mapping; when
+//                 present, block i processes row ``row_indices[i]``.
 //
 // CUDA-only.
-void dsv4_top_k_per_row_prefill(const torch::Tensor& logits,
-                                const torch::Tensor& row_starts,
-                                const torch::Tensor& row_ends,
-                                torch::Tensor&       indices_out,
-                                int64_t              num_rows,
-                                int64_t              stride0,
-                                int64_t              stride1,
-                                int64_t              top_k,
-                                bool                 force_radix_sort = false);
+void dsv4_top_k_per_row_prefill(const torch::Tensor&                logits,
+                                const torch::Tensor&                row_starts,
+                                const torch::Tensor&                row_ends,
+                                torch::Tensor&                      indices_out,
+                                int64_t                             num_rows,
+                                int64_t                             stride0,
+                                int64_t                             stride1,
+                                int64_t                             top_k,
+                                bool                                force_radix_sort = false,
+                                const std::optional<torch::Tensor>& row_indices      = std::nullopt);
 
 }  // namespace torch_ext
