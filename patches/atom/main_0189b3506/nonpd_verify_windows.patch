@@ -1,0 +1,65 @@
+--- a/atom/model_ops/moe.py
++++ b/atom/model_ops/moe.py
+@@ -1230,7 +1230,7 @@
+         return candidate
+ 
+     sort_policy = 0
+-    if hidden_states.shape[0] in (16, 32, 64) and rtp_single_verify.get():
++    if hidden_states.shape[0] in (8, 12, 16, 24, 32, 48, 64) and rtp_single_verify.get():
+         from atom.utils import is_mi308x
+ 
+         if is_mi308x(hidden_states.device):
+--- a/aiter/fused_moe.py
++++ b/aiter/fused_moe.py
+@@ -836,7 +836,7 @@
+         dispatch_policy = 0
+         if (
+             num_experts == 514 and model_dim == 2560 and block_size in (16, 32, 64)
+-            and topk_ids.shape in ((16, 12), (32, 12), (64, 12))
++            and topk_ids.shape[1:] == (12,) and topk_ids.shape[0] in (8, 12, 16, 24, 32, 48, 64)
+             and topk_weights.shape == topk_ids.shape and topk_ids.dtype == torch.int32
+             and topk_weights.dtype == torch.float32 and moebuf_dtype == torch.bfloat16
+             and expert_mask is not None and expert_mask.shape == (514,) and expert_mask.dtype == torch.int32
+--- a/atom/model_ops/qwen4_exp/hc_verify.py
++++ b/atom/model_ops/qwen4_exp/hc_verify.py
+@@ -35,7 +35,7 @@
+     rows = x.shape[0]
+     if not (
+         rtp_single_verify.get() and rank == 320 and hc_count == 4
+-        and rows in (4, 8, 16, 32, 64) and x.shape == (rows, 10240) and weight.shape == (324, 10240)
++        and rows in (4, 8, 12, 16, 24, 32, 48, 64) and x.shape == (rows, 10240) and weight.shape == (324, 10240)
+         and x.dtype == weight.dtype == torch.bfloat16 and x.device == weight.device
+         and x.is_contiguous() and weight.is_contiguous() and is_mi308x(x.device)
+     ):
+@@ -55,6 +55,6 @@
+     else:
+         splits, bn, bk, bm = (32, 32, 64, 16) if rows == 8 else (16, 64, 128, 64 if rows == 64 else 16)
+         partials = torch.empty((splits, rows, 324), device=x.device, dtype=torch.float32)
+-        split_project[((324 + bn - 1) // bn, splits, max(1, rows // bm))](x, weight, partials, rows, bn, bk, splits, bm, num_warps=4)
++        split_project[((324 + bn - 1) // bn, splits, (rows + bm - 1) // bm)](x, weight, partials, rows, bn, bk, splits, bm, num_warps=4)
+         finalize[(rows, 6)](partials, gate, inject, rows, splits, splits, num_warps=2)
+     return gate, inject
+--- a/atom/plugin/rtpllm/utils/qwen4_exp_context.py
++++ b/atom/plugin/rtpllm/utils/qwen4_exp_context.py
+@@ -1020,13 +1020,19 @@
+             )
+             from atom.model_ops.qwen38_moe_dispatch import FUSION_VERIFY_MOE, rtp_single_verify
+ 
+-            # Select only the verifier graph for one or two requests and three proposals.
++            # Narrower verify windows use the same row-wise kernels on standalone target batches.
+             role = str(runtime.parallelism_config.role_type).rsplit(".", 1)[-1]
+             single_verify = (
+                 gdn_metadata is not None
+                 and (gdn_metadata.num_spec_decodes in (1, 2)
+                      or (role == "PDFUSION" and gdn_metadata.num_spec_decodes in (4, 8, 16)))
+-                and gdn_metadata.num_spec_decode_tokens == 4 * gdn_metadata.num_spec_decodes
++                and (
++                    gdn_metadata.num_spec_decode_tokens == 4 * gdn_metadata.num_spec_decodes
++                    or (role == "PDFUSION" and gdn_metadata.num_spec_decodes in (4, 8, 16)
++                        and gdn_metadata.num_spec_decode_tokens in (
++                            2 * gdn_metadata.num_spec_decodes, 3 * gdn_metadata.num_spec_decodes
++                        ))
++                )
+                 and not runtime._rtp_model_config.is_mtp
+                 and (
+                     role == "DECODE"

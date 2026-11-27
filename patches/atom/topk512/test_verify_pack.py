@@ -3,7 +3,7 @@ import pytest
 import torch
 
 
-@pytest.mark.parametrize("rows", [16, 32, 64])
+@pytest.mark.parametrize("rows", [8, 12, 16, 24, 32, 48, 64])
 def test_qwen4_verify_pack(rows):
     if not torch.version.hip or not torch.cuda.is_available() or "MI308X" not in torch.cuda.get_device_name():
         pytest.skip("requires the MI308X wheel overlay")
@@ -34,3 +34,25 @@ def test_qwen4_verify_pack(rows):
             padded = int(expected[3][0])
             for left, right, length in zip(expected, actual, (padded, padded, padded // 32, 2, rows)):
                 torch.testing.assert_close(left[:length], right[:length], rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("rows", [12, 24, 48])
+def test_qwen4_verify_hc_projection(rows):
+    if not torch.version.hip or not torch.cuda.is_available() or "MI308X" not in torch.cuda.get_device_name():
+        pytest.skip("requires the MI308X wheel overlay")
+
+    from atom.model_ops.qwen38_moe_dispatch import rtp_single_verify
+    from atom.model_ops.qwen4_exp.hc_verify import try_project
+
+    rng = torch.Generator(device="cuda").manual_seed(4321)
+    x = torch.randn(rows, 10240, dtype=torch.bfloat16, device="cuda", generator=rng)
+    w = torch.randn(324, 10240, dtype=torch.bfloat16, device="cuda", generator=rng) * 0.01
+    token = rtp_single_verify.set(True)
+    try:
+        gate, inject = try_project(x, w, 320, 4)
+    finally:
+        rtp_single_verify.reset(token)
+    ref = (x.float() @ w.float().T).bfloat16()
+    expected_gate = torch.nn.functional.silu((ref[:, :320] * 0.25).float()).bfloat16()
+    torch.testing.assert_close(inject, ref[:, 320:], rtol=0.012, atol=0.002)
+    torch.testing.assert_close(gate, expected_gate, rtol=0.012, atol=0.002)
