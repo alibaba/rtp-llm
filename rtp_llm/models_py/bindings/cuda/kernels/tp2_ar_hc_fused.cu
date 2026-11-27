@@ -43,6 +43,7 @@ constexpr int    kBranchPushChunk      = kThreads / kBranches;  // 80 uint4s per
 constexpr size_t kRowU4                = kHidden / 8;    // 320 uint4s
 constexpr int    kLamportSlots         = 3;
 constexpr int    kGatherThreads        = 256;
+constexpr int    kMaxTopK              = 16;
 
 struct Tp2HcSignal {
     alignas(128) uint32_t cta_gen[kMaxSignalBlocks][32];
@@ -393,6 +394,17 @@ static DINLINE void pdl_trigger() {
 #endif
 }
 
+static __device__ __forceinline__ void lamport_clear_prev_slot(
+    uint4* self_clear, size_t clear_u4, int bid, int tid) {
+    if (clear_u4 > 0) {
+        const uint4  neg_zero = make_uint4(0x80008000U, 0x80008000U, 0x80008000U, 0x80008000U);
+        const size_t gstride  = static_cast<size_t>(gridDim.x) * kThreads;
+        for (size_t i = static_cast<size_t>(bid) * kThreads + tid; i < clear_u4; i += gstride) {
+            st_u4_wt(self_clear + i, neg_zero);
+        }
+    }
+}
+
 __global__ void tp2ArHcInitLamportKernel(uint4* buf, size_t num_u4) {
     const uint4  neg_zero = make_uint4(0x80008000U, 0x80008000U, 0x80008000U, 0x80008000U);
     const size_t stride   = static_cast<size_t>(gridDim.x) * blockDim.x;
@@ -699,14 +711,7 @@ tp2ArHcLamportInjectOnlyBranchKernel(const uint4* __restrict__    hyper_x,
     }
 
     lamport_advance_slot(self_sig, slot, total_u4, tid);
-
-    if (clear_u4 > 0) {
-        const uint4  neg_zero = make_uint4(0x80008000U, 0x80008000U, 0x80008000U, 0x80008000U);
-        const size_t gstride  = static_cast<size_t>(gridDim.x) * kThreads;
-        for (size_t i = static_cast<size_t>(bid) * kThreads + tid; i < clear_u4; i += gstride) {
-            st_u4_wt(self_clear + i, neg_zero);
-        }
-    }
+    lamport_clear_prev_slot(self_clear, clear_u4, bid, tid);
 
     uint4 pr;
     do {
@@ -766,14 +771,7 @@ tp2ArHcLamportInjectOnlyRowKernel(const uint4* __restrict__    hyper_x,
     }
 
     lamport_advance_slot(self_sig, slot, total_u4, tid);
-
-    if (clear_u4 > 0) {
-        const uint4  neg_zero = make_uint4(0x80008000U, 0x80008000U, 0x80008000U, 0x80008000U);
-        const size_t gstride  = static_cast<size_t>(gridDim.x) * kThreads;
-        for (size_t i = static_cast<size_t>(bid) * kThreads + tid; i < clear_u4; i += gstride) {
-            st_u4_wt(self_clear + i, neg_zero);
-        }
-    }
+    lamport_clear_prev_slot(self_clear, clear_u4, bid, tid);
 
     for (int r = bid; r < rows; r += gridDim.x) {
         const bool   last_iter = (r + gridDim.x >= rows);
@@ -1503,6 +1501,827 @@ torch::Tensor tp2ArHcInjectOnly(const torch::Tensor&        hyper_x,
         else            DISPATCH_ONLY(false, false);
     }
 #undef DISPATCH_ONLY
+
+    return residual;
+}
+
+namespace tp2_hc_ipc {
+
+static inline int64_t ep_gather_max_branch_rows(int dev, int max_res_branch) {
+    // Switch from BranchKernel (4 CTAs/row, 4x down_out reads) to RowKernel
+    // (1 CTA/row, 1x down_out read) once RowKernel fills ~87.5% of the device's
+    // SMs: 68 on 78-SM H20 (C1-C16 Branch, C32 Row) and 115 on 132-SM H200.
+    int sm_count = 0;
+    cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, dev);
+    const int64_t sm_cap  = std::max<int64_t>(1, (static_cast<int64_t>(sm_count) * 7) / 8);
+    const int64_t res_cap = static_cast<int64_t>(max_res_branch / kBranches);
+    return std::min<int64_t>(sm_cap, res_cap);
+}
+
+struct EpGatherValidated {
+    size_t  lamport_slot_u4;
+    int64_t rows;
+    int64_t top_k;
+};
+
+static inline EpGatherValidated validate_ep_gather_common(const char*                 op_name,
+                                                          const torch::Tensor&        hyper_x,
+                                                          const torch::Tensor&        down_out,
+                                                          const torch::Tensor&        shared_out,
+                                                          const torch::Tensor&        topk_ids,
+                                                          const torch::Tensor&        topk_weights,
+                                                          const torch::Tensor&        gates,
+                                                          const std::vector<int64_t>& lamport_buffers,
+                                                          const std::vector<int64_t>& signals,
+                                                          int64_t                     rank,
+                                                          int64_t                     num_local,
+                                                          int64_t                     lamport_buffer_bytes) {
+    TORCH_CHECK(hyper_x.is_cuda() && down_out.is_cuda() && shared_out.is_cuda() && topk_ids.is_cuda()
+                    && topk_weights.is_cuda() && gates.is_cuda(),
+                op_name,
+                " inputs must be CUDA tensors");
+    const auto dev = hyper_x.device();
+    TORCH_CHECK(down_out.device() == dev && shared_out.device() == dev && topk_ids.device() == dev
+                    && topk_weights.device() == dev && gates.device() == dev,
+                op_name,
+                " inputs must reside on the same CUDA device");
+    TORCH_CHECK(hyper_x.scalar_type() == torch::kBFloat16 && down_out.scalar_type() == torch::kBFloat16
+                    && shared_out.scalar_type() == torch::kBFloat16 && gates.scalar_type() == torch::kBFloat16,
+                op_name,
+                " activation inputs must be BF16");
+    TORCH_CHECK(topk_ids.scalar_type() == torch::kInt32 || topk_ids.scalar_type() == torch::kInt64,
+                op_name,
+                " topk_ids must be int32 or int64");
+    TORCH_CHECK(topk_weights.scalar_type() == torch::kFloat32, op_name, " topk_weights must be float32");
+    TORCH_CHECK(hyper_x.is_contiguous() && down_out.is_contiguous() && shared_out.is_contiguous()
+                    && topk_ids.is_contiguous() && topk_weights.is_contiguous() && gates.is_contiguous(),
+                op_name,
+                " inputs must be contiguous");
+    TORCH_CHECK(reinterpret_cast<uintptr_t>(hyper_x.data_ptr()) % 16 == 0
+                    && reinterpret_cast<uintptr_t>(down_out.data_ptr()) % 16 == 0
+                    && reinterpret_cast<uintptr_t>(shared_out.data_ptr()) % 16 == 0
+                    && reinterpret_cast<uintptr_t>(gates.data_ptr()) % 8 == 0,
+                op_name,
+                " inputs must satisfy 16B (hyper_x/down_out/shared_out) and 8B (gates) alignment");
+    TORCH_CHECK(hyper_x.dim() >= 2 && hyper_x.size(-1) == kBranches * kHidden,
+                op_name,
+                " hyper_x must have rank >= 2 and width 10240");
+
+    const size_t lamport_slot_u4 = resolve_lamport_slot_u4(lamport_buffer_bytes);
+    TORCH_CHECK(rank >= 0 && rank < 2 && lamport_buffers.size() == 2 && signals.size() == 2 && lamport_slot_u4 > 0
+                    && lamport_buffers[0] != 0 && lamport_buffers[1] != 0 && signals[0] != 0 && signals[1] != 0,
+                op_name,
+                " requires 2 non-null rank Lamport buffers, signals, and positive lamport_buffer_bytes");
+    TORCH_CHECK(num_local >= 0, op_name, " num_local must be non-negative");
+
+    const int64_t max_lamport_rows = static_cast<int64_t>(lamport_slot_u4 / kRowU4);
+    const int64_t rows             = hyper_x.numel() / (kBranches * kHidden);
+    const int64_t top_k            = topk_ids.dim() == 2 ? topk_ids.size(1) : 0;
+    TORCH_CHECK(rows >= 1 && rows <= max_lamport_rows, op_name, " rows exceed Lamport slot capacity");
+    TORCH_CHECK(top_k >= 1 && top_k <= kMaxTopK && topk_ids.size(0) == rows && topk_weights.dim() == 2
+                    && topk_weights.size(0) == rows && topk_weights.size(1) == top_k,
+                op_name,
+                " topk_ids/topk_weights shape mismatch");
+    TORCH_CHECK(down_out.dim() == 2 && down_out.size(0) == rows * top_k && down_out.size(1) == kHidden,
+                op_name,
+                " down_out shape mismatch");
+    TORCH_CHECK(shared_out.dim() == 2 && shared_out.size(0) == rows && shared_out.size(1) == kHidden,
+                op_name,
+                " shared_out shape mismatch");
+    TORCH_CHECK(gates.dim() >= 2 && gates.numel() == rows * kBranches && gates.size(-1) == kBranches,
+                op_name,
+                " gates shape mismatch");
+    return {lamport_slot_u4, rows, top_k};
+}
+
+static __device__ __forceinline__ void ep_gather_load_row_meta(const void*  topk_ids,
+                                            const float* topk_weights,
+                                            int          r,
+                                            int          top_k,
+                                            int          global_start,
+                                            int          num_local,
+                                            bool         ids_is_i64,
+                                            int*         sh_slots,
+                                            float*       sh_weights,
+                                            int&         sh_num_local,
+                                            int          tid) {
+    if (tid < 32) {
+        const int64_t base = static_cast<int64_t>(r) * top_k;
+        bool          hit  = false;
+        float         w    = 0.0f;
+        if (tid < top_k) {
+            const int64_t eid = ids_is_i64
+                ? reinterpret_cast<const int64_t*>(topk_ids)[base + tid]
+                : static_cast<int64_t>(reinterpret_cast<const int32_t*>(topk_ids)[base + tid]);
+            if (eid >= global_start && eid < global_start + num_local) {
+                hit = true;
+                w   = topk_weights[base + tid];
+            }
+        }
+        const uint32_t mask = __ballot_sync(0xffffffffU, hit);
+        if (hit) {
+            const int dst   = __popc(mask & ((1U << tid) - 1U));
+            sh_slots[dst]   = static_cast<int>(base + tid);
+            sh_weights[dst] = w;
+        }
+        if (tid == 0) {
+            sh_num_local = __popc(mask);
+        }
+    }
+}
+
+static __device__ __forceinline__ bool ep_gather_is_push_warp(int g, int warp) {
+    // Partition 10 warps (320 threads) across 4 branch CTAs without splitting any warp:
+    // g=0: [0,3), g=1: [3,6), g=2: [6,8), g=3: [8,10).
+    if (g == 0) {
+        return warp < 3;
+    }
+    if (g == 1) {
+        return warp >= 3 && warp < 6;
+    }
+    if (g == 2) {
+        return warp >= 6 && warp < 8;
+    }
+    return warp >= 8;
+}
+
+static __device__ __forceinline__ uint4 ep_gather_reduce_u4(const uint4* __restrict__ down_out,
+                                         const uint4* __restrict__ shared_out,
+                                         const int*                sh_slots,
+                                         const float*              sh_weights,
+                                         int                       n_local,
+                                         size_t                    row_off,
+                                         int                       tid) {
+    float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
+    float acc4 = 0.0f, acc5 = 0.0f, acc6 = 0.0f, acc7 = 0.0f;
+    for (int i = 0; i < n_local; ++i) {
+        const uint4 v = down_out[static_cast<size_t>(sh_slots[i]) * kRowU4 + tid];
+        const float w = sh_weights[i];
+        acc0 += __uint_as_float(v.x << 16) * w;
+        acc1 += __uint_as_float(v.x & 0xffff0000U) * w;
+        acc2 += __uint_as_float(v.y << 16) * w;
+        acc3 += __uint_as_float(v.y & 0xffff0000U) * w;
+        acc4 += __uint_as_float(v.z << 16) * w;
+        acc5 += __uint_as_float(v.z & 0xffff0000U) * w;
+        acc6 += __uint_as_float(v.w << 16) * w;
+        acc7 += __uint_as_float(v.w & 0xffff0000U) * w;
+    }
+    const uint4 routed_u4 = make_uint4(pack_bf16x2(acc0, acc1),
+                                       pack_bf16x2(acc2, acc3),
+                                       pack_bf16x2(acc4, acc5),
+                                       pack_bf16x2(acc6, acc7));
+    return add_bf16x2_u4(routed_u4, shared_out[row_off]);
+}
+
+// -----------------------------------------------------------------------------
+// Lamport EP-Gather Fused Kernels: Eliminate standalone ep_gather_global_routes
+// and packed [2*rows, 2560] copy for MoE decode/verify (rows <= max_lamport_rows).
+// -----------------------------------------------------------------------------
+template<bool kCollectAmax, bool kEnablePdl>
+__global__ void __launch_bounds__(kThreads, 4)
+tp2ArHcLamportEpGatherBranchKernel(const uint4* __restrict__    hyper_x,
+                                   const uint4* __restrict__    down_out,
+                                   const uint4* __restrict__    shared_out,
+                                   const void* __restrict__     topk_ids,
+                                   const float* __restrict__    topk_weights,
+                                   const uint64_t* __restrict__ gates_packed,
+                                   const uint4* __restrict__    gamma,
+                                   uint4* __restrict__          residual_out,
+                                   uint4* __restrict__          norm_out,
+                                   float* __restrict__          scale_out,
+                                   uint4* __restrict__          self_lamp_base,
+                                   uint4* __restrict__          peer_lamp_base,
+                                   Tp2HcSignal* __restrict__    self_sig,
+                                   int                          rows,
+                                   int                          top_k,
+                                   int                          global_start,
+                                   int                          num_local,
+                                   bool                         ids_is_i64,
+                                   float                        eps,
+                                   size_t                       slot_u4) {
+    __shared__ uint32_t sh_flag;
+    __shared__ uint32_t sh_clear_u4;
+    __shared__ int      sh_slots[kMaxTopK];
+    __shared__ float    sh_weights[kMaxTopK];
+    __shared__ int      sh_num_local;
+    __shared__ float    sh_warp[kWarps];
+    __shared__ float    sh_amax[kWarps];
+
+    const int    bid        = blockIdx.x;
+    const int    tid        = threadIdx.x;
+    const int    lane       = tid & 31;
+    const int    warp       = tid >> 5;
+    const int    r          = bid >> 2;
+    const int    g          = bid & 3;
+    const size_t total_u4   = static_cast<size_t>(rows) * kRowU4;
+    const size_t branch_idx = (static_cast<size_t>(r) * kBranches + g) * kRowU4 + tid;
+
+    const uint4    gamma_u4 = gamma[static_cast<size_t>(g) * kRowU4 + tid];
+    const uint4    x_u4     = hyper_x[branch_idx];
+    const uint16_t gate_u16 = static_cast<uint16_t>((gates_packed[r] >> (g * 16)) & 0xffffU);
+
+    pdl_wait<kEnablePdl>();
+
+    // ep_gather_load_row_meta writes sh_slots/sh_weights/sh_num_local from warp 0;
+    // visibility to all warps is established by lamport_read_slot's trailing __syncthreads().
+    ep_gather_load_row_meta(
+        topk_ids, topk_weights, r, top_k, global_start, num_local, ids_is_i64, sh_slots, sh_weights, sh_num_local, tid);
+    lamport_read_slot(self_sig, sh_flag, sh_clear_u4, tid);
+
+    const uint32_t slot       = sh_flag;
+    const uint32_t clear_slot = (slot == 0U) ? 2U : (slot - 1U);
+    const size_t   clear_u4   = static_cast<size_t>(sh_clear_u4);
+
+    const uint4* self_data  = self_lamp_base + static_cast<size_t>(slot) * slot_u4;
+    uint4*       peer_data  = peer_lamp_base + static_cast<size_t>(slot) * slot_u4;
+    uint4*       self_clear = self_lamp_base + static_cast<size_t>(clear_slot) * slot_u4;
+
+    // Push warps reduce and immediately push to peer NVLink before clearing,
+    // while non-push warps clear and reduce overlapped with NVLink flight.
+    const size_t row_off = static_cast<size_t>(r) * kRowU4 + tid;
+    uint4        local_sum;
+    if (ep_gather_is_push_warp(g, warp)) {
+        local_sum = ep_gather_reduce_u4(
+            down_out, shared_out, sh_slots, sh_weights, sh_num_local, row_off, tid);
+        st_u4_wt(peer_data + row_off, sanitize_neg_zero_u4(local_sum));
+        lamport_advance_slot(self_sig, slot, total_u4, tid);
+        lamport_clear_prev_slot(self_clear, clear_u4, bid, tid);
+    } else {
+        lamport_advance_slot(self_sig, slot, total_u4, tid);
+        lamport_clear_prev_slot(self_clear, clear_u4, bid, tid);
+        local_sum = ep_gather_reduce_u4(
+            down_out, shared_out, sh_slots, sh_weights, sh_num_local, row_off, tid);
+    }
+
+    uint4 pr;
+    do {
+        pr = ld_u4_volatile(self_data + row_off);
+    } while (has_neg_zero_u4(pr));
+
+    const uint4 sub_u4 = add_bf16x2_u4(local_sum, pr);
+    const uint4 inj_u4 = mul_bf16x2_u4_scalar(sub_u4, dup_bf16_bits(gate_u16));
+    const uint4 res_u4 = add_bf16x2_u4(x_u4, inj_u4);
+    residual_out[branch_idx] = res_u4;
+
+    const float sum_sq  = block_reduce_sum_10w(sum_sq_u4(res_u4), sh_warp, warp, lane);
+    const float inv_rms = rsqrtf(sum_sq * (1.0f / 2560.0f) + eps);
+
+    uint32_t    amax_pair = 0U;
+    const uint4 norm_u4   = norm_u4_bf16<kCollectAmax>(res_u4, gamma_u4, inv_rms, amax_pair);
+
+    pdl_trigger<kEnablePdl>();
+    norm_out[branch_idx] = norm_u4;
+
+    if constexpr (kCollectAmax) {
+        finalize_grid_fp8_scale(amax_pair, sh_amax, self_sig, scale_out, warp, lane, tid);
+    }
+}
+
+template<bool kCollectAmax, bool kEnablePdl>
+__global__ void __launch_bounds__(kThreads, 3)
+tp2ArHcLamportEpGatherRowKernel(const uint4* __restrict__    hyper_x,
+                                const uint4* __restrict__    down_out,
+                                const uint4* __restrict__    shared_out,
+                                const void* __restrict__     topk_ids,
+                                const float* __restrict__    topk_weights,
+                                const uint64_t* __restrict__ gates_packed,
+                                const uint4* __restrict__    gamma,
+                                uint4* __restrict__          residual_out,
+                                uint4* __restrict__          norm_out,
+                                float* __restrict__          scale_out,
+                                uint4* __restrict__          self_lamp_base,
+                                uint4* __restrict__          peer_lamp_base,
+                                Tp2HcSignal* __restrict__    self_sig,
+                                int                          rows,
+                                int                          top_k,
+                                int                          global_start,
+                                int                          num_local,
+                                bool                         ids_is_i64,
+                                float                        eps,
+                                size_t                       slot_u4) {
+    __shared__ uint32_t sh_flag;
+    __shared__ uint32_t sh_clear_u4;
+    __shared__ int      sh_slots[kMaxTopK];
+    __shared__ float    sh_weights[kMaxTopK];
+    __shared__ int      sh_num_local;
+    __shared__ float    sh_warp[kBranches][kWarps];
+    __shared__ float    sh_inv_rms[kBranches];
+
+    const int    bid         = blockIdx.x;
+    const int    tid         = threadIdx.x;
+    const int    lane        = tid & 31;
+    const int    warp        = tid >> 5;
+    const size_t total_u4    = static_cast<size_t>(rows) * kRowU4;
+    const bool   single_iter = (rows <= gridDim.x);
+
+    pdl_wait<kEnablePdl>();
+
+    lamport_read_slot(self_sig, sh_flag, sh_clear_u4, tid);
+
+    const uint32_t slot       = sh_flag;
+    const uint32_t clear_slot = (slot == 0U) ? 2U : (slot - 1U);
+    const size_t   clear_u4   = static_cast<size_t>(sh_clear_u4);
+
+    const uint4* self_data  = self_lamp_base + static_cast<size_t>(slot) * slot_u4;
+    uint4*       peer_data  = peer_lamp_base + static_cast<size_t>(slot) * slot_u4;
+    uint4*       self_clear = self_lamp_base + static_cast<size_t>(clear_slot) * slot_u4;
+
+    uint4 local_sum0{};
+    for (int r = bid; r < rows; r += gridDim.x) {
+        if (r != bid) {
+            __syncthreads();
+        }
+        ep_gather_load_row_meta(topk_ids,
+                                topk_weights,
+                                r,
+                                top_k,
+                                global_start,
+                                num_local,
+                                ids_is_i64,
+                                sh_slots,
+                                sh_weights,
+                                sh_num_local,
+                                tid);
+        __syncthreads();
+        const size_t row_off = static_cast<size_t>(r) * kRowU4 + tid;
+        const uint4  val     = ep_gather_reduce_u4(
+            down_out, shared_out, sh_slots, sh_weights, sh_num_local, row_off, tid);
+        st_u4_wt(peer_data + row_off, sanitize_neg_zero_u4(val));
+        if (r == bid) {
+            local_sum0 = val;
+        }
+    }
+
+    lamport_advance_slot(self_sig, slot, total_u4, tid);
+    lamport_clear_prev_slot(self_clear, clear_u4, bid, tid);
+
+    uint32_t running_amax_pair = 0U;
+    for (int r = bid; r < rows; r += gridDim.x) {
+        const bool   last_iter = (r + gridDim.x >= rows);
+        const size_t row_off   = static_cast<size_t>(r) * kRowU4 + tid;
+
+        uint4 local_sum;
+        if (single_iter || r == bid) {
+            local_sum = local_sum0;
+        } else {
+            ep_gather_load_row_meta(topk_ids,
+                                    topk_weights,
+                                    r,
+                                    top_k,
+                                    global_start,
+                                    num_local,
+                                    ids_is_i64,
+                                    sh_slots,
+                                    sh_weights,
+                                    sh_num_local,
+                                    tid);
+            __syncthreads();
+            local_sum = ep_gather_reduce_u4(
+                down_out, shared_out, sh_slots, sh_weights, sh_num_local, row_off, tid);
+        }
+
+        uint4 pr;
+        do {
+            pr = ld_u4_volatile(self_data + row_off);
+        } while (has_neg_zero_u4(pr));
+
+        const uint4    sub_u4   = add_bf16x2_u4(local_sum, pr);
+        const uint64_t gate_cur = gates_packed[r];
+
+        uint4 res_u4[kBranches];
+#pragma unroll
+        for (int g = 0; g < kBranches; ++g) {
+            const size_t   out_idx  = (static_cast<size_t>(r) * kBranches + g) * kRowU4 + tid;
+            const uint16_t gate_u16 = static_cast<uint16_t>((gate_cur >> (g * 16)) & 0xffffU);
+            const uint4    x_u4     = hyper_x[out_idx];
+            const uint4    inj_u4   = mul_bf16x2_u4_scalar(sub_u4, dup_bf16_bits(gate_u16));
+            res_u4[g]               = add_bf16x2_u4(x_u4, inj_u4);
+            residual_out[out_idx]   = res_u4[g];
+
+            float sq = sum_sq_u4(res_u4[g]);
+#pragma unroll
+            for (int offset = 16; offset > 0; offset >>= 1) {
+                sq += __shfl_xor_sync(0xffffffffU, sq, offset);
+            }
+            if (lane == 0) {
+                sh_warp[g][warp] = sq;
+            }
+        }
+
+        __syncthreads();
+        if (warp < kBranches) {
+            float v = (lane < kWarps) ? sh_warp[warp][lane] : 0.0f;
+#pragma unroll
+            for (int offset = 16; offset > 0; offset >>= 1) {
+                v += __shfl_xor_sync(0xffffffffU, v, offset);
+            }
+            if (lane == 0) {
+                sh_inv_rms[warp] = rsqrtf(v * (1.0f / 2560.0f) + eps);
+            }
+        }
+        __syncthreads();
+
+#pragma unroll
+        for (int g = 0; g < kBranches; ++g) {
+            const size_t out_idx  = (static_cast<size_t>(r) * kBranches + g) * kRowU4 + tid;
+            const uint4  gamma_u4 = gamma[static_cast<size_t>(g) * kRowU4 + tid];
+            const uint4  norm_u4  = norm_u4_bf16<kCollectAmax>(res_u4[g], gamma_u4, sh_inv_rms[g], running_amax_pair);
+            if (last_iter && g == kBranches - 1) {
+                pdl_trigger<kEnablePdl>();
+            }
+            norm_out[out_idx] = norm_u4;
+        }
+    }
+
+    if constexpr (kCollectAmax) {
+        finalize_grid_fp8_scale(running_amax_pair, &sh_warp[0][0], self_sig, scale_out, warp, lane, tid);
+    }
+}
+
+template<bool kEnablePdl>
+__global__ void __launch_bounds__(kThreads, 4)
+tp2ArHcLamportEpGatherInjectOnlyBranchKernel(const uint4* __restrict__    hyper_x,
+                                             const uint4* __restrict__    down_out,
+                                             const uint4* __restrict__    shared_out,
+                                             const void* __restrict__     topk_ids,
+                                             const float* __restrict__    topk_weights,
+                                             const uint64_t* __restrict__ gates_packed,
+                                             uint4* __restrict__          residual_out,
+                                             uint4* __restrict__          self_lamp_base,
+                                             uint4* __restrict__          peer_lamp_base,
+                                             Tp2HcSignal* __restrict__    self_sig,
+                                             int                          rows,
+                                             int                          top_k,
+                                             int                          global_start,
+                                             int                          num_local,
+                                             bool                         ids_is_i64,
+                                             size_t                       slot_u4) {
+    __shared__ uint32_t sh_flag;
+    __shared__ uint32_t sh_clear_u4;
+    __shared__ int      sh_slots[kMaxTopK];
+    __shared__ float    sh_weights[kMaxTopK];
+    __shared__ int      sh_num_local;
+
+    const int    bid        = blockIdx.x;
+    const int    tid        = threadIdx.x;
+    const int    warp       = tid >> 5;
+    const int    r          = bid >> 2;
+    const int    g          = bid & 3;
+    const size_t total_u4   = static_cast<size_t>(rows) * kRowU4;
+    const size_t branch_idx = (static_cast<size_t>(r) * kBranches + g) * kRowU4 + tid;
+
+    const uint4    x_u4     = hyper_x[branch_idx];
+    const uint16_t gate_u16 = static_cast<uint16_t>((gates_packed[r] >> (g * 16)) & 0xffffU);
+
+    pdl_wait<kEnablePdl>();
+
+    // ep_gather_load_row_meta writes sh_slots/sh_weights/sh_num_local from warp 0;
+    // visibility to all warps is established by lamport_read_slot's trailing __syncthreads().
+    ep_gather_load_row_meta(
+        topk_ids, topk_weights, r, top_k, global_start, num_local, ids_is_i64, sh_slots, sh_weights, sh_num_local, tid);
+    lamport_read_slot(self_sig, sh_flag, sh_clear_u4, tid);
+
+    const uint32_t slot       = sh_flag;
+    const uint32_t clear_slot = (slot == 0U) ? 2U : (slot - 1U);
+    const size_t   clear_u4   = static_cast<size_t>(sh_clear_u4);
+
+    const uint4* self_data  = self_lamp_base + static_cast<size_t>(slot) * slot_u4;
+    uint4*       peer_data  = peer_lamp_base + static_cast<size_t>(slot) * slot_u4;
+    uint4*       self_clear = self_lamp_base + static_cast<size_t>(clear_slot) * slot_u4;
+
+    // Push warps reduce and immediately push to peer NVLink before clearing,
+    // while non-push warps clear and reduce overlapped with NVLink flight.
+    const size_t row_off = static_cast<size_t>(r) * kRowU4 + tid;
+    uint4        local_sum;
+    if (ep_gather_is_push_warp(g, warp)) {
+        local_sum = ep_gather_reduce_u4(
+            down_out, shared_out, sh_slots, sh_weights, sh_num_local, row_off, tid);
+        st_u4_wt(peer_data + row_off, sanitize_neg_zero_u4(local_sum));
+        lamport_advance_slot(self_sig, slot, total_u4, tid);
+        lamport_clear_prev_slot(self_clear, clear_u4, bid, tid);
+    } else {
+        lamport_advance_slot(self_sig, slot, total_u4, tid);
+        lamport_clear_prev_slot(self_clear, clear_u4, bid, tid);
+        local_sum = ep_gather_reduce_u4(
+            down_out, shared_out, sh_slots, sh_weights, sh_num_local, row_off, tid);
+    }
+
+    uint4 pr;
+    do {
+        pr = ld_u4_volatile(self_data + row_off);
+    } while (has_neg_zero_u4(pr));
+
+    const uint4 sub_u4 = add_bf16x2_u4(local_sum, pr);
+    const uint4 inj_u4 = mul_bf16x2_u4_scalar(sub_u4, dup_bf16_bits(gate_u16));
+    const uint4 res_u4 = add_bf16x2_u4(x_u4, inj_u4);
+
+    pdl_trigger<kEnablePdl>();
+    residual_out[branch_idx] = res_u4;
+}
+
+template<bool kEnablePdl>
+__global__ void __launch_bounds__(kThreads, 4)
+tp2ArHcLamportEpGatherInjectOnlyRowKernel(const uint4* __restrict__    hyper_x,
+                                          const uint4* __restrict__    down_out,
+                                          const uint4* __restrict__    shared_out,
+                                          const void* __restrict__     topk_ids,
+                                          const float* __restrict__    topk_weights,
+                                          const uint64_t* __restrict__ gates_packed,
+                                          uint4* __restrict__          residual_out,
+                                          uint4* __restrict__          self_lamp_base,
+                                          uint4* __restrict__          peer_lamp_base,
+                                          Tp2HcSignal* __restrict__    self_sig,
+                                          int                          rows,
+                                          int                          top_k,
+                                          int                          global_start,
+                                          int                          num_local,
+                                          bool                         ids_is_i64,
+                                          size_t                       slot_u4) {
+    __shared__ uint32_t sh_flag;
+    __shared__ uint32_t sh_clear_u4;
+    __shared__ int      sh_slots[kMaxTopK];
+    __shared__ float    sh_weights[kMaxTopK];
+    __shared__ int      sh_num_local;
+
+    const int    bid         = blockIdx.x;
+    const int    tid         = threadIdx.x;
+    const size_t total_u4    = static_cast<size_t>(rows) * kRowU4;
+    const bool   single_iter = (rows <= gridDim.x);
+
+    pdl_wait<kEnablePdl>();
+
+    lamport_read_slot(self_sig, sh_flag, sh_clear_u4, tid);
+
+    const uint32_t slot       = sh_flag;
+    const uint32_t clear_slot = (slot == 0U) ? 2U : (slot - 1U);
+    const size_t   clear_u4   = static_cast<size_t>(sh_clear_u4);
+
+    const uint4* self_data  = self_lamp_base + static_cast<size_t>(slot) * slot_u4;
+    uint4*       peer_data  = peer_lamp_base + static_cast<size_t>(slot) * slot_u4;
+    uint4*       self_clear = self_lamp_base + static_cast<size_t>(clear_slot) * slot_u4;
+
+    uint4 local_sum0{};
+    for (int r = bid; r < rows; r += gridDim.x) {
+        if (r != bid) {
+            __syncthreads();
+        }
+        ep_gather_load_row_meta(topk_ids,
+                                topk_weights,
+                                r,
+                                top_k,
+                                global_start,
+                                num_local,
+                                ids_is_i64,
+                                sh_slots,
+                                sh_weights,
+                                sh_num_local,
+                                tid);
+        __syncthreads();
+        const size_t row_off = static_cast<size_t>(r) * kRowU4 + tid;
+        const uint4  val     = ep_gather_reduce_u4(
+            down_out, shared_out, sh_slots, sh_weights, sh_num_local, row_off, tid);
+        st_u4_wt(peer_data + row_off, sanitize_neg_zero_u4(val));
+        if (r == bid) {
+            local_sum0 = val;
+        }
+    }
+
+    lamport_advance_slot(self_sig, slot, total_u4, tid);
+    lamport_clear_prev_slot(self_clear, clear_u4, bid, tid);
+
+    for (int r = bid; r < rows; r += gridDim.x) {
+        const bool   last_iter = (r + gridDim.x >= rows);
+        const size_t row_off   = static_cast<size_t>(r) * kRowU4 + tid;
+
+        uint4 local_sum;
+        if (single_iter || r == bid) {
+            local_sum = local_sum0;
+        } else {
+            __syncthreads();
+            ep_gather_load_row_meta(topk_ids,
+                                    topk_weights,
+                                    r,
+                                    top_k,
+                                    global_start,
+                                    num_local,
+                                    ids_is_i64,
+                                    sh_slots,
+                                    sh_weights,
+                                    sh_num_local,
+                                    tid);
+            __syncthreads();
+            local_sum = ep_gather_reduce_u4(
+                down_out, shared_out, sh_slots, sh_weights, sh_num_local, row_off, tid);
+        }
+
+        uint4 pr;
+        do {
+            pr = ld_u4_volatile(self_data + row_off);
+        } while (has_neg_zero_u4(pr));
+
+        const uint4    sub_u4   = add_bf16x2_u4(local_sum, pr);
+        const uint64_t gate_cur = gates_packed[r];
+
+        if (last_iter) {
+            pdl_trigger<kEnablePdl>();
+        }
+#pragma unroll
+        for (int g = 0; g < kBranches; ++g) {
+            const size_t   out_idx  = (static_cast<size_t>(r) * kBranches + g) * kRowU4 + tid;
+            const uint16_t gate_u16 = static_cast<uint16_t>((gate_cur >> (g * 16)) & 0xffffU);
+            const uint4    x_u4     = hyper_x[out_idx];
+            const uint4    inj_u4   = mul_bf16x2_u4_scalar(sub_u4, dup_bf16_bits(gate_u16));
+            residual_out[out_idx]   = add_bf16x2_u4(x_u4, inj_u4);
+        }
+    }
+}
+
+}  // namespace tp2_hc_ipc
+
+std::tuple<torch::Tensor, torch::Tensor, c10::optional<torch::Tensor>>
+tp2ArHcInjectNormEpGather(const torch::Tensor&        hyper_x,
+                          const torch::Tensor&        down_out,
+                          const torch::Tensor&        shared_out,
+                          const torch::Tensor&        topk_ids,
+                          const torch::Tensor&        topk_weights,
+                          const torch::Tensor&        gates,
+                          const torch::Tensor&        gamma,
+                          const std::vector<int64_t>& lamport_buffers,
+                          const std::vector<int64_t>& signals,
+                          int64_t                     rank,
+                          int64_t                     global_start,
+                          int64_t                     num_local,
+                          double                      eps,
+                          bool                        collect_amax,
+                          bool                        enable_pdl,
+                          int64_t                     lamport_buffer_bytes) {
+    const auto v = tp2_hc_ipc::validate_ep_gather_common("tp2ArHcInjectNormEpGather",
+                                                         hyper_x,
+                                                         down_out,
+                                                         shared_out,
+                                                         topk_ids,
+                                                         topk_weights,
+                                                         gates,
+                                                         lamport_buffers,
+                                                         signals,
+                                                         rank,
+                                                         num_local,
+                                                         lamport_buffer_bytes);
+    TORCH_CHECK(gamma.is_cuda() && gamma.device() == hyper_x.device() && gamma.scalar_type() == torch::kBFloat16
+                    && gamma.is_contiguous() && reinterpret_cast<uintptr_t>(gamma.data_ptr()) % 16 == 0
+                    && gamma.dim() == 1 && gamma.numel() == tp2_hc_ipc::kBranches * tp2_hc_ipc::kHidden,
+                "tp2ArHcInjectNormEpGather gamma mismatch");
+    const size_t  lamport_slot_u4 = v.lamport_slot_u4;
+    const int64_t rows            = v.rows;
+    const int64_t top_k           = v.top_k;
+
+    c10::cuda::CUDAGuard         guard(hyper_x.device());
+    const int                    dev      = hyper_x.get_device();
+    auto                         residual = torch::empty_like(hyper_x);
+    auto                         normed   = torch::empty_like(hyper_x);
+    c10::optional<torch::Tensor> scale_opt;
+    float*                       scale_ptr = nullptr;
+    if (collect_amax) {
+        auto scale = torch::empty({1}, torch::TensorOptions().dtype(torch::kFloat32).device(hyper_x.device()));
+        scale_ptr  = scale.data_ptr<float>();
+        scale_opt  = std::move(scale);
+    }
+
+    auto*       self_sig   = reinterpret_cast<tp2_hc_ipc::Tp2HcSignal*>(signals[rank]);
+    auto*       self_lamp  = reinterpret_cast<uint4*>(lamport_buffers[rank]);
+    auto*       peer_lamp  = reinterpret_cast<uint4*>(lamport_buffers[1 - rank]);
+    const dim3  block(tp2_hc_ipc::kThreads);
+    auto        stream     = c10::cuda::getCurrentCUDAStream(dev).stream();
+    const auto* x_ptr      = reinterpret_cast<const uint4*>(hyper_x.data_ptr());
+    const auto* d_ptr      = reinterpret_cast<const uint4*>(down_out.data_ptr());
+    const auto* sh_ptr     = reinterpret_cast<const uint4*>(shared_out.data_ptr());
+    const void* ids_ptr    = topk_ids.data_ptr();
+    const auto* wts_ptr    = topk_weights.data_ptr<float>();
+    const auto* g_ptr      = reinterpret_cast<const uint64_t*>(gates.data_ptr());
+    const auto* gm_ptr     = reinterpret_cast<const uint4*>(gamma.data_ptr());
+    auto*       r_ptr      = reinterpret_cast<uint4*>(residual.data_ptr());
+    auto*       n_ptr      = reinterpret_cast<uint4*>(normed.data_ptr());
+    const int   n_i32      = static_cast<int>(rows);
+    const int   tk_i32     = static_cast<int>(top_k);
+    const int   gs_i32     = static_cast<int>(global_start);
+    const int   nl_i32     = static_cast<int>(num_local);
+    const bool  ids_is_i64 = (topk_ids.scalar_type() == torch::kInt64);
+    const float eps_f      = static_cast<float>(eps);
+
+#define DISPATCH_EP_NORM(COLLECT, PDL)                                                                                 \
+    do {                                                                                                               \
+        static const int max_res_branch = tp2_hc_ipc::get_max_resident_ctas(                                           \
+            tp2_hc_ipc::tp2ArHcLamportEpGatherBranchKernel<COLLECT, PDL>, dev);                                        \
+        static const int64_t max_branch_rows = tp2_hc_ipc::ep_gather_max_branch_rows(dev, max_res_branch);             \
+        if (rows <= max_branch_rows) {                                                                                 \
+            const dim3 grid(static_cast<unsigned>(rows * tp2_hc_ipc::kBranches));                                      \
+            tp2_hc_ipc::launch_maybe_pdl(tp2_hc_ipc::tp2ArHcLamportEpGatherBranchKernel<COLLECT, PDL>,                 \
+                                         grid, block, stream, PDL,                                                     \
+                                         x_ptr, d_ptr, sh_ptr, ids_ptr, wts_ptr, g_ptr, gm_ptr, r_ptr, n_ptr,          \
+                                         scale_ptr, self_lamp, peer_lamp, self_sig, n_i32, tk_i32, gs_i32, nl_i32,     \
+                                         ids_is_i64, eps_f, lamport_slot_u4);                                          \
+        } else {                                                                                                       \
+            static const int max_res_row = tp2_hc_ipc::get_max_resident_ctas(                                          \
+                tp2_hc_ipc::tp2ArHcLamportEpGatherRowKernel<COLLECT, PDL>, dev);                                       \
+            const dim3 grid(static_cast<unsigned>(std::max<int64_t>(1, std::min<int64_t>(rows, max_res_row))));        \
+            tp2_hc_ipc::launch_maybe_pdl(tp2_hc_ipc::tp2ArHcLamportEpGatherRowKernel<COLLECT, PDL>,                    \
+                                         grid, block, stream, PDL,                                                     \
+                                         x_ptr, d_ptr, sh_ptr, ids_ptr, wts_ptr, g_ptr, gm_ptr, r_ptr, n_ptr,          \
+                                         scale_ptr, self_lamp, peer_lamp, self_sig, n_i32, tk_i32, gs_i32, nl_i32,     \
+                                         ids_is_i64, eps_f, lamport_slot_u4);                                          \
+        }                                                                                                              \
+    } while (0)
+
+    if (collect_amax) {
+        if (enable_pdl) DISPATCH_EP_NORM(true, true);
+        else            DISPATCH_EP_NORM(true, false);
+    } else {
+        if (enable_pdl) DISPATCH_EP_NORM(false, true);
+        else            DISPATCH_EP_NORM(false, false);
+    }
+#undef DISPATCH_EP_NORM
+
+    return {std::move(residual), std::move(normed), std::move(scale_opt)};
+}
+
+torch::Tensor tp2ArHcInjectOnlyEpGather(const torch::Tensor&        hyper_x,
+                                        const torch::Tensor&        down_out,
+                                        const torch::Tensor&        shared_out,
+                                        const torch::Tensor&        topk_ids,
+                                        const torch::Tensor&        topk_weights,
+                                        const torch::Tensor&        gates,
+                                        const std::vector<int64_t>& lamport_buffers,
+                                        const std::vector<int64_t>& signals,
+                                        int64_t                     rank,
+                                        int64_t                     global_start,
+                                        int64_t                     num_local,
+                                        bool                        enable_pdl,
+                                        int64_t                     lamport_buffer_bytes) {
+    const auto v = tp2_hc_ipc::validate_ep_gather_common("tp2ArHcInjectOnlyEpGather",
+                                                         hyper_x,
+                                                         down_out,
+                                                         shared_out,
+                                                         topk_ids,
+                                                         topk_weights,
+                                                         gates,
+                                                         lamport_buffers,
+                                                         signals,
+                                                         rank,
+                                                         num_local,
+                                                         lamport_buffer_bytes);
+    const size_t  lamport_slot_u4 = v.lamport_slot_u4;
+    const int64_t rows            = v.rows;
+    const int64_t top_k           = v.top_k;
+
+    c10::cuda::CUDAGuard guard(hyper_x.device());
+    const int            dev      = hyper_x.get_device();
+    auto                 residual = torch::empty_like(hyper_x);
+
+    auto*       self_sig   = reinterpret_cast<tp2_hc_ipc::Tp2HcSignal*>(signals[rank]);
+    auto*       self_lamp  = reinterpret_cast<uint4*>(lamport_buffers[rank]);
+    auto*       peer_lamp  = reinterpret_cast<uint4*>(lamport_buffers[1 - rank]);
+    const dim3  block(tp2_hc_ipc::kThreads);
+    auto        stream     = c10::cuda::getCurrentCUDAStream(dev).stream();
+    const auto* x_ptr      = reinterpret_cast<const uint4*>(hyper_x.data_ptr());
+    const auto* d_ptr      = reinterpret_cast<const uint4*>(down_out.data_ptr());
+    const auto* sh_ptr     = reinterpret_cast<const uint4*>(shared_out.data_ptr());
+    const void* ids_ptr    = topk_ids.data_ptr();
+    const auto* wts_ptr    = topk_weights.data_ptr<float>();
+    const auto* g_ptr      = reinterpret_cast<const uint64_t*>(gates.data_ptr());
+    auto*       r_ptr      = reinterpret_cast<uint4*>(residual.data_ptr());
+    const int   n_i32      = static_cast<int>(rows);
+    const int   tk_i32     = static_cast<int>(top_k);
+    const int   gs_i32     = static_cast<int>(global_start);
+    const int   nl_i32     = static_cast<int>(num_local);
+    const bool  ids_is_i64 = (topk_ids.scalar_type() == torch::kInt64);
+
+#define DISPATCH_EP_ONLY(PDL)                                                                                          \
+    do {                                                                                                               \
+        static const int max_res_branch = tp2_hc_ipc::get_max_resident_ctas(                                           \
+            tp2_hc_ipc::tp2ArHcLamportEpGatherInjectOnlyBranchKernel<PDL>, dev);                                       \
+        static const int64_t max_branch_rows = tp2_hc_ipc::ep_gather_max_branch_rows(dev, max_res_branch);             \
+        if (rows <= max_branch_rows) {                                                                                 \
+            const dim3 grid(static_cast<unsigned>(rows * tp2_hc_ipc::kBranches));                                      \
+            tp2_hc_ipc::launch_maybe_pdl(tp2_hc_ipc::tp2ArHcLamportEpGatherInjectOnlyBranchKernel<PDL>,                \
+                                         grid, block, stream, PDL,                                                     \
+                                         x_ptr, d_ptr, sh_ptr, ids_ptr, wts_ptr, g_ptr, r_ptr,                         \
+                                         self_lamp, peer_lamp, self_sig, n_i32, tk_i32, gs_i32, nl_i32,                \
+                                         ids_is_i64, lamport_slot_u4);                                                 \
+        } else {                                                                                                       \
+            static const int max_res_row = tp2_hc_ipc::get_max_resident_ctas(                                          \
+                tp2_hc_ipc::tp2ArHcLamportEpGatherInjectOnlyRowKernel<PDL>, dev);                                      \
+            const dim3 grid(static_cast<unsigned>(std::max<int64_t>(1, std::min<int64_t>(rows, max_res_row))));        \
+            tp2_hc_ipc::launch_maybe_pdl(tp2_hc_ipc::tp2ArHcLamportEpGatherInjectOnlyRowKernel<PDL>,                   \
+                                         grid, block, stream, PDL,                                                     \
+                                         x_ptr, d_ptr, sh_ptr, ids_ptr, wts_ptr, g_ptr, r_ptr,                         \
+                                         self_lamp, peer_lamp, self_sig, n_i32, tk_i32, gs_i32, nl_i32,                \
+                                         ids_is_i64, lamport_slot_u4);                                                 \
+        }                                                                                                              \
+    } while (0)
+
+    if (enable_pdl) DISPATCH_EP_ONLY(true);
+    else            DISPATCH_EP_ONLY(false);
+#undef DISPATCH_EP_ONLY
 
     return residual;
 }

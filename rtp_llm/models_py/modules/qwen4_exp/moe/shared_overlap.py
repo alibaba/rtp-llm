@@ -18,14 +18,23 @@ from rtp_llm.models_py.modules.base.common.fp8_linear import (
     prequantize_fp8_linear_input,
 )
 from rtp_llm.models_py.modules.qwen4_exp._profiler import record_function_range
+from rtp_llm.models_py.modules.qwen4_exp.gdn_fp8_input_projection import (
+    _quantize_ba,
+)
 from rtp_llm.models_py.modules.qwen4_exp.tp2_ar_hc_fused import (
+    can_defer_moe_ep_gather_tp2,
+    try_defer_moe_ep_gather_tp2,
     try_defer_moe_packed_tp2,
+)
+from rtp_llm.models_py.triton_kernels.common.gated_residual_mix_triton import (
+    get_prequantized_mix_reduce,
 )
 from rtp_llm.models_py.utils.device_capability import cached_device_capability
 from rtp_llm.utils.model_weight import W
 
 from .compact_fp8_decode import (
     _H20_COMPACT_EAGER_MAX_ROWS,
+    compact_moe_defer_ep_gather,
     compact_moe_output_buffer,
     h20_compact_moe_phase,
 )
@@ -299,9 +308,12 @@ class Qwen4MoeLayer(GenericMoeLayer):
             and self._sm90_mega_moe is None
             and (self._ep_two_batch is None or not self._ep_two_batch.supports(hidden_states))
         )
+        defer_ep_gather = (
+            use_pack and can_defer_moe_ep_gather_tp2(rows, hidden_states.device)
+        )
         packed = (
             hidden_states.new_empty((2 * rows, hidden_states.shape[1]))
-            if use_pack
+            if (use_pack and not defer_ep_gather)
             else None
         )
         main = torch.cuda.current_stream(hidden_states.device)
@@ -332,7 +344,26 @@ class Qwen4MoeLayer(GenericMoeLayer):
             and not torch.nn.modules.module._global_forward_pre_hooks
             and not torch.nn.modules.module._global_forward_hooks
         ):
-            prequant_entry = prequantize_fp8_linear_input(gate_proj, hidden_states)
+            bundle = (
+                get_prequantized_mix_reduce(hidden_states, "moe_trt128")
+                if gate_proj.weight.dtype == torch.float8_e4m3fn
+                and hidden_states.dtype == torch.bfloat16
+                and hidden_states.is_contiguous()
+                else None
+            )
+            if bundle is not None:
+                q_tensor, s_tensor = _quantize_ba(
+                    hidden_states, bundle.partial, wait_x=True
+                )
+                prequant_entry = (
+                    hidden_states.data_ptr(),
+                    tuple(hidden_states.shape),
+                    hidden_states.stride(),
+                    q_tensor,
+                    s_tensor,
+                )
+            else:
+                prequant_entry = prequantize_fp8_linear_input(gate_proj, hidden_states)
             if prequant_entry is not None:
                 prequant_scope = _prequantized_fp8_input.set(prequant_entry)
                 if not capturing and use_aux_stream:
@@ -362,10 +393,20 @@ class Qwen4MoeLayer(GenericMoeLayer):
                     shared,
                     out=packed[rows:] if packed is not None else None,
                 )
+            ep_defer_slot = None
             if self._ep_two_batch is not None and self._ep_two_batch.supports(
                 hidden_states
             ):
                 experts = self._ep_two_batch.forward(self, hidden_states)
+            elif defer_ep_gather:
+                ep_defer_slot = []
+                defer_scope = compact_moe_defer_ep_gather.set(ep_defer_slot)
+                try:
+                    experts = super()._forward_routed(
+                        hidden_states, skip_tp_allreduce=True
+                    )
+                finally:
+                    compact_moe_defer_ep_gather.reset(defer_scope)
             elif use_pack:
                 out_scope = compact_moe_output_buffer.set(packed[:rows])
                 try:
@@ -386,7 +427,30 @@ class Qwen4MoeLayer(GenericMoeLayer):
         if not capturing and use_aux_stream:
             shared.record_stream(main)
         reduce = getattr(self, "tp_all_reduce", all_reduce)
+        if ep_defer_slot:
+            deferred = try_defer_moe_ep_gather_tp2(ep_defer_slot[0], shared)
+            if deferred is not None:
+                return deferred
+            from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
+                ep_gather_global_routes,
+            )
+
+            eg = ep_defer_slot[0]
+            packed = hidden_states.new_empty((2 * rows, hidden_states.shape[1]))
+            ep_gather_global_routes(
+                eg.down_out,
+                eg.topk_ids,
+                eg.topk_weights,
+                packed[:rows],
+                eg.global_start,
+                eg.num_local,
+            )
+            packed[rows:].copy_(shared)
+            experts = packed[:rows]
+            shared = packed[rows:]
         if use_pack:
+            if packed is None:
+                packed = hidden_states.new_empty((2 * rows, hidden_states.shape[1]))
             # Retain separate BF16 rounding per branch before the final sum.
             if experts.data_ptr() != packed[:rows].data_ptr():
                 packed[:rows].copy_(experts)

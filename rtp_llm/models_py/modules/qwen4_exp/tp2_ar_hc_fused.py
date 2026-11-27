@@ -42,20 +42,40 @@ class _DeferSlot:
 
 
 class DeferredTp2Sublayer:
-    __slots__ = ("local_tensor", "packed_dual", "workspace")
+    __slots__ = ("local_tensor", "packed_dual", "workspace", "ep_gather")
 
     def __init__(
         self,
         local_tensor: torch.Tensor,
         packed_dual: bool,
         workspace: "Qwen4Tp2ArHcWorkspace",
+        *,
+        ep_gather=None,
     ) -> None:
         self.local_tensor = local_tensor
         self.packed_dual = bool(packed_dual)
         self.workspace = workspace
+        self.ep_gather = ep_gather
 
     def materialize(self) -> torch.Tensor:
         from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
+
+        if self.ep_gather is not None:
+            from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
+                ep_gather_global_routes,
+            )
+
+            eg = self.ep_gather
+            routed = torch.empty_like(self.local_tensor)
+            ep_gather_global_routes(
+                eg.down_out,
+                eg.topk_ids,
+                eg.topk_weights,
+                routed,
+                eg.global_start,
+                eg.num_local,
+            )
+            return all_reduce(routed + self.local_tensor, Group.TP, inplace=None)
 
         tensor = self.local_tensor
         if self.packed_dual:
@@ -98,6 +118,29 @@ def try_defer_moe_packed_tp2(packed: torch.Tensor) -> Optional[DeferredTp2Sublay
     ):
         slot.consumed = True
         return DeferredTp2Sublayer(packed, True, slot.workspace)
+    return None
+
+
+def can_defer_moe_ep_gather_tp2(rows: int, device: torch.device) -> bool:
+    slot = _moe_tp2_defer_slot.get()
+    return (
+        slot is not None
+        and not slot.consumed
+        and slot.workspace.can_stage_ep_gather_rows(rows, device)
+    )
+
+
+def try_defer_moe_ep_gather_tp2(
+    ep_gather, shared: torch.Tensor
+) -> Optional[DeferredTp2Sublayer]:
+    slot = _moe_tp2_defer_slot.get()
+    if (
+        slot is not None
+        and not slot.consumed
+        and slot.workspace.can_stage_ep_gather(ep_gather, shared)
+    ):
+        slot.consumed = True
+        return DeferredTp2Sublayer(shared, False, slot.workspace, ep_gather=ep_gather)
     return None
 
 
@@ -309,6 +352,61 @@ class Qwen4Tp2ArHcWorkspace:
             and not packed.requires_grad
         )
 
+    def can_stage_ep_gather_rows(self, rows: int, device: torch.device) -> bool:
+        return (
+            device == self.device
+            and 1 <= rows <= getattr(self, "max_lamport_rows", 0)
+            and bool(getattr(self, "lamport_buffers", None))
+            and getattr(self, "lamport_buffer_bytes", 0) > 0
+            and hasattr(getattr(self, "ops", None), "tp2_ar_hc_inject_norm_ep_gather")
+            and hasattr(getattr(self, "ops", None), "tp2_ar_hc_inject_only_ep_gather")
+        )
+
+    def can_stage_ep_gather(self, ep_gather, shared: torch.Tensor) -> bool:
+        if not (
+            isinstance(shared, torch.Tensor)
+            and shared.is_cuda
+            and shared.device == self.device
+            and shared.dtype == torch.bfloat16
+            and shared.ndim == 2
+            and shared.shape[1] == 2560
+            and shared.is_contiguous()
+            and shared.data_ptr() % 16 == 0
+            and not shared.requires_grad
+        ):
+            return False
+        rows = int(shared.shape[0])
+        if not self.can_stage_ep_gather_rows(rows, shared.device):
+            return False
+        down = ep_gather.down_out
+        ids = ep_gather.topk_ids
+        wts = ep_gather.topk_weights
+        if not (isinstance(ids, torch.Tensor) and ids.ndim == 2):
+            return False
+        top_k = int(ids.shape[1])
+        return (
+            1 <= top_k <= 16
+            and isinstance(down, torch.Tensor)
+            and down.is_cuda
+            and down.device == self.device
+            and down.dtype == torch.bfloat16
+            and down.shape == (rows * top_k, 2560)
+            and down.is_contiguous()
+            and down.data_ptr() % 16 == 0
+            and not down.requires_grad
+            and ids.is_cuda
+            and ids.device == self.device
+            and ids.dtype in (torch.int32, torch.int64)
+            and ids.shape == (rows, top_k)
+            and ids.is_contiguous()
+            and isinstance(wts, torch.Tensor)
+            and wts.is_cuda
+            and wts.device == self.device
+            and wts.dtype == torch.float32
+            and wts.shape == (rows, top_k)
+            and wts.is_contiguous()
+        )
+
     def try_inject_grouped_norm(
         self,
         hyper_x: torch.Tensor,
@@ -320,6 +418,50 @@ class Qwen4Tp2ArHcWorkspace:
         collect_scale: bool = True,
     ):
         rows = hyper_x.numel() // 10240 if hyper_x.ndim >= 2 and hyper_x.shape[-1] == 10240 else 0
+        if deferred.ep_gather is not None:
+            if not (
+                cached_device_capability(self.device) == (9, 0)
+                and self.supports_hyper(hyper_x)
+                and self.can_stage_ep_gather(deferred.ep_gather, deferred.local_tensor)
+                and deferred.local_tensor.shape[0] == rows
+                and gates.shape == (*hyper_x.shape[:-1], 4)
+                and gamma.shape == (10240,)
+                and all(
+                    t.dtype == torch.bfloat16
+                    and t.device == self.device
+                    and t.is_contiguous()
+                    and t.data_ptr() % 8 == 0
+                    and not t.requires_grad
+                    for t in (gates, gamma)
+                )
+                and hyper_x.data_ptr() % 16 == 0
+                and gamma.data_ptr() % 16 == 0
+                and isinstance(eps, (float, int))
+                and math.isfinite(eps)
+                and eps >= 0
+            ):
+                return None
+            pdl = sm90_pdl_enabled(self.device)
+            eg = deferred.ep_gather
+            residual, normed, scale = self.ops.tp2_ar_hc_inject_norm_ep_gather(
+                hyper_x,
+                eg.down_out,
+                deferred.local_tensor,
+                eg.topk_ids,
+                eg.topk_weights,
+                gates,
+                gamma,
+                self.lamport_buffers,
+                self.signals,
+                self.rank,
+                int(eg.global_start),
+                int(eg.num_local),
+                float(eps),
+                bool(collect_scale),
+                bool(pdl),
+                getattr(self, "lamport_buffer_bytes", 0),
+            )
+            return residual, normed, scale
         expected_sub_rows = 2 * rows if deferred.packed_dual else rows
         if not (
             cached_device_capability(self.device) == (9, 0)
@@ -369,6 +511,38 @@ class Qwen4Tp2ArHcWorkspace:
         gates: torch.Tensor,
     ):
         rows = hyper_x.numel() // 10240 if hyper_x.ndim >= 2 and hyper_x.shape[-1] == 10240 else 0
+        if deferred.ep_gather is not None:
+            if not (
+                cached_device_capability(self.device) == (9, 0)
+                and self.supports_hyper(hyper_x)
+                and self.can_stage_ep_gather(deferred.ep_gather, deferred.local_tensor)
+                and deferred.local_tensor.shape[0] == rows
+                and gates.shape == (*hyper_x.shape[:-1], 4)
+                and gates.dtype == torch.bfloat16
+                and gates.device == self.device
+                and gates.is_contiguous()
+                and gates.data_ptr() % 8 == 0
+                and hyper_x.data_ptr() % 16 == 0
+                and not gates.requires_grad
+            ):
+                return None
+            pdl = sm90_pdl_enabled(self.device)
+            eg = deferred.ep_gather
+            return self.ops.tp2_ar_hc_inject_only_ep_gather(
+                hyper_x,
+                eg.down_out,
+                deferred.local_tensor,
+                eg.topk_ids,
+                eg.topk_weights,
+                gates,
+                self.lamport_buffers,
+                self.signals,
+                self.rank,
+                int(eg.global_start),
+                int(eg.num_local),
+                bool(pdl),
+                getattr(self, "lamport_buffer_bytes", 0),
+            )
         expected_sub_rows = 2 * rows if deferred.packed_dual else rows
         if not (
             cached_device_capability(self.device) == (9, 0)

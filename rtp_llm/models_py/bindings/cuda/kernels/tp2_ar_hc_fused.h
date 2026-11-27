@@ -49,4 +49,36 @@ torch::Tensor tp2ArHcInjectOnly(const torch::Tensor&        hyper_x,
                                 const std::vector<int64_t>& lamport_buffers      = {},
                                 int64_t                     lamport_buffer_bytes = 0);
 
+std::tuple<torch::Tensor, torch::Tensor, c10::optional<torch::Tensor>>
+tp2ArHcInjectNormEpGather(const torch::Tensor&        hyper_x,
+                          const torch::Tensor&        down_out,
+                          const torch::Tensor&        shared_out,
+                          const torch::Tensor&        topk_ids,
+                          const torch::Tensor&        topk_weights,
+                          const torch::Tensor&        gates,
+                          const torch::Tensor&        gamma,
+                          const std::vector<int64_t>& lamport_buffers,
+                          const std::vector<int64_t>& signals,
+                          int64_t                     rank,
+                          int64_t                     global_start,
+                          int64_t                     num_local,
+                          double                      eps,
+                          bool                        collect_amax,
+                          bool                        enable_pdl,
+                          int64_t                     lamport_buffer_bytes);
+
+torch::Tensor tp2ArHcInjectOnlyEpGather(const torch::Tensor&        hyper_x,
+                                        const torch::Tensor&        down_out,
+                                        const torch::Tensor&        shared_out,
+                                        const torch::Tensor&        topk_ids,
+                                        const torch::Tensor&        topk_weights,
+                                        const torch::Tensor&        gates,
+                                        const std::vector<int64_t>& lamport_buffers,
+                                        const std::vector<int64_t>& signals,
+                                        int64_t                     rank,
+                                        int64_t                     global_start,
+                                        int64_t                     num_local,
+                                        bool                        enable_pdl,
+                                        int64_t                     lamport_buffer_bytes);
+
 }  // namespace rtp_llm

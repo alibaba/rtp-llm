@@ -2,7 +2,6 @@ import os
 import socket
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
 
 import torch
 import torch.distributed as dist
@@ -153,6 +152,115 @@ def _tp2_worker(rank: int, port: int) -> None:
                     if collect:
                         torch.testing.assert_close(c_scale, ref_scale, atol=1e-6, rtol=1e-5)
                 graph.reset()
+
+            # Fused EP-gather + TP2 AR+HC Lamport parity (Branch + Row, InjectOnly + InjectNorm, int32 + int64, CUDA Graph)
+            from rtp_llm.models_py.modules.qwen4_exp.moe.compact_fp8_decode import (
+                DeferredEpGather,
+            )
+            from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
+                ep_gather_global_routes,
+            )
+
+            global_start = rank * 256
+            num_local = 256
+            # Include rows=512 to exercise multi-iteration RowKernel (> max_res_row on both H20 & H200)
+            # and an all-peer-expert case (sh_num_local == 0).
+            for rows, id_dtype, all_peer in (
+                (1, torch.int32, False),
+                (8, torch.int64, False),
+                (16, torch.int32, True),
+                (64, torch.int32, False),
+                (128, torch.int32, False),
+                (512, torch.int64, False),
+            ):
+                eg_gen = torch.Generator(device=device)
+                eg_gen.manual_seed(30000 + rows + (1 if all_peer else 0))
+                hx = torch.randn((rows, 10240), generator=eg_gen, device=device, dtype=torch.bfloat16)
+                gt = torch.randn((rows, 4), generator=eg_gen, device=device, dtype=torch.bfloat16)
+                if all_peer:
+                    peer_start = (1 - rank) * 256
+                    ids = torch.randint(peer_start, peer_start + 256, (rows, 10), generator=eg_gen, device=device, dtype=id_dtype)
+                else:
+                    ids = torch.randint(-1, 512, (rows, 10), generator=eg_gen, device=device, dtype=id_dtype)
+                wts = torch.softmax(torch.randn((rows, 10), generator=eg_gen, device=device, dtype=torch.float32), dim=-1)
+
+                r_gen = torch.Generator(device=device)
+                r_gen.manual_seed(40000 + rows * 10 + rank)
+                down_out = torch.randn((rows * 10, 2560), generator=r_gen, device=device, dtype=torch.bfloat16)
+                shared_out = torch.randn((rows, 2560), generator=r_gen, device=device, dtype=torch.bfloat16)
+                shared_out[0, :16] = torch.tensor(-0.0, device=device, dtype=torch.bfloat16)
+
+                ref_routed = torch.empty_like(shared_out)
+                ep_gather_global_routes(down_out, ids, wts, ref_routed, global_start, num_local)
+                ref_sub = ref_routed + shared_out
+                dist.all_reduce(ref_sub, group=group)
+
+                deferred_eg = DeferredTp2Sublayer(
+                    shared_out,
+                    False,
+                    ws,
+                    ep_gather=DeferredEpGather(down_out, ids, wts, global_start, num_local),
+                )
+                actual_only = ws.try_inject_only(hx, deferred_eg, gt)
+                expected_only = inject_into_residual(hx, ref_sub, gt)
+                assert torch.equal(actual_only, expected_only), ("ep_only", rows, id_dtype)
+
+                for collect in (False, True):
+                    res, norm, scale = ws.try_inject_grouped_norm(
+                        hx, deferred_eg, gt, gamma, 1e-6, collect_scale=collect
+                    )
+                    ref_res, ref_norm, ref_scale = try_inject_grouped_norm(
+                        hx, ref_sub, gt, gamma, 1e-6, collect_scale=collect
+                    )
+                    assert torch.equal(res, ref_res), ("ep_norm", rows, id_dtype, collect)
+                    torch.testing.assert_close(norm, ref_norm, atol=1e-2, rtol=1e-2)
+                    if collect:
+                        torch.testing.assert_close(scale, ref_scale, atol=1e-6, rtol=1e-5)
+
+            for rows in (8, 64, 128):
+                hx = torch.randn((rows, 10240), device=device, dtype=torch.bfloat16)
+                gt = torch.randn((rows, 4), device=device, dtype=torch.bfloat16)
+                down_out = torch.randn((rows * 10, 2560), device=device, dtype=torch.bfloat16)
+                shared_out = torch.randn((rows, 2560), device=device, dtype=torch.bfloat16)
+                ids = torch.randint(0, 512, (rows, 10), device=device, dtype=torch.int32)
+                wts = torch.softmax(torch.randn((rows, 10), device=device, dtype=torch.float32), dim=-1)
+                deferred_eg = DeferredTp2Sublayer(
+                    shared_out,
+                    False,
+                    ws,
+                    ep_gather=DeferredEpGather(down_out, ids, wts, global_start, num_local),
+                )
+                ws.try_inject_grouped_norm(hx, deferred_eg, gt, gamma, 1e-6, collect_scale=True)
+                torch.cuda.synchronize(device)
+                dist.barrier(group=group)
+                eg_graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(eg_graph):
+                    c_res, c_norm, c_scale = ws.try_inject_grouped_norm(
+                        hx, deferred_eg, gt, gamma, 1e-6, collect_scale=True
+                    )
+                for step in range(3):
+                    sg = torch.Generator(device=device)
+                    sg.manual_seed(55000 + rows + step)
+                    hx.copy_(torch.randn(hx.shape, generator=sg, device=device, dtype=torch.bfloat16))
+                    gt.copy_(torch.randn(gt.shape, generator=sg, device=device, dtype=torch.bfloat16))
+                    ids.copy_(torch.randint(-1, 512, ids.shape, generator=sg, device=device, dtype=torch.int32))
+                    wts.copy_(torch.softmax(torch.randn(wts.shape, generator=sg, device=device, dtype=torch.float32), dim=-1))
+                    rg = torch.Generator(device=device)
+                    rg.manual_seed(66000 + rows + step * 10 + rank)
+                    down_out.copy_(torch.randn(down_out.shape, generator=rg, device=device, dtype=torch.bfloat16))
+                    shared_out.copy_(torch.randn(shared_out.shape, generator=rg, device=device, dtype=torch.bfloat16))
+                    eg_graph.replay()
+                    ref_routed = torch.empty_like(shared_out)
+                    ep_gather_global_routes(down_out, ids, wts, ref_routed, global_start, num_local)
+                    ref_sub = ref_routed + shared_out
+                    dist.all_reduce(ref_sub, group=group)
+                    ref_res, ref_norm, ref_scale = try_inject_grouped_norm(
+                        hx, ref_sub, gt, gamma, 1e-6, collect_scale=True
+                    )
+                    assert torch.equal(c_res, ref_res)
+                    torch.testing.assert_close(c_norm, ref_norm, atol=1e-2, rtol=1e-2)
+                    torch.testing.assert_close(c_scale, ref_scale, atol=1e-6, rtol=1e-5)
+                eg_graph.reset()
 
             # Multicast-free TP2 P2P IPC AllGather (decode + 10K prefill BF16 & FP8 + CUDA Graph)
             from rtp_llm.models_py.distributed.tp2_p2p_all_gather import Tp2P2pAllGather

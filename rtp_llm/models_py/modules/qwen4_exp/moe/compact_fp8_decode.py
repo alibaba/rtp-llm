@@ -1,6 +1,7 @@
 """Compact block-scaled MoE for replicated inputs on Hopper."""
 
 from contextvars import ContextVar
+from dataclasses import dataclass
 from functools import lru_cache
 import os
 from typing import Literal
@@ -17,12 +18,25 @@ from rtp_llm.models_py.utils.device_capability import sm90_pdl_enabled
 
 from .moe_align_triton import moe_align_decode, moe_align_large_decode
 
+
+@dataclass
+class DeferredEpGather:
+    down_out: torch.Tensor
+    topk_ids: torch.Tensor
+    topk_weights: torch.Tensor
+    global_start: int
+    num_local: int
+
+
 # Capture records the dispatch selected for this forward. Replay keeps it.
 h20_compact_moe_phase: ContextVar[
     Literal["eager", "decode", "target_verify"] | None
 ] = ContextVar("h20_compact_moe_phase", default=None)
 compact_moe_output_buffer: ContextVar[torch.Tensor | None] = ContextVar(
     "compact_moe_output_buffer", default=None
+)
+compact_moe_defer_ep_gather: ContextVar[list | None] = ContextVar(
+    "compact_moe_defer_ep_gather", default=None
 )
 
 _STABLE_ALIGNMENT_MAX_ROUTES = 5120
@@ -240,7 +254,7 @@ def compact_fp8_decode(
             experts,
             max_routes=_STABLE_ALIGNMENT_MAX_ROUTES,
             global_start=global_start,
-            allow_unordered=routes > 640,
+            allow_unordered=True,
         )
         up_config, down_config = _expert_gemm_configs(
             x, x_scale, up_weights, down_weights, top_k
@@ -257,8 +271,11 @@ def compact_fp8_decode(
     down_input = x.new_empty((routes, intermediate))
     down_scale = x.new_empty((routes, groups), dtype=torch.float32)
     pdl = sm90_pdl_enabled(x.device)
-    # Four-row tiles also pay off for small top-10 batches on H20.
-    if large or routes > 640 or (routes >= 80 and _device_num_sms(x.device) == 78):
+    # Four-row tiles avoid launching thousands of single-warp CTAs once there
+    # are enough tiled CTAs to fill the device's SMs (e.g. 78 on H20, 132 on H200).
+    if large or (
+        routes >= 80 and triton.cdiv(routes, 4) * groups >= _device_num_sms(x.device)
+    ):
         tile_rows = 8 if routes >= 5120 else 4
         _silu_mul_quantize_tiles[(triton.cdiv(routes, tile_rows), groups)](
             up,
@@ -301,6 +318,31 @@ def compact_fp8_decode(
         pre_ready_routing=True,
     )
     del down_input, down_scale, plans
+
+    defer_slot = compact_moe_defer_ep_gather.get()
+    if (
+        defer_slot is not None
+        and not defer_slot
+        and hidden == 2560
+        and 1 <= top_k <= 16
+        and down.is_contiguous()
+        and down.dtype == torch.bfloat16
+        and down.data_ptr() % 16 == 0
+        and ids.is_contiguous()
+        and ids.dtype in (torch.int32, torch.int64)
+        and route_weights.is_contiguous()
+        and route_weights.dtype == torch.float32
+    ):
+        defer_slot.append(
+            DeferredEpGather(
+                down_out=down,
+                topk_ids=ids,
+                topk_weights=route_weights,
+                global_start=global_start,
+                num_local=experts,
+            )
+        )
+        return down[:tokens]
 
     staged_out = compact_moe_output_buffer.get()
     if (

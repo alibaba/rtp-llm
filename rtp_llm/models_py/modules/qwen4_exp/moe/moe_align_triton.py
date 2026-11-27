@@ -228,7 +228,7 @@ def moe_align_decode(
             BLOCK_TILE=block_tile,
             GLOBAL_START=global_start,
             PDL=pdl,
-            num_warps=4,
+            num_warps=8 if routes > 40 else 4,
             launch_pdl=pdl,
         )
         return sorted_ids, experts, padded
@@ -254,7 +254,7 @@ def moe_align_decode(
         num_warps=4 if slot_tile <= 4096 else 8,
         launch_pdl=pdl,
     )
-    if allow_unordered and routes > 640:
+    if allow_unordered:
         _atomic_scatter[(triton.cdiv(routes, 128),)](
             topk_ids,
             offsets,
