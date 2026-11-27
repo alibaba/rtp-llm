@@ -54,7 +54,7 @@ from rtp_llm.multimodal.vit_metrics import (
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput, get_multimodal_feature_hash
 from rtp_llm.utils.base_model_datatypes import MMUrlType
 from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
-from rtp_llm.utils.import_util import import_optional_internal_source_entrypoint
+from rtp_llm.utils.media_download_metrics import use_worker_media_metrics
 from rtp_llm.utils.time_util import Timer, timer_wrapper
 
 _worker_vit_config: Optional[VitConfig] = None
@@ -162,20 +162,6 @@ def _feature_hashes_from_result(result: Any) -> List[torch.Tensor]:
     return hashes
 
 
-def _initialize_worker_media_metrics() -> None:
-    try:
-        if not import_optional_internal_source_entrypoint("utils.media_download_metrics"):
-            return
-        from internal_source.rtp_llm.utils.media_download_metrics import (
-            initialize_media_download_metrics,
-        )
-
-        initialize_media_download_metrics(preprocessing_worker=True)
-    except BaseException:
-        # This daemon only runs the optional extension and cannot stop the worker.
-        logging.warning("Could not initialize media download metrics", exc_info=True)
-
-
 def _worker_initializer(
     vit_config: VitConfig,
     preprocess_params: dict,
@@ -194,16 +180,7 @@ def _worker_initializer(
     _worker_vit_config = vit_config
     _worker_preprocess_params = preprocess_params
     _worker_preprocess_func = preprocess_func
-    try:
-        threading.Thread(
-            target=_initialize_worker_media_metrics,
-            name="media-download-metrics",
-            daemon=True,
-        ).start()
-    except Exception:
-        logging.warning(
-            "Could not start media download metrics initialization", exc_info=True
-        )
+    use_worker_media_metrics()
     logging.info(f"Worker process {os.getpid()} initialized.")
 
 
