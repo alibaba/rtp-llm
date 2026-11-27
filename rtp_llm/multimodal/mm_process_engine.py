@@ -274,7 +274,8 @@ class MMProcessEngine:
                 ),
             )
             logging.info(
-                "ViT shared remote cache enabled; accepted encoder results upload directly"
+                "ViT shared remote cache enabled, write_policy=%s",
+                self._remote_embedding_cache.write_policy,
             )
 
         # threading.Lock: protects gRPC-handler-thread access within this
@@ -401,12 +402,21 @@ class MMProcessEngine:
                 self.vit_config.mm_cache_cpu_max_bytes,
             )
             cache_shards = 8 if largest_cache >= 256 * 1024 * 1024 else 1
+        remote = self._remote_embedding_cache
+        evict_to_remote = remote is not None and remote.write_policy == "on_evict"
         self._embedding_cache = ShardedMMEmbeddingCache(
             gpu_max_bytes=self.vit_config.mm_cache_gpu_max_bytes,
             cpu_max_bytes=self.vit_config.mm_cache_cpu_max_bytes,
             shards=max(1, cache_shards),
             report_metrics=True,
             async_publication=self.vit_config.mm_cache_async_publish,
+            on_cpu_evict=remote.submit_evicted if evict_to_remote else None,
+            on_gpu_evict=remote.submit_evicted if evict_to_remote else None,
+            eviction_snapshot_max_bytes=(
+                min(remote.max_inflight_bytes, remote.max_object_bytes)
+                if evict_to_remote
+                else None
+            ),
         )
         hash_cache_class = MMHashKeyCache
         if self._embedding_cache.uses_native_index and emb_host_feature_enabled(

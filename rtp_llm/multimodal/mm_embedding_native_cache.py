@@ -98,10 +98,13 @@ class NativeMMHashKeyCache(MMHashKeyCache):
 class _NativeRequestEntry(MMEmbeddingCacheEntry):
     """A pending producer or transient request handle for a native generation."""
 
-    def __init__(self, generation, cell, on_complete, on_fail, on_read, ready=False):
+    def __init__(
+        self, generation, cell, on_complete, on_fail, on_read, *, ready, track_evictions
+    ):
         super().__init__(on_complete, on_fail, on_read, generation=generation)
         self._native_cell = cell
         self._native_published = ready
+        self._track_evictions = track_evictions
         if ready:
             self._terminal = True
             self._event = _SIGNALED_EVENT
@@ -127,6 +130,11 @@ class _NativeRequestEntry(MMEmbeddingCacheEntry):
             verdict.message if verdict is not None else "",
         )
         super().set_greennet_verdict(verdict, checked=checked)
+
+    def set_greennet_error(self, error):
+        if self._track_evictions:
+            self._native_cell.set_audit_error()
+        super().set_greennet_error(error)
 
     def _sync_verdict(self):
         decided, checked, present, passed, code, message, _ = self._native_cell.audit()
@@ -164,6 +172,9 @@ class NativeMMEmbeddingCache(MMEmbeddingCache):
         async_publication=False,
         lifetime_metrics=None,
         publish_queue_size=1024,
+        on_cpu_evict=None,
+        on_gpu_evict=None,
+        eviction_snapshot_max_bytes=None,
     ):
         from librtp_compute_ops import EmbLocalCacheShard, record_emb_local_ready
 
@@ -173,9 +184,19 @@ class NativeMMEmbeddingCache(MMEmbeddingCache):
             if gpu_max_bytes or torch.cuda.is_available()
             else -1
         )
+        self._notify_evictions = on_cpu_evict is not None or on_gpu_evict is not None
+        core_options = ()
+        if self._notify_evictions:
+            core_options = (
+                on_cpu_evict is not None,
+                on_gpu_evict is not None,
+                64 * 1024**2
+                if eviction_snapshot_max_bytes is None
+                else eviction_snapshot_max_bytes,
+            )
         with cuda_graph_gate.operation():
             self._core = EmbLocalCacheShard(
-                gpu_max_bytes, cpu_max_bytes, self._native_device
+                gpu_max_bytes, cpu_max_bytes, self._native_device, *core_options
             )
         # Share the existing request/publish coordinator. Zero capacities here
         # leave the legacy pools unallocated.
@@ -184,6 +205,8 @@ class NativeMMEmbeddingCache(MMEmbeddingCache):
             0,
             report_metrics=report_metrics,
             lifetime_metrics=lifetime_metrics,
+            on_cpu_evict=on_cpu_evict,
+            on_gpu_evict=on_gpu_evict,
         )
         self._gpu_max_bytes = gpu_max_bytes
         self._cpu_max_bytes = cpu_max_bytes
@@ -208,7 +231,10 @@ class NativeMMEmbeddingCache(MMEmbeddingCache):
 
         generation = f"{self.instance_id}-{generation}"
         if ready:
-            return _NativeRequestEntry(generation, cell, None, None, on_read, True)
+            return _NativeRequestEntry(
+                generation, cell, None, None, on_read,
+                ready=True, track_evictions=self._notify_evictions,
+            )
 
         def on_complete(entry, result):
             shard = owner()
@@ -220,7 +246,10 @@ class NativeMMEmbeddingCache(MMEmbeddingCache):
             if shard is not None:
                 shard._on_fail(cache_key, entry, error)
 
-        entry = _NativeRequestEntry(generation, cell, on_complete, on_fail, on_read)
+        entry = _NativeRequestEntry(
+            generation, cell, on_complete, on_fail, on_read,
+            ready=False, track_evictions=self._notify_evictions,
+        )
         entry.capture_compute_streams = True
         return entry
 
@@ -282,6 +311,33 @@ class NativeMMEmbeddingCache(MMEmbeddingCache):
             return 0, device
         return torch.cuda.current_stream(device).cuda_stream, device
 
+    def _deliver_evictions(self, snapshots):
+        # Called after the native mutation and outside cache locks. A callback
+        # may retain its value, raise, or immediately re-enter the same shard.
+        for snapshot in snapshots:
+            try:
+                (
+                    key, remote_key, generation, tier, result, origin,
+                    present, checked, passed, code, message,
+                ) = snapshot.unpack()
+                entry = MMEmbeddingCacheEntry(
+                    generation=f"{self.instance_id}-{generation}"
+                )
+                entry.tier = tier
+                entry.remote_cache_context = {"key": remote_key, "trace_id": None}
+                entry.remote_embedding_origin = origin
+                entry.set_greennet_verdict(
+                    GreenNetVerdict(passed, code, message) if present else None,
+                    checked=checked,
+                )
+                entry.complete(result)
+                callback = self._on_gpu_evict if tier == "gpu" else self._on_cpu_evict
+                callback(key, entry)
+            except Exception:
+                logging.warning(
+                    "ViT native cache eviction callback failed", exc_info=True
+                )
+
     def _on_complete_sync(self, cache_key, entry, result):
         cell = getattr(entry, "_native_cell", None)
         if cell is None:
@@ -289,10 +345,20 @@ class NativeMMEmbeddingCache(MMEmbeddingCache):
         published = False
         charged = 0
         evictions = demoted = 0
+        snapshots = ()
         try:
             ready = entry.ready_events
+            if self._notify_evictions:
+                try:
+                    context = getattr(entry, "remote_cache_context", None)
+                    if context and isinstance(context.get("key"), str):
+                        cell.set_remote_key(context["key"])
+                except Exception:
+                    logging.warning(
+                        "ViT native cache eviction metadata skipped", exc_info=True
+                    )
             with cuda_graph_gate.operation():
-                published, charged, evictions, demoted = self._core.publish(
+                outcome = self._core.publish(
                     cache_key,
                     cell,
                     result,
@@ -300,6 +366,10 @@ class NativeMMEmbeddingCache(MMEmbeddingCache):
                     ready,
                     *self._stream(),
                 )
+                if len(outcome) == 5:
+                    snapshots = outcome[4]
+                    outcome = outcome[:4]
+                published, charged, evictions, demoted = outcome
             if published:
                 with entry.storage_lock:
                     entry._native_published = True
@@ -316,6 +386,8 @@ class NativeMMEmbeddingCache(MMEmbeddingCache):
                 self._core.erase(cache_key, cell)
             self._pending_entries.pop(cell, None)
         self._record_mutations(evictions, demoted)
+        if snapshots:
+            self._deliver_evictions(snapshots)
         self._report_admission(charged)
         self._report_current_residency()
 
@@ -323,23 +395,23 @@ class NativeMMEmbeddingCache(MMEmbeddingCache):
         cell = entry._native_cell
         with cuda_graph_gate.operation():
             stream = self._stream()
-            result, promoted, evicted, demoted, promotion_failed = self._core.read(
-                cache_key, cell, *stream
-            )
+            outcome = self._core.read(cache_key, cell, *stream)
             with entry.storage_lock:
                 published = entry._native_published
                 fallback = entry.result
                 ready = entry.ready_events
-            if result is None and published:
+            if outcome[0] is None and published:
                 # The publisher replaced the staging result after the first
                 # lookup. The cell still owns the acquired generation.
-                result, promoted, evicted, demoted, promotion_failed = self._core.read(
-                    cache_key, cell, *stream
-                )
-            if result is None:
+                outcome = self._core.read(cache_key, cell, *stream)
+            if outcome[0] is None:
                 for event in ready:
                     event.wait()
                 return fallback
+        if len(outcome) == 6:
+            self._deliver_evictions(outcome[5])
+            outcome = outcome[:5]
+        result, promoted, evicted, demoted, promotion_failed = outcome
         if promoted or evicted or demoted or promotion_failed:
             with self._lock:
                 self._stats["promotion"] += int(promoted)
@@ -393,9 +465,11 @@ class NativeMMEmbeddingCache(MMEmbeddingCache):
     def resize(self, gpu_max_bytes, cpu_max_bytes):
         self._validate_limits(gpu_max_bytes, cpu_max_bytes)
         with cuda_graph_gate.operation():
-            evicted, demoted, cleared_through = self._core.resize(
+            outcome = self._core.resize(
                 gpu_max_bytes, cpu_max_bytes, *self._stream()
             )
+        snapshots = outcome[3] if len(outcome) == 4 else ()
+        evicted, demoted, cleared_through = outcome[:3]
         with self._lock:
             self._gpu_max_bytes = gpu_max_bytes
             self._cpu_max_bytes = cpu_max_bytes
@@ -406,6 +480,8 @@ class NativeMMEmbeddingCache(MMEmbeddingCache):
                     if cell.generation > cleared_through
                 }
         self._record_mutations(evicted, demoted)
+        if snapshots:
+            self._deliver_evictions(snapshots)
         if self._owns_lifetime_metrics and self._lifetime_metrics is not None:
             self._lifetime_metrics.resize(gpu_max_bytes + cpu_max_bytes)
         self._report_current_residency()

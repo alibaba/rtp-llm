@@ -47,6 +47,15 @@ class VitResourceConfigTest(unittest.TestCase):
         )
         self.assertEqual(config.mm_remote_cache_quarantine_ttl_seconds, 17)
 
+    def test_remote_eviction_policy_does_not_enable_remote_cache(self):
+        config, _ = self.parse(
+            env={"MM_EMBEDDING_CACHE_CONFIG": '{"remote":{"write_policy":"on_evict"}}'}
+        )
+        self.assertEqual(config.mm_remote_cache_write_policy, "on_evict")
+        self.assertFalse(config.mm_remote_cache_enable)
+        defaults, _ = self.parse()
+        self.assertEqual(defaults.mm_remote_cache_write_policy, "on_encode")
+
     def test_embedding_json_expands_existing_fields_with_zero_local_cache(self):
         document = json.dumps(
             {
@@ -114,6 +123,8 @@ class VitResourceConfigTest(unittest.TestCase):
             '{"remote":{"enbale":true}}',
             '{"local":{"cpu_max_bytes":false}}',
             '{"remote":{"enable":1}}',
+            '{"remote":{"write_policy":"evict"}}',
+            '{"remote":{"write_policy":true}}',
             '{"remote":{"max_pending":0}}',
             '{"remote":{"metadata_workers":0}}',
             '{"remote":{"read_transfer_workers":false}}',

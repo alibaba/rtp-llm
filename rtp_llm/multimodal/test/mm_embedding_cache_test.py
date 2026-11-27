@@ -2092,6 +2092,102 @@ for operation in operations:
         self.assertEqual(cache.stats()["cpu_max_bytes"], 10)
 
 
+class NativeEvictionNotificationTest(unittest.TestCase):
+    def cache(self, gpu, cpu, **options):
+        try:
+            from librtp_compute_ops import EmbLocalCacheShard  # noqa: F401
+        except ImportError:
+            self.skipTest("native local cache extension unavailable")
+        from rtp_llm.multimodal.mm_embedding_native_cache import NativeMMEmbeddingCache
+
+        cache = NativeMMEmbeddingCache(gpu, cpu, **options)
+        self.addCleanup(cache.close)
+        return cache
+
+    def publish(self, cache, key, value, remote_key=None, origin="encoder", verdict=None):
+        state, entry = cache.try_acquire(key)
+        self.assertEqual(state, "miss")
+        if remote_key is not None:
+            entry.remote_cache_context = {"key": remote_key}
+        entry.remote_embedding_origin = origin
+        entry.set_greennet_verdict(verdict, checked=verdict is not None)
+        self.assertTrue(cache.complete(key, entry, (value, {"alias": value})))
+        return entry.generation
+
+    def test_capacity_writes_own_one_eligible_generation(self):
+        from rtp_llm.multimodal.greennet_hook import GreenNetVerdict
+
+        callbacks = []
+
+        def receive(key, entry):
+            self.assertIsNone(cache.peek(key))
+            callbacks.append((key, entry))
+
+        cache = self.cache(0, 64, on_cpu_evict=receive, eviction_snapshot_max_bytes=64)
+        data = torch.arange(32, dtype=torch.bfloat16)
+        self.publish(cache, "a", data, "stale")
+        cache.remove("a")
+        approval = GreenNetVerdict(True, 1, "accepted")
+        generation = self.publish(cache, "a", data + 1, "fresh", verdict=approval)
+        cache.peek("a").set_greennet_error(RuntimeError("after definitive approval"))
+        self.publish(cache, "unbound", data + 2)
+        self.publish(cache, "from-remote", data + 3, "remote", origin="remote")
+        self.publish(cache, "denied", data, "denied", verdict=GreenNetVerdict(False, 2))
+        self.publish(cache, "failed-check", data, "failed-check")
+        cache.peek("failed-check").set_greennet_error(RuntimeError("audit unavailable"))
+        self.publish(cache, "clear", data, "clear")
+        cache.clear()
+        self.publish(cache, "close", data, "close")
+        cache.close()
+
+        self.assertEqual(len(callbacks), 1)
+        key, evicted = callbacks[0]
+        self.assertEqual((key, evicted.generation, evicted.tier), ("a", generation, "cpu"))
+        self.assertEqual(evicted.remote_cache_context["key"], "fresh")
+        self.assertEqual(evicted.remote_embedding_origin, "encoder")
+        self.assertEqual(evicted.greennet_snapshot(), (approval, True))
+        self.assertIs(evicted.result[0], evicted.result[1]["alias"])
+        self.assertTrue(torch.equal(evicted.wait()[0], data + 1))
+
+    def test_optional_notifications_share_a_mutation_byte_budget(self):
+        seen = []
+
+        def callback(key, entry):
+            seen.append((key, entry))
+            raise ValueError("optional remote unavailable")
+
+        cache = self.cache(0, 128, on_cpu_evict=callback, eviction_snapshot_max_bytes=64)
+        small = torch.full((32,), 1, dtype=torch.bfloat16)
+        self.publish(cache, "a", small, "a")
+        self.publish(cache, "b", small, "b")
+        self.publish(cache, "c", torch.zeros(64, dtype=torch.bfloat16))
+        self.assertEqual([row[0] for row in seen], ["a"])
+        self.assertEqual(cache.resident_tiers(), {"c": "cpu"})
+        self.assertEqual(cache.stats()["eviction_snapshot_dropped"], 1)
+        self.assertEqual(cache.stats()["cpu_pool_pending_bytes"], 0)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
+    def test_gpu_demotion_notifies_only_when_an_entry_leaves_the_cache(self):
+        seen = []
+        receive = lambda key, entry: seen.append((key, entry))
+        cache = self.cache(128, 128, on_gpu_evict=receive, on_cpu_evict=receive)
+        data = torch.arange(64, dtype=torch.bfloat16, device="cuda")
+        self.publish(cache, "a", data, "a")
+        self.publish(cache, "b", data + 1, "b")
+        self.assertEqual(cache.resident_tiers(), {"a": "cpu", "b": "gpu"})
+        self.assertEqual(seen, [])
+        self.publish(cache, "c", data + 2, "c")
+        self.assertEqual(cache.resident_tiers(), {"b": "cpu", "c": "gpu"})
+        self.assertEqual([(k, e.tier) for k, e in seen], [("a", "cpu")])
+        self.assertTrue(seen[0][1].result[0].is_cuda)
+        self.assertTrue(torch.equal(seen[0][1].result[0], data))
+        # Promotion has to remove c: the CPU block still belongs to b.
+        self.assertTrue(torch.equal(cache.peek("b").wait()[0], data + 1))
+        self.assertEqual([(k, e.tier) for k, e in seen], [("a", "cpu"), ("c", "gpu")])
+        cache.close()
+        self.assertTrue(torch.equal(seen[1][1].result[0], data + 2))
+
+
 class AsyncPublicationTest(unittest.TestCase):
     def test_complete_publishes_result_before_insertion(self):
         cache = MMEmbeddingCache(0, 64, async_publication=True)

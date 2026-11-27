@@ -2455,6 +2455,158 @@ class RemoteCacheTest(unittest.TestCase):
         self.assertEqual(remote.stats()["inflight_tasks"], 0)
         self.assertEqual(store.objects, {})
 
+    def policy_work_item(self, cache, remote, local_key):
+        from rtp_llm.multimodal.mm_work_item import MMWorkItem
+
+        state, entry = cache.try_acquire(local_key)
+        self.assertEqual(state, "miss")
+        item = SimpleNamespace(
+            url=local_key,
+            mm_type=1,
+            mm_preprocess_config=SimpleNamespace(mm_timeout_ms=30000),
+        )
+        work = MMWorkItem(
+            [item],
+            embedding_cache=cache,
+            cache_claim=(local_key, entry, state),
+            defer_feature_hashes=True,
+        )
+        work.remote_cache = remote
+        work.remote_cache_key = f"model/{local_key}"
+        remote.bind_entry(entry, work.remote_cache_key, "test")
+        return work
+
+    def test_cpu_pressure_spills_encoder_bf16_and_remote_hit_does_not_write_back(self):
+        self.check_cpu_pressure_spill(native=False)
+
+    def test_native_cpu_pressure_spills_encoder_bf16_and_skips_remote_write_back(self):
+        try:
+            from librtp_compute_ops import EmbLocalCacheShard
+        except ImportError:
+            self.skipTest("requires the native EMB local cache")
+        self.check_cpu_pressure_spill(native=True)
+
+    def check_cpu_pressure_spill(self, *, native):
+        from rtp_llm.multimodal.mm_embedding_cache import ShardedMMEmbeddingCache
+
+        store = Store()
+        remote = self.remote(store, write_policy="on_evict")
+        with patch.dict(os.environ, MM_EMB_NATIVE_LOCAL_CACHE=str(int(native))):
+            os.environ.pop("MM_EMB_NATIVE_LOCAL_CACHE_HOSTS", None)
+            cache = ShardedMMEmbeddingCache(
+                0, 16, shards=1,
+                on_cpu_evict=remote.submit_evicted,
+                on_gpu_evict=remote.submit_evicted,
+                eviction_snapshot_max_bytes=min(remote.max_inflight_bytes, remote.max_object_bytes),
+            )
+        self.assertEqual(cache.uses_native_index, native)
+        self.addCleanup(cache.close)
+        # Include signed zero and a NaN payload. Compare raw BF16 bytes after
+        # the source tensor and the cache's sole pool block have both been reused.
+        bits = torch.tensor(
+            [0, -32768, 32705, 16256, -1, 193, 16255, 257], dtype=torch.int16
+        )
+        result = (bits.clone().view(torch.bfloat16).reshape(2, 4), None)
+        with patch.object(remote, "submit_result", wraps=remote.submit_result) as write:
+            self.policy_work_item(cache, remote, "first").complete_cache(result)
+            result[0].zero_()
+            self.assertEqual(cache.resident_tier("first"), "cpu")
+            write.assert_not_called()
+
+            self.policy_work_item(cache, remote, "second").complete_cache(
+                (torch.full_like(result[0], 11), None)
+            )
+            self.assertIsNone(cache.peek("first"))
+            self.assertEqual(cache.resident_tier("second"), "cpu")
+            self.assertTrue(store.saved.wait(2))
+            self.assertEqual(set(store.objects), {"model/first"})
+            restored = remote.load("model/first")
+            self.assertTrue(torch.equal(restored[0].view(torch.int16).flatten(), bits))
+
+            cache.remove("second")
+            again = self.policy_work_item(cache, remote, "first")
+            again.cache_source = "remote"
+            again.complete_cache(restored)
+            self.policy_work_item(cache, remote, "third").complete_cache(result)
+            self.assertIsNone(cache.peek("first"))
+            self.assertEqual([c.args[0] for c in write.call_args_list], ["model/first"])
+
+    def test_evict_policy_skips_explicit_removal_clear_and_failed_publication(self):
+        store = Store()
+        remote = self.remote(store, write_policy="on_evict")
+        cache = MMEmbeddingCache(0, 16, on_cpu_evict=remote.submit_evicted)
+        self.addCleanup(cache.close)
+        result = (torch.ones((2, 4), dtype=torch.bfloat16), None)
+        with patch.object(remote, "submit_result", wraps=remote.submit_result) as write:
+            self.policy_work_item(cache, remote, "removed").complete_cache(result)
+            cache.remove("removed")
+            self.policy_work_item(cache, remote, "cleared").complete_cache(result)
+            cache.clear()
+            failed = self.policy_work_item(cache, remote, "failed")
+            failed.fail_cache(RuntimeError("encoder failed"))
+            self.assertIsNone(cache.peek("failed"))
+            write.assert_not_called()
+
+    def test_default_policy_writes_encoded_cpu_result_while_still_resident(self):
+        store = Store()
+        remote = self.remote(store)
+        cache = MMEmbeddingCache(0, 16)
+        self.addCleanup(cache.close)
+        value = torch.arange(8, dtype=torch.bfloat16).reshape(2, 4)
+        self.policy_work_item(cache, remote, "first").complete_cache((value, None))
+        self.assertTrue(store.saved.wait(2))
+        self.assertEqual(cache.resident_tier("first"), "cpu")
+        restored = remote.load("model/first")
+        self.assertTrue(torch.equal(restored[0].view(torch.uint8), value.view(torch.uint8)))
+
+    def test_evict_policy_skips_failed_and_rejected_inspections(self):
+        for decision in ("failed", "rejected"):
+            with self.subTest(decision=decision):
+                store = Store()
+                remote = self.remote(store, write_policy="on_evict")
+                cache = MMEmbeddingCache(0, 16, on_cpu_evict=remote.submit_evicted)
+                self.addCleanup(cache.close)
+                value = (torch.ones(2, 4, dtype=torch.bfloat16), None)
+                first = self.policy_work_item(cache, remote, "first")
+                first.complete_cache(value)
+                if decision == "failed":
+                    first.cache_entry.set_greennet_error(RuntimeError("inspection failed"))
+                else:
+                    first.cache_entry.set_greennet_verdict(GreenNetVerdict(False))
+                with patch(
+                    "rtp_llm.multimodal.mm_remote_embedding_cache.plan_object",
+                    wraps=plan_object,
+                ) as encode:
+                    self.policy_work_item(cache, remote, "second").complete_cache(value)
+                    encode.assert_not_called()
+                self.assertIsNone(cache.peek("first"))
+                remote.close()
+                self.assertEqual(store.objects, {})
+
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+    def test_gpu_pressure_demotes_to_cpu_before_remote_write(self):
+        store = Store()
+        remote = self.remote(store, write_policy="on_evict")
+        cache = MMEmbeddingCache(
+            16, 16, on_cpu_evict=remote.submit_evicted, on_gpu_evict=remote.submit_evicted
+        )
+        self.addCleanup(cache.close)
+        with patch.object(remote, "submit_result", wraps=remote.submit_result) as write:
+            for index, key in enumerate(("first", "second")):
+                value = torch.full(
+                    (2, 4), index + 1, dtype=torch.bfloat16, device="cuda"
+                )
+                self.policy_work_item(cache, remote, key).complete_cache((value, None))
+            self.assertEqual(cache.resident_tiers(), {"first": "cpu", "second": "gpu"})
+            write.assert_not_called()
+            self.policy_work_item(cache, remote, "third").complete_cache((value, None))
+            self.assertTrue(store.saved.wait(2))
+            self.assertEqual([c.args[0] for c in write.call_args_list], ["model/first"])
+            restored = remote.load("model/first")
+            self.assertTrue(
+                torch.equal(restored[0].cpu(), torch.ones(2, 4, dtype=torch.bfloat16))
+            )
+
     def test_oversized_read_and_write_bypass(self):
         store = Store({"key": torch.empty(1024, dtype=torch.uint8)})
         remote = self.remote(store, max_object_bytes=128)

@@ -163,13 +163,35 @@ void setPoolStats(py::dict& output, const char* prefix, const Arena::Stats& stat
     put("wasted_bytes", 0);
     put("largest_free_block_bytes", stats.largest_free);
 }
+
+template<typename... Args>
+py::tuple mutationResult(Shard::Mutations& mutations, Args&&... args) {
+    if (mutations.snapshots.empty()) {
+        return py::make_tuple(std::forward<Args>(args)...);
+    }
+    return py::make_tuple(std::forward<Args>(args)..., std::move(mutations.snapshots));
+}
 }  // namespace
 
 void registerEmbLocalCache(pybind11::module& m) {
+    py::class_<Shard::Eviction>(m, "EmbLocalEviction")
+        .def("unpack", [](const Shard::Eviction& victim) {
+            py::tuple leaves(victim.tensors.size());
+            for (size_t i = 0; i < victim.tensors.size(); ++i) {
+                leaves[i] = py::cast(victim.tensors[i]);
+            }
+            const auto& audit = victim.audit;
+            return py::make_tuple(victim.key, victim.remote_key, victim.generation,
+                                  victim.tier == Tier::Cpu ? "cpu" : "gpu", decode(*victim.tree, leaves),
+                                  audit.origin, audit.verdict_present, audit.checked, audit.passed, audit.code,
+                                  audit.message);
+        });
     py::class_<Cell, std::shared_ptr<Cell>>(m, "EmbLocalGeneration")
         .def_property_readonly("generation", &Cell::generation)
         .def("set_verdict", &Cell::setVerdict)
         .def("set_origin", &Cell::setOrigin)
+        .def("set_remote_key", &Cell::setRemoteKey)
+        .def("set_audit_error", &Cell::setAuditError)
         .def("audit", [](const Cell& cell) {
             const auto audit = cell.audit();
             return py::make_tuple(audit.decided,
@@ -192,6 +214,7 @@ void registerEmbLocalCache(pybind11::module& m) {
     });
     py::class_<Shard>(m, "EmbLocalCacheShard")
         .def(py::init<int64_t, int64_t, int>())
+        .def(py::init<int64_t, int64_t, int, bool, bool, int64_t>())
         .def("claim",
              [](Shard& shard, const std::string& key) {
                  return lookupResult(withoutGil([&] { return shard.claim(key); }));
@@ -233,7 +256,7 @@ void registerEmbLocalCache(pybind11::module& m) {
                 int64_t                                    tokens,
                 const std::vector<std::shared_ptr<Ready>>& ready,
                 uintptr_t                                  stream,
-                int                                        device) {
+                int                                        device) -> py::tuple {
                  auto                                   tree = std::make_shared<Tree>();
                  Shard::TensorList                      tensors;
                  std::unordered_map<PyObject*, int64_t> seen;
@@ -247,14 +270,14 @@ void registerEmbLocalCache(pybind11::module& m) {
                      auto                   result = shard.publish(
                          key, cell.generation(), tensors, std::move(tree), tokens, ready, streamFor(stream, device));
                      published = result.first;
-                     mutations = result.second;
+                     mutations = std::move(result.second);
                  }
                  auto       record = published ? cell.record() : nullptr;
                  const auto bytes  = record ? record->bytes[0] + record->bytes[1] : 0;
-                 return py::make_tuple(published, bytes, mutations.evicted, mutations.demoted);
+                 return mutationResult(mutations, published, bytes, mutations.evicted, mutations.demoted);
              })
         .def("read",
-             [](Shard& shard, const std::string& key, const Cell& cell, uintptr_t stream, int device) {
+             [](Shard& shard, const std::string& key, const Cell& cell, uintptr_t stream, int device) -> py::tuple {
                  auto record = cell.record();
                  if (!record) {
                      return py::make_tuple(py::object(py::none()), false, int64_t{0}, int64_t{0}, false);
@@ -271,7 +294,7 @@ void registerEmbLocalCache(pybind11::module& m) {
                          try {
                              auto promotion = shard.tryPromote(key, record, result, cuda_stream);
                              promoted       = promotion.first;
-                             mutations      = promotion.second;
+                             mutations      = std::move(promotion.second);
                          } catch (const std::exception&) {
                              // Readback is already complete and independently owned.
                              promotion_failed = true;
@@ -282,8 +305,8 @@ void registerEmbLocalCache(pybind11::module& m) {
                  for (size_t i = 0; i < result.size(); ++i) {
                      leaves[i] = py::cast(std::move(result[i]));
                  }
-                 return py::make_tuple(
-                     decode(*record->tree, leaves), promoted, mutations.evicted, mutations.demoted, promotion_failed);
+                 return mutationResult(mutations, decode(*record->tree, leaves), promoted, mutations.evicted,
+                                       mutations.demoted, promotion_failed);
              })
         .def(
             "resident_tier",
@@ -333,7 +356,7 @@ void registerEmbLocalCache(pybind11::module& m) {
                      py::gil_scoped_release release;
                      result = shard.resize(gpu, cpu, streamFor(stream, device));
                  }
-                 return py::make_tuple(result.evicted, result.demoted, result.cleared_through);
+                 return mutationResult(result, result.evicted, result.demoted, result.cleared_through);
              })
         .def("resident_charge",
              [](Shard& shard) {
@@ -355,6 +378,7 @@ void registerEmbLocalCache(pybind11::module& m) {
             out["gpu_resident_bytes"]   = snapshot.bytes[1];
             out["cpu_resident_bytes"]   = snapshot.bytes[0];
             out["pending_entries"]      = snapshot.pending;
+            out["eviction_snapshot_dropped"] = shard.droppedSnapshots();
             setPoolStats(out, "cpu_pool_", cpu);
             setPoolStats(out, "gpu_pool_", gpu);
             return out;
