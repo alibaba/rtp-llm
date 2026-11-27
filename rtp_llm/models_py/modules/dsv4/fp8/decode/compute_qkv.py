@@ -77,7 +77,10 @@ def decode_compute_qkv(
     )
 
     if return_freqs_cis:
-        freqs_cis = attn.freqs_cis.index_select(0, pos.to(torch.long)).contiguous()
+        idx = pos if pos.dtype == torch.long else pos.to(torch.long)
+        freqs_cis = attn.freqs_cis.index_select(0, idx)
+        if not freqs_cis.is_contiguous():
+            freqs_cis = freqs_cis.contiguous()
     else:
         freqs_cis = attn.freqs_cis
 

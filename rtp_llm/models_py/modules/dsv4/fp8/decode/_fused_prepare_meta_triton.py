@@ -71,6 +71,7 @@ def _fused_prepare_meta_kernel(
     HAS_SWA_TOPK_LEN: tl.constexpr,
     HAS_CMP_TOPK_LEN_4: tl.constexpr,
     HAS_CMP_TOPK_LEN_128: tl.constexpr,
+    PAD_POS_IDS_LONG_16: tl.constexpr,
 ):
     r = tl.program_id(0)
     q = tl.program_id(1)
@@ -87,6 +88,15 @@ def _fused_prepare_meta_kernel(
         tl.store(position_ids_ptr + out_rq, abs_pos)
     if HAS_POS_IDS_LONG:
         tl.store(position_ids_long_ptr + out_rq, abs_pos.to(tl.int64))
+        if PAD_POS_IDS_LONG_16:
+            if (r == bs - 1) and (q == Q_LEN - 1):
+                t_act = bs * Q_LEN
+                k16 = tl.arange(0, 16)
+                tl.store(
+                    position_ids_long_ptr + t_act + k16,
+                    0,
+                    mask=(t_act + k16) < 16,
+                )
 
     # ---- Scalar outputs (write once per request; gate on q==0) ----
     if q == 0:
@@ -277,6 +287,15 @@ def fused_update_decode_meta_pure(
     BLOCK_K = _next_pow2(max(index_topk, 1))
     BLOCK_HCA = _next_pow2(hca_dense_width)
 
+    pos16_backing = getattr(meta, "hca_front_position_ids_16", None)
+    pad_pos_ids_long_16 = bool(
+        pos_ids_long is not None
+        and pos16_backing is not None
+        and pos16_backing.data_ptr() == pos_ids_long.data_ptr()
+        and int(pos16_backing.numel()) >= 16
+        and bs * q_len < 16
+    )
+
     grid = (bs, q_len)
     _fused_prepare_meta_kernel[grid](
         start_pos,
@@ -318,6 +337,7 @@ def fused_update_decode_meta_pure(
         HAS_SWA_TOPK_LEN=swa_topk_len is not None,
         HAS_CMP_TOPK_LEN_4=cmp_topk_4 is not None,
         HAS_CMP_TOPK_LEN_128=cmp_topk_128 is not None,
+        PAD_POS_IDS_LONG_16=pad_pos_ids_long_16,
     )
 
 
@@ -397,6 +417,7 @@ def _fused_phase2b_pool_slot_mapping_kernel(
     HAS_CSA_STATE: tl.constexpr,
     HAS_IDX_STATE: tl.constexpr,
     HAS_HCA_STATE: tl.constexpr,
+    PAD_HCA_STATE_16: tl.constexpr,
 ):
     r = tl.program_id(0)
     q = tl.program_id(1)
@@ -494,6 +515,15 @@ def _fused_phase2b_pool_slot_mapping_kernel(
             bid_hca_st <= 0, -1, bid_hca_st * HCA_STATE_E + in_blk_idx_hca
         )
         tl.store(slot_hca_state_ptr + out_idx, slot_hca_st)
+        if PAD_HCA_STATE_16:
+            if (r == bs - 1) and (q == Q_LEN - 1):
+                t_act = bs * Q_LEN
+                k16 = tl.arange(0, 16)
+                tl.store(
+                    slot_hca_state_ptr + t_act + k16,
+                    -1,
+                    mask=(t_act + k16) < 16,
+                )
 
 
 def fused_phase2b_pool_slot_mapping(
@@ -632,6 +662,15 @@ def fused_phase2b_pool_slot_mapping(
     idx_state_tokens = _raw_tokens(INDEXER_STATE) if has_idx_state else 1
     hca_state_tokens = _raw_tokens(HCA_STATE) if has_hca_state else 1
 
+    hca_state16_backing = getattr(meta, "hca_front_state_rows_16", None)
+    pad_hca_state_16 = bool(
+        has_hca_state
+        and hca_state16_backing is not None
+        and hca_state16_backing.data_ptr() == slot_hca_state.data_ptr()
+        and int(hca_state16_backing.numel()) >= 16
+        and bs * q_len < 16
+    )
+
     grid = (bs, q_len)
     _fused_phase2b_pool_slot_mapping_kernel[grid](
         start_pos,
@@ -679,4 +718,5 @@ def fused_phase2b_pool_slot_mapping(
         HAS_CSA_STATE=has_csa_state,
         HAS_IDX_STATE=has_idx_state,
         HAS_HCA_STATE=has_hca_state,
+        PAD_HCA_STATE_16=pad_hca_state_16,
     )

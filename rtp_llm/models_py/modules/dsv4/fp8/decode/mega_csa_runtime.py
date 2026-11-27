@@ -95,6 +95,7 @@ class MegaCSARuntime:
             Tuple[int, str],
             Tuple[torch.Tensor, torch.Tensor, Tuple[int, int, int]],
         ] = {}
+        self._mqa_request_ids_cache: Dict[Tuple[str, int, int], torch.Tensor] = {}
 
     def begin_decode(self, metadata: Any) -> None:
         """Mark one Python forward for shared metadata and schedule lifetime."""
@@ -243,15 +244,18 @@ class MegaCSARuntime:
         # DeepGEMM 2.8.1 removed the non-varlen SM100 metadata branch; the
         # schedule must use one token per row with each row's request id
         # (batch-major order keeps the kernel token layout unchanged).
-        rows = int(context_2d.shape[0]) * int(context_2d.shape[1])
+        bsz = int(context_2d.shape[0])
+        seq_len = int(context_2d.shape[1])
+        rows = bsz * seq_len
         lengths = context_2d.reshape(rows, 1)
-        request_ids = (
-            torch.arange(
-                int(context_2d.shape[0]), dtype=torch.int32, device=context_2d.device
-            )
-            .repeat_interleave(int(context_2d.shape[1]))
-            .contiguous()
-        )
+        req_key = (str(context_2d.device), bsz, seq_len)
+        request_ids = self._mqa_request_ids_cache.get(req_key)
+        if request_ids is None:
+            request_ids = torch.arange(bsz, dtype=torch.int32, device=context_2d.device)
+            if seq_len != 1:
+                request_ids = request_ids.repeat_interleave(seq_len).contiguous()
+            if not (context_2d.is_cuda and torch.cuda.is_current_stream_capturing()):
+                self._mqa_request_ids_cache[req_key] = request_ids
         schedule = deep_gemm.get_paged_mqa_logits_metadata(
             lengths, entries_per_block, deep_gemm.get_num_sms(), indices=request_ids
         )
@@ -392,10 +396,27 @@ class MegaCSARuntime:
         positions_i64: torch.Tensor,
         state_rows: torch.Tensor,
         m: int,
+        metadata: Any = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Return 16-row padded inputs for sub-16 HCA front, copied once/step."""
+        """Return 16-row padded inputs for sub-16 HCA front (zero-copy when pre-padded)."""
         if m >= 16:
             return positions_i64, state_rows
+        if metadata is not None:
+            pos16 = getattr(metadata, "hca_front_position_ids_16", None)
+            rows16 = getattr(metadata, "hca_front_state_rows_16", None)
+            if (
+                isinstance(pos16, torch.Tensor)
+                and isinstance(rows16, torch.Tensor)
+                and int(pos16.numel()) >= 16
+                and int(rows16.numel()) >= 16
+                and pos16.data_ptr() == positions_i64.data_ptr()
+                and rows16.data_ptr() == state_rows.data_ptr()
+                and pos16.device == positions_i64.device
+                and rows16.device == state_rows.device
+                and pos16.dtype == positions_i64.dtype
+                and rows16.dtype == state_rows.dtype
+            ):
+                return pos16[:16], rows16[:16]
         key = (m, str(positions_i64.device))
         sig = (self._step, int(positions_i64.data_ptr()), int(state_rows.data_ptr()))
         cached = self._hca_front_inputs.get(key)

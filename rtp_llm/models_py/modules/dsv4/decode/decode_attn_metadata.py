@@ -553,13 +553,23 @@ def update_decode_metadata_in_place(
             dst_bt = meta.pool_block_tables.get(at)
             if dst_bt is None:
                 continue
+            if (
+                dst_bt.data_ptr() == src_bt.data_ptr()
+                and dst_bt.shape[0] <= src_bt.shape[0]
+                and dst_bt.shape[1] == src_bt.shape[1]
+                and dst_bt.stride() == src_bt.stride()
+            ):
+                continue
             n_rows = min(src_bt.shape[0], dst_bt.shape[0])
             n_cols = min(src_bt.shape[1], dst_bt.shape[1])
-            # Zero stale rows beyond current bs to avoid carrying old block
-            # ids (defensive — graph reads only [:bs] anyway).
-            dst_bt[bs:].zero_()
+            # Zero stale rows/columns when mutating eagerly, but inside CUDA
+            # graph capture the bucket geometry is fixed and dst_bt was zeroed at
+            # allocation/warmup.
+            is_capturing = dst_bt.is_cuda and torch.cuda.is_current_stream_capturing()
+            if not is_capturing and bs < dst_bt.shape[0]:
+                dst_bt[bs:].zero_()
             dst_bt[:n_rows, :n_cols].copy_(src_bt[:n_rows, :n_cols])
-            if n_cols < dst_bt.shape[1]:
+            if not is_capturing and n_cols < dst_bt.shape[1]:
                 dst_bt[:n_rows, n_cols:].zero_()
 
         # SWA: every token writes; abs_pos = start_pos + s.

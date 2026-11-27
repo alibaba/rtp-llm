@@ -377,10 +377,11 @@ class MegaHCAAdapter:
         # the 3-memset tail chain and runs with pdl=True.
         if token_count < 16:
             front_logical_m = 16
-            positions_front, state_rows_front = (
-                self.runtime.hca_padded_front_inputs(
-                    positions_i64, pools.slots.state_rows, token_count
-                )
+            positions_front, state_rows_front = self.runtime.hca_padded_front_inputs(
+                positions_i64,
+                pools.slots.state_rows,
+                token_count,
+                metadata=metadata,
             )
         else:
             front_logical_m = token_count

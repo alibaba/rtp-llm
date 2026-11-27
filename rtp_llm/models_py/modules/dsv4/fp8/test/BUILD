@@ -232,6 +232,20 @@ dsv4_sm100_py_test(
     for name in ["test_mega_csa_adapter", "test_mega_hca_adapter"]
 ]
 
+dsv4_sm100_py_test(
+    name = "test_decode_graph_memset_audit",
+    args = ["-s"],
+    extra_srcs = [
+        "mega_attention_test_utils.py",
+        "test_mega_csa_rtp_eager.py",
+        "test_mega_hca_rtp_eager.py",
+    ],
+    deps = _DSV4_FP8_TEST_DEPS + [
+        "//rtp_llm:deep_gemm",
+    ],
+    timeout = "long",
+)
+
 cuda13_sm100_py_test(
     name = "test_indexer_q_fp8_quant_perf",
     srcs = ["test_indexer_q_fp8_quant.py"],

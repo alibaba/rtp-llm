@@ -238,6 +238,10 @@ class DSv4DecodeAttnMetadataFP8:
     compressed_topk_length_by_ratio: Dict[int, torch.Tensor] = field(
         default_factory=dict
     )  # ratio -> [B] int32
+    # Pre-padded >=16-element views aliasing position_ids_long and HCA_STATE
+    # slots so sub-16 HCA front GEMM can consume them zero-copy.
+    hca_front_position_ids_16: Optional[torch.Tensor] = None
+    hca_front_state_rows_16: Optional[torch.Tensor] = None
 
 
 def get_or_build_sched_meta(
@@ -807,7 +811,11 @@ def allocate_decode_metadata_fp8(
 
     start_pos = torch.zeros(B, dtype=torch.int32, device=device)
     position_ids = torch.zeros(T_total, dtype=torch.int32, device=device)
-    position_ids_long = torch.zeros(T_total, dtype=torch.long, device=device)
+    position_ids_long_backing = torch.zeros(
+        max(T_total, 16), dtype=torch.long, device=device
+    )
+    position_ids_long = position_ids_long_backing[:T_total]
+    hca_front_position_ids_16 = position_ids_long_backing[:16]
     slot_swa = torch.full((T_total,), -1, dtype=torch.int32, device=device)
     topk_window = torch.full(
         (B, q_len, window_size),
@@ -869,6 +877,7 @@ def allocate_decode_metadata_fp8(
     pool_block_tables: Dict[str, torch.Tensor] = {}
     pool_write_slot_mappings: Dict[str, torch.Tensor] = {}
     compressor_state_slot_mappings: Dict[str, torch.Tensor] = {}
+    hca_front_state_rows_16: Optional[torch.Tensor] = None
     paged_entries_from_specs, paged_tokens_from_specs, paged_max_blocks = (
         _parse_paged_pool_specs(paged_pool_specs)
     )
@@ -897,12 +906,24 @@ def allocate_decode_metadata_fp8(
             )
         for attn_type in (CSA_STATE, HCA_STATE, INDEXER_STATE):
             if attn_type in paged_max_blocks:
-                compressor_state_slot_mappings[attn_type] = torch.full(
-                    (T_total,),
-                    -1,
-                    dtype=torch.int64,
-                    device=device,
-                )
+                if attn_type == HCA_STATE:
+                    hca_state_backing = torch.full(
+                        (max(T_total, 16),),
+                        -1,
+                        dtype=torch.int64,
+                        device=device,
+                    )
+                    compressor_state_slot_mappings[attn_type] = hca_state_backing[
+                        :T_total
+                    ]
+                    hca_front_state_rows_16 = hca_state_backing[:16]
+                else:
+                    compressor_state_slot_mappings[attn_type] = torch.full(
+                        (T_total,),
+                        -1,
+                        dtype=torch.int64,
+                        device=device,
+                    )
 
     # Pre-allocate swa_abs_idx[B, q_len, win] int32 (always — Phase 2B-2a
     # paged read may consume it; cost is trivial compared to the rest).
@@ -975,6 +996,8 @@ def allocate_decode_metadata_fp8(
         hca_cmp_global_slots=hca_cmp_global_slots_alloc,
         swa_topk_length=swa_topk_length,
         compressed_topk_length_by_ratio=compressed_topk_length_by_ratio,
+        hca_front_position_ids_16=hca_front_position_ids_16,
+        hca_front_state_rows_16=hca_front_state_rows_16,
     )
 
 
@@ -1082,6 +1105,15 @@ def update_decode_metadata_in_place_fp8(
         meta.position_ids[: bs * q_len].copy_(position_ids_flat)
         if meta.position_ids_long is not None:
             meta.position_ids_long[: bs * q_len].copy_(position_ids_flat.to(torch.long))
+            if (
+                meta.hca_front_position_ids_16 is not None
+                and bs * q_len < 16
+                and not (
+                    meta.position_ids_long.is_cuda
+                    and torch.cuda.is_current_stream_capturing()
+                )
+            ):
+                meta.hca_front_position_ids_16[bs * q_len : 16].zero_()
         if meta.decode_seq_start_per_req is not None:
             meta.decode_seq_start_per_req[:bs].copy_(start_pos)
         meta.topk_buffer_compressed[:bs].fill_(-1)
@@ -1109,16 +1141,23 @@ def update_decode_metadata_in_place_fp8(
             dst_bt = meta.pool_block_tables.get(at)
             if dst_bt is None:
                 continue
-            if dst_bt.data_ptr() == src_bt.data_ptr() and dst_bt.shape == src_bt.shape:
+            if (
+                dst_bt.data_ptr() == src_bt.data_ptr()
+                and dst_bt.shape[0] <= src_bt.shape[0]
+                and dst_bt.shape[1] == src_bt.shape[1]
+                and dst_bt.stride() == src_bt.stride()
+            ):
                 continue
             n_rows = min(src_bt.shape[0], dst_bt.shape[0])
             n_cols = min(src_bt.shape[1], dst_bt.shape[1])
-            # Zero stale rows beyond current bs to avoid carrying old block
-            # ids (defensive — graph reads only [:bs] anyway).
-            if bs < dst_bt.shape[0]:
+            # Zero stale rows/columns when mutating eagerly, but inside CUDA
+            # graph capture the bucket geometry is fixed and dst_bt was zeroed at
+            # allocation/warmup.
+            is_capturing = dst_bt.is_cuda and torch.cuda.is_current_stream_capturing()
+            if not is_capturing and bs < dst_bt.shape[0]:
                 dst_bt[bs:].zero_()
             dst_bt[:n_rows, :n_cols].copy_(src_bt[:n_rows, :n_cols])
-            if n_cols < dst_bt.shape[1]:
+            if not is_capturing and n_cols < dst_bt.shape[1]:
                 dst_bt[:n_rows, n_cols:].zero_()
 
         from rtp_llm.models_py.modules.dsv4.fp8.decode._fused_prepare_meta_triton import (
@@ -1148,6 +1187,15 @@ def update_decode_metadata_in_place_fp8(
                 bs,
                 paged_pool_entries_per_block,
             )
+            if (
+                meta.hca_front_state_rows_16 is not None
+                and bs * q_len < 16
+                and not (
+                    meta.hca_front_state_rows_16.is_cuda
+                    and torch.cuda.is_current_stream_capturing()
+                )
+            ):
+                meta.hca_front_state_rows_16[bs * q_len : 16].fill_(-1)
 
     # Iter3.3: precompute translate_swa / translate_hca once per step.
     # Shared across all 43 attention layers. Graph-safe: write straight into
@@ -1301,7 +1349,14 @@ def build_decode_metadata_fp8(
     T_total = B * q_len
     position_ids_2d = _build_position_ids_2d(start_pos, q_len, device)
     position_ids_flat = position_ids_2d.reshape(-1).contiguous()
-    position_ids_long = position_ids_flat.to(torch.long)
+    if T_total < 16:
+        position_ids_long_backing = torch.zeros(16, dtype=torch.long, device=device)
+        position_ids_long_backing[:T_total].copy_(position_ids_flat.to(torch.long))
+        position_ids_long = position_ids_long_backing[:T_total]
+        hca_front_position_ids_16 = position_ids_long_backing
+    else:
+        position_ids_long = position_ids_flat.to(torch.long)
+        hca_front_position_ids_16 = position_ids_long[:16]
 
     # SWA slot mapping (always needed).
     swa_buffer_stride = window_size
@@ -1416,6 +1471,7 @@ def build_decode_metadata_fp8(
     decode_cu_seq_per_req: Optional[torch.Tensor] = None
     swa_global_slots: Optional[torch.Tensor] = None
     hca_cmp_global_slots: Optional[torch.Tensor] = None
+    hca_front_state_rows_16: Optional[torch.Tensor] = None
     if paged_block_tables and paged_pool_entries_per_block:
         from rtp_llm.models_py.modules.dsv4.fp8.decode.pool_slot_mapping import (
             compute_kv_pool_slot_mapping,
@@ -1518,13 +1574,28 @@ def build_decode_metadata_fp8(
             if at not in pool_block_tables:
                 continue
             entries_per_block = paged_pool_entries_per_block[at]
-            compressor_state_slot_mappings[at] = _compute_state_pool_slot_mapping(
+            mapped = _compute_state_pool_slot_mapping(
                 pool_block_tables[at],
                 position_ids_long,
                 req_id_per_token_long,
                 entries_per_block,
                 paged_pool_tokens_per_block_resolved[at],
             )
+            if at == HCA_STATE:
+                if int(mapped.numel()) < 16:
+                    hca_state_backing = torch.full(
+                        (16,), -1, dtype=torch.int64, device=device
+                    )
+                    hca_state_backing[: int(mapped.numel())].copy_(mapped)
+                    compressor_state_slot_mappings[at] = hca_state_backing[
+                        : int(mapped.numel())
+                    ]
+                    hca_front_state_rows_16 = hca_state_backing
+                else:
+                    compressor_state_slot_mappings[at] = mapped
+                    hca_front_state_rows_16 = mapped[:16]
+            else:
+                compressor_state_slot_mappings[at] = mapped
 
         if SWA_KV in pool_block_tables:
             swa_eb = paged_pool_entries_per_block[SWA_KV]
@@ -1586,4 +1657,6 @@ def build_decode_metadata_fp8(
         hca_cmp_global_slots=hca_cmp_global_slots,
         swa_topk_length=swa_topk_length,
         compressed_topk_length_by_ratio=compressed_topk_length_by_ratio,
+        hca_front_position_ids_16=hca_front_position_ids_16,
+        hca_front_state_rows_16=hca_front_state_rows_16,
     )

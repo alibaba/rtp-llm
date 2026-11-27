@@ -291,6 +291,22 @@ cuda13_sm100_py_test(
 )
 
 cuda13_sm100_py_test(
+    name = "mega_moe_graph_audit_test",
+    srcs = [
+        "mega_moe_graph_audit_test.py",
+        "mega_moe_routed_only_execution_test.py",
+    ],
+    main = "mega_moe_graph_audit_test.py",
+    env_inherit = ["HOME"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+    ],
+    timeout = "long",
+    gpu_count = 2,
+)
+
+cuda13_sm100_py_test(
     name = "mega_moe_end_to_end_perf_test",
     srcs = [
         "mega_moe_end_to_end_perf_test.py",

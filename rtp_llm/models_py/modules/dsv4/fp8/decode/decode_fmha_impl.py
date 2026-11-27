@@ -125,10 +125,10 @@ class DSv4DecodeFmhaImplFP8:
                 and src_bt.dtype == torch.int32
                 and src_bt.is_contiguous()
                 and src_bt.dim() == 2
-                and int(src_bt.shape[0]) == max_batch_size
+                and int(src_bt.shape[0]) >= max_batch_size
                 and int(src_bt.shape[1]) >= int(dst_bt.shape[1])
             ):
-                self.metadata.pool_block_tables[tag] = src_bt
+                self.metadata.pool_block_tables[tag] = src_bt[:max_batch_size]
 
     def _can_use_in_graph_prepare(self, attn_inputs: Any) -> bool:
         # Subclasses overriding prepare_cuda_graph (e.g. PPU) manage their own path.

@@ -69,12 +69,12 @@ def decode_output_proj(
         o = attn._wo_a_einsum_from_fp8(o_fp8, o_scale, bsz, q_len)
     else:
         if position_ids is not None:
-            freqs_cis = freqs_cis.index_select(
-                0,
-                position_ids.reshape(-1).to(
-                    device=freqs_cis.device, dtype=torch.long
-                ),
-            ).contiguous()
+            idx = position_ids.reshape(-1)
+            if idx.dtype != torch.long or idx.device != freqs_cis.device:
+                idx = idx.to(device=freqs_cis.device, dtype=torch.long)
+            freqs_cis = freqs_cis.index_select(0, idx)
+            if not freqs_cis.is_contiguous():
+                freqs_cis = freqs_cis.contiguous()
         if freqs_cis.dim() == 2 and int(freqs_cis.shape[0]) == bsz:
             apply_rotary_emb_batched(o[..., -rd:], freqs_cis, inverse=True)
         else:
