@@ -70,6 +70,26 @@ class LinearAttentionConfigBindingsTest(TestCase):
 
 
 class KVCacheConfigPickleTest(TestCase):
+    def test_eviction_config_round_trip_and_v25_defaults(self):
+        config = KVCacheConfig()
+        config.host_cache_evict_max_pending_bytes = 123
+        config.block_tree_last_tier_evict_strategy = "watermark"
+        config.device_cache_evict_max_pending_bytes = 456
+        config.memory_cache_max_descriptors_per_transfer_batch = 3
+        state = config.__getstate__()
+        self.assertEqual(state[81:], ("watermark", 456))
+        self.assertEqual(pickle.loads(pickle.dumps(config)).__getstate__(), state)
+        previous = KVCacheConfig.__new__(KVCacheConfig)
+        previous.__setstate__((state[0], 25, *state[2:81]))
+        self.assertEqual(previous.host_cache_evict_max_pending_bytes, 123)
+        self.assertEqual(previous.__getstate__()[81:], ("on_demand", 0))
+        self.assertEqual(previous.memory_cache_max_descriptors_per_transfer_batch, 3)
+        for version, limits in ((26, (0, 5)), (27, (3, 5, 7))):
+            with self.subTest(version=version):
+                previous = KVCacheConfig.__new__(KVCacheConfig)
+                previous.__setstate__((state[0], version, *state[2:], *limits))
+                self.assertEqual(previous.__getstate__(), state)
+
     def test_pool_block_weights_binding_defaults_empty_and_preserves_raw_json(self):
         config = KVCacheConfig()
         self.assertEqual(config.kv_cache_pool_block_weights, "")
@@ -85,8 +105,8 @@ class KVCacheConfigPickleTest(TestCase):
         config.reserve_block_ratio = 9
         config.kv_cache_event_instance_group = "weighted-pools"
         state = config.__getstate__()
-        self.assertEqual(state[:2], ("KVCacheConfig", 25))
-        self.assertEqual(len(state), 81)
+        self.assertEqual(state[:2], ("KVCacheConfig", 28))
+        self.assertEqual(len(state), 83)
         self.assertEqual(state[80], config.kv_cache_pool_block_weights)
         self.assertTrue(state[79])
 
@@ -137,7 +157,7 @@ class KVCacheConfigPickleTest(TestCase):
         config = KVCacheConfig()
         config.block_tree_task_pool_size = 6
         config.block_tree_transfer_worker_count = 7
-        config.disk_cache_evict_max_pending_bytes = 80 * 1024 * 1024
+        config.host_cache_evict_max_pending_bytes = 80 * 1024 * 1024
         config.enable_disk_cache = True
         config.disk_cache_paths = "/tmp/cache"
         for name, value in BASE_EVENT_FIELD_VALUES.items():
@@ -149,8 +169,8 @@ class KVCacheConfigPickleTest(TestCase):
                 config.kv_cache_pool_block_weights = '{"full":7,"linear":2}'
                 state = config.__getstate__()
                 v22_state = _version_twenty_two_state(config)
-                self.assertEqual(len(state), 81)
-                self.assertEqual(state[:2], ("KVCacheConfig", 25))
+                self.assertEqual(len(state), 83)
+                self.assertEqual(state[:2], ("KVCacheConfig", 28))
                 self.assertEqual(state[63:68], tuple(BASE_EVENT_FIELD_VALUES.values()))
                 self.assertIs(state[68], enable_crc)
                 self.assertEqual(state[77], 6)
@@ -171,7 +191,7 @@ class KVCacheConfigPickleTest(TestCase):
                 self.assertEqual(restored.kv_cache_pool_block_weights, '{"full":7,"linear":2}')
                 self.assertEqual(restored.block_tree_transfer_worker_count, 7)
                 self.assertEqual(
-                    restored.disk_cache_evict_max_pending_bytes, 80 * 1024 * 1024
+                    restored.host_cache_evict_max_pending_bytes, 80 * 1024 * 1024
                 )
                 self.assertTrue(restored.enable_disk_cache)
                 self.assertEqual(restored.disk_cache_paths, "/tmp/cache")
@@ -191,7 +211,7 @@ class KVCacheConfigPickleTest(TestCase):
 
     def test_previous_versions_use_default_pending_budget(self):
         source = KVCacheConfig()
-        source.disk_cache_evict_max_pending_bytes = 80 * 1024 * 1024
+        source.host_cache_evict_max_pending_bytes = 80 * 1024 * 1024
         state = _version_twenty_state(source)
         for version, size in (
             (6, 64),
@@ -213,7 +233,7 @@ class KVCacheConfigPickleTest(TestCase):
                 restored.__setstate__(previous)
                 self.assertEqual(previous, original_state)
                 self.assertEqual(
-                    restored.disk_cache_evict_max_pending_bytes, 100 * 1024 * 1024
+                    restored.host_cache_evict_max_pending_bytes, 100 * 1024 * 1024
                 )
                 self.assertFalse(restored.enable_linear_cache_reclaim)
 
@@ -269,8 +289,8 @@ class KVCacheConfigPickleTest(TestCase):
         source.dsv41_decoder_swa_pool_blocks = 512
         source.kvcm_task_timeout_ms = 23000
         source.kv_cache_event_snapshot_interval_ms = 45000
-        source.disk_cache_evict_timeout_ms = 5000
-        source.disk_cache_evict_max_pending_bytes = 80 * 1024 * 1024
+        source.host_to_disk_timeout_ms = 5000
+        source.host_cache_evict_max_pending_bytes = 80 * 1024 * 1024
         source.block_tree_task_pool_size = 6
         source.block_tree_frozen_force_release_timeout_ms = 120000
 
@@ -306,26 +326,22 @@ class KVCacheConfigPickleTest(TestCase):
         self.assertEqual(restored.__getstate__(), config.__getstate__())
 
     def test_disk_timeout_defaults_and_overrides_survive_worker_round_trips(self):
-        self.assertEqual(KVCacheConfig().disk_cache_sync_timeout_ms, 3000)
-        self.assertEqual(KVCacheConfig().disk_cache_evict_timeout_ms, 3000)
-        for eviction_timeout in (-1, 45000):
-            with self.subTest(eviction_timeout=eviction_timeout):
-                config = KVCacheConfig()
-                config.disk_cache_sync_timeout_ms = 200
-                config.disk_cache_evict_timeout_ms = eviction_timeout
-                config.kvcm_task_timeout_ms = 23000
-                for _ in range(2):
-                    config = pickle.loads(pickle.dumps(config))
-                    self.assertEqual(config.disk_cache_sync_timeout_ms, 200)
-                    self.assertEqual(
-                        config.disk_cache_evict_timeout_ms, eviction_timeout
-                    )
-                    self.assertEqual(config.kvcm_task_timeout_ms, 23000)
+        self.assertEqual(KVCacheConfig().disk_to_device_timeout_ms, 3000)
+        self.assertEqual(KVCacheConfig().host_to_disk_timeout_ms, 3000)
+        config = KVCacheConfig()
+        config.disk_to_device_timeout_ms = 200
+        config.host_to_disk_timeout_ms = 45000
+        config.kvcm_task_timeout_ms = 23000
+        for _ in range(2):
+            config = pickle.loads(pickle.dumps(config))
+            self.assertEqual(config.disk_to_device_timeout_ms, 200)
+            self.assertEqual(config.host_to_disk_timeout_ms, 45000)
+            self.assertEqual(config.kvcm_task_timeout_ms, 23000)
 
-    def test_older_versions_inherit_the_disk_load_timeout_for_eviction(self):
+    def test_older_versions_use_default_host_to_disk_timeout(self):
         source = KVCacheConfig()
-        source.disk_cache_sync_timeout_ms = 4321
-        source.disk_cache_evict_timeout_ms = 45000
+        source.disk_to_device_timeout_ms = 4321
+        source.host_to_disk_timeout_ms = 45000
         source.kvcm_task_timeout_ms = 23000
         state = _version_twenty_state(source)
         for version, size in ((12, 84), (13, 88)):
@@ -333,8 +349,8 @@ class KVCacheConfigPickleTest(TestCase):
                 previous = (state[0], version, *state[2:size])
                 restored = KVCacheConfig.__new__(KVCacheConfig)
                 restored.__setstate__(previous)
-                self.assertEqual(restored.disk_cache_sync_timeout_ms, 4321)
-                self.assertEqual(restored.disk_cache_evict_timeout_ms, -1)
+                self.assertEqual(restored.disk_to_device_timeout_ms, 4321)
+                self.assertEqual(restored.host_to_disk_timeout_ms, 3000)
                 self.assertEqual(restored.kvcm_task_timeout_ms, 23000)
 
     def test_tail_and_pool_configuration_survives_worker_round_trips(self):
@@ -421,7 +437,7 @@ class KVCacheConfigPickleTest(TestCase):
             ):
                 state = KVCacheConfig().__getstate__()
                 restored = KVCacheConfig.__new__(KVCacheConfig)
-                restored.__setstate__((*state[:78], timeout, state[79], state[80]))
+                restored.__setstate__((*state[:78], timeout, *state[79:]))
 
     def test_previous_versions_use_default_frozen_force_release_timeout(self):
         source = KVCacheConfig()

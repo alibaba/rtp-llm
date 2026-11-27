@@ -181,8 +181,8 @@ TEST(BlockTreeLoaderTest, LocalHostLoadSettlesDespiteBackendFailure) {
     for (const auto& [pool, block] : request_refs) {
         releaseDeviceBlocks(*environment->cache, pool, {block});
     }
-    environment->reclaimAll();
-    environment->expectFullyReclaimed();
+    environment->dropAll();
+    environment->expectAllBlocksFree();
 }
 
 TEST(BlockTreeLoaderTest, HostLoadInstallsAllocatorBoundDeviceTargets) {
@@ -273,12 +273,12 @@ TEST(BlockTreeLoaderTest, HostLoadInstallsAllocatorBoundDeviceTargets) {
 
     result.async_context.reset();
     load_context.reset();
-    environment->reclaimAll();
+    environment->dropAll();
     for (const auto& [pool, block] : request_targets) {
         releaseDeviceBlocks(*environment->cache, pool, {block});
     }
-    environment->reclaimAll();
-    environment->expectFullyReclaimed();
+    environment->dropAll();
+    environment->expectAllBlocksFree();
 }
 
 TEST(BlockTreeLoaderTest, HostLoadUsesReservedAdmissionWhenBackgroundQueueIsFull) {
@@ -367,12 +367,12 @@ TEST(BlockTreeLoaderTest, HostLoadUsesReservedAdmissionWhenBackgroundQueueIsFull
 
     result.async_context.reset();
     load_context.reset();
-    environment->reclaimAll();
+    environment->dropAll();
     for (const auto& [pool, block] : request_targets) {
         releaseDeviceBlocks(*environment->cache, pool, {block});
     }
-    environment->reclaimAll();
-    environment->expectFullyReclaimed();
+    environment->dropAll();
+    environment->expectAllBlocksFree();
     EXPECT_EQ(environment->cache->task_pool_->pending_tasks_.load(), 0);
     const auto events         = profile->finish();
     size_t     business_waits = 0;
@@ -843,8 +843,8 @@ TEST(BlockTreeLoaderTest, DiskTransferFailureInstallsNoLoadTargets) {
     }
     result.async_context.reset();
     load_context.reset();
-    environment->reclaimAll();
-    environment->expectFullyReclaimed();
+    environment->dropAll();
+    environment->expectAllBlocksFree();
     for (const auto& group : environment->groups) {
         EXPECT_EQ(group->diskPool()->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
         for (const auto& pool : group->devicePools()) {
@@ -889,8 +889,8 @@ TEST(BlockTreeLoaderTest, LoadStateMachineRejectsDuplicateTransitionAndRestoresS
     environment->cache->evictor_.admitCandidate(find_result.back(), group_set_id, Tier::HOST);
     EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
 
-    environment->reclaimAll();
-    environment->expectFullyReclaimed();
+    environment->dropAll();
+    environment->expectAllBlocksFree();
 }
 
 TEST(BlockTreeLoaderTest, ChangeTransferStateDoesNotOverwriteForeignTransferState) {
@@ -917,8 +917,8 @@ TEST(BlockTreeLoaderTest, ChangeTransferStateDoesNotOverwriteForeignTransferStat
     EXPECT_EQ(resource.transfer_state, GroupSetTransferState::EVICTING);
 
     resource.transfer_state = GroupSetTransferState::IDLE;
-    environment->reclaimAll();
-    environment->expectFullyReclaimed();
+    environment->dropAll();
+    environment->expectAllBlocksFree();
 }
 
 class DeferredLoadEngine final: public PerRankBlockTransferEngine {
@@ -1085,8 +1085,8 @@ TEST(BlockTreeLoaderTest, PrefixValidatorExceptionLeavesReferencesAndTransferSta
     ASSERT_NE(retry, nullptr);
     EXPECT_FALSE(retry->newLoadIndices().empty());
     EXPECT_TRUE(retry->abortPending());
-    env->reclaimAll();
-    env->expectFullyReclaimed();
+    env->dropAll();
+    env->expectAllBlocksFree();
 }
 
 TEST(BlockTreeLoaderTest, SettlementReleasesTargetPinsAndPreservesJoinedRequestReferences) {
@@ -1177,8 +1177,8 @@ TEST(BlockTreeLoaderTest, SettlementReleasesTargetPinsAndPreservesJoinedRequestR
             EXPECT_EQ(pool->isAllocated(block), install_targets);
         }
         env->cache->transfer_dispatcher_->per_rank_engine_ = original_engine;
-        env->reclaimAll();
-        env->expectFullyReclaimed();
+        env->dropAll();
+        env->expectAllBlocksFree();
     }
 }
 
@@ -1233,8 +1233,8 @@ TEST(BlockTreeLoaderTest, RejectedJoinedContextReleasesOnlyItsRequestReferences)
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*env->cache);
     env->cache->transfer_dispatcher_->per_rank_engine_ = original_engine;
     unreferenceTargets(refs);
-    env->reclaimAll();
-    env->expectFullyReclaimed();
+    env->dropAll();
+    env->expectAllBlocksFree();
 }
 
 TEST(BlockTreeLoaderTest, RejectedLoadSubmissionReleasesContextAndRollsBackReferences) {
@@ -1339,8 +1339,8 @@ TEST(BlockTreeLoaderTest, RejectedLoadSubmissionReleasesContextAndRollsBackRefer
 
         drain.run();
         unreferenceTargets(refs);
-        env->reclaimAll();
-        env->expectFullyReclaimed();
+        env->dropAll();
+        env->expectAllBlocksFree();
     }
 }
 
@@ -1391,8 +1391,8 @@ TEST(BlockTreeLoaderTest, FailedLoadPreparationRollsBackBeforeFailureIsPublished
     context.reset();
     EXPECT_TRUE(env->allResourcesAtTier(Tier::HOST));
     unreferenceTargets(refs);
-    env->reclaimAll();
-    env->expectFullyReclaimed();
+    env->dropAll();
+    env->expectAllBlocksFree();
 }
 
 TEST(BlockTreeLoaderTest, ExpiredLoadSettlesOnceEvenWhenTaskPoolIsClosed) {
@@ -1423,7 +1423,7 @@ TEST(BlockTreeLoaderTest, ExpiredLoadSettlesOnceEvenWhenTaskPoolIsClosed) {
                                0,
                                true,
                                nullptr,
-                               [](bool) {});
+                               [] {});
         std::shared_ptr<LoadAsyncContext> context;
         {
             std::lock_guard<std::mutex> lock(env->cache->mutex_);
@@ -1459,8 +1459,8 @@ TEST(BlockTreeLoaderTest, ExpiredLoadSettlesOnceEvenWhenTaskPoolIsClosed) {
         }
         loader.shutdown();
         unreferenceTargets(refs);
-        env->reclaimAll();
-        env->expectFullyReclaimed();
+        env->dropAll();
+        env->expectAllBlocksFree();
     }
 }
 
@@ -1586,8 +1586,8 @@ TEST(BlockTreeLoaderTest, OldLoadSettlementPreservesNewGenerationAndItsJoiners) 
         env->releaseMatch(new_match);
         env->releaseMatch(joined_match);
         env->cache->transfer_dispatcher_->per_rank_engine_ = original_engine;
-        env->reclaimAll();
-        env->expectFullyReclaimed();
+        env->dropAll();
+        env->expectAllBlocksFree();
     }
 }
 
@@ -1696,8 +1696,8 @@ TEST_P(ConcurrentBlockTreeLoaderTest, MixedLoadFailurePublishesHostAndKeepsJoine
     env->releaseMatch(owner_match);
     env->releaseMatch(joined_match);
     env->releaseMatch(retry_match);
-    env->reclaimAll();
-    env->expectFullyReclaimed();
+    env->dropAll();
+    env->expectAllBlocksFree();
 }
 
 INSTANTIATE_TEST_SUITE_P(CompletionOrdersAndFailures,
@@ -1780,8 +1780,8 @@ TEST(BlockTreeLoaderTest, HostSuccessUsesResidentSwaFallbackWithoutLoadingAnExtr
             EXPECT_TRUE(env->resourcesForPathNode(3)[1].hasTier(Tier::DEVICE));
             unreferenceTargets(refs);
             env->releaseMatch(match);
-            env->reclaimAll();
-            env->expectFullyReclaimed();
+            env->dropAll();
+            env->expectAllBlocksFree();
         }
     }
 }
@@ -1837,12 +1837,12 @@ TEST(BlockTreeLoaderTest, UnknownDiskCompletionFreezesOnlyItsTargetBeforeHostCom
     }
     unreferenceTargets(refs);
     env->releaseMatch(match);
-    env->reclaimAll();
+    env->dropAll();
     for (const auto& target : frozen_tasks.begin()->second.targets) {
         EXPECT_EQ(target.pool->treeRefCount(target.block), 1u);
     }
     reclaimer.forceRelease(frozen_tasks.begin()->first);
-    env->expectFullyReclaimed();
+    env->expectAllBlocksFree();
 }
 
 TEST(BlockTreeLoaderTest, SwaCorruptionDropsNonLeafResourceAndPreservesFullPath) {
@@ -1887,8 +1887,8 @@ TEST(BlockTreeLoaderTest, SwaCorruptionDropsNonLeafResourceAndPreservesFullPath)
     EXPECT_EQ(later->matchedBlocks(), 2u);
     EXPECT_TRUE(later->abortPending());
     unreferenceTargets(refs);
-    env->reclaimAll();
-    env->expectFullyReclaimed();
+    env->dropAll();
+    env->expectAllBlocksFree();
 }
 
 TEST(BlockTreeLoaderTest, SwaBatchCorruptionPreservesDescendantsBeyondWindow) {
@@ -1941,8 +1941,8 @@ TEST(BlockTreeLoaderTest, SwaBatchCorruptionPreservesDescendantsBeyondWindow) {
     }
     EXPECT_TRUE(later->abortPending());
     unreferenceTargets(refs);
-    env->reclaimAll();
-    env->expectFullyReclaimed();
+    env->dropAll();
+    env->expectAllBlocksFree();
 }
 
 class BlockTreeLoaderCorruptionTest: public ::testing::TestWithParam<size_t> {};
@@ -2060,8 +2060,8 @@ TEST_P(BlockTreeLoaderCorruptionTest, FullCorruptionBlocksPendingKeyUntilDescend
     for (size_t group = 0; group < env->groups.size(); ++group) {
         block_tree_cache_test::unreferenceDeviceBlocksForTest(*env->groups[group], replacement_blocks[group]);
     }
-    env->reclaimAll();
-    env->expectFullyReclaimed();
+    env->dropAll();
+    env->expectAllBlocksFree();
 }
 
 TEST(BlockTreeLoaderTest, FullCorruptionRacingPendingCommitReleasesEachReferenceOnce) {
@@ -2118,7 +2118,7 @@ TEST(BlockTreeLoaderTest, FullCorruptionRacingPendingCommitReleasesEachReference
     EXPECT_EQ(env->cache->getKeySnapshot().version, after_drop.version);
     unreferenceTargets(owner_refs);
     unreferenceTargets(pending_refs);
-    env->expectFullyReclaimed();
+    env->expectAllBlocksFree();
 }
 
 TEST(BlockTreeLoaderTest, FullCorruptionReclaimsIdleDescendantsOutsideTheLoadBatch) {
@@ -2157,7 +2157,7 @@ TEST(BlockTreeLoaderTest, FullCorruptionReclaimsIdleDescendantsOutsideTheLoadBat
         EXPECT_EQ(pool->usedBlocksNum(), 0u);
     }
     unreferenceTargets(refs);
-    env->expectFullyReclaimed();
+    env->expectAllBlocksFree();
 }
 
 TEST(BlockTreeLoaderTest, FullPendingCommitRejectsCorruptSubtreeAndReclaimsItsNode) {
@@ -2212,7 +2212,7 @@ TEST(BlockTreeLoaderTest, FullPendingCommitRejectsCorruptSubtreeAndReclaimsItsNo
     }
     unreferenceTargets(owner_refs);
     unreferenceTargets(pending_refs);
-    env->expectFullyReclaimed();
+    env->expectAllBlocksFree();
 }
 
 INSTANTIATE_TEST_SUITE_P(DescendantFullAndSwa, BlockTreeLoaderCorruptionTest, ::testing::Values(size_t{0}, size_t{1}));
@@ -2249,7 +2249,7 @@ TEST(BlockTreeLoaderTest, BatchSettlementHandlesCorruptionInEveryGroupAndAncesto
         }
     }
     unreferenceTargets(refs);
-    env->expectFullyReclaimed();
+    env->expectAllBlocksFree();
 }
 
 TEST(BlockTreeLoaderTest, ConcurrentFullAndSwaCorruptionPreservesSwaPathAndReclaimsFullPendingLoad) {
@@ -2363,8 +2363,8 @@ TEST(BlockTreeLoaderTest, ConcurrentFullAndSwaCorruptionPreservesSwaPathAndRecla
             EXPECT_FALSE(resource.transfer_detached);
         }
     }
-    env->reclaimAll();
-    env->expectFullyReclaimed();
+    env->dropAll();
+    env->expectAllBlocksFree();
 }
 
 TEST(BlockTreeLoaderTest, PendingLoadAllowsNonOwnerLoadAcrossOwnerSettlement) {
@@ -2430,8 +2430,8 @@ TEST(BlockTreeLoaderTest, PendingLoadAllowsNonOwnerLoadAcrossOwnerSettlement) {
             unreferenceTargets(second_refs);
             env->releaseMatch(first);
             env->releaseMatch(second);
-            env->reclaimAll();
-            env->expectFullyReclaimed();
+            env->dropAll();
+            env->expectAllBlocksFree();
         }
     }
 }
@@ -2554,8 +2554,8 @@ TEST(BlockTreeLoaderTest, NonOwnerInsertKeepsDevicePrefixAcrossOwnerSettlement) 
             unreferenceTargets(owner_refs);
             unreferenceTargets(non_owner_refs);
             unreferenceTargets(suffix_refs);
-            env->reclaimAll();
-            env->expectFullyReclaimed();
+            env->dropAll();
+            env->expectAllBlocksFree();
         }
     }
 }
@@ -2636,8 +2636,8 @@ TEST(BlockTreeLoaderTest, PrunedAdoptedDeviceReleasesCurrentCacheAndOriginalLoad
             unreferenceTargets(non_owner_refs);
             env->releaseMatch(owner_match);
             env->releaseMatch(non_owner_match);
-            env->reclaimAll();
-            env->expectFullyReclaimed();
+            env->dropAll();
+            env->expectAllBlocksFree();
         }
     }
 }
@@ -2713,12 +2713,11 @@ TEST(BlockTreeLoaderTest, ReplacedLoadCannotChangeNewEvictionState) {
                 EXPECT_EQ(resource.transfer_state, GroupSetTransferState::EVICTING);
                 EXPECT_EQ(resource.device_blocks, resources[0][0].device_blocks);
                 EXPECT_TRUE(next->isCurrentOwner());
-                evictor.completeEvict({*next});
-                evictor.settleEviction({*next});
+                evictor.commitTransferLocked({*next});
             }
             unreferenceTargets(owner_refs);
-            env->reclaimAll();
-            env->expectFullyReclaimed();
+            env->dropAll();
+            env->expectAllBlocksFree();
         }
     }
 }
@@ -2769,8 +2768,7 @@ TEST(BlockTreeLoaderTest, NonOwnerPrefixDoesNotPublishOwnerDeviceSuffix) {
         ASSERT_TRUE(context->success());
         if (evicting) {
             std::lock_guard<std::mutex> lock(env->cache->mutex_);
-            env->cache->evictor_.completeEvict({*eviction});
-            env->cache->evictor_.settleEviction({*eviction});
+            env->cache->evictor_.commitTransferLocked({*eviction});
         } else {
             EXPECT_TRUE(pending->abortPending());
         }
@@ -2778,8 +2776,8 @@ TEST(BlockTreeLoaderTest, NonOwnerPrefixDoesNotPublishOwnerDeviceSuffix) {
         EXPECT_EQ(env->resourcesForPathNode(1)[0].getTopTier(), evicting ? Tier::DISK : Tier::HOST);
         EXPECT_EQ(env->resourcesForPathNode(1)[0].transfer_state, GroupSetTransferState::IDLE);
         unreferenceTargets(refs);
-        env->reclaimAll();
-        env->expectFullyReclaimed();
+        env->dropAll();
+        env->expectAllBlocksFree();
     }
 }
 
@@ -2819,7 +2817,9 @@ TEST(BlockTreeLoaderTest, NonOwnerLoadKeepsRemovedNodesPendingUntilLastUserFinis
             }
             {
                 std::lock_guard<std::mutex> lock(env->cache->mutex_);
-                while (env->cache->evictor_.dropLocked(0, source, false)) {}
+                while (auto drop_victim = env->cache->evictor_.chooseVictim(0, source, /*force_drop=*/true)) {
+                    env->cache->evictor_.runDropTask(std::move(*drop_victim));
+                }
             }
             ASSERT_TRUE(env->cache->tree_->findNode(env->keys).empty());
             ASSERT_EQ(env->cache->tree_->pending_node_pool_.size(), options.path_length);
@@ -2857,8 +2857,8 @@ TEST(BlockTreeLoaderTest, NonOwnerLoadKeepsRemovedNodesPendingUntilLastUserFinis
             EXPECT_EQ(env->cache->tree_->findNode(env->keys).size(), options.path_length);
             env->releaseRequestRefs();
             unreferenceTargets(refs);
-            env->reclaimAll();
-            env->expectFullyReclaimed();
+            env->dropAll();
+            env->expectAllBlocksFree();
         }
     }
 }
@@ -2895,7 +2895,7 @@ TEST(BlockTreeLoaderTest, ReplacedEvictionWithdrawsPendingReleaseAndReportsAllEv
                                                                 env->host_pools[0].get();
                     {
                         std::lock_guard<std::mutex> lock(env->cache->mutex_);
-                        ASSERT_TRUE(evictor.batchEvictLocked(0, old_tier, 1).async_submitted);
+                        ASSERT_TRUE(evictor.batchEvictLocked(0, old_tier, 1));
                         EXPECT_EQ(evictor.pending_release_counts_.at(old_pool), 1u);
                     }
                     ASSERT_TRUE(engine->waitForBatches(1));
@@ -2908,14 +2908,16 @@ TEST(BlockTreeLoaderTest, ReplacedEvictionWithdrawsPendingReleaseAndReportsAllEv
                     {
                         std::lock_guard<std::mutex> lock(env->cache->mutex_);
                         EXPECT_EQ(evictor.pending_release_counts_.at(old_pool), 0u);
-                        EXPECT_EQ(evictor.heaps_[0].watermark_rounds[static_cast<size_t>(old_tier)].pending_count, 1u);
+                        EXPECT_EQ(evictor.watermarkStrategy(old_tier)->watermark_rounds_[0].pending_count, 1u);
                         EXPECT_EQ(old_pool->referencedBlocksNum(BlockTreeRefType::EVICT), 1u);
-                        ASSERT_TRUE(evictor.batchEvictLocked(0, Tier::DEVICE, 1).async_submitted);
+                        ASSERT_TRUE(evictor.batchEvictLocked(0, Tier::DEVICE, 1));
                         for (size_t member : {0u, 1u}) {
                             EXPECT_EQ(evictor.pending_release_counts_.at(env->device_pools[member].get()), 1u);
                             EXPECT_EQ(env->device_pools[member]->usedBlocksNum(), 1u);
                         }
-                        EXPECT_NO_THROW(evictor.computeWatermarkEvictCount(*env->groups[0], Tier::DEVICE, {0.5, 0.75}));
+                        bool waiting_for_budget = false;
+                        EXPECT_FALSE(evictor.scheduleWatermarkGroupLocked(
+                            0, Tier::DEVICE, TierWatermark{0.5, 0.75}, waiting_for_budget));
                     }
                     ASSERT_TRUE(engine->waitForBatches(2));
                     BlockTreeCacheMetricsReporter reporter(nullptr);
@@ -2939,11 +2941,11 @@ TEST(BlockTreeLoaderTest, ReplacedEvictionWithdrawsPendingReleaseAndReportsAllEv
                         EXPECT_EQ(evictor.pending_release_counts_.at(env->device_pools[0].get()), old_first ? 1u : 0u);
                         EXPECT_EQ(old_pool->referencedBlocksNum(BlockTreeRefType::EVICT),
                                   old_first ? (old_tier == Tier::HOST ? 1u : 0u) : 1u);
-                        size_t pending_tasks = 0;
-                        for (const auto& round : evictor.heaps_[0].watermark_rounds) {
-                            pending_tasks += round.pending_count;
+                        size_t pending_count = 0;
+                        for (Tier source : {Tier::DEVICE, Tier::HOST}) {
+                            pending_count += evictor.watermarkStrategy(source)->watermark_rounds_[0].pending_count;
                         }
-                        EXPECT_EQ(pending_tasks, 1u);
+                        EXPECT_EQ(pending_count, 1u);
                     }
                     const bool last_success = old_first ? new_success : old_success;
                     engine->completeResult(1 - first,
@@ -2956,14 +2958,14 @@ TEST(BlockTreeLoaderTest, ReplacedEvictionWithdrawsPendingReleaseAndReportsAllEv
                         for (const auto& entry : evictor.pending_release_counts_) {
                             EXPECT_EQ(entry.second, 0u);
                         }
-                        for (const auto& round : evictor.heaps_[0].watermark_rounds) {
-                            EXPECT_EQ(round.pending_count, 0u);
+                        for (Tier source : {Tier::DEVICE, Tier::HOST}) {
+                            EXPECT_EQ(evictor.watermarkStrategy(source)->watermark_rounds_[0].pending_count, 0u);
                         }
                         EXPECT_TRUE(evictor.heaps_[0].pending_timings.empty());
                         EXPECT_EQ(old_pool->referencedBlocksNum(BlockTreeRefType::EVICT), 0u);
                     }
-                    env->reclaimAll();
-                    env->expectFullyReclaimed();
+                    env->dropAll();
+                    env->expectAllBlocksFree();
                 }
             }
         }
@@ -3039,8 +3041,8 @@ TEST(BlockTreeLoaderTest, NonOwnerFullCrcPrunesBusySubtreeAndRestoresParentCandi
                 EXPECT_EQ(path.front()->group_set_resources[0].transfer_state, GroupSetTransferState::IDLE);
                 unreferenceTargets(owner_refs);
                 unreferenceTargets(non_owner_refs);
-                env->reclaimAll();
-                env->expectFullyReclaimed();
+                env->dropAll();
+                env->expectAllBlocksFree();
             }
         }
     }
@@ -3107,8 +3109,8 @@ TEST(BlockTreeLoaderTest, NonOwnerLoadCrcFailureInvalidatesOnlyCurrentSource) {
             }
             unreferenceTargets(owner_refs);
             unreferenceTargets(non_owner_refs);
-            env->reclaimAll();
-            env->expectFullyReclaimed();
+            env->dropAll();
+            env->expectAllBlocksFree();
         }
     }
 }

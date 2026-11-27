@@ -291,6 +291,38 @@ protected:
     std::vector<BlockIdxType>                      hosts, disks;
 };
 
+TEST_F(TransferWorkLoopTest, HostWatermarkBatchFitsOneResidentTransfer) {
+    using block_tree_cache_test::BlockTreeCacheTestPeer;
+    BlockTreeCacheConfig config;
+    config.enable_host_cache = config.enable_disk_cache = true;
+    config.transfer_worker_count = config.transfer_queue_max_size = 1;
+    config.max_descriptors_per_transfer_batch                     = 2;
+    auto cache = block_tree_cache_test::makeBlockTreeCacheForTest({group}, config);
+    ASSERT_NE(cache, nullptr);
+    const auto   schedule_capacity_check = cache->capacityChangeCallback();
+    const size_t initial_host            = host->usedBlocksNum();
+    const size_t initial_disk            = disk->usedBlocksNum();
+    for (int64_t key : {1, 2}) {
+        std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
+        resources[0][0].host_block = group->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
+        ASSERT_TRUE(block_tree_cache_test::insertGroupSetResources(*cache, {key}, resources));
+    }
+    BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
+    io->blocked = true;
+    block_tree_cache_detail::ScopeRollback unblock([&] { io->release(); });
+    const double                           total = host->totalBlocksNum();
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(
+        *cache, Tier::HOST, initial_host / total, (initial_host + 2) / total);
+    schedule_capacity_check();
+    ASSERT_TRUE(io->waitWrites());
+    EXPECT_EQ(BlockTreeCacheTestPeer::pendingEvictionReleasesForTest(*cache), 2u);
+    unblock.run();
+    BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
+    EXPECT_EQ(io->writes, 2u);
+    EXPECT_EQ(host->usedBlocksNum(), initial_host);
+    EXPECT_EQ(disk->usedBlocksNum(), initial_disk + 2);
+}
+
 class TransferWorkLoopDeathTest: public TransferWorkLoopTest {
 protected:
     void SetUp() override {
@@ -2541,7 +2573,7 @@ TEST_F(TransferWorkLoopTest, IndependentFullAndSwaDiskPoolsShareOneExecutorAcros
     swa_policy.sliding_window_size = 128;
     auto topology = makeTestTopology({makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, 384),
                                       makeTestGroupBase(swa_policy, {1}, 384)});
-    group->initialize(0, topology, {"group0"}, makeTestBackingLayout(384, false));
+    group->initialize(0, topology, {"group0"}, makeTestBackingLayout(384, false), 0);
     auto       swa_disk  = makeDiskPool(384, 16, temp.path, std::make_unique<ControlledDiskIO>(), "swa");
     auto       swa       = makeTestGroupSet(1, topology, {"group1"}, {}, host, swa_disk);
     const auto swa_block = poolMalloc(*swa_disk);
@@ -2568,7 +2600,7 @@ TEST_F(TransferWorkLoopCrcTest, UnifiedStagingQueueAdmitsSwaWhileFullWaiterIsBlo
     swa_policy.sliding_window_size = 128;
     auto topology = makeTestTopology({makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, 384),
                                       makeTestGroupBase(swa_policy, {1}, 384)});
-    group->initialize(0, topology, {"group0"}, makeTestBackingLayout(384, true));
+    group->initialize(0, topology, {"group0"}, makeTestBackingLayout(384, true), 0);
     auto swa = makeTestGroupSet(1, topology, {"group1"}, {device}, host, disk, true);
     engine   = std::make_shared<PerRankBlockTransferEngine>(
         std::vector<GroupSetPtr>{group, swa}, true, 2, 2, 1, 8, nullptr, 0, 1, diskOptions());
@@ -2762,7 +2794,7 @@ TEST_F(TransferWorkLoopCrcTest, StagingClassStridesPreserveConfiguredBatchLimit)
     swa_policy.sliding_window_size = 128;
     auto topology = makeTestTopology({makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, 384),
                                       makeTestGroupBase(swa_policy, {1}, 384)});
-    group->initialize(0, topology, {"group0"}, makeTestBackingLayout(384, true));
+    group->initialize(0, topology, {"group0"}, makeTestBackingLayout(384, true), 0);
     auto config             = std::make_shared<DiskBlockPoolConfig>();
     config->pool_type       = BlockPoolType::DISK;
     config->pool_name       = "swa_larger_stride";
@@ -2855,7 +2887,7 @@ TEST_F(TransferWorkLoopCrcTest, LoadOwnersHavePrivateStagingAndAllOwnersKeepInde
     swa_policy.sliding_window_size = 128;
     auto topology = makeTestTopology({makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, 384),
                                       makeTestGroupBase(swa_policy, {1}, 384)});
-    group->initialize(0, topology, {"group0"}, makeTestBackingLayout(384, true));
+    group->initialize(0, topology, {"group0"}, makeTestBackingLayout(384, true), 0);
     auto config             = std::make_shared<DiskBlockPoolConfig>();
     config->pool_type       = BlockPoolType::DISK;
     config->pool_name       = "multi_loop_swa_stride";

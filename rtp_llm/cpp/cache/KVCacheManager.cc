@@ -382,11 +382,11 @@ bool KVCacheManager::init() {
         return false;
     }
     coordinator_manager_->attachBlockTreeCache(block_tree_cache_);
-    const auto notify_cache = block_tree_cache_->capacityChangeCallback();
+    const auto schedule_capacity_check = block_tree_cache_->capacityChangeCallback();
     for (const auto& pool : coordinator_manager_->groupBlockPools()) {
-        pool->setCapacityChangeCallback([capacity_changed, notify_cache] {
+        pool->setCapacityChangeCallback([capacity_changed, schedule_capacity_check] {
             capacity_changed();
-            notify_cache();
+            schedule_capacity_check();
         });
     }
     initCacheEventPublisher();

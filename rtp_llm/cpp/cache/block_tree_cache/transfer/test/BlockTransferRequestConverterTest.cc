@@ -90,7 +90,8 @@ std::vector<GroupSetPtr> protectedGroupSets() {
         group->initialize(group->groupSetId(),
                           group->topologyPtr(),
                           group->groupTags(),
-                          block_transfer_engine_test::makeTestBackingLayout(group->payloadBytes(), true));
+                          block_transfer_engine_test::makeTestBackingLayout(group->payloadBytes(), true),
+                          0);
     }
     return groups;
 }
@@ -437,7 +438,7 @@ TEST(BlockTransferRequestConverterTest, DecodePreservesOriginalItemIndicesWhenSk
     auto        groups = makeGroupSets();
     const auto& empty  = groups.back();
     const auto  stage  = CacheTopology::create(empty->topologyPtr()->groups(), {{0, {"group0", "group5"}}});
-    empty->initialize(empty->groupSetId(), stage, empty->groupTags(), {});
+    empty->initialize(empty->groupSetId(), stage, empty->groupTags(), {}, 0);
     MemoryOperationRequestPB request;
     appendDeviceToHostItem(request, "group6");
     appendDeviceToHostItem(request, "group0");
@@ -655,7 +656,8 @@ TEST(BlockTransferRequestConverterTest, CrcRoutesReorderedGroupSetsAndMembersByT
     receiver->initialize(0,
                          receiver->topologyPtr(),
                          receiver->groupTags(),
-                         block_transfer_engine_test::makeTestBackingLayout(receiver->payloadBytes(), true));
+                         block_transfer_engine_test::makeTestBackingLayout(receiver->payloadBytes(), true),
+                         0);
     const std::vector<TransferDescriptor> inputs{
         TransferDescriptor::deviceToHost(2, {11, 12}, 21),
         TransferDescriptor::hostToDevice(2, 21, {11, 12}),
@@ -721,7 +723,7 @@ TEST(BlockTransferRequestConverterTest, CrcRejectsMalformedSecondItemWithoutPubl
 TEST(BlockTransferRequestConverterTest, MixedGroupLayoutsRoundTripWithLocalCrcConfiguration) {
     auto        groups   = protectedGroupSets();
     const auto& ordinary = groups[2];
-    ordinary->initialize(2, ordinary->topologyPtr(), ordinary->groupTags());
+    ordinary->initialize(2, ordinary->topologyPtr(), ordinary->groupTags(), {}, 0);
     const auto               first  = TransferDescriptor::hostToDevice(0, 21, {11});
     const auto               second = TransferDescriptor::hostToDevice(2, 22, {12, 13});
     MemoryOperationRequestPB request;

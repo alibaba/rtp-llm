@@ -138,7 +138,8 @@ GroupSet::GroupSet(std::vector<DeviceBlockPoolPtr> device_pools,
 void GroupSet::initialize(size_t                               group_set_id,
                           std::shared_ptr<const CacheTopology> topology,
                           std::vector<std::string>             group_tags,
-                          BackingLayout                        backing_layout) {
+                          BackingLayout                        backing_layout,
+                          size_t                               eviction_block_bytes) {
     RTP_LLM_CHECK_WITH_INFO(topology != nullptr, "GroupSet requires a topology");
     RTP_LLM_CHECK_WITH_INFO(!group_tags.empty(), "GroupSet requires at least one member tag");
     RTP_LLM_CHECK_WITH_INFO(device_pools_.empty() || device_pools_.size() == group_tags.size(),
@@ -167,12 +168,13 @@ void GroupSet::initialize(size_t                               group_set_id,
         }
     }
 
-    group_set_id_  = group_set_id;
-    topology_      = std::move(topology);
-    group_tags_    = std::move(group_tags);
-    payload_bytes_ = physical_payload_bytes;
-    enable_crc_    = backing_layout.crc_enabled;
-    storage_bytes_ = backing_layout.storage_bytes == 0 ? physical_payload_bytes : backing_layout.storage_bytes;
+    group_set_id_         = group_set_id;
+    topology_             = std::move(topology);
+    group_tags_           = std::move(group_tags);
+    payload_bytes_        = physical_payload_bytes;
+    eviction_block_bytes_ = eviction_block_bytes;
+    enable_crc_           = backing_layout.crc_enabled;
+    storage_bytes_        = backing_layout.storage_bytes == 0 ? physical_payload_bytes : backing_layout.storage_bytes;
 }
 
 void GroupSet::referenceBlocks(const MultiNodeResource& resource) const {
@@ -214,13 +216,15 @@ BlockIdxType GroupSet::allocateSingleBlock(Tier tier, BlockTreeRefType ref_type)
     return blocks.has_value() ? blocks->front() : NULL_BLOCK_IDX;
 }
 
-std::optional<BlockIdList> GroupSet::allocateBlocks(size_t n, Tier tier, BlockTreeRefType ref_type) {
-    IBlockPool* pool = nullptr;
+IBlockPool* GroupSet::hostOrDiskPool(Tier tier) const {
     if (tier == Tier::HOST) {
-        pool = host_pool_.get();
-    } else if (tier == Tier::DISK) {
-        pool = disk_pool_.get();
+        return host_pool_.get();
     }
+    return tier == Tier::DISK ? disk_pool_.get() : nullptr;
+}
+
+std::optional<BlockIdList> GroupSet::allocateBlocks(size_t n, Tier tier, BlockTreeRefType ref_type) {
+    auto* pool = hostOrDiskPool(tier);
     if (!pool)
         return std::nullopt;
     auto blocks = pool->malloc(n);
@@ -231,12 +235,8 @@ std::optional<BlockIdList> GroupSet::allocateBlocks(size_t n, Tier tier, BlockTr
 }
 
 void GroupSet::unreferenceBlocks(Tier tier, const BlockIdList& blocks, BlockTreeRefType ref_type) const {
-    if (tier == Tier::HOST) {
-        if (host_pool_)
-            host_pool_->decTreeRef(blocks, ref_type);
-    } else if (tier == Tier::DISK) {
-        if (disk_pool_)
-            disk_pool_->decTreeRef(blocks, ref_type);
+    if (auto* pool = hostOrDiskPool(tier)) {
+        pool->decTreeRef(blocks, ref_type);
     }
 }
 

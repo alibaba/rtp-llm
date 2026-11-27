@@ -330,12 +330,12 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help="HOST SWA/full 可用 block 数比例，默认 1.0；仅同时存在 FULL/SWA 时生效，不改变检查点间隔。",
     )
     kv_cache_group.add_argument(
-        "--memory_cache_sync_timeout_ms",
-        env_name="MEMORY_CACHE_SYNC_TIMEOUT_MS",
-        bind_to=(kv_cache_config, "memory_cache_sync_timeout_ms"),
+        "--device_host_timeout_ms",
+        env_name="DEVICE_HOST_TIMEOUT_MS",
+        bind_to=(kv_cache_config, "device_host_timeout_ms"),
         type=int,
         default=10000,
-        help="Memory KVCache 多 TP 同步超时，单位毫秒",
+        help="DEVICE→HOST evict 和 HOST→DEVICE load 共用的传输超时，包含排队时间，默认 10000 毫秒。",
     )
     kv_cache_group.add_argument(
         "--disk_cache_paths",
@@ -362,21 +362,20 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help="磁盘 KV cache 是否使用 buffered I/O。默认开启。",
     )
     kv_cache_group.add_argument(
-        "--disk_cache_sync_timeout_ms",
-        env_name="DISK_CACHE_SYNC_TIMEOUT_MS",
-        bind_to=(kv_cache_config, "disk_cache_sync_timeout_ms"),
+        "--disk_to_device_timeout_ms",
+        env_name="DISK_TO_DEVICE_TIMEOUT_MS",
+        bind_to=(kv_cache_config, "disk_to_device_timeout_ms"),
         type=int,
         default=3000,
-        help="磁盘 KV cache load 传输超时，包含排队时间，默认 3000 毫秒。",
+        help="DISK→DEVICE load 传输超时，包含排队时间，默认 3000 毫秒。",
     )
     kv_cache_group.add_argument(
-        "--disk_cache_evict_timeout_ms",
-        env_name="DISK_CACHE_EVICT_TIMEOUT_MS",
-        bind_to=(kv_cache_config, "disk_cache_evict_timeout_ms"),
+        "--host_to_disk_timeout_ms",
+        env_name="HOST_TO_DISK_TIMEOUT_MS",
+        bind_to=(kv_cache_config, "host_to_disk_timeout_ms"),
         type=int,
         default=3000,
-        help="磁盘 KV cache evict/store 写盘传输超时，包含排队时间，默认 3000 毫秒。"
-        "设为 -1 时沿用 DISK_CACHE_SYNC_TIMEOUT_MS，否则必须为正数。",
+        help="HOST→DISK evict 传输超时，包含排队时间，默认 3000 毫秒。",
     )
     kv_cache_group.add_argument(
         "--disk_cache_staging_block_count",
@@ -396,26 +395,39 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         ),
     )
     kv_cache_group.add_argument(
-        "--disk_cache_evict_max_pending_bytes",
-        env_name="DISK_CACHE_EVICT_MAX_PENDING_BYTES",
-        bind_to=(kv_cache_config, "disk_cache_evict_max_pending_bytes"),
+        "--block_tree_last_tier_evict_strategy",
+        env_name="BLOCK_TREE_LAST_TIER_EVICT_STRATEGY",
+        bind_to=(kv_cache_config, "block_tree_last_tier_evict_strategy"),
+        choices=("on_demand", "watermark"),
+        default=kv_cache_config.block_tree_last_tier_evict_strategy,
+        help="末层 evict 策略。on_demand 在需要空间时 evict，watermark 按水位分批 evict。",
+    )
+    kv_cache_group.add_argument(
+        "--device_cache_evict_max_pending_bytes",
+        env_name="DEVICE_CACHE_EVICT_MAX_PENDING_BYTES",
+        bind_to=(kv_cache_config, "device_cache_evict_max_pending_bytes"),
         type=int,
-        default=kv_cache_config.disk_cache_evict_max_pending_bytes,
-        help=(
-            "HOST->DISK 水位淘汰共享的未结算字节上限。PP=1 按本地落盘 stride 计费，"
-            "PP>1 按该组实际写盘的 stage 的平均落盘 stride 计费，向上取整到字节；"
-            "必须大于 0，超大单块允许独占提交。"
-        ),
+        default=kv_cache_config.device_cache_evict_max_pending_bytes,
+        help="DEVICE→HOST evict 的未完成字节上限，按 HOST 块 stride 计费（PP 取有本组数据的 stage 的平均值），同一源层各组共享。0 关闭字节限制。超大单块可独占提交。",
     )
     kv_cache_group.add_argument(
         "--memory_cache_max_descriptors_per_transfer_batch",
         env_name="MEMORY_CACHE_MAX_DESCRIPTORS_PER_TRANSFER_BATCH",
         bind_to=(kv_cache_config, "memory_cache_max_descriptors_per_transfer_batch"),
         type=int,
-        default=32,
+        default=kv_cache_config.memory_cache_max_descriptors_per_transfer_batch,
+        help="各层水位 evict 和本地传输共用的每批 descriptor 上限。必须大于 0，CRC 工作区容量可降低该 rank 的实际批次上限。",
+    )
+    kv_cache_group.add_argument(
+        "--host_cache_evict_max_pending_bytes",
+        env_name="HOST_CACHE_EVICT_MAX_PENDING_BYTES",
+        bind_to=(kv_cache_config, "host_cache_evict_max_pending_bytes"),
+        type=int,
+        default=kv_cache_config.host_cache_evict_max_pending_bytes,
         help=(
-            "各传输方向共用的最大 descriptor 批大小；启用 CRC 时，显存预算可能降低实际批大小。"
-            "Disk->Device 还受 staging 容量限制，Device->Disk 保留单项提交。"
+            "HOST->DISK 水位淘汰共享的未结算字节上限。PP=1 按本地落盘 stride 计费，"
+            "PP>1 按该组实际写盘的 stage 的平均落盘 stride 计费，向上取整到字节；"
+            "0 关闭字节限制，超大单块允许独占提交。"
         ),
     )
     kv_cache_group.add_argument(
@@ -462,10 +474,10 @@ def init_kv_cache_group_args(parser, kv_cache_config):
             "要求 Q >= worker_count。配额不能跨 loop 借用。"
         ),
     )
-    for tier, low, high in (
-        ("device", 0.82, 0.90),
-        ("memory", 0.90, 0.94),
-        ("disk", 0.92, 0.97),
+    for tier, low, high, usage in (
+        ("device", 0.82, 0.90, "启用 HOST 或末层选择 watermark 时生效。"),
+        ("memory", 0.90, 0.94, "启用 DISK 或末层选择 watermark 时生效。"),
+        ("disk", 0.92, 0.97, "末层选择 watermark 时生效。"),
     ):
         for boundary, default in (("low", low), ("high", high)):
             name = f"block_tree_{tier}_evict_{boundary}_watermark_ratio"
@@ -475,7 +487,7 @@ def init_kv_cache_group_args(parser, kv_cache_config):
                 bind_to=(kv_cache_config, name),
                 type=float,
                 default=default,
-                help=f"BlockTreeCache {tier} 淘汰水位 {boundary} 比例。",
+                help=f"BlockTreeCache {tier} 淘汰水位 {boundary} 比例。{usage}",
             )
 
     kv_cache_group.add_argument(

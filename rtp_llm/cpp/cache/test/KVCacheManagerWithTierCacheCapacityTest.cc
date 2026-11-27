@@ -134,9 +134,9 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullLowerPoolSkipsEvictionAndRetries
     ASSERT_NO_FATAL_FAILURE(reclaimAndExpectInitialPools(manager_, initial_device, initial_lower, GetParam()));
 }
 
-TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullHostPoolSelfDrainsThenDeviceEvictionRetries) {
+TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceEvictionMakesRoomInFullHostPool) {
     if (GetParam() != TierLayout::HOST_ONLY) {
-        GTEST_SKIP() << "HOST self-drain coverage requires HostOnly layout";
+        GTEST_SKIP() << "requires HostOnly layout";
     }
     ASSERT_NO_FATAL_FAILURE(initManager(/*device_blocks=*/128, /*lower_cache_size_mb=*/1));
     auto       cache          = manager_->blockTreeCache();
@@ -208,6 +208,11 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullHostPoolSelfDrainsThenDeviceEvic
 
     const auto device_ratio = oneUsedBlockWatermarkRatio(device_pools);
     ASSERT_TRUE(device_ratio.has_value());
+    for (const auto& blocks : host_blocks) {
+        for (size_t group_set_id = 0; group_set_id < blocks.size(); ++group_set_id) {
+            host_pools[group_set_id]->incTreeRef(blocks[group_set_id], BlockTreeRefType::LOAD);
+        }
+    }
     const size_t submits_before_full_host = transfer_engine_->submittedDescriptorCount();
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, *device_ratio);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
@@ -230,44 +235,20 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullHostPoolSelfDrainsThenDeviceEvic
         EXPECT_EQ(host_pools[group_set_id]->referencedBlocksNum(BlockTreeRefType::EVICT), 0u);
     }
     ASSERT_TRUE(pathDevicePayloadMatches(manager_, *cache, retry_seed.cache_keys));
+    for (const auto& blocks : host_blocks) {
+        for (size_t group_set_id = 0; group_set_id < blocks.size(); ++group_set_id) {
+            host_pools[group_set_id]->decTreeRef(blocks[group_set_id], BlockTreeRefType::LOAD);
+        }
+    }
     ASSERT_NO_FATAL_FAILURE(
         expectFullTierPathUnchanged(*cache, full_seed.cache_keys, Tier::HOST, host_blocks, host_pools, host_capacity));
-    const auto host_delete_baseline = snapshotPathResources(*cache, full_seed.cache_keys);
-    ASSERT_TRUE(host_delete_baseline.has_value());
-
-    const auto host_ratio = blockExcessWatermarkRatio(host_pools, /*excess_blocks=*/1);
-    ASSERT_TRUE(host_ratio.has_value());
-    const size_t submits_before_host_delete = transfer_engine_->submittedDescriptorCount();
-    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, *host_ratio);
-    BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
-    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, 0.0);
-    BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
-    EXPECT_EQ(transfer_engine_->submittedDescriptorCount(), submits_before_host_delete)
-        << "HostOnly HOST eviction deletes cache-owned victims without a copy";
-    std::vector<size_t> freed_host_blocks(cache->groupSets().size(), 0);
-    for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
-        size_t removed = 0;
-        for (size_t path_index = 0; path_index < host_delete_baseline->size(); ++path_index) {
-            const BlockIdxType block = (*host_delete_baseline)[path_index][group_set_id].host_block;
-            if (!host_pools[group_set_id]->isAllocated(block)) {
-                ++removed;
-            }
-        }
-        ASSERT_GT(removed, 0u) << "group_set=" << group_set_id;
-        freed_host_blocks[group_set_id] = removed;
-        EXPECT_EQ(host_pools[group_set_id]->freeBlocksNum(), removed);
-        EXPECT_EQ(host_pools[group_set_id]->usedBlocksNum(), host_capacity - removed);
-        EXPECT_EQ(host_pools[group_set_id]->referencedBlocksNum(BlockTreeRefType::CACHE), host_capacity - removed);
-        EXPECT_EQ(host_pools[group_set_id]->referencedBlocksNum(BlockTreeRefType::EVICT), 0u);
-    }
-
     const size_t submits_before_retry = transfer_engine_->submittedDescriptorCount();
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, *device_ratio);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
     BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     const auto descriptors_after_retry = transfer_engine_->descriptors();
-    ASSERT_GT(descriptors_after_retry.size(), submits_before_retry);
+    ASSERT_EQ(descriptors_after_retry.size(), submits_before_retry + cache->groupSets().size());
     for (size_t index = submits_before_retry; index < descriptors_after_retry.size(); ++index) {
         const auto& descriptor = descriptors_after_retry[index];
         ASSERT_LT(descriptor.group_set_id, cache->groupSets().size());
@@ -287,16 +268,20 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullHostPoolSelfDrainsThenDeviceEvic
             EXPECT_FALSE(
                 group_set->devicePools()[member_index]->isAllocated(retry_device_sources[group_set_id][member_index]));
         }
-        EXPECT_EQ(host_pools[group_set_id]->freeBlocksNum(), freed_host_blocks[group_set_id] - 1);
-        EXPECT_EQ(host_pools[group_set_id]->referencedBlocksNum(BlockTreeRefType::CACHE),
-                  host_capacity - freed_host_blocks[group_set_id] + 1);
+        size_t retained = 0;
+        for (const auto* node : cache->tree()->findNode(full_seed.cache_keys)) {
+            retained += node->group_set_resources[group_set_id].hasTier(Tier::HOST);
+        }
+        EXPECT_LT(retained, host_capacity);
+        EXPECT_EQ(host_pools[group_set_id]->usedBlocksNum(), retained + 1);
+        EXPECT_EQ(host_pools[group_set_id]->referencedBlocksNum(BlockTreeRefType::CACHE), retained + 1);
         EXPECT_EQ(host_pools[group_set_id]->referencedBlocksNum(BlockTreeRefType::EVICT), 0u);
     }
 
     ASSERT_NO_FATAL_FAILURE(reclaimAndExpectInitialPools(manager_, initial_device, initial_lower, GetParam()));
 }
 
-TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullDiskPoolEvictsThenHostEvictionRetries) {
+TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostEvictionMakesRoomInFullDiskPool) {
     if (GetParam() != TierLayout::HOST_DISK) {
         GTEST_SKIP() << "DISK eviction recovery requires HostDisk layout";
     }
@@ -371,6 +356,11 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullDiskPoolEvictsThenHostEvictionRe
 
     const auto host_ratio = oneUsedBlockWatermarkRatio(host_pools);
     ASSERT_TRUE(host_ratio.has_value());
+    for (const auto& blocks : disk_blocks) {
+        for (size_t group_set_id = 0; group_set_id < blocks.size(); ++group_set_id) {
+            disk_pools[group_set_id]->incTreeRef(blocks[group_set_id], BlockTreeRefType::LOAD);
+        }
+    }
     const size_t submits_before_full_disk = transfer_engine_->submittedDescriptorCount();
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, *host_ratio);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
@@ -388,44 +378,20 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullDiskPoolEvictsThenHostEvictionRe
         EXPECT_EQ(host_pools[group_set_id]->referencedBlocksNum(BlockTreeRefType::EVICT), 0u);
         EXPECT_EQ(disk_pools[group_set_id]->referencedBlocksNum(BlockTreeRefType::EVICT), 0u);
     }
+    for (const auto& blocks : disk_blocks) {
+        for (size_t group_set_id = 0; group_set_id < blocks.size(); ++group_set_id) {
+            disk_pools[group_set_id]->decTreeRef(blocks[group_set_id], BlockTreeRefType::LOAD);
+        }
+    }
     ASSERT_NO_FATAL_FAILURE(
         expectFullTierPathUnchanged(*cache, full_seed.cache_keys, Tier::DISK, disk_blocks, disk_pools, disk_capacity));
-    const auto disk_delete_baseline = snapshotPathResources(*cache, full_seed.cache_keys);
-    ASSERT_TRUE(disk_delete_baseline.has_value());
-
-    const auto disk_ratio = blockExcessWatermarkRatio(disk_pools, /*excess_blocks=*/1);
-    ASSERT_TRUE(disk_ratio.has_value());
-    const size_t submits_before_disk_delete = transfer_engine_->submittedDescriptorCount();
-    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DISK, *disk_ratio);
-    BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
-    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DISK, 0.0);
-    BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
-    EXPECT_EQ(transfer_engine_->submittedDescriptorCount(), submits_before_disk_delete)
-        << "DISK eviction deletes cache-owned victims without a copy";
-    std::vector<size_t> freed_disk_blocks(cache->groupSets().size(), 0);
-    for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
-        size_t removed = 0;
-        for (size_t path_index = 0; path_index < disk_delete_baseline->size(); ++path_index) {
-            const BlockIdxType block = (*disk_delete_baseline)[path_index][group_set_id].disk_block;
-            if (!disk_pools[group_set_id]->isAllocated(block)) {
-                ++removed;
-            }
-        }
-        ASSERT_GT(removed, 0u) << "group_set=" << group_set_id;
-        freed_disk_blocks[group_set_id] = removed;
-        EXPECT_EQ(disk_pools[group_set_id]->freeBlocksNum(), removed);
-        EXPECT_EQ(disk_pools[group_set_id]->usedBlocksNum(), disk_capacity - removed);
-        EXPECT_EQ(disk_pools[group_set_id]->referencedBlocksNum(BlockTreeRefType::CACHE), disk_capacity - removed);
-        EXPECT_EQ(disk_pools[group_set_id]->referencedBlocksNum(BlockTreeRefType::EVICT), 0u);
-    }
-
     const size_t submits_before_retry = transfer_engine_->submittedDescriptorCount();
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, *host_ratio);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, 0.0);
     BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     const auto descriptors_after_retry = transfer_engine_->descriptors();
-    ASSERT_GT(descriptors_after_retry.size(), submits_before_retry);
+    ASSERT_EQ(descriptors_after_retry.size(), submits_before_retry + cache->groupSets().size());
     for (size_t index = submits_before_retry; index < descriptors_after_retry.size(); ++index) {
         const auto& descriptor = descriptors_after_retry[index];
         ASSERT_LT(descriptor.group_set_id, cache->groupSets().size());
@@ -441,9 +407,13 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullDiskPoolEvictsThenHostEvictionRe
         EXPECT_EQ(resource.getTopTier(), Tier::DISK);
         EXPECT_EQ(disk_pools[group_set_id]->treeRefCount(resource.disk_block), 1u);
         EXPECT_FALSE(host_pools[group_set_id]->isAllocated(retry_host_sources[group_set_id]));
-        EXPECT_EQ(disk_pools[group_set_id]->freeBlocksNum(), freed_disk_blocks[group_set_id] - 1);
-        EXPECT_EQ(disk_pools[group_set_id]->referencedBlocksNum(BlockTreeRefType::CACHE),
-                  disk_capacity - freed_disk_blocks[group_set_id] + 1);
+        size_t retained = 0;
+        for (const auto* node : cache->tree()->findNode(full_seed.cache_keys)) {
+            retained += node->group_set_resources[group_set_id].hasTier(Tier::DISK);
+        }
+        EXPECT_LT(retained, disk_capacity);
+        EXPECT_EQ(disk_pools[group_set_id]->usedBlocksNum(), retained + 1);
+        EXPECT_EQ(disk_pools[group_set_id]->referencedBlocksNum(BlockTreeRefType::CACHE), retained + 1);
         EXPECT_EQ(disk_pools[group_set_id]->referencedBlocksNum(BlockTreeRefType::EVICT), 0u);
     }
 

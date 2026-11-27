@@ -45,25 +45,27 @@ TEST(GroupSetTest, StoresOrderedTagMembershipAndLogicalPayload) {
 TEST(GroupSetTest, UsesPlannedBackingLayoutWithoutRecomputingStorage) {
     const auto topology = makeTestTopology({makeGroupBase({0, 1})});
     auto       group    = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{}, nullptr, nullptr);
-    group->initialize(0, topology, {"group0"}, BackingLayout{4096, 4112, 8192, true});
+    group->initialize(0, topology, {"group0"}, BackingLayout{4096, 4112, 8192, true}, 0);
     EXPECT_TRUE(group->usesPhysicalPayloadGeometry());
     EXPECT_TRUE(group->crcEnabled());
     EXPECT_EQ(group->payloadBytes(), 4096u);
     EXPECT_EQ(group->storageBytes(), 4112u);
+    EXPECT_EQ(group->evictionBlockBytes(), 0u);
 
-    group->initialize(0, topology, {"group0"}, BackingLayout{0, 176, 4096, true});
+    group->initialize(0, topology, {"group0"}, BackingLayout{0, 176, 4096, true}, 8192);
     EXPECT_FALSE(group->usesPhysicalPayloadGeometry());
     EXPECT_TRUE(group->crcEnabled());
     EXPECT_EQ(group->payloadBytes(), 160u);
     EXPECT_EQ(group->storageBytes(), 176u);
+    EXPECT_EQ(group->evictionBlockBytes(), 8192u);
 
-    group->initialize(0, topology, {"group0"});
+    group->initialize(0, topology, {"group0"}, {}, 0);
     EXPECT_FALSE(group->usesPhysicalPayloadGeometry());
     EXPECT_FALSE(group->crcEnabled());
     EXPECT_EQ(group->payloadBytes(), 160u);
     EXPECT_EQ(group->storageBytes(), 160u);
 
-    group->initialize(0, topology, {"group0"}, BackingLayout{4096, 4096, 4096, false});
+    group->initialize(0, topology, {"group0"}, BackingLayout{4096, 4096, 4096, false}, 0);
     EXPECT_TRUE(group->usesPhysicalPayloadGeometry());
     EXPECT_FALSE(group->crcEnabled());
     EXPECT_EQ(group->storageBytes(), 4096u);
@@ -240,11 +242,11 @@ TEST(GroupSetTest, RejectsUnknownDuplicateAndMisalignedTagsBeforeInitialization)
     const auto pool_b   = makeTestDevicePool({{64, 16}}, 4, "group_set_validate_b");
 
     EXPECT_ANY_THROW(std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{pool_a}, nullptr, nullptr)
-                         ->initialize(0, topology, {"missing"}));
+                         ->initialize(0, topology, {"missing"}, {}, 0));
     EXPECT_ANY_THROW(std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{pool_a, pool_b}, nullptr, nullptr)
-                         ->initialize(0, topology, {"group0", "group0"}));
+                         ->initialize(0, topology, {"group0", "group0"}, {}, 0));
     EXPECT_ANY_THROW(std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{pool_a}, nullptr, nullptr)
-                         ->initialize(0, topology, topology->groupTags()));
+                         ->initialize(0, topology, topology->groupTags(), {}, 0));
 }
 
 TEST(GroupSetTest, ReleasesLowerTierTreeReferencesInBatch) {

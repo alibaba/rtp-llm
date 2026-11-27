@@ -141,6 +141,36 @@ TEST(BlockTreeTaskPoolTest, ExpiredAbsoluteDeadlineRunsTimeoutInsteadOfTask) {
     EXPECT_TRUE(timeout_ran.load());
 }
 
+TEST(BlockTreeTaskPoolTest, RepeatedCapacityChecksYieldToQueuedLoadAndBackgroundWork) {
+    BlockTreeTaskPool pool(1, 2, "capacity_check_fairness");
+    ASSERT_TRUE(pool.start());
+    std::promise<void> started;
+    std::promise<void> release;
+    auto               gate = release.get_future();
+    ASSERT_TRUE(pool.submit(BlockTreeTaskClass::LOAD, [&] {
+        started.set_value();
+        gate.wait();
+    }));
+    started.get_future().wait();
+    std::vector<char>     order;
+    std::function<void()> capacity_check = [&] {
+        order.push_back('C');
+        if (order.size() < 6) {
+            EXPECT_TRUE(pool.submit(BlockTreeTaskClass::CAPACITY_CHECK, capacity_check));
+        }
+    };
+    EXPECT_TRUE(pool.submit(BlockTreeTaskClass::CAPACITY_CHECK, capacity_check));
+    EXPECT_TRUE(pool.submit(BlockTreeTaskClass::BACKGROUND, [&] { order.push_back('B'); }));
+    EXPECT_TRUE(pool.submit(BlockTreeTaskClass::LOAD, [&] { order.push_back('L'); }));
+    for (size_t i = 0; i < 16; ++i) {
+        EXPECT_TRUE(pool.submit(BlockTreeTaskClass::CAPACITY_CHECK, capacity_check));
+    }
+    EXPECT_EQ(pool.queueSizes().background, 2u);
+    release.set_value();
+    pool.waitForIdle();
+    EXPECT_EQ(order, (std::vector<char>{'L', 'C', 'B', 'C', 'C', 'C'}));
+}
+
 TEST(BlockTreeTaskPoolTest, ShutdownRejectsNewTasksAndIsIdempotent) {
     BlockTreeTaskPool pool(1, 8, "BlockTreeTaskPoolTest");
     ASSERT_TRUE(pool.start());

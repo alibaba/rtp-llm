@@ -401,7 +401,7 @@ PPValidationResult validatePPTopology(const std::vector<StageCacheSnapshot>& sta
         }
     }
     deriveConstructionInputs(result);
-    std::unordered_map<CacheGroupType, std::pair<unsigned __int128, size_t>> disk_strides;
+    std::unordered_map<CacheGroupType, std::pair<unsigned __int128, size_t>> pool_strides;
     for (size_t s = 0; s < stages.size(); ++s) {
         const auto& sizing = stages[s].block_tree;
         if (sizing.host_budget_bytes == 0 && sizing.disk_budget_bytes == 0) {
@@ -412,11 +412,9 @@ PPValidationResult validatePPTopology(const std::vector<StageCacheSnapshot>& sta
             for (const auto& group_set : sizing.group_sets) {
                 const auto& group = result.canonical_groups[canonical_index.at(group_set.first_tag)];
                 pools.push_back({group.type, group.logical_block_num, group_set.pool_stride});
-                if (sizing.disk_budget_bytes > 0) {
-                    auto& [stride_sum, owner_count] = disk_strides[group.type];
-                    stride_sum += group_set.pool_stride;
-                    ++owner_count;
-                }
+                auto& [stride_sum, owner_count] = pool_strides[group.type];
+                stride_sum += group_set.pool_stride;
+                ++owner_count;
             }
             const auto counts = computeHostDiskBlockCounts(pools, sizing);
             if (!counts) {
@@ -428,10 +426,9 @@ PPValidationResult validatePPTopology(const std::vector<StageCacheSnapshot>& sta
             return fail("BlockTreeCache capacity on stage " + std::to_string(s) + ": " + e.what());
         }
     }
-    for (const auto& [type, strides] : disk_strides) {
+    for (const auto& [type, strides] : pool_strides) {
         const auto& [stride_sum, owner_count] = strides;
-        result.agreed.disk_eviction_block_bytes[type] =
-            static_cast<size_t>((stride_sum + owner_count - 1) / owner_count);
+        result.agreed.eviction_block_bytes[type] = static_cast<size_t>((stride_sum + owner_count - 1) / owner_count);
     }
     result.ok = true;
     return result;

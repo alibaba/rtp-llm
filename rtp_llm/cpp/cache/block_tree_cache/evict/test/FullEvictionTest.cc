@@ -181,19 +181,19 @@ TEST(FullEvictionRegressionTest, ExtendingExistingLeafRefreshesOnlyFullParent) {
 }
 
 // ---------------------------------------------------------------------------
-// Test: Reclaim single leaf — node deleted, parent becomes leaf.
+// Test: Drop single leaf — node deleted, parent becomes leaf.
 //
-//   Before reclaimBlocksForTest(DEVICE):                After reclaimBlocksForTest(1) + wait:
+//   Before dropBlocksForTest(DEVICE):                After dropBlocksForTest(1) + wait:
 //   root → [100] → [200] → [300] ←heap   root → [100] → [200] ←new leaf, in heap
 //
-//   [300] reclaimed: D cleared → empty → deleted.
+//   [300] dropped: D cleared → empty → deleted.
 //   [200] becomes leaf -> refreshCandidate re-admits it as a device candidate.
 // ---------------------------------------------------------------------------
-TEST_F(FullEvictionTest, ReclaimSingleLeafDeletesNodeAndPromotesParent) {
+TEST_F(FullEvictionTest, DropSingleLeafDeletesNodeAndPromotesParent) {
     insertPath({100, 200, 300}, 10);
 
-    int reclaimed = BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE);
-    EXPECT_EQ(reclaimed, 1);
+    int dropped = BlockTreeCacheTestPeer::dropBlocksForTest(*cache_, 1, Tier::DEVICE);
+    EXPECT_EQ(dropped, 1);
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
 
     auto stats = cache_->getStats();
@@ -202,15 +202,15 @@ TEST_F(FullEvictionTest, ReclaimSingleLeafDeletesNodeAndPromotesParent) {
 }
 
 // ---------------------------------------------------------------------------
-// Test: Parent becomes leaf after child reclaim.
+// Test: Parent becomes leaf after child drop.
 //
-//   Before:                              After reclaimBlocksForTest(1) + wait:
+//   Before:                              After dropBlocksForTest(1) + wait:
 //   root → [100] → [200] → [300] ←heap   root → [100] → [200] ←heap
 // ---------------------------------------------------------------------------
 TEST_F(FullEvictionTest, ParentBecomesLeafAfterChildEviction) {
     insertPath({100, 200, 300}, 10);
 
-    BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE);
+    BlockTreeCacheTestPeer::dropBlocksForTest(*cache_, 1, Tier::DEVICE);
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
 
     auto stats = cache_->getStats();
@@ -219,34 +219,34 @@ TEST_F(FullEvictionTest, ParentBecomesLeafAfterChildEviction) {
 }
 
 // ---------------------------------------------------------------------------
-// Test: Sequential reclaim drains a 3-node chain.
+// Test: Sequential drop drains a 3-node chain.
 //
 //   Step 0: root → [100] → [200] → [300]  heap: {[300]}
-//   Step 1: reclaim [300] → deleted        heap: {[200]}
-//   Step 2: reclaim [200] → deleted        heap: {[100]}
-//   Step 3: reclaim [100] → deleted        heap: {}
+//   Step 1: drop [300] → deleted        heap: {[200]}
+//   Step 2: drop [200] → deleted        heap: {[100]}
+//   Step 3: drop [100] → deleted        heap: {}
 //   Final:  empty tree
 // ---------------------------------------------------------------------------
-TEST_F(FullEvictionTest, SequentialReclaimDrainsChain) {
+TEST_F(FullEvictionTest, SequentialDropDrainsChain) {
     insertPath({100, 200, 300}, 10);
 
-    // Step 1: reclaim [300]
-    EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE), 1);
+    // Step 1: drop [300]
+    EXPECT_EQ(BlockTreeCacheTestPeer::dropBlocksForTest(*cache_, 1, Tier::DEVICE), 1);
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
     EXPECT_EQ(cache_->getStats().tree_node_count, 2u);
 
-    // Step 2: reclaim [200]
-    EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE), 1);
+    // Step 2: drop [200]
+    EXPECT_EQ(BlockTreeCacheTestPeer::dropBlocksForTest(*cache_, 1, Tier::DEVICE), 1);
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
     EXPECT_EQ(cache_->getStats().tree_node_count, 1u);
 
-    // Step 3: reclaim [100]
-    EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE), 1);
+    // Step 3: drop [100]
+    EXPECT_EQ(BlockTreeCacheTestPeer::dropBlocksForTest(*cache_, 1, Tier::DEVICE), 1);
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
     EXPECT_EQ(cache_->getStats().tree_node_count, 0u);
 
-    // No more to reclaim
-    EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE), 0);
+    // No more to drop
+    EXPECT_EQ(BlockTreeCacheTestPeer::dropBlocksForTest(*cache_, 1, Tier::DEVICE), 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -256,7 +256,7 @@ TEST_F(FullEvictionTest, SequentialReclaimDrainsChain) {
 //                → [300] D={20} ← leaf, in heap
 //
 //   Both [200] and [300] are insert-leaves → both in heap.
-//   After reclaiming both leaves, [100] becomes leaf with data → 3rd reclaim needed.
+//   After dropping both leaves, [100] becomes leaf with data → 3rd drop needed.
 // ---------------------------------------------------------------------------
 TEST_F(FullEvictionTest, ForkBothLeavesEvictable) {
     insertPath({100, 200}, 10);
@@ -266,38 +266,38 @@ TEST_F(FullEvictionTest, ForkBothLeavesEvictable) {
     EXPECT_EQ(stats.tree_node_count, 3u);
     EXPECT_EQ(stats.device_heap_total_size, 2u);  // [200] and [300]
 
-    // Reclaim first leaf
-    BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE);
+    // Drop first leaf
+    BlockTreeCacheTestPeer::dropBlocksForTest(*cache_, 1, Tier::DEVICE);
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
     EXPECT_EQ(cache_->getStats().tree_node_count, 2u);  // [100] + one leaf
 
-    // Reclaim second leaf
-    BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE);
+    // Drop second leaf
+    BlockTreeCacheTestPeer::dropBlocksForTest(*cache_, 1, Tier::DEVICE);
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
     EXPECT_EQ(cache_->getStats().tree_node_count, 1u);  // [100] survives (has data)
 
-    // Reclaim [100] (now leaf after both children deleted)
-    BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE);
+    // Drop [100] (now leaf after both children deleted)
+    BlockTreeCacheTestPeer::dropBlocksForTest(*cache_, 1, Tier::DEVICE);
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
     EXPECT_EQ(cache_->getStats().tree_node_count, 0u);
 }
 
 // ---------------------------------------------------------------------------
-// Test: LRU ordering — oldest leaf reclaimed first.
+// Test: LRU ordering — oldest leaf dropped first.
 //
 //   Insert [100] D={10}, then [200] D={20}.
-//   Both are leaves (separate roots). LRU: reclaim [100] first.
+//   Both are leaves (separate roots). LRU: drop [100] first.
 // ---------------------------------------------------------------------------
-TEST_F(FullEvictionTest, LRUReclaimsOldestLeafFirst) {
+TEST_F(FullEvictionTest, LRUDropsOldestLeafFirst) {
     insertPath({100}, 10);
     insertPath({200}, 20);
 
     EXPECT_EQ(cache_->getStats().device_heap_total_size, 2u);
 
-    BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE);
+    BlockTreeCacheTestPeer::dropBlocksForTest(*cache_, 1, Tier::DEVICE);
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
 
-    // [100] was reclaimed (oldest). Only [200] remains.
+    // [100] was dropped (oldest). Only [200] remains.
     EXPECT_EQ(cache_->getStats().tree_node_count, 1u);
 
     auto result = cache_->match({200});
@@ -306,7 +306,7 @@ TEST_F(FullEvictionTest, LRUReclaimsOldestLeafFirst) {
 }
 
 // A real match is the only event that advances LRU heat. Matching the oldest
-// leaf makes it newer than a leaf inserted later, so the latter is reclaimed.
+// leaf makes it newer than a leaf inserted later, so the latter is dropped.
 TEST_F(FullEvictionTest, MatchRefreshesLruOrder) {
     insertPath({100}, 10);
     insertPath({200}, 20);
@@ -315,7 +315,7 @@ TEST_F(FullEvictionTest, MatchRefreshesLruOrder) {
     ASSERT_EQ(match.matched_device_blocks, 1u);
     block_tree_cache_test::releaseRequestRefsForTest(*cache_, match.matched_device_resources);
 
-    EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE), 1);
+    EXPECT_EQ(BlockTreeCacheTestPeer::dropBlocksForTest(*cache_, 1, Tier::DEVICE), 1);
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
 
     auto hot_match  = cache_->match({100});
@@ -348,7 +348,7 @@ TEST_F(FullEvictionTest, MatchReleaseDoesNotMutateHeat) {
 
     // Releasing the hotter node must not refresh it again: the untouched rival
     // remains the next LRU victim.
-    EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE), 1);
+    EXPECT_EQ(BlockTreeCacheTestPeer::dropBlocksForTest(*cache_, 1, Tier::DEVICE), 1);
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
     auto hot_match  = cache_->match({100});
     auto cold_match = cache_->match({200});
@@ -369,7 +369,7 @@ TEST_F(FullEvictionTest, OverlappingInsertDoesNotOverwriteOrRefreshLru) {
     ASSERT_FALSE(before.empty());
     ASSERT_EQ(before.back()->group_set_resources[0].device_blocks, std::vector<BlockIdxType>({10}));
 
-    EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE), 1);
+    EXPECT_EQ(BlockTreeCacheTestPeer::dropBlocksForTest(*cache_, 1, Tier::DEVICE), 1);
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
 
     auto old_match = cache_->match({100});
@@ -564,7 +564,7 @@ TEST(FullPruneTest, RemovesUnmatchableClosureRootAcrossFullGroups) {
     // Losing group 0's sole closure-root tier makes the whole FULL path
     // unmatchable. Pruning therefore removes every group and tier in the
     // closure, including group 1's otherwise valid DEVICE resources.
-    EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 1, Tier::HOST), 1);
+    EXPECT_EQ(BlockTreeCacheTestPeer::dropBlocksForTest(*cache, 1, Tier::HOST), 1);
     EXPECT_TRUE(cache->tree()->findNode({100, 200}).empty());
 
     const CacheStats stats = cache->getStats();
@@ -756,17 +756,12 @@ TEST(FullPruneTest, ReverseDirectDropAttachesOneClosureForMultipleFullGroups) {
     EXPECT_FALSE(full1_host_pool->isAllocated(full1_host_descendant));
 }
 
-TEST(FullPruneTest, WatermarkSelectsAndCommitsEachClosureSequentially) {
+TEST(FullPruneTest, OnDemandEvictionSelectsAndCommitsEachClosureSequentially) {
     TieredFullCache environment = makeTieredFullCache(/*enable_lower_tiers=*/false);
     const auto      path        = insertFullSandwich(environment);
     ASSERT_EQ(path.size(), 5u);
 
-    const size_t used_blocks = environment.device_pool->usedBlocksNum();
-    ASSERT_GE(used_blocks, 2u);
-    const double watermark_ratio =
-        (static_cast<double>(used_blocks - 2) + 0.5) / environment.device_pool->totalBlocksNum();
-    BlockTreeCacheTestPeer::setTierWatermarkForTest(*environment.cache, Tier::DEVICE, watermark_ratio);
-    BlockTreeCacheTestPeer::runMaintenanceForTest(*environment.cache);
+    EXPECT_EQ(environment.cache->evictForGroup("group0", 2), 2);
 
     const auto remaining_path = environment.cache->tree()->findNode({100, 200, 300, 400, 500});
     ASSERT_EQ(remaining_path.size(), 1u);
@@ -799,9 +794,7 @@ TEST(FullPruneTest, HostPruneKeepsRequestReferencedDeviceDescendantUntilRelease)
     device_pool->incRef({11});
     ASSERT_EQ(device_pool->refCount(11), 2u);
 
-    const double watermark_ratio = 0.5 / static_cast<double>(host_pool->totalBlocksNum());
-    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, watermark_ratio);
-    BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
+    ASSERT_TRUE(BlockTreeCacheTestPeer::evictOneForGroupSetForTest(*cache, 0, Tier::HOST, /*force_drop=*/true));
 
     EXPECT_EQ(cache->tree()->findNode({100, 200, 300}).size(), 1u);
     EXPECT_EQ(cache->getStats().tree_node_count, 1u);

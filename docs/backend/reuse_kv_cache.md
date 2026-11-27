@@ -54,10 +54,29 @@ available after the runtime reserve. Startup reduces concurrent slots first, the
 transfer batch size. The smallest workspace can exceed that target if it still leaves
 room for the KV cache. An explicit `KV_CACHE_MEM_MB` reserves that KV capacity first.
 
-Device free-block headroom is managed by `BLOCK_TREE_DEVICE_EVICT_HIGH_WATERMARK_RATIO` (default 0.90)
-and `BLOCK_TREE_DEVICE_EVICT_LOW_WATERMARK_RATIO` (default 0.82). Reaching the high occupancy watermark
-triggers eviction toward the low watermark. Allocations can consume this headroom and reclaim cached
-blocks on demand; blocks still referenced by requests or transfers may delay physical reclamation.
+DEVICE→HOST and HOST→DISK evict in batches when the source reaches its high occupancy watermark,
+and continue toward its low watermark. DEVICE defaults to 0.90 for the high watermark and 0.82 for
+the low watermark. Requests and transfers release their block references before the pool can reuse
+the space. Each source has its own pending-byte budget
+(`DEVICE_CACHE_EVICT_MAX_PENDING_BYTES` and `HOST_CACHE_EVICT_MAX_PENDING_BYTES`, defaulting to 0 and 100 MiB respectively).
+All tiers share `MEMORY_CACHE_MAX_DESCRIPTORS_PER_TRANSFER_BATCH`, which defaults to 32 and must be positive.
+Each rank uses its local CRC workspace batch size when available. Rank 0 uses the same effective limit for watermark eviction and local transfers.
+A byte budget of 0 disables the byte limit. Groups share the byte budget for their source tier. Each descriptor is charged one pool stride, averaged over owning stages under PP.
+A block larger than its source budget can transfer alone.
+
+`BLOCK_TREE_LAST_TIER_EVICT_STRATEGY` selects how the last local tier evicts blocks.
+
+- `on_demand` (default) retains cached blocks until an allocation needs space. For an upper-tier
+  evict, BTC requests the difference between the source batch limit and the free target blocks, then selects source blocks
+  under the same cache lock. The transfer is limited to the available space and current source watermark demand.
+  A group can evict its own target blocks while waiting for its source tier's transfer budget.
+- `watermark` evicts toward the last tier's low watermark in batches, releasing the cache lock
+  between batches. The last tier uses the shared batch limit and its own
+  `BLOCK_TREE_{DEVICE,MEMORY,DISK}_EVICT_{HIGH,LOW}_WATERMARK_RATIO` settings.
+
+When a request needs more DEVICE blocks, BTC evicts the shortfall from the requested member pool.
+This synchronous evict uses the request size even while a DEVICE watermark transfer is pending.
+
 Scheduler admission separately uses `RESERVE_BLOCK_RATIO` (default 5%) to preserve headroom for
 running requests to grow. This admission reserve is independent of the cache eviction watermarks.
 
@@ -78,7 +97,7 @@ protocol compatibility, but do not change this local-tier policy.
 
 - **Lookup** may use any enabled local tier, plus the configured remote backend.
 - **Storage after successful completion** inserts into L1 (DEVICE) when enabled. Eviction
-  can demote cached blocks from L1 to L2 (HOST) and from L2 to L3 (DISK).
+  can evict cached blocks from L1 to L2 (HOST) and from L2 to L3 (DISK).
 
 With cache reuse enabled, the local-tier rules are:
 
@@ -91,7 +110,7 @@ With cache reuse enabled, the local-tier rules are:
 
 Remote caching requires a backend enabled and initialized by the deployment configuration.
 Every DEVICE insert also prepares a remote upload when that backend exists, including
-resident inserts and duplicate keys. Local cache demotion does not initiate uploads. Remote writes are
+resident inserts and duplicate keys. Local cache eviction does not initiate uploads. Remote writes are
 asynchronous, submitted outside the tree lock, and do not delay insert until I/O completes;
 a failed upload does not roll back the DEVICE cache entry.
 

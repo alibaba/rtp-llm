@@ -17,13 +17,11 @@ namespace rtp_llm {
 class BlockTreeStorer {
 public:
     // Invoked with the shared cache mutex held.
-    using SettledFn = std::function<void(bool check_watermark)>;
-
     BlockTreeStorer(BlockTree*                      tree,
                     BlockTreeEvictor&               evictor,
                     BlockTreeCacheMetricsReporter&  metrics_reporter,
                     std::shared_ptr<StorageBackend> storage_backend,
-                    SettledFn                       settled);
+                    std::function<void()>           schedule_capacity_check);
 
     StorageWriteTask storeLocked(const CacheKeysType&                              cache_keys,
                                  const std::vector<std::vector<GroupSetResource>>& resources,
@@ -49,7 +47,7 @@ private:
     BlockTreeEvictor&               evictor_;
     BlockTreeCacheMetricsReporter&  metrics_reporter_;
     std::shared_ptr<StorageBackend> storage_backend_;
-    SettledFn                       settled_;
+    std::function<void()>           schedule_capacity_check_;
 };
 
 }  // namespace rtp_llm

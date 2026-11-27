@@ -167,20 +167,22 @@ struct KVCacheConfig {
     std::string                             multi_task_prompt     = "";
     std::string                             multi_task_prompt_str = "";
     std::map<std::string, std::vector<int>> multi_task_prompt_tokens;
-    int64_t                                 reserve_block_ratio           = 5;
-    int64_t                                 memory_cache_size_mb          = 0;
-    int64_t                                 memory_cache_sync_timeout_ms  = 10000;
-    std::string                             disk_cache_paths              = "";
-    int64_t                                 disk_cache_size_mb            = 0;
-    bool                                    disk_cache_buffered_io        = true;
-    int64_t                                 disk_cache_sync_timeout_ms    = 3000;
-    // Evict/store override; -1 inherits the load timeout above.
-    int64_t disk_cache_evict_timeout_ms                     = 3000;
-    int64_t disk_cache_evict_max_pending_bytes              = 100 * 1024 * 1024;
-    int64_t disk_cache_staging_block_count                  = 128;
-    int64_t memory_cache_max_descriptors_per_transfer_batch = 32;
-    int     block_tree_task_pool_size          = 4;
-    int64_t block_tree_transfer_worker_count   = 2;
+    int64_t                                 reserve_block_ratio       = 5;
+    int64_t                                 memory_cache_size_mb      = 0;
+    int64_t                                 device_host_timeout_ms    = 10000;
+    std::string                             disk_cache_paths          = "";
+    int64_t                                 disk_cache_size_mb        = 0;
+    bool                                    disk_cache_buffered_io    = true;
+    int64_t                                 disk_to_device_timeout_ms = 3000;
+    int64_t                                 host_to_disk_timeout_ms   = 3000;
+
+    std::string block_tree_last_tier_evict_strategy               = "on_demand";
+    int64_t     device_cache_evict_max_pending_bytes              = 0;
+    int64_t     memory_cache_max_descriptors_per_transfer_batch   = 32;
+    int64_t     host_cache_evict_max_pending_bytes                = 100 * 1024 * 1024;
+    int64_t     disk_cache_staging_block_count                    = 128;
+    int         block_tree_task_pool_size                         = 4;
+    int64_t     block_tree_transfer_worker_count                  = 2;
     int64_t block_tree_business_queue_max_size = 10000;
     int64_t block_tree_transfer_queue_max_size = 10000;
     int64_t block_tree_frozen_force_release_timeout_ms   = 300000;

@@ -32,7 +32,6 @@ struct DiskBlockPoolConfig: public BlockPoolConfigBase {
     size_t                                   disk_size_bytes{0};
     size_t                                   payload_bytes{0};
     size_t                                   stride_bytes{0};
-    size_t                                   eviction_block_bytes{0};
     bool                                     buffered_io{true};
     std::shared_ptr<BlockTreeDiskMountGuard> mount_guard;
 };
@@ -86,7 +85,6 @@ public:
 
     size_t             payloadBytes() const;
     size_t             strideBytes() const;
-    size_t             evictionBlockBytes() const;
     size_t             blockSizeBytes() const override;
     size_t             readBytes() const;
     size_t             writeBytes() const;

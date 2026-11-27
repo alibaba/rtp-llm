@@ -22,7 +22,7 @@ protected:
         group_        = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{pool_}, host_pool_, nullptr);
         auto group    = makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, 1);
         auto topology = makeTestTopology({std::move(group)});
-        group_->initialize(0, topology, topology->groupTags());
+        group_->initialize(0, topology, topology->groupTags(), {}, 0);
         tree_ = std::make_unique<BlockTree>(std::vector<GroupSetPtr>{group_});
     }
 
@@ -257,7 +257,7 @@ TEST_F(FullGroupSetTest, CompleteDeviceValueRequiresDeviceTierAndNoNullBlocks) {
     auto first    = makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, 1);
     auto second   = first;
     auto topology = makeTestTopology({std::move(first), std::move(second)});
-    two_pool_group->initialize(0, topology, topology->groupTags());
+    two_pool_group->initialize(0, topology, topology->groupTags(), {}, 0);
 
     GroupSetResource resource;
     EXPECT_FALSE(resource.hasCompleteDeviceValue());

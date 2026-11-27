@@ -388,12 +388,12 @@ inline KVCacheConfig makeTierConfig(TierLayout layout, const std::string& disk_p
     config.enable_device_cache            = true;
     config.enable_memory_cache            = true;
     config.memory_cache_size_mb           = lower_cache_size_mb;
-    config.memory_cache_sync_timeout_ms   = 5000;
+    config.device_host_timeout_ms         = 5000;
     config.enable_disk_cache              = layout == TierLayout::HOST_DISK;
     config.disk_cache_paths               = layout == TierLayout::HOST_DISK ? disk_path : "";
     config.disk_cache_size_mb             = layout == TierLayout::HOST_DISK ? lower_cache_size_mb : 0;
     config.disk_cache_buffered_io         = true;
-    config.disk_cache_sync_timeout_ms     = 5000;
+    config.disk_to_device_timeout_ms      = 5000;
     config.disk_cache_staging_block_count = 8;
     config.enable_crc                     = true;
     config.reuse_cache_tail_blocks        = std::numeric_limits<int>::max();
@@ -1362,7 +1362,7 @@ inline void reclaimAndExpectInitialPools(const std::shared_ptr<KVCacheManager>& 
     ASSERT_NE(cache, nullptr);
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     for (const Tier tier : {Tier::DEVICE, Tier::HOST, Tier::DISK}) {
-        BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, /*num_blocks=*/4096, tier);
+        BlockTreeCacheTestPeer::dropBlocksForTest(*cache, /*num_blocks=*/4096, tier);
         block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     }
     const auto stats = cache->getStats();

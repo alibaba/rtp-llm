@@ -61,7 +61,7 @@ def _pace_suites():
 # keep the physical payload alive while the remote upload completes.
 REMOTE_CACHE_DEVICE_STORE_ARGS = (
     " --enable_device_cache 1 --enable_memory_cache 0 --enable_disk_cache 0" +
-    " --test_block_num 500" +
+    " --block_tree_last_tier_evict_strategy watermark --test_block_num 500" +
     " --block_tree_device_evict_low_watermark_ratio 0.001" +
     " --block_tree_device_evict_high_watermark_ratio 0.002"
 )

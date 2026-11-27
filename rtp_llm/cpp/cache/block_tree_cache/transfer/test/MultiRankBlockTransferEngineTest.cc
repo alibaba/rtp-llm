@@ -168,7 +168,8 @@ static std::unique_ptr<BlockTreeCache> makeBroadcastCache(const std::shared_ptr<
         std::vector<DeviceBlockPoolPtr>{device_pool}, block_transfer_engine_test::makeHostPool(256, 8), nullptr);
     auto topology = block_transfer_engine_test::makeTestTopology(
         {block_transfer_engine_test::makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, 256)});
-    full->initialize(0, topology, topology->groupTags(), block_transfer_engine_test::makeTestBackingLayout(256, false));
+    full->initialize(
+        0, topology, topology->groupTags(), block_transfer_engine_test::makeTestBackingLayout(256, false), 0);
     std::vector<GroupSetPtr> groups = {full};
     return makeBlockTreeCacheForTest(std::move(groups),
                                      BlockTreeCacheConfig{},
@@ -189,7 +190,7 @@ static BlockIdxType prepareDeviceTarget(const std::shared_ptr<FullGroupSet>& gro
     const DeviceBlockPoolPtr& device_pool = group->devicePools().front();
     auto                      topology    = block_transfer_engine_test::makeTestTopology(
         {block_transfer_engine_test::makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, 256)});
-    group->initialize(0, topology, topology->groupTags());
+    group->initialize(0, topology, topology->groupTags(), {}, 0);
     const auto block = device_pool->malloc();
     if (!block.has_value()) {
         return NULL_BLOCK_IDX;
@@ -209,7 +210,7 @@ static void initializeBroadcastGroups(const std::vector<std::shared_ptr<FullGrou
     auto   topology = block_transfer_engine_test::makeTestTopology(std::move(group_bases));
     size_t group_id = 0;
     for (const auto& tag : topology->groupTags()) {
-        groups[group_id]->initialize(group_id, topology, {tag});
+        groups[group_id]->initialize(group_id, topology, {tag}, {}, 0);
         ++group_id;
     }
 }
@@ -258,7 +259,7 @@ TEST(RequestLevelBroadcastTest, EachRankReceivesWholeRequestAndMergesLocalBatche
     std::vector<MultiRankBlockTransferRpcConfig>               configs;
     auto coordinator_reclaimer = std::make_shared<BlockTreeReclaimer>();
     for (size_t rank = 0; rank < 2; ++rank) {
-        auto engine = std::make_shared<RecordingLocalTransferEngine>(2, rank == 1 ? 3 : NULL_BLOCK_IDX);
+        auto engine = std::make_shared<RecordingLocalTransferEngine>(rank == 0 ? 4 : 2, rank == 1 ? 3 : NULL_BLOCK_IDX);
 
         MultiRankBlockTransferRpcConfig config{true, MemoryOperationResponsePB::OK, grpc::Status::OK, state};
         config.local_dispatcher = std::make_shared<BlockTransferDispatcher>(
@@ -292,11 +293,13 @@ TEST(RequestLevelBroadcastTest, EachRankReceivesWholeRequestAndMergesLocalBatche
     ASSERT_EQ(state->requests.size(), 2u);
     for (const auto& request : state->requests)
         EXPECT_EQ(request.copy_items_size(), 7);
-    for (const auto& engine : engines) {
-        ASSERT_EQ(engine->batches.size(), 4u);
-        for (const auto& batch : engine->batches) {
-            ASSERT_FALSE(batch.empty());
-            EXPECT_LE(batch.size(), 2u);
+    const std::vector<std::vector<size_t>> expected_sizes{{4, 3}, {2, 2, 2, 1}};
+    for (size_t rank = 0; rank < engines.size(); ++rank) {
+        const auto& batches = engines[rank]->batches;
+        ASSERT_EQ(batches.size(), expected_sizes[rank].size());
+        for (size_t i = 0; i < batches.size(); ++i) {
+            const auto& batch = batches[i];
+            ASSERT_EQ(batch.size(), expected_sizes[rank][i]);
             for (const auto& descriptor : batch)
                 EXPECT_EQ(descriptor.group_set_id, batch.front().group_set_id);
         }
@@ -422,7 +425,7 @@ TEST(MultiRankDiskBytesTest, EvictionUsesEachRanksPhysicalStrideAndIndependentFi
         io.read_thread_count  = 1;
         io.write_thread_count = 1;
         auto engine           = std::make_shared<PerRankBlockTransferEngine>(
-            std::vector<GroupSetPtr>{group}, true, 2, block_count, 1, 4, nullptr, rank, 1, io);
+            std::vector<GroupSetPtr>{group}, true, 2, rank == 0 ? block_count : 1, 1, 4, nullptr, rank, 1, io);
 
         MultiRankBlockTransferRpcConfig config{true, MemoryOperationResponsePB::OK, grpc::Status::OK};
         config.groups           = {group};
@@ -550,10 +553,11 @@ TEST_F(MultiRankBlockTransferEngineTest, PublicationCopyFailureRemainsRetryableA
     auto cache   = makeBroadcastCache(manager);
     auto context = cache->transfer_dispatcher_->multi_rank_engine_->execute(
         TransferTask(makeBroadcastDescriptors(), std::chrono::seconds(5)));
-    std::atomic<size_t> callbacks{0};
-    context->onDone([&](TransferResult result) {
+    auto callback_done     = std::make_shared<std::promise<void>>();
+    auto callback_finished = callback_done->get_future();
+    context->onDone([callback_done](TransferResult result) {
         EXPECT_TRUE(result.ok());
-        ++callbacks;
+        EXPECT_NO_THROW(callback_done->set_value());
     });
     publication_copy_attempt = &attempted;
     block_tree_cache_detail::before_transfer_publication_copy_for_test.store(&failPublicationCopyOnce);
@@ -564,7 +568,7 @@ TEST_F(MultiRankBlockTransferEngineTest, PublicationCopyFailureRemainsRetryableA
     context->waitDone();
     EXPECT_TRUE(context->success());
     context->waitDone();
-    EXPECT_EQ(callbacks.load(), 1u);
+    EXPECT_EQ(callback_finished.wait_for(std::chrono::seconds(5)), std::future_status::ready);
     publication_copy_attempt = nullptr;
 }
 
@@ -1952,7 +1956,8 @@ static std::vector<GroupSetPtr> makeMixedIntegrityBroadcastGroups() {
         1,
         protected_group->topologyPtr(),
         protected_group->groupTags(),
-        block_transfer_engine_test::makeTestBackingLayout(protected_group->payloadBytes(), true));
+        block_transfer_engine_test::makeTestBackingLayout(protected_group->payloadBytes(), true),
+        0);
     return {ordinary, protected_group};
 }
 

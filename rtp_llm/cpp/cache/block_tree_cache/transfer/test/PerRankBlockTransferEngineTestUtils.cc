@@ -153,7 +153,8 @@ GroupSetPtr makeTestGroupSet(size_t                               group_set_id,
     group_set->initialize(group_set_id,
                           std::move(topology),
                           std::move(group_tags),
-                          makeTestBackingLayout(payload_bytes, enable_crc, physical_payload_bytes > 0));
+                          makeTestBackingLayout(payload_bytes, enable_crc, physical_payload_bytes > 0),
+                          0);
     return group_set;
 }
 

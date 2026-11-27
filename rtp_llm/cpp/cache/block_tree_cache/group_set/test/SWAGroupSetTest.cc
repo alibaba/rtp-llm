@@ -28,7 +28,7 @@ protected:
         policy.sliding_window_size = 128;
         auto group                 = makeTestGroupBase(std::move(policy), {0}, 1, 0, 128, 64);
         auto topology              = makeTestTopology({std::move(group)});
-        group_->initialize(0, topology, topology->groupTags());
+        group_->initialize(0, topology, topology->groupTags(), {}, 0);
     }
 
     void TearDown() override {

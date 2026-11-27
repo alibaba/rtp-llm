@@ -29,7 +29,7 @@ BlockTreeLoader::BlockTreeLoader(BlockTree*                      tree,
                                  int                             host_timeout_ms,
                                  bool                            enable_device_cache,
                                  std::shared_ptr<StorageBackend> storage_backend,
-                                 SettledFn                       settled):
+                                 std::function<void()>           schedule_capacity_check):
     tree_(tree),
     evictor_(evictor),
     task_pool_(task_pool),
@@ -39,7 +39,7 @@ BlockTreeLoader::BlockTreeLoader(BlockTree*                      tree,
     disk_timeout_ms_(disk_timeout_ms),
     enable_device_cache_(enable_device_cache),
     storage_backend_(std::move(storage_backend)),
-    settled_(std::move(settled)),
+    schedule_capacity_check_(std::move(schedule_capacity_check)),
     load_task_runner_(tree->groupSets(), transfer_dispatcher, *task_pool, metrics_reporter),
     load_context_coordinator_(std::make_shared<LoadContextCoordinator>(
         [this](const std::shared_ptr<LoadAsyncContext>& context) { return commitLoad(context); },
@@ -354,7 +354,7 @@ bool BlockTreeLoader::commitLoad(const std::shared_ptr<LoadAsyncContext>& contex
             if (context->createLoadOperations(*tree_)) {
                 auto task = LoadTask::create(context, host_timeout_ms_, disk_timeout_ms_);
                 context->setSettlementReadyCallback(
-                    [this, task](const auto& ready) { scheduleContextSettlement(task, ready); });
+                    [this, task](const auto& ready) { scheduleLoadSettlement(task, ready); });
                 if (load_task_runner_.submit(task)) {
                     return true;
                 }
@@ -363,7 +363,7 @@ bool BlockTreeLoader::commitLoad(const std::shared_ptr<LoadAsyncContext>& contex
             return false;
         }
     }
-    context->setSettlementReadyCallback([this](const auto& ready) { scheduleContextSettlement(nullptr, ready); });
+    context->setSettlementReadyCallback([this](const auto& ready) { scheduleLoadSettlement(nullptr, ready); });
     if (!context->newLoadIndices().empty()) {
         context->cancelUnsubmittedTransfers();
     }
@@ -429,12 +429,12 @@ void BlockTreeLoader::abortLoadLocked(const std::vector<TransferDescriptor>&    
     evictor_.discardDetachedTransfer(detached_descs);
     tree_->removePendingNodes(pending_nodes);
     if (device_refs_released) {
-        settled_(true);
+        schedule_capacity_check_();
     }
 }
 
-void BlockTreeLoader::scheduleContextSettlement(const std::shared_ptr<LoadTask>&         task,
-                                                const std::shared_ptr<LoadAsyncContext>& context) {
+void BlockTreeLoader::scheduleLoadSettlement(const std::shared_ptr<LoadTask>&         task,
+                                             const std::shared_ptr<LoadAsyncContext>& context) {
     const auto&    descriptors   = task ? task->load_descs : context->loadDescs();
     const uint64_t transfer_id   = task ? task->completionTransfer().traceId() : context->workflowId();
     auto stage_context = CacheStageContext::forWorkflow(
@@ -502,6 +502,7 @@ bool BlockTreeLoader::settleLoadLocked(LoadTask&                task,
                                        bool                     aggregate_success,
                                        bool&                    host_success,
                                        const CacheStageContext& stage_context) {
+    TransferStageTimer update(stage_context, "completion_tree_update", "business_completion");
     std::vector<BlockTreeEvictor::InvalidationSource> corrupted;
     const auto collect_corrupted = [this, &corrupted](const TransferTask& transfer, const TransferResult& result) {
         for (size_t index = 0; index < result.block_errors.size(); ++index) {
@@ -536,8 +537,6 @@ bool BlockTreeLoader::settleLoadLocked(LoadTask&                task,
     std::vector<MultiNodeResource>        source_cache_refs;
 
     {
-        auto update = TransferStageTimer::scope(
-            stage_context, "completion_tree_update", "business_completion", settlement_success);
         std::vector<TransferDescriptor> detached_descs;
         for (size_t desc_index = 0; desc_index < task.load_descs.size(); ++desc_index) {
             const TransferDescriptor& desc      = task.load_descs[desc_index];
@@ -599,23 +598,22 @@ bool BlockTreeLoader::settleLoadLocked(LoadTask&                task,
         unreferenceBlocks(tree_->groupSets(), source_cache_refs, BlockTreeRefType::CACHE);
         evictor_.discardDetachedTransfer(detached_descs);
     }
-    {
-        auto refs = TransferStageTimer::scope(
-            stage_context, "completion_release_refs", "business_completion", settlement_success);
-        for (const auto& resource : target_load_refs) {
-            tree_->groupSets()[resource.group_set_id]->unreferenceBlocks(resource, BlockTreeRefType::LOAD);
-        }
-    }
+    update.finish(settlement_success);
     {
         auto cleanup =
             TransferStageTimer::scope(stage_context, "completion_cleanup", "business_completion", settlement_success);
+        for (const auto& resource : target_load_refs) {
+            tree_->groupSets()[resource.group_set_id]->unreferenceBlocks(resource, BlockTreeRefType::LOAD);
+        }
         tree_->removePendingNodes(pending_nodes);
         evictor_.invalidateSources(corrupted);
     }
     {
-        auto watermark =
+        auto watermark_timer =
             TransferStageTimer::scope(stage_context, "completion_watermark", "business_completion", settlement_success);
-        settled_(state_settled);
+        if (state_settled) {
+            schedule_capacity_check_();
+        }
     }
     return settlement_success;
 }

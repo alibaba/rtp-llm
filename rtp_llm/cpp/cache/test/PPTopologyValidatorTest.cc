@@ -412,6 +412,8 @@ TEST(PPTopologyValidatorTest, TierCountsRespectStageStridesAndMissingGroupSets) 
     ASSERT_TRUE(result.ok) << result.error;
     EXPECT_EQ(result.agreed.block_tree.host.at(CacheGroupType::FULL), 60u);
     EXPECT_EQ(result.agreed.block_tree.host.at(CacheGroupType::SWA), 24u);
+    EXPECT_EQ(result.agreed.eviction_block_bytes.at(CacheGroupType::FULL), 6144u);
+    EXPECT_EQ(result.agreed.eviction_block_bytes.at(CacheGroupType::SWA), 8192u);
     EXPECT_TRUE(result.agreed.block_tree.disk.empty());
 }
 
@@ -428,7 +430,7 @@ TEST(PPTopologyValidatorTest, DiskEvictionChargeAveragesOnlyWritingStages) {
 
     const auto result = validatePPTopology({stage0, stage1, stage2});
     ASSERT_TRUE(result.ok) << result.error;
-    const auto& bytes = result.agreed.disk_eviction_block_bytes;
+    const auto& bytes = result.agreed.eviction_block_bytes;
     EXPECT_EQ(bytes.at(CacheGroupType::FULL), 5462u);  /** ceil((4096 + 4096 + 8192) / 3) */
     EXPECT_EQ(bytes.at(CacheGroupType::SWA), 6144u);   /** (4096 + 8192) / 2 */
 }

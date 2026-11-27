@@ -104,7 +104,7 @@ bazel-testlogs/rtp_llm/models_py/bindings/cuda/test/crc_copy_benchmark_test/
 
 运行前应提交待测源码，保证两项 commit 环境变量对应构建输入。Runner 要求提供完整 SHA，将 source commit、main base commit 和实际 binary SHA256 写入 manifest 及每次进程的原始 metadata；缺失这些信息时直接失败。两次进程的数据只有来源一致才能合并。请同时保留完整命令和测试产物。
 
-框架默认 `memory_cache_max_descriptors_per_transfer_batch=8`。本测试直接提交至多 32 个 backing，测量单次 copy 的批量扩展情况，不代表默认框架配置的请求耗时。
+框架默认 `memory_cache_max_descriptors_per_transfer_batch=32`。本测试直接提交至多 32 个 backing，测量单次 copy 的批量扩展情况，不代表默认框架配置的请求耗时。
 
 统计器本身有不占 GPU 的回归测试，检查缺失/重复样本、错误配对、非法耗时、损坏检查失败和错误排除声明：
 
