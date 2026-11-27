@@ -9,6 +9,7 @@ from rtp_llm.config.quant_config import (
     ModelOptFp4Config,
     resolve_nvfp4_backend,
 )
+from rtp_llm.models_py.expert_placement import expert_placement_for_layer
 from rtp_llm.models_py.layers.moe_experts import BaseMoEExperts
 from rtp_llm.models_py.new_models.qwen4_exp.nvfp4_experts import Qwen4Nvfp4Experts
 from rtp_llm.models_py.quant_methods.base import QuantizationConfig
@@ -72,6 +73,19 @@ def make_qwen4_experts(plan, layer_idx, load, *, prefix=None):
                 or (device.type == "cuda" and torch.cuda.get_device_capability(device) in ((9, 0), (12, 0)))
             )
         ):
+            # The direct Marlin router addresses expert weights by contiguous
+            # logical ID. Check the same physical plan as the reader before
+            # allocating storage, not after a replica has been materialized.
+            placement = expert_placement_for_layer(
+                plan.model_config, layer_index=layer_idx, logical_expert_count=e,
+                ep_size=load.ep_size, ep_rank=load.ep_rank,
+                parallelism_config=load.parallelism_config,
+            )
+            if not placement.is_identity:
+                raise ValueError(
+                    "Qwen4 NVFP4 Marlin requires identity expert placement "
+                    "(no redundant or permuted experts)"
+                )
             return Qwen4Nvfp4Experts(
                 h, m, e, load.ep_size, load.ep_rank,
                 tp_size=load.ffn_tp_size if load.ep_size == 1 else 1,

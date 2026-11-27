@@ -42,10 +42,10 @@ def _owner(kind, tp, rank):
         root.proj = QKVParallelLinear(
             hidden_size=1152, num_heads=4, num_kv_heads=2, head_dim=128, **kwargs
         )
-    elif kind == "merged":
+    elif kind in ("merged", "merged_partial"):
         root.proj = MergedColumnParallelLinear(
             input_size=1152,
-            output_size=512,
+            output_size=384 if kind == "merged_partial" else 512,
             shard_names=["gate_proj", "up_proj"],
             **kwargs
         )
@@ -60,6 +60,7 @@ def _checkpoint(kind):
     rows = {
         "qkv": [("q_proj", 512), ("k_proj", 256), ("v_proj", 256)],
         "merged": [("gate_proj", 256), ("up_proj", 256)],
+        "merged_partial": [("gate_proj", 192), ("up_proj", 192)],
         "row": [("", 384)],
         "column": [("", 384)],
     }[kind]
@@ -236,13 +237,16 @@ class OnlineFp8ScaleLayoutTest(unittest.TestCase):
             weight = (blocks * (1.0 / scale)).clamp(-448, 448).to(torch.float8_e4m3fn)
             return weight.reshape(n, k), scale.reshape(n // 128, k // 128)
 
-        for kind in ("column", "row", "merged", "qkv"):
+        for kind in ("column", "row", "merged", "qkv", "merged_partial"):
             with tempfile.TemporaryDirectory() as directory:
                 save_file(
                     _checkpoint(kind), os.path.join(directory, "model.safetensors")
                 )
                 for backend in checkpoint_readers("scratch", "fastsafetensors"):
-                    for tp in (1, 2):
+                    # Non-128-row projection boundaries are representable
+                    # for an unsharded fused checkpoint, not a partial tile
+                    # from which another TP rank's source rows are absent.
+                    for tp in ((1,) if kind == "merged_partial" else (1, 2)):
                         for rank in range(tp):
                             with self.subTest(
                                 kind=kind, backend=backend, tp=tp, rank=rank

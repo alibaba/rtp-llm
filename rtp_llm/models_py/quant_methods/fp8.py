@@ -1192,14 +1192,20 @@ class Fp8BlockOnlineLinearMethod(FloatingStartupLoRA, QuantizeMethodBase):
         if direct_ue8m0:
             # Main quantizes online dense source weights directly to UE8M0;
             # float-scale FP8 -> BF16 -> UE8M0 introduces a second rounding.
-            # TP owners have already selected their local, block-aligned rows.
+            # Without TP this is the same complete fused matrix as the original
+            # converter: a 128-row quantization tile may span two projections.
+            # A sharded owner has discarded neighboring rows, so joining two
+            # partial tiles locally would compute a different block maximum.
             if num_shards > 1:
                 sizes = (
                     [layer.q_size, layer.kv_size, layer.kv_size]
                     if hasattr(layer, "q_size") and hasattr(layer, "kv_size")
                     else [logical_n // num_shards] * num_shards
                 )
-                if sum(sizes) != logical_n or any(s % self.BLOCK for s in sizes):
+                if sum(sizes) != logical_n or (
+                    getattr(layer, "tp_size", None) != 1
+                    and any(s % self.BLOCK for s in sizes)
+                ):
                     raise ValueError(
                         f"FP8 merged shard rows must align to {self.BLOCK}: {sizes}"
                     )

@@ -64,6 +64,25 @@ def source_checkpoint(directory, kind):
 
 
 class PrecisionPlanTest(unittest.TestCase):
+    def test_marlin_admits_identity_but_not_replicas_or_permutations(self):
+        from rtp_llm.models_py.new_models.qwen4_exp.expert_factory import make_qwen4_experts
+
+        with tempfile.TemporaryDirectory() as directory:
+            config, _ = source_checkpoint(directory, "nvfp4")
+            plan = Qwen4CheckpointPlan(directory, config)
+            load = NewLoaderConfig(device="cpu", ep_size=2, ep_rank=1)
+            owner = make_qwen4_experts(plan, 0, load)
+            self.assertEqual((owner.first, owner.local), (1, 1))
+            config.eplb_config.redundant_expert = 2
+            with self.assertRaisesRegex(ValueError, "Marlin requires identity"):
+                make_qwen4_experts(plan, 0, load)
+            config.eplb_config.redundant_expert = 0
+            perm = Path(directory) / "permutation.json"
+            perm.write_text(json.dumps([[1, 0]] * config.num_layers))
+            config.phy2log_path = str(perm)
+            with self.assertRaisesRegex(ValueError, "Marlin requires identity"):
+                make_qwen4_experts(plan, 0, load)
+
     def test_bf16_eplb_reloads_mapped_expert_prefix(self):
         from rtp_llm.utils.model_weight import W
 
