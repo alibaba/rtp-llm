@@ -1837,6 +1837,127 @@ def test_r8_hc_splitk_and_dflash_branch5120() -> None:
     print("  PASS: R8 HC Split-K & DFlash2 branch5120 verified (0 splitKreduce, 0 cutlass_80).")
 
 
+def test_r9_l2_swapped_hc_and_norm5120() -> None:
+    import torch.nn.functional as F
+
+    print("[Test R9] Swapped (HC, row) HC combine+norm, split-5120 grouped norm & DFlash2/mix_reduce parity...")
+    device = torch.device("cuda:0")
+    dtype = torch.bfloat16
+    torch.manual_seed(202690)
+    H, HC, LR = 5120, 4, 128
+
+    with torch.no_grad():
+        # 1. grouped_gemma_rmsnorm_bias_triton & mix_with_latent split-5120 across crossover
+        hc = Qwen4_5HyperConnection(H, HC, LR, dtype=dtype, device=device).eval()
+        for rows, single_stream, use_bias in (
+            (16, False, True),
+            (64, True, False),
+            (128, False, True),
+            (256, True, True),
+            (1024, False, False),
+            (1536, False, True),
+        ):
+            xr = torch.randn((rows, H if single_stream else HC * H), device=device, dtype=dtype) * 0.3
+            nw = torch.randn((HC * H,), device=device, dtype=dtype) * 0.2
+            nb = (torch.randn((HC * H,), device=device, dtype=dtype) * 0.1) if use_bias else None
+            n_tri = grouped_gemma_rmsnorm_bias_triton(xr, nw, nb, HC, eps=1e-6)
+            n_ref = grouped_gemma_rmsnorm_bias_ref(xr, nw, nb, HC, eps=1e-6)
+            cos_g = F.cosine_similarity(n_tri.float().flatten(), n_ref.float().flatten(), dim=0).item()
+            assert cos_g >= 0.99999 and _diff_stats(n_tri, n_ref)[0] < 0.08, f"grouped norm rows={rows}: cos={cos_g}"
+
+            if not single_stream:
+                pl = torch.randn((rows, LR), device=device, dtype=dtype) * 0.2
+                m_tri, _, ij_tri, lt_tri = hc.mix_with_latent(xr, prev_latent=pl)
+                m_ref, _, ij_ref, lt_ref = hc.mix_with_latent_ref(xr, prev_latent=pl)
+                for a, b in ((m_tri, m_ref), (ij_tri, ij_ref), (lt_tri, lt_ref)):
+                    assert F.cosine_similarity(a.float().flatten(), b.float().flatten(), dim=0).item() >= 0.9999
+
+        # 2. hc_combine_and_norm_triton across branch/swapped crossover (16..2048) + CG
+        for rows, single_stream, use_bias in (
+            (16, False, True),
+            (64, True, False),
+            (128, False, True),
+            (512, False, True),
+            (2048, False, True),
+            (2048, True, False),
+        ):
+            res = torch.randn((rows, H if single_stream else HC * H), device=device, dtype=dtype) * 0.35
+            sub = torch.randn((rows, H), device=device, dtype=dtype) * 0.35
+            inj = torch.randn((rows, HC), device=device, dtype=dtype) * 0.25
+            c_tri, n_tri = hc_combine_and_norm_triton(sub, res, inj, hc.hc_norm_weight, hc.hc_norm_bias if use_bias else None, eps=1e-6)
+            c_ref = hc_combine_ref(sub, res, inj)
+            n_ref = grouped_gemma_rmsnorm_bias_ref(c_ref, hc.hc_norm_weight, hc.hc_norm_bias if use_bias else None, HC, eps=1e-6)
+            assert _diff_stats(c_tri, c_ref)[0] < 2e-2
+            assert F.cosine_similarity(n_tri.float().flatten(), n_ref.float().flatten(), dim=0).item() >= 0.99999
+
+        # 3. hc_dflash_gconv_combine_norm_triton across rows <128 and >=128 + CG
+        taps, bs, gs = 4, 8, 512
+        n_grp = H // gs
+        base_gc = torch.randn((taps, H), device=device, dtype=dtype) * 0.2
+        w_gc = torch.randn((HC * H,), device=device, dtype=dtype) * 0.2
+        b_gc = torch.randn((HC * H,), device=device, dtype=dtype) * 0.2
+        for rows_gc in (32, 128, 256, 1024):
+            raw_gc = torch.randn((rows_gc, H), device=device, dtype=dtype) * 0.3
+            delta_gc = torch.randn((rows_gc, taps, n_grp), device=device, dtype=dtype) * 0.2
+            res_gc = torch.randn((rows_gc, HC * H), device=device, dtype=dtype) * 0.3
+            inj_gc = torch.rand((rows_gc, HC), device=device, dtype=dtype) * 1.5
+            comb_d, norm_d = hc_dflash_gconv_combine_norm_triton(
+                raw_gc, delta_gc, base_gc, bs, gs, taps, res_gc, inj_gc, w_gc, b_gc, clip_value=10.0
+            )
+            row_in_blk = torch.arange(rows_gc, device=device) % bs
+            grp_ids = torch.arange(H, device=device) // gs
+            acc = torch.zeros_like(raw_gc, dtype=torch.float32)
+            for k in range(taps):
+                src_row = (torch.arange(rows_gc, device=device) - k).clamp_min(0)
+                mask = (row_in_blk >= k).float().unsqueeze(-1)
+                eff_w = base_gc[k].float().unsqueeze(0) + delta_gc[:, k, :][:, grp_ids].float()
+                acc += eff_w * raw_gc[src_row].float() * mask
+            sub_gc_ref = acc.clamp(-10.0, 10.0).to(dtype)
+            comb_ref = hc_combine_ref(sub_gc_ref, res_gc, inj_gc)
+            norm_ref = grouped_gemma_rmsnorm_bias_ref(comb_ref, w_gc, b_gc, HC, eps=1e-6)
+            assert _diff_stats(comb_d, comb_ref)[0] < 2e-2
+            assert F.cosine_similarity(norm_d.float().flatten(), norm_ref.float().flatten(), dim=0).item() >= 0.99999
+        g_gc = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g_gc):
+            c_gc_cg, n_gc_cg = hc_dflash_gconv_combine_norm_triton(
+                raw_gc, delta_gc, base_gc, bs, gs, taps, res_gc, inj_gc, w_gc, b_gc, clip_value=10.0
+            )
+        raw_gc.copy_(torch.randn_like(raw_gc) * 0.3)
+        g_gc.replay()
+        c_gc_eag, n_gc_eag = hc_dflash_gconv_combine_norm_triton(
+            raw_gc, delta_gc, base_gc, bs, gs, taps, res_gc, inj_gc, w_gc, b_gc, clip_value=10.0
+        )
+        assert float((c_gc_cg - c_gc_eag).abs().max().item()) == 0.0
+        assert float((n_gc_cg - n_gc_eag).abs().max().item()) == 0.0
+
+        # 4. hc_mix_reduce_with_down_inject_triton across <2048 and >=2048 + CG
+        for rows_m in (32, 2048, 2560):
+            lg = torch.randn((rows_m, HC * H), device=device, dtype=dtype) * 0.3
+            nm = torch.randn((rows_m, HC * H), device=device, dtype=dtype) * 0.3
+            rw = torch.randn((rows_m, 144), device=device, dtype=dtype) * 0.3
+            out_f, lat_f, inj_f = hc_mix_reduce_with_down_inject_triton(lg, nm, rw, LR, HC, has_latent=True, has_inj=True)
+            out_r = hc_mix_reduce_triton(lg, nm, HC)
+            lat_r, inj_r = hc_down_inject_epilogue_triton(rw, LR, HC)
+            assert _diff_stats(out_f, out_r)[0] < 1e-2
+            assert _diff_stats(lat_f, lat_r)[0] < 1e-2
+            assert _diff_stats(inj_f, inj_r)[0] < 1e-2
+        g_m = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g_m):
+            om_cg, lm_cg, im_cg = hc_mix_reduce_with_down_inject_triton(lg, nm, rw, LR, HC, has_latent=True, has_inj=True)
+        lg.copy_(torch.randn_like(lg) * 0.3)
+        g_m.replay()
+        om_eag, lm_eag, im_eag = hc_mix_reduce_with_down_inject_triton(lg, nm, rw, LR, HC, has_latent=True, has_inj=True)
+        for a, b in ((om_cg, om_eag), (lm_cg, lm_eag), (im_cg, im_eag)):
+            assert float((a - b).abs().max().item()) == 0.0
+
+    with torch.enable_grad():
+        xr_g = (torch.randn((256, HC * H), device=device, dtype=dtype) * 0.2).requires_grad_(True)
+        pl_g = torch.randn((256, LR), device=device, dtype=dtype) * 0.2
+        mg, rg, _, _ = hc.mix_with_latent(xr_g, prev_latent=pl_g, ws=HCStaticWorkspace())
+        assert rg.requires_grad and not mg.requires_grad
+    print("  PASS: R9 swapped (HC, row) HC combine+norm, split-5120 norm & DFlash2/mix_reduce verified.")
+
+
 def main() -> int:
     print(
         f"Device: {torch.cuda.get_device_name(0)} "
@@ -1855,6 +1976,7 @@ def main() -> int:
     test_r6_fast_launch_opaque_decode_and_ple_snap_aligned()
     test_r7_fused_hc_epilogues_branch5120_workspaces_and_sp_shortconv()
     test_r8_hc_splitk_and_dflash_branch5120()
+    test_r9_l2_swapped_hc_and_norm5120()
     run_benchmarks()
     print(f"\nALL TESTS & BENCHMARKS PASSED in {time.perf_counter() - t0:.2f}s!")
     return 0

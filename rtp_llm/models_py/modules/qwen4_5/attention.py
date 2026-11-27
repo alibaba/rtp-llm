@@ -12,6 +12,7 @@ Architecture (1109-bf16-re-mxfp4-ple-fp8, dense MQA-1, NO QSA indexer):
 
 from __future__ import annotations
 
+import os
 from typing import Any, Callable, Optional, Tuple
 
 import torch
@@ -30,6 +31,137 @@ from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import Qwen4ExpQSAIndexer, 
 from rtp_llm.models_py.modules.qwen4_5.short_conv import _triton_int_spec, triton_fast_launch
 
 _ATTN_TRITON_CACHE: dict = {}
+_FI_MM_BF16: Any = None
+_FI_MM_UNAVAILABLE = object()
+_SM100_CAP_CACHE: dict[int, bool] = {}
+
+
+def _is_bf16_tgv_enabled() -> bool:
+    raw = os.environ.get("QWEN4_5_BF16_TGV", "1").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+def _get_flashinfer_mm_bf16(device: torch.device) -> Any:
+    """Return cached ``flashinfer.mm_bf16`` on SM100+ CUDA devices, else ``None``."""
+    global _FI_MM_BF16
+    if device.type != "cuda":
+        return None
+    dev_idx = int(device.index) if device.index is not None else int(torch.cuda.current_device())
+    is_sm100 = _SM100_CAP_CACHE.get(dev_idx)
+    if is_sm100 is None:
+        try:
+            major, _ = torch.cuda.get_device_capability(dev_idx)
+            is_sm100 = int(major) >= 10
+        except Exception:
+            is_sm100 = False
+        _SM100_CAP_CACHE[dev_idx] = is_sm100
+    if not is_sm100:
+        return None
+    if _FI_MM_BF16 is _FI_MM_UNAVAILABLE:
+        return None
+    if _FI_MM_BF16 is None:
+        try:
+            import flashinfer
+
+            mm_fn = getattr(flashinfer, "mm_bf16", None)
+            _FI_MM_BF16 = mm_fn if callable(mm_fn) else _FI_MM_UNAVAILABLE
+        except Exception:
+            _FI_MM_BF16 = _FI_MM_UNAVAILABLE
+    return None if _FI_MM_BF16 is _FI_MM_UNAVAILABLE else _FI_MM_BF16
+
+
+def _should_use_bf16_tgv(m_rows: int, k_dim: int, n_dim: int) -> bool:
+    """Select strict-win ``(M, K, N)`` buckets proven faster in L2-cold CG on SM103."""
+    if (
+        m_rows <= 0
+        or k_dim < 2048
+        or n_dim < 2048
+        or n_dim > 26000
+        or (k_dim % 16) != 0
+        or (n_dim % 8) != 0
+        or (n_dim * k_dim) >= (1 << 30)
+    ):
+        return False
+    if n_dim <= 3072:
+        return m_rows <= 24
+    if n_dim <= 4096:
+        return m_rows <= 16
+    return m_rows <= 8
+
+
+def _is_bf16_weight_ready(w: Any, x: torch.Tensor) -> bool:
+    """Validate that ``w`` and ``x`` can safely execute a bias-free BF16 CUDA GEMM."""
+    if not (isinstance(w, torch.Tensor) and x.is_cuda and x.dtype == torch.bfloat16 and x.ndim >= 2):
+        return False
+    if (
+        not w.is_cuda
+        or w.dtype != torch.bfloat16
+        or w.ndim != 2
+        or not w.is_contiguous()
+        or w.device != x.device
+    ):
+        return False
+    if torch.is_grad_enabled() and (x.requires_grad or w.requires_grad):
+        return False
+    k_dim = int(x.shape[-1])
+    return k_dim > 0 and int(w.shape[1]) == k_dim and int(x.numel() // k_dim) > 0
+
+
+def _extract_bf16_linear_weight(mod: Any, x: torch.Tensor) -> Optional[torch.Tensor]:
+    """Return contiguous BF16 weight if ``mod(x)`` resolves to a bias-free BF16 linear."""
+    if getattr(mod, "bias", None) is not None:
+        return None
+    w = getattr(mod, "weight", None)
+    if not _is_bf16_weight_ready(w, x):
+        return None
+    resolve_fn = getattr(mod, "_resolve_backend", None)
+    if callable(resolve_fn):
+        m_rows = int(x.numel() // int(x.shape[-1]))
+        try:
+            if resolve_fn(m_rows, x.device) != "bf16":
+                return None
+        except Exception:
+            return None
+    return w
+
+
+def _try_bf16_tgv(x: torch.Tensor, w: torch.Tensor) -> Optional[torch.Tensor]:
+    if not _is_bf16_tgv_enabled():
+        return None
+    k_dim = int(x.shape[-1])
+    m_rows = int(x.numel() // k_dim)
+    n_dim = int(w.shape[0])
+    if not _should_use_bf16_tgv(m_rows, k_dim, n_dim):
+        return None
+    mm_fn = _get_flashinfer_mm_bf16(x.device)
+    if mm_fn is None:
+        return None
+    x_2d = x.reshape(m_rows, k_dim)
+    if not x_2d.is_contiguous():
+        x_2d = x_2d.contiguous()
+    with torch.cuda.device(x.device):
+        out_2d = mm_fn(x_2d, w.t(), pdl=True, backend="tgv")
+    return out_2d.reshape(*x.shape[:-1], n_dim)
+
+
+def dense_weight_bf16_or_tgv(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    """Run ``F.linear(x, weight)`` or FlashInfer ``tgv`` on winning ``(M, K, N)`` buckets."""
+    if _is_bf16_weight_ready(weight, x):
+        tgv_out = _try_bf16_tgv(x, weight)
+        if tgv_out is not None:
+            return tgv_out
+    return F.linear(x, weight)
+
+
+def dense_linear_bf16_or_tgv(mod: Any, x: torch.Tensor) -> torch.Tensor:
+    """Run ``mod(x)`` via FlashInfer BF16 ``tgv`` when in BF16 fallback on winning buckets."""
+    if _is_bf16_tgv_enabled():
+        w = _extract_bf16_linear_weight(mod, x)
+        if w is not None:
+            tgv_out = _try_bf16_tgv(x, w)
+            if tgv_out is not None:
+                return tgv_out
+    return mod(x)
 
 
 @triton.jit
@@ -939,7 +1071,7 @@ class Qwen4_5Attention(nn.Module):
         """Project ``(q_packed, k_raw, v_raw, q_idx, raw_k_idx)`` in one fused GEMM when valid."""
         if self._fused_qkv_idx_ptrs_valid():
             assert self.qkv_idx_proj is not None
-            packed = self.qkv_idx_proj(hidden_states)
+            packed = dense_linear_bf16_or_tgv(self.qkv_idx_proj, hidden_states)
             chunks = torch.split(packed, self._qkv_idx_splits, dim=-1)
             q_packed = chunks[0]
             if self._qkv_idx_has_kv:
@@ -964,9 +1096,17 @@ class Qwen4_5Attention(nn.Module):
                 )
             return q_packed, k_raw, v_raw, q_idx, raw_k_idx
 
-        q_packed = self.q_proj(hidden_states)
-        k_raw = self.k_proj(hidden_states) if (not self.is_consumer and self.k_proj is not None) else None
-        v_raw = self.v_proj(hidden_states) if (not self.is_consumer and self.v_proj is not None) else None
+        q_packed = dense_linear_bf16_or_tgv(self.q_proj, hidden_states)
+        k_raw = (
+            dense_linear_bf16_or_tgv(self.k_proj, hidden_states)
+            if (not self.is_consumer and self.k_proj is not None)
+            else None
+        )
+        v_raw = (
+            dense_linear_bf16_or_tgv(self.v_proj, hidden_states)
+            if (not self.is_consumer and self.v_proj is not None)
+            else None
+        )
         if self.indexer is not None and need_idx:
             if need_idx_norm:
                 q_idx, raw_k_idx = self.indexer.project(hidden_states)
@@ -1097,8 +1237,8 @@ class Qwen4_5Attention(nn.Module):
             v_full = kv_cache.v_cache[:, :total_seq]  # [B, total_seq, 1, 256]
         else:
             assert self.k_proj is not None and self.v_proj is not None and self.k_norm is not None
-            k_raw = pre_k_raw if pre_k_raw is not None else self.k_proj(hidden_states)  # [B, T, 256]
-            v_raw = pre_v_raw if pre_v_raw is not None else self.v_proj(hidden_states)  # [B, T, 256]
+            k_raw = pre_k_raw if pre_k_raw is not None else dense_linear_bf16_or_tgv(self.k_proj, hidden_states)  # [B, T, 256]
+            v_raw = pre_v_raw if pre_v_raw is not None else dense_linear_bf16_or_tgv(self.v_proj, hidden_states)  # [B, T, 256]
 
             if self.use_kv_sconv:
                 if k_sconv_fn is not None:
@@ -1269,7 +1409,7 @@ class Qwen4_5Attention(nn.Module):
         # 6. Output gate & output projection
         out_flat = apply_attn_output_gate_flatten(attn_out, gate)
         return self._maybe_all_reduce(
-            self.o_proj(out_flat), skip_allreduce=skip_allreduce
+            dense_linear_bf16_or_tgv(self.o_proj, out_flat), skip_allreduce=skip_allreduce
         )
 
     def forward_paged_decode(
@@ -1336,8 +1476,8 @@ class Qwen4_5Attention(nn.Module):
                 and block_table is not None
                 and seq_before_dev is not None
             )
-            k_raw = pre_k_raw if pre_k_raw is not None else self.k_proj(hidden_states)
-            v_raw = pre_v_raw if pre_v_raw is not None else self.v_proj(hidden_states)
+            k_raw = pre_k_raw if pre_k_raw is not None else dense_linear_bf16_or_tgv(self.k_proj, hidden_states)
+            v_raw = pre_v_raw if pre_v_raw is not None else dense_linear_bf16_or_tgv(self.v_proj, hidden_states)
             if self.use_kv_sconv and not preconv_kv:
                 if self.k_sconv is not None:
                     k_raw = causal_dwconv1d(
@@ -1374,7 +1514,7 @@ class Qwen4_5Attention(nn.Module):
         else:
             out_flat = attn_out.reshape(bsz, seq_len, self.num_heads * self.head_dim)
         return self._maybe_all_reduce(
-            self.o_proj(out_flat), skip_allreduce=skip_allreduce
+            dense_linear_bf16_or_tgv(self.o_proj, out_flat), skip_allreduce=skip_allreduce
         )
 
 
@@ -1385,5 +1525,7 @@ __all__ = [
     "apply_attn_output_gate_flatten",
     "apply_partial_neox_rope",
     "causal_dwconv1d",
+    "dense_linear_bf16_or_tgv",
+    "dense_weight_bf16_or_tgv",
     "gemma_rmsnorm_and_partial_rope",
 ]

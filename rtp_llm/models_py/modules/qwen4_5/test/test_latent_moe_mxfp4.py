@@ -3362,6 +3362,175 @@ def test_r8_splitk_router_bf16_tgv_and_dp_tpsp(device: torch.device) -> None:
     print("  PASS R8 Split-K Router, Low-M BF16 TGV (5768/6400/5120), Autograd & DP+TPSP Dispatch")
 
 
+def test_r9_tgv_tactics_and_contig_overlap(device: torch.device) -> None:
+    print("\n=== [16] Test R9 Direct TGV Tactic Dispatch (M=1..64) & Contiguous EP Overlap ===")
+    from rtp_llm.models_py.modules.qwen4_5.moe import (
+        _bf16_linear_tgv_or_torch,
+        _can_bf16_tgv,
+    )
+
+    prev_tgv = os.environ.get("QWEN4_5_BF16_TGV")
+    os.environ["QWEN4_5_BF16_TGV"] = "1"
+    try:
+        # 1. Verify shape/M tactic selection, parity, 0 splitKreduce, 0 cutlass_80, and CG replay
+        tgv_cases = [
+            (1, 5120, 5768),
+            (8, 5120, 5768),
+            (16, 5120, 5768),
+            (24, 5120, 5768),
+            (32, 5120, 5768),
+            (16, 5120, 6400),
+            (32, 3200, 5120),
+            (16, 2560, 5120),
+            (64, 5120, 2560),
+            (16, 320, 5120),
+        ]
+        for M_c, K_c, N_c in tgv_cases:
+            x_c = torch.randn((M_c, K_c), dtype=torch.bfloat16, device=device) * 0.25
+            w_c = torch.randn((N_c, K_c), dtype=torch.bfloat16, device=device) * 0.05
+            spec = _can_bf16_tgv(x_c, w_c)
+            assert spec is not None and spec[1] is not None and spec[2] is not None, (
+                f"Expected direct TGV spec for {(M_c, K_c, N_c)}, got {spec}"
+            )
+            y_tgv = _bf16_linear_tgv_or_torch(x_c, w_c)
+            y_ref = F.linear(x_c, w_c)
+            cos = _diff_stats(y_tgv, y_ref)[2]
+            assert cos >= 0.9999, f"TGV mismatch {(M_c, K_c, N_c)}: cos={cos}"
+            torch.cuda.synchronize(device)
+            with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as prof:
+                _bf16_linear_tgv_or_torch(x_c, w_c)
+            torch.cuda.synchronize(device)
+            ks = [e.key.lower() for e in prof.key_averages()]
+            assert not any("splitkreduce" in k for k in ks), f"splitKreduce in {(M_c, K_c, N_c)}: {ks}"
+            assert not any("cutlass_80" in k for k in ks), f"cutlass_80 in {(M_c, K_c, N_c)}: {ks}"
+
+            if M_c in (16, 24, 32) and N_c in (5768, 5120, 2560):
+                for _ in range(2):
+                    _bf16_linear_tgv_or_torch(x_c, w_c)
+                torch.cuda.synchronize(device)
+                g_c = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(g_c):
+                    y_cg = _bf16_linear_tgv_or_torch(x_c, w_c)
+                x_mut = torch.randn((M_c, K_c), dtype=torch.bfloat16, device=device) * 0.25
+                x_c.copy_(x_mut)
+                g_c.replay()
+                torch.cuda.synchronize(device)
+                assert _diff_stats(y_cg, F.linear(x_mut, w_c))[2] >= 0.9999
+                del g_c
+
+        # Guardrails: N<1024 and large-M (N>2560, M>32) fall back cleanly to F.linear
+        for M_no, K_no, N_no in ((16, 5120, 640), (64, 5120, 5768), (8, 5120, 25600)):
+            assert _can_bf16_tgv(
+                torch.empty((M_no, K_no), dtype=torch.bfloat16, device=device),
+                torch.empty((N_no, K_no), dtype=torch.bfloat16, device=device),
+            ) is None
+
+        # 2. Module E2E at M=16, 24, 32 (Qwen4_5DenseMLP + Qwen4_5LatentMoE)
+        mlp9 = Qwen4_5DenseMLP(
+            hidden_size=5120,
+            intermediate_size=3200,
+            dtype=torch.bfloat16,
+            device=device,
+            dense_linear_mode="auto",
+        )
+        moe9 = Qwen4_5LatentMoE(
+            hidden_size=5120,
+            routed_expert_hidden_size=2560,
+            moe_intermediate_size=128,
+            shared_expert_intermediate_size=320,
+            num_experts=512,
+            num_experts_per_tok=10,
+            dtype=torch.bfloat16,
+            device=device,
+            dense_linear_mode="auto",
+            backend="triton_splitk",
+        )
+        _init_latent_moe_weights(moe9, seed=9100)
+        moe9.prepare_weights()
+        for M_e in (16, 24, 32):
+            x_e = torch.randn((M_e, 5120), dtype=torch.bfloat16, device=device) * 0.4
+            for name_m, mod_m in (("DenseMLP", mlp9), ("LatentMoE", moe9)):
+                os.environ["QWEN4_5_BF16_TGV"] = "1"
+                y_fast = mod_m(x_e)
+                os.environ["QWEN4_5_BF16_TGV"] = "0"
+                y_base = mod_m(x_e)
+                os.environ["QWEN4_5_BF16_TGV"] = "1"
+                cos_e = _diff_stats(y_fast, y_base)[2]
+                assert cos_e >= 0.9999, f"R9 {name_m} M={M_e} cos={cos_e}"
+                torch.cuda.synchronize(device)
+                with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as pe:
+                    mod_m(x_e)
+                torch.cuda.synchronize(device)
+                ke = [ev.key.lower() for ev in pe.key_averages()]
+                assert not any("splitkreduce" in k for k in ke), f"R9 splitKreduce in {name_m} M={M_e}: {ke}"
+                assert not any("cutlass_80" in k for k in ke), f"R9 cutlass_80 in {name_m} M={M_e}: {ke}"
+        del mlp9, moe9
+
+        # 3. Autograd safety at M=16 and M=32
+        with torch.inference_mode(False), torch.enable_grad():
+            for M_g in (16, 32):
+                x_g = torch.randn((M_g, 5120), dtype=torch.bfloat16, device=device, requires_grad=True)
+                w_g = torch.randn((5768, 5120), dtype=torch.bfloat16, device=device, requires_grad=True)
+                y_g = _bf16_linear_tgv_or_torch(x_g, w_g)
+                assert y_g.requires_grad
+                y_g.sum().backward()
+                assert x_g.grad is not None and w_g.grad is not None
+    finally:
+        if prev_tgv is None:
+            os.environ.pop("QWEN4_5_BF16_TGV", None)
+        else:
+            os.environ["QWEN4_5_BF16_TGV"] = prev_tgv
+
+    # 4. M9-2 Contiguous EP=4 overlap parity (raw, prequant_fp8, and all_tokens == 0 edge case)
+    moe_ep = Qwen4_5LatentMoE(
+        hidden_size=5120,
+        routed_expert_hidden_size=2560,
+        moe_intermediate_size=256,
+        shared_expert_intermediate_size=320,
+        num_experts=512,
+        num_experts_per_tok=10,
+        ep_size=4,
+        ep_rank=0,
+        dtype=torch.bfloat16,
+        device=device,
+        backend="deepgemm_contiguous",
+    )
+    _init_latent_moe_weights(moe_ep, seed=9200)
+    w_ep = moe_ep._mxfp4_weights()
+    w_ep.get_deepgemm_pair()
+    for M_p in (256, 2560):
+        x_p = torch.randn((M_p, 2560), dtype=torch.bfloat16, device=device) * 0.2
+        ids_p = torch.randint(0, 512, (M_p, 10), dtype=torch.int32, device=device)
+        tw_p = torch.full((M_p, 10), 0.1, dtype=torch.float32, device=device)
+        y_raw = mxfp4_moe_forward(x_p, ids_p, tw_p, w_ep, ep_start=0, ep_size=4, backend="deepgemm_contiguous")
+        xp_q, xp_sc = per_token_group_quant_fp8_ue8m0(x_p, scale_format="raw")
+        y_pq = mxfp4_moe_forward(
+            None,
+            ids_p,
+            tw_p,
+            w_ep,
+            ep_start=0,
+            ep_size=4,
+            backend="deepgemm_contiguous",
+            prequant_fp8=(xp_q, xp_sc),
+        )
+        y_ref_fi = mxfp4_moe_forward(x_p, ids_p, tw_p, w_ep, ep_start=0, ep_size=4, backend="flashinfer")
+        assert _diff_stats(y_raw, y_pq)[2] >= 0.999999
+        assert _diff_stats(y_raw, y_ref_fi)[2] >= 0.9999
+
+    # Empty local-expert routing (all_tokens == 0) must return zeros cleanly
+    x_empty = torch.randn((128, 2560), dtype=torch.bfloat16, device=device) * 0.2
+    ids_remote = torch.randint(128, 512, (128, 10), dtype=torch.int32, device=device)
+    tw_remote = torch.full((128, 10), 0.1, dtype=torch.float32, device=device)
+    y_zero = mxfp4_moe_forward(
+        x_empty, ids_remote, tw_remote, w_ep, ep_start=0, ep_size=4, backend="deepgemm_contiguous"
+    )
+    assert y_zero.shape == (128, 2560) and torch.count_nonzero(y_zero).item() == 0
+    del moe_ep
+
+    print("  PASS R9 Direct TGV Tactic Dispatch (M=1..64) & Contiguous EP Overlap")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Qwen 4.5-Flash LatentMoE & SM100 MXFP4 test suite")
     parser.add_argument("--distributed", action="store_true", help="Run multi-GPU FastAllReduce/TP/EP tests")
@@ -3427,6 +3596,7 @@ def main() -> int:
         test_r6_small_batch_launch_reduction_and_kernels(device)
         test_r7_tpsp_and_fused_kernels(device)
         test_r8_splitk_router_bf16_tgv_and_dp_tpsp(device)
+        test_r9_tgv_tactics_and_contig_overlap(device)
 
     if args.distributed:
         test_distributed_fast_comm_tp_ep(world_size=args.world_size)

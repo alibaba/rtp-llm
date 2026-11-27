@@ -21,6 +21,7 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
+from .attention import dense_linear_bf16_or_tgv, dense_weight_bf16_or_tgv
 from .contracts import PLELayerState
 from .short_conv import (
     Qwen4_5ShortConv,
@@ -1857,9 +1858,9 @@ class Qwen4_5PLELayer(nn.Module):
     def _project_kv_fused(self, emb: torch.Tensor, *, use_fused_cuda: bool) -> Tuple[torch.Tensor, torch.Tensor]:
         if use_fused_cuda and self.hidden_size <= 8192:
             w_kv = self._get_fused_kv_weight()
-            kv = F.linear(emb, w_kv)
+            kv = dense_weight_bf16_or_tgv(emb, w_kv)
             return kv[..., : self.hc_hidden_size], kv[..., self.hc_hidden_size :]
-        return self.key_proj(emb), self.value_proj(emb)
+        return dense_linear_bf16_or_tgv(self.key_proj, emb), dense_linear_bf16_or_tgv(self.value_proj, emb)
 
     def forward_verify(
         self,

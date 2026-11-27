@@ -592,38 +592,81 @@ def _qwen45_router_splitk_reduce_topk_kernel(
 
 
 _FLASHINFER_MM_BF16 = None
+_FLASHINFER_TGV_FN = None
+_FLASHINFER_TGV_TACTIC_NUM = 0
 _FLASHINFER_TGV_CHECKED = False
 
 
-def _get_flashinfer_mm_bf16(device: torch.device) -> Any:
-    global _FLASHINFER_MM_BF16, _FLASHINFER_TGV_CHECKED
+def _get_flashinfer_tgv_backend(device: torch.device) -> Tuple[Any, Any, int]:
+    """Return ``(mm_fn, tgv_fn, tactic_num)`` when SM100+ TGV BF16 path is enabled."""
+    global _FLASHINFER_MM_BF16, _FLASHINFER_TGV_FN, _FLASHINFER_TGV_TACTIC_NUM, _FLASHINFER_TGV_CHECKED
     if os.environ.get("QWEN4_5_BF16_TGV", "1") == "0":
-        return None
+        return None, None, 0
+    if device.type != "cuda":
+        return None, None, 0
+    try:
+        cap_major, _ = torch.cuda.get_device_capability(device)
+        if cap_major < 10:
+            return None, None, 0
+    except Exception:
+        return None, None, 0
     if not _FLASHINFER_TGV_CHECKED:
         _FLASHINFER_TGV_CHECKED = True
         try:
             import flashinfer
 
-            fn = getattr(flashinfer, "mm_bf16", None)
-            _FLASHINFER_MM_BF16 = fn
+            _FLASHINFER_MM_BF16 = getattr(flashinfer, "mm_bf16", None)
         except Exception:
             _FLASHINFER_MM_BF16 = None
-    if _FLASHINFER_MM_BF16 is None or device.type != "cuda":
+        if cap_major == 10:
+            try:
+                from flashinfer.gemm import gemm_base as _gb
+
+                use_100f = bool(_gb.is_sm100f_supported(device))
+                mod = _gb.gen_tgv_gemm_sm10x_module(torch.bfloat16, use_100f).build_and_load()
+                _FLASHINFER_TGV_FN = mod.tgv_gemm
+                _FLASHINFER_TGV_TACTIC_NUM = int(mod.tgv_gemm_tactic_num())
+            except Exception:
+                _FLASHINFER_TGV_FN = None
+                _FLASHINFER_TGV_TACTIC_NUM = 0
+    return _FLASHINFER_MM_BF16, _FLASHINFER_TGV_FN, _FLASHINFER_TGV_TACTIC_NUM
+
+
+def _select_bf16_tgv_tactic(M: int, K: int, N: int, tactic_num: int) -> Optional[int]:
+    """Select empirically optimal SM100+ TGV tactic (splitKreduce=0) or ``None`` if F.linear wins."""
+    if M <= 0 or K < 320 or N < 1024 or (K % 16) != 0 or (N % 8) != 0:
         return None
-    try:
-        cap_major, _ = torch.cuda.get_device_capability(device)
-        if cap_major < 10:
+    if N * K >= (1 << 30):
+        return None
+    if N > 8192:
+        if M > 4:
             return None
-    except Exception:
+        tactic = 3 if K >= 10240 else (2 if K >= 1280 else 1)
+    elif M <= 8:
+        tactic = 3 if K >= 10240 else (2 if K >= 1280 else 1)
+    elif M <= 16:
+        tactic = 6 if K >= 1280 else 5
+    elif M <= 32:
+        if N <= 2560 and M > 24:
+            tactic = 5
+        elif 1280 <= K < 2560:
+            tactic = 7
+        else:
+            tactic = 8
+    elif M <= 64 and N <= 2560:
+        tactic = 8
+    else:
         return None
-    return _FLASHINFER_MM_BF16
+    return tactic if tactic < tactic_num else None
 
 
-def _can_bf16_tgv(x: torch.Tensor, w: torch.Tensor) -> Optional[Tuple[Any, int, int, int]]:
-    """Return ``(mm_fn, M, K, N)`` if shape/dtype/device match low-M SM100+ TGV fast path."""
-    mm_fn = _get_flashinfer_mm_bf16(x.device)
+def _can_bf16_tgv(
+    x: torch.Tensor, w: torch.Tensor
+) -> Optional[Tuple[Any, Any, Optional[int], int, int, int]]:
+    """Return ``(mm_fn, tgv_fn, tactic, M, K, N)`` for zero-splitKreduce SM100+ TGV fast path."""
+    mm_fn, tgv_fn, tactic_num = _get_flashinfer_tgv_backend(x.device)
     if (
-        mm_fn is not None
+        (tgv_fn is not None or mm_fn is not None)
         and x.is_cuda
         and w.is_cuda
         and x.dtype == torch.bfloat16
@@ -634,23 +677,44 @@ def _can_bf16_tgv(x: torch.Tensor, w: torch.Tensor) -> Optional[Tuple[Any, int, 
         K = int(w.shape[1])
         N = int(w.shape[0])
         M = int(x.numel() // K) if K > 0 and x.shape[-1] == K else 0
-        if 1 <= M <= 8 and K >= 1280 and N >= 1024 and (K % 16) == 0 and (N % 8) == 0:
-            return mm_fn, M, K, N
+        if M <= 0:
+            return None
+        if tgv_fn is not None:
+            tactic = _select_bf16_tgv_tactic(M, K, N, tactic_num)
+            if tactic is not None:
+                return mm_fn, tgv_fn, tactic, M, K, N
+        elif (
+            mm_fn is not None
+            and 1 <= M <= 8
+            and K >= 1280
+            and N >= 1024
+            and (K % 16) == 0
+            and (N % 8) == 0
+        ):
+            return mm_fn, None, None, M, K, N
     return None
 
 
-def _run_bf16_tgv(x: torch.Tensor, w: torch.Tensor, spec: Tuple[Any, int, int, int]) -> torch.Tensor:
-    mm_fn, M, K, N = spec
+def _run_bf16_tgv(
+    x: torch.Tensor,
+    w: torch.Tensor,
+    spec: Tuple[Any, Any, Optional[int], int, int, int],
+) -> torch.Tensor:
+    mm_fn, tgv_fn, tactic, M, K, N = spec
     x_2d = x.reshape(M, K)
     if not x_2d.is_contiguous():
         x_2d = x_2d.contiguous()
     with _cuda_device_ctx(x.device):
-        out_2d = mm_fn(x_2d, w.t(), pdl=True, backend="tgv")
+        if tgv_fn is not None and tactic is not None:
+            out_2d = torch.empty((M, N), dtype=torch.bfloat16, device=x.device)
+            tgv_fn(w, x_2d.t(), None, tactic, out_2d, True)
+        else:
+            out_2d = mm_fn(x_2d, w.t(), pdl=True, backend="tgv")
     return out_2d.reshape(*x.shape[:-1], N) if x.ndim != 2 else out_2d
 
 
 def _bf16_linear_tgv_or_torch(x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
-    """Run zero-splitKreduce FlashInfer TGV GEMM on SM100+ for M<=8 wide BF16 projections."""
+    """Run zero-splitKreduce FlashInfer TGV GEMM on SM100+ for optimal (M, K, N) BF16 shapes."""
     spec = _can_bf16_tgv(x, w)
     if spec is not None:
         return _run_bf16_tgv(x, w, spec)
@@ -660,9 +724,9 @@ def _bf16_linear_tgv_or_torch(x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
 def _dense_linear_or_tgv(
     x: torch.Tensor, w: torch.Tensor, fp8_mod: Optional[SM100FP8Linear]
 ) -> torch.Tensor:
-    """Dispatch to low-M BF16 TGV when active or ``fp8_mod`` resolves to BF16, else ``fp8_mod``/``F.linear``."""
+    """Dispatch to BF16 TGV when active or ``fp8_mod`` resolves to BF16, else ``fp8_mod``/``F.linear``."""
     spec = _can_bf16_tgv(x, w)
-    if spec is not None and (fp8_mod is None or fp8_mod._resolve_backend(spec[1], x.device) == "bf16"):
+    if spec is not None and (fp8_mod is None or fp8_mod._resolve_backend(spec[3], x.device) == "bf16"):
         return _run_bf16_tgv(x, w, spec)
     if fp8_mod is not None:
         return fp8_mod(x)

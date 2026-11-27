@@ -9,6 +9,10 @@
 
 #include <gtest/gtest.h>
 
+#if USING_CUDA
+#include <c10/cuda/CUDAFunctions.h>
+#endif
+
 #include <memory>
 #include <string>
 #include <utility>
@@ -790,5 +794,90 @@ TEST(GrammarLogitsProcessorTest, StructuralTagReasoningBudgetForcesTokenEndAndFi
     EXPECT_EQ(proc->committedOutputLen().value(), 0);
     EXPECT_EQ(proc.matcher->numAcceptedTokens(), 0);
 }
+
+#if USING_CUDA
+namespace {
+class ScopedCudaSyncErrorMode {
+public:
+    explicit ScopedCudaSyncErrorMode(c10::cuda::SyncDebugMode mode):
+        prev_(c10::cuda::warning_state().get_sync_debug_mode()) {
+        c10::cuda::warning_state().set_sync_debug_mode(mode);
+    }
+    ~ScopedCudaSyncErrorMode() {
+        c10::cuda::warning_state().set_sync_debug_mode(prev_);
+    }
+
+private:
+    c10::cuda::SyncDebugMode prev_;
+};
+}  // namespace
+
+TEST(GrammarLogitsProcessorTest, SixteenStreamsApplyAsyncWithoutSyncOrPoolOverwriteRace) {
+    auto backend = makeBackend();
+    ASSERT_TRUE(backend);
+
+    constexpr int kNumStreams = 16;
+    std::vector<int> expected_tokens;
+    expected_tokens.reserve(kNumStreams);
+    std::vector<ProcessorBundle> procs;
+    procs.reserve(kNumStreams);
+    for (int i = 0; i < kNumStreams; ++i) {
+        const int tok = 'a' + i;
+        expected_tokens.push_back(tok);
+        procs.push_back(makeProcessor(backend, std::string(1, static_cast<char>(tok)) + "z"));
+        ASSERT_TRUE(procs.back().proc);
+    }
+
+    // Batch 16 grammar streams back-to-back on GPU under SyncDebugMode::L_ERROR:
+    // proves DecodeMaskBuilder::applyState issues zero cudaStreamSynchronize inside H2D copy_.
+    auto logits = torch::zeros({kNumStreams, 128}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+    {
+        ScopedCudaSyncErrorMode sync_guard(c10::cuda::SyncDebugMode::L_ERROR);
+        for (int i = 0; i < kNumStreams; ++i) {
+            auto row_logits = logits.narrow(0, i, 1);
+            ASSERT_FALSE(procs[i]->process(makeSamplerInputs(row_logits), 0, 1).has_value());
+        }
+    }
+
+    auto cpu_logits = logits.cpu().contiguous();
+    for (int i = 0; i < kNumStreams; ++i) {
+        const auto* row_ptr = cpu_logits.data_ptr<float>() + i * 128;
+        std::vector<float> values(row_ptr, row_ptr + 128);
+        expectTokenAllowed(values, expected_tokens[i]);
+        expectTokenMasked(values, expected_tokens[(i + 1) % kNumStreams]);
+        expectTokenMasked(values, kZ);
+    }
+}
+
+TEST(GrammarLogitsProcessorTest, RapidTwentyStepUpdatesReusePinnedPoolWithoutSyncOrCorruption) {
+    auto backend = makeBackend();
+    ASSERT_TRUE(backend);
+
+    constexpr int kSteps = 20;
+    const std::string pattern = "abcdefghijklmnopqrst";
+    auto proc = makeProcessor(backend, pattern);
+    ASSERT_TRUE(proc.proc);
+
+    auto logits = torch::zeros({kSteps, 128}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+    {
+        ScopedCudaSyncErrorMode sync_guard(c10::cuda::SyncDebugMode::L_ERROR);
+        for (int step = 0; step < kSteps; ++step) {
+            auto row_logits = logits.narrow(0, step, 1);
+            ASSERT_FALSE(proc->process(makeSamplerInputs(row_logits), 0, 1).has_value());
+            auto tok = torch::tensor({static_cast<int32_t>(pattern[step])}, torch::kInt32).reshape({1, 1});
+            ASSERT_FALSE(proc->updateStatus(tok, 1).has_value());
+        }
+    }
+
+    auto cpu_logits = logits.cpu().contiguous();
+    for (int step = 0; step < kSteps; ++step) {
+        const auto* row_ptr = cpu_logits.data_ptr<float>() + step * 128;
+        std::vector<float> values(row_ptr, row_ptr + 128);
+        const int allowed = static_cast<int>(pattern[step]);
+        expectTokenAllowed(values, allowed);
+        expectTokenMasked(values, allowed == 'a' ? 'b' : 'a');
+    }
+}
+#endif  // USING_CUDA
 
 }  // namespace rtp_llm

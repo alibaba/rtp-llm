@@ -1952,6 +1952,235 @@ def test_r8_gdn_prefill_fast_launch_and_ple_halo_parity() -> None:
     print("  [R8 GDN & PLE PASS] triton_fast_launch ragged+snap & N==halo_w SP zero-copy halo verified.")
 
 
+def test_r9_bf16_tgv_buckets_and_gdn_qkvz_ba_fusion() -> None:
+    import os
+    from rtp_llm.models_py.modules.qwen4_5.attention import (
+        _should_use_bf16_tgv,
+        dense_linear_bf16_or_tgv,
+    )
+    from rtp_llm.models_py.modules.qwen4_5.fp8_linear import SM100FP8Linear
+
+    print("\n=== [R9 BF16 TGV] Strict-Win Buckets + GDN qkvz/ba Zero-Copy Fusion + Autograd/Reload ===")
+    device = torch.device("cuda")
+    dtype = torch.bfloat16
+    torch.manual_seed(4900)
+    cap_major, _ = torch.cuda.get_device_capability(device)
+
+    # 1. Verify bucket predicate boundaries match L2-cold CG roofline wins
+    assert _should_use_bf16_tgv(1, 5120, 5184) and _should_use_bf16_tgv(8, 5120, 5184)
+    assert not _should_use_bf16_tgv(16, 5120, 5184)
+    assert _should_use_bf16_tgv(16, 5120, 4096) and not _should_use_bf16_tgv(24, 5120, 4096)
+    assert _should_use_bf16_tgv(16, 5120, 2560) and _should_use_bf16_tgv(24, 5120, 2560)
+    assert not _should_use_bf16_tgv(32, 5120, 2560)
+    assert _should_use_bf16_tgv(8, 2048, 5120) and not _should_use_bf16_tgv(16, 2048, 5120)
+    assert not _should_use_bf16_tgv(8, 5120, 64) and not _should_use_bf16_tgv(8, 5120, 1152)
+
+    prev_tgv = os.environ.get("QWEN4_5_BF16_TGV")
+    prev_fuse = os.environ.get("QWEN4_5_GDN_FUSE_QKVZ_BA")
+    try:
+        # 2. Strict-win BF16 TGV CUDA Graph zero splitK / cutlass_80 & cos>=0.9999 + env toggle
+        with torch.no_grad():
+            for m_rows, k_dim, n_dim in (
+                (1, 5120, 5184),
+                (8, 5120, 5760),
+                (4, 5120, 5248),
+                (16, 5120, 4096),
+                (16, 5120, 2560),
+                (8, 2048, 5120),
+            ):
+                lin = torch.nn.Linear(k_dim, n_dim, bias=False, device=device, dtype=dtype).eval()
+                lin.weight.normal_(0.0, 0.02)
+                x = torch.randn((m_rows, k_dim), device=device, dtype=dtype) * 0.1
+
+                os.environ["QWEN4_5_BF16_TGV"] = "0"
+                y_ref = dense_linear_bf16_or_tgv(lin, x)
+                os.environ["QWEN4_5_BF16_TGV"] = "1"
+                y_opt = dense_linear_bf16_or_tgv(lin, x)
+                cos = float(F.cosine_similarity(y_opt.float().flatten(), y_ref.float().flatten(), dim=0).item())
+                assert cos >= 0.9999, f"TGV parity fail ({m_rows},{k_dim},{n_dim}) cos={cos}"
+
+                if cap_major >= 10:
+                    cg = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(cg):
+                        _ = dense_linear_bf16_or_tgv(lin, x)
+                    with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as prof:
+                        cg.replay()
+                        torch.cuda.synchronize(device)
+                    sk = sum(1 for e in prof.events() if e.device_type == torch.autograd.DeviceType.CUDA and "splitK" in e.name)
+                    c80 = sum(1 for e in prof.events() if e.device_type == torch.autograd.DeviceType.CUDA and "cutlass_80" in e.name)
+                    assert sk == 0, f"Unexpected splitK={sk} for ({m_rows},{k_dim},{n_dim})"
+                    assert c80 == 0, f"Unexpected cutlass_80={c80} for ({m_rows},{k_dim},{n_dim})"
+
+        # 3. Autograd backward safety when requires_grad=True
+        lin_grad = torch.nn.Linear(2048, 5120, bias=False, device=device, dtype=dtype)
+        lin_grad.weight.data.normal_(0.0, 0.02)
+        x_grad = (torch.randn((4, 2048), device=device, dtype=dtype) * 0.1).requires_grad_(True)
+        x_ref = x_grad.detach().clone().requires_grad_(True)
+        w_ref = lin_grad.weight.detach().clone().requires_grad_(True)
+        os.environ["QWEN4_5_BF16_TGV"] = "1"
+        dense_linear_bf16_or_tgv(lin_grad, x_grad).float().sum().backward()
+        F.linear(x_ref, w_ref).float().sum().backward()
+        assert x_grad.grad is not None and lin_grad.weight.grad is not None
+        assert F.cosine_similarity(x_grad.grad.float().flatten(), x_ref.grad.float().flatten(), dim=0).item() >= 0.9999
+        assert F.cosine_similarity(lin_grad.weight.grad.float().flatten(), w_ref.grad.float().flatten(), dim=0).item() >= 0.9999
+
+        # 4. GDN producer zero-copy qkvz+ba fusion parity across forward / opaque / verify / ragged prefill + reload
+        cfg = make_config(hidden_size=5120)
+        plan = YoCoSharingPlan.from_config(cfg)
+        with torch.no_grad():
+            gdn = (
+                Qwen4_5GatedDeltaNet.from_config(cfg, layer_idx=0, sharing_plan=plan, tp_size=4, tp_rank=0)
+                .to(device=device, dtype=dtype)
+                .eval()
+                .requires_grad_(False)
+            )
+            init_realistic_weights(gdn)
+            assert not hasattr(gdn, "in_proj_qkvz_ba")
+
+            sm_qkvz = SM100FP8Linear(
+                in_features=gdn.in_proj_qkvz.in_features,
+                out_features=gdn.in_proj_qkvz.out_features,
+                bias=False,
+                mode="auto",
+                keep_bf16=False,
+                prepare_trtllm_ll=True,
+                prepare_mxfp8=False,
+                dtype=dtype,
+                device=device,
+            )
+            sm_qkvz.weight = gdn.in_proj_qkvz.weight
+            sm_qkvz.prepare_weights()
+            gdn.in_proj_qkvz = sm_qkvz
+
+            # 4a) Forward B=8,T=1 and B=16,T=1 parity vs unfused baseline
+            for bsz_t in (8, 16):
+                h_t = torch.randn((bsz_t, 1, 5120), device=device, dtype=dtype) * 0.1
+                st_r = gdn.create_state(bsz_t, device, dtype)
+                st_f = gdn.create_state(bsz_t, device, dtype)
+                st_f.conv_state.copy_(st_r.conv_state)
+                st_f.ssm_state.copy_(st_r.ssm_state)
+
+                os.environ["QWEN4_5_BF16_TGV"] = "0"
+                os.environ["QWEN4_5_GDN_FUSE_QKVZ_BA"] = "0"
+                y_r, _ = gdn.forward(h_t, state=st_r)
+                os.environ["QWEN4_5_BF16_TGV"] = "1"
+                os.environ["QWEN4_5_GDN_FUSE_QKVZ_BA"] = "1"
+                y_f, _ = gdn.forward(h_t, state=st_f)
+                assert F.cosine_similarity(y_f.float().flatten(), y_r.float().flatten(), dim=0).item() >= 0.99999
+
+            # Verify zero-copy contiguous aliasing kept identical Parameter objects & contiguous memory
+            w_q_p = gdn.in_proj_qkvz.weight
+            w_ba_p = gdn.in_proj_ba.weight
+            assert w_ba_p.data_ptr() == w_q_p.data_ptr() + w_q_p.numel() * w_q_p.element_size()
+
+            # 4b) Decode opaque & Verify parity + in-place reload + parameter swap
+            h_v = torch.randn((4, 8, 5120), device=device, dtype=dtype) * 0.1
+            st_vr = gdn.create_state(4, device, dtype)
+            st_vf = gdn.create_state(4, device, dtype)
+            sc_r = torch.empty((4, 8, gdn.conv_dim, 3), device=device, dtype=dtype)
+            ss_r = torch.empty((4, 8, gdn.num_v_heads, 64, 64), device=device, dtype=torch.float32)
+            sc_f, ss_f = torch.empty_like(sc_r), torch.empty_like(ss_r)
+            os.environ["QWEN4_5_BF16_TGV"] = "0"
+            os.environ["QWEN4_5_GDN_FUSE_QKVZ_BA"] = "0"
+            yv_r, _ = gdn.forward_verify(h_v, init_conv_state=st_vr.conv_state, init_ssm_state=st_vr.ssm_state, stage_conv_state=sc_r, stage_ssm_state=ss_r)
+            os.environ["QWEN4_5_BF16_TGV"] = "1"
+            os.environ["QWEN4_5_GDN_FUSE_QKVZ_BA"] = "1"
+            yv_f, _ = gdn.forward_verify(h_v, init_conv_state=st_vf.conv_state, init_ssm_state=st_vf.ssm_state, stage_conv_state=sc_f, stage_ssm_state=ss_f)
+            assert F.cosine_similarity(yv_f.float().flatten(), yv_r.float().flatten(), dim=0).item() >= 0.99999
+
+            # Weight .copy_() & Param replacement refresh
+            gdn.in_proj_ba.weight.data.zero_()
+            q_new, ba_new = gdn._project_qkvz_ba(h_v)
+            assert float(ba_new.abs().max().item()) == 0.0
+            gdn.in_proj_ba.weight = torch.nn.Parameter(torch.full_like(gdn.in_proj_ba.weight, 0.25), requires_grad=False)
+            _, ba_swapped = gdn._project_qkvz_ba(torch.ones((1, 1, 5120), device=device, dtype=dtype))
+            assert F.cosine_similarity(ba_swapped.float().flatten(), torch.full((64,), 1280.0, device=device), dim=0).item() >= 0.9999
+
+        # 5. inference_mode safety (never reads _version on inference tensor)
+        with torch.inference_mode():
+            gdn_inf = Qwen4_5GatedDeltaNet.from_config(cfg, layer_idx=0, sharing_plan=plan, tp_size=4, tp_rank=0).to(device=device, dtype=dtype).eval()
+            q_inf, ba_inf = gdn_inf._project_qkvz_ba(torch.randn((2, 1, 5120), device=device, dtype=dtype))
+            assert q_inf.shape == (2, 1, 5120) and ba_inf.shape == (2, 1, 64)
+
+        # 6. TMA unaligned fallback & size guard (attention.py _should_use_bf16_tgv)
+        assert not _should_use_bf16_tgv(4, 2050, 2052)
+        assert not _should_use_bf16_tgv(4, 2048, 2052)
+        assert not _should_use_bf16_tgv(4, 2050, 2048)
+        assert not _should_use_bf16_tgv(4, 65536, 20480)
+        with torch.no_grad():
+            os.environ["QWEN4_5_BF16_TGV"] = "1"
+            lin_unaligned = torch.nn.Linear(2050, 2052, bias=False, device=device, dtype=dtype).eval()
+            lin_unaligned.weight.normal_(0.0, 0.02)
+            x_unaligned = torch.randn((4, 2050), device=device, dtype=dtype) * 0.1
+            y_unaligned = dense_linear_bf16_or_tgv(lin_unaligned, x_unaligned)
+            y_unaligned_ref = F.linear(x_unaligned, lin_unaligned.weight)
+            assert float((y_unaligned - y_unaligned_ref).abs().max().item()) == 0.0
+
+        # 7. 0-warmup CUDA Graph capture must never cache graph-pool buf or mutate weights (#533)
+        os.environ["QWEN4_5_BF16_TGV"] = "1"
+        os.environ["QWEN4_5_GDN_FUSE_QKVZ_BA"] = "1"
+        x_zero_cg = torch.randn((4, 1, 5120), device=device, dtype=dtype) * 0.1
+        for mode_name in ("no_grad", "inference_mode"):
+            ctx_mgr = torch.no_grad() if mode_name == "no_grad" else torch.inference_mode()
+            with ctx_mgr:
+                gdn_0 = (
+                    Qwen4_5GatedDeltaNet.from_config(cfg, layer_idx=0, sharing_plan=plan, tp_size=4, tp_rank=0)
+                    .to(device=device, dtype=dtype)
+                    .eval()
+                )
+                if mode_name == "no_grad":
+                    gdn_0.requires_grad_(False)
+                init_realistic_weights(gdn_0)
+                w1_orig = gdn_0.in_proj_qkvz.weight.detach().clone()
+                w2_orig = gdn_0.in_proj_ba.weight.detach().clone()
+                ref_qkvz = dense_linear_bf16_or_tgv(gdn_0.in_proj_qkvz, x_zero_cg)
+                ref_ba = dense_linear_bf16_or_tgv(gdn_0.in_proj_ba, x_zero_cg)
+                ref_flin_q = F.linear(x_zero_cg, w1_orig)
+                assert gdn_0._fused_qkvz_ba_buf is None
+
+                cg_0 = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(cg_0):
+                    _q_cap, _ba_cap = gdn_0._project_qkvz_ba(x_zero_cg)
+                # Before replay: capture must leave _fused_qkvz_ba_buf None & weights intact
+                assert gdn_0._fused_qkvz_ba_buf is None, f"{mode_name} leaked graph buf before reset"
+                assert float((gdn_0.in_proj_qkvz.weight - w1_orig).abs().max().item()) == 0.0
+                assert float((gdn_0.in_proj_ba.weight - w2_orig).abs().max().item()) == 0.0
+                cg_0.reset()
+                del cg_0
+                assert gdn_0._fused_qkvz_ba_buf is None, f"{mode_name} leaked graph buf after reset"
+                assert float((gdn_0.in_proj_qkvz.weight - w1_orig).abs().max().item()) == 0.0
+                assert float((gdn_0.in_proj_ba.weight - w2_orig).abs().max().item()) == 0.0
+                assert float((F.linear(x_zero_cg, gdn_0.in_proj_qkvz.weight) - ref_flin_q).abs().max().item()) == 0.0
+
+                os.environ["QWEN4_5_GDN_FUSE_QKVZ_BA"] = "0"
+                q_eg0, ba_eg0 = gdn_0._project_qkvz_ba(x_zero_cg)
+                assert float((q_eg0 - ref_qkvz).abs().max().item()) == 0.0
+                assert float((ba_eg0 - ref_ba).abs().max().item()) == 0.0
+                os.environ["QWEN4_5_GDN_FUSE_QKVZ_BA"] = "1"
+                q_eg1, ba_eg1 = gdn_0._project_qkvz_ba(x_zero_cg)
+                assert F.cosine_similarity(q_eg1.float().flatten(), ref_qkvz.float().flatten(), dim=0).item() >= 0.99999
+                assert F.cosine_similarity(ba_eg1.float().flatten(), ref_ba.float().flatten(), dim=0).item() >= 0.99999
+
+                # Warmed-up CG capture must cleanly reuse persistent buffer and match
+                cg_warm = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(cg_warm):
+                    q_wcg, ba_wcg = gdn_0._project_qkvz_ba(x_zero_cg)
+                cg_warm.replay()
+                assert F.cosine_similarity(q_wcg.float().flatten(), ref_qkvz.float().flatten(), dim=0).item() >= 0.99999
+                assert F.cosine_similarity(ba_wcg.float().flatten(), ref_ba.float().flatten(), dim=0).item() >= 0.99999
+                cg_warm.reset()
+    finally:
+        if prev_tgv is None:
+            os.environ.pop("QWEN4_5_BF16_TGV", None)
+        else:
+            os.environ["QWEN4_5_BF16_TGV"] = prev_tgv
+        if prev_fuse is None:
+            os.environ.pop("QWEN4_5_GDN_FUSE_QKVZ_BA", None)
+        else:
+            os.environ["QWEN4_5_GDN_FUSE_QKVZ_BA"] = prev_fuse
+    print("  [R9 BF16 TGV PASS] Strict-win buckets, zero-copy qkvz+ba fusion, autograd/inference_mode & reload verified.")
+
+
 def main() -> None:
     t0 = time.time()
     test_yoco_sharing_plan_and_param_shapes()
@@ -1965,6 +2194,7 @@ def main() -> None:
     test_r6_gdn_decode_opaque_and_direct_chunk64_snaps()
     test_r7_ple_sp_and_sharded_table()
     test_r8_gdn_prefill_fast_launch_and_ple_halo_parity()
+    test_r9_bf16_tgv_buckets_and_gdn_qkvz_ba_fusion()
     run_b300_benchmarks()
     print(f"\nALL TESTS & BENCHMARKS PASSED in {time.time() - t0:.2f}s")
 

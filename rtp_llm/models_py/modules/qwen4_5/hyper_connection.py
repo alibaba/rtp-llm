@@ -170,6 +170,40 @@ def _grouped_gemma_rmsnorm_bias_chunked_kernel(
 
 
 @triton.jit
+def _grouped_gemma_rmsnorm_bias_split5120_kernel(
+    X_PTR,
+    W_PTR,
+    B_PTR,
+    OUT_PTR,
+    HIDDEN: tl.constexpr,
+    HC_COUNT: tl.constexpr,
+    SINGLE_STREAM: tl.constexpr,
+    EPS: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
+):
+    """Exact 4096+1024 split per-branch GemmaRMSNorm+bias with L2-friendly (HC, row) grid."""
+    br = tl.program_id(0).to(tl.int64)
+    row = tl.program_id(1).to(tl.int64)
+    o0 = tl.arange(0, 4096)
+    o1 = 4096 + tl.arange(0, 1024)
+    c0 = br * HIDDEN + o0
+    c1 = br * HIDDEN + o1
+    out_base = row * (HC_COUNT * HIDDEN)
+    in0 = (row * HIDDEN + o0) if SINGLE_STREAM else (out_base + c0)
+    in1 = (row * HIDDEN + o1) if SINGLE_STREAM else (out_base + c1)
+    x0 = tl.load(X_PTR + in0).to(tl.float32)
+    x1 = tl.load(X_PTR + in1).to(tl.float32)
+    inv_rms = 1.0 / tl.sqrt((tl.sum(x0 * x0, axis=0) + tl.sum(x1 * x1, axis=0)) / HIDDEN + EPS)
+    y0 = x0 * inv_rms * (1.0 + tl.load(W_PTR + c0).to(tl.float32))
+    y1 = x1 * inv_rms * (1.0 + tl.load(W_PTR + c1).to(tl.float32))
+    if HAS_BIAS:
+        y0 = y0 + tl.load(B_PTR + c0).to(tl.float32)
+        y1 = y1 + tl.load(B_PTR + c1).to(tl.float32)
+    tl.store(OUT_PTR + out_base + c0, y0)
+    tl.store(OUT_PTR + out_base + c1, y1)
+
+
+@triton.jit
 def _hc_combine_kernel(
     RES_PTR,
     OUT_PTR,
@@ -303,9 +337,9 @@ def _hc_combine_and_norm_branch5120_kernel(
     EPS: tl.constexpr,
     HAS_BIAS: tl.constexpr,
 ):
-    """4096+1024 branch-parallel HC combine+norm (zero padding waste, high occupancy at small B)."""
-    row = tl.program_id(0).to(tl.int64)
-    br = tl.program_id(1).to(tl.int64)
+    """4096+1024 branch-parallel HC combine+norm with L2-friendly (HC, row) grid."""
+    br = tl.program_id(0).to(tl.int64)
+    row = tl.program_id(1).to(tl.int64)
     o0 = tl.arange(0, 4096)
     o1 = 4096 + tl.arange(0, 1024)
     c0 = br * HIDDEN + o0
@@ -753,10 +787,11 @@ def _hc_dflash_gconv_combine_norm_branch5120_kernel(
     SINGLE_STREAM: tl.constexpr,
     EPS: tl.constexpr,
     HAS_BIAS: tl.constexpr,
+    SWAP_GRID: tl.constexpr = False,
 ):
     """Per-(row, branch) 4096+1024 exact DFlashGroupedConv.finish + HC combine+norm."""
-    row = tl.program_id(0).to(tl.int64)
-    branch = tl.program_id(1).to(tl.int64)
+    row = tl.program_id(1).to(tl.int64) if SWAP_GRID else tl.program_id(0).to(tl.int64)
+    branch = tl.program_id(0).to(tl.int64) if SWAP_GRID else tl.program_id(1).to(tl.int64)
     o0 = tl.arange(0, 4096).to(tl.int64)
     o1 = 4096 + tl.arange(0, 1024).to(tl.int64)
     g0 = o0 // GROUP_SIZE
@@ -926,10 +961,11 @@ def _hc_mix_reduce_with_down_inject_kernel(
     BLOCK: tl.constexpr,
     BLOCK_L: tl.constexpr,
     BLOCK_H: tl.constexpr,
+    SWAP_GRID: tl.constexpr = False,
 ):
-    """Fused hc_mix_reduce + (pid_1 == 0) down/inject epilogue when prev_mix and not is_head."""
-    row = tl.program_id(0).to(tl.int64)
-    pid_col = tl.program_id(1)
+    """Fused hc_mix_reduce + (pid_col == 0) down/inject epilogue when prev_mix and not is_head."""
+    pid_col = tl.program_id(0) if SWAP_GRID else tl.program_id(1)
+    row = tl.program_id(1).to(tl.int64) if SWAP_GRID else tl.program_id(0).to(tl.int64)
     col = pid_col.to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
     mask = col < HIDDEN
     acc = tl.zeros((BLOCK,), dtype=tl.float32)
@@ -1140,6 +1176,62 @@ def grouped_gemma_rmsnorm_bias_ref(
     return out.to(x.dtype)
 
 
+def _launch_grouped_gemma_rmsnorm_bias(
+    x_c: torch.Tensor,
+    w_c: torch.Tensor,
+    b_c: torch.Tensor,
+    out: torch.Tensor,
+    width: int,
+    group_size: int,
+    x_width: int,
+    hc_count: int,
+    single_stream: bool,
+    eps: float,
+    has_bias: bool,
+    rows: int,
+) -> None:
+    """Dispatch grouped GemmaRMSNorm+bias, using L2-friendly (HC, row) 4096+1024 split for large H=5120."""
+    if group_size == 5120 and hc_count == 4 and rows >= 128:
+        num_warps = 4 if rows >= 256 else 8
+        ckey = (
+            x_c.device.index, 36, x_c.dtype, w_c.dtype, b_c.dtype, out.dtype,
+            single_stream, float(eps), has_bias, num_warps,
+        )
+        triton_fast_launch(
+            _HC_TRITON_CACHE, ckey, _grouped_gemma_rmsnorm_bias_split5120_kernel,
+            hc_count, rows, 1, x_c.data_ptr() | w_c.data_ptr() | b_c.data_ptr() | out.data_ptr(),
+            (x_c, w_c, b_c, out),
+            {"HIDDEN": group_size, "HC_COUNT": hc_count, "SINGLE_STREAM": single_stream, "EPS": eps, "HAS_BIAS": has_bias},
+            num_warps=num_warps,
+        )
+    elif group_size <= 8192:
+        block = max(128, triton.next_power_of_2(group_size))
+        num_warps = 8 if block >= 4096 else 4
+        ckey = (x_c.device.index, 0, x_c.dtype, w_c.dtype, b_c.dtype, out.dtype, width, group_size, x_width, single_stream, float(eps), has_bias, block, num_warps)
+        triton_fast_launch(
+            _HC_TRITON_CACHE, ckey, _grouped_gemma_rmsnorm_bias_kernel,
+            rows, hc_count, 1, x_c.data_ptr() | w_c.data_ptr() | b_c.data_ptr() | out.data_ptr(),
+            (x_c, w_c, b_c, out),
+            {"WIDTH": width, "GROUP_SIZE": group_size, "X_STRIDE": x_width, "SINGLE_STREAM": single_stream, "EPS": eps, "HAS_BIAS": has_bias, "BLOCK": block},
+            num_warps=num_warps,
+        )
+    else:
+        _grouped_gemma_rmsnorm_bias_chunked_kernel[(rows, hc_count)](
+            x_c,
+            w_c,
+            b_c,
+            out,
+            WIDTH=width,
+            GROUP_SIZE=group_size,
+            X_STRIDE=x_width,
+            SINGLE_STREAM=single_stream,
+            EPS=eps,
+            HAS_BIAS=has_bias,
+            BLOCK=4096,
+            num_warps=8,
+        )
+
+
 def grouped_gemma_rmsnorm_bias_triton(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -1173,32 +1265,9 @@ def grouped_gemma_rmsnorm_bias_triton(
     if rows == 0:
         return out
     has_bias = bias is not None
-    if group_size <= 8192:
-        block = max(128, triton.next_power_of_2(group_size))
-        num_warps = 8 if block >= 4096 else 4
-        ckey = (x_c.device.index, 0, x_c.dtype, w_c.dtype, b_c.dtype, out.dtype, width, group_size, x_width, single_stream, float(eps), has_bias, block, num_warps)
-        triton_fast_launch(
-            _HC_TRITON_CACHE, ckey, _grouped_gemma_rmsnorm_bias_kernel,
-            rows, hc_count, 1, x_c.data_ptr() | w_c.data_ptr() | b_c.data_ptr() | out.data_ptr(),
-            (x_c, w_c, b_c, out),
-            {"WIDTH": width, "GROUP_SIZE": group_size, "X_STRIDE": x_width, "SINGLE_STREAM": single_stream, "EPS": eps, "HAS_BIAS": has_bias, "BLOCK": block},
-            num_warps=num_warps,
-        )
-    else:
-        _grouped_gemma_rmsnorm_bias_chunked_kernel[(rows, hc_count)](
-            x_c,
-            w_c,
-            b_c,
-            out,
-            WIDTH=width,
-            GROUP_SIZE=group_size,
-            X_STRIDE=x_width,
-            SINGLE_STREAM=single_stream,
-            EPS=eps,
-            HAS_BIAS=has_bias,
-            BLOCK=4096,
-            num_warps=8,
-        )
+    _launch_grouped_gemma_rmsnorm_bias(
+        x_c, w_c, b_c, out, width, group_size, x_width, hc_count, single_stream, float(eps), has_bias, rows,
+    )
     return out
 
 
@@ -1261,6 +1330,42 @@ def hc_combine_triton(
     return dst
 
 
+def _launch_hc_combine_and_norm_branch5120(
+    res_c: torch.Tensor,
+    sub_c: torch.Tensor,
+    inj_c: torch.Tensor,
+    w_c: torch.Tensor,
+    b_c: torch.Tensor,
+    combined: torch.Tensor,
+    normed: torch.Tensor,
+    rows: int,
+    hidden_size: int,
+    hc_count: int,
+    single_stream: bool,
+    eps: float,
+    has_bias: bool,
+) -> None:
+    """Launch L2-friendly (HC, row) 4096+1024 split combine+norm across all M regimes."""
+    num_warps = 4 if rows >= 128 else 8
+    ptr_or = (
+        res_c.data_ptr() | sub_c.data_ptr() | inj_c.data_ptr() | w_c.data_ptr()
+        | b_c.data_ptr() | combined.data_ptr() | normed.data_ptr()
+    )
+    ckey = (
+        res_c.device.index, 34, res_c.dtype, sub_c.dtype, inj_c.dtype,
+        w_c.dtype, b_c.dtype, single_stream, float(eps), has_bias, num_warps,
+    )
+    triton_fast_launch(
+        _HC_TRITON_CACHE, ckey, _hc_combine_and_norm_branch5120_kernel,
+        hc_count, rows, 1, ptr_or, (res_c, sub_c, inj_c, w_c, b_c, combined, normed),
+        {
+            "HIDDEN": hidden_size, "HC_COUNT": hc_count, "SINGLE_STREAM": single_stream,
+            "EPS": float(eps), "HAS_BIAS": has_bias,
+        },
+        num_warps=num_warps,
+    )
+
+
 def hc_combine_and_norm_triton(
     block_output: torch.Tensor,
     residual: torch.Tensor,
@@ -1305,25 +1410,14 @@ def hc_combine_and_norm_triton(
         return combined, normed
 
     has_b = norm_bias is not None
-    ptr_or = res_c.data_ptr() | sub_c.data_ptr() | inj_c.data_ptr() | w_c.data_ptr() | b_c.data_ptr() | combined.data_ptr() | normed.data_ptr()
     if hidden_size == 5120 and hc_count == 4:
-        if rows >= 1024:
-            ckey = (res_c.device.index, 2, res_c.dtype, sub_c.dtype, inj_c.dtype, w_c.dtype, b_c.dtype, single_stream, float(eps), has_b)
-            triton_fast_launch(
-                _HC_TRITON_CACHE, ckey, _hc_combine_and_norm_split5120_shared_sub_kernel,
-                rows, 1, 1, ptr_or, (res_c, sub_c, inj_c, w_c, b_c, combined, normed),
-                {"HIDDEN": hidden_size, "HC_COUNT": hc_count, "SINGLE_STREAM": single_stream, "EPS": eps, "HAS_BIAS": has_b},
-                num_warps=4,
-            )
-            return combined, normed
-        ckey = (res_c.device.index, 34, res_c.dtype, sub_c.dtype, inj_c.dtype, w_c.dtype, b_c.dtype, single_stream, float(eps), has_b)
-        triton_fast_launch(
-            _HC_TRITON_CACHE, ckey, _hc_combine_and_norm_branch5120_kernel,
-            rows, hc_count, 1, ptr_or, (res_c, sub_c, inj_c, w_c, b_c, combined, normed),
-            {"HIDDEN": hidden_size, "HC_COUNT": hc_count, "SINGLE_STREAM": single_stream, "EPS": eps, "HAS_BIAS": has_b},
-            num_warps=8,
+        _launch_hc_combine_and_norm_branch5120(
+            res_c, sub_c, inj_c, w_c, b_c, combined, normed,
+            rows, hidden_size, hc_count, single_stream, float(eps), has_b,
         )
         return combined, normed
+
+    ptr_or = res_c.data_ptr() | sub_c.data_ptr() | inj_c.data_ptr() | w_c.data_ptr() | b_c.data_ptr() | combined.data_ptr() | normed.data_ptr()
 
     block = max(128, triton.next_power_of_2(hidden_size))
     num_warps = 4
@@ -1420,19 +1514,9 @@ def hc_sconv_decode_opaque_combine_norm_triton(
                 },
                 num_warps=4,
             )
-            cn_ptr_or = (
-                res_c.data_ptr() | sconv_sub.data_ptr() | inj_c.data_ptr() | w_c.data_ptr()
-                | b_c.data_ptr() | combined.data_ptr() | normed.data_ptr()
-            )
-            cn_ckey = (
-                res_c.device.index, 34, res_c.dtype, sconv_sub.dtype, inj_c.dtype,
-                w_c.dtype, b_c.dtype, single_stream, float(eps), has_bias,
-            )
-            triton_fast_launch(
-                _HC_TRITON_CACHE, cn_ckey, _hc_combine_and_norm_branch5120_kernel,
-                rows, hc_count, 1, cn_ptr_or, (res_c, sconv_sub, inj_c, w_c, b_c, combined, normed),
-                {"HIDDEN": hidden_size, "HC_COUNT": hc_count, "SINGLE_STREAM": single_stream, "EPS": float(eps), "HAS_BIAS": has_bias},
-                num_warps=8,
+            _launch_hc_combine_and_norm_branch5120(
+                res_c, sconv_sub, inj_c, w_c, b_c, combined, normed,
+                rows, hidden_size, hc_count, single_stream, float(eps), has_bias,
             )
             return combined, normed
         ckey = (
@@ -1693,23 +1777,26 @@ def hc_dflash_gconv_combine_norm_triton(
         and hc_count == 4
         and (4096 % int(gconv_group_size)) == 0
     ):
+        swap_grid = rows >= 128
+        num_warps = 4 if swap_grid else 8
+        grid0, grid1 = (hc_count, rows) if swap_grid else (rows, hc_count)
         ckey = (
-            res_c.device.index, 34, res_c.dtype, sub_2d.dtype, delta_3d.dtype, base_c.dtype,
+            res_c.device.index, 37, res_c.dtype, sub_2d.dtype, delta_3d.dtype, base_c.dtype,
             inj_c.dtype, w_c.dtype, b_c.dtype,
             _triton_int_spec(x_s0), _triton_int_spec(d_s0), _triton_int_spec(d_s1), _triton_int_spec(b_s0),
             single_stream, float(eps), has_bias, has_clip,
-            int(gconv_taps), int(gconv_block_size), int(gconv_group_size),
+            int(gconv_taps), int(gconv_block_size), int(gconv_group_size), swap_grid, num_warps,
         )
         triton_fast_launch(
             _HC_TRITON_CACHE, ckey, _hc_dflash_gconv_combine_norm_branch5120_kernel,
-            rows, hc_count, 1, ptr_or, rt_args,
+            grid0, grid1, 1, ptr_or, rt_args,
             {
                 "HAS_CLIP": has_clip, "TAPS": int(gconv_taps),
                 "BLOCK_SIZE": int(gconv_block_size), "GROUP_SIZE": int(gconv_group_size),
                 "HIDDEN": hidden_size, "HC_COUNT": hc_count, "SINGLE_STREAM": single_stream,
-                "EPS": float(eps), "HAS_BIAS": has_bias,
+                "EPS": float(eps), "HAS_BIAS": has_bias, "SWAP_GRID": swap_grid,
             },
-            num_warps=8,
+            num_warps=num_warps,
         )
         return combined, normed
 
@@ -1775,9 +1862,12 @@ def hc_mix_reduce_with_down_inject_triton(
     block = 512 if hidden_size >= 512 else max(128, triton.next_power_of_2(hidden_size))
     block_l = max(16, triton.next_power_of_2(hc_lowrank)) if has_latent else 16
     block_h = max(16, triton.next_power_of_2(hc_count))
+    swap_grid = rows >= 2048
+    n_col_blocks = triton.cdiv(hidden_size, block)
+    grid0, grid1 = (n_col_blocks, rows) if swap_grid else (rows, n_col_blocks)
     ckey = (
         logits_c.device.index, 30, logits_c.dtype, normed_c.dtype, raw_c.dtype,
-        hidden_size, hc_count, hc_lowrank, raw_stride, has_latent, has_inj, block, block_l, block_h,
+        hidden_size, hc_count, hc_lowrank, raw_stride, has_latent, has_inj, block, block_l, block_h, swap_grid,
     )
     ptr_or = (
         logits_c.data_ptr() | normed_c.data_ptr() | out.data_ptr()
@@ -1785,12 +1875,12 @@ def hc_mix_reduce_with_down_inject_triton(
     )
     triton_fast_launch(
         _HC_TRITON_CACHE, ckey, _hc_mix_reduce_with_down_inject_kernel,
-        rows, triton.cdiv(hidden_size, block), 1, ptr_or,
+        grid0, grid1, 1, ptr_or,
         (logits_c, normed_c, out, raw_c, latent_arg, inj_arg),
         {
             "RAW_STRIDE": raw_stride, "LOWRANK": hc_lowrank, "HIDDEN": hidden_size,
             "HC_COUNT": hc_count, "HAS_LATENT": has_latent, "HAS_INJ": has_inj,
-            "BLOCK": block, "BLOCK_L": block_l, "BLOCK_H": block_h,
+            "BLOCK": block, "BLOCK_L": block_l, "BLOCK_H": block_h, "SWAP_GRID": swap_grid,
         },
         num_warps=4,
     )
@@ -2211,16 +2301,9 @@ class Qwen4_5HyperConnection(nn.Module):
         normed = _hc_static_empty((*x_c.shape[:-1], width), x_c.dtype, x_c.device, "normed")
         rows = x_c.numel() // x_w
         if rows > 0:
-            has_b = self.hc_norm_bias is not None
-            block = max(128, triton.next_power_of_2(self.hidden_size))
-            num_warps = 8 if block >= 4096 else 4
-            ckey = (x_c.device.index, 0, x_c.dtype, w_c.dtype, b_c.dtype, normed.dtype, width, self.hidden_size, x_w, single_stream, float(self.eps), has_b, block, num_warps)
-            triton_fast_launch(
-                _HC_TRITON_CACHE, ckey, _grouped_gemma_rmsnorm_bias_kernel,
-                rows, self.hc_count, 1, x_c.data_ptr() | w_c.data_ptr() | b_c.data_ptr() | normed.data_ptr(),
-                (x_c, w_c, b_c, normed),
-                {"WIDTH": width, "GROUP_SIZE": self.hidden_size, "X_STRIDE": x_w, "SINGLE_STREAM": single_stream, "EPS": self.eps, "HAS_BIAS": has_b, "BLOCK": block},
-                num_warps=num_warps,
+            _launch_grouped_gemma_rmsnorm_bias(
+                x_c, w_c, b_c, normed, width, self.hidden_size, x_w,
+                self.hc_count, single_stream, float(self.eps), self.hc_norm_bias is not None, rows,
             )
         return self._project_and_mix_from_normed(normed, hyper_input, prev_latent, ws=ws)
 

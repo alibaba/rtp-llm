@@ -62,6 +62,7 @@ from rtp_llm.models_py.model_desc.qwen4_5 import (
 import inspect
 from rtp_llm.models_py.modules.qwen4_5.attention import (
     apply_attn_output_gate_flatten,
+    dense_linear_bf16_or_tgv,
     gemma_rmsnorm_and_partial_rope,
 )
 from rtp_llm.models_py.modules.qwen4_5.checkpoint_loader import bind_qwen4_5_model_weights
@@ -7526,8 +7527,8 @@ class Qwen4_5PagedStateBridge:
                 cu_list = plan.cu_seqlens_host
                 if not layer.is_consumer:
                     assert sa.k_proj is not None and sa.v_proj is not None and sa.k_norm is not None
-                    k_raw = pre_k_raw if pre_k_raw is not None else sa.k_proj(attn_in)
-                    v_raw = pre_v_raw if pre_v_raw is not None else sa.v_proj(attn_in)
+                    k_raw = pre_k_raw if pre_k_raw is not None else dense_linear_bf16_or_tgv(sa.k_proj, attn_in)
+                    v_raw = pre_v_raw if pre_v_raw is not None else dense_linear_bf16_or_tgv(sa.v_proj, attn_in)
                     if sa.use_kv_sconv and sa.k_sconv is not None and sa.v_sconv is not None:
                         if kv_cache is not None and FULL_ATTN_KV_SCONV_TAG in layer_caches:
                             sc_c = layer_caches[FULL_ATTN_KV_SCONV_TAG]
@@ -8167,7 +8168,9 @@ class Qwen4_5PagedStateBridge:
 
                 if out_flat is None:
                     out_flat = apply_attn_output_gate_flatten(attn_bhtd, gate_4d).squeeze(0)
-                attn_out = sa._maybe_all_reduce(sa.o_proj(out_flat), skip_allreduce=sp_active)
+                attn_out = sa._maybe_all_reduce(
+                    dense_linear_bf16_or_tgv(sa.o_proj, out_flat), skip_allreduce=sp_active
+                )
 
             if sp_active:
                 attn_out = self._sp_reduce_scatter_dim0(
@@ -8912,8 +8915,8 @@ class Qwen4_5PagedStateBridge:
                         bt_kv = _block_table_for_tag(attention_inputs, FULL_ATTN_KV_TAG)
                         active_kv, _ = _get_vrf_vis(bt_kv)
 
-                        k_raw = pre_k_raw if pre_k_raw is not None else sa.k_proj(attn_in)
-                        v_raw = pre_v_raw if pre_v_raw is not None else sa.v_proj(attn_in)
+                        k_raw = pre_k_raw if pre_k_raw is not None else dense_linear_bf16_or_tgv(sa.k_proj, attn_in)
+                        v_raw = pre_v_raw if pre_v_raw is not None else dense_linear_bf16_or_tgv(sa.v_proj, attn_in)
                         if sc_c is not None and sa.use_kv_sconv and sa.k_sconv is not None and sa.v_sconv is not None:
                             bt_sc = _block_table_for_tag(attention_inputs, FULL_ATTN_KV_SCONV_TAG)
                             sc_shape = (
@@ -9100,7 +9103,9 @@ class Qwen4_5PagedStateBridge:
                         )
 
                     out_flat = apply_attn_output_gate_flatten(attn_bhsd, gate_4d)
-                    attn_out = sa._maybe_all_reduce(sa.o_proj(out_flat), skip_allreduce=vrf_sp_active)
+                    attn_out = sa._maybe_all_reduce(
+                        dense_linear_bf16_or_tgv(sa.o_proj, out_flat), skip_allreduce=vrf_sp_active
+                    )
                 else:
                     # Legacy dense MQA attention path (preproject Q+K+V across V steps in 1 GEMM)
                     pre_vrf = sa.project_qkv_and_indexer(attn_in, need_idx=False)
@@ -10801,6 +10806,8 @@ class Qwen4_5RTPModel(_RtpGptModelBase):
             nn.Module.__init__(self)
 
         self.config = config
+        if not hasattr(self, "py_hw_kernel_config"):
+            self.py_hw_kernel_config = py_hw_kernel_config
         self.parallelism_config = parallelism_config
         self.arch_config = arch_config or _resolve_arch_config(config)
         self.max_generate_batch_size = int(max_generate_batch_size)
@@ -11038,6 +11045,11 @@ class Qwen4_5RTPModel(_RtpGptModelBase):
     def initialize(self, init_resource: Any) -> bool:
         """Attach engine-allocated ``KVCache`` pool from ``PyModelInitResources``."""
         self.kv_cache = getattr(init_resource, "kv_cache", None)
+        for attr in ("py_hw_kernel_config", "hw_kernel_config", "server_config"):
+            if getattr(self, attr, None) is None:
+                val = getattr(init_resource, attr, None)
+                if val is not None:
+                    setattr(self, attr, val)
         return True
 
     def prepare_fmha_impl(
@@ -11428,6 +11440,52 @@ class Qwen4_5RTPModel(_RtpGptModelBase):
             except Exception:
                 pass
 
+    @staticmethod
+    def _parse_cuda_graph_flag(val: Any) -> Optional[bool]:
+        """Parse boolean-like env/config flags, returning ``None`` if unset or blank."""
+        if val is None:
+            return None
+        if isinstance(val, bool):
+            return val
+        if isinstance(val, (int, float)):
+            return bool(val)
+        norm = str(val).strip().lower()
+        if not norm:
+            return None
+        if norm in ("0", "false", "no", "off"):
+            return False
+        if norm in ("1", "true", "yes", "on"):
+            return True
+        return None
+
+    def _is_auto_prefill_cg_enabled(self) -> bool:
+        """Gate Auto-Prefill-CG by explicit env override and engine/model CUDA Graph config."""
+        explicit = self._parse_cuda_graph_flag(os.environ.get("QWEN4_5_AUTO_PREFILL_CG"))
+        if explicit is not None:
+            return explicit
+        if self._parse_cuda_graph_flag(os.environ.get("ENABLE_CUDA_GRAPH")) is False:
+            return False
+        cfg_obj = getattr(self, "config", None)
+        for src in (
+            getattr(self, "py_hw_kernel_config", None),
+            getattr(self, "hw_kernel_config", None),
+            getattr(self, "server_config", None),
+            cfg_obj,
+            getattr(cfg_obj, "py_hw_kernel_config", None),
+            getattr(cfg_obj, "hw_kernel_config", None),
+            getattr(cfg_obj, "server_config", None),
+        ):
+            if src is None:
+                continue
+            raw_val = (
+                src.get("enable_cuda_graph", None)
+                if isinstance(src, Mapping)
+                else getattr(src, "enable_cuda_graph", None)
+            )
+            if self._parse_cuda_graph_flag(raw_val) is False:
+                return False
+        return True
+
     def _maybe_run_auto_prefill_cg(
         self,
         flat_ids: torch.Tensor,
@@ -11440,7 +11498,7 @@ class Qwen4_5RTPModel(_RtpGptModelBase):
         cap_ids: Sequence[int],
         device: torch.device,
     ) -> Optional[Any]:
-        if os.environ.get("QWEN4_5_AUTO_PREFILL_CG", "1") == "0":
+        if not self._is_auto_prefill_cg_enabled():
             return None
         mxfp4_backend = os.environ.get("QWEN4_5_MXFP4_BACKEND", "auto").strip().lower()
         if mxfp4_backend == "ref":
@@ -11655,7 +11713,13 @@ class Qwen4_5RTPModel(_RtpGptModelBase):
             cap_exc: Optional[BaseException] = None
             res_cap: Any = None
             try:
-                with torch.cuda.graph(graph, pool=self._auto_prefill_cg_pool):
+                # Thread-local capture prevents poisoning background threads (e.g. CrcBlockCopy.cu)
+                # that poll cudaStreamQuery / cudaEventQuery on separate streams during capture.
+                with torch.cuda.graph(
+                    graph,
+                    pool=self._auto_prefill_cg_pool,
+                    capture_error_mode="thread_local",
+                ):
                     res_cap = self.bridge.run_prefill_ragged(
                         self.model,
                         static_ids,

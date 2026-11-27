@@ -30,6 +30,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import functools
 import os
+import threading
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import torch
@@ -54,6 +55,31 @@ MXFP4_BLOCK_SIZE = 32
 _DG_CONTIG_ALIGN = 128
 _MASKED_WS_MAX_M = 512
 _MASKED_WS_CACHE: Dict[Tuple[int, int], torch.Tensor] = {}
+_CONTIG_TLS = threading.local()
+
+
+def _get_contig_sync_state(
+    dev: torch.device, need_i32: int
+) -> Tuple[torch.Tensor, torch.cuda.Event, torch.Tensor]:
+    """Return thread- and stream-local ``(pinned_tok, event, i32_slab)`` for async D2H overlap."""
+    cache = getattr(_CONTIG_TLS, "by_stream", None)
+    if cache is None:
+        cache = {}
+        _CONTIG_TLS.by_stream = cache
+    dev_idx = int(dev.index if dev.index is not None else torch.cuda.current_device())
+    with _cuda_device_ctx(dev):
+        stream_id = int(torch.cuda.current_stream(dev).cuda_stream)
+        key = (dev_idx, stream_id)
+        entry = cache.get(key)
+        if entry is None:
+            pinned = torch.empty((1,), dtype=torch.int32, pin_memory=True)
+            ev = torch.cuda.Event()
+            slab = torch.empty((need_i32,), dtype=torch.int32, device=dev)
+            entry = [pinned, ev, slab]
+            cache[key] = entry
+        elif int(entry[2].numel()) < need_i32:
+            entry[2] = torch.empty((need_i32,), dtype=torch.int32, device=dev)
+    return entry[0], entry[1], entry[2]
 
 
 def _align256(n: int) -> int:
@@ -2957,8 +2983,44 @@ def mxfp4_moe_deepgemm_contiguous(
     flat_ids = ids_c.view(-1)
     e_lo = int(ep_start) if ep_size > 1 else 0
     m_total_slots = M * top_k
+    nosync_env = os.environ.get("QWEN4_5_MOE_CONTIG_NOSYNC")
+    explicit_ep_nosync = (
+        nosync_env is not None
+        and nosync_env.strip().lower() in ("1", "true", "yes")
+    )
+    capturing_cg = (
+        torch.cuda.is_current_stream_capturing()
+        or os.environ.get("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD") == "1"
+    )
+    # Keep EP>1 non-CG prefill exact via async D2H + event overlap unless explicitly opted in;
+    # otherwise the M*top_k + E_local*127 upper bound bloats all_tokens >3x on sparse EP=4 ranks.
+    use_cap_nosync = (
+        (ep_size <= 1)
+        or capturing_cg
+        or (
+            explicit_ep_nosync
+            and E_local <= 2048
+            and ids_c.dtype == torch.int32
+            and m_total_slots <= 524288
+        )
+    )
+    sync_state: Optional[Tuple[torch.Tensor, torch.cuda.Event]] = None
+    slab_write_cnt: Optional[torch.Tensor] = None
     if E_local <= 2048 and ids_c.dtype == torch.int32:
-        counts = torch.zeros((E_local,), dtype=torch.int32, device=dev)
+        if not use_cap_nosync:
+            pinned_tok, ev_tok, i32_slab = _get_contig_sync_state(dev, E_local * 4 + 1)
+            counts = i32_slab[:E_local]
+            counts.zero_()
+            aligned_counts = i32_slab[E_local : 2 * E_local]
+            offsets = i32_slab[2 * E_local : 3 * E_local]
+            slab_write_cnt = i32_slab[3 * E_local : 4 * E_local]
+            all_tokens_buf = i32_slab[4 * E_local : 4 * E_local + 1]
+            sync_state = (pinned_tok, ev_tok)
+        else:
+            counts = torch.zeros((E_local,), dtype=torch.int32, device=dev)
+            aligned_counts = torch.empty((E_local,), dtype=torch.int32, device=dev)
+            offsets = torch.empty((E_local,), dtype=torch.int32, device=dev)
+            all_tokens_buf = torch.empty((1,), dtype=torch.int32, device=dev)
         _contig_ep_bincount_only_kernel[(triton.cdiv(m_total_slots, 256),)](
             flat_ids,
             counts,
@@ -2969,9 +3031,6 @@ def mxfp4_moe_deepgemm_contiguous(
             BLOCK=256,
             num_warps=4,
         )
-        aligned_counts = torch.empty((E_local,), dtype=torch.int32, device=dev)
-        offsets = torch.empty((E_local,), dtype=torch.int32, device=dev)
-        all_tokens_buf = torch.empty((1,), dtype=torch.int32, device=dev)
         e_pad = max(16, triton.next_power_of_2(E_local))
         _contig_prefix_scan_align_kernel[(1,)](
             counts,
@@ -2983,6 +3042,10 @@ def mxfp4_moe_deepgemm_contiguous(
             E_PAD=e_pad,
             num_warps=4,
         )
+        if sync_state is not None:
+            with _cuda_device_ctx(dev):
+                sync_state[0].copy_(all_tokens_buf, non_blocking=True)
+                sync_state[1].record(torch.cuda.current_stream(dev))
     else:
         if ep_size > 1:
             in_range = (flat_ids >= e_lo) & (flat_ids < e_lo + E_local)
@@ -2995,27 +3058,19 @@ def mxfp4_moe_deepgemm_contiguous(
         aligned_counts = ((counts + alignment - 1) // alignment) * alignment
         offsets = torch.cumsum(aligned_counts, dim=0) - aligned_counts
         all_tokens_buf = None
-    nosync_env = os.environ.get("QWEN4_5_MOE_CONTIG_NOSYNC")
-    explicit_ep_nosync = (
-        nosync_env is not None
-        and nosync_env.strip().lower() in ("1", "true", "yes")
-    )
-    capturing_cg = (
-        torch.cuda.is_current_stream_capturing()
-        or os.environ.get("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD") == "1"
-    )
-    # Keep EP>1 non-CG prefill exact via all_tokens_buf.item() unless explicitly opted in;
-    # otherwise the M*top_k + E_local*127 upper bound bloats all_tokens >3x on sparse EP=4 ranks.
-    use_cap_nosync = (
-        (ep_size <= 1)
-        or capturing_cg
-        or (
-            explicit_ep_nosync
-            and E_local <= 2048
-            and ids_c.dtype == torch.int32
-            and m_total_slots <= 524288
-        )
-    )
+
+    # Overlap independent weight lookup, output slot alloc, and FP8 quant with D2H before waiting.
+    (w13_i8, w13_s), (w2_i8, w2_s) = weights.get_deepgemm_pair()
+    if prequant_fp8 is not None:
+        x_q, x_sc_raw = prequant_fp8
+    else:
+        assert x is not None
+        x_q, x_sc_raw = per_token_group_quant_fp8_ue8m0(x, scale_format="raw")
+    num_groups = L // 32
+    num_packs = num_groups // 4
+    M_total = M * top_k
+    dst_slots = torch.empty((M, top_k), dtype=torch.int32, device=dev)
+
     if use_cap_nosync:
         all_tokens = (
             (m_total_slots + E_local * (alignment - 1) + alignment - 1) // alignment
@@ -3023,29 +3078,29 @@ def mxfp4_moe_deepgemm_contiguous(
         active_rows_t: Optional[torch.Tensor] = torch.empty((1,), dtype=torch.int32, device=dev)
         grid_init = (E_local + 32,)
     else:
-        all_tokens = int(
-            all_tokens_buf.item() if all_tokens_buf is not None else aligned_counts.sum().item()
-        )
+        if sync_state is not None:
+            with _cuda_device_ctx(dev):
+                sync_state[1].synchronize()
+            all_tokens = int(sync_state[0][0])
+        else:
+            all_tokens = int(
+                all_tokens_buf.item() if all_tokens_buf is not None else aligned_counts.sum().item()
+            )
         if all_tokens == 0:
             return torch.zeros((M, L), dtype=res_dtype, device=dev)
         active_rows_t = None
         grid_init = (E_local,)
 
-    (w13_i8, w13_s), (w2_i8, w2_s) = weights.get_deepgemm_pair()
-
-    if prequant_fp8 is not None:
-        x_q, x_sc_raw = prequant_fp8
-    else:
-        assert x is not None
-        x_q, x_sc_raw = per_token_group_quant_fp8_ue8m0(x, scale_format="raw")
     a_fp8 = torch.empty((all_tokens, L), dtype=torch.float8_e4m3fn, device=dev)
-    num_groups = L // 32
-    num_packs = num_groups // 4
     tma_m = ((all_tokens + 3) // 4) * 4
     a_scale = torch.empty((num_packs, tma_m), dtype=torch.int32, device=dev).T[:all_tokens]
 
     m_indices = torch.empty((all_tokens,), dtype=torch.int32, device=dev)
-    write_cnt = torch.empty((E_local,), dtype=torch.int32, device=dev)
+    write_cnt = (
+        slab_write_cnt
+        if slab_write_cnt is not None
+        else torch.empty((E_local,), dtype=torch.int32, device=dev)
+    )
     _init_m_indices_kernel[grid_init](
         counts,
         aligned_counts,
@@ -3060,8 +3115,6 @@ def mxfp4_moe_deepgemm_contiguous(
         num_warps=4,
     )
 
-    M_total = M * top_k
-    dst_slots = torch.empty((M, top_k), dtype=torch.int32, device=dev)
     _scatter_fp8_to_contig_kernel[(M_total,)](
         x_q.view(torch.uint8),
         x_sc_raw,

@@ -4161,6 +4161,9 @@ def qsa_sparse_prefill_attention(
     bsz, h_q, seq_len, head_dim = q_bhtd.shape
     h_kv = int(k_bhtd.shape[1])
     total_kv = int(k_bhtd.shape[2])
+    k_sel_len = int(selected.shape[-1])
+    if total_kv == 0 or k_sel_len == 0:
+        return torch.zeros_like(q_bhtd)
     q_per_kv = h_q // h_kv
     scale = 1.0 / math.sqrt(head_dim)
     out = torch.zeros_like(q_bhtd)
@@ -4171,9 +4174,7 @@ def qsa_sparse_prefill_attention(
         for s in range(seq_len):
             sel_row = selected[b, s]
             valid_mask = (sel_row >= 0) & (sel_row < total_kv)
-            if not bool(valid_mask.any()):
-                continue
-            safe_idx = sel_row.clamp(0, max(total_kv - 1, 0)).long()
+            safe_idx = sel_row.clamp(0, total_kv - 1).long()
             k_sel = k_f[b, :, safe_idx, :]  # [H_kv, K, D]
             v_sel = v_f[b, :, safe_idx, :]  # [H_kv, K, D]
             if q_per_kv > 1:
@@ -4181,8 +4182,11 @@ def qsa_sparse_prefill_attention(
                 v_sel = v_sel.repeat_interleave(q_per_kv, dim=0)
             scores = torch.einsum("hd,hkd->hk", q_f[b, :, s, :], k_sel) * scale
             scores = scores.masked_fill(~valid_mask.unsqueeze(0), float("-inf"))
-            probs = torch.softmax(scores, dim=-1)
-            probs = probs.masked_fill(~valid_mask.unsqueeze(0), 0.0)
+            probs = torch.where(
+                valid_mask.unsqueeze(0),
+                torch.softmax(scores, dim=-1),
+                0.0,
+            )
             out[b, :, s, :] = torch.einsum("hk,hkd->hd", probs, v_sel).to(q_bhtd.dtype)
     return out
 

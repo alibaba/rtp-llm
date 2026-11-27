@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <deque>
 #include <limits>
+#include <memory>
 #include <new>
 #include <optional>
 #include <string>
@@ -11,7 +13,11 @@
 #include <c10/util/Exception.h>
 #include <dlpack/dlpack.h>
 
+#include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/engine_base/grammar/RtpGrammarMatcher.h"
+#if USING_CUDA
+#include <c10/cuda/CUDAGuard.h>
+#endif
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/BitmaskUtils.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
@@ -147,6 +153,20 @@ prepareSpecMask(RtpGrammarMatcher& matcher, int64_t eos_token_id, const SpecLogi
 
 class GrammarLogitsProcessor::DecodeMaskBuilder final {
 public:
+    ~DecodeMaskBuilder() {
+#if USING_CUDA
+        auto drain = [](const std::shared_ptr<PinnedBitmaskSlot>& slot) {
+            if (slot && slot->recorded && slot->copy_done.has_value() && !slot->copy_done->query()) {
+                slot->copy_done->synchronize();
+            }
+        };
+        drain(device_mask_state_.pinned_slot);
+        for (const auto& slot : slot_pool_) {
+            drain(slot);
+        }
+#endif
+    }
+
     ErrorInfo apply(const torch::Tensor& logits,
                     RtpGrammarMatcher&   matcher,
                     int64_t              accepted_token_len,
@@ -159,17 +179,17 @@ public:
 
             auto state_or = build(matcher, accepted_token_len, grammar_vocab_size);
             if (!state_or.ok()) {
-                device_mask_state_ = finished(accepted_token_len);
+                setDeviceMaskState(finished(accepted_token_len));
                 return state_or.status();
             }
 
-            device_mask_state_ = std::move(state_or.value());
+            setDeviceMaskState(std::move(state_or.value()));
             return applyState(logits, device_mask_state_, eos_token_id);
         } catch (const std::bad_alloc& e) {
-            device_mask_state_ = finished(accepted_token_len);
+            setDeviceMaskState(finished(accepted_token_len));
             return detail::grammarMaskBuildError("decode", e);
         } catch (const c10::Error& e) {
-            device_mask_state_ = finished(accepted_token_len);
+            setDeviceMaskState(finished(accepted_token_len));
             return detail::grammarMaskBuildError("decode", e);
         }
     }
@@ -181,13 +201,50 @@ private:
         FINISHED,
     };
 
-    struct DeviceMaskState {
-        DeviceMaskMode mode          = DeviceMaskMode::FINISHED;
-        int64_t        token_len     = -1;
-        bool           mask_required = false;
-        torch::Tensor  packed_allow_mask_cpu;
-        int32_t        grammar_vocab_size = 0;
+#if USING_CUDA
+    struct PinnedBitmaskSlot {
+        torch::Tensor                cpu_buf;
+        int32_t                      words = 0;
+        std::optional<torch::Event>  copy_done;
+        bool                         recorded = false;
     };
+#else
+    struct PinnedBitmaskSlot {};
+#endif
+
+    struct DeviceMaskState {
+        DeviceMaskMode                     mode          = DeviceMaskMode::FINISHED;
+        int64_t                            token_len     = -1;
+        bool                               mask_required = false;
+        torch::Tensor                      packed_allow_mask_cpu;
+        std::shared_ptr<PinnedBitmaskSlot> pinned_slot;
+        int32_t                            grammar_vocab_size = 0;
+    };
+
+    static constexpr size_t kMaxPinnedPoolSize = 256;
+
+    void setDeviceMaskState(DeviceMaskState next) {
+        retireSlot(std::move(device_mask_state_.pinned_slot));
+        device_mask_state_ = std::move(next);
+    }
+
+    void retireSlot(std::shared_ptr<PinnedBitmaskSlot> slot) {
+#if USING_CUDA
+        if (!slot) {
+            return;
+        }
+        if (slot_pool_.size() >= kMaxPinnedPoolSize) {
+            auto front = std::move(slot_pool_.front());
+            slot_pool_.pop_front();
+            if (front && front->recorded && front->copy_done.has_value() && !front->copy_done->query()) {
+                front->copy_done->synchronize();
+            }
+        }
+        slot_pool_.push_back(std::move(slot));
+#else
+        (void)slot;
+#endif
+    }
 
     static DeviceMaskState finished(int64_t accepted_token_len) {
         DeviceMaskState state;
@@ -214,32 +271,81 @@ private:
             return ErrorResult<DeviceMaskState>(std::move(state));
         }
 
-        auto    bitmask = prepareMask(grammar_vocab_size);
+        const int32_t words = (grammar_vocab_size + 31) / 32;
+#if USING_CUDA
+        auto slot    = acquirePinnedSlot(words);
+        auto bitmask = slot->cpu_buf.narrow(1, 0, words);
+#else
+        std::shared_ptr<PinnedBitmaskSlot> slot;
+        auto                               bitmask = prepareCpuMask(words);
+#endif
         int64_t dl_shape[2];
         auto    dl =
             makeSingleRowBitmaskView(bitmask.data_ptr<int32_t>(), static_cast<int32_t>(bitmask.size(1)), dl_shape);
         auto filled = matcher.fillBitmask(&dl, 0);
         if (!filled.ok()) {
+            retireSlot(std::move(slot));
             return filled.status();
         }
 
-        state.mode                  = DeviceMaskMode::MASK;
-        state.mask_required         = filled.value();
-        state.packed_allow_mask_cpu = filled.value() ? std::move(bitmask) : torch::Tensor{};
-        state.grammar_vocab_size    = grammar_vocab_size;
+        state.mode               = DeviceMaskMode::MASK;
+        state.mask_required      = filled.value();
+        state.grammar_vocab_size = grammar_vocab_size;
+        if (filled.value()) {
+            state.packed_allow_mask_cpu = std::move(bitmask);
+            state.pinned_slot           = std::move(slot);
+        } else {
+            state.packed_allow_mask_cpu = torch::Tensor{};
+            retireSlot(std::move(slot));
+        }
         return ErrorResult<DeviceMaskState>(std::move(state));
     }
 
-    torch::Tensor prepareMask(int32_t grammar_vocab_size) {
-        const int32_t words = (grammar_vocab_size + 31) / 32;
+#if USING_CUDA
+    std::shared_ptr<PinnedBitmaskSlot> acquirePinnedSlot(int32_t words) {
+        for (auto it = slot_pool_.begin(); it != slot_pool_.end();) {
+            auto& entry = *it;
+            const bool ready = !entry->recorded || !entry->copy_done.has_value() || entry->copy_done->query();
+            if (!ready) {
+                ++it;
+                continue;
+            }
+            auto slot = std::move(entry);
+            it        = slot_pool_.erase(it);
+            if (slot && slot->words >= words) {
+                slot->cpu_buf.fill_(-1);
+                slot->recorded = false;
+                return slot;
+            }
+        }
+        if (slot_pool_.size() >= kMaxPinnedPoolSize) {
+            auto front = std::move(slot_pool_.front());
+            slot_pool_.pop_front();
+            if (front && front->recorded && front->copy_done.has_value() && !front->copy_done->query()) {
+                front->copy_done->synchronize();
+            }
+            if (front && front->words >= words) {
+                front->cpu_buf.fill_(-1);
+                front->recorded = false;
+                return front;
+            }
+        }
+        auto slot     = std::make_shared<PinnedBitmaskSlot>();
+        slot->cpu_buf = at::full({1, words}, -1, at::TensorOptions().dtype(at::kInt).pinned_memory(true));
+        slot->words   = words;
+        return slot;
+    }
+#else
+    torch::Tensor prepareCpuMask(int32_t words) {
         if (!reusable_bitmask_cpu_.defined() || reusable_mask_words_ < words) {
-            reusable_bitmask_cpu_ = at::full({1, words}, -1, at::dtype(at::kInt)).pin_memory();
+            reusable_bitmask_cpu_ = at::full({1, words}, -1, at::dtype(at::kInt));
             reusable_mask_words_  = words;
         } else {
             reusable_bitmask_cpu_.fill_(-1);
         }
         return reusable_bitmask_cpu_.narrow(1, 0, words);
     }
+#endif
 
     ErrorInfo applyState(const torch::Tensor& logits, const DeviceMaskState& state, int64_t eos_token_id) {
         const size_t logits_vocab_size = static_cast<size_t>(logits.size(0));
@@ -258,14 +364,22 @@ private:
             auto mask = state.packed_allow_mask_cpu;
 #if USING_CUDA
             if (logits.is_cuda()) {
-                const int64_t words = state.packed_allow_mask_cpu.size(1);
+                c10::cuda::CUDAGuard device_guard(logits.device());
+                const int64_t        words = state.packed_allow_mask_cpu.size(1);
                 if (!reusable_bitmask_gpu_.defined() || reusable_bitmask_gpu_.device() != logits.device()
                     || reusable_bitmask_gpu_.size(1) < words) {
                     reusable_bitmask_gpu_ =
                         torch::empty({1, words}, torch::TensorOptions().dtype(torch::kInt32).device(logits.device()));
                 }
                 mask = reusable_bitmask_gpu_.narrow(1, 0, words);
-                mask.copy_(state.packed_allow_mask_cpu);
+                mask.copy_(state.packed_allow_mask_cpu, /*non_blocking=*/true);
+                if (state.pinned_slot) {
+                    if (!state.pinned_slot->copy_done.has_value()) {
+                        state.pinned_slot->copy_done.emplace(cuda_graph::makeGraphEvent());
+                    }
+                    state.pinned_slot->copy_done->record(cuda_graph::graphGetCurrentStream());
+                    state.pinned_slot->recorded = true;
+                }
             }
 #endif
             runtimeApplyPackedMaskLogits(logits, mask, mask_vocab_size);
@@ -291,9 +405,13 @@ private:
     }
 
     DeviceMaskState device_mask_state_{};
-    torch::Tensor   reusable_bitmask_cpu_;
-    torch::Tensor   reusable_bitmask_gpu_;
-    int32_t         reusable_mask_words_ = 0;
+#if USING_CUDA
+    std::deque<std::shared_ptr<PinnedBitmaskSlot>> slot_pool_;
+#else
+    torch::Tensor reusable_bitmask_cpu_;
+    int32_t       reusable_mask_words_ = 0;
+#endif
+    torch::Tensor reusable_bitmask_gpu_;
 };
 
 GrammarLogitsProcessor::GrammarLogitsProcessor(std::shared_ptr<RtpGrammarMatcher> matcher, int64_t eos_token_id):

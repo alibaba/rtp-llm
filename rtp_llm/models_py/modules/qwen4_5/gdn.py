@@ -22,6 +22,7 @@ Architecture (1109-bf16-re-mxfp4-ple-fp8):
 
 from __future__ import annotations
 
+import os
 from typing import Callable, Any, Optional, Tuple
 
 import torch
@@ -30,7 +31,17 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
-from rtp_llm.models_py.modules.qwen4_5.attention import causal_dwconv1d
+from rtp_llm.models_py.modules.qwen4_5.attention import (
+    _extract_bf16_linear_weight,
+    causal_dwconv1d,
+    dense_linear_bf16_or_tgv,
+    dense_weight_bf16_or_tgv,
+)
+
+
+def _is_gdn_fuse_qkvz_ba_enabled() -> bool:
+    raw = os.environ.get("QWEN4_5_GDN_FUSE_QKVZ_BA", "1").strip().lower()
+    return raw not in ("0", "false", "no", "off")
 from rtp_llm.models_py.modules.qwen4_5.short_conv import _triton_int_spec, triton_fast_launch
 
 _GDN_TRITON_CACHE: dict = {}
@@ -2947,6 +2958,8 @@ class Qwen4_5GatedDeltaNet(nn.Module):
             norm_before_gate=config.norm_before_gate,
         )
         self.out_proj = nn.Linear(self.value_dim, self.hidden_size, bias=False)
+        self._fused_qkvz_ba_buf: Optional[torch.Tensor] = None
+        self._fused_qkvz_ba_cache_key: Any = None
 
     @classmethod
     def from_config(
@@ -3022,6 +3035,88 @@ class Qwen4_5GatedDeltaNet(nn.Module):
         )
         return GDNLayerState(conv_state=conv_state, ssm_state=ssm_state)
 
+    def _get_fused_qkvz_ba_weight(
+        self, w_qkvz: torch.Tensor, w_ba: torch.Tensor
+    ) -> Optional[torch.Tensor]:
+        """Return contiguous ``[w_qkvz; w_ba]`` with zero-copy aliasing when non-trainable."""
+        n1 = int(w_qkvz.shape[0])
+        n2 = int(w_ba.shape[0])
+        k_dim = int(w_qkvz.shape[1])
+        buf = getattr(self, "_fused_qkvz_ba_buf", None)
+        capturing = w_qkvz.is_cuda and torch.cuda.is_current_stream_capturing()
+        can_alias = (
+            not w_qkvz.requires_grad
+            and not w_ba.requires_grad
+            and not w_qkvz.is_inference()
+            and not w_ba.is_inference()
+        )
+        if can_alias:
+            expected_ba_ptr = w_qkvz.data_ptr() + int(w_qkvz.numel()) * int(w_qkvz.element_size())
+            if (
+                buf is not None
+                and buf.device == w_qkvz.device
+                and buf.dtype == w_qkvz.dtype
+                and tuple(buf.shape) == (n1 + n2, k_dim)
+                and buf.is_contiguous()
+                and w_qkvz.data_ptr() == buf.data_ptr()
+                and w_ba.data_ptr() == expected_ba_ptr
+            ):
+                return buf
+            # Never allocate in a CUDA Graph private pool or mutate parameter pointers during capture.
+            if capturing:
+                return None
+            new_buf = torch.empty((n1 + n2, k_dim), dtype=w_qkvz.dtype, device=w_qkvz.device)
+            new_buf[:n1].copy_(w_qkvz)
+            new_buf[n1:].copy_(w_ba)
+            w_qkvz.data = new_buf[:n1]
+            w_ba.data = new_buf[n1:]
+            self._fused_qkvz_ba_buf = new_buf
+            self._fused_qkvz_ba_cache_key = None
+            return new_buf
+
+        key = (
+            w_qkvz.data_ptr(),
+            0 if w_qkvz.is_inference() else int(w_qkvz._version),
+            tuple(w_qkvz.shape),
+            w_ba.data_ptr(),
+            0 if w_ba.is_inference() else int(w_ba._version),
+            tuple(w_ba.shape),
+        )
+        if (
+            buf is not None
+            and getattr(self, "_fused_qkvz_ba_cache_key", None) == key
+            and buf.device == w_qkvz.device
+            and buf.dtype == w_qkvz.dtype
+        ):
+            return buf
+        if capturing:
+            return None
+        buf = torch.cat([w_qkvz, w_ba], dim=0).contiguous()
+        self._fused_qkvz_ba_buf = buf
+        self._fused_qkvz_ba_cache_key = key
+        return buf
+
+    def _project_qkvz_ba(self, hidden_states: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Project ``(qkvz, ba)`` via one BF16 GEMM (or ``tgv`` at low M) when both are BF16."""
+        assert self.in_proj_ba is not None
+        if _is_gdn_fuse_qkvz_ba_enabled():
+            w_qkvz = _extract_bf16_linear_weight(self.in_proj_qkvz, hidden_states)
+            w_ba = (
+                _extract_bf16_linear_weight(self.in_proj_ba, hidden_states)
+                if w_qkvz is not None
+                else None
+            )
+            if w_qkvz is not None and w_ba is not None:
+                w_fused = self._get_fused_qkvz_ba_weight(w_qkvz, w_ba)
+                if w_fused is not None:
+                    n1 = int(w_qkvz.shape[0])
+                    fused = dense_weight_bf16_or_tgv(hidden_states, w_fused)
+                    return fused[..., :n1], fused[..., n1:]
+        return (
+            dense_linear_bf16_or_tgv(self.in_proj_qkvz, hidden_states),
+            dense_linear_bf16_or_tgv(self.in_proj_ba, hidden_states),
+        )
+
     def _unpack_qkvz_normal(
         self, projected: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -3093,7 +3188,7 @@ class Qwen4_5GatedDeltaNet(nn.Module):
                 raise ValueError(
                     f"Consumer GDN layer {self.layer_idx} requires SharedGDNInputs from source layer"
                 )
-            qz = self.in_proj_qkvz(hidden_states)
+            qz = dense_linear_bf16_or_tgv(self.in_proj_qkvz, hidden_states)
             z_view = self._view_z_strided(qz, is_consumer=True)
             if (
                 not self.gdn_no_q_conv
@@ -3163,14 +3258,13 @@ class Qwen4_5GatedDeltaNet(nn.Module):
                     )
 
             out = self.norm(core_out, z_view)
-            out = self.out_proj(out.reshape(bsz, seq_len, self.value_dim))
+            out = dense_linear_bf16_or_tgv(self.out_proj, out.reshape(bsz, seq_len, self.value_dim))
             out = self._maybe_all_reduce(out, skip_allreduce=skip_allreduce)
             return out, None
 
         # Normal / YoCo Source layer
         assert self.in_proj_ba is not None and self.A_log is not None and self.dt_bias is not None
-        qkvz = self.in_proj_qkvz(hidden_states)
-        ba = self.in_proj_ba(hidden_states)
+        qkvz, ba = self._project_qkvz_ba(hidden_states)
 
         if (
             seq_len == 1
@@ -3256,7 +3350,7 @@ class Qwen4_5GatedDeltaNet(nn.Module):
             )
 
         out = self.norm(core_out, z_view)
-        out = self.out_proj(out.reshape(bsz, seq_len, self.value_dim))
+        out = dense_linear_bf16_or_tgv(self.out_proj, out.reshape(bsz, seq_len, self.value_dim))
         out = self._maybe_all_reduce(out, skip_allreduce=skip_allreduce)
 
         published: Optional[SharedGDNInputs] = None
@@ -3420,7 +3514,7 @@ class Qwen4_5GatedDeltaNet(nn.Module):
         if self.is_consumer:
             if shared is None:
                 raise ValueError(f"Consumer GDN layer {self.layer_idx} requires SharedGDNInputs")
-            qz = self.in_proj_qkvz(hidden_states)
+            qz = dense_linear_bf16_or_tgv(self.in_proj_qkvz, hidden_states)
             z_view = self._view_z_strided(qz, is_consumer=True)
             if (
                 not self.gdn_no_q_conv
@@ -3450,13 +3544,12 @@ class Qwen4_5GatedDeltaNet(nn.Module):
                     initial_state=None, output_final_state=False, inplace_state=False,
                 )
             out = self.norm(core_out, z_view)
-            out = self.out_proj(out.reshape(bsz, 1, self.value_dim))
+            out = dense_linear_bf16_or_tgv(self.out_proj, out.reshape(bsz, 1, self.value_dim))
             return self._maybe_all_reduce(out, skip_allreduce=skip_allreduce), None
 
         assert self.in_proj_ba is not None and self.A_log is not None and self.dt_bias is not None
         assert conv_pool_2d is not None and bt_conv is not None and ssm_pool_2d is not None and bt_ssm is not None
-        qkvz = self.in_proj_qkvz(hidden_states)
-        ba = self.in_proj_ba(hidden_states)
+        qkvz, ba = self._project_qkvz_ba(hidden_states)
         q = torch.empty((bsz, 1, self.num_k_heads, self.head_k_dim), dtype=qkvz.dtype, device=qkvz.device)
         k = torch.empty((bsz, 1, self.num_k_heads, self.head_k_dim), dtype=qkvz.dtype, device=qkvz.device)
         v = torch.empty((bsz, 1, self.num_v_heads, self.head_v_dim), dtype=qkvz.dtype, device=qkvz.device)
@@ -3472,7 +3565,7 @@ class Qwen4_5GatedDeltaNet(nn.Module):
             output_final_state=self.publishes_shared,
         )
         out = self.norm(core_out, z_view)
-        out = self.out_proj(out.reshape(bsz, 1, self.value_dim))
+        out = dense_linear_bf16_or_tgv(self.out_proj, out.reshape(bsz, 1, self.value_dim))
         out = self._maybe_all_reduce(out, skip_allreduce=skip_allreduce)
         published = SharedGDNInputs(key=k, value=v, g=g, beta=beta, ssm_state=final_ssm) if self.publishes_shared else None
         return out, published
@@ -3766,7 +3859,7 @@ class Qwen4_5GatedDeltaNet(nn.Module):
                 raise ValueError(
                     f"Consumer GDN layer {self.layer_idx} requires SharedGDNInputs from source layer"
                 )
-            qz = self.in_proj_qkvz(hidden_states)
+            qz = dense_linear_bf16_or_tgv(self.in_proj_qkvz, hidden_states)
             z_view = self._view_z_strided(qz, is_consumer=True)
             if self.gdn_no_q_conv:
                 q_g = qz.unflatten(-1, (self.num_k_heads, self.head_k_dim + self.gqa_ratio * self.head_v_dim))[
@@ -3903,15 +3996,14 @@ class Qwen4_5GatedDeltaNet(nn.Module):
                 )
 
             out = self.norm(core_out, z_view)
-            out = self.out_proj(out.reshape(bsz, verify_w, self.value_dim))
+            out = dense_linear_bf16_or_tgv(self.out_proj, out.reshape(bsz, verify_w, self.value_dim))
             out = self._maybe_all_reduce(out, skip_allreduce=skip_allreduce)
             return out, None
 
         # Normal / YoCo Source verify
         assert self.in_proj_ba is not None and self.A_log is not None and self.dt_bias is not None
         assert init_conv_state is not None
-        qkvz = self.in_proj_qkvz(hidden_states)
-        ba = self.in_proj_ba(hidden_states)
+        qkvz, ba = self._project_qkvz_ba(hidden_states)
         g, beta = compute_gdn_gating(
             ba,
             self.A_log,
@@ -4006,7 +4098,7 @@ class Qwen4_5GatedDeltaNet(nn.Module):
         )
 
         out = self.norm(core_out, z_view)
-        out = self.out_proj(out.reshape(bsz, verify_w, self.value_dim))
+        out = dense_linear_bf16_or_tgv(self.out_proj, out.reshape(bsz, verify_w, self.value_dim))
         out = self._maybe_all_reduce(out, skip_allreduce=skip_allreduce)
 
         published: Optional[SharedGDNInputs] = None
@@ -4062,7 +4154,7 @@ class Qwen4_5GatedDeltaNet(nn.Module):
                 raise ValueError(
                     f"Consumer GDN layer {self.layer_idx} requires SharedGDNInputs from source layer"
                 )
-            qz = self.in_proj_qkvz(hidden_states)
+            qz = dense_linear_bf16_or_tgv(self.in_proj_qkvz, hidden_states)
             z_view = self._view_z_strided(qz.unsqueeze(0), is_consumer=True)
             if self.gdn_no_q_conv:
                 q_g = qz.unflatten(-1, (self.num_k_heads, self.head_k_dim + self.gqa_ratio * self.head_v_dim))[
@@ -4133,14 +4225,13 @@ class Qwen4_5GatedDeltaNet(nn.Module):
                 output_final_states=False,
             )
             out = self.norm(core_out.unsqueeze(0), z_view).squeeze(0)
-            out = self.out_proj(out.reshape(N, self.value_dim))
+            out = dense_linear_bf16_or_tgv(self.out_proj, out.reshape(N, self.value_dim))
             out = self._maybe_all_reduce(out, skip_allreduce=skip_allreduce)
             return out, None
 
         # Normal / YoCo Source packed prefill
         assert self.in_proj_ba is not None and self.A_log is not None and self.dt_bias is not None
-        qkvz = self.in_proj_qkvz(hidden_states)
-        ba = self.in_proj_ba(hidden_states)
+        qkvz, ba = self._project_qkvz_ba(hidden_states)
         g, beta = compute_gdn_gating(
             ba.unsqueeze(0),
             self.A_log,
@@ -4220,7 +4311,7 @@ class Qwen4_5GatedDeltaNet(nn.Module):
         )
 
         out = self.norm(core_out.unsqueeze(0), z_view).squeeze(0)
-        out = self.out_proj(out.reshape(N, self.value_dim))
+        out = dense_linear_bf16_or_tgv(self.out_proj, out.reshape(N, self.value_dim))
         out = self._maybe_all_reduce(out, skip_allreduce=skip_allreduce)
 
         published: Optional[SharedGDNInputs] = None

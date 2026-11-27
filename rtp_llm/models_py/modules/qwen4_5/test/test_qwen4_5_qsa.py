@@ -3455,6 +3455,406 @@ class Qwen4_5QSATest(unittest.TestCase):
         ).to(dev)
         self.assertGreaterEqual(_cosine(out_bm, ref_bm), 0.9999)
 
+    def test_r9_qsa_zero_sync_and_bf16_tgv_decode_parity(self) -> None:
+        if not torch.cuda.is_available():
+            self.skipTest("R9 BF16 TGV & zero-sync runtime check requires CUDA")
+        dev = _device()
+        dt = torch.bfloat16
+        cap_major, _ = torch.cuda.get_device_capability(dev)
+        arch = Qwen4_5ArchConfig(
+            vocab_size=256,
+            hidden_size=5120,
+            num_hidden_layers=8,
+            intermediate_size=1024,
+            first_k_dense_replace=1,
+            max_position_embeddings=512,
+            full_attention_interval=4,
+            num_attention_heads=8,
+            num_key_value_heads=1,
+            head_dim=256,
+            attn_output_gate=True,
+            partial_rotary_factor=0.25,
+            linear_num_key_heads=8,
+            linear_key_head_dim=64,
+            linear_num_value_heads=32,
+            linear_value_head_dim=64,
+            hc_count=4,
+            hc_lowrank=128,
+            num_experts=16,
+            num_experts_per_tok=4,
+            routed_expert_hidden_size=256,
+            moe_intermediate_size=256,
+            shared_expert_intermediate_size=128,
+            ple_layer_ids=(2,),
+            ple_embed_dim=512,
+            ple_conv_kernel_size=4,
+            ngram_size=3,
+            heads_per_ngram=4,
+            ngram_vocab_size_base=256,
+            make_ngram_vocab_size_divisible_by=64,
+            split_ngram_parts=4,
+            ple_quant_scheme="bf16",
+            share_map="4->8,5->6,5->7",
+            enable_yoco_decode=True,
+            quant_method="mxfp4",
+            indexer_head_dim=128,
+            indexer_n_heads=8,
+            indexer_kv_heads=1,
+            indexer_compress_ratio=4,
+            indexer_budget=16,
+        )
+        pools = {
+            t: 128
+            for t in (
+                INDEXER_KV_TAG,
+                INDEXER_STATE_TAG,
+                FULL_ATTN_KV_TAG,
+                "linear",
+                "gdn_consumer_q_conv",
+                "full_attn_kv_sconv",
+                "full_attn_output_sconv",
+                "linear_attn_output_sconv",
+                "ffn_output_sconv",
+                "ple_conv_state",
+                "ple_ngram_ctx",
+            )
+        }
+        prev_tgv = os.environ.get("QWEN4_5_BF16_TGV")
+        prev_fuse = os.environ.get("QWEN4_5_GDN_FUSE_QKVZ_BA")
+        try:
+            with torch.no_grad():
+                lm = Qwen4_5ForCausalLM(
+                    arch,
+                    use_triton_mxfp4=True,
+                    compute_mode="fp8",
+                    dense_linear_mode="auto",
+                    dtype=dt,
+                    device=dev,
+                )
+                lm.init_synthetic_weights(seed=9901, ple_mode="gpu_full", ple_fp8=False)
+                _stabilize_router_margins(lm)
+                lm.prepare_weights(dense_linear_mode="auto")
+                plan = build_qwen4_5_kv_cache_plan(arch)
+                kv = LocalKVCache(plan, tokens_per_block=64, num_blocks_per_tag=pools, device=dev, dtype=dt)
+                rt = Qwen4_5RTPModel.from_causal_lm(lm, kv_cache=kv)
+
+                gen = torch.Generator(device="cpu").manual_seed(9902)
+                tbl16 = build_block_tables_for_requests(kv, [80] * 16)
+                p16 = torch.randint(4, 240, (16 * 64,), generator=gen, dtype=torch.int64).to(dev)
+                ai_p16 = make_tagged_attention_inputs(
+                    tbl16,
+                    is_prefill=True,
+                    input_lengths=[64] * 16,
+                    sequence_lengths=[64] * 16,
+                    prefix_lengths=[0] * 16,
+                    device=dev,
+                )
+                mi_p16 = LocalPyModelInputs(input_ids=p16, attention_inputs=ai_p16)
+                fh_p16 = rt.prepare_fmha_impl(mi_p16, is_cuda_graph=False)
+                rt.forward(mi_p16, fmha_impl=fh_p16)
+
+                snap = {
+                    (lid, tag): lc.kv_cache_base.clone()
+                    for lid, tm in enumerate(kv.layer_caches)
+                    for tag, lc in tm.items()
+                }
+
+                def _restore_kv() -> None:
+                    for (lid, tag), buf in snap.items():
+                        kv.layer_caches[lid][tag].kv_cache_base.copy_(buf)
+
+                # Decode B=1 & B=16 parity + splitK drop verification
+                for bsz in (1, 16):
+                    toks = torch.randint(4, 240, (bsz,), generator=gen, dtype=torch.int64).to(dev)
+                    ai_d = make_tagged_attention_inputs(
+                        {k: v[:bsz] for k, v in tbl16.items()},
+                        is_prefill=False,
+                        input_lengths=[1] * bsz,
+                        sequence_lengths=[64] * bsz,
+                        prefix_lengths=[0] * bsz,
+                        device=dev,
+                    )
+                    for g_ai in ai_d.values():
+                        g_ai.sequence_lengths_plus_1_device = g_ai._sequence_lengths_dev + 1
+                    mi_d = LocalPyModelInputs(input_ids=toks, attention_inputs=ai_d)
+                    fh_d = rt.prepare_fmha_impl(mi_d, is_cuda_graph=True)
+
+                    _restore_kv()
+                    os.environ["QWEN4_5_BF16_TGV"] = "0"
+                    os.environ["QWEN4_5_GDN_FUSE_QKVZ_BA"] = "0"
+                    out_base = rt.forward(mi_d, fmha_impl=fh_d).hidden_states
+                    with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as prof_b:
+                        _restore_kv()
+                        _ = rt.forward(mi_d, fmha_impl=fh_d)
+                        torch.cuda.synchronize(dev)
+                    sk_base = sum(1 for e in prof_b.events() if e.device_type == torch.autograd.DeviceType.CUDA and "splitK" in e.name)
+
+                    _restore_kv()
+                    os.environ["QWEN4_5_BF16_TGV"] = "1"
+                    os.environ["QWEN4_5_GDN_FUSE_QKVZ_BA"] = "1"
+                    out_opt = rt.forward(mi_d, fmha_impl=fh_d).hidden_states
+                    with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as prof_o:
+                        _restore_kv()
+                        _ = rt.forward(mi_d, fmha_impl=fh_d)
+                        torch.cuda.synchronize(dev)
+                    sk_opt = sum(1 for e in prof_o.events() if e.device_type == torch.autograd.DeviceType.CUDA and "splitK" in e.name)
+                    c80_opt = sum(1 for e in prof_o.events() if e.device_type == torch.autograd.DeviceType.CUDA and "cutlass_80" in e.name)
+
+                    self.assertGreaterEqual(_cosine(out_opt, out_base), 0.9999)
+                    self.assertEqual(c80_opt, 0)
+                    if cap_major >= 10:
+                        self.assertLess(sk_opt, sk_base)
+
+                # Zero-sync verification across Prefill, Decode B=16 (CG path), and Verify B=16 V=8 + Commit
+                v_toks = torch.randint(4, 240, (16 * 8,), generator=gen, dtype=torch.int64).to(dev)
+                ai_v = make_tagged_attention_inputs(
+                    tbl16,
+                    is_prefill=True,
+                    input_lengths=[8] * 16,
+                    sequence_lengths=[],
+                    prefix_lengths=[64] * 16,
+                    device=dev,
+                )
+                for g_ai in ai_v.values():
+                    g_ai.is_target_verify = True
+                mi_v = LocalPyModelInputs(input_ids=v_toks, attention_inputs=ai_v)
+                fh_v = rt.prepare_fmha_impl(mi_v, is_cuda_graph=False)
+                acc_v = torch.full((16,), 4, dtype=torch.int32, device=dev)
+                rt.forward(mi_v, fmha_impl=fh_v)
+                rt.prepare_speculative_target_commit(acc_v)
+                rt.finish_speculative_target_commit(False)
+                rt.finalize_speculative_target_commit()
+                _restore_kv()
+
+                prev_mode = torch.cuda.get_sync_debug_mode()
+                try:
+                    torch.cuda.set_sync_debug_mode("error")
+                    rt.forward(mi_p16, fmha_impl=rt.prepare_fmha_impl(mi_p16, is_cuda_graph=False))
+                    rt.forward(mi_d, fmha_impl=fh_d)
+                    rt.forward(mi_v, fmha_impl=fh_v)
+                    rt.prepare_speculative_target_commit(acc_v)
+                    rt.finish_speculative_target_commit(True)
+                    rt.finalize_speculative_target_commit()
+                finally:
+                    torch.cuda.set_sync_debug_mode(prev_mode)
+
+                # Verify CPU fallback handles all-invalid (-1), mixed, and zero-KV masks without NaN or sync.
+                q_cpu = torch.randn(1, 4, 2, 64, dtype=torch.bfloat16)
+                k_cpu = torch.randn(1, 1, 8, 64, dtype=torch.bfloat16)
+                v_cpu = torch.randn(1, 1, 8, 64, dtype=torch.bfloat16)
+                sel_cpu = torch.tensor(
+                    [[[-1, -1, -1, -1], [-1, 2, 99, -1]]], dtype=torch.int32
+                )
+                out_cpu = qsa_sparse_prefill_attention(
+                    q_cpu, k_cpu, v_cpu, sel_cpu, validate_selected=False
+                )
+                self.assertTrue(torch.isfinite(out_cpu).all())
+                self.assertEqual(float(out_cpu[:, :, 0, :].abs().max().item()), 0.0)
+                self.assertTrue(
+                    torch.allclose(
+                        out_cpu[0, :, 1, :],
+                        v_cpu[0, 0, 2, :].unsqueeze(0).expand(4, -1),
+                        atol=1e-2,
+                        rtol=1e-2,
+                    )
+                )
+                out_zero_kv = qsa_sparse_prefill_attention(
+                    q_cpu,
+                    k_cpu[:, :, :0, :],
+                    v_cpu[:, :, :0, :],
+                    sel_cpu,
+                    validate_selected=False,
+                )
+                self.assertEqual(float(out_zero_kv.abs().max().item()), 0.0)
+        finally:
+            if prev_tgv is None:
+                os.environ.pop("QWEN4_5_BF16_TGV", None)
+            else:
+                os.environ["QWEN4_5_BF16_TGV"] = prev_tgv
+            if prev_fuse is None:
+                os.environ.pop("QWEN4_5_GDN_FUSE_QKVZ_BA", None)
+            else:
+                os.environ["QWEN4_5_GDN_FUSE_QKVZ_BA"] = prev_fuse
+
+    def test_r9_auto_prefill_cg_thread_local_and_enable_cuda_graph_gate(self) -> None:
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA is required for R9 Auto-Prefill-CG thread_local & gate test")
+        import threading
+        from types import SimpleNamespace
+        from rtp_llm.models_py.model_desc.qwen4_5_runtime import QWEN4_5_CACHE_TAGS
+
+        dev = torch.device("cuda:0")
+        dt = torch.bfloat16
+        arch = _make_mini_arch(
+            indexer_head_dim=128,
+            indexer_n_heads=8,
+            indexer_kv_heads=1,
+            indexer_compress_ratio=4,
+            indexer_budget=32,
+            max_position_embeddings=512,
+        )
+        pools = {t: 64 for t in set(QWEN4_5_CACHE_TAGS) | {"linear"}}
+        tracked_envs = (
+            "ENABLE_CUDA_GRAPH",
+            "QWEN4_5_AUTO_PREFILL_CG",
+            "QWEN4_5_AUTO_PREFILL_CG_MIN_TOKENS",
+            "QWEN4_5_AUTO_PREFILL_CG_MAX_TOKENS",
+            "QWEN4_5_AUTO_PREFILL_CG_MIN_HITS",
+            "QWEN4_5_MXFP4_BACKEND",
+        )
+        prev_envs = {k: os.environ.get(k) for k in tracked_envs}
+        os.environ["QWEN4_5_MXFP4_BACKEND"] = "triton"
+        os.environ["QWEN4_5_AUTO_PREFILL_CG_MIN_TOKENS"] = "32"
+        os.environ["QWEN4_5_AUTO_PREFILL_CG_MAX_TOKENS"] = "512"
+        os.environ["QWEN4_5_AUTO_PREFILL_CG_MIN_HITS"] = "2"
+
+        rt_cg = None
+        rt_off = None
+        try:
+            with torch.no_grad():
+                lm = Qwen4_5ForCausalLM(
+                    arch, use_triton_mxfp4=True, compute_mode="bf16", dtype=dt, device=dev
+                )
+                lm.init_synthetic_weights(seed=9911, ple_mode="gpu_full", ple_fp8=False)
+                _stabilize_router_margins(lm)
+                lm.prepare_weights()
+                plan = build_qwen4_5_kv_cache_plan(arch)
+                kv_off = LocalKVCache(plan, tokens_per_block=64, num_blocks_per_tag=pools, device=dev, dtype=dt)
+                kv_cg = LocalKVCache(plan, tokens_per_block=64, num_blocks_per_tag=pools, device=dev, dtype=dt)
+                kv_eg = LocalKVCache(plan, tokens_per_block=64, num_blocks_per_tag=pools, device=dev, dtype=dt)
+
+                # (A) ENABLE_CUDA_GRAPH=0 & HW/server_config enable_cuda_graph=False gate Auto-Prefill-CG
+                os.environ.pop("QWEN4_5_AUTO_PREFILL_CG", None)
+                os.environ["ENABLE_CUDA_GRAPH"] = "0"
+                rt_off = Qwen4_5RTPModel.from_causal_lm(lm, kv_cache=kv_off)
+                self.assertFalse(rt_off._is_auto_prefill_cg_enabled())
+                rt_hw_off = Qwen4_5RTPModel.from_causal_lm(
+                    lm,
+                    kv_cache=kv_off,
+                    py_hw_kernel_config=SimpleNamespace(enable_cuda_graph=False),
+                )
+                os.environ.pop("ENABLE_CUDA_GRAPH", None)
+                self.assertFalse(rt_hw_off._is_auto_prefill_cg_enabled())
+                mcfg_off = SimpleNamespace(enable_cuda_graph=False)
+                rt_mcfg_off = Qwen4_5RTPModel.from_causal_lm(lm, model_config=mcfg_off, kv_cache=kv_off)
+                self.assertFalse(rt_mcfg_off._is_auto_prefill_cg_enabled())
+                rt_srv_off = Qwen4_5RTPModel.from_causal_lm(lm, kv_cache=kv_off)
+                rt_srv_off.server_config = SimpleNamespace(enable_cuda_graph=False)
+                self.assertFalse(rt_srv_off._is_auto_prefill_cg_enabled())
+
+                gen = torch.Generator(device="cpu").manual_seed(9912)
+                tb_off = build_block_tables_for_requests(kv_off, [128, 128, 128])
+                os.environ["ENABLE_CUDA_GRAPH"] = "0"
+                for ri in range(3):
+                    ai_o = make_tagged_attention_inputs(
+                        {t: [rows[ri]] for t, rows in tb_off.items()},
+                        is_prefill=True,
+                        input_lengths=[48],
+                        sequence_lengths=[64 + 48],
+                        prefix_lengths=[64],
+                        device=dev,
+                    )
+                    ids_o = torch.randint(4, 240, (48,), generator=gen, dtype=torch.int64).to(dev)
+                    _ = rt_off.forward(LocalPyModelInputs(input_ids=ids_o, attention_inputs=ai_o))
+                self.assertEqual(len(rt_off._auto_prefill_cg_entries), 0)
+
+                # Explicit QWEN4_5_AUTO_PREFILL_CG=1 overrides ENABLE_CUDA_GRAPH=0
+                os.environ["QWEN4_5_AUTO_PREFILL_CG"] = "1"
+                self.assertTrue(rt_off._is_auto_prefill_cg_enabled())
+
+                # (B) thread_local capture must never poison concurrent stream.query() / event.query()
+                rt_cg = Qwen4_5RTPModel.from_causal_lm(lm, kv_cache=kv_cg)
+                rt_eg = Qwen4_5RTPModel.from_causal_lm(lm, kv_cache=kv_eg)
+                tb_cg = build_block_tables_for_requests(kv_cg, [128, 128, 128])
+                tb_eg = build_block_tables_for_requests(kv_eg, [128, 128, 128])
+
+                def _step(rt_m, tb_all, ri, ids_t, pfx):
+                    ai = make_tagged_attention_inputs(
+                        {t: [rows[ri]] for t, rows in tb_all.items()},
+                        is_prefill=True,
+                        input_lengths=[int(ids_t.numel())],
+                        sequence_lengths=[pfx + int(ids_t.numel())],
+                        prefix_lengths=[pfx],
+                        device=dev,
+                    )
+                    return rt_m.forward(LocalPyModelInputs(input_ids=ids_t, attention_inputs=ai))
+
+                for ri in range(3):
+                    ptok = torch.randint(4, 240, (64,), generator=gen, dtype=torch.int64).to(dev)
+                    _step(rt_cg, tb_cg, ri, ptok, 0)
+                    os.environ["QWEN4_5_AUTO_PREFILL_CG"] = "0"
+                    _step(rt_eg, tb_eg, ri, ptok, 0)
+                    os.environ["QWEN4_5_AUTO_PREFILL_CG"] = "1"
+
+                # Hit 1 (eager warmup)
+                c0 = torch.randint(4, 240, (48,), generator=gen, dtype=torch.int64).to(dev)
+                _step(rt_cg, tb_cg, 0, c0, 64)
+                self.assertEqual(len(rt_cg._auto_prefill_cg_entries), 0)
+
+                # Start background CUDA stream poller simulating TransferWorkLoop / CrcBlockCopy.cu
+                bg_stream = torch.cuda.Stream(device=dev)
+                bg_buf = torch.zeros((256,), dtype=torch.float32, device=dev)
+                stop_ev = threading.Event()
+                started_ev = threading.Event()
+                bg_iters = [0]
+                bg_errors: list = []
+
+                def _bg_poller() -> None:
+                    torch.cuda.set_device(dev)
+                    ev = torch.cuda.Event()
+                    try:
+                        with torch.cuda.stream(bg_stream):
+                            while not stop_ev.is_set():
+                                bg_buf.add_(1.0)
+                                ev.record(bg_stream)
+                                _ = bg_stream.query()
+                                _ = ev.query()
+                                bg_stream.synchronize()
+                                bg_iters[0] += 1
+                                if bg_iters[0] >= 5:
+                                    started_ev.set()
+                    except BaseException as exc:
+                        bg_errors.append(repr(exc))
+                        started_ev.set()
+
+                th = threading.Thread(target=_bg_poller, daemon=True)
+                th.start()
+                self.assertTrue(started_ev.wait(timeout=5.0))
+                iters_before_cap = bg_iters[0]
+                try:
+                    c1 = torch.randint(4, 240, (48,), generator=gen, dtype=torch.int64).to(dev)
+                    out_c1 = _step(rt_cg, tb_cg, 1, c1, 64)
+                finally:
+                    stop_ev.set()
+                    th.join(timeout=5.0)
+
+                self.assertEqual(bg_errors, [], f"Concurrent stream polling failed during CG capture: {bg_errors}")
+                self.assertGreater(bg_iters[0], iters_before_cap)
+                self.assertEqual(len(rt_cg._auto_prefill_cg_entries), 1)
+                self.assertEqual(float(bg_buf[0].item()), float(bg_iters[0]))
+
+                # Verify captured graph output & step-3 replay match eager
+                os.environ["QWEN4_5_AUTO_PREFILL_CG"] = "0"
+                out_e1 = _step(rt_eg, tb_eg, 1, c1, 64)
+                os.environ["QWEN4_5_AUTO_PREFILL_CG"] = "1"
+                self.assertGreaterEqual(_cosine(out_c1.hidden_states, out_e1.hidden_states), 0.99999)
+
+                c2 = torch.randint(4, 240, (48,), generator=gen, dtype=torch.int64).to(dev)
+                out_c2 = _step(rt_cg, tb_cg, 2, c2, 64)
+                os.environ["QWEN4_5_AUTO_PREFILL_CG"] = "0"
+                out_e2 = _step(rt_eg, tb_eg, 2, c2, 64)
+                self.assertGreaterEqual(_cosine(out_c2.hidden_states, out_e2.hidden_states), 0.99999)
+        finally:
+            if rt_cg is not None:
+                rt_cg.release_auto_prefill_cg()
+            if rt_off is not None:
+                rt_off.release_auto_prefill_cg()
+            for k_env, v_env in prev_envs.items():
+                if v_env is None:
+                    os.environ.pop(k_env, None)
+                else:
+                    os.environ[k_env] = v_env
+
 def _r7_sp2_nccl_cg_worker(
     rank: int,
     world_size: int,
