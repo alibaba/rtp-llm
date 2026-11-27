@@ -386,6 +386,129 @@ class TestHCImpl(unittest.TestCase):
                     self.assertEqual(tuple(s_got.stride()), tuple(s_ref.stride()))
 
     @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+    def test_fused_mhc_pre_norm_prefill_chunked_and_tail_pad(self) -> None:
+        from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
+            sgl_per_token_group_quant_fp8,
+        )
+        from rtp_llm.models_py.modules.base.cuda.norm import RMSNorm
+        from rtp_llm.models_py.modules.dsv4._fused_rmsnorm_fp8_quant_triton import (
+            rmsnorm_fp8_quant_ue8m0,
+        )
+        from rtp_llm.models_py.modules.dsv4.hc import (
+            can_use_fused_mhc_pre_norm,
+            fused_mhc_pre_norm,
+            fused_mhc_pre_norm_quant,
+        )
+
+        major, _ = torch.cuda.get_device_capability()
+        if major != 10:
+            self.skipTest("requires SM100/SM103 for tf32_hc_prenorm_gemm")
+
+        for seed, shape, min_tokens in (
+            (101, (17, 4, 3200), 0),
+            (202, (1025, 4, 4096), 1024),
+        ):
+            with self.subTest(shape=shape):
+                dim = shape[-1]
+                fn, base, scale = _weights(4, dim, device="cuda")
+                unit = TileLangHCUnit(
+                    fn,
+                    base,
+                    scale,
+                    dim=dim,
+                    hc_mult=4,
+                    hc_sinkhorn_iters=10,
+                    norm_eps=1e-6,
+                    hc_eps=1e-6,
+                )
+                torch.manual_seed(seed)
+                w = torch.randn(dim, device="cuda", dtype=torch.bfloat16) * 0.5 + 1.0
+                norm = RMSNorm(w, eps=1e-6)
+                x = torch.randn(*shape, device="cuda", dtype=torch.bfloat16)
+                with torch.inference_mode():
+                    if not can_use_fused_mhc_pre_norm(
+                        x, unit, norm, quant_ue8m0=True, min_tokens=min_tokens
+                    ):
+                        self.skipTest("tf32_hc_prenorm_gemm unavailable in DeepGEMM")
+                    x_pre_ref, post_ref, comb_ref = unit.pre(x)
+                    x_norm_ref = norm(x_pre_ref)
+                    x_norm_got, post_got, comb_got = fused_mhc_pre_norm(x, unit, norm)
+                    nq_ref, q_ref, s_ref = rmsnorm_fp8_quant_ue8m0(
+                        x_pre_ref.clone(), w, eps=1e-6
+                    )
+                    nq_got, q_post, q_comb, (q_got, s_got) = fused_mhc_pre_norm_quant(
+                        x, unit, norm
+                    )
+                    q_same_norm, s_same_norm = sgl_per_token_group_quant_fp8(
+                        nq_got,
+                        group_size=128,
+                        eps=1.0e-4,
+                        column_major_scales=True,
+                        scale_tma_aligned=True,
+                        scale_ue8m0=True,
+                    )
+
+                torch.testing.assert_close(post_got, post_ref, atol=1e-4, rtol=1e-4)
+                torch.testing.assert_close(comb_got, comb_ref, atol=1e-4, rtol=1e-4)
+                torch.testing.assert_close(x_norm_got, x_norm_ref, atol=2e-2, rtol=2e-2)
+                torch.testing.assert_close(q_post, post_ref, atol=1e-4, rtol=1e-4)
+                torch.testing.assert_close(q_comb, comb_ref, atol=1e-4, rtol=1e-4)
+                torch.testing.assert_close(nq_got, nq_ref, atol=2e-2, rtol=2e-2)
+
+                active_groups = dim // 128
+                s_got_bytes = (
+                    s_got.contiguous()
+                    .view(torch.uint8)
+                    .reshape(s_got.shape[0], s_got.shape[1] * 4)
+                )
+                s_same_bytes = (
+                    s_same_norm.contiguous()
+                    .view(torch.uint8)
+                    .reshape(s_same_norm.shape[0], s_same_norm.shape[1] * 4)
+                )
+                s_ref_bytes = (
+                    s_ref.contiguous()
+                    .view(torch.uint8)
+                    .reshape(s_ref.shape[0], s_ref.shape[1] * 4)
+                )
+
+                self.assertEqual(tuple(s_got.shape), tuple(s_ref.shape))
+                self.assertEqual(tuple(s_got.stride()), tuple(s_ref.stride()))
+                self.assertTrue(
+                    torch.equal(
+                        s_got_bytes[:, :active_groups], s_same_bytes[:, :active_groups]
+                    )
+                )
+                self.assertTrue(torch.all(s_got_bytes[:, active_groups:] == 0))
+
+                same_exact = float(
+                    (q_got.view(torch.uint8) == q_same_norm.view(torch.uint8))
+                    .float()
+                    .mean()
+                    .item()
+                )
+                self.assertGreaterEqual(same_exact, 0.9999)
+                torch.testing.assert_close(
+                    q_got.float(), q_same_norm.float(), atol=0.125, rtol=0.13
+                )
+
+                s_ref_u8_diff = (
+                    s_got_bytes[:, :active_groups].to(torch.int16)
+                    - s_ref_bytes[:, :active_groups].to(torch.int16)
+                ).abs()
+                self.assertGreaterEqual(
+                    float((s_ref_u8_diff == 0).float().mean().item()), 0.9999
+                )
+                self.assertLessEqual(int(s_ref_u8_diff.max().item()), 1)
+                q_ref_exact = float(
+                    (q_got.view(torch.uint8) == q_ref.view(torch.uint8))
+                    .float()
+                    .mean()
+                    .item()
+                )
+                self.assertGreaterEqual(q_ref_exact, 0.999)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
     def test_mhc_pre_and_post_decode_prefill_and_dim7168(self) -> None:
         major, _ = torch.cuda.get_device_capability()
         if major != 10:

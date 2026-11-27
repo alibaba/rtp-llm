@@ -153,6 +153,7 @@ dsv4_sm100_py_test(
 
 _PERF_TESTS = [
     "test_fused_inv_rope_fp8_quant_perf",
+    "test_fused_mhc_pre_norm_perf",
     "test_fused_rmsnorm_rope_perf",
     "test_rope_only_perf",
     "test_cp_restore_perf",
@@ -183,7 +184,9 @@ _PERF_TESTS = [
             "manual",
             "perf",
         ],
-        deps = _MODEL_TEST_DEPS + [":dsv4_kernel_perf_utils"],
+        deps = _MODEL_TEST_DEPS + [":dsv4_kernel_perf_utils"] + ([
+            "//rtp_llm/models_py:tile_kernels_mhc",
+        ] if name == "test_fused_mhc_pre_norm_perf" else []),
     )
     for name in _PERF_TESTS
 ]

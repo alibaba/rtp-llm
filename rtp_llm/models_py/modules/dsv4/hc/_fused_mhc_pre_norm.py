@@ -1,7 +1,5 @@
 """Fused DeepSeek-V4 mHC pre + RMSNorm (+ optional FP8 UE8M0 quant) & copy kernels."""
 
-from __future__ import annotations
-
 import functools
 from typing import Any, Optional, Tuple
 
@@ -122,7 +120,9 @@ if triton is not None:
         sinkhorn_repeat,
         out_scale_stride_k,
         HIDDEN_SIZE: tl.constexpr,
-        BLOCK_H: tl.constexpr,
+        CHUNK_H: tl.constexpr,
+        NUM_CHUNKS: tl.constexpr,
+        IS_ALIGNED: tl.constexpr,
         MHC_MULT: tl.constexpr,
         MHC_MULT3: tl.constexpr,
         MHC_NORM_EPS: tl.constexpr,
@@ -135,9 +135,10 @@ if triton is not None:
         FP8_MIN: tl.constexpr,
         FP8_MAX: tl.constexpr,
         GROUP_SIZE: tl.constexpr,
-        BLOCK_NUM_GROUPS: tl.constexpr,
-        SCALE_PACKS: tl.constexpr,
+        PACKS_PER_CHUNK: tl.constexpr,
+        ACTIVE_GROUPS: tl.constexpr,
         ACTIVE_SCALE_PACKS: tl.constexpr,
+        HAS_TAIL_PAD: tl.constexpr,
     ):
         pid = tl.program_id(0).to(tl.int64)
         M_i64 = M.to(tl.int64)
@@ -160,9 +161,6 @@ if triton is not None:
 
         inv_hc = tl.rsqrt(sqrsum / (MHC_MULT * HIDDEN_SIZE) + MHC_NORM_EPS)
         mix_pre *= inv_hc
-        mix_post *= inv_hc
-        mix_comb *= inv_hc
-
         s0 = tl.load(mhc_scale_ptr + 0)
         s1 = tl.load(mhc_scale_ptr + 1)
         s2 = tl.load(mhc_scale_ptr + 2)
@@ -171,10 +169,15 @@ if triton is not None:
         b_comb = tl.load(mhc_base_ptr + 8 + offs_4_2d)
 
         pre_mix = tl.sigmoid(mix_pre * s0 + b_pre) + MHC_PRE_EPS
-        post_mix = tl.sigmoid(mix_post * s1 + b_post) * MHC_POST_MULT
+        p0 = tl.sum(tl.where(offs_4 == 0, pre_mix, 0.0), axis=0)
+        p1 = tl.sum(tl.where(offs_4 == 1, pre_mix, 0.0), axis=0)
+        p2 = tl.sum(tl.where(offs_4 == 2, pre_mix, 0.0), axis=0)
+        p3 = tl.sum(tl.where(offs_4 == 3, pre_mix, 0.0), axis=0)
+
+        post_mix = tl.sigmoid((mix_post * inv_hc) * s1 + b_post) * MHC_POST_MULT
         tl.store(post_mix_ptr + pid * MHC_MULT + offs_4, post_mix)
 
-        cm = mix_comb * s2 + b_comb
+        cm = (mix_comb * inv_hc) * s2 + b_comb
         row_max = tl.max(cm, axis=1)[:, None]
         cm = tl.exp(cm - row_max)
         row_sum = tl.sum(cm, axis=1)[:, None]
@@ -188,50 +191,221 @@ if triton is not None:
             cm = cm / (col_sum + MHC_SINKHORN_EPS)
         tl.store(comb_mix_ptr + pid * 16 + offs_4_2d, cm)
 
-        offs_h = tl.arange(0, BLOCK_H)
-        h_mask = offs_h < HIDDEN_SIZE
-        ol = tl.zeros((BLOCK_H,), dtype=tl.float32)
         res_base = residual_ptr + pid * (MHC_MULT * HIDDEN_SIZE)
-        for lane in tl.static_range(MHC_MULT):
-            p_lane = tl.sum(tl.where(offs_4 == lane, pre_mix, 0.0), axis=0)
-            x_lane = tl.load(
-                res_base + lane * HIDDEN_SIZE + offs_h, mask=h_mask, other=0.0
-            ).to(tl.float32)
-            ol += p_lane * x_lane
+        norm_row_ptr = out_norm_ptr + pid * HIDDEN_SIZE
+        q_row_ptr = out_q_ptr + pid * HIDDEN_SIZE
+        offs_c = tl.arange(0, CHUNK_H)
 
-        # Preserve exact BF16 intermediate rounding between mHC pre and RMSNorm.
-        ol_bf16 = ol.to(tl.bfloat16).to(tl.float32)
-        var = tl.sum(ol_bf16 * ol_bf16, axis=0) / HIDDEN_SIZE
-        rrms = tl.rsqrt(var + RMS_EPS)
-        w = tl.load(norm_weight_ptr + offs_h, mask=h_mask, other=0.0).to(tl.float32)
-        y = (ol_bf16 * rrms * w).to(tl.bfloat16)
-        tl.store(out_norm_ptr + pid * HIDDEN_SIZE + offs_h, y, mask=h_mask)
+        if NUM_CHUNKS == 1:
+            if IS_ALIGNED:
+                x0 = tl.load(res_base + offs_c, eviction_policy="evict_first").to(
+                    tl.float32
+                )
+                x1 = tl.load(
+                    res_base + HIDDEN_SIZE + offs_c, eviction_policy="evict_first"
+                ).to(tl.float32)
+                x2 = tl.load(
+                    res_base + 2 * HIDDEN_SIZE + offs_c, eviction_policy="evict_first"
+                ).to(tl.float32)
+                x3 = tl.load(
+                    res_base + 3 * HIDDEN_SIZE + offs_c, eviction_policy="evict_first"
+                ).to(tl.float32)
+                ol = ((p0 * x0 + p1 * x1) + p2 * x2) + p3 * x3
+                ol_bf16 = ol.to(tl.bfloat16).to(tl.float32)
+                var = tl.sum(ol_bf16 * ol_bf16, axis=0) / HIDDEN_SIZE
+                rrms = tl.rsqrt(var + RMS_EPS)
+                w = tl.load(norm_weight_ptr + offs_c).to(tl.float32)
+                y = (ol_bf16 * rrms * w).to(tl.bfloat16)
+                tl.store(norm_row_ptr + offs_c, y)
+            else:
+                c_mask = offs_c < HIDDEN_SIZE
+                x0 = tl.load(
+                    res_base + offs_c,
+                    mask=c_mask,
+                    other=0.0,
+                    eviction_policy="evict_first",
+                ).to(tl.float32)
+                x1 = tl.load(
+                    res_base + HIDDEN_SIZE + offs_c,
+                    mask=c_mask,
+                    other=0.0,
+                    eviction_policy="evict_first",
+                ).to(tl.float32)
+                x2 = tl.load(
+                    res_base + 2 * HIDDEN_SIZE + offs_c,
+                    mask=c_mask,
+                    other=0.0,
+                    eviction_policy="evict_first",
+                ).to(tl.float32)
+                x3 = tl.load(
+                    res_base + 3 * HIDDEN_SIZE + offs_c,
+                    mask=c_mask,
+                    other=0.0,
+                    eviction_policy="evict_first",
+                ).to(tl.float32)
+                ol = ((p0 * x0 + p1 * x1) + p2 * x2) + p3 * x3
+                # Preserve exact BF16 intermediate rounding between mHC pre and RMSNorm.
+                ol_bf16 = tl.where(c_mask, ol.to(tl.bfloat16).to(tl.float32), 0.0)
+                var = tl.sum(ol_bf16 * ol_bf16, axis=0) / HIDDEN_SIZE
+                rrms = tl.rsqrt(var + RMS_EPS)
+                w = tl.load(norm_weight_ptr + offs_c, mask=c_mask, other=0.0).to(
+                    tl.float32
+                )
+                y = (ol_bf16 * rrms * w).to(tl.bfloat16)
+                tl.store(norm_row_ptr + offs_c, y, mask=c_mask)
 
-        if QUANT_UE8M0:
-            y_f32 = y.to(tl.float32)
-            y_grouped = tl.reshape(y_f32, (BLOCK_NUM_GROUPS, GROUP_SIZE))
-            absmax = tl.max(tl.abs(y_grouped), axis=1)
-            scale_raw = tl.maximum(absmax, CLAMP_EPS) / FP8_MAX
-            exponent = tl.ceil(tl.log2(scale_raw))
-            scale = tl.math.exp2(exponent)
-            q = tl.clamp(y_grouped / scale[:, None], FP8_MIN, FP8_MAX).to(
-                out_q_ptr.dtype.element_ty
-            )
-            tl.store(
-                out_q_ptr + pid * HIDDEN_SIZE + offs_h,
-                tl.reshape(q, (BLOCK_H,)),
-                mask=h_mask,
-            )
-            exp_biased = tl.clamp(exponent + 127.0, 0.0, 255.0).to(tl.int32)
-            exp_packs = tl.reshape(exp_biased, (SCALE_PACKS, 4))
+            if QUANT_UE8M0:
+                y_f32 = y.to(tl.float32)
+                y_grouped = tl.reshape(y_f32, (PACKS_PER_CHUNK, 4, GROUP_SIZE))
+                absmax = tl.max(tl.abs(y_grouped), axis=2)
+                scale_raw = tl.maximum(absmax, CLAMP_EPS) * (1.0 / FP8_MAX)
+                raw_bits = scale_raw.to(tl.int32, bitcast=True)
+                mant = raw_bits & 0x7FFFFF
+                exp_biased = tl.minimum(
+                    tl.maximum(
+                        ((raw_bits >> 23) & 0xFF) + tl.where(mant != 0, 1, 0), 1
+                    ),
+                    253,
+                )
+                inv_scale = ((254 - exp_biased) << 23).to(tl.float32, bitcast=True)
+                q = tl.clamp(y_grouped * inv_scale[:, :, None], FP8_MIN, FP8_MAX).to(
+                    out_q_ptr.dtype.element_ty
+                )
+                if IS_ALIGNED:
+                    tl.store(q_row_ptr + offs_c, tl.reshape(q, (CHUNK_H,)))
+                else:
+                    tl.store(
+                        q_row_ptr + offs_c,
+                        tl.reshape(q, (CHUNK_H,)),
+                        mask=offs_c < HIDDEN_SIZE,
+                    )
+                if HAS_TAIL_PAD:
+                    group_ids = (
+                        tl.arange(0, PACKS_PER_CHUNK)[:, None] * 4
+                        + tl.arange(0, 4)[None, :]
+                    )
+                    exp_biased = tl.where(group_ids < ACTIVE_GROUPS, exp_biased, 0)
+                pack_shifts = tl.arange(0, 4)[None, :] * 8
+                packed_scales = tl.sum(exp_biased << pack_shifts, axis=1)
+                offs_sp = tl.arange(0, PACKS_PER_CHUNK)
+                tl.store(
+                    out_scale_ptr + offs_sp.to(tl.int64) * out_scale_stride_k + pid,
+                    packed_scales,
+                    mask=offs_sp < ACTIVE_SCALE_PACKS,
+                )
+        else:
+            var_vec = tl.zeros((CHUNK_H,), dtype=tl.float32)
+            for chunk_id in range(0, NUM_CHUNKS):
+                cols = chunk_id * CHUNK_H + offs_c
+                if IS_ALIGNED:
+                    x0 = tl.load(res_base + cols, eviction_policy="evict_first").to(
+                        tl.float32
+                    )
+                    x1 = tl.load(
+                        res_base + HIDDEN_SIZE + cols, eviction_policy="evict_first"
+                    ).to(tl.float32)
+                    x2 = tl.load(
+                        res_base + 2 * HIDDEN_SIZE + cols, eviction_policy="evict_first"
+                    ).to(tl.float32)
+                    x3 = tl.load(
+                        res_base + 3 * HIDDEN_SIZE + cols, eviction_policy="evict_first"
+                    ).to(tl.float32)
+                    ol_c = ((p0 * x0 + p1 * x1) + p2 * x2) + p3 * x3
+                    ol_bf16_c = ol_c.to(tl.bfloat16)
+                    tl.store(norm_row_ptr + cols, ol_bf16_c)
+                    ol_bf16_f32 = ol_bf16_c.to(tl.float32)
+                else:
+                    c_mask = cols < HIDDEN_SIZE
+                    x0 = tl.load(
+                        res_base + cols,
+                        mask=c_mask,
+                        other=0.0,
+                        eviction_policy="evict_first",
+                    ).to(tl.float32)
+                    x1 = tl.load(
+                        res_base + HIDDEN_SIZE + cols,
+                        mask=c_mask,
+                        other=0.0,
+                        eviction_policy="evict_first",
+                    ).to(tl.float32)
+                    x2 = tl.load(
+                        res_base + 2 * HIDDEN_SIZE + cols,
+                        mask=c_mask,
+                        other=0.0,
+                        eviction_policy="evict_first",
+                    ).to(tl.float32)
+                    x3 = tl.load(
+                        res_base + 3 * HIDDEN_SIZE + cols,
+                        mask=c_mask,
+                        other=0.0,
+                        eviction_policy="evict_first",
+                    ).to(tl.float32)
+                    ol_c = ((p0 * x0 + p1 * x1) + p2 * x2) + p3 * x3
+                    # Preserve exact BF16 intermediate rounding between mHC pre and RMSNorm;
+                    # stage in out_norm_ptr (L2-hot) so Pass 2 avoids re-reading 4x residual.
+                    ol_bf16_c = ol_c.to(tl.bfloat16)
+                    tl.store(norm_row_ptr + cols, ol_bf16_c, mask=c_mask)
+                    ol_bf16_f32 = tl.where(c_mask, ol_bf16_c.to(tl.float32), 0.0)
+                var_vec += ol_bf16_f32 * ol_bf16_f32
+
+            rrms = tl.rsqrt(tl.sum(var_vec, axis=0) / HIDDEN_SIZE + RMS_EPS)
             pack_shifts = tl.arange(0, 4)[None, :] * 8
-            packed_scales = tl.sum(exp_packs << pack_shifts, axis=1)
-            offs_sp = tl.arange(0, SCALE_PACKS)
-            tl.store(
-                out_scale_ptr + offs_sp.to(tl.int64) * out_scale_stride_k + pid,
-                packed_scales,
-                mask=offs_sp < ACTIVE_SCALE_PACKS,
-            )
+            for chunk_id in range(0, NUM_CHUNKS):
+                cols = chunk_id * CHUNK_H + offs_c
+                if IS_ALIGNED:
+                    ol_bf16_c = tl.load(norm_row_ptr + cols).to(tl.float32)
+                    w_c = tl.load(norm_weight_ptr + cols).to(tl.float32)
+                    y_c = (ol_bf16_c * rrms * w_c).to(tl.bfloat16)
+                    tl.store(norm_row_ptr + cols, y_c)
+                else:
+                    c_mask = cols < HIDDEN_SIZE
+                    ol_bf16_c = tl.load(norm_row_ptr + cols, mask=c_mask, other=0.0).to(
+                        tl.float32
+                    )
+                    w_c = tl.load(norm_weight_ptr + cols, mask=c_mask, other=0.0).to(
+                        tl.float32
+                    )
+                    y_c = (ol_bf16_c * rrms * w_c).to(tl.bfloat16)
+                    tl.store(norm_row_ptr + cols, y_c, mask=c_mask)
+
+                if QUANT_UE8M0:
+                    y_f32 = y_c.to(tl.float32)
+                    y_grouped = tl.reshape(y_f32, (PACKS_PER_CHUNK, 4, GROUP_SIZE))
+                    absmax = tl.max(tl.abs(y_grouped), axis=2)
+                    scale_raw = tl.maximum(absmax, CLAMP_EPS) * (1.0 / FP8_MAX)
+                    raw_bits = scale_raw.to(tl.int32, bitcast=True)
+                    mant = raw_bits & 0x7FFFFF
+                    exp_biased = tl.minimum(
+                        tl.maximum(
+                            ((raw_bits >> 23) & 0xFF) + tl.where(mant != 0, 1, 0), 1
+                        ),
+                        253,
+                    )
+                    inv_scale = ((254 - exp_biased) << 23).to(tl.float32, bitcast=True)
+                    q_c = tl.clamp(
+                        y_grouped * inv_scale[:, :, None], FP8_MIN, FP8_MAX
+                    ).to(out_q_ptr.dtype.element_ty)
+                    if IS_ALIGNED:
+                        tl.store(q_row_ptr + cols, tl.reshape(q_c, (CHUNK_H,)))
+                    else:
+                        tl.store(
+                            q_row_ptr + cols,
+                            tl.reshape(q_c, (CHUNK_H,)),
+                            mask=cols < HIDDEN_SIZE,
+                        )
+                    pack_base = chunk_id * PACKS_PER_CHUNK
+                    if HAS_TAIL_PAD:
+                        group_ids = (pack_base + tl.arange(0, PACKS_PER_CHUNK))[
+                            :, None
+                        ] * 4 + tl.arange(0, 4)[None, :]
+                        exp_biased = tl.where(group_ids < ACTIVE_GROUPS, exp_biased, 0)
+                    packed_scales = tl.sum(exp_biased << pack_shifts, axis=1)
+                    offs_sp = pack_base + tl.arange(0, PACKS_PER_CHUNK)
+                    tl.store(
+                        out_scale_ptr + offs_sp.to(tl.int64) * out_scale_stride_k + pid,
+                        packed_scales,
+                        mask=offs_sp < ACTIVE_SCALE_PACKS,
+                    )
 
     @triton.jit(
         do_not_specialize=[
@@ -441,9 +615,22 @@ def _run_fused_mhc_pre_norm(
         num_tokens, hidden_size, dtype=torch.bfloat16, device=x.device
     )
 
-    block_h = max(512, triton.next_power_of_2(hidden_size))
-    block_num_groups = block_h // group_size
-    scale_packs = block_num_groups // 4
+    if hidden_size <= 512:
+        chunk_h = max(
+            4 * group_size if quant_ue8m0 else 256,
+            triton.next_power_of_2(hidden_size),
+        )
+    else:
+        chunk_h = 512
+    num_chunks = (hidden_size + chunk_h - 1) // chunk_h
+    packs_per_chunk = max(1, chunk_h // (4 * group_size))
+    active_groups = hidden_size // group_size
+    if num_chunks == 1:
+        num_warps = 8 if chunk_h >= 2048 else (4 if chunk_h >= 1024 else 1)
+    elif chunk_h <= 512:
+        num_warps = 1 if not quant_ue8m0 else 2
+    else:
+        num_warps = 2
 
     if quant_ue8m0:
         out_q = torch.empty(
@@ -453,7 +640,7 @@ def _run_fused_mhc_pre_norm(
             num_tokens, hidden_size, device=x.device, group_size=group_size
         )
         out_scale_stride_k = int(out_scale.stride(1))
-        active_scale_packs = (hidden_size // group_size + 3) // 4
+        active_scale_packs = (active_groups + 3) // 4
         finfo = torch.finfo(torch.float8_e4m3fn)
         fp8_min = float(finfo.min)
         fp8_max = float(finfo.max)
@@ -482,7 +669,9 @@ def _run_fused_mhc_pre_norm(
         int(hc_unit.hc_sinkhorn_iters),
         out_scale_stride_k,
         HIDDEN_SIZE=hidden_size,
-        BLOCK_H=block_h,
+        CHUNK_H=chunk_h,
+        NUM_CHUNKS=num_chunks,
+        IS_ALIGNED=(hidden_size % chunk_h == 0),
         MHC_MULT=_MHC_MULT,
         MHC_MULT3=_MHC_MULT3,
         MHC_NORM_EPS=float(hc_unit.norm_eps),
@@ -495,11 +684,12 @@ def _run_fused_mhc_pre_norm(
         FP8_MIN=fp8_min,
         FP8_MAX=fp8_max,
         GROUP_SIZE=group_size,
-        BLOCK_NUM_GROUPS=block_num_groups,
-        SCALE_PACKS=scale_packs,
+        PACKS_PER_CHUNK=packs_per_chunk,
+        ACTIVE_GROUPS=active_groups,
         ACTIVE_SCALE_PACKS=active_scale_packs,
-        num_warps=8 if block_h >= 4096 else 4,
-        num_stages=2,
+        HAS_TAIL_PAD=(num_chunks * chunk_h) != hidden_size,
+        num_warps=num_warps,
+        num_stages=1 if num_chunks == 1 else 2,
     )
 
     out_norm_view = out_norm.view(*outer_shape, hidden_size)

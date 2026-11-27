@@ -28,6 +28,7 @@ _GPU_TESTS = [
     "test_ring_write_mask",
     "test_fp8_mqa_prefill_indexer_score",
     "test_fp8_paged_indexer_score",
+    "test_fused_qnorm_quant",
     "test_indexer_compute_q_flat_input",
     "test_indexer_fp8_prefill_chain",
     "test_indexer_fp8_prefill_meta",
@@ -155,6 +156,17 @@ cuda13_sm100_py_test(
     ]
 ]
 
+dsv4_py_test(
+    name = "test_fused_qnorm_quant_perf",
+    tags = [
+        "manual",
+        "perf",
+    ],
+    deps = _DSV4_FP8_TEST_DEPS + [
+        "//rtp_llm/models_py/modules/dsv4/test:dsv4_kernel_perf_utils",
+    ],
+)
+
 test_suite(
     name = "dsv4_fp8_cuda13_unit",
     tests = [":" + name for name in _GPU_TESTS + _CONTRACT_TESTS] + [
@@ -170,6 +182,7 @@ test_suite(
         ":test_flash_mla_decode_kernel_layout_x86",
         ":test_fused_compressor_meta_triton_x86",
         ":test_fused_decode_meta_comprehensive_x86",
+        ":test_fused_qnorm_quant_x86",
         ":test_indexer_cp_padded_gather_distributed_x86",
         ":test_indexer_cp_padded_gather_triton_x86",
         ":test_indexer_fp8_score_x86",
