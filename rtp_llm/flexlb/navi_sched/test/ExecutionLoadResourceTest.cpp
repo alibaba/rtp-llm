@@ -1,3 +1,4 @@
+#include "aios/navi_sched/debug/NaviSchedScheduleReplayJson.h"
 #include "autil/DataBuffer.h"
 #include "aios/navi_sched/resource/MasterKVReadyWorkload.h"
 #include "aios/navi_sched/config/NaviSchedConfigBuilder.h"
@@ -1209,5 +1210,81 @@ TEST(ExecutionLoadResourceTest, NativeKVLoadClassificationKeepsUndeclaredModelBe
     EXPECT_FALSE(context._decisions[0].executionLoadIncluded.has_value());
     EXPECT_EQ(0u, source->richCalls);
     EXPECT_EQ(1u, source->plainCalls);
+}
+}
+
+namespace navi_sched {
+TEST(ExecutionLoadResourceTest, NativeWorkloadCaptureDefaultsOffAndBoundsSamples) {
+    NaviSchedWorkloadSnapshot workload;
+    workload.nativePPState = std::make_shared<const NaviSchedNativePPState>();
+    EXPECT_FALSE(NaviSchedScheduleReplayJson::captureNativeWorkload(workload, 20));
+    EXPECT_FALSE(NaviSchedScheduleReplayJson::captureNativeWorkload(workload, 0, true));
+    EXPECT_FALSE(NaviSchedScheduleReplayJson::captureNativeWorkload(workload, 19, true));
+    EXPECT_FALSE(NaviSchedScheduleReplayJson::captureNativeWorkload(workload, 20, true, 32));
+    const auto captured = NaviSchedScheduleReplayJson::captureNativeWorkload(workload, 20, true);
+    ASSERT_TRUE(captured);
+    EXPECT_EQ(std::string::npos, captured->find("forward_payload"));
+    EXPECT_EQ(std::string::npos, captured->find("cached_block_hashes"));
+    EXPECT_TRUE(NaviSchedScheduleReplayJson::captureNativeWorkload(workload, 40, true));
+    workload.nativePPState.reset();
+    EXPECT_FALSE(NaviSchedScheduleReplayJson::captureNativeWorkload(workload, 20, true));
+}
+
+TEST(ExecutionLoadResourceTest, NativeWorkloadCapturePreservesQueueAndCompletionStates) {
+    NaviSchedWorkloadSnapshot workload;
+    workload.revision = 321;
+    workload.eventTimeUs = 123456;
+    workload.nativePPObservationAgeUs = 765;
+    workload.executionLoadTracked = true;
+    workload.admittedBatch.scheduleBatchId = 881;
+    workload.admittedBatch.localBatchId = 71;
+    workload.admittedBatch.requestCount = 2;
+    workload.admittedBatch.requestIds = {502, 501};
+    auto native = std::make_shared<NaviSchedNativePPState>();
+    native->observationId = 991;
+    auto &request = native->requests.emplace_back();
+    request.requestId = 501;
+    request.promptTokens = 20000;
+    request.computedTokens = 4096;
+    request.queue = static_cast<NativePPQueue>(1);
+    request.queueIndex = 3;
+    request.phase = static_cast<NativePPRequestPhase>(2);
+    auto &result = native->results.emplace_back();
+    result.schedulerOutputId = 192;
+    result.loadRequestIds = {501, 502};
+    result.executeReplyReady = true;
+    result.resultReady = false;
+    native->pendingDecision.emplace();
+    native->pendingDecision->schedulerOutputId = 193;
+    native->pendingDecision->loadRequestIds = {503};
+    workload.nativePPState = native;
+    const auto captured = NaviSchedScheduleReplayJson::captureNativeWorkload(workload, 20, true);
+    ASSERT_TRUE(captured);
+    NaviSchedWorkloadSnapshot decoded;
+    NaviSchedScheduleReplayJson::workloadFromJsonString(*captured, decoded);
+    EXPECT_EQ(workload.revision, decoded.revision);
+    EXPECT_EQ(workload.eventTimeUs, decoded.eventTimeUs);
+    EXPECT_EQ(765, decoded.nativePPObservationAgeUs);
+    EXPECT_TRUE(decoded.executionLoadTracked);
+    EXPECT_EQ(881, decoded.admittedBatch.scheduleBatchId);
+    EXPECT_EQ(71, decoded.admittedBatch.localBatchId);
+    EXPECT_EQ(2, decoded.admittedBatch.requestCount);
+    EXPECT_EQ(workload.admittedBatch.requestIds, decoded.admittedBatch.requestIds);
+    ASSERT_TRUE(decoded.nativePPState);
+    ASSERT_EQ(1u, decoded.nativePPState->requests.size());
+    const auto &copy = decoded.nativePPState->requests[0];
+    EXPECT_EQ(request.requestId, copy.requestId);
+    EXPECT_EQ(request.computedTokens, copy.computedTokens);
+    EXPECT_EQ(request.queue, copy.queue);
+    EXPECT_EQ(request.queueIndex, copy.queueIndex);
+    EXPECT_EQ(request.phase, copy.phase);
+    ASSERT_EQ(1u, decoded.nativePPState->results.size());
+    EXPECT_EQ(result.loadRequestIds, decoded.nativePPState->results[0].loadRequestIds);
+    EXPECT_TRUE(decoded.nativePPState->results[0].executeReplyReady);
+    EXPECT_FALSE(decoded.nativePPState->results[0].resultReady);
+    ASSERT_TRUE(decoded.nativePPState->pendingDecision);
+    EXPECT_EQ(193u, decoded.nativePPState->pendingDecision->schedulerOutputId);
+    EXPECT_EQ(std::vector<uint64_t>({503}), decoded.nativePPState->pendingDecision->loadRequestIds);
+    EXPECT_EQ(captured, NaviSchedScheduleReplayJson::captureNativeWorkload(workload, 20, true));
 }
 }

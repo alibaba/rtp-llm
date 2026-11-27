@@ -1,3 +1,5 @@
+#include "autil/EnvUtil.h"
+#include <cstring>
 #include "aios/navi_sched/scheduler/MasterScheduleContextKernel.h"
 #include "aios/navi_sched/scheduler/MasterSchedulePrepareKernel.h"
 
@@ -456,6 +458,10 @@ MasterScheduleResultKernel::getAdmissionPredictionAudit(
 void MasterScheduleResultKernel::logAdmissionPredictions(
     const NaviSchedScheduleContext &context, const char *admissionPhase) const
 {
+    static const bool captureNativeWorkload = autil::EnvUtil::getEnv(
+        "NAVI_SCHED_MASTER_NATIVE_WORKLOAD_AUDIT", false);
+    bool nativeWorkloadLogged = false;
+
     std::unordered_set<int64_t> loggedBatchIds;
     for (size_t requestIndex = 0; requestIndex < context._decisions.size();
          ++requestIndex) {
@@ -478,6 +484,32 @@ void MasterScheduleResultKernel::logAdmissionPredictions(
             continue;
         }
         const auto &node = context._scheduleNodes[nodeIndex];
+        if (captureNativeWorkload && !nativeWorkloadLogged &&
+            std::strcmp(admissionPhase, "admitted") == 0) {
+            const auto captureBeginUs = autil::TimeUtility::monotonicTimeUs();
+            try {
+                const auto captured = NaviSchedScheduleReplayJson::captureNativeWorkload(
+                    node._workload, decision.scheduleId, true);
+                if (captured) {
+                    nativeWorkloadLogged = true;
+                    NAVI_KERNEL_LOG(
+                        INFO,
+                        "[navi-master-native-workload-snapshot] schedule_time_us=%ld "
+                        "schedule_id=%lu schedule_batch_id=%ld request_id=%lu "
+                        "agent=%s model_revision=%ld report_receive_time_us=%ld "
+                        "capture_us=%ld payload_bytes=%lu workload_json=%s",
+                        context.getScheduleTimeUs(), decision.scheduleId, decision.batchId,
+                        decision.requestId, node.getAgentId().c_str(),
+                        node.getLatencyModelRevision(), node._workloadReportReceiveTimeUs,
+                        autil::TimeUtility::monotonicTimeUs() - captureBeginUs,
+                        captured->size(), captured->c_str());
+                }
+            } catch (const std::exception &error) {
+                nativeWorkloadLogged = true;
+                NAVI_KERNEL_LOG(WARN, "Native workload diagnostic capture failed: %s",
+                                error.what());
+            }
+        }
         for (const auto &entry : audit.frozenExecutionInputs) {
             const auto &input = entry.input;
             const auto observation =

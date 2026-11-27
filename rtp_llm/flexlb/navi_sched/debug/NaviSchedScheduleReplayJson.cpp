@@ -360,6 +360,12 @@ struct ReplayWorkloadJson : public autil::legacy::Jsonizable {
         json.Jsonize("admitted_local_batch_id", admittedLocalBatchId);
         json.Jsonize("admitted_request_count", admittedRequestCount);
         json.Jsonize("admitted_request_ids", admittedRequestIds);
+        if (json.GetMode() != JsonMode::TO_JSON) {
+            value.admittedBatch.scheduleBatchId = admittedScheduleBatchId;
+            value.admittedBatch.localBatchId = admittedLocalBatchId;
+            value.admittedBatch.requestCount = admittedRequestCount;
+            value.admittedBatch.requestIds = std::move(admittedRequestIds);
+        }
         if (json.GetMode() != JsonMode::TO_JSON || !value.nativeCacheQueries.empty()) {
             std::vector<ReplayNativeCacheQueryJson> queries;
             for (const auto &query : value.nativeCacheQueries)
@@ -885,6 +891,25 @@ struct ReplayJson : public autil::legacy::Jsonizable {
     }
 };
 
+}
+
+std::optional<std::string> NaviSchedScheduleReplayJson::captureNativeWorkload(
+    const NaviSchedWorkloadSnapshot &workload, uint64_t scheduleId,
+    bool enabled, size_t maxBytes)
+{
+    if (!enabled || scheduleId == 0 || scheduleId % 20 != 0 || !workload.nativePPState)
+        return std::nullopt;
+    auto json = autil::legacy::ToJsonString(ReplayWorkloadJson(workload), true);
+    if (json.size() > maxBytes) return std::nullopt;
+    return json;
+}
+
+void NaviSchedScheduleReplayJson::workloadFromJsonString(
+    const std::string &json, NaviSchedWorkloadSnapshot &workload)
+{
+    ReplayWorkloadJson encoded;
+    autil::legacy::FromJsonString(encoded, json);
+    workload = std::move(encoded.value);
 }
 
 std::string NaviSchedScheduleReplayJson::toJsonString(
