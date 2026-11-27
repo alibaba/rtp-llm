@@ -83,7 +83,7 @@ def _enabled_or_supported(q, k, cos, sin):
         and cos.is_contiguous()
         and sin.is_contiguous()
         and q.device == k.device == cos.device == sin.device
-        and torch.cuda.get_device_capability(q.device)[0] == 10
+        and torch.cuda.get_device_capability(q.device)[0] in (9, 10)
         and q.untyped_storage().data_ptr() == k.untyped_storage().data_ptr()
         and k.data_ptr() == q.data_ptr() + 1024 * q.element_size()
     )

@@ -61,7 +61,7 @@ def _supported(gate: torch.Tensor, up: torch.Tensor) -> bool:
         and up.stride(1) == 1
         and gate.stride(0) >= _VISION_INTERMEDIATE
         and up.stride(0) >= _VISION_INTERMEDIATE
-        and torch.cuda.get_device_capability(gate.device)[0] == 10
+        and torch.cuda.get_device_capability(gate.device)[0] in (9, 10)
     )
 
 

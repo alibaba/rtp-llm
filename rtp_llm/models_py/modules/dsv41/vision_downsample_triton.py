@@ -81,7 +81,7 @@ def is_supported(x, grids, ratio):
         and width > 0
         and all(grid == grids[0] for grid in grids)
         and x.shape[0] == len(grids) * height * width
-        and torch.cuda.get_device_capability(x.device)[0] == 10
+        and torch.cuda.get_device_capability(x.device)[0] in (9, 10)
     )
 
 

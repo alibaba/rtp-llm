@@ -260,7 +260,7 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
 
         if (
             not self.vision.blocks
-            or torch.cuda.get_device_capability(self._device)[0] != 10
+            or torch.cuda.get_device_capability(self._device)[0] not in (9, 10)
         ):
             return
         block = self.vision.blocks[0]
