@@ -49,6 +49,7 @@ py_test(
     srcs = ["hybrid_ft_test.py", "main_checkpoint_test.py"],
     main = "hybrid_ft_test.py",
     deps = [
+        "//rtp_llm:model_descriptors",
         "//rtp_llm/models_py:checkpoint_reader_test_support",
         "//rtp_llm/models_py:new_weight_loader",
         "//rtp_llm/models_py/new_models/kimi_linear/test:hybrid_ft_fixture",

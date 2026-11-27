@@ -11,7 +11,8 @@ from unittest.mock import patch
 import torch
 from safetensors.torch import save_file
 
-from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers
+from rtp_llm.models.downstream_modules.classifier.classifier import ClassifierHandler
+from rtp_llm.models.downstream_modules.custom_module import CustomModule
 from rtp_llm.models.kimi_k25.kimi_k25 import KimiK25
 from rtp_llm.models.kimi_linear.kimi_linear import KimiLinear
 from rtp_llm.models.qwen3_next.qwen3_next import Qwen3Next, Qwen35Dense, Qwen35Moe
@@ -20,6 +21,7 @@ from rtp_llm.models.qwen3_next.qwen3_next_mtp import (
     Qwen35DenseMTP,
     Qwen35MoeMTP,
 )
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers
 from rtp_llm.models_py.ft_checkpoint import CheckpointTopology, FTCheckpoint
 from rtp_llm.models_py.model_loader import NewModelLoader
 from rtp_llm.models_py.new_models.kimi_k25.test.test_language import (
@@ -42,12 +44,13 @@ from rtp_llm.ops import (
     HybridAttentionType,
     KVCacheConfig,
     ParallelismConfig,
+    TaskType,
 )
 from rtp_llm.tools.convert.ft_export_job import create_ft_export_job
 from rtp_llm.tools.convert.ft_export_metadata import generate_ft_index
 
 
-def _export_ft(source, output, config, wrapper, tp=1):
+def _export_ft(source, output, config, wrapper, tp=1, *, handler=None):
     config.ckpt_path = str(source)
     config.lora_infos = {}
     for rank in range(tp):
@@ -66,7 +69,7 @@ def _export_ft(source, output, config, wrapper, tp=1):
             force_cpu_load_weights=True,
             moe_pure_tp_preshard=False,
             loader_recycle_handles=False,
-            _init_custom_module=lambda: None,
+            _init_custom_module=lambda: handler,
         )
         with patch("sys.argv", ["weights_convert"]):
             create_ft_export_job(descriptor).dump_weight_as_ft_style("cpu", str(output))
@@ -74,6 +77,72 @@ def _export_ft(source, output, config, wrapper, tp=1):
 
 
 class HybridFTRoundTrip(unittest.TestCase):
+    def _check_decoder_handler(self, source, ft, cfg, wrapper, weights):
+        hidden = torch.tensor([[1.0, 2.0, -1.0, 0.0], [0.0, 1.0, 2.0, -1.0]])
+        weight = torch.tensor([[1.0, -3.0, 2.0, 5.0], [-2.0, 1.0, 4.0, 3.0]])
+        bias = torch.tensor([3.0, -2.0])
+        scores = hidden @ weight.T + bias
+        (source / "config.json").write_text(json.dumps({"num_labels": 2}))
+        save_file(
+            {**weights, "classifier.weight": weight, "classifier.bias": bias},
+            str(source / "model.safetensors"),
+        )
+        cfg.ckpt_path = str(source)
+        # Both of these services use ClassifierHandler. Exercise its actual
+        # declarations and forward without starting a tokenizer/HTTP renderer.
+        for task in (TaskType.SEQ_CLASSIFICATION, TaskType.RERANKER):
+            cfg.task_type = task
+            module = CustomModule(cfg, None)
+            module.handler = ClassifierHandler(cfg)
+            module.handler.device = torch.device("cpu")
+            options = replace(
+                _load_config(),
+                custom_weight_mappings=module.checkpoint_weight_mappings(),
+            )
+            archive = source / task.name
+            _export_ft(source, archive, cfg, wrapper, handler=module)
+            for path in (source, archive):
+                for reader in checkpoint_readers("scratch", "fastsafetensors"):
+                    with self.subTest(
+                        model=cfg.model_type, task=task, path=path.name, reader=reader
+                    ):
+                        load = replace(
+                            options, load_method=reader, force_cpu_load_weights=True
+                        )
+                        owner = NewModelLoader(cfg, load, str(path)).load()
+                        table = owner.runtime_weight_view()
+                        self.assertIsNone(owner.lm_head)
+                        for key, value in (
+                            ("classifier.weight", weight), ("classifier.bias", bias)
+                        ):
+                            torch.testing.assert_close(
+                                table["__custom__." + key], value, rtol=0, atol=0
+                            )
+                        module.init(
+                            SimpleNamespace(get_global_weight=table.__getitem__)
+                        )
+                        actual = module.handler.forward(
+                            torch.tensor([0, 1]), hidden, torch.tensor([1, 1])
+                        )
+                        torch.testing.assert_close(actual, scores, rtol=0, atol=0)
+        # A generation-only archive is not a source for a declared score head.
+        with self.assertRaisesRegex(ValueError, "Missing FT handler tensor"):
+            NewModelLoader(cfg, options, str(ft)).load()
+        save_file(
+            {
+                **weights,
+                "classifier.weight": weight[:, :2].contiguous(),
+                "classifier.bias": bias,
+            },
+            str(source / "model.safetensors"),
+        )
+        malformed = source / "malformed"
+        _export_ft(source, malformed, cfg, wrapper, handler=module)
+        with self.assertRaisesRegex(
+            ValueError, "Invalid downstream tensor classifier.weight"
+        ):
+            NewModelLoader(cfg, options, str(malformed)).load()
+
     def test_qwen35_gated_q_peft_hf_and_ft(self):
         # The reference merges PEFT into the original HF tensor. No
         # expected tensor is constructed using the loader's split helper.
@@ -175,6 +244,22 @@ class HybridFTRoundTrip(unittest.TestCase):
         for name in expected:
             with self.subTest(name=name):
                 torch.testing.assert_close(actual[name], expected[name], rtol=0, atol=0)
+        if not stage_only and config.model_type in (
+            "qwen3_next", "qwen35_dense", "qwen35_moe"
+        ):
+            self._check_decoder_handler(source, ft, config, wrapper, weights)
+
+    def test_qwen35_dense_target_and_handler(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cfg = _config(tie=False)
+            cfg.model_type = "qwen35_dense"
+            cfg.expert_num = cfg.moe_k = cfg.moe_inter_size = cfg.moe_style = 0
+            weights = {
+                key.replace("model.", "model.language_model.", 1): value
+                for key, value in _dense_weights(True).items()
+            }
+            self._check(root, root / "ft", cfg, Qwen35Dense, weights)
 
     def test_qwen35_dense_mtp(self):
         with tempfile.TemporaryDirectory() as directory:

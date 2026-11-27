@@ -1140,6 +1140,7 @@ class Qwen3NextForCausalLM(ResidentDecoderOwner, DecoderHandlerOwner, Qwen3NextM
         owns_head = cfg["num_layers"] - 1 in self._owned_layer_ids
         if not self._expects_mtp:
             self._init_decoder_handlers(load_config, cfg["hidden_size"])
+            self.supports_ft_handler_heads = True
         self._cfg = cfg
         self.tie_word_embeddings = cfg["tie_word_embeddings"]
         self.normalize_lm_head_weight = _config_bool(
