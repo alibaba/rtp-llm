@@ -365,6 +365,7 @@ class VitConfig:
         # eviction/copy never blocks the request that produced the embedding.
         self.mm_cache_async_publish: bool = True
         self.mm_remote_cache_enable: bool = False
+        self.mm_remote_cache_write_policy: str = "on_encode"
         # None retains legacy env compatibility when JSON omits these switches.
         self.mm_remote_cache_gdr_enable: Optional[bool] = None
         self.mm_remote_cache_gdr_num: int = 1
@@ -502,6 +503,7 @@ class VitConfig:
             f"mm_cache_cpu_max_bytes: {self.mm_cache_cpu_max_bytes}\n"
             f"mm_hash_key_cache_max_bytes: {self.mm_hash_key_cache_max_bytes}\n"
             f"mm_remote_cache_enable: {self.mm_remote_cache_enable}\n"
+            f"mm_remote_cache_write_policy: {self.mm_remote_cache_write_policy}\n"
             f"mm_remote_cache_namespace: {self.mm_remote_cache_namespace}\n"
             f"mm_remote_cache_write_timeout_ms: {self.mm_remote_cache_write_timeout_ms}\n"
             f"mm_remote_cache_max_object_bytes: {self.mm_remote_cache_max_object_bytes}\n"

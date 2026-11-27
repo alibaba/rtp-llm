@@ -277,7 +277,12 @@ class MMWorkItem:
                 self.embedding_producer_streams = _current_cuda_streams(result)
         elif self.feature_hashes is None:
             self.feature_hashes = _feature_hashes_from_result(result)
-        if self.remote_cache is not None and self._remote_producer_streams is None:
+        evict_to_remote = getattr(self.remote_cache, "write_policy", None) == "on_evict"
+        if (
+            self.remote_cache is not None
+            and not evict_to_remote
+            and self._remote_producer_streams is None
+        ):
             # Inspection may publish from another thread. Snapshot on the
             # stream that owns the encoder output before that storage is reused.
             self._remote_producer_streams = _current_cuda_streams(result)
@@ -299,13 +304,19 @@ class MMWorkItem:
         ):
             self._remote_write_attempted = True
             self.remaining_timeout_s()
-            self.remote_cache.submit_result(
-                self.remote_cache_key,
-                result,
-                trace_id=self.remote_trace_id,
-                producer_streams=self._remote_producer_streams,
-                entry=self.cache_entry,
-            )
+            if evict_to_remote:
+                # A synchronous publisher can evict this generation before
+                # the engine gets back from its scheduler wait.
+                if self.cache_entry is not None:
+                    self.cache_entry.remote_embedding_origin = "encoder"
+            else:
+                self.remote_cache.submit_result(
+                    self.remote_cache_key,
+                    result,
+                    trace_id=self.remote_trace_id,
+                    producer_streams=self._remote_producer_streams,
+                    entry=self.cache_entry,
+                )
         if (
             self.embedding_cache is None
             or self.cache_key is None

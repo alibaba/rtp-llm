@@ -1,7 +1,6 @@
-"""Bounded shared KVCM tier, populated by accepted encoder results.
+"""Bounded shared KVCM tier for accepted encoder results.
 
 Remote keys scope local embedding identities to an immutable model namespace.
-The local GPU/CPU scheduler and asynchronous eviction policy remain unchanged.
 """
 
 import concurrent.futures
@@ -115,7 +114,11 @@ class MMRemoteEmbeddingCache:
         gdr_pool=None,
         audit_enabled=None,
         request_scoped_inspection=False,
+        write_policy="on_encode",
     ):
+        if write_policy not in ("on_encode", "on_evict"):
+            raise ValueError("remote.write_policy must be on_encode or on_evict")
+        self.write_policy = write_policy
         if min(
             max_object_bytes,
             max_inflight_bytes,
@@ -330,6 +333,7 @@ class MMRemoteEmbeddingCache:
             gdr_pool=client if gdr_enabled else None,
             audit_enabled=vit_config.mm_remote_cache_audit,
             request_scoped_inspection=request_scoped_inspection,
+            write_policy=getattr(vit_config, "mm_remote_cache_write_policy", "on_encode"),
         )
 
     def normalize_cpp_url_input(self, item):
@@ -999,8 +1003,46 @@ class MMRemoteEmbeddingCache:
                 events.append(ready)
         return events
 
+    def submit_evicted(self, local_key, entry):
+        context = getattr(entry, "remote_cache_context", None)
+        if (
+            not context
+            or not context.get("key")
+            or entry.error is not None
+            or getattr(entry, "remote_embedding_origin", None) != "encoder"
+        ):
+            return
+        # Copy-out owns this storage independently of the retired pool block.
+        # Keep the restore placement of tensors that were demoted to CPU.
+        with entry.storage_lock:
+            if entry.pool_owners:
+                self._report_skip("write", "eviction_copy")
+                return
+            result, devices = entry.result, entry.original_devices
+            events = tuple(entry.ready_events)
+        if result is None:
+            return
+        for event in events:
+            event.synchronize()
+        self.submit_result(
+            context["key"],
+            result,
+            trace_id=context.get("trace_id"),
+            entry=entry,
+            devices=devices,
+            write_source="local_eviction",
+        )
+
     def submit_result(
-        self, key, result, *, trace_id=None, producer_streams=(), entry=None
+        self,
+        key,
+        result,
+        *,
+        trace_id=None,
+        producer_streams=(),
+        entry=None,
+        devices=None,
+        write_source="encoder_result",
     ):
         """Admit an encoder result and enqueue its owned snapshot for upload."""
         if key is None or self._skip_quarantined("write"):
@@ -1009,7 +1051,13 @@ class MMRemoteEmbeddingCache:
         try:
             inspection = None
             if entry is not None:
-                verdict, checked = entry.greennet_snapshot()
+                if write_source == "local_eviction":
+                    inspection_state = entry.greennet_snapshot_if_valid()
+                    if inspection_state is None:
+                        return
+                else:
+                    inspection_state = entry.greennet_snapshot()
+                verdict, checked = inspection_state
                 if verdict is not None:
                     if not verdict.passed:
                         return
@@ -1030,6 +1078,11 @@ class MMRemoteEmbeddingCache:
                     },
                     max_bytes=self.max_object_bytes,
                     checksum=False,
+                    devices=(
+                        dict(version=None, result=devices, greennet=None, cache_key=None)
+                        if devices is not None
+                        else None
+                    ),
                 )
         except (ValueError, TypeError, RecursionError):
             self._count("encode_skip")
@@ -1049,7 +1102,9 @@ class MMRemoteEmbeddingCache:
                 self._pending_writes.discard(key)
             return
         self.record(
-            "encoder_result_admitted",
+            "eviction_admitted"
+            if write_source == "local_eviction"
+            else "encoder_result_admitted",
             key=key,
             trace_id=trace_id,
             nbytes=plan.nbytes,
@@ -1090,7 +1145,7 @@ class MMRemoteEmbeddingCache:
                 "store_success",
                 key=key,
                 trace_id=trace_id,
-                write_source="encoder_result",
+                write_source=write_source,
                 nbytes=nbytes,
                 tensors=tensors,
             )

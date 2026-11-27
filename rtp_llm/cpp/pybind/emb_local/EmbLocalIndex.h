@@ -93,9 +93,33 @@ public:
         audit_.origin = std::move(origin);
     }
 
+    void setRemoteKey(std::string key) {
+        std::lock_guard lock(audit_mutex_);
+        remote_key_ = std::make_unique<std::string>(std::move(key));
+    }
+
+    void setAuditError() {
+        std::lock_guard lock(audit_mutex_);
+        // Match MMEmbeddingCacheEntry.set_greennet_error: an already definitive
+        // checked decision takes precedence over a later pipeline failure.
+        if (!(audit_.checked && audit_.verdict_present && (audit_.passed || audit_.code == 2))) {
+            audit_error_ = true;
+        }
+    }
+
+    std::optional<std::pair<std::string, Audit>> evictedMetadata() const {
+        std::lock_guard lock(audit_mutex_);
+        if (!remote_key_ || audit_error_ || audit_.origin != "encoder" || (audit_.verdict_present && !audit_.passed)) {
+            return {};
+        }
+        return std::make_pair(*remote_key_, audit_);
+    }
+
 private:
     mutable std::mutex              audit_mutex_;
     Audit                           audit_;
+    std::unique_ptr<std::string>    remote_key_;
+    bool                            audit_error_ = false;
     const uint64_t                  generation_;
     std::shared_ptr<const Resident> record_;
 };
@@ -208,6 +232,7 @@ public:
 
     struct Removed {
         std::shared_ptr<const Resident> resident;
+        std::shared_ptr<Cell>           cell;
         bool                            removed = false;
         explicit                        operator bool() const {
             return removed;
@@ -231,6 +256,7 @@ public:
                 result.resident = std::move(state.resident);
             }
             result.removed = true;
+            result.cell    = std::move(state.cell);
             entries_.erase(found);
         }
         return result;

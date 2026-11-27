@@ -114,6 +114,7 @@ _EMBEDDING_CACHE_FIELDS = {
     },
     "remote": {
         "enable": ("mm_remote_cache_enable", bool, None),
+        "write_policy": ("mm_remote_cache_write_policy", str, None),
         "namespace": ("mm_remote_cache_namespace", str, None),
         "gdr_enable": ("mm_remote_cache_gdr_enable", bool, None),
         "gdr_num": ("mm_remote_cache_gdr_num", int, 1),
@@ -177,6 +178,11 @@ def parse_embedding_cache_config(value):
                     raise ValueError(f"{section}.{key} must be >= {minimum}")
                 if kind is str and not item.strip():
                     raise ValueError(f"{section}.{key} must not be blank")
+                if field == "mm_remote_cache_write_policy" and item not in (
+                    "on_encode",
+                    "on_evict",
+                ):
+                    raise ValueError("remote.write_policy must be on_encode or on_evict")
                 fields[field] = item
         return fields
     except (ValueError, TypeError) as error:
@@ -211,7 +217,11 @@ def init_vit_group_args(parser, vit_config):
         env_name="MM_EMBEDDING_CACHE_CONFIG",
         type=parse_embedding_cache_config,
         default=None,
-        help="Embedding cache JSON with local/remote sections; supplied keys override legacy options",
+        help=(
+            "Embedding cache JSON with local/remote sections. remote.write_policy "
+            "defaults to on_encode. on_evict writes when a computed embedding leaves "
+            "the last local tier. Remote reads use the same settings for both policies."
+        ),
     )
     vit_group.add_argument(
         "--vit_separation",

@@ -810,9 +810,15 @@ class MMEmbeddingCacheEntry:
             self._signal_event("_greennet_event")
 
     def greennet_snapshot(self) -> Tuple[Optional[GreenNetVerdict], bool]:
+        return self.greennet_snapshot_if_valid() or (None, False)
+
+    def greennet_snapshot_if_valid(
+        self,
+    ) -> Optional[Tuple[Optional[GreenNetVerdict], bool]]:
+        """A failed inspection must not be serialized as an unchecked result."""
         with self._state_lock:
             if self._greennet_error is not None:
-                return None, False
+                return None
             return self._greennet_verdict, self._greennet_checked
 
     def set_greennet_error(self, error: Exception) -> None:
@@ -1497,22 +1503,24 @@ class MMEmbeddingCache:
         for owner in owners:
             owner.release()
 
-    def _unlink_entry_locked(self, cache_key: str, eviction: bool = False):
+    def _unlink_entry_locked(
+        self, cache_key: str, eviction: bool = False, previous_tier=None
+    ):
         """Index-only removal. Caller owns transfer lock through finalization."""
         entry = self._entries.pop(cache_key)
-        tier = entry.tier
+        tier = entry.tier or previous_tier
         self._uncharge_locked(cache_key, entry)
         if eviction:
             self._stats["eviction"] += 1
         return cache_key, entry, tier, eviction
 
-    def _finish_removal(self, removal) -> None:
+    def _finish_removal(self, removal, *, write_back=True) -> None:
         cache_key, entry, tier, eviction = removal
         callback = None
-        if eviction and entry.is_done:
+        if eviction and write_back and entry.is_done:
             if tier == "cpu":
                 callback = self._on_cpu_evict
-            elif tier == "gpu" and self._cpu_max_bytes == 0:
+            elif tier == "gpu":
                 callback = self._on_gpu_evict
         # Copies, event waits, pool releases and remote admission must not
         # block unrelated index probes or embedding -> hash publication.
@@ -1528,13 +1536,15 @@ class MMEmbeddingCache:
             if self._report_metrics_enabled:
                 kmonitor.report(AccMetrics.VIT_EMBEDDING_CACHE_EVICTION_QPS_METRIC, 1)
 
-    def _remove_entry(self, cache_key, expected=None, *, eviction=False) -> bool:
+    def _remove_entry(
+        self, cache_key, expected=None, *, eviction=False, previous_tier=None
+    ) -> bool:
         """Caller owns _transfer_lock, never the index lock."""
         with self._lock:
             entry = self._entries.get(cache_key)
             if entry is None or (expected is not None and entry is not expected):
                 return False
-            removal = self._unlink_entry_locked(cache_key, eviction)
+            removal = self._unlink_entry_locked(cache_key, eviction, previous_tier)
         self._finish_removal(removal)
         return True
 
@@ -1603,6 +1613,7 @@ class MMEmbeddingCache:
         devices: Any,
         offloaded: bool,
         source_events: List[Any],
+        previous_tier=None,
     ) -> bool:
         """Pack and admit an uncharged entry; caller owns _transfer_lock."""
         required_gpu, required_cpu = _compact_tensor_tier_bytes(result, devices)
@@ -1611,7 +1622,9 @@ class MMEmbeddingCache:
             or required_cpu > self._cpu_max_bytes
             or (required_gpu == 0 and required_cpu == 0)
         ):
-            self._remove_entry(cache_key, entry, eviction=True)
+            self._remove_entry(
+                cache_key, entry, eviction=True, previous_tier=previous_tier
+            )
             return False
         if required_gpu:
             self._make_gpu_room(required_gpu)
@@ -1651,7 +1664,9 @@ class MMEmbeddingCache:
             with self._lock:
                 if self._entries.get(cache_key) is entry:
                     self._stats["transfer_error"] += 1
-            self._remove_entry(cache_key, entry, eviction=True)
+            self._remove_entry(
+                cache_key, entry, eviction=True, previous_tier=previous_tier
+            )
             return False
         except Exception:
             # Cache insertion is optional. Preserve the successful computation
@@ -1698,9 +1713,12 @@ class MMEmbeddingCache:
         entry: MMEmbeddingCacheEntry,
         result: Any,
         events: List[Any],
+        previous_tier=None,
     ) -> None:
         devices = _map_tensors(result, lambda _: torch.device("cpu"))
-        if self._store_pooled(cache_key, entry, result, devices, True, events):
+        if self._store_pooled(
+            cache_key, entry, result, devices, True, events, previous_tier
+        ):
             with self._lock:
                 self._stats["demotion"] += 1
 
@@ -1722,7 +1740,9 @@ class MMEmbeddingCache:
         if removal is not None:
             self._finish_removal(removal)
         else:
-            self._store_cpu(key, entry, entry.result, entry.ready_events)
+            self._store_cpu(
+                key, entry, entry.result, entry.ready_events, previous_tier="gpu"
+            )
         return True
 
     def _on_complete(
@@ -1938,6 +1958,7 @@ class MMEmbeddingCache:
                     entry.original_devices,
                     False,
                     self._record_ready_events(restored),
+                    previous_tier="cpu",
                 )
                 if promoted:
                     with self._lock:
@@ -2059,7 +2080,7 @@ class MMEmbeddingCache:
                         for key in list(self._entries)
                     ]
                 for removal in removals:
-                    self._finish_removal(removal)
+                    self._finish_removal(removal, write_back=False)
                 if grow_gpu:
                     self._gpu_pool = _TensorMemoryPool(
                         gpu_max_bytes,
@@ -2220,6 +2241,7 @@ class ShardedMMEmbeddingCache:
         on_cpu_evict: Optional[Callable[[str, MMEmbeddingCacheEntry], None]] = None,
         async_publication: bool = False,
         on_gpu_evict: Optional[Callable[[str, MMEmbeddingCacheEntry], None]] = None,
+        eviction_snapshot_max_bytes: Optional[int] = None,
     ):
         if shards < 1:
             raise ValueError("embedding cache shards must be positive")
@@ -2230,10 +2252,9 @@ class ShardedMMEmbeddingCache:
         )
         cache_class = MMEmbeddingCache
         eviction_policy = dict(on_cpu_evict=on_cpu_evict, on_gpu_evict=on_gpu_evict)
-        if (
-            _native_local_cache_enabled()
-            and on_cpu_evict is None
-            and on_gpu_evict is None
+        if _native_local_cache_enabled() and (
+            eviction_snapshot_max_bytes is not None
+            or (on_cpu_evict is None and on_gpu_evict is None)
         ):
             import librtp_compute_ops
 
@@ -2241,7 +2262,12 @@ class ShardedMMEmbeddingCache:
                 from .mm_embedding_native_cache import NativeMMEmbeddingCache
 
                 cache_class = NativeMMEmbeddingCache
-                eviction_policy = {}
+                if eviction_snapshot_max_bytes is not None:
+                    eviction_policy["eviction_snapshot_max_bytes"] = (
+                        eviction_snapshot_max_bytes
+                    )
+                else:
+                    eviction_policy = {}
         self.uses_native_index = cache_class is not MMEmbeddingCache
         self._shards = [
             cache_class(
