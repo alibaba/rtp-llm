@@ -15,6 +15,8 @@ from rtp_llm.models_py.modules.dsv41.fp8._v41_output_projection import quantizat
 
 # WO_A's inverse-RoPE quantizer retains its separately qualified row range.
 _SM90_WO_A_DIRECT_SCALE_MAX_TOKENS = 96
+# Hopper SM90 einsum direct-scale crossover: 1.27x faster at M=1024, 0.93x at M=2048.
+_SM90_WO_A_EINSUM_DIRECT_SCALE_MAX_TOKENS = 1024
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +69,7 @@ class Sm90GroupedOutputProjection(torch.nn.Module):
                 self.G,
             )
         self._direct_scale_max_tokens = (
-            256
+            _SM90_WO_A_EINSUM_DIRECT_SCALE_MAX_TOKENS
             if self._einsum is not None and (self.G, self.N, self.K) == (8, 1024, 4096)
             else _SM90_WO_A_DIRECT_SCALE_MAX_TOKENS
         )

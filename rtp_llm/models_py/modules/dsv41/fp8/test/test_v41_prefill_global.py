@@ -14,6 +14,7 @@ import triton
 import triton.language as tl
 
 from rtp_llm.models_py.modules.dsv41.fp8 import _v41_prefill_global as fused
+from rtp_llm.models_py.modules.dsv41.fp8._indexer_quant_triton import quantize_indexer_k
 from rtp_llm.models_py.modules.dsv41.fp8._v41_fp4_triton import (
     quantize_and_insert_k_cache_fp4,
     quantize_indexer_k_fp4,
@@ -501,6 +502,57 @@ class PrefillGlobalCudaTest(unittest.TestCase):
                 )
             )
             torch.testing.assert_close(c.index_pool, expected, rtol=0, atol=0)
+
+    def test_index_fp8_epilogue_bytes_and_zero_signs(self):
+        for dtype in (torch.bfloat16, torch.float32):
+            for ratio in (1, 2):
+                c = _case(513, ratio, norm_dtype=dtype)
+                positions = c.positions[c.boundary_indices]
+                rows = positions.shape[0]
+                pages, entries = c.index_pool.shape[:2]
+                raw_pool = torch.full(
+                    (pages, entries * 132 + 128),
+                    0x5A,
+                    dtype=torch.uint8,
+                    device="cuda",
+                )
+                index_pool = raw_pool[:, : entries * 132].view(pages, entries, 132)
+                projected = torch.randn(rows, 128, device="cuda", dtype=torch.bfloat16)
+                projected[0].zero_()
+                projected[1].fill_(-0.0)
+                projected[2].fill_(2.0**-60)
+                projected[3].fill_(2.0**30)
+                expected = torch.full(
+                    (pages, entries, 132),
+                    0x5A,
+                    dtype=torch.uint8,
+                    device="cuda",
+                )
+                keys = rope_only(
+                    _index_norm_reference(projected, c.index_norm, c.eps),
+                    c.freqs[(positions // ratio) * ratio],
+                    64,
+                )
+                quantize_indexer_k(keys, c.index_slots, expected)
+                self.assertTrue(
+                    fused.store_index(
+                        projected,
+                        c.index_norm,
+                        c.eps,
+                        positions,
+                        c.freqs,
+                        index_pool,
+                        c.index_slots,
+                        ratio,
+                    )
+                )
+                torch.testing.assert_close(index_pool, expected, rtol=0, atol=0)
+                torch.testing.assert_close(
+                    raw_pool[:, entries * 132 :],
+                    torch.full((pages, 128), 0x5A, dtype=torch.uint8, device="cuda"),
+                    rtol=0,
+                    atol=0,
+                )
 
     def test_dynamic_graph_replay(self):
         c = _case(129, 2, strided=True, tile_offset=19)

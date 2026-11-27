@@ -1900,18 +1900,22 @@ class AttentionV41FP8(AttentionFP8):
                 )
                 carry_generation += 1
             projected_index = F.linear(latent, owner.index_wk)
+            index_target = index_pool
+            if self._indexer_mode == "fp8_dg" and index_pool is not None:
+                from ._v41_sm90_fp8_indexer_cache import dg_pages
+
+                index_target = dg_pages(index_pool)
             index_stored = (
                 prefill
-                and self._indexer_mode != "fp8_dg"
                 and main_pool is not None
-                and index_pool is not None
+                and index_target is not None
                 and prefill_global.store_index(
                     projected_index,
                     owner.index_k_norm,
                     self.eps,
                     boundary_pos,
                     self.freqs_cis,
-                    index_pool,
+                    index_target,
                     index_slots,
                     ratio,
                 )

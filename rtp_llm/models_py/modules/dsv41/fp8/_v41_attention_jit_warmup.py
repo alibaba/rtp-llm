@@ -566,6 +566,24 @@ def _warm_pool(attn, layout, cp_size, cp_rank, max_batch_size, device):
             initialize_zero_page(pages)
             dg_block_table(torch.tensor([[1]], dtype=torch.int32, device=device), pool)
             projected = torch.zeros((rows, 128), dtype=torch.bfloat16, device=device)
+            for offset, slot_offset in ((0, 0), (0, 1), (1, 0), (1, 1)):
+                index_positions = _indexer_warmup_vector(
+                    rows, torch.int64, device, 1, offset
+                )
+                index_slots = _private_slots(rows + slot_offset, pages.shape[1], device)[
+                    slot_offset:
+                ]
+                stored = producer.store_index(
+                    projected,
+                    attn.index_k_norm,
+                    attn.eps,
+                    index_positions,
+                    attn.freqs_cis,
+                    pages,
+                    index_slots,
+                    layout.ratio,
+                )
+                _require_launch(stored, "index store fp8", enabled=producer._enabled(projected))
             quantize_indexer_k(projected, slots, pages)
             gather_fp8_indexer(pages, slots)
             unpack_raw_fp8_indexer(gather_raw_fp8_indexer(pages, slots))

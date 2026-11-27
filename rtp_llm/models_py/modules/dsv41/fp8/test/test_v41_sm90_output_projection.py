@@ -188,7 +188,7 @@ class SM90OutputProjectionTest(unittest.TestCase):
         )
 
         module, weight, scales = self.fixture(8, 1024, 4096)
-        self.assertEqual(module._direct_scale_max_tokens, 256)
+        self.assertEqual(module._direct_scale_max_tokens, 1024)
         with patch.dict(os.environ, {"DSV4_FP8_QUANT_KERNEL": "auto"}):
             for rows in (97, 128, 160, 256):
                 with self.subTest(rows=rows):
@@ -248,14 +248,14 @@ class SM90OutputProjectionTest(unittest.TestCase):
 
     def test_direct_scale_extension_keeps_other_shapes_and_large_rows(self):
         module, _, _ = self.fixture(8, 1024, 4096)
-        for rows in (1, 16, 48, 96, 257):
+        for rows in (1, 16, 48, 96, 512, 1024, 1025):
             with self.subTest(rows=rows):
                 o, freqs = _input(rows, 8, 4096)
                 o.mul_(0.125)
                 expected = module.forward_quantized(*module.quantize(o, freqs))
                 with patch.object(module, "quantize", wraps=module.quantize) as packed:
                     self.assertTrue(torch.equal(module(o, freqs), expected))
-                    self.assertEqual(packed.call_count, int(rows > 256))
+                    self.assertEqual(packed.call_count, int(rows > 1024))
         small, _, _ = self.fixture(1, 256, 512)
         self.assertEqual(small._direct_scale_max_tokens, 96)
         o, freqs = _input(97, 1, 512)

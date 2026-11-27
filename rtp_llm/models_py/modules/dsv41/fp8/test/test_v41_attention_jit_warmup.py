@@ -1551,6 +1551,9 @@ class V41AttentionWarmupCPU(unittest.TestCase):
                 "_prefill_state_store_kernel": {"STATE_ROWS"},
                 "_prefill_index_store_kernel": {"POOL_STRIDE", "BLOCKS"},
             },
+            "_v41_sm90_prefill_global_kernels.py": {
+                "_prefill_index_store_kernel": {"POOL_STRIDE", "BLOCKS"},
+            },
             "_v41_prefill_candidates.py": {
                 "_prefill_candidate_pool_kernel": {"WIDTH", "STRIDE", "NBLOCKS"},
                 "_prefill_candidate_store_bitmap_kernel": {"FLAG_WORDS", "FLAG_STRIDE"},

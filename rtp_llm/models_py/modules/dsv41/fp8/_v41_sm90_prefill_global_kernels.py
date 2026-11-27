@@ -102,6 +102,13 @@ def _main_pool(pool, device):
     )
 
 
+def _index_pool(pool, device):
+    return _pool(pool, device, 68) or (
+        torch.cuda.get_device_capability(device) == (9, 0)
+        and _pool(pool, device, 132)
+    )
+
+
 @triton.jit
 def _trap():
     tl.inline_asm_elementwise(
@@ -496,6 +503,7 @@ def _prefill_index_store_kernel(
     BLOCKS,
     NATIVE_NORM: tl.constexpr,
     TRAP: tl.constexpr,
+    FP8_CACHE: tl.constexpr = False,
 ):
     row = tl.program_id(0).to(tl.int64)
     slot = tl.load(slots + row).to(tl.int64)
@@ -523,13 +531,27 @@ def _prefill_index_store_kernel(
         )
         position = tl.load(positions + row).to(tl.int64)
         rotated = _rope_bf16(normalized, frequencies, position // RATIO * RATIO, 128)
+        base = pool + (slot // ENTRIES) * POOL_STRIDE
+        offset = slot % ENTRIES
+        if FP8_CACHE:
+            k_vals = rotated.to(tl.float32)
+            absmax = tl.max(tl.abs(k_vals), axis=0)
+            scale = tl.maximum(absmax / 448.0, 1e-12)
+            q_fp8 = (k_vals / scale).to(tl.float8e4nv)
+            tl.store(
+                (base + offset * 128 + columns).to(tl.pointer_type(tl.uint8)),
+                q_fp8.to(tl.uint8, bitcast=True),
+            )
+            tl.store(
+                (base + ENTRIES * 128 + offset * 4).to(tl.pointer_type(tl.float32)),
+                scale,
+            )
+            return
         grouped = rotated.to(tl.float32).reshape((4, 32))
         maxima = tl.maximum(tl.max(tl.abs(grouped), 1), 6.0 * (2.0**-126))
         sf, exponent = _round_power_of_two_scale(maxima, 1.0 / 6.0)
         normalized = tl.minimum(tl.maximum(tl.div_rn(grouped, sf[:, None]), -6.0), 6.0)
         codes = _round_e2m1(normalized).reshape((64, 2))
         even, odd = tl.split(codes)
-        base = pool + (slot // ENTRIES) * POOL_STRIDE
-        offset = slot % ENTRIES
         tl.store(base + offset * 64 + tl.arange(0, 64), even | (odd << 4))
         tl.store(base + ENTRIES * 64 + offset * 4 + tl.arange(0, 4), exponent)

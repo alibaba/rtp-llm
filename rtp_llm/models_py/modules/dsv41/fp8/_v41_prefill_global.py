@@ -98,6 +98,13 @@ def _main_pool(pool, device):
     )
 
 
+def _index_pool(pool, device):
+    return _pool(pool, device, 68) or (
+        torch.cuda.get_device_capability(device) == (9, 0)
+        and _pool(pool, device, 132)
+    )
+
+
 @triton.jit
 def _trap():
     tl.inline_asm_elementwise(
@@ -753,7 +760,7 @@ def compress_main_and_store_states(
 
 
 def store_index(projected, norm, eps, positions, freqs, index_pool, index_slots, ratio):
-    """Normalize compact BF16 index projection and store its planar MXFP4 rows."""
+    """Normalize compact BF16 index projection and store its planar MXFP4 or FP8 rows."""
     if not _enabled(projected) or projected.ndim != 2:
         return False
     rows, device = projected.shape[0], projected.device
@@ -766,11 +773,19 @@ def store_index(projected, norm, eps, positions, freqs, index_pool, index_slots,
         and _vector(positions, rows, device)
         and _vector(index_slots, rows, device)
         and _frequencies(freqs, device)
-        and _pool(index_pool, device, 68)
+        and _index_pool(index_pool, device)
     ):
         return False
     if rows:
-        _prefill_index_store_kernel[(rows,)](
+        kernel = _prefill_index_store_kernel
+        kernel_options = {}
+        if index_pool.shape[-1] == 132:
+            from ._v41_sm90_prefill_global_kernels import (
+                _prefill_index_store_kernel as kernel,
+            )
+
+            kernel_options = {"FP8_CACHE": True}
+        kernel[(rows,)](
             projected,
             norm,
             positions,
@@ -785,6 +800,7 @@ def store_index(projected, norm, eps, positions, freqs, index_pool, index_slots,
             index_pool.shape[0],
             norm.dtype == torch.bfloat16 and projected.is_contiguous(),
             trap_invalid_kv_access_enabled(),
+            **kernel_options,
             num_warps=4,
             enable_fp_fusion=False,
         )
