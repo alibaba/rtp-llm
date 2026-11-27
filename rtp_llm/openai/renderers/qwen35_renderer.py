@@ -40,7 +40,7 @@ class Qwen35Renderer(Qwen3CoderRenderer, Qwen2VLRenderer):
         self._prompt_backend = None
         if (
             renderer_params.model_type == "atom_qwen4_exp"
-            and os.getenv("ROLE_TYPE", "").upper() == "PREFILL"
+            and os.getenv("ROLE_TYPE", "PDFUSION").upper() in ("PREFILL", "PDFUSION")
         ):
             import torch
             from transformers import PreTrainedTokenizerFast
