@@ -77,7 +77,7 @@ def write(root, missing=None):
     )
 
 
-def load(root, method, role, tp, rank, device="cpu"):
+def load(root, method, role, tp, rank, device="cpu", *, return_service=False):
     cfg = ModelFactory.get_model_cls("qwen_7b").create_config(str(root))
     cfg.model_type, cfg.data_type, cfg.task_type = (
         "qwen_7b",
@@ -126,7 +126,7 @@ def load(root, method, role, tp, rank, device="cpu"):
     ):
         svc = ModelFactory._create_model(cfg, engine)
     assert svc.model_weights_loader.loaded_method == NewLoaderLoadMethod(method)
-    return svc.py_model
+    return svc if return_service else svc.py_model
 
 
 def check(root, method, role, tp, rank):
@@ -189,6 +189,19 @@ def worker(rank, root):
 
 
 class Qwen1CheckpointTest(unittest.TestCase):
+    def test_canonical_online_names_keep_transformer_checkpoint_layout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write(root)
+            service = load(root, "scratch", RoleType.PREFILL, 1, 0, return_service=True)
+            owner = service.py_model.layers[0].self_attn.o_proj
+            for name in ("transformer.h.0.attn.c_proj.weight", "model.layers.0.self_attn.o_proj.weight",
+                         "decoder.layers.0.self_attention.linear_proj.weight"):
+                with self.subTest(name=name):
+                    new = owner.weight.detach().clone() + 1
+                    service.weight_manager.update_tensors({name: new})
+                    torch.testing.assert_close(owner.weight, new, rtol=0, atol=0)
+
     def test_ppu_streamed_scratch_policy(self):
         owner = SimpleNamespace(ppu_dense_streamed_scratch=True)
         method = NewLoaderLoadMethod.SCRATCH

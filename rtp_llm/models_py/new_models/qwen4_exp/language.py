@@ -36,7 +36,6 @@ class Qwen4ForCausalLM(Qwen4TargetWeights):
                     hook()
         from rtp_llm.models_py.new_models.qwen4_exp.runtime_bindings import bind_target
         runtime = bind_target(self,self.config,self.load_config)
-        # Only these two ordinary tensors are read directly by execution.
         # Scaled/packed vocab, tied mirrors, and prepared decoder copies do
         # not have a complete online refresh contract.
         direct = set()
@@ -45,10 +44,30 @@ class Qwen4ForCausalLM(Qwen4TargetWeights):
                 if leaf is not None and not leaf.fp8_storage and leaf.storage_scale is None:
                     leaf.supports_independent_weight_updates = True
                     direct.add(id(leaf.weight))
+        # Only publish an ordinary o_proj if the actual execution backend
+        # kept the original NK tensor (same storage, offset, size and stride).
+        for layer, bound in zip(self.layers, runtime.layers):
+            attention = getattr(layer, "self_attn", None)
+            if attention is None:
+                continue
+            leaf = attention.o_proj
+            weight = getattr(bound.self_attn.o_proj, "weight", None)
+            if (callable(getattr(leaf, "prepare_weight_updates", None))
+                    and weight is not None and weight.is_set_to(leaf.weight)):
+                leaf.supports_independent_weight_updates = True
+                direct.add(id(leaf.weight))
         for parameter in self.parameters():
             if id(parameter) not in direct:
                 parameter._rtp_requires_restart_for_update = True
         object.__setattr__(self,"_runtime",runtime)
+
+    def online_checkpoint_name(self, name):
+        # RL clients use model.layers.* even for nested language checkpoints.
+        # Translate public decoder/vocab names only; loading still requires
+        # the actual checkpoint prefix and ownership.
+        if name.startswith(("model.layers.", "model.embed_tokens.")):
+            return self.checkpoint_plan.prefix + name.removeprefix("model.")
+        return name
 
     def __getattr__(self,name):
         try:

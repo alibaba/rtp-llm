@@ -8,7 +8,13 @@ import torch
 from rtp_llm.models_py.module_base import RtpModule, copy_weight_
 from rtp_llm.models_py.new_models.qwen4_exp.hyper_connection import Qwen4TensorWeight
 from rtp_llm.models_py.new_models.qwen4_exp.hyper_connection import Qwen4ProjectionWeight
-from rtp_llm.models_py.new_models.qwen4_exp.dense_weights import Qwen4BlockProjection
+from rtp_llm.models_py.new_models.qwen4_exp.dense_weights import Qwen4BlockProjection, Qwen4ShardedProjection
+
+
+class _PlainOutputProjection(Qwen4ShardedProjection):
+    def prepare_weight_updates(self, weights):
+        from rtp_llm.models_py.runtime_weight_update import prepare_leaf_weight_updates
+        return prepare_leaf_weight_updates(self, weights)
 
 
 class Qwen4AttentionWeights(RtpModule):
@@ -43,7 +49,11 @@ class Qwen4AttentionWeights(RtpModule):
         projection = Qwen4BlockProjection if fp8_storage else Qwen4TensorWeight
         self.qkv_proj = projection((self.q_size + 2*self.kv_size, hidden_size), dtype=dtype)
         self.gate = Qwen4ProjectionWeight((self.q_size, hidden_size), dtype=dtype, fp8_storage=fp8_storage)
-        self.o_proj = projection((hidden_size, self.q_size), dtype=dtype)
+        self.o_proj = (
+            projection((hidden_size, self.q_size), dtype=dtype) if fp8_storage
+            else _PlainOutputProjection((hidden_size, num_heads * head_dim), axis=1,
+                                        tp_size=tp_size, tp_rank=tp_rank, dtype=dtype)
+        )
         self.q_norm = Qwen4TensorWeight((head_dim,), dtype=dtype)
         self.k_norm = Qwen4TensorWeight((head_dim,), dtype=dtype)
         self.qsa_indexer = qsa_indexer
@@ -85,6 +95,9 @@ class Qwen4AttentionWeights(RtpModule):
             if name in ("q_proj.weight", "k_proj.weight", "v_proj.weight"):
                 self._load_qkv_part(name[0], tensor)
             elif name == "o_proj.weight":
+                if isinstance(self.o_proj, _PlainOutputProjection):
+                    self._load_child_weights(self.o_proj, {"weight": tensor})
+                    continue
                 expected = (self.hidden_size, self.num_heads*self.head_dim)
                 if tuple(tensor.shape) != expected:
                     raise ValueError(f"Qwen4 output projection shape must be {expected}")

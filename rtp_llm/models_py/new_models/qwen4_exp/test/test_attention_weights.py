@@ -45,6 +45,10 @@ class AttentionWeightsTest(unittest.TestCase):
                         torch.testing.assert_close(attn.qkv_proj.weight,expected,rtol=0,atol=0)
                         torch.testing.assert_close(attn.gate.weight,g,rtol=0,atol=0)
                         torch.testing.assert_close(attn.o_proj.weight,weights["self_attn.o_proj.weight"][:,rank*8:(rank+1)*8],rtol=0,atol=0)
+                        fresh = -weights["self_attn.o_proj.weight"]
+                        update, = attn.o_proj.prepare_weight_updates({"weight": fresh})
+                        self.assertIs(update.target, attn.o_proj.weight)
+                        torch.testing.assert_close(update.source, fresh[:,rank*8:(rank+1)*8],rtol=0,atol=0)
                         torch.testing.assert_close(attn.q_norm.weight,weights["self_attn.q_norm.weight"],rtol=0,atol=0)
 
     def test_missing_component_fails_loading(self):

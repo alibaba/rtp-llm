@@ -49,3 +49,11 @@ class Qwen1ForCausalLM(Qwen2ForCausalLM):
 
     WEIGHTS_MAPPER = Qwen1CheckpointMapper()
     ppu_dense_streamed_scratch = True
+
+    @staticmethod
+    def online_checkpoint_name(name):
+        # Preserve original transformer.h.* checkpoint dispatch. Public RL
+        # clients may instead send canonical model/decoder-layer spellings.
+        if name.startswith(("model.layers.", "model.embed_tokens.", "model.norm.")):
+            return name.removeprefix("model.")
+        return name

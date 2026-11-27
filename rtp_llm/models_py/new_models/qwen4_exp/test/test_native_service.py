@@ -114,6 +114,19 @@ class NativeQwen4ServiceTest(unittest.TestCase):
                 model.weight_manager.update_tensors({"embedding": update, "lm_head": head.clone() + 2})
                 torch.testing.assert_close(model.py_model._runtime.embed_tokens.weight, update)
                 torch.testing.assert_close(head, values["lm_head.weight"] + 2)
+                # The RL wire uses decoder.* / model.* even when this HF
+                # checkpoint stores nested model.language_model.* names.
+                op = model.py_model._runtime.layers[1].self_attn.o_proj
+                param = model.py_model.layers[1].self_attn.o_proj.weight
+                self.assertTrue(op.weight.is_set_to(param))
+                fresh = torch.full_like(param, 2)
+                model.weight_manager.update_tensors({
+                    "decoder.layers.1.self_attention.linear_proj.weight": fresh,
+                    "model.embed_tokens.weight": old_embedding,
+                })
+                self.assertTrue(op.weight.is_set_to(param))
+                torch.testing.assert_close(op.weight, fresh, rtol=0, atol=0)
+                torch.testing.assert_close(model.py_model._runtime.embed_tokens.weight, old_embedding)
                 qsa = model.py_model.layers[1].self_attn.qsa_indexer
                 self.assertIs(qsa.rope_config, config.attn_config.rope_config)
                 torch.testing.assert_close(
