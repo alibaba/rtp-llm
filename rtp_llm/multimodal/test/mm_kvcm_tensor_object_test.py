@@ -177,6 +177,10 @@ class TensorObjectTest(unittest.TestCase):
                 self.assertEqual(fallback is None, type(scalar) is str)
                 if native is not None:
                     self.assertTrue(stream.query())
+                    with self.assertRaisesRegex(ValueError, "cache key mismatch"):
+                        librtp_compute_ops.restore_emb_cuda_object(
+                            wire, "wrong", True, consumer.stream_id
+                        )
                 result = unpack_object(
                     wire,
                     expected_key="original",

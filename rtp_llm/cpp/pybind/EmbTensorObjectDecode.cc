@@ -171,17 +171,20 @@ std::vector<EmbTensorSlice> validateLayout(rapidjson::Document&              doc
         throw UnsupportedLayout{};
     }
     if (expected) {
-        if (stringValue(tree[0]) != "dict") {
-            throw UnsupportedLayout{};
-        }
         bool keyMatched = false;
-        for (const auto& item : tree[1].GetArray()) {
-            if (stringValue(item[0]) == "cache_key" && stringValue(item[1][0]) == "scalar" && item[1][1].IsString()) {
-                keyMatched = stringValue(item[1][1]) == *expected;
+        if (stringValue(tree[0]) == "dict") {
+            for (const auto& item : tree[1].GetArray()) {
+                if (stringValue(item[0]) == "cache_key" && stringValue(item[1][0]) == "scalar"
+                    && item[1][1].IsString()) {
+                    keyMatched = stringValue(item[1][1]) == *expected;
+                    break;
+                }
             }
         }
         if (!keyMatched) {
-            throw UnsupportedLayout{};
+            // The validated RTPMM002 tree cannot satisfy the key in the
+            // Python parser either. Reject before copying the payload.
+            throw std::invalid_argument("remote embedding cache key mismatch or missing binding");
         }
     }
     const int64_t               payloadOffset = (16 + static_cast<int64_t>(header.size()) + 63) / 64 * 64;
