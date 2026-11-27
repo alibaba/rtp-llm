@@ -17,6 +17,9 @@ from rtp_llm.models_py.modules.base.common.fp8_linear import Fp8Linear
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
     CudaFp8GEMMLinear,
 )
+from rtp_llm.models_py.triton_kernels.common.gated_residual_mix_triton import (
+    get_prequantized_mix_reduce,
+)
 from rtp_llm.models_py.utils.device_capability import (
     cached_device_capability,
     sm90_pdl_enabled,
@@ -76,11 +79,14 @@ def _quant_from_partial(
     REDUCE: tl.constexpr,
     BLOCK: tl.constexpr,
     PDL: tl.constexpr = False,
+    WAIT_X: tl.constexpr = False,
 ):
     tile = tl.program_id(0)
     index = tile * BLOCK + tl.arange(0, BLOCK)
+    if PDL and WAIT_X:
+        tl.extra.cuda.gdc_wait()
     raw = tl.load(x + index, index < N, other=0).to(tl.float32)
-    if PDL:
+    if PDL and not WAIT_X:
         tl.extra.cuda.gdc_wait()
     blocks = tl.arange(0, REDUCE)
     maximum = tl.max(tl.load(partial + blocks, blocks < PARTS, other=0), 0)
@@ -127,14 +133,15 @@ def _quantize_qkvz(x, *, v2):
     return q, s, partial
 
 
-def _quantize_ba(x, partial):
+def _quantize_ba(x, partial, *, wait_x: bool = False):
     pad = triton.cdiv(x.shape[0], 16) * 16
     bq = torch.empty((pad, x.shape[1]), dtype=torch.float8_e4m3fn, device=x.device)
     tiles = partial.numel()
     bs = torch.empty(1, device=x.device, dtype=torch.float32)
     single_pass_cap = 512 if torch.cuda.is_current_stream_capturing() else 128
-    if x.shape[0] > single_pass_cap:
-        # Reduce once for long inputs and reuse the vectorized BA quantizer.
+    if x.shape[0] > single_pass_cap or tiles > 4096:
+        # Reduce once for long inputs or wide per-group partial buffers, then
+        # reuse the vectorized per-tensor BA quantizer.
         if tiles > 65536:
             partial = partial.amax().reshape(1)
             tiles = 1
@@ -142,6 +149,7 @@ def _quantize_ba(x, partial):
         return scaled_fp8_per_tensor_quant(x, scale=bs, output=bq)
 
     pdl = sm90_pdl_enabled(x.device)
+    reduce_block = triton.next_power_of_2(tiles)
     _quant_from_partial[(triton.cdiv(bq.numel(), 1024),)](
         x,
         bq,
@@ -150,9 +158,11 @@ def _quantize_ba(x, partial):
         x.numel(),
         bq.numel(),
         tiles,
-        triton.next_power_of_2(tiles),
+        reduce_block,
         1024,
         PDL=pdl,
+        WAIT_X=wait_x,
+        num_warps=8 if reduce_block >= 8192 else 4,
         enable_fp_fusion=False,
         launch_pdl=pdl,
     )
@@ -209,14 +219,19 @@ def try_project_pair(x, qkvz, ba, *, ba_stream=None, defer_ba_wait=False):
         backend, ("forward", "quantize_input", "forward_quantized")
     ):
         return None
-    q, scales, partial = _quantize_qkvz(x, v2=v2)
+    bundle = get_prequantized_mix_reduce(x, "attn_v2" if v2 else "attn_legacy")
+    from_mix_reduce = bundle is not None
+    if bundle is not None:
+        q, scales, partial = bundle.q, bundle.s, bundle.partial
+    else:
+        q, scales, partial = _quantize_qkvz(x, v2=v2)
     if ba_stream is not None and torch.cuda.is_current_stream_capturing():
         # The BA reduction can run while the QKVZ GEMM consumes its own scales.
         main = torch.cuda.current_stream(x.device)
         ba_stream.wait_stream(main)
         projected_qkvz = backend.forward_quantized(q, scales)
         with torch.cuda.stream(ba_stream):
-            ba_q, ba_scale = _quantize_ba(x, partial)
+            ba_q, ba_scale = _quantize_ba(x, partial, wait_x=from_mix_reduce)
             projected_ba = ba._run_quantized(
                 ba_q, ba_scale, x.shape[:-1], x.shape[0]
             ).to(x.dtype)
@@ -227,9 +242,9 @@ def try_project_pair(x, qkvz, ba, *, ba_stream=None, defer_ba_wait=False):
     if x.shape[0] > 64:
         # Preserve the native submission order on long inputs.
         projected_qkvz = backend.forward_quantized(q, scales)
-        ba_q, ba_scale = _quantize_ba(x, partial)
+        ba_q, ba_scale = _quantize_ba(x, partial, wait_x=from_mix_reduce)
     else:
-        ba_q, ba_scale = _quantize_ba(x, partial)
+        ba_q, ba_scale = _quantize_ba(x, partial, wait_x=from_mix_reduce)
         projected_qkvz = backend.forward_quantized(q, scales)
     projected_ba = ba._run_quantized(
         ba_q, ba_scale, x.shape[:-1], x.shape[0]

@@ -1,4 +1,4 @@
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Optional, Tuple, Union
 
 import torch
 
@@ -29,6 +29,9 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
 from rtp_llm.models_py.modules.factory.fused_moe.defs.type import RouterType
 from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
     MoeConfigResolver,
+)
+from rtp_llm.models_py.triton_kernels.common.gated_residual_mix_triton import (
+    get_prequantized_mix_reduce,
 )
 from rtp_llm.models_py.utils.arch import get_sm
 
@@ -283,6 +286,9 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
                 scale_ue8m0=True,
             )
         else:
+            bundle = get_prequantized_mix_reduce(a1, "moe_trt128")
+            if bundle is not None:
+                return bundle.q, bundle.s
             from rtp_llm.ops.compute_ops import trt_fp8_quantize_128
 
             return trt_fp8_quantize_128(a1, False)

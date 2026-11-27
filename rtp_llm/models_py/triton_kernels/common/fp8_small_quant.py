@@ -281,7 +281,8 @@ def try_silu_mul_fp8_quant(gate_up, *, output=None):
         activated = torch.empty(
             (rows, width), device=gate_up.device, dtype=torch.bfloat16
         )
-        parts = tr.cdiv(rows * width, 128)
+        part_block = 1024
+        parts = tr.cdiv(rows * width, part_block)
         partial = torch.empty((parts,), device=gate_up.device, dtype=torch.float32)
         _silu_mul_fp8_partial_amax[(parts,)](
             gate_up,
@@ -289,9 +290,9 @@ def try_silu_mul_fp8_quant(gate_up, *, output=None):
             partial,
             rows * width,
             width,
-            128,
+            part_block,
             PDL=pdl,
-            num_warps=1,
+            num_warps=4,
             enable_fp_fusion=False,
             launch_pdl=pdl,
         )

@@ -28,6 +28,9 @@ from rtp_llm.models_py.distributed.collective_torch import (
 )
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import is_deep_gemm_e8m0_used
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
+from rtp_llm.models_py.triton_kernels.common.gated_residual_mix_triton import (
+    get_prequantized_mix_reduce,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
@@ -208,6 +211,9 @@ class PureDpRouterFp8PerBlock(PureDpRouterBase):
                 scale_ue8m0=True,
             )
         else:
+            bundle = get_prequantized_mix_reduce(a1, "moe_trt128")
+            if bundle is not None:
+                return bundle.q, bundle.s
             from rtp_llm.ops.compute_ops import trt_fp8_quantize_128
 
             return trt_fp8_quantize_128(a1, False)

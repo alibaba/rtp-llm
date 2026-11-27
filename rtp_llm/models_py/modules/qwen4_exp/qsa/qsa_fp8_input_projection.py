@@ -27,6 +27,9 @@ from rtp_llm.models_py.modules.qwen4_exp.gdn_fp8_input_projection import (
     _quantize_qkvz,
     _unmodified,
 )
+from rtp_llm.models_py.triton_kernels.common.gated_residual_mix_triton import (
+    get_prequantized_mix_reduce,
+)
 from rtp_llm.models_py.utils.device_capability import cached_device_capability
 
 
@@ -92,8 +95,12 @@ def try_prepare_qsa_triple(x: torch.Tensor, qkv_proj, gate, qk_proj):
     ):
         return None
 
-    q_group, s_group, partial = _quantize_qkvz(x, v2=v2)
-    q_tensor, s_tensor = _quantize_ba(x, partial)
+    bundle = get_prequantized_mix_reduce(x, "attn_v2" if v2 else "attn_legacy")
+    if bundle is not None:
+        q_group, s_group, partial = bundle.q, bundle.s, bundle.partial
+    else:
+        q_group, s_group, partial = _quantize_qkvz(x, v2=v2)
+    q_tensor, s_tensor = _quantize_ba(x, partial, wait_x=bundle is not None)
     rows = x.shape[0]
     prefix = x.shape[:-1]
     gate_out = gate._run_quantized(q_tensor, s_tensor, prefix, rows).to(x.dtype)

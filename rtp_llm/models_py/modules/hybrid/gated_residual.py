@@ -355,6 +355,21 @@ class GatedResidual(nn.Module):
         bf16_fp8_candidate = self._use_bf16_down_inject(normed)
         merged = self.bf16_fp8_down_inject if bf16_fp8_candidate else self.merged_down_inject
         rows = normed.numel() // self.hc_hidden_size
+        bf16_up = self.bf16_fp8_up
+        # On SM90, cuBLASLt picks a slow split-K kernel with an explicit Memset
+        # for BF16 (M=8, 320) @ (320, 10240), whereas M=9 picks the fast
+        # non-split-K 192x16 tile with zero Memset. Pad one zero row directly in
+        # the preceding epilogue kernel and slice back to 8 rows after F.linear.
+        pad_up_m8 = (
+            bf16_up is not None
+            and normed.ndim == 2
+            and rows == 8
+            and self.mix_down.shape[0] == 320
+            and self.hc_hidden_size == 10240
+            and normed.dtype == torch.bfloat16
+            and normed.device == bf16_up.device
+            and cached_device_capability(normed.device) == (9, 0)
+        )
         # Wide BF16 inputs use separate projections to preserve the model's
         # down/inject rounding.
         if (
@@ -366,7 +381,10 @@ class GatedResidual(nn.Module):
             and (1 <= rows <= 32 or bf16_fp8_candidate)
         ):
             mix, inject_weights = _hc_down.down_inject_epilogue(
-                F.linear(normed, merged), self.mix_down.shape[0], self.hc_mult
+                F.linear(normed, merged),
+                self.mix_down.shape[0],
+                self.hc_mult,
+                pad_rows=1 if pad_up_m8 else 0,
             )
         else:
             down = (
@@ -395,14 +413,15 @@ class GatedResidual(nn.Module):
                     if self.inject is not None
                     else None
                 )
-                fused = _hc_down.separate_down_inject_epilogue(down, injection)
+                fused = _hc_down.separate_down_inject_epilogue(
+                    down, injection, pad_rows=1 if pad_up_m8 else 0
+                )
             if fused is None:
                 mix = F.silu(down / self.hc_mult)
             else:
                 mix, inject_weights = fused
         mixed = None
         up = self.up_projection
-        bf16_up = self.bf16_fp8_up
         use_bf16_up = (
             bf16_up is not None
             and mix.dtype == torch.bfloat16
@@ -431,11 +450,12 @@ class GatedResidual(nn.Module):
                 mix, up.weight, up.scale, normed, self.hc_mult
             )
         if mixed is None:
-            mix_logits = (
-                F.linear(mix, bf16_up)
-                if use_bf16_up
-                else dense_projection(mix, self.mix_up, self.up_projection)
-            )
+            if use_bf16_up:
+                mix_logits = F.linear(mix, bf16_up)
+                if pad_up_m8 and mix_logits.shape[0] != rows:
+                    mix_logits = mix_logits[:rows]
+            else:
+                mix_logits = dense_projection(mix, self.mix_up, self.up_projection)
             branches = (self.hc_mult, self.hidden_size)
             fused_mix = (
                 _hc_mix is not None
@@ -444,7 +464,17 @@ class GatedResidual(nn.Module):
                 and _hc_mix.is_supported(mix_logits, normed, self.hc_mult)
             )
             if fused_mix:
-                mixed = _hc_mix.fused_mix_reduce(mix_logits, normed, self.hc_mult)
+                fp8_req = _hc_mix._mix_reduce_fp8_request.get()
+                if fp8_req is not None and _hc_mix.is_fp8_supported(
+                    mix_logits, normed, self.hc_mult
+                ):
+                    bundle = _hc_mix.fused_mix_reduce_fp8(
+                        mix_logits, normed, self.hc_mult, mode=fp8_req.mode
+                    )
+                    fp8_req.result = bundle
+                    mixed = bundle.x
+                else:
+                    mixed = _hc_mix.fused_mix_reduce(mix_logits, normed, self.hc_mult)
             else:
                 mix = torch.sigmoid(mix_logits)
                 mixed = (
