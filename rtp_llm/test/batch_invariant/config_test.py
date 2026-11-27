@@ -345,10 +345,11 @@ class Qwen38FlashNextBatchInvariantTest(unittest.TestCase):
                 with patches[0], patches[1], patches[2]:
                     configure_batch_invariant_model(engine, model)
                 self.assertFalse(engine.hw_kernel_config.enable_cuda_graph)
-                # TP == EP takes the capturable PureTpRouter; DP/EP keeps pure-DP.
+                # TP == EP takes the Triton path over the capturable
+                # PureTpRouter; DP/EP takes the fused BF16 MegaMoE kernel.
                 self.assertEqual(
                     engine.moe_config.moe_strategy,
-                    "no_quant_pure_dp" if dp > 1 else "no_quant_cpp",
+                    "bf16_mega_moe" if dp > 1 else "no_quant_cpp",
                 )
 
     def test_accepts_sm100(self):
@@ -370,7 +371,15 @@ class Qwen38FlashNextBatchInvariantTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Qwen3.8-Flash-Next 48L requires"):
                 configure_batch_invariant_model(qwen38_engine(2, 1, 2), make_qwen38())
 
-    def test_cuda_graph_allowed_when_tp_equals_ep_and_rejected_under_pure_dp(self):
+    def test_cuda_graph_allowed_on_both_moe_backends(self):
+        """Both Qwen3.8 MoE backends are capturable, for different reasons.
+
+        TP == EP uses PureTpRouter, whose all-gather dispatch and fixed-order
+        reduction are both capturable; DP/EP uses BF16 MegaMoE, which has no
+        router to capture at all. The pure-DP rejection that used to cover
+        DP/EP here now only applies to the backends that still use that router,
+        which ``BatchInvariantConfigTest`` covers.
+        """
         checkpoint = qwen38_checkpoint()
         patches = self._patches(checkpoint)
         with patches[0], patches[1], patches[2]:
@@ -378,10 +387,10 @@ class Qwen38FlashNextBatchInvariantTest(unittest.TestCase):
             configure_batch_invariant_model(engine, make_qwen38())
             self.assertTrue(engine.hw_kernel_config.enable_cuda_graph)
             self.assertEqual(engine.moe_config.moe_strategy, "no_quant_cpp")
-            with self.assertRaisesRegex(ValueError, "requires TP_SIZE=EP_SIZE"):
-                configure_batch_invariant_model(
-                    qwen38_engine(1, 8, 8, cuda_graph=True), make_qwen38()
-                )
+            engine = qwen38_engine(1, 8, 8, cuda_graph=True)
+            configure_batch_invariant_model(engine, make_qwen38())
+            self.assertTrue(engine.hw_kernel_config.enable_cuda_graph)
+            self.assertEqual(engine.moe_config.moe_strategy, "bf16_mega_moe")
 
     def test_local_prefix_reuse_allowed_but_external_caches_are_not(self):
         checkpoint = qwen38_checkpoint()
@@ -419,6 +428,40 @@ class Qwen38FlashNextBatchInvariantTest(unittest.TestCase):
             model.vit_separation = VitSeparation.VIT_SEPARATION_ROLE
             with self.assertRaisesRegex(ValueError, "no separate ViT"):
                 configure_batch_invariant_model(qwen38_engine(8, 1, 8), model)
+
+    def test_dp_ep_selects_bf16_mega_moe_and_keeps_cuda_graph(self):
+        checkpoint = qwen38_checkpoint()
+        patches = self._patches(checkpoint)
+        with patches[0], patches[1], patches[2]:
+            for tp, dp, ep in ((1, 8, 8), (16, 16, 16), (32, 32, 32)):
+                engine = qwen38_engine(1, dp, ep, cuda_graph=True, reuse_cache=True)
+                configure_batch_invariant_model(engine, make_qwen38())
+                self.assertEqual(engine.moe_config.moe_strategy, "bf16_mega_moe")
+                self.assertTrue(engine.hw_kernel_config.enable_cuda_graph)
+                # MegaMoE dispatches over NVLink, not the process group.
+                self.assertFalse(engine.moe_config.use_all_gather)
+                self.assertFalse(engine.moe_config.use_deepep_moe)
+            # TP == EP keeps the Triton path and its all-gather dispatch.
+            engine = qwen38_engine(8, 1, 8, cuda_graph=True)
+            configure_batch_invariant_model(engine, make_qwen38())
+            self.assertEqual(engine.moe_config.moe_strategy, "no_quant_cpp")
+            self.assertTrue(engine.moe_config.use_all_gather)
+
+    def test_multi_node_requires_dp_ep_inside_one_nvlink_domain(self):
+        checkpoint = qwen38_checkpoint()
+        patches = self._patches(checkpoint)
+        with patches[0], patches[1], patches[2]:
+            # DP16/EP16 across two nodes of a 72-rank NVLink domain is fine.
+            engine = qwen38_engine(1, 16, 16, cuda_graph=True)
+            engine.parallelism_config.local_world_size = 8
+            configure_batch_invariant_model(engine, make_qwen38())
+            self.assertEqual(engine.moe_config.moe_strategy, "bf16_mega_moe")
+            # TP8/DP1/EP8 has no multi-node form: its MoE dispatch is an
+            # all-gather over the process group.
+            engine = qwen38_engine(8, 1, 8)
+            engine.parallelism_config.local_world_size = 4
+            with self.assertRaisesRegex(ValueError, "NVLink domain"):
+                configure_batch_invariant_model(engine, make_qwen38())
 
     def test_rejects_wrong_layer_schedule(self):
         checkpoint = qwen38_checkpoint()

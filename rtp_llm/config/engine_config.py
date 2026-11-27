@@ -281,11 +281,22 @@ _BATCH_INVARIANT_QWEN_MODELS = {
 _BATCH_INVARIANT_QWEN38_LAYERS = (48, 8)
 _BATCH_INVARIANT_QWEN38_GEOMETRY = (2560, 24, 2, 256, (512, 10, 640))
 # (world_size, dp_size, ep_size, tp_size) accepted for Qwen3.8-Flash-Next.
+# The DP/EP entries past 8 ranks are the GB200 NVL72 shapes: BF16 MegaMoE owns
+# the whole MoE layer there, so experts per rank drop to 32 or 16 while
+# attention stays local at TP1 with no all-reduce. DeepGEMM sizes its symmetric
+# buffer for up to 72 ranks (layout/sym_buffer.cuh: kNumMaxRanks), so the limit
+# is the NVLink domain, not the kernel.
 _BATCH_INVARIANT_QWEN38_TOPOLOGIES = (
     (8, 1, 8, 8),
     (4, 1, 4, 4),
     (8, 8, 8, 1),
+    (16, 16, 16, 1),
+    (32, 32, 32, 1),
 )
+# Beyond one node, DP/EP batch invariance requires MegaMoE: its symmetric
+# buffer is addressed by peer pointer arithmetic, so every rank must sit in one
+# NVLink domain, and the all-gather MoE path it replaces has no multi-node form.
+_BATCH_INVARIANT_NVLINK_DOMAIN_RANKS = 72
 
 
 def configure_batch_invariant_model(
@@ -365,9 +376,13 @@ def configure_batch_invariant_model(
             parallel.ep_size,
             parallel.tp_size,
         )
+        # A multi-node EP group is admitted only inside one NVLink domain, and
+        # only for the MegaMoE path, which is the only MoE backend here whose
+        # dispatch and combine cross nodes over NVLink rather than over the
+        # process group.
+        multi_node = parallel.local_world_size != parallel.world_size
         if (
             topology not in _BATCH_INVARIANT_QWEN38_TOPOLOGIES
-            or parallel.local_world_size != parallel.world_size
             or parallel.ffn_tp_size != parallel.tp_size
             or parallel.pp_size != 1
             or parallel.prefill_cp_config.is_enabled()
@@ -378,8 +393,16 @@ def configure_batch_invariant_model(
                 for _, dp, ep, tp in _BATCH_INVARIANT_QWEN38_TOPOLOGIES
             )
             conflicts.append(
-                f"{name} requires one of {supported} on one node, "
+                f"{name} requires one of {supported}, "
                 "FFN_TP_SIZE=TP_SIZE, PP_SIZE=1 and CP disabled"
+            )
+        elif multi_node and not (
+            dp_ep and parallel.world_size <= _BATCH_INVARIANT_NVLINK_DOMAIN_RANKS
+        ):
+            conflicts.append(
+                f"{name} spanning nodes requires a DP/EP topology inside one "
+                f"NVLink domain of at most {_BATCH_INVARIANT_NVLINK_DOMAIN_RANKS} "
+                "ranks (MegaMoE dispatch is NVLink peer-addressed)"
             )
     elif model is None:
         supported = ", ".join(name for name, _ in _BATCH_INVARIANT_QWEN_MODELS.values())
@@ -484,7 +507,13 @@ def configure_batch_invariant_model(
         conflicts.append("LoRA adapters are unsupported")
     if hw.enable_decode_cascade_attention:
         conflicts.append("ENABLE_DECODE_CASCADE_ATTENTION must be disabled")
-    if hw.enable_cuda_graph and dp_ep:
+    # Qwen3.8 at DP/EP runs BF16 MegaMoE, which replaces the pure-DP router
+    # outright: one kernel owns dispatch, both expert GEMMs and the combine, its
+    # launch geometry is fixed by the symmetric buffer, and it is bit-exact
+    # across every block_m its heuristic picks. So the pure-DP CUDA Graph
+    # rejection below applies to the all-gather router, not to this path.
+    mega_dp_ep = qwen38 and dp_ep
+    if hw.enable_cuda_graph and dp_ep and not mega_dp_ep:
         # PureDpRouter derives its pad width from a runtime all_gather plus
         # .item(), which is a D2H sync mid-capture and a dynamic pad shape on
         # replay, so it declines CUDA Graph (pure_dp_router.py:88) and the
@@ -502,6 +531,8 @@ def configure_batch_invariant_model(
         conflicts.append("USE_BATCH_DECODE_SCHEDULER must be disabled")
     if m11:
         moe_strategies = ("mega_moe",)
+    elif mega_dp_ep:
+        moe_strategies = ("auto", "bf16_mega_moe")
     elif dp_ep:
         moe_strategies = (
             ("auto", "fp8_per_block_pure_dp", "fp8_per_block_ep_normal")
@@ -529,6 +560,11 @@ def configure_batch_invariant_model(
     ):
         if m11:
             conflicts.append("M11 requires native mega_moe without expert remapping")
+        elif mega_dp_ep:
+            conflicts.append(
+                "requires BF16 MegaMoE (MOE_STRATEGY=auto or bf16_mega_moe) "
+                "without DeepEP, Mori or expert remapping"
+            )
         elif dp_ep:
             conflicts.append(
                 "requires the eager all-gather MoE path for DP/EP without expert remapping"
@@ -577,7 +613,16 @@ def configure_batch_invariant_model(
     if conflicts:
         raise ValueError("RTP_BATCH_INVARIANT=1:\n" + "\n".join(conflicts))
 
-    if dp_ep and not m11:
+    if mega_dp_ep:
+        # One fused NVLink kernel instead of an all-gather router: nothing here
+        # dispatches over the process group, which is what makes this topology
+        # capturable and what lets it cross nodes inside an NVLink domain.
+        moe.moe_strategy = "bf16_mega_moe"
+        moe.use_all_gather = False
+        moe.use_deepep_moe = False
+        moe.use_deepep_low_latency = False
+        moe.use_deepep_internode = False
+    elif dp_ep and not m11:
         # Ordinary DP/EP auto-selection uses DeepEP. Move the same shards over
         # the stage group in BI, where the combine order is fixed.
         moe.moe_strategy = "fp8_per_block_pure_dp" if fp8_block else "no_quant_pure_dp"
@@ -610,13 +655,14 @@ def configure_batch_invariant_model(
             "Qwen3.8-Flash-Next batch invariant: %d layers "
             "(%d GDN / %d sparse QSA), TP%d/DP%d/EP%d, BF16 dense, KV and MoE, "
             "FP32 SSM and logits, 128-token pages, BF16 PLE, "
-            "cuda_graph=%s, reuse_cache=%s",
+            "moe_strategy=%s, cuda_graph=%s, reuse_cache=%s",
             model_config.num_layers,
             model_config.num_layers * 3 // 4,
             model_config.num_layers // 4,
             parallel.tp_size,
             parallel.dp_size,
             parallel.ep_size,
+            moe.moe_strategy,
             hw.enable_cuda_graph,
             cache.reuse_cache,
         )
