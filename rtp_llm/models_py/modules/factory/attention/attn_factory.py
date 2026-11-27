@@ -359,16 +359,14 @@ class AttnImplFactory(object):
         attn_inputs.headwise_config = getattr(model_config, "headwise_config", None)
         if batch_invariant:
             if attn_configs.is_sparse and attn_configs.use_sparse_gqa_fmha:
-                if is_cuda_graph:
-                    raise ValueError("batch-invariant sparse GQA requires CUDA eager")
-                attn_inputs.is_cuda_graph = False
+                attn_inputs.is_cuda_graph = is_cuda_graph
                 return cls.get_fmha_impl_method("sparse_gqa")(
                     attn_configs,
                     weight,
                     attn_inputs,
                     fmha_config,
                     model_config.quant_config,
-                    False,
+                    is_cuda_graph,
                     model_config.max_seq_len,
                     parallelism_config,
                     cuda_graph_selection_mode,

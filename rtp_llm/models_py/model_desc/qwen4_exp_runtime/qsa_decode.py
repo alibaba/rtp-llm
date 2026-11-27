@@ -318,27 +318,30 @@ def select_decode_tokens(
         rope_cos, rope_sin = position_state.rope(rope_config, group=True)
         position_state.stage()
     batch_invariant = getattr(indexer, "batch_invariant", False)
-    fused_writer = not batch_invariant
-    if fused_writer:
-        from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_decode import (
-            is_supported,
-            write_decode_key_with_undo_,
-        )
+    from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_decode import (
+        is_supported,
+        write_decode_key_with_undo_,
+    )
 
-        fused_writer = is_supported(
-            raw_keys,
-            sequence_lengths,
-            rope_cos,
-            rope_sin,
-            indexer.k_norm_gamma,
-            kv_pool,
-            kv_table,
-            state_pool,
-            state_table,
-            kv_tokens_per_block=kv_tokens_per_block,
-            state_tokens_per_block=int(self.indexer_state_cache.seq_size_per_block),
-            ratio=ratio,
-        )
+    # The fused writer runs one program per request and reduces only over the
+    # fixed 4-token compression group and the 128-wide head, so no element of
+    # its output depends on how many requests share the launch: it is batch
+    # invariant as written. It is also the only writer whose launch geometry a
+    # CUDA Graph can replay, which is why batch invariance uses it too.
+    fused_writer = is_supported(
+        raw_keys,
+        sequence_lengths,
+        rope_cos,
+        rope_sin,
+        indexer.k_norm_gamma,
+        kv_pool,
+        kv_table,
+        state_pool,
+        state_table,
+        kv_tokens_per_block=kv_tokens_per_block,
+        state_tokens_per_block=int(self.indexer_state_cache.seq_size_per_block),
+        ratio=ratio,
+    )
     if graph_decode and not fused_writer:
         raise RuntimeError(
             "qwen4_exp QSA Graph decode requires the fixed-shape Triton writer"

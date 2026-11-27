@@ -303,6 +303,33 @@ def batch_invariant_enabled():
     return _options is not None and _options.batch_invariant
 
 
+_gather_buffers: dict[tuple, torch.Tensor] = {}
+
+
+def _gather_buffer(flat, world_size):
+    """Reuse one gather buffer per (device, dtype, capacity) at a fixed address.
+
+    CUDA Graph capture records the addresses its kernels touch, so a freshly
+    allocated buffer per reduce would either be captured at an address the
+    allocator later reuses for something else, or force the capture pool to
+    grow. Key on a capacity that only ever grows, so replay reads the same
+    pointer. The contents are fully overwritten by the all-gather, so carrying
+    a larger buffer across calls cannot leak state between requests.
+    """
+    needed = flat.numel() * world_size
+    key = (flat.device, flat.dtype, world_size)
+    buffer = _gather_buffers.get(key)
+    if buffer is None or buffer.numel() < needed:
+        if torch.cuda.is_current_stream_capturing():
+            raise RuntimeError(
+                "batch-invariant all-reduce gather buffer must be sized before "
+                "CUDA Graph capture; run the capture warmup first"
+            )
+        buffer = flat.new_empty(needed)
+        _gather_buffers[key] = buffer
+    return buffer[:needed].view(world_size, flat.numel())
+
+
 def batch_invariant_all_reduce(tensor, group, out):
     """Gather TP partials and round once after a fixed rank-order sum."""
     flat = tensor.contiguous().view(-1)
@@ -313,7 +340,7 @@ def batch_invariant_all_reduce(tensor, group, out):
 
     # NCCL only moves the partials. Its message-dependent partitioning cannot
     # change the arithmetic, which follows the same order for each element.
-    contributions = flat.new_empty((world_size, flat.numel()))
+    contributions = _gather_buffer(flat, world_size)
     dist.all_gather_into_tensor(contributions, flat, group=group)
     return _sum_rank_order(contributions, out)
 
@@ -396,4 +423,5 @@ def destroy_all_reduce():
             _canonical_p2p.close()
     finally:
         abort_graph_capture()
+        _gather_buffers.clear()
         _communicator = _canonical_p2p = _group = _options = None

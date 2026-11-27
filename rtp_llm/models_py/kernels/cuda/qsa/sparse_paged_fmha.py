@@ -465,6 +465,9 @@ def sparse_paged_gqa_attn(
         # nothing more. Qwen4-Max M11 is 64/4 = 16 exactly; Qwen3.8-Flash-Next
         # is 24/2 = 12 at TP1 and 12/1 = 12 at TP2. Gate on the properties the
         # kernel actually depends on rather than on one model's head counts.
+        # graph_capture is allowed: the BI path's only extra work is
+        # compact_qsa_selection, whose output shape and grid are fixed at
+        # capture time, and the grouped kernel's split count is a constant.
         if (
             (head_dim, page_size, block_k) != (256, 128, 64)
             or kv_heads < 1
@@ -473,7 +476,6 @@ def sparse_paged_gqa_attn(
             or kv_cache.dtype != torch.bfloat16
             or selected.shape[-1] != 2051
             or selected_has_count
-            or graph_capture
             or output_gate is not None
             or fp16_pv
         ):
