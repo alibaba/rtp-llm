@@ -773,8 +773,6 @@ message MemoryOperationRequestPB {
     repeated CopyItem copy_items = 1;
     CopyDirection copy_direction = 2;
     int64 timeout_ms = 3;
-    // Per-execution trace shared by all ranks; absent (zero) on older peers.
-    // Zero cannot identify an operation for recovery. Never used for allocation or routing.
     uint64 transfer_trace_id = 4;
     int64 transfer_request_id = 5;
     bool has_transfer_request_id = 6;
@@ -798,8 +796,6 @@ message MemoryOperationResponsePB {
     repeated Code block_errors = 2;
     // The worker's error code and all failure messages, including transfer stage and descriptor context.
     ErrorDetailsPB error_info = 3;
-    // True only when this worker's transfer can no longer access any of its buffers.
-    // Independent of transfer success; absent/false supplies no safety proof.
     bool buffer_safe = 4;
 }
 
@@ -1084,12 +1080,12 @@ message RemoteBlockMaskPB {
 }
 
 // Query existing worker evidence without admitting, cancelling or replaying I/O.
-// Numeric transfer traces and KVCM READ string traces are separate namespaces.
 message TransferCompletionKeyPB {
     oneof trace {
         uint64 transfer_trace_id = 1;
         string kvcm_trace_id = 2;
     }
+    string trace_id = 3;
 }
 
 enum TransferCompletionStatePB {
@@ -1105,8 +1101,6 @@ message TransferCompletionQueryRequestPB {
 message TransferCompletionEntryPB {
     TransferCompletionKeyPB key = 1;
     TransferCompletionStatePB state = 2;
-    // UNKNOWN is safe only when the worker atomically banned this missing trace.
-    // The ban must survive cleanup so arbitrarily late requests cannot execute.
     bool admission_closed = 3;
 }
 
@@ -1126,6 +1120,9 @@ enum TransferCompletionForgetStatusPB {
 
 message TransferCompletionForgetRequestPB {
     repeated TransferCompletionKeyPB keys = 1;
+    // The coordinator has released the FrozenTask holds for these KVCM reads.
+    bool kvcm_read_released = 2;
+    bool transfer_released = 3;
 }
 
 message TransferCompletionForgetEntryPB {
