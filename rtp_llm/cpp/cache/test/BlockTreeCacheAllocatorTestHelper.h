@@ -40,7 +40,7 @@ public:
 
     size_t devicePrefixBlocksForTest(const CacheKeysType& keys) const {
         const auto&                 cache = *blockTreeCacheOwner();
-        std::lock_guard<std::mutex> lock(cache.mutex_);
+        auto lock = block_tree_cache_test::BlockTreeCacheTestPeer::lockForTest(cache);
         size_t                      count = 0;
         for (const auto* node : cache.tree()->findNode(keys)) {
             for (size_t gid = 0; gid < cache.groupSets().size(); ++gid) {

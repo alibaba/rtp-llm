@@ -47,6 +47,12 @@ bool P2PSchedulerDecodeWrite::init() {
                != static_cast<size_t>(config_.parallelism_config.tp_size * config_.parallelism_config.pp_size)) {
         return false;
     }
+    if (config_.local_full_page_rr && config_.parallelism_config.tp_size > 1) {
+        RTP_LLM_LOG_ERROR("P2PSchedulerDecodeWrite: sharded local Decode KV cache "
+                          "(local_full_page_rr=true, tp_size=%ld) is not supported",
+                          config_.parallelism_config.tp_size);
+        return false;
+    }
     auto async_write_pool = std::make_shared<autil::LockFreeThreadPool>(
         kAsyncWriteThreadCount, kAsyncWriteQueueSize, nullptr, "P2PAsyncWriteKickoff");
     if (!async_write_pool->start() || !checker_.init(config_, metrics_reporter_)) {

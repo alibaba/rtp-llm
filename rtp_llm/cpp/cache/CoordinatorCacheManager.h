@@ -329,7 +329,25 @@ protected:
     std::unique_ptr<GpuBlockCopy> gpu_block_copy_;
 
 private:
-    size_t groupIdForTag(std::string_view tag) const;
+    struct WritebackHeldState {
+        struct PoolState {
+            std::vector<uint32_t> refs;
+            size_t                held = 0;
+        };
+        using OwnedBlocks = std::vector<std::pair<DeviceBlockPool*, std::vector<BlockIdxType>>>;
+
+        std::mutex                            mutex;
+        std::map<DeviceBlockPool*, PoolState> pools;
+
+        void        ensurePoolLocked(DeviceBlockPool* pool);
+        OwnedBlocks buildOwned(const std::vector<SingleTypeCacheManagerPtr>& groups,
+                               const KVCacheResource&                        resource) const;
+        void        commitLocked(const OwnedBlocks& owned) noexcept;
+        void        releaseLocked(const OwnedBlocks& owned) noexcept;
+    };
+
+    size_t                              groupIdForTag(std::string_view tag) const;
+    std::shared_ptr<WritebackHeldState> writeback_held_state_ = std::make_shared<WritebackHeldState>();
 };
 
 using CoordinatorCacheManagerPtr = std::shared_ptr<CoordinatorCacheManager>;

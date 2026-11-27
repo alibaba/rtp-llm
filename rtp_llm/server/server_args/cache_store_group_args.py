@@ -31,8 +31,9 @@ def init_cache_store_group_args(parser, cache_store_config):
         bind_to=(cache_store_config, "p2p_writeback_max_kv_ratio"),
         type=float,
         default=0.3,
-        help="Prefill-side admission: accept writeback only when its held blocks are below this fraction "
-        "of each pool's free plus reclaimable cache blocks. Ignored on decode.",
+        help="Prefill-side admission: accept writeback only when the cumulative distinct blocks held by all "
+        "in-flight and retained writebacks (including this request) are below this fraction of each pool's "
+        "non-inference capacity (free + reclaimable + currently writeback-held blocks). Ignored on decode.",
     )
     cache_store_group.add_argument(
         "--cache_store_rdma_mode",

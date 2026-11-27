@@ -391,6 +391,11 @@ public:
         }
         cv_.notify_all();
     }
+    bool transferStarted(const std::string& key) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto                  it = states_.find(key);
+        return it != states_.end() && it->second.started;
+    }
     bool transferStopped(const std::string& key) const {
         std::lock_guard<std::mutex> lock(mutex_);
         const auto                  it = states_.find(key);
@@ -3083,6 +3088,7 @@ TEST(P2PWritebackWorkerAddressTest, ValidatesIpv6WithOrWithoutBrackets) {
 
 TEST_F(P2PConnectorWriteSchedulerTest, SlowControlConnectionDoesNotBlockAdmissionOrDeadline) {
     prefill_.reset();
+    prefill_config_.p2p_writeback_max_kv_ratio = 0.5;
     createPrefill();
     auto first = request();
     first.set_timeout_ms(200);
@@ -3103,7 +3109,7 @@ TEST_F(P2PConnectorWriteSchedulerTest, SlowControlConnectionDoesNotBlockAdmissio
     completeAll(true);
     first_call.get();
     second_call.get();
-    EXPECT_TRUE(state->isStopped());
+    EXPECT_TRUE(await([&] { return state->isStopped(); }));
 }
 
 TEST_F(P2PConnectorWriteSchedulerTest, QueuedReceiveControlUsesIndependentBoundedQueryBudget) {
@@ -3345,6 +3351,116 @@ TEST_F(P2PConnectorWriteSchedulerTest, KvBudgetRejectsBeforeEvictionAndCountsCac
     ASSERT_TRUE(allocator->admitWriteBackDecodeCache(keys_, 1, resource, start, load, true, 0.2001).ok());
     ASSERT_EQ(start, 1u);
     EXPECT_EQ(resource->blocks("default").size(), 3u);
+}
+
+TEST_F(P2PConnectorWriteSchedulerTest, AdmitWriteBackDecodeCacheEnforcesCumulativeHeldBudget) {
+    auto          allocator = std::make_shared<Allocator>(config_);
+    KVCacheConfig cache_config;
+    cache_config.block_tree_device_evict_low_watermark_ratio  = 0.01;
+    cache_config.block_tree_device_evict_high_watermark_ratio = 0.02;
+    allocator->setBlockTreeCacheConfigForTest(cache_config);
+    ASSERT_TRUE(allocator->init());
+    ASSERT_TRUE(test::seedCompleteBlockTreePath(allocator, {keys_.front()}).success);
+    const auto pool = allocator->cacheGroups().front()->blockPool();
+    ASSERT_EQ(pool->availableBlocksNum(), 15u);
+
+    KVCacheResourcePtr                resource_a;
+    KVCacheResourcePtr                resource_b;
+    KVCacheResourcePtr                resource_c;
+    size_t                            start_a = 0;
+    size_t                            start_b = 0;
+    size_t                            start_c = 0;
+    std::shared_ptr<LoadAsyncContext> load_a;
+    std::shared_ptr<LoadAsyncContext> load_b;
+    std::shared_ptr<LoadAsyncContext> load_c;
+    const CacheKeysType               keys_b = {keys_.front(), 300};
+    const CacheKeysType               keys_c = {keys_.front(), 301};
+
+    // Request A needs 3 distinct blocks: 3 / 15 = 20% < 30% -> admitted.
+    ASSERT_TRUE(allocator->admitWriteBackDecodeCache(keys_, 1, resource_a, start_a, load_a, true, 0.3).ok());
+    ASSERT_NE(resource_a, nullptr);
+
+    // Request B shares keys_[0] with A and needs 1 new block: cumulative 4 distinct / 15 = 26.7% < 30% -> admitted.
+    ASSERT_TRUE(allocator->admitWriteBackDecodeCache(keys_b, 1, resource_b, start_b, load_b, true, 0.3).ok());
+    ASSERT_NE(resource_b, nullptr);
+
+    // Request C shares keys_[0] and needs 1 more block: cumulative 5 distinct / 15 = 33.3% >= 30% -> rejected.
+    const auto rejected = allocator->admitWriteBackDecodeCache(keys_c, 1, resource_c, start_c, load_c, true, 0.3);
+    EXPECT_EQ(rejected.code(), ErrorCode::MALLOC_FAILED) << rejected.ToString();
+    EXPECT_EQ(resource_c, nullptr);
+    EXPECT_EQ(load_c, nullptr);
+
+    // Releasing Request A frees its 2 exclusive blocks while keeping B's shared prefix + 1 exclusive block tracked.
+    resource_a.reset();
+    ASSERT_TRUE(allocator->admitWriteBackDecodeCache(keys_c, 1, resource_c, start_c, load_c, true, 0.3).ok());
+    ASSERT_NE(resource_c, nullptr);
+    EXPECT_EQ(start_c, 1u);
+}
+
+TEST_F(P2PConnectorWriteSchedulerTest, RetainedTimedOutWriteCountsTowardPrefillCumulativeBudget) {
+    prefill_.reset();
+    createPrefill();
+    auto first = request("stalled-a");
+    first.set_timeout_ms(120);
+    first.set_deadline_ms(currentTimeMs() + 120);
+    P2PConnectorStartWriteBackResponsePB first_response;
+    auto first_call = std::async(std::launch::async, [&] { prefill_->handleWrite(first, first_response); });
+    ASSERT_TRUE(await([&] { return prefill_workers_[0].starts == 1 && prefill_workers_[1].starts == 1; }));
+    const auto first_state = prefill_->findRequest(first.unique_key());
+    ASSERT_NE(first_state, nullptr);
+
+    // Hold rpc_pool_->mutex_ so first times out without stop confirmation and keeps retaining its target KV.
+    std::unique_lock<std::mutex> connection_lock(prefill_client_->tp_broadcast_manager_->rpc_pool_->mutex_);
+    ASSERT_TRUE(await([&] { return first_state->errorInfo().hasError(); }, 1000));
+    first_call.get();
+    EXPECT_FALSE(first_state->isStopped());
+
+    // Second request needs 2 additional blocks (cumulative 5 / 15 = 33.3% >= 30%) -> rejected while first retains KV.
+    auto                                 second = request("blocked-b");
+    P2PConnectorStartWriteBackResponsePB second_response;
+    prefill_->handleWrite(second, second_response);
+    EXPECT_EQ(second_response.error_code(), transErrorCodeToRPC(ErrorCode::MALLOC_FAILED)) << second_response.error_message();
+
+    // Release first's control path and confirm physical stop; retained KV drops and a new writeback can proceed.
+    connection_lock.unlock();
+    completeAll();
+    ASSERT_TRUE(await([&] { return first_state->isStopped(); }));
+
+    auto                                 third = request("admitted-c");
+    P2PConnectorStartWriteBackResponsePB third_response;
+    auto third_call = std::async(std::launch::async, [&] { prefill_->handleWrite(third, third_response); });
+    ASSERT_TRUE(await([&] {
+        return prefill_workers_[0].transferStarted(third.unique_key())
+               && prefill_workers_[1].transferStarted(third.unique_key())
+               && decode_workers_[0].transferStarted(third.unique_key())
+               && decode_workers_[1].transferStarted(third.unique_key());
+    }));
+    completeAll();
+    third_call.get();
+    EXPECT_EQ(third_response.error_code(), ErrorCodePB::NONE_ERROR) << third_response.error_message();
+}
+
+TEST_F(P2PConnectorWriteSchedulerTest, DecodeWriteSchedulerRejectsLocalPageRRShardingWhenTpGreaterThanOne) {
+    auto cfg_sharded_tp2               = decode_config_;
+    cfg_sharded_tp2.local_full_page_rr = true;
+    P2PSchedulerDecodeWrite sharded_tp2(cfg_sharded_tp2, decode_client_, *decode_source_worker_);
+    EXPECT_FALSE(sharded_tp2.init());
+
+    auto cfg_unsharded_tp2               = decode_config_;
+    cfg_unsharded_tp2.local_full_page_rr = false;
+    P2PSchedulerDecodeWrite unsharded_tp2(cfg_unsharded_tp2, decode_client_, *decode_source_worker_);
+    EXPECT_TRUE(unsharded_tp2.init());
+    unsharded_tp2.stop();
+
+    auto cfg_sharded_tp1                             = decode_config_;
+    cfg_sharded_tp1.parallelism_config.tp_size       = 1;
+    cfg_sharded_tp1.worker_grpc_addrs                = {decode_addrs_[0]};
+    cfg_sharded_tp1.local_full_page_rr               = true;
+    auto tp1_client = std::make_shared<P2PBroadcastClient>(std::vector<std::string>{decode_addrs_[0]}, 200);
+    ASSERT_TRUE(tp1_client->init());
+    P2PSchedulerDecodeWrite sharded_tp1(cfg_sharded_tp1, tp1_client, *decode_source_worker_);
+    EXPECT_TRUE(sharded_tp1.init());
+    sharded_tp1.stop();
 }
 
 TEST(P2PWriteRpcUtilTest, CallForResultKeepsFailureCause) {

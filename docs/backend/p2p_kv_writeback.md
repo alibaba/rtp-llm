@@ -15,7 +15,7 @@ Prefill 与 Decode 双方均需开启 `--p2p_writeback_enable 1`（且 Prefill �
 | `--p2p_writeback_enable` | `P2P_WRITEBACK_ENABLE` | `false` | Prefill / Decode | 是否启用 Decode→Prefill KV 写回。 |
 | `--p2p_writeback_require_device_prefix` | `P2P_WRITEBACK_REQUIRE_DEVICE_PREFIX` | `true` | Prefill | 为 `true` 时要求 prompt 前缀已在 Prefill DEVICE 显存中，否则拒绝写回；为 `false` 时允许从本地 HOST/DISK 补载缺失前缀后再合并写回。 |
 | `--load_cache_timeout_ms` | `LOAD_CACHE_TIMEOUT_MS` | `5000` | Prefill / Decode | 复用正向 P2P 通信超时配置，作为单次写回请求的端到端超时预算（毫秒），独立于生成请求本身的超时。 |
-| `--p2p_writeback_max_kv_ratio` | `P2P_WRITEBACK_MAX_KV_RATIO` | `0.3` | Prefill | Prefill 准入水位：仅当写回持有的块数低于各独立显存池「空闲块 + 可回收缓存块」总量的该比例时才接受写回，避免挤占正常推理显存。Decode 侧忽略此参数。 |
+| `--p2p_writeback_max_kv_ratio` | `P2P_WRITEBACK_MAX_KV_RATIO` | `0.3` | Prefill | Prefill 准入水位：仅当所有在途及滞留写回（含本请求）累计持有的去重物理块数低于各独立显存池非推理可用容量（「空闲块 + 可回收缓存块 + 当前写回已持有块」，上限为池总块数）的该比例时才接受写回，避免挤占正常推理显存。Decode 侧忽略此参数。 |
 
 ### 请求级覆盖
 

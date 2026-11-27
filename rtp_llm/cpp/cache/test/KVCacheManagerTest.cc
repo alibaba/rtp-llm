@@ -1082,6 +1082,42 @@ TEST_F(KVCacheManagerTest, CandidateConfigAllocatesMergedDraftSegmentsWithinBudg
     EXPECT_EQ(candidate_config.mtp_sub_configs[0]->group("default").block_num, candidate);
 }
 
+TEST_F(KVCacheManagerTest, DecodeWritebackRejectsLocalShardedKvCache) {
+    auto cache_config = makeSimpleMhaCacheConfig(
+        /*layer_num=*/2, /*block_num=*/8, /*tokens_per_block=*/4, rtp_llm::DataType::TYPE_FP16);
+    cache_config.local_kv_cache_sharded = true;
+
+    KVCacheConfig options;
+    options.reuse_cache         = true;
+    options.enable_device_cache = true;
+    ParallelismConfig parallelism;
+    parallelism.role_type  = RoleType::DECODE;
+    parallelism.tp_size                            = 2;
+    parallelism.tp_rank                            = 0;
+    parallelism.world_size                         = 2;
+    parallelism.prefill_cp_config.method           = CPRotateMethod::PREFILL_CP;
+    parallelism.prefill_cp_config.kv_cache_sharded = true;
+    parallelism.prefill_cp_config.prefill_cp_size  = 2;
+    RuntimeConfig runtime;
+    runtime.worker_grpc_addrs = {"127.0.0.1:12345", "127.0.0.1:12347"};
+    runtime.worker_addrs      = {"127.0.0.1:12346:12345", "127.0.0.1:12348:12347"};
+    PDSepConfig pd;
+    pd.role_type               = RoleType::DECODE;
+    pd.cache_store_rdma_mode   = false;
+    pd.cache_store_listen_port = 0;
+    CacheStoreConfig store;
+    store.p2p_writeback_enable = true;
+
+    KVCacheManager rejected(cache_config, false, nullptr, options, parallelism, runtime, {}, pd, store);
+    EXPECT_FALSE(rejected.init());
+
+    // Prefill CP>1 / Decode CP=1 (local_kv_cache_sharded=false on Decode) remains supported.
+    cache_config.local_kv_cache_sharded = false;
+    KVCacheManager allowed(cache_config, false, nullptr, options, parallelism, runtime, {}, pd, store);
+    EXPECT_TRUE(allowed.init());
+    EXPECT_TRUE(allowed.hasP2PWriteback());
+}
+
 TEST_F(KVCacheManagerTest, UnresolvedNormalConfigCannotBeUsedForWarmup) {
     auto          model = makeDSV4ManagerFlashModelConfig();
     KVCacheConfig options;

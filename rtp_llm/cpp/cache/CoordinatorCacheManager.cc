@@ -297,6 +297,67 @@ void CoordinatorCacheManager::releaseMatchedBlockReferences(const BlockTreeMatch
     }
 }
 
+void CoordinatorCacheManager::WritebackHeldState::ensurePoolLocked(DeviceBlockPool* pool) {
+    auto&        state = pools[pool];
+    const size_t count = pool->config().physical_block_count;
+    if (state.refs.size() < count) {
+        state.refs.resize(count, 0);
+    }
+}
+
+CoordinatorCacheManager::WritebackHeldState::OwnedBlocks
+CoordinatorCacheManager::WritebackHeldState::buildOwned(const std::vector<SingleTypeCacheManagerPtr>& groups,
+                                                        const KVCacheResource&                        resource) const {
+    std::map<DeviceBlockPool*, std::vector<BlockIdxType>> by_pool;
+    for (const auto& group : groups) {
+        if (!group->prefixReuseEnabled()) {
+            continue;
+        }
+        auto&       pool_blocks = by_pool[group->blockPool().get()];
+        const auto& src         = resource.blocks(group->tag());
+        pool_blocks.reserve(pool_blocks.size() + src.size());
+        for (const auto block : src) {
+            if (!isNullBlockIdx(block) && block >= 0) {
+                pool_blocks.push_back(block);
+            }
+        }
+    }
+    OwnedBlocks owned;
+    owned.reserve(by_pool.size());
+    for (auto& [pool, blocks] : by_pool) {
+        if (blocks.empty()) {
+            continue;
+        }
+        std::sort(blocks.begin(), blocks.end());
+        blocks.erase(std::unique(blocks.begin(), blocks.end()), blocks.end());
+        owned.emplace_back(pool, std::move(blocks));
+    }
+    return owned;
+}
+
+void CoordinatorCacheManager::WritebackHeldState::commitLocked(const OwnedBlocks& owned) noexcept {
+    for (const auto& [pool, blocks] : owned) {
+        auto& state = pools.find(pool)->second;
+        for (const auto block : blocks) {
+            if (state.refs[block]++ == 0) {
+                ++state.held;
+            }
+        }
+    }
+}
+
+void CoordinatorCacheManager::WritebackHeldState::releaseLocked(const OwnedBlocks& owned) noexcept {
+    for (const auto& [pool, blocks] : owned) {
+        auto& state = pools.find(pool)->second;
+        for (const auto block : blocks) {
+            if (--state.refs[block] == 0) {
+                --state.held;
+            }
+        }
+    }
+}
+
+// Caller must hold writeback_held_state_->mutex when max_kv_ratio is set.
 ErrorInfo CoordinatorCacheManager::mallocAndBindLoadTargets(
     KVCacheResource&                         resource,
     LoadAsyncContext*                        load_context,
@@ -345,9 +406,19 @@ ErrorInfo CoordinatorCacheManager::mallocAndBindLoadTargets(
             }
         }
         for (const auto& [pool, held] : matched) {
-            const size_t demand   = held.size() + missing[pool];
-            const size_t capacity = available.at(pool);
-            if (demand > 0 && (capacity == 0 || static_cast<double>(demand) / capacity >= *max_kv_ratio)) {
+            const auto   pool_it  = writeback_held_state_->pools.find(pool);
+            const size_t prior    = pool_it != writeback_held_state_->pools.end() ? pool_it->second.held : 0;
+            size_t       new_held = 0;
+            for (const auto block : held) {
+                if (pool_it == writeback_held_state_->pools.end() || block < 0
+                    || static_cast<size_t>(block) >= pool_it->second.refs.size()
+                    || pool_it->second.refs[block] == 0) {
+                    ++new_held;
+                }
+            }
+            const size_t total    = prior + new_held + missing[pool];
+            const size_t capacity = std::min(available.at(pool) + prior, pool->totalBlocksNum());
+            if (total > 0 && (capacity == 0 || static_cast<double>(total) / capacity >= *max_kv_ratio)) {
                 return ErrorInfo(ErrorCode::MALLOC_FAILED, "writeback exceeds available KV budget");
             }
         }
@@ -435,27 +506,39 @@ ErrorInfo CoordinatorCacheManager::admitWriteBackDecodeCache(const CacheKeysType
     }
     // Share the normal allocator transaction for the capacity snapshot and block allocation.
     std::lock_guard<std::mutex> lock(malloc_mutex_);
-    const auto groups = cacheGroups();
-
-    std::map<DeviceBlockPool*, size_t> available;
-    if (max_kv_ratio) {
-        for (const auto& group : groups) {
-            const auto pool = group->blockPool().get();
-            if (!available.count(pool)) {
-                available.emplace(pool, pool->availableBlocksNum());
+    const auto                  groups          = cacheGroups();
+    auto                        held_state      = writeback_held_state_;
+    auto                        held_by_request = std::make_shared<WritebackHeldState::OwnedBlocks>();
+    KVCacheResourcePtr owner(new KVCacheResource, [groups, held_state, held_by_request](KVCacheResource* resource) {
+        if (held_by_request->empty()) {
+            for (const auto& group : groups) {
+                group->unreference(resource->blocks(group->tag()));
             }
-        }
-    }
-
-    KVCacheResourcePtr owner(new KVCacheResource, [groups](KVCacheResource* resource) {
-        for (const auto& group : groups) {
-            group->unreference(resource->blocks(group->tag()));
+        } else {
+            std::lock_guard<std::mutex> release_lock(held_state->mutex);
+            for (const auto& group : groups) {
+                group->unreference(resource->blocks(group->tag()));
+            }
+            held_state->releaseLocked(*held_by_request);
         }
         delete resource;
     });
     owner->initGroups(config_.topologyPtr());
     owner->setCacheKeys(cache_keys);
     owner->setLastBlockAligned(true);
+
+    // Declare held_lock after owner so early-return destruction unlocks held_state->mutex first.
+    std::unique_lock<std::mutex>       held_lock(held_state->mutex);
+    std::map<DeviceBlockPool*, size_t> available;
+    for (const auto& group : groups) {
+        const auto pool = group->blockPool().get();
+        if (group->prefixReuseEnabled()) {
+            held_state->ensurePoolLocked(pool);
+        }
+        if (max_kv_ratio && !available.count(pool)) {
+            available.emplace(pool, pool->availableBlocksNum());
+        }
+    }
     BlockTreeMatchResult match_result;
     const auto           tree_keys = cp_size > 1 ? cp_slot_mapper_->canonicalCacheKeys(cache_keys) : cache_keys;
 
@@ -487,13 +570,19 @@ ErrorInfo CoordinatorCacheManager::admitWriteBackDecodeCache(const CacheKeysType
     }
 
     // A fully DEVICE-cached handshake needs neither transfer nor a new KV budget.
-    if (matched_blocks == tree_keys.size() && !local_load) {
+    const bool track_writeback_budget = !(matched_blocks == tree_keys.size() && !local_load);
+    if (!track_writeback_budget) {
         max_kv_ratio.reset();
     }
     // Check the complete physical demand before allocation can evict cached blocks.
     const auto malloc_error = mallocAndBindLoadTargets(*owner, local_load.get(), max_kv_ratio, available);
     if (malloc_error.hasError()) {
         return malloc_error;
+    }
+    if (track_writeback_budget) {
+        auto owned = held_state->buildOwned(groups, *owner);
+        held_state->commitLocked(owned);
+        *held_by_request = std::move(owned);
     }
     resource     = std::move(owner);
     start_block  = matched_blocks * cp_size;

@@ -1471,6 +1471,13 @@ bool KVCacheManager::initP2PConnector() {
         append_layout(draft, draft.layer_num, local_stage.mutable_draft_shards());
     }
     const bool decode                = pd_sep_config_.role_type == RoleType::DECODE;
+    if (decode && cache_store_config_.p2p_writeback_enable && config_.local_kv_cache_sharded
+        && parallelism_config_.tp_size > 1) {
+        RTP_LLM_LOG_ERROR("KVCacheManager: p2p_writeback_enable does not support sharded local Decode KV cache "
+                          "(local_kv_cache_sharded=true, tp_size=%ld)",
+                          parallelism_config_.tp_size);
+        return false;
+    }
     const bool report_physical_bytes = decode || cache_store_config_.p2p_writeback_enable;
     if (report_physical_bytes) {
         for (const auto& group : config_.topology().groups()) {
