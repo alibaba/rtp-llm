@@ -67,13 +67,20 @@ class DraftExportContractTest(unittest.TestCase):
                         tokenizer_object=Tokenizer(WordLevel({"<unk>": 0}, unk_token="<unk>")),
                         unk_token="<unk>",
                     ).save_pretrained(source)
-                job = WeightConverter(str(source), None, {"TP_SIZE": "1", "DP_SIZE": "1", "ACT_TYPE": "fp16"})
+                job = WeightConverter(str(source), None, {
+                    "TP_SIZE": "1", "DP_SIZE": "1", "ACT_TYPE": "fp16",
+                    "LOADER_RECYCLE_HANDLES": "false", "MOE_PURE_TP_PRESHARD": "true",
+                })
                 self.assertEqual(job.model_type, kind)
                 with patch.object(sys, "argv", [
                     "weights_convert", "--pretrained_model_dir", str(source),
                     "--output_dir_base", str(out),
-                ]):
+                ]), patch("rtp_llm.tools.convert.weights_convert.create_ft_export_job",
+                          wraps=create_ft_export_job) as build_job:
                     job.convert(str(out))
+                descriptor, = build_job.call_args.args
+                self.assertIs(descriptor.loader_recycle_handles, False)
+                self.assertIs(descriptor.moe_pure_tp_preshard, True)
                 self.assertTrue((out / "done").is_file())
                 index = json.loads((out / "model.safetensors.index.json").read_text())["weight_map"]
                 for role in (".global.embedding", ".global.lm_head"):

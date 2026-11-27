@@ -33,15 +33,20 @@ def load_meta_checkpoint(model, checkpoint):
             method = type(linear.quant_method)
             if method in (UnquantizedLinearMethod, WeightOnlyInt8LinearMethod):
                 continue
-            if linear.quant_config.quant_type == "fp8_online":
-                from rtp_llm.models_py.quant_methods.fp8 import Fp8OnlineLinearMethod
-
-                if method is Fp8OnlineLinearMethod:
-                    generated[f"layers.{index}.{path}.weight_scale"] = linear.weight_scale
-                    continue
+            from rtp_llm.models_py.quant_methods.fp8 import (
+                Fp8BlockOnlineLinearMethod,
+                Fp8OnlineLinearMethod,
+                Fp8PerChannelOnlineLinearMethod,
+            )
+            # The raw FP rows are staged exactly as for unquantized import.
+            # Only online methods derive this scale after all rows are bound.
+            # Use exact types: the prequantized block method subclasses online.
+            if method in (Fp8OnlineLinearMethod, Fp8PerChannelOnlineLinearMethod, Fp8BlockOnlineLinearMethod):
+                generated[f"layers.{index}.{path}.weight_scale"] = linear.weight_scale
+                continue
             raise ValueError(
                 "Meta consolidated import supports unquantized, online W8A16 "
-                "and online per-tensor FP8 projections only"
+                "and online FP8 projections only"
             )
 
     def local(name, dim, leaf, leaf_name="weight", wrapped=False):

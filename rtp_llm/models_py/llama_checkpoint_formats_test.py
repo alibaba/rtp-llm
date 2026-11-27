@@ -511,6 +511,32 @@ class LlamaCheckpointFormatsTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Missing FT sources.*input_scale"):
                 load(ft, 2, 0)
 
+    def test_meta_stages_raw_rows_for_online_fp8_quantizers_only(self):
+        from rtp_llm.models_py.meta_checkpoint import MetaLlamaCheckpoint
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            raw = write_meta_source(root)
+            for rank in range(2):
+                for mode in ("fp8_per_channel_online", "fp8_block_online"):
+                    with self.subTest(rank=rank, mode=mode):
+                        cp = MetaLlamaCheckpoint.open(root)
+                        loader = make_loader(root, tp=2, rank=rank, dtype=torch.bfloat16, online_quant=mode)
+                        model = loader._create_checkpoint_model(cp)
+                        model.load_meta_checkpoint(cp)
+                        proj = model.layers[0].self_attn.qkv_proj
+                        q = raw["layers.0.attention.wq.weight"][[0, 2, 1, 3, 4, 6, 5, 7]]
+                        k = raw["layers.0.attention.wk.weight"][[0, 2, 1, 3]]
+                        expected = torch.cat((q.chunk(2)[rank], k, raw["layers.0.attention.wv.weight"]))
+                        torch.testing.assert_close(proj.weight, expected.bfloat16(), atol=0, rtol=0)
+                        shape = (12, 1) if mode == "fp8_per_channel_online" else (1, 1)
+                        torch.testing.assert_close(proj.weight_scale, torch.ones(shape))
+            # Packed FP8 looks similar, but raw Meta archives do not carry its scales.
+            cp = MetaLlamaCheckpoint.open(root)
+            model = make_loader(root, online_quant="fp8_block")._create_checkpoint_model(cp)
+            with self.assertRaisesRegex(ValueError, "online FP8 projections only"):
+                model.load_meta_checkpoint(cp)
+
     def test_meta_consolidated_pth_without_hf_config(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

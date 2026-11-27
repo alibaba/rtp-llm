@@ -29,6 +29,7 @@ from rtp_llm.ops import (
     ProfilingDebugLoggingConfig,
     TaskType,
 )
+from rtp_llm.server.server_args.util import str2bool
 from rtp_llm.tools.api.hf_model_helper import HfStyleModelInfo
 from rtp_llm.tools.convert.ft_export_job import DraftFTDescriptor, create_ft_export_job
 from rtp_llm.tools.convert.ft_export_metadata import generate_ft_index
@@ -257,6 +258,12 @@ class WeightConverter:
 
         parallelism_config = self._build_parallelism_config()
 
+        # _convert has already overlaid the explicit --env_params on the
+        # worker environment. Honor the same reader knobs for score and draft.
+        reader_options = {
+            "loader_recycle_handles": str2bool(os.environ.get("LOADER_RECYCLE_HANDLES", "1")),
+            "moe_pure_tp_preshard": str2bool(os.environ.get("MOE_PURE_TP_PRESHARD", "0")),
+        }
         hw_kernel_config = HWKernelConfig()
         if (
             self.model_type in (
@@ -271,6 +278,7 @@ class WeightConverter:
                 hw_kernel_config=hw_kernel_config,
                 kv_cache_config=kv_cache_config,
                 get_weight_cls=self.model_cls.get_weight_cls,
+                **reader_options,
             )
         else:
             # Ordinary models still need their tokenizer's task/vocab metadata.
@@ -286,6 +294,7 @@ class WeightConverter:
                 max_generate_batch_size=0,
                 vit_config=VitConfig(),
                 merge_lora=False,
+                **reader_options,
             )
         writer = create_ft_export_job(model)
         device_str = (
