@@ -618,5 +618,93 @@ class IndexerCPPaddedGatherTritonTest(unittest.TestCase):
             )
 
 
+class RaggedRestoreScatterTritonTest(unittest.TestCase):
+    def setUp(self) -> None:
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA required")
+        self.device = torch.device("cuda")
+        torch.manual_seed(91)
+
+    def test_try_restore_2d_ragged_parity_and_no_recompile(self) -> None:
+        _restore_dequantize_scatter_packed_k_cache_flat_kernel.device_caches.clear()
+        gathered = torch.randint(
+            0, 64, (24, ENTRY_BYTES), dtype=torch.uint8, device=self.device
+        )
+        gathered[:, 576:] = 127
+
+        # Disjoint ragged destination offsets + asymmetric request lengths (incl. 0-len req).
+        seq_lens = torch.tensor([5, 0, 3], dtype=torch.int32, device=self.device)
+        restore_idx = torch.tensor(
+            [7, 1, 9, 2, 14, 18, 3, 11], dtype=torch.int64, device=self.device
+        )
+        out_3d = torch.full((3, 8, HEAD_DIM), -4.0, dtype=torch.bfloat16, device=self.device)
+        self.assertTrue(
+            try_restore_dequantize_scatter_packed_k_cache_flat(
+                out_3d, gathered, restore_idx, seq_lens, 1, seq_lens_total=8
+            )
+        )
+        out_2d = torch.full((18, HEAD_DIM), -4.0, dtype=torch.bfloat16, device=self.device)
+        cu_dst = torch.tensor([2, 10, 12], dtype=torch.int32, device=self.device)
+        self.assertTrue(
+            try_restore_dequantize_scatter_packed_k_cache_flat(
+                out_2d,
+                gathered,
+                restore_idx,
+                seq_lens,
+                1,
+                seq_lens_total=8,
+                cu_dst_offsets=cu_dst,
+            )
+        )
+        torch.cuda.synchronize()
+        self.assertTrue(
+            torch.equal(out_2d[3:8].view(torch.int16), out_3d[0, 1:6].view(torch.int16))
+        )
+        self.assertTrue(
+            torch.equal(out_2d[13:16].view(torch.int16), out_3d[2, 1:4].view(torch.int16))
+        )
+        self.assertTrue(torch.all(out_2d[:3] == -4.0))
+        self.assertTrue(torch.all(out_2d[8:13] == -4.0))
+        self.assertTrue(torch.all(out_2d[16:] == -4.0))
+
+        # Varying total_ws_rows and n_tokens with same BATCH_BLOCK=4 must not recompile.
+        cache_first = _triton_cache_size(
+            _restore_dequantize_scatter_packed_k_cache_flat_kernel
+        )
+        out_2d_bigger = torch.empty(
+            (47, HEAD_DIM), dtype=torch.bfloat16, device=self.device
+        )
+        self.assertTrue(
+            try_restore_dequantize_scatter_packed_k_cache_flat(
+                out_2d_bigger,
+                gathered,
+                torch.arange(6, dtype=torch.int64, device=self.device),
+                torch.tensor([2, 1, 3], dtype=torch.int32, device=self.device),
+                0,
+                seq_lens_total=6,
+                cu_dst_offsets=torch.tensor([0, 9, 25], dtype=torch.int32, device=self.device),
+            )
+        )
+        torch.cuda.synchronize()
+        self.assertEqual(
+            _triton_cache_size(_restore_dequantize_scatter_packed_k_cache_flat_kernel),
+            cache_first,
+        )
+
+        # Reject invalid cu_dst_offsets size cleanly without mutating out.
+        bad_dst = torch.tensor([0, 2], dtype=torch.int32, device=self.device)
+        self.assertFalse(
+            try_restore_dequantize_scatter_packed_k_cache_flat(
+                out_2d_bigger,
+                gathered,
+                torch.arange(6, dtype=torch.int64, device=self.device),
+                torch.tensor([2, 1, 3], dtype=torch.int32, device=self.device),
+                0,
+                seq_lens_total=6,
+                cu_dst_offsets=bad_dst,
+            )
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -321,6 +321,46 @@ def test_build_swa_cp_local_indices_batched_varlen_offsets() -> None:
     assert torch.equal(rank1_lens, torch.tensor([2, 2, 1], dtype=torch.int32))
 
 
+def test_ragged_cp_local_indices_and_remap() -> None:
+    # Varlen B=2 ragged offsets for raw-Q merge local workspace:
+    # req0 compressed at [0..3), SWA at [4..8)
+    # req1 compressed at [11..14), SWA at [15..19)
+    per_req = torch.tensor([6, 4], dtype=torch.int64)
+    req_ids = torch.tensor([0, 1], dtype=torch.int64)
+    cu_cmp = torch.tensor([0, 11], dtype=torch.int32)
+    cu_swa = torch.tensor([4, 15], dtype=torch.int32)
+    topk = torch.tensor([[0, 2, 5, -1], [0, 1, 3, -1]], dtype=torch.int32)
+    rank0_topk = SHARD.remap_topk_to_cp_local(
+        topk,
+        per_req_total_kv_lens=per_req,
+        cp_size=2,
+        cp_rank=0,
+        block_size=2,
+        req_id_per_token=req_ids,
+        cu_cmp_offsets=cu_cmp,
+    )
+    # block0 (0,1) owned by rank0, block1 (2,3) by rank1, block2 (4,5) by rank0 (local_pos=2,3).
+    assert torch.equal(rank0_topk[0], torch.tensor([0, -1, 3, -1], dtype=torch.int32))
+    assert torch.equal(rank0_topk[1], torch.tensor([11, 12, -1, -1], dtype=torch.int32))
+
+    gp = torch.tensor([5, 2], dtype=torch.int64)
+    prefix = torch.tensor([5, 2], dtype=torch.int64)
+    swa_idx, swa_lens = SHARD.build_swa_cp_local_indices(
+        gp,
+        prefix_lengths=prefix,
+        cp_size=2,
+        cp_rank=0,
+        window_size=4,
+        req_id_per_token=req_ids,
+        cu_swa_offsets=cu_swa,
+    )
+    # req0: gather_start=2, owned keys [2,4] => offsets [0,2] + 4 = [4,6]
+    # req1: gather_start=0, owned keys [0,2] => offsets [0,2] + 15 = [15,17]
+    assert torch.equal(swa_idx[0, :2], torch.tensor([4, 6], dtype=torch.int32))
+    assert torch.equal(swa_idx[1, :2], torch.tensor([15, 17], dtype=torch.int32))
+    assert torch.equal(swa_lens, torch.tensor([2, 2], dtype=torch.int32))
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in list(globals().items()):

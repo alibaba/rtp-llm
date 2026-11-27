@@ -636,6 +636,9 @@ class SwaPrefillMeta(NamedTuple):
     cache_compaction: Optional[CPByteSlicedSlotCompaction] = None
     cache_cu_tiles: Optional[torch.Tensor] = None
     cache_total_tiles: Optional[int] = None
+    total_ws_rows: int = 0
+    cu_swa_offsets: Optional[torch.Tensor] = None
+    cu_swa_offsets_cpu: Optional[Tuple[int, ...]] = None
 
 
 class WorkspaceMeta(NamedTuple):
@@ -712,6 +715,10 @@ class WorkspaceMeta(NamedTuple):
     cmp_total_tiles: Optional[int] = None
     swa_cache_cu_tiles: Optional[torch.Tensor] = None
     swa_cache_total_tiles: Optional[int] = None
+    total_ws_rows: int = 0
+    cu_cmp_offsets: Optional[torch.Tensor] = None
+    cu_swa_offsets: Optional[torch.Tensor] = None
+    cu_swa_offsets_cpu: Optional[Tuple[int, ...]] = None
 
 
 class CsaPrefillMeta(NamedTuple):
@@ -3162,19 +3169,33 @@ class AttentionFP8(nn.Module):
             self._prefill_output_all_reduce(out)
             return out
 
+        use_ragged = wm.cu_swa_offsets is not None
         async_workspace_reads = self._should_async_workspace_reads_for_prefill(common)
         with record_function_range("dsv4.fp8.attn.workspace.alloc"):
             # E5b: combined indices only address rows written by compressed-K
             # gather, SWA-prefix gather, or fresh-K overlay; keep this
             # uninitialized to avoid a full workspace memset per layer.
-            workspace = torch.empty(
-                (B, wm.M, D), dtype=torch.bfloat16, device=qkv.q.device
-            )
+            if use_ragged:
+                workspace = torch.empty(
+                    (max(wm.total_ws_rows, 1), D),
+                    dtype=torch.bfloat16,
+                    device=qkv.q.device,
+                )
+            else:
+                workspace = torch.empty(
+                    (B, wm.M, D), dtype=torch.bfloat16, device=qkv.q.device
+                )
 
         cmp_pending = None
         cmp_reader_for_pending = None
         cmp_prepare_for_pending = None
         swa_prefix_pending = None
+        extra_cmp_kwargs: Dict[str, Any] = (
+            dict(cu_dst_offsets=wm.cu_cmp_offsets, max_tokens_hint=wm.N)
+            if use_ragged
+            else {}
+        )
+        swa_offset = 0 if use_ragged else wm.N
         try:
             if wm.N > 0:
                 with record_function_range("dsv4.fp8.attn.workspace.gather_cmp"):
@@ -3211,6 +3232,7 @@ class AttentionFP8(nn.Module):
                                 block_size=wm.cmp_eb,
                                 offset=0,
                                 stream=self._get_cp_gather_stream(qkv.q.device),
+                                **extra_cmp_kwargs,
                             )
                         if cmp_pending is not None:
                             cmp_reader_for_pending = cmp_reader
@@ -3231,6 +3253,7 @@ class AttentionFP8(nn.Module):
                                 offset=0,
                                 cu_tiles=wm.cmp_cu_tiles,
                                 total_tiles=wm.cmp_total_tiles,
+                                **extra_cmp_kwargs,
                             )
                         else:
                             cmp_reader.fill(
@@ -3241,6 +3264,7 @@ class AttentionFP8(nn.Module):
                                 block_table=wm.cmp_bt_int32,
                                 block_size=wm.cmp_eb,
                                 offset=0,
+                                **extra_cmp_kwargs,
                             )
             # SWA dequant only reads the cached prefix tail. The fresh new-K rows
             # are already available as BF16 and are overlaid below; cold prefill
@@ -3259,7 +3283,7 @@ class AttentionFP8(nn.Module):
                                     k_cache_raw=swa_pool_raw,
                                     slot_mapping=wm.swa_cache_slot_mapping,
                                     gather_lens=wm.swa_cache_gather_lens,
-                                    offset=wm.N,
+                                    offset=swa_offset,
                                     full_entries_per_block=wm.swa_eb,
                                     cp_rank=int(common.cp_ctx.cp_rank),
                                     cp_size=int(common.cp_ctx.cp_size),
@@ -3271,6 +3295,8 @@ class AttentionFP8(nn.Module):
                                     ),
                                     cu_tiles=wm.swa_cache_cu_tiles,
                                     total_tiles=wm.swa_cache_total_tiles,
+                                    cu_dst_offsets=wm.cu_swa_offsets,
+                                    cu_dst_offsets_cpu=wm.cu_swa_offsets_cpu,
                                 )
                         if swa_prefix_pending is None:
                             _swa_dq.dequantize_and_gather_k_cache_slots_cp_byte_sliced(
@@ -3278,13 +3304,15 @@ class AttentionFP8(nn.Module):
                                 k_cache_raw=swa_pool_raw,
                                 slot_mapping=wm.swa_cache_slot_mapping,
                                 gather_lens=wm.swa_cache_gather_lens,
-                                offset=wm.N,
+                                offset=swa_offset,
                                 full_entries_per_block=wm.swa_eb,
                                 cp_rank=int(common.cp_ctx.cp_rank),
                                 cp_size=int(common.cp_ctx.cp_size),
                                 compaction=wm.swa_cache_compaction,
                                 cu_tiles=wm.swa_cache_cu_tiles,
                                 total_tiles=wm.swa_cache_total_tiles,
+                                cu_dst_offsets=wm.cu_swa_offsets,
+                                cu_dst_offsets_cpu=wm.cu_swa_offsets_cpu,
                             )
                     else:
                         assert swa_pool_3d is not None
@@ -3293,18 +3321,20 @@ class AttentionFP8(nn.Module):
                             k_cache=swa_pool_3d,
                             slot_mapping=wm.swa_cache_slot_mapping,
                             gather_lens=wm.swa_cache_gather_lens,
-                            offset=wm.N,
+                            offset=swa_offset,
                             cu_tiles=wm.swa_cache_cu_tiles,
                             total_tiles=wm.swa_cache_total_tiles,
+                            cu_dst_offsets=wm.cu_swa_offsets,
                         )
             # BF16 overlay of freshly computed new K — single ``index_copy_``
             # using the meta-precomputed ``new_k_slot_in_flat``. Avoids the FP8
             # round-trip loss on tokens we just wrote, while keeping the hot
             # path free of casts / gathers / per-request slicing.
+            ws_flat = workspace if use_ragged else workspace.view(B * wm.M, D)
             with record_function_range("dsv4.fp8.attn.workspace.overlay_new_k"):
                 kv_bf16 = qkv.kv_full.to(torch.bfloat16).reshape(-1, D)
                 row_scatter(
-                    workspace.view(B * wm.M, D),
+                    ws_flat,
                     wm.new_k_slot_in_flat,
                     kv_bf16,
                 )
@@ -3344,7 +3374,7 @@ class AttentionFP8(nn.Module):
             # combine kernel is queued behind the overlay writes on the same
             # stream, so moving pure CPU/view/allocation work here lets it run
             # while the GPU drains the pre-combine dependency chain.
-            kv_view = workspace.view(B * wm.M, 1, D)
+            kv_view = ws_flat.unsqueeze(1)
             projected_out = torch.empty(
                 qkv.q.shape[0],
                 self.dim,
@@ -3372,6 +3402,7 @@ class AttentionFP8(nn.Module):
                         int(cmp_topk.shape[-1]),
                         wm.M,
                         wm.N,
+                        wm.total_ws_rows,
                         legacy_prefix_length,
                     )
                     if combine_cache is not None
@@ -3392,8 +3423,10 @@ class AttentionFP8(nn.Module):
                         window_size=self.window_size,
                         compress_ratio=ratio,
                         topk=int(cmp_topk.shape[-1]),
-                        M=wm.M,
-                        N=wm.N,
+                        M=0 if use_ragged else wm.M,
+                        N=0 if use_ragged else wm.N,
+                        cu_cmp_offsets=wm.cu_cmp_offsets,
+                        cu_swa_offsets=wm.cu_swa_offsets,
                     )
                     assert common.req_id_per_token is not None
                     assert common.prefix_lengths is not None
@@ -3422,9 +3455,11 @@ class AttentionFP8(nn.Module):
                         window_size=self.window_size,
                         compress_ratio=ratio,
                         topk=int(cmp_topk.shape[-1]),
-                        M=wm.M,
-                        N=wm.N,
+                        M=0 if use_ragged else wm.M,
+                        N=0 if use_ragged else wm.N,
                         flash_mla_indices=True,
+                        cu_cmp_offsets=wm.cu_cmp_offsets,
+                        cu_swa_offsets=wm.cu_swa_offsets,
                     )
 
             post_gather_stream = None
@@ -3434,7 +3469,7 @@ class AttentionFP8(nn.Module):
             # Only the NCCL stage is pulled ahead. Local restore/dequant/scatter
             # is queued after overlay/combine and must finish before FlashMLA
             # reads workspace. The three writes target disjoint ranges
-            # (cmp [0:N), SWA prefix [N:N+P), fresh K [N+P:]); if this prepare
+            # (cmp, SWA prefix, fresh K); if this prepare
             # point is moved earlier for more overlap, keep the Work.wait() call
             # inside the post stream helper or gathered bytes can be read early.
             if cmp_pending is not None:
@@ -3458,6 +3493,8 @@ class AttentionFP8(nn.Module):
                         swa_prefix_pending,
                         out=workspace,
                         stream=post_gather_stream,
+                        cu_dst_offsets=wm.cu_swa_offsets,
+                        cu_dst_offsets_cpu=wm.cu_swa_offsets_cpu,
                     )
 
             # The post-stream restore/dequant for cmp + SWA prefix can run
@@ -3626,7 +3663,8 @@ class AttentionFP8(nn.Module):
         per_req_total_kv_lens: torch.Tensor,
         cp_size: int,
         block_size: int,
-        M: int,
+        M: int = 0,
+        cu_cmp_offsets: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         device = local_topk.device
         per_req = per_req_total_kv_lens.to(device=device, dtype=torch.int64)
@@ -3640,7 +3678,14 @@ class AttentionFP8(nn.Module):
         req = req_id_per_token.to(device=device, dtype=torch.int64).reshape(-1)
         req_base = cu_local.index_select(0, req).unsqueeze(1)
         local_pos = local_topk.to(torch.int64) - req_base
-        req_workspace_base = (req * int(M)).unsqueeze(1)
+        if cu_cmp_offsets is not None:
+            req_workspace_base = (
+                cu_cmp_offsets.to(device=device, dtype=torch.int64)
+                .index_select(0, req)
+                .unsqueeze(1)
+            )
+        else:
+            req_workspace_base = (req * int(M)).unsqueeze(1)
         valid = local_topk >= 0
         workspace_idx = req_workspace_base + local_pos
         return torch.where(
@@ -3720,14 +3765,33 @@ class AttentionFP8(nn.Module):
             wm.cmp_eb,
             cp_ctx.cp_rank,
         ).to(device=qkv.q.device, dtype=torch.int32)
-        local_N = int(local_cmp_lens.max().item()) if local_cmp_lens.numel() else 0
-        gather_len_max = (
-            int(wm.swa_gather_lens.max().item()) if wm.swa_gather_lens.numel() else 0
+        local_ws_per_req = (local_cmp_lens + wm.swa_gather_lens.to(torch.int32)).to(
+            torch.int32
         )
-        local_M = local_N + gather_len_max
+        if B > 0:
+            local_N, gather_len_max, local_total_ws_rows = (
+                int(v)
+                for v in torch.stack(
+                    [
+                        local_cmp_lens.max(),
+                        wm.swa_gather_lens.max(),
+                        local_ws_per_req.sum(),
+                    ]
+                ).tolist()
+            )
+        else:
+            local_N = 0
+            gather_len_max = 0
+            local_total_ws_rows = 0
+        local_cu_cmp = torch.zeros((B,), dtype=torch.int32, device=qkv.q.device)
+        if B > 1:
+            local_cu_cmp[1:] = torch.cumsum(
+                local_ws_per_req[:-1], dim=0, dtype=torch.int32
+            )
+        local_cu_swa = (local_cu_cmp + local_cmp_lens).contiguous()
         # E5b: raw-Q merge builds compact topk over written local rows only.
         workspace = torch.empty(
-            (B, local_M, D), dtype=torch.bfloat16, device=qkv.q.device
+            (max(local_total_ws_rows, 1), D), dtype=torch.bfloat16, device=qkv.q.device
         )
 
         if local_N > 0:
@@ -3739,6 +3803,8 @@ class AttentionFP8(nn.Module):
                 block_table=wm.cmp_bt_int32,
                 block_size=wm.cmp_eb,
                 offset=0,
+                cu_dst_offsets=local_cu_cmp,
+                max_tokens_hint=local_N,
             )
 
         # Mirror the packed-KV workspace path: the SWA pool only needs to
@@ -3755,7 +3821,9 @@ class AttentionFP8(nn.Module):
                 gather_lens=wm.swa_cache_gather_lens,
                 block_table=wm.swa_bt_int32,
                 block_size=wm.swa_eb,
-                offset=local_N,
+                offset=0,
+                cu_dst_offsets=local_cu_swa,
+                max_tokens_hint=gather_len_max,
             )
 
         req_full, pos_full = self._cp_full_req_ids_and_positions(common)
@@ -3772,13 +3840,12 @@ class AttentionFP8(nn.Module):
         P_per_req = torch.clamp_max(prefix_lens, self.window_size - 1)
         local_pos = pos_full - prefix_lens.index_select(0, req_full)
         new_k_slots = (
-            req_full * local_M
-            + local_N
+            local_cu_swa.to(torch.long).index_select(0, req_full)
             + P_per_req.index_select(0, req_full)
             + local_pos
         ).contiguous()
         row_scatter(
-            workspace.view(B * local_M, D),
+            workspace,
             new_k_slots,
             qkv.kv_full.to(torch.bfloat16).reshape(-1, D),
         )
@@ -3808,21 +3875,14 @@ class AttentionFP8(nn.Module):
             assert cmp_topk_runtime is not None
             cmp_topk_full = cp_all_gather_full_varlen(cmp_topk_runtime, cp_ctx)
 
-        local_topk_compact = remap_topk_to_cp_local(
+        local_topk = remap_topk_to_cp_local(
             cmp_topk_full,
             per_req_total_kv_lens=wm.cmp_seq_lens.to(torch.int64),
             cp_size=cp_ctx.cp_size,
             cp_rank=cp_ctx.cp_rank,
             block_size=wm.cmp_eb,
             req_id_per_token=req_full,
-        )
-        local_topk = self._compact_local_topk_to_workspace(
-            local_topk_compact,
-            req_id_per_token=req_full,
-            per_req_total_kv_lens=wm.cmp_seq_lens.to(torch.int64),
-            cp_size=cp_ctx.cp_size,
-            block_size=wm.cmp_eb,
-            M=local_M,
+            cu_cmp_offsets=local_cu_cmp,
         )
         local_swa, _ = build_swa_cp_local_indices(
             pos_full,
@@ -3830,15 +3890,14 @@ class AttentionFP8(nn.Module):
             cp_size=cp_ctx.cp_size,
             cp_rank=cp_ctx.cp_rank,
             window_size=self.window_size,
-            M=local_M,
-            N=local_N,
             req_id_per_token=req_full,
+            cu_swa_offsets=local_cu_swa,
         )
         combined_indices, combined_lens = self._compact_indices([local_topk, local_swa])
 
         local_o, _, local_lse = flash_mla_sparse_fwd(
             q=q_full,
-            kv=workspace.view(B * local_M, 1, D),
+            kv=workspace.unsqueeze(1),
             indices=combined_indices.unsqueeze(1),
             sm_scale=self.softmax_scale,
             attn_sink=None,
@@ -4660,6 +4719,7 @@ class AttentionFP8(nn.Module):
             cmp_total_tiles: Optional[int] = None
             swa_cache_cu_tiles: Optional[torch.Tensor] = None
             swa_cache_total_tiles: Optional[int] = None
+            cu_swa_offsets_cpu: Optional[Tuple[int, ...]] = None
             if device.type == "cuda" and torch.cuda.is_current_stream_capturing():
                 # Replay can change device lengths/prefixes. Size from the
                 # fixed block-table/token capacities, not capture-time values.
@@ -4668,7 +4728,20 @@ class AttentionFP8(nn.Module):
                     * _dsv4_pool_tokens_per_block(self._kv_cache, tag=cmp_at)
                     // ratio
                 )
-                gather_len_max = (seq_len_full if cp_active else seqlen) + win - 1
+                P_cap = win - 1
+                seqlen_eff = seq_len_full if cp_active else seqlen
+                cu_seqlens_eff = (
+                    cu_seqlens_full_eff
+                    if cp_active
+                    else cu_seqlens.to(device=device, dtype=torch.int32)
+                )
+                req_idx = torch.arange(B, dtype=torch.int32, device=device)
+                cu_cmp_offsets = (
+                    req_idx * (N_max + P_cap) + cu_seqlens_eff[:-1]
+                ).contiguous()
+                cu_swa_offsets = (cu_cmp_offsets + N_max).contiguous()
+                total_ws_rows = B * (N_max + P_cap) + seqlen_eff
+                gather_len_max = seqlen_eff + P_cap
                 total_cmp_tokens = None
             elif (
                 cp_active
@@ -4691,6 +4764,20 @@ class AttentionFP8(nn.Module):
                 N_max = max(compressed_lengths, default=0)
                 gather_len_max = max(gather_lengths, default=0)
                 total_cmp_tokens = sum(compressed_lengths)
+                cu_cmp_host: list[int] = []
+                cu_swa_host: list[int] = []
+                acc = 0
+                for n_b, g_b in zip(compressed_lengths, gather_lengths):
+                    cu_cmp_host.append(acc)
+                    cu_swa_host.append(acc + n_b)
+                    acc += n_b + g_b
+                total_ws_rows = acc
+                cu_swa_offsets_cpu = tuple(cu_swa_host)
+                cu_offsets_2d = torch.tensor(
+                    [cu_cmp_host, cu_swa_host], dtype=torch.int32, device=device
+                )
+                cu_cmp_offsets = cu_offsets_2d[0]
+                cu_swa_offsets = cu_offsets_2d[1]
                 cmp_cu_tiles, cmp_total_tiles = _swa_dq.build_dequant_cu_tiles_from_host(
                     compressed_lengths, device=device
                 )
@@ -4701,16 +4788,19 @@ class AttentionFP8(nn.Module):
                     swa_prefix_lengths_host, device=device
                 )
             else:
-                # Fold the compressed-token and dequant-tile totals into the
-                # existing metadata D2H so the readers add zero per-layer syncs.
+                # Fold the compressed-token, workspace-row, and dequant-tile
+                # totals into the existing metadata D2H so readers add zero
+                # per-layer syncs.
                 tile_t = _swa_dq.TILE_T
                 cmp_tiles = (N_per_req + tile_t - 1) // tile_t
                 swa_prefix_tiles = (P_per_req + tile_t - 1) // tile_t
+                ws_per_req = (N_per_req + gather_len_per_req).to(torch.int32)
                 host_geometry = torch.stack(
                     [
                         N_per_req.max(),
                         gather_len_per_req.max(),
                         N_per_req.sum(),
+                        ws_per_req.sum(),
                         cmp_tiles.sum(),
                         swa_prefix_tiles.sum(),
                     ]
@@ -4719,9 +4809,18 @@ class AttentionFP8(nn.Module):
                     N_max,
                     gather_len_max,
                     total_cmp_tokens,
+                    total_ws_rows,
                     cmp_total_tiles,
                     swa_cache_total_tiles,
                 ) = (int(v) for v in host_geometry.tolist())
+                cu_cmp_offsets = torch.zeros((B,), dtype=torch.int32, device=device)
+                if B > 1:
+                    cu_cmp_offsets[1:] = torch.cumsum(
+                        ws_per_req[:-1], dim=0, dtype=torch.int32
+                    )
+                cu_swa_offsets = (
+                    cu_cmp_offsets + N_per_req.to(torch.int32)
+                ).contiguous()
                 cmp_cu_tiles = _swa_dq.build_dequant_cu_tiles_device(N_per_req)
                 swa_cache_cu_tiles = _swa_dq.build_dequant_cu_tiles_device(P_per_req)
             N = N_max
@@ -4748,6 +4847,7 @@ class AttentionFP8(nn.Module):
                     M=M,
                     window_size=win,
                     base_offset=N,
+                    cu_swa_offsets=cu_swa_offsets,
                 )
             else:
                 new_k_slot_in_flat = _swa_ops.compute_swa_slot_in_flat(
@@ -4757,6 +4857,7 @@ class AttentionFP8(nn.Module):
                     M=M,
                     window_size=win,
                     base_offset=N,
+                    cu_swa_offsets=cu_swa_offsets,
                 )
 
             T_total = seqlen
@@ -4924,6 +5025,10 @@ class AttentionFP8(nn.Module):
             cmp_total_tiles=cmp_total_tiles,
             swa_cache_cu_tiles=swa_cache_cu_tiles,
             swa_cache_total_tiles=swa_cache_total_tiles,
+            total_ws_rows=total_ws_rows,
+            cu_cmp_offsets=cu_cmp_offsets,
+            cu_swa_offsets=cu_swa_offsets,
+            cu_swa_offsets_cpu=cu_swa_offsets_cpu,
         )
 
     def _build_compressor_meta(
@@ -5223,18 +5328,45 @@ class AttentionFP8(nn.Module):
                 .to(device=device, dtype=torch.int32)[:write_B]
                 .contiguous()
             )
+        cu_swa_offsets: Optional[torch.Tensor] = None
+        cu_swa_offsets_cpu: Optional[Tuple[int, ...]] = None
+        total_ws_rows = 0
         if capturing:
             # Every request has at most write_num_tokens new tokens and
             # win-1 cached tokens. Keep this bound valid across graph replays.
-            combined_gather_len_max = write_num_tokens + (win - 1 if any_cont else 0)
+            p_cap = win - 1 if any_cont else 0
+            combined_gather_len_max = write_num_tokens + p_cap
+            if any_cont:
+                cu_swa_offsets = (
+                    torch.arange(write_B, dtype=torch.int32, device=device) * p_cap
+                    + write_query_start_loc[:-1]
+                ).contiguous()
+                total_ws_rows = write_B * p_cap + write_num_tokens
         elif any_cont and cache_gather_lens is not None:
             host_prefix_lengths = getattr(cp_ctx, "prefix_lengths_host", None)
+            host_input_lengths = getattr(cp_ctx, "input_lengths_global_host", None)
             if (
                 cp_on_write
                 and host_prefix_lengths is not None
                 and len(host_prefix_lengths) == write_B
+                and host_input_lengths is not None
+                and len(host_input_lengths) == write_B
             ):
-                combined_gather_len_max = int(combined_gather_lens.max().item())
+                gather_lengths_host = [
+                    int(length) + min(int(prefix), win - 1)
+                    for prefix, length in zip(host_prefix_lengths, host_input_lengths)
+                ]
+                cu_swa_host: list[int] = []
+                acc = 0
+                for g_b in gather_lengths_host:
+                    cu_swa_host.append(acc)
+                    acc += g_b
+                total_ws_rows = acc
+                combined_gather_len_max = max(gather_lengths_host, default=0)
+                cu_swa_offsets_cpu = tuple(cu_swa_host)
+                cu_swa_offsets = torch.tensor(
+                    cu_swa_host, dtype=torch.int32, device=device
+                )
                 (
                     cache_cu_tiles,
                     cache_total_tiles,
@@ -5246,12 +5378,24 @@ class AttentionFP8(nn.Module):
                 cache_tiles = (
                     cache_gather_lens + _swa_dq.TILE_T - 1
                 ) // _swa_dq.TILE_T
-                combined_gather_len_max, cache_total_tiles = (
+                combined_gather_lens_i32 = combined_gather_lens.to(torch.int32)
+                combined_gather_len_max, total_ws_rows, cache_total_tiles = (
                     int(v)
                     for v in torch.stack(
-                        [combined_gather_lens.max(), cache_tiles.sum()]
+                        [
+                            combined_gather_lens_i32.max(),
+                            combined_gather_lens_i32.sum(),
+                            cache_tiles.sum(),
+                        ]
                     ).tolist()
                 )
+                cu_swa_offsets = torch.zeros(
+                    (write_B,), dtype=torch.int32, device=device
+                )
+                if write_B > 1:
+                    cu_swa_offsets[1:] = torch.cumsum(
+                        combined_gather_lens_i32[:-1], dim=0, dtype=torch.int32
+                    )
                 cache_cu_tiles = _swa_dq.build_dequant_cu_tiles_device(
                     cache_gather_lens
                 )
@@ -5303,10 +5447,11 @@ class AttentionFP8(nn.Module):
                     window_size=win,
                     compress_ratio=1,
                     topk=0,
-                    M=M,
+                    M=0,
                     N=0,
                     req_id_per_token=req_id_per_token,
                     prefix_lengths=prefix_lengths,
+                    cu_swa_offsets=cu_swa_offsets,
                 )
 
                 slot_in_flat = _swa_ops.compute_swa_slot_in_flat_from_cu(
@@ -5315,8 +5460,9 @@ class AttentionFP8(nn.Module):
                     ),
                     prefix_lengths.to(device=device)[:write_B],
                     num_tokens=cp_ctx.seq_len_full,
-                    M=M,
+                    M=0,
                     window_size=win,
+                    cu_swa_offsets=cu_swa_offsets,
                 )
             else:
                 topk_indices_empty = torch.empty(
@@ -5330,8 +5476,9 @@ class AttentionFP8(nn.Module):
                     window_size=win,
                     compress_ratio=1,
                     topk=0,
-                    M=M,
+                    M=0,
                     N=0,
+                    cu_swa_offsets=cu_swa_offsets,
                 )
                 # Pre-bake the per-token scatter index for ``via_concat``
                 # step-2. E6c fuses the casts/gathers/arithmetic into one
@@ -5340,8 +5487,9 @@ class AttentionFP8(nn.Module):
                     position_ids.to(device=device),
                     req_id_per_token.to(device=device),
                     prefix_lengths.to(device=device),
-                    M=M,
+                    M=0,
                     window_size=win,
+                    cu_swa_offsets=cu_swa_offsets,
                 )
             prefix_len_max = 1
         else:
@@ -5373,6 +5521,9 @@ class AttentionFP8(nn.Module):
             cache_compaction=cache_compaction,
             cache_cu_tiles=cache_cu_tiles,
             cache_total_tiles=cache_total_tiles,
+            total_ws_rows=total_ws_rows,
+            cu_swa_offsets=cu_swa_offsets,
+            cu_swa_offsets_cpu=cu_swa_offsets_cpu,
         )
 
     def _prefill_compute_qkv(
@@ -5747,12 +5898,20 @@ class AttentionFP8(nn.Module):
         assert common.use_varlen, "DSV4 FP8 SWA concat requires varlen metadata"
         B = common.batch_size
 
+        use_ragged = meta.cu_swa_offsets is not None
         # E5b: meta.combined_indices is built from valid prefix/new-K slots only.
-        workspace = torch.empty(
-            (B, meta.M, D),
-            dtype=torch.bfloat16,
-            device=qkv.q.device,
-        )
+        if use_ragged:
+            workspace = torch.empty(
+                (max(meta.total_ws_rows, 1), D),
+                dtype=torch.bfloat16,
+                device=qkv.q.device,
+            )
+        else:
+            workspace = torch.empty(
+                (B, meta.M, D),
+                dtype=torch.bfloat16,
+                device=qkv.q.device,
+            )
 
         # 1. Prefix tail dequant through precomputed global SWA slots.
         if meta.prefix_len_max > 0:
@@ -5774,6 +5933,8 @@ class AttentionFP8(nn.Module):
                         compaction=meta.cache_compaction,
                         cu_tiles=meta.cache_cu_tiles,
                         total_tiles=meta.cache_total_tiles,
+                        cu_dst_offsets=meta.cu_swa_offsets,
+                        cu_dst_offsets_cpu=meta.cu_swa_offsets_cpu,
                     )
                 else:
                     _swa_dq.dequantize_and_gather_k_cache_slots(
@@ -5784,18 +5945,20 @@ class AttentionFP8(nn.Module):
                         offset=0,
                         cu_tiles=meta.cache_cu_tiles,
                         total_tiles=meta.cache_total_tiles,
+                        cu_dst_offsets=meta.cu_swa_offsets,
                     )
 
         # 2. New K BF16 overlay.
         kv_bf16 = qkv.kv_full.to(torch.bfloat16)
         # ``meta.slot_in_flat`` is pre-baked in ``_build_swa_prefill_meta_varlen``
-        # (= ``req_id * M + min(prefix, win-1) + local_pos``). Single
-        # vectorized ``row_scatter`` here — no per-layer casts / gathers / arith.
+        # (via ``cu_swa_offsets`` in ragged mode). Single vectorized ``row_scatter``
+        # here — no per-layer casts / gathers / arith.
         assert (
             meta.slot_in_flat is not None
         ), "via_concat varlen path expects pre-baked slot_in_flat in swa_meta"
+        ws_flat = workspace if use_ragged else workspace.view(B * meta.M, D)
         with record_function_range("dsv4.fp8.attn.swa_concat.overlay_new_k"):
-            row_scatter(workspace.view(B * meta.M, D), meta.slot_in_flat, kv_bf16)
+            row_scatter(ws_flat, meta.slot_in_flat, kv_bf16)
         # Free kv_full storage before flash_mla_sparse_fwd. After the
         # overlay nothing else reads it on this path; the NamedTuple ref
         # would otherwise keep it alive through the sparse-attn workspace
@@ -5803,10 +5966,10 @@ class AttentionFP8(nn.Module):
         dispose_tensor(kv_bf16)
         dispose_tensor(qkv.kv_full)
 
-        # 3. Chunked flash_mla_sparse_fwd over the [B*M] flat KV view.
+        # 3. Chunked flash_mla_sparse_fwd over the flat KV view.
         return self._flash_mla_sparse_fwd_chunked_projected(
             q=qkv.q,
-            kv=workspace.view(B * meta.M, 1, D),
+            kv=ws_flat.unsqueeze(1),
             indices=meta.combined_indices.unsqueeze(1),
             topk_length=meta.combined_lens,
             freqs_cis=common.freqs_cis,

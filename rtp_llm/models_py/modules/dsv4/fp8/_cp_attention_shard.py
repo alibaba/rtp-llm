@@ -152,6 +152,7 @@ def remap_topk_to_cp_local(
     cp_rank: int,
     block_size: int,
     req_id_per_token: Optional[torch.Tensor] = None,
+    cu_cmp_offsets: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Filter global/request-local topk to the current CP rank's local KV ids.
 
@@ -162,6 +163,9 @@ def remap_topk_to_cp_local(
         cp_size/cp_rank/block_size: RR ownership rule
             ``owner = (logical_block_idx % cp_size)``.
         req_id_per_token: optional ``[T]`` request id. If omitted, B must be 1.
+        cu_cmp_offsets: optional ``[>= B]`` ragged destination base offset per
+            request in a flat 2D local workspace. When omitted, defaults to
+            packed ``cu_local`` offsets.
 
     Returns:
         ``[T, K]`` int32 topk where non-owned entries are ``-1`` and owned
@@ -196,9 +200,18 @@ def remap_topk_to_cp_local(
                 f"req_id_per_token length {int(req.numel())} != topk rows {T}"
             )
 
-    local_lens = cp_padded_local_kv_lens(per_req, cp_size, block_size)
-    cu_local = torch.zeros(B + 1, dtype=torch.int64, device=device)
-    cu_local[1:] = torch.cumsum(local_lens, dim=0)
+    if cu_cmp_offsets is not None:
+        cu_cmp = cu_cmp_offsets.to(device=device, dtype=torch.int64).reshape(-1)
+        if int(cu_cmp.numel()) < B:
+            raise ValueError(
+                f"cu_cmp_offsets length {int(cu_cmp.numel())} < batch size {B}"
+            )
+        req_base = cu_cmp.index_select(0, req).unsqueeze(1)
+    else:
+        local_lens = cp_padded_local_kv_lens(per_req, cp_size, block_size)
+        cu_local = torch.zeros(B + 1, dtype=torch.int64, device=device)
+        cu_local[1:] = torch.cumsum(local_lens, dim=0)
+        req_base = cu_local.index_select(0, req).unsqueeze(1)
 
     idx = topk_indices.to(torch.int64)
     valid = idx >= 0
@@ -209,7 +222,6 @@ def remap_topk_to_cp_local(
     owner = block % cp_size
     local_block = block // cp_size
     local_pos = local_block * block_size + token_in_block
-    req_base = cu_local.index_select(0, req).unsqueeze(1)
     req_len = per_req.index_select(0, req).unsqueeze(1)
     owned = valid & (owner == cp_rank) & (safe_idx < req_len)
     local_idx = req_base + local_pos
@@ -223,10 +235,11 @@ def build_swa_cp_local_indices(
     cp_size: int,
     cp_rank: int,
     window_size: int,
-    M: int,
-    N: int,
+    M: int = 0,
+    N: int = 0,
     req_id_per_token: Optional[torch.Tensor] = None,
     owner_chunk_size: int = 1,
+    cu_swa_offsets: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Build rank-local SWA workspace indices for logical SWA partitioning.
 
@@ -242,10 +255,12 @@ def build_swa_cp_local_indices(
         prefix_lengths: ``[B]`` per-request prefix/start positions.
         cp_size/cp_rank: CP partition.
         window_size: SWA attention window.
-        M/N: workspace stride and compressed-region length. SWA rows start at
-            ``req_id * M + N``.
+        M/N: workspace stride and compressed-region length when
+            ``cu_swa_offsets is None`` (SWA rows start at ``req_id * M + N``).
         req_id_per_token: optional ``[T]`` request id. Required when B > 1.
         owner_chunk_size: owner granularity. ``1`` gives token-level balance.
+        cu_swa_offsets: optional ``[>= B]`` ragged SWA start row per request in
+            a flat 2D workspace.
 
     Returns:
         ``(indices, lens)`` where ``indices`` is ``[T, window_size]`` int32
@@ -266,7 +281,7 @@ def build_swa_cp_local_indices(
         raise ValueError(f"cp_rank({cp_rank}) out of range [0,{cp_size})")
     if window_size <= 0:
         raise ValueError(f"window_size must be positive, got {window_size}")
-    if M <= 0 or N < 0:
+    if cu_swa_offsets is None and (M <= 0 or N < 0):
         raise ValueError(f"M must be positive and N non-negative, got M={M}, N={N}")
     if owner_chunk_size <= 0:
         raise ValueError(f"owner_chunk_size must be positive, got {owner_chunk_size}")
@@ -274,6 +289,14 @@ def build_swa_cp_local_indices(
     device = global_positions.device
     T = int(global_positions.numel())
     B = int(prefix_lengths.numel())
+    if cu_swa_offsets is not None:
+        cu_swa = cu_swa_offsets.to(device=device, dtype=torch.int64).reshape(-1)
+        if int(cu_swa.numel()) < B:
+            raise ValueError(
+                f"cu_swa_offsets length {int(cu_swa.numel())} < batch size {B}"
+            )
+    else:
+        cu_swa = None
     if req_id_per_token is None:
         if B != 1:
             raise ValueError("req_id_per_token is required when B > 1")
@@ -313,11 +336,13 @@ def build_swa_cp_local_indices(
         ((key_pos // owner_chunk_size) % cp_size) == cp_rank
     ) & valid_in_window  # [T, W] bool
 
-    # Target workspace column for each (row, key_pos) cell — only meaningful
+    # Target workspace index for each (row, key_pos) cell — only meaningful
     # where owned_mask is True; the rest get filtered out below.
-    target_value = (
-        req.unsqueeze(1) * M + N + (key_pos - gather_start_per_row.unsqueeze(1))
-    )  # [T, W]
+    if cu_swa is not None:
+        swa_ws_base = cu_swa.index_select(0, req).unsqueeze(1)
+    else:
+        swa_ws_base = req.unsqueeze(1) * M + N
+    target_value = swa_ws_base + (key_pos - gather_start_per_row.unsqueeze(1))  # [T, W]
 
     # Per-row rank of each owned cell (0, 1, 2, ... in row-scan order).
     # cumsum on bool produces the 1-indexed rank at each owned cell.

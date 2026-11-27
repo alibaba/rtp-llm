@@ -649,6 +649,13 @@ class BuildSwaPrefillMetaVarlenTest(unittest.TestCase):
         # req0: 4 + 0 = 4; req1: 3 + 7 = 10. max = 10.
         self.assertEqual(meta.combined_gather_len_max, 10)
         self.assertEqual(meta.M, 10)
+        self.assertEqual(meta.total_ws_rows, 14)
+        self.assertTrue(
+            torch.equal(
+                meta.cu_swa_offsets,
+                torch.tensor([0, 4], dtype=torch.int32, device=self.device),
+            )
+        )
         # combined_lens per token: cold req topk + swa = 0 + min(local+1, win),
         # cont req similarly. For req0 (S=4): [1, 2, 3, 4]; for req1 (sp=32, S=3):
         # local pos 0,1,2 → swa_len = min(33, 8), min(34, 8), min(35, 8) = 8.
@@ -681,9 +688,16 @@ class BuildSwaPrefillMetaVarlenTest(unittest.TestCase):
                 torch.tensor([4, 7], dtype=torch.int32, device=self.device),
             )
         )
-        # combined_gather_len_max = max(3 + 4, 5 + 7) = 12.
+        # combined_gather_len_max = max(3 + 4, 5 + 7) = 12; ragged total = 7 + 12 = 19.
         self.assertEqual(meta.combined_gather_len_max, 12)
         self.assertEqual(meta.M, 12)
+        self.assertEqual(meta.total_ws_rows, 19)
+        self.assertTrue(
+            torch.equal(
+                meta.cu_swa_offsets,
+                torch.tensor([0, 7], dtype=torch.int32, device=self.device),
+            )
+        )
         # combined_lens (swa-only ⇒ topk_len=0):
         # req0 sp=4 S=3: positions abs=[4,5,6] → swa_len = min(p+1, win) = [5, 6, 7]
         # req1 sp=20 S=5: positions abs=[20..24] → swa_len capped at win=8 = [8]*5
@@ -957,6 +971,214 @@ class ViaConcatScatterTest(unittest.TestCase):
         self.assertTrue(torch.all(ws[1, 0:7, :] == 0))
         # Req 1 tail (rows 11..M-1) untouched.
         self.assertTrue(torch.all(ws[1, 11:, :] == 0))
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+class RaggedSwaViaConcatEndToEndTest(unittest.TestCase):
+    """Verify mixed-reuse SWA-only ``_build_swa_prefill_meta_varlen`` + ``_attn_fp8_swa_via_concat``."""
+
+    def test_mixed_cold_plus_cont_swa_only_ragged_workspace(self) -> None:
+        from types import SimpleNamespace
+        from unittest import mock
+
+        from rtp_llm.models_py.modules.dsv4.fp8._swa_kv_insert_triton import (
+            quantize_and_insert_k_cache,
+        )
+        from rtp_llm.models_py.modules.dsv4.fp8.attention import (
+            PrefillMeta,
+            PrefillQKV,
+        )
+
+        device = torch.device("cuda")
+        torch.manual_seed(17)
+        win = 8
+        eb = 16
+        B = 3
+        prefix_list = [0, 20, 4]
+        input_list = [5, 4, 3]
+        P_list = [min(p, win - 1) for p in prefix_list]  # [0, 7, 4]
+        expected_total_rows = sum(p + s for p, s in zip(P_list, input_list))  # 5 + 11 + 7 = 23
+
+        swa_pool = torch.zeros(
+            (12, eb, _SWA_FP8_ENTRY_BYTES), dtype=torch.uint8, device=device
+        )
+        # Populate prefix tokens for req 1 (sp=20, blocks [2, 3]) and req 2 (sp=4, block [4]).
+        bt = torch.tensor(
+            [[0, 1], [2, 3], [4, 5]], dtype=torch.int32, device=device
+        )
+        req1_prefix = (
+            torch.arange(1, 21, dtype=torch.bfloat16, device=device)
+            .unsqueeze(1)
+            .expand(20, 512)
+            .contiguous()
+        )
+        req2_prefix = (
+            (torch.arange(1, 5, dtype=torch.bfloat16, device=device) + 100.0)
+            .unsqueeze(1)
+            .expand(4, 512)
+            .contiguous()
+        )
+        slots_r1 = torch.cat(
+            [
+                2 * eb + torch.arange(eb, dtype=torch.int64, device=device),
+                3 * eb + torch.arange(4, dtype=torch.int64, device=device),
+            ]
+        )
+        slots_r2 = 4 * eb + torch.arange(4, dtype=torch.int64, device=device)
+        quantize_and_insert_k_cache(req1_prefix, swa_pool, slots_r1)
+        quantize_and_insert_k_cache(req2_prefix, swa_pool, slots_r2)
+
+        layer = Attention.__new__(Attention)
+        torch.nn.Module.__init__(layer)
+        layer.layer_id = 0
+        layer.compress_ratio = 0
+        layer.window_size = win
+        layer.head_dim = 512
+        layer._cp_ctx = None
+        layer._kv_cache = _StubKvCache(eb)
+        layer._block_tables_by_type = {SWA_KV: bt}
+        layer._pool_entries_per_block = lambda tag: eb  # type: ignore[assignment]
+        layer._swa_entries_per_block = lambda: eb  # type: ignore[assignment]
+        layer._swa_cp_byte_sliced = lambda: False  # type: ignore[assignment]
+        layer._pool_raw_u8 = lambda tag: None  # type: ignore[assignment]
+        layer._pool_view_3d_fp8 = lambda tag: swa_pool  # type: ignore[assignment]
+
+        positions, req_id, cu_seqlens = _flat_positions(
+            prefix_list, input_list, device
+        )
+        pl = torch.tensor(prefix_list, dtype=torch.int32, device=device)
+        il = torch.tensor(input_list, dtype=torch.int32, device=device)
+        swa_meta = layer._build_swa_prefill_meta_varlen(
+            seqlen=sum(input_list),
+            device=device,
+            any_cont=True,
+            batch_size=B,
+            cu_seqlens=cu_seqlens,
+            input_lengths=il,
+            prefix_lengths=pl,
+            position_ids=positions,
+            req_id_per_token=req_id,
+        )
+        self.assertEqual(swa_meta.total_ws_rows, expected_total_rows)
+        self.assertTrue(
+            torch.equal(
+                swa_meta.cu_swa_offsets,
+                torch.tensor([0, 5, 16], dtype=torch.int32, device=device),
+            )
+        )
+
+        # Verify CP host-known path preserves cu_swa_offsets_cpu too.
+        layer._cp_ctx = SimpleNamespace(
+            cp_size=2,
+            cp_rank=0,
+            seq_len_full=sum(input_list),
+            input_lengths_global=il,
+            input_lengths_global_host=tuple(input_list),
+            prefix_lengths=pl,
+            prefix_lengths_host=tuple(prefix_list),
+            cu_seqlens_global=cu_seqlens,
+            global_positions=positions,
+        )
+        cp_swa_meta = layer._build_swa_prefill_meta_varlen(
+            seqlen=sum(input_list),
+            device=device,
+            any_cont=True,
+            batch_size=B,
+            cu_seqlens=cu_seqlens,
+            input_lengths=il,
+            prefix_lengths=pl,
+            position_ids=positions,
+            req_id_per_token=req_id,
+        )
+        self.assertEqual(cp_swa_meta.cu_swa_offsets_cpu, (0, 5, 16))
+        self.assertEqual(cp_swa_meta.total_ws_rows, expected_total_rows)
+        layer._cp_ctx = None
+
+        T = sum(input_list)
+        kv_full = (
+            (torch.arange(1, T + 1, dtype=torch.bfloat16, device=device) + 200.0)
+            .unsqueeze(1)
+            .expand(T, 512)
+            .contiguous()
+        )
+        captured: dict[str, torch.Tensor] = {}
+
+        def _fake_projected(
+            *, q, kv, indices, topk_length, freqs_cis, prefill_workspace, profile_name
+        ):
+            del q, freqs_cis, prefill_workspace, profile_name
+            captured["kv"] = kv.clone()
+            captured["indices"] = indices.clone()
+            captured["topk_length"] = topk_length.clone()
+            return torch.zeros((T, 16), dtype=torch.bfloat16, device=device)
+
+        layer._flash_mla_sparse_fwd_chunked_projected = _fake_projected  # type: ignore[assignment]
+        common = PrefillMeta(
+            seqlen=T,
+            seqlen_full=T,
+            rd=0,
+            device=device,
+            cp_ctx=None,
+            cp_on=False,
+            freqs_cis=torch.zeros(T, 2, device=device),
+            topk_idxs=torch.zeros(T, 0, dtype=torch.int32, device=device),
+            sp_int=0,
+            any_cont=True,
+            row_seqlens_full=il.long(),
+            use_varlen=True,
+            sp_per_req=pl.long(),
+            cu_seqlens=cu_seqlens,
+            batch_size=B,
+            input_lengths=il,
+            prefix_lengths=pl,
+            position_ids=positions,
+            req_id_per_token=req_id,
+            max_seqlen_q=max(input_list),
+            swa_meta=swa_meta,
+        )
+        qkv = PrefillQKV(
+            qr=torch.zeros(T, 512, dtype=torch.bfloat16, device=device),
+            q=torch.zeros(T, 1, 512, dtype=torch.bfloat16, device=device),
+            kv_full=kv_full.clone(),
+        )
+        with mock.patch(
+            "rtp_llm.models_py.modules.dsv4.fp8.attention.dispose_tensor",
+            lambda t: None,
+        ):
+            layer._attn_fp8_swa_via_concat(qkv, common)
+
+        kv = captured["kv"]
+        indices = captured["indices"].squeeze(1)
+        topk_len = captured["topk_length"]
+        self.assertEqual(tuple(kv.shape), (expected_total_rows, 1, 512))
+        # Verify prefix tail + new K rows in each request's ragged slice:
+        # req 0 (cold S=5): [0..5) == kv_full[0..5)
+        self.assertTrue(torch.equal(kv[0:5, 0, :], kv_full[0:5]))
+        # req 1 (sp=20 -> P=7, S=4): [5..12) == req1_prefix[-7:], [12..16) == kv_full[5..9)
+        self.assertTrue(
+            torch.allclose(
+                kv[5:12, 0, :].float(),
+                req1_prefix[-7:].float(),
+                rtol=0.1,
+                atol=1.0,
+            )
+        )
+        self.assertTrue(torch.equal(kv[12:16, 0, :], kv_full[5:9]))
+        # req 2 (sp=4 -> P=4, S=3): [16..20) == req2_prefix[-4:], [20..23) == kv_full[9..12)
+        self.assertTrue(
+            torch.allclose(
+                kv[16:20, 0, :].float(),
+                req2_prefix[-4:].float(),
+                rtol=0.1,
+                atol=1.0,
+            )
+        )
+        self.assertTrue(torch.equal(kv[20:23, 0, :], kv_full[9:12]))
+        # Every attended slot must stay strictly within [0, expected_total_rows).
+        for t_idx in range(T):
+            ln = int(topk_len[t_idx].item())
+            row_idx = indices[t_idx, :ln]
+            self.assertTrue(bool(((row_idx >= 0) & (row_idx < expected_total_rows)).all()))
 
 
 if __name__ == "__main__":

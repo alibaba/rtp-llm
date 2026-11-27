@@ -1223,36 +1223,45 @@ def combine_topk_swa_indices_cp_varlen(
     window_size: int,
     compress_ratio: int,
     topk: int,
-    M: int,
-    N: int,
+    M: int = 0,
+    N: int = 0,
     req_id_per_token: Optional[torch.Tensor] = None,
     prefix_lengths: Optional[torch.Tensor] = None,
+    *,
+    cu_cmp_offsets: Optional[torch.Tensor] = None,
+    cu_swa_offsets: Optional[torch.Tensor] = None,
 ) -> "tuple[torch.Tensor, torch.Tensor]":
     """**Varlen B>=1 path**:
     multi-request-aware vectorized replacement for
     ``_swa_ops_triton.combine_topk_swa_indices`` under CP.
 
-    For B==1 single-request prefill this is bit-equal to
-    :func:`combine_topk_swa_indices_cp_b1`. For B>1 it emits indices in
-    the flattened workspace coordinate system:
+    For B==1 single-request prefill (without ragged offsets) this delegates to
+    :func:`combine_topk_swa_indices_cp_b1`. For B>1 or ragged 2D workspaces it
+    emits indices in the workspace coordinate system:
 
-      * compressed slots: ``req_id * M + topk_indices[t, k]``
-      * SWA slots: ``req_id * M + N + local_slot``
+      * compressed slots: ``cmp_base + topk_indices[t, k]``
+      * SWA slots: ``swa_base + local_slot``
 
     ``global_positions`` are absolute per-request positions
     (``prefix_lengths[req] + local_pos``), not padded-concat positions.
     """
     if req_id_per_token is None or prefix_lengths is None:
-        return combine_topk_swa_indices_cp_b1(
-            topk_indices=topk_indices,
-            global_positions=global_positions,
-            sp_int=sp_int,
-            window_size=window_size,
-            compress_ratio=compress_ratio,
-            topk=topk,
-            M=M,
-            N=N,
+        if cu_cmp_offsets is None and cu_swa_offsets is None:
+            return combine_topk_swa_indices_cp_b1(
+                topk_indices=topk_indices,
+                global_positions=global_positions,
+                sp_int=sp_int,
+                window_size=window_size,
+                compress_ratio=compress_ratio,
+                topk=topk,
+                M=M,
+                N=N,
+            )
+        device = topk_indices.device
+        req_id_per_token = torch.zeros(
+            (int(global_positions.shape[0]),), dtype=torch.int64, device=device
         )
+        prefix_lengths = torch.full((1,), int(sp_int), dtype=torch.int64, device=device)
 
     device = topk_indices.device
     T = int(global_positions.shape[0])
@@ -1276,12 +1285,21 @@ def combine_topk_swa_indices_cp_varlen(
     )
     swa_len = torch.minimum(gp + 1, gp.new_full((), window_size)).to(torch.int64)
     combined_lens = (topk_len + swa_len).to(torch.int32).contiguous()
-    req_base = req * int(M)
+    if cu_cmp_offsets is not None:
+        cmp_base = _gather_1d(cu_cmp_offsets.to(device=device, dtype=torch.int64), req)
+    else:
+        cmp_base = req * int(M)
+    if cu_swa_offsets is not None:
+        swa_ws_base = _gather_1d(
+            cu_swa_offsets.to(device=device, dtype=torch.int64), req
+        )
+    else:
+        swa_ws_base = req * int(M) + int(N)
 
     if topk > 0:
         off_k = torch.arange(topk, device=device, dtype=torch.int64).unsqueeze(0)
         mask_k = off_k < topk_len.unsqueeze(1)
-        topk_vals = req_base.unsqueeze(1) + topk_indices.to(torch.int64)
+        topk_vals = cmp_base.unsqueeze(1) + topk_indices.to(torch.int64)
         combined_indices[:, :topk] = torch.where(
             mask_k,
             topk_vals.to(torch.int32),
@@ -1291,8 +1309,7 @@ def combine_topk_swa_indices_cp_varlen(
     off_w = torch.arange(window_size, device=device, dtype=torch.int64).unsqueeze(0)
     mask_w = off_w < swa_len.unsqueeze(1)
     swa_val = (
-        req_base.unsqueeze(1)
-        + int(N)
+        swa_ws_base.unsqueeze(1)
         + (gp - gather_start).unsqueeze(1)
         - swa_len.unsqueeze(1)
         + 1

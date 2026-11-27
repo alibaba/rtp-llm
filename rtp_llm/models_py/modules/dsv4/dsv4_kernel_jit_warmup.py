@@ -966,6 +966,59 @@ def _warmup_combine_topk_swa_indices_cp(
         prefix_lengths=prefix_lengths,
     )
 
+    cu_cmp_offsets = torch.zeros((1,), dtype=torch.int32, device=device)
+    cu_swa_offsets = torch.full((1,), n_value, dtype=torch.int32, device=device)
+    if topk_width > 0:
+        combine_topk_swa_indices_cp(
+            topk_indices=topk_indices,
+            global_positions=global_positions,
+            sp_int=0,
+            window_size=int(window_size),
+            compress_ratio=int(compress_ratio),
+            topk=topk_width,
+            M=0,
+            N=0,
+            req_id_per_token=req_id_per_token,
+            prefix_lengths=prefix_lengths,
+            flash_mla_indices=True,
+            dense_arange_topk=False,
+            cu_cmp_offsets=cu_cmp_offsets,
+            cu_swa_offsets=cu_swa_offsets,
+        )
+        if int(compress_ratio) == 128:
+            combine_topk_swa_indices_cp(
+                topk_indices=topk_indices,
+                global_positions=global_positions,
+                sp_int=0,
+                window_size=int(window_size),
+                compress_ratio=int(compress_ratio),
+                topk=topk_width,
+                M=0,
+                N=0,
+                req_id_per_token=req_id_per_token,
+                prefix_lengths=prefix_lengths,
+                flash_mla_indices=True,
+                dense_arange_topk=True,
+                cu_cmp_offsets=cu_cmp_offsets,
+                cu_swa_offsets=cu_swa_offsets,
+            )
+    else:
+        combine_topk_swa_indices_cp(
+            topk_indices=topk_indices,
+            global_positions=global_positions,
+            sp_int=0,
+            window_size=int(window_size),
+            compress_ratio=int(compress_ratio),
+            topk=0,
+            M=0,
+            N=0,
+            req_id_per_token=req_id_per_token,
+            prefix_lengths=prefix_lengths,
+            flash_mla_indices=True,
+            cu_cmp_offsets=None,
+            cu_swa_offsets=cu_swa_offsets,
+        )
+
 
 def _warmup_fused_kv_compress_norm_rope_insert(
     *,
@@ -2425,15 +2478,19 @@ def warmup_dsv4_fp8_swa_slot_dequant_jit(
             device=device,
         )
         swa_slot_prefixes = torch.zeros(batch_size, dtype=torch.int32, device=device)
+        swa_slot_cu_offsets = torch.arange(
+            0, total_tokens, 2, dtype=torch.int32, device=device
+        )
 
         def _launch_swa_slot_metadata() -> None:
             compute_swa_slot_in_flat_from_cu(
                 swa_slot_cu,
                 swa_slot_prefixes,
                 num_tokens=total_tokens,
-                M=4,
+                M=0,
                 window_size=128,
-                base_offset=1,
+                base_offset=0,
+                cu_swa_offsets=swa_slot_cu_offsets,
             )
 
         _run_triton_warmup_launch_with_retry(
@@ -2442,7 +2499,7 @@ def warmup_dsv4_fp8_swa_slot_dequant_jit(
             _launch_swa_slot_metadata,
             device=device,
         )
-        del swa_slot_cu, swa_slot_prefixes
+        del swa_slot_cu, swa_slot_prefixes, swa_slot_cu_offsets
     if direct_scatter_enabled:
         slot_mapping = torch.tensor([[0, 1], [1, -1]], dtype=torch.long, device=device)
         gather_lens = torch.tensor([2, 1], dtype=torch.int32, device=device)
@@ -2468,7 +2525,43 @@ def warmup_dsv4_fp8_swa_slot_dequant_jit(
             full_entries_per_block=entries_per_block,
             num_unique_blocks=1,
         )
-        del slot_mapping, gather_lens, workspace
+        workspace_2d = torch.empty((4, HEAD_DIM), dtype=torch.bfloat16, device=device)
+        cu_dst_2d = torch.tensor([0, 2], dtype=torch.int32, device=device)
+        cu_tiles_2d = torch.tensor([0, 1, 2], dtype=torch.int32, device=device)
+        if not try_dequantize_and_gather_k_cache_slots_to_workspace(
+            out=workspace_2d,
+            k_cache=full_view,
+            slot_mapping=slot_mapping,
+            gather_lens=gather_lens,
+            offset=0,
+            cu_tiles=cu_tiles_2d,
+            total_tiles=2,
+            cu_dst_offsets=cu_dst_2d,
+        ):
+            raise RuntimeError(
+                "DSV4 SWA ragged direct dequant-scatter is enabled but unsupported "
+                "during JIT warmup"
+            )
+        _launch_dequantize_and_gather_k_slots_cp_rank_major_unchecked(
+            workspace_2d,
+            full_raw.view(cp_size, local_slice_bytes),
+            slot_mapping,
+            gather_lens,
+            0,
+            full_entries_per_block=entries_per_block,
+            num_unique_blocks=1,
+            cu_tiles=cu_tiles_2d,
+            total_tiles=2,
+            cu_dst_offsets=cu_dst_2d,
+        )
+        del (
+            slot_mapping,
+            gather_lens,
+            workspace,
+            workspace_2d,
+            cu_dst_2d,
+            cu_tiles_2d,
+        )
     if direct_gather_enabled:
         pool_cache = torch.zeros((2, 4, ENTRY_BYTES), dtype=torch.uint8, device=device)
         for batch_size in direct_gather_batches:
@@ -2505,22 +2598,30 @@ def warmup_dsv4_fp8_swa_slot_dequant_jit(
         restore_indices = torch.arange(batch_size, dtype=torch.int64, device=device)
         restore_seq_lens = torch.ones(batch_size, dtype=torch.int32, device=device)
         restore_workspace = torch.empty(
-            (batch_size, 2, HEAD_DIM), dtype=torch.bfloat16, device=device
+            (batch_size, HEAD_DIM), dtype=torch.bfloat16, device=device
         )
+        restore_cu_dst = torch.arange(batch_size, dtype=torch.int32, device=device)
         restored = try_restore_dequantize_scatter_packed_k_cache_flat(
             restore_workspace,
             restore_gathered,
             restore_indices,
             restore_seq_lens,
-            1,
+            0,
             seq_lens_total=batch_size,
+            cu_dst_offsets=restore_cu_dst,
         )
         if not restored:
             raise RuntimeError(
                 "DSV4 fused restore-dequant-scatter is supported but rejected "
                 f"JIT warmup for batch_size={batch_size}"
             )
-        del restore_gathered, restore_indices, restore_seq_lens, restore_workspace
+        del (
+            restore_gathered,
+            restore_indices,
+            restore_seq_lens,
+            restore_workspace,
+            restore_cu_dst,
+        )
     del full_raw, full_view, slot_indices, out
     _sync_cuda(device)
     if rank == 0:

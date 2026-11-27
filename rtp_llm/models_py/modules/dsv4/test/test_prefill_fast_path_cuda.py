@@ -728,10 +728,11 @@ class PrefillFastPathCudaTest(_PrefillForwardTestBase):
                             window_size=4,
                             compress_ratio=1,
                             topk=0,
-                            M=captured.M,
+                            M=0,
                             N=0,
                             req_id_per_token=requests,
                             prefix_lengths=prefixes,
+                            cu_swa_offsets=captured.cu_swa_offsets,
                         )
                         torch.testing.assert_close(captured.combined_indices, indices)
                         torch.testing.assert_close(captured.combined_lens, lens)
@@ -842,12 +843,63 @@ class PrefillFastPathCudaTest(_PrefillForwardTestBase):
                         self.assertTrue(torch.all(captured_kv[:, width:] == 0))
 
                         meta = captured_workspace or captured_swa
-                        base = captured_workspace.N if captured_workspace else 0
-                        expected_slots = [
-                            request * meta.M + base + min(prefix, 3) + offset
-                            for request, (length, prefix) in enumerate(zip(lens, prefs))
-                            for offset in range(length)
-                        ]
+                        cu_req = [0, lens[0]]
+                        if captured_workspace:
+                            expected_cu_cmp = [
+                                request * (captured_workspace.N + 3) + cu_req[request]
+                                for request in range(len(lens))
+                            ]
+                            expected_cu_swa = [
+                                off + captured_workspace.N for off in expected_cu_cmp
+                            ]
+                            self.assertEqual(
+                                captured_workspace.total_ws_rows,
+                                2 * (captured_workspace.N + 3) + 8,
+                            )
+                            torch.testing.assert_close(
+                                captured_workspace.cu_cmp_offsets,
+                                torch.tensor(
+                                    expected_cu_cmp,
+                                    dtype=torch.int32,
+                                    device=device,
+                                ),
+                            )
+                            torch.testing.assert_close(
+                                captured_workspace.cu_swa_offsets,
+                                torch.tensor(
+                                    expected_cu_swa,
+                                    dtype=torch.int32,
+                                    device=device,
+                                ),
+                            )
+                            expected_slots = [
+                                expected_cu_swa[request] + min(prefix, 3) + offset
+                                for request, (length, prefix) in enumerate(
+                                    zip(lens, prefs)
+                                )
+                                for offset in range(length)
+                            ]
+                        else:
+                            expected_cu_swa = [
+                                request * 3 + cu_req[request]
+                                for request in range(len(lens))
+                            ]
+                            self.assertEqual(captured_swa.total_ws_rows, 2 * 3 + 8)
+                            torch.testing.assert_close(
+                                captured_swa.cu_swa_offsets,
+                                torch.tensor(
+                                    expected_cu_swa,
+                                    dtype=torch.int32,
+                                    device=device,
+                                ),
+                            )
+                            expected_slots = [
+                                expected_cu_swa[request] + min(prefix, 3) + offset
+                                for request, (length, prefix) in enumerate(
+                                    zip(lens, prefs)
+                                )
+                                for offset in range(length)
+                            ]
                         slots = (
                             meta.new_k_slot_in_flat
                             if captured_workspace

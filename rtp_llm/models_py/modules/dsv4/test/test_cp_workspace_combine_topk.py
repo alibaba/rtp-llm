@@ -365,6 +365,39 @@ def test_cp_varlen_b1_matches_b1_helper() -> None:
     assert torch.equal(idx_var, idx_b1)
 
 
+def test_cp_varlen_ragged_offsets() -> None:
+    win = 8
+    ratio = 4
+    topk = 4
+    prefix = torch.tensor([0, 10], dtype=torch.int64)
+    req = torch.tensor([0, 0, 1, 1], dtype=torch.int32)
+    gp = torch.tensor([0, 7, 10, 13], dtype=torch.int64)
+    topk_indices = torch.tensor(
+        [[0, 1, 2, 3]] * 4,
+        dtype=torch.int32,
+    )
+    cu_cmp = torch.tensor([0, 12], dtype=torch.int32)
+    cu_swa = torch.tensor([2, 18], dtype=torch.int32)
+    idx_rag, lens_rag = combine_varlen(
+        topk_indices=topk_indices,
+        global_positions=gp,
+        sp_int=0,
+        window_size=win,
+        compress_ratio=ratio,
+        topk=topk,
+        M=0,
+        N=0,
+        req_id_per_token=req,
+        prefix_lengths=prefix,
+        cu_cmp_offsets=cu_cmp,
+        cu_swa_offsets=cu_swa,
+    )
+    # Token 2 belongs to req 1 -> cmp base 12, swa base 18 (gp=10, gather_start=3, swa_len=8 => 18+0).
+    assert int(idx_rag[2, 0].item()) == 12
+    assert int(idx_rag[2, 1].item()) == 13
+    assert int(idx_rag[2, int(lens_rag[2].item()) - 8].item()) == 18
+
+
 if __name__ == "__main__":
     test_cp1_b1_fresh_matches_kernel_reference()
     test_cp2_b1_zigzag_each_rank_matches_kernel_at_global_pos()
@@ -372,4 +405,5 @@ if __name__ == "__main__":
     test_cp_swa_only_topk0()
     test_cp_varlen_b2_adds_request_workspace_offsets()
     test_cp_varlen_b1_matches_b1_helper()
+    test_cp_varlen_ragged_offsets()
     print("OK")

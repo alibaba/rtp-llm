@@ -443,6 +443,169 @@ class SwaCombineTopkTest(unittest.TestCase):
             prefix_lengths=torch.zeros(1, dtype=torch.int64, device=self.device),
         )
 
+    def test_ragged_offsets_parity_non_cp_and_cp(self):
+        from rtp_llm.models_py.modules.dsv4.cp import combine_topk_swa_indices_cp_varlen
+
+        win = 8
+        ratio = 4
+        topk = 4
+        prefix = torch.tensor([0, 10, 2], dtype=torch.int32, device=self.device)
+        inputs = [8, 6, 4]
+        qsl = torch.tensor([0, 8, 14, 18], dtype=torch.int32, device=self.device)
+        seq_lens = prefix + torch.tensor(inputs, dtype=torch.int32, device=self.device)
+        gather_lens = torch.tensor(inputs, dtype=torch.int32, device=self.device) + torch.clamp_max(
+            prefix, win - 1
+        )
+        n_per_req = seq_lens // ratio
+        ws_per_req = n_per_req + gather_lens
+        cu_cmp = torch.tensor(
+            [0, int(ws_per_req[0].item()), int(ws_per_req[:2].sum().item())],
+            dtype=torch.int32,
+            device=self.device,
+        )
+        cu_swa = cu_cmp + n_per_req
+        T = sum(inputs)
+        topk_indices = torch.randint(0, 3, (T, topk), dtype=torch.int32, device=self.device)
+
+        got_idx, got_lens = combine_topk_swa_indices(
+            topk_indices=topk_indices,
+            query_start_loc=qsl,
+            seq_lens=seq_lens,
+            gather_lens=gather_lens,
+            window_size=win,
+            compress_ratio=ratio,
+            topk=topk,
+            cu_cmp_offsets=cu_cmp,
+            cu_swa_offsets=cu_swa,
+            flash_mla_indices=True,
+        )
+        # Non-CP reference via per-token global position and CP varlen ref.
+        req = torch.repeat_interleave(
+            torch.arange(3, dtype=torch.int32, device=self.device),
+            torch.tensor(inputs, dtype=torch.int32, device=self.device),
+        )
+        gp = torch.cat(
+            [
+                torch.arange(int(p.item()), int(p.item()) + s, dtype=torch.int64, device=self.device)
+                for p, s in zip(prefix, inputs)
+            ]
+        )
+        ref_idx, ref_lens = combine_topk_swa_indices_cp_varlen(
+            topk_indices=topk_indices,
+            global_positions=gp,
+            sp_int=0,
+            window_size=win,
+            compress_ratio=ratio,
+            topk=topk,
+            req_id_per_token=req,
+            prefix_lengths=prefix,
+            cu_cmp_offsets=cu_cmp,
+            cu_swa_offsets=cu_swa,
+        )
+        self.assertTrue(torch.equal(got_lens, ref_lens))
+        self.assertTrue(torch.equal(got_idx.squeeze(1), ref_idx))
+
+        # CP Triton kernel (dense_arange_topk=False & True) and SWA-only (cu_cmp_offsets=None).
+        got_cp_idx, got_cp_lens = combine_topk_swa_indices_cp(
+            topk_indices=topk_indices,
+            global_positions=gp,
+            sp_int=0,
+            window_size=win,
+            compress_ratio=ratio,
+            topk=topk,
+            req_id_per_token=req,
+            prefix_lengths=prefix,
+            flash_mla_indices=True,
+            cu_cmp_offsets=cu_cmp,
+            cu_swa_offsets=cu_swa,
+        )
+        self.assertTrue(torch.equal(got_cp_lens, ref_lens))
+        self.assertTrue(torch.equal(got_cp_idx.squeeze(1), ref_idx))
+
+        arange_row = torch.arange(topk, dtype=torch.int32, device=self.device).view(1, topk).expand(T, topk)
+        got_hca, got_hca_lens = combine_topk_swa_indices_cp(
+            topk_indices=arange_row,
+            global_positions=gp,
+            sp_int=0,
+            window_size=win,
+            compress_ratio=ratio,
+            topk=topk,
+            req_id_per_token=req,
+            prefix_lengths=prefix,
+            flash_mla_indices=True,
+            dense_arange_topk=True,
+            cu_cmp_offsets=cu_cmp,
+            cu_swa_offsets=cu_swa,
+        )
+        ref_hca, ref_hca_lens = combine_topk_swa_indices_cp_varlen(
+            topk_indices=arange_row.contiguous(),
+            global_positions=gp,
+            sp_int=0,
+            window_size=win,
+            compress_ratio=ratio,
+            topk=topk,
+            req_id_per_token=req,
+            prefix_lengths=prefix,
+            cu_cmp_offsets=cu_cmp,
+            cu_swa_offsets=cu_swa,
+        )
+        self.assertTrue(torch.equal(got_hca_lens, ref_hca_lens))
+        self.assertTrue(torch.equal(got_hca.squeeze(1), ref_hca))
+
+        # SWA-only (cu_cmp_offsets=None, topk=0) B=1 & B=3.
+        got_swa, got_swa_lens = combine_topk_swa_indices_cp(
+            topk_indices=torch.empty((T, 0), dtype=torch.int32, device=self.device),
+            global_positions=gp,
+            sp_int=0,
+            window_size=win,
+            compress_ratio=1,
+            topk=0,
+            req_id_per_token=req,
+            prefix_lengths=prefix,
+            flash_mla_indices=True,
+            cu_cmp_offsets=None,
+            cu_swa_offsets=cu_swa,
+        )
+        ref_swa, ref_swa_lens = combine_topk_swa_indices_cp_varlen(
+            topk_indices=torch.empty((T, 0), dtype=torch.int32, device=self.device),
+            global_positions=gp,
+            sp_int=0,
+            window_size=win,
+            compress_ratio=1,
+            topk=0,
+            req_id_per_token=req,
+            prefix_lengths=prefix,
+            cu_cmp_offsets=None,
+            cu_swa_offsets=cu_swa,
+        )
+        self.assertTrue(torch.equal(got_swa_lens, ref_swa_lens))
+        self.assertTrue(torch.equal(got_swa.squeeze(1), ref_swa))
+
+        # B=1 CP non-varlen with ragged offsets.
+        gp_b1 = gp[:8]
+        got_b1_idx, got_b1_lens = combine_topk_swa_indices_cp(
+            topk_indices=topk_indices[:8],
+            global_positions=gp_b1,
+            sp_int=0,
+            window_size=win,
+            compress_ratio=ratio,
+            topk=topk,
+            cu_cmp_offsets=torch.tensor([3], dtype=torch.int32, device=self.device),
+            cu_swa_offsets=torch.tensor([9], dtype=torch.int32, device=self.device),
+        )
+        ref_b1_idx, ref_b1_lens = combine_topk_swa_indices_cp_varlen(
+            topk_indices=topk_indices[:8],
+            global_positions=gp_b1,
+            sp_int=0,
+            window_size=win,
+            compress_ratio=ratio,
+            topk=topk,
+            cu_cmp_offsets=torch.tensor([3], dtype=torch.int32, device=self.device),
+            cu_swa_offsets=torch.tensor([9], dtype=torch.int32, device=self.device),
+        )
+        self.assertTrue(torch.equal(got_b1_lens, ref_b1_lens))
+        self.assertTrue(torch.equal(got_b1_idx, ref_b1_idx))
+
 
 if __name__ == "__main__":
     unittest.main()

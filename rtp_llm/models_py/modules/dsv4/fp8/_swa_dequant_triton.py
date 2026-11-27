@@ -54,6 +54,8 @@ class CPByteSlicedSwaPrefixPending:
     work_waited: bool = False
     cu_tiles: Optional[torch.Tensor] = None
     total_tiles: Optional[int] = None
+    cu_dst_offsets: Optional[torch.Tensor] = None
+    cu_dst_offsets_cpu: Optional[Tuple[int, ...]] = None
 
 
 # Layout constants — must stay byte-aligned with
@@ -183,7 +185,15 @@ def _resolve_flat_tile_batch_and_idx(cu_tiles_ptr, num_reqs):
     return batch_idx, tile_idx
 
 
-@triton.jit(do_not_specialize=["offset", "max_blocks_per_seq", "num_reqs"])
+@triton.jit(
+    do_not_specialize=[
+        "out_stride0",
+        "out_stride1",
+        "offset",
+        "max_blocks_per_seq",
+        "num_reqs",
+    ]
+)
 def _dequantize_and_gather_k_kernel(
     out_ptr,
     out_stride0,
@@ -195,6 +205,7 @@ def _dequantize_and_gather_k_kernel(
     gather_lens_ptr,
     max_blocks_per_seq,
     cu_tiles_ptr,
+    cu_dst_offsets_ptr,
     num_reqs,
     fp8_dim: tl.constexpr,
     bf16_dim: tl.constexpr,
@@ -212,6 +223,7 @@ def _dequantize_and_gather_k_kernel(
     TILE_T: tl.constexpr,
     TRAP_INVALID_KV_ACCESS: tl.constexpr,
     USE_FLAT_GRID: tl.constexpr,
+    HAS_CU_DST_OFFSETS: tl.constexpr,
 ):
     """One program per (request, tile worker) or per active flat 1D tile.
 
@@ -285,8 +297,12 @@ def _dequantize_and_gather_k_kernel(
         # very large per-request strides, so batch_idx * out_stride0 may exceed
         # signed int32 even though the underlying tensor allocation is valid.
         output_row = offset.to(tl.int64) + i_vec.to(tl.int64)
-        batch_off = batch_idx.to(tl.int64) * out_stride0.to(tl.int64)
-        output_row_off = batch_off + output_row * out_stride1.to(tl.int64)
+        if HAS_CU_DST_OFFSETS:
+            dst_base = tl.load(cu_dst_offsets_ptr + batch_idx).to(tl.int64)
+            output_row_off = (dst_base + output_row) * out_stride0.to(tl.int64)
+        else:
+            batch_off = batch_idx.to(tl.int64) * out_stride0.to(tl.int64)
+            output_row_off = batch_off + output_row * out_stride1.to(tl.int64)
 
         # NoPE dequant: one 2D fp8 load over the padded [TILE_T, fp8_dim_pow2]
         # tile plus one (TILE_T, n_scale_groups) scale load. Reshaping to
@@ -352,25 +368,54 @@ def dequantize_and_gather_k_cache(
     *,
     cu_tiles: Optional[torch.Tensor] = None,
     total_tiles: Optional[int] = None,
+    cu_dst_offsets: Optional[torch.Tensor] = None,
+    max_tokens_hint: int = 0,
 ) -> None:
     """Dequantize + gather FP8 K cache into a BF16 workspace.
 
-    Direct port of vLLM ``dequantize_and_gather_k_cache``.
+    Direct port of vLLM ``dequantize_and_gather_k_cache``, extended with
+    optional ragged 2D destination offsets via ``cu_dst_offsets``.
 
     Args:
-      out:          ``[num_reqs, max_num_tokens, 512]`` bf16 — workspace; this
-                    function writes into ``out[:, offset:offset+gather_len, :]``.
-      k_cache:      ``[num_blocks, block_size, 584]`` uint8 — the FP8 SWA pool
-                    in ``fp8_ds_mla`` layout.
-      seq_lens:     ``[num_reqs]`` int — total tokens per request in ``k_cache``.
-      gather_lens:  optional ``[num_reqs]`` int — tokens to gather (suffix);
-                    ``None`` ⇒ gather all ``seq_lens[r]`` tokens for request r.
-      block_table:  ``[num_reqs, max_blocks_per_seq]`` int — physical block id
-                    per logical block per request.
-      block_size:   tokens per cache block (matches the 3D shape of k_cache).
-      offset:       column offset in ``out`` to start writing.
+      out:             Either ``[num_reqs, max_num_tokens, 512]`` bf16 when
+                       ``cu_dst_offsets is None`` (writes
+                       ``out[:, offset:offset+gather_len, :]``) or flat ragged
+                       ``[total_rows, 512]`` bf16 when ``cu_dst_offsets`` is
+                       provided (writes
+                       ``out[cu_dst_offsets[b]+offset : ...+gather_len, :]``).
+      k_cache:         ``[num_blocks, block_size, 584]`` uint8 — the FP8 SWA pool
+                       in ``fp8_ds_mla`` layout.
+      seq_lens:        ``[num_reqs]`` int — total tokens per request in ``k_cache``.
+      gather_lens:     optional ``[num_reqs]`` int — tokens to gather (suffix);
+                       ``None`` ⇒ gather all ``seq_lens[r]`` tokens for request r.
+      block_table:     ``[num_reqs, max_blocks_per_seq]`` int — physical block id
+                       per logical block per request.
+      block_size:      tokens per cache block (matches the 3D shape of k_cache).
+      offset:          row offset relative to request base in ``out`` to start writing.
+      cu_dst_offsets:  optional ``[>= num_reqs]`` int32 contiguous tensor on
+                       ``out.device`` giving base row per request in 2D ``out``.
+      max_tokens_hint: optional per-request token count hint used when launching
+                       the non-flat grid against a 2D ragged workspace.
     """
-    assert out.dim() == 3 and out.shape[-1] == HEAD_DIM and out.dtype == torch.bfloat16
+    num_reqs = int(seq_lens.shape[0])
+    has_cu_dst_offsets = cu_dst_offsets is not None
+    if has_cu_dst_offsets:
+        assert out.dim() == 2 and out.shape[-1] == HEAD_DIM and out.dtype == torch.bfloat16
+        assert (
+            out.stride(1) == 1
+        ), f"2D out must have contiguous last dim; got stride={out.stride()}"
+        assert (
+            cu_dst_offsets.dim() == 1
+            and int(cu_dst_offsets.numel()) >= num_reqs
+            and cu_dst_offsets.dtype == torch.int32
+            and cu_dst_offsets.device == out.device
+            and cu_dst_offsets.is_contiguous()
+        ), (
+            f"cu_dst_offsets contract mismatch: shape={cu_dst_offsets.shape} "
+            f"dtype={cu_dst_offsets.dtype} num_reqs={num_reqs}"
+        )
+    else:
+        assert out.dim() == 3 and out.shape[-1] == HEAD_DIM and out.dtype == torch.bfloat16
     assert (
         k_cache.dim() == 3
         and k_cache.shape[-1] == ENTRY_BYTES
@@ -393,7 +438,6 @@ def dequantize_and_gather_k_cache(
         f"dev={block_table.device} (k_cache dev={k_cache.device})"
     )
 
-    num_reqs = int(seq_lens.shape[0])
     if cu_tiles is not None and total_tiles is not None:
         total_tiles_int = int(total_tiles)
         if num_reqs == 0 or total_tiles_int <= 0:
@@ -409,8 +453,15 @@ def dequantize_and_gather_k_cache(
         use_flat_grid = True
         cu_tiles_arg: Optional[torch.Tensor] = cu_tiles
     else:
+        if num_reqs == 0:
+            return
+        tokens_hint = (
+            int(max_tokens_hint)
+            if int(max_tokens_hint) > 0
+            else (int(out.shape[1]) if not has_cu_dst_offsets else int(out.shape[0]))
+        )
         num_workers = _select_dequant_num_workers(
-            num_reqs, max_tokens_hint=int(out.shape[1])
+            num_reqs, max_tokens_hint=tokens_hint
         )
         grid = (num_reqs, num_workers)
         use_flat_grid = False
@@ -427,6 +478,7 @@ def dequantize_and_gather_k_cache(
         gather_lens,
         max_blocks_per_seq=block_table.shape[-1],
         cu_tiles_ptr=cu_tiles_arg,
+        cu_dst_offsets_ptr=cu_dst_offsets,
         num_reqs=num_reqs,
         fp8_dim=NOPE_DIM,
         bf16_dim=ROPE_DIM,
@@ -444,6 +496,7 @@ def dequantize_and_gather_k_cache(
         TILE_T=TILE_T,
         TRAP_INVALID_KV_ACCESS=True,
         USE_FLAT_GRID=use_flat_grid,
+        HAS_CU_DST_OFFSETS=has_cu_dst_offsets,
         num_warps=4,
     )
 
@@ -509,6 +562,7 @@ def _dequantize_and_gather_k_slots_kernel(
     gather_lens_ptr,
     max_gather_len,
     cu_tiles_ptr,
+    cu_dst_offsets_ptr,
     num_reqs,
     fp8_dim: tl.constexpr,
     bf16_dim: tl.constexpr,
@@ -527,6 +581,7 @@ def _dequantize_and_gather_k_slots_kernel(
     CP_RANK_MAJOR_RAW: tl.constexpr,
     SLICE_GE_TILE_COLS: tl.constexpr,
     USE_FLAT_GRID: tl.constexpr,
+    HAS_CU_DST_OFFSETS: tl.constexpr,
 ):
     """Gather/dequant using pre-translated flat global slot ids, TILE_T
     contiguous gathered tokens per loop iteration.
@@ -564,8 +619,12 @@ def _dequantize_and_gather_k_slots_kernel(
         row_mask = row_valid[:, None] & slot_valid[:, None]
 
         output_row = offset.to(tl.int64) + i_vec.to(tl.int64)
-        batch_off = batch_idx.to(tl.int64) * out_stride0.to(tl.int64)
-        output_row_off = batch_off + output_row * out_stride1.to(tl.int64)
+        if HAS_CU_DST_OFFSETS:
+            dst_base = tl.load(cu_dst_offsets_ptr + batch_idx).to(tl.int64)
+            output_row_off = (dst_base + output_row) * out_stride0.to(tl.int64)
+        else:
+            batch_off = batch_idx.to(tl.int64) * out_stride0.to(tl.int64)
+            output_row_off = batch_off + output_row * out_stride1.to(tl.int64)
 
         physical_block_idx = slots // cache_block_size
         pos_in_block = slots % cache_block_size
@@ -676,6 +735,7 @@ def _launch_dequantize_and_gather_k_slots_unchecked(
     cp_rank_major_raw: bool,
     cu_tiles: Optional[torch.Tensor] = None,
     total_tiles: Optional[int] = None,
+    cu_dst_offsets: Optional[torch.Tensor] = None,
 ) -> None:
     """Launch after the caller has established the packed-slot contracts."""
     batch_size = int(slot_mapping.shape[0])
@@ -716,6 +776,7 @@ def _launch_dequantize_and_gather_k_slots_unchecked(
         gather_lens,
         max_gather_len,
         cu_tiles_ptr=cu_tiles_arg,
+        cu_dst_offsets_ptr=cu_dst_offsets,
         num_reqs=batch_size,
         fp8_dim=NOPE_DIM,
         bf16_dim=ROPE_DIM,
@@ -737,6 +798,7 @@ def _launch_dequantize_and_gather_k_slots_unchecked(
         # element); narrower slices fall back to per-element division.
         SLICE_GE_TILE_COLS=int(block_stride) >= _MIN_SINGLE_CARRY_SLICE_BYTES,
         USE_FLAT_GRID=use_flat_grid,
+        HAS_CU_DST_OFFSETS=cu_dst_offsets is not None,
         num_warps=4,
     )
 
@@ -752,6 +814,7 @@ def _launch_dequantize_and_gather_k_slots_cp_rank_major_unchecked(
     num_unique_blocks: int,
     cu_tiles: Optional[torch.Tensor] = None,
     total_tiles: Optional[int] = None,
+    cu_dst_offsets: Optional[torch.Tensor] = None,
 ) -> None:
     """Launch after start/compaction established rank-major raw contracts."""
     _launch_dequantize_and_gather_k_slots_unchecked(
@@ -766,6 +829,7 @@ def _launch_dequantize_and_gather_k_slots_cp_rank_major_unchecked(
         cp_rank_major_raw=True,
         cu_tiles=cu_tiles,
         total_tiles=total_tiles,
+        cu_dst_offsets=cu_dst_offsets,
     )
 
 
@@ -778,6 +842,7 @@ def dequantize_and_gather_k_cache_slots(
     *,
     cu_tiles: Optional[torch.Tensor] = None,
     total_tiles: Optional[int] = None,
+    cu_dst_offsets: Optional[torch.Tensor] = None,
 ) -> None:
     """Dequantize + gather FP8 K cache using flat global slot ids.
 
@@ -786,7 +851,28 @@ def dequantize_and_gather_k_cache_slots(
     This is the SWA prefill path for layouts where block-table row coverage
     differs from the per-block ring entry count.
     """
-    assert out.dim() == 3 and out.shape[-1] == HEAD_DIM and out.dtype == torch.bfloat16
+    has_cu_dst_offsets = cu_dst_offsets is not None
+    assert (
+        slot_mapping.dim() == 2
+    ), f"slot_mapping must be [num_reqs, max_gather_len], got {slot_mapping.shape}"
+    if has_cu_dst_offsets:
+        assert out.dim() == 2 and out.shape[-1] == HEAD_DIM and out.dtype == torch.bfloat16
+        assert (
+            out.stride(1) == 1
+        ), f"2D out must have contiguous last dim; got stride={out.stride()}"
+        assert (
+            cu_dst_offsets.dim() == 1
+            and int(cu_dst_offsets.numel()) >= int(slot_mapping.shape[0])
+            and cu_dst_offsets.dtype == torch.int32
+            and cu_dst_offsets.device == out.device
+            and cu_dst_offsets.is_contiguous()
+        ), f"cu_dst_offsets contract mismatch: shape={cu_dst_offsets.shape}"
+    else:
+        assert out.dim() == 3 and out.shape[-1] == HEAD_DIM and out.dtype == torch.bfloat16
+        assert int(slot_mapping.shape[0]) == int(out.shape[0]), (
+            f"slot_mapping batch ({slot_mapping.shape[0]}) must match out batch "
+            f"({out.shape[0]})"
+        )
     assert (
         k_cache.dim() == 3
         and k_cache.shape[-1] == ENTRY_BYTES
@@ -795,13 +881,6 @@ def dequantize_and_gather_k_cache_slots(
     assert k_cache.stride(2) == 1 and k_cache.stride(1) == ENTRY_BYTES, (
         "k_cache must be packed within each token (stride[1]=584, stride[2]=1); "
         f"got stride={k_cache.stride()}"
-    )
-    assert (
-        slot_mapping.dim() == 2
-    ), f"slot_mapping must be [num_reqs, max_gather_len], got {slot_mapping.shape}"
-    assert int(slot_mapping.shape[0]) == int(out.shape[0]), (
-        f"slot_mapping batch ({slot_mapping.shape[0]}) must match out batch "
-        f"({out.shape[0]})"
     )
     if gather_lens is not None:
         assert int(gather_lens.shape[0]) == int(slot_mapping.shape[0]), (
@@ -845,6 +924,7 @@ def dequantize_and_gather_k_cache_slots(
         cp_rank_major_raw=False,
         cu_tiles=cu_tiles,
         total_tiles=total_tiles,
+        cu_dst_offsets=cu_dst_offsets,
     )
 
 
@@ -862,6 +942,7 @@ def try_dequantize_and_gather_k_cache_slots_to_workspace(
     *,
     cu_tiles: Optional[torch.Tensor] = None,
     total_tiles: Optional[int] = None,
+    cu_dst_offsets: Optional[torch.Tensor] = None,
 ) -> bool:
     """Dequantize compact slots directly into their final workspace rows.
 
@@ -873,14 +954,13 @@ def try_dequantize_and_gather_k_cache_slots_to_workspace(
     if not direct_triton_fast_path_supported(out.device):
         return False
 
+    has_cu_dst_offsets = cu_dst_offsets is not None
     tensors = (out, k_cache, slot_mapping, gather_lens)
     if (
         any(not tensor.is_cuda for tensor in tensors)
         or any(tensor.device != out.device for tensor in tensors[1:])
-        or out.dim() != 3
         or out.dtype != torch.bfloat16
         or int(out.shape[-1]) != HEAD_DIM
-        or int(out.stride(2)) != 1
         or k_cache.dim() != 3
         or k_cache.dtype != torch.uint8
         or int(k_cache.shape[-1]) != ENTRY_BYTES
@@ -891,15 +971,33 @@ def try_dequantize_and_gather_k_cache_slots_to_workspace(
         or slot_mapping.dim() != 2
         or slot_mapping.dtype != torch.int64
         or not slot_mapping.is_contiguous()
-        or int(slot_mapping.shape[0]) != int(out.shape[0])
         or gather_lens.dim() != 1
         or gather_lens.dtype != torch.int32
         or not gather_lens.is_contiguous()
         or int(gather_lens.shape[0]) != int(slot_mapping.shape[0])
         or int(offset) < 0
-        or int(offset) + int(slot_mapping.shape[1]) > int(out.shape[1])
     ):
         return False
+    if has_cu_dst_offsets:
+        if (
+            not cu_dst_offsets.is_cuda
+            or cu_dst_offsets.device != out.device
+            or out.dim() != 2
+            or int(out.stride(1)) != 1
+            or cu_dst_offsets.dim() != 1
+            or cu_dst_offsets.dtype != torch.int32
+            or not cu_dst_offsets.is_contiguous()
+            or int(cu_dst_offsets.numel()) < int(slot_mapping.shape[0])
+        ):
+            return False
+    else:
+        if (
+            out.dim() != 3
+            or int(out.stride(2)) != 1
+            or int(slot_mapping.shape[0]) != int(out.shape[0])
+            or int(offset) + int(slot_mapping.shape[1]) > int(out.shape[1])
+        ):
+            return False
 
     batch_size = int(slot_mapping.shape[0])
     max_gather_len = int(slot_mapping.shape[1])
@@ -918,6 +1016,7 @@ def try_dequantize_and_gather_k_cache_slots_to_workspace(
         cp_rank_major_raw=False,
         cu_tiles=cu_tiles,
         total_tiles=total_tiles,
+        cu_dst_offsets=cu_dst_offsets,
     )
     return True
 
@@ -1329,6 +1428,7 @@ def _restore_dequantize_scatter_packed_k_cache_flat_kernel(
     gathered_rows,
     restore_indices_ptr,
     seq_lens_ptr,
+    cu_dst_offsets_ptr,
     batch_size,
     n_tokens,
     offset,
@@ -1339,6 +1439,7 @@ def _restore_dequantize_scatter_packed_k_cache_flat_kernel(
     entry_bytes: tl.constexpr,
     n_quant_blocks: tl.constexpr,
     BATCH_BLOCK: tl.constexpr,
+    HAS_CU_DST_OFFSETS: tl.constexpr,
 ):
     """Restore, dequantize, and scatter one packed row per program.
 
@@ -1362,16 +1463,39 @@ def _restore_dequantize_scatter_packed_k_cache_flat_kernel(
         tl.where(batch_offsets == batch_idx, seq_ends - seq_lens, 0), axis=0
     )
     token_in_request = token_idx - seq_start
-    destination_row = offset.to(tl.int64) + token_in_request
-    valid_destination = (
-        valid_batch
-        & (batch_idx < out_batch_size)
-        & (selected_seq_len >= 0)
-        & (token_in_request >= 0)
-        & (token_in_request < selected_seq_len)
-        & (destination_row >= 0)
-        & (destination_row < out_rows_per_batch)
-    )
+    safe_batch_idx = tl.where(valid_batch, batch_idx, 0).to(tl.int64)
+    if HAS_CU_DST_OFFSETS:
+        dst_base = tl.load(
+            cu_dst_offsets_ptr + safe_batch_idx, mask=valid_batch, other=0
+        ).to(tl.int64)
+        destination_row = dst_base + offset.to(tl.int64) + token_in_request
+        valid_destination = (
+            valid_batch
+            & (selected_seq_len >= 0)
+            & (token_in_request >= 0)
+            & (token_in_request < selected_seq_len)
+            & (destination_row >= 0)
+            & (destination_row < out_rows_per_batch)
+        )
+        safe_destination_row = tl.where(valid_destination, destination_row, 0)
+        output_row_ptr = out_ptr + safe_destination_row * out_stride0.to(tl.int64)
+    else:
+        destination_row = offset.to(tl.int64) + token_in_request
+        valid_destination = (
+            valid_batch
+            & (batch_idx < out_batch_size)
+            & (selected_seq_len >= 0)
+            & (token_in_request >= 0)
+            & (token_in_request < selected_seq_len)
+            & (destination_row >= 0)
+            & (destination_row < out_rows_per_batch)
+        )
+        safe_destination_row = tl.where(valid_destination, destination_row, 0)
+        output_row_ptr = (
+            out_ptr
+            + safe_batch_idx * out_stride0.to(tl.int64)
+            + safe_destination_row * out_stride1.to(tl.int64)
+        )
 
     restored_idx = tl.load(
         restore_indices_ptr + token_idx, mask=token_valid, other=-1
@@ -1383,13 +1507,6 @@ def _restore_dequantize_scatter_packed_k_cache_flat_kernel(
     token_fp8_ptr = token_ptr
     token_bf16_ptr = token_ptr + fp8_dim
     token_scale_ptr = token_ptr + token_data_size
-    safe_batch_idx = tl.where(valid_batch, batch_idx, 0).to(tl.int64)
-    safe_destination_row = tl.where(valid_destination, destination_row, 0)
-    output_row_ptr = (
-        out_ptr
-        + safe_batch_idx * out_stride0.to(tl.int64)
-        + safe_destination_row * out_stride1.to(tl.int64)
-    )
 
     for qblock_idx in tl.static_range(n_quant_blocks):
         qblock_start = qblock_idx * quant_block
@@ -1466,6 +1583,7 @@ def try_restore_dequantize_scatter_packed_k_cache_flat(
     offset: int,
     *,
     seq_lens_total: int,
+    cu_dst_offsets: Optional[torch.Tensor] = None,
 ) -> bool:
     """Fuse packed-row restore, BF16 dequantization, and workspace scatter.
 
@@ -1489,16 +1607,14 @@ def try_restore_dequantize_scatter_packed_k_cache_flat(
         return n_tokens == 0
     if not direct_triton_fast_path_supported(out.device):
         return False
+    has_cu_dst_offsets = cu_dst_offsets is not None
     tensors = (out, gathered, restore_indices, seq_lens)
     if (
         batch_size > 64
         or any(not tensor.is_cuda for tensor in tensors)
         or any(tensor.device != out.device for tensor in tensors[1:])
-        or out.dim() != 3
         or out.dtype != torch.bfloat16
-        or int(out.shape[0]) < batch_size
         or int(out.shape[-1]) != HEAD_DIM
-        or int(out.stride(2)) != 1
         or gathered.dim() != 2
         or gathered.dtype != torch.uint8
         or int(gathered.shape[-1]) != ENTRY_BYTES
@@ -1510,10 +1626,30 @@ def try_restore_dequantize_scatter_packed_k_cache_flat(
         or seq_lens.dtype != torch.int32
         or not seq_lens.is_contiguous()
         or int(offset) < 0
-        or int(offset) >= int(out.shape[1])
-        or n_tokens > batch_size * (int(out.shape[1]) - int(offset))
     ):
         return False
+    if has_cu_dst_offsets:
+        if (
+            not cu_dst_offsets.is_cuda
+            or cu_dst_offsets.device != out.device
+            or out.dim() != 2
+            or int(out.stride(1)) != 1
+            or cu_dst_offsets.dim() != 1
+            or cu_dst_offsets.dtype != torch.int32
+            or not cu_dst_offsets.is_contiguous()
+            or int(cu_dst_offsets.numel()) < batch_size
+            or n_tokens > int(out.shape[0])
+        ):
+            return False
+    else:
+        if (
+            out.dim() != 3
+            or int(out.shape[0]) < batch_size
+            or int(out.stride(2)) != 1
+            or int(offset) >= int(out.shape[1])
+            or n_tokens > batch_size * (int(out.shape[1]) - int(offset))
+        ):
+            return False
     if n_tokens == 0:
         return True
 
@@ -1522,12 +1658,13 @@ def try_restore_dequantize_scatter_packed_k_cache_flat(
         out,
         out.stride(0),
         out.stride(1),
-        int(out.shape[0]),
-        int(out.shape[1]),
+        1 if has_cu_dst_offsets else int(out.shape[0]),
+        int(out.shape[0]) if has_cu_dst_offsets else int(out.shape[1]),
         gathered,
         int(gathered.shape[0]),
         restore_indices,
         seq_lens,
+        cu_dst_offsets,
         batch_size,
         n_tokens,
         int(offset),
@@ -1538,6 +1675,7 @@ def try_restore_dequantize_scatter_packed_k_cache_flat(
         entry_bytes=ENTRY_BYTES,
         n_quant_blocks=NOPE_TILES,
         BATCH_BLOCK=batch_block,
+        HAS_CU_DST_OFFSETS=has_cu_dst_offsets,
         num_warps=4,
     )
     return True
@@ -1791,6 +1929,35 @@ def _validate_runtime_gather_lens(
     return saved
 
 
+def _write_ragged_2d_slices(
+    out: torch.Tensor,
+    offset: int,
+    batch_size: int,
+    width: int,
+    gather_lens_present: bool,
+    gather_lens_cpu: Tuple[int, ...],
+    cu_dst_offsets: torch.Tensor,
+    cu_dst_offsets_cpu: Optional[Tuple[int, ...]],
+    src_3d: Optional[torch.Tensor] = None,
+) -> None:
+    """Copy or zero-fill ragged 2D per-request workspace slices."""
+    offsets = (
+        cu_dst_offsets_cpu
+        if (cu_dst_offsets_cpu is not None and len(cu_dst_offsets_cpu) >= batch_size)
+        else cu_dst_offsets[:batch_size].tolist()
+    )
+    use_lens = gather_lens_present and len(gather_lens_cpu) == batch_size
+    for b in range(batch_size):
+        gl = int(gather_lens_cpu[b]) if use_lens else width
+        if gl > 0:
+            base = int(offsets[b]) + offset
+            dst = out[base : base + gl, :]
+            if src_3d is None:
+                dst.zero_()
+            else:
+                dst.copy_(src_3d[b, :gl, :])
+
+
 def start_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
     *,
     k_cache_raw: torch.Tensor,
@@ -1805,6 +1972,8 @@ def start_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
     profile_name: str = "dsv4.cp.all_gather.swa_prefix",
     cu_tiles: Optional[torch.Tensor] = None,
     total_tiles: Optional[int] = None,
+    cu_dst_offsets: Optional[torch.Tensor] = None,
+    cu_dst_offsets_cpu: Optional[Tuple[int, ...]] = None,
 ) -> Optional[CPByteSlicedSwaPrefixPending]:
     """Launch only the NCCL stage for CP byte-sliced SWA prefix reads."""
     assert slot_mapping.dim() == 2
@@ -1816,6 +1985,14 @@ def start_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
     W = int(slot_mapping.shape[1])
     if B == 0 or W == 0:
         return None
+    if cu_dst_offsets is not None:
+        assert (
+            cu_dst_offsets.dim() == 1
+            and int(cu_dst_offsets.numel()) >= B
+            and cu_dst_offsets.dtype == torch.int32
+            and cu_dst_offsets.device == k_cache_raw.device
+            and cu_dst_offsets.is_contiguous()
+        ), f"cu_dst_offsets contract mismatch: shape={cu_dst_offsets.shape}"
     assert (
         compaction is not None
     ), "CP byte-sliced SWA gather requires metadata-precomputed compaction"
@@ -1917,6 +2094,8 @@ def start_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
         local_slices=local_slices,
         cu_tiles=cu_tiles,
         total_tiles=total_tiles,
+        cu_dst_offsets=cu_dst_offsets,
+        cu_dst_offsets_cpu=cu_dst_offsets_cpu,
     )
 
 
@@ -1925,10 +2104,32 @@ def prepare_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
     *,
     out: torch.Tensor,
     stream: Optional[Any] = None,
+    cu_dst_offsets: Optional[torch.Tensor] = None,
+    cu_dst_offsets_cpu: Optional[Tuple[int, ...]] = None,
 ) -> None:
     """Enqueue restore/dequant/copy for a pending CP byte-sliced SWA read."""
     if pending.ready_event is not None:
         return
+    cu_dst_offsets_eff = (
+        cu_dst_offsets if cu_dst_offsets is not None else pending.cu_dst_offsets
+    )
+    cu_dst_offsets_cpu_eff = (
+        cu_dst_offsets_cpu
+        if cu_dst_offsets_cpu is not None
+        else pending.cu_dst_offsets_cpu
+    )
+    if cu_dst_offsets_eff is not None:
+        assert out.dim() == 2 and out.shape[-1] == HEAD_DIM and out.dtype == torch.bfloat16
+        assert out.stride(1) == 1
+        assert (
+            cu_dst_offsets_eff.dim() == 1
+            and int(cu_dst_offsets_eff.numel()) >= pending.B
+            and cu_dst_offsets_eff.dtype == torch.int32
+            and cu_dst_offsets_eff.device == out.device
+            and cu_dst_offsets_eff.is_contiguous()
+        )
+    else:
+        assert out.dim() == 3 and out.shape[-1] == HEAD_DIM and out.dtype == torch.bfloat16
     device = pending.gathered.device
     if stream is None:
         raise ValueError("CP byte-sliced SWA async prepare requires a stream")
@@ -1960,6 +2161,7 @@ def prepare_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
                     num_unique_blocks=int(pending.unique_blocks.numel()),
                     cu_tiles=pending.cu_tiles,
                     total_tiles=pending.total_tiles,
+                    cu_dst_offsets=cu_dst_offsets_eff,
                 )
             else:
                 full_raw = (
@@ -1988,7 +2190,19 @@ def prepare_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
                     pending.compact_slots.reshape(-1),
                 )
                 restored_3d = restored.view(pending.B, pending.W, HEAD_DIM)
-                if pending.gather_lens_cpu:
+                if cu_dst_offsets_eff is not None:
+                    _write_ragged_2d_slices(
+                        out,
+                        pending.offset,
+                        pending.B,
+                        pending.W,
+                        gather_lens_present=bool(pending.gather_lens_cpu),
+                        gather_lens_cpu=pending.gather_lens_cpu,
+                        cu_dst_offsets=cu_dst_offsets_eff,
+                        cu_dst_offsets_cpu=cu_dst_offsets_cpu_eff,
+                        src_3d=restored_3d,
+                    )
+                elif pending.gather_lens_cpu:
                     # CPU lengths are captured during compaction; avoid per-request
                     # device synchronizations in the fallback hot path.
                     for b, gl in enumerate(pending.gather_lens_cpu):
@@ -2064,14 +2278,18 @@ def dequantize_and_gather_k_cache_slots_cp_byte_sliced(
     *,
     cu_tiles: Optional[torch.Tensor] = None,
     total_tiles: Optional[int] = None,
+    cu_dst_offsets: Optional[torch.Tensor] = None,
+    cu_dst_offsets_cpu: Optional[Tuple[int, ...]] = None,
 ) -> None:
     """Reconstruct CP byte-sliced SWA entries with all_gather, then dequantize.
 
     Args:
-        out: BF16 destination workspace with shape ``[B, M, HEAD_DIM]``.
-            M is max_b(max(prefix_len, window_size - 1) + input_len))
-            Restored rows are written to ``out[:, offset:offset + W, :]``,
-            clipped per request by ``gather_lens`` when it is provided.
+        out: BF16 destination workspace with shape ``[B, M, HEAD_DIM]`` when
+            ``cu_dst_offsets is None`` or flat ragged ``[total_rows, HEAD_DIM]``
+            when ``cu_dst_offsets`` is provided. Restored rows are written to
+            ``out[:, offset:offset + W, :]`` (or
+            ``out[cu_dst_offsets[b] + offset : ..., :]``), clipped per request
+            by ``gather_lens`` when provided.
         k_cache_raw: Current rank's SWA_KV raw byte pool with shape
             ``[num_blocks, local_slice_bytes]``. Each row is this CP rank's
             byte slice of one physical SWA block.
@@ -2082,24 +2300,41 @@ def dequantize_and_gather_k_cache_slots_cp_byte_sliced(
             W is max_b(min(prefix_len, window_size - 1))
         gather_lens: Optional per-request valid length with shape ``[B]``.
             If ``None``, all ``W`` columns are copied for every request.
-        offset: Column offset in ``out`` where restored SWA rows begin.
+        offset: Row offset relative to request base in ``out`` where restored
+            SWA rows begin.
             This is ``0`` for SWA-only attention. For CSA/HCA workspace
-            attention, ``out[:, :offset, :]`` holds compressed K, so SWA rows
+            attention, compressed K precedes SWA rows, so SWA rows
             start after that compressed prefix.
         full_entries_per_block: Entry count of the reconstructed full SWA
             block, i.e. the divisor used to decode ``slot_mapping``.
         cp_rank: Current CP rank id. Used for contract validation only; the
             input pool already contains this rank's local byte slice.
         cp_size: Number of CP ranks whose byte slices form one full SWA block.
+        cu_dst_offsets: Optional ``[>= B]`` int32 contiguous tensor on
+            ``out.device`` giving per-request base row in 2D ``out``.
+        cu_dst_offsets_cpu: Optional host tuple matching ``cu_dst_offsets`` to
+            avoid D2H syncs on zero-fill/fallback paths.
     """
-    assert out.dim() == 3 and out.shape[-1] == HEAD_DIM and out.dtype == torch.bfloat16
+    has_cu_dst_offsets = cu_dst_offsets is not None
     assert slot_mapping.dim() == 2
+    B = int(slot_mapping.shape[0])
+    W = int(slot_mapping.shape[1])
+    if has_cu_dst_offsets:
+        assert out.dim() == 2 and out.shape[-1] == HEAD_DIM and out.dtype == torch.bfloat16
+        assert out.stride(1) == 1
+        assert (
+            cu_dst_offsets.dim() == 1
+            and int(cu_dst_offsets.numel()) >= B
+            and cu_dst_offsets.dtype == torch.int32
+            and cu_dst_offsets.device == out.device
+            and cu_dst_offsets.is_contiguous()
+        ), f"cu_dst_offsets contract mismatch: shape={cu_dst_offsets.shape}"
+    else:
+        assert out.dim() == 3 and out.shape[-1] == HEAD_DIM and out.dtype == torch.bfloat16
     full_entries_per_block = int(full_entries_per_block)
     cp_size = int(cp_size)
     cp_rank = int(cp_rank)
     assert full_entries_per_block > 0 and cp_size > 1 and 0 <= cp_rank < cp_size
-    B = int(slot_mapping.shape[0])
-    W = int(slot_mapping.shape[1])
     if B == 0 or W == 0:
         return
     assert (
@@ -2114,7 +2349,43 @@ def dequantize_and_gather_k_cache_slots_cp_byte_sliced(
     unique_blocks = compaction.unique_blocks
     compact_slots = compaction.compact_slots
     if unique_blocks.numel() == 0:
-        out[:, offset : offset + W, :].zero_()
+        if not has_cu_dst_offsets:
+            out[:, offset : offset + W, :].zero_()
+        elif (
+            cu_dst_offsets_cpu is None
+            and cp_swa_direct_dequant_scatter_enabled()
+            and direct_triton_fast_path_supported(out.device)
+        ):
+            gather_lens_i32 = _device_gather_lens(
+                saved_gather_lens, batch_size=B, max_gather_len=W, device=out.device
+            )
+            dummy_gathered = k_cache_raw.new_empty(
+                (cp_size, int(k_cache_raw.shape[1]))
+            )
+            _launch_dequantize_and_gather_k_slots_cp_rank_major_unchecked(
+                out,
+                dummy_gathered,
+                compact_slots,
+                gather_lens_i32,
+                offset,
+                full_entries_per_block=full_entries_per_block,
+                num_unique_blocks=1,
+                cu_tiles=cu_tiles,
+                total_tiles=total_tiles,
+                cu_dst_offsets=cu_dst_offsets,
+            )
+        else:
+            _write_ragged_2d_slices(
+                out,
+                offset,
+                B,
+                W,
+                gather_lens_present=gather_lens is not None,
+                gather_lens_cpu=compaction.gather_lens_cpu,
+                cu_dst_offsets=cu_dst_offsets,
+                cu_dst_offsets_cpu=cu_dst_offsets_cpu,
+                src_3d=None,
+            )
         return
 
     from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
@@ -2162,6 +2433,7 @@ def dequantize_and_gather_k_cache_slots_cp_byte_sliced(
             num_unique_blocks=int(unique_blocks.numel()),
             cu_tiles=cu_tiles,
             total_tiles=total_tiles,
+            cu_dst_offsets=cu_dst_offsets,
         )
         return
     gathered = gathered.view(
@@ -2178,6 +2450,23 @@ def dequantize_and_gather_k_cache_slots_cp_byte_sliced(
     )
     restored = dequantize_slots_to_bf16(full_view, compact_slots.reshape(-1))
     restored_3d = restored.view(B, W, HEAD_DIM)
+    if has_cu_dst_offsets:
+        if gather_lens is not None:
+            assert (
+                len(compaction.gather_lens_cpu) == B
+            ), "CP byte-sliced SWA gather compaction must include per-request gather_lens_cpu"
+        _write_ragged_2d_slices(
+            out,
+            offset,
+            B,
+            W,
+            gather_lens_present=gather_lens is not None,
+            gather_lens_cpu=compaction.gather_lens_cpu,
+            cu_dst_offsets=cu_dst_offsets,
+            cu_dst_offsets_cpu=cu_dst_offsets_cpu,
+            src_3d=restored_3d,
+        )
+        return
     if gather_lens is None:
         out[:, offset : offset + W, :].copy_(restored_3d)
         return

@@ -1278,19 +1278,33 @@ class AttentionFP8(_BaseAttentionFP8):
             self._prefill_output_all_reduce(out)
             return out
 
+        use_ragged = wm.cu_swa_offsets is not None
         async_workspace_reads = self._should_async_workspace_reads_for_prefill(common)
         with record_function_range("dsv4.fp8.attn.workspace.alloc"):
             # E5b: combined indices only address rows written by compressed-K
             # gather, SWA-prefix gather, or fresh-K overlay; keep this
             # uninitialized to avoid a full workspace memset per layer.
-            workspace = torch.empty(
-                (B, wm.M, D), dtype=torch.bfloat16, device=qkv.q.device
-            )
+            if use_ragged:
+                workspace = torch.empty(
+                    (max(wm.total_ws_rows, 1), D),
+                    dtype=torch.bfloat16,
+                    device=qkv.q.device,
+                )
+            else:
+                workspace = torch.empty(
+                    (B, wm.M, D), dtype=torch.bfloat16, device=qkv.q.device
+                )
 
         cmp_pending = None
         cmp_reader_for_pending = None
         cmp_prepare_for_pending = None
         swa_prefix_pending = None
+        extra_cmp_kwargs: Dict[str, Any] = (
+            dict(cu_dst_offsets=wm.cu_cmp_offsets, max_tokens_hint=wm.N)
+            if use_ragged
+            else {}
+        )
+        swa_offset = 0 if use_ragged else wm.N
         try:
             if wm.N > 0:
                 with record_function_range("dsv4.fp8.attn.workspace.gather_cmp"):
@@ -1327,6 +1341,7 @@ class AttentionFP8(_BaseAttentionFP8):
                                 block_size=wm.cmp_eb,
                                 offset=0,
                                 stream=self._get_cp_gather_stream(qkv.q.device),
+                                **extra_cmp_kwargs,
                             )
                         if cmp_pending is not None:
                             cmp_reader_for_pending = cmp_reader
@@ -1340,6 +1355,7 @@ class AttentionFP8(_BaseAttentionFP8):
                             block_table=wm.cmp_bt_int32,
                             block_size=wm.cmp_eb,
                             offset=0,
+                            **extra_cmp_kwargs,
                         )
             # SWA dequant only reads the cached prefix tail. The fresh new-K rows
             # are already available as BF16 and are overlaid below; cold prefill
@@ -1358,7 +1374,7 @@ class AttentionFP8(_BaseAttentionFP8):
                                     k_cache_raw=swa_pool_raw,
                                     slot_mapping=wm.swa_cache_slot_mapping,
                                     gather_lens=wm.swa_cache_gather_lens,
-                                    offset=wm.N,
+                                    offset=swa_offset,
                                     full_entries_per_block=wm.swa_eb,
                                     cp_rank=int(common.cp_ctx.cp_rank),
                                     cp_size=int(common.cp_ctx.cp_size),
@@ -1368,6 +1384,8 @@ class AttentionFP8(_BaseAttentionFP8):
                                         f"dsv4.cp.all_gather.L{self.layer_id:02d}"
                                         ".swa_prefix"
                                     ),
+                                    cu_dst_offsets=wm.cu_swa_offsets,
+                                    cu_dst_offsets_cpu=wm.cu_swa_offsets_cpu,
                                 )
                         if swa_prefix_pending is None:
                             _swa_dq.dequantize_and_gather_k_cache_slots_cp_byte_sliced(
@@ -1375,11 +1393,13 @@ class AttentionFP8(_BaseAttentionFP8):
                                 k_cache_raw=swa_pool_raw,
                                 slot_mapping=wm.swa_cache_slot_mapping,
                                 gather_lens=wm.swa_cache_gather_lens,
-                                offset=wm.N,
+                                offset=swa_offset,
                                 full_entries_per_block=wm.swa_eb,
                                 cp_rank=int(common.cp_ctx.cp_rank),
                                 cp_size=int(common.cp_ctx.cp_size),
                                 compaction=wm.swa_cache_compaction,
+                                cu_dst_offsets=wm.cu_swa_offsets,
+                                cu_dst_offsets_cpu=wm.cu_swa_offsets_cpu,
                             )
                     else:
                         assert swa_pool_3d is not None
@@ -1388,17 +1408,17 @@ class AttentionFP8(_BaseAttentionFP8):
                             k_cache=swa_pool_3d,
                             slot_mapping=wm.swa_cache_slot_mapping,
                             gather_lens=wm.swa_cache_gather_lens,
-                            offset=wm.N,
+                            offset=swa_offset,
+                            cu_dst_offsets=wm.cu_swa_offsets,
                         )
             # BF16 overlay of freshly computed new K — single ``index_copy_``
             # using the meta-precomputed ``new_k_slot_in_flat``. Avoids the FP8
             # round-trip loss on tokens we just wrote, while keeping the hot
             # path free of casts / gathers / per-request slicing.
+            ws_flat = workspace if use_ragged else workspace.view(B * wm.M, D)
             with record_function_range("dsv4.fp8.attn.workspace.overlay_new_k"):
                 kv_bf16 = qkv.kv_full.to(torch.bfloat16).reshape(-1, D)
-                workspace.view(B * wm.M, D).index_copy_(
-                    0, wm.new_k_slot_in_flat, kv_bf16
-                )
+                ws_flat.index_copy_(0, wm.new_k_slot_in_flat, kv_bf16)
                 # Free the kv_full storage before combine_topk + flash_mla_sparse_fwd.
                 # After the overlay, kv_full has no remaining consumer in this
                 # function or any caller; workspace attention now output-projects
@@ -1435,7 +1455,7 @@ class AttentionFP8(_BaseAttentionFP8):
             # combine kernel is queued behind the overlay writes on the same
             # stream, so moving pure CPU/view/allocation work here lets it run
             # while the GPU drains the pre-combine dependency chain.
-            kv_view = workspace.view(B * wm.M, 1, D)
+            kv_view = ws_flat.unsqueeze(1)
             projected_out = torch.empty(
                 qkv.q.shape[0],
                 self.dim,
@@ -1459,8 +1479,10 @@ class AttentionFP8(_BaseAttentionFP8):
                     window_size=self.window_size,
                     compress_ratio=ratio,
                     topk=int(cmp_topk.shape[-1]),
-                    M=wm.M,
-                    N=wm.N,
+                    M=0 if use_ragged else wm.M,
+                    N=0 if use_ragged else wm.N,
+                    cu_cmp_offsets=wm.cu_cmp_offsets,
+                    cu_swa_offsets=wm.cu_swa_offsets,
                 )
                 assert common.req_id_per_token is not None
                 assert common.prefix_lengths is not None
@@ -1483,9 +1505,11 @@ class AttentionFP8(_BaseAttentionFP8):
                         window_size=self.window_size,
                         compress_ratio=ratio,
                         topk=int(cmp_topk.shape[-1]),
-                        M=wm.M,
-                        N=wm.N,
+                        M=0 if use_ragged else wm.M,
+                        N=0 if use_ragged else wm.N,
                         flash_mla_indices=True,
+                        cu_cmp_offsets=wm.cu_cmp_offsets,
+                        cu_swa_offsets=wm.cu_swa_offsets,
                     )
 
             post_gather_stream = None
@@ -1495,7 +1519,7 @@ class AttentionFP8(_BaseAttentionFP8):
             # Only the NCCL stage is pulled ahead. Local restore/dequant/scatter
             # is queued after overlay/combine and must finish before FlashMLA
             # reads workspace. The three writes target disjoint ranges
-            # (cmp [0:N), SWA prefix [N:N+P), fresh K [N+P:]); if this prepare
+            # (cmp, SWA prefix, fresh K); if this prepare
             # point is moved earlier for more overlap, keep the Work.wait() call
             # inside the post stream helper or gathered bytes can be read early.
             if cmp_pending is not None:
@@ -1519,6 +1543,8 @@ class AttentionFP8(_BaseAttentionFP8):
                         swa_prefix_pending,
                         out=workspace,
                         stream=post_gather_stream,
+                        cu_dst_offsets=wm.cu_swa_offsets,
+                        cu_dst_offsets_cpu=wm.cu_swa_offsets_cpu,
                     )
 
             # The post-stream restore/dequant for cmp + SWA prefix can run

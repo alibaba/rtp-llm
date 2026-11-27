@@ -657,11 +657,13 @@ def _compute_swa_slot_in_flat_kernel(
     position_ids_ptr,  # [num_tokens] int64/int32 absolute positions
     req_id_per_token_ptr,  # [num_tokens] int64/int32
     prefix_lengths_ptr,  # [B] int64/int32
+    cu_swa_offsets_ptr,  # optional [>=B] int32/int64 ragged SWA bases
     num_tokens,
     M,
     base_offset,
     window_size: tl.constexpr,
     BLOCK_M: tl.constexpr,
+    HAS_CU_SWA_OFFSETS: tl.constexpr,
 ):
     rows = tl.program_id(0).to(tl.int64) * BLOCK_M + tl.arange(0, BLOCK_M)
     mask = rows < num_tokens
@@ -669,7 +671,11 @@ def _compute_swa_slot_in_flat_kernel(
     pos = tl.load(position_ids_ptr + rows, mask=mask, other=0).to(tl.int64)
     prefix = tl.load(prefix_lengths_ptr + req, mask=mask, other=0).to(tl.int64)
     p = tl.minimum(prefix, window_size - 1)
-    slot = req * M + base_offset + p + (pos - prefix)
+    if HAS_CU_SWA_OFFSETS:
+        swa_base = tl.load(cu_swa_offsets_ptr + req, mask=mask, other=0).to(tl.int64)
+        slot = swa_base + p + (pos - prefix)
+    else:
+        slot = req * M + base_offset + p + (pos - prefix)
     tl.store(out_ptr + rows, slot, mask=mask)
 
 
@@ -678,14 +684,15 @@ def compute_swa_slot_in_flat(
     req_id_per_token: torch.Tensor,
     prefix_lengths: torch.Tensor,
     *,
-    M: int,
+    M: int = 0,
     window_size: int,
     base_offset: int = 0,
+    cu_swa_offsets: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """Build ``req * M + base + min(prefix, win-1) + (pos-prefix)``.
+    """Build ``swa_base[req] + min(prefix, win-1) + (pos-prefix)``.
 
-    This replaces a small eager chain of casts, gathers, arithmetic and
-    ``contiguous`` when building SWA workspace metadata.
+    Uses ``cu_swa_offsets[req]`` for ragged 2D workspaces when provided, else
+    ``req * M + base_offset`` for padded 3D workspaces.
     """
     position_ids = position_ids.reshape(-1)
     req_id_per_token = req_id_per_token.reshape(-1)
@@ -693,6 +700,13 @@ def compute_swa_slot_in_flat(
     assert position_ids.numel() == req_id_per_token.numel()
     num_tokens = int(position_ids.numel())
     device = position_ids.device
+    has_cu_swa_offsets = cu_swa_offsets is not None
+    if has_cu_swa_offsets:
+        cu_swa_offsets = cu_swa_offsets.reshape(-1)
+        assert (
+            int(cu_swa_offsets.numel()) >= int(prefix_lengths.numel())
+            and cu_swa_offsets.device == device
+        )
     out = torch.empty(num_tokens, dtype=torch.long, device=device)
     if num_tokens == 0:
         return out
@@ -702,13 +716,12 @@ def compute_swa_slot_in_flat(
         pos = position_ids.to(device=device, dtype=torch.long)
         prefix = prefix_lengths.to(device=device, dtype=torch.long)
         p = torch.clamp_max(prefix, int(window_size) - 1)
+        if has_cu_swa_offsets:
+            swa_base = cu_swa_offsets.to(device=device, dtype=torch.long).gather(0, req)
+        else:
+            swa_base = req * int(M) + int(base_offset)
         out.copy_(
-            (
-                req * int(M)
-                + int(base_offset)
-                + p.gather(0, req)
-                + (pos - prefix.gather(0, req))
-            ).contiguous()
+            (swa_base + p.gather(0, req) + (pos - prefix.gather(0, req))).contiguous()
         )
         return out
 
@@ -718,17 +731,21 @@ def compute_swa_slot_in_flat(
         req_id_per_token = req_id_per_token.contiguous()
     if not prefix_lengths.is_contiguous():
         prefix_lengths = prefix_lengths.contiguous()
+    if has_cu_swa_offsets and not cu_swa_offsets.is_contiguous():
+        cu_swa_offsets = cu_swa_offsets.contiguous()
     block_m = 256
     _compute_swa_slot_in_flat_kernel[(triton.cdiv(num_tokens, block_m),)](
         out,
         position_ids,
         req_id_per_token,
         prefix_lengths,
+        cu_swa_offsets,
         num_tokens,
         int(M),
         int(base_offset),
         window_size=int(window_size),
         BLOCK_M=block_m,
+        HAS_CU_SWA_OFFSETS=has_cu_swa_offsets,
     )
     return out
 
@@ -746,6 +763,7 @@ def _compute_swa_slot_in_flat_from_cu_kernel(
     out_ptr,  # [num_tokens] int64
     cu_seqlens_ptr,  # [B+1] int32/int64 full-view starts
     prefix_lengths_ptr,  # [B] int32/int64
+    cu_swa_offsets_ptr,  # optional [>=B] int32/int64 ragged SWA bases
     num_tokens,
     M,
     base_offset,
@@ -753,6 +771,7 @@ def _compute_swa_slot_in_flat_from_cu_kernel(
     num_reqs,
     BLOCK_B: tl.constexpr,
     BLOCK_M: tl.constexpr,
+    HAS_CU_SWA_OFFSETS: tl.constexpr,
 ):
     rows = tl.program_id(0).to(tl.int64) * BLOCK_M + tl.arange(0, BLOCK_M).to(tl.int64)
     mask = rows < num_tokens
@@ -767,7 +786,11 @@ def _compute_swa_slot_in_flat_from_cu_kernel(
     start = tl.load(cu_seqlens_ptr + req, mask=mask, other=0).to(tl.int64)
     prefix = tl.load(prefix_lengths_ptr + req, mask=mask, other=0).to(tl.int64)
     p = tl.minimum(prefix, window_size - 1)
-    slot = req * M + base_offset + p + (rows - start)
+    if HAS_CU_SWA_OFFSETS:
+        swa_base = tl.load(cu_swa_offsets_ptr + req, mask=mask, other=0).to(tl.int64)
+        slot = swa_base + p + (rows - start)
+    else:
+        slot = req * M + base_offset + p + (rows - start)
     tl.store(out_ptr + rows, slot, mask=mask)
 
 
@@ -776,9 +799,10 @@ def compute_swa_slot_in_flat_from_cu(
     prefix_lengths: torch.Tensor,
     *,
     num_tokens: int,
-    M: int,
+    M: int = 0,
     window_size: int,
     base_offset: int = 0,
+    cu_swa_offsets: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Build ``slot_in_flat`` for a full-view CP workspace from cu-seqlens."""
     cu_seqlens = cu_seqlens.reshape(-1)
@@ -786,6 +810,13 @@ def compute_swa_slot_in_flat_from_cu(
     assert cu_seqlens.numel() == prefix_lengths.numel() + 1
     num_tokens = int(num_tokens)
     device = cu_seqlens.device
+    has_cu_swa_offsets = cu_swa_offsets is not None
+    if has_cu_swa_offsets:
+        cu_swa_offsets = cu_swa_offsets.reshape(-1)
+        assert (
+            int(cu_swa_offsets.numel()) >= int(prefix_lengths.numel())
+            and cu_swa_offsets.device == device
+        )
     out = torch.empty(num_tokens, dtype=torch.long, device=device)
     if num_tokens == 0:
         return out
@@ -802,17 +833,19 @@ def compute_swa_slot_in_flat_from_cu(
         local_pos = torch.arange(
             num_tokens, device=device, dtype=torch.long
         ) - cu.gather(0, req)
-        out.copy_(
-            (
-                req * int(M) + int(base_offset) + p.gather(0, req) + local_pos
-            ).contiguous()
-        )
+        if has_cu_swa_offsets:
+            swa_base = cu_swa_offsets.to(device=device, dtype=torch.long).gather(0, req)
+        else:
+            swa_base = req * int(M) + int(base_offset)
+        out.copy_((swa_base + p.gather(0, req) + local_pos).contiguous())
         return out
 
     if not cu_seqlens.is_contiguous():
         cu_seqlens = cu_seqlens.contiguous()
     if not prefix_lengths.is_contiguous():
         prefix_lengths = prefix_lengths.contiguous()
+    if has_cu_swa_offsets and not cu_swa_offsets.is_contiguous():
+        cu_swa_offsets = cu_swa_offsets.contiguous()
     num_reqs = int(prefix_lengths.numel())
     if num_reqs > 1024:
         raise ValueError(
@@ -824,6 +857,7 @@ def compute_swa_slot_in_flat_from_cu(
         out,
         cu_seqlens,
         prefix_lengths,
+        cu_swa_offsets,
         num_tokens,
         int(M),
         int(base_offset),
@@ -831,6 +865,7 @@ def compute_swa_slot_in_flat_from_cu(
         num_reqs,
         BLOCK_B=block_b,
         BLOCK_M=block_m,
+        HAS_CU_SWA_OFFSETS=has_cu_swa_offsets,
     )
     return out
 
@@ -858,6 +893,8 @@ def _combine_topk_swa_indices_kernel(
     query_start_loc_ptr,
     seq_lens_ptr,
     gather_lens_ptr,
+    cu_cmp_offsets_ptr,
+    cu_swa_offsets_ptr,
     M,
     N,
     TOP_K,
@@ -865,19 +902,21 @@ def _combine_topk_swa_indices_kernel(
     WINDOW_SIZE: tl.constexpr,
     PADDED_TOP_K: tl.constexpr,
     PADDED_WINDOW_SIZE: tl.constexpr,
+    HAS_CU_CMP_OFFSETS: tl.constexpr,
+    HAS_CU_SWA_OFFSETS: tl.constexpr,
 ):
     """Per-query layout of ``[combined_topk]`` row in the gathered workspace.
 
-    Workspace layout for a single batch slice (length ``M``):
-        [0, N)              — compressed-attn region
-        [N, N + gather_len) — SWA region (last ``gather_len`` tokens)
-        [N + gather_len, M) — pad / unused
+    Workspace layout for a single batch slice (padded length ``M`` or ragged
+    via ``cu_cmp_offsets`` / ``cu_swa_offsets``):
+        [cmp_base, cmp_base + N_b)           — compressed-attn region
+        [swa_ws_base, swa_ws_base + gl_b)    — SWA region (last ``gather_len`` tokens)
 
     For query at absolute sequence position ``pos``:
         topk_len = min((pos+1) // COMPRESS_RATIO, TOP_K)   # 0 for SWA-only
         swa_len  = min(pos+1, WINDOW_SIZE)
-        row[:topk_len]                   = topk_indices[token, :topk_len] + M*batch
-        row[topk_len:topk_len+swa_len]   = M*batch + N + (pos - swa_len + 1
+        row[:topk_len]                   = topk_indices[token, :topk_len] + cmp_base
+        row[topk_len:topk_len+swa_len]   = swa_ws_base + (pos - swa_len + 1
                                                           - gather_start) + arange
             where gather_start = seq_len - gather_len
     """
@@ -896,6 +935,14 @@ def _combine_topk_swa_indices_kernel(
     gather_len = tl.load(gather_lens_ptr + batch_idx)
     start_pos = seq_len - query_len  # absolute sequence pos of first new query
     gather_start = seq_len - gather_len  # first absolute pos in gathered region
+    if HAS_CU_CMP_OFFSETS:
+        cmp_base = tl.load(cu_cmp_offsets_ptr + batch_idx).to(tl.int32)
+    else:
+        cmp_base = M * batch_idx
+    if HAS_CU_SWA_OFFSETS:
+        swa_ws_base = tl.load(cu_swa_offsets_ptr + batch_idx).to(tl.int32)
+    else:
+        swa_ws_base = M * batch_idx + N
 
     for token_idx in range(query_start + worker_id, query_end, num_workers):
         token_idx_in_query = token_idx - query_start
@@ -922,7 +969,7 @@ def _combine_topk_swa_indices_kernel(
         )
         tl.store(
             combined_indices_ptr + token_idx_i64 * combined_indices_stride + offset,
-            topk_indices + M * batch_idx,
+            topk_indices + cmp_base,
             mask=mask,
         )
 
@@ -931,14 +978,13 @@ def _combine_topk_swa_indices_kernel(
         # callers can pass any window_size.
         offset = tl.arange(0, PADDED_WINDOW_SIZE)
         # SWA workspace indices for positions [pos - swa_len + 1, pos]:
-        # buffer index = N + (position - gather_start), then offset by
-        # this batch's slice (M * batch_idx).
+        # buffer index = swa_ws_base + (position - gather_start).
         tl.store(
             combined_indices_ptr
             + token_idx_i64 * combined_indices_stride
             + topk_len
             + offset,
-            M * batch_idx + N + offset + pos - swa_len + 1 - gather_start,
+            swa_ws_base + offset + pos - swa_len + 1 - gather_start,
             mask=offset < swa_len,
         )
 
@@ -954,10 +1000,12 @@ def combine_topk_swa_indices(
     window_size: int,
     compress_ratio: int,
     topk: int,
-    M: int,
-    N: int,
+    M: int = 0,
+    N: int = 0,
     *,
     flash_mla_indices: bool = False,
+    cu_cmp_offsets: Optional[torch.Tensor] = None,
+    cu_swa_offsets: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Build ``(combined_indices, combined_lens)`` for ``flash_mla_sparse_fwd``.
 
@@ -967,10 +1015,8 @@ def combine_topk_swa_indices(
       combined_lens:   ``[num_tokens]`` int32 — pass to ``flash_mla_sparse_fwd``
         as ``topk_length``.
 
-    Args mirror vLLM signature exactly. ``M`` is the per-batch workspace
-    stride (``N + window_size + max_num_batched_tokens``). ``N`` is the
-    compressed-region size (``ceil(max_model_len / compress_ratio)``); pass
-    ``N=0`` and ``topk=0`` for SWA-only layers.
+    Args mirror vLLM signature plus optional ragged offset tensors
+    ``cu_cmp_offsets`` and ``cu_swa_offsets`` for flat 2D workspaces.
     """
     assert (
         topk_indices.dtype == torch.int32
@@ -986,6 +1032,24 @@ def combine_topk_swa_indices(
 
     num_tokens = int(topk_indices.shape[0])
     num_reqs = int(seq_lens.shape[0])
+    if cu_cmp_offsets is not None:
+        cu_cmp_offsets = cu_cmp_offsets.reshape(-1)
+        assert (
+            cu_cmp_offsets.dtype == torch.int32
+            and cu_cmp_offsets.device == topk_indices.device
+            and int(cu_cmp_offsets.numel()) >= num_reqs
+        )
+        if not cu_cmp_offsets.is_contiguous():
+            cu_cmp_offsets = cu_cmp_offsets.contiguous()
+    if cu_swa_offsets is not None:
+        cu_swa_offsets = cu_swa_offsets.reshape(-1)
+        assert (
+            cu_swa_offsets.dtype == torch.int32
+            and cu_swa_offsets.device == topk_indices.device
+            and int(cu_swa_offsets.numel()) >= num_reqs
+        )
+        if not cu_swa_offsets.is_contiguous():
+            cu_swa_offsets = cu_swa_offsets.contiguous()
     combined_topk = (
         (topk + window_size + _SPARSE_PREFILL_TOPK_ALIGNMENT - 1)
         // _SPARSE_PREFILL_TOPK_ALIGNMENT
@@ -1027,6 +1091,8 @@ def combine_topk_swa_indices(
         query_start_loc,
         seq_lens,
         gather_lens,
+        cu_cmp_offsets,
+        cu_swa_offsets,
         M,
         N,
         TOP_K=topk,
@@ -1034,6 +1100,8 @@ def combine_topk_swa_indices(
         WINDOW_SIZE=window_size,
         PADDED_TOP_K=padded_top_k,
         PADDED_WINDOW_SIZE=padded_window_size,
+        HAS_CU_CMP_OFFSETS=cu_cmp_offsets is not None,
+        HAS_CU_SWA_OFFSETS=cu_swa_offsets is not None,
     )
     return combined_indices, combined_lens
 
@@ -1059,6 +1127,8 @@ def _combine_topk_swa_indices_cp_kernel(
     global_positions_ptr,
     req_id_per_token_ptr,
     prefix_lengths_ptr,
+    cu_cmp_offsets_ptr,
+    cu_swa_offsets_ptr,
     num_tokens,
     sp_int,
     M,
@@ -1072,13 +1142,15 @@ def _combine_topk_swa_indices_cp_kernel(
     IS_VARLEN: tl.constexpr,
     DENSE_ARANGE_TOPK: tl.constexpr,
     ALIGNED_OUT: tl.constexpr,
+    HAS_CU_CMP_OFFSETS: tl.constexpr,
+    HAS_CU_SWA_OFFSETS: tl.constexpr,
 ):
     """CP-aware fused combine.
 
     Unlike the generic vLLM kernel, CP cannot derive ``pos`` from
     contiguous query row ids because rank-local rows are zigzagged. This
     kernel consumes explicit per-row ``global_positions`` and optionally
-    per-row request ids / per-request prefixes for varlen B>1.
+    per-row request ids / per-request prefixes / ragged offsets for varlen B>1.
     """
     block_t = tl.program_id(0)
     block_c = tl.program_id(1)
@@ -1102,17 +1174,39 @@ def _combine_topk_swa_indices_cp_kernel(
         prefix = tl.load(prefix_lengths_ptr + req, mask=row_mask, other=0).to(
             tl.int32
         )
-        req_base = req * M
+        if HAS_CU_CMP_OFFSETS:
+            cmp_base = tl.load(cu_cmp_offsets_ptr + req, mask=row_mask, other=0).to(
+                tl.int32
+            )
+        else:
+            cmp_base = req * M
+        if HAS_CU_SWA_OFFSETS:
+            swa_ws_base = tl.load(
+                cu_swa_offsets_ptr + req, mask=row_mask, other=0
+            ).to(tl.int32)
+        else:
+            swa_ws_base = req * M + N
     else:
         prefix = tl.full((BLOCK_T,), sp_int, tl.int32)
-        req_base = tl.zeros((BLOCK_T,), tl.int32)
+        if HAS_CU_CMP_OFFSETS:
+            cmp_base = tl.full(
+                (BLOCK_T,), tl.load(cu_cmp_offsets_ptr).to(tl.int32), tl.int32
+            )
+        else:
+            cmp_base = tl.zeros((BLOCK_T,), tl.int32)
+        if HAS_CU_SWA_OFFSETS:
+            swa_ws_base = tl.full(
+                (BLOCK_T,), tl.load(cu_swa_offsets_ptr).to(tl.int32), tl.int32
+            )
+        else:
+            swa_ws_base = tl.full((BLOCK_T,), N, tl.int32)
 
     p = tl.minimum(prefix, WINDOW_SIZE - 1)
     gather_start = prefix - p
     topk_len = tl.minimum((gp + 1) // COMPRESS_RATIO, TOP_K)
     swa_len = tl.minimum(gp + 1, WINDOW_SIZE)
     combined_len = topk_len + swa_len
-    swa_base = req_base + N + gp - gather_start - swa_len + 1 - topk_len
+    swa_base = swa_ws_base + gp - gather_start - swa_len + 1 - topk_len
 
     col = cols[None, :]
     # int64 row indexing — long-context CP4 HCA L3 prefill of a 1.1M-token
@@ -1140,7 +1234,7 @@ def _combine_topk_swa_indices_cp_kernel(
     swa_val = swa_base[:, None] + col
     out_val = tl.where(
         in_topk,
-        req_base[:, None] + topk_val,
+        cmp_base[:, None] + topk_val,
         tl.where(in_swa, swa_val, -1),
     ).to(tl.int32)
 
@@ -1173,13 +1267,15 @@ def combine_topk_swa_indices_cp(
     window_size: int,
     compress_ratio: int,
     topk: int,
-    M: int,
-    N: int,
+    M: int = 0,
+    N: int = 0,
     req_id_per_token: torch.Tensor | None = None,
     prefix_lengths: torch.Tensor | None = None,
     *,
     flash_mla_indices: bool = False,
     dense_arange_topk: bool = False,
+    cu_cmp_offsets: torch.Tensor | None = None,
+    cu_swa_offsets: torch.Tensor | None = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """CP-aware fused combine for ``flash_mla_sparse_fwd``.
 
@@ -1247,6 +1343,26 @@ def combine_topk_swa_indices_cp(
         req_ptr = global_positions
         prefix_ptr = global_positions
 
+    min_offsets = int(prefix_lengths.numel()) if is_varlen else 1
+    if cu_cmp_offsets is not None:
+        cu_cmp_offsets = cu_cmp_offsets.reshape(-1)
+        assert (
+            cu_cmp_offsets.dtype == torch.int32
+            and cu_cmp_offsets.device == topk_indices.device
+            and int(cu_cmp_offsets.numel()) >= min_offsets
+        )
+        if not cu_cmp_offsets.is_contiguous():
+            cu_cmp_offsets = cu_cmp_offsets.contiguous()
+    if cu_swa_offsets is not None:
+        cu_swa_offsets = cu_swa_offsets.reshape(-1)
+        assert (
+            cu_swa_offsets.dtype == torch.int32
+            and cu_swa_offsets.device == topk_indices.device
+            and int(cu_swa_offsets.numel()) >= min_offsets
+        )
+        if not cu_swa_offsets.is_contiguous():
+            cu_swa_offsets = cu_swa_offsets.contiguous()
+
     BLOCK_T = 8
     BLOCK_C = 256
     out_stride = int(combined_indices.stride(0))
@@ -1270,6 +1386,8 @@ def combine_topk_swa_indices_cp(
         global_positions,
         req_ptr,
         prefix_ptr,
+        cu_cmp_offsets,
+        cu_swa_offsets,
         num_tokens,
         int(sp_int),
         int(M),
@@ -1283,6 +1401,8 @@ def combine_topk_swa_indices_cp(
         IS_VARLEN=bool(is_varlen),
         DENSE_ARANGE_TOPK=bool(dense_arange_topk),
         ALIGNED_OUT=bool(aligned_out),
+        HAS_CU_CMP_OFFSETS=cu_cmp_offsets is not None,
+        HAS_CU_SWA_OFFSETS=cu_swa_offsets is not None,
         num_warps=4,
     )
     return combined_indices, combined_lens

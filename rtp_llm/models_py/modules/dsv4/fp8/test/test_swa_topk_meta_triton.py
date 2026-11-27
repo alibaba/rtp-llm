@@ -192,6 +192,41 @@ class SwaTopkMetaTritonTest(unittest.TestCase):
     def test_cuda_slot_in_flat_from_cu_mixed_batch(self):
         self._check_slot_in_flat_from_cu([0, 7, 1000], [5, 9, 33], device=torch.device("cuda"))
 
+    def _check_ragged_slots(self, prefix_lengths, input_lengths, *, device):
+        win = 16
+        pos, req_id, cu = _flat_positions(prefix_lengths, input_lengths, device)
+        prefix = torch.tensor(prefix_lengths, dtype=torch.int32, device=device)
+        cu_swa = torch.tensor([3, 40, 211], dtype=torch.int32, device=device)
+        got = _swa_ops.compute_swa_slot_in_flat(
+            pos,
+            req_id,
+            prefix,
+            window_size=win,
+            cu_swa_offsets=cu_swa,
+        )
+        got_cu = _swa_ops.compute_swa_slot_in_flat_from_cu(
+            cu,
+            prefix,
+            num_tokens=sum(input_lengths),
+            window_size=win,
+            cu_swa_offsets=cu_swa,
+        )
+        p = torch.clamp_max(prefix.long(), win - 1)
+        ref = (
+            cu_swa.long().gather(0, req_id.long())
+            + p.gather(0, req_id.long())
+            + (pos.long() - prefix.long().gather(0, req_id.long()))
+        )
+        self.assertTrue(torch.equal(got.cpu(), ref.cpu()))
+        self.assertTrue(torch.equal(got_cu.cpu(), ref.cpu()))
+
+    def test_cpu_ragged_slot_in_flat(self):
+        self._check_ragged_slots([0, 7, 1000], [5, 9, 33], device=torch.device("cpu"))
+
+    @unittest.skipIf(not torch.cuda.is_available(), "CUDA not available")
+    def test_cuda_ragged_slot_in_flat(self):
+        self._check_ragged_slots([0, 7, 1000], [5, 9, 33], device=torch.device("cuda"))
+
 
 if __name__ == "__main__":
     unittest.main()

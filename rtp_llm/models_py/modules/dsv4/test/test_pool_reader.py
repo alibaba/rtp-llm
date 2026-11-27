@@ -668,6 +668,193 @@ def test_cp_sharded_fill_block_size_mismatch_raises():
     raise AssertionError("expected ValueError on block_size mismatch")
 
 
+def test_cp_sharded_fill_and_async_ragged_2d_workspace():
+    from rtp_llm.models_py.distributed import collective_torch
+    from rtp_llm.models_py.modules.dsv4 import cp as cp_mod
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    cp_size = 2
+    block_size = 2
+    per_req = torch.tensor([3, 1], dtype=torch.int64, device=device)
+    restore_idx = cp_mod.build_kv_allgather_restore_indices(
+        per_req, cp_size, block_size, device
+    )
+    seq_lens_total = int(per_req.sum().item())
+    # Mock a pool reader over synthetic rank-major packed rows where the
+    # packed payload encodes unique tokens per (req, pos).
+    cfg = PR.CPShardConfig(
+        cp_ctx=_fake_cp_ctx(cp_size=cp_size, cp_rank=0),
+        per_req_total_kv_lens=per_req,
+        restore_indices=restore_idx,
+        block_size=block_size,
+        total_local_kv=4,
+        seq_lens_total=seq_lens_total,
+    )
+    reader = PR.CPShardedPoolReader(cfg)
+
+    # Disjoint ragged slices: req0 len=3 at [1, 4), req1 len=1 at [6, 7).
+    cu_dst_offsets = torch.tensor([1, 6], dtype=torch.int32, device=device)
+    total_rows = 8
+    k_cache = torch.randint(
+        0, 100, (4, block_size, PR.ENTRY_BYTES), dtype=torch.uint8, device=device
+    )
+    # Give scales valid unit ue8m0 (127 => 1.0) and fp8 values < 448.
+    k_cache[..., :448] &= 0x3F
+    k_cache[..., 576:] = 127
+    block_table = torch.tensor([[0, 1], [2, 0]], dtype=torch.int32, device=device)
+    seq_lens_i32 = per_req.to(torch.int32)
+
+    def _fake_build_local_flat(*, k_cache, block_table, block_size, device):
+        del k_cache, block_table, block_size
+        return torch.zeros((4, PR.ENTRY_BYTES), dtype=torch.uint8, device=device)
+
+    gathered_rank_major = torch.randint(
+        0, 64, (cp_size * 4, PR.ENTRY_BYTES), dtype=torch.uint8, device=device
+    )
+    gathered_rank_major[..., 576:] = 127
+
+    out_3d = torch.full((2, 4, 512), -9.0, dtype=torch.bfloat16, device=device)
+    out_2d = torch.full((total_rows, 512), -9.0, dtype=torch.bfloat16, device=device)
+
+    orig_build = reader._build_local_flat
+    orig_ag = getattr(PR, "all_gather", None)
+    reader._build_local_flat = _fake_build_local_flat  # type: ignore[method-assign]
+    PR.all_gather = lambda t, group=None: gathered_rank_major  # type: ignore[assignment]
+    try:
+        reader.fill(
+            out=out_3d,
+            k_cache=k_cache,
+            seq_lens=seq_lens_i32,
+            gather_lens=None,
+            block_table=block_table,
+            block_size=block_size,
+            offset=0,
+        )
+        reader.fill(
+            out=out_2d,
+            k_cache=k_cache,
+            seq_lens=seq_lens_i32,
+            gather_lens=None,
+            block_table=block_table,
+            block_size=block_size,
+            offset=0,
+            cu_dst_offsets=cu_dst_offsets,
+            max_tokens_hint=3,
+        )
+    finally:
+        reader._build_local_flat = orig_build  # type: ignore[method-assign]
+        if orig_ag is not None:
+            PR.all_gather = orig_ag  # type: ignore[assignment]
+
+    assert torch.equal(out_2d[1:4].view(torch.int16), out_3d[0, :3].view(torch.int16))
+    assert torch.equal(out_2d[6:7].view(torch.int16), out_3d[1, :1].view(torch.int16))
+    assert torch.all(out_2d[0:1] == -9.0)
+    assert torch.all(out_2d[4:6] == -9.0)
+    assert torch.all(out_2d[7:8] == -9.0)
+
+    if device.type == "cuda":
+        # Exercise fallback scatter (_scatter_flat_to_workspace) + async handle
+        # propagation of cu_dst_offsets on CUDA.
+        out_2d_fb = torch.full(
+            (total_rows, 512), -9.0, dtype=torch.bfloat16, device=device
+        )
+        orig_try_restore = PR.try_restore_dequantize_scatter_packed_k_cache_flat
+        PR.try_restore_dequantize_scatter_packed_k_cache_flat = lambda *args, **kwargs: False  # type: ignore[assignment]
+        reader._build_local_flat = _fake_build_local_flat  # type: ignore[method-assign]
+        PR.all_gather = lambda t, group=None: gathered_rank_major  # type: ignore[assignment]
+        try:
+            reader.fill(
+                out=out_2d_fb,
+                k_cache=k_cache,
+                seq_lens=seq_lens_i32,
+                gather_lens=None,
+                block_table=block_table,
+                block_size=block_size,
+                offset=0,
+                cu_dst_offsets=cu_dst_offsets,
+            )
+        finally:
+            PR.try_restore_dequantize_scatter_packed_k_cache_flat = orig_try_restore  # type: ignore[assignment]
+            reader._build_local_flat = orig_build  # type: ignore[method-assign]
+            if orig_ag is not None:
+                PR.all_gather = orig_ag  # type: ignore[assignment]
+        assert torch.equal(
+            out_2d_fb[1:4].view(torch.int16), out_3d[0, :3].view(torch.int16)
+        )
+        assert torch.equal(
+            out_2d_fb[6:7].view(torch.int16), out_3d[1, :1].view(torch.int16)
+        )
+
+        # Verify async start_fill_async / prepare_fill_async / wait_fill_async
+        # thread cu_dst_offsets into the 2D workspace.
+        from contextlib import ExitStack
+
+        class _FakeWork:
+            def wait(self):
+                pass
+
+        out_2d_async = torch.full(
+            (total_rows, 512), -9.0, dtype=torch.bfloat16, device=device
+        )
+        stream_comm = torch.cuda.Stream()
+        stream_post = torch.cuda.Stream()
+
+        def _fake_ag_into_tensor(dst, src, group=None, async_op=False):
+            del src, group, async_op
+            dst.copy_(gathered_rank_major)
+            return _FakeWork()
+
+        reader._build_local_flat = _fake_build_local_flat  # type: ignore[method-assign]
+        try:
+            with ExitStack() as stack:
+                stack.enter_context(
+                    patch.object(
+                        collective_torch, "_get_group", lambda g: object(), create=True
+                    )
+                )
+                stack.enter_context(
+                    patch.object(
+                        torch.distributed,
+                        "get_world_size",
+                        lambda g=None: cp_size,
+                    )
+                )
+                stack.enter_context(
+                    patch.object(torch.distributed, "is_initialized", lambda: True)
+                )
+                stack.enter_context(
+                    patch.object(
+                        torch.distributed,
+                        "all_gather_into_tensor",
+                        side_effect=_fake_ag_into_tensor,
+                    )
+                )
+                handle = reader.start_fill_async(
+                    out=out_2d_async,
+                    k_cache=k_cache,
+                    seq_lens=seq_lens_i32,
+                    gather_lens=None,
+                    block_table=block_table,
+                    block_size=block_size,
+                    offset=0,
+                    stream=stream_comm,
+                    cu_dst_offsets=cu_dst_offsets,
+                )
+                assert handle is not None
+                assert handle.cu_dst_offsets is cu_dst_offsets
+                reader.prepare_fill_async(handle, stream=stream_post)
+                reader.wait_fill_async(handle)
+        finally:
+            reader._build_local_flat = orig_build  # type: ignore[method-assign]
+        assert torch.equal(
+            out_2d_async[1:4].view(torch.int16), out_3d[0, :3].view(torch.int16)
+        )
+        assert torch.equal(
+            out_2d_async[6:7].view(torch.int16), out_3d[1, :1].view(torch.int16)
+        )
+        assert torch.all(out_2d_async[4:6] == -9.0)
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in list(globals().items()):

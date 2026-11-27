@@ -73,6 +73,8 @@ class CompressedKPoolReader:
         block_table: torch.Tensor,
         block_size: int,
         offset: int,
+        cu_dst_offsets: Optional[torch.Tensor] = None,
+        max_tokens_hint: int = 0,
     ) -> None:
         raise NotImplementedError
 
@@ -88,6 +90,8 @@ class LocalPoolReader(CompressedKPoolReader):
         block_table: torch.Tensor,
         block_size: int,
         offset: int,
+        cu_dst_offsets: Optional[torch.Tensor] = None,
+        max_tokens_hint: int = 0,
     ) -> None:
         dequantize_and_gather_k_cache(
             out=out,
@@ -97,6 +101,8 @@ class LocalPoolReader(CompressedKPoolReader):
             block_table=block_table,
             block_size=block_size,
             offset=offset,
+            cu_dst_offsets=cu_dst_offsets,
+            max_tokens_hint=max_tokens_hint,
         )
 
 
@@ -197,6 +203,7 @@ class CPShardedPoolReadHandle:
     out: torch.Tensor
     seq_lens: torch.Tensor
     offset: int
+    cu_dst_offsets: Optional[torch.Tensor] = None
     done_event: Optional[torch.cuda.Event] = None
     work_waited: bool = False
 
@@ -217,7 +224,10 @@ class CPShardedPoolReader(CompressedKPoolReader):
         block_table: torch.Tensor,
         block_size: int,
         offset: int,
+        cu_dst_offsets: Optional[torch.Tensor] = None,
+        max_tokens_hint: int = 0,
     ) -> None:
+        del max_tokens_hint
         self._validate_call(block_size=block_size, gather_lens=gather_lens)
         device = out.device
 
@@ -243,7 +253,9 @@ class CPShardedPoolReader(CompressedKPoolReader):
         # gathered shape is rank-major: [cp_size * total_local_kv, 584].
 
         # Step 4: restore to request-concatenated logical order.
-        self._restore_dequant_scatter(gathered, out, seq_lens, offset)
+        self._restore_dequant_scatter(
+            gathered, out, seq_lens, offset, cu_dst_offsets=cu_dst_offsets
+        )
 
     def start_fill_async(
         self,
@@ -256,6 +268,8 @@ class CPShardedPoolReader(CompressedKPoolReader):
         block_size: int,
         offset: int,
         stream: torch.cuda.Stream,
+        cu_dst_offsets: Optional[torch.Tensor] = None,
+        max_tokens_hint: int = 0,
     ) -> Optional[CPShardedPoolReadHandle]:
         """Launch only the CP all-gather stage on ``stream``.
 
@@ -263,6 +277,7 @@ class CPShardedPoolReader(CompressedKPoolReader):
         stream waits for it, and ``prepare_fill_async`` later queues restore /
         dequant / scatter on the shared post stream.
         """
+        del max_tokens_hint
         self._validate_call(block_size=block_size, gather_lens=gather_lens)
         if (
             stream is None
@@ -328,6 +343,7 @@ class CPShardedPoolReader(CompressedKPoolReader):
             out=out,
             seq_lens=seq_lens,
             offset=offset,
+            cu_dst_offsets=cu_dst_offsets,
         )
 
     def prepare_fill_async(
@@ -335,11 +351,15 @@ class CPShardedPoolReader(CompressedKPoolReader):
         handle: CPShardedPoolReadHandle,
         *,
         stream: torch.cuda.Stream,
+        cu_dst_offsets: Optional[torch.Tensor] = None,
     ) -> None:
         if handle.done_event is not None:
             return
         if stream is None:
             raise ValueError("prepare_fill_async requires an explicit stream")
+        cu_dst_offsets_eff = (
+            cu_dst_offsets if cu_dst_offsets is not None else handle.cu_dst_offsets
+        )
         current_stream = torch.cuda.current_stream(handle.out.device)
         # ``out`` is the caller's workspace.  Queue postprocess after any
         # current-stream writes to that workspace; otherwise disjoint-looking
@@ -359,6 +379,7 @@ class CPShardedPoolReader(CompressedKPoolReader):
                     handle.out,
                     handle.seq_lens,
                     handle.offset,
+                    cu_dst_offsets=cu_dst_offsets_eff,
                 )
             finally:
                 try:
@@ -485,6 +506,8 @@ class CPShardedPoolReader(CompressedKPoolReader):
         out: torch.Tensor,
         seq_lens: torch.Tensor,
         offset: int,
+        *,
+        cu_dst_offsets: Optional[torch.Tensor] = None,
     ) -> None:
         cfg = self.cfg
         D = out.shape[-1]
@@ -494,13 +517,16 @@ class CPShardedPoolReader(CompressedKPoolReader):
                 f"({cfg.per_req_total_kv_lens.numel()})"
             )
         with record_function_range("dsv4.cp.all_gather.pool_reader.gather_cmp.restore"):
+            fused_kwargs = {"seq_lens_total": int(cfg.seq_lens_total)}
+            if cu_dst_offsets is not None:
+                fused_kwargs["cu_dst_offsets"] = cu_dst_offsets
             if try_restore_dequantize_scatter_packed_k_cache_flat(
                 out,
                 gathered,
                 cfg.restore_indices,
                 seq_lens,
                 offset,
-                seq_lens_total=int(cfg.seq_lens_total),
+                **fused_kwargs,
             ):
                 return
 
@@ -515,8 +541,13 @@ class CPShardedPoolReader(CompressedKPoolReader):
             )
             dequantize_packed_k_cache_flat(restored, restored_packed)
 
-            # Step 6: scatter restored into out[r, offset:offset+T_r, :].
-            _scatter_flat_to_workspace(restored, out, seq_lens, offset)
+            # Step 6: scatter restored into workspace rows.
+            if cu_dst_offsets is not None:
+                _scatter_flat_to_workspace(
+                    restored, out, seq_lens, offset, cu_dst_offsets=cu_dst_offsets
+                )
+            else:
+                _scatter_flat_to_workspace(restored, out, seq_lens, offset)
 
 
 def _pack_padded_to_flat(
@@ -551,13 +582,18 @@ def _pack_padded_to_flat(
 
 
 def _scatter_flat_to_workspace(
-    restored: torch.Tensor, out: torch.Tensor, seq_lens: torch.Tensor, offset: int
+    restored: torch.Tensor,
+    out: torch.Tensor,
+    seq_lens: torch.Tensor,
+    offset: int,
+    cu_dst_offsets: Optional[torch.Tensor] = None,
 ) -> None:
-    """Copy restored[r-th-slice] → out[r, offset:offset+T_r, :].
+    """Copy restored[r-th-slice] → workspace rows.
 
-    Vectorized: build per-token ``(b_idx, col_idx)`` and use
-    ``out.index_put_`` for a single GPU op. Replaces a per-request loop
-    with B .item() syncs.
+    Vectorized: build per-token workspace coordinates on GPU for a single
+    scatter op, supporting both legacy 3D ``[B, M, D]`` and ragged 2D
+    ``[total_rows, D]`` (with ``cu_dst_offsets``). Replaces a per-request
+    loop with B .item() syncs.
     """
     total = int(restored.shape[0])
     if total == 0:
@@ -565,9 +601,27 @@ def _scatter_flat_to_workspace(
     device = restored.device
     seq_lens_l = seq_lens.to(device=device, dtype=torch.int64)
     B = int(seq_lens_l.shape[0])
-    if B == 1:
-        out[0, offset : offset + total, :].copy_(restored)
+    if cu_dst_offsets is None:
+        if B == 1:
+            out[0, offset : offset + total, :].copy_(restored)
+            return
+        b_idx = torch.repeat_interleave(
+            torch.arange(B, device=device, dtype=torch.int64),
+            seq_lens_l,
+            output_size=total,
+        )
+        cu_starts = torch.zeros(B, device=device, dtype=torch.int64)
+        if B > 1:
+            cu_starts[1:] = torch.cumsum(seq_lens_l[:-1], dim=0)
+        col_idx = (
+            torch.arange(total, device=device, dtype=torch.int64)
+            - cu_starts.index_select(0, b_idx)
+            + offset
+        )
+        out.index_put_((b_idx, col_idx), restored, accumulate=False)
         return
+
+    assert out.dim() == 2 and int(cu_dst_offsets.numel()) >= B
     b_idx = torch.repeat_interleave(
         torch.arange(B, device=device, dtype=torch.int64),
         seq_lens_l,
@@ -576,12 +630,16 @@ def _scatter_flat_to_workspace(
     cu_starts = torch.zeros(B, device=device, dtype=torch.int64)
     if B > 1:
         cu_starts[1:] = torch.cumsum(seq_lens_l[:-1], dim=0)
-    col_idx = (
-        torch.arange(total, device=device, dtype=torch.int64)
-        - cu_starts.index_select(0, b_idx)
-        + offset
+    dst_bases = (
+        cu_dst_offsets[:B].to(device=device, dtype=torch.int64).index_select(0, b_idx)
     )
-    out.index_put_((b_idx, col_idx), restored, accumulate=False)
+    row_idx = (
+        dst_bases
+        + offset
+        + torch.arange(total, device=device, dtype=torch.int64)
+        - cu_starts.index_select(0, b_idx)
+    )
+    out.index_copy_(0, row_idx, restored)
 
 
 def make_compressed_k_pool_reader(

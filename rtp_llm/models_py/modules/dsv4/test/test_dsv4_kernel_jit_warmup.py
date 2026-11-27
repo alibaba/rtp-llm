@@ -998,8 +998,11 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             offset,
             *,
             seq_lens_total,
+            cu_dst_offsets=None,
         ):
             del gathered, restore_indices, seq_lens, offset
+            self.assertEqual(out.dim(), 2)
+            self.assertIsNotNone(cu_dst_offsets)
             self.assertEqual(int(out.shape[0]), seq_lens_total)
             restore_batches.append(seq_lens_total)
             return True

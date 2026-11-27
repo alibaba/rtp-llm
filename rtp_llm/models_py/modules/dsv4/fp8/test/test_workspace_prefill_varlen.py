@@ -478,13 +478,26 @@ class BuildWorkspaceMetaVarlenTest(unittest.TestCase):
         self.assertEqual(m.swa_bt_int32.shape[0], 2)
         self.assertEqual(m.cmp_bt_int32.shape[0], 2)
 
-        # new_k_slot_in_flat per token:
-        # Req 0 (T=0..15): slot = 0*M + N_max + 0 + local_pos = 4 + 0..15
-        # Req 1 (T=16..27): slot = 1*M + N_max + 0 + local_pos = 20+4 + 0..11
+        # new_k_slot_in_flat per token (ragged layout):
+        # req0: cu_cmp=0, N=4, gather=16 => cu_swa=4, ws=20 => slot = 4 + 0..15 = [4..19]
+        # req1: cu_cmp=20, N=3, gather=12 => cu_swa=23, ws=15 => slot = 23 + 0..11 = [23..34]
+        self.assertEqual(m.total_ws_rows, 35)
+        self.assertTrue(
+            torch.equal(
+                m.cu_cmp_offsets,
+                torch.tensor([0, 20], dtype=torch.int32, device=self.device),
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                m.cu_swa_offsets,
+                torch.tensor([4, 23], dtype=torch.int32, device=self.device),
+            )
+        )
         expected = torch.cat(
             [
                 torch.arange(16, dtype=torch.long, device=self.device) + 4,
-                torch.arange(12, dtype=torch.long, device=self.device) + 24,
+                torch.arange(12, dtype=torch.long, device=self.device) + 23,
             ],
             dim=0,
         )
@@ -559,13 +572,26 @@ class BuildWorkspaceMetaVarlenTest(unittest.TestCase):
                 torch.tensor([8, 13], dtype=torch.int32, device=self.device),
             )
         )
-        # Slot calc:
-        # Req 0 (T=0..7, P=0): slot = 0*22 + 9 + 0 + 0..7 = [9..16]
-        # Req 1 (T=8..13, P=7): slot = 1*22 + 9 + 7 + 0..5 = [38..43]
+        # Ragged slot calc:
+        # Req 0 (N=2, P=0, S=8, ws=10): cu_cmp=0, cu_swa=2, slot = [2..9]
+        # Req 1 (N=9, P=7, S=6, ws=22): cu_cmp=10, cu_swa=19, slot = 19+7+0..5 = [26..31]
+        self.assertEqual(m.total_ws_rows, 32)
+        self.assertTrue(
+            torch.equal(
+                m.cu_cmp_offsets,
+                torch.tensor([0, 10], dtype=torch.int32, device=self.device),
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                m.cu_swa_offsets,
+                torch.tensor([2, 19], dtype=torch.int32, device=self.device),
+            )
+        )
         expected = torch.cat(
             [
-                torch.arange(8, dtype=torch.long, device=self.device) + 9,
-                torch.arange(6, dtype=torch.long, device=self.device) + 38,
+                torch.arange(8, dtype=torch.long, device=self.device) + 2,
+                torch.arange(6, dtype=torch.long, device=self.device) + 26,
             ],
             dim=0,
         )
@@ -592,13 +618,26 @@ class BuildWorkspaceMetaVarlenTest(unittest.TestCase):
                 torch.tensor([12, 15], dtype=torch.int32, device=self.device),
             )
         )
-        # Both requests have prefix > win-1, so P_b is clamped at 7 for both.
-        # Req 0 (T=0..4): slot = 0*29 + 14 + 7 + 0..4 = [21..25]
-        # Req 1 (T=5..12): slot = 1*29 + 14 + 7 + 0..7 = [50..57]
+        # Ragged offsets:
+        # Req 0 (N=6, P=7, S=5, ws=18): cu_cmp=0, cu_swa=6, slot = 6+7+0..4 = [13..17]
+        # Req 1 (N=14, P=7, S=8, ws=29): cu_cmp=18, cu_swa=32, slot = 32+7+0..7 = [39..46]
+        self.assertEqual(m.total_ws_rows, 47)
+        self.assertTrue(
+            torch.equal(
+                m.cu_cmp_offsets,
+                torch.tensor([0, 18], dtype=torch.int32, device=self.device),
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                m.cu_swa_offsets,
+                torch.tensor([6, 32], dtype=torch.int32, device=self.device),
+            )
+        )
         expected = torch.cat(
             [
-                torch.arange(5, dtype=torch.long, device=self.device) + 21,
-                torch.arange(8, dtype=torch.long, device=self.device) + 50,
+                torch.arange(5, dtype=torch.long, device=self.device) + 13,
+                torch.arange(8, dtype=torch.long, device=self.device) + 39,
             ],
             dim=0,
         )
@@ -619,12 +658,26 @@ class BuildWorkspaceMetaVarlenTest(unittest.TestCase):
         )
         # gather_max = max(2, 8) = 8. M = 2 + 8 = 10.
         self.assertEqual(m.M, 10)
-        # Req 0 (T=0..1): slot = 2 + 0..1 = [2, 3]
-        # Req 1 (T=2..9): slot = 10 + 2 + 0..7 = [12..19]
+        # Ragged offsets:
+        # Req 0 (N=0, P=0, S=2, ws=2): cu_cmp=0, cu_swa=0, slot = [0, 1]
+        # Req 1 (N=2, P=0, S=8, ws=10): cu_cmp=2, cu_swa=4, slot = [4..11]
+        self.assertEqual(m.total_ws_rows, 12)
+        self.assertTrue(
+            torch.equal(
+                m.cu_cmp_offsets,
+                torch.tensor([0, 2], dtype=torch.int32, device=self.device),
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                m.cu_swa_offsets,
+                torch.tensor([0, 4], dtype=torch.int32, device=self.device),
+            )
+        )
         expected = torch.cat(
             [
-                torch.arange(2, dtype=torch.long, device=self.device) + 2,
-                torch.arange(8, dtype=torch.long, device=self.device) + 12,
+                torch.arange(2, dtype=torch.long, device=self.device),
+                torch.arange(8, dtype=torch.long, device=self.device) + 4,
             ],
             dim=0,
         )
@@ -704,19 +757,22 @@ class WorkspaceOverlayScatterTest(unittest.TestCase):
     def _scatter(self, m: WorkspaceMeta, B: int, T: int, D: int) -> torch.Tensor:
         """Mirror the ``_attn_via_workspace`` step-4 sequence using the
         meta's pre-baked ``new_k_slot_in_flat``."""
+        del B
         kv_full = (
             torch.arange(1, T + 1, dtype=torch.bfloat16, device=self.device)
             .view(T, 1)
             .expand(T, D)
             .contiguous()
         )
-        workspace = torch.zeros((B, m.M, D), dtype=torch.bfloat16, device=self.device)
-        row_scatter(workspace.view(B * m.M, D), m.new_k_slot_in_flat, kv_full)
+        workspace = torch.zeros(
+            (max(m.total_ws_rows, 1), D), dtype=torch.bfloat16, device=self.device
+        )
+        row_scatter(workspace, m.new_k_slot_in_flat, kv_full)
         return workspace, kv_full
 
     def test_b1_scatter_matches_legacy_slice(self) -> None:
         """B==1 cold prefill: scatter via slot_in_flat == legacy
-        ``workspace[:, N+P:N+P+S, :].copy_(kv_full)``."""
+        ``workspace[N+P:N+P+S, :].copy_(kv_full)``."""
         stub = _make_stub(win=8, compress_ratio=4)
         sp, S = 4, 10
         m = _build_meta_legacy(stub, sp=sp, S=S, with_dense_cmp_topk=False)
@@ -728,12 +784,12 @@ class WorkspaceOverlayScatterTest(unittest.TestCase):
         # Sanity: P matches min(sp, win-1) == 4 for sp=4, win=8.
         self.assertEqual(P, min(sp, 8 - 1))
         ws_oracle = torch.zeros_like(ws_vec)
-        ws_oracle[0, N + P : N + P + S, :].copy_(kv_full)
+        ws_oracle[N + P : N + P + S, :].copy_(kv_full)
         self.assertTrue(torch.equal(ws_vec, ws_oracle))
 
     def test_b2_cold_plus_cont_scatter_per_request(self) -> None:
         """B==2 cold+cont: each request's new K must land at
-        ``ws[b, N_max + P_b : N_max + P_b + S_b, :]`` and bleed nowhere else."""
+        ``ws[cu_swa[b] + P_b : cu_swa[b] + P_b + S_b, :]`` and bleed nowhere else."""
         stub = _make_stub(win=8, compress_ratio=4, n_reqs=2)
         prefix = [0, 32]
         S_list = [8, 6]
@@ -742,25 +798,17 @@ class WorkspaceOverlayScatterTest(unittest.TestCase):
         T = sum(S_list)
         ws, kv_full = self._scatter(m, B=2, T=T, D=D)
 
-        N_max = m.N
-        # Req 0 (P=0, S=8): kv_full[0:8] → ws[0, 4:12, :]. Wait — N_max=9 here
-        # (recompute: sp=[0,32] ⇒ N=[0+8//4, 32+6//4]=[2, 9], N_max=9).
-        # Req 0: ws[0, 9 + 0 : 9 + 0 + 8, :] = kv_full[0:8].
-        self.assertEqual(N_max, 9)
-        self.assertTrue(torch.equal(ws[0, 9:17, :], kv_full[0:8]))
-        # Outside that slice in req 0 must remain zero (compressed [0:9] +
-        # the SWA prefix tail [9:9] is 0 wide for sp=0, then tail).
-        self.assertTrue(torch.all(ws[0, :9, :] == 0))
-        self.assertTrue(torch.all(ws[0, 17:, :] == 0))
-        # Req 1 (P=7, S=6): ws[1, 9+7 : 9+7+6, :] = ws[1, 16:22, :] = kv_full[8:14].
-        self.assertTrue(torch.equal(ws[1, 16:22, :], kv_full[8:14]))
-        # Compressed [0:9] + prefix tail [9:16] (7 rows of zeros) untouched
-        # (zero-init); tail slot beyond M=22 doesn't exist.
-        self.assertTrue(torch.all(ws[1, :16, :] == 0))
+        # Req 0: cu_cmp=0, N=2, P=0, S=8 -> cu_swa=2, slice=[2:10]
+        # Req 1: cu_cmp=10, N=9, P=7, S=6 -> cu_swa=19, slice=[26:32]
+        self.assertEqual(m.total_ws_rows, 32)
+        self.assertTrue(torch.equal(ws[2:10, :], kv_full[0:8]))
+        self.assertTrue(torch.all(ws[:2, :] == 0))
+        self.assertTrue(torch.all(ws[10:26, :] == 0))
+        self.assertTrue(torch.equal(ws[26:32, :], kv_full[8:14]))
 
     def test_b2_all_continuation_clamped_p(self) -> None:
         """Both requests' sp > win-1 ⇒ both get ``P_b = win-1`` clamp.
-        Verify each request's new K lands at the clamped offset."""
+        Verify each request's new K lands at the clamped ragged offset."""
         stub = _make_stub(win=8, compress_ratio=4, n_reqs=2)
         prefix = [20, 50]
         S_list = [5, 8]
@@ -768,31 +816,30 @@ class WorkspaceOverlayScatterTest(unittest.TestCase):
         D = 4
         T = sum(S_list)
         ws, kv_full = self._scatter(m, B=2, T=T, D=D)
-        N_max = m.N
-        self.assertEqual(N_max, 14)
-        # Req 0: P = min(20, 7) = 7. Slot = N_max + 7 = 21. S=5.
-        self.assertTrue(torch.equal(ws[0, 21:26, :], kv_full[0:5]))
-        self.assertTrue(torch.all(ws[0, :21, :] == 0))
-        # Tail from 26 to M=29.
-        self.assertTrue(torch.all(ws[0, 26:, :] == 0))
-        # Req 1: P = min(50, 7) = 7. Slot = N_max + 7 = 21. S=8.
-        self.assertTrue(torch.equal(ws[1, 21:29, :], kv_full[5:13]))
-        self.assertTrue(torch.all(ws[1, :21, :] == 0))
+        # Req 0: N=6, P=7, S=5 -> cu_swa=6, slice=[13:18]
+        # Req 1: cu_cmp=18, N=14, P=7, S=8 -> cu_swa=32, slice=[39:47]
+        self.assertEqual(m.total_ws_rows, 47)
+        self.assertTrue(torch.equal(ws[13:18, :], kv_full[0:5]))
+        self.assertTrue(torch.all(ws[:13, :] == 0))
+        self.assertTrue(torch.all(ws[18:39, :] == 0))
+        self.assertTrue(torch.equal(ws[39:47, :], kv_full[5:13]))
 
     def test_row_scatter_overlay_matches_index_copy_bf16_512(self) -> None:
         stub = _make_stub(win=8, compress_ratio=4, n_reqs=2)
         m = _build_meta_varlen(stub, [0, 32], [8, 6], with_dense_cmp_topk=False)
-        B, T, D = 2, 14, 512
+        T, D = 14, 512
         kv_full = torch.randn((T, D), dtype=torch.bfloat16, device=self.device)
         for slot_dtype in (torch.int64, torch.int32):
             with self.subTest(slot_dtype=slot_dtype):
                 ws_triton = torch.zeros(
-                    (B, m.M, D), dtype=torch.bfloat16, device=self.device
+                    (max(m.total_ws_rows, 1), D),
+                    dtype=torch.bfloat16,
+                    device=self.device,
                 )
                 ws_ref = torch.zeros_like(ws_triton)
                 slots = m.new_k_slot_in_flat.to(dtype=slot_dtype)
-                row_scatter(ws_triton.view(B * m.M, D), slots, kv_full)
-                ws_ref.view(B * m.M, D).index_copy_(0, slots.to(torch.long), kv_full)
+                row_scatter(ws_triton, slots, kv_full)
+                ws_ref.index_copy_(0, slots.to(torch.long), kv_full)
                 torch.cuda.synchronize()
                 self.assertTrue(
                     torch.equal(ws_triton.view(torch.int16), ws_ref.view(torch.int16))
@@ -1481,6 +1528,713 @@ class BuildHcaPrefillMetaTest(unittest.TestCase):
         # construction path; the builder must never touch it.
         self._call(stub, [256], [128])
         self.assertIsNone(stub.indexer)
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+class RaggedWorkspaceEndToEndTest(unittest.TestCase):
+    """End-to-end mixed-reuse CSA / HCA / CP>1 / Raw-Q merge workspace tests."""
+
+    def setUp(self) -> None:
+        self.device = _device()
+        torch.manual_seed(2026)
+
+    def test_cp_host_lengths_zero_sync_mode2_offsets(self) -> None:
+        stub = _make_stub(win=8, compress_ratio=4, n_reqs=3, blocks_per_req=4)
+        # Asymmetric mixed requests: req0=(sp=0, S=4), req1=(sp=32, S=2), req2=(sp=4, S=6)
+        prefix_list = [0, 32, 4]
+        input_list = [4, 2, 6]
+        # N = [1, 8, 2]; P = [0, 7, 4]; gather = [4, 9, 10] => ws = [5, 17, 12] -> total = 34
+        # Compare vs padded: B * M = 3 * (8 + 10) = 54.
+        pl = torch.tensor(prefix_list, dtype=torch.int32, device=self.device)
+        il_full = torch.tensor(input_list, dtype=torch.int32, device=self.device)
+        cu_full = torch.tensor([0, 4, 6, 12], dtype=torch.int32, device=self.device)
+        local_il = torch.tensor([2, 1, 3], dtype=torch.int32, device=self.device)
+        local_cu = torch.tensor([0, 2, 3, 6], dtype=torch.int32, device=self.device)
+        stub._cp_ctx = type(
+            "_Cp",
+            (),
+            dict(
+                cp_size=2,
+                cp_rank=0,
+                kv_cache_sharded=False,
+                input_lengths_global=il_full,
+                input_lengths_global_host=tuple(input_list),
+                prefix_lengths=pl,
+                prefix_lengths_host=tuple(prefix_list),
+                cu_seqlens_global=cu_full,
+                seq_len_full=12,
+                prefix_length=0,
+            ),
+        )()
+        positions = torch.arange(6, dtype=torch.int64, device=self.device)
+        req_ids = torch.tensor([0, 0, 1, 2, 2, 2], dtype=torch.int64, device=self.device)
+        with mock.patch.object(
+            torch.Tensor,
+            "tolist",
+            side_effect=AssertionError("Mode 2 CP host-lengths path must not D2H sync"),
+        ):
+            wm = stub._build_workspace_meta(
+                seqlen=6,
+                sp_int=0,
+                device=self.device,
+                with_dense_cmp_topk=True,
+                use_varlen=True,
+                batch_size=3,
+                cu_seqlens=local_cu,
+                input_lengths=local_il,
+                prefix_lengths=pl,
+                sp_per_req=pl.long(),
+                position_ids=positions,
+                req_id_per_token=req_ids,
+                max_seqlen_q=3,
+            )
+        self.assertIsNotNone(wm)
+        self.assertEqual(wm.total_ws_rows, 34)
+        self.assertLess(wm.total_ws_rows, 3 * wm.M)
+        self.assertEqual(wm.cu_swa_offsets_cpu, (1, 13, 24))
+        self.assertTrue(
+            torch.equal(
+                wm.cu_cmp_offsets,
+                torch.tensor([0, 5, 22], dtype=torch.int32, device=self.device),
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                wm.cu_swa_offsets,
+                torch.tensor([1, 13, 24], dtype=torch.int32, device=self.device),
+            )
+        )
+
+    def _make_exec_attention(
+        self,
+        *,
+        compress_ratio: int,
+        win: int,
+        eb_cmp: int,
+        eb_swa: int,
+        bt_cmp: torch.Tensor,
+        bt_swa: torch.Tensor,
+        cmp_pool: torch.Tensor,
+        swa_pool: Optional[torch.Tensor],
+        cp_ctx=None,
+        swa_raw_u8: Optional[torch.Tensor] = None,
+    ) -> Attention:
+        layer = Attention.__new__(Attention)
+        torch.nn.Module.__init__(layer)
+        layer.layer_id = 1
+        layer.compress_ratio = compress_ratio
+        layer.window_size = win
+        layer.head_dim = 512
+        layer.dim = 16
+        layer.n_heads = 1
+        layer.softmax_scale = 1.0
+        layer.attn_sink = None
+        layer._cp_ctx = cp_ctx
+
+        class _Kv:
+            group_tags = [SWA_KV, CSA_KV, HCA_KV]
+
+            def get_seq_size_per_block(self, tag: str) -> int:
+                return eb_swa if tag == SWA_KV else eb_cmp * compress_ratio
+
+            def get_kernel_seq_size_per_block(self, tag: str) -> int:
+                return self.get_seq_size_per_block(tag)
+
+        cmp_at = CSA_KV if compress_ratio == 4 else HCA_KV
+        layer._kv_cache = _Kv()
+        layer._block_tables_by_type = {SWA_KV: bt_swa, cmp_at: bt_cmp}
+        layer._pool_entries_per_block = (
+            lambda tag: eb_swa if tag == SWA_KV else eb_cmp
+        )  # type: ignore[assignment]
+        layer._swa_entries_per_block = lambda: eb_swa  # type: ignore[assignment]
+        layer._swa_cp_byte_sliced = lambda: swa_raw_u8 is not None  # type: ignore[assignment]
+        layer._pool_raw_u8 = (
+            lambda tag: swa_raw_u8 if tag == SWA_KV else None
+        )  # type: ignore[assignment]
+        layer._pool_view_3d_fp8 = (
+            lambda tag: swa_pool if tag == SWA_KV else cmp_pool
+        )  # type: ignore[assignment]
+        layer._should_async_workspace_reads_for_prefill = lambda c: False  # type: ignore[assignment]
+        return layer
+
+    def test_mixed_reuse_csa_and_hca_attn_via_workspace(self) -> None:
+        from rtp_llm.models_py.modules.dsv4.fp8._swa_kv_insert_triton import (
+            quantize_and_insert_k_cache,
+        )
+        from rtp_llm.models_py.modules.dsv4.fp8.attention import PrefillMeta, PrefillQKV
+
+        win = 8
+        for ratio in (4, 128):
+            with self.subTest(ratio=ratio):
+                eb_cmp = 8
+                eb_swa = 8
+                prefix_list = [0, 32, 8] if ratio == 4 else [0, 256, 128]
+                input_list = [6, 4, 12] if ratio == 4 else [64, 128, 32]
+                B = 3
+                max_blocks = max((p + s + eb_swa - 1) // eb_swa for p, s in zip(prefix_list, input_list)) + 1
+                bt_swa = _make_block_table(B, max_blocks, self.device).to(torch.int32)
+                bt_cmp = _make_block_table(B, max_blocks, self.device).to(torch.int32)
+                num_blocks = int(bt_swa.max().item()) + 1
+                cmp_pool = torch.zeros(
+                    (num_blocks, eb_cmp, _SWA_FP8_ENTRY_BYTES),
+                    dtype=torch.uint8,
+                    device=self.device,
+                )
+                swa_pool = torch.zeros(
+                    (num_blocks, eb_swa, _SWA_FP8_ENTRY_BYTES),
+                    dtype=torch.uint8,
+                    device=self.device,
+                )
+
+                # Fill pools with exact integer/power-of-two markers (0-loss under UE8M0).
+                cmp_markers: list[torch.Tensor] = []
+                swa_markers: list[torch.Tensor] = []
+                for b, (sp, S) in enumerate(zip(prefix_list, input_list)):
+                    nb = (sp + S) // ratio
+                    cmp_vals = (
+                        (torch.arange(1, nb + 1, dtype=torch.bfloat16, device=self.device) + b * 100.0)
+                        .unsqueeze(1)
+                        .expand(nb, 512)
+                        .contiguous()
+                    )
+                    cmp_markers.append(cmp_vals)
+                    if nb > 0:
+                        cmp_slots = torch.tensor(
+                            [int(bt_cmp[b, i // eb_cmp].item()) * eb_cmp + (i % eb_cmp) for i in range(nb)],
+                            dtype=torch.int64,
+                            device=self.device,
+                        )
+                        quantize_and_insert_k_cache(cmp_vals, cmp_pool, cmp_slots)
+
+                    swa_vals = (
+                        (torch.arange(1, sp + 1, dtype=torch.bfloat16, device=self.device) + b * 1000.0 + 500.0)
+                        .unsqueeze(1)
+                        .expand(sp, 512)
+                        .contiguous()
+                    )
+                    swa_markers.append(swa_vals)
+                    if sp > 0:
+                        swa_slots = torch.tensor(
+                            [int(bt_swa[b, i // eb_swa].item()) * eb_swa + (i % eb_swa) for i in range(sp)],
+                            dtype=torch.int64,
+                            device=self.device,
+                        )
+                        quantize_and_insert_k_cache(swa_vals, swa_pool, swa_slots)
+
+                layer = self._make_exec_attention(
+                    compress_ratio=ratio,
+                    win=win,
+                    eb_cmp=eb_cmp,
+                    eb_swa=eb_swa,
+                    bt_cmp=bt_cmp,
+                    bt_swa=bt_swa,
+                    cmp_pool=cmp_pool,
+                    swa_pool=swa_pool,
+                )
+                positions, req_ids, cu_seqlens = _flat_positions(
+                    prefix_list, input_list, self.device
+                )
+                pl = torch.tensor(prefix_list, dtype=torch.int32, device=self.device)
+                il = torch.tensor(input_list, dtype=torch.int32, device=self.device)
+                wm = layer._build_workspace_meta(
+                    seqlen=sum(input_list),
+                    sp_int=0,
+                    device=self.device,
+                    with_dense_cmp_topk=(ratio == 128),
+                    use_varlen=True,
+                    batch_size=B,
+                    cu_seqlens=cu_seqlens,
+                    input_lengths=il,
+                    prefix_lengths=pl,
+                    sp_per_req=pl.long(),
+                    position_ids=positions,
+                    req_id_per_token=req_ids,
+                    max_seqlen_q=max(input_list),
+                )
+                self.assertIsNotNone(wm)
+                self.assertLess(wm.total_ws_rows, B * wm.M)
+
+                T = sum(input_list)
+                kv_full = (
+                    (torch.arange(1, T + 1, dtype=torch.bfloat16, device=self.device) + 2000.0)
+                    .unsqueeze(1)
+                    .expand(T, 512)
+                    .contiguous()
+                )
+                captured: dict[str, torch.Tensor] = {}
+
+                def _fake_projected(
+                    *,
+                    q,
+                    kv,
+                    indices,
+                    topk_length,
+                    freqs_cis,
+                    prefill_workspace,
+                    profile_name,
+                    out,
+                ):
+                    del q, freqs_cis, prefill_workspace, profile_name
+                    captured["kv"] = kv.clone()
+                    captured["indices"] = indices.clone()
+                    captured["topk_length"] = topk_length.clone()
+                    return out
+
+                layer._flash_mla_sparse_fwd_chunked_projected = _fake_projected  # type: ignore[assignment]
+                common = PrefillMeta(
+                    seqlen=T,
+                    seqlen_full=T,
+                    rd=0,
+                    device=self.device,
+                    cp_ctx=None,
+                    cp_on=False,
+                    freqs_cis=torch.zeros(T, 2, device=self.device),
+                    topk_idxs=torch.zeros(T, 0, dtype=torch.int32, device=self.device),
+                    sp_int=0,
+                    any_cont=True,
+                    row_seqlens_full=il.long(),
+                    use_varlen=True,
+                    sp_per_req=pl.long(),
+                    cu_seqlens=cu_seqlens,
+                    batch_size=B,
+                    input_lengths=il,
+                    prefix_lengths=pl,
+                    position_ids=positions,
+                    req_id_per_token=req_ids,
+                    max_seqlen_q=max(input_list),
+                )
+                qkv = PrefillQKV(
+                    qr=torch.zeros(T, 512, dtype=torch.bfloat16, device=self.device),
+                    q=torch.zeros(T, 1, 512, dtype=torch.bfloat16, device=self.device),
+                    kv_full=kv_full.clone(),
+                )
+                if ratio == 4:
+                    cmp_topk_runtime = torch.zeros((T, 2), dtype=torch.int32, device=self.device)
+                else:
+                    cmp_topk_runtime = None
+
+                with mock.patch(
+                    "rtp_llm.models_py.modules.dsv4.fp8.attention.dispose_tensor",
+                    lambda t: None,
+                ):
+                    layer._attn_via_workspace(qkv, common, wm, cmp_topk_runtime)
+
+                kv = captured["kv"]
+                self.assertEqual(tuple(kv.shape), (wm.total_ws_rows, 1, 512))
+                cu_cmp = wm.cu_cmp_offsets.tolist()
+                cu_swa = wm.cu_swa_offsets.tolist()
+                tok_off = 0
+                for b, (sp, S) in enumerate(zip(prefix_list, input_list)):
+                    nb = (sp + S) // ratio
+                    pb = min(sp, win - 1)
+                    if nb > 0:
+                        self.assertTrue(
+                            torch.allclose(
+                                kv[cu_cmp[b] : cu_cmp[b] + nb, 0, :].float(),
+                                cmp_markers[b].float(),
+                                rtol=0.1,
+                                atol=1.0,
+                            )
+                        )
+                    if pb > 0:
+                        self.assertTrue(
+                            torch.allclose(
+                                kv[cu_swa[b] : cu_swa[b] + pb, 0, :].float(),
+                                swa_markers[b][-pb:].float(),
+                                rtol=0.1,
+                                atol=1.0,
+                            )
+                        )
+                    self.assertTrue(
+                        torch.equal(
+                            kv[cu_swa[b] + pb : cu_swa[b] + pb + S, 0, :],
+                            kv_full[tok_off : tok_off + S],
+                        )
+                    )
+                    tok_off += S
+
+                # Spot-check HCA combine cache key includes total_ws_rows.
+                if ratio == 128:
+                    layer._attn_via_workspace(
+                        PrefillQKV(
+                            qr=torch.zeros(T, 512, dtype=torch.bfloat16, device=self.device),
+                            q=torch.zeros(T, 1, 512, dtype=torch.bfloat16, device=self.device),
+                            kv_full=kv_full.clone(),
+                        ),
+                        common,
+                        wm,
+                        None,
+                    )
+
+    def test_cp_gt1_sharded_reader_bytesliced_and_raw_q_merge_ragged(self) -> None:
+        from types import SimpleNamespace
+
+        from rtp_llm.models_py.distributed import collective_torch
+        from rtp_llm.models_py.modules.dsv4 import cp as cp_mod
+        from rtp_llm.models_py.modules.dsv4.fp8._pool_reader import (
+            CPShardConfig,
+            CPShardedPoolReader,
+        )
+        from rtp_llm.models_py.modules.dsv4.fp8._swa_kv_insert_triton import (
+            quantize_and_insert_k_cache,
+            quantize_and_insert_k_cache_cp_byte_sliced,
+        )
+        from rtp_llm.models_py.modules.dsv4.fp8.attention import PrefillMeta, PrefillQKV
+
+        win = 8
+        ratio = 4
+        eb = 8
+        cp_size = 2
+        B = 2
+        prefix_list = [4, 20]
+        input_list = [4, 4]  # full seq_len_full=8, asymmetric N=[2, 6], P=[4, 7]
+        pl = torch.tensor(prefix_list, dtype=torch.int32, device=self.device)
+        il_full = torch.tensor(input_list, dtype=torch.int32, device=self.device)
+        cu_full = torch.tensor([0, 4, 8], dtype=torch.int32, device=self.device)
+        positions_full, req_full, _ = _flat_positions(
+            prefix_list, input_list, self.device
+        )
+        # Rank-0 local chunk owns half the tokens (2 + 2 = 4 tokens).
+        local_il = torch.tensor([2, 2], dtype=torch.int32, device=self.device)
+        local_cu = torch.tensor([0, 2, 4], dtype=torch.int32, device=self.device)
+        local_pos = torch.tensor([4, 5, 20, 21], dtype=torch.int64, device=self.device)
+        local_req = torch.tensor([0, 0, 1, 1], dtype=torch.int32, device=self.device)
+
+        bt = _make_block_table(B, 4, self.device).to(torch.int32)
+        num_blocks = int(bt.max().item()) + 1
+        cmp_pool = torch.zeros(
+            (num_blocks, eb, _SWA_FP8_ENTRY_BYTES),
+            dtype=torch.uint8,
+            device=self.device,
+        )
+        swa_pool_3d = torch.zeros(
+            (num_blocks, eb, _SWA_FP8_ENTRY_BYTES),
+            dtype=torch.uint8,
+            device=self.device,
+        )
+        full_stride_bytes = eb * _SWA_FP8_ENTRY_BYTES + 256
+        local_slice_bytes = full_stride_bytes // cp_size
+        swa_raw_ranks = [
+            torch.zeros((num_blocks, local_slice_bytes), dtype=torch.uint8, device=self.device)
+            for _ in range(cp_size)
+        ]
+
+        # Populate pools with known values.
+        swa_all_slots = []
+        swa_all_vals = []
+        cmp_vals_list = []
+        for b, (sp, S) in enumerate(zip(prefix_list, input_list)):
+            nb = (sp + S) // ratio
+            cv = (
+                (torch.arange(1, nb + 1, dtype=torch.bfloat16, device=self.device) + b * 50.0)
+                .unsqueeze(1)
+                .expand(nb, 512)
+                .contiguous()
+            )
+            cmp_vals_list.append(cv)
+            cs = torch.tensor(
+                [int(bt[b, i // eb].item()) * eb + (i % eb) for i in range(nb)],
+                dtype=torch.int64,
+                device=self.device,
+            )
+            quantize_and_insert_k_cache(cv, cmp_pool, cs)
+            sv = (
+                (torch.arange(1, sp + 1, dtype=torch.bfloat16, device=self.device) + b * 200.0 + 100.0)
+                .unsqueeze(1)
+                .expand(sp, 512)
+                .contiguous()
+            )
+            ss = torch.tensor(
+                [int(bt[b, i // eb].item()) * eb + (i % eb) for i in range(sp)],
+                dtype=torch.int64,
+                device=self.device,
+            )
+            quantize_and_insert_k_cache(sv, swa_pool_3d, ss)
+            swa_all_slots.append(ss)
+            swa_all_vals.append(sv)
+        all_ss = torch.cat(swa_all_slots)
+        all_sv = torch.cat(swa_all_vals)
+        w_comp = build_cp_byte_sliced_slot_compaction(
+            all_ss,
+            full_entries_per_block=eb,
+            num_blocks=num_blocks,
+            validation_site="test.cp_e2e.write",
+            negative_mode="skip_minus_one",
+        )
+        for r in range(cp_size):
+            quantize_and_insert_k_cache_cp_byte_sliced(
+                all_sv,
+                swa_raw_ranks[r],
+                all_ss,
+                full_entries_per_block=eb,
+                cp_rank=r,
+                cp_size=cp_size,
+                compaction=w_comp,
+            )
+
+        cp_ctx = SimpleNamespace(
+            cp_size=cp_size,
+            cp_rank=0,
+            kv_cache_sharded=False,
+            input_lengths_global=il_full,
+            input_lengths_global_host=tuple(input_list),
+            prefix_lengths=pl,
+            prefix_lengths_host=tuple(prefix_list),
+            cu_seqlens_global=cu_full,
+            seq_len_full=sum(input_list),
+            prefix_length=0,
+            global_positions=local_pos,
+            req_id_per_token=local_req,
+            local_token_indices=torch.tensor([0, 1, 4, 5], dtype=torch.long, device=self.device),
+            gather_restore_indices=torch.arange(sum(input_list), dtype=torch.int64, device=self.device),
+        )
+
+        # Case A: CP>1 + CP byte-sliced SWA + CPShardedPoolReader in _attn_via_workspace.
+        layer_cp = self._make_exec_attention(
+            compress_ratio=ratio,
+            win=win,
+            eb_cmp=eb,
+            eb_swa=eb,
+            bt_cmp=bt,
+            bt_swa=bt,
+            cmp_pool=cmp_pool,
+            swa_pool=None,
+            cp_ctx=cp_ctx,
+            swa_raw_u8=swa_raw_ranks[0],
+        )
+        wm_cp = layer_cp._build_workspace_meta(
+            seqlen=4,
+            sp_int=0,
+            device=self.device,
+            with_dense_cmp_topk=True,
+            use_varlen=True,
+            batch_size=B,
+            cu_seqlens=local_cu,
+            input_lengths=local_il,
+            prefix_lengths=pl,
+            sp_per_req=pl.long(),
+            position_ids=local_pos,
+            req_id_per_token=local_req,
+            max_seqlen_q=2,
+        )
+        self.assertIsNotNone(wm_cp)
+        # Swap in a mocked CPShardedPoolReader on wm_cp to exercise CPShardedPoolReader 2D path end-to-end.
+        per_req_cmp = wm_cp.cmp_seq_lens.long()
+        total_local_cmp = int(
+            cp_mod.cp_padded_local_kv_lens(per_req_cmp, cp_size, eb).sum().item()
+        )
+        restore_idx = cp_mod.build_kv_allgather_restore_indices(
+            per_req_cmp,
+            cp_size,
+            eb,
+            self.device,
+            total_local_kv=total_local_cmp,
+        )
+        sharded_reader = CPShardedPoolReader(
+            CPShardConfig(
+                cp_ctx=cp_ctx,
+                per_req_total_kv_lens=per_req_cmp,
+                restore_indices=restore_idx,
+                block_size=eb,
+                total_local_kv=total_local_cmp,
+                seq_lens_total=int(per_req_cmp.sum().item()),
+            )
+        )
+        wm_cp = wm_cp._replace(cmp_reader=sharded_reader)
+        kv_full = (
+            (torch.arange(1, 9, dtype=torch.bfloat16, device=self.device) + 900.0)
+            .unsqueeze(1)
+            .expand(8, 512)
+            .contiguous()
+        )
+        captured_cp: dict[str, torch.Tensor] = {}
+
+        def _fake_proj_cp(*, q, kv, indices, topk_length, freqs_cis, prefill_workspace, profile_name, out):
+            del q, freqs_cis, prefill_workspace, profile_name
+            captured_cp["kv"] = kv.clone()
+            captured_cp["indices"] = indices.clone()
+            captured_cp["topk_length"] = topk_length.clone()
+            return out
+
+        layer_cp._flash_mla_sparse_fwd_chunked_projected = _fake_proj_cp  # type: ignore[assignment]
+        common_cp = PrefillMeta(
+            seqlen=4,
+            seqlen_full=8,
+            rd=0,
+            device=self.device,
+            cp_ctx=cp_ctx,
+            cp_on=True,
+            freqs_cis=torch.zeros(4, 2, device=self.device),
+            topk_idxs=torch.zeros(4, 0, dtype=torch.int32, device=self.device),
+            sp_int=0,
+            any_cont=True,
+            row_seqlens_full=il_full.long(),
+            use_varlen=True,
+            sp_per_req=pl.long(),
+            cu_seqlens=local_cu,
+            batch_size=B,
+            input_lengths=local_il,
+            prefix_lengths=pl,
+            position_ids=local_pos,
+            req_id_per_token=local_req,
+            max_seqlen_q=2,
+        )
+
+        # Extract flat [total_cmp, 584] packed rows ([576 data | 8 scale]) from
+        # block-major cmp_pool ([num_blocks, eb*576 + eb*8]) matching restore_idx.
+        raw_cmp_blk = cmp_pool.view(num_blocks, -1)
+        packed_rows = []
+        for b, (sp, S) in enumerate(zip(prefix_list, input_list)):
+            for i in range((sp + S) // ratio):
+                blk = int(bt[b, i // eb].item())
+                pos = i % eb
+                packed_rows.append(
+                    torch.cat(
+                        [
+                            raw_cmp_blk[blk, pos * 576 : (pos + 1) * 576],
+                            raw_cmp_blk[
+                                blk, eb * 576 + pos * 8 : eb * 576 + (pos + 1) * 8
+                            ],
+                        ],
+                        dim=0,
+                    )
+                )
+        expected_packed_cmp = torch.stack(packed_rows, dim=0)
+        rank_major_buf = torch.zeros(
+            (cp_size * total_local_cmp, _SWA_FP8_ENTRY_BYTES),
+            dtype=expected_packed_cmp.dtype,
+            device=self.device,
+        )
+        rank_major_buf.index_copy_(0, restore_idx, expected_packed_cmp)
+
+        def fake_reader_ag(tensor, group=None):
+            del tensor, group
+            return rank_major_buf
+
+        def fake_swa_ag(tensor, group=None):
+            del tensor, group
+            comp_u = wm_cp.swa_cache_compaction.unique_blocks
+            return torch.cat([raw.index_select(0, comp_u) for raw in swa_raw_ranks], dim=0)
+
+        with mock.patch(
+            "rtp_llm.models_py.modules.dsv4.fp8._pool_reader.all_gather",
+            side_effect=fake_reader_ag,
+        ), mock.patch.object(
+            sharded_reader,
+            "_build_local_flat",
+            return_value=torch.empty(0, dtype=torch.uint8, device=self.device),
+        ), mock.patch(
+            "rtp_llm.models_py.distributed.collective_torch.all_gather",
+            side_effect=fake_swa_ag,
+        ), mock.patch(
+            "rtp_llm.models_py.modules.dsv4.fp8.attention.dispose_tensor",
+            lambda t: None,
+        ):
+            layer_cp._attn_via_workspace(
+                PrefillQKV(
+                    qr=torch.zeros(4, 512, dtype=torch.bfloat16, device=self.device),
+                    q=torch.zeros(4, 1, 512, dtype=torch.bfloat16, device=self.device),
+                    kv_full=kv_full.clone(),
+                ),
+                common_cp,
+                wm_cp,
+                None,
+            )
+
+        self.assertEqual(tuple(captured_cp["kv"].shape), (wm_cp.total_ws_rows, 1, 512))
+        cu_cmp = wm_cp.cu_cmp_offsets.tolist()
+        cu_swa = wm_cp.cu_swa_offsets.tolist()
+        # Req 0: N=2, P=4, S=4
+        self.assertTrue(
+            torch.equal(captured_cp["kv"][cu_swa[0] + 4 : cu_swa[0] + 8, 0, :], kv_full[:4])
+        )
+        # Req 1: N=6, P=7, S=4
+        self.assertTrue(
+            torch.equal(captured_cp["kv"][cu_swa[1] + 7 : cu_swa[1] + 11, 0, :], kv_full[4:])
+        )
+        torch.testing.assert_close(
+            captured_cp["kv"][cu_cmp[0] : cu_cmp[0] + 2, 0, :].float(),
+            cmp_vals_list[0].float(),
+            rtol=0.1,
+            atol=1.0,
+        )
+        torch.testing.assert_close(
+            captured_cp["kv"][cu_cmp[1] : cu_cmp[1] + 6, 0, :].float(),
+            cmp_vals_list[1].float(),
+            rtol=0.1,
+            atol=1.0,
+        )
+
+        # Case B: CP>1 raw-Q merge ragged 2D local workspace with B=2.
+        import sys
+        from types import SimpleNamespace as _NS
+        from contextlib import ExitStack
+
+        raw_captured: dict[str, torch.Tensor] = {}
+
+        def _fake_flash_raw(*, q, kv, indices, sm_scale, attn_sink, topk_length):
+            del sm_scale, attn_sink
+            raw_captured["kv"] = kv.clone()
+            raw_captured["indices"] = indices.clone()
+            raw_captured["topk_length"] = topk_length.clone()
+            return (
+                torch.zeros((q.shape[0], 1, 512), dtype=torch.bfloat16, device=self.device),
+                None,
+                torch.zeros((q.shape[0], 1), dtype=torch.float32, device=self.device),
+            )
+
+        with ExitStack() as stack:
+            stack.enter_context(
+                mock.patch.dict(
+                    sys.modules,
+                    {
+                        "flash_mla": _NS(flash_mla_sparse_fwd=_fake_flash_raw),
+                        "flash_mla_legacy": _NS(flash_mla_sparse_fwd=_fake_flash_raw),
+                    },
+                )
+            )
+            stack.enter_context(
+                mock.patch(
+                    "rtp_llm.models_py.modules.dsv4.fp8.attention.cp_all_gather_full_varlen",
+                    side_effect=lambda t, c: torch.zeros(
+                        (8, t.shape[1], t.shape[2]), dtype=t.dtype, device=t.device
+                    ),
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    collective_torch,
+                    "all_gather",
+                    side_effect=lambda t, group=None: t.repeat(cp_size, *([1] * (t.dim() - 1))),
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    layer_cp,
+                    "_cp_local_full_row_indices",
+                    return_value=torch.tensor([0, 1, 4, 5], dtype=torch.long, device=self.device),
+                )
+            )
+            out_raw = layer_cp._attn_via_workspace_cp_raw_q_merge(
+                qkv=PrefillQKV(
+                    qr=torch.zeros(4, 512, dtype=torch.bfloat16, device=self.device),
+                    q=torch.zeros(4, 1, 512, dtype=torch.bfloat16, device=self.device),
+                    kv_full=kv_full.clone(),
+                ),
+                common=common_cp,
+                workspace_meta=wm_cp,
+                cmp_topk_runtime=None,
+                cmp_pool_3d=cmp_pool,
+                swa_pool_3d=swa_pool_3d,
+            )
+        self.assertEqual(tuple(out_raw.shape), (1, 4, 1, 512))
+        # local_cmp_lens for cp_rank=0 with eb=8, cmp_seq=[2, 6]: both blocks 0 are owned by rank0 => local_cmp=[2, 6]
+        # swa_gather=[8, 11] => expected ragged local rows = 2+8 + 6+11 = 27 (< 2*(6+11)=34).
+        self.assertEqual(tuple(raw_captured["kv"].shape), (27, 1, 512))
+        for t_idx in range(8):
+            ln = int(raw_captured["topk_length"][t_idx].item())
+            row_idx = raw_captured["indices"][t_idx, 0, :ln]
+            self.assertTrue(bool(((row_idx >= 0) & (row_idx < 27)).all()))
 
 
 if __name__ == "__main__":

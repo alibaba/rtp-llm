@@ -1037,6 +1037,299 @@ class SwaFp8KvRoundtripTest(unittest.TestCase):
             )
 
 
+class Ragged2DWorkspaceDequantTest(unittest.TestCase):
+    """Parity tests for ragged 2D ``[total_ws_rows, 512]`` destinations."""
+
+    def setUp(self):
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA required")
+        self.device = torch.device("cuda")
+        torch.manual_seed(42)
+
+    def test_dequantize_and_gather_k_cache_2d_ragged_parity(self):
+        from rtp_llm.models_py.modules.dsv4.fp8._swa_dequant_triton import (
+            build_dequant_cu_tiles_device,
+        )
+
+        block_size = 8
+        num_blocks = 12
+        pool = torch.zeros(
+            (num_blocks, block_size, HEAD_BYTES), dtype=torch.uint8, device=self.device
+        )
+        # B=3 mixed lengths including seq=0 corner and non-contiguous block IDs.
+        seq_lens = torch.tensor([11, 0, 5], dtype=torch.int32, device=self.device)
+        gather_lens = torch.tensor([7, 0, 5], dtype=torch.int32, device=self.device)
+        bt = torch.tensor(
+            [[2, 5, 0], [0, 0, 0], [7, 0, 0]], dtype=torch.int32, device=self.device
+        )
+        src_vals = torch.randn(16, HEAD_DIM, dtype=torch.bfloat16, device=self.device)
+        slots = torch.cat(
+            [
+                torch.arange(16, 24, device=self.device),
+                torch.arange(40, 43, device=self.device),
+                torch.arange(56, 61, device=self.device),
+            ]
+        )
+        quantize_and_insert_k_cache(src_vals, pool, slots)
+
+        M = 12
+        offset = 2
+        out_3d = torch.full((3, M, HEAD_DIM), -5.0, dtype=torch.bfloat16, device=self.device)
+        dequantize_and_gather_k_cache(
+            out_3d, pool, seq_lens, gather_lens, bt, block_size, offset
+        )
+
+        cu_dst = torch.tensor([1, 10, 12], dtype=torch.int32, device=self.device)
+        for use_flat in (False, True):
+            with self.subTest(use_flat=use_flat):
+                cu_tiles = build_dequant_cu_tiles_device(gather_lens) if use_flat else None
+                total_tiles = int(cu_tiles[-1].item()) if cu_tiles is not None else None
+                out_2d = torch.full(
+                    (20, HEAD_DIM), -5.0, dtype=torch.bfloat16, device=self.device
+                )
+                dequantize_and_gather_k_cache(
+                    out_2d,
+                    pool,
+                    seq_lens,
+                    gather_lens,
+                    bt,
+                    block_size,
+                    offset,
+                    cu_tiles=cu_tiles,
+                    total_tiles=total_tiles,
+                    cu_dst_offsets=cu_dst,
+                    max_tokens_hint=7,
+                )
+                torch.cuda.synchronize()
+                self.assertTrue(
+                    torch.equal(
+                        out_2d[3:10].view(torch.int16),
+                        out_3d[0, 2:9].view(torch.int16),
+                    )
+                )
+                self.assertTrue(
+                    torch.equal(
+                        out_2d[14:19].view(torch.int16),
+                        out_3d[2, 2:7].view(torch.int16),
+                    )
+                )
+                self.assertTrue(torch.all(out_2d[0:3] == -5.0))
+                self.assertTrue(torch.all(out_2d[10:14] == -5.0))
+                self.assertTrue(torch.all(out_2d[19:20] == -5.0))
+
+    def test_slots_and_cp_byte_sliced_2d_ragged_parity(self):
+        from rtp_llm.models_py.modules.dsv4.fp8._swa_dequant_triton import (
+            build_dequant_cu_tiles_device,
+            try_dequantize_and_gather_k_cache_slots_to_workspace,
+        )
+
+        cp_size = 2
+        entries_per_block = 16
+        num_blocks = 6
+        full_stride_bytes = entries_per_block * HEAD_BYTES + 256
+        local_slice_bytes = full_stride_bytes // cp_size
+        values = torch.randn(
+            3 * entries_per_block, HEAD_DIM, dtype=torch.bfloat16, device=self.device
+        )
+        write_slots = torch.arange(
+            entries_per_block, 4 * entries_per_block, dtype=torch.int64, device=self.device
+        )
+        raw_by_rank = [
+            torch.zeros(num_blocks, local_slice_bytes, dtype=torch.uint8, device=self.device)
+            for _ in range(cp_size)
+        ]
+        write_comp = build_cp_byte_sliced_slot_compaction(
+            write_slots,
+            full_entries_per_block=entries_per_block,
+            num_blocks=num_blocks,
+            validation_site="test.ragged2d.write",
+            negative_mode="skip_minus_one",
+        )
+        for cp_rank, raw in enumerate(raw_by_rank):
+            quantize_and_insert_k_cache_cp_byte_sliced(
+                values,
+                raw,
+                write_slots,
+                full_entries_per_block=entries_per_block,
+                cp_rank=cp_rank,
+                cp_size=cp_size,
+                compaction=write_comp,
+            )
+
+        # Also materialize an unpacked 3D pool with identical encoded tokens.
+        pool_3d = torch.zeros(
+            (num_blocks, entries_per_block, HEAD_BYTES), dtype=torch.uint8, device=self.device
+        )
+        quantize_and_insert_k_cache(values, pool_3d, write_slots)
+
+        read_slots = torch.tensor(
+            [
+                [16, 17, -1, 18, 19, 20],
+                [-1, -1, -1, -1, -1, -1],
+                [35, -1, 48, 49, 50, 51],
+            ],
+            dtype=torch.int64,
+            device=self.device,
+        )
+        gather_lens = torch.tensor([5, 0, 4], dtype=torch.int32, device=self.device)
+        comp = build_cp_byte_sliced_slot_compaction(
+            read_slots,
+            full_entries_per_block=entries_per_block,
+            num_blocks=num_blocks,
+            validation_site="test.ragged2d.read",
+            negative_mode="skip_any",
+            gather_lens=gather_lens,
+        )
+        cu_dst = torch.tensor([2, 8, 9], dtype=torch.int32, device=self.device)
+        cu_dst_cpu = (2, 8, 9)
+        total_rows = 15
+
+        out_slots_3d = torch.full(
+            (3, 8, HEAD_DIM), -3.0, dtype=torch.bfloat16, device=self.device
+        )
+        dequantize_and_gather_k_cache_slots(
+            out_slots_3d, pool_3d, read_slots, gather_lens, 1
+        )
+        out_slots_2d = torch.full(
+            (total_rows, HEAD_DIM), -3.0, dtype=torch.bfloat16, device=self.device
+        )
+        cu_tiles = build_dequant_cu_tiles_device(gather_lens)
+        dequantize_and_gather_k_cache_slots(
+            out_slots_2d,
+            pool_3d,
+            read_slots,
+            gather_lens,
+            1,
+            cu_tiles=cu_tiles,
+            total_tiles=int(cu_tiles[-1].item()),
+            cu_dst_offsets=cu_dst,
+        )
+        out_try_2d = torch.full(
+            (total_rows, HEAD_DIM), -3.0, dtype=torch.bfloat16, device=self.device
+        )
+        self.assertTrue(
+            try_dequantize_and_gather_k_cache_slots_to_workspace(
+                out_try_2d,
+                pool_3d,
+                read_slots,
+                gather_lens,
+                1,
+                cu_dst_offsets=cu_dst,
+            )
+        )
+        torch.cuda.synchronize()
+        self.assertTrue(
+            torch.equal(out_slots_2d[3:8].view(torch.int16), out_slots_3d[0, 1:6].view(torch.int16))
+        )
+        self.assertTrue(
+            torch.equal(out_slots_2d[10:14].view(torch.int16), out_slots_3d[2, 1:5].view(torch.int16))
+        )
+        self.assertTrue(
+            torch.equal(out_try_2d.view(torch.int16), out_slots_2d.view(torch.int16))
+        )
+
+        # CP byte-sliced sync (Triton + fallback with/without cu_dst_offsets_cpu) & empty-blocks zero-fill.
+        def fake_all_gather(tensor, group=None):
+            del tensor, group
+            return torch.cat(
+                [raw.index_select(0, comp.unique_blocks) for raw in raw_by_rank], dim=0
+            )
+
+        out_cp_triton = torch.full(
+            (total_rows, HEAD_DIM), -3.0, dtype=torch.bfloat16, device=self.device
+        )
+        out_cp_fb = torch.full(
+            (total_rows, HEAD_DIM), -3.0, dtype=torch.bfloat16, device=self.device
+        )
+        out_cp_fb_nocpu = torch.full(
+            (total_rows, HEAD_DIM), -3.0, dtype=torch.bfloat16, device=self.device
+        )
+        with mock.patch(
+            "rtp_llm.models_py.distributed.collective_torch.all_gather",
+            side_effect=fake_all_gather,
+        ):
+            dequantize_and_gather_k_cache_slots_cp_byte_sliced(
+                out=out_cp_triton,
+                k_cache_raw=raw_by_rank[0],
+                slot_mapping=read_slots,
+                gather_lens=gather_lens,
+                offset=1,
+                full_entries_per_block=entries_per_block,
+                cp_rank=0,
+                cp_size=cp_size,
+                compaction=comp,
+                cu_dst_offsets=cu_dst,
+                cu_dst_offsets_cpu=cu_dst_cpu,
+            )
+            with mock.patch.dict(
+                "os.environ", {"DSV4_CP_SWA_DIRECT_DEQUANT_SCATTER": "0"}
+            ):
+                dequantize_and_gather_k_cache_slots_cp_byte_sliced(
+                    out=out_cp_fb,
+                    k_cache_raw=raw_by_rank[0],
+                    slot_mapping=read_slots,
+                    gather_lens=gather_lens,
+                    offset=1,
+                    full_entries_per_block=entries_per_block,
+                    cp_rank=0,
+                    cp_size=cp_size,
+                    compaction=comp,
+                    cu_dst_offsets=cu_dst,
+                    cu_dst_offsets_cpu=cu_dst_cpu,
+                )
+                dequantize_and_gather_k_cache_slots_cp_byte_sliced(
+                    out=out_cp_fb_nocpu,
+                    k_cache_raw=raw_by_rank[0],
+                    slot_mapping=read_slots,
+                    gather_lens=gather_lens,
+                    offset=1,
+                    full_entries_per_block=entries_per_block,
+                    cp_rank=0,
+                    cp_size=cp_size,
+                    compaction=comp,
+                    cu_dst_offsets=cu_dst,
+                    cu_dst_offsets_cpu=None,
+                )
+        self.assertTrue(
+            torch.equal(out_cp_triton.view(torch.int16), out_slots_2d.view(torch.int16))
+        )
+        self.assertTrue(
+            torch.equal(out_cp_fb.view(torch.int16), out_cp_triton.view(torch.int16))
+        )
+        self.assertTrue(
+            torch.equal(out_cp_fb_nocpu.view(torch.int16), out_cp_triton.view(torch.int16))
+        )
+
+        # All-negative unique_blocks == 0 zero-fill path for 2D.
+        empty_slots = torch.full((2, 4), -1, dtype=torch.int64, device=self.device)
+        empty_lens = torch.tensor([3, 2], dtype=torch.int32, device=self.device)
+        empty_comp = build_cp_byte_sliced_slot_compaction(
+            empty_slots,
+            full_entries_per_block=entries_per_block,
+            num_blocks=num_blocks,
+            validation_site="test.ragged2d.empty",
+            negative_mode="skip_any",
+            gather_lens=empty_lens,
+        )
+        out_empty = torch.full((10, HEAD_DIM), -7.0, dtype=torch.bfloat16, device=self.device)
+        dequantize_and_gather_k_cache_slots_cp_byte_sliced(
+            out=out_empty,
+            k_cache_raw=raw_by_rank[0],
+            slot_mapping=empty_slots,
+            gather_lens=empty_lens,
+            offset=1,
+            full_entries_per_block=entries_per_block,
+            cp_rank=0,
+            cp_size=cp_size,
+            compaction=empty_comp,
+            cu_dst_offsets=torch.tensor([0, 6], dtype=torch.int32, device=self.device),
+            cu_dst_offsets_cpu=(0, 6),
+        )
+        self.assertTrue(torch.all(out_empty[1:4] == 0))
+        self.assertTrue(torch.all(out_empty[7:9] == 0))
+        self.assertTrue(torch.all(out_empty[4:7] == -7.0))
+
+
 class RowScatterTritonTest(unittest.TestCase):
 
     def setUp(self):

@@ -25,10 +25,21 @@ from rtp_llm.models_py.modules.dsv4.fp8._compressor_vllm_triton import (
     run_save_partial_states,
 )
 from rtp_llm.models_py.modules.dsv4.fp8._swa_dequant_triton import (
+    _dequantize_and_gather_k_kernel,
     _dequantize_and_gather_k_slots_kernel,
     _gather_k_cache_packed_kernel,
     _launch_dequantize_and_gather_k_slots_cp_rank_major_unchecked,
+    _restore_dequantize_scatter_packed_k_cache_flat_kernel,
+    dequantize_and_gather_k_cache,
+    dequantize_and_gather_k_cache_slots,
     gather_k_cache_packed,
+    try_restore_dequantize_scatter_packed_k_cache_flat,
+)
+from rtp_llm.models_py.modules.dsv4.fp8._swa_ops_triton import (
+    _combine_topk_swa_indices_cp_kernel,
+    _combine_topk_swa_indices_kernel,
+    combine_topk_swa_indices,
+    combine_topk_swa_indices_cp,
 )
 
 DEVICE = "cuda"
@@ -269,6 +280,123 @@ class NoRecompileTest(unittest.TestCase):
             "rank-major slot dequant recompiled when block count/stride changed: "
             f"cache grew {cache_after_first} -> {cache_after_second}",
         )
+
+    def test_ragged_2d_workspace_kernels_no_recompile(self):
+        """Ragged 2D workspace calls must compile once and not recompile across total_ws_rows or batch shapes."""
+        _dequantize_and_gather_k_kernel.device_caches.clear()
+        _dequantize_and_gather_k_slots_kernel.device_caches.clear()
+        _restore_dequantize_scatter_packed_k_cache_flat_kernel.device_caches.clear()
+        _combine_topk_swa_indices_kernel.device_caches.clear()
+        _combine_topk_swa_indices_cp_kernel.device_caches.clear()
+
+        block_size = 16
+        k_cache = torch.zeros(
+            (8, block_size, 584), dtype=torch.uint8, device=DEVICE
+        )
+        caches_after_first: dict[str, int] = {}
+        for idx, (total_ws_rows, seq_lens_vals, gather_vals, cu_vals, n_tokens) in enumerate(
+            (
+                (17, [5, 7], [4, 3], [0, 7], 6),
+                (63, [11, 13], [8, 9], [2, 29], 10),
+                (129, [15, 2], [9, 2], [1, 45], 12),
+            )
+        ):
+            ws = torch.empty((total_ws_rows, 512), dtype=torch.bfloat16, device=DEVICE)
+            seq_lens = torch.tensor(seq_lens_vals, dtype=torch.int32, device=DEVICE)
+            gather_lens = torch.tensor(gather_vals, dtype=torch.int32, device=DEVICE)
+            cu_dst = torch.tensor(cu_vals, dtype=torch.int32, device=DEVICE)
+            bt = torch.tensor([[0, 1], [2, 3]], dtype=torch.int32, device=DEVICE)
+            slots = torch.tensor(
+                [[0, 1, 2, 3, -1, -1, -1, -1, -1], [16, 17, -1, -1, -1, -1, -1, -1, -1]],
+                dtype=torch.int64,
+                device=DEVICE,
+            )
+
+            dequantize_and_gather_k_cache(
+                ws,
+                k_cache,
+                seq_lens,
+                gather_lens,
+                bt,
+                block_size,
+                0,
+                cu_dst_offsets=cu_dst,
+                max_tokens_hint=9,
+            )
+            dequantize_and_gather_k_cache_slots(
+                ws, k_cache, slots, gather_lens, 0, cu_dst_offsets=cu_dst
+            )
+            self.assertTrue(
+                try_restore_dequantize_scatter_packed_k_cache_flat(
+                    ws,
+                    torch.zeros((32, 584), dtype=torch.uint8, device=DEVICE),
+                    torch.arange(n_tokens, dtype=torch.int64, device=DEVICE),
+                    torch.tensor(
+                        [n_tokens // 2, n_tokens - n_tokens // 2],
+                        dtype=torch.int32,
+                        device=DEVICE,
+                    ),
+                    0,
+                    seq_lens_total=n_tokens,
+                    cu_dst_offsets=cu_dst,
+                )
+            )
+            topk_indices = torch.zeros(
+                (n_tokens, 4), dtype=torch.int32, device=DEVICE
+            )
+            q_half = n_tokens // 2
+            qsl = torch.tensor([0, q_half, n_tokens], dtype=torch.int32, device=DEVICE)
+            combine_topk_swa_indices(
+                topk_indices,
+                qsl,
+                seq_lens,
+                gather_lens,
+                window_size=8,
+                compress_ratio=4,
+                topk=4,
+                flash_mla_indices=True,
+                cu_cmp_offsets=cu_dst,
+                cu_swa_offsets=cu_dst + 4,
+            )
+            combine_topk_swa_indices_cp(
+                topk_indices,
+                torch.arange(n_tokens, dtype=torch.int64, device=DEVICE),
+                sp_int=0,
+                window_size=8,
+                compress_ratio=4,
+                topk=4,
+                req_id_per_token=torch.tensor(
+                    [0] * q_half + [1] * (n_tokens - q_half),
+                    dtype=torch.int32,
+                    device=DEVICE,
+                ),
+                prefix_lengths=torch.zeros((2,), dtype=torch.int32, device=DEVICE),
+                flash_mla_indices=True,
+                cu_cmp_offsets=cu_dst,
+                cu_swa_offsets=cu_dst + 4,
+            )
+            torch.cuda.synchronize()
+            if idx == 0:
+                caches_after_first = {
+                    "dq_bt": _triton_cache_size(_dequantize_and_gather_k_kernel),
+                    "dq_slots": _triton_cache_size(_dequantize_and_gather_k_slots_kernel),
+                    "restore": _triton_cache_size(
+                        _restore_dequantize_scatter_packed_k_cache_flat_kernel
+                    ),
+                    "cmb": _triton_cache_size(_combine_topk_swa_indices_kernel),
+                    "cmb_cp": _triton_cache_size(_combine_topk_swa_indices_cp_kernel),
+                }
+
+        caches_after_all = {
+            "dq_bt": _triton_cache_size(_dequantize_and_gather_k_kernel),
+            "dq_slots": _triton_cache_size(_dequantize_and_gather_k_slots_kernel),
+            "restore": _triton_cache_size(
+                _restore_dequantize_scatter_packed_k_cache_flat_kernel
+            ),
+            "cmb": _triton_cache_size(_combine_topk_swa_indices_kernel),
+            "cmb_cp": _triton_cache_size(_combine_topk_swa_indices_cp_kernel),
+        }
+        self.assertEqual(caches_after_first, caches_after_all)
 
 
 if __name__ == "__main__":
