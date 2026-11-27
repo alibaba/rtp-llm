@@ -8,6 +8,8 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import torch
 
+from rtp_llm.device.device_type import is_ascend
+
 
 def _validate_compressed_targets(group_name: str, group_config: Dict[str, Any]) -> None:
     targets = group_config.get("targets")
@@ -176,6 +178,17 @@ class QuantizationConfig(ABC):
                     "is_quanted": True,
                 }
             )
+
+        if is_ascend():
+            w8a8_mxfp8_desc_path = os.path.join(
+                ckpt_path, "quant_model_description.json"
+            )
+            if os.path.exists(w8a8_mxfp8_desc_path):
+                with open(w8a8_mxfp8_desc_path, "r") as f:
+                    quant_desc = json.load(f)
+                w8a8_mxfp8_config = AscendW8A8MXFP8Config.from_quant_description(quant_desc)
+                if w8a8_mxfp8_config is not None:
+                    return w8a8_mxfp8_config
 
         config_path = os.path.join(ckpt_path, "config.json")
         if not os.path.exists(config_path):
@@ -512,6 +525,74 @@ class Fp8BlockWiseQuantConfig(QuantizationConfig):
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
         return Fp8BlockWiseQuantConfig(**config)
+
+
+class AscendW8A8MXFP8Config(QuantizationConfig):
+    """ModelSlim pre-quantized (W8A8_MXFP8) model config, Ascend only.
+
+    ModelSlim writes a ``quant_model_description.json`` next to the checkpoint
+    describing per-module quant types (``W8A8_MXFP8`` / ``W8A8`` / ``FLOAT`` ...).
+    Only layers explicitly marked with MXFP8 are handled by this config; other
+    layers are collected into ``exclude_modules`` so their weights keep loading
+    in high precision.
+    """
+
+    def __init__(
+        self,
+        bits: int = 8,
+        group_size: int = 32,
+        is_quanted: bool = True,
+        **kwargs: Any,
+    ):
+        super().__init__(bits=bits, group_size=group_size, is_quanted=is_quanted)
+
+    @classmethod
+    def get_method(cls) -> str:
+        return "ASCEND_W8A8_MXFP8"
+
+    @classmethod
+    def get_algo(cls) -> str:
+        return "fp8"
+
+    def get_supported_compute_dtypes(self) -> List[torch.dtype]:
+        return [torch.bfloat16]
+
+    def get_supported_kv_cache_dtypes(self) -> List[torch.dtype]:
+        # KV cache FP8 (fa_quant_type=C8) is out of scope for this stage.
+        return [torch.float16, torch.bfloat16]
+
+    @classmethod
+    def _is_mxfp8_layer(cls, value: Any) -> bool:
+        # Bare "W8A8" may be an INT8 scheme and must not be loaded as MXFP8.
+        return isinstance(value, str) and "MXFP8" in value.upper()
+
+    @classmethod
+    def from_quant_description(
+        cls, quant_desc: Dict[str, Any]
+    ) -> Optional["AscendW8A8MXFP8Config"]:
+        """Build config from the parsed ``quant_model_description.json`` content.
+
+        Returns None when no layer is explicitly marked as MXFP8, so the
+        checkpoint falls through to the other detection branches.
+        """
+        has_mxfp8 = any(
+            cls._is_mxfp8_layer(v)
+            for k, v in quant_desc.items()
+            if k != "fa_quant_type"
+        )
+        if not has_mxfp8:
+            return None
+        config = cls(bits=8, group_size=32, is_quanted=True)
+        config.exclude_modules = {
+            k
+            for k, v in quant_desc.items()
+            if k != "fa_quant_type" and not cls._is_mxfp8_layer(v)
+        }
+        return config
+
+    @classmethod
+    def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
+        return AscendW8A8MXFP8Config(**config)
 
 
 class CompressedTensorsQuantConfig(QuantizationConfig):

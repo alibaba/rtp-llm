@@ -14,13 +14,20 @@ Pins the fused-MoE strategy contract on Ascend:
 import unittest
 
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.config.quant_config import WeightOnlyInt8PerChannelQuantConfig
+from rtp_llm.config.quant_config import (
+    AscendW8A8MXFP8Config,
+    WeightOnlyInt8PerChannelQuantConfig,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.impl.ascend.strategy import (
     AscendBf16FallbackStrategy,
     AscendCannStrategy,
+    AscendW8A8MXFP8MoeStrategy,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.impl.ascend.strategy.w8a8_mxfp8_strategy import (
+    AscendW8A8MXFP8MoeRouter,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.strategy_registry import (
     StrategyRegistry,
@@ -127,6 +134,47 @@ class TestAscendMoeStrategyContract(unittest.TestCase):
             registry.get_strategy(
                 create_config_adapter(
                     quant_config=WeightOnlyInt8PerChannelQuantConfig()
+                )
+            )
+        self.assertIn("No suitable MOE strategy found", str(ctx.exception))
+
+
+class TestAscendW8A8MXFP8MoeStrategyAccess(unittest.TestCase):
+    """MXFP8 strategy admits ep_size==1 only (P1: no expert-id localization
+    for ep==tp>1); that topology must fail explicitly at strategy selection."""
+
+    QC_MXFP8 = AscendW8A8MXFP8Config(bits=8, group_size=32, is_quanted=True)
+
+    def test_router_check_rejects_ep_tp_gt1(self):
+        """ep==tp>1 falls out of the router check (review P1 regression)."""
+        checker = ConditionChecker("AscendW8A8MXFP8MoeRouter.check_conditions()")
+        AscendW8A8MXFP8MoeRouter.check_conditions(
+            checker,
+            create_config_adapter(ep_size=2, tp_size=2, quant_config=self.QC_MXFP8),
+        )
+        self.assertFalse(checker.all_passed())
+
+    def test_router_check_accepts_pure_tp(self):
+        """ep_size==1 with tp>1 (pure-TP MoE) stays admitted."""
+        checker = ConditionChecker("AscendW8A8MXFP8MoeRouter.check_conditions()")
+        AscendW8A8MXFP8MoeRouter.check_conditions(
+            checker,
+            create_config_adapter(ep_size=1, tp_size=2, quant_config=self.QC_MXFP8),
+        )
+        self.assertTrue(checker.all_passed())
+
+    @unittest.skipUnless(
+        _HAS_TORCH_NPU, "torch_npu is required for strategy wiring"
+    )
+    def test_registry_rejects_ep_tp_gt1(self):
+        """ep==tp>1 fails strategy selection explicitly, never silently."""
+        registry = StrategyRegistry()
+        registry.register(AscendW8A8MXFP8MoeStrategy())
+        with self.assertRaises(ValueError) as ctx:
+            registry.get_strategy(
+                create_config_adapter(
+                    ep_size=2, tp_size=2, quant_config=self.QC_MXFP8,
+                    data_type="bf16",
                 )
             )
         self.assertIn("No suitable MOE strategy found", str(ctx.exception))
