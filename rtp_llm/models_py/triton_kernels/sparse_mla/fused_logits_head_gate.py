@@ -65,6 +65,7 @@ def _fused_logits_head_gate_kernel(
     BLOCK_K: tl.constexpr,
     BLOCK_N: tl.constexpr,
     W_IS_TRANSPOSED: tl.constexpr,
+    FOLD_Q_SCALE: tl.constexpr,
 ):
     pid_m = tl.program_id(0).to(tl.int64)
     offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M).to(tl.int64)
@@ -106,11 +107,13 @@ def _fused_logits_head_gate_kernel(
             acc += tl.dot(x, tl.trans(w), out_dtype=tl.float32, input_precision="tf32")
 
     # Load q_scale [BLOCK_M, BLOCK_N] (already squeezed from [T, N, 1])
-    qs = tl.load(
-        qs_ptr + offs_m[:, None] * stride_qs_t + offs_n[None, :],
-        mask=mask_m[:, None] & mask_n[None, :],
-        other=0.0,
-    )
+    qs = 1.0
+    if FOLD_Q_SCALE:
+        qs = tl.load(
+            qs_ptr + offs_m[:, None] * stride_qs_t + offs_n[None, :],
+            mask=mask_m[:, None] & mask_n[None, :],
+            other=0.0,
+        )
     out = acc * qs * scale_const
 
     tl.store(
@@ -134,6 +137,7 @@ def _fused_logits_head_gate_small_t_kernel(
     stride_qs_t,
     stride_o_t,
     BLOCK_K: tl.constexpr,  # power-of-2 padded K (whole row in registers)
+    FOLD_Q_SCALE: tl.constexpr,
 ):
     """Small-T variant: one program per (token, head_n).
 
@@ -156,7 +160,9 @@ def _fused_logits_head_gate_small_t_kernel(
 
     acc = tl.sum(x * w, axis=0)  # scalar fp32
 
-    qs = tl.load(qs_ptr + t * stride_qs_t + n).to(tl.float32)
+    qs = 1.0
+    if FOLD_Q_SCALE:
+        qs = tl.load(qs_ptr + t * stride_qs_t + n).to(tl.float32)
     out = acc * qs * scale_const
 
     tl.store(out_ptr + t * stride_o_t + n, out)
@@ -164,13 +170,15 @@ def _fused_logits_head_gate_small_t_kernel(
 
 def _baseline_logits_head_gate(
     x: torch.Tensor,
-    q_scale: torch.Tensor,
+    q_scale: torch.Tensor | None,
     weights_proj: torch.nn.Module,
     scale_const: float,
 ) -> torch.Tensor:
     """Fallback 4-op chain matching the original Python implementation."""
     x_fp32 = x.float()
     w = weights_proj(x_fp32)
+    if q_scale is None:
+        return (w.unsqueeze(-1) * scale_const).to(torch.bfloat16)
     if q_scale.dim() == 2:
         q_scale_b = q_scale.unsqueeze(-1)
     else:
@@ -180,7 +188,7 @@ def _baseline_logits_head_gate(
 
 def fused_logits_head_gate(
     x: torch.Tensor,
-    q_scale: torch.Tensor,
+    q_scale: torch.Tensor | None,
     weight: torch.Tensor,
     scale_const: float,
     fallback_proj: Optional[torch.nn.Module] = None,
@@ -189,14 +197,14 @@ def fused_logits_head_gate(
 
     Args:
         x:           [T, K] bf16 input (was ``x`` before ``.float()`` cast).
-        q_scale:     [T, N, 1] fp32 OR [T, N] fp32.
+        q_scale:     [T, N, 1] or [T, N] FP32; None keeps Q scale explicit for MX.
         weight:      [N, K] bf16 (``weights_proj.weight``).
         scale_const: ``softmax_scale * weights_scale`` (Python float).
         fallback_proj: optional callable used only when the fast path bails out
                        (matches the original ``self.weights_proj``).
 
     Returns:
-        ``[T, N, 1]`` fp32 tensor.
+        ``[T, N, 1]`` FP32 tensor, or BF16 when Q scale remains explicit.
 
     Fast path conditions:
         - ``x.dtype == bf16`` (or fp16) and ``weight.dtype == bf16`` (or fp16)
@@ -214,17 +222,26 @@ def fused_logits_head_gate(
     assert K == K_w, f"x.shape[1]={K} but weight.shape[1]={K_w}"
 
     # Squeeze q_scale to [T, N]
-    if q_scale.dim() == 3:
+    if q_scale is None:
+        qs_2d = None
+    elif q_scale.dim() == 3:
         assert q_scale.shape[-1] == 1
         qs_2d = q_scale.squeeze(-1)
     elif q_scale.dim() == 2:
         qs_2d = q_scale
     else:
         raise ValueError(f"q_scale must be 2-D or 3-D, got {q_scale.shape}")
-    assert qs_2d.shape == (T, N), f"q_scale shape {qs_2d.shape} != (T={T}, N={N})"
+    assert qs_2d is None or qs_2d.shape == (
+        T,
+        N,
+    ), f"q_scale shape {qs_2d.shape} != (T={T}, N={N})"
 
     if T == 0:
-        return torch.empty((0, N, 1), dtype=torch.float32, device=x.device)
+        return torch.empty(
+            (0, N, 1),
+            dtype=torch.bfloat16 if qs_2d is None else torch.float32,
+            device=x.device,
+        )
 
     # Fast-path constraints. Production decode runs under CUDA Graph (launch
     # overhead amortized by capture+replay), so the Triton kernel can win at
@@ -244,8 +261,7 @@ def fused_logits_head_gate(
         and weight.dtype in (torch.bfloat16, torch.float16, torch.float32)
         and x.is_contiguous()
         and K <= MAX_K
-        and qs_2d.dtype == torch.float32
-        and qs_2d.is_contiguous()
+        and (qs_2d is None or (qs_2d.dtype == torch.float32 and qs_2d.is_contiguous()))
     )
 
     if not use_fast_path:
@@ -256,7 +272,11 @@ def fused_logits_head_gate(
             )
         return _baseline_logits_head_gate(x, q_scale, fallback_proj, scale_const)
 
-    out_2d = torch.empty((T, N), dtype=torch.float32, device=x.device)
+    out_2d = torch.empty(
+        (T, N),
+        dtype=torch.bfloat16 if qs_2d is None else torch.float32,
+        device=x.device,
+    )
 
     # Detect transposed weight layout for coalesced 2D loads in large-T kernel.
     w_is_transposed = weight.stride(0) < weight.stride(1)
@@ -268,16 +288,17 @@ def fused_logits_head_gate(
         _fused_logits_head_gate_small_t_kernel[(T, N)](
             x,
             weight,
-            qs_2d,
+            qs_2d if qs_2d is not None else x,
             out_2d,
             float(scale_const),
             K,
             x.stride(0),
             weight.stride(0),
             weight.stride(1),
-            qs_2d.stride(0),
+            qs_2d.stride(0) if qs_2d is not None else 0,
             out_2d.stride(0),
             BLOCK_K=BLOCK_K,
+            FOLD_Q_SCALE=qs_2d is not None,
             num_warps=num_warps,
         )
     else:
@@ -292,7 +313,7 @@ def fused_logits_head_gate(
         _fused_logits_head_gate_kernel[grid](
             x,
             weight,
-            qs_2d,
+            qs_2d if qs_2d is not None else x,
             out_2d,
             float(scale_const),
             T,
@@ -301,10 +322,11 @@ def fused_logits_head_gate(
             x.stride(0),
             weight.stride(0),
             weight.stride(1),
-            qs_2d.stride(0),
+            qs_2d.stride(0) if qs_2d is not None else 0,
             out_2d.stride(0),
             BLOCK_M=BLOCK_M,
             BLOCK_K=BLOCK_K,
+            FOLD_Q_SCALE=qs_2d is not None,
             BLOCK_N=BLOCK_N,
             W_IS_TRANSPOSED=w_is_transposed,
             num_warps=num_warps,

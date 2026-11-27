@@ -40,6 +40,7 @@ public:
             g.seq_size_per_block    = group.seqSizePerBlock();
             if (group.spec) {
                 g.spec_type             = group.spec->type;
+                g.indexer_scale_format  = group.spec->indexer_scale_format;
                 g.k_block_payload_bytes = group.spec->k_block_payload_bytes();
                 const auto& transfer    = group.spec->tp_transfer;
                 if (transfer.mode == TpCacheTransferMode::LINEAR_QKV) {

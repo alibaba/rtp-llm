@@ -64,3 +64,12 @@ def init_speculative_decoding_group_args(parser, sp_config):
         default=1,
         help="每一轮 speculative execution（推测式生成）中，最多生成多少个 token。",
     )
+
+    speculative_decoding_group.add_argument(
+        "--sp_dspark_verify_tokens",
+        env_name="SP_DSPARK_VERIFY_TOKENS",
+        bind_to=(sp_config, "sp_dspark_verify_tokens"),
+        type=int,
+        default=0,
+        help="DSpARK 每轮目标验证的草稿前缀长度；0 表示验证全部 gamma 个。",
+    )

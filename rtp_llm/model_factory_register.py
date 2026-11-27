@@ -1,3 +1,4 @@
+import importlib
 import logging
 import os
 import sys
@@ -13,6 +14,7 @@ CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
 
 _model_factory: Dict[str, Type[Any]] = {}
+_model_config_modules: Dict[str, str] = {}
 _model_registry_lock = threading.RLock()
 _lazy_model_registry = LazyModuleRegistry("model")
 _model_type_to_module = _lazy_model_registry.name_to_module
@@ -76,6 +78,7 @@ def register_lazy_model(
     module_path: str,
     support_architectures: Optional[Iterable[str]] = None,
     support_hf_repos: Optional[Iterable[str]] = None,
+    config_module: Optional[str] = None,
 ) -> None:
     """Register lightweight metadata for a model module.
 
@@ -84,6 +87,11 @@ def register_lazy_model(
     inference without importing every model implementation.
     """
     _lazy_model_registry.register(name, module_path)
+    if config_module is not None:
+        with _model_registry_lock:
+            previous = _model_config_modules.setdefault(name, config_module)
+            if previous != config_module:
+                raise ValueError(f"Conflicting configuration module for model {name}")
 
     for architecture in support_architectures or []:
         register_hf_architecture(architecture, name)
@@ -100,6 +108,15 @@ def get_lazy_model_module_path(model_type: Optional[str]) -> Optional[str]:
         return None
     _load_internal_lazy_models()
     return _lazy_model_registry.get_module_path(model_type)
+
+
+def get_model_config_module(model_type: Optional[str]):
+    """Load optional model-owned startup rules without importing model kernels."""
+    if not model_type:
+        return None
+    with _model_registry_lock:
+        module_path = _model_config_modules.get(model_type)
+    return importlib.import_module(module_path) if module_path else None
 
 
 def _load_internal_lazy_models() -> None:
@@ -236,6 +253,22 @@ def _register_builtin_lazy_models() -> None:
     register_lazy_model("cohere", "rtp_llm.models.llama", ["CohereForCausalLM"])
     register_lazy_model("mpt", "rtp_llm.models.mpt")
     register_lazy_model("phi", "rtp_llm.models.phi")
+    register_lazy_model(
+        "minimax_m31",
+        "rtp_llm.models.minimax_m31",
+        config_module="rtp_llm.models.minimax_m31_config",
+    )
+    register_lazy_model(
+        "minimax_m31_vl",
+        "rtp_llm.models.minimax_m31_vl",
+        config_module="rtp_llm.models.minimax_m31_config",
+    )
+    register_lazy_model(
+        "minimax_m31_dspark",
+        "rtp_llm.models.minimax_m31_dspark",
+        ["DSparkMiniMaxDraftModel"],
+        config_module="rtp_llm.models.minimax_m31_config",
+    )
     register_lazy_model("qwen", "rtp_llm.models.qwen", ["QWenLMHeadModel"])
     register_lazy_model("qwen_7b", "rtp_llm.models.qwen")
     register_lazy_model("qwen_13b", "rtp_llm.models.qwen")

@@ -23,7 +23,11 @@ from rtp_llm.config.py_config_modules import (
     VitConfig,
 )
 from rtp_llm.device.device_type import is_hip
-from rtp_llm.model_factory_register import _model_factory, ensure_model_registered
+from rtp_llm.model_factory_register import (
+    _model_factory,
+    ensure_model_registered,
+    get_model_config_module,
+)
 from rtp_llm.ops import (
     DataType,
     KvCacheDataType,
@@ -464,6 +468,12 @@ class ModelFactory:
             int(scheduler_config.max_batch_tokens_size),
         )
 
+        configure = getattr(
+            get_model_config_module(model_config.model_type), "configure_engine", None
+        )
+        if configure is not None:
+            configure(model_config, engine_config)
+
         # Set model_name to engine_config.runtime_config.model_name (for backward compatibility)
         engine_config.runtime_config.model_name = model_config.model_name
 
@@ -489,6 +499,12 @@ class ModelFactory:
 
         if not sp_config.checkpoint_path:
             return None
+
+        validate = getattr(
+            get_model_config_module(sp_config.model_type), "validate_draft_type", None
+        )
+        if validate is not None:
+            validate(sp_config.model_type, sp_config.type)
 
         # Current learned-draft SP engine supports MTP, EAGLE, DSpARK and DFlash.
         if sp_config.type not in [

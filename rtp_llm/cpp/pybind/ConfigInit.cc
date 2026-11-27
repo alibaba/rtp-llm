@@ -1227,6 +1227,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("checkpoint_path", &SpeculativeExecutionConfig::checkpoint_path)
         .def_readwrite("sp_dspark_mask_token_id", &SpeculativeExecutionConfig::sp_dspark_mask_token_id)
         .def_readwrite("sp_dspark_sample_from_anchor", &SpeculativeExecutionConfig::sp_dspark_sample_from_anchor)
+        .def_readwrite("sp_dspark_verify_tokens", &SpeculativeExecutionConfig::sp_dspark_verify_tokens)
         .def("to_string", [](const SpeculativeExecutionConfig& self) { return self.to_string(); })
         .def(py::pickle(
             [](const SpeculativeExecutionConfig& self) {
@@ -1237,10 +1238,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.quantization,
                                       self.checkpoint_path,
                                       self.sp_dspark_mask_token_id,
-                                      self.sp_dspark_sample_from_anchor);
+                                      self.sp_dspark_sample_from_anchor,
+                                      self.sp_dspark_verify_tokens);
             },
             [](py::tuple t) {
-                if (t.size() != 6 && t.size() != 7 && t.size() != 8)
+                if (t.size() != 6 && t.size() != 7 && t.size() != 8 && t.size() != 9)
                     throw std::runtime_error("Invalid state!");
                 SpeculativeExecutionConfig c;
                 try {
@@ -1253,9 +1255,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     if (t.size() == 7) {
                         c.sp_dspark_mask_token_id = t[6].cast<int64_t>();
                     }
-                    if (t.size() == 8) {
+                    if (t.size() >= 8) {
                         c.sp_dspark_mask_token_id      = t[6].cast<int64_t>();
                         c.sp_dspark_sample_from_anchor = t[7].cast<bool>();
+                    }
+                    if (t.size() == 9) {
+                        c.sp_dspark_verify_tokens = t[8].cast<int64_t>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("SpeculativeExecutionConfig unpickle error: ") + e.what());
@@ -2143,6 +2148,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 return c;
             }));
 
+    py::enum_<IndexerScaleFormat>(m, "IndexerScaleFormat")
+        .value("NONE", IndexerScaleFormat::NONE)
+        .value("FP32", IndexerScaleFormat::FP32)
+        .value("UE8M0", IndexerScaleFormat::UE8M0);
+
     py::class_<KVCacheSpecDesc>(m, "KVCacheSpecDesc")
         .def(py::init<>())
         .def_readwrite("tag", &KVCacheSpecDesc::tag)
@@ -2150,6 +2160,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("dtype", &KVCacheSpecDesc::dtype)
         .def_readwrite("is_state_cache", &KVCacheSpecDesc::is_state_cache)
         .def_readwrite("tp_transfer_mode", &KVCacheSpecDesc::tp_transfer_mode)
+        .def_readwrite("indexer_scale_format", &KVCacheSpecDesc::indexer_scale_format)
         .def_readwrite("entry_elems", &KVCacheSpecDesc::entry_elems)
         .def_readwrite("entry_dtype", &KVCacheSpecDesc::entry_dtype)
         .def_readwrite("entry_count_mode", &KVCacheSpecDesc::entry_count_mode)
@@ -2188,11 +2199,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.memory,
                                       self.tail,
                                       self.cp,
-                                      self.tp_transfer_mode);
+                                      self.tp_transfer_mode,
+                                      self.indexer_scale_format);
             },
             [](py::tuple t) {
                 KVCacheSpecDesc c;
-                if (t.size() != 20 && t.size() != 21)
+                if (t.size() != 20 && t.size() != 21 && t.size() != 22)
                     throw std::runtime_error("Invalid KVCacheSpecDesc state!");
                 c.tag                                  = t[0].cast<std::string>();
                 c.cache_type                           = t[1].cast<KVCacheSpecType>();
@@ -2214,8 +2226,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 c.memory                               = t[17].cast<std::optional<CacheMemoryPolicyDesc>>();
                 c.tail                                 = t[18].cast<std::optional<CacheTailPolicyDesc>>();
                 c.cp                                   = t[19].cast<std::optional<CacheCpPolicyDesc>>();
-                if (t.size() == 21) {
+                if (t.size() >= 21) {
                     c.tp_transfer_mode = t[20].cast<TpCacheTransferMode>();
+                }
+                if (t.size() == 22) {
+                    c.indexer_scale_format = t[21].cast<IndexerScaleFormat>();
                 }
                 return c;
             }));

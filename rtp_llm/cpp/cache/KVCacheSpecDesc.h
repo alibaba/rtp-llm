@@ -58,6 +58,8 @@ struct KVCacheSpecDesc {
     DataType        dtype          = DataType::TYPE_INVALID;
     bool            is_state_cache = false;
 
+    IndexerScaleFormat indexer_scale_format = IndexerScaleFormat::NONE;
+
     uint32_t entry_elems = 0;
     DataType entry_dtype = DataType::TYPE_INVALID;
 

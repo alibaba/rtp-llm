@@ -230,6 +230,10 @@ def build_dsv4_kv_cache_spec_descs(
         DataType.TYPE_UINT8,
         CSA_LAYER_COMPRESS_RATIO,
     )
+    if fp8_kv and indexer_head_dim == 128:
+        from rtp_llm.models_py.modules.indexer_mx_abi import indexer_cache_scale_format
+
+        indexer_kv.indexer_scale_format = indexer_cache_scale_format()
     indexer_state = _make_dsv4_desc(
         INDEXER_STATE_TAG,
         _FIXED_STATE_KIND,

@@ -62,7 +62,7 @@ private:
 
     void                            initScheduler();
     std::shared_ptr<GenerateStream> createStream(const std::shared_ptr<GenerateInput>& input);
-    bool                            validateStreamForScheduling(const GenerateStreamPtr& stream) const;
+    bool                            validateStreamForScheduling(const GenerateStreamPtr& stream, bool for_scheduling = true) const;
     std::shared_ptr<GenerateStream> createMinFakeStream(int32_t max_new_tokens);
     WarmUpResult                    warmUp(const EngineInitParams& params);
     WarmUpResult                    prefillWarmUp(const EngineInitParams& params);
@@ -107,6 +107,7 @@ private:
     std::unique_ptr<Executor>                     executor_;
     ModelConfig                                   model_config_;
     py::object                                    custom_output_selector_;
+    bool                                          supports_local_pd_fallback_ = true;
     ParallelismConfig                             parallelism_config;
     RuntimeConfig                                 runtime_config;
     EPLBConfig                                    eplb_config;

@@ -195,6 +195,7 @@ TEST_F(DecodeLoadHelperTest, Load_ReturnNotNull_RequestSuccess) {
 TEST_F(DecodeLoadHelperTest, LoadCarriesRemainingBudgetAndKeepsLocalDeadline) {
     const int64_t request_deadline_ms  = currentTimeMs() + 5000;
     const int64_t transfer_deadline_ms = currentTimeMs() + 500;
+    const std::string  pipeline_layout      = "decode-pipeline-layout";
     constexpr uint64_t plan_digest     = 0xfedcba9876543210ULL;
 
     auto result = client_->load(1010,
@@ -205,7 +206,9 @@ TEST_F(DecodeLoadHelperTest, LoadCarriesRemainingBudgetAndKeepsLocalDeadline) {
                                 transfer_deadline_ms,
                                 1000,
                                 false,
-                                plan_digest);
+                                plan_digest,
+                                {},
+                                pipeline_layout);
 
     ASSERT_NE(result, nullptr);
     EXPECT_EQ(result->request.timeout_ms(), 1000);
@@ -214,7 +217,9 @@ TEST_F(DecodeLoadHelperTest, LoadCarriesRemainingBudgetAndKeepsLocalDeadline) {
     EXPECT_GT(result->timeout_ms, 0);
     EXPECT_LE(result->timeout_ms, 500);
     EXPECT_TRUE(waitDone(result));
-    EXPECT_EQ(server_->service()->getLastStartLoadRequest().plan_digest(), plan_digest);
+    const auto received = server_->service()->getLastStartLoadRequest();
+    EXPECT_EQ(received.plan_digest(), plan_digest);
+    EXPECT_EQ(received.decode_pipeline_layout(), pipeline_layout);
     EXPECT_EQ(server_->service()->getLastStartLoadRequest().timeout_ms(), result->request.timeout_ms());
 }
 

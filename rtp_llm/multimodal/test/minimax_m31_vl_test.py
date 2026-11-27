@@ -1,0 +1,517 @@
+import io
+import json
+import tempfile
+import unittest
+from contextlib import nullcontext
+from itertools import product
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import torch
+from PIL import Image
+
+from rtp_llm.config.exceptions import FtRuntimeException
+from rtp_llm.multimodal.multimodal_mixin_register import get_multimodal_mixin_cls
+from rtp_llm.multimodal.multimodal_mixins.minimax_m31_vl.image_processor import (
+    MiniMaxM31VLImageProcessor,
+    get_hw_multiple_of,
+    smart_resize,
+)
+from rtp_llm.multimodal.multimodal_mixins.minimax_m31_vl.minimax_m31_vl_mixin import (
+    MiniMaxM31VLImageEmbedding,
+    MiniMaxM31VLMixin,
+    _MiniMaxM31VLPreprocessBuffers,
+    _MiniMaxM31VLVisionGraphCache,
+)
+from rtp_llm.multimodal.multimodal_mixins.minimax_m31_vl.minimax_m31_vl_vit import (
+    MiniMaxM31VLVisionModel,
+    MiniMaxM31VLVisionTower,
+    get_fused_qkv_checkpoint_names,
+)
+from rtp_llm.utils.base_model_datatypes import MMUrlType
+
+
+class MiniMaxM31VLTest(unittest.TestCase):
+    def test_mixin_rejects_non_bf16_before_visual_initialization(self):
+        with self.assertRaisesRegex(ValueError, "ACT_TYPE=bf16"):
+            MiniMaxM31VLMixin(torch.float16)
+
+    def test_transformers_fast_image_processor_import_contract(self):
+        from transformers.image_processing_utils_fast import (
+            BaseImageProcessorFast,
+            group_images_by_shape,
+            reorder_images,
+        )
+
+        self.assertTrue(callable(group_images_by_shape))
+        self.assertTrue(callable(reorder_images))
+        self.assertTrue(callable(BaseImageProcessorFast.from_pretrained))
+
+    def test_image_processor_round_trip_pretrained_and_preprocess(self):
+        with tempfile.TemporaryDirectory() as root:
+            MiniMaxM31VLImageProcessor().save_pretrained(root)
+            processor = MiniMaxM31VLImageProcessor.from_pretrained(root)
+            output = processor.preprocess(
+                Image.new("RGB", (56, 56)), return_tensors="pt"
+            )
+        self.assertGreater(output["pixel_values"].numel(), 0)
+        self.assertEqual(tuple(output["image_grid_thw"].shape), (1, 3))
+
+    def test_unindexed_word_embedding_checkpoint(self):
+        from safetensors.torch import save_file
+
+        with tempfile.TemporaryDirectory() as root:
+            expected = torch.arange(12, dtype=torch.float32).reshape(3, 4)
+            save_file(
+                {"language_model.model.embed_tokens.weight": expected},
+                str(Path(root) / "model.safetensors"),
+            )
+            actual = MiniMaxM31VLImageEmbedding._load_word_embedding(root)
+            torch.testing.assert_close(actual, expected)
+
+    def test_checkpoint_with_unimplemented_vision_post_norm_is_rejected(self):
+        with tempfile.TemporaryDirectory() as root:
+            Path(root, "model.safetensors.index.json").write_text(
+                json.dumps(
+                    {
+                        "weight_map": {
+                            "vision_tower.vision_model.post_layernorm.weight": "model.safetensors"
+                        }
+                    }
+                )
+            )
+            with self.assertRaisesRegex(ValueError, "post_layernorm is unsupported"):
+                MiniMaxM31VLImageEmbedding._load_word_embedding(root)
+
+    def test_long_side_resize_respects_area_and_dimensions(self):
+        height, width = smart_resize(
+            4000, 1000, max_long_side_pixel=4096, max_pixels=451584
+        )
+        self.assertLessEqual(height * width, 451584)
+        self.assertLessEqual(max(height, width), 4096)
+        with self.assertRaises(FtRuntimeException):
+            smart_resize(0, 100, max_long_side_pixel=4096)
+        with self.assertRaises(FtRuntimeException):
+            smart_resize(1, 10000, max_long_side_pixel=4096)
+        self.assertEqual(get_hw_multiple_of((10000, 1), 28, 1000), (980, 28))
+
+    def test_video_long_side_respects_resolved_pixel_budget(self):
+        class VideoReader:
+            def __init__(self, source, width=3840, height=2160, **kwargs):
+                self.width, self.height = width, height
+
+            def __len__(self):
+                return 2
+
+            def get_avg_fps(self):
+                return 1.0
+
+            def __getitem__(self, index):
+                return SimpleNamespace(shape=(self.height, self.width, 3))
+
+            def get_batch(self, indices):
+                return torch.zeros(
+                    (len(indices), self.height, self.width, 3), dtype=torch.uint8
+                )
+
+        for budgets, long_side, requested_min in product(
+            (
+                (200000, 300000, 451584, 200000),
+                (200000000, 300000, 451584, 300000),
+                (200000000, None, 600000, 600000),
+                (-1, 300000, 451584, 300000),
+                (-1, None, 600000, 600000),
+            ),
+            (-1, 4096),
+            (-1, 200000000),
+        ):
+            request_budget, checkpoint_budget, processor_budget, expected = budgets
+            with self.subTest(
+                request_budget=request_budget,
+                checkpoint_budget=checkpoint_budget,
+                long_side=long_side,
+                requested_min=requested_min,
+            ):
+                mm_input = SimpleNamespace(
+                    url="test",
+                    mm_preprocess_config=SimpleNamespace(
+                        fps=1.0,
+                        max_frames=2,
+                        max_pixels=request_budget,
+                        max_long_side_pixel=long_side,
+                        min_pixels=requested_min,
+                    ),
+                )
+                config = (
+                    {}
+                    if checkpoint_budget is None
+                    else {"max_pixels": checkpoint_budget}
+                )
+                with (
+                    patch.dict(
+                        "sys.modules",
+                        {
+                            "decord": SimpleNamespace(
+                                VideoReader=VideoReader,
+                                bridge=SimpleNamespace(set_bridge=lambda _: None),
+                            )
+                        },
+                    ),
+                    patch(
+                        "rtp_llm.multimodal.multimodal_mixins.minimax_m31_vl.minimax_m31_vl_mixin.get_bytes_io_from_url",
+                        return_value=io.BytesIO(b"video"),
+                    ),
+                    (
+                        self.assertRaises(FtRuntimeException)
+                        if requested_min > 0
+                        else nullcontext()
+                    ),
+                ):
+                    frames, (height, width), _ = (
+                        MiniMaxM31VLImageEmbedding._preprocess_video(
+                            mm_input,
+                            SimpleNamespace(
+                                download_headers=None, mm_video_max_file_size_kb=1
+                            ),
+                            SimpleNamespace(patch_size=14, max_pixels=processor_budget),
+                            SimpleNamespace(encode=lambda *args, **kwargs: [1]),
+                            video_processor_config=config,
+                        )
+                    )
+                if requested_min > 0:
+                    continue
+                self.assertLessEqual(height * width, expected)
+                if long_side > 0 or checkpoint_budget is not None or request_budget > 0:
+                    self.assertGreater(height * width, expected * 0.75)
+                self.assertEqual(tuple(frames.shape), (2, height, width, 3))
+
+    def test_image_request_cannot_expand_server_pixel_budget(self):
+        image_data = io.BytesIO()
+        Image.new("RGB", (1120, 1120)).save(image_data, format="PNG")
+        for budgets, long_side, requested_min in product(
+            (
+                (-1, 200000, 200000),
+                (100000, 200000, 100000),
+                (200000000, 200000, 200000),
+            ),
+            (-1, 4096),
+            (-1, 200000000),
+        ):
+            requested_max, server_max, expected = budgets
+            with self.subTest(request=requested_max, long_side=long_side):
+                mm_input = SimpleNamespace(
+                    url="test",
+                    mm_preprocess_config=SimpleNamespace(
+                        min_pixels=requested_min,
+                        max_pixels=requested_max,
+                        max_long_side_pixel=long_side,
+                    ),
+                )
+                with (
+                    patch(
+                        "rtp_llm.multimodal.multimodal_mixins.minimax_m31_vl.minimax_m31_vl_mixin.get_bytes_io_from_url",
+                        return_value=io.BytesIO(image_data.getvalue()),
+                    ),
+                    (
+                        self.assertRaises(FtRuntimeException)
+                        if requested_min > 0
+                        else nullcontext()
+                    ),
+                ):
+                    _, (height, width), _ = (
+                        MiniMaxM31VLImageEmbedding._preprocess_image(
+                            mm_input,
+                            SimpleNamespace(
+                                download_headers=None, mm_image_max_file_size_kb=1
+                            ),
+                            SimpleNamespace(
+                                patch_size=14,
+                                merge_size=2,
+                                min_pixels=3136,
+                                max_pixels=server_max,
+                            ),
+                        )
+                    )
+                if requested_min > 0:
+                    continue
+                self.assertLessEqual(height * width, expected)
+                self.assertGreater(height * width, expected * 0.75)
+
+    def test_resize_rejects_minimum_or_alignment_above_area_budget(self):
+        for kwargs in (
+            {"min_pixels": 200000000, "max_pixels": 200000},
+            {
+                "min_pixels": 200000000,
+                "max_pixels": 200000,
+                "max_long_side_pixel": 4096,
+            },
+            {"min_pixels": 40000, "max_pixels": 40000},
+        ):
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaises(FtRuntimeException):
+                    smart_resize(28, 28, **kwargs)
+
+    def test_m31_only_mixin_registration(self):
+        self.assertIs(get_multimodal_mixin_cls("minimax_m31_vl"), MiniMaxM31VLMixin)
+        self.assertEqual(
+            get_fused_qkv_checkpoint_names(
+                "vision_tower.vision_model.encoder.layers.0.self_attn.qkv_proj.weight"
+            ),
+            (
+                "vision_tower.vision_model.encoder.layers.0.self_attn.q_proj.weight",
+                "vision_tower.vision_model.encoder.layers.0.self_attn.k_proj.weight",
+                "vision_tower.vision_model.encoder.layers.0.self_attn.v_proj.weight",
+            ),
+        )
+
+    def test_batch_work_budget_is_memory_bounded_including_serial_mode(self):
+        embedding = SimpleNamespace(
+            mm_processor=SimpleNamespace(patch_size=14, max_pixels=19600),
+            merge_size=2,
+            visual=SimpleNamespace(
+                vision_config=SimpleNamespace(vision_segment_max_frames=4)
+            ),
+            _workspace_bytes_per_patch=lambda: 10,
+            _workspace_budget_bytes=lambda: 1024,
+        )
+        for media_cap in (1, 2, 200, 2**63 - 1):
+            with self.subTest(media_cap=media_cap):
+                budget = MiniMaxM31VLImageEmbedding.get_batch_work_budget(
+                    embedding, media_cap
+                )
+                self.assertIsNotNone(budget)
+                self.assertEqual(budget.estimated_workspace_bytes, 1024)
+
+    @staticmethod
+    def _small_embedding():
+        torch.manual_seed(42)
+        model = (
+            MiniMaxM31VLVisionTower(
+                {
+                    "vision_config": {
+                        "hidden_size": 24,
+                        "num_attention_heads": 3,
+                        "num_hidden_layers": 2,
+                        "intermediate_size": 48,
+                        "patch_size": 2,
+                        "image_size": 8,
+                        "vision_segment_max_frames": 2,
+                    },
+                    "text_config": {"hidden_size": 32},
+                    "projector_hidden_size": 32,
+                }
+            )
+            .to_bfloat16()
+            .eval()
+        )
+        embedding = MiniMaxM31VLImageEmbedding.__new__(MiniMaxM31VLImageEmbedding)
+        embedding.visual = model
+        embedding.mm_processor = SimpleNamespace(
+            patch_size=2,
+            rescale_factor=1 / 255,
+        )
+        embedding.temporal_patch_size, embedding.merge_size = 2, 2
+        embedding._preprocess_buffers = _MiniMaxM31VLPreprocessBuffers(
+            [0.4, 0.5, 0.6], [0.2, 0.3, 0.4]
+        )
+        embedding._vision_graph_cache = _MiniMaxM31VLVisionGraphCache(model)
+        embedding.word_embedding_weight = torch.randn(64, 32, dtype=torch.bfloat16)
+        embedding._start_emb = embedding.word_embedding_weight[0]
+        embedding._end_emb = embedding.word_embedding_weight[1]
+        embedding._bracket_embs_on_device = True
+        return embedding
+
+    @staticmethod
+    def _small_media():
+        image = (
+            torch.arange(3 * 8 * 8).remainder(256).to(torch.uint8).reshape(3, 8, 8),
+            (8, 8),
+            None,
+        )
+        video = (
+            torch.arange(9 * 8 * 8 * 3)
+            .remainder(256)
+            .to(torch.uint8)
+            .reshape(9, 8, 8, 3),
+            (8, 8),
+            [[2 + i, 10 + i] for i in range(5)],
+        )
+        return image, video
+
+    def test_workspace_budget_tracks_selected_device_capacity(self):
+        embedding = SimpleNamespace(_device=torch.device("cuda:2"))
+        gib = 1024**3
+        with (
+            patch.object(
+                torch.cuda, "mem_get_info", return_value=(8 * gib, 80 * gib)
+            ) as free,
+            patch.object(torch.cuda, "memory_reserved", return_value=3 * gib),
+            patch.object(torch.cuda, "memory_allocated", return_value=2 * gib),
+        ):
+            budget = MiniMaxM31VLImageEmbedding._workspace_budget_bytes(embedding)
+        self.assertEqual(budget, 8 * gib)
+        free.assert_called_once_with(torch.device("cuda:2"))
+
+    def test_chunking_preserves_mixed_media_frames_rope_and_positions(self):
+        embedding = self._small_embedding()
+        image, video = self._small_media()
+        data, kinds = [image, video, image], [
+            MMUrlType.IMAGE,
+            MMUrlType.VIDEO,
+            MMUrlType.IMAGE,
+        ]
+        expected = embedding._batched_embedding(data, kinds)
+        segment = (video[0][:4], video[1], video[2][:2])
+        segment_bytes = embedding.estimate_work(segment).estimated_workspace_bytes
+        output_bytes = (
+            sum(embedding.estimate_work(x).output_tokens for x in data) * 32 * 2
+        )
+        budget = 2 * segment_bytes + 2 * output_bytes
+        self.assertLess(
+            budget,
+            sum(embedding.estimate_work(x).estimated_workspace_bytes for x in data),
+        )
+        with (
+            patch.object(embedding, "_workspace_budget_bytes", return_value=budget),
+            patch.object(
+                embedding, "_run_visual", wraps=embedding._run_visual
+            ) as forward,
+        ):
+            actual = embedding.batched_embedding(data, kinds)
+        self.assertGreater(forward.call_count, 1)
+        for (got, positions), (reference, reference_positions) in zip(actual, expected):
+            torch.testing.assert_close(got, reference, rtol=0, atol=0)
+            torch.testing.assert_close(positions, reference_positions, rtol=0, atol=0)
+        self.assertEqual(
+            actual[1][0].shape[0], embedding.estimate_work(video).output_tokens
+        )
+
+    def test_admitted_batch_keeps_single_packed_forward(self):
+        embedding = self._small_embedding()
+        image, video = self._small_media()
+        work = sum(
+            embedding.estimate_work(x).estimated_workspace_bytes for x in [image, video]
+        )
+        with (
+            patch.object(embedding, "_workspace_budget_bytes", return_value=work),
+            patch.object(
+                embedding, "_run_visual", wraps=embedding._run_visual
+            ) as forward,
+        ):
+            embedding.batched_embedding(
+                [image, video], [MMUrlType.IMAGE, MMUrlType.VIDEO]
+            )
+        forward.assert_called_once()
+
+    def test_large_output_does_not_accumulate_gpu_features(self):
+        embedding = self._small_embedding()
+        image, _ = self._small_media()
+        expected, _ = embedding.embedding(image)
+        budget = embedding.estimate_work(image).estimated_workspace_bytes
+        self.assertGreater(200 * expected.numel() * expected.element_size(), budget)
+        with patch.object(embedding, "_workspace_budget_bytes", return_value=budget):
+            outputs = embedding.batched_embedding(
+                [image] * 200, [MMUrlType.IMAGE] * 200
+            )
+        self.assertEqual(len(outputs), 200)
+        for result, positions in outputs:
+            self.assertEqual(result.device.type, "cpu")
+            torch.testing.assert_close(result, expected, rtol=0, atol=0)
+            torch.testing.assert_close(
+                positions, torch.arange(expected.shape[0], dtype=torch.int32)
+            )
+
+    def test_oversized_atomic_segments_fail_before_gpu_fold(self):
+        embedding = self._small_embedding()
+        image, video = self._small_media()
+        for data, kinds, budget in (
+            ([image] * 200, [MMUrlType.IMAGE] * 200, 1000),
+            ([video] * 20, [MMUrlType.VIDEO] * 20, 1000),
+            ([video], [MMUrlType.VIDEO], 10000),
+        ):
+            with (
+                self.subTest(media_count=len(data)),
+                patch.object(embedding, "_workspace_budget_bytes", return_value=budget),
+                patch.object(embedding, "_gpu_fold") as fold,
+                self.assertRaises(FtRuntimeException),
+            ):
+                embedding.batched_embedding(data, kinds)
+            fold.assert_not_called()
+
+    def test_nonpositive_frame_limit_disables_segmentation(self):
+        for limit in (0, -1):
+            model = SimpleNamespace(vision_segment_max_frames=limit)
+            self.assertEqual(
+                MiniMaxM31VLVisionModel._apply_max_frames_limit(model, [[5, 2, 2]]),
+                [[5, 2, 2]],
+            )
+
+    def test_vision_graph_cache_cpu_fallback(self):
+        class Visual(torch.nn.Module):
+            def forward(self, pixels, grid):
+                return pixels.sum(dim=0)
+
+        cache = _MiniMaxM31VLVisionGraphCache(Visual())
+        output = cache.run(torch.ones((4, 3)), torch.tensor([[1, 2, 2]]))
+        self.assertEqual(output.tolist(), [4.0, 4.0, 4.0])
+        self.assertEqual(cache.stats()["fallback"], 1)
+
+    def test_vision_graph_capture_type_error_disables_shape(self):
+        cache = _MiniMaxM31VLVisionGraphCache(torch.nn.Identity(), capture_after=1)
+        pixels = SimpleNamespace(is_cuda=True, shape=(4, 3))
+        grid = torch.tensor([[1, 2, 2]])
+        with (
+            patch("torch.cuda.is_current_stream_capturing", return_value=False),
+            patch(
+                "rtp_llm.multimodal.multimodal_mixins.minimax_m31_vl.minimax_m31_vl_mixin._select_attention_backend",
+                return_value="flashinfer",
+            ),
+            patch.object(cache, "_signature", return_value=("shape",)),
+            patch.object(
+                cache, "_capture", side_effect=TypeError("unsupported plan")
+            ) as capture,
+            patch.object(cache, "_eager", return_value="eager"),
+        ):
+            self.assertEqual(cache.run(pixels, grid), "eager")
+            self.assertEqual(cache.run(pixels, grid), "eager")
+        self.assertEqual(capture.call_count, 1)
+
+    def test_small_vision_forward_cpu(self):
+        config = {
+            "vision_config": {
+                "hidden_size": 24,
+                "num_attention_heads": 3,
+                "num_hidden_layers": 1,
+                "intermediate_size": 48,
+                "patch_size": 2,
+                "image_size": 4,
+            },
+            "text_config": {"hidden_size": 32},
+            "projector_hidden_size": 32,
+        }
+        model = MiniMaxM31VLVisionTower(config).to_bfloat16().eval()
+        rope = model.vision_tower.vision_model
+        self.assertEqual(rope.inv_freq_t.dtype, torch.float32)
+        self.assertEqual(rope.inv_freq_h.dtype, torch.float32)
+        self.assertEqual(rope.inv_freq_w.dtype, torch.float32)
+        phases = rope._get_3d_rope_embed(1, 2, 258, 2)
+        width_phase = rope.t_dim // 2 + rope.h_dim // 2
+        self.assertNotEqual(
+            float(phases[512, width_phase]), float(phases[513, width_phase])
+        )
+        self.assertEqual(
+            MiniMaxM31VLImageEmbedding._data_type.fget(SimpleNamespace(visual=model)),
+            torch.bfloat16,
+        )
+        pixels = torch.randn(4, 24, dtype=torch.bfloat16)
+        grid = torch.tensor([[1, 2, 2]], dtype=torch.int64)
+        with torch.no_grad():
+            output = model(pixels, grid)
+        self.assertEqual(output.shape, (1, 32))
+        self.assertEqual(output.dtype, torch.bfloat16)
+        self.assertTrue(torch.isfinite(output).all())
+
+
+if __name__ == "__main__":
+    unittest.main()

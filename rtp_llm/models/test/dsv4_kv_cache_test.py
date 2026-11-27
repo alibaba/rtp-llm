@@ -29,6 +29,7 @@ from rtp_llm.ops import (
     CpPrefillSliceLayout,
     DataType,
     HybridAttentionType,
+    IndexerScaleFormat,
     KvCacheDataType,
     KVCacheSpecDesc,
     KVCacheSpecType,
@@ -55,6 +56,31 @@ class Dsv4KvCacheSpecTest(TestCase):
 
     def _by_tag(self, layer_descs):
         return {desc.tag: desc for descs in layer_descs for desc in descs}
+
+    def test_fp8_indexer_declares_native_scale_encoding(self):
+        for mx in (False, True):
+            with (
+                self.subTest(mx=mx),
+                patch(
+                    "rtp_llm.models_py.modules.indexer_mx_abi.use_mx_indexer_cache",
+                    return_value=mx,
+                ),
+            ):
+                descs = self._by_tag(self._build())
+                self.assertEqual(
+                    descs[INDEXER_KV_TAG].indexer_scale_format,
+                    IndexerScaleFormat.UE8M0 if mx else IndexerScaleFormat.FP32,
+                )
+                for tag, desc in descs.items():
+                    if tag != INDEXER_KV_TAG:
+                        self.assertEqual(
+                            desc.indexer_scale_format, IndexerScaleFormat.NONE
+                        )
+                bf16_descs = self._by_tag(self._build(fp8_kv=False))
+                self.assertEqual(
+                    bf16_descs[INDEXER_KV_TAG].indexer_scale_format,
+                    IndexerScaleFormat.NONE,
+                )
 
     def test_layer_routing_tags(self):
         layer_descs = self._build()

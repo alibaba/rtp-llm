@@ -2,8 +2,13 @@ import ast
 import unittest
 from pathlib import Path
 from typing import Iterable, Set
+from unittest.mock import patch
 
-from rtp_llm.model_factory_register import ModelDict, _model_type_to_module
+from rtp_llm.model_factory_register import (
+    ModelDict,
+    _model_type_to_module,
+    get_model_config_module,
+)
 from rtp_llm.openai.renderer_factory_register import _renderer_type_to_module
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -38,6 +43,23 @@ def _find_literal_registration_names(
 
 
 class LazyRegistryTest(unittest.TestCase):
+    def test_model_owned_configuration_is_optional(self):
+        for model_type in (None, "", "unknown_model", "qwen_3", "deepseek_v4"):
+            self.assertIsNone(get_model_config_module(model_type))
+        modules = [
+            get_model_config_module(name)
+            for name in ("minimax_m31", "minimax_m31_vl", "minimax_m31_dspark")
+        ]
+        self.assertTrue(all(module is modules[0] for module in modules))
+        self.assertEqual(modules[0].__name__, "rtp_llm.models.minimax_m31_config")
+
+    def test_startup_configuration_does_not_discover_internal_models(self):
+        # Frontend defaults must not load optional model plugins or CUDA kernels.
+        with patch("rtp_llm.model_factory_register._load_internal_lazy_models") as load:
+            self.assertIsNone(get_model_config_module("qwen_3"))
+            self.assertIsNotNone(get_model_config_module("minimax_m31"))
+            load.assert_not_called()
+
     def test_lazy_model_registry_covers_source_registrations(self):
         source_names = _find_literal_registration_names(
             (REPO_ROOT / "rtp_llm" / "models",),

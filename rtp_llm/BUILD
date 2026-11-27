@@ -65,6 +65,7 @@ rtp_kernel = [
 
 flashattn2 = ["flash_attn"]
 flashattn = flashattn2 + ["flash-attn-3"]
+m31_prefill = ["fmha-sm100", "quack-kernels"]
 
 xft_dep = select({
     "@//:using_arm": [],
@@ -154,7 +155,7 @@ requirement([
     "watchdog",
     "zstandard",
     "xgrammar",
-] + deep + flashinfer_with_cache + flashmla + rtp_kernel + flashattn)
+] + deep + flashinfer_with_cache + flashmla + rtp_kernel + flashattn + m31_prefill)
 
 
 _JIT_CACHE_SRCS = [

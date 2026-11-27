@@ -215,8 +215,16 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     };
     std::unique_ptr<NormalEngine, decltype(cleanup_on_failure)> construction_guard(this, cleanup_on_failure);
     resource_context_.defer_grammar_to_pp_tail = parallelism_config.pp_size > 1 && parallelism_config.pp_rank == 0;
+    [[maybe_unused]] bool supports_cacheless_warmup = true;
     if (params.py_model && !params.py_model.is_none()) {
         py::gil_scoped_acquire gil;
+        if (py::hasattr(params.py_model, "supports_cacheless_warmup")) {
+            supports_cacheless_warmup = params.py_model.attr("supports_cacheless_warmup").cast<bool>();
+        }
+        if (py::hasattr(params.py_model, "supports_local_pd_fallback")) {
+            supports_local_pd_fallback_ =
+                params.py_model.attr("supports_local_pd_fallback")(sp_config.type != SP_TYPE_NONE).cast<bool>();
+        }
         if (py::hasattr(params.py_model, "custom_output_handler")) {
             custom_output_selector_ = params.py_model.attr("custom_output_handler").attr("select_token_position");
         }
@@ -285,7 +293,7 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
 
     std::optional<WarmUpResult> warm_up_result = std::nullopt;
 #if USING_CUDA
-    if (runtime_config.warm_up && (!model_config_.mm_model_config.is_multimodal)) {
+    if (runtime_config.warm_up && supports_cacheless_warmup && !model_config_.mm_model_config.is_multimodal) {
         // warm up
         RTP_LLM_LOG_INFO("warm up (max_context_batch_size %d, max_seq_len %d calculate_loss %d) query begin",
                          runtime_config.fifo_scheduler_config.max_context_batch_size,
@@ -1187,7 +1195,7 @@ absl::Status NormalEngine::trySaveStepError() const {
     return absl::UnimplementedError("can not save yet!");
 }
 
-bool NormalEngine::validateStreamForScheduling(const GenerateStreamPtr& stream) const {
+bool NormalEngine::validateStreamForScheduling(const GenerateStreamPtr& stream, bool for_scheduling) const {
     if (stream->hasError()) {
         return false;
     }
@@ -1199,6 +1207,21 @@ bool NormalEngine::validateStreamForScheduling(const GenerateStreamPtr& stream) 
         && stream->maxBatchSize() > 1) {
         stream->reportError(ErrorCode::INVALID_PARAMS,
                             "speculative decoding does not support num_return_sequences > 1 or num_beams > 1");
+        return false;
+    }
+    // PD streams enter the Decode scheduler before the asynchronous first-token/KV handoff.
+    // Only local Prefill is unsupported; the connector owns PD readiness.
+    if (for_scheduling && pd_sep_config.role_type == RoleType::DECODE && stream->isContextStream()
+        && !stream->queryPdSep() && !supports_local_pd_fallback_) {
+        stream->reportError(ErrorCode::INVALID_PARAMS,
+                            "This model requires a completed Prefill handoff on DECODE; local Prefill is unsupported");
+        return false;
+    }
+    const auto& config = stream->generateConfig();
+    if (!supports_local_pd_fallback_ && parallelism_config.role_type == RoleType::PREFILL && config->max_new_tokens > 1
+        && !config->pd_separation && !config->return_prompt_logits) {
+        stream->reportError(ErrorCode::INVALID_PARAMS,
+                            "This model cannot run multi-token generation locally on PREFILL; use PD separation");
         return false;
     }
     if (pd_sep_config.role_type != RoleType::DECODE || !stream->generateConfig()->isPrefillOnly()) {
@@ -1257,7 +1280,7 @@ std::shared_ptr<GenerateStream> NormalEngine::createStream(const std::shared_ptr
 std::shared_ptr<GenerateStream> NormalEngine::makeStream(const std::shared_ptr<GenerateInput>& input) {
     auto stream = createStream(input);
     stream->setReserveStep(reserveStepForStream(stream->generateConfig()->isPrefillOnly()));
-    (void)validateStreamForScheduling(stream);
+    (void)validateStreamForScheduling(stream, /*for_scheduling=*/false);
     return stream;
 }
 
@@ -1534,23 +1557,22 @@ void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
     } else {
         bool need_prefill = false;
         bool need_decode  = false;
+        bool has_prefill  = false;
+        bool has_decode   = false;
+        for (const auto& stream : streams) {
+            if (!MtpExecutor::isMtpStreamAdmitted(stream)) {
+                continue;
+            }
+            (stream->isContextStream() ? has_prefill : has_decode) = true;
+        }
         switch (pd_sep_config.role_type) {
             case RoleType::PREFILL:
-                need_prefill = streams.empty();
+                need_prefill = !has_prefill;
                 break;
             case RoleType::DECODE:
-                need_decode = streams.empty();
+                need_decode = !has_decode;
                 break;
             case RoleType::PDFUSION: {
-                bool has_prefill = false;
-                bool has_decode  = false;
-                for (const auto& stream : streams) {
-                    if (stream->isContextStream()) {
-                        has_prefill = true;
-                    } else {
-                        has_decode = true;
-                    }
-                }
                 need_prefill = shouldAddMtpFakePrefill(
                     has_prefill, runtime_config.use_batch_decode_scheduler, parallelism_config.dp_size);
                 need_decode = !has_decode;

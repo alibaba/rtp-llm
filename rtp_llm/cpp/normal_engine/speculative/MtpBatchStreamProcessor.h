@@ -21,6 +21,7 @@ public:
                             bool                               warm_up):
         NormalBatchStreamProcessor(model_config, pd_sep_config, profiling_debug_logging_config, cache_config, warm_up),
         propose_step_(sp_config.gen_num_per_cycle),
+        verify_step_(sp_config.verifySteps()),
         vocab_size_(model_config.vocab_size),
         is_block_draft_(isBlockDraftType(sp_config.type)),
         dspark_mask_token_id_(static_cast<int32_t>(sp_config.sp_dspark_mask_token_id)),
@@ -194,10 +195,11 @@ protected:
     }
 
     int     propose_step_;
-    size_t  vocab_size_                   = 0;
-    bool    is_block_draft_                = false;
-    int32_t dspark_mask_token_id_         = -1;
-    bool    dspark_sample_from_anchor_     = true;
+    int     verify_step_;
+    size_t  vocab_size_                = 0;
+    bool    is_block_draft_            = false;
+    int32_t dspark_mask_token_id_      = -1;
+    bool    dspark_sample_from_anchor_ = true;
 
     // DSpARK proposal constants are grow-only device buffers. Keeping them on
     // device is required by RTP_LLM_STREAM_ASYNC: no accept-length D2H is

@@ -413,6 +413,13 @@ class Glm5Cmp:
             expected = int(getattr(self.config, "gen_num_per_cycle", 0) or 0) + 1
             if expected <= 1 or tokens_per_request != expected:
                 return "draft-prefill width does not match MTP"
+        if self.has_indexer and require_indexer_metadata:
+            from rtp_llm.models_py.modules.indexer_mx_abi import use_mx_indexer_cache
+
+            # RTP-kernel CMP reads and writes FP32 scales; standard Prefill may
+            # already have populated this pool with packed MX scales.
+            if use_mx_indexer_cache(hidden_states.device):
+                return "GLM5 CMP requires FP32 indexer cache scales"
         return None
 
     @classmethod

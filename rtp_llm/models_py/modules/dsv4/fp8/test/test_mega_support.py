@@ -85,6 +85,42 @@ def _pro_args(**overrides):
 
 
 class MegaSupportTest(unittest.TestCase):
+    def setUp(self):
+        # Existing fake extensions describe the legacy FP32 indexer ABI.
+        format_patch = patch(
+            "rtp_llm.models_py.modules.indexer_mx_abi.use_mx_indexer_cache",
+            return_value=False,
+        )
+        format_patch.start()
+        self.addCleanup(format_patch.stop)
+
+    def test_mx_cache_rejects_csa_but_preserves_hca_only(self):
+        extension = SimpleNamespace(dsv4_mega=_supported_extension())
+        gemm = _module_with_symbols(_REQUIRED_DEEP_GEMM_SYMBOLS)
+        for mx in (False, True):
+            for ratios in ((4,), (HCA_COMPRESS_RATIO,), (4, HCA_COMPRESS_RATIO)):
+                with (
+                    self.subTest(mx=mx, ratios=ratios),
+                    patch.object(
+                        torch.cuda, "get_device_capability", return_value=(10, 3)
+                    ),
+                    patch.dict(
+                        sys.modules, {"rtp_kernel": extension, "deep_gemm": gemm}
+                    ),
+                    patch(
+                        "rtp_llm.models_py.modules.indexer_mx_abi.use_mx_indexer_cache",
+                        return_value=mx,
+                    ),
+                ):
+                    reason = mega_decode_unavailable_reason(
+                        _pro_args(n_layers=len(ratios), compress_ratios=list(ratios)),
+                        torch.device("cuda:0"),
+                    )
+                    if mx and 4 in ratios:
+                        self.assertIn("FP32 indexer", reason or "")
+                    else:
+                        self.assertIsNone(reason)
+
     def test_non_blackwell_device_is_rejected_before_extension_import(self) -> None:
         with patch.object(torch.cuda, "get_device_capability", return_value=(9, 0)):
             reason = mega_decode_unavailable_reason(

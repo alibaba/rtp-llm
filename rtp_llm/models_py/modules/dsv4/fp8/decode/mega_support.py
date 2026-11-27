@@ -162,6 +162,12 @@ def _runtime_unavailable_reason(
             None,
         )
 
+    if "csa" in components:
+        from rtp_llm.models_py.modules.indexer_mx_abi import use_mx_indexer_cache
+
+        if use_mx_indexer_cache(device):
+            return "DSV4 Mega CSA requires FP32 indexer cache scales", None
+
     try:
         from rtp_kernel import dsv4_mega
     except Exception as exc:
