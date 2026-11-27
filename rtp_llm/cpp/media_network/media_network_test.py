@@ -1,6 +1,7 @@
 import gzip
 import socket
 import threading
+import time
 import unittest
 import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -52,6 +53,13 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(302, b"", "http://[::1]/image")
         elif self.path == "/policy":
             self.reply(302, b"", "http://denied.invalid/image")
+        elif self.path == "/backoff":
+            times, started, release = self.server.backoff
+            if not times:
+                started.set()
+                release.wait(5)
+            times.append(time.monotonic())
+            self.reply(503 if len(times) < 3 else 200, b"image")
         elif self.path == "/retry" and self.server.visits.count("/retry") == 1:
             self.reply(503, b"")
         else:
@@ -251,6 +259,76 @@ class MediaNetworkTest(unittest.TestCase):
         self.assertEqual(self.fetch("/binary", limit=1)[1], "too_large")
         self.assertEqual(self.fetch("/retry", attempts=2)[4], 1)
         self.assertEqual(self.server.visits.count("/retry"), 2)
+
+    def start_retry_with_one_worker(self, **options):
+        self.net = native.Network(1, 1, native.Policy())
+        self.addCleanup(self.net.close)
+        times, started, release = self.server.backoff = (
+            [],
+            threading.Event(),
+            threading.Event(),
+        )
+        self.addCleanup(release.set)
+        job = self.submit("/backoff", cache_key="image", attempts=3, **options)
+        self.assertTrue(started.wait(3))
+        return job, times, release
+
+    def test_backoff_frees_only_worker_and_preserves_shared_retries(self):
+        owner, times, release = self.start_retry_with_one_worker()
+        follower = self.submit("/backoff", cache_key="image", attempts=3)
+        fresh = self.submit("/binary")
+        release.set()
+        self.assertIs(self.net.next(), fresh)
+        self.assertEqual(fresh.result()[:3], (200, "", b"\x00\xffbinary"))
+        self.assertCountEqual([self.net.next(), self.net.next()], [owner, follower])
+        self.assertEqual(owner.result()[:5], (200, "", b"image", False, 2))
+        self.assertEqual(follower.result()[:3], (200, "", b"image"))
+        self.assertTrue(follower.result()[8])
+        # Deliberate HTTP backoff remains source time, separate from FIFO waiting.
+        for job in (owner, follower):
+            self.assertGreaterEqual(job.result()[6], 550)
+            self.assertGreaterEqual(job.result()[7], 0)
+        self.assertEqual(
+            self.server.visits, ["/backoff", "/binary", "/backoff", "/backoff"]
+        )
+        self.assertGreaterEqual(times[1] - times[0], 0.19)
+        self.assertGreaterEqual(times[2] - times[1], 0.39)
+
+    def test_deadline_shorter_than_backoff_skips_next_attempt(self):
+        result = self.fetch("/retry", attempts=3, budget_ms=100)
+        self.assertEqual(result[1], "timeout")
+        self.assertEqual(self.server.visits, ["/retry"])
+
+    def test_retry_deadline_completes_while_only_worker_is_busy(self):
+        # The retry is eligible after 200 ms, before this caller's deadline.
+        # A second request keeps the sole worker occupied past both instants.
+        retry, _, release_first = self.start_retry_with_one_worker(budget_ms=1000)
+        busy = self.submit("/hold")
+        started, release_busy = self.server.gates["/hold"]
+        self.addCleanup(release_busy.set)
+        release_first.set()
+        self.assertTrue(started.wait(3))
+        self.assertIs(self.net.next(), retry)
+        self.assertEqual(retry.result()[1], "timeout")
+        self.assertEqual(self.server.visits, ["/backoff", "/hold"])
+        release_busy.set()
+        self.assertIs(self.net.next(), busy)
+        self.assertEqual(busy.result()[:3], (200, "", b"slow"))
+
+    def test_close_drains_backoff_and_its_waiters(self):
+        owner, _, release_retry = self.start_retry_with_one_worker()
+        follower = self.submit("/backoff", cache_key="image", attempts=3)
+        busy = self.submit("/hold")
+        started, release_busy = self.server.gates["/hold"]
+        self.addCleanup(release_busy.set)
+        release_retry.set()
+        self.assertTrue(started.wait(3))
+        self.net.close()
+        jobs = [owner, follower, busy]
+        self.assertCountEqual([self.net.next() for _ in jobs], jobs)
+        self.assertIsNone(self.net.next())
+        self.assertEqual([job.result()[1] for job in jobs], ["cancelled"] * len(jobs))
+        self.assertEqual(self.server.visits, ["/backoff", "/hold"])
 
     def test_slow_job_allows_other_transfers_and_python_threads_to_progress(self):
         slow = native.Request()

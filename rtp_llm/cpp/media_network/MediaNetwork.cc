@@ -145,7 +145,7 @@ struct Request {
 };
 struct Job {
     Request           req;
-    Clock::time_point submitted = Clock::now(), deadline, started, finished;
+    Clock::time_point submitted = Clock::now(), deadline, finished;
     std::atomic<bool> canceled{false}, completed{false};
     std::string       error;
     Bytes             body;
@@ -695,6 +695,7 @@ public:
             throw Failure("curl initialization failed");
         connections_ = std::make_unique<CurlConnectionPool>(workers);
         try {
+            deadline_thread_ = std::thread([this] { expire_retries(); });
             for (int i = 0; i < workers; ++i)
                 workers_.emplace_back([this] { work(); });
         } catch (...) {
@@ -778,13 +779,15 @@ public:
             if (closed_)
                 return;
             closed_ = true;
-            for (const auto& job : queue_)
-                cancel_group(*job);
+            for (const auto& entry : queue_)
+                cancel_group(*entry.second);
             for (const auto& job : running_)
                 cancel_group(*job);
         }
         cv_.notify_all();
-        retry_cv_.notify_all();
+        deadline_cv_.notify_all();
+        if (deadline_thread_.joinable())
+            deadline_thread_.join();
         connections_->stop();
         for (auto& worker : workers_)
             if (worker.joinable())
@@ -795,13 +798,15 @@ public:
 
 private:
     using Entry = std::pair<std::string, Bytes>;
+    // Fresh requests and retries compete by the time they became eligible.
+    using Pending = std::multimap<Clock::time_point, std::shared_ptr<Job>>;
     void enqueue(const std::shared_ptr<Job>& job) {
-        queue_.push_back(job);
+        const auto entry = queue_.emplace(job->queued_since, job);
         if (job->owner) {
             try {
                 flights_.emplace(job->req.cache_key, job);
             } catch (...) {
-                queue_.pop_back();
+                queue_.erase(entry);
                 throw;
             }
         }
@@ -962,37 +967,41 @@ private:
         }
     }
 
-    void run(CURL* curl, Job& job) {
-        auto& req = job.req;
+    // Run one outer attempt. A retryable result yields the worker back to the queue.
+    bool run_attempt(CURL* curl, Job& job) {
+        const auto& req = job.req;
         if (job.stop_transfer())
             throw Failure("cancelled");
         if (Clock::now() >= job.deadline)
             throw Failure("timeout");
         if (req.media && !job.owner)
             endpoint(rewrite(req.url, policy_), policy_, true);
-        for (int attempt = 0;; ++attempt) {
-            bool transient = false;
-            try {
-                perform(curl, job);
-                transient = req.media
-                            && (job.status == 408 || job.status == 429 || job.status == 500 || job.status == 502
-                                || job.status == 503 || job.status == 504);
-                if (!transient || attempt + 1 >= req.attempts)
-                    return;
-            } catch (const Failure& e) {
-                if ((std::string(e.what()) != "transport" && std::string(e.what()) != "timeout"
-                     && std::string(e.what()) != "body_transport" && std::string(e.what()) != "dns")
-                    || attempt + 1 >= req.attempts)
-                    throw;
-            }
-            if (Clock::now() >= job.deadline)
-                throw Failure("timeout");
-            ++job.retries;
-            std::unique_lock<std::mutex> lock(mu_);
-            retry_cv_.wait_until(lock,
-                                 std::min(job.deadline, Clock::now() + std::chrono::milliseconds(200 * (1 << attempt))),
-                                 [&job] { return job.stop_transfer(); });
+        const bool can_retry = job.retries + 1 < req.attempts;
+        try {
+            perform(curl, job);
+            return can_retry && req.media
+                   && (job.status == 408 || job.status == 429 || job.status == 500 || job.status == 502
+                       || job.status == 503 || job.status == 504);
+        } catch (const Failure& e) {
+            const std::string reason = e.what();
+            if (!can_retry
+                || (reason != "transport" && reason != "timeout" && reason != "body_transport" && reason != "dns"))
+                throw;
+            return true;
         }
+    }
+    void schedule_retry(const std::shared_ptr<Job>& job, Clock::time_point now) {
+        job->queued_since = now + std::chrono::milliseconds(200 << job->retries);
+        auto entry        = queue_.emplace(job->queued_since, job);
+        try {
+            retry_deadlines_.emplace(job->deadline, entry);
+        } catch (...) {
+            queue_.erase(entry);
+            throw;
+        }
+        ++job->retries;
+        cv_.notify_one();
+        deadline_cv_.notify_one();
     }
     void complete_followers(const std::shared_ptr<Job>& job, Clock::time_point now) {
         const auto [begin, end] = flights_.equal_range(job->req.cache_key);
@@ -1002,8 +1011,6 @@ private:
         std::vector<std::shared_ptr<Job>> remaining;
         const bool exhausted = job->error == "timeout" && now + std::chrono::milliseconds(1) >= job->deadline;
         for (auto& waiter : job->followers) {
-            if (job->started > waiter->queued_since)
-                waiter->queue_time += job->started - waiter->queued_since;
             if (waiter->canceled.load())
                 waiter->error = "cancelled";
             else if (now >= waiter->deadline)
@@ -1035,26 +1042,88 @@ private:
         enqueue(next);
         cv_.notify_one();
     }
+    void complete(const std::shared_ptr<Job>& job, Clock::time_point now) {
+        if (job->error.empty() && !job->stop_transfer()) {
+            try {
+                remember(*job);
+            } catch (const std::bad_alloc&) {
+                // Cache publication is optional once the body has been downloaded.
+            }
+        }
+        if (job->owner)
+            complete_followers(job, now);
+        if (job->canceled.load())
+            job->error = "cancelled";
+        finish(job);
+    }
+    static void account_queue(Job& job, Clock::time_point now) {
+        if (now <= job.queued_since)
+            return;
+        job.queue_time += now - job.queued_since;
+        for (const auto& waiter : job.followers)
+            waiter->queue_time += now - std::max(job.queued_since, waiter->queued_since);
+    }
+    // A retry can expire even when every worker is serving another origin.
+    void expire_retries() {
+        std::unique_lock<std::mutex> lock(mu_);
+        while (!closed_) {
+            if (retry_deadlines_.empty()) {
+                deadline_cv_.wait(lock);
+                continue;
+            }
+            auto       first    = retry_deadlines_.begin();
+            const auto deadline = first->first;
+            const auto now      = Clock::now();
+            if (now < deadline) {
+                deadline_cv_.wait_until(lock, deadline);
+                continue;
+            }
+            auto entry = first->second;
+            auto job   = entry->second;
+            retry_deadlines_.erase(first);
+            queue_.erase(entry);
+            account_queue(*job, now);
+            job->error = "timeout";
+            complete(job, now);
+        }
+    }
+    std::shared_ptr<Job> take_ready() {
+        std::unique_lock<std::mutex> lock(mu_);
+        for (;;) {
+            if (queue_.empty()) {
+                if (closed_)
+                    return {};
+                cv_.wait(lock);
+                continue;
+            }
+            auto       entry    = queue_.begin();
+            const auto eligible = entry->first;
+            const auto now      = Clock::now();
+            if (!closed_ && now < eligible) {
+                cv_.wait_until(lock, eligible);
+                continue;
+            }
+            auto job = entry->second;
+            if (job->retries) {
+                const auto [begin, end] = retry_deadlines_.equal_range(job->deadline);
+                auto expiry = std::find_if(begin, end, [&](const auto& pair) { return pair.second == entry; });
+                retry_deadlines_.erase(expiry);
+            }
+            queue_.erase(entry);
+            account_queue(*job, now);
+            running_.insert(job);
+            ++active_;
+            return job;
+        }
+    }
     void work() {
         std::unique_ptr<CURL, decltype(&curl_easy_cleanup)> curl(curl_easy_init(), curl_easy_cleanup);
-        for (;;) {
-            std::shared_ptr<Job> job;
-            {
-                std::unique_lock<std::mutex> lock(mu_);
-                cv_.wait(lock, [this] { return closed_ || !queue_.empty(); });
-                if (queue_.empty())
-                    return;
-                job = std::move(queue_.front());
-                queue_.pop_front();
-                running_.insert(job);
-                ++active_;
-            }
-            job->started = Clock::now();
-            job->queue_time += job->started - job->queued_since;
+        while (auto job = take_ready()) {
+            bool retry = false;
             try {
                 if (!curl)
                     throw Failure("curl initialization failed");
-                run(curl.get(), *job);
+                retry = run_attempt(curl.get(), *job);
             } catch (const std::exception& e) {
                 job->error = e.what();
             }
@@ -1062,18 +1131,19 @@ private:
             running_.erase(job);
             --active_;
             const auto now = Clock::now();
-            if (job->error.empty() && !job->stop_transfer()) {
-                try {
-                    remember(*job);
-                } catch (const std::bad_alloc&) {
-                    // Cache publication is optional once the body has been downloaded.
+            if (retry && !job->stop_transfer()) {
+                if (now >= job->deadline)
+                    job->error = "timeout";
+                else {
+                    try {
+                        schedule_retry(job, now);
+                        continue;
+                    } catch (const std::exception& e) {
+                        job->error = e.what();
+                    }
                 }
             }
-            if (job->owner)
-                complete_followers(job, now);
-            if (job->canceled.load())
-                job->error = "cancelled";
-            finish(job);
+            complete(job, now);
         }
     }
     size_t                                                      capacity_, active_ = 0, follower_count_ = 0;
@@ -1081,8 +1151,11 @@ private:
     std::unordered_multimap<std::string, std::shared_ptr<Job>>  flights_;
     bool                                                        closed_ = false;
     std::mutex                                                  mu_;
-    std::condition_variable                                     cv_, done_cv_, retry_cv_;
-    std::deque<std::shared_ptr<Job>>                            queue_, done_;
+    std::condition_variable                                     cv_, done_cv_, deadline_cv_;
+    Pending                                                     queue_;
+    std::multimap<Clock::time_point, Pending::iterator>         retry_deadlines_;
+    std::thread                                                 deadline_thread_;
+    std::deque<std::shared_ptr<Job>>                            done_;
     std::unordered_set<std::shared_ptr<Job>>                    running_;
     std::unique_ptr<CurlConnectionPool>                         connections_;
     std::vector<std::thread>                                    workers_;
