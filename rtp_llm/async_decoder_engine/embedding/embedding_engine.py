@@ -6,6 +6,7 @@ from typing_extensions import override
 
 from rtp_llm.async_decoder_engine.base_engine import BaseEngine
 from rtp_llm.config.engine_config import EngineConfig
+from rtp_llm.device.device_type import device_name
 from rtp_llm.multimodal.mm_process_engine import MMProcessEngine
 from rtp_llm.multimodal.multimodal_mixin_factory import MultimodalMixinFactory
 from rtp_llm.ops import RtpEmbeddingOp, VitSeparation
@@ -54,7 +55,7 @@ class EmbeddingCppEngine(BaseEngine):
                     model_config=self.model.model_config,
                     engine_config=self.engine_config,
                     vit_config=self.model.vit_config,
-                    device=f"cuda:{self.engine_config.parallelism_config.local_rank}",
+                    device=f"{device_name()}:{self.engine_config.parallelism_config.local_rank}",
                 )
             )
         self.cpp_engine.init(
