@@ -39,6 +39,12 @@ class SparsePrefillLaunchConfigTest(unittest.TestCase):
             (1, 5120, "NVIDIA H20", (16, 1)),
             (1, 20480, "NVIDIA H20", (16, 1)),
             (1, 32768, "NVIDIA H20", (32, 4)),
+            (1, 128, "NVIDIA H200", (64, 4)),
+            (1, 512, "NVIDIA H200", (32, 4)),
+            (1, 1024, "NVIDIA H200", (16, 1)),
+            (1, 5120, "NVIDIA H200", (64, 2)),
+            (1, 20480, "NVIDIA H200", (64, 2)),
+            (1, 32768, "NVIDIA H200", (16, 1)),
         ]
         for batch, length, device_name, expected in cases:
             with self.subTest(batch=batch, length=length, device_name=device_name):

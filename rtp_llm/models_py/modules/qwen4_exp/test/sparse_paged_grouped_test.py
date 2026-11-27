@@ -326,6 +326,141 @@ class GroupedSplitBatchMatrixTest(unittest.TestCase):
             msg=lambda m: f"graph replay: {m}",
         )
 
+    def test_block_ids_strided_q_and_fused_fp8_merge(self):
+        from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
+            sgl_per_token_group_quant_fp8,
+        )
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.qsa_topk_triton import (
+            QsaDeferredBlockSelection,
+            _expand_tokens,
+        )
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_paged_fmha import (
+            QsaFp8OutputRequest,
+            _qsa_fp8_output_request,
+        )
+
+        page_size = 64
+        q_heads, kv_heads, head_dim = 12, 1, 256
+        for batch, query_len, direct_decode in ((2, 4, False), (4, 1, True)):
+            with self.subTest(batch=batch, query_len=query_len, direct_decode=direct_decode):
+                torch.manual_seed(777 + batch * 10 + query_len)
+                max_blocks = 40
+                cache_blocks = batch * max_blocks + 4
+                kv_cache = (
+                    torch.randn(
+                        (cache_blocks, 2, kv_heads, page_size, head_dim),
+                        device=_DEVICE,
+                        dtype=torch.bfloat16,
+                    )
+                    * 0.1
+                )
+                block_table = (
+                    torch.arange(1, batch * max_blocks + 1, device=_DEVICE, dtype=torch.int32)
+                    .view(batch, max_blocks)
+                )
+                kv_lens = torch.randint(
+                    128, max_blocks * page_size, (batch, query_len), device=_DEVICE, dtype=torch.int32
+                )
+                rows = batch * query_len
+                score_cols = max_blocks * (page_size // 4)
+                scores = torch.randn((rows, score_cols), device=_DEVICE, dtype=torch.float32)
+                complete = (kv_lens.reshape(-1) // 4).unsqueeze(1)
+                col_idx = torch.arange(score_cols, device=_DEVICE).unsqueeze(0)
+                scores = torch.where(col_idx < complete, scores, float("-inf"))
+                _, topk_blocks = torch.topk(scores, 512, dim=-1)
+                topk_blocks = topk_blocks.to(torch.int32).contiguous()
+
+                expanded = torch.empty((rows, 2051), device=_DEVICE, dtype=torch.int32)
+                flat_lens = kv_lens.reshape(-1)
+                _expand_tokens[(rows,)](
+                    scores,
+                    topk_blocks,
+                    flat_lens,
+                    expanded,
+                    K=512,
+                    LENGTH_STRIDE=flat_lens.stride(0),
+                    FINITE_ONLY=True,
+                    SCORE_WIDTH=score_cols,
+                    SCORE_ROW_STRIDE=scores.stride(0),
+                    num_warps=4,
+                )
+                sel_tokens = expanded.view(batch, query_len, 2051)
+                sel_blocks = topk_blocks.view(batch, query_len, 512)
+
+                q_bthd = (
+                    torch.randn((batch, query_len, q_heads, head_dim), device=_DEVICE, dtype=torch.bfloat16)
+                    * 0.1
+                )
+                q_strided = q_bthd.transpose(1, 2)
+                gate = torch.randn_like(q_bthd)
+
+                ref_out = sparse_paged_gqa_attn(
+                    q_strided.contiguous(),
+                    kv_cache,
+                    block_table,
+                    kv_lens,
+                    sel_tokens,
+                    page_size=page_size,
+                    kv_head_num=kv_heads,
+                    output_gate=gate,
+                    validate_selected=False,
+                    bthd_output=True,
+                    _h20_direct_decode=direct_decode,
+                )
+                blk_sel = QsaDeferredBlockSelection(
+                    blocks=topk_blocks, scores=scores, finite_only=True
+                )
+                got_out = sparse_paged_gqa_attn(
+                    q_strided,
+                    kv_cache,
+                    block_table,
+                    kv_lens,
+                    sel_blocks,
+                    page_size=page_size,
+                    kv_head_num=kv_heads,
+                    output_gate=gate,
+                    validate_selected=False,
+                    bthd_output=True,
+                    _h20_direct_decode=direct_decode,
+                    block_selection=blk_sel,
+                )
+                torch.testing.assert_close(got_out, ref_out, atol=0, rtol=0)
+
+                # Verify fused FP8 split-merge matches standalone group quantizer.
+                fp8_req = QsaFp8OutputRequest(v2=False)
+                tok = _qsa_fp8_output_request.set(fp8_req)
+                try:
+                    sparse_paged_gqa_attn(
+                        q_strided,
+                        kv_cache,
+                        block_table,
+                        kv_lens,
+                        sel_blocks,
+                        page_size=page_size,
+                        kv_head_num=kv_heads,
+                        output_gate=gate,
+                        validate_selected=False,
+                        bthd_output=True,
+                        _h20_direct_decode=direct_decode,
+                        block_selection=blk_sel,
+                    )
+                finally:
+                    _qsa_fp8_output_request.reset(tok)
+                self.assertIsNotNone(fp8_req.result)
+                q_fp8, s_col = fp8_req.result
+                ref_q, ref_s = sgl_per_token_group_quant_fp8(
+                    ref_out.reshape(rows, q_heads * head_dim),
+                    128,
+                    eps=1e-4,
+                    column_major_scales=True,
+                    scale_tma_aligned=True,
+                    scale_ue8m0=False,
+                )
+                torch.testing.assert_close(
+                    q_fp8.view(torch.uint8), ref_q.view(torch.uint8), atol=0, rtol=0
+                )
+                torch.testing.assert_close(s_col, ref_s, atol=0, rtol=0)
+
 
 class GroupedSplitOldNewParityTest(unittest.TestCase):
     """Direct old-vs-new comparison by gating the new path off."""

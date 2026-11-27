@@ -1,8 +1,23 @@
 """QSA token selection with native RTP TopK on SM90."""
 
+from contextvars import ContextVar
+from dataclasses import dataclass
+
 import torch
 import triton
 import triton.language as tl
+
+
+@dataclass
+class QsaDeferredBlockSelection:
+    blocks: torch.Tensor
+    scores: torch.Tensor
+    finite_only: bool
+
+
+_qsa_defer_block_expand: ContextVar[list | None] = ContextVar(
+    "_qsa_defer_block_expand", default=None
+)
 
 
 @triton.jit
@@ -207,6 +222,21 @@ def try_select_qsa_tokens(
         blocks = torch.empty((rows, 512), device=scores.device, dtype=torch.int32)
         workspace = torch.empty(0, device=scores.device, dtype=torch.uint8)
         rtp_llm_ops.topk_v3(scores, complete, blocks, workspace, 512, columns)
+        defer_slot = _qsa_defer_block_expand.get()
+        if (
+            defer_slot is not None
+            and not defer_slot
+            and not packed_count
+            and scores.stride(1) == 1
+        ):
+            defer_slot.append(
+                QsaDeferredBlockSelection(
+                    blocks=blocks,
+                    scores=scores,
+                    finite_only=finite_only,
+                )
+            )
+            return blocks
         output = torch.empty((rows, 2051), device=scores.device, dtype=torch.int32)
         _expand_tokens[(rows,)](
             scores,

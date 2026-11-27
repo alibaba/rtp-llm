@@ -778,10 +778,13 @@ class SparseGqaFmhaImpl(FMHAImplBase):
 
         from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_paged_fmha import (
             sparse_paged_gqa_attn,
+            supports_bthd_paged_output,
             try_h20_direct_paged_decode,
             try_sm90_packed_paged_decode,
         )
 
+        block_selection = getattr(self, "_qsa_block_selection", None)
+        self._qsa_block_selection = None
         if (
             self.attn_inputs.is_cuda_graph
             and not self.is_target_verify
@@ -805,16 +808,30 @@ class SparseGqaFmhaImpl(FMHAImplBase):
                 not self.is_prefill
                 and os.environ.get("RTP_QWEN4_EXPERIMENT_H20_DIRECT_DECODE", "1") == "1"
             ):
-                output = try_h20_direct_paged_decode(*decode_args, **decode_kwargs)
+                output = try_h20_direct_paged_decode(
+                    *decode_args,
+                    **decode_kwargs,
+                    block_selection=block_selection,
+                )
                 if output is not None:
                     return output
-            output = try_sm90_packed_paged_decode(*decode_args, **decode_kwargs)
-            if output is not None:
-                return output
+            if block_selection is None:
+                output = try_sm90_packed_paged_decode(*decode_args, **decode_kwargs)
+                if output is not None:
+                    return output
 
-        q = q.view(batch, query_len, self.head_num, self.head_dim).transpose(1, 2)
+        q_bhsd = q.view(batch, query_len, self.head_num, self.head_dim).transpose(1, 2)
+        use_bthd = query_len > 1 and supports_bthd_paged_output(
+            q_bhsd,
+            kv_cache.kv_cache_base,
+            selected_indices,
+            page_size=page_size,
+            kv_head_num=self.kv_head_num,
+            selected_has_count=False,
+            block_selection=block_selection,
+        )
         output = sparse_paged_gqa_attn(
-            q.contiguous(),
+            q_bhsd if use_bthd else q_bhsd.contiguous(),
             kv_cache.kv_cache_base,
             block_table,
             kv_lens,
@@ -832,7 +849,11 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             ),
             **self._paged_kv_scale_args(kv_cache),
             **({"graph_capture": True} if self.attn_inputs.is_cuda_graph else {}),
+            **({"bthd_output": True} if use_bthd else {}),
+            **({"block_selection": block_selection} if block_selection is not None else {}),
         )
+        if use_bthd:
+            return output.reshape(tokens, self.q_width)
         return output.transpose(1, 2).reshape(tokens, self.q_width)
 
     def _forward_ragged_paged(
@@ -854,10 +875,39 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             )
 
         from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_paged_fmha import (
+            _qsa_fp8_output_request,
             sparse_paged_gqa_attn,
             try_sm90_packed_paged_prefill,
         )
 
+        # Ragged incremental prefill may pad/slice/cat per-request outputs in BF16;
+        # never let a partial-request call consume the whole-batch FP8 merge request.
+        _fp8_tok = _qsa_fp8_output_request.set(None)
+        try:
+            return self._forward_ragged_paged_inner(
+                q,
+                kv_cache,
+                plan,
+                validate_selected=validate_selected,
+                output_gate=output_gate,
+                sparse_paged_gqa_attn=sparse_paged_gqa_attn,
+                try_sm90_packed_paged_prefill=try_sm90_packed_paged_prefill,
+            )
+        finally:
+            _qsa_fp8_output_request.reset(_fp8_tok)
+
+    def _forward_ragged_paged_inner(
+        self,
+        q: torch.Tensor,
+        kv_cache: LayerKVCache,
+        plan: IncrementalPrefillInputs,
+        *,
+        validate_selected: bool,
+        output_gate: Optional[torch.Tensor],
+        sparse_paged_gqa_attn,
+        try_sm90_packed_paged_prefill,
+    ) -> torch.Tensor:
+        tokens = int(plan.tokens)
         step = plan.step_plan
         if (
             not self._is_mtp_draft

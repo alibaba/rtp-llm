@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextvars import ContextVar
 from typing import Any
 
 import torch
@@ -22,6 +23,10 @@ from .qsa_cache_views import (
 )
 from .qsa_plans import IncrementalPrefillPlan, TargetVerifyPlan
 from .qsa_step_plan import get_prefill_step_plan, host_input_mirror
+
+_target_metadata_step_cache: ContextVar[dict | None] = ContextVar(
+    "_target_metadata_step_cache", default=None
+)
 
 
 def _draft_incremental_prefill_geometry(
@@ -301,13 +306,6 @@ def _target_verify_geometry(
             device=device, dtype=torch.int32, non_blocking=True
         ).contiguous()
 
-    expected_cu = torch.arange(
-        0,
-        (batch_size + 1) * query_len,
-        query_len,
-        dtype=torch.int32,
-        device=device,
-    )
     cu_seqlens = self.main_inputs.cu_seqlens_device
     if (
         cu_seqlens.dtype != torch.int32
@@ -318,6 +316,13 @@ def _target_verify_geometry(
             "qwen4_exp QSA target-verify cu_seqlens do not match gamma+1"
         )
     if not graph_target:
+        expected_cu = torch.arange(
+            0,
+            (batch_size + 1) * query_len,
+            query_len,
+            dtype=torch.int32,
+            device=device,
+        )
         if qsa_strict_validation_enabled():
             if not bool(torch.equal(cu_seqlens, expected_cu)):
                 raise RuntimeError(
@@ -429,7 +434,29 @@ def _target_verify_geometry(
         try_target_metadata,
     )
 
-    metadata = try_target_metadata(prefixes_device, query_len, ratio)
+    step_cache = (
+        None if qsa_strict_validation_enabled() else _target_metadata_step_cache.get()
+    )
+    meta_key = (
+        (
+            device.index,
+            prefixes_device.data_ptr(),
+            batch_size,
+            query_len,
+            ratio,
+            bool(torch.cuda.is_current_stream_capturing()),
+        )
+        if step_cache is not None
+        else None
+    )
+    cached_entry = step_cache.get(meta_key) if meta_key is not None else None
+    metadata = cached_entry[1] if cached_entry is not None else None
+    if metadata is None:
+        metadata = try_target_metadata(prefixes_device, query_len, ratio)
+        if metadata is not None and meta_key is not None:
+            # Pin prefixes_device for the step so its address cannot be reused
+            # by another temporary allocation within the same step cache scope.
+            step_cache[meta_key] = (prefixes_device, metadata)
     query_positions = block_starts = None
     if metadata is None:
         if offsets is None:
@@ -549,7 +576,7 @@ def _target_verify_geometry(
             "batch_size": batch_size,
             "query_len": query_len,
             "prefixes": prefixes_device,
-            "cu_seqlens": expected_cu,
+            "cu_seqlens": cu_seqlens.contiguous(),
             "visible_lengths": visible_lengths,
             "compressed_lengths": compressed_lengths,
             "max_ctx_len": max_ctx_len,

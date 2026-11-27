@@ -1106,6 +1106,7 @@ class SparseGqaImplForwardTest(unittest.TestCase):
             *,
             page_size,
             kv_head_num,
+            bthd_output=False,
         ):
             observed.update(
                 q_shape=tuple(q.shape),
@@ -1115,8 +1116,9 @@ class SparseGqaImplForwardTest(unittest.TestCase):
                 indices_shape=tuple(indices.shape),
                 page_size=page_size,
                 kv_head_num=kv_head_num,
+                bthd_output=bthd_output,
             )
-            return q
+            return q.transpose(1, 2) if bthd_output else q
 
         with patch(
             "rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_paged_fmha."

@@ -182,8 +182,12 @@ def supports_sm90_sparse_prefill(
     return torch.cuda.get_device_capability(q.device)[0] == 9
 
 
+def _is_h20_device(device_name: str) -> bool:
+    return "H20" in device_name and "H200" not in device_name
+
+
 def _prefill_launch_config(batch, length, device_name):
-    if "H20" in device_name:
+    if _is_h20_device(device_name):
         if length > 20480 or batch * length <= 1024:
             return 32, 4
         return 16, 1
@@ -248,6 +252,6 @@ def try_sm90_sparse_prefill(q, k, v, selected, *, blk_k=64, selected_has_count=F
         num_warps=warps,
         num_stages=2,
         # On H20, the register limit improves residency for the 32-key tile.
-        maxnreg=96 if "H20" in device_name and length > 20480 else None,
+        maxnreg=96 if _is_h20_device(device_name) and length > 20480 else None,
     )
     return out
