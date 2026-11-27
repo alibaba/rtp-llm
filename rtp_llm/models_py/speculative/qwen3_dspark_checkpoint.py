@@ -6,6 +6,14 @@ These functions do not select a loader, model runtime or sampling strategy.
 import torch
 
 
+def target_weight_roles(config):
+    """Return only explicitly target-owned vocabulary roles; never infer from missing tensors."""
+    roles = getattr(config, "_dspark_shared_target_weights", None)
+    if roles is not None:
+        return tuple(roles)
+    return ("lm_head",) if getattr(config, "dspark_share_target_lm_head", False) else ()
+
+
 def target_layer_ids(config):
     """Return zero-based transformer layer IDs in execution order."""
     speculators = config.get("speculators_model_type") == "dspark"

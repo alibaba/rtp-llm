@@ -5,6 +5,7 @@ from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.qwen_v3 import QwenV3
 from rtp_llm.models_py.speculative.qwen3_dspark_checkpoint import (
     target_layer_ids as checkpoint_target_layer_ids,
+    target_weight_roles,
 )
 from rtp_llm.utils.util import get_config_from_path
 
@@ -76,14 +77,7 @@ class Qwen3DSpark(QwenV3):
         explicit_roles = getattr(
             draft_model_config, "_dspark_shared_target_weights", None
         )
-        roles = explicit_roles
-        if roles is None:
-            # Config-only callers may supply the public TorchSpec flag directly.
-            roles = (
-                ("lm_head",)
-                if getattr(draft_model_config, "dspark_share_target_lm_head", False)
-                else ()
-            )
+        roles = target_weight_roles(draft_model_config)
         if not roles:
             return ()
         target = target_model.model_config

@@ -56,7 +56,7 @@ def create_ft_export_job(model):
     # cannot import. Validate the registered *draft* before emitting shards.
     kind = getattr(config, "model_type", None)
     writer_factory = None
-    if kind in ("qwen_3_dflash", "qwen_3_moe_eagle3", "qwen_2-mtp"):
+    if kind in ("qwen_3_dflash", "qwen_3_moe_eagle3", "qwen_2-mtp", "qwen_3_dspark"):
         from rtp_llm.models_py.registry import get_model_class
 
         owner = get_model_class(kind)

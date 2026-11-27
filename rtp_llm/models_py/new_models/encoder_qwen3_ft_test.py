@@ -30,12 +30,14 @@ from rtp_llm.models.jina_bert.jina_bert import JinaBert
 from rtp_llm.models.megatron_bert import MegatronBert
 from rtp_llm.models.qwen_3_dspark import Qwen3DSpark
 from rtp_llm.models.qwen_v3 import QwenV3
+from rtp_llm.models_py.borrowed_parameters import BorrowedParameter
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.new_models.jina_bert.jina_checkpoint_test import (
     checkpoint as jina_weights,
 )
 from rtp_llm.models_py.new_models.qwen3_dspark.checkpoint_test import (
     checkpoint as dspark_weights,
+    config as dspark_config,
 )
 from rtp_llm.models_py.quant_methods import QuantizationConfig
 from rtp_llm.ops import (
@@ -51,7 +53,8 @@ from rtp_llm.tools.convert.ft_export_metadata import generate_ft_index
 
 class ProductionFtRoundTrip(unittest.TestCase):
     def round_trip(
-        self, name, service_cls, hf_config, weights, task, *, aliases=(), static=False
+        self, name, service_cls, hf_config, weights, task, *, aliases=(), static=False,
+        borrowed_roles=(),
     ):
         with tempfile.TemporaryDirectory() as tmp:
             hf, ft = Path(tmp) / "hf", Path(tmp) / "ft"
@@ -122,7 +125,7 @@ class ProductionFtRoundTrip(unittest.TestCase):
                 shutil.copyfile(hf / "pertensorquant.ini", ft / "pertensorquant.ini")
             generate_ft_index(str(ft), {"TP_SIZE": "1", "EP_SIZE": "1", "DP_SIZE": "1"})
 
-            def load(path, tag, method):
+            def load(path, tag, method, loans=None):
                 options = NewLoaderConfig(
                     device="cpu",
                     compute_dtype=torch.float32,
@@ -133,11 +136,44 @@ class ProductionFtRoundTrip(unittest.TestCase):
                         QuantizationConfig("pertensor_quant") if static else None
                     ),
                 )
-                return NewModelLoader(
-                    config(path, tag), options, model_path=str(path)
-                ).load()
+                loader = NewModelLoader(
+                    config(path, tag), options, model_path=str(path), parameter_aliases=loans
+                )
+                result = loader.load()
+                self.assertEqual(loader.loaded_method.value, method)
+                return result
 
-            reference = load(hf, name, "scratch")
+            loans = {}
+            if borrowed_roles:
+                # Load a separate target with distinguishable vocabulary bytes.
+                target_dir = Path(tmp) / "target"
+                target_dir.mkdir()
+                target_weights = dspark_weights(False)
+                for key in ("model.embed_tokens.weight", "lm_head.weight"):
+                    target_weights[key] += 17
+                save_file(target_weights, target_dir / "model.safetensors")
+                target = NewModelLoader(
+                    dspark_config(False),
+                    NewLoaderConfig(device="cpu", compute_dtype=torch.float32,
+                                    parallelism_config=pc, load_method="scratch"),
+                    model_path=str(target_dir),
+                ).load()
+                index = json.loads((ft / "model.safetensors.index.json").read_text())
+                for role, destination in (("embedding", "embed_tokens.weight"), ("lm_head", "lm_head.weight")):
+                    self.assertEqual(f"rank_00_00_00.global.{role}" in index["weight_map"],
+                                     role not in borrowed_roles)
+                    if role in borrowed_roles:
+                        loans[destination] = BorrowedParameter(target, destination)
+                with self.assertRaisesRegex(ValueError, "Missing FT sources"):
+                    load(ft, name, "scratch")
+            reference = load(hf, name, "scratch", loans)
+
+            def check_loans(result):
+                for destination, binding in loans.items():
+                    self.assertIs(result.get_parameter(destination), binding.parameter())
+                    key = "model.embed_tokens.weight" if destination == "embed_tokens.weight" else destination
+                    torch.testing.assert_close(binding.parameter(), target_weights[key], rtol=0, atol=0)
+
             readers = (
                 ("scratch",)
                 if os.environ.get("NEWLOADER_TEST_NATIVE_FST") == "0"
@@ -149,7 +185,8 @@ class ProductionFtRoundTrip(unittest.TestCase):
             for tag in (name, *aliases):
                 for method in readers:
                     with self.subTest(tag=tag, method=method):
-                        result = load(ft, tag, method)
+                        result = load(ft, tag, method, loans)
+                        check_loans(result)
                         self.assertEqual(
                             reference.state_dict().keys(), result.state_dict().keys()
                         )
@@ -162,6 +199,21 @@ class ProductionFtRoundTrip(unittest.TestCase):
                                 result.runtime_weight_view()[role],
                                 reference.runtime_weight_view()[role],
                             )
+            if borrowed_roles:
+                # Older FT writers included independent bytes even for a loan.
+                # They must not replace or mutate the live target's parameters.
+                extra = {
+                    f"rank_00_00_00.global.{role}": torch.full(
+                        (hf_config.vocab_size, hf_config.hidden_size), -900.0
+                    )
+                    for role in borrowed_roles
+                }
+                stale = "legacy-vocab.safetensors"
+                save_file(extra, ft / stale)
+                index["weight_map"].update(dict.fromkeys(extra, stale))
+                (ft / "model.safetensors.index.json").write_text(json.dumps(index))
+                for method in readers:
+                    check_loans(load(ft, name, method, loans))
             if name == "megatron_bert":
                 index_path = ft / "model.safetensors.index.json"
                 index = json.loads(index_path.read_text())
@@ -307,6 +359,26 @@ class ProductionFtRoundTrip(unittest.TestCase):
         self.round_trip(
             "qwen_3_dspark", Qwen3DSpark, cfg, dspark_weights(), TaskType.LANGUAGE_MODEL
         )
+
+    def test_dspark_ft_borrows_only_explicit_target_vocabulary(self):
+        for roles in (("embedding",), ("lm_head",), ("embedding", "lm_head")):
+            with self.subTest(roles=roles):
+                cfg = Qwen3Config(
+                    vocab_size=8, hidden_size=4, intermediate_size=4, num_hidden_layers=2,
+                    num_attention_heads=2, num_key_value_heads=1, head_dim=2,
+                    tie_word_embeddings=False, target_layer_ids=[0, 3], mask_token_id=7,
+                    draft_vocab_size=8, markov_rank=2, dspark_shared_target_weights=list(roles),
+                )
+                weights = dspark_weights()
+                weights["lm_head.weight"] = torch.arange(32.0).reshape(8, 4)
+                weights["markov_head.markov_w2.weight"] = torch.arange(16.0).reshape(8, 2)
+                weights["d2t"] = torch.zeros(8, dtype=torch.int64)  # identity offset map
+                for role in roles:
+                    del weights["model.embed_tokens.weight" if role == "embedding" else "lm_head.weight"]
+                self.round_trip(
+                    "qwen_3_dspark", Qwen3DSpark, cfg, weights, TaskType.LANGUAGE_MODEL,
+                    borrowed_roles=roles,
+                )
 
 
 if __name__ == "__main__":

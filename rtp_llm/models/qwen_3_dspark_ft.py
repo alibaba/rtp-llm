@@ -6,6 +6,7 @@ import torch
 
 from rtp_llm.model_loader.weight_module import AtomicWeight
 from rtp_llm.models.qwen_v3 import QWenV3Weight
+from rtp_llm.models_py.speculative.qwen3_dspark_checkpoint import target_weight_roles
 from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity, transpose
 
 
@@ -18,6 +19,16 @@ def dspark_offset_d2t_to_absolute(ts: List[torch.Tensor]) -> torch.Tensor:
 
 
 class Qwen3DSparkWeight(QWenV3Weight):
+    def get_weight_info(self, database=None):
+        info = super().get_weight_info(database)
+        # A draft-only directory need not contain the target's vocabulary.
+        # Keep the same opt-in contract as service startup; private globals
+        # must still be exported (and a missing private tensor remains an error).
+        borrowed = target_weight_roles(self.model_config)
+        if borrowed:
+            info.weights = [field for field in info.weights if field.name not in borrowed]
+        return info
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._d2t_path = None
