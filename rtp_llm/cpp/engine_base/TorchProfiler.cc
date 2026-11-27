@@ -5,6 +5,10 @@
 #include <algorithm>
 #include <cctype>
 #include <string>
+#if USING_ASCEND
+#include <pybind11/pybind11.h>
+namespace py = pybind11;
+#endif
 
 namespace rtp_llm {
 namespace tap = torch::autograd::profiler;
@@ -45,6 +49,35 @@ std::unique_ptr<tap::ProfilerResult> tryDisableProfiler(DisableProfilerFn disabl
 }
 
 }  // namespace detail
+#if USING_ASCEND
+// Holds the Python torch_npu.profiler.profile object. All members that touch
+// Python reference counting (py::object) must be created/destroyed while
+// holding the GIL; the surrounding TorchProfile methods acquire it.
+struct AscendProfilerImpl {
+    py::object profiler;
+
+    AscendProfilerImpl() : profiler(py::none()) {}
+
+    // Build the torch_npu profiler via the Python recipe
+    // (rtp_llm.utils.ascend_profiler.AscendTorchNpuProfiler).
+    // Must be called under the GIL.
+    void create(const std::string& output_dir, const std::string& trace_name) {
+        if (output_dir.empty()) {
+            throw std::runtime_error(
+                "Ascend profiling requires a non-empty output_dir "
+                "(set torch_cuda_profiler_dir).");
+        }
+        py::object cls = py::module_::import("rtp_llm.utils.ascend_profiler")
+                             .attr("AscendTorchNpuProfiler");
+        profiler = cls(output_dir, trace_name);
+    }
+
+    void start() { profiler.attr("start")(); }
+
+    // stop() triggers on_trace_ready -> writes *_ascend_pt/ dump.
+    void stop() { profiler.attr("stop")(); }
+};
+#endif
 
 // ---- TorchProfile ----
 
@@ -57,11 +90,59 @@ TorchProfile::~TorchProfile() {
     if (!stopped_) {
         stop();
     }
+#if USING_ASCEND
+    // If a Python profiler object is still held (e.g. start() succeeded but
+    // stop() was never called, or failed mid-way), release it under the GIL
+    // because py::object destruction decrements the Python refcount.
+    if (ascend_impl_) {
+        try {
+            py::gil_scoped_acquire gil;
+            ascend_impl_.reset();
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_ERROR("ascend profiler cleanup failed: %s", e.what());
+            ascend_impl_.release();
+        }
+    }
+#endif
 }
 
 void TorchProfile::start() {
     count_ += 1;
     stopped_ = false;
+#if USING_ASCEND
+    // Ascend: drive torch_npu.profiler via Python. The engine loop thread is
+    // the same thread that runs the Python forward_micro_batch, so acquiring
+    // the GIL here is deadlock-free and the profiler is active while the npu
+    // ops are issued during the subsequent process()/forward().
+    try {
+        py::gil_scoped_acquire gil;
+        ascend_impl_ = std::make_unique<AscendProfilerImpl>();
+        ascend_impl_->create(output_dir_, prefix_);
+        ascend_impl_->start();
+        RTP_LLM_LOG_INFO("ascend torch_npu profiler started: dir=%s prefix=%s",
+                         output_dir_.c_str(),
+                         prefix_.c_str());
+        return;
+    } catch (const std::exception& e) {
+        // Copy the message while the GIL is still held: the caught exception
+        // (possibly pybind11::error_already_set) must be destroyed before the
+        // gil_scoped_acquire goes out of scope, otherwise its Python
+        // references would be released without the GIL.
+        std::string msg = e.what();
+        {
+            py::gil_scoped_acquire gil;
+            try {
+                ascend_impl_.reset();
+            } catch (...) {
+                ascend_impl_.release();
+            }
+        }
+        RTP_LLM_LOG_ERROR("ascend profiler start failed, no profiling this window: %s", msg.c_str());
+        stopped_ = true;
+        return;
+    }
+#endif
+    // CUDA / default Kineto path
     tap::prepareProfiler(config_, activities_);
     tap::enableProfiler(config_, activities_);
 }
@@ -74,6 +155,30 @@ std::pair<std::unique_ptr<tap::ProfilerResult>, std::string> TorchProfile::stopA
     // trace. Mark this wrapper stopped first so an exception is never retried
     // from the destructor.
     stopped_ = true;
+#if USING_ASCEND
+    if (ascend_impl_) {
+        try {
+            py::gil_scoped_acquire gil;
+            ascend_impl_->stop();   // on_trace_ready writes *_ascend_pt/
+            ascend_impl_.reset();   // safe under GIL
+        } catch (const std::exception& e) {
+            // Copy the message while the GIL is still held (see start()).
+            std::string msg = e.what();
+            {
+                py::gil_scoped_acquire gil;
+                try {
+                    ascend_impl_.reset();
+                } catch (...) {
+                    ascend_impl_.release();
+                }
+            }
+            RTP_LLM_LOG_ERROR("ascend profiler stop failed: %s", msg.c_str());
+        }
+        // torch_npu wrote the trace itself; no ProfilerResult to enqueue to
+        // the async save worker (StepWindowProfiler already skips nullptr).
+        return {nullptr, ""};
+    }
+#endif
     auto res = detail::tryDisableProfiler(&tap::disableProfiler);
     if (!res) {
         return {nullptr, ""};

@@ -399,14 +399,22 @@ def start_backend_server(
     py_env_configs: PyEnvConfigs,
     pipe_writer=None,
 ):
-    # Fail-fast (same pattern as the MTP gate): Ascend NPU currently supports
-    # single-card only. Remove when the Ascend TP feature lands.
-    if is_ascend() and py_env_configs.parallelism_config.world_size > 1:
-        raise RuntimeError(
-            f"TP>1 / multi-rank (world_size={py_env_configs.parallelism_config.world_size}) "
-            "is not yet supported on Ascend NPU; "
-            "run single-card (world_size=1) until Ascend TP support lands."
-        )
+    # Fail-fast: Ascend NPU currently supports pure-TP only (dp_size <= 1,
+    # no context parallelism). Remove when Ascend DP / CP support lands.
+    if is_ascend():
+        if py_env_configs.parallelism_config.dp_size > 1:
+            raise RuntimeError(
+                f"DP>1 (dp_size={py_env_configs.parallelism_config.dp_size}) is not yet "
+                "supported on Ascend NPU; use pure TP (dp_size=1, world_size=tp_size) "
+                "until Ascend DP support lands."
+            )
+        if py_env_configs.prefill_cp_config.is_enabled():
+            raise RuntimeError(
+                "Context parallelism (prefill_cp) is not supported on Ascend NPU: "
+                "no CP attention implementation is registered (CPFlashInferImpl is "
+                "CUDA-only); the first request would fail with 'can not find mha type'. "
+                "Unset CP_ROTATE_METHOD or set it to disable."
+            )
 
     # Startup window only: turn SIGTERM/SIGINT into an exception so the teardown
     # below runs (a defaulted SIGTERM would kill the process with no cleanup);
