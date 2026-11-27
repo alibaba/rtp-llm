@@ -12,6 +12,9 @@ from rtp_llm.models_py.new_models.qwen4_exp.target_weights import (
     Qwen4CheckpointPlan,
     Qwen4DecoderWeights,
     Qwen4VocabWeight,
+    qwen4_head_dtype,
+    qwen4_input_vocab_size,
+    qwen4_pad_head,
 )
 from rtp_llm.models_py.new_models.qwen4_exp_mtp.input_owner import Qwen4MTPInputOwner
 from rtp_llm.config.qwen4_mtp_vocab import MTPVocabPolicy, mtp_vocab_policy
@@ -151,31 +154,30 @@ class Qwen4MTPDraftWeights(Qwen4ResidentOwner, RtpModule):
             ("embed_tokens", True, load.attn_tp_size, load.attn_tp_rank),
             ("lm_head", False, load.lm_head_tp_size, load.lm_head_tp_rank),
         ):
+            rows = qwen4_input_vocab_size(plan) if embedding else plan.vocab_size
+            pad_head = not embedding and qwen4_pad_head(load)
             if loan is None:
                 leaf = Qwen4VocabWeight(
-                    plan.vocab_size,
+                    rows,
                     plan.hidden_size,
                     tp_size=size,
                     tp_rank=rank,
                     embedding=embedding,
-                    dtype=load.compute_dtype,
+                    dtype=load.compute_dtype if embedding else qwen4_head_dtype(config, load),
                     fp8_storage=plan.vocab_fp8,
+                    pad_head=pad_head,
                 )
             else:
                 src = getattr(loan.target, name)
                 if (src.full_shape, src.axis, src.tp_size, src.tp_rank) != (
-                    (plan.vocab_size, plan.hidden_size),
+                    (rows, plan.hidden_size),
                     int(embedding),
                     size,
                     rank,
                 ):
                     raise ValueError("Qwen4 scaled vocabulary shard layout differs")
-                local_shape = [plan.vocab_size, plan.hidden_size]
-                axis = int(embedding)
-                if local_shape[axis] % size:
-                    raise ValueError("Qwen4 vocabulary shard dimension must divide TP")
-                local_shape[axis] //= size
-                if tuple(src.weight.shape) != tuple(local_shape):
+                local_shape = Qwen4VocabWeight.local_shape(rows, plan.hidden_size, size, embedding, pad_head)
+                if tuple(src.weight.shape) != local_shape:
                     raise ValueError("Qwen4 scaled vocabulary shard shape differs")
                 leaf = BorrowedVocab(loan.embedding if embedding else loan.head)
             setattr(self, name, leaf)

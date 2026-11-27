@@ -12,7 +12,7 @@ from rtp_llm.models_py.model_loader import NewLoaderConfig
 from rtp_llm.models_py.new_models.qwen4_exp.target_weights import Qwen4TargetWeights
 
 
-def write_rank_pair(root, *, archive_head=True, unknown_source=False):
+def write_rank_pair(root, *, archive_head=True, unknown_source=False, fp32_head=False):
     text = dict(
         num_hidden_layers=1,
         hidden_size=16,
@@ -33,6 +33,9 @@ def write_rank_pair(root, *, archive_head=True, unknown_source=False):
         ple_conv_kernel_size=3,
         eos_token_id=2,
     )
+    if fp32_head:
+        # A real 30-row head yields two 16-row shards under sp_0_pad8.
+        text.update(vocab_size=30, input_vocab_size=32)
     (root / "config.json").write_text(json.dumps({"text_config": text}))
     weight_map = {}
     for rank in range(2):
@@ -91,6 +94,10 @@ def write_rank_pair(root, *, archive_head=True, unknown_source=False):
             ).bfloat16()
             for key, shape in shapes.items()
         }
+        if archive_head and fp32_head:
+            rows = torch.arange(512, dtype=torch.float32).reshape(32, 16) / 65536 + 1
+            rows[30:] = 0
+            data[f"rank_{rank}_0_{rank}.global.lm_head"] = rows.chunk(2)[rank].contiguous()
         for leaf, values in (
             ("multipliers", [1, 3, 7]),
             ("ngram_offsets", [0, 4]),
@@ -115,13 +122,15 @@ def write_rank_pair(root, *, archive_head=True, unknown_source=False):
 
 class Qwen4FTTest(unittest.TestCase):
     def check_rank1(self, backend, pruned=False, restart=False, *, embedding_task=False,
-                    archive_head=True, unknown_source=False):
+                    archive_head=True, unknown_source=False, fp32_head=False):
         with tempfile.TemporaryDirectory() as directory:
-            write_rank_pair(Path(directory), archive_head=archive_head, unknown_source=unknown_source)
+            write_rank_pair(Path(directory), archive_head=archive_head, unknown_source=unknown_source, fp32_head=fp32_head)
             topology = CheckpointTopology(tp_size=2, tp_rank=1, ep_size=2, ep_rank=1)
             ft = FTCheckpoint.open(directory, topology)
             ft.read_backend = backend
             config = {"ckpt_path": directory, "model_type": "qwen4_exp", "moe_k": 1}
+            if fp32_head:
+                config["enable_fp32_lm_head"] = True
             if embedding_task:
                 from rtp_llm.ops import TaskType
 
@@ -212,6 +221,11 @@ class Qwen4FTTest(unittest.TestCase):
 
     def test_rank1_attention_experts_and_global_parameters(self):
         self.check_rank1("scratch")
+
+    def test_unpruned_fp32_archive_keeps_head_dtype_and_pad8_shard(self):
+        for backend in checkpoint_readers("scratch", "fastsafetensors"):
+            with self.subTest(backend=backend):
+                self.check_rank1(backend, fp32_head=True)
 
     def test_ft_restart_rebuilds_constructor_and_host_ple_without_shards(self):
         self.check_rank1("scratch", restart=True)

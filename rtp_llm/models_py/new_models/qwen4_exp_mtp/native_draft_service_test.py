@@ -110,11 +110,28 @@ class DraftNativeServiceTest(unittest.TestCase):
                     Qwen4ExpMTP._validate_checkpoint(config)
 
     def test_bf16_ft_writer_round_trip_with_owned_and_borrowed_vocab(self):
+        self._check_ft_writer_round_trip(fp32_head=False)
+
+    def test_fp32_ft_head_preserves_owned_and_borrowed_draft_vocab(self):
+        self._check_ft_writer_round_trip(fp32_head=True)
+
+    def _check_ft_writer_round_trip(self, fp32_head):
         from rtp_llm.tools.convert.ft_export_job import create_ft_export_job
         from rtp_llm.tools.convert.ft_export_metadata import generate_ft_index
 
         with tempfile.TemporaryDirectory() as source, tempfile.TemporaryDirectory() as archive:
-            tc, dc, _ = shared_checkpoint(source, "bf16")
+            tc, dc, values = shared_checkpoint(source, "bf16")
+            tc.enable_fp32_lm_head = dc.enable_fp32_lm_head = fp32_head
+            if fp32_head:
+                # Input-only token IDs belong to the embedding, never the head.
+                emb = "model.language_model.embed_tokens.weight"
+                values[emb] = torch.cat((values[emb], values[emb][:3]))
+                tc.input_vocab_size = dc.input_vocab_size = values[emb].shape[0]
+                path = Path(source) / "config.json"
+                raw = json.loads(path.read_text())
+                raw["text_config"]["input_vocab_size"] = values[emb].shape[0]
+                path.write_text(json.dumps(raw))
+                save_file(values, str(Path(source) / "model.safetensors"))
             pc = ParallelismConfig()
             pc.world_size = pc.tp_size = pc.ep_size = 1
             pc.world_rank = pc.tp_rank = pc.ep_rank = pc.local_rank = 0
@@ -144,12 +161,16 @@ class DraftNativeServiceTest(unittest.TestCase):
                     with self.subTest(method=method, borrow=borrow):
                         config = CheckpointOnlyDraft._create_config_from_json(archive, json.loads(raw))
                         config.data_type, config.generate_env_config = "bf16", None
-                        config.enable_fp32_lm_head = False
+                        config.enable_fp32_lm_head = fp32_head
+                        if fp32_head:
+                            config.input_vocab_size = tc.input_vocab_size
                         alias = (dict(weight_alias_owner=target, weight_alias_names=("embedding", "lm_head"))
                                  if borrow else {})
                         actual = CheckpointOnlyDraft.from_config(
                             model_config=config, **dict(kwargs, load_method=method), **alias)
                         self.addCleanup(actual.py_model.close)
+                        self.assertEqual(actual.py_model.lm_head.weight.dtype,
+                                         torch.float32 if fp32_head else torch.bfloat16)
                         expected = dict(original.py_model.named_parameters())
                         params = dict(actual.py_model.named_parameters())
                         self.assertEqual(params.keys(), expected.keys())

@@ -78,6 +78,36 @@ def _checkpoint(root):
 
 
 class TargetWeightsTest(unittest.TestCase):
+    def test_unpruned_fp32_head_keeps_source_precision_and_tp_padding(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = _checkpoint(root)
+            config = json.loads((root / "config.json").read_text())
+            config["text_config"].update(vocab_size=30, input_vocab_size=32)
+            (root / "config.json").write_text(json.dumps(config))
+            # Not representable in BF16. A cast via the backbone dtype loses bits.
+            head = 1 + torch.arange(30 * 128).reshape(30, 128).float() / 65536
+            data["lm_head.weight"] = head
+            save_file(data, str(root / "model.safetensors"))
+            expected = torch.cat((head, head.new_zeros(2, 128)))
+            for rank in (0, 1):
+                cfg = dict(model_type="_qwen4_whole_target_checkpoint", ckpt_path=directory,
+                           num_experts=2, moe_k=1, enable_fp32_lm_head=True)
+                load = NewLoaderConfig(device="cpu", compute_dtype=torch.bfloat16, load_method="scratch",
+                                       tp_size=2, tp_rank=rank, ep_size=2, ep_rank=rank)
+                model = NewModelLoader(cfg, load, model_path=directory).load()
+                try:
+                    self.assertEqual(model.lm_head.weight.dtype, torch.float32)
+                    torch.testing.assert_close(model.lm_head.weight, expected.chunk(2)[rank], rtol=0, atol=0)
+                    self.assertEqual(model.embed_tokens.weight.dtype, torch.bfloat16)
+                    # A checkpoint-named online update stages the same rank geometry;
+                    # the live parameter remains unchanged until commit.
+                    update, = model.lm_head.prepare_weight_updates({"weight": -head})
+                    torch.testing.assert_close(update.source, -expected.chunk(2)[rank], rtol=0, atol=0)
+                    self.assertIs(update.target, model.lm_head.weight)
+                finally:
+                    model.close()
+
     def test_rank_local_owner_keeps_full_classifier_and_no_generation_head(self):
         from rtp_llm.models_py.downstream_heads import handler_weight_mappings
         from rtp_llm.models_py.new_models.qwen4_exp.language import Qwen4ForCausalLM

@@ -25,6 +25,13 @@ from rtp_llm.models_py.new_models.qwen4_exp.expert_factory import make_qwen4_exp
 from rtp_llm.models_py.new_models.qwen4_exp.ple_layer import Qwen4PLELayer
 from rtp_llm.models_py.new_models.qwen4_exp.qsa_indexer import Qwen4QSAIndexer
 from rtp_llm.models_py.new_models.qwen4_exp.resident_checkpoint import Qwen4ResidentOwner
+from rtp_llm.utils.model_weight import sp_0_pad8, sp_0_pad8_size
+
+
+def _option(config, name, default):
+    if isinstance(config, dict):
+        return config.get(name, default)
+    return getattr(config, name, default)
 
 
 class Qwen4CheckpointPlan:
@@ -37,11 +44,9 @@ class Qwen4CheckpointPlan:
         quant = self.source_config.get("quantization_config", {})
         self.source_kind = "bf16" if not quant else ("nvfp4" if quant.get("quant_method") == "modelopt" else "fp8")
         self.source_fp8 = self.source_kind == "fp8"
-        def option(name, default):
-            return model_config.get(name, default) if isinstance(model_config, dict) else getattr(model_config, name, default)
-        self.dense_storage = option("_qwen4_dense_storage", "fp8" if self.source_fp8 else "source_bf16")
-        self.vocab_storage = option("_qwen4_vocab_storage", self.dense_storage)
-        self.ple_prefetch_mb = option("qwen4_ple_prefetch_mb", 256)
+        self.dense_storage = _option(model_config, "_qwen4_dense_storage", "fp8" if self.source_fp8 else "source_bf16")
+        self.vocab_storage = _option(model_config, "_qwen4_vocab_storage", self.dense_storage)
+        self.ple_prefetch_mb = _option(model_config, "qwen4_ple_prefetch_mb", 256)
         if self.dense_storage not in ("fp8", "source_bf16") or self.vocab_storage not in ("fp8", "source_bf16"):
             raise ValueError("Invalid Qwen4 dense/vocabulary storage recipe")
         self.dense_fp8 = self.source_fp8 and self.dense_storage == "fp8"
@@ -135,16 +140,46 @@ class _Qwen4VocabStorage:
         self._storage_ready = True
 
 
+def qwen4_input_vocab_size(plan):
+    size = (
+        _option(plan.model_config, "input_vocab_size", 0)
+        or plan.text.get("input_vocab_size")
+        or plan.vocab_size
+    )
+    if type(size) is not int or size <= 0:
+        raise ValueError("Qwen4 input vocabulary must have a positive size")
+    return size
+
+
+def qwen4_head_dtype(config, load):
+    return torch.float32 if _option(config, "enable_fp32_lm_head", False) else load.compute_dtype
+
+
+def qwen4_pad_head(load):
+    # AtomicWeight's FT exporter bypasses sp_0_pad8 only on a single TP/DP/EP lane.
+    return max(load.lm_head_tp_size, load.ep_size,
+               getattr(load.parallelism_config, "dp_size", 1)) > 1
+
+
 class Qwen4VocabWeight(_Qwen4VocabStorage, Qwen4ProjectionWeight):
-    def __init__(self, vocab_size, hidden_size, *, tp_size, tp_rank, embedding, dtype, fp8_storage=False):
-        axis = 1 if embedding else 0
-        shape = [vocab_size, hidden_size]
-        if shape[axis] % tp_size or not 0 <= tp_rank < tp_size:
+    @staticmethod
+    def local_shape(vocab_size, hidden_size, tp_size, embedding, pad_head=False):
+        axis = int(embedding)
+        rows = sp_0_pad8_size(vocab_size, tp_size) if pad_head and not embedding else vocab_size
+        shape = [rows, hidden_size]
+        if tp_size <= 0 or shape[axis] % tp_size:
             raise ValueError("Qwen4 vocabulary shard dimension must divide TP")
-        self.full_shape = tuple(shape)
-        self.axis, self.tp_size, self.tp_rank = axis, tp_size, tp_rank
         shape[axis] //= tp_size
-        super().__init__(tuple(shape), dtype=dtype, fp8_storage=fp8_storage)
+        return tuple(shape)
+
+    def __init__(self, vocab_size, hidden_size, *, tp_size, tp_rank, embedding, dtype, fp8_storage=False, pad_head=False):
+        if not 0 <= tp_rank < tp_size:
+            raise ValueError("Qwen4 vocabulary TP rank out of range")
+        self.full_shape = (vocab_size, hidden_size)
+        self.axis, self.tp_size, self.tp_rank = int(embedding), tp_size, tp_rank
+        self.pad_head = pad_head and not embedding
+        shape = self.local_shape(vocab_size, hidden_size, tp_size, embedding, self.pad_head)
+        super().__init__(shape, dtype=dtype, fp8_storage=fp8_storage)
 
     def prepare_weight_updates(self, weights):
         from rtp_llm.models_py.runtime_weight_update import prepare_leaf_weight_updates
@@ -154,8 +189,11 @@ class Qwen4VocabWeight(_Qwen4VocabStorage, Qwen4ProjectionWeight):
         for name, tensor in weights.items():
             if name != "weight" or tuple(tensor.shape) != self.full_shape:
                 raise ValueError("Invalid Qwen4 vocabulary tensor")
-            count = self.full_shape[self.axis] // self.tp_size
-            local = tensor.narrow(self.axis, self.tp_rank*count, count)
+            if self.pad_head:
+                local = sp_0_pad8(tensor, self.tp_size, self.tp_rank)
+            else:
+                count = self.full_shape[self.axis] // self.tp_size
+                local = tensor.narrow(self.axis, self.tp_rank*count, count)
             super().load_weights({"weight":local})
 
 
@@ -284,12 +322,7 @@ class Qwen4TargetWeights(Qwen4ResidentOwner, DecoderHandlerOwner, RtpModule):
         ) or Qwen4CheckpointPlan(directory, model_config)
         self.WEIGHTS_MAPPER = WeightsMapper(prefix_mapping={plan.prefix:""})
         self._init_decoder_handlers(load_config, plan.hidden_size)
-        def option(name, default):
-            return model_config.get(name, default) if isinstance(model_config, dict) else getattr(model_config, name, default)
-        input_vocab = option("input_vocab_size", 0) or plan.text.get("input_vocab_size") or plan.vocab_size
-        if type(input_vocab) is not int or input_vocab <= 0:
-            raise ValueError("Qwen4 input vocabulary must have a positive size")
-        self.embed_tokens = Qwen4VocabWeight(input_vocab,plan.hidden_size,tp_size=load_config.attn_tp_size,
+        self.embed_tokens = Qwen4VocabWeight(qwen4_input_vocab_size(plan),plan.hidden_size,tp_size=load_config.attn_tp_size,
             tp_rank=load_config.attn_tp_rank,embedding=True,dtype=load_config.compute_dtype,fp8_storage=plan.vocab_fp8)
         head_options = output_vocab_head_kwargs(model_config)
         if not needs_generation_projection(model_config):
@@ -298,13 +331,14 @@ class Qwen4TargetWeights(Qwen4ResidentOwner, DecoderHandlerOwner, RtpModule):
             self.lm_head = Qwen4PrunedLMHead(
                 plan.vocab_size, plan.hidden_size,
                 tp_size=load_config.lm_head_tp_size, tp_rank=load_config.lm_head_tp_rank,
-                params_dtype=torch.float32 if option("enable_fp32_lm_head", False) else load_config.compute_dtype,
+                params_dtype=qwen4_head_dtype(model_config, load_config),
                 fp8_storage=plan.vocab_fp8, **head_options,
             )
         else:
             self.lm_head = Qwen4VocabWeight(plan.vocab_size,plan.hidden_size,tp_size=load_config.lm_head_tp_size,
-                tp_rank=load_config.lm_head_tp_rank,embedding=False,dtype=load_config.compute_dtype,fp8_storage=plan.vocab_fp8)
-        tied = option("tie_word_embeddings", plan.text.get("tie_word_embeddings", plan.source_config.get("tie_word_embeddings", False)))
+                tp_rank=load_config.lm_head_tp_rank,embedding=False,dtype=qwen4_head_dtype(model_config, load_config),
+                fp8_storage=plan.vocab_fp8, pad_head=qwen4_pad_head(load_config))
+        tied = _option(model_config, "tie_word_embeddings", plan.text.get("tie_word_embeddings", plan.source_config.get("tie_word_embeddings", False)))
         self._untied_vocab = not tied
         # Unlike the output head, Qwen4's input embedding shards hidden
         # columns. Derive the mirror from its full HF source, never its shard.

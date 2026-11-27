@@ -631,6 +631,7 @@ py_library(
         "//rtp_llm:fastsafetensors",
         "//rtp_llm:ops",
         "//rtp_llm:triton",
+        "//rtp_llm:utils",
         "//rtp_llm/models_py/distributed:collective_torch",
     ] + select({
         # The ROCm fastsafetensors wrapper imports fast_safetensors, shipped
