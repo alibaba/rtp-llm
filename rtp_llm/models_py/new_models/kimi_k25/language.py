@@ -29,7 +29,9 @@ class KimiK25ForCausalLM(DeepSeekV32ForCausalLM):
         text = config.get("text_config")
         if not isinstance(text, dict):
             raise ValueError("Kimi-K2.5 requires a nested text_config")
-        return {**config, **text}
+        # Kimi checkpoints default to base 50000, not DeepSeek's 10000.
+        # Explicit top-level/text fields and modern rope_parameters still win.
+        return {"rope_theta": 50000, **config, **text}
 
     def __init__(self, model_config, load_config):
         super().__init__(model_config, load_config)

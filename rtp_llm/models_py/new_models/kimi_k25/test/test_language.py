@@ -230,6 +230,55 @@ class KimiLanguageTest(unittest.TestCase):
     def test_registered_language_class(self):
         self.assertIs(get_model_class("kimi_k25"), KimiK25ForCausalLM)
 
+    def test_text_rope_cache_uses_kimi_default_and_explicit_checkpoint_base(self):
+        from rtp_llm.models.rotary_embedding.deepseek_rotary_embedding import (
+            DeepseekV3RotaryEmbedding,
+        )
+
+        # With rotary width two the only inverse frequency is 1 for every
+        # base, so comparing outputs at that width would hide the regression.
+        dim, seq = 8, 32
+        language = language_weights()
+        attn = "model.layers.0.self_attn."
+        language[attn + "q_b_proj.weight"] = torch.zeros(4 * (2 + dim), 4)
+        language[attn + "kv_a_proj_with_mqa.weight"] = torch.zeros(4 + dim, 8)
+        weights = {"language_model." + k: v for k, v in language.items()}
+        for outer, text, expected in (
+            ({}, {}, 50000),
+            ({"rope_theta": 20000}, {}, 20000),
+            ({"rope_theta": 20000}, {"rope_theta": 30000}, 30000),
+            (
+                {},
+                {"rope_theta": 30000, "rope_parameters": {"rope_theta": 40000}},
+                40000,
+            ),
+        ):
+            with self.subTest(expected=expected), tempfile.TemporaryDirectory() as root:
+                cfg = config()
+                cfg.update(outer)
+                del cfg["text_config"]["rope_theta"]
+                cfg["text_config"].update(text, qk_rope_head_dim=dim)
+                checkpoint(root, cfg, weights)
+                model_config = KimiK25._create_config(root)
+                model_config.model_type = "kimi_k25"
+                model_config.max_seq_len = seq
+                model_config.attn_config.kernel_tokens_per_block = 64
+                owner = NewModelLoader(
+                    model_config, load_config(), model_path=root
+                ).load()
+
+                reference = DeepseekV3RotaryEmbedding(dim, seq, expected, device="cpu")
+                cache = torch.cat(
+                    (
+                        reference.cos_cached[:, : dim // 2],
+                        reference.sin_cached[:, : dim // 2],
+                    ),
+                    dim=-1,
+                )
+                torch.testing.assert_close(
+                    owner.cos_sin_cache[:seq], cache, rtol=0, atol=0
+                )
+
     def test_explicit_mm_service_uses_direct_projector_without_old_weight_loader(self):
         cfg = config()
         visual = KimiK25ForVisionEmbedding(cfg, load_config())
