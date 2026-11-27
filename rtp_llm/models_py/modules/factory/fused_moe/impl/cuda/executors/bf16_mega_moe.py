@@ -23,6 +23,7 @@ update.
 from __future__ import annotations
 
 import logging
+import weakref
 from typing import Any, Dict
 
 import torch
@@ -37,6 +38,27 @@ from rtp_llm.utils.model_weight import W
 
 from .fp8_fp4_base import split_moe_w13_gate_up
 from .mega_moe import MegaMoeExecutor
+
+
+# Every live BF16 MegaMoE layer, so a weight refit can re-derive all of them.
+# Weak, so a destroyed engine does not keep its executors alive.
+_LIVE_EXECUTORS: "weakref.WeakSet" = weakref.WeakSet()
+
+
+def refresh_all_routed_weights() -> int:
+    """Re-derive every live layer's MegaMoE layout from its source weights.
+
+    An RL weight update writes the layers' source tensors in place; the kernel
+    reads only the transformed copy, so something has to re-derive it. Nothing
+    in the engine notifies a module that a refit committed, and the source
+    tensors are inference tensors, which carry no version counter to poll -- so
+    the refit path calls this once after COMMIT_UPDATE instead.
+    """
+    refreshed = 0
+    for executor in list(_LIVE_EXECUTORS):
+        executor.refresh_routed_weights()
+        refreshed += 1
+    return refreshed
 
 
 class Bf16MegaMoEInputPacker(MegaMoEInputPacker):
@@ -93,77 +115,88 @@ class Bf16MegaMoeExecutor(MegaMoeExecutor):
     def _transform_routed_weights(
         self, layer_weights: Dict, deep_gemm, inter: int
     ) -> torch.device:
-        """Stack the EP-local BF16 routed experts into the MegaMoE layout.
+        """Derive the MegaMoE layout, leaving the source weights in the layer.
 
         Routed weights arrive already EP-sliced as ``[E_local, 2*inter, dim]``
         and ``[E_local, dim, inter]``. The only reordering is gate|up, which
         ``transform_weights_for_mega_moe`` then interleaves for the kernel.
+
+        Unlike the FP8 executor, these are read and **not popped**. An RL weight
+        update writes the layer's live tensors in place, and a key the layer no
+        longer holds is rejected outright by the refit transaction
+        (``rl_weight_update.py``: ``unexpected or repeated internal weight``).
+        Keeping them is what makes this path refittable; the cost is the source
+        copy staying resident next to the transformed one.
         """
         cfg = self.cfg
-        w13 = layer_weights.pop(W.moe_w1)
-        w2 = layer_weights.pop(W.moe_w2)
+        w13 = layer_weights[W.moe_w1]
+        w2 = layer_weights[W.moe_w2]
         if w13.dtype != torch.bfloat16 or w2.dtype != torch.bfloat16:
             raise ValueError(
                 "BF16 MegaMoE requires bfloat16 routed weights, got "
                 f"{w13.dtype} and {w2.dtype}"
             )
-        device = w13.device
-        gate_w, up_w = split_moe_w13_gate_up(w13, inter, cfg.moe_w1_layout)
-        if cfg.moe_w1_layout != "gate_up":
-            w13 = torch.cat((gate_w, up_w), dim=-2)
-        del gate_w, up_w
-
-        l1_w, l2_w = deep_gemm.transform_weights_for_mega_moe(w13, w2)
-        del w13, w2
-        torch.cuda.empty_cache()
+        self._source_l1 = w13
+        self._source_l2 = w2
+        l1_w, l2_w = self._derive(deep_gemm, w13, w2, inter)
         self._mega_l1_w = l1_w
         self._mega_l1_sf = None
         self._mega_l2_w = l2_w
         self._mega_l2_sf = None
-        return device
+        _LIVE_EXECUTORS.add(self)
+        return w13.device
+
+    def _derive(self, deep_gemm, w13, w2, inter: int):
+        gate_w, up_w = split_moe_w13_gate_up(w13, inter, self.cfg.moe_w1_layout)
+        if self.cfg.moe_w1_layout != "gate_up":
+            w13 = torch.cat((gate_w, up_w), dim=-2)
+        del gate_w, up_w
+        l1_w, l2_w = deep_gemm.transform_weights_for_mega_moe(w13, w2)
+        return l1_w, l2_w
 
     def _make_input_packer(self):
         return Bf16MegaMoEInputPacker()
 
     @torch.inference_mode()
-    def refresh_routed_weights(self, layer_weights: Dict) -> None:
-        """Re-apply the MegaMoE layout after an RL weight update, in place.
+    def refresh_routed_weights(self) -> None:
+        """Re-derive the MegaMoE layout in place when the sources have changed.
 
+        Called by :func:`refresh_all_routed_weights` after a refit commits.
         The captured decode graph recorded the addresses of ``_mega_l1_w`` and
-        ``_mega_l2_w``, so the transform's result is copied into the existing
-        tensors rather than rebound. A shape change would mean the checkpoint
-        geometry moved, which no refit is allowed to do, so it raises instead of
-        silently reallocating and invalidating the graph.
+        ``_mega_l2_w``, so the fresh layout is copied into the existing tensors
+        rather than rebound. A shape or dtype change would mean the checkpoint
+        geometry moved, which no refit may do, so it raises instead of silently
+        reallocating and invalidating the graph.
         """
         import deep_gemm
 
-        previous = (self._mega_l1_w, self._mega_l2_w)
-        pointers = tuple(tensor.data_ptr() for tensor in previous)
-        shapes = tuple(tuple(tensor.shape) for tensor in previous)
-        self._transform_routed_weights(
-            layer_weights, deep_gemm, self._intermediate_size(self.cfg)
+        resident = (self._mega_l1_w, self._mega_l2_w)
+        pointers = tuple(tensor.data_ptr() for tensor in resident)
+        fresh = self._derive(
+            deep_gemm,
+            self._source_l1,
+            self._source_l2,
+            self._intermediate_size(self.cfg),
         )
-        fresh = (self._mega_l1_w, self._mega_l2_w)
-        for index, (old, new) in enumerate(zip(previous, fresh)):
-            if tuple(new.shape) != shapes[index] or new.dtype != old.dtype:
+        for old, new in zip(resident, fresh):
+            if tuple(new.shape) != tuple(old.shape) or new.dtype != old.dtype:
                 raise RuntimeError(
                     "BF16 MegaMoE refit changed the routed weight layout "
-                    f"({shapes[index]} {old.dtype} -> {tuple(new.shape)} "
+                    f"({tuple(old.shape)} {old.dtype} -> {tuple(new.shape)} "
                     f"{new.dtype}); the captured decode graph cannot follow it"
                 )
             old.copy_(new)
-        self._mega_l1_w, self._mega_l2_w = previous
         del fresh
-        torch.cuda.empty_cache()
-        if tuple(t.data_ptr() for t in previous) != pointers:
+        if tuple(t.data_ptr() for t in resident) != pointers:
             raise RuntimeError("BF16 MegaMoE refit moved a resident weight buffer")
-        logging.debug(
-            "[MegaMoE] layer=%d routed weights refreshed in place",
+        logging.info(
+            "[MegaMoE] layer=%d routed weights re-derived in place after refit",
             self.cfg.layer_id,
         )
 
     def _launch(self, y: torch.Tensor, tokens: int, device: torch.device) -> None:
         import deep_gemm
+
 
         sync_cuda_graph_warmup_ranks(
             f"moe.bf16_mega_moe.layer{self.cfg.layer_id}.before_deepgemm",
