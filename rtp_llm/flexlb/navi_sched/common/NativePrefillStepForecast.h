@@ -8,6 +8,7 @@
 #include <limits>
 #include <vector>
 #include <unordered_set>
+#include <utility>
 
 namespace navi_sched {
 
@@ -44,12 +45,74 @@ public:
                         const std::vector<NativePrefillStepRequest> &requests,
                         const TPUPrefillExecutionPolicyConfig &policy)
     {
+        std::vector<TPUPrefillRequestInput> ordered;
+        size_t bound = 0;
+        if (!collectInputs(features, requests, policy, ordered, bound)) return false;
+        TPUPrefillExecutionProjection projection;
+        if (!ordered.empty() &&
+            !TPUPrefillExecutionPolicy::projectCacheResolvedBatchSummary(
+                ordered, policy, bound, projection)) return false;
+        return features.setBatchCount(projection.stepCount);
+    }
+
+    // Keep only work through the round completing every target member. This
+    // changes a prediction's scope, never the Native queue or its execution.
+    static bool prepareUntilTargets(
+        NaviSchedLatencyFeatures &features,
+        const std::vector<NativePrefillStepRequest> &requests,
+        const TPUPrefillExecutionPolicyConfig &policy,
+        const std::vector<uint64_t> &targetRequestIds)
+    {
+        if (features.hasExecutionGeometry() || features.hasExecutionCacheSource()) return false;
+        std::vector<TPUPrefillRequestInput> ordered;
+        size_t bound = 0;
+        if (!collectInputs(features, requests, policy, ordered, bound)) return false;
+        const std::unordered_set<uint64_t> targets(targetRequestIds.begin(), targetRequestIds.end());
+        if (targets.empty() || targets.size() != targetRequestIds.size()) return false;
+        std::vector<size_t> indexes;
+        for (size_t i = 0; i < requests.size(); ++i)
+            if (targets.count(requests[i].requestId)) indexes.push_back(i);
+        if (indexes.size() != targets.size()) return false;
+        TPUPrefillExecutionProjection projection;
+        if (!TPUPrefillExecutionPolicy::projectCacheResolvedUntilTargetsSummary(
+                ordered, indexes, policy, bound, projection)) return false;
+        NaviSchedLatencyFeatures originalVolume, scopedVolume;
+        const auto append = [&](NaviSchedLatencyFeatures &to, int64_t count, int64_t h,
+                                int64_t n, double square, double product) {
+            return features.usesCapacitySplit()
+                ? to.appendCapacitySplitAggregate(0, count, h, n, square, product,
+                                                  0, 0, 0, 0.0, 0.0)
+                : to.appendAggregate(0, count, h, n, square, product);
+        };
+        if (!append(originalVolume, features.getRunningBatchSize(),
+                    features.getRunningCacheHitTokenCount(), features.getRunningCacheMissTokenCount(),
+                    features.getRunningCacheMissTokenSquareSum(),
+                    features.getRunningCacheHitMissTokenProductSum())) return false;
+        for (size_t i = 0; i < ordered.size(); ++i) {
+            const auto n = projection.scheduledTokensPerRequest[i];
+            if (!n) continue;
+            const auto h = ordered[i].computedTokens;
+            if (!append(scopedVolume, 1, h, n, static_cast<double>(n) * n,
+                        static_cast<double>(h) * n)) return false;
+        }
+        auto candidate = features;
+        if (!candidate.subtract(originalVolume) || !candidate.append(scopedVolume) ||
+            !candidate.setBatchCount(projection.stepCount)) return false;
+        features = std::move(candidate);
+        return true;
+    }
+
+private:
+    static bool collectInputs(
+        const NaviSchedLatencyFeatures &features,
+        const std::vector<NativePrefillStepRequest> &requests,
+        const TPUPrefillExecutionPolicyConfig &policy,
+        std::vector<TPUPrefillRequestInput> &ordered, size_t &bound)
+    {
         if (features.getExpectedKVWorkload() || features.getWaitingBatchSize() != 0 ||
             features.getRunningDecodeRequestCount() != 0) return false;
         long double count = 0, hit = 0, miss = 0, square = 0, product = 0;
-        size_t bound = 0;
         std::unordered_set<uint64_t> seen;
-        std::vector<TPUPrefillRequestInput> ordered;
         ordered.reserve(requests.size());
         for (const auto &request : requests) {
             const auto &input = request.input;
@@ -79,12 +142,7 @@ public:
             !equal(miss, features.getRunningCacheMissTokenCount()) ||
             !equal(square, features.getRunningCacheMissTokenSquareSum()) ||
             !equal(product, features.getRunningCacheHitMissTokenProductSum())) return false;
-        TPUPrefillExecutionProjection projection;
-        if (!TPUPrefillExecutionPolicy::validate(policy) ||
-            (!ordered.empty() &&
-             !TPUPrefillExecutionPolicy::projectCacheResolvedBatchSummary(
-                 ordered, policy, bound, projection))) return false;
-        return features.setBatchCount(projection.stepCount);
+        return TPUPrefillExecutionPolicy::validate(policy);
     }
 };
 

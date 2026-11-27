@@ -1660,3 +1660,169 @@ TEST(ExecutionLoadResourceTest, NativeBacklogUsesPackedStepsWithoutChangingConti
                      node.getExistingUnifiedLatencyMs());
 }
 }
+
+namespace navi_sched {
+TEST(ExecutionLoadResourceTest, CompletionProjectionKeepsPartialPredecessorAndLeavesWholeWorkUnchanged) {
+    const std::vector<TPUPrefillRequestInput> requests{
+        {410375, 0, 4096}, {65805, 65536, 65536}};
+    TPUPrefillExecutionProjection whole, scoped;
+    ASSERT_TRUE(TPUPrefillExecutionPolicy::projectCacheResolvedBatchSummary(
+        requests, stepPackingPolicy(), 500000, whole));
+    ASSERT_TRUE(TPUPrefillExecutionPolicy::projectCacheResolvedUntilTargetsSummary(
+        requests, {1}, stepPackingPolicy(), 500000, scoped));
+    EXPECT_GT(whole.stepCount, scoped.stepCount);
+    EXPECT_TRUE(whole.scheduledTokensPerRequest.empty());
+    EXPECT_EQ(1, scoped.stepCount);
+    EXPECT_EQ((std::vector<int64_t>{4096, 269}), scoped.scheduledTokensPerRequest);
+    EXPECT_TRUE(scoped.steps.empty());
+    EXPECT_EQ(0, requests.front().computedTokens);
+    EXPECT_EQ(65536, requests.back().computedTokens);
+}
+
+TEST(ExecutionLoadResourceTest, CompletionProjectionWaitsForEveryTargetAndRejectsInvalidScope) {
+    const std::vector<TPUPrefillRequestInput> requests{
+        {410375, 0, 4096}, {65805, 65536, 65536}, {16385, 0, 0}};
+    TPUPrefillExecutionProjection first, both;
+    ASSERT_TRUE(TPUPrefillExecutionPolicy::projectCacheResolvedUntilTargetsSummary(
+        requests, {1}, stepPackingPolicy(), 500000, first));
+    ASSERT_TRUE(TPUPrefillExecutionPolicy::projectCacheResolvedUntilTargetsSummary(
+        requests, {1, 2}, stepPackingPolicy(), 500000, both));
+    EXPECT_GT(both.stepCount, first.stepCount);
+    EXPECT_EQ(269, both.scheduledTokensPerRequest[1]);
+    EXPECT_EQ(16385, both.scheduledTokensPerRequest[2]);
+    for (const auto &targets : std::vector<std::vector<size_t>>{{}, {3}, {1, 1}}) {
+        auto invalid = both;
+        EXPECT_FALSE(TPUPrefillExecutionPolicy::projectCacheResolvedUntilTargetsSummary(
+            requests, targets, stepPackingPolicy(), 500000, invalid));
+        EXPECT_EQ(0, invalid.stepCount);
+        EXPECT_TRUE(invalid.scheduledTokensPerRequest.empty());
+    }
+    EXPECT_FALSE(TPUPrefillExecutionPolicy::projectCacheResolvedUntilTargetsSummary(
+        requests, {1, 2}, stepPackingPolicy(), 1, both));
+    EXPECT_EQ(0, both.stepCount);
+    EXPECT_TRUE(both.scheduledTokensPerRequest.empty());
+}
+
+TEST(ExecutionLoadResourceTest, CompletionForecastRebuildsMomentsAndPreservesElapsedAndPrecedingCount) {
+    auto features = emptyStepPackingFeatures();
+    features.appendRequest(0, 410375);
+    features.appendRequest(65536, 269);
+    ASSERT_TRUE(features.setBatchCount(80));
+    ASSERT_TRUE(features.appendPrecedingRequestCount(7));
+    ASSERT_TRUE(features.appendRunningElapsedTimeMs(12.5));
+    const std::vector<NativePrefillStepRequest> requests{
+        {11, {410375, 0, 4096}, false, true},
+        {12, {65805, 65536, 65536}, false, false}};
+    const auto original = features;
+    ASSERT_TRUE(NativePrefillStepForecast::prepareUntilTargets(
+        features, requests, stepPackingPolicy(), {12}));
+    EXPECT_EQ(1, features.getBatchCount());
+    EXPECT_EQ(2, features.getRunningBatchSize());
+    EXPECT_EQ(65536, features.getCacheHitTokenCount());
+    EXPECT_EQ(4365, features.getCacheMissTokenCount());
+    EXPECT_DOUBLE_EQ(4096.0 * 4096 + 269.0 * 269,
+                     features.getCacheMissTokenSquareSum());
+    EXPECT_DOUBLE_EQ(65536.0 * 269, features.getCacheHitMissTokenProductSum());
+    EXPECT_EQ(7, features.getPrecedingRequestCount());
+    EXPECT_DOUBLE_EQ(12.5, features.getRunningElapsedTimeMs());
+    EXPECT_TRUE(features.usesCapacitySplit());
+    auto whole = original;
+    ASSERT_TRUE(NativePrefillStepForecast::prepare(whole, requests, stepPackingPolicy()));
+    EXPECT_EQ(410644, whole.getCacheMissTokenCount());
+    EXPECT_GT(whole.getBatchCount(), features.getBatchCount());
+}
+
+TEST(ExecutionLoadResourceTest, CompletionForecastRequiresExplicitCompleteTargetsWithoutMutatingFailure) {
+    auto features = emptyStepPackingFeatures();
+    features.appendRequest(0, 5000);
+    ASSERT_TRUE(features.setBatchCount(9));
+    const std::vector<NativePrefillStepRequest> requests{{11, {5000, 0, 0}, false, true}};
+    for (const auto &targets : std::vector<std::vector<uint64_t>>{{}, {12}, {11, 11}}) {
+        auto candidate = features;
+        EXPECT_FALSE(NativePrefillStepForecast::prepareUntilTargets(
+            candidate, requests, stepPackingPolicy(), targets));
+        EXPECT_EQ(9, candidate.getBatchCount());
+        EXPECT_EQ(5000, candidate.getCacheMissTokenCount());
+    }
+    features.appendRequest(0, 1);
+    EXPECT_FALSE(NativePrefillStepForecast::prepareUntilTargets(
+        features, requests, stepPackingPolicy(), {11}));
+    EXPECT_EQ(5001, features.getCacheMissTokenCount());
+}
+
+TEST(ExecutionLoadResourceTest, CompletionForecastDoesNotReinterpretGeometryOrCacheSourceFeatures) {
+    auto base = emptyStepPackingFeatures();
+    base.appendRequest(0, 5000);
+    const std::vector<NativePrefillStepRequest> requests{{11, {5000, 0, 0}, false, true}};
+    auto geometry = base;
+    ASSERT_TRUE(geometry.setExecutionGeometry(2, 8192));
+    EXPECT_FALSE(NativePrefillStepForecast::prepareUntilTargets(
+        geometry, requests, stepPackingPolicy(), {11}));
+    EXPECT_TRUE(geometry.hasExecutionGeometry());
+    NaviSchedLatencyFeatures source;
+    source.appendRequest(4096, 5000);
+    const std::vector<NativePrefillStepRequest> sourceRequests{
+        {11, {9096, 4096, 0}, false, true}};
+    ASSERT_TRUE(source.setExecutionCacheSource(1, 4096));
+    EXPECT_FALSE(NativePrefillStepForecast::prepareUntilTargets(
+        source, sourceRequests, stepPackingPolicy(), {11}));
+    EXPECT_TRUE(source.hasExecutionCacheSource());
+}
+
+TEST(ExecutionLoadResourceTest, CompletionLatencyAndWorkMarginalUseTheirOwnConsistentScopes) {
+    auto snapshot = emptyStepPackingSnapshot();
+    auto info = std::make_shared<NaviSchedNodeInfo>(*snapshot.info);
+    info->bizName = "kv_load_test";
+    info->agentId = "agent_0";
+    info->serverAddress = "127.0.0.1:19001";
+    info->pdSeparated = true;
+    snapshot.info = info;
+    snapshot.workload.executionLoadRequests.push_back(
+        {11, 1, 0, 0, 410375, true, NativeKVExecutionState::READY});
+    snapshot.reportedWorkloadFeatures.appendRequest(0, 410375);
+    snapshot.workloadFeatures = snapshot.reportedWorkloadFeatures;
+    MasterBatchReservation::UnfinishedRequest prior;
+    prior.state = MasterBatchReservation::RequestState::DISPATCHED;
+    prior.request.requestId = 11;
+    prior.request.totalTokenCount = 410375;
+    prior.request.predictedSharedPrefixBoundary = 4096;
+    snapshot.nativePrefillReservations.push_back(prior);
+    auto source = std::make_shared<InitialKVLoadNode>();
+    source->totalBlocks = {16};
+    source->hbmBlocks = {16};
+    NaviSchedScheduleContext context;
+    NaviSchedScheduleItem item;
+    item.request.requestId = 12;
+    item.request.promptTokenCount = 65805;
+    item.request.blockSize = 4096;
+    context._requests.push_back(item);
+    context.setNodes({source}, {snapshot});
+    ASSERT_TRUE(context.prepare());
+    NaviSchedLatencyPrediction prediction;
+    const auto target = context.estimateBatchExecutionLatencyMs(0, {0}, &prediction);
+    const auto work = context.estimateBatchWorkCompletionLatencyMs(0, {0});
+    ASSERT_GT(target, 0);
+    EXPECT_GT(work, target);
+    EXPECT_EQ(1, prediction.features.getBatchCount());
+    EXPECT_EQ(4365, prediction.features.getCacheMissTokenCount());
+    const auto &node = context.getNode(0);
+    const float costs[1] = {};
+    uint32_t assignment[1] = {0};
+    const int64_t tokens[1] = {65805};
+    const double inverse[1] = {1.0 / 65805};
+    for (const auto lambda : {0.0, 0.5, 1.0}) {
+        CostSchedulerKernelInternal::DiscreteForwardWorkspace workspace;
+        const auto value = CostSchedulerKernelInternal::forwardDiscrete(
+            context, costs, assignment, tokens, inverse, 65805, lambda, 0.0, workspace);
+        const auto expected = lambda * (work - node.getExistingDiscreteUnifiedLatencyMs()) / 65805 +
+                              (1.0 - lambda) * target / 65805;
+        EXPECT_NEAR(expected, value, 1e-12) << lambda;
+    }
+    autil::DataBuffer wire;
+    prediction.serialize(wire);
+    NaviSchedLatencyPrediction decoded;
+    decoded.deserialize(wire);
+    EXPECT_EQ(prediction.features.getCacheMissTokenCount(), decoded.features.getCacheMissTokenCount());
+    EXPECT_EQ(1, decoded.features.getBatchCount());
+}
+}

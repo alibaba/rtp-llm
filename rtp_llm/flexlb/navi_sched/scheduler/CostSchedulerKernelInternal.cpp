@@ -1514,6 +1514,7 @@ double CostSchedulerKernelInternal::forwardDiscreteImpl(
         }
         double nodeCost = 0.0;
         double existingNodeCost = 0.0;
+        double wholeWorkCost = 0.0;
         const auto &baseline = baselineFor(nodeIndex);
         if (NonLinearPrefillModelR::usesGeometryForVersion(
                 node.getLatencyBinaryVersion()) ||
@@ -1521,9 +1522,15 @@ double CostSchedulerKernelInternal::forwardDiscreteImpl(
                 node.getLatencyBinaryVersion()) || node.getNativeStepTokenBudget() > 0) {
             nodeCost = context.estimateBatchExecutionLatencyMs(
                 nodeIndex, geometryRequests[nodeIndex]);
-            if (node.getNativeStepTokenBudget() > 0)
+            if (node.getNativeStepTokenBudget() > 0) {
                 existingNodeCost = node.getExistingDiscreteUnifiedLatencyMs();
-            if (!std::isfinite(nodeCost) || !std::isfinite(existingNodeCost)) {
+                wholeWorkCost = context.estimateBatchWorkCompletionLatencyMs(
+                    nodeIndex, geometryRequests[nodeIndex]);
+            } else {
+                wholeWorkCost = nodeCost;
+            }
+            if (!std::isfinite(nodeCost) || !std::isfinite(existingNodeCost) ||
+                !std::isfinite(wholeWorkCost)) {
                 return std::numeric_limits<double>::infinity();
             }
         } else if (baseline.unified) {
@@ -1563,11 +1570,13 @@ double CostSchedulerKernelInternal::forwardDiscreteImpl(
             floorCost = node.applyLatencyResidual(floorCost);
             nodeCost = node.decayUnifiedLatency(costWithReportedWorkload, floorCost);
             existingNodeCost = node.getExistingUnifiedLatencyMs();
+            wholeWorkCost = nodeCost;
         } else {
             nodeCost = NonLinearPrefillModelR::calculateLatencyFromRequestCostSum(
                 node.getLatencyParameters(), workspace.requestCostSums[nodeIndex],
                 workspace.totalPromptTokenSums[nodeIndex], 0.0);
             nodeCost = node.applyLatencyResidual(nodeCost);
+            wholeWorkCost = nodeCost;
         }
         auto inverseTokenWeightSum = workspace.inverseTokenWeightSums[nodeIndex];
         auto latencyWeight =
@@ -1576,7 +1585,7 @@ double CostSchedulerKernelInternal::forwardDiscreteImpl(
                       latencyWeightLogScale
                 : inverseTokenWeightSum;
         const auto firstTerm = node.usesUnifiedLatencyPrediction()
-                                   ? nodeCost - existingNodeCost
+                                   ? wholeWorkCost - existingNodeCost
                                    : nodeCost * requestWeightSum;
         const auto nodeValue =
             firstScale * firstTerm +

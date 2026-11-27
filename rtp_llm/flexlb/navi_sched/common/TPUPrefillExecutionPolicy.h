@@ -114,6 +114,8 @@ struct TPUPrefillExecutionProjection {
     int64_t globalPaddedTokenSum = 0;
     std::vector<TPUPrefillExecutionStep> steps;
     int64_t attentionPairSum = 0;
+    // Populated only by target-scoped projections; indexed by input request.
+    std::vector<int64_t> scheduledTokensPerRequest;
 };
 
 // Pure arithmetic only: these functions send no requests and change no runtime
@@ -198,6 +200,11 @@ public:
         const std::vector<TPUPrefillRequestInput> &orderedRequests,
         const TPUPrefillExecutionPolicyConfig &config, size_t maxProjectionSteps,
         TPUPrefillExecutionProjection &output, std::string *error = nullptr);
+    static bool projectCacheResolvedUntilTargetsSummary(
+        const std::vector<TPUPrefillRequestInput> &orderedRequests,
+        const std::vector<size_t> &targetIndexes,
+        const TPUPrefillExecutionPolicyConfig &config, size_t maxProjectionSteps,
+        TPUPrefillExecutionProjection &output, std::string *error = nullptr);
 
 private:
     static bool projectLatencyFeaturesImpl(
@@ -207,7 +214,8 @@ private:
     static bool projectCacheResolvedBatchImpl(
         const std::vector<TPUPrefillRequestInput> &orderedRequests,
         const TPUPrefillExecutionPolicyConfig &config, size_t maxProjectionSteps,
-        TPUPrefillExecutionProjection &output, std::string *error, bool collectSteps);
+        TPUPrefillExecutionProjection &output, std::string *error, bool collectSteps,
+        const std::vector<size_t> *targetIndexes = nullptr);
 };
 
 } // namespace navi_sched

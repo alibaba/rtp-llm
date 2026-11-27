@@ -386,7 +386,8 @@ bool TPUPrefillExecutionPolicy::projectStepGeometry(
 bool TPUPrefillExecutionPolicy::projectCacheResolvedBatchImpl(
     const std::vector<TPUPrefillRequestInput> &orderedRequests,
     const TPUPrefillExecutionPolicyConfig &config, size_t maxProjectionSteps,
-    TPUPrefillExecutionProjection &output, std::string *error, bool collectSteps)
+    TPUPrefillExecutionProjection &output, std::string *error, bool collectSteps,
+    const std::vector<size_t> *targetIndexes)
 {
     output = {};
     if (!validate(config, error)) {
@@ -402,6 +403,16 @@ bool TPUPrefillExecutionPolicy::projectCacheResolvedBatchImpl(
         }
     }
     TPUPrefillExecutionProjection candidate;
+    if (targetIndexes) {
+        if (targetIndexes->empty()) return fail(error, "missing completion targets");
+        std::vector<bool> seen(requests.size(), false);
+        for (const auto index : *targetIndexes) {
+            if (index >= requests.size() || seen[index])
+                return fail(error, "invalid completion target index");
+            seen[index] = true;
+        }
+        candidate.scheduledTokensPerRequest.assign(requests.size(), 0);
+    }
     // A deferred whole chunk depends only on immutable policy/request state.
     // Reuse it until this request advances, including across full rounds.
     std::vector<int64_t> nextTokens, nextPairs;
@@ -415,10 +426,13 @@ bool TPUPrefillExecutionPolicy::projectCacheResolvedBatchImpl(
         admitted.assign(requests.size(), false);
     }
     while (true) {
-        const auto workRemains =
-            std::any_of(requests.begin(), requests.end(), [](const auto &request) {
-                return request.computedTokens < request.prefillEnd();
-            });
+        const auto workRemains = targetIndexes
+            ? std::any_of(targetIndexes->begin(), targetIndexes->end(), [&](size_t index) {
+                  return requests[index].computedTokens < requests[index].prefillEnd();
+              })
+            : std::any_of(requests.begin(), requests.end(), [](const auto &request) {
+                  return request.computedTokens < request.prefillEnd();
+              });
         if (!workRemains) {
             output = std::move(candidate);
             return true;
@@ -485,6 +499,7 @@ bool TPUPrefillExecutionPolicy::projectCacheResolvedBatchImpl(
                 pairs;                // Each admitted chunk fits the remaining capacity.
             scheduledTotal += tokens; // Bounded by the original step budget.
             request.computedTokens += tokens; // tokens <= prompt-computed.
+            if (targetIndexes) candidate.scheduledTokensPerRequest[index] += tokens;
             if (config.fixedPrefillChunkPlan) {
                 nextTokens[index] = -1;
                 admitted[index] = true;
@@ -616,6 +631,16 @@ bool TPUPrefillExecutionPolicy::projectCacheResolvedBatchSummary(
 {
     return projectCacheResolvedBatchImpl(requests, config, maxSteps, output, error,
                                          false);
+}
+
+bool TPUPrefillExecutionPolicy::projectCacheResolvedUntilTargetsSummary(
+    const std::vector<TPUPrefillRequestInput> &requests,
+    const std::vector<size_t> &targetIndexes,
+    const TPUPrefillExecutionPolicyConfig &config, size_t maxSteps,
+    TPUPrefillExecutionProjection &output, std::string *error)
+{
+    return projectCacheResolvedBatchImpl(requests, config, maxSteps, output, error,
+                                         false, &targetIndexes);
 }
 
 } // namespace navi_sched

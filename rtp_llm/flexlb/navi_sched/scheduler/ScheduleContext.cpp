@@ -1940,10 +1940,18 @@ double NaviSchedScheduleContext::estimateBatchExecutionLatencyMs(
                                            nullptr);
 }
 
+double NaviSchedScheduleContext::estimateBatchWorkCompletionLatencyMs(
+    size_t nodeIndex, const std::vector<size_t> &requestIndexes) const
+{
+    return estimateBatchExecutionLatencyMs(nodeIndex, requestIndexes, nullptr,
+                                           nullptr, 0, false);
+}
+
 double NaviSchedScheduleContext::estimateBatchExecutionLatencyMs(
     size_t nodeIndex, const std::vector<size_t> &requestIndexes,
     NaviSchedLatencyPrediction *latencyPrediction,
-    const std::vector<int64_t> *matchedBlockCounts, int64_t predictionTimeUs) const
+    const std::vector<int64_t> *matchedBlockCounts, int64_t predictionTimeUs,
+    bool targetCompletionScope) const
 {
     if (latencyPrediction) {
         *latencyPrediction = NaviSchedLatencyPrediction();
@@ -2098,10 +2106,12 @@ double NaviSchedScheduleContext::estimateBatchExecutionLatencyMs(
         !node.prepareLatencyPredictionFeatures(withoutReportedWorkload)) return 0.0;
     const auto unpackedSteps = withReportedWorkload.getBatchCount();
     bool packedSteps = false;
+    bool completionScoped = false;
     if (node._nativeStepTokenBudget > 0 && node._nativeStepPackingRequests &&
         node._prefillExecutionPolicy) {
         auto withRequests = *node._nativeStepPackingRequests;
         std::vector<NativePrefillStepRequest> floorRequests;
+        std::vector<uint64_t> targetRequestIds;
         for (const auto &request : withRequests)
             if (!request.reported) floorRequests.push_back(request);
         const auto inputs = getExecutionCacheInputs(nodeIndex);
@@ -2121,6 +2131,7 @@ double NaviSchedScheduleContext::estimateBatchExecutionLatencyMs(
                 NativePrefillStepRequest member{request.requestId, input, false, false};
                 withRequests.push_back(member);
                 floorRequests.push_back(member);
+                targetRequestIds.push_back(request.requestId);
             }
         }
         auto packedWith = withReportedWorkload;
@@ -2129,16 +2140,28 @@ double NaviSchedScheduleContext::estimateBatchExecutionLatencyMs(
                 packedWith, withRequests, *node._prefillExecutionPolicy) &&
             NativePrefillStepForecast::prepare(
                 packedFloor, floorRequests, *node._prefillExecutionPolicy)) {
+            if (targetCompletionScope) {
+                auto scopedWith = packedWith, scopedFloor = packedFloor;
+                if (NativePrefillStepForecast::prepareUntilTargets(
+                        scopedWith, withRequests, *node._prefillExecutionPolicy, targetRequestIds) &&
+                    NativePrefillStepForecast::prepareUntilTargets(
+                        scopedFloor, floorRequests, *node._prefillExecutionPolicy, targetRequestIds)) {
+                    packedWith = std::move(scopedWith);
+                    packedFloor = std::move(scopedFloor);
+                    completionScoped = true;
+                }
+            }
             withReportedWorkload = std::move(packedWith);
             withoutReportedWorkload = std::move(packedFloor);
             packedSteps = true;
         }
     }
     if (node._nativeStepTokenBudget > 0 && latencyPrediction && _scheduleId % 20 == 0)
-        std::fprintf(stderr, "[navi-master-native-step-packing] schedule_id=%lu node=%lu applied=%d metadata_available=%d old_steps=%ld new_steps=%ld floor_steps=%ld\n",
+        std::fprintf(stderr, "[navi-master-native-step-packing] schedule_id=%lu node=%lu applied=%d metadata_available=%d old_steps=%ld new_steps=%ld floor_steps=%ld completion_scoped=%d\n",
                      _scheduleId, nodeIndex, int(packedSteps),
                      int(node._nativeStepPackingRequests.has_value()), unpackedSteps,
-                     withReportedWorkload.getBatchCount(), withoutReportedWorkload.getBatchCount());
+                     withReportedWorkload.getBatchCount(), withoutReportedWorkload.getBatchCount(),
+                     int(completionScoped));
     const auto withReportedPrediction = node.predictFrozenLatency(withReportedWorkload);
     const auto withoutReportedPrediction = node.predictFrozenLatency(withoutReportedWorkload);
     const auto prediction =

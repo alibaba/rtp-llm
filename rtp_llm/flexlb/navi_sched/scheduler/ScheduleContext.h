@@ -387,6 +387,10 @@ public:
     double estimateBatchExecutionLatencyMs(
         size_t nodeIndex, const std::vector<size_t> &requestIndexes,
         NaviSchedLatencyPrediction *latencyPrediction = nullptr) const;
+    // Whole-work completion is the cost marginal's quantity, distinct from
+    // the incoming batch's completion when Native chunks interleave.
+    double estimateBatchWorkCompletionLatencyMs(
+        size_t nodeIndex, const std::vector<size_t> &requestIndexes) const;
     std::shared_ptr<const NaviSchedNativeContinuousInput> getNativeContinuousInput(
         size_t nodeIndex) const;
     const NaviSchedGeometryOptimizationInput *getGeometryOptimizationInput(
@@ -409,7 +413,8 @@ private:
                                            const std::vector<size_t> &requestIndexes,
                                            NaviSchedLatencyPrediction *latencyPrediction,
                                            const std::vector<int64_t> *matchedBlockCounts,
-                                           int64_t predictionTimeUs = 0) const;
+                                           int64_t predictionTimeUs = 0,
+                                           bool targetCompletionScope = true) const;
 
     // Install before replay/cache preparation freezes this round's inputs.
     bool setRemoteCacheReadyBlocks(
