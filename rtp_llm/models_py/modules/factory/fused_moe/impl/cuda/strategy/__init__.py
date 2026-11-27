@@ -27,6 +27,7 @@ from .fp8_per_tensor import (
     CudaFp8PerTensorNoDPStrategy,
 )
 from .no_quant import (
+    CudaBf16MegaMoeStrategy,
     CudaNoQuantCppStrategy,
     CudaNoQuantDpNormalStrategy,
     CudaNoQuantEpLowLatencyStrategy,
@@ -43,6 +44,7 @@ __all__ = [
     "CudaNvfp4MarlinStrategy",
     # No quantization
     "CudaNoQuantEpLowLatencyStrategy",
+    "CudaBf16MegaMoeStrategy",
     "CudaNoQuantCppStrategy",
     "CudaNoQuantDpNormalStrategy",
     "CudaNoQuantPureDPStrategy",

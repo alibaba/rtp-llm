@@ -11,9 +11,28 @@ The cache key set MUST stay invariant across the refactor — see Phase 1 risk
 #9 in ``.claude/plans/optimized-riding-mist.md``.
 """
 
+import inspect
 import logging
 
 import torch
+
+
+def _dispatch_selector(function, use_fp8_dispatch: bool, mma_type: str) -> dict:
+    """Name the activation dispatch the way this DeepGEMM build spells it.
+
+    DeepGEMM replaced the boolean ``use_fp8_dispatch`` with an ``mma_type``
+    string once BF16 and FP8xFP8 MegaMoE variants appeared. Both spellings are
+    in the wild, so pick by signature instead of pinning a version: passing the
+    wrong one raises ``TypeError`` deep inside an allocation that every MoE
+    layer shares.
+    """
+    try:
+        parameters = inspect.signature(function).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+    if "mma_type" in parameters:
+        return {"mma_type": mma_type}
+    return {"use_fp8_dispatch": use_fp8_dispatch}
 
 # Module-level cache for the Mega MoE symm-mem dispatch buffer. Keyed by the
 # shape parameters so different model configs in the same process don't
@@ -31,10 +50,16 @@ def estimate_mega_moe_symm_buffer_bytes(
     intermediate_hidden: int,
     use_fp8_dispatch: bool = True,
     activation: str = "swiglu",
+    mma_type: str = "fp8xfp4",
 ) -> int | None:
     try:
         import deep_gemm
 
+        # The C++ entry point took the same selector rename as the Python
+        # wrapper; it is positional here, so pick the value rather than a name.
+        selector = _dispatch_selector(
+            deep_gemm.get_symm_buffer_for_mega_moe, use_fp8_dispatch, mma_type
+        )
         return int(
             deep_gemm._C.get_symm_buffer_size_for_mega_moe(
                 group_size,
@@ -43,7 +68,7 @@ def estimate_mega_moe_symm_buffer_bytes(
                 num_topk,
                 hidden,
                 intermediate_hidden,
-                use_fp8_dispatch,
+                next(iter(selector.values())),
                 activation,
             )[0]
         )
@@ -60,6 +85,7 @@ def _get_or_create_mega_buf(
     intermediate_hidden,
     use_fp8_dispatch,
     activation,
+    mma_type="fp8xfp4",
 ):
     import deep_gemm
 
@@ -72,6 +98,7 @@ def _get_or_create_mega_buf(
         intermediate_hidden,
         bool(use_fp8_dispatch),
         activation,
+        mma_type,
     )
     buf = _MEGA_BUF_CACHE.get(key)
     if buf is None:
@@ -89,6 +116,7 @@ def _get_or_create_mega_buf(
                 intermediate_hidden=intermediate_hidden,
                 use_fp8_dispatch=use_fp8_dispatch,
                 activation=activation,
+                mma_type=mma_type,
             )
             if group_size > 0
             else None
@@ -100,8 +128,10 @@ def _get_or_create_mega_buf(
             num_topk=num_topk,
             hidden=hidden,
             intermediate_hidden=intermediate_hidden,
-            use_fp8_dispatch=use_fp8_dispatch,
             activation=activation,
+            **_dispatch_selector(
+                deep_gemm.get_symm_buffer_for_mega_moe, use_fp8_dispatch, mma_type
+            ),
         )
         actual_bytes = None
         try:

@@ -151,6 +151,18 @@ def _get_validated_world_ep_group(cfg, dist):
 
 class MegaMoeExecutor(Fp8Fp4ExecutorBase):
     execute_empty_inputs = True
+    # The activation dispatch this executor's kernel consumes. The BF16
+    # variant overrides both, so everything shared below -- buffer sizing, JIT
+    # warmup bucket selection, capacity checks -- reads them from the class.
+    mma_type = _MMA_TYPE
+    use_fp8_dispatch = True
+
+    @staticmethod
+    def _intermediate_size(cfg) -> int:
+        return _mega_intermediate_size(cfg)
+
+    def _make_input_packer(self):
+        return get_mega_moe_input_packer()
 
     @property
     def supports_gate_pack(self) -> bool:
@@ -174,7 +186,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
 
         cfg = self.cfg
         D = cfg.dim
-        inter = _mega_intermediate_size(cfg)
+        inter = self._intermediate_size(cfg)
         device = self._transform_routed_weights(layer_weights, deep_gemm, inter)
 
         # (4) Allocate the symmetric-memory buffer.  Uses
@@ -195,8 +207,9 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             num_topk=cfg.n_activated_experts,
             hidden=D,
             intermediate_hidden=inter,
-            use_fp8_dispatch=True,
+            use_fp8_dispatch=self.use_fp8_dispatch,
             activation="swiglu",
+            mma_type=self.mma_type,
         )
         # Single-layer staging output. All MoE layers execute sequentially, so one
         # process-local buffer is enough and avoids O(layers) persistent memory.
@@ -206,7 +219,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             torch.bfloat16,
             device,
         )
-        self._input_packer = get_mega_moe_input_packer()
+        self._input_packer = self._make_input_packer()
         self._maybe_warmup_jit_once()
 
     def _transform_routed_weights(
@@ -327,14 +340,14 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
                 max_tokens_per_rank,
                 tokens,
                 cfg.n_activated_experts,
-                _MMA_TYPE,
+                self.mma_type,
             )
         return generate_mega_moe_jit_token_counts(
             num_ranks=cfg.ep_size,
             num_experts=cfg.n_routed_experts,
             num_experts_per_rank=cfg.n_local_experts,
             num_topk=cfg.n_activated_experts,
-            intermediate_hidden=_mega_intermediate_size(cfg),
+            intermediate_hidden=self._intermediate_size(cfg),
             num_sms=num_sms,
             max_tokens_per_rank=max_tokens_per_rank,
             include_cap=cfg.warmup_include_capacity,
