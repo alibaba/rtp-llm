@@ -175,6 +175,10 @@ def reference_forward(weights, hidden):
 
 
 def assert_language_forward(test, model, weights, input_ids, features=None):
+    # This is a direct model call, not audio preprocessing or a generation RPC.
+    # Import here: the separate checkpoint-only suite needs no compute extension.
+    from rtp_llm.ops.compute_ops import PyEmbeddingInputs, PyModelInputs, PyMultimodalInputs
+
     mask = torch.ones(len(input_ids), dtype=torch.bool)
     if features is not None:
         mask[1 : 1 + len(features)] = False
@@ -182,22 +186,16 @@ def assert_language_forward(test, model, weights, input_ids, features=None):
     expected_input = F.embedding(safe_ids.long(), weights["model.embed_tokens.weight"])
     if features is not None:
         expected_input[1 : 1 + len(features)] = features
-    inputs = types.SimpleNamespace(
-        input_ids=input_ids,
-        capture_hidden_states=False,
-        embedding_inputs=(
-            None if features is None else types.SimpleNamespace(text_tokens_mask=mask)
-        ),
-        multimodal_inputs=(
-            None
-            if features is None
-            else types.SimpleNamespace(
-                multimodal_features=[features],
-                mm_features_locs=torch.tensor([1]),
-                mm_extra_input=[],
-            )
-        ),
-    )
+    inputs = PyModelInputs()
+    inputs.input_ids = input_ids
+    if features is not None:
+        embedding = PyEmbeddingInputs()
+        embedding.text_tokens_mask = mask
+        inputs.embedding_inputs = embedding
+        media = PyMultimodalInputs()
+        media.multimodal_features = [features]
+        media.mm_features_locs = torch.tensor([1])
+        inputs.multimodal_inputs = media
     with torch.inference_mode():
         actual = model(inputs, fmha_impl=TorchCausalGQA()).hidden_states
         expected = reference_forward(weights, expected_input)
@@ -257,6 +255,7 @@ class MultimodalLanguageNativeBoundaryTest(unittest.TestCase):
             config.data_type, config.lora_infos = "fp32", {}
             self.assertEqual(config.input_vocab_size, 15)
             self.assertEqual(config.mm_model_config.mm_sep_tokens, [[-200]])
+            self.assertFalse(config.mm_model_config.is_multimodal)
             service = service_cls(
                 model_config=config,
                 parallelism_config=ParallelismConfig(),

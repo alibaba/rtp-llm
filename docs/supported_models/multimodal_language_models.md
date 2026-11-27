@@ -21,3 +21,10 @@ python3 -m rtp_llm.start_server \
 **ROCm:** Qwen2-VL and Qwen2.5-VL checkpoints use non-interleaved MRoPE by default. The ROCm fused attention path does not implement that layout. Use CUDA; setting `mrope_interleaved=true` would change the model's semantics.
 
 Historical registrations such as original Qwen-VL (`qwen_vl`), Qwen2-Audio, LLaVA and ChatGLM4V do not provide a direct vision checkpoint owner. Do not use those names as aliases for the Qwen2/3-VL owners. See [text generation models](generative_models.md) for how to query the installed language owners.
+
+**CosyVoice Qwen (`cosyvoice_qwen`) is a language decoder, not an audio encoder.**
+The generation service accepts token IDs for this model. The `-200` marker in
+its configuration does not enable audio URLs, waveform decoding, or inline
+speech embeddings over the generation RPC. A direct Python model caller can
+supply already-encoded speech features in `PyModelInputs`, with a text-token
+mask and the corresponding feature offsets; that is a model-level interface.

@@ -45,6 +45,7 @@ py_test(
     deps = [
         "//rtp_llm/models_py:checkpoint_reader_test_support",
         "//rtp_llm:fastsafetensors",
+        "//rtp_llm:ops",
         "//rtp_llm:safetensors",
         "//rtp_llm:sdk",
         "//rtp_llm:torch",
