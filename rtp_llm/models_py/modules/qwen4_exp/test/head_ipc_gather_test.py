@@ -87,6 +87,21 @@ class HeadIpcGatherTest(unittest.TestCase):
         )
         self.assertIs(seen[0], local)
 
+        model_none = SimpleNamespace()
+        self.assertIsNone(
+            Qwen4ExpModel.try_target_argmax_fp8_lm_head_for_tp(model_none, local, 16)
+        )
+        argmax_expected = torch.zeros(4, 1, dtype=torch.int64)
+        argmax_seen = []
+        model._head_ipc_gather = SimpleNamespace(
+            try_argmax=lambda x, v: (argmax_seen.append((x, v)), argmax_expected)[1]
+        )
+        self.assertIs(
+            Qwen4ExpModel.try_target_argmax_fp8_lm_head_for_tp(model, local, 16),
+            argmax_expected,
+        )
+        self.assertEqual(argmax_seen, [(local, 16)])
+
 
 if __name__ == "__main__":
     unittest.main()
