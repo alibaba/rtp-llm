@@ -1288,3 +1288,63 @@ TEST(ExecutionLoadResourceTest, NativeWorkloadCapturePreservesQueueAndCompletion
     EXPECT_EQ(captured, NaviSchedScheduleReplayJson::captureNativeWorkload(workload, 20, true));
 }
 }
+
+namespace navi_sched {
+TEST(ExecutionLoadResourceTest, NativeWorkloadCaptureSupportsLoadReportsWithoutPPOwner) {
+    NaviSchedWorkloadSnapshot workload;
+    workload.revision = 71;
+    workload.requestCount = 1;
+    workload.executionLoadTracked = true;
+    workload.executionLoadRequests.emplace_back();
+    auto &load = workload.executionLoadRequests.back();
+    load.requestId = 4001;
+    load.localBatchId = 41;
+    load.loadGeneration = 6;
+    load.contextTokens = 4096;
+    load.computeTokens = 8192;
+    load.preparationElapsedMs = 123.0;
+    load.state = NativeKVExecutionState::PREPARING;
+    EXPECT_FALSE(NaviSchedScheduleReplayJson::captureNativeWorkload(workload, 20));
+    const auto captured = NaviSchedScheduleReplayJson::captureNativeWorkload(workload, 20, true);
+    ASSERT_TRUE(captured);
+    NaviSchedWorkloadSnapshot decoded;
+    NaviSchedScheduleReplayJson::workloadFromJsonString(*captured, decoded);
+    EXPECT_FALSE(decoded.nativePPState);
+    EXPECT_TRUE(decoded.executionLoadTracked);
+    ASSERT_EQ(1u, decoded.executionLoadRequests.size());
+    const auto &copy = decoded.executionLoadRequests[0];
+    EXPECT_EQ(load.requestId, copy.requestId);
+    EXPECT_EQ(load.localBatchId, copy.localBatchId);
+    EXPECT_EQ(load.loadGeneration, copy.loadGeneration);
+    EXPECT_EQ(load.contextTokens, copy.contextTokens);
+    EXPECT_EQ(load.computeTokens, copy.computeTokens);
+    EXPECT_EQ(load.state, copy.state);
+    EXPECT_DOUBLE_EQ(load.preparationElapsedMs, copy.preparationElapsedMs);
+}
+
+TEST(ExecutionLoadResourceTest, NativeWorkloadCaptureSupportsQueryReportsWithoutPPOwner) {
+    NaviSchedWorkloadSnapshot workload;
+    workload.revision = 72;
+    workload.nativeCacheQueries.emplace_back();
+    auto &query = workload.nativeCacheQueries.back();
+    query.requestId = 4002;
+    query.generation = 9;
+    query.localPrefixTokenCount = 12288;
+    query.futureState = static_cast<NativeCacheQueryFutureState>(2);
+    query.receiveState = static_cast<NativeCacheReceiveState>(1);
+    const auto captured = NaviSchedScheduleReplayJson::captureNativeWorkload(workload, 20, true);
+    ASSERT_TRUE(captured);
+    NaviSchedWorkloadSnapshot decoded;
+    NaviSchedScheduleReplayJson::workloadFromJsonString(*captured, decoded);
+    EXPECT_FALSE(decoded.nativePPState);
+    ASSERT_EQ(1u, decoded.nativeCacheQueries.size());
+    const auto &copy = decoded.nativeCacheQueries[0];
+    EXPECT_EQ(query.requestId, copy.requestId);
+    EXPECT_EQ(query.generation, copy.generation);
+    EXPECT_EQ(query.localPrefixTokenCount, copy.localPrefixTokenCount);
+    EXPECT_EQ(query.futureState, copy.futureState);
+    EXPECT_EQ(query.receiveState, copy.receiveState);
+    EXPECT_FALSE(NaviSchedScheduleReplayJson::captureNativeWorkload(workload, 21, true));
+    EXPECT_FALSE(NaviSchedScheduleReplayJson::captureNativeWorkload(workload, 20, true, 16));
+}
+}

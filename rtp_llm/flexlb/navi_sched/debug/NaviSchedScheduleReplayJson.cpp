@@ -897,7 +897,10 @@ std::optional<std::string> NaviSchedScheduleReplayJson::captureNativeWorkload(
     const NaviSchedWorkloadSnapshot &workload, uint64_t scheduleId,
     bool enabled, size_t maxBytes)
 {
-    if (!enabled || scheduleId == 0 || scheduleId % 20 != 0 || !workload.nativePPState)
+    if (!enabled || scheduleId == 0 || scheduleId % 20 != 0)
+        return std::nullopt;
+    if (!workload.nativePPState && workload.executionLoadRequests.empty() &&
+        workload.nativeCacheQueries.empty())
         return std::nullopt;
     auto json = autil::legacy::ToJsonString(ReplayWorkloadJson(workload), true);
     if (json.size() > maxBytes) return std::nullopt;
