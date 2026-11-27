@@ -51,9 +51,12 @@ install -m 644 assets/rtp-btc-notify.service assets/rtp-btc-notify.timer "$units
 
 QODER_CONFIG_DIR="$app/qoder-teams" "$HOME/.local/bin/qodercli" login
 python3 "$app/notify.py" configure
+# 若机器人启用了自定义关键词，将其中一个关键词单独写入 "$app/keyword"，再启用定时器。
 python3 "$app/notify.py" init
 systemctl --user daemon-reload
 systemctl --user enable --now rtp-btc-notify.timer
 ```
 
 通过 `configure` 的隐藏输入粘贴目标群机器人的 Webhook。Webhook、Qoder 登录状态和 SQLite 投递记录都保存在部署用户的运行目录。更新现有部署时只替换此 Skill 中的脚本和 unit 文件，保留运行目录中的凭据和投递记录。需要退出 SSH 后持续运行的主机，可用 `loginctl show-user "$USER" -p Linger` 检查用户服务是否常驻。
+
+如果日志显示钉钉回执码 `310000` 且提示「关键词不匹配」，核对运行目录下的 `keyword` 文件与群机器人的安全设置。预览和正式投递使用同一段文本。修改关键词后，下一次检查会使用新配置重试已生成的消息。

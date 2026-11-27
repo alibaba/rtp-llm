@@ -61,10 +61,9 @@ def connect():
     return db
 
 
-def discover(db, kind, opened_since, start, end):
+def discover(db, kind, opened_since, start, end, criteria):
     if start > end:
         return
-    criteria = "is:merged merged:" if kind == "merged" else "created:>={} updated:".format(opened_since)
     query = "repo:{} is:pr base:main {}{}..{}".format(REPO, criteria, stamp(start), stamp(end))
     page = 1
     while True:
@@ -75,8 +74,8 @@ def discover(db, kind, opened_since, start, end):
             if start == end:
                 raise RuntimeError("单秒搜索结果超过 GitHub 上限")
             mid = start + dt.timedelta(seconds=int((end - start).total_seconds()) // 2)
-            discover(db, kind, opened_since, start, mid)
-            discover(db, kind, opened_since, mid + dt.timedelta(seconds=1), end)
+            discover(db, kind, opened_since, start, mid, criteria)
+            discover(db, kind, opened_since, mid + dt.timedelta(seconds=1), end, criteria)
             return
         items = data["items"]
         db.executemany("INSERT OR IGNORE INTO notifications(number,kind,state,updated_at) VALUES (?,?,'new',?)",
@@ -224,9 +223,19 @@ def store_webhook():
     print("Webhook 已保存，权限 0600。")
 
 
+def group_text(message):
+    try:
+        keyword = (ROOT / "keyword").read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return message
+    if not keyword or keyword in message:
+        return message
+    return message + "\n\n订阅：" + keyword
+
+
 def deliver(db, number, kind, message):
     url = WEBHOOK.read_text().strip()
-    payload = {"msgtype": "text", "text": {"content": message}, "at": {"isAtAll": False}}
+    payload = {"msgtype": "text", "text": {"content": group_text(message)}, "at": {"isAtAll": False}}
     req = Request(url, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
     with db:
         db.execute("UPDATE notifications SET state='sending' WHERE number=? AND kind=?", (number, kind))
@@ -242,7 +251,8 @@ def deliver(db, number, kind, message):
         if isinstance(receipt.get("errcode"), int):
             with db:
                 db.execute("UPDATE notifications SET state='ready' WHERE number=? AND kind=?", (number, kind))
-        raise RuntimeError("钉钉回执码 {}".format(receipt.get("errcode")))
+        reason = "，关键词不匹配" if "关键词" in str(receipt.get("errmsg", "")) else ""
+        raise RuntimeError("钉钉回执码 {}{}".format(receipt.get("errcode"), reason))
     with db:
         db.execute("UPDATE notifications SET state='sent' WHERE number=? AND kind=?", (number, kind))
     print("已送达 {} #{}".format(TITLES[kind], number))
@@ -260,7 +270,15 @@ def run(db):
         cursor = dt.datetime.strptime(meta.get(cursor_key, cutoffs[kind]), STAMP)
         try:
             with db:
-                discover(db, kind, cutoffs["opened"], max(start, cursor - dt.timedelta(days=1)), end)
+                window_start = max(start, cursor - dt.timedelta(days=1))
+                if kind == "opened":
+                    # Creation is immutable; review activity can move updated_at beyond the scan cutoff.
+                    discover(db, kind, cutoffs["opened"], window_start, end, "created:")
+                    if window_start > start:
+                        older = "created:{}..{} updated:".format(cutoffs["opened"], stamp(window_start - dt.timedelta(seconds=1)))
+                        discover(db, kind, cutoffs["opened"], window_start, end, older)
+                else:
+                    discover(db, kind, cutoffs["opened"], window_start, end, "is:merged merged:")
                 if end >= cursor:
                     db.execute("INSERT OR REPLACE INTO meta VALUES (?,?)", (cursor_key, stamp(end)))
         except Exception as exc:
@@ -279,7 +297,8 @@ def run(db):
         except QoderAccessError:
             raise
         except Exception as exc:
-            failures.append("{} #{} ({})".format(TITLES[kind], number, type(exc).__name__))
+            detail = str(exc) if isinstance(exc, RuntimeError) else type(exc).__name__
+            failures.append("{} #{} ({})".format(TITLES[kind], number, detail))
     uncertain = db.execute("SELECT number,kind FROM notifications WHERE state='sending' ORDER BY number").fetchall()
     if uncertain:
         raise RuntimeError("钉钉回执未确认，需对照群记录核实 PR {}".format(uncertain))
@@ -301,7 +320,8 @@ def main():
     if args.action == "preview":
         if args.number is None:
             parser.error("preview 需要 PR 编号")
-        print(build_message(args.number, kind=args.kind) or "跳过")
+        message = build_message(args.number, kind=args.kind)
+        print(group_text(message) if message else "跳过")
         return
     db = connect()
     if args.action == "status":
