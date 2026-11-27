@@ -118,10 +118,10 @@ class Qwen4MoeLayer(GenericMoeLayer):
         ):
             shared_gate_logits = self.shared_expert_gate(hidden_states)
 
-        # Keep the fused softmax/pack route for SE. The ordinary router instead
-        # computes top-k on the original rows once and releases the logits.
+        # The fused route packs each chunk directly into the staging buffer.
+        # The ordinary router computes top-k once and releases the logits.
         routing = None
-        if not self._uses_fused_gate_pack():
+        if not self._uses_fused_gate_pack(router_logits):
             routing = self._select_routing(router_logits)
             router_logits = None
 

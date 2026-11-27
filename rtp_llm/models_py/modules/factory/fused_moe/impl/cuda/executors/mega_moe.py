@@ -563,18 +563,53 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             raise RuntimeError("MegaMoE fused gate packing requires the fused packer")
         tokens = x.size(0)
         self._validate_capacity(tokens)
+        weights, indices = self._pack_gate_inputs(x, gate_payload, tokens)
+        y = self._mega_y[:tokens]
+        self._launch(y, tokens, x.device)
+        return y, weights, indices
+
+    def _pack_gate_inputs(
+        self, x: torch.Tensor, gate_payload: ExpertGatePayload, tokens: int
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        buf = self._mega_buf
+        weights = buf.topk_weights[:tokens]
+        indices = buf.topk_idx[:tokens]
+        if gate_payload.score_func == "softmax":
+            from rtp_llm.models_py.triton_kernels.moe.softmax_gate_pack import (
+                fused_pack_mega_moe_softmax_inputs,
+            )
+
+            if (
+                gate_payload.bias is not None
+                or gate_payload.input_ids is not None
+                or gate_payload.tid2eid is not None
+                or gate_payload.route_scale != 1.0
+            ):
+                raise ValueError(
+                    "Softmax gate pack requires unmodified normalized routing"
+                )
+            fused_pack_mega_moe_softmax_inputs(
+                x,
+                gate_payload.scores,
+                buf.x[:tokens],
+                buf.x_sf[:tokens],
+                indices,
+                weights,
+                topk=gate_payload.topk,
+            )
+            return weights, indices
+
         from rtp_llm.models_py.triton_kernels.moe.mega_moe_input_pack import (
             fused_pack_mega_moe_gate_inputs,
         )
 
-        buf = self._mega_buf
         fused_pack_mega_moe_gate_inputs(
             x,
             gate_payload.scores,
             buf.x[:tokens],
             buf.x_sf[:tokens],
-            buf.topk_idx[:tokens],
-            buf.topk_weights[:tokens],
+            indices,
+            weights,
             topk=gate_payload.topk,
             score_func=gate_payload.score_func,
             route_scale=gate_payload.route_scale,
@@ -583,6 +618,4 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             input_ids=gate_payload.input_ids,
             tid2eid=gate_payload.tid2eid,
         )
-        y = self._mega_y[:tokens]
-        self._launch(y, tokens, x.device)
-        return y, buf.topk_weights[:tokens], buf.topk_idx[:tokens]
+        return weights, indices

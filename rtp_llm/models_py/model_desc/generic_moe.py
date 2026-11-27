@@ -204,10 +204,19 @@ class GenericMoeLayer(nn.Module):
             self.shared_expert_gate(hidden_states), use_static_buffer=use_static_buffer
         )
 
-    def _uses_fused_gate_pack(self) -> bool:
+    def _uses_fused_gate_pack(self, router_logits: torch.Tensor) -> bool:
         return (
-            self._uses_shared_expert_gates
-            and self.fused_moe.supports_gate_pack
+            self.fused_moe.supports_gate_pack is True
+            and (
+                self._uses_shared_expert_gates
+                # Preserve the explicit batch-invariant router in routed-only MoE.
+                or (
+                    not self.batch_invariant
+                    and not self.fused_moe.includes_shared_expert
+                )
+            )
+            and router_logits.dtype == torch.bfloat16
+            and router_logits.stride(-1) == 1
             and self.config.scoring_func == 0
             and self.config.has_moe_norm
             and float(self.config.routed_scaling_factor or 1.0) == 1.0
@@ -293,10 +302,8 @@ class GenericMoeLayer(nn.Module):
             expert_args = {
                 "shared_expert_gates": self._routed_shared_gates(hidden_states)
             }
-            if self._uses_fused_gate_pack():
-                return self._forward_gate_pack(
-                    hidden_states, router_logits, expert_args
-                )
+        if self._uses_fused_gate_pack(router_logits):
+            return self._forward_gate_pack(hidden_states, router_logits, expert_args)
         topk_weights, topk_ids = self._select_routing(router_logits)
         return self._forward_with_routing(
             hidden_states, topk_weights, topk_ids, expert_args

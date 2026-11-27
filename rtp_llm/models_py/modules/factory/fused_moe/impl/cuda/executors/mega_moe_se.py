@@ -536,53 +536,12 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
         tokens = x.size(0)
         self._validate_capacity(tokens)
         block_m = self._block_m(tokens)
-        from rtp_llm.models_py.triton_kernels.moe.mega_moe_input_pack import (
-            fused_pack_mega_moe_gate_inputs,
-        )
         from rtp_llm.models_py.triton_kernels.moe.mega_moe_se_input_pack import (
             stage_mega_moe_se_shared_l1_scales,
         )
 
         buf = self._mega_buf
-        if gate_payload.score_func == "softmax":
-            from rtp_llm.models_py.triton_kernels.moe.softmax_gate_pack import (
-                fused_pack_mega_moe_softmax_inputs,
-            )
-
-            if (
-                gate_payload.bias is not None
-                or gate_payload.input_ids is not None
-                or gate_payload.tid2eid is not None
-                or gate_payload.route_scale != 1.0
-            ):
-                raise ValueError(
-                    "Softmax gate pack requires unmodified normalized routing"
-                )
-            fused_pack_mega_moe_softmax_inputs(
-                x,
-                gate_payload.scores,
-                buf.x[:tokens],
-                buf.x_sf[:tokens],
-                buf.topk_idx[:tokens],
-                buf.topk_weights[:tokens],
-                topk=gate_payload.topk,
-            )
-        else:
-            fused_pack_mega_moe_gate_inputs(
-                x,
-                gate_payload.scores,
-                buf.x[:tokens],
-                buf.x_sf[:tokens],
-                buf.topk_idx[:tokens],
-                buf.topk_weights[:tokens],
-                topk=gate_payload.topk,
-                score_func=gate_payload.score_func,
-                route_scale=gate_payload.route_scale,
-                norm_eps=gate_payload.norm_eps,
-                bias=gate_payload.bias,
-                input_ids=gate_payload.input_ids,
-                tid2eid=gate_payload.tid2eid,
-            )
+        weights, indices = self._pack_gate_inputs(x, gate_payload, tokens)
         stage_mega_moe_se_shared_l1_scales(
             buf.x_sf[:tokens],
             buf.shared_l1_acts_sf,
@@ -591,7 +550,7 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
         )
         y = self._mega_y[:tokens]
         self._launch(y, tokens, x.device, shared_expert_gates)
-        return y, buf.topk_weights[:tokens], buf.topk_idx[:tokens]
+        return y, weights, indices
 
     def execute(
         self,

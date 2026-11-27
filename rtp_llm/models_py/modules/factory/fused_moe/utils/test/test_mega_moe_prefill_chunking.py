@@ -67,26 +67,38 @@ class MegaMoePrefillChunkingTest(unittest.TestCase):
             )
 
     def test_qwen4_routes_pack_and_shared_gates_across_chunks(self):
-        for use_fused_pack in (False, True):
-            with self.subTest(fused=use_fused_pack):
-                self._check_qwen4_routing(use_fused_pack)
+        for use_fused_pack, use_shared_gates in (
+            (False, False),
+            (True, False),
+            (True, True),
+        ):
+            with self.subTest(fused=use_fused_pack, shared=use_shared_gates):
+                self._check_qwen4_routing(use_fused_pack, use_shared_gates)
 
-    def _check_qwen4_routing(self, use_fused_pack):
+    def _check_qwen4_routing(self, use_fused_pack, use_shared_gates):
         layer = Qwen4MoeLayer.__new__(Qwen4MoeLayer)
         torch.nn.Module.__init__(layer)
         group = Mock(spec=dist.ProcessGroup)
         group.size.return_value = 72
         layer.prefill_chunker = MegaMoePrefillChunker(4, group)
-        layer._uses_shared_expert_gates = use_fused_pack
-        layer._uses_fused_gate_pack = Mock(return_value=use_fused_pack)
+        layer._uses_shared_expert_gates = use_shared_gates
+        layer.batch_invariant = False
+        layer.config = SimpleNamespace(
+            scoring_func=0, has_moe_norm=True, routed_scaling_factor=1.0
+        )
+        layer.correction_bias = None
+        layer.fake_balance_expert = None
+        layer.fused_moe = SimpleNamespace(
+            supports_gate_pack=use_fused_pack, includes_shared_expert=use_shared_gates
+        )
         layer.shared_expert = None
         layer.shared_expert_gate = None
         layer.gate = Mock(side_effect=lambda x: x + 10)
         layer._routed_shared_gates = Mock(
-            side_effect=lambda x, *, use_static_buffer: x[:, 0] + 20
+            side_effect=lambda x, **_: x[:, 0].float() + 20
         )
         layer._select_routing = Mock(side_effect=lambda scores: (scores, scores.long()))
-        scratch = torch.empty((4, 1))
+        scratch = torch.empty((4, 1), dtype=torch.bfloat16)
         seen = []
 
         def routed(x, weights, ids, extra):
@@ -97,7 +109,12 @@ class MegaMoePrefillChunkingTest(unittest.TestCase):
 
         def packed(x, scores, extra):
             torch.testing.assert_close(scores, x + 10)
-            torch.testing.assert_close(extra["shared_expert_gates"], x[:, 0] + 20)
+            if use_shared_gates:
+                torch.testing.assert_close(
+                    extra["shared_expert_gates"], x[:, 0].float() + 20
+                )
+            else:
+                self.assertIsNone(extra)
             return run(x)
 
         def run(x):
@@ -107,7 +124,7 @@ class MegaMoePrefillChunkingTest(unittest.TestCase):
 
         layer._forward_with_routing = routed
         layer._forward_gate_pack = packed
-        inputs = torch.arange(5, dtype=torch.float32).view(-1, 1)
+        inputs = torch.arange(5, dtype=torch.bfloat16).view(-1, 1)
 
         def exchange(count, *, op, group):
             self.assertEqual(group.size(), 72)
@@ -122,11 +139,19 @@ class MegaMoePrefillChunkingTest(unittest.TestCase):
         self.assertEqual(collective.call_count, 1)
         layer.gate.assert_called_once()
         self.assertEqual(layer._select_routing.call_count, int(not use_fused_pack))
-        self.assertEqual(layer._routed_shared_gates.call_count, int(use_fused_pack))
-        if use_fused_pack:
+        self.assertEqual(layer._routed_shared_gates.call_count, int(use_shared_gates))
+        if use_shared_gates:
             layer._routed_shared_gates.assert_called_once_with(
                 inputs, use_static_buffer=False
             )
+        torch.testing.assert_close(layer(inputs[:2]), inputs[:2] * 2)
+        self.assertEqual(seen, [4, 1, 0, 2])
+        self.assertEqual(layer._select_routing.call_count, 2 * int(not use_fused_pack))
+
+        if use_fused_pack and not use_shared_gates:
+            layer.batch_invariant = True
+            torch.testing.assert_close(layer(inputs[:2]), inputs[:2] * 2)
+            layer._select_routing.assert_called_once()
 
     def test_model_skips_decode_verify_commit_and_capture(self):
         chunker = Mock()
