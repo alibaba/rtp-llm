@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
@@ -60,6 +61,8 @@ class _DraftServiceFixture:
         self.assertIs(get_model_class(tag), Glm5MTPForCausalLM)
         for combined, draft_layer in ((True, 2), (False, 0), (True, 78)):
             cfg, data, prefix = fixture(combined)
+            if combined and draft_layer == 2:
+                del cfg["num_nextn_predict_layers"]
             if draft_layer == 78:
                 # Cropped score, original draft layer number retained on disk.
                 original = prefix
@@ -86,7 +89,7 @@ class _DraftServiceFixture:
                 ("weights_proj.weight", (2, 32)),
             ):
                 data[prefix + "self_attn.indexer." + key] = torch.ones(shape)
-                if draft_layer == 78:
+                if combined:
                     for i in range(cfg["num_hidden_layers"]):
                         data[f"model.layers.{i}.self_attn.indexer." + key] = torch.ones(shape)
             embed_src = (
@@ -112,7 +115,7 @@ class _DraftServiceFixture:
                             service.model_weights_loader.loaded_method.value, method
                         )
                         self.assertEqual(model._checkpoint_layer, draft_layer)
-                        if draft_layer == 78:
+                        if combined:
                             target = load_service(root, method, cls=_Score, tag="glm_5").py_model
                             owns = target.checkpoint_weight_name_filter()
                             self.assertFalse(owns(prefix + "self_attn.q_a_proj.weight"))
@@ -212,6 +215,15 @@ class _DraftServiceFixture:
                                 norm(expected, "shared_head.norm.weight").to(expected),
                             )
                         clone = model.clone_for_cuda_graph()
+                        self.assertIs(clone._weight_update_lock, model._weight_update_lock)
+                        with ThreadPoolExecutor(max_workers=1) as pool:
+                            with clone._weight_update_lock:
+                                writer = pool.submit(
+                                    service.weight_manager.update_tensors,
+                                    {embed_src: data[embed_src]},
+                                )
+                                with self.assertRaisesRegex(BlockingIOError, "forward or update"):
+                                    writer.result(timeout=5)
                         self.assertIsNot(clone.layers[0], model.layers[0])
                         self.assertIs(
                             clone.layers[0].self_attn, model.layers[0].self_attn

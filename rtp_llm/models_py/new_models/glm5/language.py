@@ -520,6 +520,10 @@ class Glm5MTPForCausalLM(_OwnedGlm5, DeepSeekV32MTPForCausalLM, GenericMoeMTPMod
             self.py_hw_kernel_config,
         )
         clone.max_generate_batch_size = self.max_generate_batch_size
+        # The graph clone shares parameter storage; its C++ read guard must
+        # exclude writes through the original service's weight manager.
+        if hasattr(self, "_weight_update_lock"):
+            clone._weight_update_lock = self._weight_update_lock
         clone.moe_config = self.moe_config
         clone._mla_kernel_layout = self._mla_kernel_layout
         clone.register_buffer("cos_sin_cache", self.cos_sin_cache, persistent=False)

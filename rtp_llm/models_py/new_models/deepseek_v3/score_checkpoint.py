@@ -11,11 +11,17 @@ def score_name_filter(active_depth, score_depth, appended_depth, *, resolve_appe
         raise ValueError(f"requested {active_depth} score layers but checkpoint declares {score_depth}")
 
     @lru_cache(maxsize=1)
-    def appended_start():
-        marker = resolve_appended() if resolve_appended is not None and appended_depth == 1 else None
-        if marker is not None and marker < score_depth:
-            raise ValueError(f"draft layer {marker} overlaps score depth {score_depth}")
-        return score_depth if marker is None else marker
+    def appended_range():
+        if resolve_appended is not None and appended_depth <= 1:
+            # A combined GLM checkpoint may omit the NextN count or retain
+            # the original draft index after cropping. Only its EH projection
+            # proves that an otherwise undeclared layer belongs to the draft.
+            marker = resolve_appended()
+            if marker is not None:
+                if marker < score_depth:
+                    raise ValueError(f"draft layer {marker} overlaps score depth {score_depth}")
+                return range(marker, marker + 1)
+        return range(score_depth, score_depth + appended_depth)
 
     def belongs(name):
         if name.startswith("model.layers."):
@@ -27,10 +33,7 @@ def score_name_filter(active_depth, score_depth, appended_depth, *, resolve_appe
                 index = int(layer)
                 if index < score_depth:
                     return index < active_depth
-                if not appended_depth:
-                    return True
-                start = appended_start()
-                return not start <= index < start + appended_depth
+                return index not in appended_range()
         # Preserve unrecognized names: normal NewLoader dispatch must reject
         # them (multimodal parents apply their own namespace filter first).
         return True
